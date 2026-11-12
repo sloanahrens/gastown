@@ -37,6 +37,32 @@ func crewFlagFacts(opts Options) (branch, head string, err error) {
 	return branch, head, nil
 }
 
+// checkFlagsMatchWorktree is the --branch and --head check for a crew submission
+// whose worktree is present. The flags name nothing the worktree does not
+// already have: they must be the worktree's own branch and HEAD, or the gated
+// path would submit a different commit than the one the caller named. With no
+// flags there is nothing to check. rev resolves a ref in the worktree.
+func checkFlagsMatchWorktree(opts Options, branch string, rev func(ref string) (string, error)) error {
+	if opts.Branch == "" && opts.Head == "" {
+		return nil
+	}
+	flagBranch, flagHead, err := crewFlagFacts(opts)
+	if err != nil {
+		return err
+	}
+	if flagBranch != branch {
+		return fmt.Errorf("gt done: --branch %s is not this worktree's branch %s", flagBranch, branch)
+	}
+	worktreeHead, err := rev("HEAD")
+	if err != nil {
+		return fmt.Errorf("gt done: resolving HEAD: %w", err)
+	}
+	if flagHead != strings.TrimSpace(worktreeHead) {
+		return fmt.Errorf("gt done: --head %s is not this worktree's HEAD %s", ShortSHA(flagHead), ShortSHA(worktreeHead))
+	}
+	return nil
+}
+
 // isFullCommitID reports whether s is a complete SHA-1 or SHA-256 commit id
 // in lowercase hex, the form origin reports a tip in.
 func isFullCommitID(s string) bool {
@@ -144,5 +170,6 @@ func submitCrewAbsentForLanding(r *doneRun, head string) error {
 		return err
 	}
 	fmt.Fprintln(r.stdout(), "presubmit not run: the worktree is not in this process; run make presubmit on the Mac first")
+	fmt.Fprintln(r.stdout(), "uncommitted work not checked: the worktree is not in this process")
 	return markCrewSubmitted(r, issue, bd, target, head)
 }

@@ -91,3 +91,29 @@ func TestDoneCallerDirRefusesUnusableDirectory(t *testing.T) {
 		t.Fatalf("doneCallerDir err = %v, want the absolute-path refusal", err)
 	}
 }
+
+// TestDoneFlagsWithPresentWorktreeTakeWorktreeRule: a crew caller that names
+// both flags while its worktree is present in this process is not a flags
+// submission. Its directory is required like any other, so done.Run takes the
+// worktree path, where the flags are checked against the worktree and the
+// local gate runs (gt-pyh5p6).
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestDoneFlagsWithPresentWorktreeTakeWorktreeRule(t *testing.T) {
+	present := t.TempDir()
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, present)
+
+	cwd, byFlags, err := doneCallerDir("crew/operator/gt-1", strings.Repeat("a1", 20), func(key string) string {
+		if key == "BD_ACTOR" {
+			return "gastown/crew/operator"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("doneCallerDir: %v", err)
+	}
+	if byFlags || cwd != present {
+		t.Errorf("doneCallerDir = %q, byFlags %v; want %q with byFlags false", cwd, byFlags, present)
+	}
+}

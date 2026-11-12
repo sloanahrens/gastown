@@ -56,6 +56,49 @@ func TestCrewDoneAbsentWorktreeUsesFlags(t *testing.T) {
 	if !strings.Contains(out.String(), notRun) {
 		t.Errorf("output %q lacks %q", out.String(), notRun)
 	}
+	const notChecked = "uncommitted work not checked"
+	if !strings.Contains(out.String(), notChecked) {
+		t.Errorf("output %q lacks %q", out.String(), notChecked)
+	}
+}
+
+// TestCheckFlagsMatchWorktree: with the worktree present, --branch and --head
+// must name its own branch and HEAD; a mismatch, a lone flag or a failed HEAD
+// read refuses, and no flags leaves the gated path untouched (gt-pyh5p6).
+func TestCheckFlagsMatchWorktree(t *testing.T) {
+	t.Parallel()
+	const worktreeBranch = "crew/operator/gt-1"
+	fullHead := strings.Repeat("a1", 20)
+	headOK := func(string) (string, error) { return fullHead, nil }
+	for _, tc := range []struct {
+		name    string
+		opts    Options
+		rev     func(string) (string, error)
+		wantErr string
+	}{
+		{"no flags", Options{}, func(string) (string, error) { return "", errors.New("rev must not run") }, ""},
+		{"flags match worktree", Options{Branch: worktreeBranch, Head: fullHead}, headOK, ""},
+		{"branch differs", Options{Branch: "crew/operator/other", Head: fullHead}, headOK, "not this worktree's branch"},
+		{"head differs", Options{Branch: worktreeBranch, Head: strings.Repeat("b2", 20)}, headOK, "not this worktree's HEAD"},
+		{"lone branch", Options{Branch: worktreeBranch}, headOK, "go together"},
+		{"lone head", Options{Head: fullHead}, headOK, "go together"},
+		{"head unreadable", Options{Branch: worktreeBranch, Head: fullHead},
+			func(string) (string, error) { return "", errors.New("no HEAD") }, "resolving HEAD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkFlagsMatchWorktree(tc.opts, worktreeBranch, tc.rev)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("checkFlagsMatchWorktree: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 // TestCrewDoneAbsentWorktreeRefusesWhenRemoteBehind: origin at another commit,

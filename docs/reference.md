@@ -288,10 +288,13 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 (skip it with `--pre-verified` when you already ran it), then writes the comment
 `Submitted for landing: <branch> @ <sha> onto <target>`, the READY TO LAND block and the
 `gt:ready-to-land` label. It pushes nothing and rebases nothing.
-When the worktree is not in the process (a pod), `gt done --bead <id> --branch <b> --head <sha>`
-names the submission instead: both flags or neither. It reads origin from the rig's canonical
-clone (`<town>/<rig>/mayor/rig`), requires origin at `<sha>` (exit 11 otherwise), and runs no
-local gate: it prints `presubmit not run` and the bead is marked the same way (gt-pyh5p6).
+The flags apply only when the caller's directory is absent from the process (a pod): then
+`gt done --bead <id> --branch <b> --head <sha>` names the submission instead of the worktree,
+both flags or neither. It reads origin from the rig's canonical clone (`<town>/<rig>/mayor/rig`),
+requires origin at `<sha>` (exit 11 otherwise), and runs no local gate: it prints `presubmit not
+run` and `uncommitted work not checked`, and the bead is marked the same way (gt-pyh5p6). With the
+worktree present the flags must equal its branch and HEAD (a mismatch refuses), and the normal
+path runs, local gate included.
 `BD_ACTOR` falls back to `git config user.name`. A polecat's `gt done` refuses
 `--pre-verified`. The last line a crew submission prints names `gt land wait` for the
 landing outcomes; its text is `crewNextStepLine` in `internal/done/done_crew.go` (gt-2ass0).

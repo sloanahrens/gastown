@@ -65,11 +65,16 @@ type Options struct {
 	Target string
 	// Bead is the crew work bead to submit (--bead). Crew only.
 	Bead string
-	// Branch and Head are the crew submission facts for a caller whose
-	// worktree is not in this process (--branch, --head): the pushed branch
-	// and the commit it must be at on origin. Crew only, and given together.
+	// Branch and Head are the crew submission facts (--branch, --head): the
+	// pushed branch and the commit it must be at on origin. Crew only, and
+	// given together. With the worktree present they must equal the worktree's
+	// own branch and HEAD, and the local gate runs as usual.
 	Branch string
 	Head   string
+	// WorktreeAbsent is set when the caller's worktree is not in this process,
+	// so Branch and Head are the whole submission and nothing in the worktree
+	// is read (the pod case).
+	WorktreeAbsent bool
 	// CloneRepo opens the git surface of the rig's canonical clone for a
 	// Branch/Head submission, which reads and writes nothing in the caller's
 	// worktree. Nil is the real git.

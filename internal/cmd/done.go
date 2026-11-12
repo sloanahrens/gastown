@@ -158,6 +158,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 		Bead:                doneBead,
 		Branch:              doneBranch,
 		Head:                doneHead,
+		WorktreeAbsent:      byFlags,
 		AllowReverts:        doneAllowReverts,
 		AllowThrowawayPaths: doneAllowThrowawayPaths,
 		PreVerified:         donePreVerified,
@@ -187,9 +188,11 @@ func runDone(cmd *cobra.Command, args []string) error {
 
 // doneCallerDir is the directory gt done acts for. It is refused unless it is
 // present in this process: gt done fetches, rebases, gates and pushes there.
-// The one exception is a crew submission that names its branch and head: its
-// facts come from the flags, so the directory only names the role, and
-// byFlags is true (gt-pyh5p6). A lone flag, or a flagged call from a
+// The one exception is a crew submission that names its branch and head while
+// its worktree is absent from this process: its facts come from the flags, so
+// the directory only names the role, and byFlags is true (gt-pyh5p6). With the
+// worktree present the flags are checked against it and the worktree rule
+// applies, so the local gate runs. A lone flag, or a flagged call from a
 // non-crew session, takes the worktree rule and is refused by done.Run.
 func doneCallerDir(branch, head string, getenv func(string) string) (cwd string, byFlags bool, err error) {
 	if branch == "" && head == "" {
@@ -201,7 +204,13 @@ func doneCallerDir(branch, head string, getenv func(string) string) (cwd string,
 		return "", false, err
 	}
 	if branch != "" && head != "" && done.IsCrewRun(getenv, cwd) {
-		return cwd, true, nil
+		present, existsErr := callercwd.Exists()
+		if existsErr != nil {
+			return "", false, existsErr
+		}
+		if !present {
+			return cwd, true, nil
+		}
 	}
 	cwd, err = callercwd.Require()
 	return cwd, false, err

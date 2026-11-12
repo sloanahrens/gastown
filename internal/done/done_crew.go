@@ -121,7 +121,7 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 	if exitType != ExitCompleted {
 		return fmt.Errorf("gt done --status %s is for polecats; a crew session has no Witness to signal (submit with plain gt done)", exitType)
 	}
-	if opts.Branch != "" || opts.Head != "" {
+	if opts.WorktreeAbsent {
 		return runDoneCrewFromFlags(opts, getenv)
 	}
 	cwd, err := opts.getwd()()
@@ -157,6 +157,9 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		return fmt.Errorf("getting current branch: %w", err)
 	}
 	if err := requireRealCurrentBranch(branch, "gt done"); err != nil {
+		return err
+	}
+	if err := checkFlagsMatchWorktree(opts, branch, g.Rev); err != nil {
 		return err
 	}
 
