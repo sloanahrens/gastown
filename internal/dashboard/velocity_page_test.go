@@ -199,6 +199,24 @@ func TestVelocityUndefinedFiguresDrawADashNotZero(t *testing.T) {
 	}
 }
 
+// A points 24h total the feed leaves unset reads as a dash, not as 0: the page
+// reads "–" when the figure is null, so an absent total is not a count of zero.
+func TestVelocityUnsetPoints24hDrawsADash(t *testing.T) {
+	t.Parallel()
+
+	st := velocityPaneReading()
+	st["trend"].(map[string]any)["velocity"].(map[string]any)["figures"] = map[string]any{
+		"points_24h": nil, "unweighted_24h": 0,
+	}
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", st)
+	row := readFigureRow(t, p)
+
+	if got := figureNamed(t, row, "points 24h"); got.Value != "–" {
+		t.Errorf("points 24h reads %q with no total, want a dash", got.Value)
+	}
+}
+
 // velocityColumn is one hour's column in the points row: its parts from the top
 // down, each by class and inline height, and the tooltip the column carries.
 type velocityColumn struct {
