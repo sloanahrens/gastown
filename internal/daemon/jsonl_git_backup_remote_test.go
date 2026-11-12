@@ -372,3 +372,106 @@ func TestJSONLGitBackupParseServerDatabases(t *testing.T) {
 		})
 	}
 }
+
+// TestJSONLGitBackupRemoteServerConfiguredDatabasesExportWithoutListing: a town
+// that names its databases does not ask the server at all, and exports exactly
+// the names it configured.
+func TestJSONLGitBackupRemoteServerConfiguredDatabasesExportWithoutListing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	server := &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"served"}]}`)}
+	d, _, _ := newRemoteBackupDaemon(t, townRoot, remoteDoltHost, server)
+	d.patrolConfig.Patrols.JsonlGitBackup.Databases = []string{"hq", "gt"}
+
+	d.syncJsonlGitBackup()
+
+	if server.showCalls != 0 {
+		t.Errorf("SHOW DATABASES ran %d time(s) with a configured list, want none", server.showCalls)
+	}
+	if got := strings.Join(server.exported, ","); got != "hq,gt" {
+		t.Errorf("exported %q, want exactly the configured hq,gt", got)
+	}
+}
+
+// TestJSONLGitBackupRemoteAlertClearsOnNextGoodTick: an alert opened when the
+// remote client directory could not be made is closed by the next tick that
+// makes it, whether the databases come from the config or from the server.
+func TestJSONLGitBackupRemoteAlertClearsOnNextGoodTick(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		databases []string
+		wantShow  int
+		wantExp   string
+	}{
+		{"a configured database list", []string{"hq", "gt"}, 0, "hq,gt"},
+		{"a list from the server", nil, 1, "gt,hq"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := filepath.Join(t.TempDir(), "town")
+			if err := os.WriteFile(townRoot, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			server := &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"},{"Database":"gt"}]}`)}
+			d, rec, _ := newRemoteBackupDaemon(t, townRoot, remoteDoltHost, server)
+			d.patrolConfig.Patrols.JsonlGitBackup.Databases = tt.databases
+
+			d.syncJsonlGitBackup()
+			if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 1 {
+				t.Fatalf("first tick with a broken client directory left %+v, want one alert", open)
+			}
+			if server.showCalls != 0 || len(server.exported) != 0 {
+				t.Fatalf("broken tick listed (%d) or exported %v, want neither", server.showCalls, server.exported)
+			}
+
+			if err := os.Remove(townRoot); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(townRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			d.syncJsonlGitBackup()
+
+			if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 0 {
+				t.Errorf("remote alert still open after a working tick: %+v", open)
+			}
+			if server.showCalls != tt.wantShow {
+				t.Errorf("SHOW DATABASES ran %d time(s), want %d", server.showCalls, tt.wantShow)
+			}
+			if got := strings.Join(server.exported, ","); got != tt.wantExp {
+				t.Errorf("exported %q, want %q", got, tt.wantExp)
+			}
+		})
+	}
+}
+
+// TestJSONLGitBackupRemoteListFailureThenGoodListClosesAlert: the alert a failed
+// server list raises is closed by a later tick whose list succeeds.
+func TestJSONLGitBackupRemoteListFailureThenGoodListClosesAlert(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	server := &remoteServerFake{showErr: errors.New("connection refused")}
+	d, rec, _ := newRemoteBackupDaemon(t, townRoot, remoteDoltHost, server)
+
+	d.syncJsonlGitBackup()
+	if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 1 {
+		t.Fatalf("failed list left %+v, want one alert", open)
+	}
+	if len(server.exported) != 0 {
+		t.Fatalf("failed list exported %v, want nothing", server.exported)
+	}
+
+	server.showErr = nil
+	server.showOut = []byte(`{"rows":[{"Database":"hq"},{"Database":"gt"}]}`)
+	d.syncJsonlGitBackup()
+
+	if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 0 {
+		t.Errorf("remote alert still open after a good list: %+v", open)
+	}
+	if got := strings.Join(server.exported, ","); got != "gt,hq" {
+		t.Errorf("exported %q, want gt,hq", got)
+	}
+}

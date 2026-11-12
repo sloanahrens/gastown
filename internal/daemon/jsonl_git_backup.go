@@ -309,10 +309,16 @@ func (d *Daemon) syncJsonlGitBackup() {
 			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("cannot list the databases on the Dolt server %s — offsite backup has nothing to export: %v", target.host, err))
 			return
 		}
-		d.clearAlerts("databases listed through the server", alertKeyJSONLRemote)
 		databases = served
 	} else if len(databases) == 0 {
 		databases = discoverJsonlBackupDatabases(dataDir)
+	}
+	if remote {
+		// The remote alert covers both the client directory and the list, so a
+		// tick that reaches here closes it: the directory was made, and the list,
+		// when it ran, succeeded. A tick with a configured database list never
+		// runs the list, and used to leave the alert open forever (gt-4ko5ko).
+		d.clearAlerts("the remote server backup has its client directory and database list", alertKeyJSONLRemote)
 	}
 	if len(databases) == 0 {
 		// A remote server's list is empty, not its data dir: name the server, so
