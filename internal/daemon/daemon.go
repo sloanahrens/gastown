@@ -349,6 +349,9 @@ type Daemon struct {
 	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
 	// in tests; nil reads the version package's.
 	buildCommitFn func() string
+	// fullBuildCommitFn replaces the daemon's full build commit at start (see
+	// startBuildCheckout) in tests; nil reads the version package's.
+	fullBuildCommitFn func() (string, error)
 	// hostNodeReadContextFn replaces hostNodeReadContext, the per-run deadline of
 	// the node-disk read, so a test can count the deadlines a read creates.
 	hostNodeReadContextFn func(context.Context) (context.Context, context.CancelFunc)
@@ -1766,6 +1769,13 @@ func (d *Daemon) Run() (err error) {
 	// The seat map must read cleanly before anything is dispatched: a daemon
 	// that ran on a partial seat list would spend seats the operator closed.
 	if err := checkSeatMap(d.config.TownRoot); err != nil {
+		return err
+	}
+
+	// In a pod, the gt source checkout is made at this daemon's own commit before
+	// anything is dispatched: the sandbox policy and the image check read that
+	// checkout, and nothing else creates it. A host daemon skips this (gt-cbtejf).
+	if err := d.startBuildCheckout(d.ctx); err != nil {
 		return err
 	}
 
