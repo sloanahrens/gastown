@@ -146,6 +146,8 @@ func TestJevSpendTableNamesEveryCaller(t *testing.T) {
 // helper refuses must come back from "gt jev spend" naming the flag. Each case
 // builds a command of its own, so no case sees another's flag values.
 func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
+	t.Parallel()
+
 	town := t.TempDir()
 
 	cases := []struct {

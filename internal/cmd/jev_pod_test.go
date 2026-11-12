@@ -100,6 +100,8 @@ const jevPodCommandLine = "kubectl --context colima-gt-control -n gt exec deploy
 // text: the logs' home, and the pod command that runs the same subcommand with
 // the flags the caller gave.
 func TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand(t *testing.T) {
+	t.Parallel()
+
 	t.Run("the message states where the logs live and names the command", func(t *testing.T) {
 		err := runJevPodCase(t, "health", nil)
 		require.Error(t, err)
@@ -175,6 +177,8 @@ func jevGuardedCommand(t *testing.T, name string, findTown func() (string, error
 // town lookup that fails, so a command that reached its lookup would return a
 // different error.
 func TestJevLogReadingCommandsRefuseOutsideThePodBeforeReadingAnyFile(t *testing.T) {
+	t.Parallel()
+
 	for _, c := range jevGuardedCommands {
 		t.Run(c.name, func(t *testing.T) {
 			townCalled := false
@@ -202,6 +206,8 @@ func TestJevLogReadingCommandsRefuseOutsideThePodBeforeReadingAnyFile(t *testing
 // subcommand is neither in the guarded list nor listed as a patrol writer, so a
 // new reader cannot ship unguarded. It reads the subcommand names only; no test
 // parses a flag on the shared command.
+//
+//testpolicy:allow parallel — it reads the shared cobra tree, whose first Commands() call sorts it in place.
 func TestEveryJevSubcommandIsGuardedOrListedAsAPatrolWriter(t *testing.T) {
 	guarded := map[string]bool{}
 	for _, c := range jevGuardedCommands {
@@ -242,6 +248,8 @@ func TestEveryJevSubcommandIsGuardedOrListedAsAPatrolWriter(t *testing.T) {
 // holding a space, quote, dollar sign or backtick reaches the pod command as
 // one word, and a value the shell reads plainly stays bare.
 func TestJevPodCommandQuotesFlagValues(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		args []string
@@ -289,6 +297,8 @@ func newJevPodFlagCmd(t *testing.T, args []string) *cobra.Command {
 // KUBERNETES_SERVICE_HOST set: each reaches its normal path and no refusal
 // appears.
 func TestJevCommandsRunUnchangedInsideThePod(t *testing.T) {
+	t.Parallel()
+
 	t.Run("health", func(t *testing.T) {
 		now := jevHealthFixedNow()
 		out, err := runJevHealthCommand(t, newJevHealthTown(t, now, 5*time.Minute), now, false)
@@ -392,6 +402,8 @@ func TestJevCommandsRunUnchangedInsideThePod(t *testing.T) {
 // refusal is a plain error with exit status 1, and no JSON document reaches
 // stdout. requests has no --json flag, so it is driven plain.
 func TestJevRefusalKeepsJSONStdoutEmptyAndExitsOne(t *testing.T) {
+	t.Parallel()
+
 	for _, c := range jevGuardedCommands {
 		t.Run(c.name, func(t *testing.T) {
 			cmd := c.newCmd(townFinder(""), outsidePodEnv())
@@ -414,6 +426,8 @@ func TestJevRefusalKeepsJSONStdoutEmptyAndExitsOne(t *testing.T) {
 // TestJevPodHelpNamesNoHostOrDate holds the help paragraph to the invariant
 // that it cannot go stale: no host, install, date or build is named.
 func TestJevPodHelpNamesNoHostOrDate(t *testing.T) {
+	t.Parallel()
+
 	for _, stale := range []string{"Mac", "cut-over", "2026", "colima", "launchd"} {
 		assert.NotContains(t, jevPodHelp, stale)
 	}
@@ -421,6 +435,8 @@ func TestJevPodHelpNamesNoHostOrDate(t *testing.T) {
 
 // TestJevRefusalNamesNoHostOrDate holds the refusal to the same invariant.
 func TestJevRefusalNamesNoHostOrDate(t *testing.T) {
+	t.Parallel()
+
 	err := runJevPodCase(t, "health", nil)
 	require.Error(t, err)
 	for _, stale := range []string{"Mac", "cut-over", "2026", "launchd"} {
