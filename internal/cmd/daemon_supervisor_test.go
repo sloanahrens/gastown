@@ -365,6 +365,50 @@ func TestStartDaemon_UnsupportedOSSpawnsDirectly(t *testing.T) {
 	}
 }
 
+// A macOS town has no supervisor kind gt can drive, so its start is a hand
+// spawn. A launchd job the operator left loaded would run beside that spawn,
+// so the start refuses and names the job; an unreadable job is refused too,
+// since an unknown state is not a clean one.
+func TestStartDaemon_DarwinRefusesALeftoverLaunchdJob(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name  string
+		state templates.SupervisorState
+	}{
+		{"loaded", templates.SupervisorState{Loaded: true, LastExit: -1}},
+		{"unreadable", templates.SupervisorState{LastExit: -1, Err: errors.New("launchctl print failed")}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"), row.state, nil)
+
+			_, _, err := c.startDaemon(t.TempDir())
+
+			if err == nil || !strings.Contains(err.Error(), templates.LaunchdLabel) {
+				t.Fatalf("startDaemon = %v, want a refusal naming the leftover %s job", err, templates.LaunchdLabel)
+			}
+			if calls.spawned || len(calls.argv) != 0 {
+				t.Fatalf("spawned=%v argv=%v, want nothing launched beside the job", calls.spawned, calls.argv)
+			}
+		})
+	}
+}
+
+// With no launchd job left behind, a macOS start is the hand spawn it has
+// always been.
+func TestStartDaemon_DarwinSpawnsWhenNoLaunchdJobIsLoaded(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"),
+		templates.SupervisorState{LastExit: -1}, nil)
+
+	if _, _, err := c.startDaemon(t.TempDir()); err != nil {
+		t.Fatalf("startDaemon: %v", err)
+	}
+	if !calls.spawned {
+		t.Fatal("did not spawn the daemon directly")
+	}
+}
+
 // The town may be spelled differently from the provisioned file (a symlink
 // to it, /tmp vs /private/tmp on macOS); the guard must still see the
 // supervisor, or it hand-spawns beside a loaded job.

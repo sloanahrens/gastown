@@ -860,6 +860,11 @@ func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via str
 	if err != nil {
 		return "", 0, err
 	}
+	if sup == nil {
+		if err := c.refuseLeftoverLaunchdJob(); err != nil {
+			return "", 0, err
+		}
+	}
 	if err := c.refuseFileKindTakeover(sup, takeover); err != nil {
 		return "", 0, err
 	}
@@ -915,6 +920,26 @@ func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via str
 	}
 	pid, err = c.spawn(townRoot, takeoverEnv)
 	return "", pid, err
+}
+
+// refuseLeftoverLaunchdJob refuses a hand start on macOS while the launchd job
+// a town used to run is still loaded. gt no longer supervises with launchd, so
+// detection finds no supervisor there and the start would spawn a daemon beside
+// that job, which then competes for the lock. An unreadable job is refused too:
+// an unknown state is not an unloaded one. Other hosts are left alone, since
+// the launchd probe is a command only macOS has.
+func (c *daemonControl) refuseLeftoverLaunchdJob() error {
+	if c.goos != "darwin" {
+		return nil
+	}
+	st := c.supervisorState(config.SupervisorLaunchd)
+	if st.Err != nil {
+		return fmt.Errorf("could not read the launchd job %s, and a daemon started by hand could run beside it: %w", templates.LaunchdLabel, st.Err)
+	}
+	if st.Loaded {
+		return fmt.Errorf("the launchd job %s is still loaded: gt no longer supervises a daemon with launchd, so unload that job before starting the daemon by hand", templates.LaunchdLabel)
+	}
+	return nil
 }
 
 // guardStart asks the startup guard whether the daemon sup is about to start
