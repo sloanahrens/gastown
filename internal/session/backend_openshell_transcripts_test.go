@@ -136,7 +136,11 @@ func TestOpenShellOpsDeleteFailedCopyLogsOneLineAndStillDeletes(t *testing.T) {
 	if callIndex(fake.Calls(), "delete") < 0 {
 		t.Fatalf("openshell calls = %v, want the sandbox deleted", fake.Calls())
 	}
-	if _, ok, _ := ReadSandboxRecord(b.townRoot, openshellTestSession); ok {
+	_, ok, err := ReadSandboxRecord(b.townRoot, openshellTestSession)
+	if err != nil {
+		t.Fatalf("reading the record after Delete: %v", err)
+	}
+	if ok {
 		t.Error("record survived Delete after a failed copy")
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], openshellTestSession) || !strings.Contains(warnings[0], "copying its transcripts out failed") {
