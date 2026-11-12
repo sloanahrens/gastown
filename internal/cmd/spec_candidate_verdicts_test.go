@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -906,5 +908,96 @@ func TestSpecCandidateBlockedContainerIsHeldOnceItsBlockerCloses(t *testing.T) {
 	r := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
 	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
 		t.Errorf("the tick after the blocker closed skipped %+v, want the container held", r.Skipped)
+	}
+}
+
+// A ready chore and a ready P5 task are refused by the dispatcher's type and
+// priority rules, and each is reported as one not-eligible skip line naming its
+// refusal, so the tick log says why neither took a seat. The P2 task beside them
+// is the candidate (gt-jr5elm).
+func TestSpecCandidatesReportTypeAndPriorityRefusals(t *testing.T) {
+	t.Parallel()
+	board := []*beads.Issue{
+		{ID: "gt-chore", Type: "chore", Status: "open", Priority: 2},
+		{ID: "gt-p5", Type: "task", Status: "open", Priority: 5},
+		{ID: "gt-open", Type: "task", Status: "open", Priority: 2},
+	}
+	got := specCandidates(specTown(t), 2, func(string) ([]*beads.Issue, error) { return board, nil })
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-open" {
+		t.Fatalf("candidates = %+v, want gt-open alone", got.Candidates)
+	}
+	want := map[string]string{
+		"gt-chore": "type chore",
+		"gt-p5":    "priority P5 outside the ceiling P2",
+	}
+	if len(got.Skipped) != len(want) {
+		t.Fatalf("skipped = %+v, want one line per refusal", got.Skipped)
+	}
+	for _, e := range got.Skipped {
+		reason, ok := want[e.Bead]
+		if !ok {
+			t.Errorf("unexpected skip entry %+v", e)
+			continue
+		}
+		if wantLine := fmt.Sprintf("%s: %s (%s)", e.Bead, specdispatch.SkipNotEligible, reason); e.Line != wantLine {
+			t.Errorf("skip line = %q, want %q", e.Line, wantLine)
+		}
+	}
+}
+
+// A bead refused as an agent or epic kind, as assigned, or as deferred gets no
+// skip line: those refusals are the bead's own state or kind, and reporting them
+// would print one line per such bead on every tick (gt-jr5elm).
+func TestSpecCandidatesStaySilentOnKindAndStateRefusals(t *testing.T) {
+	t.Parallel()
+	board := []*beads.Issue{
+		{ID: "gt-epic", Type: "epic", Status: "open", Priority: 2},
+		{ID: "gt-agent", Type: "task", Status: "open", Priority: 2, Labels: []string{"gt:agent"}},
+		{ID: "gt-assigned", Type: "task", Status: "open", Priority: 2, Assignee: "gastown/polecats/ruby"},
+		{ID: "gt-deferred", Type: "task", Status: "deferred", Priority: 2},
+	}
+	got := specCandidates(specTown(t), 2, func(string) ([]*beads.Issue, error) { return board, nil })
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	if len(got.Candidates) != 0 {
+		t.Errorf("candidates = %+v, want none", got.Candidates)
+	}
+	if len(got.Skipped) != 0 {
+		t.Errorf("skipped = %+v, want no line for kind or state refusals", got.Skipped)
+	}
+}
+
+// The dry run prints the same two refusals in its skipped section: the report
+// is built from the production candidate read, and the printed report names
+// each refusal, while no bead is slung (gt-jr5elm).
+func TestSpecDispatchDryRunReportsTypeAndPriorityRefusals(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := []*beads.Issue{
+		{ID: "gt-chore", Type: "chore", Status: "open", Priority: 2},
+		{ID: "gt-p5", Type: "task", Status: "open", Priority: 5},
+	}
+	f := newFakeSpecTown()
+	env := f.env()
+	env.DryRun = true
+	env.Candidates = func() specBoardRead {
+		return specCandidates(townRoot, 2, func(string) ([]*beads.Issue, error) { return board, nil })
+	}
+	r := runSpecDispatchCycle(env)
+	if len(f.slung) != 0 {
+		t.Fatalf("dry run slung %v", f.slung)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	printSpecDispatchReport(cmd, r)
+	for _, want := range []string{"gt-chore: not eligible (type chore)", "gt-p5: not eligible (priority P5 outside the ceiling P2)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("dry-run output %q does not carry %q; skipped = %+v", out.String(), want, r.Skipped)
+		}
 	}
 }
