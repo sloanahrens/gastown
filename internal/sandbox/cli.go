@@ -316,6 +316,14 @@ func (c *CLI) Delete(ctx context.Context, name string) error {
 	return err
 }
 
+// Download copies the sandbox path remote into localDir. A failure is returned
+// with the command's stderr; a missing sandbox is not special-cased here.
+func (c *CLI) Download(ctx context.Context, name, remote, localDir string) error {
+	a := c.argv("sandbox", "download", name, remote, localDir)
+	_, _, err := c.run(ctx, callTimeout, "sandbox download", a, nil, nil)
+	return err
+}
+
 // Logs returns the sandbox-source log lines from the last since.
 func (c *CLI) Logs(ctx context.Context, name string, since time.Duration) (string, error) {
 	a := c.argv("logs", name, "--since", formatSince(since), "--source", "sandbox")
