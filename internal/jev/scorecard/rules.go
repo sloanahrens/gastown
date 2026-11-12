@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/rules"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // RulesBattery is the rules battery's name, its --battery value.
@@ -28,7 +30,16 @@ const (
 	ruleRulesRevertGuard = "rules:revert-guard"
 	ruleRulesStandDown   = "rules:rework-stand-down"
 	ruleRulesNoRecord    = "rules:no-guard-record"
+	ruleRulesOmFinding   = "rules:om-rule-finding"
 )
+
+// omRuleIDPattern matches a standing rule id in an om finding's title or claim.
+// om cites the rules the town enforces by number there, as in the finding
+// "Status headers are not in R12 form". The id is case-sensitive and must stand
+// alone, so "XR12" and "R12a" do not match.
+const omRuleIDPattern = `\bR[0-9]+\b`
+
+var omRuleIDRE = regexp.MustCompile(omRuleIDPattern)
 
 // reworkStandDownPrefix opens the close-skipped comment gt done writes when a
 // rework stands down because its head is the rejected one (gt-3e1z4). The
@@ -84,9 +95,14 @@ type rulesAdapter struct {
 	// commentCache holds each bead's comments by commentKey, once read by
 	// Prefetch or by Label. A failed read is not kept.
 	commentCache map[string][]beads.Comment
-	// warn tells the operator about a failed prefetch read; nil means stderr
-	// through warnf. A test sets it to see the warning without swapping
-	// os.Stderr.
+	// reviews is each bead's first-attempt om verdict, read once on the first
+	// label that reaches it.
+	reviews     map[string]land.ReviewRecord
+	reviewsRead bool
+	reviewsErr  error
+	// warn tells the operator about a failed prefetch read or a session left
+	// unlabeled over the review log; nil means stderr through warnf. A test sets
+	// it to see the warning without swapping os.Stderr.
 	warn func(format string, args ...any)
 }
 
@@ -156,7 +172,13 @@ func (a *rulesAdapter) Parse(raw []byte) (Item, error) {
 // a stand-down comment whose time cannot be read, or a record with no polecat
 // to match it by, leaves the session unlabeled, since the record may be there.
 // The rule that set the label is named with each source that matched, joined
-// by "+".
+// by "+". The om source only adds a true: a session whose attempt-1 verdict,
+// later than the submission, has a finding citing a standing rule id is labeled
+// broke. It never changes a label to false, and a session no source matches is
+// labeled false exactly as it was before the source. An unreadable review log
+// leaves a session unlabeled, with a warning, only when no guard or stand-down
+// record labels it broke; a session those already label stays broke, and its
+// rule names only the sources that were read.
 //
 // Only broke_standing_rule is labeled. rule_kind has no guard record that
 // names a kind, so it is never labeled here.
@@ -234,8 +256,27 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		}
 	}
 
+	// The om source is read after the others, so an unreadable review log cannot
+	// unlabel a session that a guard or stand-down record already labels broke.
+	reviews, reviewsErr := a.readReviews()
+	if reviewsErr == nil {
+		if r, ok := reviews[line.Bead]; ok && r.At.After(line.DoneAt) && citesStandingRule(r) {
+			sources = append(sources, ruleRulesOmFinding)
+		}
+	}
+
 	if len(sources) == 0 {
 		if unreadable {
+			return Labeling{}, nil
+		}
+		if reviewsErr != nil {
+			// Only the review log can say whether this session is broke, and it
+			// cannot be read. The session stays unlabeled and the reading goes on.
+			warn := a.warn
+			if warn == nil {
+				warn = warnf
+			}
+			warn("leaving %s unlabeled: %v", line.Bead, reviewsErr)
 			return Labeling{}, nil
 		}
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qBrokeStandingRule: false}, Rule: ruleRulesNoRecord}, nil
@@ -422,6 +463,45 @@ func (a *rulesAdapter) readRefusals() ([]attention.Refusal, error) {
 	a.refusals = append(rotated, current...)
 	a.refusalsRead = true
 	return a.refusals, nil
+}
+
+// readReviews returns each bead's first-attempt om verdict, read once; a failed
+// read is kept with its error, so the log is not read again for each session.
+// Where a bead has more than one first attempt, the first in the log is kept,
+// as dispatch.go keeps it. A review log that cannot be read is an error, which
+// Label turns into an unlabeled session where the log decides the label.
+func (a *rulesAdapter) readReviews() (map[string]land.ReviewRecord, error) {
+	if a.reviewsRead {
+		return a.reviews, a.reviewsErr
+	}
+	a.reviewsRead = true
+	recs, err := land.TownReviewsFile(a.town).Since(time.Time{})
+	if err != nil {
+		a.reviewsErr = fmt.Errorf("reading the review log: %w", err)
+		return nil, a.reviewsErr
+	}
+	first := map[string]land.ReviewRecord{}
+	for _, r := range recs {
+		if r.Attempt != 1 {
+			continue
+		}
+		if _, seen := first[r.BeadID]; !seen {
+			first[r.BeadID] = r
+		}
+	}
+	a.reviews = first
+	return first, nil
+}
+
+// citesStandingRule reports whether a finding of the verdict cites a standing
+// rule id in its title or its claim.
+func citesStandingRule(r land.ReviewRecord) bool {
+	for _, f := range r.FindingText {
+		if omRuleIDRE.MatchString(f.Title) || omRuleIDRE.MatchString(f.Claim) {
+			return true
+		}
+	}
+	return false
 }
 
 // inRuleWindow reports whether at falls from the submission to the window's end.
