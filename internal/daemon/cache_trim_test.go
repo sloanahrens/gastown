@@ -84,6 +84,14 @@ const (
 	// whole node filesystem for a local-path claim (gt-eyjgal).
 	cacheTrimDuVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- du -sk " + cacheTrimMountPath
 
+	// cacheTrimCanListVerb is the permission check the pass makes before it reads
+	// a namespace's pods: whether the sandbox kubeconfig may list them there.
+	cacheTrimCanListVerb = "auth can-i list pods -n " + cacheTrimNamespace
+
+	// cacheTrimReplacementWaitVerb is the wait for the replacement of a stuck trim
+	// Job, the call a test fails to make the replacement's Job report completion.
+	cacheTrimReplacementWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s"
+
 	// cacheTrimLastAppliedLimit is the metadata size the API server holds
 	// kubectl's last-applied-configuration annotation to, in bytes.
 	cacheTrimLastAppliedLimit = 262144
@@ -164,6 +172,9 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 		config:       &Config{TownRoot: t.TempDir()},
 		logger:       log.New(&logs, "", 0),
 		patrolConfig: diskMaintEnabled("", mode),
+		// The alerts a pass raises and clears go to a notifier the test holds, not
+		// a gt subprocess.
+		notifier: notifyfake.New(),
 	}
 	d.execCmd = cli.run
 	d.maint.quiet = func(*Daemon) (bool, string) { return true, "" }
@@ -426,13 +437,16 @@ func TestCacheTrimImageFromTheValuesFile(t *testing.T) {
 	})
 }
 
-// TestCacheTrimValuesFileWithNoMirrorIsRefused pins the refusal: a values file
-// names a CI image, and image_registry names no sandbox mirror to pull its digest
-// from. The pass says so and stops before any cluster call; it does not fall back
-// to the CI reference the sandbox nodes cannot pull.
-func TestCacheTrimValuesFileWithNoMirrorIsRefused(t *testing.T) {
+// TestCacheTrimValuesFileWithNoMirrorFallsBack pins the fallback: a values file
+// names a CI image and image_registry is unset. The pass does not stop: the Job
+// runs the claim's own profile image, as it did before the values file, and one
+// alert names the unset setting. Setting image_registry clears that alert on a
+// later pass (gt-yduowj).
+func TestCacheTrimValuesFileWithNoMirrorFallsBack(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	rec := notifyfake.New()
+	f.d.notifier = rec
 	f.writeValuesFile(t, imagevalues.Values{
 		Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
 		Polecat: cacheTrimForgejoPolecat,
@@ -440,13 +454,189 @@ func TestCacheTrimValuesFileWithNoMirrorIsRefused(t *testing.T) {
 	})
 	f.d.runDiskMaintenance()
 
-	for _, verb := range f.verbs() {
-		if strings.HasPrefix(verb, "apply ") || verb == cacheTrimClaimsVerb {
-			t.Errorf("the pass ran %q with no sandbox mirror to pull the values file's image from", verb)
+	const claimImage = "gastown-polecat:dev"
+	containers := f.appliedTrimJob(t).Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		t.Fatal("the applied Job has no container")
+	}
+	for _, c := range containers {
+		if c.Image != claimImage {
+			t.Errorf("the Job's container %s runs %q, want the claim's image %q with no mirror to name", c.Name, c.Image, claimImage)
+		}
+		if c.ImagePullPolicy != "Always" {
+			t.Errorf("the Job's container %s carries the pull policy %q, want %q for a moving tag", c.Name, c.ImagePullPolicy, "Always")
 		}
 	}
-	if logged := f.log.String(); !strings.Contains(logged, "image_registry names no sandbox mirror") {
-		t.Errorf("the log does not say why nothing was trimmed: %s", logged)
+	open := rec.OpenEscalations(cacheTrimNoMirrorKey)
+	if len(open) != 1 {
+		t.Fatalf("open alerts under %q = %+v, want one for the unset image_registry", cacheTrimNoMirrorKey, open)
+	}
+	if !strings.Contains(open[0].Reason, "image_registry") {
+		t.Errorf("the alert does not name the unset image_registry: %q", open[0].Reason)
+	}
+
+	f.setImageRegistry(cacheTrimMirror)
+	f.trimDue()
+	f.d.runDiskMaintenance()
+	if n := len(rec.OpenEscalations(cacheTrimNoMirrorKey)); n != 0 {
+		t.Errorf("the alert is still open after image_registry was set: %d", n)
+	}
+}
+
+// TestCacheTrimPodReadRefusalNamesTheVerb pins the refusal when the cluster will
+// not let the sandbox kubeconfig list the claim's pods. Only a "no" from the
+// cluster is a denial: the namespace is skipped with one alert that names the list
+// pods verb, and a later pass that reads the pods clears it. A check that cannot
+// answer is logged and raises nothing, and the pass still trims nothing there.
+func TestCacheTrimPodReadRefusalNamesTheVerb(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name    string
+		auth    cliReply
+		denied  bool
+		wantLog string
+	}{
+		{name: "the cluster says no", auth: cliReply{stdout: "no\n", code: 1}, denied: true},
+		{name: "the answer is neither yes nor no", auth: cliReply{stdout: "maybe\n"}, wantLog: "could not be checked"},
+		{name: "the check fails", auth: cliReply{stderr: "error: connection refused", code: 1}, wantLog: "could not be checked"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimPodsVerb:    {stderr: "Error from server (Forbidden): pods is forbidden", code: 1},
+				cacheTrimCanListVerb: row.auth,
+			})
+			rec := notifyfake.New()
+			f.d.notifier = rec
+			f.writeValuesFile(t, cacheTrimValues())
+			f.d.runDiskMaintenance()
+
+			if applied := f.applied(t); len(applied) != 0 {
+				t.Errorf("the pass applied %v in a namespace the cluster refused it", applied)
+			}
+			key := cacheTrimNoPodListKey(cacheTrimNamespace)
+			open := rec.OpenEscalations(key)
+			if row.denied {
+				if len(open) != 1 {
+					t.Fatalf("open alerts under %q = %+v, want one naming the verb", key, open)
+				}
+				if !strings.Contains(open[0].Reason, "list pods") {
+					t.Errorf("the alert does not name the list pods verb: %q", open[0].Reason)
+				}
+			} else if len(open) != 0 {
+				t.Errorf("an unanswered check raised an alert: %+v", open)
+			}
+			if row.wantLog != "" && !strings.Contains(f.log.String(), row.wantLog) {
+				t.Errorf("the log does not say the check could not answer (want %q): %s", row.wantLog, f.log.String())
+			}
+		})
+	}
+}
+
+// TestCacheTrimPodListAlertClearsWhenThePodsAreReadable: a denied namespace whose
+// pods a later pass reads is no longer refused, so its alert is cleared.
+func TestCacheTrimPodListAlertClearsWhenThePodsAreReadable(t *testing.T) {
+	t.Parallel()
+	overrides := map[string]cliReply{
+		cacheTrimPodsVerb:    {stderr: "Error from server (Forbidden): pods is forbidden", code: 1},
+		cacheTrimCanListVerb: {stdout: "no\n", code: 1},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.writeValuesFile(t, cacheTrimValues())
+	f.d.runDiskMaintenance()
+
+	key := cacheTrimNoPodListKey(cacheTrimNamespace)
+	if n := len(rec.OpenEscalations(key)); n != 1 {
+		t.Fatalf("after the refusal, open alerts = %d, want one", n)
+	}
+
+	delete(overrides, cacheTrimPodsVerb)
+	delete(overrides, cacheTrimCanListVerb)
+	f.trimDue()
+	f.d.runDiskMaintenance()
+
+	if clears := rec.Clears(); len(clears) == 0 || !slices.Contains(clears[len(clears)-1].Fingerprints, key) {
+		t.Errorf("the readable namespace did not clear its alert; clears = %+v", clears)
+	}
+	if n := len(rec.OpenEscalations(key)); n != 0 {
+		t.Errorf("the alert is still open after the pods were read: %d", n)
+	}
+}
+
+// TestCacheTrimUndeliveredStuckAlertIsClearedLater pins the alert's end when its
+// send fails: the alert stays marked, so the completed trim on a later pass clears
+// it, and the failed send is logged rather than dropped.
+func TestCacheTrimUndeliveredStuckAlertIsClearedLater(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	overrides := map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ErrImagePull", cacheTrimMirrorPolecat)),
+		cacheTrimReplacementWaitVerb:       {stderr: "error: timed out waiting for the condition", code: 1},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	clk := clockwork.NewFakeClockAt(diskMaintNow)
+	f.d.clock = clk
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, cacheTrimValues())
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1"))
+
+	// The failed send retries on the daemon's clock, so the test drives it.
+	runOnClock(t, clk, time.Second, f.d.runDiskMaintenance)
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+	if n := len(rec.OpenEscalations(key)); n != 0 {
+		t.Fatalf("an undelivered alert is open under %q: %d", key, n)
+	}
+	if !strings.Contains(f.log.String(), "was not sent") {
+		t.Errorf("the log does not say the alert was not sent: %s", f.log.String())
+	}
+
+	rec.Fail(notifyfake.KindEscalate, nil)
+	delete(overrides, cacheTrimReplacementWaitVerb)
+	f.trimDue()
+	runOnClock(t, clk, time.Second, f.d.runDiskMaintenance)
+	if clears := rec.Clears(); len(clears) == 0 || !slices.Contains(clears[len(clears)-1].Fingerprints, key) {
+		t.Errorf("the completed replacement did not clear the marked alert; clears = %+v", clears)
+	}
+}
+
+// TestCacheTrimUnclearedStuckAlertIsRetried pins the other half of the alert's
+// end: a clear that fails is logged and the alert stays marked, so the next
+// completed trim clears it again.
+func TestCacheTrimUnclearedStuckAlertIsRetried(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	overrides := map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ErrImagePull", cacheTrimMirrorPolecat)),
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	f.d.clock = clockwork.NewFakeClockAt(diskMaintNow)
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, cacheTrimValues())
+	rec.Fail(notifyfake.KindClear, errors.New("gt escalate clear: exit status 1"))
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+
+	f.d.runDiskMaintenance()
+	if n := len(rec.OpenEscalations(key)); n != 1 {
+		t.Fatalf("after the stuck Job was reported, open alerts = %d, want one", n)
+	}
+	if !strings.Contains(f.log.String(), "was not cleared") {
+		t.Errorf("the log does not say the alert was not cleared: %s", f.log.String())
+	}
+
+	rec.Fail(notifyfake.KindClear, nil)
+	f.trimDue()
+	f.d.runDiskMaintenance()
+	if n := len(rec.OpenEscalations(key)); n != 0 {
+		t.Errorf("the next completed trim did not clear the alert it failed to clear: %d open", n)
 	}
 }
 
