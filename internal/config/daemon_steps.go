@@ -64,8 +64,8 @@ var daemonSteps = []DaemonStep{
 	{"town-metrics", DaemonStepPlugin, DaemonStepRuns, []string{"docker", "lsof", "ps"}, "runs in the container: daemon.log 2026-11-08 12:52:20 'Handler: script plugin town-metrics ok (exit 0 after 5s)'; its lsof, ps and docker probes read the container, not the host"},
 
 	{"landing_worker", DaemonStepPatrol, DaemonStepRuns, []string{"om"}, "runs in the container: daemon.log 2026-11-08 12:55:40 'landing_worker: Landing of gt-gg9hv.68 ... left for the overseer', 1239 of its lines in the last 20000; reviews with om when review is on. A rig that sets post_land_command needs a toolchain this image does not carry, so the verdict stays main's Forgejo status (gt-gg9hv.7.1)"},
-	{"rebuild_gt", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl"},
-	{"update", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl install the binary on the host and reload the host's daemon"},
+	{"rebuild_gt", DaemonStepPatrol, DaemonStepHost, nil, "builds cmd/gt-installer from the synced checkout and runs it with --source rebuild-gt, which installs the new gt binary and writes the daemon's restart marker"},
+	{"update", DaemonStepPatrol, DaemonStepHost, nil, "launches the detached gt update --from-daemon run, which installs the new gt build and restarts the daemon"},
 	{"rebuild_om", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
 	{"rebuild_hm", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
 	{"disk_maintenance", DaemonStepPatrol, DaemonStepRuns, []string{"kubectl"}, "runs in the container: daemon.log 2026-11-08 12:53:42 'disk_maintenance: cache trim gt-cache in openshell applied: route=shards n=15'; the cache trim execs kubectl (internal/daemon/cache_trim.go)"},
