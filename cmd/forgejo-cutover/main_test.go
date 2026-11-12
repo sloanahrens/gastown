@@ -53,12 +53,11 @@ func (stubGit) OriginURL(string) (string, error) {
 // directory and a file, so no test touches the real filesystem.
 func stubEnv(getenv func(string) string) forgejocut.Env {
 	return forgejocut.Env{
-		Getenv:     getenv,
-		IsDir:      func(string) bool { return true },
-		IsFile:     func(string) bool { return true },
-		Town:       func() string { return "" },
-		Executable: func() (string, error) { return "/repo/forgejo-cutover", nil },
-		Git:        stubGit{},
+		Getenv: getenv,
+		IsDir:  func(string) bool { return true },
+		IsFile: func(string) bool { return true },
+		Town:   func() string { return "" },
+		Git:    stubGit{},
 	}
 }
 
@@ -116,7 +115,6 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 				"--accept-diverged",
 				"(default: " + forgejocut.DefaultMainBranch + ")",
 				"else " + forgejocut.DefaultAPIURL + ")",
-				"(default: " + forgejocut.DefaultProbe + ")",
 			} {
 				if !strings.Contains(stdout.String(), want) {
 					t.Errorf("run(%s) stdout = %q, want it to hold %q", flag, stdout.String(), want)
@@ -124,6 +122,9 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 			}
 			if strings.Contains(stdout.String(), "--mirror") {
 				t.Errorf("run(%s) stdout names --mirror, which the port dropped", flag)
+			}
+			if strings.Contains(stdout.String(), "--probe") {
+				t.Errorf("run(%s) stdout names --probe, which the probe no longer takes", flag)
 			}
 			if stderr.Len() != 0 {
 				t.Errorf("run(%s) stderr = %q, want nothing on a help request", flag, stderr.String())
@@ -159,25 +160,16 @@ func TestMainExecRunnerRefusesAnEmptyArgv(t *testing.T) {
 	if err := r.Run(nil); err == nil || !strings.Contains(err.Error(), "no command to run") {
 		t.Errorf("Run(nil) = %v, want the empty argv refused", err)
 	}
-	if err := r.RunWithToken(nil, forgejoprov.Secret{}); err == nil || !strings.Contains(err.Error(), "no command to run") {
-		t.Errorf("RunWithToken(nil) = %v, want the empty argv refused", err)
-	}
 }
 
 // TestMainExecRunnerBuildsEachChildInProcess: every method hands its seam the
 // child the run built: the argv it was given, the environment with the token
-// variables removed and only the probe's child carrying the resolved token, the
-// operator's streams on a running child, and the capture mode. Removing the
-// scrub, the extra probe entry, or a stream assignment turns it red.
+// variables removed, the operator's streams on a running child, and the capture
+// mode. Removing the scrub or a stream assignment turns it red.
 func TestMainExecRunnerBuildsEachChildInProcess(t *testing.T) {
 	t.Parallel()
 	const brokerLeak = "leak-broker-token"
 	const standInLeak = "leak-standin-token" //nolint:gosec // G101: a fixture, not a credential
-	const probeToken = "tok-probe-only-marker"
-	tokenSecret, err := forgejoprov.ResolveAdminToken(func(string) string { return probeToken }, nil, "")
-	if err != nil {
-		t.Fatalf("resolve the fixture token: %v", err)
-	}
 
 	var stdout, stderr strings.Builder
 	start := &recordingStart{out: []byte("child output")}
@@ -198,28 +190,24 @@ func TestMainExecRunnerBuildsEachChildInProcess(t *testing.T) {
 	if err != nil || string(out) != "child output" {
 		t.Fatalf("Output = %q, %v, want the seam's output", out, err)
 	}
-	if err := r.Run([]string{"bash", "probe.sh"}); err != nil {
+	if err := r.Run([]string{"env", "gt", "daemon", "restart"}); err != nil {
 		t.Fatalf("Run = %v, want the seam's answer", err)
 	}
-	if err := r.RunWithToken([]string{"bash", "probe.sh"}, tokenSecret); err != nil {
-		t.Fatalf("RunWithToken = %v, want the seam's answer", err)
-	}
 
-	if len(start.cmds) != 3 {
-		t.Fatalf("the seam was handed %d children, want 3", len(start.cmds))
+	if len(start.cmds) != 2 {
+		t.Fatalf("the seam was handed %d children, want 2", len(start.cmds))
 	}
 	wantArgv := [][]string{
 		{"bd", "list"},
-		{"bash", "probe.sh"},
-		{"bash", "probe.sh"},
+		{"env", "gt", "daemon", "restart"},
 	}
 	for i, want := range wantArgv {
 		if got := start.cmds[i].Args; !slices.Equal(got, want) {
 			t.Errorf("child %d argv = %q, want %q", i, got, want)
 		}
 	}
-	if !slices.Equal(start.captures, []bool{true, false, false}) {
-		t.Errorf("the capture modes = %v, want the read captured and the runs streamed", start.captures)
+	if !slices.Equal(start.captures, []bool{true, false}) {
+		t.Errorf("the capture modes = %v, want the read captured and the run streamed", start.captures)
 	}
 	for i, cmd := range start.cmds {
 		if slices.Contains(cmd.Env, "GT_AUTH_FORGEJO_TOKEN="+brokerLeak) || slices.Contains(cmd.Env, "FORGEJO_ADMIN_TOKEN="+standInLeak) {
@@ -229,20 +217,67 @@ func TestMainExecRunnerBuildsEachChildInProcess(t *testing.T) {
 			t.Errorf("child %d lost an unrelated variable: %q", i, cmd.Env)
 		}
 	}
-	probeEntry := forgejoprov.BrokerTokenEnv + "=" + probeToken
-	if !slices.Contains(start.cmds[2].Env, probeEntry) {
-		t.Errorf("the probe's child did not receive the resolved token: %q", start.cmds[2].Env)
-	}
-	if slices.Contains(start.cmds[1].Env, probeEntry) {
-		t.Errorf("a child other than the probe received the token: %q", start.cmds[1].Env)
-	}
-
 	if start.cmds[0].Stdout != nil || start.cmds[0].Stderr != nil {
 		t.Error("the captured read was given the operator's streams")
 	}
-	for _, i := range []int{1, 2} {
-		if start.cmds[i].Stdout != &stdout || start.cmds[i].Stderr != &stderr {
-			t.Errorf("child %d did not get the operator's streams", i)
+	if start.cmds[1].Stdout != &stdout || start.cmds[1].Stderr != &stderr {
+		t.Error("child 1 did not get the operator's streams")
+	}
+}
+
+// TestCutoverChildEnvironmentsHoldNoToken: no child a cutover run starts is handed
+// the admin token, under either of its names. The probe runs in process and is
+// given the token there, so every child's environment is the process's with the
+// token variables removed. Putting the token into a child's environment turns it
+// red. The failure messages name the child and never its environment, which holds
+// the token.
+func TestCutoverChildEnvironmentsHoldNoToken(t *testing.T) {
+	t.Parallel()
+	const token = "tok-run-admin-marker" //nolint:gosec // G101: a fixture, not a credential
+	start := &recordingStart{out: []byte("0\n")}
+	var stdout, stderr strings.Builder
+	r := execRunner{
+		environ: func() []string {
+			return []string{
+				forgejoprov.BrokerTokenEnv + "=" + token,
+				"FORGEJO_ADMIN_TOKEN=" + token,
+				"UNRELATED=kept",
+			}
+		},
+		stdout: &stdout,
+		stderr: &stderr,
+		start:  start.start,
+	}
+	// The children a run starts, in the order it starts them: the landing-queue
+	// read, the promote-key derivation, the key mint and the daemon restart.
+	children := []func() error{
+		func() error {
+			_, err := r.Output([]string{"bd", "-C", "/srv/town/gastown", "count"})
+			return err
+		},
+		func() error {
+			_, err := r.Output([]string{"ssh-keygen", "-y", "-f", "/srv/town/key"})
+			return err
+		},
+		func() error { return r.Run([]string{"ssh-keygen", "-q", "-t", "ed25519", "-f", "/srv/town/key"}) },
+		func() error { return r.Run([]string{"env", "gt", "daemon", "restart"}) },
+	}
+	for _, child := range children {
+		if err := child(); err != nil {
+			t.Fatalf("a child failed: %v", err)
+		}
+	}
+	if len(start.cmds) != len(children) {
+		t.Fatalf("the seam was handed %d children, want %d", len(start.cmds), len(children))
+	}
+	for i, cmd := range start.cmds {
+		for _, entry := range cmd.Env {
+			if strings.Contains(entry, token) {
+				t.Errorf("child %d (%s) was handed the admin token", i, cmd.Args[0])
+			}
+		}
+		if !slices.Contains(cmd.Env, "UNRELATED=kept") {
+			t.Errorf("child %d (%s) lost an unrelated variable", i, cmd.Args[0])
 		}
 	}
 }
@@ -263,7 +298,6 @@ func TestMainExecRunnerHonorsACanceledContext(t *testing.T) {
 	}{
 		{"Output", func() error { _, err := r.Output(argv); return err }},
 		{"Run", func() error { return r.Run(argv) }},
-		{"RunWithToken", func() error { return r.RunWithToken(argv, forgejoprov.Secret{}) }},
 	} {
 		if err := call.run(); !errors.Is(err, context.Canceled) {
 			t.Errorf("%s = %v, want the canceled context's error", call.name, err)

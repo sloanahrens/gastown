@@ -134,9 +134,8 @@ func liveEnv() forgejocut.Env {
 			fi, err := os.Stat(path)
 			return err == nil && fi.Mode().IsRegular()
 		},
-		Town:       townFromCwd,
-		Executable: os.Executable,
-		Git:        bareGit{},
+		Town: townFromCwd,
+		Git:  bareGit{},
 	}
 }
 
@@ -173,19 +172,17 @@ func (bareGit) OriginURL(bareRepo string) (string, error) {
 }
 
 // tokenEnvNames are the variables the admin token arrives in: the broker's and
-// the stand-in's. No child inherits either. The one exception is the probe, when
-// it has no token file: RunWithToken gives that child the broker's variable, and
-// the probe's own children inherit it from there; no other child of the cutover
-// carries a token.
+// the stand-in's. No child inherits either. The probe is not a child: it runs in
+// this process and reads the token through its own environment seam.
 var tokenEnvNames = []string{
 	forgejoprov.BrokerTokenEnv,
 	"FORGEJO_ADMIN_TOKEN", //nolint:gosec // G101: the variable's name, not a credential
 }
 
 // execRunner is forgejocut.Runner over the operating system: Output captures a
-// read's stdout, and Run lets a child's own output reach the operator's streams —
-// the probe's log is the operator's to read. Every child is bounded by the run's
-// context and runs with the admin token removed from its environment.
+// read's stdout, and Run lets a child's own output reach the operator's streams.
+// Every child is bounded by the run's context and runs with the admin token
+// removed from its environment.
 type execRunner struct {
 	// ctx bounds the child; nil is context.Background.
 	ctx context.Context
@@ -213,14 +210,15 @@ func (r execRunner) command(argv []string) (*exec.Cmd, error) {
 }
 
 // childEnv is the environment a child runs with: the process's own, less the
-// variables the admin token arrives in, plus extra for the one child allowed it.
-func (r execRunner) childEnv(extra []string) []string {
+// variables the admin token arrives in. No child is given the token: the probe
+// runs in process.
+func (r execRunner) childEnv() []string {
 	environ := r.environ
 	if environ == nil {
 		environ = os.Environ
 	}
 	entries := environ()
-	env := make([]string, 0, len(entries)+len(extra))
+	env := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		key, _, _ := strings.Cut(entry, "=")
 		if slices.Contains(tokenEnvNames, key) {
@@ -228,7 +226,7 @@ func (r execRunner) childEnv(extra []string) []string {
 		}
 		env = append(env, entry)
 	}
-	return append(env, extra...)
+	return env
 }
 
 // runChild hands the built child to the seam, or starts it.
@@ -248,29 +246,23 @@ func (r execRunner) Output(argv []string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd.Env = r.childEnv(nil)
+	cmd.Env = r.childEnv()
 	return r.runChild(cmd, true)
 }
 
 // Run runs argv with the run's own stdout and stderr.
 func (r execRunner) Run(argv []string) error {
-	return r.runStreaming(argv, nil)
+	return r.runStreaming(argv)
 }
 
-// RunWithToken runs argv with the admin token in its environment: the probe's
-// channel. Every other variable the token could hide in is still removed.
-func (r execRunner) RunWithToken(argv []string, token forgejoprov.Secret) error {
-	return r.runStreaming(argv, []string{forgejoprov.BrokerTokenEnv + "=" + token.Reveal()})
-}
-
-// runStreaming builds the child once, adds extra to its scrubbed environment and
-// runs it with the run's streams.
-func (r execRunner) runStreaming(argv, extra []string) error {
+// runStreaming builds the child once, scrubs its environment and runs it with the
+// run's streams.
+func (r execRunner) runStreaming(argv []string) error {
 	cmd, err := r.command(argv)
 	if err != nil {
 		return err
 	}
-	cmd.Env = r.childEnv(extra)
+	cmd.Env = r.childEnv()
 	cmd.Stdout = r.stdout
 	cmd.Stderr = r.stderr
 	_, err = r.runChild(cmd, false)
@@ -298,8 +290,6 @@ var usage = fmt.Sprintf(`Usage: forgejo-cutover <rig> --repo OWNER/NAME [options
                          $FORGEJO_URL, else --api-url less /api/v1)
   --admin-token-file F   file holding FORGEJO_ADMIN_TOKEN=... (default
                          $FORGEJO_ADMIN_ENV, else no file is read)
-  --probe PATH           probe run before the cutover, found beside the binary
-                         (default: %s)
   --gt PATH              gt binary for the daemon restart (default: %s)
   --dry-run              read and print, never write
   -h, --help             this text
@@ -308,6 +298,5 @@ var usage = fmt.Sprintf(`Usage: forgejo-cutover <rig> --repo OWNER/NAME [options
 	forgejocut.DefaultGateWorkflow,
 	forgejocut.DefaultBotPrefix,
 	forgejocut.DefaultAPIURL,
-	forgejocut.DefaultProbe,
 	forgejocut.DefaultGT,
 )

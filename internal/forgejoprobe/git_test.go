@@ -4,41 +4,49 @@ import (
 	"errors"
 	"io"
 	"os/exec"
-	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
-// TestGitEnvDropsTheScrubbedVars checks the environment a git child is built
-// from: every name ending in _TOKEN and the three variables that pin a repository
-// are removed; every other variable stays, HOME and PATH included, and a name
-// that only starts with a token's name is not mistaken for it. It runs no git.
-func TestGitEnvDropsTheScrubbedVars(t *testing.T) {
+// TestGitRunScrubsTheChildEnvironment drives Run through its process seam and
+// reads the environment git is started with: the admin token variables, a
+// caller-supplied token and the repository pins are absent, and HOME stays.
+// Removing the scrub from Run turns it red, since GitChildEnv is the only filter.
+func TestGitRunScrubsTheChildEnvironment(t *testing.T) {
 	t.Parallel()
-	environ := []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/home/user",
-		"GT_AUTH_FORGEJO_TOKEN=broker-token",
-		"FORGEJO_ADMIN_TOKEN=admin-token",
-		"FOO_TOKEN=foo-token",
-		"FORGEJO_ADMIN_ENV=/etc/forgejo/admin.env",
-		"FORGEJO_ADMIN_TOKEN_FILE=/run/token",
-		"GIT_DIR=/elsewhere/.git",
-		"GIT_INDEX_FILE=/elsewhere/index",
-		"GIT_WORK_TREE=/elsewhere/tree",
-		"GIT_SSH_COMMAND=ssh -i /home/user/.ssh/id",
-		"GIT_TERMINAL_PROMPT=0",
+	var gotEnv []string
+	g := execGit{
+		run: func(cmd *exec.Cmd) error {
+			gotEnv = cmd.Env
+			return nil
+		},
+		environ: func() []string {
+			return []string{
+				"HOME=/home/user",
+				"GT_AUTH_FORGEJO_TOKEN=broker-token",
+				"FORGEJO_ADMIN_TOKEN=admin-token",
+				"GIT_DIR=/elsewhere/.git",
+			}
+		},
 	}
-	want := []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/home/user",
-		"FORGEJO_ADMIN_ENV=/etc/forgejo/admin.env",
-		"FORGEJO_ADMIN_TOKEN_FILE=/run/token",
-		"GIT_SSH_COMMAND=ssh -i /home/user/.ssh/id",
-		"GIT_TERMINAL_PROMPT=0",
+	if _, err := g.Run("work/copy", []string{"FOO_TOKEN=caller-token"}, "status"); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if got := gitEnv(environ); !reflect.DeepEqual(got, want) {
-		t.Fatalf("gitEnv = %q, want %q", got, want)
+	for _, entry := range gotEnv {
+		for _, token := range []string{"broker-token", "admin-token", "caller-token"} {
+			if strings.Contains(entry, token) {
+				t.Errorf("git was started with a token in its environment (%s)", strings.SplitN(entry, "=", 2)[0])
+			}
+		}
+	}
+	for _, name := range []string{"GIT_DIR", "GT_AUTH_FORGEJO_TOKEN", "FORGEJO_ADMIN_TOKEN", "FOO_TOKEN"} {
+		if slices.ContainsFunc(gotEnv, func(kv string) bool { return strings.HasPrefix(kv, name+"=") }) {
+			t.Errorf("git was started with %s in its environment", name)
+		}
+	}
+	if !slices.Contains(gotEnv, "HOME=/home/user") {
+		t.Errorf("git lost HOME, which the credential helpers need")
 	}
 }
 

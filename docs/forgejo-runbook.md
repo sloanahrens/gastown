@@ -200,7 +200,11 @@ Before a rig's cutover its gate workflow is on the GitHub `main` — landed
 through the old path first, so Forgejo never falls back to
 `.github/workflows` — and its runner image can run that gate.
 
-`sudo -u gt-forge gt-approve run forgejo-probe -- <rig> --repo OWNER/NAME`
+The `forgejo-probe-go` broker rule is not installed yet: the operator must first
+install the probe binary and pin its sha256 in the broker policy, a human gesture
+at a sitting.
+
+`sudo -u gt-forge gt-approve run forgejo-probe-go -- <rig> --repo OWNER/NAME`
 proves the last of those before anything changes: it clones the rig's GitHub
 `main`, pushes it to the rig's Forgejo copy as `land/probe-<rig>` from a
 throwaway worktree of the rig's own repository — the same push the landing
@@ -391,6 +395,6 @@ the revoked value until it restarts.
 
 The Go packages `internal/forgejoprov`, `internal/forgejoresync` and
 `internal/forgejocut` test every path above against the Forgejo fake in
-`internal/forgejotest`, with no live instance and no network. The one shell test
-left, `scripts/forgejo-probe_test.sh`, drives the probe against a stub Forgejo
-and runs under `make test-makefile`.
+`internal/forgejotest`, with no live instance and no network. The probe's own
+tests are in `internal/forgejoprobe` and run under `go test`; no shell test is
+left for the probe.

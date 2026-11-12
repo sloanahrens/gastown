@@ -694,7 +694,7 @@ func TestRunRefusalsAndFailures(t *testing.T) {
 				delete(fx.env, "GT_AUTH_FORGEJO_TOKEN")
 				fx.files[runHome+"/forgejo/.env"] = "FORGEJO_ADMIN_TOKEN=" + runDecoyTK + "\n"
 			},
-			msg: "sudo -u gt-forge gt-approve run forgejo-probe",
+			msg: "sudo -u gt-forge gt-approve run forgejo-probe-go",
 			assert: func(t *testing.T, fx *runFixture) {
 				expect(t, strings.Contains(fx.stderr.String(), "no admin token"), "the missing token is named in the error")
 				expect(t, len(fx.forge.calls) == 0, "no request is sent without a token")
@@ -708,7 +708,7 @@ func TestRunRefusalsAndFailures(t *testing.T) {
 			args:  runArgs("--admin-token-file", "/absent.env"),
 			msg:   "no admin token",
 			assert: func(t *testing.T, fx *runFixture) {
-				expect(t, strings.Contains(fx.stderr.String(), "sudo -u gt-forge gt-approve run forgejo-probe"),
+				expect(t, strings.Contains(fx.stderr.String(), "sudo -u gt-forge gt-approve run forgejo-probe-go"),
 					"the error names the broker command")
 				expect(t, len(fx.forge.calls) == 0, "no request is sent without a token")
 			},

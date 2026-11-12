@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/forgejoprobe"
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejotest"
 )
@@ -69,7 +70,6 @@ func runOptions(dryRun bool) *Options {
 		APIURL:         runAPIURL,
 		WebURL:         runWebURL,
 		AdminTokenFile: runTokenFile,
-		Probe:          "/probe/forgejo-probe.sh",
 		GT:             "gt",
 		DryRun:         dryRun,
 	}
@@ -296,14 +296,12 @@ type runExec struct {
 	files      *memFiles
 	counts     []string // the landing counts, in call order; the last repeats
 	countErr   error
-	probeErr   error
 	mintErr    error
 	deriveErr  error
 	restartErr error
-	calls      [][]string           // Output calls
-	runs       [][]string           // Run calls
-	tokens     []forgejoprov.Secret // the token each RunWithToken call was handed
-	writes     []string             // a key mint
+	calls      [][]string // Output calls
+	runs       [][]string // Run calls
+	writes     []string   // a key mint
 	countIndex int
 }
 
@@ -332,8 +330,6 @@ func (f *runExec) Output(argv []string) ([]byte, error) {
 func (f *runExec) Run(argv []string) error {
 	f.runs = append(f.runs, slices.Clone(argv))
 	switch argv[0] {
-	case "bash":
-		return f.probeErr
 	case "ssh-keygen":
 		if f.mintErr != nil {
 			return f.mintErr
@@ -351,11 +347,19 @@ func (f *runExec) Run(argv []string) error {
 	return fmt.Errorf("unexpected Run call: %q", argv)
 }
 
-// RunWithToken is the probe's channel when no token file was named: it records
-// the token and behaves as Run does.
-func (f *runExec) RunWithToken(argv []string, token forgejoprov.Secret) error {
-	f.tokens = append(f.tokens, token)
-	return f.Run(argv)
+// fakeProbeRun is the ProbeFunc seam a whole-run test injects: it records each
+// probe run's arguments and what the probe's environment answers for the broker's
+// token variable, and answers with the exit code the test sets.
+type fakeProbeRun struct {
+	rc     int
+	calls  [][]string
+	tokens []string
+}
+
+func (p *fakeProbeRun) run(_ context.Context, args []string, getenv func(string) string, _ forgejoprobe.Streams) int {
+	p.calls = append(p.calls, slices.Clone(args))
+	p.tokens = append(p.tokens, getenv(forgejoprov.BrokerTokenEnv))
+	return p.rc
 }
 
 // runWorld is one whole cutover's world: the options, the seam set and the fakes
@@ -368,6 +372,7 @@ type runWorld struct {
 	exec   *runExec
 	fake   *forgejotest.Fake
 	pfiles *provisionFiles
+	probe  *fakeProbeRun
 	// madeTemp and removed are the import's scratch directory lifecycle: the
 	// (dir, pattern) MkdirTemp was asked for, and the path RemoveAll was given.
 	madeTemp *[]string
@@ -423,13 +428,15 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 	fake.ViewerExists = true
 	pfiles := newProvisionFiles()
 	exec := &runExec{files: files, counts: []string{"0"}}
+	probe := &fakeProbeRun{}
 	stdout, stderr := &strings.Builder{}, &strings.Builder{}
 	madeTemp, removed := &[]string{}, &[]string{}
 	env := RunEnv{
-		Git:    git.run,
-		Files:  files,
-		Now:    func() time.Time { return time.Date(2026, 11, 1, 14, 5, 9, 0, time.UTC) },
-		Runner: exec,
+		Git:      git.run,
+		Files:    files,
+		Now:      func() time.Time { return time.Date(2026, 11, 1, 14, 5, 9, 0, time.UTC) },
+		Runner:   exec,
+		ProbeRun: probe.run,
 		MkdirTemp: func(dir, pattern string) (string, error) {
 			*madeTemp = append(*madeTemp, dir+"|"+pattern)
 			return runScratchRoot, nil
@@ -448,7 +455,7 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 		Stdout: stdout,
 		Stderr: stderr,
 	}
-	return &runWorld{opts: opts, env: env, files: files, git: git, exec: exec, fake: fake, pfiles: pfiles, madeTemp: madeTemp, removed: removed, stdout: stdout, stderr: stderr}
+	return &runWorld{opts: opts, env: env, files: files, git: git, exec: exec, fake: fake, pfiles: pfiles, probe: probe, madeTemp: madeTemp, removed: removed, stdout: stdout, stderr: stderr}
 }
 
 // runGetenv is the environment seam a whole-run test reads: the config home the
@@ -558,7 +565,7 @@ func TestRunDryRunWritesNothingOutsideItsTempDir(t *testing.T) {
 
 	out := w.output()
 	for _, want := range []string{
-		"bash /probe/forgejo-probe.sh acme --repo acme/rig",
+		"+ forgejo-probe acme --repo acme/rig",
 		"--town-root " + runTownRoot,
 		"git ls-remote",
 		"ssh-keygen -q -t ed25519",
@@ -609,10 +616,10 @@ func TestRunDryRunWritesNothingOutsideItsTempDir(t *testing.T) {
 	if len(w.pfiles.written) != 0 {
 		t.Errorf("the dry run wrote token files: %q", w.pfiles.written)
 	}
+	if len(w.probe.calls) != 0 {
+		t.Errorf("the dry run ran the probe: %q", w.probe.calls)
+	}
 	for _, argv := range w.exec.runs {
-		if argv[0] == "bash" {
-			t.Errorf("the dry run ran the probe: %q", argv)
-		}
 		if argv[0] == "env" {
 			t.Errorf("the dry run restarted the daemon: %q", argv)
 		}
@@ -659,12 +666,15 @@ func TestRunSecondRunChangesNothing(t *testing.T) {
 	if len(w.fake.Writes()) == 0 {
 		t.Fatal("the first run sent no write to Forgejo")
 	}
-	firstProbe := childArgv(w.exec.runs, "bash")
-	firstRestart := childArgv(w.exec.runs, "env")
-	if firstProbe == nil || firstRestart == nil {
-		t.Fatalf("the first run did not run the probe and the restart: %q", w.exec.runs)
+	if len(w.probe.calls) != 1 {
+		t.Fatalf("the first run ran the probe %d time(s), want once", len(w.probe.calls))
 	}
-	runsBefore, readsBefore := len(w.exec.runs), len(w.exec.calls)
+	firstProbe := w.probe.calls[0]
+	firstRestart := childArgv(w.exec.runs, "env")
+	if firstRestart == nil {
+		t.Fatalf("the first run did not run the restart: %q", w.exec.runs)
+	}
+	runsBefore, readsBefore, probesBefore := len(w.exec.runs), len(w.exec.calls), len(w.probe.calls)
 
 	w.resetWrites()
 	tokensBefore := w.snapshotTokens()
@@ -689,19 +699,16 @@ func TestRunSecondRunChangesNothing(t *testing.T) {
 	if len(w.exec.writes) != 0 {
 		t.Errorf("the second run ran the write children %q", w.exec.writes)
 	}
-	// The two children a converged run still runs — the probe and the daemon
-	// restart — ran with exactly the first run's argv, and no other child ran.
-	// Making either step write, adding a child, or changing its argv turns this
-	// red.
+	// The probe and the daemon restart a converged run still makes ran with exactly
+	// the first run's argv, and no other child ran. Making either step write, adding
+	// a run, or changing its argv turns this red.
+	secondProbes := w.probe.calls[probesBefore:]
+	if len(secondProbes) != 1 || !slices.Equal(secondProbes[0], firstProbe) {
+		t.Errorf("the second run's probe = %q, want one run of the first run's %q", secondProbes, firstProbe)
+	}
 	secondRuns := w.exec.runs[runsBefore:]
-	if len(secondRuns) != 2 {
-		t.Fatalf("the second run ran %d child(ren) %q, want the probe and the restart", len(secondRuns), secondRuns)
-	}
-	if !slices.Equal(secondRuns[0], firstProbe) {
-		t.Errorf("the second run's probe = %q, want the first run's %q", secondRuns[0], firstProbe)
-	}
-	if !slices.Equal(secondRuns[1], firstRestart) {
-		t.Errorf("the second run's restart = %q, want the first run's %q", secondRuns[1], firstRestart)
+	if len(secondRuns) != 1 || !slices.Equal(secondRuns[0], firstRestart) {
+		t.Fatalf("the second run ran child(ren) %q, want only the restart %q", secondRuns, firstRestart)
 	}
 	secondReads := w.exec.calls[readsBefore:]
 	if len(secondReads) == 0 {
@@ -739,7 +746,7 @@ func TestRunStopsAtTheFirstFailingStepAndSaysWhich(t *testing.T) {
 		{
 			name: "step 1 (the probe)",
 			prepare: func(w *runWorld) {
-				w.exec.probeErr = errExit
+				w.probe.rc = forgejoprobe.ExitFailure
 			},
 			gone: "importing every GitHub ref",
 		},
@@ -1245,7 +1252,7 @@ func TestRunBrokerToken(t *testing.T) {
 			if violations := w.fake.Violations(); len(violations) != 0 {
 				t.Errorf("%d request(s) reached Forgejo without the token: %v", len(violations), violations)
 			}
-			for _, argv := range append(append(slices.Clone(w.exec.calls), w.exec.runs...), w.git.calls...) {
+			for _, argv := range append(append(append(slices.Clone(w.exec.calls), w.exec.runs...), w.git.calls...), w.probe.calls...) {
 				if slices.Contains(argv, token) || strings.Contains(strings.Join(argv, " "), token) {
 					t.Errorf("an argv carries the token: %q", argv)
 				}
@@ -1263,23 +1270,23 @@ func TestRunBrokerToken(t *testing.T) {
 					t.Errorf("%s holds the token", path)
 				}
 			}
-			var probes int
+			if len(w.probe.calls) != 1 {
+				t.Errorf("the probe ran %d times, want once", len(w.probe.calls))
+			}
 			for _, argv := range w.exec.runs {
-				if len(argv) == 0 || argv[0] != "bash" {
-					continue
+				if len(argv) > 0 && argv[0] == "bash" {
+					t.Errorf("the probe ran as a child process: %q", argv)
 				}
-				probes++
+			}
+			for _, argv := range w.probe.calls {
 				if slices.Contains(argv, "--admin-token-file") {
 					t.Errorf("the probe was handed a token file with none named: %q", argv)
 				}
 			}
-			if probes != 1 {
-				t.Errorf("the probe ran %d times, want once", probes)
-			}
-			// The probe is the one child handed the token, and it is handed the
-			// resolved value; no other child's call carries one.
-			if len(w.exec.tokens) != 1 || w.exec.tokens[0].Reveal() != token {
-				t.Errorf("the probe was handed %d token(s), want exactly the resolved one", len(w.exec.tokens))
+			// The probe runs in process and its environment answers the resolved value
+			// under the broker's name. No child process is handed the token at all.
+			if len(w.probe.tokens) != 1 || w.probe.tokens[0] != token {
+				t.Errorf("the probe's environment answered %d token value(s), want exactly the resolved one", len(w.probe.tokens))
 			}
 			if settings := string(w.files.files[w.opts.RigRoot+"/settings/config.json"]); !strings.Contains(settings, runForgejoURL) {
 				t.Errorf("the run did not converge the rig's settings:\n%s", settings)

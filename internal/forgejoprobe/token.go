@@ -62,7 +62,7 @@ func (e noTokenError) Error() string {
 	if e.tokenFile != "" {
 		standIn = "FORGEJO_ADMIN_TOKEN (or FORGEJO_ADMIN_TOKEN= in <file>)"
 	}
-	return "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe -- <its arguments>), or set " + standIn + " for a stand-in"
+	return fmt.Sprintf("no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set %s for a stand-in", forgejoprov.ProbeRule, standIn)
 }
 
 // Unwrap returns the forgejoprov error the refusal replaces.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -160,10 +161,18 @@ func gitRunnerWith(bound time.Duration, start func(ctx context.Context, name str
 // and ctx ending kills the whole group, so a remote helper git spawned goes too;
 // WaitDelay then stops Output waiting on a pipe a helper outside the group holds.
 func gitCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return gitCommandIn(ctx, os.Environ(), name, args...)
+}
+
+// gitCommandIn is gitCommand over the environment it is handed, so a test pins
+// what a git child inherits without starting git. The environment is
+// forgejoprov.GitChildEnv's: no git child the cutover starts inherits the admin
+// token, under either name, or a repository pin.
+func gitCommandIn(ctx context.Context, environ []string, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	util.SetProcessGroup(cmd)
 	cmd.WaitDelay = gitWaitDelay
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(forgejoprov.GitChildEnv(environ), "GIT_TERMINAL_PROMPT=0")
 	return cmd
 }
 

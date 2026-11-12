@@ -185,6 +185,7 @@ const (
 	ProvisionRule = "forgejo-provision-go"
 	ResyncRule    = "forgejo-resync-go"
 	CutoverRule   = "forgejo-cutover-go"
+	ProbeRule     = "forgejo-probe-go"
 )
 
 // noAdminTokenError is the error ResolveAdminToken returns when no source holds
