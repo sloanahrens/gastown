@@ -90,6 +90,10 @@ td.n,th.n{text-align:right}
 .lheadbtn .caret{display:inline-block;width:10px}
 .lheadbody{margin-bottom:6px}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11px;margin-top:3px}
+.vpick{display:flex;gap:4px;flex-wrap:wrap;align-items:center;font-size:11px;margin:2px 0}
+button.vsel{background:none;border:1px solid var(--line);border-radius:3px;color:var(--dim);font:inherit;font-size:11px;padding:0 6px;cursor:pointer}
+button.vsel:hover{color:var(--text)}
+button.vsel.on{color:var(--text);border-color:var(--dim)}
 .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 .kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:6px}#cost .kv{margin-bottom:2px}
 .kv b{font-size:16px}.kv span{color:var(--dim);font-size:11px;display:block}
@@ -1671,6 +1675,14 @@ const LANDINGS_HEAD_KEY = "gt-landings-head";
 let landingsHeadFolded = false;
 try { landingsHeadFolded = localStorage.getItem(LANDINGS_HEAD_KEY) === "folded"; } catch (e) {}
 
+// The seat class the velocity rows follow, picked above the points row. The
+// choice lives here, not in the buttons, because renderTrend rebuilds the
+// buttons on every redraw; storage that throws leaves the choice in place for
+// the session (gt-vd91ny.8).
+const VELOCITY_CLASS_KEY = "gt-landings-velocity-class";
+let velocityClassChoice = "all";
+try { velocityClassChoice = localStorage.getItem(VELOCITY_CLASS_KEY) || "all"; } catch (e) {}
+
 // percentile is a reading's p-th percentile by nearest rank: the smallest value
 // at or above p of the sorted readings, so it is always one landing's own time
 // rather than an invented one. Nulls (a stage a landing did not run) are left
@@ -1807,7 +1819,10 @@ function renderTrend(s) {
   lhbody.append(el("div", "k title", "landings per hour, red = rejected"), bars);
   // With a velocity feed, the points per hour sit in a second row under the
   // landings bars, on the same hours, and the one axis labels both (gt-vd91ny.6).
-  if (t.velocity) lhbody.append(el("div", "k title", "points per hour, hatched cap = landings without time"), velocityBars(hours, t.velocity, hhmm));
+  // The seat class picked above the points row sets both the points row and the
+  // differences (gt-vd91ny.8).
+  const vel = t.velocity ? velocityRows(t.velocity, hours, hhmm) : null;
+  if (vel) lhbody.append(vel.pick, vel.points);
   lhbody.append(timeAxis(t0, t1));
 
   // The velocity's differences sit under the points row, over the whole window
@@ -1816,15 +1831,7 @@ function renderTrend(s) {
   // earliest hours it draws need the smoothing history before the trend window
   // (gt-vd91ny.7). D1 says whether velocity is rising or falling and D2 is its
   // acceleration.
-  if (t.velocity) {
-    const vh = t.velocity.hours || [];
-    lhbody.append(differenceBars("D1", "d1", "points/h", "the points per hour's change over 3h: up when velocity is rising", vh, hhmm));
-    lhbody.append(differenceBars("D2", "d2", "points/h²", "the acceleration: the change in D1 over 3h", vh, hhmm));
-    lhbody.append(legend([
-      ["var(--violet)", "D1 = the points per hour's change over 3h, up when rising · D2 = the change in D1 (acceleration)"],
-      ["var(--dim)", "a muted bar is within noise"],
-    ]));
-  }
+  if (vel) lhbody.append(vel.diff);
 
   // The gate, om and load readings are one compact stats line each, off the
   // same reading the chart above draws.
@@ -1844,22 +1851,79 @@ function renderTrend(s) {
   keepLandingsScroll(box, top);
 }
 
+// velocityRows draws the velocity rows under the landings bars for one seat
+// class at a time: the buttons that pick the class, the points row, and the two
+// difference rows. A feed with no class beside the whole town draws that series
+// and no buttons. A class with no landing with time draws its text in place of
+// the rows, never empty rows (gt-vd91ny.8).
+function velocityRows(velocity, hours, hhmm) {
+  const classes = velocity.classes || null;
+  const names = classes ? ["all"].concat(Object.keys(classes).filter(k => k !== "all").sort()) : [];
+  const feed = name => classes ? (classes[name] || []) : (velocity.hours || []);
+  const pick = el("div", "vpick");
+  const points = el("div", "vpoints");
+  const diff = el("div", "vdiff");
+  const buttons = new Map();
+  const draw = name => {
+    for (const [n, b] of buttons) {
+      b.className = n === name ? "vsel on" : "vsel";
+      b.setAttribute("aria-pressed", n === name ? "true" : "false");
+    }
+    const series = feed(name);
+    // Only a seat class can be empty: a feed without classes has no class to
+    // name, so its rows draw as they always did.
+    if (classes && !series.some(v => v.weighted > 0 || v.rejected_points > 0)) {
+      points.replaceChildren(el("div", "empty", "no landings with time"));
+      diff.replaceChildren();
+      return;
+    }
+    points.replaceChildren(el("div", "k title", "points per hour, red = rejected points, hatched cap = landings without time"), velocityBars(hours, series, hhmm));
+    diff.replaceChildren(
+      differenceBars("D1", "d1", "points/h", "the points per hour's change over 3h: up when velocity is rising", series, hhmm),
+      differenceBars("D2", "d2", "points/h²", "the acceleration: the change in D1 over 3h", series, hhmm),
+      legend([
+        ["var(--violet)", "D1 = the points per hour's change over 3h, up when rising · D2 = the change in D1 (acceleration)"],
+        ["var(--dim)", "a muted bar is within noise"],
+      ]),
+    );
+  };
+  if (names.length > 1) {
+    pick.append(el("span", "title", "seat class"));
+    for (const n of names) {
+      const b = el("button", "vsel", n);
+      b.type = "button";
+      b.addEventListener("click", () => {
+        velocityClassChoice = n;
+        try { localStorage.setItem(VELOCITY_CLASS_KEY, n); } catch (e) {}
+        draw(n);
+      });
+      buttons.set(n, b);
+      pick.append(b);
+    }
+  }
+  draw(classes && names.includes(velocityClassChoice) ? velocityClassChoice : "all");
+  return {pick, points, diff};
+}
+
 // velocityBars draws the points per hour under the landings bars: one column per
 // trend hour, matched to the velocity hour with the same start, its height the
 // hour's points against the largest hour's. An unweighted landing is a small
 // hatched cap on its column and never a zero-height bar, so an hour with only
 // unweighted landings draws the cap alone and says no points were measured.
-function velocityBars(hours, velocity, hhmm) {
-  const byHour = new Map((velocity.hours || []).map(v => [new Date(v.hour).getTime(), v]));
+// Rejected points stack as a red segment directly above the landed bar, on the
+// same scale, and the tooltip counts them with the rejections without time.
+function velocityBars(hours, series, hhmm) {
+  const byHour = new Map(series.map(v => [new Date(v.hour).getTime(), v]));
   const at = hours.map(h => byHour.get(new Date(h.hour).getTime()) || null);
-  const max = Math.max(1, ...at.map(v => v ? v.points : 0));
+  const max = Math.max(1, ...at.map(v => v ? v.points + (v.rejected_points || 0) : 0));
   const bars = el("div", "hbars vbars");
   hours.forEach((h, i) => {
     const v = at[i];
     const col = el("div", "hbar");
     if (!v) { col.title = hhmm(h.hour) + " · no points reading"; bars.append(col); return; }
-    col.title = hhmm(h.hour) + (v.weighted || !v.unweighted ? " · " + v.points + " points" : " · no points measured") + (v.unweighted ? " · " + v.unweighted + (v.unweighted === 1 ? " landing" : " landings") + " without time" : "");
+    col.title = hhmm(h.hour) + (v.weighted || !v.unweighted ? " · " + v.points + " points" : " · no points measured") + (v.unweighted ? " · " + v.unweighted + (v.unweighted === 1 ? " landing" : " landings") + " without time" : "") + (v.rejected_points ? " · " + v.rejected_points + (v.rejected_points === 1 ? " point rejected" : " points rejected") : "") + (v.rejected_unweighted ? " · " + v.rejected_unweighted + (v.rejected_unweighted === 1 ? " rejection" : " rejections") + " without time" : "");
     if (v.unweighted) col.append(el("i", "hcap"));
+    if (v.rejected_points) { const r = el("i", "hrej"); r.style.height = v.rejected_points / max * 100 + "%"; col.append(r); }
     if (v.points) { const p = el("i", "hpts"); p.style.height = v.points / max * 100 + "%"; col.append(p); }
     bars.append(col);
   });
