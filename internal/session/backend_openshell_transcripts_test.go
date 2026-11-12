@@ -467,6 +467,115 @@ func TestOpenShellOpsDeleteWarnsWhenTheTranscriptsDirCannotBeRead(t *testing.T) 
 	}
 }
 
+func TestOpenShellOpsDeleteFailedListingLogsOneLineAndStillDeletes(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 1")},
+		Stderr: map[string]string{"exec": "gateway unreachable"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.cli.Run = copyingRunner(fake, listingLine(seatRemote("ses-1.jsonl"), seatBase, 4), map[string]string{
+		seatRemote("ses-1.jsonl"): "tttt",
+	})
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	writeOpsRecord(t, b)
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete = %v, want the delete to go on past a failed listing", err)
+	}
+	if callIndex(fake.Calls(), "download") >= 0 {
+		t.Fatalf("openshell calls = %v, want no download without a listing", fake.Calls())
+	}
+	if callIndex(fake.Calls(), "delete") < 0 {
+		t.Fatalf("openshell calls = %v, want the sandbox deleted", fake.Calls())
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "copying its transcripts out failed") || !strings.Contains(warnings[0], "listing its transcripts") {
+		t.Fatalf("warnings = %q, want one line saying the listing failed", warnings)
+	}
+}
+
+func TestOpenShellOpsDeleteCopyThatCannotMakeItsFolderFailsTheCopy(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	// The session's own transcript is downloaded first, newest first. Then a plain
+	// file takes the place of the folder its subagent's transcript must go in.
+	top, sub := seatRemote("ses-1.jsonl"), seatRemote("ses-1/subagents/agent-a.jsonl")
+	inner := copyingRunner(fake, listingLine(top, seatBase.Add(-time.Hour), 4)+listingLine(sub, seatBase.Add(-2*time.Hour), 4), map[string]string{
+		top: "tttt",
+		sub: "ssss",
+	})
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
+		out, errOut, err := inner(ctx, argv, stdin, env)
+		if slices.Contains(argv, "download") && err == nil {
+			if werr := os.WriteFile(filepath.Join(argv[len(argv)-1], "ses-1"), []byte("x"), 0o644); werr != nil {
+				t.Fatal(werr)
+			}
+		}
+		return out, errOut, err
+	}
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	writeOpsRecord(t, b)
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete = %v, want the delete to go on past a copy that cannot make its folder", err)
+	}
+	if callIndex(fake.Calls(), "delete") < 0 {
+		t.Fatalf("openshell calls = %v, want the sandbox deleted", fake.Calls())
+	}
+	// Only the session's own transcript is downloaded: the subagent's has no folder to go in.
+	if got := downloadedRemotes(fake.Calls()); !reflect.DeepEqual(got, []string{top}) {
+		t.Errorf("downloads = %v, want only %s before the folder fails", got, top)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "copying its transcripts out failed") {
+		t.Fatalf("warnings = %q, want one line saying the copy failed", warnings)
+	}
+	if _, err := os.Stat(SandboxTranscriptCopyDir(b.townRoot, openshellTestRig, openshellTestPolecat)); !os.IsNotExist(err) {
+		t.Errorf("partial copy left behind: stat err = %v", err)
+	}
+}
+
+func TestOpenShellOpsDeleteCapRecordThatCannotBeWrittenFailsTheCopy(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.transcriptCap = 4
+	newer, older := seatRemote("new.jsonl"), seatRemote("old.jsonl")
+	inner := copyingRunner(fake, listingLine(newer, seatBase.Add(-time.Hour), 4)+listingLine(older, seatBase.Add(-2*time.Hour), 4), map[string]string{
+		newer: "nnnn",
+		older: "oooo",
+	})
+	copyDir := SandboxTranscriptCopyDir(b.townRoot, openshellTestRig, openshellTestPolecat)
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
+		out, errOut, err := inner(ctx, argv, stdin, env)
+		if slices.Contains(argv, "download") && err == nil {
+			// The cap record is a file at the copy's root, so a directory there cannot be written over.
+			if merr := os.MkdirAll(filepath.Join(copyDir, sandboxTranscriptMarker), 0o755); merr != nil {
+				t.Fatal(merr)
+			}
+		}
+		return out, errOut, err
+	}
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	writeOpsRecord(t, b)
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete = %v, want the delete to go on past an unwritable cap record", err)
+	}
+	if callIndex(fake.Calls(), "delete") < 0 {
+		t.Fatalf("openshell calls = %v, want the sandbox deleted", fake.Calls())
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "copying its transcripts out failed") || !strings.Contains(warnings[0], "recording the transcripts the cap left out") {
+		t.Fatalf("warnings = %q, want one line saying the cap record could not be written", warnings)
+	}
+	if _, err := os.Stat(copyDir); !os.IsNotExist(err) {
+		t.Errorf("a copy with no cap record left behind: stat err = %v", err)
+	}
+}
+
 // writeSeatRecord writes the test seat's record with the time its sandbox was
 // created, which is when the seat started.
 func writeSeatRecord(t *testing.T, b *openshellBackend, createdAt time.Time) {
