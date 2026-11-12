@@ -117,6 +117,33 @@ func TestReadLinesResumes(t *testing.T) {
 	}
 }
 
+// TestReadLinesResumesEmptyFile: a first read of an empty file returns the file's
+// identity at offset 0, and reading again from that cursor is accepted. The
+// cursor of a first read is not a bad offset.
+func TestReadLinesResumesEmptyFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "feed.jsonl"), "")
+
+	first, err := ReadLines(confine(t, dir, "feed.jsonl"), Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPage(t, first, nil, false, false)
+	if first.Cursor.Gen == "" || first.Cursor.Off != 0 {
+		t.Fatalf("first cursor = %+v, want the file's identity at offset 0", first.Cursor)
+	}
+
+	second, err := ReadLines(confine(t, dir, "feed.jsonl"), first.Cursor, 10)
+	if err != nil {
+		t.Fatalf("second read from the first read's cursor: %v", err)
+	}
+	wantPage(t, second, nil, false, false)
+	if second.Cursor != first.Cursor {
+		t.Fatalf("second cursor = %+v, want %+v", second.Cursor, first.Cursor)
+	}
+}
+
 func TestReadLinesPages(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -355,6 +382,9 @@ func TestReadLinesTailBytes(t *testing.T) {
 		wantOff   int64
 	}{
 		{"tail covers the file", "a\nbb\nccc\n", 100, []string{"a", "bb", "ccc"}, 9},
+		{"file exactly the tail window, trailing newline", "abc\n", 4, []string{"abc"}, 4},
+		{"file exactly the tail window, no newline", "abc", 3, nil, 0},
+		{"file of exactly the line cap, no newline", strings.Repeat("x", MaxLineBytes), 10, nil, 0},
 		{"window opens on a line start", "a\nbb\nccc\n", 4, []string{"ccc"}, 9},
 		{"a line the window cuts is left out", "a\nbb\nccc\n", 3, nil, 9},
 		{"window opens mid-line, next line starts it", "aaaaaaaaaa\nbb\n", 5, []string{"bb"}, 14},
@@ -401,22 +431,33 @@ func TestReadLinesTailHoldsPartialLine(t *testing.T) {
 }
 
 // TestReadLinesTailLineCap: a tail window with no newline in the last
-// MaxLineBytes+1 bytes sits in a line over the cap. That is an error naming the
-// cap. It is not a page of lines from the file's start: the short lines before
-// the long one fill a page past MaxPageBytes, so a read from the start would
-// return them with no error.
+// MaxLineBytes+1 bytes sits in a line over the cap, which is an error naming the
+// cap. The first row also shows it is not a page of lines from the file's start:
+// the short lines before the long one fill a page past MaxPageBytes, so a read
+// from the start would return them with no error.
 func TestReadLinesTailLineCap(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	short := strings.Repeat("a\n", MaxPageBytes/2+1)
-	writeFile(t, filepath.Join(dir, "feed.jsonl"), short+strings.Repeat("x", MaxLineBytes+1))
-
-	_, err := ReadTail(confine(t, dir, "feed.jsonl"), 10)
-	if err == nil {
-		t.Fatal("want an error for a tail that ends in a line over the cap, got none")
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"line over the cap after short lines", short + strings.Repeat("x", MaxLineBytes+1)},
+		{"file of exactly one byte over the cap, no newline", strings.Repeat("x", MaxLineBytes+1)},
 	}
-	if !strings.Contains(err.Error(), strconv.Itoa(MaxLineBytes)) {
-		t.Fatalf("error %q does not name the cap %d", err, MaxLineBytes)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "feed.jsonl"), tt.content)
+			_, err := ReadTail(confine(t, dir, "feed.jsonl"), 10)
+			if err == nil {
+				t.Fatal("want an error for a tail that ends in a line over the cap, got none")
+			}
+			if !strings.Contains(err.Error(), strconv.Itoa(MaxLineBytes)) {
+				t.Fatalf("error %q does not name the cap %d", err, MaxLineBytes)
+			}
+		})
 	}
 }
 
@@ -577,6 +618,20 @@ func TestConfineReportsUnresolvablePaths(t *testing.T) {
 				t.Fatalf("Confine(%q, %q) resolved an unresolvable path", tt.root, tt.path)
 			}
 		})
+	}
+}
+
+// TestConfineRefusesRelativeRoot: a root that is not absolute is refused by
+// name, not resolved against the process's working directory. A root that does
+// not exist would also be refused, so the error must be the absolute-path rule.
+func TestConfineRefusesRelativeRoot(t *testing.T) {
+	t.Parallel()
+	_, err := Confine("relative/root", "feed.jsonl")
+	if err == nil {
+		t.Fatal("Confine accepted a relative root")
+	}
+	if !strings.Contains(err.Error(), "is not an absolute path") {
+		t.Fatalf("error %q does not name the absolute-path rule", err)
 	}
 }
 
