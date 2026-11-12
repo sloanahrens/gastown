@@ -612,7 +612,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return runRigListIn(townRoot, os.Stdout, rigListJSON)
+	return runRigListIn(townRoot, os.Stdout, rigListJSON, tmux.NewTmux().ListSessions)
 }
 
 // runRigListIn lists the rigs of the town at townRoot to out. Split from
@@ -620,7 +620,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 // choice. A missing rigs.json is an empty town; one that cannot be read or
 // parsed is an error, never "No rigs configured." (and never text on a
 // --json run).
-func runRigListIn(townRoot string, out io.Writer, asJSON bool) error {
+func runRigListIn(townRoot string, out io.Writer, asJSON bool, listSessions func() ([]string, error)) error {
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
 	if err != nil {
@@ -640,15 +640,15 @@ func runRigListIn(townRoot string, out io.Writer, asJSON bool) error {
 	// Create rig manager to get details
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
-	t := tmux.NewTmux()
 
 	type rigInfo struct {
 		Name        string `json:"name"`
 		BeadsPrefix string `json:"beads_prefix"`
-		// RepoPath is the rig's git working clone (usually <rig>/mayor/rig),
-		// not the rig root. Plugins enumerate rigs through this list to run
-		// git against each repository; an empty value means the rig has no
-		// clone checked out. See rig.Rig.RepoPath.
+		// RepoPath is the rig's git working clone (usually <rig>/refinery/rig, or
+		// the rig root for an adopted layout), else the shared <rig>/.repo.git.
+		// Plugins enumerate rigs through this list to run git against each
+		// repository; an empty value means the rig has neither.
+		// See rig.Rig.RepoPath and rig.Rig.BareRepoPath.
 		RepoPath string `json:"repo_path"`
 		Status   string `json:"status"`
 		// Sessions counts the rig's live tmux sessions (polecats, crew).
@@ -660,7 +660,7 @@ func runRigListIn(townRoot string, out io.Writer, asJSON bool) error {
 	}
 
 	var rigs []rigInfo
-	allSessions, _ := t.ListSessions()
+	allSessions, _ := listSessions()
 	reg := townRegistry()
 
 	for name := range rigsConfig.Rigs {
@@ -674,12 +674,19 @@ func runRigListIn(townRoot string, out io.Writer, asJSON bool) error {
 
 		opState, _ := getRigOperationalState(townRoot, name)
 
+		// A bare-only rig has no working clone to report: its repository is the
+		// shared .repo.git, so that is what repo_path names.
+		repoPath := r.RepoPath()
+		if repoPath == "" {
+			repoPath = r.BareRepoPath()
+		}
+
 		sessions := countRigSessions(reg, allSessions, name)
 		summary := r.Summary()
 		rigs = append(rigs, rigInfo{
 			Name:        name,
 			BeadsPrefix: prefix,
-			RepoPath:    r.RepoPath(),
+			RepoPath:    repoPath,
 			Status:      strings.ToLower(opState),
 			Sessions:    sessions,
 			Polecats:    summary.PolecatCount,

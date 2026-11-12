@@ -146,9 +146,10 @@ func newGuardCorpusFixture(t *testing.T) guardCorpusFixture {
 		t.Fatalf("mkdir town: %v", err)
 	}
 	// The rig the dangerous rows name: a rig root with its polecats/
-	// aggregate, one polecat worktree and the bare repo. Built so each row is
-	// judged against a directory that exists, as it is in a real town.
-	for _, rel := range []string{"gastown/polecats/topaz/gastown", "gastown/.repo.git"} {
+	// aggregate, one polecat worktree, the mayor/ aggregate and the bare
+	// repo. Built so each row is judged against a directory that exists, as
+	// it is in a real town.
+	for _, rel := range []string{"gastown/polecats/topaz/gastown", "gastown/mayor", "gastown/.repo.git"} {
 		if err := os.MkdirAll(filepath.Join(town, rel), 0o755); err != nil {
 			t.Fatalf("mkdir town/%s: %v", rel, err)
 		}

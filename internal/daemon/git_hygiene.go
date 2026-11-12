@@ -113,11 +113,19 @@ func (d *Daemon) runGitHygiene() {
 	}()
 
 	var repos []string
+	skipped := 0
 	for _, name := range d.getKnownRigs() {
 		r := &rig.Rig{Name: name, Path: filepath.Join(d.config.TownRoot, name)}
-		if p := gitHygieneRepoPath(r); p != "" {
-			repos = append(repos, p)
+		p := gitHygieneRepoPath(r)
+		if p == "" {
+			// A legacy mayor/rig-only rig has no repository the patrol cleans. Log
+			// and count it, so it does not drop out of the patrol silently
+			// (gt-3lvcjz.30).
+			skipped++
+			d.logger.Printf("git_hygiene: rig %s: skipped, no %s/%s and no working clone (a legacy mayor/rig-only rig is not cleaned)", name, name, constants.DirRepoGit)
+			continue
 		}
+		repos = append(repos, p)
 	}
 	// No repository to clean is the failure the script guarded against
 	// (gt-chqi): a run over nothing must not read as a clean run.
@@ -134,7 +142,7 @@ func (d *Daemon) runGitHygiene() {
 		total.remote += res.remote
 		d.logger.Printf("git_hygiene: %s: %d merged, %d orphan, %d remote, gc=%t", repo, res.merged, res.orphan, res.remote, res.gc)
 	}
-	summary := fmt.Sprintf("%d repo(s): %d merged, %d orphan, %d remote branch(es) deleted", len(repos), total.merged, total.orphan, total.remote)
+	summary := fmt.Sprintf("%d repo(s): %d merged, %d orphan, %d remote branch(es) deleted, %d rig(s) skipped", len(repos), total.merged, total.orphan, total.remote, skipped)
 	if total.merged+total.orphan+total.remote == 0 {
 		cycle.skipStep("branches", summary)
 		return

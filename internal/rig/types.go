@@ -39,7 +39,8 @@ type Rig struct {
 	// Crew workers are user-managed persistent workspaces.
 	Crew []string `json:"crew,omitempty"`
 
-	// HasMayor indicates if the rig has a mayor clone.
+	// HasMayor reports a legacy mayor clone in the rig. RepoPath does not offer
+	// that clone as a candidate.
 	HasMayor bool `json:"has_mayor"`
 
 	// IdentityBeads, when set, answers the reads this Rig makes itself (the
@@ -53,7 +54,6 @@ type Rig struct {
 var AgentDirs = []string{
 	"polecats",
 	"crew",
-	"mayor/rig",
 }
 
 // RigSummary provides a concise overview of a rig.
@@ -75,12 +75,12 @@ func (r *Rig) Summary() RigSummary {
 // BeadsPath returns the path to use for beads operations.
 // Always returns the rig root path where .beads/ contains either:
 //   - A local beads database (when repo doesn't track .beads/)
-//   - A redirect file pointing to mayor/rig/.beads (when repo tracks .beads/)
+//   - A redirect file pointing to the repo clone's .beads/ (when repo tracks .beads/)
 //
 // The redirect is set up by initBeads() during rig creation and followed
 // automatically by the bd CLI and beads.ResolveBeadsDir().
 //
-// This ensures we never write to the user's repo clone (mayor/rig/) and
+// This ensures we never write to the user's repo clone and
 // all beads operations go through the redirect system.
 func (r *Rig) BeadsPath() string {
 	return r.Path
@@ -101,24 +101,22 @@ func (r *Rig) DefaultBranch() string {
 }
 
 // RepoPath returns the absolute path of the rig's git working clone, or ""
-// when the rig has no repository checked out.
+// when the rig has no working clone checked out.
 //
-// The rig root is not usually a git worktree: `gt rig add` lays out the clones
-// at <rig>/mayor/rig and <rig>/refinery/rig, while the rig root holds only the
-// .beads/ redirect and the agent directories. A caller that needs to run git in
-// the rig's repository wants the shared .repo.git (BareRepoPath) where the rig
-// has one, or a clone from below; the rig root would make `git -C` resolve to
-// the enclosing town repo instead.
+// The rig root is not usually a git worktree: the rig root holds only the
+// .beads/ redirect and the agent directories, and the clone lives below it at
+// <rig>/refinery/rig. A caller that needs to run git in the rig's repository
+// wants the shared .repo.git (BareRepoPath) where the rig has one, or a clone
+// from below; the rig root would make `git -C` resolve to the enclosing town
+// repo instead.
 //
-// Candidates are tried in the same order as Manager.detectGitURL: the rig root
-// first (legacy and adopted layouts check the repository out in place), then
-// the mayor and refinery clones. A candidate only counts when it is the root of
-// its own working tree; see IsWorkTreeRoot for why that is stricter than
-// `git rev-parse --git-dir`.
+// Candidates are the rig root first (legacy and adopted layouts check the
+// repository out in place), then the refinery clone. A candidate only counts
+// when it is the root of its own working tree; see IsWorkTreeRoot for why that
+// is stricter than `git rev-parse --git-dir`.
 func (r *Rig) RepoPath() string {
 	candidates := []string{
 		r.Path,
-		constants.RigMayorPath(r.Path),
 		filepath.Join(r.Path, "refinery", "rig"),
 	}
 	for _, candidate := range candidates {

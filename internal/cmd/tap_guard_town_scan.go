@@ -53,14 +53,19 @@ import (
 //
 // A rig's deeper clone directories — mayor/rig and a single
 // polecats/<name>/<repo> — are each one repository and stay scannable.
+//
+// mayor is listed here by name: it is no longer an agent directory, so it does
+// not come from rig.AgentDirs, but a recursive scan rooted at <rig>/mayor still
+// walks the rig's whole mayor tree, so it stays blocked (gt-3lvcjz.30).
 func rigAggregateDirs() map[string]bool {
-	dirs := make(map[string]bool, len(rig.AgentDirs))
+	dirs := make(map[string]bool, len(rig.AgentDirs)+1)
 	for _, d := range rig.AgentDirs {
 		first, _, _ := strings.Cut(d, "/")
 		if first != "" {
 			dirs[first] = true
 		}
 	}
+	dirs["mayor"] = true
 	return dirs
 }
 
