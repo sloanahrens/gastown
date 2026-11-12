@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // The trend panel is the last 24 hours: landings and rejections by local hour,
@@ -31,16 +32,27 @@ const (
 
 // localHour is the local hour t falls in. Landings and stage lines are stamped
 // in UTC, so the conversion has to come first: truncating in the writer's own
-// zone would bucket those records by their UTC hour.
+// zone would bucket those records by their UTC hour. The hour rule is the one
+// the velocity series uses, so a repeated fall-back hour splits the same way in
+// both charts.
 func localHour(t time.Time) time.Time {
-	t = t.In(time.Local)
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.Local)
+	return localHourIn(t, time.Local)
+}
+
+// localHourIn is localHour with its hours read on loc.
+func localHourIn(t time.Time, loc *time.Location) time.Time {
+	return storypoints.HourStart(t, loc)
 }
 
 // windowStart is the oldest hour of a window of hours buckets that ends with
 // the hour now falls in.
 func windowStart(now time.Time, hours int) time.Time {
-	return localHour(now).Add(-time.Duration(hours-1) * time.Hour)
+	return windowStartIn(now, hours, time.Local)
+}
+
+// windowStartIn is windowStart with its hours read on loc.
+func windowStartIn(now time.Time, hours int, loc *time.Location) time.Time {
+	return localHourIn(now, loc).Add(-time.Duration(hours-1) * time.Hour)
 }
 
 // trendWindowStart is the oldest moment the 24 hourly buckets cover.
@@ -53,7 +65,12 @@ func trendWindowStart(now time.Time) time.Time {
 // a record outside the window is not counted, an empty hour is present with
 // zeros, and the stage points are thinned to trendMaxStages across the window.
 func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, loads []dashboard.LoadPoint) *dashboard.Trend {
-	base := localHour(now)
+	return buildTrendIn(now, recs, stages, rejs, loads, time.Local)
+}
+
+// buildTrendIn is buildTrend with its hours read on loc.
+func buildTrendIn(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, loads []dashboard.LoadPoint, loc *time.Location) *dashboard.Trend {
+	base := localHourIn(now, loc)
 	hours := make([]dashboard.TrendHour, trendHours)
 	idx := make(map[time.Time]int, trendHours)
 	for i := range hours {
@@ -61,7 +78,7 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 		idx[hours[i].Hour] = i
 	}
 	bucket := func(at time.Time) (int, bool) {
-		i, ok := idx[localHour(at)]
+		i, ok := idx[localHourIn(at, loc)]
 		return i, ok
 	}
 
