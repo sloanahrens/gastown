@@ -149,12 +149,44 @@ func cloudCheckCommand(cfg *DaemonPatrolConfig) string {
 // errCloudCheckNoStatus marks a run that exited 0 without writing its status file.
 var errCloudCheckNoStatus = errors.New("exit 0 without writing the status file")
 
-// cloudCheckWritten reports whether the run that started at started wrote the
-// status file at path. A file an earlier run left is older than started, and a
-// file that cannot be read after the run was not written by it.
-func cloudCheckWritten(path string, started time.Time) bool {
+// cloudCheckStatusFile is the status file's state at one moment: its info and
+// bytes when it is readable, or the error that says it is absent or unreadable.
+type cloudCheckStatusFile struct {
+	info fs.FileInfo
+	body string
+	err  error
+}
+
+// cloudCheckStatusFileOf reads the state of the status file at path.
+func cloudCheckStatusFileOf(path string) cloudCheckStatusFile {
 	info, err := os.Stat(path)
-	return err == nil && !info.ModTime().Before(started)
+	if err != nil {
+		return cloudCheckStatusFile{err: err}
+	}
+	body, err := os.ReadFile(path)
+	return cloudCheckStatusFile{info: info, body: string(body), err: err}
+}
+
+// cloudCheckWritten reports whether the run wrote the status file, from its
+// state before the run and after it. The file is written when it is present
+// afterward and was absent before, or when its modification time, size or bytes
+// changed. The bytes are compared because a same-size rewrite within one
+// modification-time tick leaves the first two unchanged. A rewrite that leaves
+// all three as they were reads as not written, so the alert stays. A file
+// unreadable before the run is unknown, not written.
+func cloudCheckWritten(before, after cloudCheckStatusFile) bool {
+	if after.err != nil {
+		return false
+	}
+	if errors.Is(before.err, fs.ErrNotExist) {
+		return true
+	}
+	if before.err != nil {
+		return false
+	}
+	return !after.info.ModTime().Equal(before.info.ModTime()) ||
+		after.info.Size() != before.info.Size() ||
+		before.body != after.body
 }
 
 // cloudCheckStatusPath is the status file for a town: the path the dashboard
@@ -233,6 +265,7 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 
 	statusPath := cloudCheckStatusPath(d.config.TownRoot)
 	command := cloudCheckCommand(d.patrolConfig)
+	before := cloudCheckStatusFileOf(statusPath)
 	err = s.run(ctx, command, []string{cloudCheckQuietArg, cloudCheckJSONArg, statusPath}, []string{cloudCheckKeyEnv + "=" + keyFile})
 	elapsed := s.now().Sub(started).Round(time.Millisecond)
 	d.cloudCheckLastRun.Store(s.now().UnixNano())
@@ -246,7 +279,7 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	}
 
 	status := runExitStatus(err)
-	if err == nil && !cloudCheckWritten(statusPath, started) {
+	if err == nil && !cloudCheckWritten(before, cloudCheckStatusFileOf(statusPath)) {
 		err = errCloudCheckNoStatus
 		status = "exit 0 without a new status"
 	}
