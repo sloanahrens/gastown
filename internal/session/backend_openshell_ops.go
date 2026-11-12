@@ -379,12 +379,12 @@ func (b *openshellBackend) Stop(session string) error {
 
 // Delete copies the sandbox's transcripts out, then removes the sandbox and its
 // registry record, and ends the tracker token of the seat it ran. A sandbox
-// that is already gone counts as deleted
-// and still ends the token; any other failure keeps the record so the delete
-// can be retried. A record that cannot be read is a refusal, not a guess: the
-// seat it names is unknown, so the sandbox stays until the record reads
-// (gt-p85pw.86). A sandbox with no record has no seat to name, so its token
-// cannot be revoked here; that is warned, never silent.
+// that is already gone counts as deleted and still ends the token; any other
+// failure keeps the record so the delete can be retried. A record that cannot
+// be read is a refusal, not a guess: the seat it names is unknown, so the
+// sandbox stays until the record reads (gt-p85pw.86). A sandbox with no record
+// has no seat to name, so its token cannot be revoked here; that is warned,
+// never silent.
 func (b *openshellBackend) Delete(session string) error {
 	rec, hasRec, err := ReadSandboxRecord(b.townRoot, session)
 	if err != nil {

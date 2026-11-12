@@ -265,9 +265,9 @@ func TestOpenShellOpsDeleteRemovesTheSandboxAndItsRecord(t *testing.T) {
 	if err := b.Delete(openshellTestSession); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	copyDir := SandboxTranscriptCopyDir(b.townRoot, openshellTestRig, openshellTestPolecat)
+	// The sandbox holds no transcript, so the copy lists it and downloads nothing.
 	want := [][]string{
-		{"openshell", "sandbox", "download", openshellTestSession, "/sandbox/.claude/projects", copyDir},
+		{"openshell", "sandbox", "exec", "-n", openshellTestSession, "--no-tty", "--no-login-shell", "--", "find", sandboxProjectsDir, "-type", "f", "-name", "*.jsonl", "-printf", `%T@ %s %p\n`},
 		{"openshell", "sandbox", "delete", openshellTestSession},
 	}
 	if !reflect.DeepEqual(fake.Calls(), want) {
