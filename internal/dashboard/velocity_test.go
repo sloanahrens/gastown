@@ -13,7 +13,8 @@ var updateVelocityGolden = flag.Bool("update-velocity-golden", false, "rewrite t
 
 // fixedVelocity is the feed the golden pins: one hour with every value defined
 // and a second with its differences unavailable, a class slice, and figures
-// with one nil. It is fixed data, so the golden does not move with the clock.
+// with every value defined. It is fixed data, so the golden does not move with
+// the clock.
 func fixedVelocity() Velocity {
 	hour := time.Date(2026, 11, 11, 14, 0, 0, 0, time.UTC)
 	return Velocity{
