@@ -79,6 +79,8 @@ daemon container through this final step, with the pod found by its label:
   ... | kubectl --context colima-gt-control -n gt exec -i "$(kubectl --context colima-gt-control -n gt get pods -l app.kubernetes.io/name=daemon --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')" -c daemon -- gt report publish --bird <NAME>
 
 The -i is required: without it the pod reads an empty document and writes nothing.
+The request in docs/birds/daily-request.md gives the same step, and says when a
+Mac caller goes back to plain gt report publish.
 
 Examples:
   jq -n --rawfile page page.html --slurpfile sidecar sidecar.json \

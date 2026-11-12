@@ -233,6 +233,17 @@ func TestReportPodPublishStepIsInTheRequestAndHelp(t *testing.T) {
 	}
 }
 
+// TestReportPublishHelpPointsAtTheRequest asserts the help that copies the pod
+// publish step also points at the request it comes from, so a reader of the
+// help can find the reasoning and the return-to-plain-gt rule there.
+func TestReportPublishHelpPointsAtTheRequest(t *testing.T) {
+	t.Parallel()
+	const pointer = "The request in docs/birds/daily-request.md gives the same step"
+	if !strings.Contains(reportPublishCmd.Long, pointer) {
+		t.Errorf("gt report publish help does not point at docs/birds/daily-request.md:\n%s", reportPublishCmd.Long)
+	}
+}
+
 // TestDailyRequestSaysWhyThePodAndWhenItReturns asserts the daily request names
 // the wrapper bead that ends the pod step, so a Mac bird knows when to publish
 // with plain gt again.
@@ -243,7 +254,7 @@ func TestDailyRequestSaysWhyThePodAndWhenItReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", docPath, err)
 	}
-	for _, want := range []string{"the Mac's gt", "gt-yjzepk", "gt report publish --bird <NAME>"} {
+	for _, want := range []string{"the Mac's gt", "gt-yjzepk", "return to plain gt report publish"} {
 		if !strings.Contains(string(doc), want) {
 			t.Errorf("%s does not contain %q, which says why the pod is used and when the step returns to plain gt", docPath, want)
 		}
