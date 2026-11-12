@@ -975,6 +975,52 @@ func TestMainFieldRecordedGreenStaysGreen(t *testing.T) {
 	}
 }
 
+// A post-land note rides in the main field's detail and leaves the status
+// alone: the rig reads the same tag, verdict and value with the note as without
+// it, and a rig with no note prints none (gt-gg9hv.7.4).
+func TestMainPostLandNote(t *testing.T) {
+	t.Parallel()
+	const note = "ci / post-land (push) is posted only for some pushes: post-land.yml posts it only for commits touching the filtered paths"
+	status := PostLandCheck{Context: "ci / post-land (push)"}
+	tests := []struct {
+		name string
+		main RigMain
+	}{
+		{"green-1h", RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: status}},
+		{"green-30h", RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(30 * time.Hour), PostLand: status}},
+		{"red", RigMain{Rig: "mango", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(30 * time.Hour), PostLand: status}},
+		{"never-landed", RigMain{Rig: "mango", PostLand: status}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bare := healthy()
+			bare.mains = []RigMain{tt.main}
+			want := field(t, Compute(context.Background(), inputs(bare)), "main/mango")
+
+			noted := tt.main
+			noted.PostLandNote = note
+			withNote := healthy()
+			withNote.mains = []RigMain{noted}
+			got := field(t, Compute(context.Background(), inputs(withNote)), "main/mango")
+
+			if got.Tag != want.Tag || got.Verdict != want.Verdict || got.Value != want.Value {
+				t.Errorf("main/mango with a note = %+v, want the status without one, %+v", got, want)
+			}
+			wantDetail := note
+			if want.Detail != "" {
+				wantDetail = want.Detail + "; " + note
+			}
+			if got.Detail != wantDetail {
+				t.Errorf("main/mango detail with a note = %q, want %q", got.Detail, wantDetail)
+			}
+			if strings.Contains(want.Detail, note) {
+				t.Errorf("main/mango detail without a note = %q, want no note", want.Detail)
+			}
+		})
+	}
+}
+
 // An aged green keeps the whole town green, and its age appears in gt status
 // but not on the one line, which lists only non-green fields (gt-f701fm).
 func TestAgedGreenKeepsTheLineGreen(t *testing.T) {

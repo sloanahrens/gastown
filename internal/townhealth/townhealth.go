@@ -490,6 +490,12 @@ type RigMain struct {
 	// rig without one never runs a post-landing check, so having no verdict
 	// is its normal state rather than an open question (gt-fn9e6.34).
 	PostLand PostLandCheck
+	// PostLandNote is a warning about the rig's status context that does not
+	// change the main field's status: a workflow posts the context only for
+	// some pushes, so the verdict may never arrive for a push that touches no
+	// filtered path (gt-gg9hv.7.4). The field's detail carries it; empty when
+	// there is nothing to say.
+	PostLandNote string
 	// Landed reports whether the landing worker has a landing record for the
 	// rig at all. A rig with none has not landed since it was added, so its
 	// missing verdict reads NEW; one that has landed with no verdict reads
@@ -1152,54 +1158,65 @@ func mains(in Inputs) []Field {
 	}
 	fs := make([]Field, 0, len(ms))
 	for _, m := range ms {
-		check := m.PostLand
-		switch {
-		case m.Err != nil:
-			fs = append(fs, unknown(FieldMain, m.Rig, "", m.Err))
-		case check.Context == "" && check.Command == postLandPlaceholderCommand:
-			// The interim placeholder exits 0 without testing anything, so a
-			// green recorded under it is not evidence about main. Say so
-			// rather than reading the command as a check (gt-gg9hv.7.2).
-			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("post-land check is a placeholder")))
-		case m.LastRun == "" && !check.Configured():
-			// No check is configured, so there is nothing to have a verdict
-			// about: n/a rather than UNKNOWN, which would read as a check
-			// that should have run (gt-fn9e6.34). A rig that once ran a check
-			// keeps its recorded verdict either way.
-			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "n/a", Detail: "no post_land_command configured"})
-		case m.LastRun == "" && !m.Landed:
-			// The landing worker has no landing record for this rig, so it has
-			// not landed since it was added and there is no verdict to have
-			// missed. The field reads NEW and green, so the town and the
-			// readiness probe are not held back by a rig just added
-			// (gt-30ehe8).
-			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: New, Verdict: Green, Value: "no landing yet", Detail: "no post-landing verdict recorded yet"})
-		case m.LastRun == "":
-			// The rig has a landing record but no post-land verdict: no run of
-			// its check recorded one. Reading that green would hide a check
-			// that silently does nothing, so it stays UNKNOWN (gt-30ehe8).
-			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("landed, but no post-landing verdict recorded")))
-		case m.LastRun != m.LastGreen:
-			// A red verdict is a standing fact about LastRun, recorded at some
-			// time after LastGreenAt, so its age cannot be judged from that
-			// clock; it stays red until a newer verdict moves LastRun.
-			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Red, Value: "red", Detail: "main red at " + short(m.LastRun)})
-		case check.Context != "" && m.LastGreenAt.IsZero():
-			// Only a status verdict is aged by LastGreenAt, so only there does
-			// a green with no recorded time leave the age unknown. A command
-			// rig's green is recorded when the check runs and needs no clock.
-			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("green verdict has no recorded time")))
-		case check.Context != "" && in.Now.Sub(m.LastGreenAt) > PostLandAgeShownAfter:
-			// No newer verdict is recorded, so the green stands and its age goes
-			// in the value. The line lists only non-green fields, so this green
-			// adds nothing to a green line.
-			age := in.Now.Sub(m.LastGreenAt)
-			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green " + Short(age)})
-		default:
-			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green"})
+		f := mainField(in, m)
+		if m.PostLandNote != "" {
+			f.Detail = joinDetail(f.Detail, m.PostLandNote)
 		}
+		fs = append(fs, f)
 	}
 	return fs
+}
+
+// mainField is one rig's main field, judged from its main state and its
+// post-land check. The note a rig carries is added by mains, so it never
+// changes the verdict picked here.
+func mainField(in Inputs, m RigMain) Field {
+	check := m.PostLand
+	switch {
+	case m.Err != nil:
+		return unknown(FieldMain, m.Rig, "", m.Err)
+	case check.Context == "" && check.Command == postLandPlaceholderCommand:
+		// The interim placeholder exits 0 without testing anything, so a
+		// green recorded under it is not evidence about main. Say so
+		// rather than reading the command as a check (gt-gg9hv.7.2).
+		return unknown(FieldMain, m.Rig, "", errors.New("post-land check is a placeholder"))
+	case m.LastRun == "" && !check.Configured():
+		// No check is configured, so there is nothing to have a verdict
+		// about: n/a rather than UNKNOWN, which would read as a check
+		// that should have run (gt-fn9e6.34). A rig that once ran a check
+		// keeps its recorded verdict either way.
+		return Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "n/a", Detail: "no post_land_command configured"}
+	case m.LastRun == "" && !m.Landed:
+		// The landing worker has no landing record for this rig, so it has
+		// not landed since it was added and there is no verdict to have
+		// missed. The field reads NEW and green, so the town and the
+		// readiness probe are not held back by a rig just added
+		// (gt-30ehe8).
+		return Field{Name: FieldMain, Rig: m.Rig, Tag: New, Verdict: Green, Value: "no landing yet", Detail: "no post-landing verdict recorded yet"}
+	case m.LastRun == "":
+		// The rig has a landing record but no post-land verdict: no run of
+		// its check recorded one. Reading that green would hide a check
+		// that silently does nothing, so it stays UNKNOWN (gt-30ehe8).
+		return unknown(FieldMain, m.Rig, "", errors.New("landed, but no post-landing verdict recorded"))
+	case m.LastRun != m.LastGreen:
+		// A red verdict is a standing fact about LastRun, recorded at some
+		// time after LastGreenAt, so its age cannot be judged from that
+		// clock; it stays red until a newer verdict moves LastRun.
+		return Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Red, Value: "red", Detail: "main red at " + short(m.LastRun)}
+	case check.Context != "" && m.LastGreenAt.IsZero():
+		// Only a status verdict is aged by LastGreenAt, so only there does
+		// a green with no recorded time leave the age unknown. A command
+		// rig's green is recorded when the check runs and needs no clock.
+		return unknown(FieldMain, m.Rig, "", errors.New("green verdict has no recorded time"))
+	case check.Context != "" && in.Now.Sub(m.LastGreenAt) > PostLandAgeShownAfter:
+		// No newer verdict is recorded, so the green stands and its age goes
+		// in the value. The line lists only non-green fields, so this green
+		// adds nothing to a green line.
+		age := in.Now.Sub(m.LastGreenAt)
+		return Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green " + Short(age)}
+	default:
+		return Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green"}
+	}
 }
 
 // promotions judges each promoting rig's GitHub main beside its main field

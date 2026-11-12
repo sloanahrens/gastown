@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -22,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -523,6 +525,22 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 			Context: postLandCtx,
 			Command: rigPostLandCommand(rigPath),
 		}
+		// A status context gets its verdict only from a workflow that posts it
+		// on the rig's main. A rig whose workflows post it on no push reads
+		// UNKNOWN with the reason at this read; a rig whose workflows post it
+		// for some pushes keeps its verdict and carries a note (gt-gg9hv.7.4).
+		var note string
+		if postLand.Context != "" {
+			verdict, why, werr := postLandWorkflowVerdict(s.d.gitAt, rigPath, postLand.Context)
+			switch {
+			case werr != nil:
+				err = errors.Join(err, werr)
+			case verdict == landworker.DoesNotPost:
+				err = errors.Join(err, errors.New(why))
+			case verdict == landworker.PostsForSomeCommits:
+				note = why
+			}
+		}
 		// Only a rig with no verdict reads its landings file: the record
 		// decides NEW against UNKNOWN, while a recorded verdict answers the
 		// field on its own.
@@ -539,10 +557,60 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 		}
 		out = append(out, townhealth.RigMain{
 			Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, LastGreenAt: st.LastGreenAt,
-			PostLand: postLand, Landed: landed, Err: err,
+			PostLand: postLand, PostLandNote: note, Landed: landed, Err: err,
 		})
 	}
 	return out, nil
+}
+
+// postLandWorkflowDir is the directory a rig's workflow files live in. Only the
+// files directly in it are read as workflows; a file in a subdirectory is not.
+const postLandWorkflowDir = ".forgejo/workflows"
+
+// postLandWorkflowVerdict is the matcher's verdict for a rig's post-land status
+// context, read from the workflow files on the rig's main in the repository the
+// rig already holds. why is the matcher's reason, and names the context. Nothing
+// is fetched: a repository that cannot be read is an error, never a rig with no
+// workflows.
+func postLandWorkflowVerdict(open func(dir string) daemonGit, rigPath, statusContext string) (landworker.PostVerdict, string, error) {
+	repoDir := constants.RigBareRepoPath(rigPath)
+	if _, err := os.Stat(repoDir); err != nil {
+		return landworker.DoesNotPost, "", fmt.Errorf("reading the workflows that post %q: rig repository: %w", statusContext, err)
+	}
+	branch, err := rigDefaultBranch(rigPath)
+	if err != nil {
+		return landworker.DoesNotPost, "", fmt.Errorf("reading the workflows that post %q: %w", statusContext, err)
+	}
+	files, err := readWorkflowFiles(open, repoDir, "refs/remotes/origin/"+branch)
+	if err != nil {
+		return landworker.DoesNotPost, "", fmt.Errorf("reading the workflows that post %q: %w", statusContext, err)
+	}
+	verdict, why := landworker.WorkflowsPostContext(files, statusContext)
+	return verdict, why, nil
+}
+
+// readWorkflowFiles reads the workflow files directly under postLandWorkflowDir
+// at ref, in the repository at repoDir, through open. One file that cannot be
+// read fails the whole read: a partial set would judge the rig on the files that
+// happened to read.
+func readWorkflowFiles(open func(dir string) daemonGit, repoDir, ref string) (map[string][]byte, error) {
+	g := open(repoDir)
+	blobs, err := g.TreeFileBlobs(ref)
+	if err != nil {
+		return nil, fmt.Errorf("listing %s in %s: %w", ref, repoDir, err)
+	}
+	files := make(map[string][]byte)
+	for file := range blobs {
+		if path.Dir(file) != postLandWorkflowDir {
+			continue
+		}
+		data, err := g.ShowFileAtRev(ref, file)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s at %s: %w", file, ref, err)
+		}
+		files[file] = []byte(data)
+	}
+	return files, nil
 }
 
 // hasLandingRecord reports whether the landing worker has a record of any
