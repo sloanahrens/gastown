@@ -113,6 +113,18 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"town root bd path", polecatRole, b.town, `/usr/local/bin/bd create --title=x`, true},
 		{"town root bd new alias", polecatRole, b.town, `bd new --title=x`, true},
 		{"town root bd q", polecatRole, b.town, `bd q "x"`, true},
+		// bd todo add files a bead as bd create does, and bd swarm create files
+		// a swarm molecule of beads; only the second word makes them a create.
+		{"town root bd todo add", polecatRole, b.town, `bd todo add "x"`, true},
+		{"town root bd swarm create", polecatRole, b.town, `bd swarm create x`, true},
+		{"worktree bd todo add", polecatRole, b.worktree, `bd todo add "x"`, false},
+		{"worktree bd swarm create", polecatRole, b.worktree, `bd swarm create x`, false},
+		{"town root bd todo alone", polecatRole, b.town, `bd todo`, false},
+		{"town root bd todo done", polecatRole, b.town, `bd todo done x-1`, false},
+		{"town root bd swarm status", polecatRole, b.town, `bd swarm status x`, false},
+		{"cd town then bd todo add", polecatRole, b.worktree, `cd ` + b.town + ` && bd todo add "x"`, true},
+		{"bd -C town todo add", polecatRole, b.worktree, `bd -C ` + b.town + ` todo add "x"`, true},
+		{"bd -C town swarm create", polecatRole, b.worktree, `bd -C ` + b.town + ` swarm create x`, true},
 		{"town root after a global flag", polecatRole, b.town, `bd --db x create --title=x`, true},
 		{"cd town then create", polecatRole, b.worktree, `cd ` + b.town + ` && bd create --title=x`, true},
 		{"relative cd up to town", polecatRole, b.worktree, `cd ../../../.. && bd create --title=x`, true},

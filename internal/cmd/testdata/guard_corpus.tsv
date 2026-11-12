@@ -578,3 +578,7 @@ dangerous	polecat	"git push origin HEAD:main > out"	refuse	Polecats never push t
 container_suite	polecat	"bd close gt-x && GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
 dangerous	polecat	"bd close gt-x && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
 test_scope	polecat	"bd close gt-x && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
+# --- gt-gq3e23: bd todo add and bd swarm create file a bead as bd create does; bd-create-store refuses them from the town root, the three guards here do not judge them. Stamp for the guard sources after the fix ---
+container_suite	polecat	"bd todo add \"x\""	allow		gt-gq3e23	15c34025ef4c6d1d1172d06958c0c0fb3830fc3eb3a098e5931a5f61e327a0ff
+dangerous	polecat	"bd todo add \"x\""	allow		gt-gq3e23	15c34025ef4c6d1d1172d06958c0c0fb3830fc3eb3a098e5931a5f61e327a0ff
+test_scope	polecat	"bd todo add \"x\""	allow		gt-gq3e23	15c34025ef4c6d1d1172d06958c0c0fb3830fc3eb3a098e5931a5f61e327a0ff
