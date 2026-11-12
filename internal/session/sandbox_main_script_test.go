@@ -46,6 +46,7 @@ func runMainScript(t *testing.T, f mainScriptFakes, hold string) (exit int, slee
 	writeFakeTool(t, filepath.Join(bin, "sleep"), fakeSleep(logPath, marker))
 
 	args := []string{"-c", sandboxMainScript, "sh", fakeMainSession, f.waitSeconds, fakeMainPollSec, f.home, "", hold}
+	//testpolicy:allow no-subprocess — the script is the unit under test: it runs under sh, and the fake tmux and sleep it calls are the only seam
 	cmd := exec.Command("/bin/sh", args...)
 	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
 	out, err := cmd.CombinedOutput()
@@ -71,6 +72,7 @@ func runMainScript(t *testing.T, f mainScriptFakes, hold string) (exit int, slee
 
 func writeFakeTool(t *testing.T, path, body string) {
 	t.Helper()
+	//testpolicy:allow no-exec-files — the fake tmux and sleep must be executable for the script to run them; both live in the test's t.TempDir()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // G306: a fake tool the test runs
 		t.Fatal(err)
 	}
@@ -91,6 +93,7 @@ func fakeTmux(f mainScriptFakes) string {
 	if f.paneDead {
 		pane = "echo 1"
 	}
+	//testpolicy:allow no-exec-files — the body of the fake tmux that writeFakeTool puts in the test's t.TempDir() for the script to run
 	return "#!/bin/sh\n" +
 		"case \"$*\" in\n" +
 		"  *new-session*) " + newSession + " ;;\n" +
@@ -102,6 +105,7 @@ func fakeTmux(f mainScriptFakes) string {
 
 // fakeSleep logs its argument and whether the marker exists when it is called.
 func fakeSleep(logPath, marker string) string {
+	//testpolicy:allow no-exec-files — the body of the fake sleep that writeFakeTool puts in the test's t.TempDir() for the script to run
 	return "#!/bin/sh\n" +
 		"m=no; [ -e '" + marker + "' ] && m=yes\n" +
 		"echo \"$1 marker=$m\" >> '" + logPath + "'\n"
