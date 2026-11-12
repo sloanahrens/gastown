@@ -169,6 +169,29 @@ func TestHourlyAcrossADSTChange(t *testing.T) {
 		}
 	})
 
+	t.Run("fall back starts a window in the second repeated hour", func(t *testing.T) {
+		t.Parallel()
+		second := time.Date(2026, 11, 1, 7, 0, 0, 0, time.UTC) // 01:00 CST, the second 01:00
+		firstHour := second.Add(30 * time.Minute)              // 01:30 CST
+		landings := []Landing{
+			{At: second.Add(-20 * time.Minute), PolecatSecs: 600}, // 01:40 CDT, before the window: 8 points, ignored
+			{At: second.Add(10 * time.Minute), PolecatSecs: 60},   // 01:10 CST
+			{At: second.Add(70 * time.Minute), PolecatSecs: 60},   // 02:10 CST
+		}
+
+		s := Hourly(landings, nil, firstHour, 2, loc)
+
+		wantHours(t, "all", s.Classes[AllClass], []hourWant{
+			{points: 1, weighted: 1},
+			{points: 1, weighted: 1},
+		})
+		for i, hp := range s.Classes[AllClass] {
+			if want := second.Add(time.Duration(i) * time.Hour); !hp.Hour.Equal(want) {
+				t.Errorf("hour %d starts at %s, want %s", i, hp.Hour, want)
+			}
+		}
+	})
+
 	t.Run("fall back keeps both occurrences of the repeated hour", func(t *testing.T) {
 		t.Parallel()
 		base := time.Date(2026, 11, 1, 0, 0, 0, 0, loc) // 00:00 CDT
@@ -198,5 +221,54 @@ func TestHourlyAcrossADSTChange(t *testing.T) {
 		if off1 == off2 {
 			t.Errorf("both repeated hours have UTC offset %d, want the change of offset", off1)
 		}
+	})
+}
+
+// TestHourlyAcrossAHalfHourFallBack pins the window start in Australia/Lord_Howe,
+// whose fall-back is 02:00 daylight (+11) to 01:30 standard (+10:30), so the
+// wall-clock 01:30 to 02:00 range repeats and no wall-clock :00 starts the
+// standard occurrence.
+func TestHourlyAcrossAHalfHourFallBack(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("Australia/Lord_Howe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC) // 01:30 +10:30, the offset change
+
+	t.Run("second occurrence starts at the offset change", func(t *testing.T) {
+		t.Parallel()
+		firstHour := change.Add(15 * time.Minute) // 01:45 +10:30
+		landings := []Landing{
+			{At: change.Add(10 * time.Minute), PolecatSecs: 60}, // 01:40 +10:30
+		}
+
+		s := Hourly(landings, nil, firstHour, 2, loc)
+
+		if got := s.Classes[AllClass][0].Hour; !got.Equal(change) {
+			t.Errorf("hour 0 starts at %s, want the offset change %s", got, change)
+		}
+		wantHours(t, "all", s.Classes[AllClass], []hourWant{
+			{points: 1, weighted: 1},
+			{},
+		})
+	})
+
+	t.Run("first occurrence starts at its wall-clock hour", func(t *testing.T) {
+		t.Parallel()
+		firstHour := change.Add(-15 * time.Minute) // 01:45 +11:00
+		want := change.Add(-time.Hour)             // 01:00 +11:00
+		landings := []Landing{
+			{At: change.Add(-10 * time.Minute), PolecatSecs: 60}, // 01:50 +11:00
+		}
+
+		s := Hourly(landings, nil, firstHour, 1, loc)
+
+		if got := s.Classes[AllClass][0].Hour; !got.Equal(want) {
+			t.Errorf("hour 0 starts at %s, want %s", got, want)
+		}
+		wantHours(t, "all", s.Classes[AllClass], []hourWant{
+			{points: 1, weighted: 1},
+		})
 	})
 }
