@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 )
 
@@ -48,7 +49,7 @@ func TestIntegrationRigDiffsChangedLines(t *testing.T) {
 	}
 
 	town := t.TempDir()
-	repo := filepath.Join(town, dedupe.RigName, "mayor", "rig")
+	repo := constants.RigBareRepoPath(filepath.Join(town, dedupe.RigName))
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestIntegrationRigDiffsPrefetchMatchesPerCommit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	town := t.TempDir()
-	repo := filepath.Join(town, dedupe.RigName, "mayor", "rig")
+	repo := constants.RigBareRepoPath(filepath.Join(town, dedupe.RigName))
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}

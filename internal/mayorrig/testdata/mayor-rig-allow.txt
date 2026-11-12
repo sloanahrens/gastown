@@ -51,10 +51,7 @@ internal/doctor/testutil_symlink_check.go	5	pending-retirement	doctor testutil s
 internal/doctor/unregistered_beads_check.go	1	pending-retirement	doctor unregistered beads check: the constants.DirMayor directory name it skips
 internal/doltserver/doltserver.go	4	pending-retirement	dolt server: reads the rig's mayor/rig/.beads database and port
 internal/done/done.go	1	pending-retirement	gt done: the rig work directory under mayor/rig
-internal/forgejocut/repoint.go	2	pending-retirement	forgejo cutover repoint: rewrites remotes in the rig's mayor/rig checkout
 internal/installer/paths.go	1	pending-retirement	installer: the branch checkout default and the source lookup it builds in, deleted with gt-yjzepk
-internal/jev/rework/wire.go	2	pending-retirement	rework wiring: the git base candidates .repo.git and mayor/rig, and the error text
-internal/jev/scorecard/finding.go	2	pending-retirement	scorecard finding: the git base candidates .repo.git and mayor/rig, and the error text
 internal/mail/address_policy.go	2	pending-retirement	mail address policy: the constants.DirMayor address prefix, which is not the clone path
 internal/mail/router.go	1	pending-retirement	mail router: the constants.DirMayor address check, which is not the clone path
 internal/metrics/source_config.go	1	pending-retirement	metrics source config: the .om.json path under the rig's mayor/rig checkout

@@ -57,10 +57,10 @@ func (c *Cutover) now() time.Time {
 }
 
 // RepointRemotes is step 5's git half: the rig's origin is set to the Forgejo URL
-// in the bare repository the landing path pushes to, in the mayor's clone and in
-// every crew clone that exists. A directory already at the URL is reported and
-// left alone; a directory that is not a git repository is reported and skipped,
-// since crew/ holds files beside the clones.
+// in the bare repository the landing path pushes to, and in every crew clone that
+// exists. A directory already at the URL is reported and left alone; a directory
+// that is not a git repository is reported and skipped, since crew/ holds files
+// beside the clones.
 //
 // A dry run prints each set-url it would run and runs none; it still makes the
 // read-only calls that find each repository and its origin. This changes live
@@ -83,22 +83,19 @@ func (c *Cutover) RepointRemotes() (err error) {
 }
 
 // repointDir is one directory to repoint. A crew entry may be a directory that
-// is not a clone and is then skipped; the bare repository and the mayor's clone
-// must be repositories, or the step fails.
+// is not a clone and is then skipped; the bare repository must be a repository,
+// or the step fails.
 type repointDir struct {
 	path string
 	crew bool
 }
 
 // repointDirs lists the directories to repoint, in the script's order: the bare
-// repository, the mayor's clone when it exists, then each crew directory by name.
-// A hidden entry and a file in crew/ are not clones.
+// repository, then each crew directory by name. A hidden entry and a file in
+// crew/ are not clones.
 func (c *Cutover) repointDirs() ([]repointDir, error) {
 	o := c.Opts
 	dirs := []repointDir{{path: o.BareRepo}}
-	if c.isDir(filepath.Join(o.RigRoot, "mayor", "rig")) {
-		dirs = append(dirs, repointDir{path: filepath.Join(o.RigRoot, "mayor", "rig")})
-	}
 	crew := filepath.Join(o.RigRoot, "crew")
 	if !c.isDir(crew) {
 		return dirs, nil
@@ -126,9 +123,8 @@ func (c *Cutover) isDir(path string) bool {
 
 // repointOne sets one directory's origin to url, or says why it did not. A crew
 // directory that is not a repository of its own is logged and skipped; the bare
-// repository and the mayor's clone that are not fail the step, since a step that
-// reports success with origin still at GitHub would let the registry move on
-// without them.
+// repository that is not fails the step, since a step that reports success with
+// origin still at GitHub would let the registry move on without it.
 func (c *Cutover) repointOne(dir, url string, crew bool) error {
 	if !c.isRepositoryRoot(dir) {
 		if !crew {
