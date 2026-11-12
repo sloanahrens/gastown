@@ -104,7 +104,9 @@ const postLandCancelledDescription = "has been cancelled" //nolint:misspell // t
 // postLandStatusCancelled reports whether st is a run canceled before it
 // judged the work rather than a failure of the work. The description match is
 // exact (case-insensitive, trimmed) so a real failure whose text merely
-// mentions a cancellation still reads red.
+// mentions a cancellation still reads red. Because the description is the only
+// evidence, a match never helps prove a commit green: a real failure wearing
+// the same text would otherwise be hidden (gt-gwwbua).
 func postLandStatusCancelled(st forgejo.CommitStatus) bool {
 	if st.Status != forgejo.StateFailure && st.Status != forgejo.StateError {
 		return false
@@ -118,9 +120,12 @@ func postLandStatusCancelled(st forgejo.CommitStatus) bool {
 // (gt-fn9e6.7), and with no creator on any of them one failure or error is red
 // even beside a success. A canceled run contributes no verdict: it never
 // judged the work, so reading it as red raised a false red main (gt-ybeeqc).
-// Another status carrying the context still decides, and a commit whose only
-// status is canceled before it judged the work is UNKNOWN, so main is judged
-// by the next commit's status.
+// Another status carrying the context still decides: a real failure beside a
+// canceled run reads RED. A success beside one reads UNKNOWN, not GREEN,
+// because the canceled run's mark is its description alone and a real failure
+// could wear that text (gt-gwwbua). A commit whose only status is canceled
+// before it judged the work is UNKNOWN too, so main is judged by the next
+// commit's status.
 func postLandStatusRead(cs *forgejo.CombinedStatus, err error, name, sha string) PostLandStatusResult {
 	if err != nil {
 		return PostLandStatusResult{
@@ -192,6 +197,18 @@ func postLandStatusRead(cs *forgejo.CombinedStatus, err error, name, sha string)
 		}
 	}
 	if allSuccess {
+		if canceled != nil {
+			// A description is the only thing that called the set-aside status
+			// a canceled run, and the same text is what a real failure would
+			// carry. A success beside it therefore does not prove the commit
+			// green: reading GREEN here would hide that failure (gt-gwwbua).
+			return PostLandStatusResult{
+				Verdict: PostLandStatusUnknown,
+				State:   "canceled",
+				Description: fmt.Sprintf("a status claiming a canceled run sits beside a success on %s: %s",
+					short(sha), strings.TrimSpace(canceled.Description)),
+			}
+		}
 		return PostLandStatusResult{Verdict: PostLandStatusGreen, State: string(forgejo.StateSuccess)}
 	}
 	// No red and no green: name what CI is still waiting on, else what it
