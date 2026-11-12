@@ -576,16 +576,15 @@ func writeFile(path string, r io.Reader) error {
 
 // analyseTargets runs the mango stage for every target whose training split
 // holds MangoMinSupport positives, and reports every target's split counts
-// either way. It also reports the day range the split covered: every target
-// cuts the same landings, so the first target's split dates the panel.
+// either way. It also reports the day range the split covered. The split is
+// cut from the landings alone, so every target shares it and it is dated once
+// here, not from whichever target happens to come first.
 func analyseTargets(ctx context.Context, env Env, o AnalysisOptions, header []string, rows []Row, explainOnly []string) ([]TargetResult, PanelSplit, error) {
 	results := make([]TargetResult, 0, len(mangoTargets))
-	var split PanelSplit
-	for i, target := range mangoTargets {
+	train, holdout := SplitByDate(rows, defaultTrainFraction)
+	split := panelSplit(train, holdout)
+	for _, target := range mangoTargets {
 		p := Prepare(header, rows, explainOnly, target)
-		if i == 0 {
-			split = panelSplit(p)
-		}
 		if p.TrainPositives < MangoMinSupport {
 			results = append(results, skipTarget(target, p))
 			continue
