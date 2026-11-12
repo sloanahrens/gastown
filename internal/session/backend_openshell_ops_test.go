@@ -265,7 +265,11 @@ func TestOpenShellOpsDeleteRemovesTheSandboxAndItsRecord(t *testing.T) {
 	if err := b.Delete(openshellTestSession); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	want := [][]string{{"openshell", "sandbox", "delete", openshellTestSession}}
+	copyDir := SandboxTranscriptCopyDir(b.townRoot, openshellTestRig, openshellTestPolecat)
+	want := [][]string{
+		{"openshell", "sandbox", "download", openshellTestSession, "/sandbox/.claude/projects", copyDir},
+		{"openshell", "sandbox", "delete", openshellTestSession},
+	}
 	if !reflect.DeepEqual(fake.Calls(), want) {
 		t.Fatalf("openshell calls = %v, want %v", fake.Calls(), want)
 	}

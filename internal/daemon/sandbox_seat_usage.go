@@ -16,12 +16,15 @@ import (
 	"github.com/steveyegge/gastown/internal/usageattrib"
 )
 
-// A sandbox seat's work usage is read from the transcripts on the host that its
-// own Claude sessions wrote for its host worktree, and written as the seat ends.
-// The worktree goes with the seat's directories, so the record is written before
-// they are removed. A reused worktree keeps its predecessor's transcripts: those
-// last written before the seat started are left out. A seat with none on the
-// host writes no record, and its end logs why.
+// A sandbox seat's work usage is read from the transcripts its own Claude
+// sessions wrote, and written as the seat ends. A sandbox seat's transcripts are
+// the copy its sandbox was copied to before it was deleted (session.
+// CopiedSandboxTranscripts); a seat with no copy reads the host's Claude project
+// directories for its host worktree. The worktree goes with the seat's
+// directories, so the record is written before they are removed. A reused
+// worktree keeps its predecessor's transcripts: those last written before the
+// seat started are left out. A seat with none writes no record, and its end logs
+// why.
 
 // seatUsageHook holds the seams of the seat-end usage record.
 type seatUsageHook struct {
@@ -44,7 +47,7 @@ var errSeatUsageUnlisted = errors.New("no transcript lister is wired, so its tra
 // errSeatNoTranscriptOnHost is the refusal when the host's Claude project
 // directories hold no transcript for the seat's worktree. The lister does not say
 // why none is there, so the reason offers the sandbox location as a possibility only.
-var errSeatNoTranscriptOnHost = errors.New("no transcript of its sessions is in the host's Claude project directories for its worktree, so none is read; if its sessions ran in a sandbox, they may have written theirs under /sandbox/.claude/projects, which the host does not hold, and they would need copying out before the sandbox is deleted")
+var errSeatNoTranscriptOnHost = errors.New("no transcript of its sessions is in the host's Claude project directories for its worktree, so none is read; if its sessions ran in a sandbox, they may have written theirs under /sandbox/.claude/projects, which the host does not hold; the copy taken out of that sandbox before it was deleted holds none of them, or none was taken")
 
 // seatStartedAt is when the seat started: the creation stamp of its sandbox
 // record. When a teardown has already removed that record, the removal left the
@@ -90,9 +93,17 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		write = usageattrib.Write
 	}
 	clone := polecat.SandboxSeatHostDirsFor(filepath.Join(h.town(), rig), rig, name).ClonePath
-	paths, err := list(h.town(), clone)
+	// The copy taken from the sandbox before it was deleted is read first: the
+	// sandbox's own transcripts are the seat's, and the host holds none of them.
+	paths, err := session.CopiedSandboxTranscripts(h.town(), rig, name)
 	if err != nil {
-		return "", nil, fmt.Errorf("listing its transcripts: %w", err)
+		return "", nil, fmt.Errorf("listing its copied transcripts: %w", err)
+	}
+	if len(paths) == 0 {
+		paths, err = list(h.town(), clone)
+		if err != nil {
+			return "", nil, fmt.Errorf("listing its transcripts: %w", err)
+		}
 	}
 	if len(paths) == 0 {
 		if startErr != nil {

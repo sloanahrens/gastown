@@ -10,8 +10,8 @@ import (
 // doctor tests never start an openshell process. Reply, Err and Stderr are
 // keyed by the openshell verb (the first argument after the global flags
 // and the optional "sandbox" noun): "create", "get", "exec", "upload",
-// "stop", "start", "delete", "logs". An unkeyed call succeeds with empty
-// output.
+// "stop", "start", "delete", "logs", "download". An unkeyed call succeeds with
+// empty output.
 type Fake struct {
 	Reply  map[string]string // verb -> stdout
 	Err    map[string]error  // verb -> error returned with the call
@@ -60,7 +60,7 @@ func copyRows(in [][]string) [][]string {
 // verbs are the openshell subcommands the Fake keys on.
 var verbs = map[string]bool{
 	"create": true, "get": true, "exec": true, "upload": true,
-	"stop": true, "start": true, "delete": true, "logs": true,
+	"stop": true, "start": true, "delete": true, "logs": true, "download": true,
 }
 
 // valueFlags are the global flags that consume the next argument.

@@ -171,6 +171,14 @@ func claudeProjectHash(normalizedPath string) string {
 	}, normalizedPath)
 }
 
+// ProjectDirName is the name Claude Code gives the project directory of the
+// absolute path abs: every letter-or-digit kept, every other rune a dash. A
+// caller that reads the project directory Claude wrote for abs, wherever it
+// ran, names it with this.
+func ProjectDirName(abs string) string {
+	return claudeProjectHash(abs)
+}
+
 // ClaudeProjectDirFor returns the primary Claude Code project directory for
 // workDir — the configured config dir's. Exported for callers that need to
 // inspect an agent's conversation log directly (e.g. witness liveness checks,

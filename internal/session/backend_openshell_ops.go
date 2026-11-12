@@ -377,8 +377,9 @@ func (b *openshellBackend) Stop(session string) error {
 	return b.cli.Stop(context.Background(), session)
 }
 
-// Delete removes the sandbox and its registry record, and ends the tracker
-// token of the seat it ran. A sandbox that is already gone counts as deleted
+// Delete copies the sandbox's transcripts out, then removes the sandbox and its
+// registry record, and ends the tracker token of the seat it ran. A sandbox
+// that is already gone counts as deleted
 // and still ends the token; any other failure keeps the record so the delete
 // can be retried. A record that cannot be read is a refusal, not a guess: the
 // seat it names is unknown, so the sandbox stays until the record reads
@@ -388,6 +389,9 @@ func (b *openshellBackend) Delete(session string) error {
 	rec, hasRec, err := ReadSandboxRecord(b.townRoot, session)
 	if err != nil {
 		return fmt.Errorf("sandbox %s: reading its record to find its seat's token: %w", session, err)
+	}
+	if hasRec {
+		b.copySeatTranscripts(rec)
 	}
 	if err := b.deleteSandbox(session); err != nil {
 		return err
@@ -406,6 +410,7 @@ func (b *openshellBackend) Delete(session string) error {
 // already gone still ends its seat, and a failed delete revokes nothing, since
 // the sandbox may still run.
 func (b *openshellBackend) deleteRecorded(rec SandboxRecord) error {
+	b.copySeatTranscripts(rec)
 	if err := b.deleteSandbox(rec.Session); err != nil {
 		return err
 	}

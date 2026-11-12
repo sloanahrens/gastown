@@ -274,6 +274,16 @@ func TestUploadArgv(t *testing.T) {
 		"openshell", "-g", "openshell", "sandbox", "upload", "--no-git-ignore", "n", "/tmp/skel.tgz", "/sandbox/")
 }
 
+func TestDownloadArgv(t *testing.T) {
+	t.Parallel()
+	cli, f := newFakeCLI()
+	if err := cli.Download(context.Background(), "n", "/sandbox/.claude/projects", "/town/.runtime/usage/transcripts/r/p"); err != nil {
+		t.Fatal(err)
+	}
+	wantCall(t, f,
+		"openshell", "-g", "openshell", "sandbox", "download", "n", "/sandbox/.claude/projects", "/town/.runtime/usage/transcripts/r/p")
+}
+
 func TestStopStartDeleteArgv(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

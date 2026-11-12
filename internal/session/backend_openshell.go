@@ -135,6 +135,9 @@ type openshellBackend struct {
 	// probe is the tmux surface existence and liveness read for a session;
 	// nil means the routed client that runs inside the sandbox. Tests set it.
 	probe func(session string) liveness.Probe
+	// transcriptCap is the most a seat's transcript copy keeps; zero is
+	// sandboxTranscriptCap. Tests set it.
+	transcriptCap int64
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
