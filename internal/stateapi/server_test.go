@@ -66,6 +66,8 @@ func TestServerAuth(t *testing.T) {
 		{"missing header refused on info", fixedToken(testToken), "/v1/info", "", http.StatusUnauthorized},
 		{"wrong token refused on info", fixedToken(testToken), "/v1/info", "Bearer tok-nope", http.StatusUnauthorized},
 		{"other scheme refused on info", fixedToken(testToken), "/v1/info", "Basic " + testToken, http.StatusUnauthorized},
+		{"lowercase bearer admitted on info", fixedToken(testToken), "/v1/info", "bearer " + testToken, http.StatusOK},
+		{"uppercase bearer admitted on info", fixedToken(testToken), "/v1/info", "BEARER " + testToken, http.StatusOK},
 		{"bearer without a token refused", fixedToken(testToken), "/v1/info", "Bearer ", http.StatusUnauthorized},
 		{"multi-word bearer refused even when it matches", fixedToken("tok 0123456789"), "/v1/info", "Bearer tok 0123456789", http.StatusUnauthorized},
 		{"empty configured token refuses a presented token", fixedToken(""), "/v1/info", "Bearer " + testToken, http.StatusUnauthorized},
