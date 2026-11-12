@@ -3,6 +3,7 @@ package forgejoprov
 import (
 	"errors"
 	"io/fs"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -247,6 +248,27 @@ func TestRunRefusesEmptyWorkflowList(t *testing.T) {
 	}
 	if got := string(files.files[DefaultWorkflowList]); got != "" {
 		t.Errorf("empty list = %q, want it left empty", got)
+	}
+}
+
+// TestRunFailsWhenCandidateRuleCannotBeRemoved: a candidate-branch rule the run cannot remove
+// fails the run before the hook list is written, so a repository whose branch rules did not
+// finish is not added to the list.
+func TestRunFailsWhenCandidateRuleCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.ProtectedLandBranch = true
+	f.AddRepo(protectionRepo)
+	files := newMemFiles()
+	files.seed(DefaultWorkflowList, "acme/other\n", workflowListMode)
+
+	rt := failingRoute{next: f, match: "/branch_protections/land", status: http.StatusInternalServerError}
+	res := runProvisioning(t, rt, files, nil, "--repo", protectionRepo)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	if got, want := string(files.files[DefaultWorkflowList]), "acme/other\n"; got != want {
+		t.Errorf("hook list = %q, want it untouched at %q", got, want)
 	}
 }
 
