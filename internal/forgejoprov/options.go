@@ -52,6 +52,7 @@ type Options struct {
 	GateContexts   []string // --gate-context: required commit-status contexts
 	MainBranch     string   // --main-branch: protected landing target
 	LandBranch     string   // --land-branch: candidate branch pattern kept unprotected
+	WorkflowList   string   // --workflow-list: hook list a provisioned repository is appended to
 	Rotate         bool     // --rotate: mint a new token where one exists, revoking the old
 	DryRun         bool     // --dry-run: read and report without writing
 	// SkipTokens mints, lists and revokes no bot token, for a broker run with no
@@ -133,6 +134,7 @@ var valueFlags = map[string]func(*Options, string){
 	"--gate-context":     func(o *Options, v string) { o.GateContexts = append(o.GateContexts, v) },
 	"--main-branch":      func(o *Options, v string) { o.MainBranch = v },
 	"--land-branch":      func(o *Options, v string) { o.LandBranch = v },
+	"--workflow-list":    func(o *Options, v string) { o.WorkflowList = v },
 }
 
 // Parse turns one command line into Options, resolving defaults from getenv
@@ -152,6 +154,7 @@ func Parse(args []string, getenv func(string) string) (*Options, error) {
 		TokenName:      DefaultTokenName,
 		MainBranch:     DefaultMainBranch,
 		LandBranch:     DefaultLandBranch,
+		WorkflowList:   DefaultWorkflowList,
 	}
 	if err := o.parseFlags(args); err != nil {
 		return nil, err

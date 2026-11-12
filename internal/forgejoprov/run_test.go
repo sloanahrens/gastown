@@ -96,6 +96,11 @@ func runProvisioningCtx(ctx context.Context, t *testing.T, rt http.RoundTripper,
 	if err != nil {
 		t.Fatalf("Parse(%v) = %v, want the command line accepted", args, err)
 	}
+	// A run with a repository reads the workflow-file hook list; a test that names none
+	// gets a neutral one, so the list is a fixture, not a missing file.
+	if _, ok := files.files[DefaultWorkflowList]; !ok {
+		files.seed(DefaultWorkflowList, "forge/other\n", 0o640)
+	}
 	var reads []string
 	readFile := func(path string) ([]byte, error) {
 		reads = append(reads, path)
@@ -114,6 +119,18 @@ func runProvisioningCtx(ctx context.Context, t *testing.T, rt http.RoundTripper,
 		Random:   &countingRandom{},
 	})
 	return runResult{code: code, logs: logs.String(), reads: reads}
+}
+
+// tokenFileCount counts the files a run wrote other than the workflow-file hook list: a
+// run with a repository appends to that list, which is not a token file.
+func tokenFileCount(files *memFiles) int {
+	n := 0
+	for path := range files.files {
+		if path != DefaultWorkflowList {
+			n++
+		}
+	}
+	return n
 }
 
 // holdDriftedMain creates the main rule on protectionRepo with a gate context that is
@@ -241,7 +258,7 @@ func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 	if !strings.Contains(first.logs, "no bot-viewer user; skipping its read grant on acme/rig") {
 		t.Errorf("first run logs = %q, want the missing viewer notice", first.shown())
 	}
-	if got := len(files.files); got != 3 {
+	if got := tokenFileCount(files); got != 3 {
 		t.Fatalf("first run wrote %d files, want the three role token files", got)
 	}
 	tokens := maps.Clone(files.files)
@@ -474,7 +491,7 @@ func TestRunDryRunSendsNoWriteAndSaysWould(t *testing.T) {
 	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("dry run sent writes %v, want none", writes)
 	}
-	if got := len(files.files); got != 0 {
+	if got := tokenFileCount(files); got != 0 {
 		t.Errorf("dry run wrote %d token files, want none", got)
 	}
 	for _, want := range []string{
@@ -544,7 +561,7 @@ func TestRunSkipTokensSendsNoTokenRequest(t *testing.T) {
 	if got := countCalls(calls, http.MethodPost, "/branch_protections"); got != 1 {
 		t.Errorf("branch protection POSTs = %d, want 1", got)
 	}
-	if got := len(files.files); got != 0 {
+	if got := tokenFileCount(files); got != 0 {
 		t.Errorf("run wrote %d token files, want none", got)
 	}
 }
@@ -609,7 +626,7 @@ func TestRunRotateWithSkipTokensRefuses(t *testing.T) {
 			if calls := f.CallLog(); len(calls) != 0 {
 				t.Errorf("run sent %d requests, want none before the refusal", len(calls))
 			}
-			if got := len(files.files); got != 0 {
+			if got := tokenFileCount(files); got != 0 {
 				t.Errorf("run wrote %d token files, want none", got)
 			}
 		})
@@ -646,7 +663,7 @@ func TestRunSkipTokensDryRunPlanNamesTheSkippedStep(t *testing.T) {
 	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("dry run sent writes %v, want none", writes)
 	}
-	if got := len(files.files); got != 0 {
+	if got := tokenFileCount(files); got != 0 {
 		t.Errorf("dry run wrote %d token files, want none", got)
 	}
 }
@@ -739,7 +756,7 @@ func TestRunDeniedMintWritesNoTokenFile(t *testing.T) {
 	if res := runProvisioning(t, f, files, nil, "--repo", protectionRepo); res.code != ExitFailure {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
-	if got := len(files.files); got != 0 {
+	if got := tokenFileCount(files); got != 0 {
 		t.Errorf("refused mint wrote %d files, want none", got)
 	}
 }
@@ -830,7 +847,7 @@ func TestRunFailsWhenAUserReadFails(t *testing.T) {
 	if !strings.Contains(res.logs, "GET /users/bot-polecat: unexpected HTTP 500") {
 		t.Errorf("logs = %q, want the failed read named", res.shown())
 	}
-	if got := len(files.files); got != 0 {
+	if got := tokenFileCount(files); got != 0 {
 		t.Errorf("failed read wrote %d token files, want none", got)
 	}
 	if writes := f.Writes(); len(writes) != 0 {
@@ -967,6 +984,10 @@ func TestRunNeverPrintsATokenOrTouchesTheRealHome(t *testing.T) {
 				t.Error(msg)
 			}
 			for path := range files.files {
+				// The hook list is the one file outside the config dir a run may write.
+				if path == DefaultWorkflowList {
+					continue
+				}
 				if !strings.HasPrefix(path, fixtureConfigDir+"/") {
 					t.Errorf("wrote %s, outside the config dir %s", path, fixtureConfigDir)
 				}

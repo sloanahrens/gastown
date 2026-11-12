@@ -37,6 +37,7 @@ func TestParseDefaultsTable(t *testing.T) {
 		GateContexts:   []string{"ci / gate (push)", "om / review"},
 		MainBranch:     "main",
 		LandBranch:     "land/*",
+		WorkflowList:   DefaultWorkflowList,
 	}
 	cases := []struct {
 		name   string

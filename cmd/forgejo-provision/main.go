@@ -87,6 +87,8 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --main-branch NAME     protected landing target (default: %s)
   --land-branch PATTERN  candidate branch pattern, which the run makes sure is
                          unprotected (default: %s)
+  --workflow-list FILE   workflow-file hook list each repository is appended
+                         to, unless it already names it (default: %s)
   --rotate               mint a new token even where a token file exists, and
                          revoke the token the file records (its TOKEN_NAME
                          line, else the token named by --token-name)
@@ -105,6 +107,7 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
 	quotedAndList(forgejoprov.DefaultGateContexts()),
 	forgejoprov.DefaultMainBranch,
 	forgejoprov.DefaultLandBranch,
+	forgejoprov.DefaultWorkflowList,
 )
 
 // quotedAndList joins the default gate contexts the way the usage text names
