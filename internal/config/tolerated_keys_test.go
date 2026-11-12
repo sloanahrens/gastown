@@ -85,39 +85,19 @@ func TestToleratedTierSweepKeyWarnsOncePerProcess(t *testing.T) {
 	}
 }
 
-// The forgejo block left the schema with the power states (gt-a2uug4.17). The
-// live settings file still carries it, so a load accepts it, reads nothing from
-// it, and names it once per process.
-const toleratedForgejoDoc = `{"type":"town-settings","version":1,"forgejo":{"dir":"~/forgejo"}}`
-
-// The warning names the key once; a test must reset the record before it.
-//
-//testpolicy:allow parallel — it reads and resets the process-wide record of named keys, so no other test may name one while it runs
-func TestToleratedForgejoBlockLoadsAndWarnsOnce(t *testing.T) {
-	forgetToleratedKeyWarnings()
-	t.Cleanup(forgetToleratedKeyWarnings)
-
-	var warn bytes.Buffer
-	var s TownSettings
-	if err := decodeJSONFile("settings/config.json", []byte(toleratedForgejoDoc), &s, &warn); err != nil {
-		t.Fatalf("decodeJSONFile: %v", err)
-	}
-	want := "warning: forgejo is no longer read and can be removed\n"
-	if warn.String() != want {
-		t.Errorf("warning = %q, want %q", warn.String(), want)
-	}
-}
-
-func TestToleratedForgejoBlockBesideAMisspelledKeyIsRefused(t *testing.T) {
+// The forgejo block left the schema with the power states (gt-a2uug4.17). Its
+// tolerated entry went once no live settings file carried it (gt-x4wnny), so a
+// load now refuses the block as an undeclared key.
+func TestForgejoBlockIsRefusedAsUnknownKey(t *testing.T) {
 	t.Parallel()
-	body := `{"type":"town-settings","version":1,"forgejo":{"dir":"~/forgejo"},"forgjo":{}}`
+	body := `{"type":"town-settings","version":1,"forgejo":{"dir":"~/forgejo"}}`
 	var s TownSettings
 	err := DecodeJSONFile("settings/config.json", []byte(body), &s)
 	var pe *ParseError
 	if !errors.As(err, &pe) {
-		t.Fatalf("DecodeJSONFile = %v, want a ParseError for the misspelt key", err)
+		t.Fatalf("DecodeJSONFile = %v, want a ParseError for the forgejo block", err)
 	}
-	if want := []string{"forgjo"}; !slices.Equal(pe.Keys, want) {
-		t.Errorf("Keys = %v, want only the misspelling %v", pe.Keys, want)
+	if want := []string{"forgejo"}; !slices.Equal(pe.Keys, want) {
+		t.Errorf("Keys = %v, want %v", pe.Keys, want)
 	}
 }
