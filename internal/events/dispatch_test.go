@@ -6,17 +6,20 @@ import (
 )
 
 // dispatchEv builds one log line for the dispatch clock's tests: a sling when
-// the type is a sling, a done event otherwise.
+// the type is a sling, a done event otherwise. The sling's actor is a seat, so
+// the line is a seat-to-seat handoff and keeps the bead's run; a test that
+// needs a sling by anyone else builds it with dispatchSlingEv.
 func dispatchEv(typ, at, bead string) Event {
-	e := Event{Timestamp: at, Type: typ, Payload: map[string]interface{}{"bead": bead}}
+	e := Event{Timestamp: at, Type: typ, Actor: "gastown/polecats/nux", Payload: map[string]interface{}{"bead": bead}}
 	if typ == TypeSling {
 		e.Payload["target"] = "gastown/polecats/" + bead
 	}
 	return e
 }
 
-// dispatchSlingEv builds a sling line written by actor to the seat it names,
-// so a test can tell the spec dispatcher's slings from anyone else's.
+// dispatchSlingEv builds a sling line written by actor to the seat it names, so
+// a test can choose the actor that decides whether the sling is a seat-to-seat
+// handoff or starts a new run.
 func dispatchSlingEv(at, bead, actor, seat string) Event {
 	return Event{
 		Timestamp: at,
@@ -52,9 +55,9 @@ func mustTime(t *testing.T, s string) time.Time {
 	return ts
 }
 
-// The clock belongs to the bead, not the seat: a bead slung again — to the
+// A seat-to-seat handoff is the same run: a bead slung again by a seat — to the
 // same seat or another one — keeps the dispatch it first went out on, and a
-// done event ends the run so the dispatch after it starts over.
+// done event ends the run so the dispatch after it starts over (gt-m14shr).
 func TestDispatchStartCountsTheBeadsFirstDispatch(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -68,7 +71,7 @@ func TestDispatchStartCountsTheBeadsFirstDispatch(t *testing.T) {
 			want: t9,
 		},
 		{
-			name: "re-slung to a second seat keeps the first dispatch",
+			name: "re-slung by a seat keeps the first dispatch",
 			evs: []Event{
 				dispatchEv(TypeSling, t9, "gt-a"),
 				dispatchEv(TypeSling, t11, "gt-a"),
@@ -361,18 +364,65 @@ func TestDispatchClockSpecDispatchSlingStartsNewRun(t *testing.T) {
 	}
 }
 
-// Anyone but the spec dispatcher keeps today's rule: a bead slung from one
-// seat to another keeps the dispatch it first went out on, so moving between
-// seats cannot restart its clock.
-func TestDispatchClockOtherActorSlingKeepsTheRun(t *testing.T) {
+// A sling by an actor that is not a polecat seat starts a new run (gt-m14shr):
+// the overseer hand-slung gt-8r17fp with actor "unknown" and the seat was
+// stopped 35s into its run on the clock of the run before it. The dispatcher,
+// the overseer, a crew actor and a sling whose actor the log could not name all
+// start the bead over; only a seat identity keeps the earlier dispatch.
+func TestDispatchClockANonSeatSlingStartsANewRun(t *testing.T) {
+	t.Parallel()
+	const second = "2026-10-27T12:00:00Z" // three hours after the first sling
+	for _, tt := range []struct {
+		name  string
+		actor string
+		want  string
+	}{
+		{name: "a hand sling the log could not name", actor: "unknown", want: second},
+		{name: "the overseer", actor: "town/crew/overseer", want: second},
+		{name: "a crew actor", actor: "gastown/crew/egret", want: second},
+		{name: "the spec dispatcher", actor: SpecDispatchActor, want: second},
+		{name: "an empty actor", actor: "", want: second},
+		// A seat slinging the bead on hands over the run it holds, so the
+		// earlier dispatch stays the clock.
+		{name: "a polecat seat", actor: "gastown/polecats/capable", want: t9},
+		// Only the exact "<rig>/polecats/<name>" form is a seat. Anything else
+		// — a two-segment name, an empty rig or polecat, an extra segment, the
+		// crew form, a casing the role package never writes — is not one, and
+		// its sling starts a new run rather than inheriting the old clock.
+		{name: "two path segments", actor: "gastown/capable", want: second},
+		{name: "an empty polecat name", actor: "gastown/polecats/", want: second},
+		{name: "an empty rig", actor: "/polecats/capable", want: second},
+		{name: "an extra segment", actor: "gastown/polecats/capable/x", want: second},
+		{name: "the crew form", actor: "gastown/crew/capable", want: second},
+		{name: "a polecats segment in another casing", actor: "gastown/POLECATS/capable", want: second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(t9, "gt-a", SpecDispatchActor, "gastown/nux"),
+				dispatchSlingEv(second, "gt-a", tt.actor, "gastown/capable"),
+			})
+			got, ok := clock.Start("gt-a")
+			if !ok || !got.Equal(mustTime(t, tt.want)) {
+				t.Errorf("start = %v (%t), want %s", got, ok, tt.want)
+			}
+		})
+	}
+}
+
+// A seat that slings the bead on keeps the run its dispatcher began: the seat
+// hands over a run that is still the bead's, and the earlier dispatch stays its
+// clock (gt-m14shr).
+func TestDispatchClockSeatSlingKeepsTheEarlierStart(t *testing.T) {
 	t.Parallel()
 	clock := NewDispatchClock()
 	clock.Add([]Event{
-		dispatchSlingEv(t9, "gt-a", "hq-crew-egret", "gastown/nux"),
-		dispatchSlingEv(t11, "gt-a", "hq-crew-egret", "gastown/capable"),
+		dispatchSlingEv(t9, "gt-a", "unknown", "gastown/capable"),
+		dispatchSlingEv(t11, "gt-a", "gastown/polecats/capable", "gastown/polecats/rictus"),
 	})
 	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t9)) {
-		t.Errorf("start = %v (%t), want %s: a seat-to-seat sling keeps the first dispatch", got, ok, t9)
+		t.Errorf("start = %v (%t), want %s: a seat's handoff keeps the run the dispatch began", got, ok, t9)
 	}
 }
 
@@ -415,18 +465,46 @@ func TestDispatchClockSpecDispatchSlingIsReplaySafe(t *testing.T) {
 	}
 }
 
-// A repeat spec-dispatch sling to the seat that already holds the bead is the
-// same run: it must not restart the clock, or a repeated sling could keep a
-// runaway bead from ever being stopped.
-func TestDispatchClockSpecDispatchRepeatToTheSameSeatKeepsTheRun(t *testing.T) {
+// The incident fixture is order and replay safe: folding the two slings in at
+// any chunk boundary, or folding the same lines in twice, dates the run from
+// the hand sling (gt-m14shr).
+func TestDispatchClockNonSeatSlingIsReplaySafe(t *testing.T) {
+	t.Parallel()
+	first := dispatchSlingEv("2026-11-12T09:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux")
+	second := dispatchSlingEv("2026-11-12T12:00:00Z", "gt-a", "unknown", "gastown/nux")
+	run := []Event{first, second}
+	want := mustTime(t, "2026-11-12T12:00:00Z")
+	for cut := 0; cut <= len(run); cut++ {
+		clock := NewDispatchClock()
+		clock.Add(run[:cut])
+		clock.Add(run[cut:])
+		if got, ok := clock.Start("gt-a"); !ok || !got.Equal(want) {
+			t.Errorf("cut %d: start = %v (%t), want %v", cut, got, ok, want)
+		}
+	}
+	clock := NewDispatchClock()
+	clock.Add(run)
+	clock.Add(run)
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(want) {
+		t.Errorf("the lines folded twice: start = %v (%t), want %v", got, ok, want)
+	}
+}
+
+// A repeat sling by the dispatcher to the seat that already holds the bead
+// starts a new run like any other sling by a non-seat actor: the target no
+// longer decides, because the hand sling that was stopped 35s in named the seat
+// that already held the bead (gt-m14shr). The cost is that a bead re-slung on
+// every dispatcher tick restarts its clock; the rule buys a new holder a clock
+// of its own.
+func TestDispatchClockSpecDispatchRepeatToTheSameSeatStartsANewRun(t *testing.T) {
 	t.Parallel()
 	clock := NewDispatchClock()
 	clock.Add([]Event{
 		dispatchSlingEv("2026-10-30T12:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
 		dispatchSlingEv("2026-10-30T12:10:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
 	})
-	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, "2026-10-30T12:00:00Z")) {
-		t.Errorf("start = %v (%t), want 12:00:00Z: a repeat to the same seat keeps the first dispatch", got, ok)
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, "2026-10-30T12:10:00Z")) {
+		t.Errorf("start = %v (%t), want 12:10:00Z: the dispatcher's sling starts a new run", got, ok)
 	}
 }
 

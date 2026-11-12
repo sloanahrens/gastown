@@ -878,15 +878,16 @@ func TestRunOverrunGuard_GateTimeBeforeARestartIsNotCarried(t *testing.T) {
 	}
 }
 
-// The guard judges the bead's clock, not the seat's: a bead re-slung to a
-// second seat is nudged or stopped on the dispatch it first went out on, even
-// though that seat has held it only a few minutes. A done event ends that run,
-// so a bead dispatched again after it is judged from the new dispatch
-// (gt-tzbtf).
+// The guard judges the bead's clock, not the seat's: a bead handed on by a
+// seat to a second seat is nudged or stopped on the dispatch it first went out
+// on, even though that seat has held it only a few minutes. A done event ends
+// that run, so a bead dispatched again after it is judged from the new dispatch
+// (gt-tzbtf). The fixture stamps a seat actor because a sling by a seat is a
+// handoff; a sling by anyone else starts a new run (gt-m14shr).
 func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
 	t.Parallel()
 	line := func(ts, typ, bead, target string) string {
-		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"gastown/polecats/capable","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
 	}
 	for _, tt := range []struct {
 		name string
@@ -1010,14 +1011,16 @@ func TestRunOverrunGuard_DisabledDoesNothing(t *testing.T) {
 	}
 }
 
-// The guard's clock is the bead's, not the seat's: a bead re-slung to a second
-// seat is still dated from its first dispatch, and a done event ends that run,
-// so a bead dispatched again after it starts over (gt-tzbtf).
+// The guard's clock is the bead's, not the seat's: a bead handed on by a seat
+// to a second seat is still dated from its first dispatch, and a done event
+// ends that run, so a bead dispatched again after it starts over (gt-tzbtf).
+// The fixture stamps a seat actor because a sling by a seat is a handoff; a
+// sling by anyone else starts a new run (gt-m14shr).
 func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	line := func(ts, typ, bead, target string) string {
-		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q},"visibility":"both"}`,
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"gastown/polecats/capable","payload":{"bead":%q,"target":%q},"visibility":"both"}`,
 			ts, typ, bead, target)
 	}
 	body := strings.Join([]string{
@@ -1065,11 +1068,12 @@ func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 
 // A submission for landing ends the run it was made in, so the bead's clock is
 // the first sling since the submission, not the dispatch the run began with
-// (gt-chd44). A bead that was never submitted keeps its first dispatch.
+// (gt-chd44). A bead that was never submitted keeps the first dispatch it was
+// handed, a seat's own re-sling being a handoff (gt-m14shr).
 func TestOverrunSlungReader_ASubmissionEndsTheRun(t *testing.T) {
 	t.Parallel()
 	line := func(ts, typ string) string {
-		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":"gt-aaa11","target":"gastown/polecats/capable"},"visibility":"both"}`,
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"gastown/polecats/capable","payload":{"bead":"gt-aaa11","target":"gastown/polecats/capable"},"visibility":"both"}`,
 			ts, typ)
 	}
 	t10 := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
