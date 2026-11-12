@@ -80,8 +80,8 @@ const paneTreeJS = `(function () {
 var clockText = regexp.MustCompile(`\d{2}:\d{2}`)
 
 // TestVelocityAbsentPaneDrawsWhatItDrew: with no velocity in the reading the
-// pane draws the same tree it drew before the velocity figures and points row
-// existed. The golden was taken from the page before the feed was drawn.
+// pane draws the tree pinned in the golden file. The golden is a snapshot of
+// that tree, and rewriting it with the flag accepts whatever the page draws.
 func TestVelocityAbsentPaneDrawsWhatItDrew(t *testing.T) {
 	t.Parallel()
 
@@ -196,6 +196,24 @@ func TestVelocityUndefinedFiguresDrawADashNotZero(t *testing.T) {
 		if got := figureNamed(t, row, label); got.Value != "–" {
 			t.Errorf("%s reads %q with no value, want a dash", label, got.Value)
 		}
+	}
+}
+
+// A points 24h total the feed leaves unset reads as a dash, not as 0: the page
+// reads "–" when the figure is null, so an absent total is not a count of zero.
+func TestVelocityUnsetPoints24hDrawsADash(t *testing.T) {
+	t.Parallel()
+
+	st := velocityPaneReading()
+	st["trend"].(map[string]any)["velocity"].(map[string]any)["figures"] = map[string]any{
+		"points_24h": nil, "unweighted_24h": 0,
+	}
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", st)
+	row := readFigureRow(t, p)
+
+	if got := figureNamed(t, row, "points 24h"); got.Value != "–" {
+		t.Errorf("points 24h reads %q with no total, want a dash", got.Value)
 	}
 }
 
