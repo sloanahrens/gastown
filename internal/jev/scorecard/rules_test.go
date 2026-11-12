@@ -3,6 +3,7 @@ package scorecard
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -568,23 +569,59 @@ func TestRulesOmSourceNeverTurnsATrueIntoAFalse(t *testing.T) {
 	}
 }
 
-// TestRulesUnreadableReviewLogIsAnError checks a review log that cannot be read
-// is an error, not a clean read: the session is not labeled false for want of a
-// finding the log may hold.
-func TestRulesUnreadableReviewLogIsAnError(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	// A directory where the log file is: the log cannot be read as a file.
+// unreadableReviewLogAdapter is the adapter for a town whose review log cannot
+// be read: a directory is where the log file is. Its warnings are collected in
+// the returned slice.
+func unreadableReviewLogAdapter(t *testing.T, town string) (*rulesAdapter, *[]string) {
+	t.Helper()
 	if err := os.MkdirAll(land.TownReviewsFile(town).Path, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+	var warned []string
+	a.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	return a, &warned
+}
+
+// TestRulesUnreadableReviewLogLeavesOnlyDependentSessionsUnlabeledAndLogsAReason
+// checks a session that only the review log could label is left unlabeled with
+// a logged reason, and Label returns no error, so the reading goes on.
+func TestRulesUnreadableReviewLogLeavesOnlyDependentSessionsUnlabeledAndLogsAReason(t *testing.T) {
+	t.Parallel()
+	a, warned := unreadableReviewLogAdapter(t, t.TempDir())
 
 	it, err := a.Parse(rulesRaw(t, "gt-x"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lab, err := a.Label(context.Background(), it); err == nil {
-		t.Errorf("labeling = %+v with an unreadable review log, want an error", lab)
+	lab, err := a.Label(context.Background(), it)
+	if err != nil {
+		t.Fatalf("Label error = %v for an unreadable review log, want the session left unlabeled", err)
+	}
+	if lab.Labeled {
+		t.Errorf("labeling = %+v, want unlabeled: the review log decides this session", lab)
+	}
+	if len(*warned) != 1 || !strings.Contains((*warned)[0], "gt-x") || !strings.Contains((*warned)[0], "review log") {
+		t.Errorf("warnings = %q, want one naming gt-x and the review log", *warned)
+	}
+}
+
+// TestRulesGuardMatchWithUnreadableReviewLogIsLabeledBrokeTrue checks a session
+// a guard record already labels broke stays broke when the review log cannot be
+// read, since the review log does not decide it.
+func TestRulesGuardMatchWithUnreadableReviewLogIsLabeledBrokeTrue(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown", Worker: "bullet",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := unreadableReviewLogAdapter(t, town)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesRevertGuard {
+		t.Errorf("labeling = %+v with a guard match and an unreadable review log, want broke true from %s", lab, ruleRulesRevertGuard)
 	}
 }

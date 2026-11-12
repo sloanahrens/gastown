@@ -99,9 +99,10 @@ type rulesAdapter struct {
 	// label that reaches it.
 	reviews     map[string]land.ReviewRecord
 	reviewsRead bool
-	// warn tells the operator about a failed prefetch read; nil means stderr
-	// through warnf. A test sets it to see the warning without swapping
-	// os.Stderr.
+	reviewsErr  error
+	// warn tells the operator about a failed prefetch read or a session left
+	// unlabeled over the review log; nil means stderr through warnf. A test sets
+	// it to see the warning without swapping os.Stderr.
 	warn func(format string, args ...any)
 }
 
@@ -174,7 +175,10 @@ func (a *rulesAdapter) Parse(raw []byte) (Item, error) {
 // by "+". The om source only adds a true: a session whose attempt-1 verdict,
 // later than the submission, has a finding citing a standing rule id is labeled
 // broke. It never changes a label to false, and a session no source matches is
-// labeled false exactly as it was before the source.
+// labeled false exactly as it was before the source. An unreadable review log
+// leaves a session unlabeled, with a warning, only when no guard or stand-down
+// record labels it broke; a session those already label stays broke, and its
+// rule names only the sources that were read.
 //
 // Only broke_standing_rule is labeled. rule_kind has no guard record that
 // names a kind, so it is never labeled here.
@@ -252,16 +256,27 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		}
 	}
 
-	reviews, err := a.readReviews()
-	if err != nil {
-		return Labeling{}, err
-	}
-	if r, ok := reviews[line.Bead]; ok && r.At.After(line.DoneAt) && citesStandingRule(r) {
-		sources = append(sources, ruleRulesOmFinding)
+	// The om source is read after the others, so an unreadable review log cannot
+	// unlabel a session that a guard or stand-down record already labels broke.
+	reviews, reviewsErr := a.readReviews()
+	if reviewsErr == nil {
+		if r, ok := reviews[line.Bead]; ok && r.At.After(line.DoneAt) && citesStandingRule(r) {
+			sources = append(sources, ruleRulesOmFinding)
+		}
 	}
 
 	if len(sources) == 0 {
 		if unreadable {
+			return Labeling{}, nil
+		}
+		if reviewsErr != nil {
+			// Only the review log can say whether this session is broke, and it
+			// cannot be read. The session stays unlabeled and the reading goes on.
+			warn := a.warn
+			if warn == nil {
+				warn = warnf
+			}
+			warn("leaving %s unlabeled: %v", line.Bead, reviewsErr)
 			return Labeling{}, nil
 		}
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qBrokeStandingRule: false}, Rule: ruleRulesNoRecord}, nil
@@ -450,17 +465,20 @@ func (a *rulesAdapter) readRefusals() ([]attention.Refusal, error) {
 	return a.refusals, nil
 }
 
-// readReviews returns each bead's first-attempt om verdict, read once. Where a
-// bead has more than one first attempt, the first in the log is kept, as
-// dispatch.go keeps it. A review log that cannot be read is an error, so Label
-// leaves the session unlabeled rather than reading it as having no finding.
+// readReviews returns each bead's first-attempt om verdict, read once; a failed
+// read is kept with its error, so the log is not read again for each session.
+// Where a bead has more than one first attempt, the first in the log is kept,
+// as dispatch.go keeps it. A review log that cannot be read is an error, which
+// Label turns into an unlabeled session where the log decides the label.
 func (a *rulesAdapter) readReviews() (map[string]land.ReviewRecord, error) {
 	if a.reviewsRead {
-		return a.reviews, nil
+		return a.reviews, a.reviewsErr
 	}
+	a.reviewsRead = true
 	recs, err := land.TownReviewsFile(a.town).Since(time.Time{})
 	if err != nil {
-		return nil, fmt.Errorf("reading the review log: %w", err)
+		a.reviewsErr = fmt.Errorf("reading the review log: %w", err)
+		return nil, a.reviewsErr
 	}
 	first := map[string]land.ReviewRecord{}
 	for _, r := range recs {
@@ -472,7 +490,6 @@ func (a *rulesAdapter) readReviews() (map[string]land.ReviewRecord, error) {
 		}
 	}
 	a.reviews = first
-	a.reviewsRead = true
 	return first, nil
 }
 
