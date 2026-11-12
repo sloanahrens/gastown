@@ -138,7 +138,7 @@ func TestRunExitCodes(t *testing.T) {
 			name:     "a run whose gateway gt refuses exits 1",
 			exec:     refuseGt,
 			wantCode: 1,
-			wantErr:  "openshell-providers: gt sandbox endpoint --gateway openshell failed",
+			wantErr:  "openshell-providers: gt sandbox endpoint --gateway k8s failed",
 		},
 		{
 			name:     "a provider create that fails exits 1 and names the command",

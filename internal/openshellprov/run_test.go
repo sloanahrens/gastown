@@ -215,7 +215,7 @@ func checkNamesGateway(t *testing.T, calls []string, gatewayName string) {
 		case strings.HasPrefix(c, "gt "):
 			want := gatewayName
 			if want == "" {
-				want = "openshell"
+				want = "k8s"
 			}
 			if !strings.Contains(c, "--gateway "+want+" ") {
 				t.Errorf("gt call %q does not name gateway %s", c, want)

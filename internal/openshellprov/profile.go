@@ -11,7 +11,7 @@ const gtBinary = "gt"
 
 // defaultGateway is the gateway a sandbox profile with no gateway runs on, and
 // the one Gt targets when its Gateway is empty.
-const defaultGateway = "openshell"
+const defaultGateway = "k8s"
 
 // blanks are the characters the script's awk reads as a space in a profile.
 const blanks = " \t\r\v\f"
@@ -49,7 +49,7 @@ func ProfileID(yaml []byte) string {
 type Gt struct {
 	// Run runs every gt call.
 	Run Runner
-	// Gateway is the --gateway name; empty is the default gateway, openshell.
+	// Gateway is the --gateway name; empty is the default gateway, k8s.
 	Gateway string
 	// Root is the gt source checkout the policy paths are relative to, passed as --root.
 	Root string
