@@ -1173,67 +1173,6 @@ day.
       `launchctl print gui/$(id -u)/com.gastown.daemon`, for the comparison at
       the end and for the rollback.
 
-### The cutover
-
-> The `gt daemon cutover` command this section describes was removed by
-> gt-a2uug4.15: the launchd supervisor commands left gt with the rest of its
-> macOS code. The window it ran on 2026-11-04 is recorded below as history;
-> there is no cutover command to run today.
-
-It ran five steps, each with a budget, and printed what state the town is left
-in whenever one ended badly. Nothing was rolled back by itself.
-
-1. **Wait for a quiet town**, up to 30 minutes: the dispatch hold on, no
-   `gt sling` running, no container-gate job running (any held slot counts, whatever the pool size). This was the command's own
-   wait for a quiet gate; it read the three and changed nothing. If it gave up
-   it printed `not cutting over to container, nothing was changed:` and named
-   the first blocker standing at the last read.
-2. **Check quiet again** immediately before touching the old daemon. If the town
-   stopped being quiet it ended with `the town stopped being quiet`, and nothing
-   was changed.
-3. **Stop the launchd daemon, just after it completes a heartbeat, and wait for proof it stopped**. Proof: `state.json`
-   records a clean stop (`running` false) and the launchd job reads as not
-   loaded. If the proof does not come within a minute (the daemon's 30-second
-   shutdown budget and 30 seconds more), it
-   prints that the old daemon is not proven stopped and the restore command
-   (`launchctl bootstrap gui/<uid> <the job's plist>`), and does not start the
-   container.
-4. **Start the container through the startup guard** and wait 2 minutes for
-   `state.json` to name `container` and the container's name as owner. If the
-   guard refuses, it prints that the old daemon is stopped and the restore
-   command. If the container starts and never takes the town, it prints the
-   container's logs command and the rollback. Starting the daemon starts
-   `sweep-dind` first; the daemon waits for it to be healthy.
-5. **Wait for the container daemon's second heartbeat**, up to 6 minutes. If
-   there is none it reports the container unhealthy, with its logs command and
-   the rollback. `docker ps` now shows `sweep-dind` and the daemon.
-
-Expected on success, last lines: `container owns the town and has beaten twice.`
-then `✓ Cutover to container done.`
-
-**The cutover does not switch `daemon.supervisor`.** After it reports success,
-set the setting to the new side. This is the operator's step, in the live
-settings: in `settings/config.json`'s `daemon` section (or `mayor/daemon.json`
-on an unmigrated town, whichever the daemon reads; L1 Step 5 says how to find
-it), set
-
-```
-"daemon": { "supervisor": "container" }
-```
-
-keeping the container name and compose project already there. The rollback
-reverses this switch: see [Rollback](#rollback). Then, from `<live-town>`:
-
-```
-gt daemon status
-```
-
-Expected: the daemon running and a line `Supervised: container <name> running
-gt-daemon:<rev>`, naming the live container. Until the setting is switched, `gt
-daemon stop`, `start` and `status` still act on launchd; the window is not
-complete before this step. Do not add `daemon.om_token_meta` here unless the
-installed `gt` knows it (see the preconditions).
-
 ### Checks during the first 24 hours
 
 Take checks 1 to 3 at the start of the window (T+0), at each hour from T+1 to
@@ -1263,61 +1202,11 @@ at the first sign of trouble.
       here would be the worst case. Instead read that `ps` shows no `gt daemon
       run` process on the host: `pgrep -fl "gt daemon run"` prints nothing.
 
-If any check fails and the cause is not understood within minutes, roll back.
+If any check fails and the cause is not understood within minutes, stop and escalate to the overseer.
 
 ### Rollback
 
-> The reverse cutover command this section describes was removed by
-> gt-a2uug4.15, and gt no longer supports a launchd-supervised town: the
-> launchd supervisor commands left gt with the rest of its macOS code. The
-> record below says what the reverse cutover did on 2026-11-04. It is history,
-> not a procedure to run today.
-
-The rollback was the reverse cutover, and it was rehearsed here before the
-window because the window's safety rested on it.
-
-Before it, these had to be true:
-
-- The container daemon is the owner, or has just failed: `state.json` names
-  `container` as owner, or the container is down and `state.json` shows a clean
-  stop. A `state.json` that names launchd as owner needs no rollback.
-- The launchd job's plist is still on disk. This is why it stays installed:
-  `launchctl bootstrap` loads the job from that file. Check: the plist file
-  exists (`launchctl print gui/$(id -u)/com.gastown.daemon` reports not found
-  while the job is booted out, which is expected).
-- The dispatch hold is still on, since the reverse cutover waited for the same
-  quiet town: no `gt sling` running and no container-gate job running.
-- Run from `<live-town>`. It stopped the container, proved it stopped, started
-  launchd through the startup guard, and waited for `state.json` to name
-  `launchd` / `com.gastown.daemon` and for the second heartbeat. Then it ran
-  `compose down` on the container's project, which removes both containers and
-  keeps their volumes.
-
-Expected on success: `launchd owns the town and has beaten twice.`, then
-`Removed the container side's containers with compose down; their volumes are
-kept.`, then `✓ Cutover to launchd done.`
-
-It removed both containers, the daemon's and `sweep-dind`'s. It stopped the
-daemon container, then, once launchd had beaten twice, ran
-`docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`.
-That is `down` without `-v`, so the volumes are kept. Never add `-v` without
-the overseer.
-
-If the `down` could not be built, nothing ran. That happens when the container
-settings do not name a compose project: both `daemon.container_name` and
-`daemon.compose_project` must be set, and a name that fails validation is
-refused the same way. It then printed that the containers were not removed,
-with the reason, and asked for them to be removed by hand, keeping the volumes.
-
-**After the rollback, switch the setting back.** The rollback did not switch
-`daemon.supervisor`; the operator set `"supervisor": "launchd"` in the live
-settings in place of `container`, keeping the container fields so a later
-window needed no edit. Then it compared `docker --context desktop-linux ps` and
-`<live-town>/daemon/state.json` with the baseline recorded before the window.
-The container's compose file and image stayed in place; they cost nothing.
-
-Record the rollback on the program bead whether it was rehearsed or used, with
-the time and the output.
+The reverse cutover was removed by gt-a2uug4.15, with the launchd supervisor commands. gt no longer supports a launchd-supervised town, so there is no rollback procedure to run.
 
 ### What the L3 cutover on 2026-11-04 showed
 
