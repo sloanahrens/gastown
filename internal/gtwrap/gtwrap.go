@@ -1,6 +1,7 @@
 // Package gtwrap decides what the wrapper runs inside the daemon image: the
-// tool it was invoked as, the arguments unchanged, and the environment that
-// crosses. The Docker commands themselves are a Runner behind that decision, so
+// tool it was invoked as, the arguments (unchanged here; cmd/gt-wrap adds gt
+// done's worktree facts, withWorktreeFacts, and rewrites a Mac file argument to
+// stdin before the call is planned), and the environment that crosses. The Docker commands themselves are a Runner behind that decision, so
 // the decision is a pure function a test drives with no container.
 package gtwrap
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -13,7 +15,7 @@ import (
 const gitTimeout = 5 * time.Second
 
 // gitFatal is the status git exits with on a fatal error. A directory outside any
-// repository is one of them.
+// repository is one of them, and so are other failures.
 const gitFatal = 128
 
 // ErrNotWorktree reports that a directory is not inside a git worktree.
@@ -54,27 +56,66 @@ func ReadWorktreeFacts(git Git, dir string) (facts WorktreeFacts, ok bool, err e
 	return WorktreeFacts{Branch: branch, Head: strings.TrimSpace(head)}, true, nil
 }
 
+// notARepoText is what git says, with its messages in English, when dir is
+// outside any repository. Other fatal errors (a repository git refuses as owned
+// by someone else, a corrupt or unreadable one) share its exit status 128, so the
+// status alone cannot tell them apart.
+const notARepoText = "not a git repository"
+
+// gitEnvOverrides are the variables that make git ignore -C and read another
+// repository, index or work tree than the one at dir.
+var gitEnvOverrides = []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"}
+
 // OSGit runs git on the host, in dir, with args as an argument list and no shell.
-// It is bounded by gitTimeout. Its errors name the subcommand and never git's
-// output, which can hold a path.
+// It is bounded by gitTimeout. The subprocess answers in English, so the refusal
+// of a directory outside any repository is recognised, and it does not inherit
+// the variables that would point it elsewhere than dir. An error names the
+// subcommand and the first line of what git said, so a refusal such as
+// "dubious ownership" reaches the caller.
 func OSGit(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).Output()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitEnv(os.Environ())
+	out, err := cmd.Output()
 	if err != nil {
-		return "", gitError(err, args)
+		var exit *exec.ExitError
+		stderr := ""
+		if errors.As(err, &exit) {
+			stderr = string(exit.Stderr)
+		}
+		return "", gitError(err, stderr, args)
 	}
 	return string(out), nil
 }
 
-// gitError maps a failed git run onto the facts reader's errors. Git exits with
-// its fatal status when dir is outside any repository, and also on other fatal
-// errors; every fatal status maps to ErrNotWorktree, so gt done is refused in the
-// pod. Any other failure, a timeout or a missing git included, is an error.
-func gitError(err error, args []string) error {
+// gitEnv is environ without the variables that override -C, and with git's
+// messages in English.
+func gitEnv(environ []string) []string {
+	out := make([]string, 0, len(environ)+1)
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		if !slices.Contains(gitEnvOverrides, name) && name != "LC_ALL" {
+			out = append(out, entry)
+		}
+	}
+	return append(out, "LC_ALL=C")
+}
+
+// gitError maps a failed git run onto the facts reader's errors. Only git's
+// answer that dir is outside any repository (its fatal status with the
+// not-a-repository text in stderr) is ErrNotWorktree, which the caller reads as
+// "add nothing". Every other failure is an error that carries the first line of
+// stderr: another fatal status, a timeout and a missing git included, so a broken
+// git is refused here and never mistaken for a plain directory.
+func gitError(err error, stderr string, args []string) error {
 	var coded interface{ ExitCode() int }
-	if errors.As(err, &coded) && coded.ExitCode() == gitFatal {
+	if errors.As(err, &coded) && coded.ExitCode() == gitFatal && strings.Contains(stderr, notARepoText) {
 		return ErrNotWorktree
 	}
-	return fmt.Errorf("gtwrap: git %s: %w", strings.Join(args, " "), err)
+	detail := ""
+	if first, _, _ := strings.Cut(strings.TrimSpace(stderr), "\n"); first != "" {
+		detail = ": " + first
+	}
+	return fmt.Errorf("gtwrap: git %s: %w%s", strings.Join(args, " "), err, detail)
 }
