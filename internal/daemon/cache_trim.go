@@ -125,6 +125,25 @@ const (
 	// that is open while the trim runs can explain a claim still over the
 	// threshold without the Job having failed to remove anything.
 	cacheTrimNoOpOpenSandboxes = "open sandbox paths can explain this; the claim is read whole, not just what the trim left"
+
+	// cacheTrimStuckPullKeyPrefix is the alert key's prefix for a trim Job
+	// replaced because its pods could not pull the image; the namespace and the
+	// Job's name follow it (gt-yduowj).
+	cacheTrimStuckPullKeyPrefix = "cache-trim-image-pull:"
+
+	// cacheTrimAlertSeverity is how loud the trim's own alerts are: the disk is
+	// not trimmed until the operator fixes the image, the mirror setting or the
+	// permission, not a host filling (the host-disk alerts own that).
+	cacheTrimAlertSeverity = "medium"
+
+	// cacheTrimNoMirrorKey is the alert key of a values file whose image_registry
+	// is unset: the trim runs the claim's own image until the setting names a
+	// mirror (gt-yduowj).
+	cacheTrimNoMirrorKey = "cache-trim-no-mirror"
+
+	// cacheTrimNoPodListKeyPrefix is the alert key's prefix for a namespace the
+	// sandbox kubeconfig may not list pods in; the namespace follows it.
+	cacheTrimNoPodListKeyPrefix = "cache-trim-no-pod-list:"
 )
 
 // errCacheTrimNoContext is the preflight's refusal for a kubeconfig that parses
@@ -326,14 +345,15 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	for _, err := range errs {
 		d.cacheTrimLogf("disk_maintenance: cache trim: not applied: %v", err)
 	}
-	// The pass runs the polecat image the CI-built values file names, when that
-	// file is there, so the trim's helper is the one built with the daemon's
-	// commit rather than a moving tag a profile carries. The file is read once
+	// The pass runs the sandbox mirror's copy of the polecat image the CI-built
+	// values file names, when that file is there, so the trim's helper is the
+	// one built with the daemon's commit rather than a moving tag a profile
+	// carries. The file is read once
 	// for the pass, so every Job it applies runs the one image it records; with
 	// no file each claim keeps its profile's image (gt-pm2y2m). It is read
 	// before the empty-claims return below, so a malformed file is named in a
 	// pass with nothing to trim rather than only in one that trims (gt-714vqw).
-	valuesImage, fromValues, err := d.cacheTrimImage()
+	valuesImage, fromValues, err := d.cacheTrimImage(ctx)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim: %v; nothing trimmed", err)
 		return false
@@ -398,12 +418,53 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 // file is the one gt update images writes under the town's gastown directory. A
 // pair not built yet answers false with no error; a file that is there and
 // cannot be read or parsed is an error, never an absent pair.
-func (d *Daemon) cacheTrimImage() (string, bool, error) {
+//
+// The image is the sandbox mirror's copy of the digest the file records, not the
+// CI registry's reference: the sandbox nodes cannot pull from the CI host
+// (gt-yduowj).
+//
+// A values file with no image_registry has no mirror to pull from. The pass does
+// not stop for that: a full disk is worse than a stale image, so the claim's own
+// image runs, as it did before the file existed, and one alert names the unset
+// setting (gt-yduowj).
+func (d *Daemon) cacheTrimImage(ctx context.Context) (string, bool, error) {
 	values, ok, err := imagevalues.LoadIn(filepath.Join(d.config.TownRoot, "gastown"))
 	if err != nil {
 		return "", false, err
 	}
-	return values.Polecat, ok, nil
+	if !ok {
+		d.cacheTrimClearAlert(ctx, cacheTrimNoMirrorKey, "no values file names a polecat image to mirror")
+		return "", false, nil
+	}
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil || cfg.ImageRegistry == "" {
+		d.cacheTrimReportNoMirror(ctx, values.Polecat)
+		return "", false, nil
+	}
+	d.cacheTrimClearAlert(ctx, cacheTrimNoMirrorKey, "image_registry is set")
+	return cacheTrimMirrorImage(cfg.ImageRegistry, values.Polecat), true, nil
+}
+
+// cacheTrimReportNoMirror raises the alert for a values file whose image_registry
+// is unset. The alert is marked open before the send, so a send that fails is
+// still cleared by the pass that finds the setting named.
+func (d *Daemon) cacheTrimReportNoMirror(ctx context.Context, polecat string) {
+	d.cacheTrimNoOp.markAlertOpen(cacheTrimNoMirrorKey)
+	message := fmt.Sprintf("the values file names the polecat image %s, but image_registry is not set, so there is no sandbox mirror to pull it from. The cache trim runs the claim's own profile image until image_registry names the mirror.", polecat)
+	if err := d.escalateAlertSeverityCtx(ctx, cacheTrimAlertSeverity, cacheTrimNoMirrorKey, "cache_trim", message); err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim: the alert for the unset image_registry was not sent: %v", err)
+	}
+}
+
+// cacheTrimMirrorImage is the sandbox mirror's reference to the polecat image
+// digest the values file names: the host image_registry names, the repository
+// the polecat-image step publishes to (publishPolecatDevTag reads the same
+// setting), and the file's digest. The caller has checked that registry is set,
+// and imagevalues refused a polecat reference without a digest when it loaded
+// the file, so the digest follows the reference's '@'.
+func cacheTrimMirrorImage(registry, polecat string) string {
+	_, digest, _ := strings.Cut(polecat, "@")
+	return registry + "/" + imagevalues.PolecatImage + "@" + digest
 }
 
 // cacheTrimPreflight refuses a kubeconfig that does not resolve the sandbox
@@ -456,10 +517,43 @@ func cacheTrimNoOpKey(namespace, claim string) string {
 // times the cap, with the item each raises. The pass writes it on the goroutine
 // a pass is dispatched to and the attention tick reads it on the heartbeat
 // goroutine, so a mutex guards it; it is memory only, and the next pass's
-// reading re-derives it after a restart.
+// reading re-derives it after a restart. It also holds which image-pull alerts
+// this process has open (openAlerts), under the same mutex.
 type cacheTrimNoOp struct {
 	mu    sync.Mutex
 	items map[string]attention.Item
+	// openAlerts is the trim's alerts this process raised and has not yet
+	// cleared: a stuck image pull, a missing image_registry, a namespace the
+	// sandbox may not list pods in (gt-yduowj). A pass clears the ones it holds
+	// once the condition behind them is gone, so a healthy pass with no alert
+	// open does not run a clear. A clear that fails keeps its alert marked, so
+	// the next pass retries it. It is memory only: a restart forgets an alert
+	// still open, which is then cleared with gt escalate clear.
+	openAlerts map[string]bool
+}
+
+// markAlertOpen records that the alert under key is open.
+func (s *cacheTrimNoOp) markAlertOpen(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openAlerts == nil {
+		s.openAlerts = map[string]bool{}
+	}
+	s.openAlerts[key] = true
+}
+
+// alertOpen reports whether this process has the alert under key open.
+func (s *cacheTrimNoOp) alertOpen(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.openAlerts[key]
+}
+
+// forgetAlert drops the alert under key once it is cleared.
+func (s *cacheTrimNoOp) forgetAlert(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.openAlerts, key)
 }
 
 // raise stores it under its key, replacing an earlier measurement of the same
@@ -560,9 +654,16 @@ func cacheTrimOverTheCap(used, capBytes int64) bool {
 func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string, listerDeadline time.Time) bool {
 	sandboxes, sources, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
+		// A read the cluster refuses names the verb in an alert, and the pass
+		// skips the namespace; any other failure is only logged, as before.
+		if d.cacheTrimPodListDenied(ctx, kubeconfig, namespace) {
+			d.cacheTrimReportNoPodList(ctx, namespace)
+			return false
+		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the pods that mount it could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
 		return false
 	}
+	d.cacheTrimClearAlert(ctx, cacheTrimNoPodListKey(namespace), "the sandbox may list pods in "+namespace)
 	var listing []cachevol.Entry
 	switch {
 	case len(sources) > 0:
@@ -876,11 +977,22 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 	stale := cachevol.TrimStale(m, existing)
 	// An earlier Job that still runs is left alone, and this trim waits for the
 	// next pass: deleting it would stop the trim its own pods are in the middle
-	// of, and applying over it is refused because its template is immutable.
+	// of, and applying over it is refused because its template is immutable. A
+	// Job whose pods cannot pull its image is the exception: nothing it runs is
+	// in progress, so it is deleted below and reported (gt-yduowj).
+	stuck := map[string]string{}
 	for _, o := range stale {
-		if o.Kind == "Job" && running[o.Name] {
+		if o.Kind != "Job" || !running[o.Name] {
+			continue
+		}
+		image, ok, err := d.cacheTrimStuckPull(ctx, kubeconfig, namespace, o.Name)
+		if err != nil {
+			return false, fmt.Errorf("reading the pods of the earlier trim Job %s: %w", o.Name, err)
+		}
+		if !ok {
 			return false, fmt.Errorf("the earlier trim Job %s is still running; its pods mount the claim, so it is left to finish", o.Name)
 		}
+		stuck[o.Name] = image
 	}
 	for _, object := range stale {
 		kind := strings.ToLower(object.Kind)
@@ -896,6 +1008,9 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 			return false, fmt.Errorf("deleting the stale %s %s: %w", object.Kind, object.Name, err)
 		}
 		d.logger.Printf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, object.Kind, object.Name)
+		if image, ok := stuck[object.Name]; ok {
+			d.cacheTrimReportStuckPull(ctx, namespace, object.Name, image)
+		}
 	}
 
 	docs := m.Documents()
@@ -919,6 +1034,10 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 	if !d.cacheTrimWaitJob(ctx, kubeconfig, namespace, jobName) {
 		return false, nil
 	}
+	// A completed Job pulled its image, so an alert this process raised for a
+	// stuck one is no longer true. An alert whose clear failed stays marked, and
+	// the next completed trim clears it.
+	d.cacheTrimClearAlert(ctx, cacheTrimStuckPullKey(namespace, jobName), "cache trim Job "+jobName+" completed")
 	if err := d.cacheTrimCleanShards(ctx, kubeconfig, namespace, m); err != nil {
 		return false, err
 	}
@@ -938,6 +1057,176 @@ func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jo
 	}
 	d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; the trim is left for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
 	return false
+}
+
+// cacheTrimJobPod is the part of a trim Job's pod the stuck-pull read decides
+// on. The trim's init container writes the removal list, so its pull counts as
+// the Job's pull too.
+type cacheTrimJobPod struct {
+	Metadata struct {
+		CreationTimestamp time.Time `json:"creationTimestamp"`
+	} `json:"metadata"`
+	Status struct {
+		Phase                 string                     `json:"phase"`
+		InitContainerStatuses []cacheTrimContainerStatus `json:"initContainerStatuses"`
+		ContainerStatuses     []cacheTrimContainerStatus `json:"containerStatuses"`
+	} `json:"status"`
+}
+
+// cacheTrimContainerStatus is one container's state, as the pod reports it.
+type cacheTrimContainerStatus struct {
+	Image string `json:"image"`
+	State struct {
+		Waiting *struct {
+			Reason string `json:"reason"`
+		} `json:"waiting"`
+	} `json:"state"`
+}
+
+// cacheTrimPullWait returns the image of the first container that waits on an
+// image pull, and whether one does.
+func cacheTrimPullWait(statuses []cacheTrimContainerStatus) (string, bool) {
+	for _, s := range statuses {
+		if s.State.Waiting != nil && (s.State.Waiting.Reason == "ErrImagePull" || s.State.Waiting.Reason == "ImagePullBackOff") {
+			return s.Image, true
+		}
+	}
+	return "", false
+}
+
+// cacheTrimStuckPull reports the image an earlier trim Job cannot pull. It is
+// stuck when every live pod of the Job is Pending, waits on an image pull, and
+// was created more than cacheTrimWaitTimeout ago: a Job whose pod runs, or whose
+// pod has not waited that long, is not stuck and is left to finish. A pod with
+// no creation time is not judged stuck, since its age is unknown; a read that
+// fails is an error, and the caller leaves the Job alone.
+func (d *Daemon) cacheTrimStuckPull(ctx context.Context, kubeconfig, namespace, jobName string) (string, bool, error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "pods", "-n", namespace, "-l", "job-name="+jobName, "-o", "json")
+	if err != nil {
+		return "", false, fmt.Errorf("listing the Job's pods: %w", err)
+	}
+	var list struct {
+		Items *[]cacheTrimJobPod `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return "", false, fmt.Errorf("decoding the Job's pods: %w", err)
+	}
+	if list.Items == nil {
+		return "", false, errors.New("decoding the Job's pods: the reply names no pod list")
+	}
+	now := d.clk().Now()
+	image, live := "", 0
+	for _, pod := range *list.Items {
+		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+			continue
+		}
+		live++
+		podImage, pulling := cacheTrimPullWait(pod.Status.InitContainerStatuses)
+		if !pulling {
+			podImage, pulling = cacheTrimPullWait(pod.Status.ContainerStatuses)
+		}
+		created := pod.Metadata.CreationTimestamp
+		if pod.Status.Phase != "Pending" || !pulling || created.IsZero() || now.Sub(created) <= cacheTrimWaitTimeout {
+			return "", false, nil
+		}
+		if image == "" {
+			image = podImage
+		}
+	}
+	if live == 0 {
+		return "", false, nil
+	}
+	return image, true, nil
+}
+
+// cacheTrimStuckPullKey is the alert key of a trim Job replaced for an image it
+// could not pull: one key per Job, so a later replacement records onto the same
+// open alert.
+func cacheTrimStuckPullKey(namespace, jobName string) string {
+	return cacheTrimStuckPullKeyPrefix + namespace + "/" + jobName
+}
+
+// cacheTrimReportStuckPull raises the alert for a stuck trim Job the pass has
+// deleted, naming the image its pods could not pull. The alert is marked open
+// before the send, so a send that fails is still cleared by the next completed
+// trim; the Job is already gone, so the pass goes on rather than refusing.
+func (d *Daemon) cacheTrimReportStuckPull(ctx context.Context, namespace, jobName, image string) {
+	key := cacheTrimStuckPullKey(namespace, jobName)
+	d.cacheTrimNoOp.markAlertOpen(key)
+	message := fmt.Sprintf("cache trim Job %s in %s could not pull its image %s for longer than %s; it is deleted, and this pass applies a new one. The sandbox mirror must hold that digest.",
+		jobName, namespace, image, cacheTrimWaitTimeout)
+	if err := d.escalateAlertSeverityCtx(ctx, cacheTrimAlertSeverity, key, "cache_trim", message); err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the alert for the stuck image pull was not sent: %v", jobName, namespace, err)
+	}
+}
+
+// cacheTrimClearAlert clears the alert under key when this process has it open,
+// because the condition behind it no longer holds. The mark is dropped only when
+// the clear lands: a clear that fails is logged and keeps the alert marked, so
+// the next pass that finds the condition gone clears it again. A key this
+// process never opened is not sent a clear.
+func (d *Daemon) cacheTrimClearAlert(ctx context.Context, key, reason string) {
+	if !d.cacheTrimNoOp.alertOpen(key) {
+		return
+	}
+	if err := d.clearAlertsCtx(ctx, reason, key); err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim: the alert %s was not cleared: %v", key, err)
+		return
+	}
+	d.cacheTrimNoOp.forgetAlert(key)
+}
+
+// cacheTrimNoPodListKey is the alert key of a namespace the sandbox kubeconfig
+// may not list pods in: one key per namespace, since two namespaces are two
+// sandboxes.
+func cacheTrimNoPodListKey(namespace string) string {
+	return cacheTrimNoPodListKeyPrefix + namespace
+}
+
+// cacheTrimCanListPods asks the cluster whether the sandbox kubeconfig may list
+// pods in namespace: the trim reads the pods that mount its claim, and the pods of
+// an earlier trim Job, in that namespace. The cluster's "no" reports false. An
+// answer that is neither yes nor no, or a failed check, is an error, so the
+// namespace is judged again on the next pass rather than read as allowed.
+func (d *Daemon) cacheTrimCanListPods(ctx context.Context, kubeconfig, namespace string) (bool, error) {
+	out, _, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "auth", "can-i", "list", "pods", "-n", namespace)
+	switch answer := strings.TrimSpace(string(out)); {
+	case answer == "yes" && err == nil:
+		return true, nil
+	case answer == "no":
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("kubectl auth can-i list pods failed: %w", err)
+	default:
+		return false, errors.New("kubectl auth can-i list pods answered neither yes nor no")
+	}
+}
+
+// cacheTrimPodListDenied reports whether the cluster refuses the sandbox
+// kubeconfig a list of pods in namespace. It is asked only once a pod read has
+// failed, so a pass whose reads succeed makes no call for it. A check that cannot
+// answer is logged and is not a denial: the pod read's own error still refuses
+// the namespace.
+func (d *Daemon) cacheTrimPodListDenied(ctx context.Context, kubeconfig, namespace string) bool {
+	allowed, err := d.cacheTrimCanListPods(ctx, kubeconfig, namespace)
+	if err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim: whether the sandbox may list pods in %s could not be checked: %v", namespace, err)
+		return false
+	}
+	return !allowed
+}
+
+// cacheTrimReportNoPodList raises the alert for a namespace the sandbox may not
+// list pods in. It names the verb, so the operator knows the permission to grant;
+// the namespace is skipped until then. The alert is marked open before the send,
+// as the stuck-pull report is.
+func (d *Daemon) cacheTrimReportNoPodList(ctx context.Context, namespace string) {
+	key := cacheTrimNoPodListKey(namespace)
+	d.cacheTrimNoOp.markAlertOpen(key)
+	message := fmt.Sprintf("the sandbox kubeconfig may not list pods in namespace %s. The cache trim needs the list pods verb there to find the pods that mount its claim and the pods of its Job, so the trim of that namespace is skipped until the verb is granted.", namespace)
+	if err := d.escalateAlertSeverityCtx(ctx, cacheTrimAlertSeverity, key, "cache_trim", message); err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim: the alert for the missing list pods verb in %s was not sent: %v", namespace, err)
+	}
 }
 
 // cacheTrimFieldManager is the field manager every document of a trim is

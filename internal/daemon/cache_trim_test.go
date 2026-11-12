@@ -32,6 +32,7 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
@@ -82,6 +83,14 @@ const (
 	// completed trim: du in the pod the listing came from, since df reports the
 	// whole node filesystem for a local-path claim (gt-eyjgal).
 	cacheTrimDuVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- du -sk " + cacheTrimMountPath
+
+	// cacheTrimCanListVerb is the permission check the pass makes before it reads
+	// a namespace's pods: whether the sandbox kubeconfig may list them there.
+	cacheTrimCanListVerb = "auth can-i list pods -n " + cacheTrimNamespace
+
+	// cacheTrimReplacementWaitVerb is the wait for the replacement of a stuck trim
+	// Job, the call a test fails to make the replacement's Job report completion.
+	cacheTrimReplacementWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s"
 
 	// cacheTrimLastAppliedLimit is the metadata size the API server holds
 	// kubectl's last-applied-configuration annotation to, in bytes.
@@ -163,6 +172,9 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 		config:       &Config{TownRoot: t.TempDir()},
 		logger:       log.New(&logs, "", 0),
 		patrolConfig: diskMaintEnabled("", mode),
+		// The alerts a pass raises and clears go to a notifier the test holds, not
+		// a gt subprocess.
+		notifier: notifyfake.New(),
 	}
 	d.execCmd = cli.run
 	d.maint.quiet = func(*Daemon) (bool, string) { return true, "" }
@@ -351,26 +363,51 @@ func (f *cacheTrimFixture) writeValuesFile(t *testing.T, v imagevalues.Values) {
 	}
 }
 
+// cacheTrimMirror is the sandbox mirror image_registry names in the fixture: the
+// host the polecat-image step publishes to and the sandbox nodes pull from.
+const cacheTrimMirror = "localhost:5001"
+
+// cacheTrimForgejoPolecat is the CI copy of the polecat image a values file
+// names, the reference the sandbox nodes cannot pull (gt-yduowj).
+var cacheTrimForgejoPolecat = "forgejo:3000/bot-registry/gastown-polecat@sha256:" + strings.Repeat("b", 64)
+
+// cacheTrimMirrorPolecat is the sandbox mirror's copy of that digest, the image
+// a trim Job runs once the values file names it.
+var cacheTrimMirrorPolecat = cacheTrimMirror + "/" + imagevalues.PolecatImage + "@sha256:" + strings.Repeat("b", 64)
+
+// setImageRegistry sets the sandbox mirror the pass reads from image_registry,
+// the setting the polecat-image step publishes to.
+func (f *cacheTrimFixture) setImageRegistry(registry string) {
+	f.d.patrolConfig.Patrols.TierSweep = &TierSweepConfig{Runner: &agentconfig.TierSweepRunnerConfig{ImageRegistry: registry}}
+}
+
 // TestCacheTrimImageFromTheValuesFile is the bead's gate: with the CI-built
-// values file present, the Job the pass applies runs the polecat image the file
-// names, and its digest reference carries no pull policy; with no file the Job
-// runs the claim's profile image under today's policy for its moving tag.
+// values file present, the Job the pass applies runs the sandbox mirror's copy
+// of the polecat digest the file names, and its digest reference carries no
+// pull policy; with no file the Job runs the claim's profile image under today's
+// policy for its moving tag.
 func TestCacheTrimImageFromTheValuesFile(t *testing.T) {
 	t.Parallel()
 	t.Run("the values file names the image", func(t *testing.T) {
 		t.Parallel()
 		f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
-		values := cacheTrimValues()
+		f.setImageRegistry(cacheTrimMirror)
+		values := imagevalues.Values{
+			Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+			Polecat: cacheTrimForgejoPolecat,
+			Commit:  strings.Repeat("c", 40),
+		}
 		f.writeValuesFile(t, values)
 		f.d.runDiskMaintenance()
 
+		want := cacheTrimMirror + "/" + imagevalues.PolecatImage + "@sha256:" + strings.Repeat("b", 64)
 		containers := f.appliedTrimJob(t).Spec.Template.Spec.Containers
 		if len(containers) == 0 {
 			t.Fatal("the applied Job has no container")
 		}
 		for _, c := range containers {
-			if c.Image != values.Polecat {
-				t.Errorf("the Job's container %s runs %q, want the values file's polecat image %q", c.Name, c.Image, values.Polecat)
+			if c.Image != want {
+				t.Errorf("the Job's container %s runs %q, want the sandbox mirror's copy %q of the values file's digest", c.Name, c.Image, want)
 			}
 			if c.ImagePullPolicy != "" {
 				t.Errorf("the Job's container %s carries the pull policy %q, want none for a digest reference", c.Name, c.ImagePullPolicy)
@@ -398,6 +435,497 @@ func TestCacheTrimImageFromTheValuesFile(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCacheTrimValuesFileWithNoMirrorFallsBack pins the fallback: a values file
+// names a CI image and image_registry is unset. The pass does not stop: the Job
+// runs the claim's own profile image, as it did before the values file, and one
+// alert names the unset setting. Setting image_registry clears that alert on a
+// later pass (gt-yduowj).
+func TestCacheTrimValuesFileWithNoMirrorFallsBack(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.writeValuesFile(t, imagevalues.Values{
+		Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+		Polecat: cacheTrimForgejoPolecat,
+		Commit:  strings.Repeat("c", 40),
+	})
+	f.d.runDiskMaintenance()
+
+	const claimImage = "gastown-polecat:dev"
+	containers := f.appliedTrimJob(t).Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		t.Fatal("the applied Job has no container")
+	}
+	for _, c := range containers {
+		if c.Image != claimImage {
+			t.Errorf("the Job's container %s runs %q, want the claim's image %q with no mirror to name", c.Name, c.Image, claimImage)
+		}
+		if c.ImagePullPolicy != "Always" {
+			t.Errorf("the Job's container %s carries the pull policy %q, want %q for a moving tag", c.Name, c.ImagePullPolicy, "Always")
+		}
+	}
+	open := rec.OpenEscalations(cacheTrimNoMirrorKey)
+	if len(open) != 1 {
+		t.Fatalf("open alerts under %q = %+v, want one for the unset image_registry", cacheTrimNoMirrorKey, open)
+	}
+	if !strings.Contains(open[0].Reason, "image_registry") {
+		t.Errorf("the alert does not name the unset image_registry: %q", open[0].Reason)
+	}
+
+	f.setImageRegistry(cacheTrimMirror)
+	f.trimDue()
+	f.d.runDiskMaintenance()
+	if n := len(rec.OpenEscalations(cacheTrimNoMirrorKey)); n != 0 {
+		t.Errorf("the alert is still open after image_registry was set: %d", n)
+	}
+}
+
+// TestCacheTrimPodReadRefusalNamesTheVerb pins the refusal when the cluster will
+// not let the sandbox kubeconfig list the claim's pods. Only a "no" from the
+// cluster is a denial: the namespace is skipped with one alert that names the list
+// pods verb, and a later pass that reads the pods clears it. A check that cannot
+// answer is logged and raises nothing, and the pass still trims nothing there.
+func TestCacheTrimPodReadRefusalNamesTheVerb(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name    string
+		auth    cliReply
+		denied  bool
+		wantLog string
+	}{
+		{name: "the cluster says no", auth: cliReply{stdout: "no\n", code: 1}, denied: true},
+		{name: "the answer is neither yes nor no", auth: cliReply{stdout: "maybe\n"}, wantLog: "could not be checked"},
+		{name: "the check fails", auth: cliReply{stderr: "error: connection refused", code: 1}, wantLog: "could not be checked"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimPodsVerb:    {stderr: "Error from server (Forbidden): pods is forbidden", code: 1},
+				cacheTrimCanListVerb: row.auth,
+			})
+			rec := notifyfake.New()
+			f.d.notifier = rec
+			f.writeValuesFile(t, cacheTrimValues())
+			f.d.runDiskMaintenance()
+
+			if applied := f.applied(t); len(applied) != 0 {
+				t.Errorf("the pass applied %v in a namespace the cluster refused it", applied)
+			}
+			key := cacheTrimNoPodListKey(cacheTrimNamespace)
+			open := rec.OpenEscalations(key)
+			if row.denied {
+				if len(open) != 1 {
+					t.Fatalf("open alerts under %q = %+v, want one naming the verb", key, open)
+				}
+				if !strings.Contains(open[0].Reason, "list pods") {
+					t.Errorf("the alert does not name the list pods verb: %q", open[0].Reason)
+				}
+			} else if len(open) != 0 {
+				t.Errorf("an unanswered check raised an alert: %+v", open)
+			}
+			if row.wantLog != "" && !strings.Contains(f.log.String(), row.wantLog) {
+				t.Errorf("the log does not say the check could not answer (want %q): %s", row.wantLog, f.log.String())
+			}
+		})
+	}
+}
+
+// TestCacheTrimPodListAlertClearsWhenThePodsAreReadable: a denied namespace whose
+// pods a later pass reads is no longer refused, so its alert is cleared.
+func TestCacheTrimPodListAlertClearsWhenThePodsAreReadable(t *testing.T) {
+	t.Parallel()
+	overrides := map[string]cliReply{
+		cacheTrimPodsVerb:    {stderr: "Error from server (Forbidden): pods is forbidden", code: 1},
+		cacheTrimCanListVerb: {stdout: "no\n", code: 1},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.writeValuesFile(t, cacheTrimValues())
+	f.d.runDiskMaintenance()
+
+	key := cacheTrimNoPodListKey(cacheTrimNamespace)
+	if n := len(rec.OpenEscalations(key)); n != 1 {
+		t.Fatalf("after the refusal, open alerts = %d, want one", n)
+	}
+
+	delete(overrides, cacheTrimPodsVerb)
+	delete(overrides, cacheTrimCanListVerb)
+	f.trimDue()
+	f.d.runDiskMaintenance()
+
+	if clears := rec.Clears(); len(clears) == 0 || !slices.Contains(clears[len(clears)-1].Fingerprints, key) {
+		t.Errorf("the readable namespace did not clear its alert; clears = %+v", clears)
+	}
+	if n := len(rec.OpenEscalations(key)); n != 0 {
+		t.Errorf("the alert is still open after the pods were read: %d", n)
+	}
+}
+
+// TestCacheTrimUndeliveredStuckAlertIsClearedLater pins the alert's end when its
+// send fails: the alert stays marked, so the completed trim on a later pass clears
+// it, and the failed send is logged rather than dropped.
+func TestCacheTrimUndeliveredStuckAlertIsClearedLater(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	overrides := map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ErrImagePull", cacheTrimMirrorPolecat)),
+		cacheTrimReplacementWaitVerb:       {stderr: "error: timed out waiting for the condition", code: 1},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	clk := clockwork.NewFakeClockAt(diskMaintNow)
+	f.d.clock = clk
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, cacheTrimValues())
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1"))
+
+	// The failed send retries on the daemon's clock, so the test drives it.
+	runOnClock(t, clk, time.Second, f.d.runDiskMaintenance)
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+	if n := len(rec.OpenEscalations(key)); n != 0 {
+		t.Fatalf("an undelivered alert is open under %q: %d", key, n)
+	}
+	if !strings.Contains(f.log.String(), "was not sent") {
+		t.Errorf("the log does not say the alert was not sent: %s", f.log.String())
+	}
+
+	rec.Fail(notifyfake.KindEscalate, nil)
+	delete(overrides, cacheTrimReplacementWaitVerb)
+	f.trimDue()
+	runOnClock(t, clk, time.Second, f.d.runDiskMaintenance)
+	if clears := rec.Clears(); len(clears) == 0 || !slices.Contains(clears[len(clears)-1].Fingerprints, key) {
+		t.Errorf("the completed replacement did not clear the marked alert; clears = %+v", clears)
+	}
+}
+
+// TestCacheTrimUnclearedStuckAlertIsRetried pins the other half of the alert's
+// end: a clear that fails is logged and the alert stays marked, so the next
+// completed trim clears it again.
+func TestCacheTrimUnclearedStuckAlertIsRetried(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	overrides := map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ErrImagePull", cacheTrimMirrorPolecat)),
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	f.d.clock = clockwork.NewFakeClockAt(diskMaintNow)
+	rec := notifyfake.New()
+	f.d.notifier = rec
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, cacheTrimValues())
+	rec.Fail(notifyfake.KindClear, errors.New("gt escalate clear: exit status 1"))
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+
+	f.d.runDiskMaintenance()
+	if n := len(rec.OpenEscalations(key)); n != 1 {
+		t.Fatalf("after the stuck Job was reported, open alerts = %d, want one", n)
+	}
+	if !strings.Contains(f.log.String(), "was not cleared") {
+		t.Errorf("the log does not say the alert was not cleared: %s", f.log.String())
+	}
+
+	rec.Fail(notifyfake.KindClear, nil)
+	f.trimDue()
+	f.d.runDiskMaintenance()
+	if n := len(rec.OpenEscalations(key)); n != 0 {
+		t.Errorf("the next completed trim did not clear the alert it failed to clear: %d open", n)
+	}
+}
+
+// TestCacheTrimMirrorImage pins the reference the trim Job runs: the host
+// image_registry names, the polecat repository, and the digest the file records.
+// A setting with no host, or a file reference with no digest, is refused.
+func TestCacheTrimMirrorImage(t *testing.T) {
+	t.Parallel()
+	digest := "@sha256:" + strings.Repeat("b", 64)
+	tests := []struct {
+		name     string
+		registry string
+		want     string
+	}{
+		{"the mirror host the setting names", cacheTrimMirror, cacheTrimMirror + "/gastown-polecat" + digest},
+		{"another mirror host", "registry.sandbox:5000", "registry.sandbox:5000/gastown-polecat" + digest},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := cacheTrimMirrorImage(tc.registry, cacheTrimForgejoPolecat); got != tc.want {
+				t.Errorf("cacheTrimMirrorImage(%q, %q) = %q, want %q", tc.registry, cacheTrimForgejoPolecat, got, tc.want)
+			}
+		})
+	}
+}
+
+// cacheTrimExistingVerb is the read of the trim's objects in the namespace: the
+// Jobs and shard ConfigMaps an earlier run left behind.
+const cacheTrimExistingVerb = "get job,configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim -o json"
+
+// cacheTrimRunningJobJSON is the earlier trim Job, with one pod still active.
+const cacheTrimRunningJobJSON = `{"items":[{"kind":"Job","metadata":{"name":"` + cacheTrimJob + `","namespace":"` + cacheTrimNamespace + `",` +
+	`"labels":{"app.kubernetes.io/name":"polecat-cache-trim","app.kubernetes.io/managed-by":"gt"}},"status":{"active":1}}]}`
+
+// cacheTrimJobPodsVerb is the read of the pods the earlier trim Job runs, the
+// call the stuck-pull check makes.
+func cacheTrimJobPodsVerb(job string) string {
+	return "get pods -n " + cacheTrimNamespace + " -l job-name=" + job + " -o json"
+}
+
+// cacheTrimJobPodJSON is one pod of the earlier trim Job as the API server
+// reports it: its phase, its creation time (omitted when zero), and its init
+// container waiting on reason, or terminated when reason is "". The main
+// container waits on PodInitializing while the pod is Pending and runs after it.
+func cacheTrimJobPodJSON(phase string, created time.Time, reason, image string) string {
+	meta := `{}`
+	if !created.IsZero() {
+		meta = `{"creationTimestamp":"` + created.UTC().Format(time.RFC3339) + `"}`
+	}
+	initState := `{"terminated":{"exitCode":0}}`
+	if reason != "" {
+		initState = `{"waiting":{"reason":"` + reason + `"}}`
+	}
+	mainState := `{"running":{}}`
+	if phase == "Pending" {
+		mainState = `{"waiting":{"reason":"PodInitializing"}}`
+	}
+	return `{"metadata":` + meta + `,"status":{"phase":"` + phase + `",` +
+		`"initContainerStatuses":[{"name":"init","image":"` + image + `","state":` + initState + `}],` +
+		`"containerStatuses":[{"name":"agent","image":"` + image + `","state":` + mainState + `}]}}`
+}
+
+// cacheTrimPodsReply is the pods reply holding the given pods.
+func cacheTrimPodsReply(pods ...string) cliReply {
+	return cliReply{stdout: `{"items":[` + strings.Join(pods, ",") + `]}`}
+}
+
+// TestCacheTrimReplacesAJobStuckInAnImagePull pins the stuck-pull path: an
+// earlier trim Job whose pod has waited on its image pull past the wait is
+// deleted by this pass, the one alert naming the image is raised, and a new Job
+// is applied in its place. Once the new Job completes the alert is cleared.
+func TestCacheTrimReplacesAJobStuckInAnImagePull(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ErrImagePull", cacheTrimMirrorPolecat)),
+	})
+	f.d.clock = clockwork.NewFakeClockAt(diskMaintNow)
+	notifier := notifyfake.New()
+	f.d.notifier = notifier
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, imagevalues.Values{
+		Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+		Polecat: cacheTrimForgejoPolecat,
+		Commit:  strings.Repeat("c", 40),
+	})
+	f.d.runDiskMaintenance()
+
+	deleteVerb := "delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
+	deleted, ok := f.indexOf(deleteVerb)
+	if !ok {
+		t.Fatalf("the pass did not delete the stuck Job; ran %v", f.verbs())
+	}
+	if _, ok := f.indexAfter(cacheTrimApplyVerb, deleted); !ok {
+		t.Errorf("the pass did not apply a new Job after deleting the stuck one; ran %v", f.verbs())
+	}
+	for _, c := range f.appliedTrimJob(t).Spec.Template.Spec.Containers {
+		if c.Image != cacheTrimMirrorPolecat {
+			t.Errorf("the new Job's container %s runs %q, want %q", c.Name, c.Image, cacheTrimMirrorPolecat)
+		}
+	}
+
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+	raised := notifier.Escalations()
+	if len(raised) != 1 {
+		t.Fatalf("raised %d alerts, want one for the stuck Job", len(raised))
+	}
+	if raised[0].Escalation.Fingerprint != key {
+		t.Errorf("the alert's key is %q, want %q", raised[0].Escalation.Fingerprint, key)
+	}
+	if reason := raised[0].Escalation.Reason; !strings.Contains(reason, cacheTrimJob) || !strings.Contains(reason, cacheTrimMirrorPolecat) {
+		t.Errorf("the alert does not name the stuck Job and the image it could not pull %q: %q", cacheTrimMirrorPolecat, reason)
+	}
+	if clears := notifier.Clears(); len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{key}) {
+		t.Errorf("the replacement completed, so the alert should be cleared once; clears = %+v", clears)
+	}
+}
+
+// TestCacheTrimStuckJobStaysReportedUntilItsReplacementCompletes pins the other
+// half: when the replacement Job does not complete either, the alert stays open
+// and names the image, and the pass ends without waiting past its wait.
+func TestCacheTrimStuckJobStaysReportedUntilItsReplacementCompletes(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ImagePullBackOff", cacheTrimMirrorPolecat)),
+		"wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s": {
+			stderr: "error: timed out waiting for the condition", code: 1,
+		},
+	})
+	f.d.clock = clockwork.NewFakeClockAt(diskMaintNow)
+	notifier := notifyfake.New()
+	f.d.notifier = notifier
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, imagevalues.Values{
+		Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+		Polecat: cacheTrimForgejoPolecat,
+		Commit:  strings.Repeat("c", 40),
+	})
+	f.d.runDiskMaintenance()
+
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+	open := notifier.OpenEscalations(key)
+	if len(open) != 1 {
+		t.Fatalf("open alerts under %q = %d, want one", key, len(open))
+	}
+	if !strings.Contains(open[0].Reason, cacheTrimMirrorPolecat) {
+		t.Errorf("the open alert does not name the image %q: %q", cacheTrimMirrorPolecat, open[0].Reason)
+	}
+	if clears := notifier.Clears(); len(clears) != 0 {
+		t.Errorf("the replacement did not complete, so nothing should be cleared; clears = %+v", clears)
+	}
+}
+
+// TestCacheTrimClearsAStuckAlertOnALaterCompletedTrim pins the alert's end when
+// the replacement fails to apply: the stuck Job is already gone, so the alert
+// stays open, and a later trim that completes with no stuck Job clears it.
+func TestCacheTrimClearsAStuckAlertOnALaterCompletedTrim(t *testing.T) {
+	t.Parallel()
+	created := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	overrides := map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", created, "ErrImagePull", cacheTrimMirrorPolecat)),
+		cacheTrimApplyVerb:                 {stderr: "the server refused the Job", code: 1},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	f.d.clock = clockwork.NewFakeClockAt(diskMaintNow)
+	notifier := notifyfake.New()
+	f.d.notifier = notifier
+	f.setImageRegistry(cacheTrimMirror)
+	f.writeValuesFile(t, imagevalues.Values{
+		Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+		Polecat: cacheTrimForgejoPolecat,
+		Commit:  strings.Repeat("c", 40),
+	})
+	key := cacheTrimStuckPullKey(cacheTrimNamespace, cacheTrimJob)
+	f.d.runDiskMaintenance()
+	if n := len(notifier.OpenEscalations(key)); n != 1 {
+		t.Fatalf("after the failed replacement, open alerts = %d, want the stuck one", n)
+	}
+
+	// The next pass finds no earlier Job and applies a trim that completes.
+	delete(overrides, cacheTrimApplyVerb)
+	overrides[cacheTrimExistingVerb] = cliReply{stdout: `{"items":[]}`}
+	f.trimDue()
+	f.d.runDiskMaintenance()
+
+	if clears := notifier.Clears(); len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{key}) {
+		t.Errorf("the completed trim should clear the stuck alert once; clears = %+v", clears)
+	}
+	if n := len(notifier.OpenEscalations(key)); n != 0 {
+		t.Errorf("the stuck alert is still open after a trim completed: %d", n)
+	}
+}
+
+// TestCacheTrimLeavesAnEarlierJobAloneUnlessItIsStuck pins each way the
+// stuck-pull check refuses: the Job is left running, the pass applies nothing
+// and deletes nothing, and the log says why.
+func TestCacheTrimLeavesAnEarlierJobAloneUnlessItIsStuck(t *testing.T) {
+	t.Parallel()
+	old := diskMaintNow.Add(-cacheTrimWaitTimeout - time.Minute)
+	young := diskMaintNow.Add(-cacheTrimWaitTimeout / 2)
+	tests := []struct {
+		name    string
+		pods    cliReply
+		logWant string
+	}{
+		{
+			"a pod that has not waited past the wait",
+			cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", young, "ErrImagePull", cacheTrimForgejoPolecat)),
+			"the earlier trim Job " + cacheTrimJob + " is still running",
+		},
+		{
+			"a pod that runs",
+			cacheTrimPodsReply(cacheTrimJobPodJSON("Running", old, "", cacheTrimForgejoPolecat)),
+			"the earlier trim Job " + cacheTrimJob + " is still running",
+		},
+		{
+			"a pod with no creation time",
+			cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", time.Time{}, "ErrImagePull", cacheTrimForgejoPolecat)),
+			"the earlier trim Job " + cacheTrimJob + " is still running",
+		},
+		{
+			"a pod waiting for a node, not an image",
+			cacheTrimPodsReply(cacheTrimJobPodJSON("Pending", old, "", cacheTrimForgejoPolecat)),
+			"the earlier trim Job " + cacheTrimJob + " is still running",
+		},
+		{
+			"a Job whose pods have all finished",
+			cacheTrimPodsReply(cacheTrimJobPodJSON("Succeeded", old, "", cacheTrimForgejoPolecat)),
+			"the earlier trim Job " + cacheTrimJob + " is still running",
+		},
+		{
+			"one stuck pod beside a running one",
+			cacheTrimPodsReply(
+				cacheTrimJobPodJSON("Pending", old, "ErrImagePull", cacheTrimForgejoPolecat),
+				cacheTrimJobPodJSON("Running", old, "", cacheTrimForgejoPolecat)),
+			"the earlier trim Job " + cacheTrimJob + " is still running",
+		},
+		{
+			"the pod list cannot be read",
+			cliReply{stderr: "connection refused", code: 1},
+			"reading the pods of the earlier trim Job " + cacheTrimJob,
+		},
+		{
+			"the pod list is not JSON",
+			cliReply{stdout: "not json"},
+			"reading the pods of the earlier trim Job " + cacheTrimJob,
+		},
+		{
+			"the pod reply names no pod list",
+			cliReply{stdout: "{}"},
+			"names no pod list",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+				cacheTrimJobPodsVerb(cacheTrimJob): tc.pods,
+			})
+			f.d.clock = clockwork.NewFakeClockAt(diskMaintNow)
+			notifier := notifyfake.New()
+			f.d.notifier = notifier
+			f.setImageRegistry(cacheTrimMirror)
+			f.writeValuesFile(t, imagevalues.Values{
+				Daemon:  "forgejo:3000/bot-registry/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+				Polecat: cacheTrimForgejoPolecat,
+				Commit:  strings.Repeat("c", 40),
+			})
+			f.d.runDiskMaintenance()
+
+			for _, verb := range f.verbs() {
+				if strings.HasPrefix(verb, "delete ") || strings.HasPrefix(verb, "apply ") {
+					t.Errorf("the pass ran %q for a Job it must leave alone", verb)
+				}
+			}
+			if logged := f.log.String(); !strings.Contains(logged, tc.logWant) {
+				t.Errorf("the log does not say why the Job was left: want %q in %s", tc.logWant, logged)
+			}
+			if n := len(notifier.Escalations()); n != 0 {
+				t.Errorf("raised %d alerts for a Job that is not stuck, want none", n)
+			}
+		})
+	}
 }
 
 // TestCacheTrimMalformedValuesFile pins the refusal: a values file that is there
