@@ -34,6 +34,22 @@ type bdCall struct {
 	args []string
 }
 
+// routedBd answers a bd list with list, and a bd show of a bead with shows[bead];
+// a bead with no entry in shows fails its show. It records the calls.
+func routedBd(list string, shows map[string]string, calls *[]bdCall) BdRun {
+	return func(dir string, args []string) ([]byte, error) {
+		*calls = append(*calls, bdCall{dir, args})
+		if args[0] == "list" {
+			return []byte(list), nil
+		}
+		out, ok := shows[args[len(args)-1]]
+		if !ok {
+			return nil, errors.New("bd failed")
+		}
+		return []byte(out), nil
+	}
+}
+
 // fakeBd answers every call with the same output, and records the calls.
 func fakeBd(out string, ok bool, calls *[]bdCall) BdRun {
 	return func(dir string, args []string) ([]byte, error) {
@@ -371,5 +387,82 @@ func TestHandoffBytesCacheSkipsCalls(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("bd calls = %d, want none for a cached bead", len(calls))
+	}
+}
+
+// estimateListFixture lists one estimated bead and one bead with no story-point
+// label, so only the first is shown for its comments.
+const estimateListFixture = `[
+ {"id": "gt-1", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["sp:8", "sp-rung:all"]},
+ {"id": "gt-2", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["bird-filed"]}
+]`
+
+// TestLoadBeadsReadsTheLatestEstimateTime: a bead with an sp: label has the
+// created time of its latest SP ESTIMATE v1 comment, not a later comment of
+// another kind and not an earlier estimate. A bead with no sp: label is not shown.
+func TestLoadBeadsReadsTheLatestEstimateTime(t *testing.T) {
+	t.Parallel()
+	show := `{"schema_version": 1, "data": [{"id": "gt-1", "comments": [
+		{"text": "SP ESTIMATE v1 sp:8 rung:all hash:a", "created_at": "2026-10-21T10:00:00Z"},
+		{"text": "SP ESTIMATE v1 sp:5 rung:all hash:b", "created_at": "2026-10-19T10:00:00Z"},
+		{"text": "OVERSEER: a note after the estimate", "created_at": "2026-10-30T10:00:00Z"}
+	]}]}`
+	var calls []bdCall
+	var d Dropped
+	rows := LoadBeads(routedBd(estimateListFixture, map[string]string{"gt-1": show}, &calls), []string{"/g"}, &d)
+	if got := rows[0].EstimatedAt; got != "2026-10-21T10:00:00Z" {
+		t.Errorf("gt-1 EstimatedAt = %q, want the latest estimate's time", got)
+	}
+	if got := rows[1].EstimatedAt; got != "" {
+		t.Errorf("gt-2 EstimatedAt = %q, want none for a bead with no sp: label", got)
+	}
+	for _, c := range calls {
+		if c.args[0] == "show" && c.args[len(c.args)-1] != "gt-1" {
+			t.Errorf("bd show of %v, want only gt-1 shown", c.args)
+		}
+	}
+	if d.Count() != 0 {
+		t.Errorf("dropped = %+v, want none", d.Items)
+	}
+}
+
+// TestLoadBeadsLeavesTheEstimateTimeEmptyWhenItIsUnknown: a show that fails, one
+// that holds no bead, and an estimate comment whose time does not parse each
+// leave the time empty and are named in dropped. An unreadable time does not fall
+// back to an earlier estimate's time, so the report never reads a late estimate as
+// an early one.
+func TestLoadBeadsLeavesTheEstimateTimeEmptyWhenItIsUnknown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		show    string
+		failed  bool
+		dropped string
+	}{
+		{name: "show fails", failed: true, dropped: "bd:gt-1"},
+		{name: "show holds no bead", show: `[]`, dropped: "bd:gt-1"},
+		{
+			name:    "estimate comment with no time",
+			show:    `[{"comments": [{"text": "SP ESTIMATE v1 sp:8", "created_at": ""}, {"text": "SP ESTIMATE v1 sp:5", "created_at": "2026-10-19T10:00:00Z"}]}]`,
+			dropped: "labels:gt-1",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []bdCall
+			var d Dropped
+			shows := map[string]string{"gt-1": tc.show}
+			if tc.failed {
+				shows = map[string]string{}
+			}
+			rows := LoadBeads(routedBd(estimateListFixture, shows, &calls), []string{"/g"}, &d)
+			if got := rows[0].EstimatedAt; got != "" {
+				t.Errorf("EstimatedAt = %q, want empty for an unknown time", got)
+			}
+			if len(d.Items) != 1 || d.Items[0].Source != tc.dropped {
+				t.Errorf("dropped = %+v, want one item from %s", d.Items, tc.dropped)
+			}
+		})
 	}
 }

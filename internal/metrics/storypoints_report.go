@@ -203,12 +203,19 @@ type spPair struct {
 
 // spLandings is the landings table read for the report.
 type spLandings struct {
-	// pairs are the landed beads with both an estimate and a measured time.
+	// pairs are the scored landed beads: an estimate, a measured time, and an
+	// estimate written before the bead's first dispatch.
 	pairs []spPair
 	// unmeasured counts the landed beads with an estimate and no measured time.
 	unmeasured int
 	// rungNone counts the landed beads whose estimate made no rung.
 	rungNone int
+	// afterDispatch counts the landed beads with an estimate and a measured time
+	// that are not scored: the estimate was written at or after the first
+	// dispatch, or one of the two times is missing or unreadable.
+	afterDispatch int
+	// minutesRows counts the landed rows whose sp_minutes cell is set.
+	minutesRows int
 }
 
 // readSPLandings reads the table's story-point cells. A cell that does not parse
@@ -219,6 +226,13 @@ func readSPLandings(rows []Row) (spLandings, error) {
 	for _, row := range rows {
 		if row["sp_rung"] == rungNone {
 			out.rungNone++
+		}
+		minutes, hasMinutes, err := parseMinutesCell(row["sp_minutes"])
+		if err != nil {
+			return spLandings{}, err
+		}
+		if hasMinutes {
+			out.minutesRows++
 		}
 		est := row["sp"]
 		if est == "" {
@@ -237,17 +251,46 @@ func readSPLandings(rows []Row) (spLandings, error) {
 		if err != nil {
 			return spLandings{}, err
 		}
-		pair := spPair{seat: row["seat_class"], rung: row["sp_rung"], est: points, actual: measured}
-		if m := row["sp_minutes"]; m != "" {
-			minutes, err := strconv.ParseFloat(m, 64)
-			if err != nil || math.IsNaN(minutes) || minutes <= 0 {
-				return spLandings{}, fmt.Errorf("metrics: sp_minutes %q is not a positive number", m)
-			}
-			pair.minutes, pair.hasMinutes = minutes, true
+		if !estimatedBeforeDispatch(row) {
+			out.afterDispatch++
+			continue
 		}
-		out.pairs = append(out.pairs, pair)
+		out.pairs = append(out.pairs, spPair{
+			seat: row["seat_class"], rung: row["sp_rung"], est: points, actual: measured,
+			minutes: minutes, hasMinutes: hasMinutes,
+		})
 	}
 	return out, nil
+}
+
+// estimatedBeforeDispatch reports whether a landed row's estimate was written
+// before the bead's first dispatch. Both times must read: an estimate with no
+// readable write time, or a bead with no readable dispatch, is not known to be
+// before its dispatch, so it is not scored.
+func estimatedBeforeDispatch(row Row) bool {
+	written, err := ParseTS(row["sp_estimated_at"])
+	if err != nil {
+		return false
+	}
+	dispatched, err := ParseTS(row["dispatched_at"])
+	if err != nil {
+		return false
+	}
+	return written.Before(dispatched)
+}
+
+// parseMinutesCell reads a sp_minutes cell: "" is no minutes, and a value that is
+// not a positive number is an error, since the trigger table over it would count
+// a bead wrongly.
+func parseMinutesCell(cell string) (minutes float64, ok bool, err error) {
+	if cell == "" {
+		return 0, false, nil
+	}
+	minutes, err = strconv.ParseFloat(cell, 64)
+	if err != nil || math.IsNaN(minutes) || minutes <= 0 {
+		return 0, false, fmt.Errorf("metrics: sp_minutes %q is not a positive number", cell)
+	}
+	return minutes, true, nil
 }
 
 // parseSPCell reads a points cell and refuses a value that is not a point on the
@@ -323,10 +366,12 @@ func share(n, d int) (float64, bool) {
 }
 
 // WriteStoryPointsReport writes the shadow report for the landings rows. Below
-// shadowMinLandings landed beads with an estimate and a measured time it writes
-// that count and nothing else. Otherwise it writes the rank tables per seat class
-// and per rung, the unmeasured and rung-none counts, and the trigger table when
-// every landed bead carries its estimated minutes.
+// shadowMinLandings scored landed beads (an estimate, a measured time, and an
+// estimate written before dispatch) it writes that count and nothing else.
+// Otherwise it writes the rank tables per seat class and per rung, the unmeasured,
+// rung-none and after-dispatch counts, and the trigger section: the trigger table
+// when the scored beads carry their estimated minutes, else the line that none is
+// recorded yet.
 func WriteStoryPointsReport(w io.Writer, rows []Row) error {
 	land, err := readSPLandings(rows)
 	if err != nil {
@@ -343,7 +388,8 @@ func WriteStoryPointsReport(w io.Writer, rows []Row) error {
 	writeGroups(&b, "per seat class", land.pairs, func(p spPair) string { return orNone(p.seat, "(no seat class)") })
 	writeGroups(&b, "per rung", land.pairs, func(p spPair) string { return orNone(p.rung, "(no rung)") })
 	fmt.Fprintf(&b, "estimated but unmeasured: %d; rung none: %d\n", land.unmeasured, land.rungNone)
-	writeTriggers(&b, land.pairs)
+	fmt.Fprintf(&b, "estimates written after dispatch: %d\n", land.afterDispatch)
+	writeTriggers(&b, land)
 	_, err = io.WriteString(w, b.String())
 	return err
 }
@@ -376,15 +422,21 @@ func (s spStats) rhoText() string {
 }
 
 // writeTriggers writes the split trigger table at the minutes the design names.
-// It is written only when every landed bead carries its estimated minutes; a
-// table over some beads would read as the whole.
-func writeTriggers(b *strings.Builder, pairs []spPair) {
-	est := make([]float64, 0, len(pairs))
-	actual := make([]int, 0, len(pairs))
-	for _, p := range pairs {
+// When no landed row carries its estimated minutes it says so in the section, so
+// the section is never silently absent. It is written from the scored beads only
+// when every one of them carries its minutes; a table over some beads would read
+// as the whole.
+func writeTriggers(b *strings.Builder, land spLandings) {
+	if land.minutesRows == 0 {
+		b.WriteString("split trigger\n  no estimated minutes recorded yet\n")
+		return
+	}
+	est := make([]float64, 0, len(land.pairs))
+	actual := make([]int, 0, len(land.pairs))
+	for _, p := range land.pairs {
 		if !p.hasMinutes {
 			fmt.Fprintf(b, "split trigger: not computed, %d of %d landings carry no estimated minutes\n",
-				countWithoutMinutes(pairs), len(pairs))
+				countWithoutMinutes(land.pairs), len(land.pairs))
 			return
 		}
 		est = append(est, p.minutes)

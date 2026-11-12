@@ -162,8 +162,12 @@ func TestTriggerTableRefusesMismatchedColumns(t *testing.T) {
 }
 
 // spLandingRow is one landing row with the story-point cells the report reads.
+// Its estimate is written the day before its first dispatch, so the row is scored.
 func spLandingRow(i int, est, actual string, seat, rung string) Row {
-	return Row{"bead": "gt-" + strconv.Itoa(i), "sp": est, "sp_actual": actual, "seat_class": seat, "sp_rung": rung}
+	return Row{
+		"bead": "gt-" + strconv.Itoa(i), "sp": est, "sp_actual": actual, "seat_class": seat, "sp_rung": rung,
+		"sp_estimated_at": "2026-10-19T10:00:00Z", "dispatched_at": "2026-10-20T10:00:00Z",
+	}
 }
 
 // measuredRows builds n landed beads with an estimate and a measured time, across
@@ -221,7 +225,8 @@ func TestShadowReportAtSixtyPrintsTheTables(t *testing.T) {
 		"per rung\n",
 		"shape-jev",
 		"estimated but unmeasured: 2; rung none: 1",
-		"split trigger: not computed, 60 of 60 landings carry no estimated minutes",
+		"estimates written after dispatch: 0",
+		"split trigger\n  no estimated minutes recorded yet\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("report lacks %q:\n%s", want, got)
@@ -260,5 +265,80 @@ func TestShadowReportRefusesAnUnreadableCell(t *testing.T) {
 	var out bytes.Buffer
 	if err := WriteStoryPointsReport(&out, rows); err == nil {
 		t.Errorf("WriteStoryPointsReport returned no error for sp 4; output:\n%s", out.String())
+	}
+}
+
+// TestShadowReportLeavesOutAnEstimateWithoutAUsableWriteBeforeDispatch: an
+// estimate written at or after the bead's first dispatch, or with a missing or
+// unreadable time on either side, is not scored. With 59 scored beads the report
+// stays at the count; with 60 it prints the tables and counts the excluded row.
+func TestShadowReportLeavesOutAnEstimateWithoutAUsableWriteBeforeDispatch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		edit func(Row)
+	}{
+		{name: "written after dispatch", edit: func(r Row) { r["sp_estimated_at"] = "2026-10-21T10:00:00Z" }},
+		{name: "written at dispatch", edit: func(r Row) { r["sp_estimated_at"] = "2026-10-20T10:00:00Z" }},
+		{name: "no write time", edit: func(r Row) { delete(r, "sp_estimated_at") }},
+		{name: "unreadable write time", edit: func(r Row) { r["sp_estimated_at"] = "soon" }},
+		{name: "no dispatch time", edit: func(r Row) { r["dispatched_at"] = "" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			excluded := spLandingRow(95, "5", "5", "haiku", "all")
+			tc.edit(excluded)
+
+			var below bytes.Buffer
+			if err := WriteStoryPointsReport(&below, append(measuredRows(59), excluded)); err != nil {
+				t.Fatalf("WriteStoryPointsReport: %v", err)
+			}
+			want := "story points: 59 estimated landings with a measured time; the report needs 60\n"
+			if below.String() != want {
+				t.Errorf("below sixty output = %q, want %q", below.String(), want)
+			}
+
+			var at bytes.Buffer
+			if err := WriteStoryPointsReport(&at, append(measuredRows(60), excluded)); err != nil {
+				t.Fatalf("WriteStoryPointsReport at sixty: %v", err)
+			}
+			if got := at.String(); !strings.Contains(got, "shadow report: 60 estimated landings") ||
+				!strings.Contains(got, "estimates written after dispatch: 1\n") {
+				t.Errorf("at sixty output lacks the scored count or the excluded line:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestShadowReportSaysNoMinutesYetWhenNoLandingHasThem: with no sp_minutes cell on
+// any landing the trigger section says so on its own line.
+func TestShadowReportSaysNoMinutesYetWhenNoLandingHasThem(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	if err := WriteStoryPointsReport(&out, measuredRows(60)); err != nil {
+		t.Fatalf("WriteStoryPointsReport: %v", err)
+	}
+	if !strings.Contains(out.String(), "split trigger\n  no estimated minutes recorded yet\n") {
+		t.Errorf("report lacks the no-minutes line in the trigger section:\n%s", out.String())
+	}
+}
+
+// TestShadowReportNamesTheBeadsWithoutMinutesWhenSomeHaveThem: with minutes on
+// some landings and not all, the trigger table is not written over the rest; the
+// section counts the landings that carry none.
+func TestShadowReportNamesTheBeadsWithoutMinutesWhenSomeHaveThem(t *testing.T) {
+	t.Parallel()
+	rows := measuredRows(60)
+	for i := range rows[:59] {
+		rows[i]["sp_minutes"] = strconv.Itoa(8 + i%12)
+	}
+	var out bytes.Buffer
+	if err := WriteStoryPointsReport(&out, rows); err != nil {
+		t.Fatalf("WriteStoryPointsReport: %v", err)
+	}
+	want := "split trigger: not computed, 1 of 60 landings carry no estimated minutes\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report lacks %q:\n%s", want, out.String())
 	}
 }

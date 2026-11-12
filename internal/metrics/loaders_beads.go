@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -127,7 +128,9 @@ func unwrapBdData(out []byte) []byte {
 // Branch line of the notes, so a review can be attributed to the seat that
 // wrote the branch it judged. SubmittedAt is the time on the notes' last READY
 // TO LAND block, "" for a bead whose block carries none. A null closed_at is a
-// nil ClosedAt, which keeps an open bead apart from a closed one.
+// nil ClosedAt, which keeps an open bead apart from a closed one. EstimatedAt is
+// the created time of the bead's latest SP ESTIMATE v1 comment, read only for a
+// bead with an sp: label; "" when there is none or it cannot be read.
 type BeadRow struct {
 	ID              string
 	Rig             string
@@ -144,6 +147,58 @@ type BeadRow struct {
 	RejectionKinds  []string
 	Branch          string
 	SubmittedAt     string
+	EstimatedAt     string
+}
+
+// estimateCommentPrefix opens the comment a story-point estimate writes beside
+// its labels.
+const estimateCommentPrefix = "SP ESTIMATE v1"
+
+// estimatedAt is the created time of a bead's latest SP ESTIMATE v1 comment, the
+// time its story-point labels were written. It is "" when the bead has no such
+// comment. It is also "" when the show fails or a comment's time does not parse,
+// and both are named in dropped: a time that cannot be read is unknown, so the
+// report does not read the estimate as written before dispatch.
+func estimatedAt(run BdRun, dir, bead string, dropped *Dropped) string {
+	var data []struct {
+		Comments []struct {
+			Text      string `json:"text"`
+			CreatedAt string `json:"created_at"`
+		} `json:"comments"`
+	}
+	// The flags precede "--" so the bead id is read as an argument, never as a flag.
+	raw, err := bdJSON(run, dir, []string{"show", "--json", "--include-comments", "--", bead})
+	if err == nil {
+		err = json.Unmarshal(raw, &data)
+	}
+	if err != nil || len(data) == 0 {
+		dropped.Add("bd:"+bead, "bd show failed: estimate time not read")
+		return ""
+	}
+	var latest time.Time
+	for _, c := range data[0].Comments {
+		if !strings.HasPrefix(c.Text, estimateCommentPrefix) {
+			continue
+		}
+		at, err := ParseTS(c.CreatedAt)
+		if err != nil {
+			dropped.Add("labels:"+bead, "SP ESTIMATE comment with no readable time")
+			return ""
+		}
+		if at.After(latest) {
+			latest = at
+		}
+	}
+	if latest.IsZero() {
+		return ""
+	}
+	return latest.UTC().Format(time.RFC3339Nano)
+}
+
+// hasEstimateLabel reports whether a bead carries an sp: label, the label an
+// estimate writes.
+func hasEstimateLabel(labels []string) bool {
+	return slices.ContainsFunc(labels, func(l string) bool { return strings.HasPrefix(l, "sp:") })
 }
 
 // bdListBead is one entry of `bd list --json`. A JSON null decodes to the zero
@@ -199,7 +254,7 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 			if at := land.ReadyBlockTime(b.Notes); !at.IsZero() {
 				submittedAt = at.UTC().Format(time.RFC3339)
 			}
-			rows = append(rows, BeadRow{
+			row := BeadRow{
 				ID:              b.ID,
 				Rig:             strings.SplitN(b.ID, "-", 2)[0],
 				CreatedAt:       b.CreatedAt,
@@ -215,7 +270,11 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				RejectionKinds:  kinds,
 				Branch:          BranchLine(b.Notes),
 				SubmittedAt:     submittedAt,
-			})
+			}
+			if hasEstimateLabel(labels) {
+				row.EstimatedAt = estimatedAt(run, d, b.ID, dropped)
+			}
+			rows = append(rows, row)
 		}
 	}
 	return rows

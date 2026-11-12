@@ -265,7 +265,7 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 	appended := []string{
 		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
-		"jev_fits20", "jev_size", "sp", "sp_rung",
+		"jev_fits20", "jev_size", "sp", "sp_rung", "sp_minutes", "sp_estimated_at",
 	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))

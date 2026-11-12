@@ -45,9 +45,10 @@ var edges = []Edge{
 var rungs = []string{"all", "shape-jev", "shape-embed", "shape"}
 
 const (
-	spPrefix     = "sp:"
-	actualPrefix = "sp-actual:"
-	rungPrefix   = "sp-rung:"
+	spPrefix      = "sp:"
+	actualPrefix  = "sp-actual:"
+	rungPrefix    = "sp-rung:"
+	minutesPrefix = "sp-minutes:"
 )
 
 // Edges returns a copy of the scale, from the smallest point up.
@@ -91,7 +92,13 @@ func RungLabel(rung string) string {
 	return rungPrefix + rung
 }
 
-// LabelKind says which of the three label forms a Label is.
+// MinutesLabel returns the label that carries an estimate's pre-rounding
+// minutes, sp-minutes:<n>, written beside sp:N.
+func MinutesLabel(minutes float64) string {
+	return minutesPrefix + strconv.FormatFloat(minutes, 'f', -1, 64)
+}
+
+// LabelKind says which of the four label forms a Label is.
 type LabelKind int
 
 const (
@@ -101,19 +108,22 @@ const (
 	KindActual
 	// KindRung is an sp-rung:<rung> label.
 	KindRung
+	// KindMinutes is an sp-minutes:<n> label.
+	KindMinutes
 )
 
 // Label is a parsed story-point label. Points is set for KindEstimate and
-// KindActual; Rung is set for KindRung.
+// KindActual; Rung is set for KindRung; Minutes is set for KindMinutes.
 type Label struct {
-	Kind   LabelKind
-	Points int
-	Rung   string
+	Kind    LabelKind
+	Points  int
+	Rung    string
+	Minutes float64
 }
 
-// ParseLabel parses a label that SPLabel, ActualLabel or RungLabel would write.
-// Any other spelling is refused with ErrBadLabel, so sp:05 and sp:+5 are not
-// read as sp:5.
+// ParseLabel parses a label that SPLabel, ActualLabel, RungLabel or MinutesLabel
+// would write. Any other spelling is refused with ErrBadLabel, so sp:05 and
+// sp:+5 are not read as sp:5.
 func ParseLabel(s string) (Label, error) {
 	if rest, ok := strings.CutPrefix(s, spPrefix); ok {
 		n, err := parsePoints(rest)
@@ -134,6 +144,13 @@ func ParseLabel(s string) (Label, error) {
 			return Label{}, badLabel(s)
 		}
 		return Label{Kind: KindRung, Rung: rest}, nil
+	}
+	if rest, ok := strings.CutPrefix(s, minutesPrefix); ok {
+		m, err := strconv.ParseFloat(rest, 64)
+		if err != nil || math.IsNaN(m) || math.IsInf(m, 0) || m <= 0 || MinutesLabel(m) != s {
+			return Label{}, badLabel(s)
+		}
+		return Label{Kind: KindMinutes, Minutes: m}, nil
 	}
 	return Label{}, badLabel(s)
 }

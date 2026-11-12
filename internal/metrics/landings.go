@@ -42,12 +42,15 @@ var appendedLandingColumns = []string{
 // predictors and are not explain-only.
 var jevLandingColumns = []string{"jev_fits20", "jev_size"}
 
-// storyPointLandingColumns are the bead's story-point labels as the landing
-// carries them: sp is the estimate (sp:N) and sp_rung names the inputs it was
-// made from (sp-rung:<rung>). They are read from the bead's labels, so a bead
-// the estimate never labeled keeps both cells empty. They come after the Jev
-// columns, append-only.
-var storyPointLandingColumns = []string{"sp", "sp_rung"}
+// storyPointLandingColumns are the bead's story-point cells as the landing
+// carries them. sp is the estimate (sp:N), sp_rung names the inputs it was made
+// from (sp-rung:<rung>) and sp_minutes is its pre-rounding minutes
+// (sp-minutes:<n>); those three are read from the bead's labels, so a bead the
+// estimate never labeled keeps them empty. sp_estimated_at is the created time of
+// the bead's latest SP ESTIMATE v1 comment, the time the labels were written; it
+// is read from the comment, and the report compares it with dispatched_at. They
+// come after the Jev columns, append-only.
+var storyPointLandingColumns = []string{"sp", "sp_rung", "sp_minutes", "sp_estimated_at"}
 
 // landingColumns is the header landings.csv is written with: the legacy header
 // then the appended columns, then the Jev columns, then the story-point
@@ -96,14 +99,15 @@ const rungLabelNone = "sp-rung:" + rungNone
 // rungNone is the rung value of an estimate no input made.
 const rungNone = "none"
 
-// storyPointCells reads a bead's sp and sp_rung cells from its labels. A label
-// that starts sp: or sp-rung: and does not parse is named in dropped, not
-// ignored: a bead whose estimate cannot be read is unknown, not unlabelled. Two
-// different values of one kind are also unknown, so that cell is empty.
-func storyPointCells(bead string, labels []string, dropped *Dropped) (sp, rung string) {
-	var points, rungs []string
+// storyPointCells reads a bead's sp, sp_rung and sp_minutes cells from its
+// labels. A label that starts sp:, sp-rung: or sp-minutes: and does not parse is
+// named in dropped, not ignored: a bead whose estimate cannot be read is unknown,
+// not unlabelled. Two different values of one kind are also unknown, so that cell
+// is empty.
+func storyPointCells(bead string, labels []string, dropped *Dropped) (sp, rung, minutes string) {
+	var points, rungs, minuteValues []string
 	for _, label := range labels {
-		if !strings.HasPrefix(label, "sp:") && !strings.HasPrefix(label, "sp-rung:") {
+		if !strings.HasPrefix(label, "sp:") && !strings.HasPrefix(label, "sp-rung:") && !strings.HasPrefix(label, "sp-minutes:") {
 			continue
 		}
 		parsed, err := storypoints.ParseLabel(label)
@@ -112,6 +116,8 @@ func storyPointCells(bead string, labels []string, dropped *Dropped) (sp, rung s
 			points = append(points, strconv.Itoa(parsed.Points))
 		case err == nil && parsed.Kind == storypoints.KindRung:
 			rungs = append(rungs, parsed.Rung)
+		case err == nil && parsed.Kind == storypoints.KindMinutes:
+			minuteValues = append(minuteValues, strconv.FormatFloat(parsed.Minutes, 'f', -1, 64))
 		case label == rungLabelNone:
 			rungs = append(rungs, rungNone)
 		default:
@@ -126,7 +132,11 @@ func storyPointCells(bead string, labels []string, dropped *Dropped) (sp, rung s
 	if err != nil {
 		dropped.Add("labels:"+bead, "conflicting sp-rung labels: "+strings.Join(rungs, ","))
 	}
-	return sp, rung
+	minutes, err = singleLabelValue(minuteValues)
+	if err != nil {
+		dropped.Add("labels:"+bead, "conflicting sp-minutes labels: "+strings.Join(minuteValues, ","))
+	}
+	return sp, rung, minutes
 }
 
 // singleLabelValue is the one value a bead's labels of a kind agree on: "" when

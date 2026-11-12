@@ -169,9 +169,13 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	header := append(append([]string{}, landingColumns...), "unknown_metric")
 	// Every target drops the whole target list and none defines a column of its
 	// own, so the rows share one header; a per-target drop rule fails the row it
-	// applies to. The Jev columns are pre-landing answers, so they are predictors,
-	// and so are the story-point estimate columns, made before dispatch.
-	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,unknown_metric"
+	// applies to. The Jev columns are pre-landing answers, so they are predictors.
+	// The story-point columns sp, sp_rung and sp_minutes are predictors too. They
+	// are the labels as they stand at extract time, not as they stood at dispatch:
+	// the extract does not compare an estimate's write time with the dispatch, so
+	// an estimate written after dispatch can reach a predictor. Only the report
+	// applies that check (it scores on sp_estimated_at, which is explain-only).
+	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,sp_minutes,unknown_metric"
 	tests := []struct {
 		target string
 		want   string

@@ -195,6 +195,10 @@ func TestParseLabelRoundTrips(t *testing.T) {
 		labels = append(labels, RungLabel(r))
 		wants = append(wants, Label{Kind: KindRung, Rung: r})
 	}
+	for _, m := range []float64{3, 12.5, 0.75} {
+		labels = append(labels, MinutesLabel(m))
+		wants = append(wants, Label{Kind: KindMinutes, Minutes: m})
+	}
 	for i, s := range labels {
 		got, err := ParseLabel(s)
 		if err != nil {
@@ -229,6 +233,14 @@ func TestParseLabelRejects(t *testing.T) {
 		{"rung with empty name", "sp-rung:"},
 		{"rung not in the set", "sp-rung:bogus"},
 		{"rung with wrong case", "sp-rung:ALL"},
+		{"minutes of zero", "sp-minutes:0"},
+		{"minutes negative", "sp-minutes:-2"},
+		{"minutes with empty value", "sp-minutes:"},
+		{"minutes not a number", "sp-minutes:soon"},
+		{"minutes NaN", "sp-minutes:NaN"},
+		{"minutes infinite", "sp-minutes:+Inf"},
+		{"minutes with leading zero", "sp-minutes:012.5"},
+		{"minutes in exponent form", "sp-minutes:1e3"},
 		{"empty string", ""},
 		{"unknown prefix", "sz:3"},
 		{"bare number", "3"},

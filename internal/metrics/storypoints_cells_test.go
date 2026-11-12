@@ -11,14 +11,18 @@ import (
 func TestStoryPointCellsReadTheLabels(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		labels []string
-		sp     string
-		rung   string
+		name    string
+		labels  []string
+		sp      string
+		rung    string
+		minutes string
 	}{
 		{name: "estimate and rung", labels: []string{"bird-filed", "sp:8", "sp-rung:shape-jev", "sp-actual:5"}, sp: "8", rung: "shape-jev"},
 		{name: "rung none", labels: []string{"sp:3", "sp-rung:none"}, sp: "3", rung: "none"},
 		{name: "repeated identical label", labels: []string{"sp:21", "sp:21"}, sp: "21", rung: ""},
+		{name: "estimate with its minutes", labels: []string{"sp:13", "sp-rung:all", "sp-minutes:14.25"}, sp: "13", rung: "all", minutes: "14.25"},
+		{name: "estimate with no minutes label", labels: []string{"sp:13", "sp-rung:all"}, sp: "13", rung: "all", minutes: ""},
+		{name: "minutes alone", labels: []string{"sp-minutes:3"}, minutes: "3"},
 		{name: "no story-point label", labels: []string{"bird-filed"}, sp: "", rung: ""},
 		{name: "no labels", labels: nil, sp: "", rung: ""},
 	}
@@ -26,9 +30,9 @@ func TestStoryPointCellsReadTheLabels(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var dropped Dropped
-			sp, rung := storyPointCells("gt-sp1", tc.labels, &dropped)
-			if sp != tc.sp || rung != tc.rung {
-				t.Errorf("cells = (%q, %q), want (%q, %q)", sp, rung, tc.sp, tc.rung)
+			sp, rung, minutes := storyPointCells("gt-sp1", tc.labels, &dropped)
+			if sp != tc.sp || rung != tc.rung || minutes != tc.minutes {
+				t.Errorf("cells = (%q, %q, %q), want (%q, %q, %q)", sp, rung, minutes, tc.sp, tc.rung, tc.minutes)
 			}
 			if len(dropped.Items) != 0 {
 				t.Errorf("dropped = %v, want none for a readable bead", dropped.Items)
@@ -43,11 +47,12 @@ func TestStoryPointCellsReadTheLabels(t *testing.T) {
 func TestStoryPointCellsNameUnreadableLabels(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		labels []string
-		sp     string
-		rung   string
-		drops  int
+		name    string
+		labels  []string
+		sp      string
+		rung    string
+		minutes string
+		drops   int
 	}{
 		{name: "sp not on the scale", labels: []string{"sp:4"}, drops: 1},
 		{name: "sp with leading zero", labels: []string{"sp:05"}, drops: 1},
@@ -55,14 +60,17 @@ func TestStoryPointCellsNameUnreadableLabels(t *testing.T) {
 		{name: "two estimates disagree", labels: []string{"sp:8", "sp:13"}, drops: 1},
 		{name: "two rungs disagree", labels: []string{"sp-rung:all", "sp-rung:shape"}, drops: 1},
 		{name: "readable sp beside an unreadable rung", labels: []string{"sp:8", "sp-rung:gut"}, sp: "8", drops: 1},
+		{name: "minutes of zero", labels: []string{"sp:5", "sp-minutes:0"}, sp: "5", drops: 1},
+		{name: "minutes with leading zero", labels: []string{"sp-minutes:012"}, drops: 1},
+		{name: "two minutes disagree", labels: []string{"sp-minutes:12", "sp-minutes:14"}, drops: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var dropped Dropped
-			sp, rung := storyPointCells("gt-sp2", tc.labels, &dropped)
-			if sp != tc.sp || rung != tc.rung {
-				t.Errorf("cells = (%q, %q), want (%q, %q)", sp, rung, tc.sp, tc.rung)
+			sp, rung, minutes := storyPointCells("gt-sp2", tc.labels, &dropped)
+			if sp != tc.sp || rung != tc.rung || minutes != tc.minutes {
+				t.Errorf("cells = (%q, %q, %q), want (%q, %q, %q)", sp, rung, minutes, tc.sp, tc.rung, tc.minutes)
 			}
 			if len(dropped.Items) != tc.drops {
 				t.Errorf("dropped = %v, want %d items", dropped.Items, tc.drops)
@@ -77,7 +85,10 @@ func TestStoryPointCellsNameUnreadableLabels(t *testing.T) {
 func TestLandingRowCarriesTheStoryPointCells(t *testing.T) {
 	t.Parallel()
 	ledger := LoadLedger(map[string][]string{"gastown": {polecatLedgerLine(`"polecat_secs":600,"agent":"sbx-haiku"`)}}, &Dropped{})
-	beads := map[string]BeadRow{"gt-p1": {Labels: []string{"sp:5", "sp-rung:all"}}}
+	beads := map[string]BeadRow{"gt-p1": {
+		Labels:      []string{"sp:5", "sp-rung:all", "sp-minutes:6.5"},
+		EstimatedAt: "2026-10-19T10:00:00Z",
+	}}
 	var dropped Dropped
 	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
 		beads, nil, nil, nil, nil, StageStamps{}, nil, &dropped)
@@ -92,6 +103,12 @@ func TestLandingRowCarriesTheStoryPointCells(t *testing.T) {
 	}
 	if got := rows[0]["sp_rung"]; got != "all" {
 		t.Errorf("sp_rung = %q, want all", got)
+	}
+	if got := rows[0]["sp_minutes"]; got != "6.5" {
+		t.Errorf("sp_minutes = %q, want 6.5 from the sp-minutes label", got)
+	}
+	if got := rows[0]["sp_estimated_at"]; got != "2026-10-19T10:00:00Z" {
+		t.Errorf("sp_estimated_at = %q, want the estimate's write time", got)
 	}
 	if got := rows[0]["sp_actual"]; got != "8" {
 		t.Errorf("sp_actual = %q, want 8 (600 seconds is 10 minutes)", got)
