@@ -105,6 +105,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"build gt: ", "go build -trimpath -ldflags " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
+		{"build trackerd: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build town-metrics: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build hm: ", "go build -trimpath -o " + filepath.Join(b.Out, "hm") + " " + HMPackage + "   (clean worktree of /src/hm at " + testHMCommit + ")"},
@@ -157,8 +158,38 @@ func TestPlanShowsTheShortCommitStamp(t *testing.T) {
 	t.Fatalf("plan has no build gt: line:\n%s", strings.Join(lines, "\n"))
 }
 
+// TestPlanNamesTheTrackerdBuild: the plan names the trackerd build after the om
+// build and before the plugin builds, in the order the builds run.
+func TestPlanNamesTheTrackerdBuild(t *testing.T) {
+	t.Parallel()
+	b := planBuilder(t)
+	lines, err := b.Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	at := func(prefix string) int {
+		for i, line := range lines {
+			if strings.HasPrefix(line, prefix) {
+				return i
+			}
+		}
+		return -1
+	}
+	om := at("build om: ")
+	trackerd := at("build trackerd: ")
+	if trackerd < 0 {
+		t.Fatalf("plan has no build trackerd: line:\n%s", strings.Join(lines, "\n"))
+	}
+	if trackerd <= om {
+		t.Errorf("the build trackerd: line is at %d, want it after build om: at %d", trackerd, om)
+	}
+	if app := at("build app-promote: "); app <= trackerd {
+		t.Errorf("the build app-promote: line is at %d, want it after the build trackerd: line at %d", app, trackerd)
+	}
+}
+
 // TestPlanListsThePluginBuilds: the plan names the build of each plugin the
-// container daemon runs, after the three binaries and before the fetches, with
+// container daemon runs, after the binaries and before the fetches, with
 // the package and the output path under the plugin's directory.
 func TestPlanListsThePluginBuilds(t *testing.T) {
 	t.Parallel()
@@ -192,7 +223,7 @@ func TestPlanListsThePluginBuilds(t *testing.T) {
 			continue
 		}
 		if at <= om {
-			t.Errorf("the build %s: line is at %d, want it after the three binaries (build om: is at %d)", p.name, at, om)
+			t.Errorf("the build %s: line is at %d, want it after the binaries (build om: is at %d)", p.name, at, om)
 		}
 		if !strings.HasPrefix(lines[at], want) {
 			t.Errorf("the build %s: line = %q, want it to start %q", p.name, lines[at], want)

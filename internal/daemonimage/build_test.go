@@ -166,7 +166,7 @@ func builderFor(t *testing.T) (Builder, *fakeRunner) {
 	return validBuilder(run, t.TempDir()), run
 }
 
-func TestBuildBinariesReturnsTheThreePathsUnderOut(t *testing.T) {
+func TestBuildBinariesReturnsTheFourPathsUnderOut(t *testing.T) {
 	t.Parallel()
 	b, _ := builderFor(t)
 	paths, err := b.BuildBinaries(context.Background(), testRev)
@@ -177,6 +177,7 @@ func TestBuildBinariesReturnsTheThreePathsUnderOut(t *testing.T) {
 		filepath.Join(b.Out, "gt"),
 		filepath.Join(b.Out, "bd"),
 		filepath.Join(b.Out, "om"),
+		filepath.Join(b.Out, "trackerd"),
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("BuildBinaries paths = %q, want %q", paths, want)
@@ -191,7 +192,7 @@ func TestBuildBinariesReturnsTheThreePathsUnderOut(t *testing.T) {
 		t.Fatalf("reading the output directory: %v", err)
 	}
 	if got := len(entries); got != len(want) {
-		t.Errorf("the output directory holds %d entries after a build, want the three binaries only", got)
+		t.Errorf("the output directory holds %d entries after a build, want the four binaries only", got)
 	}
 }
 
@@ -201,8 +202,8 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	names := []string{"gt", "bd", "om"}
-	pkgs := []string{GTPackage, BDPackage, OMPackage}
+	names := []string{"gt", "bd", "om", "trackerd"}
+	pkgs := []string{GTPackage, BDPackage, OMPackage, TrackerdPackage}
 	if len(run.calls) != len(names) {
 		t.Fatalf("recorded %d builds, want %d", len(run.calls), len(names))
 	}
@@ -232,6 +233,7 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 		{src: b.GTSrc, commit: testRev},
 		{src: b.BDSrc, commit: testBDCommit},
 		{src: b.OMSrc, commit: testOMCommit},
+		{src: b.GTSrc, commit: testRev},
 	}
 	if len(run.adds) != len(want) {
 		t.Fatalf("made %d worktrees, want %d", len(run.adds), len(want))
@@ -248,8 +250,36 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 			t.Errorf("build %d ran in %q, want its worktree %q", i, run.calls[i].dir, got.dir)
 		}
 	}
-	if !reflect.DeepEqual(run.removed, []string{run.adds[0].dir, run.adds[1].dir, run.adds[2].dir}) {
+	if !reflect.DeepEqual(run.removed, []string{run.adds[0].dir, run.adds[1].dir, run.adds[2].dir, run.adds[3].dir}) {
 		t.Errorf("removed worktrees %q, want every worktree the builds added", run.removed)
+	}
+}
+
+// TestBuildBinariesBuildsTrackerdFromTheGTCommit: trackerd is compiled from
+// TrackerdPackage in a clean worktree of the gt checkout at the gt commit, to
+// its path under b.Out, with no -ldflags stamp.
+func TestBuildBinariesBuildsTrackerdFromTheGTCommit(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	paths, err := b.BuildBinaries(context.Background(), testRev)
+	if err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	trackerd := filepath.Join(b.Out, "trackerd")
+	if got := paths[len(paths)-1]; got != trackerd {
+		t.Fatalf("BuildBinaries last path = %q, want the trackerd build %q", got, trackerd)
+	}
+	call := run.calls[len(run.calls)-1]
+	wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", TrackerdPackage}
+	if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
+		t.Errorf("trackerd build argv = %q, want %q", call.argv, wantArgv)
+	}
+	add := run.adds[len(run.adds)-1]
+	if add.src != b.GTSrc || add.commit != testRev {
+		t.Errorf("trackerd worktree = checkout %s at %s, want the gt checkout %s at %s", add.src, add.commit, b.GTSrc, testRev)
+	}
+	if call.dir != add.dir {
+		t.Errorf("trackerd build ran in %q, want its worktree %q", call.dir, add.dir)
 	}
 }
 
@@ -513,6 +543,7 @@ func TestBuildBinariesFailsWithoutLeavingPartialOutput(t *testing.T) {
 		{"gt", GTPackage},
 		{"bd", BDPackage},
 		{"om", OMPackage},
+		{"trackerd", TrackerdPackage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

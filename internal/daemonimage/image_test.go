@@ -52,7 +52,7 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 
 // imageBinaryNames is the binaries the image copies from the root of its build
 // context.
-var imageBinaryNames = []string{"gt", "bd", "om", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
+var imageBinaryNames = []string{"gt", "bd", "om", "trackerd", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
 
 // imageBinaries is the list of the image's binaries, plugin binaries and mango
 // files in b.Out, in the order the Dockerfile copies them from its context.
@@ -223,7 +223,7 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 			*bins = (*bins)[:2]
 		}, want: "no om binary"},
 		{name: "the claude CLI missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
-			*bins = (*bins)[:3]
+			*bins = (*bins)[:4]
 		}, want: "no claude binary"},
 		{name: "the mango files missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
 			*bins = (*bins)[:len(*bins)-len(mangoNames)]
@@ -245,6 +245,62 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 				t.Errorf("a refused image ran %d docker calls, want none", len(run.calls))
 			}
 		})
+	}
+}
+
+// TestBuildImageRefusesAMissingTrackerd: a trackerd the image would COPY but that
+// is not in b.Out, or is absent from the binaries passed, is refused before
+// docker runs, and the refusal names trackerd.
+func TestBuildImageRefusesAMissingTrackerd(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		breakIt func(t *testing.T, b Builder, bins []string) []string
+		want    string
+	}{
+		{name: "a trackerd not on disk", breakIt: func(t *testing.T, b Builder, bins []string) []string {
+			if err := os.Remove(filepath.Join(b.Out, "trackerd")); err != nil {
+				t.Fatalf("removing the trackerd binary: %v", err)
+			}
+			return bins
+		}, want: "is not a file in"},
+		{name: "a trackerd missing from the list", breakIt: func(_ *testing.T, _ Builder, bins []string) []string {
+			return slices.DeleteFunc(bins, func(p string) bool { return filepath.Base(p) == "trackerd" })
+		}, want: "no trackerd binary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, run := imageBuilder(t)
+			bins := tc.breakIt(t, b, imageBinaries(b))
+			tag, err := b.BuildImage(context.Background(), testRev, bins)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("BuildImage = %q, %v; want an error naming %q", tag, err, tc.want)
+			}
+			if len(run.calls) != 0 {
+				t.Errorf("a refused image ran %d docker calls, want none", len(run.calls))
+			}
+		})
+	}
+}
+
+// TestDaemonDockerfileCopiesTrackerd: the image ships trackerd at
+// /usr/local/bin/trackerd by one COPY of mode 0755 from the build context, beside
+// the gt COPY.
+func TestDaemonDockerfileCopiesTrackerd(t *testing.T) {
+	t.Parallel()
+	var got []string
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		if in.cmd != "COPY" {
+			continue
+		}
+		_, src, _ := copyOperands(in.args)
+		if src == "trackerd" {
+			got = append(got, in.cmd+" "+strings.Join(in.args, " "))
+		}
+	}
+	want := []string{"COPY --chmod=0755 trackerd /usr/local/bin/trackerd"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s copies trackerd as %q, want %q", DockerfilePath, got, want)
 	}
 }
 

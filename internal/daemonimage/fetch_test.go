@@ -102,8 +102,8 @@ func TestFetchSourceByURLAtThePinnedCommit(t *testing.T) {
 		if len(run.adds) < 2 || run.adds[1].src != dir {
 			t.Errorf("the bd worktrees were made from %v, want the fetched tree %s", run.adds, dir)
 		}
-		if len(paths) != 3 {
-			t.Errorf("BuildBinaries returned %v, want the three binaries", paths)
+		if len(paths) != 4 {
+			t.Errorf("BuildBinaries returned %v, want the four binaries", paths)
 		}
 		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("the fetched tree %s is still in the build context after the build (err %v)", dir, err)
@@ -154,8 +154,8 @@ func TestFetchSourceKeepsACheckoutFlagExactly(t *testing.T) {
 			t.Errorf("a worktree was made from %q, want a named checkout", add.src)
 		}
 	}
-	if len(paths) != 3 {
-		t.Errorf("BuildBinaries returned %v, want the three binaries", paths)
+	if len(paths) != 4 {
+		t.Errorf("BuildBinaries returned %v, want the four binaries", paths)
 	}
 
 	clone := filepath.Join(t.TempDir(), "town", "gastown", "mayor", "rig")
