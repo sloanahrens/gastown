@@ -96,46 +96,65 @@ func TestReadRepoFile_MainWinsOverAStaleClone(t *testing.T) {
 	}
 }
 
-// TestReadRepoFile_UntrackedOnMainFallsBackToTheClone keeps the clone's copy
-// reachable for a file the repo does not commit: the pre-gt-yj6g1 behaviour.
-func TestReadRepoFile_UntrackedOnMainFallsBackToTheClone(t *testing.T) {
+// TestReadRepoFile_UntrackedOnMainIsNotFound: a file the repo does not commit is
+// not found, even when the clone holds it. The clone's copy is never served
+// under main's name (gt-yj6g1).
+func TestReadRepoFile_UntrackedOnMainIsNotFound(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
 	bareRigRepo(t, f, townRoot, "mango", nil)
-	path := cloneFile(t, townRoot, "mango", ".gastown/settings.json", `{"type":"rig-settings"}`)
+	cloneFile(t, townRoot, "mango", ".gastown/settings.json", `{"type":"rig-settings"}`)
 
 	got, err := ReadRepoFile(fakeRepoOpener(f), townRoot, "mango", ".gastown/settings.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || string(got.Data) != `{"type":"rig-settings"}` {
-		t.Fatalf("Data = %q (found %v), want the clone's copy", got.Data, got.Found)
-	}
-	if got.Source != path {
-		t.Errorf("Source = %q, want the clone's path %q", got.Source, path)
+	if got.Found || got.Data != nil || got.Source != "" {
+		t.Fatalf("read = %+v, want not found: the clone's copy is not main's", got)
 	}
 }
 
-// TestReadRepoFile_NoRepoFallsBackToTheClone covers the rig whose clones are
-// all there is: no .repo.git at all.
-func TestReadRepoFile_NoRepoFallsBackToTheClone(t *testing.T) {
+// TestReadRepoFile_NoRepoIsNotFound covers a rig with no .repo.git at all: the
+// clone holds a file, and it is still not read.
+func TestReadRepoFile_NoRepoIsNotFound(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	path := cloneFile(t, townRoot, "mango", ".om.json", "{}\n")
+	cloneFile(t, townRoot, "mango", ".om.json", "{}\n")
 
 	got, err := ReadRepoFile(fakeRepoOpener(gitfake.New()), townRoot, "mango", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || got.Source != path {
-		t.Fatalf("read = %+v, want the clone's copy at %s", got, path)
+	if got.Found {
+		t.Fatalf("read = %+v, want not found: the rig has no repo to read main from", got)
 	}
 }
 
-// TestReadRepoFile_MainNotFetchedFallsBackToTheClone: a ref that is not there
-// is main having nothing to prefer, not a broken repo.
-func TestReadRepoFile_MainNotFetchedFallsBackToTheClone(t *testing.T) {
+// TestReadRepoFile_RepoPathUnstatableFailsClosed: a .repo.git path that cannot
+// be stat'ed for a reason other than absence is an error naming the rig, not
+// a rig with no repo. A regular file where the rig directory should be makes
+// the stat fail with ENOTDIR.
+func TestReadRepoFile_RepoPathUnstatableFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, "mango"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadRepoFile(fakeRepoOpener(gitfake.New()), townRoot, "mango", ".om.json")
+	if err == nil {
+		t.Fatalf("ReadRepoFile = %+v, want an error for a repo path that cannot be stat'ed", got)
+	}
+	if !strings.Contains(err.Error(), "mango") {
+		t.Errorf("error %q does not name the rig", err)
+	}
+}
+
+// TestReadRepoFile_MainNotFetchedIsNotFound: a ref that is not there is main
+// having nothing to read, not a broken repo, and the clone is not read in its
+// place.
+func TestReadRepoFile_MainNotFetchedIsNotFound(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
@@ -148,8 +167,8 @@ func TestReadRepoFile_MainNotFetchedFallsBackToTheClone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || !strings.Contains(string(got.Data), "stale") {
-		t.Fatalf("Data = %q (found %v), want the clone's copy", got.Data, got.Found)
+	if got.Found {
+		t.Fatalf("read = %+v, want not found: no fetched main to read", got)
 	}
 }
 
@@ -195,62 +214,49 @@ func TestReadRepoFile_UnreadableShowFailsClosed(t *testing.T) {
 	}
 }
 
-// TestReadRepoFile_FileNotOnMainIsTheClone's: main answered for the path and
-// carries no such file, so what the clone still holds is the clone's copy — a
-// rubric main deleted must not read as one main carries (gt-yj6g1).
-func TestReadRepoFile_FileNotOnMainIsTheClone(t *testing.T) {
+// TestReadRepoFile_FileNotOnMainIsNotFound: main answered for the path and
+// carries no such file, so the clone's leftover copy is not main's and is not
+// read — a rubric main deleted must not read as one main carries (gt-yj6g1).
+func TestReadRepoFile_FileNotOnMainIsNotFound(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigRepoDir(t, townRoot, "mango-deleted-on-main")
-	path := cloneFile(t, townRoot, "mango-deleted-on-main", ".om.json", `{"deleted":true}`)
+	cloneFile(t, townRoot, "mango-deleted-on-main", ".om.json", `{"deleted":true}`)
 
 	got, err := ReadRepoFile(
 		stubOpener(stubRepo{refExists: true, fileErr: git.ErrNotAtRef}), townRoot, "mango-deleted-on-main", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || got.Source != path {
-		t.Fatalf("read = %+v, want the clone's copy at %s", got, path)
-	}
-	if !strings.Contains(got.Fallback, "origin/main does not carry it") {
-		t.Errorf("Fallback = %q, want main named as not carrying the file", got.Fallback)
-	}
-	if !RepoFileCloneFallbackWarned("mango-deleted-on-main", ".om.json") {
-		t.Error("the clone-sourced answer was not reported")
+	if got.Found || got.Data != nil || got.Source != "" {
+		t.Fatalf("read = %+v, want not found: main does not carry the file", got)
 	}
 }
 
-// TestReadRepoFile_NoFetchedMainIsTheClone's: a repo with no origin/<branch>
-// ref has no main to prefer, so the clone's copy answers — reported as the
-// clone's, which is the answer a rig that never fetches its repo would
-// otherwise serve as main's (gt-yj6g1).
-func TestReadRepoFile_NoFetchedMainIsTheClone(t *testing.T) {
+// TestReadRepoFile_NoFetchedMainIsNotFound: a repo with no origin/<branch> ref
+// has no main to read, so the clone's copy is not served in its place
+// (gt-yj6g1).
+func TestReadRepoFile_NoFetchedMainIsNotFound(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigRepoDir(t, townRoot, "mango-unfetched")
-	path := cloneFile(t, townRoot, "mango-unfetched", ".om.json", `{"unfetched":true}`)
+	cloneFile(t, townRoot, "mango-unfetched", ".om.json", `{"unfetched":true}`)
 
 	got, err := ReadRepoFile(stubOpener(stubRepo{}), townRoot, "mango-unfetched", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || got.Source != path {
-		t.Fatalf("read = %+v, want the clone's copy at %s", got, path)
-	}
-	if !strings.Contains(got.Fallback, "no origin/main ref") {
-		t.Errorf("Fallback = %q, want the missing ref named", got.Fallback)
-	}
-	if !RepoFileCloneFallbackWarned("mango-unfetched", ".om.json") {
-		t.Error("the clone-sourced answer was not reported")
+	if got.Found {
+		t.Fatalf("read = %+v, want not found: the repo has no fetched main", got)
 	}
 }
 
-// TestReadRepoFile_MainAnswersWithoutAFallback: a read main answers carries no
-// fallback, which is what tells a caller that must follow main the two apart.
-func TestReadRepoFile_MainAnswersWithoutAFallback(t *testing.T) {
+// TestReadRepoFile_MainAnswersWithMainsSource: a read main answers is main's
+// copy, with Source naming origin/<branch> and the repo it came from.
+func TestReadRepoFile_MainAnswersWithMainsSource(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	rigRepoDir(t, townRoot, "mango-on-main")
+	repo := rigRepoDir(t, townRoot, "mango-on-main")
 	cloneFile(t, townRoot, "mango-on-main", ".om.json", `{"stale":true}`)
 
 	got, err := ReadRepoFile(
@@ -261,8 +267,8 @@ func TestReadRepoFile_MainAnswersWithoutAFallback(t *testing.T) {
 	if string(got.Data) != `{"from":"main"}` {
 		t.Errorf("Data = %q, want main's copy", got.Data)
 	}
-	if got.Fallback != "" {
-		t.Errorf("Fallback = %q, want empty for an answer main gave", got.Fallback)
+	if want := "origin/main in " + repo; got.Source != want {
+		t.Errorf("Source = %q, want %q", got.Source, want)
 	}
 }
 

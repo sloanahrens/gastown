@@ -10,14 +10,13 @@ import (
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
-func setupRigWithRubric(t *testing.T, tmpDir, rigName string, editorialConfig string) string {
+// setupRigWithRubric makes a rig whose repo main carries the rubric, with
+// editorialConfig as its config.json when it is not empty, and returns the fake
+// world the check reads the repo through.
+func setupRigWithRubric(t *testing.T, tmpDir, rigName string, editorialConfig string) *gitfake.Fake {
 	t.Helper()
 	rigPath := filepath.Join(tmpDir, rigName)
-	rubricDir := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(rubricDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rubricDir, ".om.json"), []byte(`{"rubric":[]}`), 0644); err != nil {
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if editorialConfig != "" {
@@ -25,17 +24,17 @@ func setupRigWithRubric(t *testing.T, tmpDir, rigName string, editorialConfig st
 			t.Fatal(err)
 		}
 	}
-	return rigPath
+	return rigRepoWithRubric(t, tmpDir, rigName, map[string]string{".om.json": `{"rubric":[]}`})
 }
 
 func TestEditorialRequiredCheck_RubricPresentRequiredFalse(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
-	setupRigWithRubric(t, tmpDir, rigName, `{"merge_queue":{"editorial":{"required":false}}}`)
+	f := setupRigWithRubric(t, tmpDir, rigName, `{"merge_queue":{"editorial":{"required":false}}}`)
 
 	check := NewEditorialRequiredCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f)
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning, got %v: %s", result.Status, result.Message)
@@ -46,10 +45,10 @@ func TestEditorialRequiredCheck_RubricPresentNoConfigAtAll(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
-	setupRigWithRubric(t, tmpDir, rigName, "")
+	f := setupRigWithRubric(t, tmpDir, rigName, "")
 
 	check := NewEditorialRequiredCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f)
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning when required is unset, got %v: %s", result.Status, result.Message)
@@ -63,11 +62,11 @@ func TestEditorialRequiredCheck_RubricPresentRequiredTrue(t *testing.T) {
 	// A rig config.json carries identity as well as merge_queue: with one
 	// loader for the file (gt-y3pgh.2.5) an identity-less file no longer
 	// decodes, so the fixture is shaped like a real one.
-	setupRigWithRubric(t, tmpDir, rigName,
+	f := setupRigWithRubric(t, tmpDir, rigName,
 		`{"type":"rig","version":1,"name":"testrig","merge_queue":{"editorial":{"required":true}}}`)
 
 	check := NewEditorialRequiredCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f)
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK, got %v: %s", result.Status, result.Message)
@@ -165,26 +164,64 @@ func TestEditorialRequiredCheck_UnreadableRepoWarnsNamingRig(t *testing.T) {
 	}
 }
 
-// TestEditorialRequiredCheck_RubricOnlyInTheCloneWarns: the clone's copy is not
-// the rubric main carries, and a rubric deleted on main while the clone still
-// holds it must not read as one the rig has — even with editorial review on,
-// which is what would otherwise report the enforcement in place (gt-yj6g1).
-func TestEditorialRequiredCheck_RubricOnlyInTheCloneWarns(t *testing.T) {
+// writeStaleCloneRubric puts a rubric in the rig's mayor/rig clone, the copy
+// main no longer carries, so a check that read the clone would see a rubric.
+func writeStaleCloneRubric(t *testing.T, tmpDir, rigName string) {
+	t.Helper()
+	cloneDir := filepath.Join(tmpDir, rigName, "mayor", "rig")
+	if err := os.MkdirAll(cloneDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, ".om.json"), []byte(`{"rubric":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEditorialRequiredCheck_RubricOnlyInTheCloneIsNoRubric: a rubric deleted on
+// main while the clone still holds it is not a rubric the rig has. A rig that
+// requires editorial review with no rubric on main warns and names the rig and
+// .om.json; the clone's copy does not make the rubric enforced (gt-yj6g1).
+func TestEditorialRequiredCheck_RubricOnlyInTheCloneIsNoRubric(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
-	// The clone has the rubric and the rig requires editorial review; main
-	// carries no rubric at all.
-	setupRigWithRubric(t, tmpDir, rigName,
-		`{"type":"rig","version":1,"name":"testrig","merge_queue":{"editorial":{"required":true}}}`)
+	writeStaleCloneRubric(t, tmpDir, rigName)
+	config := `{"type":"rig","version":1,"name":"testrig","merge_queue":{"editorial":{"required":true}}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, rigName, "config.json"), []byte(config), 0644); err != nil {
+		t.Fatal(err)
+	}
 	f := rigRepoWithRubric(t, tmpDir, rigName, map[string]string{"README.md": "# testrig\n"})
 
 	check := NewEditorialRequiredCheck()
 	result := check.Run(withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f))
 	if result.Status != StatusWarning {
-		t.Fatalf("expected StatusWarning for a rubric only the clone carries, got %v: %s", result.Status, result.Message)
+		t.Fatalf("expected StatusWarning for required editorial with no rubric on main, got %v: %s", result.Status, result.Message)
 	}
-	if !strings.Contains(result.Message, "main") {
-		t.Errorf("message %q does not name main as the copy without the rubric", result.Message)
+	if !strings.Contains(result.Message, rigName) || !strings.Contains(result.Message, ".om.json") {
+		t.Errorf("message = %q, want it to name rig %q and .om.json", result.Message, rigName)
+	}
+}
+
+// TestEditorialRequiredCheck_RubricOnlyInTheCloneRequiredFalseIsOK is the twin
+// of the required case: with editorial review not required and no rubric on
+// main, the clone's stale copy is ignored and the rig reads as having no rubric.
+func TestEditorialRequiredCheck_RubricOnlyInTheCloneRequiredFalseIsOK(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	writeStaleCloneRubric(t, tmpDir, rigName)
+	config := `{"type":"rig","version":1,"name":"testrig","merge_queue":{"editorial":{"required":false}}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, rigName, "config.json"), []byte(config), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f := rigRepoWithRubric(t, tmpDir, rigName, map[string]string{"README.md": "# testrig\n"})
+
+	check := NewEditorialRequiredCheck()
+	result := check.Run(withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f))
+	if result.Status != StatusOK {
+		t.Fatalf("expected StatusOK when editorial is not required, got %v: %s", result.Status, result.Message)
+	}
+	if result.Message != "No .om.json rubric in rig repo" {
+		t.Errorf("message = %q, want no rubric in the rig repo", result.Message)
 	}
 }

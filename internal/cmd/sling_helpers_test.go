@@ -634,12 +634,13 @@ func TestLoadRigCommandVarsReadsRigRootMergeQueue(t *testing.T) {
 	}
 }
 
-// TestLoadRigCommandVarsPrecedence verifies the three-tier merge order
-// mandated by gt-e50d's narrowed fix: rig root config.json is the floor,
-// the repo-committed .gastown/settings.json overrides it, and rig-local
-// settings/config.json has the final say. Each tier sets a distinct command
-// so the test fails if rootMQ and repoMQ are ever collapsed into a single
-// "floor" or their precedence is flipped.
+// TestLoadRigCommandVarsPrecedence verifies the merge order mandated by
+// gt-e50d's narrowed fix: rig root config.json is the floor and rig-local
+// settings/config.json has the final say. The repo-committed
+// .gastown/settings.json is main's copy (gt-yj6g1), and this rig has no repo
+// whose main carries one, so the clone's copy is not read and the floor
+// answers. The repo tier's precedence over the floor is pinned by the rig
+// package's ResolveMergeQueueConfigIn tests, which read it through a fake repo.
 func TestLoadRigCommandVarsPrecedence(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -671,8 +672,8 @@ func TestLoadRigCommandVarsPrecedence(t *testing.T) {
 		t.Fatalf("write rig config.json: %v", err)
 	}
 
-	// Repo-committed settings override the floor for build and test, but
-	// leave lint unset so it must fall through to the rig-root floor.
+	// Settings the clone holds for the repo tier. They are not main's copy, so
+	// they must not override the floor.
 	repoSettings := `{
   "type": "rig-settings",
   "version": 1,
@@ -708,8 +709,8 @@ func TestLoadRigCommandVarsPrecedence(t *testing.T) {
 
 	want := map[string]string{
 		"build_command": "make build-local", // rig-local wins over both repo and root
-		"test_command":  "make test-repo",   // repo wins over root floor
-		"lint_command":  "make lint-root",   // neither repo nor local set it — falls to root floor
+		"test_command":  "make test-root",   // the clone's repo settings are not read — root floor
+		"lint_command":  "make lint-root",   // nothing else sets it — root floor
 	}
 	for key, wantVal := range want {
 		if gotVal, ok := got[key]; !ok || gotVal != wantVal {

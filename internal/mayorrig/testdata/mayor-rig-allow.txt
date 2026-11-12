@@ -39,7 +39,6 @@ internal/daemon/types.go	1	pending-retirement	daemon types: the daemon.json path
 internal/daemonimage/build.go	1	pending-retirement	daemonimage build: the error text that refuses a mayor/rig clone as a build source
 internal/doctor/branch_check.go	1	pending-retirement	doctor branch check: the mayor/rig path in its checkout list
 internal/doctor/dolt_stray_servers_check.go	1	pending-retirement	doctor dolt stray servers check: the rig's mayor/rig/.beads path it scans
-internal/doctor/editorial_required_check.go	1	pending-retirement	doctor editorial check: message naming the mayor/rig clone's .om.json
 internal/doctor/foreign_remote_check.go	1	pending-retirement	doctor foreign remote check: message naming mayor/rig as the place for rig remotes
 internal/doctor/hooks_path_all_rigs_check.go	1	pending-retirement	doctor hooks path check: the mayor/rig clone it checks for each rig
 internal/doctor/migration_check.go	1	pending-retirement	doctor migration check: the rig's mayor/rig/.beads directory
@@ -57,7 +56,6 @@ internal/mail/router.go	1	pending-retirement	mail router: the constants.DirMayor
 internal/metrics/source_config.go	1	pending-retirement	metrics source config: the .om.json path under the rig's mayor/rig checkout
 internal/nudge/deliver/town.go	1	pending-retirement	nudge delivery: the constants.DirMayor target prefix, which is not the clone path
 internal/rig/manager.go	5	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
-internal/rig/repofile.go	2	pending-retirement	rig repo file: reads files from the rig's mayor/rig clone, and its warning text
 internal/rig/types.go	2	pending-retirement	rig types: the mayor/rig entry in the rig directory list, and the RigMayorPath call that builds the checkout path
 internal/sandbox/skeleton.go	1	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
 internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the constants.DirMayor path to the rigs registry
