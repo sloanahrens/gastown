@@ -2090,22 +2090,16 @@ An item still standing with no disposition is `clears_on_its_own` false once its
 inside it; one whose life the queue files no longer hold is unlabeled. A bead read that fails for any reason other
 than not-found fails the report.
 
-The `landing` battery reads `.runtime/jev/landing.jsonl`. A landing's label
-comes from a review of its logged head, and every label records its source,
-`overseer` or `polecat`; the report counts each question's labels by source. The
-overseer's note on the bead wins: the latest `OVERSEER REVIEW <head> PASS|FAIL`
-line for the logged head, read with the parser the risk-path attention item
-uses. When the notes hold no such verdict — none, or a `WAIVED` or `AUDITED`
-line — the label comes from the bead's polecat review document,
-`docs/reviews/<date>-<bead>.md` on the bare clone's `main`, whose verdict line
-is `POLECAT REVIEW <head> PASS|FAIL[: <the defect>]`; the head may be
-abbreviated to at least 7 hex digits, as a review document usually names it. A
-clone that cannot be read fails the report, as a missing rig does: otherwise
-every landing it would have labeled would read as unreviewed with a clean exit.
-A `PASS` from either source sets `needs_review_now` and `risk` false
-(`landing:review-pass`), a `FAIL` sets both true (`landing:review-fail`), and a
-head neither review records leaves the item unlabeled. The finding beads a
-`FAIL` names in the bead's notes are counted in the report's context.
+The `landing` battery reads `.runtime/jev/landing.jsonl`. A landing's labels come
+from the om verdict on its bead's first attempt in
+`.runtime/landings/reviews.jsonl`, read as `firstAttemptRejected` in
+`internal/jev/scorecard/landing.go` reads it. A rejection sets
+`needs_review_now` and `risk` true (`landing:first-attempt-rejected`), and an
+approval sets both false (`landing:first-attempt-approved`). A landing logged at
+or after that first verdict, a bead with no first attempt in the log, and a
+first attempt that is neither an approval nor a rejection are unlabeled. A
+review log that exists but cannot be read fails the report; a log that does not
+exist yet has no records.
 
 The `submission` battery reads `.runtime/jev/submission.jsonl`, the submission
 battery's log. Each line is joined to the om review that judged it: the first
