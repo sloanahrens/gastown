@@ -169,6 +169,29 @@ func TestHourlyAcrossADSTChange(t *testing.T) {
 		}
 	})
 
+	t.Run("fall back starts a window in the second repeated hour", func(t *testing.T) {
+		t.Parallel()
+		second := time.Date(2026, 11, 1, 7, 0, 0, 0, time.UTC) // 01:00 CST, the second 01:00
+		firstHour := second.Add(30 * time.Minute)              // 01:30 CST
+		landings := []Landing{
+			{At: second.Add(-20 * time.Minute), PolecatSecs: 600}, // 01:40 CDT, before the window: 8 points, ignored
+			{At: second.Add(10 * time.Minute), PolecatSecs: 60},   // 01:10 CST
+			{At: second.Add(70 * time.Minute), PolecatSecs: 60},   // 02:10 CST
+		}
+
+		s := Hourly(landings, nil, firstHour, 2, loc)
+
+		wantHours(t, "all", s.Classes[AllClass], []hourWant{
+			{points: 1, weighted: 1},
+			{points: 1, weighted: 1},
+		})
+		for i, hp := range s.Classes[AllClass] {
+			if want := second.Add(time.Duration(i) * time.Hour); !hp.Hour.Equal(want) {
+				t.Errorf("hour %d starts at %s, want %s", i, hp.Hour, want)
+			}
+		}
+	})
+
 	t.Run("fall back keeps both occurrences of the repeated hour", func(t *testing.T) {
 		t.Parallel()
 		base := time.Date(2026, 11, 1, 0, 0, 0, 0, loc) // 00:00 CDT
