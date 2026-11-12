@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,16 +126,19 @@ func TestRefOutcomeChecksReadExitStatus(t *testing.T) {
 }
 
 // scanExitStatusTextMatches lists the non-test Go files under dir, at any
-// depth, that call strings.Contains with a string literal holding
-// "exit status". A comment that mentions the phrase is not a call and is not
-// listed. A file is parsed only when its text holds the phrase, so a literal
-// that spells it with an escape is outside this guard's reach; the guard
-// exists to stop the plain text match from coming back.
+// depth, that call strings.Contains with an argument holding "exit status":
+// a string literal, or a named constant declared in the same file or in a
+// non-test sibling file of the same directory. A comment that mentions the
+// phrase is not a call and is not listed. A file is parsed only when its text
+// holds the phrase or a Contains call, so a literal that spells the phrase
+// with an escape, or a constant of another package, is outside this guard's
+// reach; the guard exists to stop the plain text match from coming back.
 //
 // It returns the number of files it judged so a caller can tell an empty tree
 // from a clean one, and an error for a walk or parse it could not complete:
 // an unreadable tree is never reported as clean.
 func scanExitStatusTextMatches(dir string) (matches []string, judged int, err error) {
+	siblingConsts := map[string]map[string]string{}
 	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -146,7 +150,7 @@ func scanExitStatusTextMatches(dir string) (matches []string, judged int, err er
 		if readErr != nil {
 			return readErr
 		}
-		if !bytes.Contains(src, []byte("exit status")) {
+		if !bytes.Contains(src, []byte("exit status")) && !bytes.Contains(src, []byte("Contains")) {
 			return nil
 		}
 		f, parseErr := parser.ParseFile(token.NewFileSet(), path, src, 0)
@@ -154,7 +158,13 @@ func scanExitStatusTextMatches(dir string) (matches []string, judged int, err er
 			return fmt.Errorf("parsing %s: %w", path, parseErr)
 		}
 		judged++
-		if callsContainsExitStatus(f) {
+		pkgConsts, constErr := packageExitStatusConsts(filepath.Dir(path), siblingConsts)
+		if constErr != nil {
+			return constErr
+		}
+		consts := maps.Clone(pkgConsts)
+		collectStringConsts(f, consts)
+		if callsContainsExitStatus(f, consts) {
 			matches = append(matches, path)
 		}
 		return nil
@@ -166,11 +176,94 @@ func scanExitStatusTextMatches(dir string) (matches []string, judged int, err er
 	return matches, judged, nil
 }
 
+// packageExitStatusConsts returns the string constants declared in the
+// non-test Go files directly under dir that hold the phrase, keyed by name.
+// The result is cached per dir in cache. A sibling file that holds the phrase
+// is parsed; one that does not cannot declare a constant with it.
+func packageExitStatusConsts(dir string, cache map[string]map[string]string) (map[string]string, error) {
+	if consts, ok := cache[dir]; ok {
+		return consts, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	consts := map[string]string{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		src, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if !bytes.Contains(src, []byte("exit status")) {
+			continue
+		}
+		f, parseErr := parser.ParseFile(token.NewFileSet(), path, src, 0)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, parseErr)
+		}
+		collectStringConsts(f, consts)
+	}
+	cache[dir] = consts
+	return consts, nil
+}
+
+// collectStringConsts adds to into every constant of f whose value is a
+// string literal, at any scope. A name that a local variable shadows is still
+// taken as the constant, which errs toward flagging.
+func collectStringConsts(f *ast.File, into map[string]string) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		decl, ok := n.(*ast.GenDecl)
+		if !ok || decl.Tok != token.CONST {
+			return true
+		}
+		for _, spec := range decl.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					break
+				}
+				if v, ok := stringLiteral(vs.Values[i]); ok {
+					into[name.Name] = v
+				}
+			}
+		}
+		return true
+	})
+}
+
+// stringLiteral returns the value of expr when it is a string literal.
+func stringLiteral(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	return v, err == nil
+}
+
+// stringArg returns the string an argument holds: a name that consts maps, or
+// a string literal.
+func stringArg(arg ast.Expr, consts map[string]string) (string, bool) {
+	if id, ok := arg.(*ast.Ident); ok {
+		v, found := consts[id.Name]
+		return v, found
+	}
+	return stringLiteral(arg)
+}
+
 // callsContainsExitStatus reports whether f calls the strings package's
-// Contains with a string literal holding "exit status". An aliased import of
-// strings and a dot import are both followed, so only renaming the method
-// escapes it.
-func callsContainsExitStatus(f *ast.File) bool {
+// Contains with an argument holding "exit status": a string literal, or an
+// identifier that consts maps to such a literal. An aliased import of strings
+// and a dot import are both followed, so only renaming the method escapes it.
+func callsContainsExitStatus(f *ast.File, consts map[string]string) bool {
 	stringsName, dotImport := stringsImportName(f)
 	if stringsName == "" && !dotImport {
 		return false
@@ -195,12 +288,8 @@ func callsContainsExitStatus(f *ast.File) bool {
 			return true
 		}
 		for _, arg := range call.Args {
-			lit, isLit := arg.(*ast.BasicLit)
-			if !isLit || lit.Kind != token.STRING {
-				continue
-			}
-			v, unquoteErr := strconv.Unquote(lit.Value)
-			if unquoteErr == nil && strings.Contains(v, "exit status") {
+			v, isString := stringArg(arg, consts)
+			if isString && strings.Contains(v, "exit status") {
 				found = true
 				return false
 			}
@@ -283,5 +372,100 @@ func TestExitStatusTextGuardDetectsMatch(t *testing.T) {
 	}
 	if judged != 3 {
 		t.Errorf("judged %d files, want the three non-test files holding the phrase", judged)
+	}
+}
+
+// TestExitStatusTextGuardResolvesNamedConstant drives the guard through a
+// call whose argument is a named constant: the constant is resolved in the
+// call's own file and in a sibling non-test file of its directory. A constant
+// without the phrase, or one declared only in a test file, is not a match.
+func TestExitStatusTextGuardResolvesNamedConstant(t *testing.T) {
+	t.Parallel()
+
+	const useSrc = "package x\n\nimport \"strings\"\n\nfunc banned(err error) bool {\n\treturn strings.Contains(err.Error(), exitText)\n}\n"
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  []string
+	}{
+		{
+			name: "constant in the same file",
+			files: map[string]string{
+				"named.go": "package x\n\nimport \"strings\"\n\nconst exitText = \"exit status 1\"\n\nfunc banned(err error) bool {\n\treturn strings.Contains(err.Error(), exitText)\n}\n",
+			},
+			want: []string{"named.go"},
+		},
+		{
+			name: "constant in a sibling file",
+			files: map[string]string{
+				"consts.go": "package x\n\nconst exitText = \"exit status 1\"\n",
+				"use.go":    useSrc,
+			},
+			want: []string{"use.go"},
+		},
+		{
+			name: "constant without the phrase",
+			files: map[string]string{
+				"consts.go": "package x\n\nconst exitText = \"exit\"\n",
+				"use.go":    useSrc,
+			},
+		},
+		{
+			name: "constant declared only in a test file",
+			files: map[string]string{
+				"consts_test.go": "package x\n\nconst exitText = \"exit status 1\"\n",
+				"use.go":         useSrc,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			for name, src := range tt.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			matches, _, err := scanExitStatusTextMatches(dir)
+			if err != nil {
+				t.Fatalf("scanning fixture: %v", err)
+			}
+			var want []string
+			for _, name := range tt.want {
+				want = append(want, filepath.Join(dir, name))
+			}
+			if !reflect.DeepEqual(matches, want) {
+				t.Errorf("matches = %v, want %v", matches, want)
+			}
+		})
+	}
+}
+
+// TestExitStatusTextGuardFailsOnUnparsableSibling: a sibling file that holds
+// the phrase but does not parse could declare the constant a call uses, so the
+// guard cannot judge the call. It returns an error rather than a clean scan.
+func TestExitStatusTextGuardFailsOnUnparsableSibling(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		// a_use.go sorts first, so the walk reaches the call before the broken
+		// sibling and the constant lookup is what reports the parse error.
+		"a_use.go":  "package x\n\nimport \"strings\"\n\nfunc banned(err error) bool {\n\treturn strings.Contains(err.Error(), exitText)\n}\n",
+		"broken.go": "package x\n\nconst exitText = \"exit status 1\"\n\nfunc (\n",
+	}
+	for name, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	matches, _, err := scanExitStatusTextMatches(dir)
+	if err == nil {
+		t.Fatalf("matches = %v with no error, want the parse error for broken.go", matches)
+	}
+	if matches != nil {
+		t.Errorf("matches = %v alongside the error, want none", matches)
 	}
 }

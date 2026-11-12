@@ -3344,3 +3344,85 @@ func TestIntegrationFullRangeCommitSummariesListsAMergedInForeignCommit(t *testi
 		}
 	}
 }
+
+// TestIntegrationRefExistenceReadsRealExitStatus runs the exit-status outcome
+// checks against real git. A ref that is there is found, a ref that is not is
+// an ordinary "no" with no error, and a directory outside any repository is an
+// error, never a "no" (git exits 128 there, whose text contains "exit status 1").
+func TestIntegrationRefExistenceReadsRealExitStatus(t *testing.T) {
+	t.Parallel()
+	local, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(local)
+
+	tests := []struct {
+		name  string
+		check func(*Git) (bool, error)
+		want  bool
+	}{
+		{"BranchExists present", func(g *Git) (bool, error) { return g.BranchExists(mainBranch) }, true},
+		{"BranchExists missing", func(g *Git) (bool, error) { return g.BranchExists("no-such-branch") }, false},
+		{"RefExists qualified present", func(g *Git) (bool, error) { return g.RefExists("refs/heads/" + mainBranch) }, true},
+		{"RefExists qualified missing", func(g *Git) (bool, error) { return g.RefExists("refs/heads/no-such-branch") }, false},
+		{"RemoteTrackingBranchExists present", func(g *Git) (bool, error) { return g.RemoteTrackingBranchExists("origin", mainBranch) }, true},
+		{"RemoteTrackingBranchExists missing", func(g *Git) (bool, error) { return g.RemoteTrackingBranchExists("origin", "no-such-branch") }, false},
+		{"IsEmpty with refs", func(g *Git) (bool, error) { return g.IsEmpty() }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.check(g)
+			if err != nil {
+				t.Fatalf("error = %v, want none", err)
+			}
+			if got != tt.want {
+				t.Errorf("answer = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIntegrationRefExistenceFatalIsErrorNotAnswer runs the same checks in a
+// directory that is not a repository, where git exits 128. Each must return
+// the error, not an ordinary "no" or "empty".
+func TestIntegrationRefExistenceFatalIsErrorNotAnswer(t *testing.T) {
+	t.Parallel()
+	g := NewGit(t.TempDir())
+
+	tests := []struct {
+		name  string
+		check func(*Git) (bool, error)
+	}{
+		{"BranchExists", func(g *Git) (bool, error) { return g.BranchExists("main") }},
+		{"RefExists qualified", func(g *Git) (bool, error) { return g.RefExists("refs/heads/main") }},
+		{"IsEmpty", func(g *Git) (bool, error) { return g.IsEmpty() }},
+		{"RemoteTrackingBranchExists", func(g *Git) (bool, error) { return g.RemoteTrackingBranchExists("origin", "main") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.check(g)
+			if err == nil {
+				t.Fatalf("answer = %v with no error, want the fatal git error", got)
+			}
+			if got {
+				t.Errorf("answer = true alongside the error, want false")
+			}
+		})
+	}
+}
+
+// TestIntegrationIsEmptyReadsNoRefsAsEmpty pins the one exit-status answer
+// that is "yes": a freshly initialised repository with no refs is empty.
+func TestIntegrationIsEmptyReadsNoRefsAsEmpty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runGitTestCmd(t, dir, "init", "-q")
+
+	got, err := NewGit(dir).IsEmpty()
+	if err != nil {
+		t.Fatalf("IsEmpty: %v", err)
+	}
+	if !got {
+		t.Errorf("IsEmpty = false on a repository with no refs, want true")
+	}
+}
