@@ -41,14 +41,14 @@ func TestGitHygieneRepoPath(t *testing.T) {
 		name string
 		// layout is what the rig root holds: "bare" for the shared .repo.git,
 		// "emptybare" for a directory with that name and no repository behind
-		// it, "clone" for a mayor/rig working tree.
+		// it, "clone" for a refinery/rig working tree.
 		layout []string
 		want   string // the repository to clean, relative to the rig root; "" for none
 	}{
 		{name: "shared bare repo only", layout: []string{"bare"}, want: ".repo.git"},
 		{name: "bare repo beside the working clone", layout: []string{"bare", "clone"}, want: ".repo.git"},
-		{name: "working clone only", layout: []string{"clone"}, want: filepath.Join("mayor", "rig")},
-		{name: "empty .repo.git beside the working clone", layout: []string{"emptybare", "clone"}, want: filepath.Join("mayor", "rig")},
+		{name: "working clone only", layout: []string{"clone"}, want: filepath.Join("refinery", "rig")},
+		{name: "empty .repo.git beside the working clone", layout: []string{"emptybare", "clone"}, want: filepath.Join("refinery", "rig")},
 		{name: "empty .repo.git directory only", layout: []string{"emptybare"}, want: ""},
 		{name: "no repository", layout: nil, want: ""},
 	}
@@ -66,7 +66,7 @@ func TestGitHygieneRepoPath(t *testing.T) {
 					// The directory name with nothing behind it (gt-nm4b9).
 					mustMkdirAll(t, filepath.Join(rigRoot, ".repo.git"))
 				default:
-					mustMkdirAll(t, filepath.Join(rigRoot, "mayor", "rig", ".git"))
+					mustMkdirAll(t, filepath.Join(rigRoot, "refinery", "rig", ".git"))
 				}
 			}
 
@@ -86,7 +86,7 @@ func TestGitHygieneRepoPath(t *testing.T) {
 func TestGitHygieneRepoPath_LeavesRepoPathAlone(t *testing.T) {
 	t.Parallel()
 	rigRoot := t.TempDir()
-	clone := filepath.Join(rigRoot, "mayor", "rig")
+	clone := filepath.Join(rigRoot, "refinery", "rig")
 	mustMkdirAll(t, filepath.Join(rigRoot, ".repo.git"))
 	writeFile(t, filepath.Join(rigRoot, ".repo.git", "HEAD"), "ref: refs/heads/main\n")
 	mustMkdirAll(t, filepath.Join(clone, ".git"))
@@ -121,7 +121,7 @@ func TestRunGitHygiene_CleansMergedAndOrphanedBranches(t *testing.T) {
 	open := f.Commit(t, origin, "polecat/open", "open work", map[string]string{"o.txt": "o\n"})
 	f.Commit(t, origin, "polecat/live", "live work", map[string]string{"l.txt": "l\n"})
 
-	repo := filepath.Join(d.config.TownRoot, "r1", "mayor", "rig")
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
 	f.Clone(t, origin, repo)
 	// polecat/old's work landed on origin's main as a different commit (a
 	// rebase or squash), so its patch is on origin though its SHA is not.
@@ -190,7 +190,7 @@ func TestRunGitHygiene_KeepsRefsLandedThroughThePrune(t *testing.T) {
 	f.SetRef(t, origin, "refs/landed/gt-abc", landed)
 	f.SetRef(t, origin, "refs/heads/polecat/merged", base)
 
-	repo := filepath.Join(d.config.TownRoot, "r1", "mayor", "rig")
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
 	f.Clone(t, origin, repo)
 	f.SetRef(t, repo, "refs/landed/gt-abc", landed)
 	f.SetRef(t, repo, "refs/heads/polecat/done", base)
@@ -226,7 +226,7 @@ func TestRunGitHygiene_UnreadableOriginDeletesOnlyMergedBranches(t *testing.T) {
 	origin := filepath.Join(t.TempDir(), "origin.git")
 	f.InitBare(t, origin)
 	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
-	repo := filepath.Join(d.config.TownRoot, "r1", "mayor", "rig")
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
 	f.Clone(t, origin, repo)
 	f.SetRef(t, repo, "refs/heads/polecat/done", base)
 	f.SetRef(t, repo, "refs/heads/polecat/wip", base)
@@ -587,7 +587,7 @@ func TestRunGitHygiene_CleansTheBareRepoWhenTheRigAlsoHasAClone(t *testing.T) {
 	f.SetRef(t, bare, "refs/heads/main", base)
 	f.SetRef(t, bare, "refs/heads/done", base)
 
-	clone := filepath.Join(rigRoot, "mayor", "rig")
+	clone := filepath.Join(rigRoot, "refinery", "rig")
 	f.Clone(t, origin, clone)
 	f.SetRef(t, clone, "refs/heads/done", base)
 
@@ -605,7 +605,7 @@ func TestRunGitHygiene_CleansTheBareRepoWhenTheRigAlsoHasAClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := []string{"done", "main"}; !slices.Equal(cloneBranches, want) {
-		t.Errorf("mayor/rig branches = %v, want %v: the patrol must not clean the working clone", cloneBranches, want)
+		t.Errorf("refinery/rig branches = %v, want %v: the patrol must not clean the working clone", cloneBranches, want)
 	}
 	if !strings.Contains(logs.String(), bare) {
 		t.Errorf("log does not name the bare repo %s:\n%s", bare, logs.String())

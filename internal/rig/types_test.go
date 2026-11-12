@@ -223,20 +223,35 @@ func TestDefaultBranch_FallsBackToMain(t *testing.T) {
 func TestRepoPath(t *testing.T) {
 	t.Parallel()
 
-	t.Run("mayor clone when rig root is not a repo", func(t *testing.T) {
+	// A mayor/rig work tree is not a candidate: a rig whose only clone is there
+	// has no RepoPath, so callers fall back to the bare repo or report none.
+	t.Run("mayor clone is not a candidate", func(t *testing.T) {
 		t.Parallel()
 
 		rigPath := filepath.Join(t.TempDir(), "gastown")
 		mkClone(t, filepath.Join(rigPath, "mayor", "rig"))
 
 		r := Rig{Name: "gastown", Path: rigPath}
-		want := filepath.Join(rigPath, "mayor", "rig")
+		if got := r.RepoPath(); got != "" {
+			t.Errorf("RepoPath() = %q, want %q (mayor/rig is not a candidate)", got, "")
+		}
+	})
+
+	t.Run("mayor clone beside the refinery clone is ignored", func(t *testing.T) {
+		t.Parallel()
+
+		rigPath := filepath.Join(t.TempDir(), "gastown")
+		mkClone(t, filepath.Join(rigPath, "mayor", "rig"))
+		mkClone(t, filepath.Join(rigPath, "refinery", "rig"))
+
+		r := Rig{Name: "gastown", Path: rigPath}
+		want := filepath.Join(rigPath, "refinery", "rig")
 		if got := r.RepoPath(); got != want {
 			t.Errorf("RepoPath() = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("refinery clone when mayor clone is absent", func(t *testing.T) {
+	t.Run("refinery clone is the candidate", func(t *testing.T) {
 		t.Parallel()
 
 		rigPath := filepath.Join(t.TempDir(), "gastown")
@@ -254,7 +269,7 @@ func TestRepoPath(t *testing.T) {
 
 		rigPath := filepath.Join(t.TempDir(), "gastown")
 		mkClone(t, rigPath)
-		mkClone(t, filepath.Join(rigPath, "mayor", "rig"))
+		mkClone(t, filepath.Join(rigPath, "refinery", "rig"))
 
 		r := Rig{Name: "gastown", Path: rigPath}
 		if got := r.RepoPath(); got != rigPath {
@@ -276,10 +291,10 @@ func TestRepoPath(t *testing.T) {
 		if err := os.MkdirAll(rigPath, 0755); err != nil {
 			t.Fatalf("creating rig root: %v", err)
 		}
-		mkClone(t, filepath.Join(rigPath, "mayor", "rig"))
+		mkClone(t, filepath.Join(rigPath, "refinery", "rig"))
 
 		r := Rig{Name: "gastown", Path: rigPath}
-		want := filepath.Join(rigPath, "mayor", "rig")
+		want := filepath.Join(rigPath, "refinery", "rig")
 		if got := r.RepoPath(); got != want {
 			t.Errorf("RepoPath() = %q, want %q (town root must not leak through)", got, want)
 		}
@@ -289,14 +304,14 @@ func TestRepoPath(t *testing.T) {
 		t.Parallel()
 
 		rigPath := filepath.Join(t.TempDir(), "gastown")
-		bareDir := filepath.Join(rigPath, ".repo.git", "worktrees", "mayor")
+		bareDir := filepath.Join(rigPath, ".repo.git", "worktrees", "refinery")
 		if err := os.MkdirAll(bareDir, 0755); err != nil {
 			t.Fatalf("creating bare git dir: %v", err)
 		}
-		mkLinkedWorktree(t, filepath.Join(rigPath, "mayor", "rig"), bareDir)
+		mkLinkedWorktree(t, filepath.Join(rigPath, "refinery", "rig"), bareDir)
 
 		r := Rig{Name: "gastown", Path: rigPath}
-		want := filepath.Join(rigPath, "mayor", "rig")
+		want := filepath.Join(rigPath, "refinery", "rig")
 		if got := r.RepoPath(); got != want {
 			t.Errorf("RepoPath() = %q, want %q", got, want)
 		}
@@ -316,25 +331,24 @@ func TestRepoPath(t *testing.T) {
 		}
 	})
 
-	t.Run("dangling mayor clone is skipped for the refinery clone", func(t *testing.T) {
+	t.Run("dangling refinery clone beside a mayor clone returns empty", func(t *testing.T) {
 		t.Parallel()
 
 		rigPath := filepath.Join(t.TempDir(), "gastown")
-		mkDanglingWorktree(t, filepath.Join(rigPath, "mayor", "rig"))
-		mkClone(t, filepath.Join(rigPath, "refinery", "rig"))
+		mkDanglingWorktree(t, filepath.Join(rigPath, "refinery", "rig"))
+		mkClone(t, filepath.Join(rigPath, "mayor", "rig"))
 
 		r := Rig{Name: "gastown", Path: rigPath}
-		want := filepath.Join(rigPath, "refinery", "rig")
-		if got := r.RepoPath(); got != want {
-			t.Errorf("RepoPath() = %q, want %q (a dangling mayor clone is not a repository)", got, want)
+		if got := r.RepoPath(); got != "" {
+			t.Errorf("RepoPath() = %q, want %q (a dangling refinery clone is not a repository, and mayor/rig is not a candidate)", got, "")
 		}
 	})
 
-	t.Run("dangling mayor clone alone returns empty", func(t *testing.T) {
+	t.Run("dangling refinery clone alone returns empty", func(t *testing.T) {
 		t.Parallel()
 
 		rigPath := filepath.Join(t.TempDir(), "gastown")
-		mkDanglingWorktree(t, filepath.Join(rigPath, "mayor", "rig"))
+		mkDanglingWorktree(t, filepath.Join(rigPath, "refinery", "rig"))
 
 		r := Rig{Name: "gastown", Path: rigPath}
 		if got := r.RepoPath(); got != "" {

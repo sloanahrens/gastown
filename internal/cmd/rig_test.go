@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -61,6 +62,44 @@ func registeredRigTown(t *testing.T) string {
 	return townRoot
 }
 
+// noRigSessions is a tmux session list with nothing in it, so runRigListIn
+// never starts tmux from a unit test.
+func noRigSessions() ([]string, error) { return nil, nil }
+
+// TestRunRigListJSONRepoPathBareOnly: a rig whose only repository is the shared
+// .repo.git reports that directory as repo_path, not an empty value. The
+// working clone is not a candidate any more (gt-3lvcjz.30).
+func TestRunRigListJSONRepoPathBareOnly(t *testing.T) {
+	t.Parallel()
+
+	townRoot := registeredRigTown(t)
+	bare := filepath.Join(townRoot, "testrig", ".repo.git")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runRigListIn(townRoot, &out, true, noRigSessions); err != nil {
+		t.Fatalf("runRigListIn: %v", err)
+	}
+	var rigs []struct {
+		Name     string `json:"name"`
+		RepoPath string `json:"repo_path"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rigs); err != nil {
+		t.Fatalf("--json output %q does not decode: %v", out.String(), err)
+	}
+	if len(rigs) != 1 || rigs[0].Name != "testrig" {
+		t.Fatalf("--json rigs = %+v, want one rig named testrig", rigs)
+	}
+	if got := rigs[0].RepoPath; got != bare {
+		t.Errorf("repo_path = %q, want the shared bare repo %q", got, bare)
+	}
+}
+
 // TestRunRigShutdownListPolecatsError: a polecat session list that cannot be
 // read is a failed shutdown and stop, not an empty rig. Both used to skip the
 // stop block and report success while the sessions still ran (gt-ev685).
@@ -117,7 +156,7 @@ func TestRunRigListLoadError(t *testing.T) {
 		t.Run("malformed", func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := runRigListIn(corruptRigsTown(t), &out, asJSON)
+			err := runRigListIn(corruptRigsTown(t), &out, asJSON, noRigSessions)
 			if err == nil {
 				t.Fatal("runRigListIn with a malformed rigs.json = nil, want an error")
 			}
@@ -133,7 +172,7 @@ func TestRunRigListLoadError(t *testing.T) {
 	t.Run("missing json is an empty list", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		if err := runRigListIn(t.TempDir(), &out, true); err != nil {
+		if err := runRigListIn(t.TempDir(), &out, true, noRigSessions); err != nil {
 			t.Fatalf("runRigListIn: %v", err)
 		}
 		if got := strings.TrimSpace(out.String()); got != "[]" {
@@ -144,7 +183,7 @@ func TestRunRigListLoadError(t *testing.T) {
 	t.Run("missing text says no rigs", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		if err := runRigListIn(t.TempDir(), &out, false); err != nil {
+		if err := runRigListIn(t.TempDir(), &out, false, noRigSessions); err != nil {
 			t.Fatalf("runRigListIn: %v", err)
 		}
 		if !strings.Contains(out.String(), "No rigs configured.") {
