@@ -352,21 +352,54 @@ func TestDashboardVelocityHourSeriesWithoutDifferences(t *testing.T) {
 }
 
 // The hub's trend is buildTrend's unchanged reading plus the velocity series
-// built from the same records; a feed with no records has no velocity reading.
+// built from the same records. The inputs reach past the trend's 24 hours into
+// the velocity's 72, so the comparison shows the older inputs reach the velocity
+// alone; a feed with no records has no velocity reading.
 func TestDashboardVelocityTrendCarriesIt(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 11, 18, 30, 0, 0, time.Local)
-	recs := []omRecord{dashVelocityRec("gt-a", "sbx-haiku", time.Date(2026, 11, 11, 17, 10, 0, 0, time.Local), 120, false, false)}
+	at := func(day, hour, minute int) time.Time {
+		return time.Date(2026, 11, day, hour, minute, 0, 0, time.Local)
+	}
+	secs := 30 * time.Second
+	recs := []omRecord{
+		// Before the trend's window (it opens 2026-11-10 19:00), inside the
+		// velocity's: the oldest hour of the velocity series is 2026-11-08 19:00.
+		dashVelocityRec("gt-old", "sbx-haiku", at(8, 19, 30), 60, false, false),
+		dashVelocityRec("gt-mid", "claude-sonnet", at(10, 10, 0), 300, false, false),
+		dashVelocityRec("gt-a", "sbx-haiku", at(11, 17, 10), 120, false, false),
+		dashVelocityRec("gt-b", "deepseek-flash", at(11, 18, 5), 90, false, false),
+	}
+	rejs := []omRejection{
+		{At: at(9, 12, 0), Bead: "gt-rej-old"},
+		{At: at(11, 16, 30), Bead: "gt-rej"},
+	}
+	stages := []omStage{
+		{At: at(8, 21, 0), Bead: "gt-old", Lint: &secs},
+		{At: at(11, 17, 20), Bead: "gt-a", Lint: &secs, Gate: &secs},
+	}
+	loads := []dashboard.LoadPoint{
+		{At: at(8, 21, 0), Load: 1.5},
+		{At: at(11, 17, 30), Load: 2.5},
+	}
 	polecat := dashVelocityLookup(nil, nil, nil)
 
-	tr := buildTrendWithVelocity(now, recs, nil, nil, nil, polecat)
+	tr := buildTrendWithVelocity(now, recs, stages, rejs, loads, polecat)
 	if tr.Velocity == nil {
 		t.Fatal("Trend.Velocity = nil, want the velocity series set from the records")
 	}
-	if len(tr.Velocity.Hours) != 2 {
-		t.Errorf("velocity hours = %d, want 2 (17:00 and 18:00)", len(tr.Velocity.Hours))
+	if len(tr.Velocity.Hours) != velocityHours {
+		t.Errorf("velocity hours = %d, want %d: the feed spans the whole window", len(tr.Velocity.Hours), velocityHours)
 	}
-	plain := buildTrend(now, recs, nil, nil, nil)
+	plain := buildTrend(now, recs, stages, rejs, loads)
+	landed, rejected := 0, 0
+	for _, h := range plain.Hours {
+		landed += h.Landed
+		rejected += h.Rejected
+	}
+	if landed != 2 || rejected != 1 {
+		t.Fatalf("trend counts %d landed and %d rejected; the older inputs must fall outside its 24 hours, want 2 and 1", landed, rejected)
+	}
 	plain.Velocity = tr.Velocity
 	if !reflect.DeepEqual(plain, tr) {
 		t.Errorf("buildTrendWithVelocity changed the trend besides Velocity:\n got %+v\nwant %+v", tr, plain)
@@ -375,5 +408,52 @@ func TestDashboardVelocityTrendCarriesIt(t *testing.T) {
 	empty := buildTrendWithVelocity(now, nil, nil, nil, nil, nil)
 	if empty.Velocity != nil {
 		t.Errorf("Trend.Velocity = %+v on a feed with no records, want nil", empty.Velocity)
+	}
+}
+
+// A figure with no complete hour behind it is nil, never zero. The median also
+// stays nil when the day holds no weighted landing, while a quiet complete hour
+// still reads its mean and rate as zero.
+func TestDashboardVelocityFiguresNilWithoutAReading(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 18, 30, 0, 0, time.Local)
+	cases := []struct {
+		name                         string
+		recs                         []omRecord
+		rejs                         []omRejection
+		wantAvg, wantNow, wantMedian bool
+	}{
+		{
+			name: "only the partial hour has a landing",
+			recs: []omRecord{dashVelocityRec("gt-a", "sbx-haiku", time.Date(2026, 11, 11, 18, 10, 0, 0, time.Local), 90, false, false)},
+		},
+		{
+			name: "only the partial hour has a rejection",
+			rejs: []omRejection{{At: time.Date(2026, 11, 11, 18, 10, 0, 0, time.Local), Bead: "gt-rej"}},
+		},
+		{
+			name:    "a complete hour holds only unweighted landings",
+			recs:    []omRecord{dashVelocityRec("gt-a", "sbx-haiku", time.Date(2026, 11, 11, 17, 10, 0, 0, time.Local), 0, false, false)},
+			wantAvg: true, wantNow: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := buildVelocity(now, tc.recs, tc.rejs, dashVelocityLookup(nil, nil, nil))
+			if v == nil {
+				t.Fatal("buildVelocity = nil, want a reading")
+			}
+			f := v.Figures
+			if got := f.AvgPerHour != nil; got != tc.wantAvg {
+				t.Errorf("AvgPerHour set = %v, want %v (value %v)", got, tc.wantAvg, f.AvgPerHour)
+			}
+			if got := f.NowPerHour != nil; got != tc.wantNow {
+				t.Errorf("NowPerHour set = %v, want %v (value %v)", got, tc.wantNow, f.NowPerHour)
+			}
+			if got := f.MedianPerLanding != nil; got != tc.wantMedian {
+				t.Errorf("MedianPerLanding set = %v, want %v (value %v)", got, tc.wantMedian, f.MedianPerLanding)
+			}
+		})
 	}
 }
