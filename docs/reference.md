@@ -1131,6 +1131,22 @@ gt polecat list <rig>                   # Polecats in a rig (hidden from gt agen
 
 Note: "Swarm" is ephemeral (workers on an epic's issues).
 
+### Story-point velocity
+
+The Landings pane's velocity reads each landing's polecat time as points on the Fibonacci scale 1, 2, 3, 5, 8, 13, 21, 34, 55, 89 (`internal/storypoints/points.go`). A landing's time is its polecat minutes; it takes the lowest point whose upper edge it does not exceed. A rejected landing's time is scored the same way and counts as rejected points, apart from the landed points.
+
+A landing with no measured time, or a time that is a lower bound or an upper bound, is unweighted: it adds no points and is counted as unweighted. The pane's figures are:
+
+- **points 24h**: points landed in the last 24 complete hours. Its tooltip counts the unweighted landings among them.
+- **points/h now**: mean points per hour over the last 3 complete hours. Its tooltip also gives the 24-hour average.
+- **median points**: median points of a weighted landing over the last 24 hours.
+
+The hour the clock is in is partial and is in none of them. The rate and median figures show a dash, never zero, when no complete hour or landing is behind them.
+
+Under the landings bars sit three rows. The points row draws points per hour, with rejected points stacked in red and a hatched cap for unweighted landings. D1 is the change in points per hour over 3 hours, up when velocity rises. D2 is the change in D1 over 3 hours. The points are smoothed as a 6-hour mean, and a smoothing window needs 12 weighted landings. A difference is a signal or noise against the spread of its own series, which needs at least 12 defined values; a bar that is within noise is muted, and a difference that cannot be judged draws no bar. The points row covers the trend's 24 hours, and D1 and D2 cover the feed's whole velocity window, up to 72 hours, so their earliest hours have smoothing history.
+
+The **seat class** selector above the points row picks `all`, `flash`, `haiku` or `sonnet`. `all` counts every landing; a class counts only landings whose agent is in it (`internal/storypoints/seat.go`). The choice is kept in the browser. A class with no weighted landing draws "no landings with time" in place of its rows.
+
 ### Work Assignment
 
 ```bash
