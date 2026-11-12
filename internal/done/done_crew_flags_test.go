@@ -182,3 +182,41 @@ func TestDoneFlagsRefuseNonCrewSession(t *testing.T) {
 		t.Fatalf("Run with flags from a non-crew session: err = %v, want the crew-submissions refusal", err)
 	}
 }
+
+// TestCrewDoneAbsentWorktreeFetchesThePushedBranch: the repository the submit
+// reads is the pod's rig bare repository, which cannot read a commit a Mac
+// clone pushed until the branch is fetched. The submit fetches it after the
+// push check and before the identity read, and fails without the fetch.
+func TestCrewDoneAbsentWorktreeFetchesThePushedBranch(t *testing.T) {
+	t.Parallel()
+	h, _ := absentCrewRun(t)
+	repo := h.repo
+	repo.unfetched = map[string]bool{crewTestHead: true}
+	if err := submitCrewAbsentForLanding(h.r, crewTestHead); err != nil {
+		t.Fatalf("absent crew submit with an unfetched head: %v", err)
+	}
+	if len(repo.branchFetches) != 1 || repo.branchFetches[0] != crewTestBranch {
+		t.Errorf("fetched branches = %q, want only %s", repo.branchFetches, crewTestBranch)
+	}
+	if !beads.HasLabel(h.source(t), land.LabelReadyToLand) {
+		t.Error("the submit did not mark the bead ready to land")
+	}
+}
+
+// TestCrewDoneAbsentWorktreeFetchFailureRefuses: a fetch that fails refuses,
+// naming the branch, and marks nothing.
+func TestCrewDoneAbsentWorktreeFetchFailureRefuses(t *testing.T) {
+	t.Parallel()
+	h, _ := absentCrewRun(t)
+	h.repo.fetchBranchErr = errors.New("fatal: could not read from remote repository")
+	err := submitCrewAbsentForLanding(h.r, crewTestHead)
+	if err == nil || !strings.Contains(err.Error(), crewTestBranch) || !strings.Contains(err.Error(), "bare repository") {
+		t.Fatalf("submit = %v, want a refusal naming %s and the bare repository", err, crewTestBranch)
+	}
+	if beads.HasLabel(h.source(t), land.LabelReadyToLand) {
+		t.Error("a refused submit marked the bead ready to land")
+	}
+	if comments, _ := h.bd.Comments("bd-source"); len(comments) != 0 {
+		t.Errorf("a refused submit left comments %v", comments)
+	}
+}

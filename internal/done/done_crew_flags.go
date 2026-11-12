@@ -162,6 +162,12 @@ func submitCrewAbsentForLanding(r *doneRun, head string) error {
 		return doneExit(doneExitPushUnverified,
 			fmt.Sprintf("origin/%s is not at %s; push it from your worktree on the Mac first (git push origin HEAD:%s), then re-run gt done", r.branch, ShortSHA(head), r.branch), err)
 	}
+	// The push check asked the remote only. This repository is the rig's bare
+	// repository, which a Mac crew clone shares no objects with, so the head
+	// commit is unreadable here until the branch is fetched (gt-rq6pqy).
+	if err := r.deps.repo.FetchBranch("origin", r.branch); err != nil {
+		return fmt.Errorf("fetching %s into the rig's bare repository, so the head commit can be read: %w", r.branch, err)
+	}
 	if err := refuseUncheckedCriteria(r.issueID, issue); err != nil {
 		return err
 	}

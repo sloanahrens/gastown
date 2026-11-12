@@ -53,6 +53,13 @@ type fakeDoneRepo struct {
 	pushErrs []error
 	// fetchErr fails every fetch the submit path runs before a push.
 	fetchErr error
+	// unfetched are commits this repository cannot read until FetchBranch runs,
+	// as the pod's bare repository cannot read a commit a Mac clone pushed.
+	unfetched map[string]bool
+	// branchFetches are the branches FetchBranch was asked for; fetchBranchErr
+	// fails it.
+	branchFetches  []string
+	fetchBranchErr error
 	// dropPushed makes origin delete a pushed branch after accepting it, as
 	// a post-receive hook could.
 	dropPushed bool
@@ -270,9 +277,23 @@ func (f *fakeDoneRepo) AuthorEmail() (string, error) {
 	return f.authorEmail, nil
 }
 
-func (f *fakeDoneRepo) CommitAuthorship(string) (git.CommitAuthorship, error) {
+func (f *fakeDoneRepo) FetchBranch(_, branch string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.branchFetches = append(f.branchFetches, branch)
+	if f.fetchBranchErr != nil {
+		return f.fetchBranchErr
+	}
+	f.unfetched = nil
+	return nil
+}
+
+func (f *fakeDoneRepo) CommitAuthorship(rev string) (git.CommitAuthorship, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unfetched[rev] {
+		return git.CommitAuthorship{}, fmt.Errorf("git log: fatal: bad object %s", rev)
+	}
 	if f.authorshipErr != nil {
 		return git.CommitAuthorship{}, f.authorshipErr
 	}
