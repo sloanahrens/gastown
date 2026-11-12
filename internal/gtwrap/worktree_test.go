@@ -102,10 +102,16 @@ func TestGitErrorTellsNotARepositoryFromOtherFatals(t *testing.T) {
 		err          error
 		stderr       string
 		wantNotWorkt bool
+		timedOut     bool
 		wantDetail   string
 	}{
 		{name: "fatal with the not-a-repository text", err: fakeGitExit(gitFatal),
 			stderr: "fatal: not a git repository (or any of the parent directories): .git\n", wantNotWorkt: true},
+		{name: "fatal for a linked worktree whose gitdir was pruned", err: fakeGitExit(gitFatal),
+			stderr:     "fatal: not a git repository: /r/repo/.git/worktrees/linked\n",
+			wantDetail: "not a git repository: /r/repo/.git/worktrees/linked"},
+		{name: "fatal for a .git file that points nowhere", err: fakeGitExit(gitFatal),
+			stderr: "fatal: not a git repository: /nonexistent/x\n", wantDetail: "/nonexistent/x"},
 		{name: "fatal with dubious ownership", err: fakeGitExit(gitFatal),
 			stderr:     "fatal: detected dubious ownership in repository at '/x'\nTo add an exception run: git config --global --add safe.directory /x\n",
 			wantDetail: "detected dubious ownership"},
@@ -113,13 +119,14 @@ func TestGitErrorTellsNotARepositoryFromOtherFatals(t *testing.T) {
 			stderr: "fatal: bad object HEAD\n", wantDetail: "bad object HEAD"},
 		{name: "fatal with no stderr", err: fakeGitExit(gitFatal)},
 		{name: "other status", err: fakeGitExit(1), stderr: "not a git repository"},
-		{name: "timeout", err: fakeGitExit(-1)},
+		{name: "timeout", err: fakeGitExit(-1), timedOut: true, wantDetail: "did not finish within 5s"},
+		{name: "killed without the bound", err: fakeGitExit(-1)},
 		{name: "plain error", err: errors.New("git: not found")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := gitError(tt.err, tt.stderr, []string{"branch", "--show-current"})
+			got := gitError(tt.err, tt.stderr, []string{"branch", "--show-current"}, tt.timedOut)
 			if got == nil {
 				t.Fatal("gitError returned nil, which would read as a clean run")
 			}
@@ -138,7 +145,7 @@ func TestGitErrorTellsNotARepositoryFromOtherFatals(t *testing.T) {
 func TestReadWorktreeFactsRefusesABrokenGit(t *testing.T) {
 	t.Parallel()
 	broken := func(string, ...string) (string, error) {
-		return "", gitError(fakeGitExit(gitFatal), "fatal: detected dubious ownership in repository at '/x'\n", []string{"branch", "--show-current"})
+		return "", gitError(fakeGitExit(gitFatal), "fatal: detected dubious ownership in repository at '/x'\n", []string{"branch", "--show-current"}, false)
 	}
 	_, ok, err := ReadWorktreeFacts(broken, t.TempDir())
 	if err == nil || ok || !strings.Contains(err.Error(), "dubious ownership") {
@@ -151,7 +158,11 @@ func TestReadWorktreeFactsRefusesABrokenGit(t *testing.T) {
 // rest of the environment is kept.
 func TestGitEnvDropsOverridesAndForcesEnglish(t *testing.T) {
 	t.Parallel()
-	got := gitEnv([]string{"PATH=/bin", "GIT_DIR=/elsewhere/.git", "GIT_WORK_TREE=/w", "GIT_INDEX_FILE=/i", "LC_ALL=de_DE.UTF-8", "HOME=/h"})
+	got := gitEnv([]string{
+		"PATH=/bin", "GIT_DIR=/elsewhere/.git", "GIT_WORK_TREE=/w", "GIT_INDEX_FILE=/i",
+		"GIT_COMMON_DIR=/c", "GIT_OBJECT_DIRECTORY=/o", "GIT_ALTERNATE_OBJECT_DIRECTORIES=/a",
+		"GIT_CEILING_DIRECTORIES=/ceil", "LC_ALL=de_DE.UTF-8", "HOME=/h",
+	})
 	want := []string{"PATH=/bin", "HOME=/h", "LC_ALL=C"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("gitEnv = %q, want %q", got, want)

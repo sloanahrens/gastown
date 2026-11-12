@@ -117,6 +117,72 @@ func TestRunDoneKeepsCallerFacts(t *testing.T) {
 	}
 }
 
+// TestRunDoneSkipsGitWhenBothFlagsGiven: a caller who passed --branch and --head
+// gets them as given and git is never asked, even where git is not wired.
+func TestRunDoneSkipsGitWhenBothFlagsGiven(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	git := worktreeOn("crew/a/gt-x")
+	withGit(h, git, t.TempDir())
+	if exit := h.run("gt", "done", "--bead", "gt-x", "--branch=mine", "--head", "abc"); exit != 0 {
+		t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+	}
+	if len(git.calls) != 0 {
+		t.Errorf("git was asked %q; a call with both flags needs no facts", git.calls)
+	}
+	want := []string{"gt", "done", "--bead", "gt-x", "--branch=mine", "--head", "abc"}
+	if !slices.Equal(h.fake.call.Argv, want) {
+		t.Errorf("target argv = %q, want %q", h.fake.call.Argv, want)
+	}
+
+	h = newHarness(t)
+	h.surface.git = nil
+	if exit := h.run("gt", "done", "--branch", "mine", "--head", "abc"); exit != 0 {
+		t.Errorf("with no git runner wired, both flags: run = %d, want 0; stderr: %s", exit, h.stderr)
+	}
+}
+
+// TestRunDoneMatchesFlagsOnlyInFlagPosition: a flag-shaped value is not the
+// flag, and nothing after "--" is a flag, so the facts are still added.
+func TestRunDoneMatchesFlagsOnlyInFlagPosition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "value of --bead looks like --branch",
+			args: []string{"--bead", "--branch"},
+			want: []string{"--bead", "--branch", "--branch", "crew/a/gt-x", "--head", headSHA},
+		},
+		{
+			name: "value of --finding looks like --head=x",
+			args: []string{"--finding", "--head=x", "--branch", "mine"},
+			want: []string{"--finding", "--head=x", "--branch", "mine", "--head", headSHA},
+		},
+		{
+			name: "after the separator",
+			args: []string{"--", "--branch", "--head"},
+			want: []string{"--", "--branch", "--head", "--branch", "crew/a/gt-x", "--head", headSHA},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			withGit(h, worktreeOn("crew/a/gt-x"), t.TempDir())
+			if exit := h.run(append([]string{"gt", "done"}, tt.args...)...); exit != 0 {
+				t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+			}
+			want := append([]string{"gt", "done"}, tt.want...)
+			if !slices.Equal(h.fake.call.Argv, want) {
+				t.Fatalf("target argv = %q, want %q", h.fake.call.Argv, want)
+			}
+		})
+	}
+}
+
 func TestRunDoneNoFactsOutsideWorktree(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

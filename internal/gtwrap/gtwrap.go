@@ -1,8 +1,10 @@
-// Package gtwrap decides what the wrapper runs inside the daemon image: the
-// tool it was invoked as, the arguments (unchanged here; cmd/gt-wrap adds gt
-// done's worktree facts, withWorktreeFacts, and rewrites a Mac file argument to
-// stdin before the call is planned), and the environment that crosses. The Docker commands themselves are a Runner behind that decision, so
-// the decision is a pure function a test drives with no container.
+// Package gtwrap holds what the Mac wrapper (cmd/gt-wrap) needs to run a tool
+// inside the daemon image: the docker and kubernetes targets, the choice of
+// tool and of the environment that crosses, and the reader of a worktree's
+// branch and HEAD. The commands themselves are a Runner behind that decision,
+// so the decision is a pure function a test drives with no container.
+// cmd/gt-wrap decides which calls change: it adds gt done's worktree facts
+// (withWorktreeFacts) before the call is planned.
 package gtwrap
 
 // Call is one tool invocation inside the daemon image.
