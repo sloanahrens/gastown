@@ -193,9 +193,11 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 		name      string
 		v         Values
 		dashboard bool
+		tracker   bool
 	}{
-		{"the live pod", goldenValues(t), false},
-		{"with the dashboard", dashboardValues(t), true},
+		{"the live pod", goldenValues(t), false, false},
+		{"with the dashboard", dashboardValues(t), true, false},
+		{"with the tracker", trackerValues(t), false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := mustBuild(t, tc.v)
@@ -232,12 +234,18 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 			if tc.dashboard {
 				want = append(want, "Service/"+DashboardName)
 			}
+			if tc.tracker {
+				want = append(want, "Service/"+TrackerName)
+			}
 			for _, file := range m.Secrets {
 				want = append(want, "Secret/"+file.Metadata.Name)
 			}
 			want = append(want, "Deployment/"+Name)
 			if tc.dashboard {
 				want = append(want, "Deployment/"+DashboardName)
+			}
+			if tc.tracker {
+				want = append(want, "Deployment/"+TrackerName)
 			}
 			want = append(want,
 				"RoleBinding/"+m.SweepRoleBinding.Metadata.Name,
@@ -656,6 +664,119 @@ func TestTrackerDeployment(t *testing.T) {
 	}
 }
 
+// TestTrackerService walks the Service that publishes the relay: ClusterIP on
+// TrackerPort named http, selecting the tracker pod by its own label and no
+// other pod, and absent from a render with Values.Tracker unset.
+func TestTrackerService(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, trackerValues(t))
+	svc := m.TrackerService
+	if svc.Kind != "Service" || svc.Metadata.Name != TrackerName || svc.Metadata.Namespace != DefaultNamespace {
+		t.Fatalf("the tracker Service = %s %s/%s, want Service %s/%s", svc.Kind, svc.Metadata.Namespace, svc.Metadata.Name, DefaultNamespace, TrackerName)
+	}
+	if svc.Spec.Type != "ClusterIP" || svc.Spec.ExternalName != "" {
+		t.Errorf("the tracker Service = type %q externalName %q, want a ClusterIP Service with no external name", svc.Spec.Type, svc.Spec.ExternalName)
+	}
+	if want := trackerLabels(); !maps.Equal(svc.Metadata.Labels, want) {
+		t.Errorf("the tracker Service labels = %v, want %v", svc.Metadata.Labels, want)
+	}
+	if len(svc.Spec.Ports) != 1 {
+		t.Fatalf("the tracker Service publishes %+v, want the relay port alone", svc.Spec.Ports)
+	}
+	if got := svc.Spec.Ports[0]; got.Name != "http" || got.Port != TrackerPort || got.Protocol != "TCP" {
+		t.Errorf("the tracker Service publishes %+v, want http on %d/TCP", got, TrackerPort)
+	}
+	if want := trackerSelectorLabels(); !maps.Equal(svc.Spec.Selector, want) {
+		t.Errorf("the tracker Service selects %v, want %v", svc.Spec.Selector, want)
+	}
+	pod := m.TrackerDeployment.Spec.Template.Metadata.Labels
+	for k, want := range svc.Spec.Selector {
+		if pod[k] != want {
+			t.Errorf("the Service selects %s=%s, which the tracker pod (%v) does not carry", k, want, pod)
+		}
+	}
+	// The daemon's and dashboard's pods must not carry the tracker's selector, or
+	// its Service would publish them too.
+	daemonPod := m.Deployment.Spec.Template.Metadata.Labels
+	for k, want := range svc.Spec.Selector {
+		if daemonPod[k] == want {
+			t.Errorf("the daemon pod carries the tracker Service's selector %s=%s", k, want)
+		}
+	}
+	dashboardPod := mustBuild(t, dashboardValues(t)).DashboardDeployment.Spec.Template.Metadata.Labels
+	for k, want := range svc.Spec.Selector {
+		if dashboardPod[k] == want {
+			t.Errorf("the dashboard pod carries the tracker Service's selector %s=%s", k, want)
+		}
+	}
+
+	if got := mustBuild(t, goldenValues(t)).TrackerService; got.Kind != "" {
+		t.Errorf("Values.Tracker is unset but the tracker Service renders as %s %s", got.Kind, got.Metadata.Name)
+	}
+}
+
+// TestTrackerProbes holds both probes to an exec of curl through the relay on
+// TrackerPort, with no -f: trackerd answers an unauthenticated request with a
+// 401, and any HTTP answer proves it responded. A probe on trackerd's loopback
+// port, or one carrying -f, is the failure this test names. The liveness numbers
+// are at least the readiness numbers, as for the dashboard.
+func TestTrackerProbes(t *testing.T) {
+	t.Parallel()
+	ctr := mustBuild(t, trackerValues(t)).TrackerDeployment.Spec.Template.Spec.Containers[0]
+	readiness, liveness := ctr.ReadinessProbe, ctr.LivenessProbe
+	if readiness == nil || liveness == nil {
+		t.Fatalf("the tracker probes = %+v and %+v, want both set", readiness, liveness)
+	}
+	want := []string{
+		"curl", "-sS", "-o", "/dev/null", "--max-time", "5",
+		fmt.Sprintf("http://127.0.0.1:%d/v1/stats", TrackerPort),
+	}
+	for _, tc := range []struct {
+		name                               string
+		probe                              *Probe
+		initial, period, timeout, failures int32
+	}{
+		{"readiness", readiness, 20, 15, 10, 3},
+		{"liveness", liveness, 60, 60, 15, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.probe.Exec == nil {
+				t.Fatalf("the %s probe has no exec, want %q", tc.name, want)
+			}
+			if got := tc.probe.Exec.Command; !slices.Equal(got, want) {
+				t.Errorf("the %s probe runs %q, want %q: the URL is the relay's port, which trackerd answers through", tc.name, got, want)
+			}
+			// A combined short flag such as -fsS turns -f on too, and -f fails
+			// curl on trackerd's 401, keeping the pod not Ready for ever.
+			for _, arg := range tc.probe.Exec.Command {
+				if arg == "-f" || arg == "--fail" || (strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg, "f")) {
+					t.Errorf("the %s probe passes %q, which fails curl on the 401 trackerd sends an unauthenticated request", tc.name, arg)
+				}
+			}
+			if tc.probe.InitialDelaySeconds != tc.initial || tc.probe.PeriodSeconds != tc.period ||
+				tc.probe.TimeoutSeconds != tc.timeout || tc.probe.FailureThreshold != tc.failures {
+				t.Errorf("the %s numbers = initial %d, period %d, timeout %d, failure %d, want %d, %d, %d, %d",
+					tc.name, tc.probe.InitialDelaySeconds, tc.probe.PeriodSeconds, tc.probe.TimeoutSeconds, tc.probe.FailureThreshold,
+					tc.initial, tc.period, tc.timeout, tc.failures)
+			}
+			doc := string(document(t, tc.probe))
+			if !strings.Contains(doc, "exec:") {
+				t.Errorf("the %s probe renders as\n%s\nwant an exec action", tc.name, doc)
+			}
+			// A tcpSocket passes while trackerd is down: the relay accepts the
+			// connection before it opens the forward to trackerd's loopback port.
+			if strings.Contains(doc, "tcpSocket:") {
+				t.Errorf("the %s probe renders a tcpSocket, which the relay answers with trackerd down:\n%s", tc.name, doc)
+			}
+		})
+	}
+	if liveness.InitialDelaySeconds < readiness.InitialDelaySeconds || liveness.PeriodSeconds < readiness.PeriodSeconds ||
+		liveness.TimeoutSeconds < readiness.TimeoutSeconds || liveness.FailureThreshold < readiness.FailureThreshold {
+		t.Errorf("liveness %+v is stricter than readiness %+v", *liveness, *readiness)
+	}
+}
+
 // TestTrackerPodHasNoHostPath holds the tracker pod to no volume at all: it
 // mounts nothing of the Mac and nothing of the town, so no hostPath under
 // /Users can reach it.
@@ -722,6 +843,9 @@ func TestTrackerAbsentFromTheGoldenValues(t *testing.T) {
 	if m.TrackerDeployment.Kind != "" {
 		t.Errorf("Values.Tracker is unset but the render carries a %s %s", m.TrackerDeployment.Kind, m.TrackerDeployment.Metadata.Name)
 	}
+	if m.TrackerService.Kind != "" {
+		t.Errorf("Values.Tracker is unset but the render carries a %s %s", m.TrackerService.Kind, m.TrackerService.Metadata.Name)
+	}
 	var buf bytes.Buffer
 	if err := Render(&buf, m); err != nil {
 		t.Fatalf("Render: %v", err)
@@ -746,6 +870,9 @@ func TestTrackerAbsentFromTheGoldenValues(t *testing.T) {
 		}
 		if doc.Kind == "Deployment" && doc.Metadata.Name != Name {
 			t.Errorf("Values.Tracker is unset but the render carries Deployment %q", doc.Metadata.Name)
+		}
+		if doc.Kind == "Service" && doc.Metadata.Name == TrackerName {
+			t.Errorf("Values.Tracker is unset but the render carries Service %q", doc.Metadata.Name)
 		}
 	}
 }
