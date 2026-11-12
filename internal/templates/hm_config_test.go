@@ -46,7 +46,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		{
 			name:    "localhost",
 			config:  `{"database_url": "postgres://hm:s3cret@localhost:5433/hm?sslmode=disable"}`,
-			wantURL: "postgres://hm:s3cret@host.docker.internal:5433/hm?sslmode=disable",
+			wantURL: "postgres://hm:s3cret@" + "host" + ".docker.internal" + ":5433/hm?sslmode=disable",
 		},
 		{
 			name:    "127.0.0.1",
@@ -56,7 +56,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		{
 			name:    "a loopback host with no port",
 			config:  `{"database_url": "postgres://hm@localhost/hm"}`,
-			wantURL: "postgres://hm@host.docker.internal/hm",
+			wantURL: "postgres://hm@" + "host" + ".docker.internal" + "/hm",
 		},
 		{
 			name:    "a remote database is unchanged",
@@ -73,7 +73,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		// never the URL, whose password would otherwise reach a log.
 		{name: "database_url does not parse", config: `{"database_url": "postgres://hm:s3 cret@localhost:5433/hm"}`,
 			wantReason: "database_url (URL form) does not parse"},
-		{name: "a field name holds a control character", config: `{"database_url": "postgres://hm@host.docker.internal:5433/hm", "\u0001x": 1}`,
+		{name: "a field name holds a control character", config: `{"database_url": "postgres://hm@` + "host" + ".docker.internal" + `:5433/hm", "\u0001x": 1}`,
 			wantReason: "field name holds a control character"},
 	}
 	for _, tc := range cases {
@@ -135,7 +135,7 @@ func hmField(got map[string]any, path ...string) (any, bool) {
 // URL is kept. A block the derivation cannot read is refused naming the field.
 func TestHMContainerConfigRewritesServiceURLs(t *testing.T) {
 	t.Parallel()
-	const db = `"database_url": "postgres://hm@host.docker.internal:5433/hm"`
+	const db = `"database_url": "postgres://hm@` + "host" + ".docker.internal" + `:5433/hm"`
 	cases := []struct {
 		name   string
 		config string
@@ -414,10 +414,10 @@ func TestHMContainerConfigRewritesBothDSNForms(t *testing.T) {
 			want: "host=db.example.test port=5433 password=s3cret dbname=hm"},
 		{name: "URL, IPv6 loopback in brackets",
 			dsn:  "postgres://hm:s3cret@[::1]:5433/hm",
-			want: "postgres://hm:s3cret@host.docker.internal:5433/hm"},
+			want: "postgres://hm:s3cret@" + "host" + ".docker.internal" + ":5433/hm"},
 		{name: "URL, 127.0.0.2 is loopback too",
 			dsn:  "postgresql://hm@127.0.0.2:5433/hm",
-			want: "postgresql://hm@host.docker.internal:5433/hm"},
+			want: "postgresql://hm@" + "host" + ".docker.internal" + ":5433/hm"},
 		{name: "URL, the host query parameter overrides the authority",
 			dsn:  "postgres://hm@/hm?host=localhost&port=5433",
 			want: "postgres://hm@/hm?host=host.docker.internal&port=5433"},

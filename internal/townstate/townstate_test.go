@@ -43,7 +43,7 @@ func TestManifestMirrorMatches(t *testing.T) {
 	}{
 		{
 			name: "absolute path",
-			yaml: "entries:\n  - path: /Users/sloan/gt/settings\n    owner: daemon\n    why: absolute\n",
+			yaml: "entries:\n  - path: /srv/town/settings\n    owner: daemon\n    why: absolute\n",
 			want: "relative to the town root",
 		},
 		{
