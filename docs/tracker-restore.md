@@ -37,18 +37,21 @@ cluster, and the shell's exit trap drops that database whatever happens next.
 ```bash
 set -euo pipefail
 DUMP=~/gt-backups/tracker/2026-10-28.dump
-MAINT="postgres://127.0.0.1:5433/postgres?sslmode=disable"
+MAINT="postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable"
 NAME="restorecheck_$(date +%Y%m%d%H%M%S)_$$"
-SCRATCH="postgres://127.0.0.1:5433/$NAME?sslmode=disable"
+SCRATCH="postgres://tracker@127.0.0.1:5432/$NAME?sslmode=disable"
 
 createdb --maintenance-db "$MAINT" "$NAME"
 trap 'dropdb --maintenance-db "$MAINT" --force "$NAME"' EXIT
 pg_restore --exit-on-error --no-owner -d "$SCRATCH" "$DUMP"
 ```
 
-These are the settings in trackerd's plist (`trackerplist` writes them), with
-the database swapped to `postgres` for the connection that creates another one.
-If your install listens elsewhere, read the port from that plist.
+These are the settings `deploy/tracker/docker-compose.yml` publishes for the
+tracker database: port 5432 and role `tracker`, with the database swapped to
+`postgres` for the connection that creates another one. The password the compose
+file needs lives in `tracker-db.env` beside it. trackerd reaches the same
+database through the `TRACKER_DSN` Secret of its Deployment; no plist holds
+these settings, so a database elsewhere is named by that Secret.
 
 `--exit-on-error` stops at the first error, so a restore that would otherwise
 have ignored one fails here. `--no-owner` gives the restored objects to your
@@ -95,27 +98,27 @@ and fails on a file that is not a usable dump.
 ```bash
 set -euo pipefail
 DUMP=~/gt-backups/tracker/2026-10-28.dump
-MAINT="postgres://127.0.0.1:5433/postgres?sslmode=disable"
+MAINT="postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable"
 ASIDE="tracker_damaged_$(date +%Y%m%d%H%M%S)"
 
 # 1. The dump must be readable before anything else moves.
 pg_restore -l "$DUMP" > /dev/null
 
 # 2. Nothing may hold the live database while it is renamed.
-launchctl bootout gui/$(id -u)/com.gastown.trackerd
+kubectl --context colima-gt-control -n gt scale deploy/trackerd --replicas=0
 
 # 3. Keep the damaged copy under another name. Never delete it in place.
 psql "$MAINT" -c "ALTER DATABASE tracker RENAME TO $ASIDE"
 
 # 4. Restore the night into a fresh database under the name trackerd expects.
 createdb --maintenance-db "$MAINT" tracker
-pg_restore --exit-on-error --no-owner -d "postgres://127.0.0.1:5433/tracker?sslmode=disable" "$DUMP"
+pg_restore --exit-on-error --no-owner -d "postgres://tracker@127.0.0.1:5432/tracker?sslmode=disable" "$DUMP"
 
 # 5. Read it back yourself before the service does.
-psql "postgres://127.0.0.1:5433/tracker?sslmode=disable" -c "SELECT count(*) FROM tracker.issues WHERE NOT ephemeral"
+psql "postgres://tracker@127.0.0.1:5432/tracker?sslmode=disable" -c "SELECT count(*) FROM tracker.issues WHERE NOT ephemeral"
 
 # 6. Bring the service back.
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.trackerd.plist
+kubectl --context colima-gt-control -n gt scale deploy/trackerd --replicas=1
 ```
 
 A line that fails stops the block there: a dump that does not list (1) never
@@ -127,7 +130,7 @@ The renamed copy stays on the cluster until the restored database has served
 for a while. Drop it then:
 
 ```bash
-dropdb --maintenance-db "postgres://127.0.0.1:5433/postgres?sslmode=disable" --force "$ASIDE"
+dropdb --maintenance-db "postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable" --force "$ASIDE"
 ```
 
 ## Rehearsal
@@ -140,15 +143,16 @@ default list filter had something to leave out. The dump was taken with
 `pg_dump -Fc`.
 
 - Step 2: the block ran as written, DSNs pointing at the temporary cluster
-  (its role is `postgres@`; the town's DSN carries no user). `--exit-on-error
+  (its role was `postgres@`, so they carried no user). `--exit-on-error
   --no-owner` restored, the count printed `3`, the list printed `gt-def` then
   `gt-abc`, and the by-id read of `gt-def` printed `another one | open`, the
   title and status the list showed. The trap dropped the scratch database:
   `pg_database` held only `postgres` and `tracker` afterwards.
 - Step 3, the database half: `pg_restore -l` exited 0, the rename to
   `tracker_damaged_...` succeeded, the fresh `tracker` restored and the count
-  read `3` back. The two `launchctl` lines did not run: the rehearsal host has
-  no launchd, and the tracker is not installed there.
+  read `3` back. The two service lines (2 and 6) did not run: they were
+  `launchctl` lines then, and the rehearsal host had no launchd job for the
+  tracker.
 - The package check: `go test ./internal/restorecheck/` (unit, the order and
   every refusal) and `go test -tags integration ./internal/restorecheck/`
   (a real `pg_dump` restored into a scratch database, the subset passing, and
