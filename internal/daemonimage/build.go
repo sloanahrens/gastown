@@ -46,8 +46,13 @@ const (
 	GTPackage       = "./cmd/gt"
 	BDPackage       = "./cmd/bd"
 	OMPackage       = "./cmd/om"
-	TrackerdPackage = "./tracker/cmd/trackerd"
+	TrackerdPackage = "./cmd/trackerd"
 )
+
+// TrackerdModuleDir is the directory of the gt checkout trackerd is built in.
+// tracker/ is its own Go module, so a build run from the checkout root cannot
+// name its packages: the main module does not contain them (gt-voam40).
+const TrackerdModuleDir = "tracker"
 
 // The -X stamps the gt and bd binaries are built with. gt reports the short form
 // of the commit it was built from, the form make install stamps and make
@@ -194,6 +199,10 @@ func ImageTag(rev string) string { return "gt-daemon:" + rev }
 // of that checkout it is built at, and the package and stamp it is built with.
 type binary struct {
 	name, src, commit, pkg, ldflags string
+	// moduleDir is the directory of the clean worktree the compile runs in,
+	// for a binary whose package lives in a nested module. Empty is the
+	// worktree root.
+	moduleDir string
 	// stampsBuildID marks a build whose main.Build is stamped beside main.Commit
 	// with git's abbreviation of the commit in its worktree, which only exists
 	// once the build has made it.
@@ -262,7 +271,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
-		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage},
+		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage, moduleDir: TrackerdModuleDir},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
 	if err != nil {
@@ -612,7 +621,7 @@ func (b Builder) build(ctx context.Context, build binary, stage string, env []st
 		ldflags = bdBuildFlag + short + " " + ldflags
 	}
 	argv := goBuildArgv(filepath.Join(stage, build.name), build.pkg, ldflags)
-	if err := b.Run(ctx, dir, env, argv); err != nil {
+	if err := b.Run(ctx, filepath.Join(dir, build.moduleDir), env, argv); err != nil {
 		return fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
 	}
 	return nil
@@ -759,7 +768,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
 	lines = append(lines, om.fetch...)
 	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
-	lines = append(lines, fmt.Sprintf("build trackerd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), b.GTSrc, rev))
+	lines = append(lines, fmt.Sprintf("build trackerd: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	for _, p := range imagePlugins {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}

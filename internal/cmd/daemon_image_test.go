@@ -199,7 +199,7 @@ func TestDaemonImageDryRunPrintsThePlanAndRunsNothing(t *testing.T) {
 		"build bd: go build -trimpath",
 		"./cmd/bd",
 		"build om: go build -trimpath -o " + filepath.Join(r.flags.out, "om") + " ./cmd/om",
-		"build trackerd: go build -trimpath -o " + filepath.Join(r.flags.out, "trackerd") + " ./tracker/cmd/trackerd",
+		"build trackerd: go build -trimpath -o " + filepath.Join(r.flags.out, "trackerd") + " ./cmd/trackerd   (in tracker/ of a clean worktree",
 		"build hm: go build -trimpath -o " + filepath.Join(r.flags.out, "hm") + " .",
 		"build devops-reporter: go build -trimpath -o " + filepath.Join(r.flags.out, "devops-reporter") + " ./cmd/reporter",
 		"build release-reporter: go build -trimpath -o " + filepath.Join(r.flags.out, "release-reporter") + " ./cmd/release-reporter",
