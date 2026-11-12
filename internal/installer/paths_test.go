@@ -128,6 +128,46 @@ func TestIsTownRoot(t *testing.T) {
 	}
 }
 
+// TestSourceCheckout_KeepsTheBranchCheckouts pins the lookup the installer
+// path reads until gt-yjzepk deletes it: the gastown rig directory when the
+// repository is checked out in place, else the mayor clone under it, and never
+// a town with neither.
+func TestSourceCheckout_KeepsTheBranchCheckouts(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{
+		"gastown",
+		filepath.Join("gastown", "mayor", "rig"),
+	} {
+		town := t.TempDir()
+		source := filepath.Join(town, rel)
+		writeSourceCheckout(t, source)
+
+		got, err := SourceCheckout(town)
+		if err != nil {
+			t.Fatalf("SourceCheckout(%s): %v", rel, err)
+		}
+		if got != source {
+			t.Errorf("SourceCheckout = %q, want %q", got, source)
+		}
+	}
+	if _, err := SourceCheckout(t.TempDir()); err == nil {
+		t.Error("SourceCheckout(town without a checkout) = nil error, want a refusal")
+	}
+}
+
+// writeSourceCheckout puts the marker SourceCheckout reads — cmd/gt/main.go —
+// under dir.
+func writeSourceCheckout(t *testing.T, dir string) {
+	t.Helper()
+	main := filepath.Join(dir, "cmd", "gt", "main.go")
+	if err := os.MkdirAll(filepath.Dir(main), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(main, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPathsLocations(t *testing.T) {
 	t.Parallel()
 	p := Paths{BinDir: "/bin", DaemonDir: "/daemon"}

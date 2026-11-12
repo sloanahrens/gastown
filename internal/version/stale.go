@@ -622,8 +622,27 @@ func GetRepoRootForTown(townRoot string) (string, error) {
 // polecat worktrees also contain cmd/gt/main.go but have different HEADs, so the
 // town's own checkout is preferred over CWD-based git toplevel detection.
 func GetRepoRoot() (string, error) {
+	return getRepoRoot(os.Getenv, gitToplevel)
+}
+
+// gitToplevel returns the root of the working directory's git repository, or
+// "" when the working directory is not inside one: the probe is best-effort,
+// and a failure leaves the caller with its own not-found error.
+func gitToplevel() string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	util.SetDetachedProcessGroup(cmd)
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// getRepoRoot is GetRepoRoot with the environment and the working-directory
+// git probe injected, so a test reads a tree it built rather than the host's.
+func getRepoRoot(getenv func(string) string, toplevel func() string) (string, error) {
 	// The town root the session was spawned with (agents always have it)
-	if gtRoot := workspace.TownRootFromEnv(os.Getenv); gtRoot != "" {
+	if gtRoot := workspace.TownRootFromEnv(getenv); gtRoot != "" {
 		for _, candidate := range townSourceCandidates(gtRoot) {
 			if hasGtSource(candidate) {
 				return candidate, nil
@@ -632,7 +651,7 @@ func GetRepoRoot() (string, error) {
 	}
 
 	// Try common development paths relative to home
-	home := os.Getenv("HOME")
+	home := getenv("HOME")
 	if home != "" {
 		candidates := []string{
 			home + "/gt/gastown",
@@ -648,13 +667,8 @@ func GetRepoRoot() (string, error) {
 	}
 
 	// Fall back to current directory's git repo (may be a crew rig)
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	util.SetDetachedProcessGroup(cmd)
-	if output, err := cmd.Output(); err == nil {
-		root := strings.TrimSpace(string(output))
-		if hasGtSource(root) {
-			return root, nil
-		}
+	if root := toplevel(); hasGtSource(root) {
+		return root, nil
 	}
 
 	return "", fmt.Errorf("cannot locate gt source repository")

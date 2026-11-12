@@ -15,10 +15,10 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
+	"github.com/steveyegge/gastown/internal/installer"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/update"
-	"github.com/steveyegge/gastown/internal/version"
 )
 
 // seatProbeEnv is where the seat probe reads the town: the rigs, each rig's
@@ -232,13 +232,13 @@ func newRunFunc(output commandOutput) update.RunFunc {
 
 // newExecInstaller returns the real installer the update job runs. The
 // installer builds and runs in a gt source checkout on main and fast-forwards
-// it, so it takes the branch checkout GetRepoRootForTownBranch returns, not the
+// it, so it takes the branch checkout installer.SourceCheckout returns, not the
 // detached build checkout the drift and staleness readers use. It also hands
 // the installer the polecat-image trim context the daemon passes when the tier
 // sweep runs off-host. An unreadable root or an invalid sweep context is an
 // error, never an installer that trims the wrong engine.
 func newExecInstaller(townRoot string, run update.RunFunc, cfg *daemon.DaemonPatrolConfig) (update.Installer, error) {
-	repoRoot, err := version.GetRepoRootForTownBranch(townRoot)
+	repoRoot, err := installer.SourceCheckout(townRoot)
 	if err != nil {
 		return nil, err
 	}

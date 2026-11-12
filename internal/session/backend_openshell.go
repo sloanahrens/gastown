@@ -153,10 +153,10 @@ type openshellBackend struct {
 	docker dockerRun
 	// git compares the image's gt commit with the installed one. Tests set it.
 	git gitRun
-	// policyRoot is the town's gt source checkout, the repo a sandbox profile's
-	// policy path is relative to. A polecat's worktree is the wrong base: only
-	// the gt repo carries deploy/polecat/policy.yaml, and a sandbox seat serves
-	// the town's other rigs too.
+	// policyRoot is the town's gt source checkout, the gastown rig's build
+	// checkout: the repo a sandbox profile's policy path and the image
+	// ancestry diff read. A polecat's worktree is the wrong base: only the gt
+	// repo carries deploy/polecat/policy.yaml, for the town's other rigs too.
 	policyRoot func(townRoot string) (string, error)
 	// gitEmail reads the host's global git user.email, the address the sandbox's
 	// commits carry (host polecats commit with it too); "" when it is unset.

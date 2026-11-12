@@ -2,6 +2,7 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -92,9 +93,31 @@ func resolvePaths(getenv func(string) string, home, start string, isTown func(st
 		if townRoot == "" {
 			return Paths{}, errNoTown
 		}
-		p.RigDir = filepath.Join(townRoot, "gastown", "mayor", "rig")
+		p.RigDir = defaultRigDir(townRoot)
 	}
 	return p, nil
+}
+
+// defaultRigDir is the checkout a town keeps the gt source in when a run names
+// none: the gastown rig's mayor clone.
+func defaultRigDir(townRoot string) string {
+	return filepath.Join(townRoot, "gastown", "mayor", "rig")
+}
+
+// SourceCheckout returns the town's gt source checkout that sits on a branch:
+// the gastown rig directory when the repository is checked out in place, else
+// the mayor clone defaultRigDir names. The installer builds in this checkout
+// and fast-forwards it, so it cannot take the detached build checkout the
+// stale and drift readers use. A town with neither is an error; nothing here
+// creates a checkout.
+func SourceCheckout(townRoot string) (string, error) {
+	for _, dir := range []string{filepath.Join(townRoot, "gastown"), defaultRigDir(townRoot)} {
+		if _, err := os.Stat(filepath.Join(dir, "cmd", "gt", "main.go")); err == nil {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("town %s has no branch gt source checkout (no %s below it)", townRoot,
+		filepath.Join("gastown", "cmd", "gt", "main.go"))
 }
 
 // TownRootAbove returns the outermost ancestor of dir holding the town marker,

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -2321,8 +2322,10 @@ func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
 // openshellTestPolicyRoot is where the tests' town keeps the gt source checkout,
 // the repo a profile's policy path is relative to. The polecat's worktree is a
 // different rig's repo and does not hold the policy.
+// openshellTestPolicyRoot is the gastown rig's build checkout, where
+// GetRepoRootForTown finds the gt source.
 func openshellTestPolicyRoot(townRoot string) string {
-	return filepath.Join(townRoot, "gastown", "mayor", "rig")
+	return filepath.Join(townRoot, buildsrc.BaseDirRel(), "gastown")
 }
 
 // The profile's policy is the town's copy in the gt source checkout, whichever
@@ -2347,7 +2350,7 @@ func TestOpenShellPolicyComesFromTheTownCopyNotTheWorktree(t *testing.T) {
 }
 
 // The backend a town gets from newOpenShellBackend resolves the policy with the
-// production resolver, not the test seam: the gt source checkout under the town.
+// production resolver, not the test seam: the gastown rig's build checkout.
 func TestOpenShellProductionPolicyRootIsTheTownCheckout(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)

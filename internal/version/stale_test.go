@@ -874,30 +874,51 @@ func TestGetRepoRootForTown_RefusesTheGastownRigTreeAlone(t *testing.T) {
 	}
 }
 
-// TestGetRepoRootForTownBranch_KeepsTheBranchCheckouts pins the lookup the
-// retired installer path reads until gt-yjzepk deletes it: the gastown rig
-// directory, or the mayor's worktree under it, and never a town with neither.
-func TestGetRepoRootForTownBranch_KeepsTheBranchCheckouts(t *testing.T) {
+// TestGetRepoRoot_ReadsTheHomeBuildCheckout pins the developer-clone candidate
+// GetRepoRoot keeps under $HOME: the build checkout under ~/gt.
+func TestGetRepoRoot_ReadsTheHomeBuildCheckout(t *testing.T) {
 	t.Parallel()
-	for _, rel := range []string{
-		"gastown",
-		filepath.Join("gastown", "mayor", "rig"),
-	} {
-		town := t.TempDir()
-		source := filepath.Join(town, rel)
-		writeGtSource(t, source)
+	home := t.TempDir()
+	source := filepath.Join(home, "gt", buildsrc.BaseDirRel(), "gastown")
+	writeGtSource(t, source)
 
-		got, err := GetRepoRootForTownBranch(town)
-		if err != nil {
-			t.Fatalf("GetRepoRootForTownBranch(%s): %v", rel, err)
-		}
-		if got != source {
-			t.Errorf("GetRepoRootForTownBranch = %q, want %q", got, source)
-		}
+	got, err := getRepoRoot(envFrom(map[string]string{"HOME": home}), noGitToplevel)
+	if err != nil {
+		t.Fatalf("getRepoRoot: %v", err)
 	}
-	if _, err := GetRepoRootForTownBranch(t.TempDir()); err == nil {
-		t.Error("GetRepoRootForTownBranch(town without a checkout) = nil error, want a refusal")
+	if got != source {
+		t.Errorf("getRepoRoot = %q, want %q", got, source)
 	}
+}
+
+// TestGetRepoRoot_DoesNotReadTheRetiredMayorRigHomes: the three
+// ~/.../gastown/mayor/rig entries GetRepoRoot used to fall back to are gone, so
+// a home holding only them has no gt source.
+func TestGetRepoRoot_DoesNotReadTheRetiredMayorRigHomes(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	for _, rel := range []string{
+		filepath.Join("gt", "gastown", "mayor", "rig"),
+		filepath.Join("gastown", "mayor", "rig"),
+		filepath.Join("src", "gastown", "mayor", "rig"),
+	} {
+		writeGtSource(t, filepath.Join(home, rel))
+	}
+
+	if got, err := getRepoRoot(envFrom(map[string]string{"HOME": home}), noGitToplevel); err == nil {
+		t.Fatalf("getRepoRoot = %q, want an error: the retired mayor/rig homes are not searched", got)
+	}
+}
+
+// envFrom is the environment a test gives getRepoRoot.
+func envFrom(env map[string]string) func(string) string {
+	return func(key string) string { return env[key] }
+}
+
+// noGitToplevel is the working-directory probe for a test that passes no
+// enclosing repository, so the fallback never reads the real one.
+func noGitToplevel() string {
+	return ""
 }
 
 // writeGtSource puts the marker every lookup reads — cmd/gt/main.go — under dir.
