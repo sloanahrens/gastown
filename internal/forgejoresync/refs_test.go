@@ -273,18 +273,21 @@ func TestGitCommandDisablesPrompt(t *testing.T) {
 // TestGitCommandNeverInheritsTheAdminToken: a git child is built from an
 // environment with the admin token variables removed, under either name, and with
 // everything else kept. Removing the scrub from gitCommandIn turns it red. The
-// message names the variable, never its value.
+// message names the variable, never its value. The rule is the one the probe
+// applies, so a credential of any _TOKEN name and the repository pins go too.
 func TestGitCommandNeverInheritsTheAdminToken(t *testing.T) {
 	t.Parallel()
 	const token = "tok-git-child-marker" //nolint:gosec // G101: a fixture, not a credential
 	environ := []string{
 		forgejoprov.BrokerTokenEnv + "=" + token,
 		"FORGEJO_ADMIN_TOKEN=" + token,
+		"GITHUB_TOKEN=" + token,
+		"GIT_DIR=/elsewhere/.git",
 		"HOME=/home/test",
 		"PATH=/usr/bin",
 	}
 	cmd := gitCommandIn(context.Background(), environ, "git", "ls-remote")
-	for _, name := range []string{forgejoprov.BrokerTokenEnv, "FORGEJO_ADMIN_TOKEN"} {
+	for _, name := range []string{forgejoprov.BrokerTokenEnv, "FORGEJO_ADMIN_TOKEN", "GITHUB_TOKEN", "GIT_DIR"} {
 		for _, kv := range cmd.Env {
 			if strings.HasPrefix(kv, name+"=") {
 				t.Errorf("a git child inherited %s", name)

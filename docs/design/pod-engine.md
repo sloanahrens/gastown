@@ -165,7 +165,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/cmd/update_effects.go` `buildCommand`
 - `internal/doctor/daemon_check.go` `DaemonCheck.Fix`
 - `internal/doctor/hooks_live_fire_check.go` `runLiveFireClaude`
-- `internal/forgejoresync/refs.go` `gitCommand`
+- `internal/forgejoresync/refs.go` `gitCommandIn`
 - `internal/gtwrap/docker.go` `OSShell.Attach`
 - `internal/gtwrap/docker.go` `OSShell.Capture`
 - `internal/hmhints/hmhints.go` `ExecRunner`

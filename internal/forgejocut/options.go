@@ -311,9 +311,8 @@ func checkRemoteURL(flag, raw string) error {
 }
 
 // resolveTown settles the town root and checks the town directory a parse can
-// see. The town root is the --town-root flag, then
-// GT_TOWN_ROOT, then the town the working directory is in, then $HOME/gt. GT_ROOT
-// and GT_BIN are not read.
+// see. The town root is the --town-root flag, then GT_TOWN_ROOT, then the town the
+// working directory is in, then $HOME/gt. GT_ROOT and GT_BIN are not read.
 func (o *Options) resolveTown(town *string, env Env) error {
 	switch {
 	case town != nil:

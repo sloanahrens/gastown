@@ -4,49 +4,15 @@ import (
 	"errors"
 	"io"
 	"os/exec"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// TestGitEnvDropsTheScrubbedVars checks the environment a git child is built
-// from: every name ending in _TOKEN and the three variables that pin a repository
-// are removed; every other variable stays, HOME and PATH included, and a name
-// that only starts with a token's name is not mistaken for it. It runs no git.
-func TestGitEnvDropsTheScrubbedVars(t *testing.T) {
-	t.Parallel()
-	environ := []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/home/user",
-		"GT_AUTH_FORGEJO_TOKEN=broker-token",
-		"FORGEJO_ADMIN_TOKEN=admin-token",
-		"FOO_TOKEN=foo-token",
-		"FORGEJO_ADMIN_ENV=/etc/forgejo/admin.env",
-		"FORGEJO_ADMIN_TOKEN_FILE=/run/token",
-		"GIT_DIR=/elsewhere/.git",
-		"GIT_INDEX_FILE=/elsewhere/index",
-		"GIT_WORK_TREE=/elsewhere/tree",
-		"GIT_SSH_COMMAND=ssh -i /home/user/.ssh/id",
-		"GIT_TERMINAL_PROMPT=0",
-	}
-	want := []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/home/user",
-		"FORGEJO_ADMIN_ENV=/etc/forgejo/admin.env",
-		"FORGEJO_ADMIN_TOKEN_FILE=/run/token",
-		"GIT_SSH_COMMAND=ssh -i /home/user/.ssh/id",
-		"GIT_TERMINAL_PROMPT=0",
-	}
-	if got := gitEnv(environ); !reflect.DeepEqual(got, want) {
-		t.Fatalf("gitEnv = %q, want %q", got, want)
-	}
-}
-
 // TestGitRunScrubsTheChildEnvironment drives Run through its process seam and
 // reads the environment git is started with: the admin token variables, a
 // caller-supplied token and the repository pins are absent, and HOME stays.
-// Removing the scrub from Run turns it red, since gitEnv is the only filter.
+// Removing the scrub from Run turns it red, since GitChildEnv is the only filter.
 func TestGitRunScrubsTheChildEnvironment(t *testing.T) {
 	t.Parallel()
 	var gotEnv []string

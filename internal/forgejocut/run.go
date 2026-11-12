@@ -178,9 +178,9 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 // checkAdminToken resolves the admin token the way the script's
 // resolve_admin_token did, before any step runs. The value goes back to the run
 // for one purpose: the probe, when no token file was named, is handed it in
-// process. A run with no token is refused with
-// the cutover's own broker rule; a token that was found and refused keeps the
-// provisioner's message, which names the rule and never the value.
+// process. A run with no token is refused with the cutover's own broker rule; a
+// token that was found and refused keeps the provisioner's message, which names
+// the rule and never the value.
 func (c *Cutover) checkAdminToken() (forgejoprov.Secret, error) {
 	readFile := c.ProvisionEnv.ReadFile
 	if readFile == nil {

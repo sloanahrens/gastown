@@ -26,8 +26,8 @@ var execGuardRoots = []string{
 	"internal/forgejoprobe",
 }
 
-// scrubbedConstructors are the only functions in execGuardRoots that may call
-// exec.Command or exec.CommandContext. Each keeps the admin token variables out
+// scrubbedConstructors are the only functions in execGuardRoots that may start a
+// child process (see startSeams). Each keeps the admin token variables out
 // of the child's environment, and each has a test that turns red when that is
 // taken out: execRunner.command's callers set the scrubbed environment before
 // the child starts, gitCommandIn sets it, and execGit.Run sets it. Keys are
@@ -92,6 +92,49 @@ func TestRunExecGuardRefusals(t *testing.T) {
 			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
 				"package run\n\nimport \"os/exec\"\n\nvar cmd = exec.Command(\"git\")\n")}},
 			want: "outside a scrubbed constructor (internal/run/run.go)",
+		},
+		{
+			name: "an exec.Command taken as a function value is reported",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport \"os/exec\"\n\nfunc other() { run := exec.Command; _ = run }\n")}},
+			want: "outside a scrubbed constructor (internal/run/run.go:other)",
+		},
+		{
+			name: "an exec.Cmd literal is reported, since it starts a child with no Command call",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport \"os/exec\"\n\nfunc other() { _ = &exec.Cmd{Path: \"/bin/git\"} }\n")}},
+			want: "outside a scrubbed constructor (internal/run/run.go:other)",
+		},
+		{
+			name: "new of exec.Cmd is reported",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport \"os/exec\"\n\nfunc other() { _ = new(exec.Cmd) }\n")}},
+			want: "outside a scrubbed constructor (internal/run/run.go:other)",
+		},
+		{
+			name: "os.StartProcess is reported",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport \"os\"\n\nfunc other() { _, _ = os.StartProcess(\"/bin/git\", nil, nil) }\n")}},
+			want: "outside a scrubbed constructor (internal/run/run.go:other)",
+		},
+		{
+			name: "a syscall.ForkExec under an import alias is reported",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport sc \"syscall\"\n\nfunc other() { _, _ = sc.ForkExec(\"/bin/git\", nil, nil) }\n")}},
+			want: "outside a scrubbed constructor (internal/run/run.go:other)",
+		},
+		{
+			name: "a dot import of os/exec is reported at the import, since its names hide from the selector check",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport . \"os/exec\"\n\nfunc other() { _ = Command(\"git\") }\n")}},
+			want: "outside a scrubbed constructor (internal/run/run.go)",
+		},
+		{
+			name: "the exec.Cmd type named in a signature and os.Args are not starts",
+			tree: fstest.MapFS{"internal/run/run.go": {Data: []byte(
+				"package run\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\n\n" +
+					"func other(cmd *exec.Cmd) []string { _ = os.Args; return cmd.Args }\n")}},
+			wantNil: true,
 		},
 		{
 			name:    "an exec call in a listed constructor passes",
@@ -194,8 +237,8 @@ func (u execUnreadable) Open(name string) (fs.File, error) {
 	return u.tree.Open(name)
 }
 
-// execSite is one exec.Command or exec.CommandContext call: the function that
-// makes it (file:function, or the file alone outside any function) and where.
+// execSite is one process start: the function that makes it (file:function, or the
+// file alone outside any function) and where.
 type execSite struct {
 	key string
 	pos string
@@ -218,7 +261,7 @@ func execGuardProblems(fsys fs.FS, roots []string, allowed map[string]bool) []st
 	for _, s := range sites {
 		made[s.key] = true
 		if !allowed[s.key] {
-			problems = append(problems, fmt.Sprintf("%s calls exec outside a scrubbed constructor (%s)", s.pos, s.key))
+			problems = append(problems, fmt.Sprintf("%s starts a process outside a scrubbed constructor (%s)", s.pos, s.key))
 		}
 	}
 	for _, key := range slices.Sorted(maps.Keys(allowed)) {
@@ -230,7 +273,7 @@ func execGuardProblems(fsys fs.FS, roots []string, allowed map[string]bool) []st
 }
 
 // execCallSites parses the non-test Go files under each root and returns how many
-// it parsed and every exec.Command or exec.CommandContext call among them.
+// it parsed and every process start among them.
 func execCallSites(fsys fs.FS, roots []string) (checked int, sites []execSite, err error) {
 	fset := token.NewFileSet()
 	for _, root := range roots {
@@ -260,35 +303,40 @@ func execCallSites(fsys fs.FS, roots []string) (checked int, sites []execSite, e
 	return checked, sites, nil
 }
 
-// execCallsIn lists the exec.Command and exec.CommandContext calls in one file, by
-// the top-level declaration that makes each. A file that does not import os/exec
-// has none.
+// startSeams are the packages a child process is started through, and the
+// selectors of each that start one. os/exec's Command and CommandContext build the
+// child that the scrubbed constructors build; its Cmd type, written as a literal or
+// with new, builds a child with no Command call; os.StartProcess and the syscall
+// starts launch one with no exec.Cmd at all.
+var startSeams = map[string][]string{
+	"os/exec": {"Command", "CommandContext"},
+	"os":      {"StartProcess"},
+	"syscall": {"StartProcess", "ForkExec"},
+}
+
+// execCallsIn lists the process starts in one file, by the top-level declaration
+// that makes each: a reference to a starting selector, call or not, so a function
+// value is caught too; a literal or new of exec.Cmd; and a dot import of a seam,
+// which hides its names from the selector check, so the import itself is the site.
+// A file that imports none of the seams has none.
 func execCallsIn(fset *token.FileSet, path string, file *ast.File) []execSite {
-	name := execImportName(file)
-	if name == "" {
-		return nil
-	}
+	names := startNames(file)
 	var sites []execSite
+	for _, imp := range file.Imports {
+		if p, _ := strconv.Unquote(imp.Path.Value); imp.Name != nil && imp.Name.Name == "." {
+			if _, seam := startSeams[p]; seam {
+				sites = append(sites, execSite{key: path, pos: fset.Position(imp.Pos()).String()})
+			}
+		}
+	}
 	for _, decl := range file.Decls {
 		key := path
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			key = path + ":" + funcKeyName(fn)
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != name {
-				return true
-			}
-			if sel.Sel.Name == "Command" || sel.Sel.Name == "CommandContext" {
-				sites = append(sites, execSite{key: key, pos: fset.Position(call.Pos()).String()})
+			if startsProcess(n, names) {
+				sites = append(sites, execSite{key: key, pos: fset.Position(n.Pos()).String()})
 			}
 			return true
 		})
@@ -296,19 +344,56 @@ func execCallsIn(fset *token.FileSet, path string, file *ast.File) []execSite {
 	return sites
 }
 
-// execImportName returns the name file refers to os/exec by, or "" when it does
-// not import it.
-func execImportName(file *ast.File) string {
+// startNames maps each seam file imports under a name to that name. A blank or dot
+// import has none: a blank import names nothing, and a dot import is a site.
+func startNames(file *ast.File) map[string]string {
+	names := map[string]string{}
 	for _, imp := range file.Imports {
-		if p, _ := strconv.Unquote(imp.Path.Value); p != "os/exec" {
+		p, _ := strconv.Unquote(imp.Path.Value)
+		if _, seam := startSeams[p]; !seam {
 			continue
 		}
-		if imp.Name != nil {
-			return imp.Name.Name
+		switch {
+		case imp.Name == nil:
+			names[p] = p[strings.LastIndex(p, "/")+1:]
+		case imp.Name.Name != "_" && imp.Name.Name != ".":
+			names[p] = imp.Name.Name
 		}
-		return "exec"
 	}
-	return ""
+	return names
+}
+
+// startsProcess reports whether one node starts a child process: a selector that a
+// seam exports for that purpose, a composite literal of exec.Cmd, or new of it.
+func startsProcess(n ast.Node, names map[string]string) bool {
+	switch x := n.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := x.X.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		for p, local := range names {
+			if local == pkg.Name && slices.Contains(startSeams[p], x.Sel.Name) {
+				return true
+			}
+		}
+	case *ast.CompositeLit:
+		return isExecCmd(x.Type, names)
+	case *ast.CallExpr:
+		id, ok := x.Fun.(*ast.Ident)
+		return ok && id.Name == "new" && len(x.Args) == 1 && isExecCmd(x.Args[0], names)
+	}
+	return false
+}
+
+// isExecCmd reports whether expr names os/exec's Cmd type.
+func isExecCmd(expr ast.Expr, names map[string]string) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == names["os/exec"] && sel.Sel.Name == "Cmd"
 }
 
 // funcKeyName names a function for the allowed map: its name, or Type.name for a
