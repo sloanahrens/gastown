@@ -91,7 +91,7 @@ func TestLandingRowCarriesTheStoryPointCells(t *testing.T) {
 	}}
 	var dropped Dropped
 	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
-		beads, nil, nil, nil, nil, StageStamps{}, nil, &dropped)
+		beads, nil, nil, nil, nil, nil, StageStamps{}, nil, &dropped)
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}

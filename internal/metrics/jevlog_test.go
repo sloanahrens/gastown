@@ -56,7 +56,7 @@ func TestBuildLandingsJevCells(t *testing.T) {
 		"gt-1": {Answers: dispatch.Answers{FitsTwentyMinutes: 0.75, Size: dispatch.SizeAnswer{Score: 3}}},
 	}
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, jev, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesEras, tablesShaped, StageStamps{}, jev, &Dropped{})
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}

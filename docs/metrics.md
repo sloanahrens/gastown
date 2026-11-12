@@ -64,6 +64,14 @@ A source fills one column group of the snapshot. Add one only when the move need
 
 Done when the new source's columns appear in a snapshot row, and `git diff` shows the source as the only change.
 
+## Landings table: om rounds, polecat attempts and seat class
+
+`landings.csv` takes `om_rounds` and `polecat_attempts` as its last two columns, after the Jev columns; their order is `landingColumns` in `internal/metrics/landings.go`. Both are explain-only: `landings.sidecar.json` lists them, and the mango stage never uses them as predictors.
+
+- `om_rounds`: the om verdicts on the bead at or before its landing, counted from `reviews.jsonl`. Empty when no verdict is at or before the landing. A verdict whose timestamp does not parse is skipped, with one line in the footer's gaps.
+- `polecat_attempts`: the number of seats the landing record names on the bead, the length of its `polecat_attempts`. Empty when the record carries none.
+- `seat_class`: `haiku`, `flash` or `sonnet`, from `agent`. The cell reads `unknown` when the agent maps to no class, including a landing with no agent.
+
 ## Burst rows
 
 Before writing a reader of `.runtime/metrics/bursts.jsonl`, read the `BurstRow` doc comment in `internal/metrics/burst.go`: it is the schema's one source, and it names the container-mode fields (`host_errors`, `host_age_s`) and when a row carries them.

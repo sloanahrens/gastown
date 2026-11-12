@@ -27,10 +27,10 @@ var legacyLandingColumns = []string{
 // order the footer counts them.
 var landingStageStamps = []string{"created_at", "dispatched_at", "submitted_at"}
 
-// appendedLandingColumns are the columns the stage join and the polecat time
-// add after the ported extract's header. The Python reference stays at that
-// header: a script does not take the join logic Go owns, so the contract
-// extends it append-only.
+// appendedLandingColumns are the columns the stage join and the polecat time add
+// after the ported extract's header. The Python reference stays at that header:
+// a script does not take the join logic Go owns, so the contract extends it
+// append-only.
 var appendedLandingColumns = []string{
 	"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 	"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
@@ -52,11 +52,17 @@ var jevLandingColumns = []string{"jev_fits20", "jev_size"}
 // come after the Jev columns, append-only.
 var storyPointLandingColumns = []string{"sp", "sp_rung", "sp_minutes", "sp_estimated_at"}
 
+// omLandingColumns are the om round count and the polecat attempts a landing
+// carries. Both are known only after the landing, so both are explain-only.
+// They follow the story-point columns, so every column keeps the place it had before.
+var omLandingColumns = []string{"om_rounds", "polecat_attempts"}
+
 // landingColumns is the header landings.csv is written with: the legacy header
 // then the appended columns, then the Jev columns, then the story-point
-// columns. Columns are append-only: an existing column keeps its name and its
-// place, so a reader of an older file reads the new one under the same names.
-var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns)
+// columns, then the om columns. Columns are append-only: an existing column
+// keeps its name and its place, so a reader of an older file reads the new one
+// under the same names.
+var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns)
 
 // polecatSecsCell is a landing's polecat time in seconds, "" when the ledger
 // line carries none. The writer omits a zero time, so a zero or negative value
@@ -66,6 +72,16 @@ func polecatSecsCell(l LedgerRow) string {
 		return ""
 	}
 	return strconv.FormatFloat(l.PolecatSecs, 'f', -1, 64)
+}
+
+// polecatAttemptsCell is the number of seats the landing record names on the
+// bead, "" when the record carries none (the key is absent) so a landing with no
+// attempts does not read as a count of zero.
+func polecatAttemptsCell(l LedgerRow) string {
+	if len(l.PolecatAttempts) == 0 {
+		return ""
+	}
+	return strconv.Itoa(len(l.PolecatAttempts))
 }
 
 // polecatLowerBoundCell is the lower-bound flag of a landing's polecat time. A

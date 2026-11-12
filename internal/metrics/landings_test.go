@@ -118,7 +118,7 @@ func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
 		t.Errorf("landingColumns starts %v, want the pinned header %v", got, legacy)
 	}
-	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns)
+	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns)
 	if got := landingColumns[len(legacy):]; !slices.Equal(got, want) {
 		t.Errorf("appended columns = %v, want %v", got, want)
 	}
@@ -173,25 +173,25 @@ func TestPolecatCellsFollowTheLedgerLine(t *testing.T) {
 			name:  "a bound with no time",
 			extra: `"polecat_lower_bound":true`,
 			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "1",
-				"agent": "", "seat_class": "", "sp_actual": ""},
+				"agent": "", "seat_class": "unknown", "sp_actual": ""},
 		},
 		{
 			name:  "a line from before the fields existed",
 			extra: "",
 			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "",
-				"agent": "", "seat_class": "", "sp_actual": ""},
+				"agent": "", "seat_class": "unknown", "sp_actual": ""},
 		},
 		{
 			name:  "zero seconds has no points",
 			extra: `"polecat_secs":0`,
 			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "",
-				"agent": "", "seat_class": "", "sp_actual": ""},
+				"agent": "", "seat_class": "unknown", "sp_actual": ""},
 		},
 		{
 			name:  "a negative time reads as absent",
 			extra: `"polecat_secs":-60`,
 			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "",
-				"agent": "", "seat_class": "", "sp_actual": ""},
+				"agent": "", "seat_class": "unknown", "sp_actual": ""},
 		},
 		{
 			name:  "twenty minutes is the twenty-one-point bucket",
@@ -213,6 +213,48 @@ func TestPolecatCellsFollowTheLedgerLine(t *testing.T) {
 	}
 }
 
+// TestPolecatAttemptsCellCountsTheRecordsSeats: polecat_attempts is the number of
+// entries the landing record carries, and a record without the key, or with an
+// empty list, leaves the cell empty rather than a count of zero (gt-gk99dq).
+func TestPolecatAttemptsCellCountsTheRecordsSeats(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{
+			name:  "two seats on the bead",
+			extra: `"polecat_attempts":[{"seat":"gastown/a","secs":300},{"seat":"gastown/b","secs":120,"lower_bound":true}]`,
+			want:  "2",
+		},
+		{
+			name:  "one seat on the bead",
+			extra: `"polecat_attempts":[{"seat":"gastown/a","secs":300}]`,
+			want:  "1",
+		},
+		{
+			name:  "a record without the key",
+			extra: `"polecat_secs":600`,
+			want:  "",
+		},
+		{
+			name:  "an empty list",
+			extra: `"polecat_attempts":[]`,
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := polecatCells(t, polecatLedgerLine(tc.extra))
+			if got := row["polecat_attempts"]; got != tc.want {
+				t.Errorf("polecat_attempts = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSeatClassFromTheAgentName: each agent the design names maps to its seat
 // class through the extract, and a name in none of them is empty.
 func TestSeatClassFromTheAgentName(t *testing.T) {
@@ -224,10 +266,10 @@ func TestSeatClassFromTheAgentName(t *testing.T) {
 		"deepseek-v3":   "flash",
 		"deepseek":      "flash",
 		"claude-sonnet": "sonnet",
-		"claude-opus":   "",
-		"sbx-haiku-2":   "",
-		"Deepseek-v3":   "",
-		"":              "",
+		"claude-opus":   "unknown",
+		"sbx-haiku-2":   "unknown",
+		"Deepseek-v3":   "unknown",
+		"":              "unknown",
 	}
 	for agent, want := range cases {
 		row := polecatCells(t, polecatLedgerLine(`"polecat_secs":600,"agent":"`+agent+`"`))
@@ -243,7 +285,7 @@ func TestSeatClassFromTheAgentName(t *testing.T) {
 func buildLedgerLandings(t *testing.T, ledger []LedgerRow, beads map[string]BeadRow, usage map[string]Usage, stamps StageStamps) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
-		beads, usage, nil, nil, nil, stamps, nil, &Dropped{})
+		beads, usage, nil, nil, nil, nil, stamps, nil, &Dropped{})
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}
@@ -266,6 +308,7 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
 		"jev_fits20", "jev_size", "sp", "sp_rung", "sp_minutes", "sp_estimated_at",
+		"om_rounds", "polecat_attempts",
 	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))
