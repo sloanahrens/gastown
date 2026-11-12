@@ -981,6 +981,9 @@ func Run(opts Options) error {
 	if IsCrewRun(getenv, cwd) {
 		return runDoneCrew(opts, exitType, getenv)
 	}
+	if opts.Branch != "" || opts.Head != "" {
+		return fmt.Errorf("--branch and --head are for crew submissions (gt done --bead <id> --branch <b> --head <sha>); this session is not crew")
+	}
 	if actor != "" && !isPolecatActor(actor) {
 		return fmt.Errorf("gt done is for polecats and crew only (you are %s)\nPolecat sessions end with gt done — the session is cleaned up, but identity persists.\nCrew submit a pushed branch with gt done --bead <id>. Other roles don't use gt done.", actor)
 	}

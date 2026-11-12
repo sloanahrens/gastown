@@ -1,0 +1,174 @@
+package done
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+	"unicode"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/workspace"
+)
+
+// A crew session whose worktree is not in this process (a pod, where the
+// caller's Mac path does not exist) names the submission with --branch and
+// --head instead. The branch and head are the facts the worktree would have
+// supplied, so nothing in the worktree is read: the rig's bare repository
+// reads origin/<branch> and the head commit, and the local gate cannot run
+// here (gt-pyh5p6).
+
+// crewFlagFacts validates the --branch and --head pair. Both or neither: a
+// lone flag names no submission. The branch is passed to the remote query, so
+// it must not read as an option or hold a space. The head is compared with
+// origin's full tip, which a short prefix could never equal, so it is refused
+// here rather than failing later as an unverified push.
+func crewFlagFacts(opts Options) (branch, head string, err error) {
+	branch, head = strings.TrimSpace(opts.Branch), strings.TrimSpace(opts.Head)
+	if branch == "" || head == "" {
+		return "", "", fmt.Errorf("gt done: --branch and --head go together; give both, or neither")
+	}
+	if strings.HasPrefix(branch, "-") || strings.IndexFunc(branch, unicode.IsSpace) >= 0 || strings.IndexFunc(branch, unicode.IsControl) >= 0 {
+		return "", "", fmt.Errorf("gt done: --branch %q is not a branch name", branch)
+	}
+	if !isFullCommitID(head) {
+		return "", "", fmt.Errorf("gt done: --head %q is not a full commit id (40 or 64 lowercase hex digits)", head)
+	}
+	return branch, head, nil
+}
+
+// checkFlagsMatchWorktree is the --branch and --head check for a crew submission
+// whose worktree is present. The flags name nothing the worktree does not
+// already have: they must be the worktree's own branch and HEAD, or the gated
+// path would submit a different commit than the one the caller named. With no
+// flags there is nothing to check. rev resolves a ref in the worktree.
+func checkFlagsMatchWorktree(opts Options, branch string, rev func(ref string) (string, error)) error {
+	if opts.Branch == "" && opts.Head == "" {
+		return nil
+	}
+	flagBranch, flagHead, err := crewFlagFacts(opts)
+	if err != nil {
+		return err
+	}
+	if flagBranch != branch {
+		return fmt.Errorf("gt done: --branch %s is not this worktree's branch %s", flagBranch, branch)
+	}
+	worktreeHead, err := rev("HEAD")
+	if err != nil {
+		return fmt.Errorf("gt done: resolving HEAD: %w", err)
+	}
+	if flagHead != strings.TrimSpace(worktreeHead) {
+		return fmt.Errorf("gt done: --head %s is not this worktree's HEAD %s", ShortSHA(flagHead), ShortSHA(worktreeHead))
+	}
+	return nil
+}
+
+// isFullCommitID reports whether s is a complete SHA-1 or SHA-256 commit id
+// in lowercase hex, the form origin reports a tip in.
+func isFullCommitID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// runDoneCrewFromFlags submits a crew branch named by --branch and --head.
+// The town is the one above the PROCESS's own directory (Options.ProcessDir),
+// never the caller's: the caller's directory is a Mac path this process may
+// not have, and it names the role and the display only. The rig comes from
+// the bead's prefix routing alone. Neither GT_RIG nor GT_TOWN_ROOT is read, so
+// no variable the caller sets can steer which town or rig the submission
+// lands in. It never reads the worktree, and runs the submission against the
+// rig's bare repository.
+func runDoneCrewFromFlags(opts Options, getenv func(string) string) error {
+	branch, head, err := crewFlagFacts(opts)
+	if err != nil {
+		return err
+	}
+	if err := doneRejectGitEnvOverrides(getenv); err != nil {
+		return err
+	}
+
+	processDir := strings.TrimSpace(opts.ProcessDir)
+	if processDir == "" {
+		return fmt.Errorf("gt done: this process's working directory is unavailable, so a --branch/--head submission cannot find its town")
+	}
+	townRoot, _ := workspace.Find(processDir)
+	if townRoot == "" {
+		return fmt.Errorf("gt done: no Gas Town workspace above this process's directory %s; a --branch/--head submission finds its town there, not from the caller's directory", processDir)
+	}
+
+	issueID := firstNonEmpty(opts.Bead, opts.Issue)
+	if issueID == "" {
+		issueID = crewBeadFromBranch(branch, func(prefix string) bool {
+			return beads.GetRigNameForPrefix(townRoot, prefix) != ""
+		})
+	}
+	if issueID == "" {
+		return fmt.Errorf("gt done: crew branch %s names no bead; pass --bead <id>", branch)
+	}
+
+	rigName := beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(issueID))
+	if rigName == "" || rigName == "." || rigName == ".." || strings.ContainsAny(rigName, "/\\") {
+		return fmt.Errorf("gt done: no rig names bead %s in the town's routes", issueID)
+	}
+
+	// The rig's shared bare repository is the one clone every town copy holds
+	// (a pod has no canonical working clone), and it carries origin.
+	cloneDir := constants.RigBareRepoPath(filepath.Join(townRoot, rigName))
+	var repo doneRepo = git.NewGit(cloneDir)
+	if opts.CloneRepo != nil {
+		repo = opts.CloneRepo(cloneDir)
+	}
+	// The worktree's git config is not this process's to read, so a session
+	// that names no agent gets no committer fallback: checkCrewSubmitRun
+	// refuses it before any write.
+	r := newCrewDoneRun(getenv, func() string { return "" }, cloneDir, townRoot, rigName, branch, issueID)
+	r.opts = doneOptions{target: opts.Target}
+	if def := crewRigDefaultBranch(townRoot, rigName); def != "" {
+		r.defaultBranch = def
+	}
+	r.deps = crewSubmitDeps(r, opts, repo)
+	return submitCrewAbsentForLanding(r, head)
+}
+
+// submitCrewAbsentForLanding marks a crew branch ready to land when the
+// worktree is not in this process. origin/<branch> must be at head, read
+// from the run's repo, the rig's bare repository. The worktree's own gate
+// cannot run here, so the output says so and the bead is marked the same way
+// the gated path marks it.
+func submitCrewAbsentForLanding(r *doneRun, head string) error {
+	if err := checkCrewSubmitRun(r); err != nil {
+		return err
+	}
+	issue, bd, err := r.deps.source(r.issueID)
+	if err != nil {
+		return fmt.Errorf("source issue validation failed: %w", err)
+	}
+	if bd == nil {
+		return fmt.Errorf("no beads client for %s", r.issueID)
+	}
+	target, err := resolveDoneTarget(r, issue)
+	if err != nil {
+		return err
+	}
+	if err := r.deps.repo.VerifyPushedCommit("origin", r.branch, head); err != nil {
+		return doneExit(doneExitPushUnverified,
+			fmt.Sprintf("origin/%s is not at %s; push it from your worktree on the Mac first (git push origin HEAD:%s), then re-run gt done", r.branch, ShortSHA(head), r.branch), err)
+	}
+	if err := refuseUncheckedCriteria(r.issueID, issue); err != nil {
+		return err
+	}
+	if err := refuseHumanIdentity(r, head); err != nil {
+		return err
+	}
+	fmt.Fprintln(r.stdout(), "presubmit not run: the worktree is not in this process; run make presubmit on the Mac first")
+	fmt.Fprintln(r.stdout(), "uncommitted work not checked: the worktree is not in this process")
+	return markCrewSubmitted(r, issue, bd, target, head)
+}
