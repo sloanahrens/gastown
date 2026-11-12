@@ -59,6 +59,7 @@ It makes no Jev call, changes no bead and never fetches. The labels come from
 the conflict adapter, which reads the rig's landings and the bare clone as it
 stands. A pair whose commits the clone does not hold is counted as unlabeled,
 and so is a pair whose answer stays below 0.6, which no cut reaches.
+` + jevPodHelp + `
 
 Examples:
   gt jev conflict-report
@@ -75,18 +76,23 @@ func init() {
 }
 
 func runJevConflictReport(cmd *cobra.Command, _ []string) error {
-	return jevConflictReportRun(cmd.Context(), cmd.OutOrStdout(), workspace.FindFromCwdOrError,
-		jevConflictReportSince, jevConflictReportJSON, time.Now())
+	return jevConflictReportRun(cmd, cmd.OutOrStdout(), workspace.FindFromCwdOrError,
+		jevConflictReportSince, jevConflictReportJSON, time.Now(), os.Getenv)
 }
 
-// jevConflictReportRun finds the town and runs the report in it. findTown is a
-// parameter so a test can stand in for a cwd outside any town.
-func jevConflictReportRun(ctx context.Context, w io.Writer, findTown func() (string, error), since string, asJSON bool, now time.Time) error {
+// jevConflictReportRun refuses outside the daemon pod, whose logs the report
+// reads, then finds the town and runs the report in it. findTown and getenv are
+// parameters so a test can stand in for a cwd outside any town and for the pod's
+// environment.
+func jevConflictReportRun(cmd *cobra.Command, w io.Writer, findTown func() (string, error), since string, asJSON bool, now time.Time, getenv func(string) string) error {
+	if err := jevRequirePod(getenv, cmd); err != nil {
+		return err
+	}
 	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevConflictReportWith(ctx, w, townRoot, since, asJSON, now, scorecard.OpenReadOnly, jevConflictLandings)
+	return jevConflictReportWith(cmd.Context(), w, townRoot, since, asJSON, now, scorecard.OpenReadOnly, jevConflictLandings)
 }
 
 // jevConflictOpener opens a battery's adapter. It is a parameter so a test can

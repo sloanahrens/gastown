@@ -22,9 +22,10 @@ import (
 // test names the failure by identity instead of matching this package's prose.
 var errJevHealthLedger = errors.New("reading the usage ledger")
 
-// newJevHealthCmd builds the subcommand over the town lookup and the clock it
-// reads, which the test supplies so a fixture is judged at a fixed instant.
-func newJevHealthCmd(findTown func() (string, error), now func() time.Time, stat jevStatFunc) *cobra.Command {
+// newJevHealthCmd builds the subcommand over the town lookup, the clock it
+// reads, the stat the copy read uses and the environment lookup that decides
+// whether the session is in the daemon pod. A test supplies all four.
+func newJevHealthCmd(findTown func() (string, error), now func() time.Time, stat jevStatFunc, getenv func(string) string) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "health",
@@ -32,6 +33,9 @@ func newJevHealthCmd(findTown func() (string, error), now func() time.Time, stat
 		Long:  jevHealthLong(),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := jevRequirePod(getenv, cmd); err != nil {
+				return err
+			}
 			err := jevHealthInTown(cmd.OutOrStdout(), findTown, asJSON, now(), stat)
 			if _, ok := IsSilentExit(err); ok {
 				// The exit status is the verdict; cobra must not print it as an error.
@@ -45,7 +49,7 @@ func newJevHealthCmd(findTown func() (string, error), now func() time.Time, stat
 }
 
 func init() {
-	jevCmd.AddCommand(newJevHealthCmd(workspace.FindFromCwdOrError, time.Now, os.Stat))
+	jevCmd.AddCommand(newJevHealthCmd(workspace.FindFromCwdOrError, time.Now, os.Stat, os.Getenv))
 }
 
 // jevHealthLong states the rules, rendering each threshold from the constant
@@ -76,6 +80,7 @@ The first line names the copy the rows were read from: the newest write among
 the enabled batteries' logs and the ledger. It warns when that write is older
 than %s, %d quarter-hour passes, so the copy may not be the daemon's. --json
 adds copy_newest_write {at, path}, copy_stale and copy_warning.
+`+jevPodHelp+`
 
 Examples:
   gt jev health

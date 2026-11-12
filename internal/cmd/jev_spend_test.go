@@ -143,7 +143,7 @@ func TestJevSpendTableNamesEveryCaller(t *testing.T) {
 // TestJevSpendCommandRefusesBadFlags runs the cobra command, not the helper, so
 // the flag wiring and the town lookup are covered too: a price or window the
 // helper refuses must come back from "gt jev spend" naming the flag. Parsing
-// the flags and then calling runJevSpend stands in for Execute, which would
+// the flags and then calling jevSpendRun stands in for Execute, which would
 // also run the root command's pre-run hooks.
 //
 //testpolicy:allow parallel — the spend command's flag variables are process-wide
@@ -168,7 +168,7 @@ func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, jevSpendCmd.ParseFlags(tc.args))
-			err := runJevSpend(jevSpendCmd, nil)
+			err := jevSpendRun(jevSpendCmd, inPodEnv())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.flag)
 		})
@@ -181,7 +181,7 @@ func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 		var buf bytes.Buffer
 		jevSpendCmd.SetOut(&buf)
 		require.NoError(t, jevSpendCmd.ParseFlags([]string{"--hours", "1", "--usd-per-billion-tokens", "3", "--json"}))
-		require.NoError(t, runJevSpend(jevSpendCmd, nil))
+		require.NoError(t, jevSpendRun(jevSpendCmd, inPodEnv()))
 
 		var got jev.SpendReport
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &got))

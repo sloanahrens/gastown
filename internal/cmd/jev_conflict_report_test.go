@@ -503,7 +503,7 @@ func TestJevConflictReportRunFailsOutsideATown(t *testing.T) {
 	findTown := func() (string, error) { return "", context.DeadlineExceeded }
 
 	var out bytes.Buffer
-	err := jevConflictReportRun(context.Background(), &out, findTown, "", false, jevConflictNow)
+	err := jevConflictReportRun(jevConflictReportCmd, &out, findTown, "", false, jevConflictNow, inPodEnv())
 	if err == nil {
 		t.Fatalf("a command outside any town returned a report:\n%s", out.String())
 	}

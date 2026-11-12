@@ -31,7 +31,9 @@ where every answered Jev call appends its token counts and the caller that
 spent them, and the request log, where every call that reaches the network
 appends what it sent as sizes and a hash. The calls record themselves; gt jev
 only reads. The health subcommand judges the batteries from the files they
-write; it reads nothing else.`,
+write; it reads nothing else. Before running a subcommand that reads the logs,
+read its help: it refuses outside the daemon pod, where the logs live, and
+prints the kubectl exec line that runs it there.`,
 	RunE: requireSubcommand,
 }
 
@@ -54,6 +56,7 @@ today (since local midnight), yesterday and the last 168 hours, for a dashboard
 that draws Jev spend beside DeepSeek's and Claude's. copy_newest_write is {at,
 path} of the copy's newest write, null when nothing has been written.
 copy_warning is set only when the copy could not be read, naming why.
+` + jevPodHelp + `
 
 Examples:
   gt jev spend --usd-per-billion-tokens 3 --json
@@ -73,6 +76,16 @@ func init() {
 }
 
 func runJevSpend(cmd *cobra.Command, _ []string) error {
+	return jevSpendRun(cmd, os.Getenv)
+}
+
+// jevSpendRun refuses outside the daemon pod, whose logs the command reads,
+// then finds the town and reports its ledger. getenv is the environment lookup;
+// a test supplies one.
+func jevSpendRun(cmd *cobra.Command, getenv func(string) string) error {
+	if err := jevRequirePod(getenv, cmd); err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)

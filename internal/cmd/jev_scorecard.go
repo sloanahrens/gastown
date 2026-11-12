@@ -75,6 +75,7 @@ scored it: the date, labeled, positives, verdict, and the change in labeled sinc
 the previous row. It ends a question with "no growth in N refreshes" when the
 last N or more rows share a labeled count. --history takes no other flag but
 --battery and --question.
+` + jevPodHelp + `
 
 Examples:
   gt jev scorecard --battery fixture
@@ -98,6 +99,16 @@ func init() {
 }
 
 func runJevScorecard(cmd *cobra.Command, _ []string) error {
+	return jevScorecardCommand(cmd, os.Getenv, scoreJevBattery, scorecard.Cache{})
+}
+
+// jevScorecardCommand refuses outside the daemon pod, whose logs the command
+// reads, then finds the town and runs the flags the command's globals hold.
+// getenv is the environment lookup; a test supplies one.
+func jevScorecardCommand(cmd *cobra.Command, getenv func(string) string, score jevBatteryScorer, cache scorecard.Cache) error {
+	if err := jevRequirePod(getenv, cmd); err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
@@ -111,7 +122,7 @@ func runJevScorecard(cmd *cobra.Command, _ []string) error {
 		History:  jevScorecardHistory,
 		Question: jevScorecardQuestion,
 	}
-	return jevScorecardRun(cmd.Context(), cmd.OutOrStdout(), townRoot, o, time.Now(), scoreJevBattery, scorecard.Cache{})
+	return jevScorecardRun(cmd.Context(), cmd.OutOrStdout(), townRoot, o, time.Now(), score, cache)
 }
 
 // jevScorecardOptions is the command's flags, passed as values so the dispatch

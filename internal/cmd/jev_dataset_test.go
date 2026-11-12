@@ -336,7 +336,7 @@ func TestJevDatasetAllReportsAReceiptWriteFailure(t *testing.T) {
 // Without --all the command still needs the battery and the question.
 func TestJevDatasetCommandRequiresBatteryAndQuestionWithoutAll(t *testing.T) {
 	t.Parallel()
-	cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: func() (string, error) { return t.TempDir(), nil }})
+	cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: func() (string, error) { return t.TempDir(), nil }, getenv: inPodEnv()})
 	cmd.SetArgs([]string{"--battery", scorecard.FixtureBattery})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -403,7 +403,7 @@ func TestJevDatasetCommandErrors(t *testing.T) {
 // failure without writing anything.
 func TestJevDatasetCommandNeedsTown(t *testing.T) {
 	t.Parallel()
-	cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }})
+	cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }, getenv: inPodEnv()})
 	cmd.SilenceUsage = true
 	cmd.SetArgs([]string{"--battery", "fixture", "--question", "needs"})
 	var out bytes.Buffer

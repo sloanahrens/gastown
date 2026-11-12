@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,15 +18,17 @@ import (
 )
 
 // jevDatasetDeps is what the dataset subcommand takes from the host: the town
-// whose batteries it reads. A test supplies the lookup, so no unit test needs a
-// working directory inside a town.
+// whose batteries it reads and the environment lookup that decides whether the
+// session is in the daemon pod. A test supplies both, so no unit test needs a
+// working directory inside a town or a set KUBERNETES_SERVICE_HOST.
 type jevDatasetDeps struct {
 	findTownRoot func() (string, error)
+	getenv       func(string) string
 }
 
 // realJevDatasetDeps is jevDatasetDeps on this host.
 func realJevDatasetDeps() jevDatasetDeps {
-	return jevDatasetDeps{findTownRoot: workspace.FindFromCwdOrError}
+	return jevDatasetDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
 }
 
 // jevDatasetFlags is one dataset command's flags; a command owns its own so a
@@ -70,6 +73,7 @@ what it means, the row count, the rows' date range and the dropped columns.
 hourly town-metrics run refreshes, in place of --battery and --question. A battery or
 question that fails is named on its own error line and the rest still export;
 the command exits 1 when any failed.
+` + jevPodHelp + `
 
 Examples:
   gt jev dataset --battery logtriage --question needs_action --since 30d
@@ -77,6 +81,9 @@ Examples:
   gt jev dataset --all`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := jevRequirePod(d.getenv, cmd); err != nil {
+				return err
+			}
 			if f.all {
 				return runJevDatasetAll(cmd.Context(), cmd.OutOrStdout(), d, f, time.Now())
 			}
