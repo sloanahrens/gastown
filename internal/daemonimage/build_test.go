@@ -246,8 +246,14 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 		if !strings.HasPrefix(got.dir, b.Out+string(filepath.Separator)) {
 			t.Errorf("worktree %d is %s, want it staged under %s", i, got.dir, b.Out)
 		}
-		if run.calls[i].dir != got.dir {
-			t.Errorf("build %d ran in %q, want its worktree %q", i, run.calls[i].dir, got.dir)
+		// The last build is trackerd, which compiles in the tracker module
+		// directory of its worktree; the others compile at the worktree root.
+		wantDir := got.dir
+		if i == len(want)-1 {
+			wantDir = filepath.Join(got.dir, TrackerdModuleDir)
+		}
+		if run.calls[i].dir != wantDir {
+			t.Errorf("build %d ran in %q, want %q", i, run.calls[i].dir, wantDir)
 		}
 	}
 	if !reflect.DeepEqual(run.removed, []string{run.adds[0].dir, run.adds[1].dir, run.adds[2].dir, run.adds[3].dir}) {
@@ -256,7 +262,8 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 }
 
 // TestBuildBinariesBuildsTrackerdFromTheGTCommit: trackerd is compiled from
-// TrackerdPackage in a clean worktree of the gt checkout at the gt commit, to
+// TrackerdPackage in the tracker module directory of a clean worktree of the gt
+// checkout at the gt commit, to
 // its path under b.Out, with no -ldflags stamp.
 func TestBuildBinariesBuildsTrackerdFromTheGTCommit(t *testing.T) {
 	t.Parallel()
@@ -278,8 +285,10 @@ func TestBuildBinariesBuildsTrackerdFromTheGTCommit(t *testing.T) {
 	if add.src != b.GTSrc || add.commit != testRev {
 		t.Errorf("trackerd worktree = checkout %s at %s, want the gt checkout %s at %s", add.src, add.commit, b.GTSrc, testRev)
 	}
-	if call.dir != add.dir {
-		t.Errorf("trackerd build ran in %q, want its worktree %q", call.dir, add.dir)
+	// tracker/ is its own module: a compile run from the worktree root cannot
+	// name its packages, which failed every image build (gt-voam40).
+	if want := filepath.Join(add.dir, TrackerdModuleDir); call.dir != want {
+		t.Errorf("trackerd build ran in %q, want the tracker module directory %q of its worktree", call.dir, want)
 	}
 }
 
