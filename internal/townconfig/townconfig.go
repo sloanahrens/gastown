@@ -115,7 +115,7 @@ func Check(root string) error {
 func load(root string) (*Town, []error) {
 	t := &Town{root: root, present: map[string]bool{}, rigs: map[string]config.RigEntry{}, daemonEnv: map[string]string{}}
 	var errs []error
-	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.checkScheduledRunAgents, t.loadDaemonEnv, t.loadDolt} {
+	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.checkScheduledRunAgents, t.checkSandboxEndedHolds, t.loadDaemonEnv, t.loadDolt} {
 		if err := step(); err != nil {
 			errs = append(errs, err)
 		}
@@ -265,6 +265,18 @@ func (t *Town) checkScheduledRunAgents() error {
 	}
 	if bad := ScheduledRunAgentProblems(t.daemon, t.seats); len(bad) > 0 {
 		return oneLine(t.path(FileDaemon), errors.New(strings.Join(bad, "; ")))
+	}
+	return nil
+}
+
+// checkSandboxEndedHolds fails the load when a sandbox profile's ended hold is
+// below three patrol_scan intervals: the daemon's deleter would run after the
+// gateway had already deleted a finished seat's sandbox, and its transcripts
+// would be lost (gt-yck7hz). The hold and the interval live in two files, so
+// only the load sees both.
+func (t *Town) checkSandboxEndedHolds() error {
+	if err := config.ValidateSandboxEndedHolds(t.settings, t.daemon); err != nil {
+		return oneLine(t.path(FileSettings), err)
 	}
 	return nil
 }

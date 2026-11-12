@@ -33,6 +33,11 @@ type mainScriptRun struct {
 // script sleeps for it only in its monitor loop.
 const mainScriptPollInterval = "0.2"
 
+// mainScriptHoldSeconds is the hold the tests pass the script: none, so a test
+// that ends the agent's session exits at once instead of holding the sandbox for
+// the production default.
+const mainScriptHoldSeconds = "0"
+
 func startMainScript(t *testing.T, session string, waitSeconds string) *mainScriptRun {
 	t.Helper()
 	return startMainScriptWith(t, session, waitSeconds, "", nil)
@@ -58,10 +63,7 @@ func startMainScriptWith(t *testing.T, session string, waitSeconds string, lostP
 	if prepare != nil {
 		prepare(r)
 	}
-	args := []string{"-c", sandboxMainScript, "sh", session, waitSeconds, mainScriptPollInterval, tmpdir}
-	if lostPolls != "" {
-		args = append(args, lostPolls)
-	}
+	args := []string{"-c", sandboxMainScript, "sh", session, waitSeconds, mainScriptPollInterval, tmpdir, lostPolls, mainScriptHoldSeconds}
 	cmd := exec.CommandContext(ctx, "sh", args...)
 	cmd.Env = r.env
 	if err := cmd.Start(); err != nil {

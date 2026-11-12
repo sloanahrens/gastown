@@ -32,6 +32,10 @@ type Profile struct {
 	// KubernetesCacheClaim is the shared claim a kubernetes driver mounts at
 	// /tmp/gt-cache, outside /sandbox; "" means no cache mount (gt-zl804).
 	KubernetesCacheClaim string
+	// EndedHoldSeconds is how long the sandbox stays up after the agent's session
+	// ends, so the daemon can copy the seat's transcripts out (gt-yck7hz). 0 is
+	// config.DefaultSandboxEndedHoldSeconds.
+	EndedHoldSeconds int
 
 	// Kubernetes pod placement and sizing; only a kubernetes driver sends
 	// them (as driver config). Nil and empty mean the gateway's defaults.

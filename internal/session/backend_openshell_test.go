@@ -219,7 +219,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		"--env-from", "GT_TMUX_SOCKET=GT_SANDBOX_ENV_GT_TMUX_SOCKET",
 		"--env-from", "GT_TOWN_ROOT=GT_SANDBOX_ENV_GT_TOWN_ROOT",
 		"--detach", "--no-keep",
-		"--", "sh", "-c", sandboxMainScript, "sh", openshellTestSession,
+		"--", "sh", "-c", sandboxMainScript, "sh", openshellTestSession, "", "", "", "", "1800",
 	}
 	want := [][]string{
 		create,

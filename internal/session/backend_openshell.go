@@ -98,19 +98,39 @@ const sandboxHolderSession = "boot"
 // does not outlive it. It exits 1 when the session never appears, so a launch
 // that failed after the sandbox was made also ends the sandbox.
 //
+// When the poll loop ends the script writes the sandboxEndedMarker file under the
+// home and keeps the sandbox up for the hold, so the daemon can copy the seat's
+// transcripts out before it deletes the sandbox. The loop ends on a gone session
+// or on the unreachable limit, and the hold follows either way. A script that
+// exits 1 writes no marker and holds nothing: the holder or the agent's session
+// never started, or the marker could not be written, and a missing marker tells
+// the daemon there is nothing to copy.
+//
 // Positional arguments: $1 the session name; $2 seconds to wait for the session
 // (default sandboxSessionWaitSeconds); $3 the poll interval in seconds (2); $4
-// the tmux start directory (the sandbox home); $5 the unreachable-poll limit
-// (default sandboxTmuxLostPolls). Only $1 is set in production.
-const sandboxMainScript = `S="$1"; W="${2:-` + sandboxSessionWaitSeconds + `}"; P="${3:-2}"; U="${5:-` + sandboxTmuxLostPolls + `}"; T="tmux -L ` + SandboxTmuxSocket + `"; ` +
-	`$T new-session -d -s ` + sandboxHolderSession + ` -c "${4:-` + sandboxHome + `}" || exit 1; ` +
+// the sandbox home, where the tmux session starts and the marker is written
+// (default sandboxHome); $5 the unreachable-poll limit (default
+// sandboxTmuxLostPolls); $6 the hold in seconds (default sandboxEndedHoldDefault).
+// Only $1 and $6 are set in production.
+const sandboxMainScript = `S="$1"; W="${2:-` + sandboxSessionWaitSeconds + `}"; P="${3:-2}"; D="${4:-` + sandboxHome + `}"; U="${5:-` + sandboxTmuxLostPolls + `}"; H="${6:-` + sandboxEndedHoldDefault + `}"; T="tmux -L ` + SandboxTmuxSocket + `"; ` +
+	`$T new-session -d -s ` + sandboxHolderSession + ` -c "$D" || exit 1; ` +
 	`i=0; until $T has-session -t "=$S" 2>/dev/null; do i=$((i+1)); [ "$i" -gt "$W" ] && exit 1; sleep 1; done; ` +
 	`gone=0; unk=0; while [ "$gone" -lt 3 ] && [ "$unk" -lt "$U" ]; do ` +
 	`if out=$($T list-panes -t "=$S" -F '#{pane_dead}' 2>/dev/null); then unk=0; ` +
 	`if printf '%s\n' "$out" | grep -qx 0; then gone=0; else gone=$((gone+1)); fi; ` +
 	`elif $T list-sessions >/dev/null 2>&1; then unk=0; gone=$((gone+1)); ` +
 	`else unk=$((unk+1)); fi; ` +
-	`sleep "$P"; done; exit 0`
+	`sleep "$P"; done; ` +
+	`touch "$D/` + sandboxEndedMarker + `" || exit 1; sleep "$H"; exit 0`
+
+// sandboxEndedMarker is the empty file the main script writes under the sandbox
+// home once the agent's session has ended (gt-yck7hz).
+const sandboxEndedMarker = ".gt-agent-ended"
+
+// sandboxEndedHoldDefault is the hold $6 defaults to when a caller leaves it
+// unset. It must equal config.DefaultSandboxEndedHoldSeconds: the script's text
+// is a constant, so the number is written here and a test pins the two together.
+const sandboxEndedHoldDefault = "1800"
 
 // sandboxTmuxLostPolls is how many polls in a row tmux may stay unreachable
 // (about five minutes at the 2 s interval) before the main process exits.
@@ -119,6 +139,13 @@ const sandboxTmuxLostPolls = "150"
 // sandboxSessionWaitSeconds is how long the main process waits for the agent's
 // session to appear.
 const sandboxSessionWaitSeconds = "900"
+
+// sandboxMainArgs is the argv that runs sandboxMainScript as the sandbox's main
+// process for session. $2 through $5 are empty so the script's defaults apply,
+// and $6 is the hold in seconds.
+func sandboxMainArgs(session string, holdSeconds int) []string {
+	return []string{"sh", "-c", sandboxMainScript, "sh", session, "", "", "", "", strconv.Itoa(holdSeconds)}
+}
 
 // openshellBackend hosts one polecat's session in an OpenShell sandbox named
 // for the session. Its tmux client runs every command through
@@ -1091,7 +1118,7 @@ func (b *openshellBackend) createSpec(spec SpawnSpec, tracker sandboxTracker) (s
 		Memory:     b.profile.Memory,
 		Labels:     map[string]string{"rig": spec.Rig, "polecat": spec.Polecat},
 		Env:        b.contract(spec, tracker),
-		Command:    []string{"sh", "-c", sandboxMainScript, "sh", spec.Session},
+		Command:    sandboxMainArgs(spec.Session, b.endedHold()),
 		NoKeep:     true,
 	}
 	if b.usesDockerVolumes() {
@@ -1109,6 +1136,17 @@ func (b *openshellBackend) createSpec(spec SpawnSpec, tracker sandboxTracker) (s
 		cs.DriverConfigJSON = cfg
 	}
 	return cs, nil
+}
+
+// endedHold is how long the sandbox stays up after the agent's session ends:
+// the profile's EndedHoldSeconds, or the config default when the profile leaves
+// it zero. A zero is never a valid hold (config refuses one below three patrol
+// intervals), so it can only mean the profile was not converted from settings.
+func (b *openshellBackend) endedHold() int {
+	if b.profile.EndedHoldSeconds > 0 {
+		return b.profile.EndedHoldSeconds
+	}
+	return config.DefaultSandboxEndedHoldSeconds
 }
 
 // usesDockerVolumes reports whether this seat mounts a docker cache volume:

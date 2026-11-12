@@ -1834,6 +1834,12 @@ type SandboxProfile struct {
 	ForgejoHost      string   `json:"forgejo_host,omitempty"` // the sandbox's Forgejo host; "" = ControlPlaneHost
 	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
 	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
+	// EndedHoldSeconds is how long the sandbox stays up after the agent's
+	// session ends, so the daemon copies the seat's transcripts out before it
+	// deletes the sandbox. Nil is DefaultSandboxEndedHoldSeconds. Read it through
+	// EndedHold; ValidateSandboxEndedHolds refuses a hold below three patrol_scan
+	// intervals.
+	EndedHoldSeconds *int `json:"ended_hold_seconds,omitempty"`
 	// KubernetesCacheClaim names a shared PersistentVolumeClaim the kubernetes
 	// driver mounts at /tmp/gt-cache; "" means no cache mount. It stays outside
 	// /sandbox because a mount under /sandbox replaces the sandbox's workspace
