@@ -82,6 +82,54 @@ func TestIntegrationRunnerEndToEndOnATwoScriptFixture(t *testing.T) {
 	}
 }
 
+// TestIntegrationParallelEntriesRunAtOnce runs two Parallel scripts through the
+// real runner with a pool of two. The first script writes to a FIFO and then
+// reads the reply; the second reads that FIFO and then replies. Each open
+// blocks until its peer is running, so the FIFOs are the handshake: no sleep,
+// no poll. Run one at a time, the first script blocks on its write, its budget
+// kills it, and the second blocks on its read and is killed too, so the run is red.
+func TestIntegrationParallelEntriesRunAtOnce(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const (
+		aToB = "a_to_b.fifo"
+		bToA = "b_to_a.fifo"
+	)
+	for _, fifo := range []string{aToB, bToA} {
+		if err := syscall.Mkfifo(filepath.Join(root, fifo), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scripts := map[string]string{
+		"parallel_a_test.sh": "echo ping > " + aToB + "\nread -r _ < " + bToA + "\n",
+		"parallel_b_test.sh": "read -r _ < " + aToB + "\necho pong > " + bToA + "\n",
+	}
+	for name, body := range scripts {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logDir := t.TempDir()
+
+	r := Run(t.Context(), Config{
+		Entries: []Entry{
+			{Path: "parallel_a_test.sh", Mode: Parallel},
+			{Path: "parallel_b_test.sh", Mode: Parallel},
+		},
+		Root:        root,
+		LogDir:      logDir,
+		Budget:      10 * time.Second,
+		Exec:        OSExec,
+		Now:         time.Now,
+		WithTimeout: context.WithTimeout,
+		Jobs:        2,
+	})
+
+	if r.Passed != 2 || r.Failed != 0 {
+		t.Fatalf("passed=%d failed=%d failed names=%v, want passed=2 failed=0: the scripts never met at the FIFOs, so they did not run at once (logs %s)", r.Passed, r.Failed, r.FailedNames, logDir)
+	}
+}
+
 func TestIntegrationOSExecPassesTheEnvAndMakesTheTMPDIR(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
