@@ -3,6 +3,7 @@ package version
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/buildpaths"
 	"github.com/steveyegge/gastown/internal/buildsrc"
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -73,6 +75,47 @@ func resolveCommitHash() string {
 // is available. Compare it with git ancestry, not string equality.
 func BuildCommit() string {
 	return resolveCommitHash()
+}
+
+// FullBuildCommit returns the full 40-character commit this binary was built
+// from. The stamp is short by design (buildstamp.Len), so the full sha is the
+// module's vcs.revision, which go build records from the checkout it builds in.
+// It is an error when the build records no such revision, when the revision is
+// not a full sha, or when the stamp is set and is not the start of it: a caller
+// that cannot name its own commit in full refuses, it does not guess one.
+func FullBuildCommit() (string, error) {
+	return fullBuildCommit(Commit, debug.ReadBuildInfo)
+}
+
+// fullBuildCommit is FullBuildCommit with the stamp and the build-info reader
+// injected, so a test drives the no-build-info refusal the test binary never hits.
+func fullBuildCommit(stamped string, read func() (*debug.BuildInfo, bool)) (string, error) {
+	info, ok := read()
+	if !ok {
+		return "", errors.New("the binary records no build info, so no full build commit")
+	}
+	return recordedFullCommit(stamped, info.Settings)
+}
+
+// recordedFullCommit is the vcs.revision in settings, checked as FullBuildCommit
+// documents. The settings are injected, so a test reads the values it sets.
+func recordedFullCommit(stamped string, settings []debug.BuildSetting) (string, error) {
+	var recorded string
+	for _, s := range settings {
+		if s.Key == "vcs.revision" {
+			recorded = s.Value
+		}
+	}
+	if recorded == "" {
+		return "", errors.New("the binary records no vcs.revision, so it was built outside a git checkout")
+	}
+	if _, err := buildstamp.Short(recorded); err != nil {
+		return "", fmt.Errorf("the binary's vcs.revision %q is not a full commit sha: %w", recorded, err)
+	}
+	if stamped != "" && !strings.HasPrefix(recorded, stamped) {
+		return "", fmt.Errorf("the binary's stamped commit %q is not the start of its vcs.revision %q", stamped, recorded)
+	}
+	return recorded, nil
 }
 
 // Describe returns a one-line, human-readable staleness summary for a stale

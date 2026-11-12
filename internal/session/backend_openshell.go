@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1378,6 +1379,29 @@ func confinedPath(dir, rel string) (string, error) {
 		return "", fmt.Errorf("policy path %q must be relative to the gt source checkout and stay inside it", rel)
 	}
 	return filepath.Join(dir, clean), nil
+}
+
+// CheckPolicyFiles refuses a gt source checkout that lacks a sandbox profile's
+// policy file. Each profile's policy resolves under checkout the way createSpec
+// resolves it, and a missing or unreadable file is named by its profile and
+// path. Profiles are checked in name order, so the first refusal is stable. A
+// town with no profiles has no policy to check.
+func CheckPolicyFiles(checkout string, profiles map[string]config.SandboxProfile) error {
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		policy, err := confinedPath(checkout, profiles[name].Policy)
+		if err != nil {
+			return fmt.Errorf("sandbox profile %s: %w", name, err)
+		}
+		if _, err := os.Stat(policy); err != nil {
+			return fmt.Errorf("sandbox profile %s: the policy %s is missing from the gt source checkout %s: %w", name, policy, checkout, err)
+		}
+	}
+	return nil
 }
 
 // sandboxRel is the host worktree's path under the town root. The sandbox
