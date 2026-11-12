@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/rules"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 var rulesDoneAt = time.Date(2026, 10, 21, 17, 0, 0, 0, time.UTC)
@@ -419,5 +420,171 @@ func TestReadRefusalsIncludesRotatedLedger(t *testing.T) {
 	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
 	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesRevertGuard {
 		t.Errorf("labeling = %+v, want broke true from %s", lab, ruleRulesRevertGuard)
+	}
+}
+
+// appendFirstReview writes one review line for town, the way the landing
+// worker does, so Label reads it from the review log.
+func appendFirstReview(t *testing.T, town string, rec land.ReviewRecord) {
+	t.Helper()
+	if err := land.TownReviewsFile(town).Append(rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRulesLabeledTrueWhenAFirstAttemptFindingCitesARuleId checks a session
+// whose attempt-1 verdict, later than the submission, has a finding citing a
+// standing rule id is labeled broke, from the om source, in its title or claim.
+func TestRulesLabeledTrueWhenAFirstAttemptFindingCitesARuleId(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		finding land.ReviewFindingText
+	}{
+		{name: "title", finding: land.ReviewFindingText{Title: "Status headers are not in R12 form", Claim: "the header is bare"}},
+		{name: "claim", finding: land.ReviewFindingText{Title: "Status header form", Claim: "the header breaks R3"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			appendFirstReview(t, town, land.ReviewRecord{
+				BeadID: "gt-x", Rig: "gastown", Attempt: 1, Verdict: "request_changes", Findings: 1,
+				At: rulesDoneAt.Add(time.Minute), FindingText: []land.ReviewFindingText{tc.finding},
+			})
+			a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+			lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+			if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesOmFinding {
+				t.Errorf("labeling = %+v, want broke true from %s", lab, ruleRulesOmFinding)
+			}
+		})
+	}
+}
+
+// TestRulesFindingWithoutARuleIdAddsNoLabel checks a finding that cites no
+// standing rule id does not label the session broke. The session with no guard
+// record is then labeled not broken, as it was before the om source.
+func TestRulesFindingWithoutARuleIdAddsNoLabel(t *testing.T) {
+	t.Parallel()
+	texts := []string{
+		"Status headers are not in form",
+		"the R-form is wrong",
+		"XR12 is not a rule id",
+		"R12a is not a rule id",
+		"r12 is lowercase",
+	}
+	for _, text := range texts {
+		t.Run(text, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			appendFirstReview(t, town, land.ReviewRecord{
+				BeadID: "gt-x", Rig: "gastown", Attempt: 1, Verdict: "request_changes", Findings: 1,
+				At: rulesDoneAt.Add(time.Minute), FindingText: []land.ReviewFindingText{{Title: text, Claim: text}},
+			})
+			a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+			lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+			if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+				t.Errorf("labeling = %+v for %q, want broke false from %s", lab, text, ruleRulesNoRecord)
+			}
+		})
+	}
+}
+
+// TestRulesFindingOutsideFirstAttemptOrAfterSubmissionAddsNoLabel checks the om
+// source reads only a first-attempt verdict later than the submission: a later
+// attempt, and a verdict at or before the submission, leave the session as it was.
+func TestRulesFindingOutsideFirstAttemptOrAfterSubmissionAddsNoLabel(t *testing.T) {
+	t.Parallel()
+	cited := []land.ReviewFindingText{{Title: "Status headers are not in R12 form"}}
+	cases := []struct {
+		name string
+		rec  land.ReviewRecord
+	}{
+		{name: "second attempt", rec: land.ReviewRecord{Attempt: 2, At: rulesDoneAt.Add(time.Minute)}},
+		{name: "verdict at the submission", rec: land.ReviewRecord{Attempt: 1, At: rulesDoneAt}},
+		{name: "verdict before the submission", rec: land.ReviewRecord{Attempt: 1, At: rulesDoneAt.Add(-time.Minute)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := tc.rec
+			rec.BeadID, rec.Rig, rec.Verdict, rec.Findings, rec.FindingText = "gt-x", "gastown", "request_changes", 1, cited
+			appendFirstReview(t, town, rec)
+			a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+			lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+			if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+				t.Errorf("labeling = %+v, want broke false from %s", lab, ruleRulesNoRecord)
+			}
+		})
+	}
+}
+
+// TestRulesOmSourceNeverTurnsATrueIntoAFalse checks a session a guard source has
+// labeled broke stays broke whatever its verdict says: an approve with no rule
+// finding does not clear it, and a rule finding joins the source's name.
+func TestRulesOmSourceNeverTurnsATrueIntoAFalse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		verdict  land.ReviewRecord
+		wantRule string
+	}{
+		{
+			name:     "approve with no rule finding",
+			verdict:  land.ReviewRecord{Verdict: "approve", Findings: 0},
+			wantRule: ruleRulesRevertGuard,
+		},
+		{
+			name: "rule finding joins the guard source",
+			verdict: land.ReviewRecord{Verdict: "request_changes", Findings: 1,
+				FindingText: []land.ReviewFindingText{{Title: "Status headers are not in R12 form"}}},
+			wantRule: ruleRulesRevertGuard + "+" + ruleRulesOmFinding,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := attention.AppendRefusal(town, attention.Refusal{
+				TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown", Worker: "bullet",
+				Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			rec := tc.verdict
+			rec.BeadID, rec.Rig, rec.Attempt, rec.At = "gt-x", "gastown", 1, rulesDoneAt.Add(time.Minute)
+			appendFirstReview(t, town, rec)
+			a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+			lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+			if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != tc.wantRule {
+				t.Errorf("labeling = %+v, want broke true from %s", lab, tc.wantRule)
+			}
+		})
+	}
+}
+
+// TestRulesUnreadableReviewLogIsAnError checks a review log that cannot be read
+// is an error, not a clean read: the session is not labeled false for want of a
+// finding the log may hold.
+func TestRulesUnreadableReviewLogIsAnError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the log file is: the log cannot be read as a file.
+	if err := os.MkdirAll(land.TownReviewsFile(town).Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+	it, err := a.Parse(rulesRaw(t, "gt-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lab, err := a.Label(context.Background(), it); err == nil {
+		t.Errorf("labeling = %+v with an unreadable review log, want an error", lab)
 	}
 }
