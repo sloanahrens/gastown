@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1939,6 +1940,38 @@ func TestResolveOwnCommitWidensThroughTheGastownBareRepo(t *testing.T) {
 	id := f.Commit(t, bare, "main", "build", map[string]string{"a": "a"})
 	if got := d.resolveOwnCommit(); got != id {
 		t.Fatalf("resolveOwnCommit = %q, want the bare repo's full id %s", got, id)
+	}
+}
+
+// TestResolveOwnCommitLogsWhenTheBuildCommitCannotBeResolved: a bare repo that
+// holds other commits but not this build's returns the commit as built and
+// logs one message naming the repo and the commit it could not resolve
+// (gt-3wj5wq).
+func TestResolveOwnCommitLogsWhenTheBuildCommitCannotBeResolved(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&logs, "", 0)}
+	f := useGitfake(t, d)
+	bare := filepath.Join(d.config.TownRoot, "gastown", ".repo.git")
+	f.InitBare(t, bare)
+	f.Commit(t, bare, "main", "other", map[string]string{"a": "a"})
+	own := "abc1234"
+	d.buildCommitFn = func() string { return own }
+
+	if got := d.resolveOwnCommit(); got != own {
+		t.Fatalf("resolveOwnCommit = %q, want the build commit %q", got, own)
+	}
+	logged := logs.String()
+	// The git error the message wraps carries its own newlines, so one log
+	// entry is one message; the prefix is what counts the entries.
+	if got := strings.Count(logged, "resolveOwnCommit:"); got != 1 {
+		t.Fatalf("resolveOwnCommit logged %d entries, want 1: %q", got, logged)
+	}
+	if !strings.Contains(logged, bare) {
+		t.Errorf("log line %q does not name the bare repo %s", logged, bare)
+	}
+	if !strings.Contains(logged, own) {
+		t.Errorf("log line %q does not name the build commit %s", logged, own)
 	}
 }
 

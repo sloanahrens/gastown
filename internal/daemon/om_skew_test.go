@@ -123,8 +123,14 @@ func TestOMSkewAndHMSkewRemoteReadsTheBareRepo(t *testing.T) {
 		bare    bool   // the rig's .repo.git exists
 		url     string // the origin url the bare repo prints
 		wantErr bool
+		// wantLSRemote, when set, is the exact argv the ls-remote call must
+		// carry: the url follows a "--", so one beginning with "-" is read as
+		// a url and not an option.
+		wantLSRemote []string
 	}{
 		{name: "om: the bare repo answers the url and the tip", rig: "om", probe: omProbe, bare: true, url: omURL},
+		{name: "om: a url that begins with a dash is read after --", rig: "om", probe: omProbe, bare: true, url: "-oops",
+			wantLSRemote: []string{"git", "ls-remote", "--", "-oops", omSkewRemoteRef}},
 		{name: "om: a rig with no bare repo fails naming it", rig: "om", probe: omProbe, bare: false, url: omURL, wantErr: true},
 		{name: "om: a bare repo with no origin url fails naming it", rig: "om", probe: omProbe, bare: true, url: "", wantErr: true},
 		// hm's failure rows (no origin url, a failed ls-remote) are the hm_skew
@@ -170,6 +176,11 @@ func TestOMSkewAndHMSkewRemoteReadsTheBareRepo(t *testing.T) {
 			}
 			if lsRemote := r.calls[len(r.calls)-1]; !slices.Contains(lsRemote, tc.url) {
 				t.Errorf("ls-remote call = %q, want it against the bare repo's url %q", lsRemote, tc.url)
+			}
+			if tc.wantLSRemote != nil && !slices.ContainsFunc(r.calls, func(c []string) bool {
+				return slices.Equal(c, tc.wantLSRemote)
+			}) {
+				t.Errorf("git calls = %q, want an ls-remote call %q", r.calls, tc.wantLSRemote)
 			}
 		})
 	}

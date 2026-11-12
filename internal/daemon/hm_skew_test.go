@@ -28,20 +28,22 @@ const (
 // hmSkewAnswers is what the fake hm and git answer. The zero value answers
 // nothing useful; hmSkewBehindAnswers is the town the tests start from.
 type hmSkewAnswers struct {
-	version      string   // stdout of `hm version`
-	versionErr   bool     // `hm version` fails to run
-	originErr    bool     // the rig's origin url cannot be read
-	noOrigin     bool     // the rig's origin url is empty
-	lsRemoteErr  bool     // the ls-remote call fails
-	lsRemote     string   // stdout of ls-remote
-	diffErr      bool     // the clone's diff fails
-	changed      []string // the paths the clone's diff names
-	lacksInstall bool     // the clone has no commit for the installed sha
-	probeErr     bool     // the clone cannot answer whether it has the installed sha
-	noClone      bool     // the job-owned clone does not exist yet, so the monitor clones it
-	cloneErr     bool     // the clone fails, leaving a partial directory behind
-	fetchErr     bool     // the fetch of origin's main into the clone fails
-	cloneIsFile  bool     // the clone's path is a regular file, not a directory
+	version      string    // stdout of `hm version`
+	versionErr   bool      // `hm version` fails to run
+	originErr    bool      // the rig's origin url cannot be read
+	noOrigin     bool      // the rig's origin url is empty
+	originURL    string    // the origin url the rig prints, when set
+	lsRemoteErr  bool      // the ls-remote call fails
+	lsRemote     string    // stdout of ls-remote
+	lsRemoteArgs *[]string // when set, receives the ls-remote call's argv
+	diffErr      bool      // the clone's diff fails
+	changed      []string  // the paths the clone's diff names
+	lacksInstall bool      // the clone has no commit for the installed sha
+	probeErr     bool      // the clone cannot answer whether it has the installed sha
+	noClone      bool      // the job-owned clone does not exist yet, so the monitor clones it
+	cloneErr     bool      // the clone fails, leaving a partial directory behind
+	fetchErr     bool      // the fetch of origin's main into the clone fails
+	cloneIsFile  bool      // the clone's path is a regular file, not a directory
 }
 
 // hmSkewBehindAnswers is an hm at installed sha A, origin's main at B, and a diff
@@ -85,6 +87,9 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 			}
 		case strings.Contains(joined, " remote get-url origin"):
 			out = hmSkewTestURL
+			if a.originURL != "" {
+				out = a.originURL
+			}
 			if a.noOrigin {
 				out = ""
 			}
@@ -92,6 +97,9 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 				err = errors.New("fatal: not a git repository")
 			}
 		case strings.Contains(joined, " ls-remote "):
+			if a.lsRemoteArgs != nil {
+				*a.lsRemoteArgs = slices.Clone(cmd.Args)
+			}
 			out = a.lsRemote
 			if a.lsRemoteErr {
 				err = errors.New("fatal: unable to access remote")
@@ -170,6 +178,26 @@ func hmSkewDaemon(t *testing.T, a hmSkewAnswers) (*Daemon, *notifyfake.Recorder,
 	}
 	d.hmSkew.pathFn = func() string { return hmSkewTestPath }
 	return d, rec, &logs
+}
+
+// TestHMSkewLSPassesTheURLAfterADoubleDash: the hm probe's ls-remote passes the
+// url the bare repo printed after "--", so a url beginning with "-" is read as
+// a url, not an option (gt-3wj5wq).
+func TestHMSkewLSPassesTheURLAfterADoubleDash(t *testing.T) {
+	t.Parallel()
+	var argv []string
+	a := hmSkewBehindAnswers()
+	a.originURL = "-oops"
+	a.lsRemoteArgs = &argv
+	d, _, _ := hmSkewDaemon(t, a)
+
+	if _, _, err := d.hmSkewRemote(d.config.TownRoot); err != nil {
+		t.Fatalf("hmSkewRemote with a url beginning with a dash: %v", err)
+	}
+	want := []string{"git", "ls-remote", "--", "-oops", omSkewRemoteRef}
+	if !slices.Equal(argv, want) {
+		t.Fatalf("ls-remote argv = %q, want %q", argv, want)
+	}
 }
 
 // TestHMSkewEscalatesWhenBehindOnACodePath: an installed hm behind origin's main
