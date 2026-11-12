@@ -15,12 +15,14 @@ import (
 // explainOnlyColumns are the landings.csv columns known only after the landing:
 // never a predictor, only joined back to explain a box. The polecat time and the
 // seat are written by the landing record, so they are known only after it too.
-// They are kept in the sorted order the sidecar writes.
+// The timestamps are not features either, so sp_estimated_at is explain-only
+// beside created_at and dispatched_at. They are kept in the sorted order the
+// sidecar writes.
 var explainOnlyColumns = []string{
 	"agent", "attempts", "created_at", "dispatched_at", "file_entropy", "files_touched",
 	"gate_result", "lines_added", "lines_deleted", "lines_total", "om_verdict",
 	"package_entropy", "polecat_lower_bound", "polecat_secs", "seat_class", "sp_actual",
-	"submitted_at", "time_to_land_s", "unreadable",
+	"sp_estimated_at", "submitted_at", "time_to_land_s", "unreadable",
 }
 
 // DiffSource is where a landing's size and spread columns come from: Stats
@@ -78,6 +80,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 		b := beadsByID[l.Bead]
 		model := landingModel(l, usage, stamps.Seats)
 		jevFits, jevSize := jevCells(jev, l.Bead)
+		sp, spRung, spMinutes := storyPointCells(l.Bead, b.Labels, dropped)
 		createdAt := stampCell(b.CreatedAt)
 		dispatchedAt := stampCell(stamps.Dispatched[l.Bead])
 		submittedAt := landingSubmitted(l.Bead, b, stamps, landed)
@@ -128,6 +131,10 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"sp_actual":               spActualCell(l),
 			"jev_fits20":              jevFits,
 			"jev_size":                jevSize,
+			"sp":                      sp,
+			"sp_rung":                 spRung,
+			"sp_minutes":              spMinutes,
+			"sp_estimated_at":         stampCell(b.EstimatedAt),
 		})
 	}
 	return rows, nil

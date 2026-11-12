@@ -227,13 +227,16 @@ func TestExplainOnlyColumnsExtendThePinnedSet(t *testing.T) {
 			t.Errorf("explainOnlyColumns omits %q, which the pinned set marks explain-only", column)
 		}
 	}
-	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns); got != want {
-		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended",
-			got, len(legacy), len(appendedLandingColumns))
+	// sp_estimated_at is the story-point write time: a timestamp, explain-only
+	// beside the stage stamps, and the one column past the appended set.
+	const storyPointTime = "sp_estimated_at"
+	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns)+1; got != want {
+		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended plus %s",
+			got, len(legacy), len(appendedLandingColumns), storyPointTime)
 	}
-	for _, column := range appendedLandingColumns {
+	for _, column := range append(slices.Clone(appendedLandingColumns), storyPointTime) {
 		if !slices.Contains(explainOnlyColumns, column) {
-			t.Errorf("explainOnlyColumns omits the appended stage column %q", column)
+			t.Errorf("explainOnlyColumns omits the stage column %q", column)
 		}
 	}
 }
@@ -279,6 +282,7 @@ const landingSidecarBytes = `{
   "polecat_secs",
   "seat_class",
   "sp_actual",
+  "sp_estimated_at",
   "submitted_at",
   "time_to_land_s",
   "unreadable"

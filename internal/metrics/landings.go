@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -41,11 +42,21 @@ var appendedLandingColumns = []string{
 // predictors and are not explain-only.
 var jevLandingColumns = []string{"jev_fits20", "jev_size"}
 
+// storyPointLandingColumns are the bead's story-point cells as the landing
+// carries them. sp is the estimate (sp:N), sp_rung names the inputs it was made
+// from (sp-rung:<rung>) and sp_minutes is its pre-rounding minutes
+// (sp-minutes:<n>); those three are read from the bead's labels, so a bead the
+// estimate never labeled keeps them empty. sp_estimated_at is the created time of
+// the bead's latest SP ESTIMATE v1 comment, the time the labels were written; it
+// is read from the comment, and the report compares it with dispatched_at. They
+// come after the Jev columns, append-only.
+var storyPointLandingColumns = []string{"sp", "sp_rung", "sp_minutes", "sp_estimated_at"}
+
 // landingColumns is the header landings.csv is written with: the legacy header
-// then the appended columns, then the Jev columns. Columns are append-only: an
-// existing column keeps its name and its place, so a reader of an older file
-// reads the new one under the same names.
-var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns)
+// then the appended columns, then the Jev columns, then the story-point
+// columns. Columns are append-only: an existing column keeps its name and its
+// place, so a reader of an older file reads the new one under the same names.
+var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns)
 
 // polecatSecsCell is a landing's polecat time in seconds, "" when the ledger
 // line carries none. The writer omits a zero time, so a zero or negative value
@@ -79,6 +90,67 @@ func spActualCell(l LedgerRow) string {
 		return ""
 	}
 	return strconv.Itoa(points)
+}
+
+// rungLabelNone is the label an estimate carries when no input made it. It is
+// not a rung ParseLabel accepts, so the cell reads it by its spelling.
+const rungLabelNone = "sp-rung:" + rungNone
+
+// rungNone is the rung value of an estimate no input made.
+const rungNone = "none"
+
+// storyPointCells reads a bead's sp, sp_rung and sp_minutes cells from its
+// labels. A label that starts sp:, sp-rung: or sp-minutes: and does not parse is
+// named in dropped, not ignored: a bead whose estimate cannot be read is unknown,
+// not unlabelled. Two different values of one kind are also unknown, so that cell
+// is empty.
+func storyPointCells(bead string, labels []string, dropped *Dropped) (sp, rung, minutes string) {
+	var points, rungs, minuteValues []string
+	for _, label := range labels {
+		if !strings.HasPrefix(label, "sp:") && !strings.HasPrefix(label, "sp-rung:") && !strings.HasPrefix(label, "sp-minutes:") {
+			continue
+		}
+		parsed, err := storypoints.ParseLabel(label)
+		switch {
+		case err == nil && parsed.Kind == storypoints.KindEstimate:
+			points = append(points, strconv.Itoa(parsed.Points))
+		case err == nil && parsed.Kind == storypoints.KindRung:
+			rungs = append(rungs, parsed.Rung)
+		case err == nil && parsed.Kind == storypoints.KindMinutes:
+			minuteValues = append(minuteValues, strconv.FormatFloat(parsed.Minutes, 'f', -1, 64))
+		case label == rungLabelNone:
+			rungs = append(rungs, rungNone)
+		default:
+			dropped.Add("labels:"+bead, "unreadable story-point label "+label)
+		}
+	}
+	sp, err := singleLabelValue(points)
+	if err != nil {
+		dropped.Add("labels:"+bead, "conflicting sp labels: "+strings.Join(points, ","))
+	}
+	rung, err = singleLabelValue(rungs)
+	if err != nil {
+		dropped.Add("labels:"+bead, "conflicting sp-rung labels: "+strings.Join(rungs, ","))
+	}
+	minutes, err = singleLabelValue(minuteValues)
+	if err != nil {
+		dropped.Add("labels:"+bead, "conflicting sp-minutes labels: "+strings.Join(minuteValues, ","))
+	}
+	return sp, rung, minutes
+}
+
+// singleLabelValue is the one value a bead's labels of a kind agree on: "" when
+// it has none, and an error when they disagree.
+func singleLabelValue(values []string) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+	for _, v := range values[1:] {
+		if v != values[0] {
+			return "", errors.New("labels disagree")
+		}
+	}
+	return values[0], nil
 }
 
 // LandingGaps is what the joined landings do not cover: the rows no seat record
