@@ -20,6 +20,10 @@ The dry run is every Mac caller of the wrapper: the scripts under
 `$HOME/.claude/tools`, `gt-watch`, the Claude hooks (`gt prime`) and
 `claude-agent`.
 
+`gt prime` runs from `~/gt`, as the session-start hook does. Through the wrapper it
+refuses from a crew worktree, because the pod has no such directory and so cannot
+run its worktree check or identity lock.
+
 ## Cutover
 
 Run install from the directory holding the new `gt-wrap`:
