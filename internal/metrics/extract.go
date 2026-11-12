@@ -98,6 +98,10 @@ type ExtractEnv struct {
 	// BdShowCap bounds how many beads the handoff reader fetches; zero is the
 	// ported default of 150.
 	BdShowCap int
+	// JevLog is the Jev dispatch log the landings' jev columns read, by path.
+	// A missing file leaves those columns empty and is named in the footer; it
+	// must be set, so an unwired log is never read as an absent one.
+	JevLog string
 	// LedgerLoader and ReviewLoader are the loaders the row-count assertion
 	// watches; nil means LoadLedger and LoadReviews. A test injects a loader
 	// that loses a row to drive the assertion.
@@ -140,6 +144,10 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		return res, errors.New("extract: ExtractEnv.Diffs is unset")
 	case env.RunBd == nil:
 		return res, errors.New("extract: ExtractEnv.RunBd is unset")
+	case env.JevLog == "":
+		// An empty path would read as a missing log, so an unwired one is
+		// refused here rather than passed as a log with no answers.
+		return res, errors.New("extract: ExtractEnv.JevLog is unset")
 	}
 	if err := env.makeOutDir(); err != nil {
 		return res, fmt.Errorf("extract: %w", err)
@@ -249,7 +257,11 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		}
 	}
 
-	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, eras, shaped, stamps, dropped)
+	jev, err := LoadJevFirst(env.JevLog, dropped)
+	if err != nil {
+		return res, err
+	}
+	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, eras, shaped, stamps, jev, dropped)
 	if err != nil {
 		return res, err
 	}

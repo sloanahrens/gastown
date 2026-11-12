@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/jev/dispatch"
 )
 
 // This file is the real-environment wiring. It wires the town the extract reads:
@@ -239,6 +240,7 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		Unreadable:    unreadable,
 		HandoffCache:  handoff,
 		BdShowCap:     defaultBdShowCap,
+		JevLog:        dispatch.LogPath(town),
 	}
 	return real, nil
 }

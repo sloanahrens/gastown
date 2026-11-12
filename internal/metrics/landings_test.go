@@ -9,16 +9,40 @@ import (
 	"testing"
 )
 
-// landingsFixture is testdata/landings.v2.csv, the header this join writes,
+// landingsFixture is testdata/landings.v3.csv, the header this join writes,
 // bytes included: its CRLF line endings are the extract's and the round trip is
 // measured against them.
 func landingsFixture(t *testing.T) []byte {
 	t.Helper()
-	data, err := os.ReadFile("testdata/landings.v2.csv")
+	data, err := os.ReadFile("testdata/landings.v3.csv")
 	if err != nil {
 		t.Fatalf("read the landings fixture: %v", err)
 	}
 	return data
+}
+
+// TestReadLandingsReadsAPreJevFile: landings.v2.csv is the 34-column file the
+// extract wrote before the Jev columns appended. It reads under its own header,
+// and its rows carry no Jev keys rather than empty ones.
+func TestReadLandingsReadsAPreJevFile(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("testdata/landings.v2.csv")
+	if err != nil {
+		t.Fatalf("read the pre-Jev fixture: %v", err)
+	}
+	header, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("read the pre-Jev fixture: %v", err)
+	}
+	if want := slices.Concat(legacyLandingColumns, appendedLandingColumns); !slices.Equal(header, want) {
+		t.Errorf("header = %v, want the pre-Jev header %v", header, want)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want the fixture's 3", len(rows))
+	}
+	if _, ok := rows[0]["jev_fits20"]; ok {
+		t.Errorf("rows[0] carries jev_fits20 = %q, want no such key for a pre-Jev row", rows[0]["jev_fits20"])
+	}
 }
 
 // TestReadLandingsReadsAPreChangeFile: landings.v1.csv is the 25-column file the
@@ -36,7 +60,7 @@ func TestReadLandingsReadsAPreChangeFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the pre-change fixture: %v", err)
 	}
-	legacy := landingColumns[:len(landingColumns)-len(appendedLandingColumns)]
+	legacy := legacyLandingColumns
 	if !slices.Equal(header, legacy) {
 		t.Errorf("header = %v, want the pre-change header %v", header, legacy)
 	}
@@ -94,8 +118,9 @@ func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
 		t.Errorf("landingColumns starts %v, want the pinned header %v", got, legacy)
 	}
-	if got := landingColumns[len(legacy):]; !slices.Equal(got, appendedLandingColumns) {
-		t.Errorf("appended columns = %v, want %v", got, appendedLandingColumns)
+	want := slices.Concat(appendedLandingColumns, jevLandingColumns)
+	if got := landingColumns[len(legacy):]; !slices.Equal(got, want) {
+		t.Errorf("appended columns = %v, want %v", got, want)
 	}
 }
 
@@ -218,7 +243,7 @@ func TestSeatClassFromTheAgentName(t *testing.T) {
 func buildLedgerLandings(t *testing.T, ledger []LedgerRow, beads map[string]BeadRow, usage map[string]Usage, stamps StageStamps) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
-		beads, usage, nil, nil, nil, stamps, &Dropped{})
+		beads, usage, nil, nil, nil, stamps, nil, &Dropped{})
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}
@@ -240,6 +265,7 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 	appended := []string{
 		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
+		"jev_fits20", "jev_size",
 	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))
