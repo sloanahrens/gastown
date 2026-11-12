@@ -237,7 +237,7 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		{name: "an unreadable line that holds only a variable is not a close", command: `echo "a $b`, want: nil},
 		// A quoted heredoc body is literal to the parser, so a close in it is
 		// data even with an unterminated quote in the body. The same body unquoted
-		// is judged (see the block-path table).
+		// is judged (TestParseBdCloseInvocationsBlockPathSubstitutions).
 		{name: "a close in a quoted heredoc body with an unterminated quote is data", command: "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", want: nil},
 		{
 			// A variable id is unreadable, so it cannot match a branch and
@@ -588,15 +588,6 @@ func TestBdCloseInvariantBlockPath_NewForms(t *testing.T) {
 		{"env with flags", "env -u FOO bd close gt-arno", "gt-arno"},
 		{"repeated reason leaves this id unoverridden", "bd close gt-arno gt-other --reason x --reason 'supersede: y'", "gt-arno"},
 		{"reason file without an override", "bd close gt-arno --reason-file " + dir + "/missing.txt", "gt-arno"},
-		// A line the parser cannot read is refused for its close only when it
-		// may hold a substitution: each opening alone is enough.
-		{"unclosed backquote holding a close", "echo `bd close gt-arno", "gt-arno"},
-		{"unclosed process input holding a close", "cat <(bd close gt-arno", "gt-arno"},
-		{"unclosed process output holding a close", "tee >(bd close gt-arno", "gt-arno"},
-		// The same heredoc body as the parse table, unquoted: the shell expands
-		// its substitution, so the close is judged.
-		{"a close in an unquoted heredoc body with an unterminated quote", "cat <<EOF\n$(bd close gt-arno) \"unterminated\nEOF", "gt-arno"},
-		{"the same heredoc body quoted is data", "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", ""},
 
 		{"substitution with a supersede reason", "echo $(bd close gt-arno --reason 'supersede: dup')", ""},
 		{"xargs fed by echo with a supersede reason", "echo gt-arno | xargs bd close --reason 'cancel: x'", ""},
@@ -629,6 +620,48 @@ func TestBdCloseInvariantBlockPath_NewForms(t *testing.T) {
 			t.Errorf("a branch cut for no bead has nothing to judge, but %q was refused: %s", id, refusal)
 		}
 	})
+}
+
+// TestParseBdCloseInvocationsBlockPathSubstitutions drives the decision the
+// guard turns into exit 2 (firstBdCloseRefusal) for the substitution and
+// heredoc shapes the parse-level rows pin: parsing them is not enough if the
+// refusal never sees them. An unreadable line is the branch's own close only
+// when it may hold a substitution, so each opening alone makes the close the
+// bead; a quoted heredoc body is literal data, and the same body unquoted is
+// judged.
+func TestParseBdCloseInvocationsBlockPathSubstitutions(t *testing.T) {
+	t.Parallel()
+	scope := bdCloseInvariantScope{
+		branch:  "polecat/malachite/gt-arno+muck73gu",
+		target:  "origin/main",
+		counter: fakeCloseTimeCommitCounter{count: 3},
+	}
+	tests := []struct {
+		name, command string
+		wantID        string // the id the guard refuses; "" when the close passes
+	}{
+		{"unclosed backquote holding a close", "echo `bd close gt-arno", "gt-arno"},
+		{"unclosed process input holding a close", "cat <(bd close gt-arno", "gt-arno"},
+		{"unclosed process output holding a close", "tee >(bd close gt-arno", "gt-arno"},
+		{"an unclosed line holding no substitution passes", `echo "a $b`, ""},
+		{"a close in an unquoted heredoc body with an unterminated quote", "cat <<EOF\n$(bd close gt-arno) \"unterminated\nEOF", "gt-arno"},
+		{"the same heredoc body quoted is data", "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			id, refusal := firstBdCloseRefusal(scope, parseBdCloseInvocations(tt.command), "")
+			if tt.wantID == "" {
+				if refusal != "" {
+					t.Errorf("%q refused %q (%s), want it allowed", tt.command, id, refusal)
+				}
+				return
+			}
+			if id != tt.wantID || refusal == "" {
+				t.Errorf("%q refused (%q, %q), want %s refused", tt.command, id, refusal, tt.wantID)
+			}
+		})
+	}
 }
 
 // TestBranchBeadID: the bead a polecat branch was cut for, and nothing for any
