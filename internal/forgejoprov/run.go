@@ -32,14 +32,17 @@ type Env struct {
 	// Random is the source of a new bot's password; nil is left to the provisioner, which
 	// uses crypto/rand.
 	Random io.Reader
+	// ListLock is the workflow-file hook list's lock; nil is left to the provisioner,
+	// which takes a flock on the list's sibling .lock file.
+	ListLock func(listPath string) (unlock func() error, err error)
 }
 
 // Run provisions what opts names, in the order the shell script did: each role's bot
 // and token (no token under --skip-tokens), then for each repository its access, the
-// viewer grant, the main rule and the removal of the candidate-branch rule. It returns
-// ExitOK when the run finished (a dry run included, which sends no write) and ExitFailure
-// when a step failed. Progress and failures go to env.Log; no admin or minted token
-// reaches it.
+// viewer grant, its workflow-file hook list entry, the main rule and the removal of the
+// candidate-branch rule. It returns ExitOK when the run finished (a dry run included,
+// which sends no write) and ExitFailure when a step failed. Progress and failures go to
+// env.Log; no admin or minted token reaches it.
 func Run(ctx context.Context, opts *Options, env Env) int {
 	logOut := env.Log
 	if logOut == nil {
@@ -82,6 +85,7 @@ func Run(ctx context.Context, opts *Options, env Env) int {
 		SkipTokens:      opts.SkipTokens,
 		ViewerRequested: slices.Contains(opts.Roles, "viewer"),
 		Files:           env.Files,
+		ListLock:        env.ListLock,
 	}
 	if err := provision(p, opts); err != nil {
 		logf("%v", err)
@@ -130,6 +134,8 @@ func provision(p *Provisioner, opts *Options) error {
 // drops a merge whitelist entry for a login that is not yet a collaborator, so the
 // access has to come first (gt-fn9e6.23). The viewer grant is made here only when the
 // role loop does not make it, so the access is never granted twice (gt-fn9e6.49).
+// The workflow-file hook list is written before the rules, so a run that stops after a
+// rule is written has already put the repository under the hook.
 func provisionRepo(p *Provisioner, repo string, opts *Options) error {
 	for _, role := range opts.Roles {
 		perm, ok, err := CollaboratorPermission(role)
@@ -148,11 +154,11 @@ func provisionRepo(p *Provisioner, repo string, opts *Options) error {
 			return err
 		}
 	}
+	if err := p.EnsureWorkflowProtected(repo, opts.WorkflowList); err != nil {
+		return err
+	}
 	if err := p.EnsureRule(repo, *opts); err != nil {
 		return err
 	}
-	if err := p.EnsureNoRule(repo, opts.LandBranch); err != nil {
-		return err
-	}
-	return p.EnsureWorkflowProtected(repo, opts.WorkflowList)
+	return p.EnsureNoRule(repo, opts.LandBranch)
 }

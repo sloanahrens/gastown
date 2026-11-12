@@ -443,6 +443,7 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 			ReadFile: runReadFile,
 			Files:    pfiles,
 			HTTP:     &http.Client{Transport: fake},
+			ListLock: noListLock,
 		},
 		Stdout: stdout,
 		Stderr: stderr,

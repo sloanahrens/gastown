@@ -342,9 +342,14 @@ func provisionFakeCutover(t *testing.T, dryRun bool) (*Cutover, *forgejotest.Fak
 			ReadFile: provisionReadFile,
 			Files:    files,
 			HTTP:     &http.Client{Transport: fake},
+			ListLock: noListLock,
 		},
 	}, fake, logs, files
 }
+
+// noListLock takes no file lock: these tests keep the workflow-file hook list in memory,
+// where its sibling lock file is not on disk.
+func noListLock(string) (func() error, error) { return func() error { return nil }, nil }
 
 // TestProvisionInProcessAgainstTheFake runs the real provisioner against the
 // in-process Forgejo: no child process, no socket and no argv. The observable

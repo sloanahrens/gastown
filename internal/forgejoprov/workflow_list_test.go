@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,16 +23,69 @@ const workflowListMode fs.FileMode = 0o640
 // writes.
 var errWorkflowFixture = errors.New("fixture filesystem error")
 
-// ensureWorkflow runs EnsureWorkflowProtected for repo over files and returns the
-// progress lines it logged with the error it returned.
-func ensureWorkflow(files *memFiles, repo string, dryRun bool) (string, error) {
+// listLock is the ListLock a test hands the provisioner. It counts each acquire and release,
+// tracks whether the lock is held, and can fail either step.
+type listLock struct {
+	acquired, released int
+	held               bool
+	acquireErr         error
+	releaseErr         error
+}
+
+// lock is the ListLock method: it takes the lock or fails with acquireErr.
+func (l *listLock) lock(string) (func() error, error) {
+	if l.acquireErr != nil {
+		return nil, l.acquireErr
+	}
+	l.acquired++
+	l.held = true
+	return func() error {
+		l.released++
+		l.held = false
+		return l.releaseErr
+	}, nil
+}
+
+// guardedFiles counts the reads of the list and records each read or write of it that
+// happens while the lock is not held.
+type guardedFiles struct {
+	*memFiles
+	lock      *listLock
+	reads     int
+	unguarded []string
+}
+
+func (g *guardedFiles) ReadFile(path string) ([]byte, error) {
+	g.reads++
+	if !g.lock.held {
+		g.unguarded = append(g.unguarded, "read "+path)
+	}
+	return g.memFiles.ReadFile(path)
+}
+
+func (g *guardedFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) error {
+	if !g.lock.held {
+		g.unguarded = append(g.unguarded, "write "+path)
+	}
+	return g.memFiles.WriteFileAtomic(path, data, mode)
+}
+
+// ensureWorkflowWith runs EnsureWorkflowProtected for repo over files under lock and returns
+// the progress lines it logged with the error it returned.
+func ensureWorkflowWith(files Files, lock *listLock, repo string, dryRun bool) (string, error) {
 	var logs strings.Builder
 	p := &Provisioner{
-		Client: &Client{DryRun: dryRun, Log: func(line string) { logs.WriteString(line + "\n") }},
-		Files:  files,
+		Client:   &Client{DryRun: dryRun, Log: func(line string) { logs.WriteString(line + "\n") }},
+		Files:    files,
+		ListLock: lock.lock,
 	}
 	err := p.EnsureWorkflowProtected(repo, testWorkflowList)
 	return logs.String(), err
+}
+
+// ensureWorkflow is ensureWorkflowWith over an in-memory list, under a lock that takes no file.
+func ensureWorkflow(files *memFiles, repo string, dryRun bool) (string, error) {
+	return ensureWorkflowWith(files, &listLock{}, repo, dryRun)
 }
 
 // countWorkflowWrites counts the writes files recorded for the hook list.
@@ -252,8 +307,8 @@ func TestRunRefusesEmptyWorkflowList(t *testing.T) {
 }
 
 // TestRunFailsWhenCandidateRuleCannotBeRemoved: a candidate-branch rule the run cannot remove
-// fails the run before the hook list is written, so a repository whose branch rules did not
-// finish is not added to the list.
+// fails the run after the hook list is written. The list comes before the rules, so the
+// repository is already under the hook when the rule step stops.
 func TestRunFailsWhenCandidateRuleCannotBeRemoved(t *testing.T) {
 	t.Parallel()
 	f := forgejotest.New()
@@ -267,8 +322,144 @@ func TestRunFailsWhenCandidateRuleCannotBeRemoved(t *testing.T) {
 	if res.code != ExitFailure {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
-	if got, want := string(files.files[DefaultWorkflowList]), "acme/other\n"; got != want {
-		t.Errorf("hook list = %q, want it untouched at %q", got, want)
+	if got, want := string(files.files[DefaultWorkflowList]), "acme/other\nacme/rig\n"; got != want {
+		t.Errorf("hook list = %q, want the repository appended before the rule step stopped: %q", got, want)
+	}
+}
+
+// TestRunWritesWorkflowListBeforeRules: a rule step that fails leaves the repository already
+// named by the hook list, since the list is written before any rule.
+func TestRunWritesWorkflowListBeforeRules(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	files := newMemFiles()
+	files.seed(DefaultWorkflowList, "acme/other\n", workflowListMode)
+
+	rt := failingRoute{next: f, match: "/branch_protections", status: http.StatusInternalServerError}
+	res := runProvisioning(t, rt, files, nil, "--repo", protectionRepo)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	if got, want := string(files.files[DefaultWorkflowList]), "acme/other\nacme/rig\n"; got != want {
+		t.Errorf("hook list = %q, want %q", got, want)
+	}
+}
+
+// TestRunWritesNoRuleWhenWorkflowListCannotBeRead: a list the run cannot read stops the run
+// before any branch rule is written, so no repository gets a rule the hook does not cover.
+func TestRunWritesNoRuleWhenWorkflowListCannotBeRead(t *testing.T) {
+	t.Parallel()
+	const absent = "/fixture/absent/gt-protected-workflow-repos"
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+
+	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo, "--workflow-list", absent)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	if rule := f.Rule(protectionRepo, "main"); rule != nil {
+		t.Errorf("main rule written although the list was unreadable: %v", rule)
+	}
+}
+
+// TestEnsureWorkflowProtectedHoldsListLock: the list is read and written only while the lock
+// is held, and the lock is released on every return path.
+func TestEnsureWorkflowProtectedHoldsListLock(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		list     string
+		writeErr bool
+		wantErr  bool
+	}{
+		{name: "a missing repository is read and written under the lock", list: "acme/other\n"},
+		{name: "a repository already named is read under the lock", list: "acme/rig\n"},
+		{name: "an empty list is refused and the lock is released", list: "", wantErr: true},
+		{name: "a failed write is returned and the lock is released", list: "acme/other\n", writeErr: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mem := newMemFiles()
+			mem.seed(testWorkflowList, tc.list, workflowListMode)
+			if tc.writeErr {
+				mem.writeErr = errWorkflowFixture
+			}
+			lock := &listLock{}
+			files := &guardedFiles{memFiles: mem, lock: lock}
+
+			_, err := ensureWorkflowWith(files, lock, protectionRepo, false)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("EnsureWorkflowProtected error = %v, want error %t", err, tc.wantErr)
+			}
+			if files.reads == 0 {
+				t.Error("the list was not read")
+			}
+			if len(files.unguarded) > 0 {
+				t.Errorf("list touched without the lock: %v", files.unguarded)
+			}
+			if lock.acquired != 1 || lock.released != 1 {
+				t.Errorf("lock acquired %d times and released %d, want once each", lock.acquired, lock.released)
+			}
+		})
+	}
+}
+
+// TestEnsureWorkflowProtectedRefusesWhenLockFails: a lock that cannot be taken fails the
+// provision before the list is read or written.
+func TestEnsureWorkflowProtectedRefusesWhenLockFails(t *testing.T) {
+	t.Parallel()
+	mem := newMemFiles()
+	mem.seed(testWorkflowList, "acme/other\n", workflowListMode)
+	lock := &listLock{acquireErr: errWorkflowFixture}
+	files := &guardedFiles{memFiles: mem, lock: lock}
+
+	_, err := ensureWorkflowWith(files, lock, protectionRepo, false)
+	if !errors.Is(err, errWorkflowFixture) {
+		t.Fatalf("EnsureWorkflowProtected error = %v, want the lock error", err)
+	}
+	if files.reads != 0 || countWorkflowWrites(mem) != 0 {
+		t.Errorf("list read %d times and written %d times, want neither", files.reads, countWorkflowWrites(mem))
+	}
+}
+
+// TestEnsureWorkflowProtectedReportsUnlockError: a lock that fails to release fails the
+// provision, even though the list was written.
+func TestEnsureWorkflowProtectedReportsUnlockError(t *testing.T) {
+	t.Parallel()
+	mem := newMemFiles()
+	mem.seed(testWorkflowList, "acme/other\n", workflowListMode)
+	lock := &listLock{releaseErr: errWorkflowFixture}
+
+	_, err := ensureWorkflowWith(mem, lock, protectionRepo, false)
+	if !errors.Is(err, errWorkflowFixture) {
+		t.Fatalf("EnsureWorkflowProtected error = %v, want the unlock error", err)
+	}
+}
+
+// TestEnsureWorkflowProtectedLocksSiblingFile: without a ListLock the list is locked through
+// a sibling .lock file in its own directory, and the list is still written.
+func TestEnsureWorkflowProtectedLocksSiblingFile(t *testing.T) {
+	t.Parallel()
+	list := filepath.Join(t.TempDir(), "gt-protected-workflow-repos")
+	if err := os.WriteFile(list, []byte("acme/other\n"), workflowListMode); err != nil {
+		t.Fatalf("seed list: %v", err)
+	}
+	p := &Provisioner{Client: &Client{Log: func(string) {}}}
+
+	if err := p.EnsureWorkflowProtected(protectionRepo, list); err != nil {
+		t.Fatalf("EnsureWorkflowProtected = %v, want nil", err)
+	}
+	got, err := os.ReadFile(list)
+	if err != nil {
+		t.Fatalf("read list: %v", err)
+	}
+	if want := "acme/other\nacme/rig\n"; string(got) != want {
+		t.Errorf("list = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(list + ".lock"); err != nil {
+		t.Errorf("sibling lock file: %v", err)
 	}
 }
 
