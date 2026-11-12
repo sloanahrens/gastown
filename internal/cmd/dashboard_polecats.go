@@ -472,6 +472,14 @@ func dashHookTime(townRoot string, agentUpdated time.Time, bead *beads.Issue, di
 // the seats the daemon keeps for the jev_rules battery, by rig/name, read by
 // dashKeptSeats; a seat in it carries its submitted time (gt-ddg96x).
 func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister, kept map[string]time.Time) ([]dashSeat, error) {
+	return dashSeatsWith(townRoot, sessionNames, sessionsKnown, cache, dispatches, lister, kept, func(rigPath string) *beads.Beads { return beads.New(rigPath) })
+}
+
+// dashSeatsWith is dashSeats with the rig's bead store injected, the seam a
+// test answers the store's reads through: the unit tier starts no bd
+// (docs/testing.md, "The rules"). dashSeats passes the real store. The
+// caller-injected lister is the same seam for sessions.
+func dashSeatsWith(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister, kept map[string]time.Time, openBeads func(rigPath string) *beads.Beads) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
@@ -505,7 +513,7 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 		if len(names) == 0 {
 			continue
 		}
-		rigBeads := beads.New(rigPath)
+		rigBeads := openBeads(rigPath)
 		agents, err := beads.ListAgentBeads(rigBeads)
 		if err != nil {
 			return nil, err

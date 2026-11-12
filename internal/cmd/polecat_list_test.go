@@ -360,11 +360,14 @@ func TestPolecatListReportsSeatAgentFromIntentRecord(t *testing.T) {
 		t.Fatalf("lay out the polecat: %v", err)
 	}
 	townRoot := filepath.Dir(rigPath)
-	recordDir := filepath.Join(townRoot, ".runtime", "agents", "gastown")
-	if err := os.MkdirAll(recordDir, 0o755); err != nil {
+	// The record goes where the seat's own path helper puts it, so the test
+	// lays it out the way the sling's writer does rather than by a filename
+	// the convention could change under (gt-5pl4gi, finding 559d5869a526).
+	recordPath := polecatIntentSeat("gastown", "ember").Path(townRoot)
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0o755); err != nil {
 		t.Fatalf("lay out the intent record directory: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(recordDir, "polecat.ember.json"), []byte(`{"agent":"sbx-haiku"}`), 0o644); err != nil {
+	if err := os.WriteFile(recordPath, []byte(`{"agent":"sbx-haiku"}`), 0o644); err != nil {
 		t.Fatalf("write the intent record: %v", err)
 	}
 
