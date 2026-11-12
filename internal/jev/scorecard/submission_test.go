@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -65,17 +66,23 @@ func TestSubmissionLabelJoinsTheReviewInItsWindow(t *testing.T) {
 		rows    []land.ReviewRecord
 		labeled bool
 		value   bool
+		// riskLabeled says the first attempt labels risk, and risk is that label.
+		riskLabeled bool
+		risk        bool
 	}{
 		{
-			name:    "an approve after the submission labels will_pass_review true",
-			rows:    []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
-			labeled: true,
-			value:   true,
+			name:        "an approve after the submission labels will_pass_review true",
+			rows:        []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
+			labeled:     true,
+			value:       true,
+			riskLabeled: true,
 		},
 		{
-			name:    "a request_changes after the submission labels it false",
-			rows:    []land.ReviewRecord{review("gt-a", 1, land.VerdictRequestChanges, submissionAt(10, 30))},
-			labeled: true,
+			name:        "a request_changes after the submission labels it false",
+			rows:        []land.ReviewRecord{review("gt-a", 1, land.VerdictRequestChanges, submissionAt(10, 30))},
+			labeled:     true,
+			riskLabeled: true,
+			risk:        true,
 		},
 		{
 			name:    "a review exactly at the submitted time joins it",
@@ -119,6 +126,9 @@ func TestSubmissionLabelJoinsTheReviewInItsWindow(t *testing.T) {
 				return
 			}
 			want := map[QuestionID]bool{QuestionID(submission.QWillPassReview): tc.value}
+			if tc.riskLabeled {
+				want[QuestionID(submission.QRisk)] = tc.risk
+			}
 			if !maps.Equal(lab.Labels, want) {
 				t.Errorf("labels = %v, want %v", lab.Labels, want)
 			}
@@ -228,7 +238,9 @@ func TestSubmissionLabelTakesTheRejectionForTheReviewAttempt(t *testing.T) {
 	}
 }
 
-func TestSubmissionLabelWithoutARejectionBlockLabelsOnlyTheVerdict(t *testing.T) {
+// An approval with no block labels will_pass_review and, from its first attempt,
+// risk false, and no finding question.
+func TestSubmissionLabelWithoutARejectionBlockLabelsNoFindingQuestions(t *testing.T) {
 	t.Parallel()
 	a := &submissionAdapter{
 		reviews: &land.ReviewsFile{Path: reviewFile(t, review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30)))},
@@ -238,7 +250,7 @@ func TestSubmissionLabelWithoutARejectionBlockLabelsOnlyTheVerdict(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[QuestionID]bool{QuestionID(submission.QWillPassReview): true}
+	want := map[QuestionID]bool{QuestionID(submission.QWillPassReview): true, QuestionID(submission.QRisk): false}
 	if !maps.Equal(lab.Labels, want) {
 		t.Errorf("labels = %v, want %v", lab.Labels, want)
 	}
@@ -345,9 +357,9 @@ func TestSubmissionLabelNamesARequestChangesWithNoRejectionBlock(t *testing.T) {
 		notes   string
 		rule    string
 	}{
-		{"no block at all", land.VerdictRequestChanges, 1, "a note with no block", ruleSubmissionRequestChanges + " " + ruleSubmissionNoBlock},
+		{"no block at all", land.VerdictRequestChanges, 1, "a note with no block", ruleSubmissionRequestChanges + " " + ruleSubmissionNoBlock + " " + ruleSubmissionFirstAttemptRejected},
 		{"only another attempt's block", land.VerdictRequestChanges, 2, otherAttempt, ruleSubmissionRequestChanges + " " + ruleSubmissionNoBlock},
-		{"the block of its own attempt", land.VerdictRequestChanges, 1, otherAttempt, ruleSubmissionRequestChanges},
+		{"the block of its own attempt", land.VerdictRequestChanges, 1, otherAttempt, ruleSubmissionRequestChanges + " " + ruleSubmissionFirstAttemptRejected},
 		{"an approval needs no block", land.VerdictApprove, 2, "a note with no block", ruleSubmissionApprove},
 	}
 	for _, tc := range cases {
@@ -658,23 +670,23 @@ func TestSubmissionLabelRulesForTheClaimsBoxesAndOutcome(t *testing.T) {
 			notes: landed(head),
 			want: map[string]bool{
 				submission.QWillPassReview: true, submission.QClaimsVerified: true,
-				submission.QBoxesCredible: true, submission.QOutcome: true,
+				submission.QBoxesCredible: true, submission.QOutcome: true, submission.QRisk: false,
 			},
-			rule: ruleSubmissionApprove + " " + ruleSubmissionFirstTry,
+			rule: ruleSubmissionApprove + " " + ruleSubmissionFirstTry + " " + ruleSubmissionFirstAttemptApproved,
 		},
 		{
 			name:  "a landing of another head is not this submission's first try",
 			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
 			notes: landed("head-other"),
-			want:  map[string]bool{submission.QWillPassReview: true},
-			rule:  ruleSubmissionApprove,
+			want:  map[string]bool{submission.QWillPassReview: true, submission.QRisk: false},
+			rule:  ruleSubmissionApprove + " " + ruleSubmissionFirstAttemptApproved,
 		},
 		{
 			name:  "an approval with no landing record is not a first try",
 			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
 			notes: "a note with no landing",
-			want:  map[string]bool{submission.QWillPassReview: true},
-			rule:  ruleSubmissionApprove,
+			want:  map[string]bool{submission.QWillPassReview: true, submission.QRisk: false},
+			rule:  ruleSubmissionApprove + " " + ruleSubmissionFirstAttemptApproved,
 		},
 		{
 			name:  "a landing on a later attempt is not a first try",
@@ -687,8 +699,8 @@ func TestSubmissionLabelRulesForTheClaimsBoxesAndOutcome(t *testing.T) {
 			name:  "a gate refusal labels the boxes not credible",
 			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
 			notes: gateAttempt1,
-			want:  map[string]bool{submission.QWillPassReview: true, submission.QBoxesCredible: false},
-			rule:  ruleSubmissionApprove + " " + ruleSubmissionGateRejected,
+			want:  map[string]bool{submission.QWillPassReview: true, submission.QBoxesCredible: false, submission.QRisk: false},
+			rule:  ruleSubmissionApprove + " " + ruleSubmissionGateRejected + " " + ruleSubmissionFirstAttemptApproved,
 		},
 		{
 			name:  "an om refusal on a major labels the claims unverified",
@@ -708,8 +720,8 @@ func TestSubmissionLabelRulesForTheClaimsBoxesAndOutcome(t *testing.T) {
 			name:  "a conflict refusal leaves the claims, the boxes and the outcome unlabeled",
 			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
 			notes: conflictAttempt1 + "\n" + landed(head),
-			want:  map[string]bool{submission.QWillPassReview: true},
-			rule:  ruleSubmissionApprove,
+			want:  map[string]bool{submission.QWillPassReview: true, submission.QRisk: false},
+			rule:  ruleSubmissionApprove + " " + ruleSubmissionFirstAttemptApproved,
 		},
 	}
 	for _, tc := range cases {
@@ -734,5 +746,55 @@ func TestSubmissionLabelRulesForTheClaimsBoxesAndOutcome(t *testing.T) {
 				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
 			}
 		})
+	}
+}
+
+// TestSubmissionRiskUsesTheSameJoin labels submission.risk from the bead's first
+// attempt by the join the landing adapter uses, whatever the submission's own
+// review window joins. The first of two submissions has its window closed by
+// the second before the verdict, so the window joins no review for it, and its
+// risk still matches the landing's risk for the same line time.
+func TestSubmissionRiskUsesTheSameJoin(t *testing.T) {
+	t.Parallel()
+	rows := []land.ReviewRecord{review("gt-a", 1, land.VerdictRequestChanges, submissionAt(11, 0))}
+	sub := &submissionAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t, rows...)}, notes: &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}}
+	first := submissionItem(t, sub, "gt-a", submissionAt(10, 0))
+	submissionItem(t, sub, "gt-a", submissionAt(10, 30))
+
+	lab, err := sub.Label(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRisk := map[QuestionID]bool{QuestionID(submission.QRisk): true}
+	if !maps.Equal(lab.Labels, wantRisk) {
+		t.Errorf("submission labels = %v, want only the risk label %v", lab.Labels, wantRisk)
+	}
+	if lab.Rule != ruleSubmissionFirstAttemptRejected {
+		t.Errorf("submission rule = %q, want %q", lab.Rule, ruleSubmissionFirstAttemptRejected)
+	}
+
+	la := &landingAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t, rows...)}}
+	landed, err := la.Label(context.Background(), landingItemAt(t, la, "gt-a", submissionAt(10, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := lab.Labels[QuestionID(submission.QRisk)], landed.Labels[QuestionID(landing.QRisk)]; got != want {
+		t.Errorf("submission risk = %v, landing risk = %v for the same line time, want them equal", got, want)
+	}
+}
+
+// TestSubmissionLabelFailsWhenTheReviewLogCannotBeRead fails the label rather
+// than reading an unreadable review log as no review, which would pass as
+// unlabeled.
+func TestSubmissionLabelFailsWhenTheReviewLogCannotBeRead(t *testing.T) {
+	t.Parallel()
+	// A directory where the log file should be opens, but its read fails.
+	path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := &submissionAdapter{reviews: &land.ReviewsFile{Path: path}, notes: &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}}
+	if _, err := a.Label(context.Background(), submissionItem(t, a, "gt-a", submissionAt(10, 0))); err == nil {
+		t.Error("Label succeeded over an unreadable review log, want an error")
 	}
 }

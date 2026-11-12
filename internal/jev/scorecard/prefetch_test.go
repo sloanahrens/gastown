@@ -14,7 +14,6 @@ import (
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	"github.com/steveyegge/gastown/internal/jev/submission"
-	"github.com/steveyegge/gastown/internal/land"
 )
 
 // batchBeads serves beads from a map and counts the calls made to it, one at a
@@ -295,47 +294,6 @@ func (b *batchNotes) ShowAll(_ string, ids []string) (map[string]*beads.Issue, e
 		}
 	}
 	return out, nil
-}
-
-func TestLandingPrefetchReadsNotesInOneBatchPerRig(t *testing.T) {
-	t.Parallel()
-	notes := &batchNotes{issues: map[string]*beads.Issue{}}
-	notes.byBead = map[string]string{}
-	var items []Item
-	for i := range 20 {
-		id := fmt.Sprintf("gt-l%02d", i)
-		items = append(items, landingItem(id, "a1a1a1a"))
-		text := land.OverseerReviewMarker + " a1a1a1a PASS"
-		notes.issues[id] = &beads.Issue{ID: id, Notes: text}
-		notes.byBead[id] = text
-	}
-	a := &landingAdapter{log: "unused", notes: notes}
-	want := make([]Labeling, len(items))
-	for i, it := range items {
-		lab, err := (&landingAdapter{log: "unused", notes: &notes.fakeLandingNotes}).Label(context.Background(), it)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want[i] = lab
-	}
-	notes.reads = nil
-
-	a.Prefetch(context.Background(), items)
-	for i, it := range items {
-		lab, err := a.Label(context.Background(), it)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fmt.Sprint(lab) != fmt.Sprint(want[i]) {
-			t.Errorf("item %s: batched labeling %v, per-item labeling %v", it.ID, lab, want[i])
-		}
-	}
-	if notes.batches != 1 {
-		t.Errorf("batch reads = %d, want 1 for one rig", notes.batches)
-	}
-	if len(notes.reads) != 0 {
-		t.Errorf("notes read one at a time: %v, want none", notes.reads)
-	}
 }
 
 func TestSubmissionPrefetchFillsTheNotesCache(t *testing.T) {

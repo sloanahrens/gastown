@@ -29,9 +29,9 @@ commits_match_change (noul)
   verdict: not-yet
 
 risk (score)
-  logged 4, labeled 0, positives 0, negatives 0, base rate n/a
-  mean score: positives n/a, negatives n/a
-  best F1 n/a at threshold n/a
+  logged 4, labeled 2, positives 1, negatives 1, base rate 50.0%
+  mean score: positives 2.000, negatives 1.000
+  best F1 1.000 at threshold 2.000
   verdict: not-yet
 
 tests_cover_change (noul)

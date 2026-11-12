@@ -39,8 +39,7 @@ type Item struct {
 	Model   string
 	Answers map[QuestionID]Answer
 	// Refs holds the adapter's own values from the line — the landing adapter
-	// keeps the rig and head its labels are keyed by — and the scorecard never
-	// reads them.
+	// keeps the rig and head of each line — and the scorecard never reads them.
 	Refs map[string]string
 	// Context is a value per question to tally beside that question's block,
 	// such as the agent a seat ran on. It is printed, never scored or labeled,
