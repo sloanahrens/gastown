@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // emptyRepoAdvert is a smart-HTTP upload-pack advertisement of a repository with
@@ -69,7 +68,11 @@ func TestIntegrationGitAuthenticatesWithTheTokenVariablesStripped(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			before := served.Load()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// The call ends with the test, or at the test timeout when one is set.
+			ctx, cancel := t.Context(), context.CancelFunc(func() {})
+			if d, ok := t.Deadline(); ok {
+				ctx, cancel = context.WithDeadline(ctx, d)
+			}
 			defer cancel()
 			environ := append(append(append([]string{}, base...), stripped...), tc.extraEnv...)
 			cmd := gitCommandIn(ctx, environ, "git", "ls-remote", "--", tc.url)
