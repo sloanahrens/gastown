@@ -16,6 +16,8 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
+
+	_ "time/tzdata" // the fall-back test loads America/Chicago, so it must not depend on the host's zoneinfo
 )
 
 func dur(d time.Duration) *time.Duration { return &d }
@@ -95,6 +97,69 @@ func TestBuildTrendCountsAUTCInstantInItsLocalHour(t *testing.T) {
 	}, nil, nil, nil)
 	if got := tr.Hours[trendHours-1].Landed; got != 2 {
 		t.Errorf("landed in the last hour = %d, want 2 (a UTC record counts in its local hour)", got)
+	}
+}
+
+// A repeated fall-back hour is two instants an hour apart in UTC that read the
+// same wall clock. The trend and the velocity series must split them the same
+// way: each occurrence is its own bucket, and every velocity hour holds the
+// same landings in the trend (gt-0czgpt). The zone is America/Chicago, whose
+// clocks went back on 2026-11-01 at 02:00 CDT, so 01:00 to 01:59 repeats.
+// localHour reads time.Local, so the test sets it and restores it. It is not
+// parallel for that reason.
+//
+//testpolicy:allow parallel — localHour reads time.Local with no seam, so this test swaps it and cannot run beside the parallel tests
+func TestTrendBucketsMatchVelocityAcrossAFallBack(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := time.Local
+	//testpolicy:allow no-global-swap — the swap is the input under test: localHour takes its zone from time.Local
+	time.Local = loc
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores time.Local, which the swap above replaced
+		time.Local = prev
+	})
+
+	now := time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC) // 02:00 CST, after the repeat
+	recs := []omRecord{
+		omTestRec("gt-first", "approve", 0.9, "daemon", time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC)),  // 01:30 CDT
+		omTestRec("gt-second", "approve", 0.9, "daemon", time.Date(2026, 11, 1, 7, 30, 0, 0, time.UTC)), // 01:30 CST
+	}
+	for i := range recs {
+		recs[i].PolecatSecs = 900
+	}
+
+	tr := buildTrend(now, recs, nil, nil, nil)
+	vel := buildVelocity(now, recs, nil, nil)
+	if vel == nil {
+		t.Fatal("velocity = nil, want the two landings' hours")
+	}
+
+	var wallOne []dashboard.TrendHour
+	for _, h := range tr.Hours {
+		if h.Hour.Hour() == 1 {
+			wallOne = append(wallOne, h)
+		}
+	}
+	if len(wallOne) != 2 || wallOne[0].Hour.Equal(wallOne[1].Hour) {
+		t.Fatalf("trend hours at 01:00 = %v, want the two occurrences as two buckets", wallOne)
+	}
+	if wallOne[0].Landed != 1 || wallOne[1].Landed != 1 {
+		t.Errorf("trend landed at 01:00 CDT, 01:00 CST = %d, %d, want 1, 1", wallOne[0].Landed, wallOne[1].Landed)
+	}
+
+	for _, v := range vel.Hours {
+		trendLanded := -1
+		for _, h := range tr.Hours {
+			if h.Hour.Equal(v.Hour) {
+				trendLanded = h.Landed
+			}
+		}
+		if got, want := trendLanded, v.Weighted+v.Unweighted; got != want {
+			t.Errorf("hour %v: trend landed %d, velocity landed %d, want the same bucket", v.Hour, got, want)
+		}
 	}
 }
 

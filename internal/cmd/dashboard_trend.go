@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // The trend panel is the last 24 hours: landings and rejections by local hour,
@@ -31,10 +32,11 @@ const (
 
 // localHour is the local hour t falls in. Landings and stage lines are stamped
 // in UTC, so the conversion has to come first: truncating in the writer's own
-// zone would bucket those records by their UTC hour.
+// zone would bucket those records by their UTC hour. The hour rule is the one
+// the velocity series uses, so a repeated fall-back hour splits the same way in
+// both charts.
 func localHour(t time.Time) time.Time {
-	t = t.In(time.Local)
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.Local)
+	return storypoints.HourStart(t, time.Local)
 }
 
 // windowStart is the oldest hour of a window of hours buckets that ends with

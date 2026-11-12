@@ -224,6 +224,17 @@ func TestHourlyAcrossADSTChange(t *testing.T) {
 	})
 }
 
+// TestHourStartNilLocIsTimeLocal pins that a nil loc reads the hour in
+// time.Local, the zone a caller with no zone of its own is in, so the hour
+// matches the one a caller that names time.Local gets.
+func TestHourStartNilLocIsTimeLocal(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 1, 7, 30, 0, 0, time.UTC)
+	if got, want := HourStart(at, nil), HourStart(at, time.Local); !got.Equal(want) {
+		t.Errorf("HourStart(%s, nil) = %s, want the time.Local hour %s", at, got, want)
+	}
+}
+
 // TestHourlyAcrossAHalfHourFallBack pins the window start in Australia/Lord_Howe,
 // whose fall-back is 02:00 daylight (+11) to 01:30 standard (+10:30), so the
 // wall-clock 01:30 to 02:00 range repeats and no wall-clock :00 starts the

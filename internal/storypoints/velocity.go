@@ -65,15 +65,12 @@ type Series struct {
 // never adds to Points. A record before the window or at its end is ignored.
 // A record whose agent has no seat class counts in AllClass only. A window of
 // zero or fewer hours has no buckets. A nil loc means time.Local, the zone
-// localHour in internal/cmd/dashboard_trend.go truncates in.
+// localHour in internal/cmd/dashboard_trend.go reads its hours in.
 func Hourly(landings []Landing, rejections []Rejection, firstHour time.Time, hours int, loc *time.Location) Series {
-	if loc == nil {
-		loc = time.Local
-	}
 	if hours < 0 {
 		hours = 0
 	}
-	base := hourStart(firstHour, loc)
+	base := HourStart(firstHour, loc)
 	classes := make(map[string][]HourPoint, len(seriesClasses)+1)
 	for _, key := range append([]string{AllClass}, seriesClasses...) {
 		buckets := make([]HourPoint, hours)
@@ -137,10 +134,15 @@ func classesOf(agent string) []string {
 	return []string{AllClass}
 }
 
-// hourStart returns the start of t's wall-clock hour in the UTC offset in
+// HourStart returns the start of t's wall-clock hour in the UTC offset in
 // force at t, or that offset's change when it falls mid-hour, so a repeated
-// fall-back hour keeps the occurrence t is in (gt-0kzzuz).
-func hourStart(t time.Time, loc *time.Location) time.Time {
+// fall-back hour keeps the occurrence t is in (gt-0kzzuz). It is the hour rule
+// every hour bucket uses, the velocity series and the dashboard trend alike. A
+// nil loc means time.Local.
+func HourStart(t time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.Local
+	}
 	t = t.In(loc)
 	_, off := t.Zone()
 	start := t.Add(-(time.Duration(t.Second())*time.Second + time.Duration(t.Nanosecond())))
