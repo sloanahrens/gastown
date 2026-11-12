@@ -60,7 +60,7 @@ func (fakeDiffSource) Stats(_ context.Context, _, commit string) (DiffStat, erro
 func buildTablesLandings(t *testing.T, dropped *Dropped) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, nil, dropped)
+		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesEras, tablesShaped, StageStamps{}, nil, dropped)
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}
@@ -115,6 +115,24 @@ func TestBuildLandingsFlagsAndRegime(t *testing.T) {
 	}
 }
 
+// TestBuildLandingsOMRoundsCell: a landing carries its bead's om round count,
+// and a bead with no count has an empty cell rather than a zero.
+func TestBuildLandingsOMRoundsCell(t *testing.T) {
+	t.Parallel()
+	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, fakeDiffSource{},
+		tablesBeads(), tablesUsage, tablesOverrun, map[string]int{"gt-1": 2}, tablesEras, tablesShaped, StageStamps{}, nil, &Dropped{})
+	if err != nil {
+		t.Fatalf("BuildLandings: %v", err)
+	}
+	by := rowsByBead(rows)
+	if got := by["gt-1"]["om_rounds"]; got != "2" {
+		t.Errorf("gt-1 om_rounds = %q, want 2", got)
+	}
+	if got := by["gt-2"]["om_rounds"]; got != "" {
+		t.Errorf("gt-2 om_rounds = %q, want empty for a bead with no verdict", got)
+	}
+}
+
 func TestBuildLandingsUnreadableCommitIsFlaggedNotZeroed(t *testing.T) {
 	t.Parallel()
 	dropped := &Dropped{}
@@ -146,7 +164,7 @@ func TestBuildLandingsDiffErrorOtherThanUnavailableFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, failingDiffSource{err: boom},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, nil, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesEras, tablesShaped, StageStamps{}, nil, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error, want the diff's error to stop the build")
 	}
@@ -166,7 +184,7 @@ func TestBuildLandingsBadLandedAtFails(t *testing.T) {
 	// No eras: EraOf never reads the timestamp, so only WeekOf can fail here.
 	ledger := []LedgerRow{{Bead: "gt-9", Rig: "gastown", LandedCommit: "c1", LandedAt: "not-a-time", Route: "daemon"}}
 	rows, err := BuildLandings(context.Background(), ledger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesShaped, StageStamps{}, nil, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, nil, nil, tablesShaped, StageStamps{}, nil, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error for an unparsable landed_at")
 	}
@@ -182,7 +200,7 @@ func TestBuildLandingsBadEraStartFails(t *testing.T) {
 	t.Parallel()
 	eras := map[string][]OMEra{"gastown": {{Start: "not-a-time", Threshold: 0.7}}}
 	rows, err := BuildLandings(context.Background(), tablesLedger[:1], tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, eras, tablesShaped, StageStamps{}, nil, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, nil, eras, tablesShaped, StageStamps{}, nil, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error for an unparsable era start")
 	}
@@ -230,11 +248,11 @@ func TestExplainOnlyColumnsExtendThePinnedSet(t *testing.T) {
 	// sp_estimated_at is the story-point write time: a timestamp, explain-only
 	// beside the stage stamps, and the one column past the appended set.
 	const storyPointTime = "sp_estimated_at"
-	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns)+1; got != want {
-		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended plus %s",
-			got, len(legacy), len(appendedLandingColumns), storyPointTime)
+	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns)+1+len(omLandingColumns); got != want {
+		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended plus %s plus %d om",
+			got, len(legacy), len(appendedLandingColumns), storyPointTime, len(omLandingColumns))
 	}
-	for _, column := range append(slices.Clone(appendedLandingColumns), storyPointTime) {
+	for _, column := range slices.Concat(appendedLandingColumns, []string{storyPointTime}, omLandingColumns) {
 		if !slices.Contains(explainOnlyColumns, column) {
 			t.Errorf("explainOnlyColumns omits the stage column %q", column)
 		}
@@ -276,8 +294,10 @@ const landingSidecarBytes = `{
   "lines_added",
   "lines_deleted",
   "lines_total",
+  "om_rounds",
   "om_verdict",
   "package_entropy",
+  "polecat_attempts",
   "polecat_lower_bound",
   "polecat_secs",
   "seat_class",

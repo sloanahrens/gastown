@@ -42,18 +42,22 @@ func jsonRows(lines []string, source string, dropped *Dropped) []json.RawMessage
 // landing worker writes since 10-26. The writer omits a zero time and a false
 // bound, so a line that carries none of them reads as zero here, which the
 // landings table reads as no time.
+//
+// PolecatAttempts is one entry per seat's time on the bead, as the landing
+// record writes it. The table reads only its length.
 type LedgerRow struct {
-	Bead              string  `json:"bead"`
-	Rig               string  `json:"rig"`
-	LandedCommit      string  `json:"landed_commit"`
-	LandedAt          string  `json:"landed_at"`
-	Route             string  `json:"route"`
-	OMVerdict         string  `json:"om_verdict"`
-	GateResult        string  `json:"gate_result"`
-	Branch            string  `json:"branch"`
-	PolecatSecs       float64 `json:"polecat_secs"`
-	PolecatLowerBound bool    `json:"polecat_lower_bound"`
-	Agent             string  `json:"agent"`
+	Bead              string            `json:"bead"`
+	Rig               string            `json:"rig"`
+	LandedCommit      string            `json:"landed_commit"`
+	LandedAt          string            `json:"landed_at"`
+	Route             string            `json:"route"`
+	OMVerdict         string            `json:"om_verdict"`
+	GateResult        string            `json:"gate_result"`
+	Branch            string            `json:"branch"`
+	PolecatSecs       float64           `json:"polecat_secs"`
+	PolecatLowerBound bool              `json:"polecat_lower_bound"`
+	Agent             string            `json:"agent"`
+	PolecatAttempts   []json.RawMessage `json:"polecat_attempts"`
 }
 
 // LoadLedger parses each rig's ledger lines into rows. A line that is not JSON,
@@ -264,6 +268,36 @@ func LoadReviews(lines []string, dropped *Dropped) []Review {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// OMRoundsByBead counts each landed bead's om verdicts at or before its landing.
+// Every review in the list is a verdict: LoadReviews has already set the
+// follow-up queue lines aside. A verdict whose timestamp does not parse is
+// skipped with one logged line, so one bad line does not stop the table for the
+// other landings. A landing time that does not parse is an error, raised when a
+// verdict is placed against that landing. A bead with no verdict at or before its
+// landing has no entry.
+func OMRoundsByBead(reviews []Review, landedAt map[string]string, dropped *Dropped) (map[string]int, error) {
+	rounds := make(map[string]int, len(landedAt))
+	for _, r := range reviews {
+		landed, ok := landedAt[r.Bead]
+		if !ok {
+			continue
+		}
+		landedTime, err := ParseTS(landed)
+		if err != nil {
+			return nil, fmt.Errorf("landed_at of %s %q: %w", r.Bead, landed, err)
+		}
+		at, err := ParseTS(r.At)
+		if err != nil {
+			dropped.Add("reviews", fmt.Sprintf("om verdict of %s skipped: unparseable at %q", r.Bead, r.At))
+			continue
+		}
+		if !at.After(landedTime) {
+			rounds[r.Bead]++
+		}
+	}
+	return rounds, nil
 }
 
 // Rework is one landed bead's rework history.

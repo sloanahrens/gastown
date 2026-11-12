@@ -20,8 +20,8 @@ import (
 // sidecar writes.
 var explainOnlyColumns = []string{
 	"agent", "attempts", "created_at", "dispatched_at", "file_entropy", "files_touched",
-	"gate_result", "lines_added", "lines_deleted", "lines_total", "om_verdict",
-	"package_entropy", "polecat_lower_bound", "polecat_secs", "seat_class", "sp_actual",
+	"gate_result", "lines_added", "lines_deleted", "lines_total", "om_rounds", "om_verdict",
+	"package_entropy", "polecat_attempts", "polecat_lower_bound", "polecat_secs", "seat_class", "sp_actual",
 	"sp_estimated_at", "submitted_at", "time_to_land_s", "unreadable",
 }
 
@@ -43,7 +43,7 @@ type DiffSource interface {
 // empty cell, counted in the extract's footer rather than dropped. A landing
 // whose bead has no line in jev keeps empty Jev cells.
 func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Rework, diffs DiffSource,
-	beadsByID map[string]BeadRow, usage map[string]Usage, overrun map[string]bool,
+	beadsByID map[string]BeadRow, usage map[string]Usage, overrun map[string]bool, rounds map[string]int,
 	eras map[string][]OMEra, shapedIDs map[string]bool, stamps StageStamps,
 	jev map[string]dispatch.Line, dropped *Dropped) ([]Row, error) {
 	rows := make([]Row, 0, len(ledger))
@@ -127,7 +127,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"polecat_secs":            polecatSecsCell(l),
 			"polecat_lower_bound":     polecatLowerBoundCell(l),
 			"agent":                   l.Agent,
-			"seat_class":              storypoints.SeatClass(l.Agent),
+			"seat_class":              seatClassCell(l.Agent),
 			"sp_actual":               spActualCell(l),
 			"jev_fits20":              jevFits,
 			"jev_size":                jevSize,
@@ -135,9 +135,31 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"sp_rung":                 spRung,
 			"sp_minutes":              spMinutes,
 			"sp_estimated_at":         stampCell(b.EstimatedAt),
+			"om_rounds":               roundsCell(rounds[l.Bead]),
+			"polecat_attempts":        polecatAttemptsCell(l),
 		})
 	}
 	return rows, nil
+}
+
+// seatClassCell is the landing's seat class, or "unknown" when the agent maps to
+// no class: an unmapped agent, and a landing with no agent. storypoints.SeatClass
+// keeps "" for no class, since its own callers read "" that way.
+func seatClassCell(agent string) string {
+	if class := storypoints.SeatClass(agent); class != "" {
+		return class
+	}
+	return "unknown"
+}
+
+// roundsCell is a landing's om round count, "" when no om verdict was at or
+// before its landing, so a landing the om never judged does not read as a zero
+// count.
+func roundsCell(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return strconv.Itoa(n)
 }
 
 // priorityCell is the bead's priority, or the empty cell of a bead with none.

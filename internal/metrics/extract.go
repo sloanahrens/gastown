@@ -222,6 +222,10 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	if err != nil {
 		return res, err
 	}
+	rounds, err := OMRoundsByBead(reviews, landedAt, dropped)
+	if err != nil {
+		return res, err
+	}
 	usage := LoadUsage(env.UsageFiles)
 	stamps := LoadStageStamps(env.EventLines, landedAt, dropped)
 	stamps.Seats = ReadUsageSeats(env.UsageFiles)
@@ -261,7 +265,7 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	if err != nil {
 		return res, err
 	}
-	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, eras, shaped, stamps, jev, dropped)
+	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, rounds, eras, shaped, stamps, jev, dropped)
 	if err != nil {
 		return res, err
 	}

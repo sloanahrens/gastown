@@ -55,7 +55,7 @@ func extractChain(t *testing.T, list string, shows map[string]string, ledger []s
 		beads[b.ID] = b
 	}
 	rows, err := BuildLandings(context.Background(), LoadLedger(map[string][]string{"gt": ledger}, &dropped), nil,
-		fakeDiffSource{}, beads, nil, nil, nil, nil, StageStamps{Dispatched: dispatched}, nil, &dropped)
+		fakeDiffSource{}, beads, nil, nil, nil, nil, nil, StageStamps{Dispatched: dispatched}, nil, &dropped)
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}

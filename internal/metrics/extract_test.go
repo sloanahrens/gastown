@@ -1058,3 +1058,60 @@ func TestExtractRefusesAWeeklyColumnNoCellFills(t *testing.T) {
 	}
 	assertNoFilesWritten(t, files)
 }
+
+// TestExtractRefusesAnUnparseableLandedAtWithAVerdict: a landing whose landed_at
+// does not parse stops the extract, naming the bead, when an om verdict must be
+// placed against it, and no file is written.
+func TestExtractRefusesAnUnparseableLandedAtWithAVerdict(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	env.LedgerLines = map[string][]string{"gastown": {
+		extractLedgerLine(t, "gt-a", "gastown", "daemon", "not a date"),
+	}}
+	env.ReviewLines = []string{
+		`{"bead": "gt-a", "rig": "gastown", "attempt": 1, "score": 0.9, "verdict": "approve", "at": "2026-10-13T00:00:00Z"}`,
+	}
+	_, err := Extract(context.Background(), env)
+	if err == nil {
+		t.Fatal("Extract succeeded, want the unparseable landed_at refused")
+	}
+	if !strings.Contains(err.Error(), "landed_at of gt-a") {
+		t.Errorf("error = %q, want it to name the landing's bead and landed_at", err)
+	}
+	assertNoFilesWritten(t, files)
+}
+
+// TestExtractSkipsAnOMVerdictWithAnUnparseableTime: one verdict whose timestamp
+// does not parse is logged once and not counted, and it does not stop the
+// extract for the other landings, which still carry their own rounds.
+func TestExtractSkipsAnOMVerdictWithAnUnparseableTime(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	env.ReviewLines = []string{
+		`{"bead": "gt-a", "rig": "gastown", "attempt": 1, "score": 0.9, "verdict": "approve", "at": "not a date"}`,
+		`{"bead": "gt-b", "rig": "gastown", "attempt": 1, "score": 0.9, "verdict": "approve", "at": "2026-10-13T00:00:00Z"}`,
+	}
+	res := extractRun(t, env)
+	if !files.has(landingsName) {
+		t.Fatalf("%s was not written; wrote %v", landingsName, files.names)
+	}
+	order, by := extractLandings(t, files)
+	if want := []string{"gt-a", "gt-b"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("landings.csv beads = %v, want %v", order, want)
+	}
+	if got := by["gt-a"]["om_rounds"]; got != "" {
+		t.Errorf("gt-a om_rounds = %q, want empty: its only verdict has no readable time", got)
+	}
+	if got := by["gt-b"]["om_rounds"]; got != "1" {
+		t.Errorf("gt-b om_rounds = %q, want 1", got)
+	}
+	var gaps int
+	for _, gap := range res.Footer.Gaps {
+		if gap[0] == "reviews" {
+			gaps++
+		}
+	}
+	if gaps != 1 {
+		t.Errorf("reviews gaps = %d, want one logged line for the skipped verdict; footer gaps = %v", gaps, res.Footer.Gaps)
+	}
+}

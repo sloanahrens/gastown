@@ -39,7 +39,7 @@ func TestLoadLedgerRowsAndDropsAccountForEveryNonblankLine(t *testing.T) {
 		Bead: "gt-1", Rig: "gastown", LandedCommit: "abc", LandedAt: "2026-10-01T00:00:00Z",
 		Route: "daemon", OMVerdict: "approve", GateResult: "build+lint",
 	}
-	if rows[0] != want {
+	if !reflect.DeepEqual(rows[0], want) {
 		t.Errorf("row = %+v, want %+v", rows[0], want)
 	}
 	if d.Count() != 2 {
@@ -378,5 +378,63 @@ func TestReworkByBeadRejectsAnUnparseableTimestamp(t *testing.T) {
 	}
 	if _, err := ReworkByBead(reviews, map[string]string{"gt-1": "not a date"}, nil); err == nil {
 		t.Error("ReworkByBead accepted a landing at an unparseable time, want an error")
+	}
+}
+
+func TestOMRoundsByBeadCountsVerdictsAtOrBeforeLanding(t *testing.T) {
+	t.Parallel()
+	var d Dropped
+	rv := LoadReviews(reviewFixture, &d)
+	landed := map[string]string{
+		"gt-1": "2026-09-30T23:30:00Z", // both verdicts are at this instant or before it
+		"gt-2": "2026-10-01T00:00:00Z", // its only verdict comes after
+		"gt-3": "2026-10-06T00:00:00Z",
+		"gt-4": "2026-10-03T00:00:00Z", // no verdict at all
+		"gt-5": "2026-10-05T00:00:00Z", // its only verdict comes after
+	}
+	got, err := OMRoundsByBead(rv, landed, &d)
+	if err != nil {
+		t.Fatalf("OMRoundsByBead: %v", err)
+	}
+	want := map[string]int{"gt-1": 2, "gt-3": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("OMRoundsByBead = %v, want %v: a landing with no verdict at or before it has no entry", got, want)
+	}
+	if d.Count() != 0 {
+		t.Errorf("dropped = %v, want no logged line for well-formed verdicts", d.Items)
+	}
+}
+
+func TestOMRoundsByBeadSkipsAnUnparseableVerdict(t *testing.T) {
+	t.Parallel()
+	var d Dropped
+	reviews := []Review{
+		{Bead: "gt-1", Attempt: 1, Verdict: "request_changes", At: "not a date"},
+		{Bead: "gt-1", Attempt: 2, Verdict: "approve", At: "2026-09-30T22:00:00Z"},
+		{Bead: "gt-2", Attempt: 1, Verdict: "approve", At: "2026-09-30T22:00:00Z"},
+	}
+	landed := map[string]string{"gt-1": "2026-10-01T00:00:00Z", "gt-2": "2026-10-01T00:00:00Z"}
+	got, err := OMRoundsByBead(reviews, landed, &d)
+	if err != nil {
+		t.Fatalf("OMRoundsByBead: %v, want the bad verdict skipped rather than an error", err)
+	}
+	want := map[string]int{"gt-1": 1, "gt-2": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("OMRoundsByBead = %v, want %v: the bad verdict is skipped and the others still count", got, want)
+	}
+	if d.Count() != 1 {
+		t.Fatalf("dropped = %v, want exactly one logged line for the bad verdict", d.Items)
+	}
+	if item := d.Items[0]; item.Source != "reviews" || !strings.Contains(item.Reason, "gt-1") {
+		t.Errorf("logged line = %+v, want the reviews source naming gt-1", item)
+	}
+}
+
+func TestOMRoundsByBeadRejectsAnUnparseableLanding(t *testing.T) {
+	t.Parallel()
+	var d Dropped
+	reviews := []Review{{Bead: "gt-1", Attempt: 1, Verdict: "approve", At: "2026-09-30T22:00:00Z"}}
+	if _, err := OMRoundsByBead(reviews, map[string]string{"gt-1": "not a date"}, &d); err == nil {
+		t.Error("OMRoundsByBead accepted a landing at an unparseable time, want an error")
 	}
 }
