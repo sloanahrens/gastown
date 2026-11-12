@@ -439,6 +439,12 @@ func disableCurrentAgentDND(townRoot string) (bool, error) {
 // ensureDaemon starts the daemon if not running. A daemon that is already up
 // is left as it is.
 func ensureDaemon(townRoot string) error {
+	return ensureDaemonWith(realDaemonControl(), townRoot)
+}
+
+// ensureDaemonWith is ensureDaemon on the control it starts the daemon through,
+// so a test can drive each branch with the control's seams.
+func ensureDaemonWith(ctl *daemonControl, townRoot string) error {
 	// GH#2656: Don't restart the daemon while gt down is running.
 	// GH#2907: If the sentinel's PID is dead, remove stale sentinel.
 	sentinelPath := filepath.Join(townRoot, ShutdownSentinel)
@@ -461,11 +467,10 @@ func ensureDaemon(townRoot string) error {
 		}
 	}
 
-	running, _, err := daemon.IsRunning(townRoot)
+	running, _, err := ctl.isRunning(townRoot)
 	if err != nil {
 		return err
 	}
-	ctl := realDaemonControl()
 	if running {
 		return nil
 	}

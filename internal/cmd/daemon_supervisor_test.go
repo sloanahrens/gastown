@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2422,5 +2423,105 @@ func TestContainerRestartProofRefusesAnUnsetTown(t *testing.T) {
 
 	if _, err := c.containerRestartProofFor(town, sup); !errors.Is(err, errContainerSettingsUnset) {
 		t.Fatalf("containerRestartProofFor error = %v, want the unset-settings refusal", err)
+	}
+}
+
+// A daemon that is already up is left as it is: no supervisor command, no
+// spawn, and no error.
+func TestEnsureDaemon_LeavesARunningDaemonAlone(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	if err := ensureDaemonWith(c, t.TempDir()); err != nil {
+		t.Fatalf("ensureDaemonWith: %v", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A shutdown in progress refuses before the lock is read: the daemon the
+// sentinel names is on its way out, and a start now would race it.
+func TestEnsureDaemon_RefusesWhileAShutdownSentinelNamesALiveProcess(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	sentinel := filepath.Join(town, ShutdownSentinel)
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) {
+		t.Error("read the lock during a shutdown")
+		return false, 0, nil
+	}
+
+	err := ensureDaemonWith(c, town)
+	if err == nil || !strings.Contains(err.Error(), "shutdown in progress") {
+		t.Fatalf("ensureDaemonWith = %v, want a shutdown-in-progress refusal", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A lock that cannot be read refuses the start. An unknown state is not an
+// absent daemon, so nothing is started beside one that may be running.
+func TestEnsureDaemon_ReportsAnUnreadableLockAndStartsNothing(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) {
+		return false, 0, errors.New("lock unreadable")
+	}
+
+	err := ensureDaemonWith(c, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "lock unreadable") {
+		t.Fatalf("ensureDaemonWith = %v, want the unreadable lock", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A start the guard refuses, with no daemon up afterwards, is the error the
+// operator reads: the refusal, not a success the caller would report as up.
+func TestEnsureDaemon_StartRefusedWithNoDaemonIsAnError(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+	c.guard = func(string, daemon.Owner, bool) error {
+		return errors.New("another owner holds the town")
+	}
+
+	err := ensureDaemonWith(c, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "another owner holds the town") {
+		t.Fatalf("ensureDaemonWith = %v, want the guard's refusal", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A start the guard refuses while another starter brings the daemon up is
+// success: the daemon is up, and the caller reads it from the lock.
+func TestEnsureDaemon_StartRefusedWhileAConcurrentStarterWinsIsSuccess(t *testing.T) {
+	t.Parallel()
+	c, _ := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	// The first read is ensureDaemon's own check and the second is the
+	// start's; the third, after the refused start, finds the other daemon up.
+	reads := 0
+	c.isRunning = func(string) (bool, int, error) {
+		reads++
+		return reads > 2, 4242, nil
+	}
+	c.guard = func(string, daemon.Owner, bool) error {
+		return errors.New("another owner holds the town")
+	}
+
+	if err := ensureDaemonWith(c, t.TempDir()); err != nil {
+		t.Fatalf("ensureDaemonWith = %v, want nil: a concurrent starter brought the daemon up", err)
 	}
 }
