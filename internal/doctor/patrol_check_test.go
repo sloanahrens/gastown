@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -277,8 +278,7 @@ func TestPatrolNotStuckCheck_Run_DoltFailureReportsError(t *testing.T) {
 var _ = fmt.Sprintf
 
 // writePluginFixture creates a minimal plugin directory (dir/name/plugin.md)
-// with the given content, so it is recognized as a plugin by hasPlugins/
-// DetectDrift.
+// with the given content, so DetectDrift recognizes it as a plugin.
 func writePluginFixture(t *testing.T, dir, name, content string) {
 	t.Helper()
 	pluginDir := filepath.Join(dir, name)
@@ -290,11 +290,25 @@ func writePluginFixture(t *testing.T, dir, name, content string) {
 	}
 }
 
+// newPatrolPluginCheck is NewPatrolPluginDriftCheck with the gastown build
+// checkout under townRoot standing in for buildsrc.Ensure, so no git runs.
+func newPatrolPluginCheck(townRoot string) *PatrolPluginDriftCheck {
+	check := NewPatrolPluginDriftCheck()
+	check.build = func(_ context.Context, _, _, _ string) (string, error) {
+		return filepath.Join(townRoot, ".runtime", "build-src", "gastown"), nil
+	}
+	return check
+}
+
 func TestPatrolPluginDriftCheck_SourceNotFound_ReturnsWarningNotOK(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir() // No gastown checkout anywhere under here.
+	townRoot := t.TempDir()
 
+	// The build checkout cannot be resolved, so there is no source to compare.
 	check := NewPatrolPluginDriftCheck()
+	check.build = func(context.Context, string, string, string) (string, error) {
+		return "", errors.New("no gastown build checkout")
+	}
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -304,19 +318,22 @@ func TestPatrolPluginDriftCheck_SourceNotFound_ReturnsWarningNotOK(t *testing.T)
 	if result.Message != "cannot verify plugin drift" {
 		t.Errorf("Message = %q, want %q", result.Message, "cannot verify plugin drift")
 	}
+	if !strings.Contains(result.FixHint, "gastown build checkout") {
+		t.Errorf("FixHint = %q, want it to name the gastown build checkout", result.FixHint)
+	}
 }
 
 func TestPatrolPluginDriftCheck_DriftedPlugin_WarningNamesFile(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourceDir := filepath.Join(townRoot, ".runtime", "build-src", "gastown", "plugins")
 	targetDir := filepath.Join(townRoot, "plugins")
 
 	writePluginFixture(t, sourceDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nnew body")
 	writePluginFixture(t, targetDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nold stale body")
 
-	check := NewPatrolPluginDriftCheck()
+	check := newPatrolPluginCheck(townRoot)
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -338,14 +355,14 @@ func TestPatrolPluginDriftCheck_InSync_ReturnsOK(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourceDir := filepath.Join(townRoot, ".runtime", "build-src", "gastown", "plugins")
 	targetDir := filepath.Join(townRoot, "plugins")
 
 	content := "+++\nname = \"stable\"\n+++\nsame body"
 	writePluginFixture(t, sourceDir, "stable", content)
 	writePluginFixture(t, targetDir, "stable", content)
 
-	check := NewPatrolPluginDriftCheck()
+	check := newPatrolPluginCheck(townRoot)
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -362,7 +379,7 @@ func TestPatrolPluginDriftCheck_ExtraPlugin_WarningNamesIt(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourceDir := filepath.Join(townRoot, ".runtime", "build-src", "gastown", "plugins")
 	targetDir := filepath.Join(townRoot, "plugins")
 
 	content := "+++\nname = \"stable\"\n+++\nsame body"
@@ -370,7 +387,7 @@ func TestPatrolPluginDriftCheck_ExtraPlugin_WarningNamesIt(t *testing.T) {
 	writePluginFixture(t, targetDir, "stable", content)
 	writePluginFixture(t, targetDir, "seat-refill", "+++\nname = \"seat-refill\"\n+++\nretired body")
 
-	check := NewPatrolPluginDriftCheck()
+	check := newPatrolPluginCheck(townRoot)
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 
 	if result.Status != StatusWarning {
@@ -395,7 +412,7 @@ func TestPatrolPluginDriftCheck_FixSyncsClean(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourceDir := filepath.Join(townRoot, ".runtime", "build-src", "gastown", "plugins")
 	targetDir := filepath.Join(townRoot, "plugins")
 
 	content := "+++\nname = \"stable\"\n+++\nsame body"
@@ -403,7 +420,7 @@ func TestPatrolPluginDriftCheck_FixSyncsClean(t *testing.T) {
 	writePluginFixture(t, targetDir, "stable", content)
 	writePluginFixture(t, targetDir, "seat-refill", "+++\nname = \"seat-refill\"\n+++\nretired body")
 
-	check := NewPatrolPluginDriftCheck()
+	check := newPatrolPluginCheck(townRoot)
 	ctx := &CheckContext{TownRoot: townRoot}
 	if result := check.Run(ctx); result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning before the repair", result.Status)
@@ -447,9 +464,9 @@ func TestPatrolPluginDriftCheck_FixReportsSyncErrors(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	check := NewPatrolPluginDriftCheck()
+	check := newPatrolPluginCheck(townRoot)
 	ctx := &CheckContext{TownRoot: townRoot}
-	check.sourceDir = filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	check.sourceDir = filepath.Join(townRoot, ".runtime", "build-src", "gastown", "plugins")
 	check.targetDir = filepath.Join(townRoot, "plugins")
 	check.syncPlugins = func(_, _ string, _ bool) (*plugin.SyncResult, error) {
 		return &plugin.SyncResult{Errors: []string{"removing seat-refill: permission denied"}}, nil
@@ -471,14 +488,14 @@ func TestPatrolPluginDriftCheck_FixReportsProtected(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourceDir := filepath.Join(townRoot, ".runtime", "build-src", "gastown", "plugins")
 	targetDir := filepath.Join(townRoot, "plugins")
 
 	content := "+++\nname = \"draft\"\n+++\nbody"
 	writePluginFixture(t, sourceDir, "draft", content)
 	writePluginFixture(t, targetDir, "draft", content)
 
-	check := NewPatrolPluginDriftCheck()
+	check := newPatrolPluginCheck(townRoot)
 	ctx := &CheckContext{TownRoot: townRoot}
 	check.sourceDir, check.targetDir = sourceDir, targetDir
 	check.syncPlugins = func(_, _ string, _ bool) (*plugin.SyncResult, error) {

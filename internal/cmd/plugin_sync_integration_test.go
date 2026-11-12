@@ -30,7 +30,7 @@ func TestIntegrationRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourcePlugins := filepath.Join(buildCheckoutDir(townRoot), "plugins")
 	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
@@ -43,7 +43,7 @@ func TestIntegrationRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, dryRun: true, clean: true, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, clean: true, out: &out, errOut: io.Discard}
 	if err := r.run(); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}

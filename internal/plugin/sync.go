@@ -1,14 +1,14 @@
 package plugin
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // SyncResult records the outcome of a plugin sync operation.
@@ -289,81 +289,31 @@ func copyFile(src, dst string) error {
 // chose it so a caller can say where a sync's plugins came from.
 type GastownSource struct {
 	Dir string
-	// Rule names the layout that matched, phrased for a sync log.
+	// Rule names how the source was chosen, phrased for a sync log.
 	Rule string
 }
 
-// FindGastownSource locates the gastown source repo's plugins directory and
-// reports which rule chose it.
-//
-// The town's own checkout answers first, then the LocalRepo clone named in
-// mayor/rigs.json, and the working directory never does: a stale copy in
-// either of those places once decided which plugins the town got (gt-2l1lr,
-// gt-nc7q).
-func FindGastownSource(townRoot string) (GastownSource, error) {
-	townGastown := rigCheckoutRoot(townRoot, "gastown")
-	probed := []string{townGastown}
-	if local := localRepoOverride(townRoot, "gastown"); local != "" && local != townGastown {
-		probed = append(probed, local)
+// BuildCheckoutFunc resolves a rig's job-owned build checkout to its directory,
+// at rev ("" for the bare repo's main). buildsrc.Ensure is the production one.
+type BuildCheckoutFunc func(ctx context.Context, townRoot, rig, rev string) (string, error)
+
+// gastownSourceRule is the Rule a sync log prints for the build checkout.
+const gastownSourceRule = "gastown build checkout"
+
+// FindGastownSource locates the gastown source plugins directory in the
+// gastown build checkout that build resolves, and reports the rule that chose
+// it. A resolver error fails the lookup: there is no fallback to another
+// checkout, so a stale copy cannot decide which plugins the town gets
+// (gt-2l1lr, gt-nc7q).
+func FindGastownSource(ctx context.Context, townRoot string, build BuildCheckoutFunc) (GastownSource, error) {
+	if build == nil {
+		return GastownSource{}, errors.New("no build checkout resolver for the gastown plugin source")
 	}
-
-	for _, root := range probed {
-		if source, ok := findPluginsUnder(root); ok {
-			return source, nil
-		}
-	}
-
-	return GastownSource{}, fmt.Errorf("no plugin source under %s; use --source to specify", strings.Join(probed, " or "))
-}
-
-// findPluginsUnder probes one gastown checkout root for a plugins directory,
-// in layout preference order.
-func findPluginsUnder(root string) (GastownSource, bool) {
-	candidates := []GastownSource{
-		{filepath.Join(root, "mayor", "rig", "plugins"), "mayor rig checkout"},
-		{filepath.Join(root, "crew", "den", "plugins"), "legacy crew/den layout"},
-		{filepath.Join(root, "plugins"), "legacy gastown/plugins layout"},
-	}
-	for _, candidate := range candidates {
-		if hasPlugins(candidate.Dir) {
-			return candidate, true
-		}
-	}
-	return GastownSource{}, false
-}
-
-// rigCheckoutRoot resolves the on-disk root of a registered rig's checkout
-// inside the town: <townRoot>/<rigName>. A LocalRepo override in
-// mayor/rigs.json is deliberately not honored here; see localRepoOverride.
-func rigCheckoutRoot(townRoot, rigName string) string {
-	return filepath.Join(townRoot, rigName)
-}
-
-// localRepoOverride returns the LocalRepo reference clone that mayor/rigs.json
-// names for rigName, or "" when rigs.json is absent or has no override.
-func localRepoOverride(townRoot, rigName string) string {
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	if cfg, err := config.LoadRigsConfig(rigsPath); err == nil {
-		if entry, ok := cfg.Rigs[rigName]; ok {
-			return entry.LocalRepo
-		}
-	}
-	return ""
-}
-
-func hasPlugins(dir string) bool {
-	entries, err := os.ReadDir(dir)
+	checkout, err := build(ctx, townRoot, "gastown", "")
 	if err != nil {
-		return false
+		return GastownSource{}, fmt.Errorf("gastown build checkout: %w", err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
-			if _, err := os.Stat(filepath.Join(dir, entry.Name(), "plugin.md")); err == nil {
-				return true
-			}
-		}
-	}
-	return false
+	return GastownSource{Dir: filepath.Join(checkout, "plugins"), Rule: gastownSourceRule}, nil
 }
 
 // DriftReport describes differences between source and runtime plugins.
