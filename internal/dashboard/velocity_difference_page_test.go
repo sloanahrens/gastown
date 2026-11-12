@@ -259,6 +259,87 @@ func TestVelocityDifferenceRowWithoutASignalUsesTheFixedHeight(t *testing.T) {
 	}
 }
 
+// A row whose signal values are all zero has a signal, so it is not a row with
+// no signal: the fixed height does not apply. Any noise above zero is larger
+// than every signal in that row and is capped at the row's half, not drawn at
+// the fixed height.
+func TestVelocityDifferenceRowWhoseSignalsAreZeroCapsItsNoise(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", velocityDifferencePane(
+		velocityDifferenceHour(0, 0.0, "signal", nil, ""),
+		velocityDifferenceHour(1, 0.5, "noise", nil, ""),
+	))
+	d1 := differenceRowNamed(t, readDifferenceRows(t, p), "D1")
+	if len(d1.Cols) != 2 {
+		t.Fatalf("the D1 row has %d columns, want 2", len(d1.Cols))
+	}
+
+	if bars := d1.Cols[0].Bars; len(bars) != 0 {
+		t.Errorf("the zero signal hour draws %+v, want no bar", bars)
+	}
+	noise := d1.Cols[1].Bars
+	if len(noise) != 1 || noise[0].Height != "50%" || !strings.Contains(noise[0].Class, "dmute") {
+		t.Errorf("the noise hour draws %+v, want one muted bar capped at 50%%", noise)
+	}
+}
+
+// A noise difference larger than every signal in its row is capped at the
+// row's half, never allowed to stretch the row, and it stays muted.
+func TestVelocityNoiseLargerThanEverySignalIsCapped(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", velocityDifferencePane(
+		velocityDifferenceHour(0, 1.0, "signal", nil, ""),
+		velocityDifferenceHour(1, 4.0, "noise", nil, ""),
+	))
+	d1 := differenceRowNamed(t, readDifferenceRows(t, p), "D1")
+	if len(d1.Cols) != 2 {
+		t.Fatalf("the D1 row has %d columns, want 2", len(d1.Cols))
+	}
+
+	noise := d1.Cols[1].Bars
+	if len(noise) != 1 || noise[0].Height != "50%" || !strings.Contains(noise[0].Class, "dmute") {
+		t.Errorf("the 14:00 noise draws %+v, want one muted bar capped at 50%%", noise)
+	}
+}
+
+// D2 is drawn by the same rule as D1 and scales to its own signals, not D1's:
+// a D2 signal is drawn at its share of the D2 row's largest signal, and a D2
+// noise value is muted.
+func TestVelocityD2BarsScaleToTheD2Signals(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", velocityDifferencePane(
+		velocityDifferenceHour(0, 4.0, "signal", 0.5, "signal"),
+		velocityDifferenceHour(1, -2.0, "signal", -0.25, "signal"),
+		velocityDifferenceHour(2, 1.0, "noise", 0.1, "noise"),
+	))
+	d2 := differenceRowNamed(t, readDifferenceRows(t, p), "D2")
+	if len(d2.Cols) != 3 {
+		t.Fatalf("the D2 row has %d columns, want one per feed hour (3)", len(d2.Cols))
+	}
+
+	up := d2.Cols[0].Bars
+	if len(up) != 1 || up[0].Class != "dbar dup" || up[0].Height != "50%" {
+		t.Errorf("the 13:00 D2 signal draws %+v, want one up bar at 50%% (the D2 row's largest signal)", up)
+	}
+	down := d2.Cols[1].Bars
+	if len(down) != 1 || down[0].Class != "dbar ddn" || down[0].Height != "25%" {
+		t.Errorf("the 14:00 D2 signal draws %+v, want one down bar at 25%%", down)
+	}
+	noise := d2.Cols[2].Bars
+	if len(noise) != 1 || noise[0].Height != "10%" || !strings.Contains(noise[0].Class, "dmute") {
+		t.Errorf("the 15:00 D2 noise draws %+v, want one muted bar at 10%%", noise)
+	}
+	if want := fmt.Sprintf("%s · D2 +0.10 points/h² · noise", velocityPaneHour(2).Format("15:04")); d2.Cols[2].Title != want {
+		t.Errorf("the 15:00 D2 tooltip is %q, want %q", d2.Cols[2].Title, want)
+	}
+}
+
 // The rows carry a one-line legend that says what D1 and D2 are and that a
 // muted bar is within noise.
 func TestVelocityDifferenceRowsCarryTheLegend(t *testing.T) {

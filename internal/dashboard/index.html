@@ -69,13 +69,12 @@ td.n,th.n{text-align:right}
 .hrej{background:var(--red);border-radius:2px 2px 0 0}
 .hpts{background:var(--violet);border-radius:2px 2px 0 0}
 .hcap{height:4px;background:repeating-linear-gradient(45deg,var(--violet) 0 2px,transparent 2px 4px)}
-/* The velocity's differences, D1 and D2: thin signed rows over the feed's own
-   window, one column per hour. A bar grows from the row's zero line, up for a
-   positive difference and down for a negative one, and a bar whose difference
-   is within noise is muted (gt-vd91ny.7). */
-.dbars{display:flex;align-items:center;gap:4px;margin:2px 0}
-.dlabel{flex:0 0 2ch;color:var(--dim);font-size:11px}
-.dbody{position:relative;flex:1;display:flex;gap:2px;height:32px}
+/* The velocity's difference rows, D1 and D2: one column per feed hour, each bar
+   signed about the zero line and muted within noise. The label sits above the
+   row, so the columns take the points row's full width (gt-vd91ny.7). */
+.dbars{margin:2px 0}
+.dlabel{color:var(--dim);font-size:11px}
+.dbody{position:relative;display:flex;gap:2px;height:32px}
 .dbody::before{content:"";position:absolute;left:0;right:0;top:50%;border-top:1px solid var(--line)}
 .dcol{position:relative;flex:1;min-width:1px}
 .dbar{position:absolute;left:15%;right:15%;display:block;background:var(--violet)}
@@ -1835,12 +1834,8 @@ function renderTrend(s) {
   if (vel) lhbody.append(vel.pick, vel.points);
   lhbody.append(timeAxis(t0, t1));
 
-  // The velocity's differences sit under the points row, over the whole window
-  // the feed holds (up to 72 hours) rather than the trend's 24: the feed judges
-  // each difference against the signal and noise of its whole series, and the
-  // earliest hours it draws need the smoothing history before the trend window
-  // (gt-vd91ny.7). D1 says whether velocity is rising or falling and D2 is its
-  // acceleration.
+  // The differences draw over the feed's whole window, up to 72 hours, not the
+  // trend's 24: the feed judges each one against its whole series (gt-vd91ny.7).
   if (vel) lhbody.append(vel.diff);
 
   // The gate, om and load readings are one compact stats line each, off the
@@ -1940,28 +1935,23 @@ function velocityBars(hours, series, hhmm) {
   return bars;
 }
 
-// The height of a difference bar, as a share of its row. The largest signal
-// value fills the row's half above (or below) the zero line, so DIFF_ROW_FULL
-// is the most a bar may take; a row with no signal value draws every defined
-// bar at DIFF_ROW_FIXED. Scaling to the signals and never to the row's largest
-// value keeps noise small: it is muted and, when it is larger than every
-// signal, capped rather than allowed to stretch the row (gt-vd91ny.7).
+// A difference bar's height is a percentage of its row's half. The largest
+// signal fills that half (DIFF_ROW_FULL); noise scales to the signals and is
+// capped there. A row with no signal draws its bars at DIFF_ROW_FIXED.
 const DIFF_ROW_FULL = 50;
 const DIFF_ROW_FIXED = 10;
 
-// differenceBars draws one of the velocity's differences: a thin row over the
-// feed's hours, one column per hour, each bar signed about the zero line (up
-// for positive, down for negative). key names the value and its state ("d1"
-// reads d1 and d1_state). A value whose state is noise is muted; one whose
-// state is anything else, or that is not defined, draws no bar at all and its
-// tooltip says there is not enough data. A defined value of zero draws no bar
-// either: a zero-height bar would read as a tiny change.
+// differenceBars draws one of the velocity's differences as a row with one
+// column per feed hour. key names the value and its state ("d1" reads d1 and
+// d1_state). A noise value is muted; an undefined or insufficient one draws no
+// bar, and its tooltip says so. A zero value draws no bar, so it never reads as
+// a tiny change.
 function differenceBars(name, key, unit, what, hours, hhmm) {
   const signal = hours.filter(v => v[key + "_state"] === "signal" && v[key] != null).map(v => Math.abs(v[key]));
   const scale = signal.length ? Math.max(...signal) : 0;
   const row = el("div", "dbars");
   row.title = name + ": " + what;
-  row.append(el("span", "dlabel", name));
+  row.append(el("div", "dlabel", name));
   const body = el("div", "dbody");
   for (const v of hours) {
     const col = el("div", "dcol");
@@ -1973,7 +1963,7 @@ function differenceBars(name, key, unit, what, hours, hhmm) {
     }
     col.title = hhmm(v.hour) + " · " + name + " " + (val > 0 ? "+" : "") + val.toFixed(2) + " " + unit + " · " + state;
     if (val) {
-      const h = scale ? Math.min(DIFF_ROW_FULL, Math.abs(val) / scale * DIFF_ROW_FULL) : DIFF_ROW_FIXED;
+      const h = !signal.length ? DIFF_ROW_FIXED : scale ? Math.min(DIFF_ROW_FULL, Math.abs(val) / scale * DIFF_ROW_FULL) : DIFF_ROW_FULL;
       const bar = el("i", "dbar " + (val > 0 ? "dup" : "ddn") + (state === "noise" ? " dmute" : ""));
       bar.style.height = h + "%";
       col.append(bar);
