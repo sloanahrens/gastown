@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
@@ -464,18 +465,22 @@ func TestLandingUsageRealLayout(t *testing.T) {
 // CLAUDE_CONFIG_DIR unset (internal/land/review.go omUnsetEnv, applied at the
 // review run) and HOME the container's (/root), so its transcript is written
 // under $HOME/.claude/projects/<hash of the review directory> (Claude Code's
-// project naming). A review whose transcript sits exactly there writes its
-// usage record; a review with no transcript writes nothing and keeps the one
-// reason line (gt-xxhzf6).
+// project naming). The test drives that shape: the lister resolves its config
+// dir through the production resolution with CLAUDE_CONFIG_DIR unset and HOME
+// injected, and the transcript sits at the literal $HOME/.claude/projects path
+// rather than at the resolver's answer, so a resolver that errors or is removed
+// leaves the transcript unreached. A review whose transcript sits exactly there
+// writes its usage record; a review with no transcript writes nothing and keeps
+// the one reason line (gt-xxhzf6).
 func TestLandingUsagePodOMLayout(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	// The pod's HOME and the config dir Claude resolves with CLAUDE_CONFIG_DIR
-	// unset (internal/config.ClaudeConfigDir).
 	home := t.TempDir()
-	configDir := filepath.Join(home, ".claude")
 	reviewDir := filepath.Join(town, "gastown", "review", "gt-abc")
-	projDir, err := agentlog.ClaudeProjectDirIn(configDir, reviewDir)
+	// The transcript's path is the documented shape written literally, not the
+	// resolver's answer, so the assertion below does not move with the code it
+	// drives.
+	projDir, err := agentlog.ClaudeProjectDirIn(filepath.Join(home, ".claude"), reviewDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,8 +489,13 @@ func TestLandingUsagePodOMLayout(t *testing.T) {
 	writeUsageTranscript(t, filepath.Join(projDir, "session.jsonl"), start.Add(10*time.Minute), seatCallLine("session", 120, 0, 12))
 	var logged []string
 	sink := &omUsageSink{townRoot: town,
-		configDirFor: func() (string, error) { return configDir, nil },
-		userHomeDir:  func() (string, error) { return home, nil },
+		// CLAUDE_CONFIG_DIR unset (getenv returns "") and HOME the injected
+		// container home: the production resolution must yield $HOME/.claude.
+		configDirFor: func() (string, error) {
+			return config.ClaudeConfigDirFrom(func(string) string { return "" },
+				func() (string, error) { return home, nil })
+		},
+		userHomeDir: func() (string, error) { return home, nil },
 		logf: func(f string, a ...any) {
 			logged = append(logged, fmt.Sprintf(f, a...))
 		}}
