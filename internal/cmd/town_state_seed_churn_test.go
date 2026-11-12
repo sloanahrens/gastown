@@ -147,6 +147,36 @@ func TestTownStateSeedChurnSortTable(t *testing.T) {
 			churn: false,
 		},
 		{
+			name:  "a worktree under a rig directory other than the bare repository, host file gone, is a problem",
+			m:     churnMismatch(townstate.ReasonExtra, "gastown/polecats/worktrees/x"),
+			stat:  statMissing,
+			churn: false,
+		},
+		{
+			name:  "a worktree under a rig's bare repository, host file gone, is churn",
+			m:     churnMismatch(townstate.ReasonExtra, "gastown/.repo.git/worktrees/x"),
+			stat:  statMissing,
+			churn: true,
+		},
+		{
+			name:  "a rig's bare repository path with no segment below it, host file gone, is a problem and does not panic",
+			m:     churnMismatch(townstate.ReasonMissing, "gastown/.repo.git"),
+			stat:  statMissing,
+			churn: false,
+		},
+		{
+			name:  "a changed host file whose mtime is exactly the copy start is a problem",
+			m:     churnMismatch(townstate.ReasonChanged, "gastown/src/main.go"),
+			stat:  statAt(start),
+			churn: false,
+		},
+		{
+			name:  "a changed host file whose mtime is one nanosecond after the copy start is churn",
+			m:     churnMismatch(townstate.ReasonChanged, "gastown/src/main.go"),
+			stat:  statAt(start.Add(time.Nanosecond)),
+			churn: true,
+		},
+		{
 			name:  "a refs directory outside a bare repository is a problem",
 			m:     churnMismatch(townstate.ReasonExtra, "gastown/refs/heads/x"),
 			stat:  statMissing,
