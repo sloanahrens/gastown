@@ -214,12 +214,11 @@ func panelMissingColumns(header []string) []string {
 	return missing
 }
 
-// panelSplit is the day range each side of a prepared split covers. Its rows
-// are ordered by landed_at, so the first and last row date each side; a row
-// whose landed_at names no day leaves that side without a range rather than
-// with half of one.
-func panelSplit(p Prepared) PanelSplit {
-	return PanelSplit{Train: panelRowsSpan(p.Train), Holdout: panelRowsSpan(p.Holdout)}
+// panelSplit is the day range each side of a split covers. Its rows are ordered
+// by landed_at, so the first and last row date each side; a row whose landed_at
+// names no day leaves that side without a range rather than with half of one.
+func panelSplit(train, holdout []Row) PanelSplit {
+	return PanelSplit{Train: panelRowsSpan(train), Holdout: panelRowsSpan(holdout)}
 }
 
 // panelRowsSpan is the day range of rows already ordered by landed_at.
@@ -237,7 +236,7 @@ func panelRowsSpan(rows []Row) PanelSpan {
 // panelDay is the calendar day a landed_at timestamp names, empty when the text
 // carries no day the page could place.
 func panelDay(at string) string {
-	day := panelLastPositive(at)
+	day := panelDatePart(at)
 	if _, err := time.Parse(regimeEventsDateLayout, day); err != nil {
 		return ""
 	}
@@ -317,6 +316,13 @@ func panelTarget(t TargetResult) PanelTarget {
 // panelLastPositive is the day a target's latest positive landed: the date
 // part of the ISO timestamp Prepared records, and "" when it records none.
 func panelLastPositive(at string) string {
+	return panelDatePart(at)
+}
+
+// panelDatePart is the date part of an ISO timestamp: the text itself when it
+// is already no longer than a calendar day, and its first panelDateLen bytes
+// otherwise.
+func panelDatePart(at string) string {
 	if len(at) <= panelDateLen {
 		return at
 	}

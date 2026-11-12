@@ -285,6 +285,33 @@ func TestPanelMissingColumns(t *testing.T) {
 	}
 }
 
+// TestPanelDayNamesOnlyAPlacedDay reads the calendar day out of a landed_at
+// timestamp. Text the page cannot place as a day, such as a month that does not
+// exist, names no day rather than a made-up one.
+func TestPanelDayNamesOnlyAPlacedDay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		at   string
+		want string
+	}{
+		{name: "an ISO timestamp names its day", at: "2026-10-17T08:00:00Z", want: "2026-10-17"},
+		{name: "a bare day is its own day", at: "2026-10-17", want: "2026-10-17"},
+		{name: "an empty timestamp names no day", at: "", want: ""},
+		{name: "text that is not a date names no day", at: "not-a-date", want: ""},
+		{name: "a month that does not exist names no day", at: "2026-13-01T00:00:00Z", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := panelDay(tc.at); got != tc.want {
+				t.Errorf("panelDay(%q) = %q, want %q", tc.at, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestPanelSplitDatesEachSide reads the first and last day of each side from
 // rows already ordered by landed_at. A side with no row, or one whose edge row
 // names no calendar day, gets no range rather than half of one.
@@ -299,44 +326,40 @@ func TestPanelSplitDatesEachSide(t *testing.T) {
 		return out
 	}
 	tests := []struct {
-		name string
-		p    Prepared
-		want PanelSplit
+		name           string
+		train, holdout []Row
+		want           PanelSplit
 	}{
 		{
-			name: "both sides dated",
-			p: Prepared{
-				Train:   rows("2026-09-05T10:00:00Z", "2026-10-17T08:00:00Z"),
-				Holdout: rows("2026-10-17T09:00:00Z", "2026-10-24T12:00:00Z"),
-			},
+			name:    "both sides dated",
+			train:   rows("2026-09-05T10:00:00Z", "2026-10-17T08:00:00Z"),
+			holdout: rows("2026-10-17T09:00:00Z", "2026-10-24T12:00:00Z"),
 			want: PanelSplit{
 				Train:   PanelSpan{From: "2026-09-05", To: "2026-10-17"},
 				Holdout: PanelSpan{From: "2026-10-17", To: "2026-10-24"},
 			},
 		},
 		{
-			name: "a lone row dates both ends",
-			p:    Prepared{Train: rows("2026-10-01T00:00:00Z")},
-			want: PanelSplit{Train: PanelSpan{From: "2026-10-01", To: "2026-10-01"}},
+			name:  "a lone row dates both ends",
+			train: rows("2026-10-01T00:00:00Z"),
+			want:  PanelSplit{Train: PanelSpan{From: "2026-10-01", To: "2026-10-01"}},
 		},
 		{
-			name: "an empty side has no range",
-			p:    Prepared{Holdout: rows("2026-10-01T00:00:00Z")},
-			want: PanelSplit{Holdout: PanelSpan{From: "2026-10-01", To: "2026-10-01"}},
+			name:    "an empty side has no range",
+			holdout: rows("2026-10-01T00:00:00Z"),
+			want:    PanelSplit{Holdout: PanelSpan{From: "2026-10-01", To: "2026-10-01"}},
 		},
 		{
-			name: "an edge row with no day dates nothing",
-			p: Prepared{
-				Train:   rows("", "2026-10-17T08:00:00Z"),
-				Holdout: rows("2026-10-17T09:00:00Z"),
-			},
-			want: PanelSplit{Holdout: PanelSpan{From: "2026-10-17", To: "2026-10-17"}},
+			name:    "an edge row with no day dates nothing",
+			train:   rows("", "2026-10-17T08:00:00Z"),
+			holdout: rows("2026-10-17T09:00:00Z"),
+			want:    PanelSplit{Holdout: PanelSpan{From: "2026-10-17", To: "2026-10-17"}},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := panelSplit(tc.p); got != tc.want {
+			if got := panelSplit(tc.train, tc.holdout); got != tc.want {
 				t.Errorf("panelSplit = %+v, want %+v", got, tc.want)
 			}
 		})
