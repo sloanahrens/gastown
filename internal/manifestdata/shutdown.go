@@ -6,8 +6,8 @@ import "time"
 // the pod's terminationGracePeriodSeconds both size from these values, so the
 // drain and the grace period cannot drift apart (gt-99ys4n).
 
-// LandingStepDrainBound is how long a SIGTERM waits for the landing step in
-// flight before the daemon shuts down without it.
+// LandingStepDrainBound is how long a SIGTERM waits for the landing step and the
+// slings in flight before the daemon shuts down without them.
 const LandingStepDrainBound = 2 * time.Minute
 
 // DoltStopBudget is the daemon's own graceful-shutdown ceiling: the Dolt SQL
