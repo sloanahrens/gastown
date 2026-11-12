@@ -1,10 +1,6 @@
 package session
 
 import (
-	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -13,174 +9,39 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// The fakes stand in for tmux and sleep, so the script runs its real poll loop
-// and its real hold without any real time passing. The fake sleep records each
-// call and whether the marker existed at that moment, then returns at once.
-const (
-	fakeMainSession = "gt-test-polecat"
-	fakeMainPollSec = "2"
-)
+// fakeMainSession is the agent session name the script is run for in tests.
+const fakeMainSession = "gt-test-polecat"
 
-// mainScriptFakes is what one run of the script sees.
-type mainScriptFakes struct {
-	newSessionFails bool // the holder session cannot start
-	hasSession      bool // the agent's session exists
-	paneDead        bool // the agent's pane reads dead
-	waitSeconds     string
-	home            string // $4: where the marker goes
-}
+// The script's text is checked here, not run: the marker write and the hold
+// must follow the poll loop, and no branch that exits 1 before the loop may
+// write the marker or hold. The run tests execute the script under sh
+// (sandbox_main_script_run_integration_test.go).
 
-// runMainScript runs sandboxMainScript under /bin/sh with the fakes on PATH and
-// returns its exit code, its sleep log, and whether the marker exists under home.
-// The PATH holds only the fake bin and the system directories for grep.
-func runMainScript(t *testing.T, f mainScriptFakes, hold string) (exit int, sleeps []string, marked bool) {
-	t.Helper()
-	root := t.TempDir()
-	bin := filepath.Join(root, "bin")
-	if err := os.Mkdir(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(root, "sleeps.log")
-	marker := filepath.Join(f.home, sandboxEndedMarker)
-	writeFakeTool(t, filepath.Join(bin, "tmux"), fakeTmux(f))
-	writeFakeTool(t, filepath.Join(bin, "sleep"), fakeSleep(logPath, marker))
-
-	args := []string{"-c", sandboxMainScript, "sh", fakeMainSession, f.waitSeconds, fakeMainPollSec, f.home, "", hold}
-	//testpolicy:allow no-subprocess — the script is the unit under test: it runs under sh, and the fake tmux and sleep it calls are the only seam
-	cmd := exec.Command("/bin/sh", args...)
-	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
-	out, err := cmd.CombinedOutput()
-	var ee *exec.ExitError
-	switch {
-	case err == nil:
-		exit = 0
-	case errors.As(err, &ee):
-		exit = ee.ExitCode()
-	default:
-		t.Fatalf("running the script: %v: %s", err, out)
-	}
-
-	if data, rerr := os.ReadFile(logPath); rerr == nil {
-		sleeps = strings.Split(strings.TrimSpace(string(data)), "\n")
-	} else if !errors.Is(rerr, os.ErrNotExist) {
-		t.Fatal(rerr)
-	}
-	_, serr := os.Stat(marker)
-	marked = serr == nil
-	return exit, sleeps, marked
-}
-
-func writeFakeTool(t *testing.T, path, body string) {
-	t.Helper()
-	//testpolicy:allow no-exec-files — the fake tmux and sleep must be executable for the script to run them; both live in the test's t.TempDir()
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // G306: a fake tool the test runs
-		t.Fatal(err)
-	}
-}
-
-// fakeTmux answers the script's calls from f: the holder starts or fails, the
-// agent's session exists or not, and its pane reads dead or alive.
-func fakeTmux(f mainScriptFakes) string {
-	newSession := "exit 0"
-	if f.newSessionFails {
-		newSession = "exit 1"
-	}
-	has := "exit 1"
-	if f.hasSession {
-		has = "exit 0"
-	}
-	pane := "echo 0"
-	if f.paneDead {
-		pane = "echo 1"
-	}
-	//testpolicy:allow no-exec-files — the body of the fake tmux that writeFakeTool puts in the test's t.TempDir() for the script to run
-	return "#!/bin/sh\n" +
-		"case \"$*\" in\n" +
-		"  *new-session*) " + newSession + " ;;\n" +
-		"  *has-session*) " + has + " ;;\n" +
-		"  *list-panes*) " + pane + " ;;\n" +
-		"  *list-sessions*) exit 0 ;;\n" +
-		"esac\n"
-}
-
-// fakeSleep logs its argument and whether the marker exists when it is called.
-func fakeSleep(logPath, marker string) string {
-	//testpolicy:allow no-exec-files — the body of the fake sleep that writeFakeTool puts in the test's t.TempDir() for the script to run
-	return "#!/bin/sh\n" +
-		"m=no; [ -e '" + marker + "' ] && m=yes\n" +
-		"echo \"$1 marker=$m\" >> '" + logPath + "'\n"
-}
-
-// The agent's session ends with a dead pane: the script writes the marker,
-// holds for the bound, and exits 0.
-func TestSandboxMainScriptHoldsAfterTheAgentEnds(t *testing.T) {
+// The marker write and the hold are the script's tail: after the poll loop ends,
+// the marker is written and the hold runs once, then the script exits 0.
+func TestSandboxMainScriptTextHoldsOnlyAfterThePollLoop(t *testing.T) {
 	t.Parallel()
-	home := t.TempDir()
-	exit, sleeps, marked := runMainScript(t, mainScriptFakes{hasSession: true, paneDead: true, waitSeconds: "5", home: home}, "1800")
-	if exit != 0 {
-		t.Fatalf("exit = %d, want 0 after the agent's session ended", exit)
+	const loopEnd = `sleep "$P"; done; `
+	tail := `touch "$D/` + sandboxEndedMarker + `" || exit 1; sleep "$H"; exit 0`
+	end := strings.Index(sandboxMainScript, loopEnd)
+	if end < 0 {
+		t.Fatalf("the script has no poll loop end %q", loopEnd)
 	}
-	if !marked {
-		t.Fatalf("no %s under %s after the agent's session ended", sandboxEndedMarker, home)
+	if !strings.HasSuffix(sandboxMainScript, tail) {
+		t.Fatalf("the script does not end with %q", tail)
 	}
-	// The poll loop sleeps for the poll interval between polls; the last sleep is
-	// the hold, taken with the marker already written.
-	if last := sleeps[len(sleeps)-1]; last != "1800 marker=yes" {
-		t.Fatalf("last sleep = %q, want the hold %q with the marker already written; sleeps %q", last, "1800 marker=yes", sleeps)
+	if got := strings.Index(sandboxMainScript, tail); got != end+len(loopEnd) {
+		t.Fatalf("the marker write and hold start at %d, want directly after the poll loop at %d", got, end+len(loopEnd))
 	}
-	holds := 0
-	for _, s := range sleeps {
-		if strings.HasPrefix(s, "1800 ") {
-			holds++
-		}
+	head := sandboxMainScript[:end]
+	if strings.Contains(head, sandboxEndedMarker) || strings.Contains(head, `"$H"`) {
+		t.Fatalf("a branch before the poll loop writes the marker or holds: %q", head)
 	}
-	if holds != 1 {
-		t.Fatalf("the script waited the hold %d times, want once; sleeps %q", holds, sleeps)
+	if n := strings.Count(sandboxMainScript, sandboxEndedMarker); n != 1 {
+		t.Fatalf("the marker name appears %d times, want once", n)
 	}
-}
-
-// Each abnormal exit ends without the marker and without the hold: a holder that
-// never started, a session that never appeared, and a marker the script cannot
-// write. Each returns exit 1 and holds nothing.
-func TestSandboxMainScriptAbnormalExitsDoNotHold(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		f    mainScriptFakes
-	}{
-		{
-			name: "the holder session fails to start",
-			f:    mainScriptFakes{newSessionFails: true, hasSession: true, paneDead: true, waitSeconds: "5"},
-		},
-		{
-			name: "the agent's session never appears",
-			f:    mainScriptFakes{hasSession: false, waitSeconds: "2"},
-		},
-		{
-			name: "the marker directory does not exist",
-			f:    mainScriptFakes{hasSession: true, paneDead: true, waitSeconds: "5"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			tt.f.home = t.TempDir()
-			if tt.name == "the marker directory does not exist" {
-				tt.f.home = filepath.Join(tt.f.home, "missing")
-			}
-			exit, sleeps, marked := runMainScript(t, tt.f, "1800")
-			if exit != 1 {
-				t.Fatalf("exit = %d, want 1", exit)
-			}
-			if marked {
-				t.Fatalf("the abnormal exit wrote %s", sandboxEndedMarker)
-			}
-			for _, s := range sleeps {
-				if strings.HasPrefix(s, "1800 ") {
-					t.Fatalf("the abnormal exit waited the hold: sleeps %q", sleeps)
-				}
-			}
-		})
+	if n := strings.Count(sandboxMainScript, `sleep "$H"`); n != 1 {
+		t.Fatalf("the hold appears %d times, want once", n)
 	}
 }
 

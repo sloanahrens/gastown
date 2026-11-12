@@ -35,8 +35,6 @@ import (
 // patrols.patrol_scan.enabled is true.
 
 const (
-	defaultPatrolScanInterval = 2 * time.Minute
-
 	// patrolScanBdTimeout bounds one bd call the tick makes.
 	patrolScanBdTimeout = 30 * time.Second
 
@@ -45,14 +43,10 @@ const (
 	patrolScanRestartTimeout = 3 * time.Minute
 )
 
-// patrolScanInterval returns the configured interval, or 2m.
+// patrolScanInterval returns the configured interval, or 2m. The parse lives in
+// config so the sandbox hold check reads the same interval (gt-yck7hz).
 func patrolScanInterval(config *DaemonPatrolConfig) time.Duration {
-	if c := patrolScanConfig(config); c != nil && c.IntervalStr != "" {
-		if d, err := time.ParseDuration(c.IntervalStr); err == nil && d > 0 {
-			return d
-		}
-	}
-	return defaultPatrolScanInterval
+	return agentconfig.PatrolScanInterval(config)
 }
 
 func patrolScanConfig(config *DaemonPatrolConfig) *PatrolScanConfig {

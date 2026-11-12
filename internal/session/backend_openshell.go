@@ -98,11 +98,13 @@ const sandboxHolderSession = "boot"
 // does not outlive it. It exits 1 when the session never appears, so a launch
 // that failed after the sandbox was made also ends the sandbox.
 //
-// Once the poll loop ends the agent's session is over, so the script writes the
-// sandboxEndedMarker file under the home and then keeps the sandbox up for the
-// hold, so the daemon can copy the seat's transcripts out before it deletes the
-// sandbox. A script that exits 1 holds nothing: the sandbox is already dead to
-// the seat, and a missing marker tells the daemon there is nothing to copy.
+// When the poll loop ends the script writes the sandboxEndedMarker file under the
+// home and keeps the sandbox up for the hold, so the daemon can copy the seat's
+// transcripts out before it deletes the sandbox. The loop ends on a gone session
+// or on the unreachable limit, and the hold follows either way. A script that
+// exits 1 writes no marker and holds nothing: the holder or the agent's session
+// never started, or the marker could not be written, and a missing marker tells
+// the daemon there is nothing to copy.
 //
 // Positional arguments: $1 the session name; $2 seconds to wait for the session
 // (default sandboxSessionWaitSeconds); $3 the poll interval in seconds (2); $4

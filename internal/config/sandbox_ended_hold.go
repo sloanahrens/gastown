@@ -18,7 +18,8 @@ const DefaultSandboxEndedHoldSeconds = 1800
 const sandboxEndedHoldIntervals = 3
 
 // defaultPatrolScanInterval is the interval the patrol_scan tick runs at when
-// its block sets none. It matches the daemon's defaultPatrolScanInterval.
+// its block sets none. The daemon's patrolScanInterval returns PatrolScanInterval,
+// so this is the one default.
 const defaultPatrolScanInterval = 2 * time.Minute
 
 // EndedHold returns how long the profile's sandbox stays up after the agent's
