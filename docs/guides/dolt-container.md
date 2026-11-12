@@ -19,10 +19,18 @@ shell variables set earlier.
 
 Before parking the town, read "Before any rewrite" in [Dolt history rewrites:
 offline procedures](../dolt-history-offline.md). Before setting the hold, wait
-for the drain: `gt polecat list --all --json` shows no polecat in the `working`
-state and the landing queue in `gt status` is empty. Before restoring a copy,
-read [Restoring a Dolt database from the nightly backup](../dolt-restore.md):
-it defines a night, a `.partial` directory and what `dolt backup restore` does.
+for the drain, which reads three things and needs each to read zero: no polecat
+in the `working` state in `gt polecat list --all --json`; the landing queue in
+`gt status` empty, so no landing pass is in flight; and no Dolt maintenance,
+meaning `~/gt/daemon/dolt.pause` is absent (the daemon's
+`daemon/scheduled_maintenance` writes it before each gc). An unreadable reading
+is not zero: a polecat list that fails, a queue that cannot be read, or a pause
+marker that cannot be read keeps the drain waiting. To stop new work while the
+drain runs, set `~/gt/landing.hold` (no new landing pass starts) and
+`~/gt/seat-refill.hold` (no new work is handed out); neither signals a running
+session. Before restoring a copy, read [Restoring a Dolt database from the
+nightly backup](../dolt-restore.md): it defines a night, a `.partial` directory
+and what `dolt backup restore` does.
 
 ## 1. Rehearsal on a restored copy
 
@@ -36,12 +44,13 @@ as the latency baseline.
 
 Write the dispatch hold with a note that names this rehearsal, wait for the
 drain (the check at the top of this page), then pause the Dolt writers. The
-pause writes the marker `~/gt/daemon/dolt.pause`. The daemon honours it: it neither probes, starts nor restarts the server, and `gt dolt
-start` refuses. A `gt` client honours it too: a Dolt call that fails while the
-marker holds reports the pause rather than the connection error, and bd stops
-retrying. The pause does not stop the server, which keeps serving through the
-whole rehearsal, and it keeps the daemon's maintenance gc off the live server
-while step 1.6 times it. The marker lapses at `--until` on its own.
+pause writes the marker `~/gt/daemon/dolt.pause`. The daemon honours it: it
+neither probes, starts nor restarts the server, and `gt dolt start` refuses. A
+`gt` client honours it too: a Dolt call that fails while the marker holds
+reports the pause rather than the connection error, and bd stops retrying. The
+pause does not stop the server, which keeps serving through the whole
+rehearsal, and it keeps the daemon's maintenance gc off the live server while
+step 1.6 times it. The marker lapses at `--until` on its own.
 
 ```bash
 printf '%s\n' 'overseer: Dolt container rehearsal; drain and hold' > ~/gt/seat-refill.hold
