@@ -7,6 +7,8 @@
 // (withWorktreeFacts) before the call is planned.
 package gtwrap
 
+import "io"
+
 // Call is one tool invocation inside the daemon image.
 type Call struct {
 	// Argv is the tool and its arguments, with Argv[0] the tool to run.
@@ -18,6 +20,9 @@ type Call struct {
 	Dir string
 	// TTY says stdin is a terminal, so a terminal has to be attached.
 	TTY bool
+	// Stdin, when set, is what the tool reads as stdin instead of the caller's.
+	// The kubernetes target feeds a Mac file this way, and attaches no terminal.
+	Stdin io.Reader
 }
 
 // Runner runs a Call inside the daemon image and returns the tool's own exit

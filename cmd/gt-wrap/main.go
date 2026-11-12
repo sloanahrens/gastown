@@ -166,10 +166,15 @@ func run(argv []string, s surface) int {
 	if err != nil {
 		return fail(s.stderr, err)
 	}
+	args, stdin, err := fileArgs(cfg, name, args, dir, s)
+	if err != nil {
+		return fail(s.stderr, err)
+	}
 	call, err := gtwrap.Plan(name, args, s.environ(), dir, s.stdinTTY)
 	if err != nil {
 		return fail(s.stderr, err)
 	}
+	call.Stdin = stdin
 	exit, err := t.Launch(call)
 	if err != nil {
 		fmt.Fprintln(s.stderr, err)
