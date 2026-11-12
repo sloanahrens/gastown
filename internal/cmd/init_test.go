@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // TestCreateAgentDirsMakesNoMayor: a newly initialized rig gets polecats/ and
@@ -66,6 +68,39 @@ func TestCreateAgentDirsMkdirFailureIsAnError(t *testing.T) {
 	}
 	if created != 0 {
 		t.Errorf("created = %d, want 0 before the first failure", created)
+	}
+}
+
+// TestRunInitDirectoryFailureIsReturned: runInit hands a directory it cannot
+// make back to its caller, so a rig is never reported as initialized with
+// fewer directories than it names.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestRunInitDirectoryFailureIsReturned(t *testing.T) {
+	cwd := t.TempDir()
+	gitDir := filepath.Join(cwd, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A detached HEAD is read in-process, so runInit's repository check runs
+	// no git subprocess.
+	head := "0123456789abcdef0123456789abcdef01234567\n"
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte(head), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file where crew/ belongs blocks its creation.
+	if err := os.WriteFile(filepath.Join(cwd, "crew"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, cwd)
+
+	err := runInit(initCmd, nil)
+	if err == nil {
+		t.Fatal("runInit over a blocked crew path = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "creating crew") {
+		t.Errorf("error = %q, want it to name crew", err)
 	}
 }
 
