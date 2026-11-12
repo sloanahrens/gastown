@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -315,6 +316,10 @@ type cutoverShell struct {
 }
 
 func (s *cutoverShell) Attach(argv []string, env []string) (int, error) { return 0, nil }
+
+func (s *cutoverShell) AttachStdin(argv []string, env []string, _ io.Reader) (int, error) {
+	return 0, nil
+}
 
 func (s *cutoverShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	s.captured = append(s.captured, argv)

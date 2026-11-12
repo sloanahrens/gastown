@@ -51,6 +51,8 @@ type fakeKube struct {
 
 	captured [][]string
 	attached [][]string
+	// stdins is the reader each stdin-carrying attach was given.
+	stdins []io.Reader
 }
 
 func healthyKube() *fakeKube {
@@ -64,6 +66,12 @@ func healthyKube() *fakeKube {
 func (f *fakeKube) Attach(argv []string, env []string) (int, error) {
 	f.attached = append(f.attached, argv)
 	return f.attachExit, f.attachErr
+}
+
+// AttachStdin records the reader the call carried, then attaches as Attach does.
+func (f *fakeKube) AttachStdin(argv []string, env []string, stdin io.Reader) (int, error) {
+	f.stdins = append(f.stdins, stdin)
+	return f.Attach(argv, env)
 }
 
 // Capture answers by the probe's kind. Each kind is a different kubectl verb line, so
@@ -251,6 +259,11 @@ type podShell struct {
 	runs []podRun
 	// stderr holds what the script wrote to the pod's standard error.
 	stderr bytes.Buffer
+}
+
+// AttachStdin runs the script as Attach does; the pod scripts read no stdin.
+func (p *podShell) AttachStdin(argv []string, env []string, _ io.Reader) (int, error) {
+	return p.Attach(argv, env)
 }
 
 func (p *podShell) Attach(argv []string, _ []string) (int, error) {
@@ -720,5 +733,35 @@ func TestPodTownRootMatchesTheRenderedDeployment(t *testing.T) {
 	t.Parallel()
 	if podTownRoot != k8sdaemon.TownRootPath {
 		t.Fatalf("podTownRoot = %q, want the rendered TownRootPath %q", podTownRoot, k8sdaemon.TownRootPath)
+	}
+}
+
+// TestPodAttachesStdinWithoutTTY: a call that carries a stdin reader, the Mac
+// file the wrapper feeds, execs with -i and no -t even when the caller's stdin
+// is a terminal, and hands the reader to the shell; a call with no reader keeps
+// the caller's stdin and the terminal.
+func TestPodAttachesStdinWithoutTTY(t *testing.T) {
+	t.Parallel()
+	reader := strings.NewReader("body from a Mac file")
+	f := healthyKube()
+	var note bytes.Buffer
+	call := kubeCall(t, kubeTown, true)
+	call.Stdin = reader
+	if exit, err := testKubectl(f, &note).Launch(call); exit != 0 || err != nil {
+		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+	}
+	if len(f.attached) != 1 || len(f.stdins) != 1 || f.stdins[0] != io.Reader(reader) {
+		t.Fatalf("attached %q with stdins %v; want one exec carrying the file's reader", f.attached, f.stdins)
+	}
+	if line := strings.Join(f.attached[0], " "); !strings.Contains(line, " -i ") || strings.Contains(line, " -t ") {
+		t.Errorf("exec line %q; want -i and no -t for a stdin the wrapper supplies", line)
+	}
+
+	g := healthyKube()
+	if exit, err := testKubectl(g, &note).Launch(kubeCall(t, kubeTown, true)); exit != 0 || err != nil {
+		t.Fatalf("Launch without a reader = %d, %v", exit, err)
+	}
+	if len(g.stdins) != 0 || !strings.Contains(strings.Join(g.attached[0], " "), " -t ") {
+		t.Errorf("a call with no reader attached stdins %v and %q; want the caller's stdin and -t", g.stdins, g.attached)
 	}
 }

@@ -3,6 +3,7 @@ package gtwrap
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -65,6 +66,10 @@ func (f *fakeShell) Attach(argv []string, env []string) (int, error) {
 	f.attached = append(f.attached, argv)
 	f.attachedEnv = append(f.attachedEnv, env)
 	return f.attachExit, f.attachErr
+}
+
+func (f *fakeShell) AttachStdin(argv []string, env []string, _ io.Reader) (int, error) {
+	return f.Attach(argv, env)
 }
 
 func (f *fakeShell) Capture(ctx context.Context, argv []string) (string, int, error) {

@@ -92,6 +92,9 @@ func (k Kubectl) Launch(call Call) (int, error) {
 		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
 	}
 	call.Env = env
+	if call.Stdin != nil {
+		return k.Shell.AttachStdin(k.execArgv(l.pod, call, dir), nil, call.Stdin)
+	}
 	return k.Shell.Attach(k.execArgv(l.pod, call, dir), nil)
 }
 

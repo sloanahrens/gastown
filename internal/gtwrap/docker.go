@@ -70,6 +70,9 @@ type Shell interface {
 	// there and not in argv, where a process listing would show it. An error
 	// means it did not run at all.
 	Attach(argv []string, env []string) (exit int, err error)
+	// AttachStdin is Attach with stdin read from the given reader instead of the
+	// caller's. A nil reader means the caller's stdin.
+	AttachStdin(argv []string, env []string, stdin io.Reader) (exit int, err error)
 	// Capture runs argv and returns its stdout and exit status. ctx bounds the
 	// run: when it ends, the command is stopped. An error means it did not run.
 	Capture(ctx context.Context, argv []string) (stdout string, exit int, err error)
@@ -327,7 +330,7 @@ func checkCall(call Call) error {
 
 // stdioFlags attach stdin always, and a terminal only when stdin is one.
 func stdioFlags(call Call) []string {
-	if call.TTY {
+	if call.TTY && call.Stdin == nil {
 		return []string{"-i", "-t"}
 	}
 	return []string{"-i"}
@@ -364,10 +367,19 @@ type OSShell struct{}
 // Attach runs argv with the wrapper's own stdin, stdout and stderr. env is added
 // to the wrapper's environment for the docker process; where a name appears in
 // both, the entry in env wins, since exec keeps the last value of each name.
-func (OSShell) Attach(argv []string, env []string) (int, error) {
+func (s OSShell) Attach(argv []string, env []string) (int, error) {
+	return s.AttachStdin(argv, env, nil)
+}
+
+// AttachStdin is Attach with stdin read from the given reader; nil reads the
+// wrapper's own stdin.
+func (OSShell) AttachStdin(argv []string, env []string, stdin io.Reader) (int, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), env...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, os.Stdout, os.Stderr
+	if stdin == nil {
+		cmd.Stdin = os.Stdin
+	}
 	return exitStatus(cmd.Run())
 }
 
