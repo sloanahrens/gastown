@@ -723,6 +723,7 @@ type pushGit interface {
 	IsAncestor(ancestor, descendant string) (bool, error)
 	MergeBase(a, b string) (string, error)
 	CommitsAhead(base, branch string) (int, error)
+	Cherry(upstream, head string) (string, error)
 }
 
 // The production push step hands in *git.Git, so this fails the build if its
@@ -747,8 +748,10 @@ func isNonFastForwardRejection(err error) bool {
 // behind remote counts as pushed, since the clone inside the sandbox fetches
 // what origin holds ahead of the host. A local head that is ahead means the
 // refusal is stale, so the plain push runs again, and a retry origin refuses
-// again is classified the same way, once. A diverged branch is refused with the
-// divergence named, and nothing is forced (gt-gii34).
+// again is classified the same way, once. A diverged branch whose local commits
+// are all on origin by patch identity counts as pushed; any other diverged branch
+// is refused with the divergence named, and nothing is forced (gt-gii34,
+// gt-mqxa26).
 func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
 	return pushAfterRefusal(g, branch, g.Push("origin", branch, false), true)
 }
@@ -787,6 +790,17 @@ func pushAfterRefusal(g pushGit, branch string, pushErr error, mayRetry bool) er
 			return fmt.Errorf("branch %s is ahead of origin, and origin refused its plain push again; nothing is forced: %s", branch, refusalLine(pushErr.Error()))
 		}
 		return pushAfterRefusal(g, branch, g.Push("origin", branch, false), false)
+	}
+	// A sandbox rebases and pushes its branch, so the host can hold commits that
+	// origin has under other shas. Origin is the truth for a sandbox seat: the
+	// clone inside it fetches origin, never the host branch. When every commit the
+	// local head holds is on origin by patch identity, the work is already there
+	// and nothing is pushed again (gt-mqxa26). Only a clean cherry counts: an
+	// error, or no output for a diverged pair, is not a match, and the divergence
+	// is refused below.
+	if out, err := g.Cherry(remote, local); err == nil && strings.TrimSpace(out) != "" && git.CountCherryUnmergedCommits(out) == 0 {
+		fmt.Fprintf(os.Stderr, "branch %s: local %s, origin %s: local commits are on origin by patch identity; nothing to push\n", branch, local, remote)
+		return nil
 	}
 	d, err := divergenceOf(g, branch, local, remote)
 	if err != nil {

@@ -3,6 +3,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,7 +44,13 @@ func TestIntegrationPushOrAcceptRemoteAhead(t *testing.T) {
 		t.Parallel()
 		remote := cloneReplayRemote(t, []string{"main", "b"})
 		host := pushReplayHost(t, remote, "b")
-		cloneReplayGit(t, host, "commit", "-q", "--allow-empty", "-m", "host work")
+		// A real change, not an empty commit: git cherry matches empty patches to
+		// each other, so an empty host commit would be on origin by patch identity.
+		if err := os.WriteFile(filepath.Join(host, "host.txt"), []byte("host work\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cloneReplayGit(t, host, "add", "host.txt")
+		cloneReplayGit(t, host, "commit", "-q", "-m", "host work")
 		sandboxTip := pushReplaySandboxCommit(t, remote, "b")
 		err := pushOrAcceptRemoteAhead(pushReplayGit(host), "b")
 		if err == nil || !strings.Contains(err.Error(), "[rejected]") {

@@ -824,7 +824,9 @@ func patrolRestartKey(rig, name string) string {
 
 // notePatrolRestart records how one patrol scan's restart attempt ended for a
 // seat and escalates a seat whose restart has failed with the same cause on
-// two consecutive scans, naming the seat and the cause (gt-6hhp8).
+// two consecutive scans, naming the seat and the cause (gt-6hhp8). A cause that
+// carries the diverged-branch marker escalates on its first failed scan
+// (gt-mqxa26).
 //
 // The alert clears on the first restart that succeeds, and only that clears
 // it: a cause that changes is a different failure and is escalated again from
@@ -879,13 +881,20 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 		last = patrolRestartFailure{cause: cause, scans: 1}
 	}
 	d.patrolRestartFails[key] = last
-	escalate := last.scans == 2
+	// A diverged branch is escalated on its first failed scan: the seat cannot
+	// land until someone reads the two heads, and a second scan may never come
+	// (gt-mqxa26). Any other cause waits for its second scan.
+	threshold := 2
+	if strings.Contains(cause, session.BranchDivergedMarker) {
+		threshold = 1
+	}
+	escalate := last.scans == threshold
 	delete(d.patrolRestartCleared, key)
 	d.patrolRestartFailsMu.Unlock()
 
 	if escalate {
 		d.escalateAlert(key, "patrol-restart", fmt.Sprintf(
-			"%s/%s: the patrol scan could not restart the seat on %d consecutive scans, same cause: %s",
+			"%s/%s: the patrol scan could not restart the seat on %d consecutive scan(s), same cause: %s",
 			rig, name, last.scans, cause))
 	}
 }

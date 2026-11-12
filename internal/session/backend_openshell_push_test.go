@@ -31,6 +31,10 @@ type fakePushGit struct {
 	remoteCountEr error
 	moved         *originMove
 	forced        bool
+	// cherryOut and cherryErr are what git cherry answers for the origin head as
+	// upstream and the local head as head.
+	cherryOut string
+	cherryErr error
 }
 
 // originMove is the origin head a retry finds: the remote sha and the relation,
@@ -91,6 +95,15 @@ func (f *fakePushGit) CommitsAhead(base, branch string) (int, error) {
 		return f.remoteOnly, f.remoteCountEr
 	}
 	return 0, errors.New("counted commits between the wrong heads " + base + ".." + branch)
+}
+
+// Cherry answers only for origin as upstream and the local head as head, so a
+// swapped argument order is an error and refuses the divergence.
+func (f *fakePushGit) Cherry(upstream, head string) (string, error) {
+	if upstream != f.revs["refs/remotes/origin/b"] || head != f.revs["refs/heads/b"] {
+		return "", errors.New("cherry compared the wrong heads " + upstream + ".." + head)
+	}
+	return f.cherryOut, f.cherryErr
 }
 
 // A rejected push of a branch origin holds commits for is classified before
@@ -169,6 +182,96 @@ func TestPushOrAcceptRemoteAhead(t *testing.T) {
 						t.Errorf("diverged refusal = %q, want it to name %q", err.Error(), want)
 					}
 				}
+			}
+			if g.forced {
+				t.Error("a force push was asked for")
+			}
+		})
+	}
+}
+
+// A sandbox rebases and pushes, so the host branch can hold a commit origin has
+// under another sha. When git cherry lists every local-only commit as "-", origin
+// holds the work by patch identity: the diverged branch is accepted and not
+// pushed again (gt-mqxa26).
+func TestPushDivergedAcceptedWhenLocalCommitsAreOnOrigin(t *testing.T) {
+	t.Parallel()
+	rejected := errors.New(" ! [rejected]        b -> b (non-fast-forward)")
+	g := &fakePushGit{
+		pushErr:    rejected,
+		revs:       map[string]string{"refs/heads/b": "aaa", "refs/remotes/origin/b": "bbb"},
+		mergeBase:  "mmm",
+		localOnly:  1,
+		remoteOnly: 17,
+		cherryOut:  "- aaa\n",
+	}
+	if err := pushOrAcceptRemoteAhead(g, "b"); err != nil {
+		t.Fatalf("error = %v, want the diverged branch accepted", err)
+	}
+	if g.pushes != 1 {
+		t.Errorf("pushes = %d, want 1: the accepted branch was pushed again", g.pushes)
+	}
+}
+
+// A local commit origin does not hold by patch identity is a "+" line in git
+// cherry, so the divergence is refused with both heads, the merge-base and
+// "nothing is forced" named (gt-mqxa26).
+func TestPushDivergedRefusedWhenLocalHasUniqueCommit(t *testing.T) {
+	t.Parallel()
+	rejected := errors.New(" ! [rejected]        b -> b (non-fast-forward)")
+	g := &fakePushGit{
+		pushErr:    rejected,
+		revs:       map[string]string{"refs/heads/b": "aaa", "refs/remotes/origin/b": "bbb"},
+		mergeBase:  "mmm",
+		localOnly:  2,
+		remoteOnly: 17,
+		cherryOut:  "- ccc\n+ aaa\n",
+	}
+	err := pushOrAcceptRemoteAhead(g, "b")
+	var diverged *BranchDivergedError
+	if !errors.As(err, &diverged) {
+		t.Fatalf("error = %v, want a BranchDivergedError", err)
+	}
+	for _, want := range []string{"branch b diverged from origin", "local aaa", "origin bbb", "merge-base mmm", "nothing is forced"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diverged refusal = %q, want it to name %q", err.Error(), want)
+		}
+	}
+}
+
+// A cherry that fails, or prints nothing for a diverged pair, is not a patch
+// match: the divergence is refused as it is today, and nothing is forced
+// (gt-mqxa26).
+func TestPushDivergedRefusedWhenCherryFails(t *testing.T) {
+	t.Parallel()
+	rejected := errors.New(" ! [rejected]        b -> b (non-fast-forward)")
+	cases := []struct {
+		name      string
+		cherryOut string
+		cherryErr error
+	}{
+		{"cherry_errors", "- aaa\n", errors.New("fatal: bad revision")},
+		{"cherry_prints_nothing", "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &fakePushGit{
+				pushErr:    rejected,
+				revs:       map[string]string{"refs/heads/b": "aaa", "refs/remotes/origin/b": "bbb"},
+				mergeBase:  "mmm",
+				localOnly:  1,
+				remoteOnly: 17,
+				cherryOut:  tc.cherryOut,
+				cherryErr:  tc.cherryErr,
+			}
+			err := pushOrAcceptRemoteAhead(g, "b")
+			var diverged *BranchDivergedError
+			if !errors.As(err, &diverged) {
+				t.Fatalf("error = %v, want a BranchDivergedError", err)
+			}
+			if !strings.Contains(err.Error(), "nothing is forced") {
+				t.Errorf("diverged refusal = %q, want it to say nothing is forced", err.Error())
 			}
 			if g.forced {
 				t.Error("a force push was asked for")
