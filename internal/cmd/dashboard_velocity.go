@@ -34,22 +34,27 @@ func velocityWindowStart(now time.Time) time.Time {
 // counts in the town's series only. polecat is asked once per rejection and
 // must not be nil when rejs is non-empty.
 func buildVelocity(now time.Time, recs []omRecord, rejs []omRejection, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool)) *dashboard.Velocity {
+	return buildVelocityIn(now, recs, rejs, polecat, time.Local)
+}
+
+// buildVelocityIn is buildVelocity with its hours read on loc.
+func buildVelocityIn(now time.Time, recs []omRecord, rejs []omRejection, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), loc *time.Location) *dashboard.Velocity {
 	if len(recs) == 0 && len(rejs) == 0 {
 		return nil
 	}
-	base := localHour(now)
-	first := velocityWindowStart(now)
+	base := localHourIn(now, loc)
+	first := windowStartIn(now, velocityHours, loc)
 	// The log may begin inside the window. The series then begins at the
 	// oldest hour it holds, so the hours before the feed's own history are not
 	// drawn as hours with no landings.
 	oldest := base
 	for _, rec := range recs {
-		if h := localHour(rec.LandedAt); h.Before(oldest) {
+		if h := localHourIn(rec.LandedAt, loc); h.Before(oldest) {
 			oldest = h
 		}
 	}
 	for _, rj := range rejs {
-		if h := localHour(rj.At); h.Before(oldest) {
+		if h := localHourIn(rj.At, loc); h.Before(oldest) {
 			oldest = h
 		}
 	}
@@ -86,7 +91,7 @@ func buildVelocity(now time.Time, recs []omRecord, rejs []omRejection, polecat f
 		})
 	}
 
-	series := storypoints.Hourly(landings, rejections, first, hours, time.Local)
+	series := storypoints.Hourly(landings, rejections, first, hours, loc)
 	classes := make(map[string][]dashboard.VelocityHour, len(series.Classes))
 	for key, buckets := range series.Classes {
 		classes[key] = velocityHourSeries(buckets, deriveSeries(buckets, now))

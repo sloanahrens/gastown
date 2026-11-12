@@ -67,6 +67,9 @@ type Series struct {
 // zero or fewer hours has no buckets. A nil loc means time.Local, the zone
 // localHour in internal/cmd/dashboard_trend.go reads its hours in.
 func Hourly(landings []Landing, rejections []Rejection, firstHour time.Time, hours int, loc *time.Location) Series {
+	if loc == nil {
+		loc = time.Local
+	}
 	if hours < 0 {
 		hours = 0
 	}
@@ -134,15 +137,14 @@ func classesOf(agent string) []string {
 	return []string{AllClass}
 }
 
-// HourStart returns the start of t's wall-clock hour in the UTC offset in
-// force at t, or that offset's change when it falls mid-hour, so a repeated
-// fall-back hour keeps the occurrence t is in (gt-0kzzuz). It is the hour rule
-// every hour bucket uses, the velocity series and the dashboard trend alike. A
-// nil loc means time.Local.
+// HourStart returns the start of the wall-clock hour t falls in, read on loc in
+// the UTC offset in force at t; loc must not be nil.
+//
+// A repeated fall-back hour is two buckets, so the start keeps the occurrence
+// t is in: when the offset changes mid-hour, the start is that change rather
+// than the hour's first minute (gt-0kzzuz). Every hour bucket uses this rule,
+// the velocity series and the dashboard trend alike.
 func HourStart(t time.Time, loc *time.Location) time.Time {
-	if loc == nil {
-		loc = time.Local
-	}
 	t = t.In(loc)
 	_, off := t.Zone()
 	start := t.Add(-(time.Duration(t.Second())*time.Second + time.Duration(t.Nanosecond())))

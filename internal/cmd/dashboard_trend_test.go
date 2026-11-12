@@ -105,22 +105,12 @@ func TestBuildTrendCountsAUTCInstantInItsLocalHour(t *testing.T) {
 // way: each occurrence is its own bucket, and every velocity hour holds the
 // same landings in the trend (gt-0czgpt). The zone is America/Chicago, whose
 // clocks went back on 2026-11-01 at 02:00 CDT, so 01:00 to 01:59 repeats.
-// localHour reads time.Local, so the test sets it and restores it. It is not
-// parallel for that reason.
-//
-//testpolicy:allow parallel — localHour reads time.Local with no seam, so this test swaps it and cannot run beside the parallel tests
 func TestTrendBucketsMatchVelocityAcrossAFallBack(t *testing.T) {
+	t.Parallel()
 	loc, err := time.LoadLocation("America/Chicago")
 	if err != nil {
 		t.Fatal(err)
 	}
-	prev := time.Local
-	//testpolicy:allow no-global-swap — the swap is the input under test: localHour takes its zone from time.Local
-	time.Local = loc
-	t.Cleanup(func() {
-		//testpolicy:allow no-global-swap — restores time.Local, which the swap above replaced
-		time.Local = prev
-	})
 
 	now := time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC) // 02:00 CST, after the repeat
 	recs := []omRecord{
@@ -131,8 +121,8 @@ func TestTrendBucketsMatchVelocityAcrossAFallBack(t *testing.T) {
 		recs[i].PolecatSecs = 900
 	}
 
-	tr := buildTrend(now, recs, nil, nil, nil)
-	vel := buildVelocity(now, recs, nil, nil)
+	tr := buildTrendIn(now, recs, nil, nil, nil, loc)
+	vel := buildVelocityIn(now, recs, nil, nil, loc)
 	if vel == nil {
 		t.Fatal("velocity = nil, want the two landings' hours")
 	}

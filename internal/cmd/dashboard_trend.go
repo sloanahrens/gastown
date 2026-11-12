@@ -36,13 +36,23 @@ const (
 // the velocity series uses, so a repeated fall-back hour splits the same way in
 // both charts.
 func localHour(t time.Time) time.Time {
-	return storypoints.HourStart(t, time.Local)
+	return localHourIn(t, time.Local)
+}
+
+// localHourIn is localHour with its hours read on loc.
+func localHourIn(t time.Time, loc *time.Location) time.Time {
+	return storypoints.HourStart(t, loc)
 }
 
 // windowStart is the oldest hour of a window of hours buckets that ends with
 // the hour now falls in.
 func windowStart(now time.Time, hours int) time.Time {
-	return localHour(now).Add(-time.Duration(hours-1) * time.Hour)
+	return windowStartIn(now, hours, time.Local)
+}
+
+// windowStartIn is windowStart with its hours read on loc.
+func windowStartIn(now time.Time, hours int, loc *time.Location) time.Time {
+	return localHourIn(now, loc).Add(-time.Duration(hours-1) * time.Hour)
 }
 
 // trendWindowStart is the oldest moment the 24 hourly buckets cover.
@@ -55,7 +65,12 @@ func trendWindowStart(now time.Time) time.Time {
 // a record outside the window is not counted, an empty hour is present with
 // zeros, and the stage points are thinned to trendMaxStages across the window.
 func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, loads []dashboard.LoadPoint) *dashboard.Trend {
-	base := localHour(now)
+	return buildTrendIn(now, recs, stages, rejs, loads, time.Local)
+}
+
+// buildTrendIn is buildTrend with its hours read on loc.
+func buildTrendIn(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, loads []dashboard.LoadPoint, loc *time.Location) *dashboard.Trend {
+	base := localHourIn(now, loc)
 	hours := make([]dashboard.TrendHour, trendHours)
 	idx := make(map[time.Time]int, trendHours)
 	for i := range hours {
@@ -63,7 +78,7 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 		idx[hours[i].Hour] = i
 	}
 	bucket := func(at time.Time) (int, bool) {
-		i, ok := idx[localHour(at)]
+		i, ok := idx[localHourIn(at, loc)]
 		return i, ok
 	}
 
