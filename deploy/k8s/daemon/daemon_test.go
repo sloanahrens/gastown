@@ -563,6 +563,193 @@ func TestDashboardRefusals(t *testing.T) {
 	}
 }
 
+// trackerValues is the configuration the tracker tests record: the golden values
+// with the tracker on and the DSN Secret's name.
+func trackerValues(t *testing.T) Values {
+	t.Helper()
+	v := goldenValues(t)
+	v.Tracker = true
+	v.TrackerDSNSecret = "town-tracker-dsn"
+	return v
+}
+
+// TestTrackerDeployment walks the tracker pod: trackerd on loopback with the DSN
+// Secret's dsn key in TRACKER_DSN, the relay sidecar publishing TrackerPort from
+// TrackerListenPort, and the pod shape that reaches nothing else: no
+// ServiceAccount token, no volume, Recreate, requests equal to limits.
+func TestTrackerDeployment(t *testing.T) {
+	t.Parallel()
+	v := trackerValues(t)
+	dep := mustBuild(t, v).TrackerDeployment
+	if dep.Kind != "Deployment" || dep.Metadata.Name != TrackerName || dep.Metadata.Namespace != DefaultNamespace {
+		t.Fatalf("the tracker Deployment = %s %s/%s, want Deployment %s/%s", dep.Kind, dep.Metadata.Namespace, dep.Metadata.Name, DefaultNamespace, TrackerName)
+	}
+	if dep.Spec.Replicas != 1 || dep.Spec.Strategy.Type != "Recreate" {
+		t.Errorf("the tracker Deployment runs %d replicas under %q, want 1 under Recreate", dep.Spec.Replicas, dep.Spec.Strategy.Type)
+	}
+	pod := dep.Spec.Template.Spec
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Errorf("the tracker pod sets automountServiceAccountToken to %v, want false", pod.AutomountServiceAccountToken)
+	}
+	if len(pod.Containers) != 1 || len(pod.InitContainers) != 1 {
+		t.Fatalf("the tracker pod has %d containers and %d init containers, want trackerd and the relay sidecar alone", len(pod.Containers), len(pod.InitContainers))
+	}
+
+	ctr := pod.Containers[0]
+	if ctr.Name != TrackerName || ctr.Image != v.Image {
+		t.Errorf("the trackerd container = %s on %s, want %s on the daemon image %s", ctr.Name, ctr.Image, TrackerName, v.Image)
+	}
+	if !slices.Equal(ctr.Command, []string{"trackerd"}) {
+		t.Errorf("the trackerd command = %q, want [trackerd]", ctr.Command)
+	}
+	if want := []string{"-listen", fmt.Sprintf("127.0.0.1:%d", TrackerListenPort)}; !slices.Equal(ctr.Args, want) {
+		t.Errorf("the trackerd args = %q, want %q: trackerd refuses a non-loopback listen", ctr.Args, want)
+	}
+	if ctr.Resources == nil || !maps.Equal(ctr.Resources.Requests, resourceList(v)) || !maps.Equal(ctr.Resources.Limits, resourceList(v)) {
+		t.Errorf("the trackerd resources = %+v, want requests and limits equal to %v", ctr.Resources, resourceList(v))
+	}
+	var dsn *EnvVar
+	for i := range ctr.Env {
+		if ctr.Env[i].Name == TrackerDSNEnv {
+			dsn = &ctr.Env[i]
+		}
+	}
+	if dsn == nil || dsn.ValueFrom == nil || dsn.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("the trackerd %s entry = %+v, want a secretKeyRef", TrackerDSNEnv, dsn)
+	}
+	if sel := dsn.ValueFrom.SecretKeyRef; sel.Name != v.TrackerDSNSecret || sel.Key != TrackerDSNKey {
+		t.Errorf("the %s secretKeyRef = %s/%s, want %s/%s", TrackerDSNEnv, sel.Name, sel.Key, v.TrackerDSNSecret, TrackerDSNKey)
+	}
+	// A Secret reference renders as valueFrom alone: Kubernetes refuses an entry
+	// that carries both value and valueFrom.
+	if got := string(document(t, ctr.Env)); strings.Contains(got, "value:") {
+		t.Errorf("the trackerd environment renders a literal value beside the Secret reference:\n%s", got)
+	}
+
+	relay := pod.InitContainers[0]
+	if relay.Name != TrackerRelayContainer || relay.Image != v.ProxyImage {
+		t.Errorf("the relay = %s on %s, want %s on the proxy image %s", relay.Name, relay.Image, TrackerRelayContainer, v.ProxyImage)
+	}
+	if want := []string{
+		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", TrackerPort),
+		fmt.Sprintf("TCP:127.0.0.1:%d", TrackerListenPort),
+	}; !slices.Equal(relay.Args, want) {
+		t.Errorf("the relay args = %q, want %q: it listens on every interface and forwards to trackerd's loopback port", relay.Args, want)
+	}
+	if relay.RestartPolicy != "Always" {
+		t.Errorf("the relay restartPolicy = %q, want Always, so the kubelet stops it after trackerd exits", relay.RestartPolicy)
+	}
+	if relay.Resources == nil || !maps.Equal(relay.Resources.Requests, proxyResourceList()) || !maps.Equal(relay.Resources.Limits, proxyResourceList()) {
+		t.Errorf("the relay resources = %+v, want requests and limits equal to %v", relay.Resources, proxyResourceList())
+	}
+
+	labels := dep.Spec.Template.Metadata.Labels
+	for k, want := range dep.Spec.Selector.MatchLabels {
+		if labels[k] != want {
+			t.Errorf("the Deployment selects %s=%s, which the tracker pod (%v) does not carry", k, want, labels)
+		}
+	}
+	for k, want := range mustBuild(t, goldenValues(t)).Deployment.Spec.Selector.MatchLabels {
+		if labels[k] == want {
+			t.Errorf("the tracker pod carries the daemon's selector %s=%s", k, want)
+		}
+	}
+}
+
+// TestTrackerPodHasNoHostPath holds the tracker pod to no volume at all: it
+// mounts nothing of the Mac and nothing of the town, so no hostPath under
+// /Users can reach it.
+func TestTrackerPodHasNoHostPath(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, trackerValues(t)).TrackerDeployment.Spec.Template.Spec
+	if len(pod.Volumes) != 0 {
+		t.Errorf("the tracker pod mounts %d volumes (%+v), want none", len(pod.Volumes), pod.Volumes)
+	}
+	for _, vol := range pod.Volumes {
+		if vol.HostPath == nil {
+			continue
+		}
+		t.Errorf("the tracker pod has hostPath %s at %s", vol.HostPath.Path, vol.Name)
+	}
+}
+
+// TestTrackerRefusals drives each refusal the tracker values have: no relay
+// image, no DSN Secret, a DSN Secret that is not a Secret name, a rehearsal, and
+// a DSN Secret with no tracker to read it. Each names the value at fault.
+func TestTrackerRefusals(t *testing.T) {
+	t.Parallel()
+	noRelay := trackerValues(t)
+	noRelay.ProxyImage = ""
+	noDSN := trackerValues(t)
+	noDSN.TrackerDSNSecret = ""
+	dsnNotAName := trackerValues(t)
+	dsnNotAName.TrackerDSNSecret = "postgres://tracker@db.example/town"
+	rehearsal := rehearsalValues(t)
+	rehearsal.Tracker = true
+	rehearsal.TrackerDSNSecret = "town-tracker-dsn"
+	orphan := goldenValues(t)
+	orphan.TrackerDSNSecret = "town-tracker-dsn"
+	for _, tc := range []struct {
+		name string
+		v    Values
+		want string
+	}{
+		{"no relay image", noRelay, "Values.ProxyImage"},
+		{"no DSN Secret", noDSN, "Values.TrackerDSNSecret"},
+		{"a DSN Secret that is not a name", dsnNotAName, "Values.TrackerDSNSecret"},
+		{"a rehearsal", rehearsal, "Values.Rehearsal"},
+		{"a DSN Secret without the tracker", orphan, "Values.Tracker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Build(tc.v)
+			if err == nil {
+				t.Fatalf("Build accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Build refused %s with %q, want the error to name %q", tc.name, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestTrackerAbsentFromTheGoldenValues holds that a render without Values.Tracker
+// writes no tracker object: the daemon is the only Deployment, and no document
+// carries an empty kind, which is how an unrendered object would leak.
+func TestTrackerAbsentFromTheGoldenValues(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues(t))
+	if m.TrackerDeployment.Kind != "" {
+		t.Errorf("Values.Tracker is unset but the render carries a %s %s", m.TrackerDeployment.Kind, m.TrackerDeployment.Metadata.Name)
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, m); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	dec := yaml.NewDecoder(&buf)
+	for {
+		var doc struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("decoding the rendered stream: %v", err)
+		}
+		if doc.Kind == "" {
+			t.Errorf("the render writes a document with no kind (%+v), which is how an unrendered object leaks", doc)
+		}
+		if doc.Kind == "Deployment" && doc.Metadata.Name != Name {
+			t.Errorf("Values.Tracker is unset but the render carries Deployment %q", doc.Metadata.Name)
+		}
+	}
+}
+
 func TestRenderRefusesBadValues(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

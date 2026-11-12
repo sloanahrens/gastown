@@ -63,6 +63,10 @@
 // a read-only file beside the daemon's, so one Deployment change moves both halves
 // of the pair (gt-ldqqvk). The field's comment holds the contract.
 //
+// Values.Tracker renders trackerd beside the daemon and the dashboard: on
+// loopback, with the DSN Secret's key in TRACKER_DSN, and published on TrackerPort
+// by a socat sidecar (gt-p85pw.133).
+//
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
 // through the same grants, and a manifest that renames one fails the coverage
@@ -270,6 +274,28 @@ const (
 	// the file the page reads, which the daemon container's Secrets loop also
 	// mounts at this path.
 	dashboardViewerPath = manifestdata.LiveConfigDirPath + "/" + ViewerTokenFile
+)
+
+// The tracker is a third Deployment beside the daemon and the dashboard
+// (gt-p85pw.133). trackerd refuses any non-loopback -listen
+// (tracker/server/server.go, RequireLoopback), so the pod runs it on loopback and
+// a socat sidecar publishes it on TrackerPort. The two ports differ on purpose: a
+// wildcard 7433 listener cannot bind beside a loopback 7433 one.
+const (
+	// TrackerName names the trackerd Deployment and labels its pod.
+	TrackerName = "trackerd"
+	// TrackerPort is where the relay listens and where another pod reaches
+	// trackerd. The next bead's Service publishes it.
+	TrackerPort = 7433
+	// TrackerListenPort is trackerd's loopback port, the relay's target.
+	TrackerListenPort = 7434
+	// TrackerRelayContainer names the socat sidecar that publishes TrackerListenPort
+	// on TrackerPort.
+	TrackerRelayContainer = "tracker-relay"
+	// TrackerDSNEnv and TrackerDSNKey name trackerd's connection string: the
+	// environment variable, and the key of Values.TrackerDSNSecret it reads.
+	TrackerDSNEnv = "TRACKER_DSN"
+	TrackerDSNKey = "dsn"
 )
 
 var (
@@ -661,11 +687,22 @@ type Values struct {
 	// mount is a sibling of ClaudeHomePath, so the container's own Claude config
 	// dir stays writable for its om reviews (gt-xxhzf6).
 	DaemonClaudeDir string
+	// Tracker renders the trackerd Deployment beside the daemon and the
+	// dashboard: trackerd on loopback from Values.Image, and a socat relay from
+	// Values.ProxyImage that publishes it on TrackerPort. It needs
+	// TrackerDSNSecret and refuses an empty ProxyImage, since the relay has no
+	// image without it; a rehearsal refuses it, as it refuses the dashboard.
+	Tracker bool
+	// TrackerDSNSecret is the name of the Secret whose dsn key holds the tracker's
+	// connection string; the trackerd container reads it into TRACKER_DSN. The DSN
+	// itself never reaches the render. Set without Tracker it is refused, since
+	// nothing would read it.
+	TrackerDSNSecret string
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard
-// objects are zero unless Values.Dashboard is set. The dolt-backup claim is nil
-// when Values.DoltBackupHostPath replaces it.
+// and tracker objects are zero unless Values.Dashboard or Values.Tracker is set.
+// The dolt-backup claim is nil when Values.DoltBackupHostPath replaces it.
 type Manifests struct {
 	Namespace            Namespace
 	ServiceAccount       ServiceAccount
@@ -677,6 +714,7 @@ type Manifests struct {
 	Secrets              []Secret
 	Deployment           Deployment
 	DashboardDeployment  Deployment
+	TrackerDeployment    Deployment
 	SweepRoleBinding     RoleBinding
 	CacheTrimRoleBinding RoleBinding
 	SweepReaderBinding   ClusterRoleBinding
@@ -705,6 +743,12 @@ func Build(v Values) (Manifests, error) {
 			return Manifests{}, err
 		}
 		dashboard = dash
+	}
+	// The tracker pod is built only when its values are: validateTracker has
+	// already refused a tracker with no DSN Secret or no relay image.
+	var tracker Deployment
+	if v.Tracker {
+		tracker = trackerDeployment(v, namespace)
 	}
 	deploy, err := deployment(v, namespace)
 	if err != nil {
@@ -736,6 +780,9 @@ func Build(v Values) (Manifests, error) {
 	if v.Dashboard {
 		m.DashboardService = dashboardService(namespace)
 		m.DashboardDeployment = dashboard
+	}
+	if v.Tracker {
+		m.TrackerDeployment = tracker
 	}
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
 	// the pod mounts the directory the backups are written to (gt-cbsx3k).
@@ -1333,6 +1380,90 @@ func resourceList(v Values) map[string]string {
 	return map[string]string{"cpu": v.CPU, "memory": v.Memory}
 }
 
+// trackerDeployment is the tracker's pod: trackerd on loopback, with the DSN
+// Secret's dsn key in TRACKER_DSN, and a socat sidecar publishing it. The pod
+// takes no ServiceAccount token and mounts no volume, so it reaches nothing on
+// the Mac and nothing in the town.
+func trackerDeployment(v Values, namespace string) Deployment {
+	automount := false
+	return Deployment{
+		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		Metadata: ObjectMeta{Name: TrackerName, Namespace: namespace, Labels: trackerLabels()},
+		Spec: DeploymentSpec{
+			Replicas: 1,
+			Strategy: DeploymentStrategy{Type: "Recreate"},
+			Selector: LabelSelector{MatchLabels: trackerSelectorLabels()},
+			Template: PodTemplate{
+				Metadata: PodTemplateMeta{Labels: trackerLabels()},
+				Spec: PodSpec{
+					AutomountServiceAccountToken: &automount,
+					// The relay is a native sidecar, so the kubelet stops it after
+					// trackerd has exited.
+					InitContainers: []Container{trackerRelayContainer(v)},
+					Containers:     []Container{trackerContainer(v)},
+				},
+			},
+		},
+	}
+}
+
+// trackerContainer runs trackerd on its loopback port. trackerd refuses any other
+// listen, so the relay is the only way another pod reaches it. Its resources are
+// the daemon's share: Values.CPU and Values.Memory are the only figures the
+// renderer has.
+func trackerContainer(v Values) Container {
+	return Container{
+		Name:    TrackerName,
+		Image:   v.Image,
+		Command: []string{"trackerd"},
+		Args:    []string{"-listen", "127.0.0.1:" + strconv.Itoa(TrackerListenPort)},
+		Env: []EnvVar{{
+			Name: TrackerDSNEnv,
+			ValueFrom: &EnvVarSource{SecretKeyRef: &SecretKeySelector{
+				Name: v.TrackerDSNSecret,
+				Key:  TrackerDSNKey,
+			}},
+		}},
+		Resources: &ContainerResources{
+			Requests: resourceList(v),
+			Limits:   resourceList(v),
+		},
+	}
+}
+
+// trackerRelayContainer publishes trackerd for the rest of the cluster: it
+// listens on every interface on TrackerPort, unlike the proxy sidecars, which
+// bind 127.0.0.1 because they reach outward rather than being reached.
+func trackerRelayContainer(v Values) Container {
+	return Container{
+		Name:  TrackerRelayContainer,
+		Image: v.ProxyImage,
+		Args: []string{
+			fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", TrackerPort),
+			fmt.Sprintf("TCP:127.0.0.1:%d", TrackerListenPort),
+		},
+		Resources: &ContainerResources{
+			Requests: proxyResourceList(),
+			Limits:   proxyResourceList(),
+		},
+		RestartPolicy: "Always",
+	}
+}
+
+// trackerSelectorLabels are what the tracker's Deployment selects its pods by:
+// its own name, which the daemon's and dashboard's pods do not carry.
+func trackerSelectorLabels() map[string]string {
+	return map[string]string{"app.kubernetes.io/name": TrackerName}
+}
+
+// trackerLabels are the labels on the tracker Deployment and its pod.
+func trackerLabels() map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       TrackerName,
+		"app.kubernetes.io/managed-by": "gt",
+	}
+}
+
 // volumes are the claims at the container's paths, the scratch emptyDir, and
 // one volume per rendered Secret. A Secret volume is named after its file with
 // the dots of a file name replaced, since a volume name is a DNS-1123 label.
@@ -1656,6 +1787,9 @@ func (v Values) validate() error {
 	if err := v.validateDashboard(); err != nil {
 		return err
 	}
+	if err := v.validateTracker(); err != nil {
+		return err
+	}
 	if err := v.validateDaemonClaudeDir(); err != nil {
 		return err
 	}
@@ -1691,6 +1825,35 @@ func (v Values) validateDashboard() error {
 	}
 	if _, ok := v.viewerEntry(); !ok {
 		return fmt.Errorf("Values.Dashboard is set but Values.Secrets holds no %s entry: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating", ViewerTokenFile)
+	}
+	return nil
+}
+
+// validateTracker refuses the tracker values its pod cannot render: a DSN Secret
+// name that is not a Secret name, a DSN Secret with no tracker to read it, and a
+// tracker with no DSN Secret or no relay image. The relay's image is Values.ProxyImage,
+// so an empty one leaves the sidecar with nothing to run; a rehearsal refuses the
+// tracker, as it refuses the dashboard, since trackerd is a live-pod piece.
+func (v Values) validateTracker() error {
+	if !v.Tracker {
+		if v.TrackerDSNSecret != "" {
+			return errors.New("Values.TrackerDSNSecret is set but Values.Tracker is not: the DSN Secret belongs to the trackerd Deployment, so set Tracker or drop the name")
+		}
+		return nil
+	}
+	if v.Rehearsal {
+		return errors.New("Values.Tracker is set with Values.Rehearsal: the tracker is a live-pod piece, and a rehearsal never runs trackerd")
+	}
+	if v.TrackerDSNSecret == "" {
+		return errors.New("Values.TrackerDSNSecret is empty: name the Secret whose dsn key holds the tracker's connection string, or trackerd starts with no DSN")
+	}
+	// The value is not echoed: a caller who pastes a DSN here would put its
+	// password in the error, and this is the one field that can hold one.
+	if !validDNS1123Subdomain(v.TrackerDSNSecret) {
+		return errors.New("Values.TrackerDSNSecret: want the name of a Secret (a DNS-1123 subdomain), not a DSN")
+	}
+	if v.ProxyImage == "" {
+		return errors.New("Values.Tracker is set but Values.ProxyImage is empty: the tracker-relay sidecar that publishes trackerd on TrackerPort runs that image, and an empty one has nothing to run")
 	}
 	return nil
 }
@@ -2112,6 +2275,10 @@ func Render(w io.Writer, m Manifests) error {
 	if m.DashboardDeployment.Kind != "" {
 		docs = append(docs, m.DashboardDeployment)
 	}
+	// Build leaves the tracker Deployment zero unless Values.Tracker is set.
+	if m.TrackerDeployment.Kind != "" {
+		docs = append(docs, m.TrackerDeployment)
+	}
 	// Build leaves a binding zero in a rehearsal, so a zero binding is one that
 	// was not rendered and is not written.
 	if m.SweepRoleBinding.Kind != "" {
@@ -2383,10 +2550,23 @@ type Container struct {
 	RestartPolicy string `yaml:"restartPolicy,omitempty"`
 }
 
-// EnvVar is one environment entry.
+// EnvVar is one environment entry: a literal value, or the key of a Secret. A
+// credential is named through ValueFrom, so its bytes never enter the manifest.
 type EnvVar struct {
-	Name  string `yaml:"name"`
-	Value string `yaml:"value"`
+	Name      string        `yaml:"name"`
+	Value     string        `yaml:"value,omitempty"`
+	ValueFrom *EnvVarSource `yaml:"valueFrom,omitempty"`
+}
+
+// EnvVarSource is where one environment value comes from.
+type EnvVarSource struct {
+	SecretKeyRef *SecretKeySelector `yaml:"secretKeyRef,omitempty"`
+}
+
+// SecretKeySelector names one key of a Secret in the pod's namespace.
+type SecretKeySelector struct {
+	Name string `yaml:"name"`
+	Key  string `yaml:"key"`
 }
 
 // ContainerResources is a container's share. Requests equal limits, so the
