@@ -65,6 +65,29 @@ func Due(stamp, now time.Time, every time.Duration) bool {
 	return now.Sub(stamp) >= every
 }
 
+// DuePeriod names the period a due run covers: the interval of every that
+// contains now, counted from the last run's stamp, named by the time it starts.
+func DuePeriod(stamp, now time.Time, every time.Duration) string {
+	if every <= 0 {
+		// No interval to share, so the call's own time is its whole period.
+		return now.UTC().Format(time.RFC3339)
+	}
+	if stamp.IsZero() {
+		// No run yet, so the intervals count from the zero time, which makes them
+		// the UTC days. Counting them with a Sub would overflow time.Duration;
+		// Truncate rounds down by the same measure.
+		return now.UTC().Truncate(every).Format(time.RFC3339)
+	}
+	elapsed := now.Sub(stamp)
+	periods := elapsed / every
+	// Division truncates toward zero, which rounds the wrong way for a time
+	// before the stamp; floor there so a period always starts at or before now.
+	if elapsed < 0 && periods*every != elapsed {
+		periods--
+	}
+	return stamp.Add(periods * every).UTC().Format(time.RFC3339)
+}
+
 // NeedRebuild reports whether the mango binary has to be rebuilt for head:
 // always when no build is recorded, and whenever the recorded head differs.
 func NeedRebuild(built, head string) bool {
@@ -104,6 +127,11 @@ type AnalysisOptions struct {
 	// panel's trend or events it could not draw. Nil writes them to the process
 	// log.
 	Reportf func(format string, args ...any)
+	// BeforeRun, when set, is called once the run is known to be due, before its
+	// first step, with the name of the period the run covers (DuePeriod), so a
+	// caller can do its once-a-period work on the same due decision the analysis
+	// makes. It cannot fail the run: a caller reports its own failures.
+	BeforeRun func(ctx context.Context, period string)
 }
 
 // withDefaults fills the zero fields with the daily run's values.
@@ -127,6 +155,13 @@ func (o AnalysisOptions) withDefaults() AnalysisOptions {
 		o.Reportf = log.Printf
 	}
 	return o
+}
+
+// AnalysisDir is the directory the daily analysis publishes into,
+// <town>/.runtime/metrics/latest, where a caller keeping a stamp for the same
+// due period puts it beside the analysis's own.
+func AnalysisDir(town string) string {
+	return filepath.Join(town, ".runtime", "metrics", analysisDirName)
 }
 
 // AnalysisResult is one run of the daily analysis: whether it was due, where it
@@ -156,7 +191,7 @@ type AnalysisResult struct {
 // report line, so the day's panel still publishes.
 func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisResult, error) {
 	o := opts.withDefaults()
-	dir := filepath.Join(env.Town, ".runtime", "metrics", analysisDirName)
+	dir := AnalysisDir(env.Town)
 	res := AnalysisResult{Dir: dir}
 	switch {
 	case o.MangoGitDir == "":
@@ -189,6 +224,9 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, errors.New("analysis: Env.RunEnv is unset, so mango's git and go commands cannot run")
 	case inProcess && env.RunDir == nil:
 		return res, errors.New("analysis: Env.RunDir is unset, so the in-process extract cannot run its git and bd commands")
+	}
+	if o.BeforeRun != nil {
+		o.BeforeRun(ctx, DuePeriod(stamp, now, o.Every))
 	}
 
 	if err := ensureMango(ctx, env, o); err != nil {

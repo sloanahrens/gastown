@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/metrics"
 )
@@ -72,7 +74,7 @@ func TestMetricsHourRunsEveryStepAndReportsTheFirstFailure(t *testing.T) {
 					calls = append(calls, "regime")
 					return tc.regimeErr
 				},
-				analyse: func(context.Context, io.Writer, string) error {
+				analyse: func(context.Context, io.Writer, string, func(context.Context, string)) error {
 					calls = append(calls, "analyse")
 					return tc.analyseErr
 				},
@@ -171,5 +173,231 @@ func TestRecordInstallRegimeEventsReturnsAnUnreadableFileAndRecordsTheRest(t *te
 	}
 	if !strings.Contains(string(data), `"after_ref":"om987"`) {
 		t.Fatalf("record = %q, want the readable receipt recorded", data)
+	}
+}
+
+// analysis fake calls its BeforeRun only when due, as the real analysis does
+// after its stamp check, and the dataset fake stands in for the real refresh.
+func fakeHourSteps(calls *[]string, due bool, failures []error) metricsHourSteps {
+	return metricsHourSteps{
+		snapshot: func(context.Context, io.Writer, string) error {
+			*calls = append(*calls, "snapshot")
+			return nil
+		},
+		regime: func(io.Writer, string) error {
+			*calls = append(*calls, "regime")
+			return nil
+		},
+		dataset: func(context.Context, string) (int, []error) {
+			*calls = append(*calls, "dataset")
+			return 2, failures
+		},
+		analyse: func(ctx context.Context, _ io.Writer, _ string, beforeRun func(context.Context, string)) error {
+			if due {
+				beforeRun(ctx, "2026-11-12T00:00:00Z")
+			}
+			*calls = append(*calls, "analyse")
+			return nil
+		},
+	}
+}
+
+// On a due hour the dataset is refreshed after the snapshot and before the
+// analysis, under the same lock.
+func TestMetricsHourRefreshesDatasetBeforeAnalysisWhenDue(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var calls []string
+	var out bytes.Buffer
+	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, true, nil)); err != nil {
+		t.Fatalf("runMetricsHourWith: %v", err)
+	}
+	want := []string{"snapshot", "regime", "dataset", "analyse"}
+	if !slices.Equal(calls, want) {
+		t.Errorf("steps ran %v, want %v", calls, want)
+	}
+	if !strings.Contains(out.String(), "[town-metrics] jev dataset: 2 written\n") {
+		t.Errorf("output %q does not print the dataset receipt", out.String())
+	}
+}
+
+// An hour the analysis is not due on does not refresh the datasets. The
+// analysis itself still runs, and its own stamp check makes that hour a no-op.
+func TestMetricsHourSkipsDatasetOnANotDueHour(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var calls []string
+	var out bytes.Buffer
+	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, false, nil)); err != nil {
+		t.Fatalf("runMetricsHourWith: %v", err)
+	}
+	want := []string{"snapshot", "regime", "analyse"}
+	if !slices.Equal(calls, want) {
+		t.Errorf("steps ran %v, want %v", calls, want)
+	}
+	if strings.Contains(out.String(), "jev dataset") {
+		t.Errorf("output %q mentions the dataset on a not-due hour", out.String())
+	}
+}
+
+// A dataset failure is logged on one line, and the analysis still runs and the
+// hour still succeeds.
+func TestMetricsHourLogsADatasetFailureOnceAndAnalysesStill(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var calls []string
+	var out bytes.Buffer
+	failure := errors.New("logtriage.needs_action: battery \"logtriage\" has no labeled rows")
+	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, true, []error{failure})); err != nil {
+		t.Fatalf("a dataset failure failed the hour: %v", err)
+	}
+	if !slices.Contains(calls, "analyse") {
+		t.Errorf("steps ran %v, want the analysis to run after the dataset failure", calls)
+	}
+	var lines []string
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		if strings.Contains(line, "has no labeled rows") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "[town-metrics] jev dataset: ") {
+		t.Errorf("failure lines = %q, want exactly one dataset line", lines)
+	}
+}
+
+// A refresh that had a failure leaves no stamp, so the period's next hour
+// exports again rather than leaving the failed pairs stale until the next period.
+func TestMetricsHourRetriesTheDatasetRefreshAfterAFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var calls []string
+	failure := errors.New("logtriage.needs_action: battery \"logtriage\" has no labeled rows")
+	steps := fakeHourSteps(&calls, true, []error{failure})
+	for hour := 1; hour <= 2; hour++ {
+		var out bytes.Buffer
+		if err := runMetricsHourWith(context.Background(), &out, town, steps); err != nil {
+			t.Fatalf("hour %d: %v", hour, err)
+		}
+		if got := strings.Count(strings.Join(calls, " "), "dataset"); got != hour {
+			t.Fatalf("after hour %d the datasets exported %d times, want %d", hour, got, hour)
+		}
+	}
+}
+
+// An unreadable dataset stamp is logged one line and the refresh runs anyway: a
+// stamp nobody can read must not leave the datasets stale.
+func TestMetricsHourRefreshesDatasetsOnAnUnreadableStamp(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the stamp file goes makes every read of it fail.
+	if err := os.MkdirAll(filepath.Join(metrics.AnalysisDir(town), datasetStampName), 0o755); err != nil {
+		t.Fatalf("lay out an unreadable stamp: %v", err)
+	}
+	var calls []string
+	var out bytes.Buffer
+	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, true, nil)); err != nil {
+		t.Fatalf("runMetricsHourWith: %v", err)
+	}
+	if !slices.Contains(calls, "dataset") {
+		t.Errorf("steps ran %v, want the refresh despite the unreadable stamp", calls)
+	}
+	if !strings.Contains(out.String(), "reading the dataset stamp") {
+		t.Errorf("output %q does not name the unreadable stamp", out.String())
+	}
+}
+
+// A dataset stamp that cannot be written is logged and fails nothing else: the
+// refresh already ran, and the hour's analysis still runs.
+func TestMetricsHourLogsADatasetStampItCannotWrite(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A file where the analysis directory goes makes the stamp unreadable and
+	// unwritable.
+	if err := os.MkdirAll(filepath.Join(town, ".runtime", "metrics"), 0o755); err != nil {
+		t.Fatalf("lay out the town runtime: %v", err)
+	}
+	if err := os.WriteFile(metrics.AnalysisDir(town), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatalf("lay out an unwritable stamp directory: %v", err)
+	}
+	var calls []string
+	var out bytes.Buffer
+	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, true, nil)); err != nil {
+		t.Fatalf("runMetricsHourWith: %v", err)
+	}
+	if !slices.Contains(calls, "analyse") {
+		t.Errorf("steps ran %v, want the analysis after the stamp write failed", calls)
+	}
+	if !strings.Contains(out.String(), "jev dataset stamp") {
+		t.Errorf("output %q does not name the stamp write that failed", out.String())
+	}
+}
+
+// The refresh runs once a due period, decided by the analysis's own stamp check:
+// the analysis is due and fails after the refresh every hour, so the period's
+// next hour still finds it due and skips the refresh, and the next period
+// exports again. Nothing here stubs the due decision: RunAnalysis reads the
+// analysis stamp and beforeRun fires through the real BeforeRun seam.
+func TestMetricsHourRefreshesDatasetOnceADuePeriod(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 12, 3, 0, 0, 0, time.UTC)
+	exports := 0
+	steps := metricsHourSteps{
+		snapshot: func(context.Context, io.Writer, string) error { return nil },
+		regime:   func(io.Writer, string) error { return nil },
+		dataset: func(context.Context, string) (int, []error) {
+			exports++
+			return 1, nil
+		},
+		analyse: func(ctx context.Context, out io.Writer, _ string, beforeRun func(context.Context, string)) error {
+			env := metrics.Env{
+				Town:     town,
+				Now:      func() time.Time { return now },
+				ReadFile: os.ReadFile,
+				Run: func(context.Context, []string) ([]byte, error) {
+					return nil, errors.New("the analysis must fail before it runs a command")
+				},
+				RunEnv: func(context.Context, []string, []string) ([]byte, error) {
+					return nil, errors.New("the analysis must fail before it runs a command")
+				},
+			}
+			opts := analysisOptions(town)
+			// No toolchain and no mango binary: the analysis fails after the
+			// refresh, so it never writes its stamp and is due again next hour.
+			opts.LookPath = func(string) (string, error) { return "", errors.New("no go toolchain in this test") }
+			opts.Extract = func(context.Context, string, string) (string, error) {
+				return "", errors.New("the analysis must fail before the extract")
+			}
+			opts.BeforeRun = beforeRun
+			return runMetricsAnalyse(ctx, out, env, opts)
+		},
+	}
+	hours := []struct {
+		advance time.Duration
+		want    int
+		why     string
+	}{
+		{0, 1, "the due hour refreshes the datasets"},
+		{time.Hour, 1, "the period's next hour does not refresh again"},
+		{25 * time.Hour, 2, "the next period refreshes again"},
+	}
+	for i, h := range hours {
+		now = now.Add(h.advance)
+		var out bytes.Buffer
+		if err := runMetricsHourWith(context.Background(), &out, town, steps); err == nil {
+			t.Fatalf("%s: the hour succeeded though the analysis fails", h.why)
+		}
+		if exports != h.want {
+			t.Fatalf("%s: datasets exported %d times, want %d", h.why, exports, h.want)
+		}
+		if i == 0 {
+			stamp, err := os.ReadFile(filepath.Join(metrics.AnalysisDir(town), datasetStampName))
+			if err != nil {
+				t.Fatalf("the refresh wrote no dataset stamp: %v", err)
+			}
+			if period := metrics.DuePeriod(time.Time{}, now, metrics.DailyEvery); !strings.Contains(string(stamp), period) {
+				t.Fatalf("dataset stamp %q does not name the due period %s", stamp, period)
+			}
+		}
 	}
 }

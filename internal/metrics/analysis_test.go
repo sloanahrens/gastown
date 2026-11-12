@@ -49,6 +49,111 @@ func TestDue(t *testing.T) {
 	}
 }
 
+// DuePeriod names the interval of Every containing now: two hours in one
+// interval share a name, and the hour past its end is a new period.
+func TestDuePeriod(t *testing.T) {
+	t.Parallel()
+	stamp := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		stamp time.Time
+		now   time.Time
+		every time.Duration
+		want  string
+	}{
+		{"an hour later is the same period", stamp, stamp.Add(time.Hour), DailyEvery, "2026-11-10T03:00:00Z"},
+		{"two hours later is the same period", stamp, stamp.Add(2 * time.Hour), DailyEvery, "2026-11-10T03:00:00Z"},
+		{"the first hour past the stamp is the next period", stamp, stamp.Add(25 * time.Hour), DailyEvery, "2026-11-11T03:00:00Z"},
+		{"an hour before the stamp is in the period that ends at it", stamp, stamp.Add(-time.Hour), DailyEvery, "2026-11-09T03:00:00Z"},
+		{"a zero stamp names the UTC day", time.Time{}, analyseNow, DailyEvery, "2026-10-25T00:00:00Z"},
+		{"an every with no interval leaves each hour its own", stamp, stamp.Add(time.Hour), 0, "2026-11-10T04:00:00Z"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := DuePeriod(tc.stamp, tc.now, tc.every); got != tc.want {
+				t.Fatalf("DuePeriod(%s, %s, %s) = %q, want %q", tc.stamp, tc.now, tc.every, got, tc.want)
+			}
+		})
+	}
+}
+
+// BeforeRun is the dataset refresh's seam: on a due run it is called once with
+// the run's due period, before the run's first step, and a second run finds the
+// analysis's stamp current, so it is not due and the refresh does not run again.
+func TestAnalyseBeforeRunRunsOnceBeforeTheFirstStep(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	var order []string
+	var periods []string
+	var extracts []extractCall
+	extract := analysisExtract(dayDir, &extracts)
+	opts.Extract = func(ctx context.Context, dir, docs string) (string, error) {
+		order = append(order, "extract")
+		return extract(ctx, dir, docs)
+	}
+	opts.BeforeRun = func(_ context.Context, period string) {
+		order = append(order, "refresh")
+		periods = append(periods, period)
+	}
+	env, _ := analysisEnv(t, town, dayDir, nil)
+
+	if res, err := RunAnalysis(context.Background(), env, opts); err != nil || !res.Ran {
+		t.Fatalf("first RunAnalysis = %+v, %v, want a due run", res, err)
+	}
+	if want := []string{"refresh", "extract"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("first run ran %v, want %v", order, want)
+	}
+	// The stamp was zero, so the period is the UTC day the run happened in.
+	if want := []string{"2026-10-25T00:00:00Z"}; !reflect.DeepEqual(periods, want) {
+		t.Errorf("BeforeRun periods = %q, want %q", periods, want)
+	}
+	if res, err := RunAnalysis(context.Background(), env, opts); err != nil || res.Ran {
+		t.Fatalf("second RunAnalysis = %+v, %v, want a run that is not due", res, err)
+	}
+	if want := []string{"refresh", "extract"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("after the not-due run the steps ran %v, want the refresh once: %v", order, want)
+	}
+}
+
+// A run that is not due does not call BeforeRun.
+func TestAnalyseBeforeRunSkipsANotDueRun(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	writeTownFile(t, filepath.Join(town, ".runtime", "metrics", analysisDirName, stampName), analyseNow.Add(-time.Minute).Format(time.RFC3339)+"\n")
+	opts := analysisOptions(town)
+	refreshed := false
+	opts.BeforeRun = func(context.Context, string) { refreshed = true }
+	env, _ := analysisEnv(t, town, dayDir, nil)
+
+	if res, err := RunAnalysis(context.Background(), env, opts); err != nil || res.Ran {
+		t.Fatalf("RunAnalysis = %+v, %v, want a run that is not due", res, err)
+	}
+	if refreshed {
+		t.Error("BeforeRun ran on a run that is not due")
+	}
+}
+
+// A stamp that cannot be read fails the run before BeforeRun: the day's due state
+// is unknown, so the refresh must not run on a guess.
+func TestAnalyseBeforeRunSkipsAnUnreadableStamp(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	refreshed := false
+	opts.BeforeRun = func(context.Context, string) { refreshed = true }
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	env.ReadFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+
+	if _, err := RunAnalysis(context.Background(), env, opts); err == nil {
+		t.Fatal("RunAnalysis with an unreadable stamp returned no error")
+	}
+	if refreshed {
+		t.Error("BeforeRun ran although the stamp could not be read")
+	}
+}
+
 func TestNeedRebuild(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

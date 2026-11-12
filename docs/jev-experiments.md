@@ -55,7 +55,7 @@ Transcripts and log tails can hold a path, an id or a secret that a scrub would 
 
 ## Dataset for mango
 
-Mango (the HyperCube pattern finder, `mango` rig) can mine the Jev logs for patterns the scorecard does not show. `gt jev dataset` (bead `gt-21wvf`) writes one CSV per battery question. The format was agreed with merlin on 2026-10-30 against mango's loader.
+Mango (the HyperCube pattern finder, `mango` rig) can mine the Jev logs for patterns the scorecard does not show. `gt jev dataset` (bead `gt-21wvf`) writes one CSV per battery question. The format was agreed with merlin on 2026-10-30 against mango's loader. `gt jev dataset --all` writes every question of every enabled battery, and the town-metrics hour runs that refresh once in each due period of the daily analysis (`gt metrics run`), so the files are at most a day old.
 
 - Location: the town runtime's `jev-dataset` directory, files `<battery>.<question>.csv` and `<battery>.<question>.dict.md`.
 - Row: one logged, answered item that has a label.
