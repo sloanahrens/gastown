@@ -273,7 +273,9 @@ func inNestedModule(repoRoot, dir string) bool {
 // it — every file is its input, and the file that breaks it may be new — so an
 // always entry runs on every non-empty diff whatever the branch touched
 // (gt-t4rchq). Every presubmit pays that cost, so an entry earns its place
-// only with a landing miss the path predicates could not catch.
+// only with a landing miss the path predicates could not catch. An always
+// entry carries neither judges nor removal: it runs on every non-empty diff,
+// so a predicate it can never consult would be dead configuration.
 //
 // Left out on purpose: internal/guardlint, docs-lint and repo-guards (make
 // lint already runs them before presubmit tests anything); internal/config's
@@ -301,32 +303,22 @@ var treeWideGuards = []treeWideGuard{
 	// that breaks them. Every non-empty diff runs them.
 	{
 		// TestRepoMayorRig walks every non-test Go file in the repo and holds
-		// the <rig>/mayor/rig uses it finds equal to the allowlist (gt-pyh5p6
-		// was gate-rejected for one added in internal/done). A deleted file
-		// counts: its allowlist entry is stale once the use is gone. The
-		// allowlist itself is its input too.
-		pkg:   "internal/mayorrig",
-		tests: []string{"TestRepoMayorRig"},
-		judges: func(rel string) bool {
-			return nonTestGo(rel) || rel == "internal/mayorrig/testdata/mayor-rig-allow.txt"
-		},
-		removal: true,
-		always:  true,
+		// the <rig>/mayor/rig uses it finds equal to the allowlist (gt-pyh5p6).
+		// A deleted file counts: its allowlist entry is stale once the use is
+		// gone. The allowlist itself is its input too.
+		pkg:    "internal/mayorrig",
+		tests:  []string{"TestRepoMayorRig"},
+		always: true,
 	},
 	{
 		// TestEveryEngineSiteHasARowPerFunction scans every non-test Go file
 		// under internal/ for a docker exec site and holds
 		// docs/design/pod-engine.md's inventory to one row per site
-		// (gt-o9p1s1 was gate-rejected for a new site in
-		// internal/gtwrap/native.go the doc did not list). A deletion counts:
-		// the guard opens each file the inventory cites.
-		pkg:   "internal/podengine",
-		tests: []string{"TestEveryEngineSiteHasARowPerFunction"},
-		judges: func(rel string) bool {
-			return underInternal(rel) || rel == "docs/design/pod-engine.md"
-		},
-		removal: true,
-		always:  true,
+		// (gt-o9p1s1). A deletion counts: the guard opens each file the
+		// inventory cites.
+		pkg:    "internal/podengine",
+		tests:  []string{"TestEveryEngineSiteHasARowPerFunction"},
+		always: true,
 	},
 	{
 		// TestPolicy, TestUnitTierMain, TestDockerTier and friends walk every
@@ -338,17 +330,11 @@ var treeWideGuards = []treeWideGuard{
 		// TestUnionMergeOnlyOnGrowOnlyLists reads the repo-root .gitattributes
 		// and the lists it marks merge=union, so those paths are inputs too.
 		//
-		// always: its input is every test file in the tree, and the predicate
-		// below only names the ones a branch edits (gt-t4rchq).
+		// always: its input is every test file in the tree (gt-t4rchq).
 		pkg: "internal/testpolicy",
 		tests: []string{"TestPolicy", "TestUnitTierMain", "TestAllowedTools", "TestRealGit",
 			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists"},
-		judges: func(rel string) bool {
-			return strings.HasSuffix(rel, "_test.go") || rel == ".gitattributes" ||
-				rel == "internal/testpolicy/gitfree.txt"
-		},
-		removal: true,
-		always:  true,
+		always: true,
 	},
 	{
 		// The agent prose allowlist scans templates, formula prose and the
@@ -575,7 +561,8 @@ var treeWideGuards = []treeWideGuard{
 
 // treeWideGuard is one guard package's inputs: the test functions to run and
 // a predicate over a repo-relative changed path. always marks a guard every
-// non-empty diff runs, whatever paths changed.
+// non-empty diff runs, whatever paths changed; an always entry sets no
+// predicate, since none could change its selection.
 type treeWideGuard struct {
 	pkg     string
 	tests   []string
