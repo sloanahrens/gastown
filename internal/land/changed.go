@@ -429,6 +429,16 @@ var treeWideGuards = []treeWideGuard{
 		judges: underInternalOrCmd,
 	},
 	{
+		// TestNoExitStatusTextMatchUnderInternal parses every non-test Go
+		// file under internal/ for an error's text matched against an
+		// "exit status" literal, which reads a fatal exit 128 as the
+		// ordinary exit 1 (gt-7j89ny). It reads the whole tree, not its own
+		// package, so any such file is its input.
+		pkg:    "internal/git",
+		tests:  []string{"TestNoExitStatusTextMatchUnderInternal"},
+		judges: underInternal,
+	},
+	{
 		pkg:    "internal/testdb",
 		tests:  []string{"TestOneDefinition"},
 		judges: nonTestGo,
