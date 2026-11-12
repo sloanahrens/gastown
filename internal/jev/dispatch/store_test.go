@@ -49,6 +49,25 @@ func TestJevDispatchReadAllCountsMalformedLines(t *testing.T) {
 	}
 }
 
+func TestJevDispatchReadAllCountsNullLinesAsMalformed(t *testing.T) {
+	t.Parallel()
+	ts := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	for _, nullLine := range []string{"null", "  null  "} {
+		path := writeLog(t, logLine(t, "gt-a", ts), nullLine, logLine(t, "gt-b", ts.Add(time.Minute)))
+
+		got, malformed, err := ReadAll(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if malformed != 1 {
+			t.Errorf("line %q: malformed = %d, want 1", nullLine, malformed)
+		}
+		if len(got) != 2 || got[0].Bead != "gt-a" || got[1].Bead != "gt-b" {
+			t.Errorf("line %q: lines = %+v, want gt-a then gt-b", nullLine, got)
+		}
+	}
+}
+
 func TestJevDispatchReadAllMissingFileIsAnError(t *testing.T) {
 	t.Parallel()
 	_, _, err := ReadAll(filepath.Join(t.TempDir(), "absent.jsonl"))

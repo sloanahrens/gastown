@@ -105,12 +105,14 @@ func ReadAll(path string) ([]Line, int, error) {
 		if text == "" {
 			continue
 		}
-		var l Line
-		if json.Unmarshal([]byte(text), &l) != nil {
+		// A JSON null decodes without error into a nil pointer, so it is
+		// counted with the lines that do not parse rather than kept as a zero Line.
+		var l *Line
+		if json.Unmarshal([]byte(text), &l) != nil || l == nil {
 			malformed++
 			continue
 		}
-		lines = append(lines, l)
+		lines = append(lines, *l)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, 0, fmt.Errorf("reading the dispatch log: %w", err)
