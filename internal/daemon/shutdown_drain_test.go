@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -247,5 +248,101 @@ func TestShutdownDrainTierSweepStartsNoCycle(t *testing.T) {
 	}
 	if _, found, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep"); err != nil || found {
 		t.Errorf("%s: last run while draining: found=%v err=%v, want none recorded", t.Name(), found, err)
+	}
+}
+
+// A SIGTERM with a sling in flight waits for that sling within the drain's bound,
+// and starts none that was queued behind it: the sling in flight finishes and is
+// counted, and the one waiting for its slot is reported back as not started, so
+// the drain never runs a sling the cut would kill (gt-d4jrdc).
+func TestShutdownDrainWaitsForASlingAndStartsNoQueuedOne(t *testing.T) {
+	t.Parallel()
+	b, fake, d, lines := newBlockedSlings(t, plannedTick(
+		slingJob("gt-a", "claude-sonnet"),
+		slingJob("gt-b", "deepseek-flash")))
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		SpecDispatch: &SpecDispatchConfig{MaxInFlight: 1},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	d.drainBound = time.Hour
+	holdTaken := make(chan struct{})
+	d.onDrainHold = func() { close(holdTaken) }
+
+	d.runSpecDispatch()
+	recvSling(t, b.started)
+	drained := make(chan os.Signal, 1)
+	go func() { drained <- d.drainForShutdown(make(chan os.Signal)) }()
+
+	reached(t, "the drain taking its hold", holdTaken)
+	select {
+	case sig := <-drained:
+		t.Fatalf("%s: the drain returned %v while gt-a was in flight", t.Name(), sig)
+	default:
+	}
+	close(b.release)
+	if sig := within(t, signalWait, "the drain after the sling returns", drained); sig != nil {
+		t.Errorf("%s: the drain returned the signal %v, want nil once the sling returned", t.Name(), sig)
+	}
+	waitSlings(t, d)
+
+	if n := len(fake.argvs("spec", "sling")); n != 1 {
+		t.Errorf("%s: slings run = %d, want gt-a alone: the queued gt-b must not start", t.Name(), n)
+	}
+	if n := countContaining(lines(), "gt-b: sling not started: the daemon shut down before the sling had a slot"); n != 1 {
+		t.Errorf("%s: gt-b not-started lines = %d, want one: %v", t.Name(), n, lines())
+	}
+	if in := d.specSlings.list(); len(in) != 0 {
+		t.Errorf("%s: slings in flight after the drain = %+v, want none", t.Name(), in)
+	}
+	d.dispatchTicksMu.Lock()
+	defer d.dispatchTicksMu.Unlock()
+	if len(d.dispatchTicks) != 1 {
+		t.Fatalf("%s: tick records = %d, want one", t.Name(), len(d.dispatchTicks))
+	}
+	if t0 := d.dispatchTicks[0]; t0.Dispatched != 1 || t0.Skipped != 1 {
+		t.Errorf("%s: tick record dispatched %d skipped %d, want gt-a dispatched and gt-b skipped", t.Name(), t0.Dispatched, t0.Skipped)
+	}
+}
+
+// A sling that never returns is cut at the drain's bound, and the drain says so:
+// the daemon does not wait out the sling's own bound (specSlingBound).
+func TestShutdownDrainBoundEndsASlingThatNeverReturns(t *testing.T) {
+	t.Parallel()
+	b, _, d, lines := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+	d.drainBound = 10 * time.Millisecond
+
+	d.runSpecDispatch()
+	recvSling(t, b.started)
+	drained := make(chan os.Signal, 1)
+	go func() { drained <- d.drainForShutdown(make(chan os.Signal)) }()
+
+	if sig := within(t, signalWait, "the drain past its bound", drained); sig != nil {
+		t.Errorf("%s: the drain returned the signal %v, want nil at the bound", t.Name(), sig)
+	}
+	if !strings.Contains(strings.Join(lines(), "\n"), "sling still in flight after") {
+		t.Errorf("%s: the drain did not report the sling it cut: %v", t.Name(), lines())
+	}
+	close(b.release)
+	waitSlings(t, d)
+}
+
+// Once the drain stops the sling set, a tick that hands a sling back starts none,
+// and the sling is reported back as not started with the shutdown as the reason.
+func TestShutdownDrainRefusesASlingHandedBackAfterTheStop(t *testing.T) {
+	t.Parallel()
+	_, fake, d, lines := newBlockedSlings(t)
+	d.drainBound = time.Hour
+
+	if sig := d.drainForShutdown(make(chan os.Signal)); sig != nil {
+		t.Fatalf("%s: the idle drain returned %v, want nil", t.Name(), sig)
+	}
+	d.startSpecSlings([]json.RawMessage{json.RawMessage(slingJob("gt-c", "claude-haiku"))}, 0)
+
+	if n := len(fake.argvs("spec", "sling")); n != 0 {
+		t.Errorf("%s: slings run = %d, want none once the daemon drains", t.Name(), n)
+	}
+	if n := countContaining(lines(), "gt-c: sling not started: the daemon is shutting down; the bead stays ready for the next daemon"); n != 1 {
+		t.Errorf("%s: gt-c not-started lines = %d, want one naming the shutdown: %v", t.Name(), n, lines())
 	}
 }
