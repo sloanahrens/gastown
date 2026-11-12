@@ -367,3 +367,24 @@ func TestDeriveRefusesMalformedInputs(t *testing.T) {
 		})
 	}
 }
+
+// String is the name each state is known by, and the dashboard's feed names are
+// tied to it. Each state needs its own name, and a value outside the three must
+// not read as one of them.
+func TestStateStringNamesEachState(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state State
+		want  string
+	}{
+		{StateInsufficient, "insufficient"},
+		{StateNoise, "noise"},
+		{StateSignal, "signal"},
+		{State(99), "State(99)"},
+	}
+	for _, tc := range cases {
+		if got := tc.state.String(); got != tc.want {
+			t.Errorf("State(%d).String() = %q, want %q", int(tc.state), got, tc.want)
+		}
+	}
+}

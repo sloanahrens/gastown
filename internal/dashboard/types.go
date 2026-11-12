@@ -688,9 +688,12 @@ type VelocityFigures struct {
 	MedianPerLanding *int     `json:"median_per_landing,omitempty"`
 }
 
-// The states a velocity difference can be in, as the strings the feed carries;
-// they match StateSignal, StateNoise and StateInsufficient of
-// internal/storypoints (gt-vd91ny.3).
+// The states a velocity difference can be in, as the strings the feed carries.
+// They are the names storypoints.State.String gives StateSignal, StateNoise and
+// StateInsufficient (gt-vd91ny.3). This package's code does not import
+// storypoints: TestVelocityStateNamesMatchStoryPoints ties the two, velocityState
+// in internal/cmd maps each state onto these strings, and TestVelocityGolden
+// pins the strings themselves.
 const (
 	VelocityStateSignal       = "signal"
 	VelocityStateNoise        = "noise"

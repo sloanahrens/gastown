@@ -7,13 +7,16 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 var updateVelocityGolden = flag.Bool("update-velocity-golden", false, "rewrite testdata/velocity_feed.golden")
 
 // fixedVelocity is the feed the golden pins: one hour with every value defined
 // and a second with its differences unavailable, a class slice, and figures
-// with one nil. It is fixed data, so the golden does not move with the clock.
+// with every value defined. It is fixed data, so the golden does not move with
+// the clock.
 func fixedVelocity() Velocity {
 	hour := time.Date(2026, 11, 11, 14, 0, 0, 0, time.UTC)
 	return Velocity{
@@ -62,6 +65,26 @@ func TestVelocityGolden(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Errorf("the velocity feed differs from %s (rewrite with -update-velocity-golden):\n%s\nwant:\n%s", golden, got, want)
+	}
+}
+
+// TestVelocityStateNamesMatchStoryPoints ties each state string the feed carries
+// to the name storypoints gives that state, so the two cannot drift apart: a
+// rename in either place fails here.
+func TestVelocityStateNamesMatchStoryPoints(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state storypoints.State
+		want  string
+	}{
+		{storypoints.StateSignal, VelocityStateSignal},
+		{storypoints.StateNoise, VelocityStateNoise},
+		{storypoints.StateInsufficient, VelocityStateInsufficient},
+	}
+	for _, tc := range cases {
+		if got := tc.state.String(); got != tc.want {
+			t.Errorf("storypoints state %d is named %q, want the feed's %q", int(tc.state), got, tc.want)
+		}
 	}
 }
 
