@@ -73,6 +73,10 @@ type daemonGit interface {
 	// (gt-yj6g1).
 	RefExists(ref string) (bool, error)
 	ShowFileAtRev(ref, path string) (string, error)
+	// TreeFileBlobs lists every file of a rev's tree, so the workflow files a
+	// rig's main carries are found by listing, not by guessing their names
+	// (gt-gg9hv.7.4).
+	TreeFileBlobs(rev string) (map[string]string, error)
 
 	// Rig repository upkeep, for the git_hygiene patrol.
 	FetchPrune(remote string) error
