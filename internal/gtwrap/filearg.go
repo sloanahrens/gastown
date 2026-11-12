@@ -25,16 +25,15 @@ const (
 	argRefuse
 )
 
-// bdStdinFlags take "-" for stdin under any bd command. The facts are those of
-// the beads rig at origin/main 86c717cb1: readBodyFile (cmd/bd/flags.go:188-195)
-// serves the first three, bd close reads --reason-file through it (close.go:641).
+// bdStdinFlags take "-" for stdin under any bd command: bd reads them through
+// one shared reader that treats "-" as stdin. The beads source that shows this,
+// with file and line, is recorded on gt-msc5w8.
 var bdStdinFlags = map[string]bool{
 	"--body-file": true, "--description-file": true, "--design-file": true, "--reason-file": true,
 }
 
-// bdFileCommands are the commands whose -f/--file takes "-": comments add, note
-// and human respond go through textSources (flags.go:264-266), and dep add reads
-// "-" itself (dep.go:570). Keys are "command" or "command subcommand".
+// bdFileCommands are the commands whose -f/--file takes "-" (same source, same
+// record on gt-msc5w8). Keys are "command" or "command subcommand".
 var bdFileCommands = map[string]bool{
 	"comments add": true, "note": true, "human respond": true, "dep add": true,
 }
@@ -116,8 +115,9 @@ func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg
 	stdinUsed := false
 	for i := 0; i < len(out); i++ {
 		flag, value, inline := out[i], "", false
-		if strings.HasPrefix(flag, "--") {
-			if name, v, ok := strings.Cut(flag, "="); ok {
+		if strings.HasPrefix(flag, "-") {
+			// --flag=value, and -f=value for a shorthand, which pflag accepts too.
+			if name, v, ok := strings.Cut(flag, "="); ok && len(name) > 1 {
 				flag, value, inline = name, v, true
 			}
 		}

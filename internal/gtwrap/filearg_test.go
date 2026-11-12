@@ -34,6 +34,14 @@ func TestScanFileArgsRewritesToStdin(t *testing.T) {
 			[]string{"human", "respond", "gt-x", "--file=-"}, FileArg{"--file", "n"}},
 		{"dep add --file", "bd", []string{"dep", "add", "--file", "edges.jsonl"},
 			[]string{"dep", "add", "--file", "-"}, FileArg{"--file", "edges.jsonl"}},
+		{"comments add -f=", "bd", []string{"comments", "add", "gt-x", "-f=/mac/plan.md"},
+			[]string{"comments", "add", "gt-x", "-f=-"}, FileArg{"-f", "/mac/plan.md"}},
+		{"note -f=", "bd", []string{"note", "gt-x", "-f=n.txt"},
+			[]string{"note", "gt-x", "-f=-"}, FileArg{"-f", "n.txt"}},
+		{"human respond -f=", "bd", []string{"human", "respond", "gt-x", "-f=n"},
+			[]string{"human", "respond", "gt-x", "-f=-"}, FileArg{"-f", "n"}},
+		{"dep add -f=", "bd", []string{"dep", "add", "-f=edges.jsonl"},
+			[]string{"dep", "add", "-f=-"}, FileArg{"-f", "edges.jsonl"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -67,6 +75,10 @@ func TestScanFileArgsRefusals(t *testing.T) {
 		{"bd migrate issues --ids-file", "bd", []string{"migrate", "issues", "--ids-file", "i"}, "--ids-file names a Mac file"},
 		{"bd import -i", "bd", []string{"import", "-i", "x.jsonl"}, "-i names a Mac file"},
 		{"bd export -o", "bd", []string{"export", "-o", "x.jsonl"}, "-o names a Mac file"},
+		{"bd export -o=", "bd", []string{"export", "-o=out.jsonl"}, "-o names a Mac file"},
+		{"bd import -i=", "bd", []string{"import", "-i=x.jsonl"}, "-i names a Mac file"},
+		{"bd create -f=", "bd", []string{"create", "-f=plan.md"}, "-f names a Mac file"},
+		{"gt session inject -f=", "gt", []string{"session", "inject", "s", "-f=m"}, "-f names a Mac file"},
 		{"gt spec lint --template", "gt", []string{"spec", "lint", "gt-x", "--template", "t.md"}, "--template names a Mac file"},
 		{"gt session inject -f", "gt", []string{"session", "inject", "s", "-f", "m"}, "-f names a Mac file"},
 		{"gt sandbox endpoint --from-export", "gt", []string{"sandbox", "endpoint", "--render", "--from-export", "e"}, "--from-export names a Mac file"},
