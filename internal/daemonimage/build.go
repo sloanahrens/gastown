@@ -1,5 +1,6 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
-// host: the linux/arm64 gt, bd and om binaries the image runs (gt-qpeei.9), the
+// host: the linux/arm64 gt, bd, om and trackerd binaries the image runs
+// (gt-qpeei.9), the
 // image's cgo-built mango (gt-wznahy), the pinned claude CLI om's reviewer runs
 // (gt-qpeei.35), and the image built from them (gt-qpeei.16). Every command it
 // runs and every download it makes is one injected call, so the gate proves what
@@ -39,10 +40,13 @@ const DockerContext = "desktop-linux"
 // The package each binary is built from, inside its source tree. gt and bd are
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
 // to the package polecat-image builds, and BDPackage to bdbuild.Package.
+// TrackerdPackage is built from the gt checkout at the gt commit, like gt, with
+// no stamp.
 const (
-	GTPackage = "./cmd/gt"
-	BDPackage = "./cmd/bd"
-	OMPackage = "./cmd/om"
+	GTPackage       = "./cmd/gt"
+	BDPackage       = "./cmd/bd"
+	OMPackage       = "./cmd/om"
+	TrackerdPackage = "./tracker/cmd/trackerd"
 )
 
 // The -X stamps the gt and bd binaries are built with. gt reports the short form
@@ -186,7 +190,7 @@ func (b Builder) fileOps() fileOps {
 // It is a local tag only; nothing pulls this image by name.
 func ImageTag(rev string) string { return "gt-daemon:" + rev }
 
-// binary is one of the three builds: the checkout it is built from, the commit
+// binary is one of the builds BuildBinaries makes: the checkout it is built from, the commit
 // of that checkout it is built at, and the package and stamp it is built with.
 type binary struct {
 	name, src, commit, pkg, ldflags string
@@ -210,8 +214,8 @@ var imagePlugins = []plugin{
 	{name: "town-metrics", pkg: "./plugins/town-metrics"},
 }
 
-// BuildBinaries writes gt, bd and om to b.Out and returns their paths in that
-// order. Every refusal comes before the first build runs, so a refused call
+// BuildBinaries writes gt, bd, om and trackerd to b.Out and returns their paths
+// in that order. Every refusal comes before the first build runs, so a refused call
 // writes nothing. Each binary is built in a clean worktree of its commit and is
 // staged under b.Out until all three have built, so a build that fails returns
 // its error and no paths, and leaves nothing in b.Out. A bd or om checkout that
@@ -258,6 +262,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
+		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
 	if err != nil {
@@ -754,6 +759,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
 	lines = append(lines, om.fetch...)
 	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
+	lines = append(lines, fmt.Sprintf("build trackerd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), b.GTSrc, rev))
 	for _, p := range imagePlugins {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}
@@ -1083,7 +1089,7 @@ func (b Builder) checkImageBinaries(bins []string) error {
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append(append([]string{"gt", "bd", "om", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
+	for _, name := range append(append([]string{"gt", "bd", "om", "trackerd", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
 		rels[name] = name
 		want = append(want, name)
 	}
