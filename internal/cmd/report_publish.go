@@ -72,6 +72,14 @@ The command prints the two paths and their sizes, and never prints the page.
 The daily request in docs/birds/daily-request.md builds the sidecar with jq and
 pipes the document here.
 
+A Mac caller does not publish with its own gt, which writes under the Mac's
+.runtime, where the dashboard does not read. It pipes the same document into the
+daemon container through this final step, with the pod found by its label:
+
+  ... | kubectl --context colima-gt-control -n gt exec -i "$(kubectl --context colima-gt-control -n gt get pods -l app.kubernetes.io/name=daemon --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')" -c daemon -- gt report publish --bird <NAME>
+
+The -i is required: without it the pod reads an empty document and writes nothing.
+
 Examples:
   jq -n --rawfile page page.html --slurpfile sidecar sidecar.json \
     '{bird:"dunlin",page:$page,sidecar:$sidecar[0]}' | gt report publish --bird dunlin`,

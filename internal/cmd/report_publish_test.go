@@ -210,6 +210,46 @@ func TestReportHelpLeavesTheLayoutToReportdir(t *testing.T) {
 	}
 }
 
+// reportPodPublishStep is the publish step a Mac caller runs in the daemon
+// container. The daily request and the publish help both carry it, and this
+// test holds them to the same text.
+const reportPodPublishStep = `kubectl --context colima-gt-control -n gt exec -i "$(kubectl --context colima-gt-control -n gt get pods -l app.kubernetes.io/name=daemon --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')" -c daemon -- gt report publish --bird <NAME>`
+
+// TestReportPodPublishStepIsInTheRequestAndHelp asserts the pod-side publish
+// step is in the daily request a Mac bird follows and in the publish help, so a
+// Mac caller reads the same command in both.
+func TestReportPodPublishStepIsInTheRequestAndHelp(t *testing.T) {
+	t.Parallel()
+	docPath := filepath.Join("..", "..", "docs", "birds", "daily-request.md")
+	doc, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", docPath, err)
+	}
+	if !strings.Contains(string(doc), reportPodPublishStep) {
+		t.Errorf("%s does not carry the pod publish step with exec -i and --bird", docPath)
+	}
+	if !strings.Contains(reportPublishCmd.Long, reportPodPublishStep) {
+		t.Errorf("gt report publish help does not name the pod publish step:\n%s", reportPublishCmd.Long)
+	}
+}
+
+// TestDailyRequestSaysWhyThePodAndWhenItReturns asserts the daily request names
+// the wrapper bead that ends the pod step, so a Mac bird knows when to publish
+// with plain gt again.
+func TestDailyRequestSaysWhyThePodAndWhenItReturns(t *testing.T) {
+	t.Parallel()
+	docPath := filepath.Join("..", "..", "docs", "birds", "daily-request.md")
+	doc, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", docPath, err)
+	}
+	for _, want := range []string{"the Mac's gt", "gt-yjzepk", "gt report publish --bird <NAME>"} {
+		if !strings.Contains(string(doc), want) {
+			t.Errorf("%s does not contain %q, which says why the pod is used and when the step returns to plain gt", docPath, want)
+		}
+	}
+}
+
 // TestReportPublishRollsBackAPartialRename fails the rename that puts the new
 // sidecar in place, after the new page and the previous pair have been renamed:
 // the publish fails, the old daily.html and daily.json are exactly as they
