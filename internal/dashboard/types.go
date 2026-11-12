@@ -689,11 +689,11 @@ type VelocityFigures struct {
 }
 
 // The states a velocity difference can be in, as the strings the feed carries.
-// They name StateSignal, StateNoise and StateInsufficient of internal/storypoints
-// (gt-vd91ny.3), but this package does not import storypoints: velocityState in
-// internal/cmd maps those states onto these strings, and
-// TestDashboardVelocityStateNames pins that mapping. TestVelocityGolden pins
-// the strings themselves.
+// They are the names storypoints.State.String gives StateSignal, StateNoise and
+// StateInsufficient (gt-vd91ny.3). This package's code does not import
+// storypoints: TestVelocityStateNamesMatchStoryPoints ties the two, velocityState
+// in internal/cmd maps each state onto these strings, and TestVelocityGolden
+// pins the strings themselves.
 const (
 	VelocityStateSignal       = "signal"
 	VelocityStateNoise        = "noise"

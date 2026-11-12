@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 var updateVelocityGolden = flag.Bool("update-velocity-golden", false, "rewrite testdata/velocity_feed.golden")
@@ -63,6 +65,26 @@ func TestVelocityGolden(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Errorf("the velocity feed differs from %s (rewrite with -update-velocity-golden):\n%s\nwant:\n%s", golden, got, want)
+	}
+}
+
+// TestVelocityStateNamesMatchStoryPoints ties each state string the feed carries
+// to the name storypoints gives that state, so the two cannot drift apart: a
+// rename in either place fails here.
+func TestVelocityStateNamesMatchStoryPoints(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state storypoints.State
+		want  string
+	}{
+		{storypoints.StateSignal, VelocityStateSignal},
+		{storypoints.StateNoise, VelocityStateNoise},
+		{storypoints.StateInsufficient, VelocityStateInsufficient},
+	}
+	for _, tc := range cases {
+		if got := tc.state.String(); got != tc.want {
+			t.Errorf("storypoints state %d is named %q, want the feed's %q", int(tc.state), got, tc.want)
+		}
 	}
 }
 

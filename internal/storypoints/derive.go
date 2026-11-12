@@ -57,6 +57,22 @@ const (
 	StateSignal
 )
 
+// String names the state as the velocity feed carries it: signal, noise or
+// insufficient. A value outside the three is named as its number, so a log
+// line never reads an unknown state as one of them.
+func (s State) String() string {
+	switch s {
+	case StateInsufficient:
+		return "insufficient"
+	case StateNoise:
+		return "noise"
+	case StateSignal:
+		return "signal"
+	default:
+		return fmt.Sprintf("State(%d)", int(s))
+	}
+}
+
 // Hour is the velocity at one hour. A nil value is not defined: the hour is
 // partial, its window holds too few weighted landings, a value it needs is
 // undefined, or its difference has fewer than 12 defined values. Its state is
