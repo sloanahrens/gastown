@@ -25,14 +25,14 @@ func keptSeatSince(t *testing.T, town, name, bead string, age time.Duration) {
 	}
 }
 
-// A seat kept more than two hours raises one high item that names the seat, its
-// bead and the age, and carries the daemon's reason verbatim. A seat kept for
-// just under two hours raises nothing.
+// A seat kept more than thirty minutes raises one high item that names the seat,
+// its bead and the age, and carries the daemon's reason verbatim. A seat kept
+// for just under thirty minutes raises nothing.
 func TestKeptSeatAttentionRaisesAfterTheWindow(t *testing.T) {
 	t.Parallel()
 	f := newAttentionFixture(t, keptSeatAttentionNow)
-	keptSeatSince(t, f.d.config.TownRoot, "capable", "gt-abc12", 2*time.Hour+time.Minute)
-	keptSeatSince(t, f.d.config.TownRoot, "nux", "gt-abc13", 2*time.Hour-time.Minute)
+	keptSeatSince(t, f.d.config.TownRoot, "capable", "gt-abc12", 31*time.Minute)
+	keptSeatSince(t, f.d.config.TownRoot, "nux", "gt-abc13", 29*time.Minute)
 	c := collectorFor(t, f.src, attention.KindSandboxSeatKept)
 
 	items, err := c.collect(context.Background())
@@ -40,14 +40,14 @@ func TestKeptSeatAttentionRaisesAfterTheWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(items) != 1 {
-		t.Fatalf("items = %+v, want one (the 1h59m seat raises none)", items)
+		t.Fatalf("items = %+v, want one (the 29m seat raises none)", items)
 	}
 	it := items[0]
 	if it.Key != "sandbox-seat-kept:gastown/capable" || it.Kind != attention.KindSandboxSeatKept ||
 		it.Severity != attention.SeverityHigh || it.Rig != attentionRig || it.Bead != "gt-abc12" {
 		t.Errorf("item = %+v, want a high sandbox-seat-kept item on gastown/capable and gt-abc12", it)
 	}
-	want := "gastown/capable kept 2h1m on gt-abc12: " + keptSeatReason
+	want := "gastown/capable kept 31m on gt-abc12: " + keptSeatReason
 	if it.Summary != want {
 		t.Errorf("summary = %q, want %q", it.Summary, want)
 	}

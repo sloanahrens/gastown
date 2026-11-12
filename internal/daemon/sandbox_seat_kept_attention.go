@@ -13,7 +13,7 @@ import (
 // queue wakes the overseer. The record's since is when the keep's reason began,
 // so a keep that holds past this window is one the queue shows the overseer
 // (gt-l38v7r).
-const keptSeatAttentionAfter = 2 * time.Hour
+const keptSeatAttentionAfter = 30 * time.Minute
 
 // collectKeptSandboxSeats raises one high item per kept sandbox seat whose
 // record's since is more than keptSeatAttentionAfter before now. The item names
