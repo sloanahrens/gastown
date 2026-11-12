@@ -17,6 +17,7 @@ func townMetricsSteps() []string {
 		metrics.CommandBacktest,
 		metrics.CommandReport,
 		metrics.CommandAll,
+		metrics.CommandStoryPoints,
 	}
 }
 

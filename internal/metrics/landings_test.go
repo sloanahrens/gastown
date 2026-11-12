@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// landingsFixture is testdata/landings.v3.csv, the header this join writes,
+// landingsFixture is testdata/landings.v4.csv, the header this join writes,
 // bytes included: its CRLF line endings are the extract's and the round trip is
-// measured against them.
+// measured against them. v4 is v3 with the story-point columns appended.
 func landingsFixture(t *testing.T) []byte {
 	t.Helper()
-	data, err := os.ReadFile("testdata/landings.v3.csv")
+	data, err := os.ReadFile("testdata/landings.v4.csv")
 	if err != nil {
 		t.Fatalf("read the landings fixture: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
 		t.Errorf("landingColumns starts %v, want the pinned header %v", got, legacy)
 	}
-	want := slices.Concat(appendedLandingColumns, jevLandingColumns)
+	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns)
 	if got := landingColumns[len(legacy):]; !slices.Equal(got, want) {
 		t.Errorf("appended columns = %v, want %v", got, want)
 	}
@@ -265,7 +265,7 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 	appended := []string{
 		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
-		"jev_fits20", "jev_size",
+		"jev_fits20", "jev_size", "sp", "sp_rung",
 	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))

@@ -169,8 +169,9 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	header := append(append([]string{}, landingColumns...), "unknown_metric")
 	// Every target drops the whole target list and none defines a column of its
 	// own, so the rows share one header; a per-target drop rule fails the row it
-	// applies to. The Jev columns are pre-landing answers, so they are predictors.
-	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,unknown_metric"
+	// applies to. The Jev columns are pre-landing answers, so they are predictors,
+	// and so are the story-point estimate columns, made before dispatch.
+	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,unknown_metric"
 	tests := []struct {
 		target string
 		want   string

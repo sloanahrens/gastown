@@ -78,6 +78,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 		b := beadsByID[l.Bead]
 		model := landingModel(l, usage, stamps.Seats)
 		jevFits, jevSize := jevCells(jev, l.Bead)
+		sp, spRung := storyPointCells(l.Bead, b.Labels, dropped)
 		createdAt := stampCell(b.CreatedAt)
 		dispatchedAt := stampCell(stamps.Dispatched[l.Bead])
 		submittedAt := landingSubmitted(l.Bead, b, stamps, landed)
@@ -128,6 +129,8 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"sp_actual":               spActualCell(l),
 			"jev_fits20":              jevFits,
 			"jev_size":                jevSize,
+			"sp":                      sp,
+			"sp_rung":                 spRung,
 		})
 	}
 	return rows, nil

@@ -25,6 +25,9 @@ const (
 	CommandBacktest = "backtest"
 	CommandReport   = "report"
 	CommandAll      = "all"
+	// CommandStoryPoints is the story-points shadow report. It is not part of
+	// CommandAll: it reads the extract's table and prints, it writes no digest.
+	CommandStoryPoints = "storypoints"
 )
 
 // usageText is Main's answer to an argv that names no command, kept verbatim so
@@ -123,13 +126,18 @@ func Run(ctx context.Context, command string, c Commands) error {
 			return fmt.Errorf("report: %w", err)
 		}
 	}
+	if command == CommandStoryPoints {
+		if err := c.runStoryPoints(real, env); err != nil {
+			return fmt.Errorf("storypoints: %w", err)
+		}
+	}
 	return nil
 }
 
 // isCommand reports whether name is one of main's subcommands.
 func isCommand(name string) bool {
 	switch name {
-	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll:
+	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints:
 		return true
 	}
 	return false
@@ -188,6 +196,21 @@ func (c Commands) runBacktest(real RealTown, env Env) error {
 		return err
 	}
 	return c.receipt("backtest: section written")
+}
+
+// runStoryPoints is main's storypoints step: the shadow report over the
+// landings table the day's extract wrote, printed to Out.
+func (c Commands) runStoryPoints(real RealTown, env Env) error {
+	path := filepath.Join(real.Extract.OutDir, landingsName)
+	data, err := env.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s (run %s first): %w", path, CommandExtract, err)
+	}
+	_, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	return WriteStoryPointsReport(c.Out, rows)
 }
 
 // runReport is main's report step: the digest rebuilt from the day's extract,
