@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,6 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 			return 1234, nil
 		},
 		stopDirect: func(townRoot string) error { calls.stopped = true; return nil },
-		install:    installSupervisorFile,
 		statusLine: func(string, int) string { return "none" },
 		sleep:      func(time.Duration) {},
 	}
@@ -365,6 +365,50 @@ func TestStartDaemon_UnsupportedOSSpawnsDirectly(t *testing.T) {
 	}
 }
 
+// A macOS town has no supervisor kind gt can drive, so its start is a hand
+// spawn. A launchd job the operator left loaded would run beside that spawn,
+// so the start refuses and names the job; an unreadable job is refused too,
+// since an unknown state is not a clean one.
+func TestStartDaemon_DarwinRefusesALeftoverLaunchdJob(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name  string
+		state templates.SupervisorState
+	}{
+		{"loaded", templates.SupervisorState{Loaded: true, LastExit: -1}},
+		{"unreadable", templates.SupervisorState{LastExit: -1, Err: errors.New("launchctl print failed")}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"), row.state, nil)
+
+			_, _, err := c.startDaemon(t.TempDir())
+
+			if err == nil || !strings.Contains(err.Error(), templates.LaunchdLabel) {
+				t.Fatalf("startDaemon = %v, want a refusal naming the leftover %s job", err, templates.LaunchdLabel)
+			}
+			if calls.spawned || len(calls.argv) != 0 {
+				t.Fatalf("spawned=%v argv=%v, want nothing launched beside the job", calls.spawned, calls.argv)
+			}
+		})
+	}
+}
+
+// With no launchd job left behind, a macOS start is the hand spawn it has
+// always been.
+func TestStartDaemon_DarwinSpawnsWhenNoLaunchdJobIsLoaded(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"),
+		templates.SupervisorState{LastExit: -1}, nil)
+
+	if _, _, err := c.startDaemon(t.TempDir()); err != nil {
+		t.Fatalf("startDaemon: %v", err)
+	}
+	if !calls.spawned {
+		t.Fatal("did not spawn the daemon directly")
+	}
+}
+
 // The town may be spelled differently from the provisioned file (a symlink
 // to it, /tmp vs /private/tmp on macOS); the guard must still see the
 // supervisor, or it hand-spawns beside a loaded job.
@@ -612,58 +656,6 @@ func stubRestart(t *testing.T, goos, file string, pids ...int) (*daemonControl, 
 		return pid != 0, pid, nil
 	}
 	return c, calls
-}
-
-// A file that is not this binary's rendering of this town is left exactly as
-// it is, and the start proceeds in place: rewriting it would be a
-// reconfiguration of somebody else's job, not a repair (gt-x872).
-func TestSyncSupervisorFile_LeavesAFileItDidNotRender(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
-	before, err := os.ReadFile(unit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
-
-	if rewritten := c.syncSupervisorFile(town); rewritten {
-		t.Error("syncSupervisorFile rewrote a unit this binary did not render")
-	}
-	after, err := os.ReadFile(unit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Errorf("unit changed:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-}
-
-// A job file that is already current leaves the running daemon alone: the
-// reload is an interruption, and one that is not needed is one not paid.
-func TestReconcileSupervisorJob_LeavesACurrentJobRunning(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	body, ok, err := templates.SupervisorFileContent("systemd", town, daemon.ShutdownBudget)
-	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
-	}
-	unit := filepath.Join(t.TempDir(), "gastown-daemon.service")
-	if err := os.WriteFile(unit, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	c, calls := stubRestart(t, "linux", unit, 1111)
-
-	note, err := c.reconcileSupervisorJob(town, 1111)
-	if err != nil {
-		t.Fatalf("reconcileSupervisorJob: %v", err)
-	}
-	if note != "" {
-		t.Errorf("reconcileSupervisorJob note = %q, want \"\"", note)
-	}
-	if len(calls.argv) != 0 {
-		t.Errorf("supervisor commands = %v, want none", calls.argv)
-	}
 }
 
 // A restart of a supervised daemon goes through the supervisor's restart and
@@ -1003,76 +995,37 @@ func provisionedSystemd(t *testing.T) *daemonSupervisor {
 	return sup
 }
 
-// A load that loses a race with the stop is retried. The job has to end up
-// loaded anyway: a reload that gives up after one try leaves the town with no
-// job and no daemon (gt-4k3fj.11).
-func TestStartFromFile_RetriesALoadThatLostTheRaceWithTheStop(t *testing.T) {
+// A load that fails is retried until one takes. The job has to end up loaded
+// anyway: a load that gives up after one try leaves the town with no job and
+// no daemon (gt-4k3fj.11).
+func TestLoadJob_RetriesALoadUntilOneTakes(t *testing.T) {
 	t.Parallel()
 	sup := provisionedSystemd(t)
-	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootstrapFails: 3}
+	calls, job := &supervisorCalls{}, &scriptedJob{bootstrapFails: 3}
 	stubScriptedJob(sup.ctl, calls, job)
 
-	if err := sup.startFromFile(); err != nil {
-		t.Fatalf("startFromFile: %v", err)
+	if err := sup.loadJob(); err != nil {
+		t.Fatalf("loadJob: %v", err)
 	}
 	if !job.loaded {
-		t.Error("the job was left stopped")
+		t.Error("the job was left unloaded")
 	}
-	if len(calls.argv) != 5 { // the stop, then three failed loads and the one that took
-		t.Errorf("supervisor commands = %v, want a stop then 4 loads", calls.argv)
-	}
-}
-
-// A stop that reports failure for a job it did stop must not end the reload:
-// the job is gone, so the load still has to happen.
-func TestStartFromFile_LoadsAfterAStopThatFailedButStopped(t *testing.T) {
-	t.Parallel()
-	sup := provisionedSystemd(t)
-	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, stopErr: errors.New("Failed to stop unit: Input/output error")}
-	stubScriptedJob(sup.ctl, calls, job)
-
-	if err := sup.startFromFile(); err != nil {
-		t.Fatalf("startFromFile: %v", err)
-	}
-	if !job.loaded || job.bootstraps != 1 {
-		t.Errorf("loaded=%v bootstraps=%d, want the job loaded by one load", job.loaded, job.bootstraps)
-	}
-}
-
-// A stop that failed and left the job loaded changed nothing: the job is still
-// supervising, so this is an error and not a load beside it.
-func TestStartFromFile_StopThatLeavesTheJobLoadedIsAnErrorWithoutALoad(t *testing.T) {
-	t.Parallel()
-	sup := provisionedSystemd(t)
-	calls := &supervisorCalls{}
-	stubScriptedJob(sup.ctl, calls, &scriptedJob{})
-	sup.ctl.run = func(a []string) error {
-		calls.argv = append(calls.argv, a)
-		return errors.New("boom")
-	}
-	sup.ctl.stateFor = func(kind string) templates.SupervisorState {
-		return templates.SupervisorState{Kind: kind, Loaded: true, LastExit: -1}
-	}
-
-	if err := sup.startFromFile(); err == nil {
-		t.Fatal("startFromFile succeeded although the stop failed and the job is still loaded")
-	}
-	if len(calls.argv) != 1 {
-		t.Errorf("supervisor commands = %v, want only the failed stop", calls.argv)
+	if len(calls.argv) != 4 { // three failed loads and the one that took
+		t.Errorf("supervisor commands = %v, want 4 loads", calls.argv)
 	}
 }
 
 // When no load takes, the error says the daemon has no supervisor rather than
 // reporting a start that failed.
-func TestStartFromFile_GivesUpLoudlyWhenTheJobWillNotLoad(t *testing.T) {
+func TestLoadJob_GivesUpLoudlyWhenTheJobWillNotLoad(t *testing.T) {
 	t.Parallel()
 	sup := provisionedSystemd(t)
-	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootstrapFails: 1 << 30}
+	calls, job := &supervisorCalls{}, &scriptedJob{bootstrapFails: 1 << 30}
 	stubScriptedJob(sup.ctl, calls, job)
 
-	err := sup.startFromFile()
+	err := sup.loadJob()
 	if err == nil || !strings.Contains(err.Error(), "no supervisor") {
-		t.Fatalf("startFromFile = %v, want an error naming the missing supervisor", err)
+		t.Fatalf("loadJob = %v, want an error naming the missing supervisor", err)
 	}
 	if job.bootstraps != supervisorLoadAttempts {
 		t.Errorf("bootstraps = %d, want %d", job.bootstraps, supervisorLoadAttempts)
@@ -1725,10 +1678,10 @@ func TestContainerSupervisor_RefusesATownWithoutBothContainerSettings(t *testing
 			return c.stopDaemon(io.Discard, town)
 		}},
 		{"bootstrap", func(t *testing.T, c *daemonControl, town string) error {
-			// The job the manager does not know: the load that follows the
-			// unload is a bootstrap, and a bootstrap that refuses is not
-			// retried — every attempt would refuse the same way, so waiting
-			// between them only delays the error the operator needs.
+			// The job the manager does not know: the load is a bootstrap, and
+			// a bootstrap that refuses is not retried — every attempt would
+			// refuse the same way, so waiting between them only delays the
+			// error the operator needs.
 			c.stateFor = func(kind string) templates.SupervisorState {
 				return templates.SupervisorState{Kind: kind, Loaded: false, LastExit: -1}
 			}
@@ -1738,7 +1691,7 @@ func TestContainerSupervisor_RefusesATownWithoutBothContainerSettings(t *testing
 			if err != nil {
 				t.Fatalf("detectDaemonSupervisor: %v", err)
 			}
-			err = sup.startFromFile()
+			err = sup.loadJob()
 			if waits != 0 {
 				t.Errorf("waited between %d retries of a refusal, want none", waits)
 			}
@@ -1773,105 +1726,6 @@ func TestContainerSupervisor_RefusesATownWithoutBothContainerSettings(t *testing
 				}
 			})
 		}
-	}
-}
-
-// A container town's supervisor file is its compose file, which this binary
-// never rewrites, and the systemd unit the host may still carry is not the
-// town's to touch either. Reconciling must write neither.
-func TestSyncSupervisorFile_LeavesTheFilesOfAContainerTownAlone(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
-	compose := writeComposeFile(t, town)
-	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
-	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
-		return containerTownConfig("scratch-daemon-1", "scratch"), nil
-	}
-	installs := 0
-	c.install = func(path, content string) error {
-		installs++
-		return installSupervisorFile(path, content)
-	}
-	before := map[string]string{}
-	for _, path := range []string{compose, unit} {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		before[path] = string(body)
-	}
-
-	if c.syncSupervisorFile(town) {
-		t.Error("rewrote a supervisor file for a container town")
-	}
-	if installs != 0 {
-		t.Errorf("wrote %d supervisor file(s) for a container town, want none", installs)
-	}
-	for path, want := range before {
-		got, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != want {
-			t.Errorf("%s changed although this town runs in a container", path)
-		}
-	}
-}
-
-// syncSupervisorFile reports false, and leaves the file it would have repaired
-// as it was, when it cannot make the repair: settings it cannot read and a
-// kind it cannot tell. Each is a warning, never a reason to refuse the start
-// that follows.
-func TestSyncSupervisorFile_CannotRepairReportsFalseAndWritesNothing(t *testing.T) {
-	t.Parallel()
-	for _, tt := range []struct {
-		name         string
-		patrolConfig func(string) (*config.DaemonPatrolConfig, error)
-	}{
-		{
-			name: "unreadable settings",
-			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) {
-				return nil, errors.New("daemon.json: unexpected end of JSON input")
-			},
-		},
-		{
-			name: "unknown supervisor kind",
-			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) {
-				return &config.DaemonPatrolConfig{Supervisor: "kube"}, nil
-			},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			town := t.TempDir()
-			unit := writeSupervisorFile(t, "gastown-daemon.service", town)
-			before, err := os.ReadFile(unit)
-			if err != nil {
-				t.Fatal(err)
-			}
-			c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
-			c.patrolConfig = tt.patrolConfig
-			installs := 0
-			c.install = func(string, string) error {
-				installs++
-				return errors.New("read-only file system")
-			}
-
-			if c.syncSupervisorFile(town) {
-				t.Error("reported a rewrite it could not make")
-			}
-			if installs != 0 {
-				t.Errorf("installs = %d, want 0", installs)
-			}
-			after, err := os.ReadFile(unit)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(after) != string(before) {
-				t.Error("the supervisor file changed although the repair failed")
-			}
-		})
 	}
 }
 
@@ -2569,5 +2423,105 @@ func TestContainerRestartProofRefusesAnUnsetTown(t *testing.T) {
 
 	if _, err := c.containerRestartProofFor(town, sup); !errors.Is(err, errContainerSettingsUnset) {
 		t.Fatalf("containerRestartProofFor error = %v, want the unset-settings refusal", err)
+	}
+}
+
+// A daemon that is already up is left as it is: no supervisor command, no
+// spawn, and no error.
+func TestEnsureDaemon_LeavesARunningDaemonAlone(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	if err := ensureDaemonWith(c, t.TempDir()); err != nil {
+		t.Fatalf("ensureDaemonWith: %v", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A shutdown in progress refuses before the lock is read: the daemon the
+// sentinel names is on its way out, and a start now would race it.
+func TestEnsureDaemon_RefusesWhileAShutdownSentinelNamesALiveProcess(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	sentinel := filepath.Join(town, ShutdownSentinel)
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) {
+		t.Error("read the lock during a shutdown")
+		return false, 0, nil
+	}
+
+	err := ensureDaemonWith(c, town)
+	if err == nil || !strings.Contains(err.Error(), "shutdown in progress") {
+		t.Fatalf("ensureDaemonWith = %v, want a shutdown-in-progress refusal", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A lock that cannot be read refuses the start. An unknown state is not an
+// absent daemon, so nothing is started beside one that may be running.
+func TestEnsureDaemon_ReportsAnUnreadableLockAndStartsNothing(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) {
+		return false, 0, errors.New("lock unreadable")
+	}
+
+	err := ensureDaemonWith(c, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "lock unreadable") {
+		t.Fatalf("ensureDaemonWith = %v, want the unreadable lock", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A start the guard refuses, with no daemon up afterwards, is the error the
+// operator reads: the refusal, not a success the caller would report as up.
+func TestEnsureDaemon_StartRefusedWithNoDaemonIsAnError(t *testing.T) {
+	t.Parallel()
+	c, calls := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	c.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+	c.guard = func(string, daemon.Owner, bool) error {
+		return errors.New("another owner holds the town")
+	}
+
+	err := ensureDaemonWith(c, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "another owner holds the town") {
+		t.Fatalf("ensureDaemonWith = %v, want the guard's refusal", err)
+	}
+	if len(calls.argv) != 0 || calls.spawned {
+		t.Errorf("ran %v, spawned=%v, want nothing", calls.argv, calls.spawned)
+	}
+}
+
+// A start the guard refuses while another starter brings the daemon up is
+// success: the daemon is up, and the caller reads it from the lock.
+func TestEnsureDaemon_StartRefusedWhileAConcurrentStarterWinsIsSuccess(t *testing.T) {
+	t.Parallel()
+	c, _ := stubSupervisor(t, "linux", "", loadedJob(), nil)
+	// The first read is ensureDaemon's own check and the second is the
+	// start's; the third, after the refused start, finds the other daemon up.
+	reads := 0
+	c.isRunning = func(string) (bool, int, error) {
+		reads++
+		return reads > 2, 4242, nil
+	}
+	c.guard = func(string, daemon.Owner, bool) error {
+		return errors.New("another owner holds the town")
+	}
+
+	if err := ensureDaemonWith(c, t.TempDir()); err != nil {
+		t.Fatalf("ensureDaemonWith = %v, want nil: a concurrent starter brought the daemon up", err)
 	}
 }

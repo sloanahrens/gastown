@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -17,7 +16,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
-	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -156,10 +154,6 @@ type daemonControl struct {
 	// file is missing, an error when it cannot be read or does not parse. nil
 	// reads the real file (readDaemonState).
 	readState func(townRoot string) (*daemon.State, error)
-	// syncFile brings the supervisor file up to date and reports whether it
-	// rewrote it (syncSupervisorFile); nil reads as that. Only start reads it
-	// through this seam, so a test can say the file was rewritten.
-	syncFile func(townRoot string) bool
 	// dockerInspect runs one docker command and returns its stdout; a failure
 	// is a *templates.DockerInspectError carrying its stderr, so the container
 	// kind's state read never parses the two streams as one.
@@ -168,8 +162,6 @@ type daemonControl struct {
 	spawn         func(townRoot string, env []string) (int, error)
 	stopDirect    func(townRoot string) error
 	isRunning     func(townRoot string) (bool, int, error)
-	// install writes a repaired supervisor file (installSupervisorFile).
-	install func(path, content string) error
 	// statusLine renders the Supervised: line of gt daemon status
 	// (supervisedLine).
 	statusLine func(townRoot string, lockPID int) string
@@ -199,7 +191,6 @@ func realDaemonControl() *daemonControl {
 		stateFor:          supervisorJobState,
 		stopDirect:        daemon.StopDaemon,
 		isRunning:         daemon.IsRunning,
-		install:           installSupervisorFile,
 		sleep:             clockwork.NewRealClock().Sleep,
 		pollInterval:      daemonPollInterval,
 		loadRetryInterval: supervisorLoadRetryInterval,
@@ -625,172 +616,6 @@ func (c *daemonControl) fileSupervisor(kind string) *daemonSupervisor {
 	return nil
 }
 
-// syncSupervisorFile brings an installed supervisor file up to date with the
-// binary now running, and reports whether it had to rewrite it (gt-x872).
-//
-// A supervisor file is derived state: some of its values are compiled into the
-// binary that wrote it, and a provision only runs on request. What is
-// repairable, and what is deliberately left alone, is
-// templates.SupervisorFileRepair's call; this is the installation half. A kind
-// with no binary-owned value answers false and nothing is written.
-//
-// A repair that cannot be made is warned about and then dropped: a job file
-// that is behind is never a reason to refuse to start the daemon at all.
-//
-// A rewrite only changes the file. Making the service manager act on it is
-// separate and deliberate: a service manager caches a job definition at load
-// time, so a changed file reaches the running job only through the stop and
-// load that startFromFile does, never through an in-place restart.
-//
-// A container town is left out of this: its supervisor file is the compose
-// file, and there is nothing in it for this to rewrite.
-func (c *daemonControl) syncSupervisorFile(townRoot string) (rewritten bool) {
-	cfg, err := c.townDaemonConfig(townRoot)
-	if err != nil {
-		style.PrintWarning("could not read the town's daemon settings: %v", err)
-		return false
-	}
-	path, kind, err := c.supervisorFilePath(townRoot, cfg)
-	if err != nil {
-		style.PrintWarning("could not tell which supervisor file this town uses: %v", err)
-		return false
-	}
-	if kind == "" {
-		return false
-	}
-	content, repair, err := templates.SupervisorFileRepair(path, kind, townRoot, daemon.ShutdownBudget)
-	if err == nil && repair {
-		err = c.install(path, content)
-	}
-	if err != nil {
-		style.PrintWarning("could not bring the %s job file up to date: %v", kind, err)
-		return false
-	}
-	return repair
-}
-
-// installSupervisorFile writes content over the supervisor file at path,
-// whole and moved into place: a truncate-and-write leaves a half-written file
-// behind if this process dies mid-write, and the next load would then fail on
-// it — no daemon, and nothing to say why. Same directory, so the rename is
-// atomic.
-func installSupervisorFile(path, content string) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".com.gastown.daemon.*")
-	if err != nil {
-		return fmt.Errorf("writing supervisor file: %w", err)
-	}
-	defer os.Remove(tmp.Name()) // no-op once the rename below succeeded
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing supervisor file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing supervisor file: %w", err)
-	}
-	if err := os.Chmod(tmp.Name(), 0644); err != nil {
-		return fmt.Errorf("writing supervisor file: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return fmt.Errorf("writing supervisor file: %w", err)
-	}
-	return nil
-}
-
-// reconcileSupervisorJob brings the supervisor job for townRoot in line with
-// the binary now running, for callers that found the daemon already up:
-// startDaemon and restartDaemon do the same reconciliation on their own paths,
-// so this is the town-boot version of it. The returned note is "" when there
-// was nothing to do — no supervisor, no file, or nothing repairable in it,
-// which is every kind gt supervises today.
-//
-// When a repair was made it is a restart, not just a file write: a service
-// manager caches a job definition when it loads it, so a rewritten file does
-// not reach the running job by itself (gt-x872). That is an interruption the
-// caller did not ask for — bounded, and paid once per change of the file's
-// derived values, since the rewrite is what makes the next boot find the file
-// current.
-func (c *daemonControl) reconcileSupervisorJob(townRoot string, daemonPID int) (note string, err error) {
-	sup, err := c.detectDaemonSupervisor(townRoot)
-	if err != nil || sup == nil {
-		return "", err
-	}
-	if !c.syncSupervisorFile(townRoot) {
-		return "", nil
-	}
-
-	// The reload below starts a daemon, so it asks the guard first. This is
-	// after the file sync on purpose: a gt up that reloads nothing never asks,
-	// and a daemon already running under its own owner is not judged here
-	// (gt-qpeei.28).
-	if err := c.guardStart(townRoot, sup, false); err != nil {
-		return "", fmt.Errorf("not reloading the %s job from its rewritten file: %w", sup.name, err)
-	}
-	if err := sup.startFromFile(); err != nil {
-		return "", fmt.Errorf("reloading the %s job from its rewritten file: %w", sup.name, err)
-	}
-	// The job is back but the daemon it starts needs a moment to take the
-	// lock, and the caller reads that lock for its own status line. Unlike the
-	// restart paths, the PID that must be replaced is the one the caller
-	// already read: a wait that stopped at "the lock is held" would report the
-	// daemon on its way out and call this a success.
-	if _, err := c.waitForRestart(townRoot, daemonPID); err != nil {
-		return "", fmt.Errorf("daemon did not come back after the %s job was reloaded from its file: %w", sup.name, err)
-	}
-	return fmt.Sprintf("%s job reloaded from an updated file", sup.name), nil
-}
-
-// startFromFile (re)starts the daemon from the job's file on disk, for the
-// case where that file was just rewritten: a service manager reads a job
-// definition when it loads it and caches it from then on, so the only way a
-// rewritten file reaches the job is to stop it and load it again. That is
-// what this does — sup.stop, then sup.bootstrap.
-//
-// It is deliberately not how a restart normally goes. Stopping leaves the
-// daemon unsupervised between the two commands, the window restartDaemon
-// exists to avoid (gt-sq9e), and spending it is worth it only when the job
-// definition actually changed — at most once per binary upgrade.
-//
-// Because the stop leaves nothing to bring the daemon back, it is never
-// allowed to be the last thing this does (gt-4k3fj.11: a service manager
-// removed the job during a `gt up` and nothing loaded it again). A manager can
-// finish removing a job after its stop has returned, and a load that lands in
-// that window fails; so the job is confirmed gone first and the load is
-// retried. A stop that reports failure is checked against the job's live state
-// too, because a manager reports errors for a job it did remove.
-func (s *daemonSupervisor) startFromFile() error { return s.startFromFileEnv(nil) }
-
-// startFromFileEnv is startFromFile with env added to the load command, so the
-// one start --takeover makes keeps its variable when the supervisor file was
-// rewritten first. The stop carries none: only the start needs it.
-func (s *daemonSupervisor) startFromFileEnv(env []string) error {
-	// Stop only a job the manager knows: stopping a job that is not there
-	// fails, and startFromFile is also reached from start, where "not loaded"
-	// (the state `gt daemon stop` leaves) is ordinary.
-	if st := s.jobState(); st.Err == nil && st.Loaded {
-		if err := s.runArgv(s.stop); err != nil {
-			// Only a job that is still loaded means the unload did not
-			// happen, and then that job is still supervising the daemon.
-			if st := s.jobState(); st.Err != nil || st.Loaded {
-				return fmt.Errorf("unloading the %s job to load its rewritten file: %w", s.name, err)
-			}
-		}
-		s.waitUnloaded()
-	}
-	return s.loadJobEnv(env)
-}
-
-// waitUnloaded polls until the service manager no longer knows the job, for
-// up to handStopConfirmBudget. It does not fail on timeout: the load that
-// follows retries, and is the one that reports a job that would not go.
-func (s *daemonSupervisor) waitUnloaded() {
-	for range handStopConfirmAttempts {
-		if st := s.jobState(); st.Err == nil && !st.Loaded {
-			return
-		}
-		s.ctl.sleep(s.ctl.pollInterval)
-	}
-}
-
 // supervisorLoadAttempts is how many times loadJob tries to bootstrap the job;
 // supervisorLoadRetryInterval separates the tries.
 const (
@@ -844,10 +669,10 @@ func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err e
 }
 
 // startDaemonWith is startDaemon with the operator's --takeover. Whatever the
-// supervisor, the startup guard is asked first, before the supervisor file is
-// touched and before any command runs: a refusal reaches the operator with
-// nothing launched (gt-qpeei.28). A supervisor error refuses the start and
-// never falls through to a direct spawn.
+// supervisor, the startup guard is asked first, before any command runs: a
+// refusal reaches the operator with nothing launched (gt-qpeei.28). A
+// supervisor error refuses the start and never falls through to a direct
+// spawn.
 func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via string, pid int, err error) {
 	running, pid, err := c.isRunning(townRoot)
 	if err != nil {
@@ -859,6 +684,11 @@ func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via str
 	sup, err := c.detectDaemonSupervisor(townRoot)
 	if err != nil {
 		return "", 0, err
+	}
+	if sup == nil {
+		if err := c.refuseLeftoverLaunchdJob(); err != nil {
+			return "", 0, err
+		}
 	}
 	if err := c.refuseFileKindTakeover(sup, takeover); err != nil {
 		return "", 0, err
@@ -873,28 +703,14 @@ func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via str
 		takeoverEnv = []string{config.TakeoverEnv + "=1"}
 	}
 	if sup != nil {
-		sync := c.syncSupervisorFile
-		if c.syncFile != nil {
-			sync = c.syncFile
-		}
-		rewritten := sync(townRoot)
-		var runErr error
-		if rewritten {
-			// The file the job will start from is the one just rewritten, so
-			// the job has to be loaded from it rather than restarted in place.
-			// The takeover variable rides the load too, or a start the guard
-			// approved over a fresh owner would run without it.
-			runErr = sup.startFromFileEnv(takeoverEnv)
-		} else {
-			runErr = sup.runStartArgv(sup.start, takeoverEnv)
-			if runErr != nil {
-				// A restart reaches only a job the service manager knows.
-				// One that gt daemon stop stopped is bootstrapped instead, so that
-				// a stop-then-start pair leaves a supervised daemon rather than the
-				// hand spawn that recreates the crash loop (gt-3jrm).
-				if sup.jobIsMissing() {
-					runErr = sup.runArgv(sup.bootstrap)
-				}
+		runErr := sup.runStartArgv(sup.start, takeoverEnv)
+		if runErr != nil {
+			// A restart reaches only a job the service manager knows.
+			// One that gt daemon stop stopped is bootstrapped instead, so that
+			// a stop-then-start pair leaves a supervised daemon rather than the
+			// hand spawn that recreates the crash loop (gt-3jrm).
+			if sup.jobIsMissing() {
+				runErr = sup.runArgv(sup.bootstrap)
 			}
 		}
 		if runErr != nil {
@@ -915,6 +731,26 @@ func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via str
 	}
 	pid, err = c.spawn(townRoot, takeoverEnv)
 	return "", pid, err
+}
+
+// refuseLeftoverLaunchdJob refuses a hand start on macOS while the launchd job
+// a town used to run is still loaded. gt no longer supervises with launchd, so
+// detection finds no supervisor there and the start would spawn a daemon beside
+// that job, which then competes for the lock. An unreadable job is refused too:
+// an unknown state is not an unloaded one. Other hosts are left alone, since
+// the launchd probe is a command only macOS has.
+func (c *daemonControl) refuseLeftoverLaunchdJob() error {
+	if c.goos != "darwin" {
+		return nil
+	}
+	st := c.supervisorState(config.SupervisorLaunchd)
+	if st.Err != nil {
+		return fmt.Errorf("could not read the launchd job %s, and a daemon started by hand could run beside it: %w", templates.LaunchdLabel, st.Err)
+	}
+	if st.Loaded {
+		return fmt.Errorf("the launchd job %s is still loaded: gt no longer supervises a daemon with launchd, so unload that job before starting the daemon by hand", templates.LaunchdLabel)
+	}
+	return nil
 }
 
 // guardStart asks the startup guard whether the daemon sup is about to start
@@ -1031,13 +867,6 @@ func (c *daemonControl) waitForDaemonGone(townRoot string) error {
 // first. When no supervisor is provisioned the daemon is only ever run by
 // hand, so the hand stop/start pair is the whole of it there.
 //
-// The supervisor's file is reconciled first (syncSupervisorFile). A restart is
-// both the act a stale ExitTimeOut endangers — it is what asks the service
-// manager to stop the daemon — and the one gt-driven moment the file can be
-// loaded afresh: when the reconciliation finds the file stale it rewrites it
-// and restarts the job from it, so the new value is in force from this restart
-// onward rather than at some later one.
-//
 // The outgoing PID is read before the restart so the wait can tell the new
 // daemon from the old one: waitForDaemon returns as soon as the lock reads as
 // running, and throughout a restart that is true of the process on its way
@@ -1075,7 +904,7 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 		return c.startDaemon(townRoot)
 	}
 	// A restart under a supervisor starts a daemon too, so it asks the same
-	// guard before the file is rewritten or the job touched (gt-qpeei.28).
+	// guard before the job is touched (gt-qpeei.28).
 	if err := c.guardStart(townRoot, sup, false); err != nil {
 		return "", 0, err
 	}
@@ -1090,30 +919,22 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 			return "", 0, err
 		}
 	}
-	var runErr error
-	if c.syncSupervisorFile(townRoot) {
-		// This is the restart the ExitTimeOut it carries exists for: the job
-		// is reloaded from the file, so the new value is in force before the
-		// next stop this restart causes — and for every one after it.
-		runErr = sup.startFromFile()
-	} else {
-		// A kind with a restart verb of its own runs it; the others restart
-		// with their start (systemctl restart replaces the process in place).
-		restart := sup.start
-		if sup.restart != nil {
-			restart = sup.restart
-		}
-		runErr = sup.runArgv(restart)
-		if runErr != nil {
-			// A restart reaches only a job the manager knows. The daemon that
-			// is up is then running outside its supervisor (the job was
-			// stopped and never loaded again, gt-4k3fj.11), and the job
-			// cannot be loaded beside it: the loaded job would respawn
-			// against the lock the hand-run daemon holds (gt-3jrm). So it
-			// goes, and the job comes up in its place.
-			if sup.jobIsMissing() {
-				runErr = c.replaceUnsupervisedDaemon(townRoot, sup)
-			}
+	// A kind with a restart verb of its own runs it; the others restart with
+	// their start (systemctl restart replaces the process in place).
+	restart := sup.start
+	if sup.restart != nil {
+		restart = sup.restart
+	}
+	runErr := sup.runArgv(restart)
+	if runErr != nil {
+		// A restart reaches only a job the manager knows. The daemon that is
+		// up is then running outside its supervisor (the job was stopped and
+		// never loaded again, gt-4k3fj.11), and the job cannot be loaded
+		// beside it: the loaded job would respawn against the lock the
+		// hand-run daemon holds (gt-3jrm). So it goes, and the job comes up
+		// in its place.
+		if sup.jobIsMissing() {
+			runErr = c.replaceUnsupervisedDaemon(townRoot, sup)
 		}
 	}
 	if runErr != nil {
