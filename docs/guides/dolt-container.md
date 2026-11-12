@@ -18,11 +18,11 @@ Run every step from the town root (`cd ~/gt`), in one shell: later steps use the
 shell variables set earlier.
 
 Before parking the town, read "Before any rewrite" in [Dolt history rewrites:
-offline procedures](../dolt-history-offline.md). Before setting the hold, read
-"The drain" in [Power runbook](../power-runbook.md): it defines the readings
-that must reach zero. Before restoring a copy, read [Restoring a Dolt database
-from the nightly backup](../dolt-restore.md): it defines a night, a `.partial`
-directory and what `dolt backup restore` does.
+offline procedures](../dolt-history-offline.md). Before setting the hold, wait
+for the drain: `gt polecat list --all --json` shows no polecat in the `working`
+state and the landing queue in `gt status` is empty. Before restoring a copy,
+read [Restoring a Dolt database from the nightly backup](../dolt-restore.md):
+it defines a night, a `.partial` directory and what `dolt backup restore` does.
 
 ## 1. Rehearsal on a restored copy
 
@@ -35,9 +35,8 @@ as the latency baseline.
 ### 1.1 Park the town
 
 Write the dispatch hold with a note that names this rehearsal, wait for the
-drain ([Power runbook](../power-runbook.md), "The drain"), then pause the Dolt
-writers. The pause writes the marker `~/gt/daemon/dolt.pause`. The daemon
-honours it: it neither probes, starts nor restarts the server, and `gt dolt
+drain (the check at the top of this page), then pause the Dolt writers. The
+pause writes the marker `~/gt/daemon/dolt.pause`. The daemon honours it: it neither probes, starts nor restarts the server, and `gt dolt
 start` refuses. A `gt` client honours it too: a Dolt call that fails while the
 marker holds reports the pause rather than the connection error, and bd stops
 retrying. The pause does not stop the server, which keeps serving through the
@@ -46,7 +45,7 @@ while step 1.6 times it. The marker lapses at `--until` on its own.
 
 ```bash
 printf '%s\n' 'overseer: Dolt container rehearsal; drain and hold' > ~/gt/seat-refill.hold
-gt power status        # re-run until the drain reads zero; only then run the next two lines
+gt polecat list --all --json  # re-run until no polecat is working and the landing queue in gt status is empty; only then run the next two lines
 gt dolt pause --reason 'Dolt container rehearsal' --until 90m
 gt dolt status         # names this pause, its reason and its deadline
 ```
@@ -299,14 +298,13 @@ between the two reads shows as a difference between the columns, not a fault.
 
 ```bash
 printf '%s\n' 'overseer: Dolt container cutover; drain and hold' > ~/gt/seat-refill.hold
-gt power status        # re-run until the drain reads zero; only then pause
+gt polecat list --all --json  # re-run until no polecat is working and the landing queue in gt status is empty; only then pause
 gt dolt pause --reason 'Dolt container cutover' --until 2h
 ```
 
-Wait for the drain ([Power runbook](../power-runbook.md), "The drain") before
-the pause. The pause marker keeps the daemon from starting a host server while
-the container holds port 3307, and it lapses on its own if this procedure
-stops part-way.
+Wait for the drain (the check in step 1.1) before the pause. The pause marker
+keeps the daemon from starting a host server while the container holds port
+3307, and it lapses on its own if this procedure stops part-way.
 
 ### 2.3 Take the quiesced counts and stop the host server
 

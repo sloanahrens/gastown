@@ -7,7 +7,7 @@ The daemon runs in a pod and cannot measure the Mac it sits on. This page record
 1. **One Mac binary, in devops.** `gt-mac-watch` (devops dv-dgnb, launchd job dv-7opa) reads the Mac volume and the Docker Desktop disk and publishes `probes.json` into the daemon pod with `kubectl exec` into the daemon container (`cmd/gt-mac-watch/watch.go`, in the devops repository). It is extended there with the daily prune of old images on the sandbox cluster's nodes; devops files that work, reading gastown's `gt maint apply nodes` (`internal/cmd/maint.go`, target in `internal/diskmaint/nodes`).
 2. **gastown has no Mac binary.** There is no `gt-host`. The Mac host agent that gt used to run (`internal/cmd/host_agent.go`) was deleted once gt-mac-watch was installed and the pod's file was fresh.
 3. **The contract stays in gt.** `internal/hostprobe` keeps the schema, `Read`, `Write`, `Path` and the output parsers (`probes.go`, `memory.go`). The schema version stays 3 and gt-mac-watch writes the same document. The daemon's readers do not change: `attention_host_file.go` and `disk_maintenance_disks.go` read it with the 180 second bound (`fileHostProbeMaxAge`), which stays as the alarm for a stopped publisher (`errProbeFileRefused`).
-4. **macOS-only code leaves gt.** Not only no new code: the existing launchd supervisor, installer, `gt power`, the cmux bird spawner and the diskutil read each get a removal bead, and a guard in `internal/hosttools` keeps new macOS-only files out, with the existing ones listed so the list only shrinks.
+4. **macOS-only code leaves gt.** Not only no new code: the existing launchd supervisor, installer, the power states, the cmux bird spawner and the diskutil read each get a removal bead, and a guard in `internal/hosttools` keeps new macOS-only files out, with the existing ones listed so the list only shrinks.
 
 ## Options it replaced
 
@@ -46,7 +46,7 @@ The cost of this path against the mount: the pod's file has a writer inside the 
 - Rewrite the docs and the daemon message that name the host agent or the Mac's `registry-collect` job. That job was never installed, so no job runs the registry's garbage collect until one is given a home (.11).
 - The follow-up beads, all held under epic gt-a2uug4, each shaped and lint-clean:
   - gt-a2uug4.10 removes the host agent, collectors, templates and the nodes LaunchAgent table; gt-a2uug4.11 rewrites the docs and the registry-collect message; gt-a2uug4.12 is the guard.
-  - Removal beads, one per allow-listed area: gt-a2uug4.15 (launchd supervisor commands), .16 (upgrade heal, supervisor state, plist loader), .17 (gt power), .18 (installer gateway and doctor check), .19 (cmux bird spawner, done), .20 (test tooling names), .21 (the diskutil read).
+  - Removal beads, one per allow-listed area: gt-a2uug4.15 (launchd supervisor commands), .16 (upgrade heal, supervisor state, plist loader), .17 (the power states), .18 (installer gateway and doctor check), .19 (cmux bird spawner, done), .20 (test tooling names), .21 (the diskutil read).
   - gt-a2uug4.22 narrows the kubectl credential.
 - The launchd field of the probe file stays in the schema as an unwritten pointer: a search of `internal/` finds no reader of it, and gt-mac-watch does not write it.
 

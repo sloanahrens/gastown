@@ -120,7 +120,7 @@ func TestStaleHostToolEntryIsAnError(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeFixture(t, root, "pkg/run.go", "package pkg\n\nfunc run() {}\n")
-	allowPath := writeFixture(t, root, "allow.txt", "pkg/run.go\tlaunchctl\t1\tpending-deletion\tgt power: the launchd job the power states load\n")
+	allowPath := writeFixture(t, root, "allow.txt", "pkg/run.go\tlaunchctl\t1\tpending-deletion\tgt-a2uug4.17: the launchd job the power states load\n")
 
 	err := checkHostToolsAt(root, allowPath)
 	if err == nil {
@@ -138,7 +138,7 @@ func TestStaleHostToolEntryIsAnError(t *testing.T) {
 func TestHostToolAllowlistRules(t *testing.T) {
 	t.Parallel()
 
-	const reason = "gt power: the power states load the launchd job"
+	const reason = "gt-a2uug4.17: the power states load the launchd job"
 	cases := []struct {
 		name  string
 		line  string
@@ -241,7 +241,7 @@ func TestHostToolAllowlistRules(t *testing.T) {
 func TestHostToolCountIsEnforced(t *testing.T) {
 	t.Parallel()
 
-	const reason = "gt power: the power states load the launchd job"
+	const reason = "gt-a2uug4.17: the power states load the launchd job"
 	const oneLiteral = "package pkg\n\nfunc load() string {\n\treturn \"launchctl bootstrap\"\n}\n"
 	const twoLiterals = "package pkg\n\nfunc load() string {\n\treturn \"launchctl bootstrap\"\n}\n\nfunc unload() string {\n\treturn \"launchctl bootout\"\n}\n"
 	cases := []struct {
@@ -405,7 +405,7 @@ func TestHostToolsUnreadableAllowlistIsAnError(t *testing.T) {
 		{
 			name: "an unparsable allowlist names the file",
 			setup: func(t *testing.T, root string) string {
-				return writeFixture(t, root, "host-tools-allow.txt", "pkg/run.go launchctl pending-deletion gt power\n")
+				return writeFixture(t, root, "host-tools-allow.txt", "pkg/run.go launchctl pending-deletion gt-a2uug4.17\n")
 			},
 		},
 	}
@@ -503,7 +503,7 @@ func TestDarwinTaggedFileFails(t *testing.T) {
 			name:   "a listed darwin file with a bead id passes beside a host-tool line",
 			path:   "pkg/run_darwin.go",
 			source: plainSource,
-			allow:  "pkg/run_darwin.go\tdarwin\t1\tpending-deletion\tgt-a2uug4.21: the disk-space read runs diskutil\npkg/other.go\tlaunchctl\t1\tpending-deletion\tgt power\n",
+			allow:  "pkg/run_darwin.go\tdarwin\t1\tpending-deletion\tgt-a2uug4.21: the disk-space read runs diskutil\npkg/other.go\tlaunchctl\t1\tpending-deletion\tgt-a2uug4.17\n",
 		},
 		{
 			name:   "a portable shim with a bead id passes",
