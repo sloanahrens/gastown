@@ -96,10 +96,10 @@ func TestIntegrationReadRepoFilePrefersRigRepoMain(t *testing.T) {
 	}
 }
 
-// TestIntegrationReadRepoFileFallsBackToTheClone keeps a file the repo does not
-// commit readable: a clone-local .gastown/settings.json is what every rig read
-// before gt-yj6g1, and it still resolves.
-func TestIntegrationReadRepoFileFallsBackToTheClone(t *testing.T) {
+// TestIntegrationReadRepoFileIgnoresAFileOnlyTheCloneHas: a clone-local
+// .gastown/settings.json that main does not commit is not read: real git
+// answers "not at this ref" and the read is not found (gt-yj6g1).
+func TestIntegrationReadRepoFileIgnoresAFileOnlyTheCloneHas(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "testrig"
 	upstream := sourceWithFiles(t, "upstream", map[string]string{"README.md": "# upstream\n"})
@@ -111,17 +111,15 @@ func TestIntegrationReadRepoFileFallsBackToTheClone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || string(got.Data) != settings {
-		t.Errorf("read = %+v, want the clone's copy", got)
+	if got.Found {
+		t.Errorf("read = %+v, want not found: main does not carry the file", got)
 	}
 }
 
-// TestIntegrationReadRepoFileReportsTheCloneWhenMainDroppedTheFile: a file main
-// no longer carries is not main's file. Real git answers "not at this ref", and
-// the clone's leftover copy is served as the clone's — a caller that means to
-// follow main reads Fallback rather than counting the leftover as main's
-// (gt-yj6g1).
-func TestIntegrationReadRepoFileReportsTheCloneWhenMainDroppedTheFile(t *testing.T) {
+// TestIntegrationReadRepoFileNotFoundWhenMainDroppedTheFile: a file main no
+// longer carries is not read from the clone's leftover copy. Real git answers
+// "not at this ref", and the read is not found (gt-yj6g1).
+func TestIntegrationReadRepoFileNotFoundWhenMainDroppedTheFile(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "testrig"
 	upstream := sourceWithFiles(t, "upstream", map[string]string{
@@ -134,20 +132,16 @@ func TestIntegrationReadRepoFileReportsTheCloneWhenMainDroppedTheFile(t *testing
 	gitT(t, upstream, "commit", "-q", "-m", "drop the rubric")
 	gitT(t, bare, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
 
-	cloneRubric := filepath.Join(clone, ".om.json")
-	if _, err := os.Stat(cloneRubric); err != nil {
-		t.Fatalf("fixture: the clone holds no .om.json to fall back to: %v", err)
+	if _, err := os.Stat(filepath.Join(clone, ".om.json")); err != nil {
+		t.Fatalf("fixture: the clone holds no .om.json to refuse: %v", err)
 	}
 
 	got, err := ReadRepoFile(openRepoFile, townRoot, rigName, ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
-	if !got.Found || got.Source != cloneRubric {
-		t.Fatalf("read = %+v, want the clone's copy at %s", got, cloneRubric)
-	}
-	if !strings.Contains(got.Fallback, "origin/main does not carry it") {
-		t.Errorf("Fallback = %q, want main named as not carrying the file", got.Fallback)
+	if got.Found || got.Source != "" {
+		t.Fatalf("read = %+v, want not found: main does not carry the rubric", got)
 	}
 }
 

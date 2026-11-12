@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 // neutralMangoMirror is the mirror target the rig-root configs configure and
@@ -22,13 +24,9 @@ func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
-	repoRoot := filepath.Join(rigDir, "mayor", "rig")
-	gastownDir := filepath.Join(repoRoot, ".gastown")
 	settingsDir := filepath.Join(rigDir, "settings")
-	for _, dir := range []string{gastownDir, settingsDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", settingsDir, err)
 	}
 
 	rigConfig := `{
@@ -56,9 +54,8 @@ func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
     "test_command": "make test-repo"
   }
 }`
-	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings.json: %v", err)
-	}
+	f := gitfake.New()
+	bareRigRepo(t, f, townRoot, "gastown", map[string]string{".gastown/settings.json": repoSettings})
 
 	localSettings := `{
   "type": "rig-settings",
@@ -71,7 +68,7 @@ func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
 		t.Fatalf("write settings/config.json: %v", err)
 	}
 
-	mq := ResolveMergeQueueConfig(townRoot, "gastown")
+	mq := ResolveMergeQueueConfigIn(fakeRepoOpener(f), townRoot, "gastown")
 	if mq == nil {
 		t.Fatal("ResolveMergeQueueConfig() = nil, want non-nil")
 	}
@@ -95,10 +92,8 @@ func TestResolveMergeQueueConfig_RigRootAbsent(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
-	repoRoot := filepath.Join(rigDir, "mayor", "rig")
-	gastownDir := filepath.Join(repoRoot, ".gastown")
-	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rigDir, err)
 	}
 
 	// Rig root config.json exists but has no merge_queue key at all.
@@ -117,11 +112,10 @@ func TestResolveMergeQueueConfig_RigRootAbsent(t *testing.T) {
   "version": 1,
   "merge_queue": {"test_command": "make test-repo"}
 }`
-	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings.json: %v", err)
-	}
+	f := gitfake.New()
+	bareRigRepo(t, f, townRoot, "gastown", map[string]string{".gastown/settings.json": repoSettings})
 
-	mq := ResolveMergeQueueConfig(townRoot, "gastown")
+	mq := ResolveMergeQueueConfigIn(fakeRepoOpener(f), townRoot, "gastown")
 	if mq == nil {
 		t.Fatal("ResolveMergeQueueConfig() = nil, want non-nil")
 	}
@@ -140,10 +134,8 @@ func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
-	repoRoot := filepath.Join(rigDir, "mayor", "rig")
-	gastownDir := filepath.Join(repoRoot, ".gastown")
-	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rigDir, err)
 	}
 
 	rigConfig := `{
@@ -165,11 +157,10 @@ func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
   "version": 1,
   "merge_queue": {"test_command": "make test-repo"}
 }`
-	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings.json: %v", err)
-	}
+	f := gitfake.New()
+	bareRigRepo(t, f, townRoot, "gastown", map[string]string{".gastown/settings.json": repoSettings})
 
-	mq := ResolveMergeQueueConfig(townRoot, "gastown")
+	mq := ResolveMergeQueueConfigIn(fakeRepoOpener(f), townRoot, "gastown")
 	if mq == nil {
 		t.Fatal("ResolveMergeQueueConfig() = nil, want non-nil")
 	}
@@ -278,10 +269,8 @@ func TestResolveForgejoConfig_RepoBlockIgnored(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "mango")
-	repoRoot := filepath.Join(rigDir, "mayor", "rig")
-	gastownDir := filepath.Join(repoRoot, ".gastown")
-	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rigDir, err)
 	}
 
 	rigConfig := `{
@@ -315,12 +304,10 @@ func TestResolveForgejoConfig_RepoBlockIgnored(t *testing.T) {
     }
   }
 }`
-	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings.json: %v", err)
-	}
-	repoSettingsPath := filepath.Join(gastownDir, "settings.json")
+	f := gitfake.New()
+	repoDir := bareRigRepo(t, f, townRoot, "mango", map[string]string{".gastown/settings.json": repoSettings})
 
-	fc := ResolveForgejoConfig(townRoot, "mango")
+	fc := ResolveForgejoConfigIn(fakeRepoOpener(f), townRoot, "mango")
 	if fc == nil {
 		t.Fatal("ResolveForgejoConfig() = nil, want the rig-root floor block")
 	}
@@ -338,12 +325,12 @@ func TestResolveForgejoConfig_RepoBlockIgnored(t *testing.T) {
 	}
 
 	// The strip must not disturb how the other merge_queue fields merge.
-	if mq := ResolveMergeQueueConfig(townRoot, "mango"); mq == nil || mq.TestCommand != "make test-repo" {
+	if mq := ResolveMergeQueueConfigIn(fakeRepoOpener(f), townRoot, "mango"); mq == nil || mq.TestCommand != "make test-repo" {
 		t.Errorf("TestCommand = %v, want %q (repo tier still wins for other fields)", mq, "make test-repo")
 	}
 
-	if !RepoForgejoIgnoredWarned(repoSettingsPath) {
-		t.Errorf("RepoForgejoIgnoredWarned(%s) = false, want the ignored block reported", repoSettingsPath)
+	if want := "origin/main in " + repoDir; !RepoForgejoIgnoredWarned(want) {
+		t.Errorf("RepoForgejoIgnoredWarned(%s) = false, want the ignored block reported", want)
 	}
 }
 
@@ -354,10 +341,8 @@ func TestResolveForgejoConfig_RepoBlockOnlyIsNotAForgejoRig(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "mango")
-	repoRoot := filepath.Join(rigDir, "mayor", "rig")
-	gastownDir := filepath.Join(repoRoot, ".gastown")
-	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rigDir, err)
 	}
 
 	rigConfig := `{"type":"rig","version":1,"name":"mango",
@@ -369,11 +354,10 @@ func TestResolveForgejoConfig_RepoBlockOnlyIsNotAForgejoRig(t *testing.T) {
 
 	repoSettings := `{"type":"rig-settings","version":1,
 		"merge_queue":{"forgejo":{"remote_url":"https://attacker.example/mango"}}}`
-	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings.json: %v", err)
-	}
+	f := gitfake.New()
+	bareRigRepo(t, f, townRoot, "mango", map[string]string{".gastown/settings.json": repoSettings})
 
-	if got := ResolveForgejoConfig(townRoot, "mango"); got != nil {
+	if got := ResolveForgejoConfigIn(fakeRepoOpener(f), townRoot, "mango"); got != nil {
 		t.Errorf("ResolveForgejoConfig() = %+v, want nil (repo tier cannot define the block)", got)
 	}
 }
