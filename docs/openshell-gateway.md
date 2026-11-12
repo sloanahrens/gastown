@@ -6,10 +6,11 @@ The OpenShell gateway is the long-lived service behind the `openshell` session b
 
 gt no longer installs this agent: the installer's gateway step was deleted (gt-a2uug4.18), so the plist and its launchd load are managed outside gt. The commands below operate an agent that is already installed on the Mac.
 
-Two things must exist first; nothing creates either:
+Three things must exist first; nothing creates any of them:
 
 - the `openshell-gateway` binary at `/opt/homebrew/bin` (the brew formula);
-- `~/.config/openshell/gateway.toml`, which the operator writes. Without it nothing starts the agent, so a machine with no OpenShell seats is unaffected.
+- `~/.config/openshell/gateway.toml`, which the operator writes. Without it nothing starts the agent, so a machine with no OpenShell seats is unaffected;
+- the log directory `~/gt/.runtime/openshell`, which the operator creates with `mkdir -p -m 700 ~/gt/.runtime/openshell`. The unit writes `gateway.log` there, and the directory is private because the gateway holds provider credentials.
 
 To see what an install would do without building or changing anything:
 
