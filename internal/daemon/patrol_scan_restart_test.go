@@ -189,6 +189,10 @@ func TestPatrolScanRestartEscalatesASeatThatKeepsFailing(t *testing.T) {
 		!strings.Contains(reason, "refused: non-fast-forward") {
 		t.Errorf("escalation reason = %q, want the seat and the cause named", reason)
 	}
+	// The run the alert describes has two scans, and the text says so.
+	if reason := got[0].Escalation.Reason; !strings.Contains(reason, "on 2 consecutive scans") {
+		t.Errorf("escalation reason = %q, want it to name 2 consecutive scans", reason)
+	}
 
 	// A third consecutive failure reports the same condition: one escalation,
 	// not a new one per scan.
@@ -468,8 +472,19 @@ func TestPatrolRestartDivergedEscalatesOnFirstScan(t *testing.T) {
 
 	t.Run("a diverged branch escalates on the first failed scan", func(t *testing.T) {
 		t.Parallel()
-		failure := errors.New("gt session restart gastown/goose: exit status 1: " + diverged.Error())
-		d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return failure })
+		// The failure travels the production path: the child prints the
+		// divergence, and the executor the supervisor runs reads that text.
+		output := "Error: preparing session for goose: pushing polecat/goose/gt-pyh5p6: " +
+			diverged.Error() + "\nUsage:\n  gt session restart <rig>/<polecat> [flags]\n"
+		var d *Daemon
+		d, rec := newPatrolRestartDaemon(t, 10, func(s supervisor.Seat) error { return d.restartPolecatSession(s) })
+		d.gtPath = "gt"
+		d.execCmd = newFakeCLI(cliBySub(map[string]cliReply{
+			"session restart": {code: 1, stderr: output},
+		})).run
+		d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			PatrolScan: &PatrolScanConfig{Enabled: true, Rigs: []string{"gastown"}},
+		}}
 		h := &patrolScanHost{d: d}
 		_ = h.Restart("gastown", "goose", "patrol scan: dead")
 		got := patrolRestartEscalations(rec, key)
@@ -480,6 +495,10 @@ func TestPatrolRestartDivergedEscalatesOnFirstScan(t *testing.T) {
 			if !strings.Contains(got[0].Escalation.Reason, want) {
 				t.Errorf("escalation = %q, want it to name %q", got[0].Escalation.Reason, want)
 			}
+		}
+		// One failed scan is not a run, so the alert does not describe one.
+		if reason := got[0].Escalation.Reason; strings.Contains(reason, "consecutive") {
+			t.Errorf("escalation = %q, want no run of scans named after one", reason)
 		}
 	})
 
@@ -493,10 +512,70 @@ func TestPatrolRestartDivergedEscalatesOnFirstScan(t *testing.T) {
 			t.Fatalf("escalations after one failed scan = %d, want 0", len(got))
 		}
 		_ = h.Restart("gastown", "goose", "patrol scan: dead")
-		if got := patrolRestartEscalations(rec, key); len(got) != 1 {
+		got := patrolRestartEscalations(rec, key)
+		if len(got) != 1 {
 			t.Errorf("escalations after two failed scans = %d, want 1", len(got))
 		}
 	})
+}
+
+// The patrol reads a restart failure as a divergence only when the child
+// printed the shape session.BranchDivergedError renders: a ref after the word
+// "branch", then the marker. A failure that merely mentions the marker waits
+// for its second scan like any other cause (gt-qoqxzi).
+func TestPatrolScanRestartReadsOnlyTheRenderedDivergence(t *testing.T) {
+	t.Parallel()
+	diverged := &session.BranchDivergedError{
+		Branch: "polecat/goose/gt-pyh5p6", Local: "aaa", Remote: "bbb", MergeBase: "mmm",
+		LocalOnly: 1, RemoteOnly: 2, Refusal: errors.New(" ! [rejected]"),
+	}
+	cases := []struct {
+		name  string
+		child string
+		want  bool
+	}{
+		{
+			name:  "the rendered divergence",
+			child: "preparing session for goose: pushing polecat/goose/gt-pyh5p6: " + diverged.Error(),
+			want:  true,
+		},
+		{
+			name:  "the marker with no branch before it",
+			child: "the remote said diverged from origin: retry later",
+			want:  false,
+		},
+		{
+			name:  "the marker after another word",
+			child: "the subbranch polecat/goose/gt-pyh5p6 diverged from origin: local aaa",
+			want:  false,
+		},
+		{
+			name:  "a ref against origin/HEAD",
+			child: "branch polecat/goose/gt-pyh5p6 diverged from origin/HEAD",
+			want:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{
+				logger: discardLogger,
+				config: &Config{TownRoot: t.TempDir()},
+				gtPath: "gt",
+				execCmd: newFakeCLI(cliBySub(map[string]cliReply{
+					"session restart": {code: 1, stderr: "Error: " + tc.child + "\n"},
+				})).run,
+				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+					PatrolScan: &PatrolScanConfig{Enabled: true, Rigs: []string{"gastown"}},
+				}},
+			}
+			err := d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "goose"))
+			var got *patrolRestartDiverged
+			if isDiverged := errors.As(err, &got); isDiverged != tc.want {
+				t.Errorf("restart error = %v, read as a divergence = %v, want %v", err, isDiverged, tc.want)
+			}
+		})
+	}
 }
 
 // A patrol-restart alert is filed in the town, not in the daemon, so the
