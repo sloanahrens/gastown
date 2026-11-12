@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -169,6 +171,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 	if fields == nil {
 		log("kept: no agent bead, so this town does not track it as a seat")
 		h.clearPendingSeatEnd(rig, name)
+		h.clearKeptSeat(rig, name)
 		return false
 	}
 	if _, ok, err := h.openshellSeatFor(fields.Agent); err != nil {
@@ -179,6 +182,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// A tmux seat keeps today's behavior, silently. Whatever a later
 		// pass recorded about the seat is answered: it is not a sandbox seat.
 		h.clearPendingSeatEnd(rig, name)
+		h.clearKeptSeat(rig, name)
 		return false
 	}
 	rigPath := filepath.Join(h.town(), rig)
@@ -261,6 +265,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		log("kept: %v", err)
 		return false
 	case partial != "":
+		h.clearKeptSeat(rig, name)
 		log("its host directories were partly removed, then the removal failed: %s (the seat is finished: landed %s)", partial, landing.BeadID)
 		return false
 	case unmeasured != "":
@@ -273,13 +278,17 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// The landing's own run of this step is spent, so the seat was
 		// recorded under the lock with its landing facts and is offered again
 		// on later passes until the ask has happened or the window has closed
-		// (gt-381oj).
+		// (gt-381oj). A kept record from an earlier pass names a reason the
+		// seat no longer has, so it goes; the rules keep has its own record.
+		h.clearKeptSeat(rig, name)
 		log("kept: %s", kept)
 		return false
 	case kept != "":
+		h.recordKeptSeat(rig, name, landing, kept)
 		log("kept: %s", kept)
 		return false
 	case removed:
+		h.clearKeptSeat(rig, name)
 		log("removed its host directories: the seat is finished (landed %s)", landing.BeadID)
 	}
 	return removed
@@ -306,6 +315,41 @@ func (h *patrolScanHost) recordPendingSeatEnd(rig, name string, landing sandboxS
 func (h *patrolScanHost) clearPendingSeatEnd(rig, name string) {
 	if err := removePendingSandboxSeatEnd(h.town(), rig, name); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its pending record: %v", rig, name, err)
+	}
+}
+
+// recordKeptSeat leaves the record of a keep: the bead, and the reason the end
+// gave. A keep whose reason is unchanged keeps the since its first pass stamped,
+// so the record ages from the start of the keep; a changed reason starts a new
+// since. A record it cannot read is logged, and the since starts from now. A
+// write that fails is logged, and the keep stands (gt-464nw6).
+func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLanding, reason string) {
+	path, err := keptSandboxSeatPath(h.town(), rig, name)
+	if err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the keep: %v", rig, name, err)
+		return
+	}
+	since := h.d.clk().Now().UTC()
+	prev, err := readKeptSandboxSeatRecord(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// The first pass of this keep.
+	case err != nil:
+		h.d.logger.Printf("sandbox seat end %s/%s: its kept record is unreadable, so the keep is dated from now: %v", rig, name, err)
+	case prev.Reason == reason:
+		since = prev.Since
+	}
+	rec := keptSandboxSeatRecord{Bead: landing.BeadID, Reason: reason, Since: since}
+	if err := writeKeptSandboxSeat(h.town(), rig, name, rec); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the keep: %v; the seat is kept all the same", rig, name, err)
+	}
+}
+
+// clearKeptSeat forgets the kept record of a seat the end has decided is no
+// longer kept. A removal that fails is logged, and the decision stands.
+func (h *patrolScanHost) clearKeptSeat(rig, name string) {
+	if err := removeKeptSandboxSeat(h.town(), rig, name); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its kept record: %v", rig, name, err)
 	}
 }
 
