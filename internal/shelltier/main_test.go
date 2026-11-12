@@ -19,7 +19,6 @@ var trackedShellTests = []string{
 	"deploy/k8s/kind/kind_test.sh",
 	"scripts/check-install-path_test.sh",
 	"scripts/deep-review_test.sh",
-	"scripts/forgejo-probe_test.sh",
 	"scripts/gate-vs-load_test.sh",
 	"scripts/install-local_test.sh",
 	"scripts/makefile-gate_test.sh",

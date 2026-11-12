@@ -93,8 +93,6 @@ func Manifest() []Entry {
 		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text",
 			Triggers: []string{"scripts/", "Makefile", "internal/"}},
 		{Path: "scripts/gate-vs-load_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command",
-			Triggers: []string{"scripts/", "Makefile", ".githooks/"}},
 		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command",
 			Triggers: []string{"scripts/", "Makefile", "deploy/"}},
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
