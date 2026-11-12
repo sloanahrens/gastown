@@ -2983,14 +2983,16 @@ func (g *Git) CreateBranchFrom(name, ref string) error {
 // BranchExists checks if a branch exists locally.
 func (g *Git) BranchExists(name string) (bool, error) {
 	_, err := g.run("show-ref", "--verify", "--quiet", "refs/heads/"+name)
-	if err != nil {
-		// Exit code 1 means branch doesn't exist
-		if strings.Contains(err.Error(), "exit status 1") {
-			return false, nil
-		}
-		return false, err
+	if err == nil {
+		return true, nil
 	}
-	return true, nil
+	// Exit code 1 means the branch doesn't exist; any other failure is an
+	// error. Read the status, not the text: "exit status 128" contains
+	// "exit status 1".
+	if exitCode(err) == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 // RefExists checks if a ref exists (works for any ref including origin/<branch>).
@@ -3000,13 +3002,15 @@ func (g *Git) RefExists(ref string) (bool, error) {
 	// exit 0 = exists, exit 1 = missing, exit >1 = error.
 	if strings.HasPrefix(ref, "refs/") {
 		_, err := g.run("show-ref", "--verify", "--quiet", ref)
-		if err != nil {
-			if strings.Contains(err.Error(), "exit status 1") {
-				return false, nil
-			}
-			return false, err
+		if err == nil {
+			return true, nil
 		}
-		return true, nil
+		// Exit code 1 means the ref is missing; anything else — a fatal
+		// repository error (128) included — is returned.
+		if exitCode(err) == 1 {
+			return false, nil
+		}
+		return false, err
 	}
 
 	// Short refs (e.g., origin/main) need rev-parse --verify.
@@ -3037,8 +3041,9 @@ func (g *Git) UpdateRef(ref, commit string) error {
 func (g *Git) IsEmpty() (bool, error) {
 	out, err := g.run("show-ref")
 	if err != nil {
-		// git show-ref exits 1 when there are no refs — that means empty
-		if strings.Contains(err.Error(), "exit status 1") {
+		// git show-ref exits 1 when there are no refs — that means empty; a
+		// fatal failure (128) is an error, never a quiet "empty".
+		if exitCode(err) == 1 {
 			return true, nil
 		}
 		return false, err
@@ -3234,13 +3239,15 @@ func shortSHA(sha string) string {
 func (g *Git) RemoteTrackingBranchExists(remote, branch string) (bool, error) {
 	ref := fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
 	_, err := g.run("show-ref", "--verify", "--quiet", ref)
-	if err != nil {
-		if strings.Contains(err.Error(), "exit status 1") {
-			return false, nil
-		}
-		return false, err
+	if err == nil {
+		return true, nil
 	}
-	return true, nil
+	// Exit code 1 means the remote-tracking ref is missing; any other
+	// failure is returned.
+	if exitCode(err) == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 // DeleteBranch deletes a local branch.

@@ -207,6 +207,7 @@ var guardTriggers = []struct {
 	{"internal/tmux", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/deps", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/git", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
