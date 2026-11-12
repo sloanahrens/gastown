@@ -285,7 +285,7 @@ const (
 	// TrackerName names the trackerd Deployment and labels its pod.
 	TrackerName = "trackerd"
 	// TrackerPort is where the relay listens and where another pod reaches
-	// trackerd. The next bead's Service publishes it.
+	// trackerd; trackerService publishes it.
 	TrackerPort = 7433
 	// TrackerListenPort is trackerd's loopback port, the relay's target.
 	TrackerListenPort = 7434
@@ -711,6 +711,7 @@ type Manifests struct {
 	DoltBackupClaim      *PersistentVolumeClaim
 	ForgejoService       Service
 	DashboardService     Service
+	TrackerService       Service
 	Secrets              []Secret
 	Deployment           Deployment
 	DashboardDeployment  Deployment
@@ -782,6 +783,7 @@ func Build(v Values) (Manifests, error) {
 		m.DashboardDeployment = dashboard
 	}
 	if v.Tracker {
+		m.TrackerService = trackerService(namespace)
 		m.TrackerDeployment = tracker
 	}
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
@@ -1245,6 +1247,22 @@ func dashboardService(namespace string) Service {
 	}
 }
 
+// trackerService publishes the relay's port inside the cluster, so another pod
+// in the control cluster reaches trackerd by name. Its selector is the tracker
+// pod's own label, which neither the daemon's nor the dashboard's pods carry.
+// The port is the relay's TrackerPort, not trackerd's loopback listen.
+func trackerService(namespace string) Service {
+	return Service{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Service"},
+		Metadata: ObjectMeta{Name: TrackerName, Namespace: namespace, Labels: trackerLabels()},
+		Spec: ServiceSpec{
+			Type:     "ClusterIP",
+			Selector: trackerSelectorLabels(),
+			Ports:    []ServicePort{{Name: "http", Port: TrackerPort, Protocol: "TCP"}},
+		},
+	}
+}
+
 // dashboardDeployment is the dashboard's pod: one container running `gt dashboard`,
 // the town-state claim read-only, and the viewer token. The pod takes no
 // ServiceAccount token, and its only writable volume is an emptyDir at /tmp; the
@@ -1428,6 +1446,33 @@ func trackerContainer(v Values) Container {
 			Requests: resourceList(v),
 			Limits:   resourceList(v),
 		},
+		ReadinessProbe: trackerProbe(20, 15, 10, 3),
+		// Liveness is no stricter than readiness: every number is at least the
+		// readiness number, and the longer delay and threshold keep one slow
+		// request from restarting the pod.
+		LivenessProbe: trackerProbe(60, 60, 15, 5),
+	}
+}
+
+// trackerProbe runs curl in the trackerd container through the relay's port, so
+// one probe covers trackerd and the relay together. It passes when trackerd
+// answered an HTTP request, a 401 included, since that is what trackerd sends
+// to an unauthenticated request (tracker/server/server.go); -f is absent because
+// it would fail the probe for ever. Relay down is connection refused; relay up
+// with trackerd down is an empty reply (curl exit 52, reasoned from socat
+// closing an accepted connection whose upstream refused, not measured); a hang
+// hits --max-time. It does not check that the token store or Postgres work: a
+// 401 needs neither.
+func trackerProbe(initialDelay, period, timeout, failures int32) *Probe {
+	return &Probe{
+		Exec: &ExecAction{Command: []string{
+			"curl", "-sS", "-o", "/dev/null", "--max-time", "5",
+			"http://127.0.0.1:" + strconv.Itoa(TrackerPort) + "/v1/stats",
+		}},
+		InitialDelaySeconds: initialDelay,
+		PeriodSeconds:       period,
+		TimeoutSeconds:      timeout,
+		FailureThreshold:    failures,
 	}
 }
 
@@ -2267,6 +2312,10 @@ func Render(w io.Writer, m Manifests) error {
 	// zero object is one that was not rendered and is not written.
 	if m.DashboardService.Kind != "" {
 		docs = append(docs, m.DashboardService)
+	}
+	// Build leaves the tracker Service zero unless Values.Tracker is set.
+	if m.TrackerService.Kind != "" {
+		docs = append(docs, m.TrackerService)
 	}
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
