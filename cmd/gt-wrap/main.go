@@ -135,7 +135,7 @@ func run(argv []string, s surface) int {
 	args := argv[1:]
 	nat, native := cfg.Native[name]
 	if native && diagnose {
-		if status := reportNative(s.stdout, nat, s.stat); status != 0 {
+		if status := reportNative(s.stdout, nat, s.stat, s.executable); status != 0 {
 			return status
 		}
 	}

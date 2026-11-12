@@ -85,3 +85,57 @@ func TestNativeCheckReportsAStatFailure(t *testing.T) {
 		t.Fatalf("Check() = %v, want the stat error to be carried", err)
 	}
 }
+
+func TestNativeRefusesItself(t *testing.T) {
+	t.Parallel()
+	// The wrapper is the test binary, a real executable; the other file is the
+	// system shell, a different one. Neither is written by the test.
+	dir := t.TempDir()
+	wrapper, err := os.Executable()
+	if err != nil {
+		t.Fatalf("find the test binary: %v", err)
+	}
+	const other = "/bin/sh"
+	link := filepath.Join(dir, "om-link")
+	if err := os.Symlink(wrapper, link); err != nil {
+		t.Fatalf("symlink the wrapper: %v", err)
+	}
+	hard := filepath.Join(dir, "om-hard")
+	if err := os.Link(wrapper, hard); err != nil {
+		t.Fatalf("link the wrapper: %v", err)
+	}
+	self := func() (string, error) { return wrapper, nil }
+
+	for name, path := range map[string]string{"the same path": wrapper, "a symlink to it": link, "a hard link of it": hard} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			t.Parallel()
+			err := Native{Tool: "om", Path: path}.CheckNotSelf(os.Stat, self)
+			if err == nil || !strings.Contains(err.Error(), "native.om.path") || !strings.Contains(err.Error(), "is this wrapper itself") {
+				t.Fatalf("CheckNotSelf = %v, want a refusal naming native.om.path and the wrapper", err)
+			}
+		})
+	}
+	t.Run("accepts another file", func(t *testing.T) {
+		t.Parallel()
+		if err := (Native{Tool: "om", Path: other}).CheckNotSelf(os.Stat, self); err != nil {
+			t.Fatalf("CheckNotSelf = %v, want nil for a different file", err)
+		}
+	})
+	boom := errors.New("boom")
+	for name, tc := range map[string]struct {
+		executable func() (string, error)
+		stat       func(string) (fs.FileInfo, error)
+	}{
+		"no way to find the wrapper": {executable: nil, stat: os.Stat},
+		"the wrapper not found":      {executable: func() (string, error) { return "", boom }, stat: os.Stat},
+		"the wrapper unreadable":     {executable: self, stat: func(p string) (fs.FileInfo, error) { return nil, boom }},
+	} {
+		t.Run("refuses when "+name, func(t *testing.T) {
+			t.Parallel()
+			err := Native{Tool: "om", Path: other}.CheckNotSelf(tc.stat, tc.executable)
+			if err == nil || !strings.Contains(err.Error(), "cannot be compared") {
+				t.Fatalf("CheckNotSelf = %v, want a refusal: unknown is not different", err)
+			}
+		})
+	}
+}

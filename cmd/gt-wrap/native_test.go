@@ -251,3 +251,48 @@ func TestDoctorOmReportsNativePath(t *testing.T) {
 		}
 	})
 }
+
+// selfConfig points the native om at the wrapper the harness is running as, the
+// state after the cutover when the config still names the installed om.
+func selfConfig(t *testing.T, h *harness) string {
+	t.Helper()
+	self, err := h.surface.executable()
+	if err != nil {
+		t.Fatalf("find the stand-in wrapper: %v", err)
+	}
+	return nativeConfig(t, omNative(self, "review"))
+}
+
+func TestRunNativeSelfPathRefused(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, selfConfig(t, h))
+	fp := &fakeProcess{}
+	h.surface.native = fp
+
+	if exit := h.run("om", "review", "-base", "origin/main"); exit != 1 {
+		t.Fatalf("run = %d, want 1; stdout: %s", exit, h.stdout)
+	}
+	if !strings.Contains(h.stderr.String(), "native.om.path") || !strings.Contains(h.stderr.String(), "is this wrapper itself") {
+		t.Errorf("stderr %q does not say the native path is the wrapper", h.stderr)
+	}
+	if fp.ran {
+		t.Error("the wrapper started a process for a native path that is itself")
+	}
+	if h.fake.launched || h.targetSet {
+		t.Error("a refused native call reached the target")
+	}
+}
+
+func TestDoctorNativeSelfPathDown(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, selfConfig(t, h))
+	h.fake.diag = gtwrap.Diagnosis{Rung: gtwrap.RungExec, Container: "gt-daemon", Image: "gt-daemon:1", Reason: "up"}
+	if exit := h.run("om", "--doctor"); exit != 1 {
+		t.Fatalf("run = %d, want 1; stderr: %s", exit, h.stderr)
+	}
+	if !strings.Contains(h.stdout.String(), "(not runnable)") || !strings.Contains(h.stdout.String(), "is this wrapper itself") {
+		t.Errorf("stdout %q does not report the native path as the wrapper", h.stdout)
+	}
+}

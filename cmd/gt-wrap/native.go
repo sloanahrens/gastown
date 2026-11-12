@@ -37,12 +37,21 @@ func nativeTools(entries map[string]nativeEntry, path string) (map[string]gtwrap
 	return out, nil
 }
 
+// checkNative is every refusal a native path can earn: it cannot run, or it is
+// this wrapper. The call path and --doctor both ask it, so they cannot differ.
+func checkNative(nat gtwrap.Native, stat func(string) (fs.FileInfo, error), executable func() (string, error)) error {
+	if err := nat.Check(stat); err != nil {
+		return err
+	}
+	return nat.CheckNotSelf(stat, executable)
+}
+
 // runNative runs a call the config names for the Mac: the configured binary in
 // the caller's directory, with the caller's whole environment, and its exit
 // status passed through. A path that cannot run refuses the call, and the call
 // never reaches the target.
 func runNative(nat gtwrap.Native, args []string, s surface) int {
-	if err := nat.Check(s.stat); err != nil {
+	if err := checkNative(nat, s.stat, s.executable); err != nil {
 		return fail(s.stderr, err)
 	}
 	if s.native == nil {
@@ -65,8 +74,8 @@ func runNative(nat gtwrap.Native, args []string, s surface) int {
 
 // reportNative is the native line of --doctor: the path a native call runs, and
 // whether it can run. A path that cannot run is down, so the doctor exits 1.
-func reportNative(stdout io.Writer, nat gtwrap.Native, stat func(string) (fs.FileInfo, error)) int {
-	if err := nat.Check(stat); err != nil {
+func reportNative(stdout io.Writer, nat gtwrap.Native, stat func(string) (fs.FileInfo, error), executable func() (string, error)) int {
+	if err := checkNative(nat, stat, executable); err != nil {
 		fmt.Fprintf(stdout, "native: %q (not runnable): %v\n", nat.Path, err)
 		return exitFailure
 	}

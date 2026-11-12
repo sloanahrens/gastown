@@ -70,7 +70,11 @@ func newHarness(t *testing.T) *harness {
 		stdout: &bytes.Buffer{},
 		stderr: &bytes.Buffer{},
 	}
+	// The wrapper running now is the test binary: a real executable the check
+	// that a native path is not the wrapper itself can compare with, and no file
+	// the test has to make executable.
 	h.surface = surface{
+		executable: os.Executable,
 		getenv: func(name string) string {
 			if name == "HOME" {
 				return h.home
