@@ -720,3 +720,169 @@ func TestTemplateSkeleton(t *testing.T) {
 		}
 	})
 }
+
+// otherRigSpec is goodSpec as a bead of the gastown rig in a town whose rigs
+// are rigs, with its Constraints body replaced by constraints (gt-qotsst).
+func otherRigSpec(constraints string, rigs ...string) Spec {
+	s := goodSpec()
+	s.Rig = "gastown"
+	s.TownRigs = rigs
+	s.Description = strings.Replace(s.Description, "Go only.", constraints, 1)
+	return s
+}
+
+// refusalNaming returns the refusal whose reason holds every one of wants.
+func refusalNaming(v LintVerdict, wants ...string) (Refusal, bool) {
+	for _, r := range v.Refusals {
+		if containsAll(r.Reason, wants) {
+			return r, true
+		}
+	}
+	return Refusal{}, false
+}
+
+func containsAll(s string, wants []string) bool {
+	for _, w := range wants {
+		if !strings.Contains(s, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestOtherRigRefusesPathInAnotherRig pins the refusal: a Constraints path
+// into another rig's directory, in any of the four forms, refuses the bead
+// and the refusal names the rig and the path.
+func TestOtherRigRefusesPathInAnotherRig(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, path string }{
+		{"town checkout", "~/gt/om/internal/cli/cli.go"},
+		{"sandbox checkout", "/sandbox/gt/om/"},
+		{"macOS checkout", "/Users/alice/gt/om/internal/cli/cli.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := otherRigSpec("Change "+tc.path+" to read the flag.", "gastown", "om", "beads")
+			v := Lint(s, defaultTemplate())
+			if v.Route != RouteRefuse {
+				t.Fatalf("Route = %s, want refuse: %s", v.Route, v.Line("gt-good"))
+			}
+			if _, ok := refusalNaming(v, "om", tc.path, "split the work into one bead per rig", "repo, commit, file and line"); !ok {
+				t.Errorf("no refusal names rig om and path %s: %+v", tc.path, v.Refusals)
+			}
+		})
+	}
+}
+
+// TestOtherRigPassesOwnRig pins that a path into the bead's own rig is not a
+// refusal, in the same forms the other-rig refusal reads.
+func TestOtherRigPassesOwnRig(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"~/gt/gastown/internal/cli/cli.go", "/sandbox/gt/gastown/", "/Users/alice/gt/gastown/internal/cli/cli.go"} {
+		s := otherRigSpec("Change "+path+" to read the flag.", "gastown", "om", "beads")
+		if v := Lint(s, defaultTemplate()); !v.Clean() {
+			t.Errorf("own-rig path %s refused: %s", path, v.Line("gt-good"))
+		}
+	}
+}
+
+// TestOtherRigRefusesInGateAndAcceptance pins that the Gate and the acceptance
+// list are read as well as the Goal and Constraints.
+func TestOtherRigRefusesInGateAndAcceptance(t *testing.T) {
+	t.Parallel()
+	s := otherRigSpec("Go only.", "gastown", "om")
+	s.Description = strings.Replace(s.Description, "make gate", "run ~/gt/om/scripts/gate.sh", 1)
+	s.Acceptance = "- [ ] the fix passes ~/gt/om/internal/x_test.go"
+	v := Lint(s, defaultTemplate())
+	for _, field := range []string{"## Gate", "acceptance"} {
+		if !refusalIn(v, field, "in the om rig") {
+			t.Errorf("%s path not refused: %+v", field, v.Refusals)
+		}
+	}
+}
+
+// refusalIn reports whether v refuses field with a reason holding want.
+func refusalIn(v LintVerdict, field, want string) bool {
+	for _, r := range v.Refusals {
+		if r.Field == field && strings.Contains(r.Reason, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOtherRigIgnoresOutOfScope pins that Out of scope may name another rig's
+// path: a bead says what it leaves to another rig there.
+func TestOtherRigIgnoresOutOfScope(t *testing.T) {
+	t.Parallel()
+	s := otherRigSpec("Go only.", "gastown", "om")
+	s.Description = strings.Replace(s.Description, "Nothing else.", "The om fix in ~/gt/om/internal/cli/cli.go is left to a bead for om.", 1)
+	if v := LintShape(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("out-of-scope path refused: %s", v.Line("gt-good"))
+	}
+}
+
+// TestOtherRigMatchesWholeRigName pins that a rig name inside a longer word,
+// or the word "command", names no rig: "omega" and "xom" are not "om".
+func TestOtherRigMatchesWholeRigName(t *testing.T) {
+	t.Parallel()
+	s := otherRigSpec("Read the command output in /sandbox/gt/omega/ and ~/gt/omnibus/notes.md, not /sandbox/gt/xom/.", "gastown", "om")
+	if v := LintShape(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("longer names refused as om: %s", v.Line("gt-good"))
+	}
+}
+
+// TestOtherRigEmptyListStillRefusesPath pins that a rig-name list the caller did
+// not read (an absent registry) still refuses a path into another rig: the
+// refusal compares the path's rig segment with the bead's own rig, not with the
+// list. A path into the bead's own rig still passes.
+func TestOtherRigEmptyListStillRefusesPath(t *testing.T) {
+	t.Parallel()
+	for name, rigs := range map[string][]string{"nil": nil, "empty": {}, "blank": {" ", ""}} {
+		s := otherRigSpec("Change ~/gt/om/internal/cli/cli.go to read the flag.", rigs...)
+		v := Lint(s, defaultTemplate())
+		if v.Route != RouteRefuse {
+			t.Errorf("%s rig list passed a path into om: %s", name, v.Line("gt-good"))
+		}
+		if _, ok := refusalNaming(v, "om", "~/gt/om/internal/cli/cli.go"); !ok {
+			t.Errorf("%s rig list: no refusal names om and the path: %+v", name, v.Refusals)
+		}
+		own := otherRigSpec("Change ~/gt/gastown/internal/cli/cli.go to read the flag.", rigs...)
+		if v := Lint(own, defaultTemplate()); !v.Clean() {
+			t.Errorf("%s rig list refused a path into the bead's own rig: %s", name, v.Line("gt-good"))
+		}
+	}
+}
+
+// TestOtherRigNotCheckedWithoutTheBeadsRig pins that a Spec which names no rig
+// of its own earns no other-rig refusal, with or without the town's list: the
+// LintShape callers outside the dispatcher (the findings filer, the tier sweep,
+// the dashboard badge) build such a Spec, and a path into any rig, the bead's
+// own included, must not turn their beads unshaped.
+func TestOtherRigNotCheckedWithoutTheBeadsRig(t *testing.T) {
+	t.Parallel()
+	for name, rigs := range map[string][]string{"no list": nil, "with the list": {"gastown", "om"}} {
+		for _, path := range []string{"~/gt/gastown/internal/cli/cli.go", "~/gt/om/internal/cli/cli.go"} {
+			s := otherRigSpec("Change "+path+" to read the flag.", rigs...)
+			s.Rig = ""
+			if v := LintShape(s, defaultTemplate()); !v.Clean() {
+				t.Errorf("%s, no rig of its own, path %s: refused: %s", name, path, v.Line("gt-good"))
+			}
+		}
+	}
+}
+
+// TestOtherRigListNarrowsTheSegments pins that with the town's list a segment
+// that is not a rig passes, so a path under the town root's own directories is
+// not named a rig; with no list every other segment is refused.
+func TestOtherRigListNarrowsTheSegments(t *testing.T) {
+	t.Parallel()
+	const path = "/sandbox/gt/docs/AGENT-ERGONOMICS.md"
+	if v := LintShape(otherRigSpec("Read "+path+" first.", "gastown", "om"), defaultTemplate()); !v.Clean() {
+		t.Errorf("a town directory that is no rig refused with the list: %s", v.Line("gt-good"))
+	}
+	if v := LintShape(otherRigSpec("Read "+path+" first."), defaultTemplate()); v.Route != RouteRefuse {
+		t.Errorf("a town directory passed with no list: %s", v.Line("gt-good"))
+	}
+}

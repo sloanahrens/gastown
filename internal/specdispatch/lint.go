@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -262,6 +263,16 @@ type Spec struct {
 	// set the caller did not fill, and no path passes on it. Only a bead with a
 	// Files section reads the set; the cue grammar is unchanged.
 	BlockerCreates []string
+	// Rig is the bead's own rig, filled by the caller from its ID prefix. The
+	// other-rig check reads every rig in TownRigs except this one. Empty is a
+	// bead with no rig, so every known rig counts as another (gt-qotsst).
+	Rig string
+	// TownRigs is the town's rig names, filled by the caller from the rig
+	// registry. Nil or empty is a list the caller did not read: a path into a
+	// rig-shaped directory other than the bead's own is still refused, and
+	// Advice says the prose check did not run when the bead names another rig's
+	// read (gt-qotsst).
+	TownRigs []string
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -553,6 +564,139 @@ func acceptanceDisagreement(field, section string) string {
 		len(sectionItems), len(fieldItems), side, firstLine(longer[short]))
 }
 
+// knownRigs is the town's rig names the caller passed, cleaned: blanks and
+// repeats dropped, sorted. Empty is a list the caller did not read.
+func knownRigs(s Spec) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range s.TownRigs {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// otherRigs is knownRigs without the bead's own rig: the rigs a path may not
+// name, since a polecat's sandbox holds only its own rig (gt-qotsst).
+func otherRigs(s Spec) []string {
+	var out []string
+	for _, r := range knownRigs(s) {
+		if r != s.Rig {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// rigAlternation is the regexp alternation that matches any of rigs, each
+// quoted. A rig name with a metacharacter in it matches itself and nothing else.
+func rigAlternation(rigs []string) string {
+	quoted := make([]string, len(rigs))
+	for i, r := range rigs {
+		quoted[i] = regexp.QuoteMeta(r)
+	}
+	return "(?:" + strings.Join(quoted, "|") + ")"
+}
+
+// genericRigName matches any rig-shaped name. The other-rig check falls back to
+// it when the town's rig list is unread, so a path into any rig is still refused
+// rather than passed for want of the list. A dotted name (".beads") is not a rig.
+const genericRigName = `[A-Za-z][A-Za-z0-9_-]*`
+
+// otherRigPathPatterns is the form a path into a rig's directory takes in
+// prose: a checkout under the town (~/gt/<rig>/, /Users/<user>/gt/<rig>/,
+// /sandbox/gt/<rig>/). Group 1 is the path and group 2 the rig. The rig's
+// retired per-rig clone is not a form of its own: a path to it under the town
+// root already matches, and the retirement guard allows no new name for it.
+func otherRigPathPatterns(rigAlt string) []*regexp.Regexp {
+	return []*regexp.Regexp{
+		regexp.MustCompile("((?:~/gt|/Users/[^/\\s]+/gt|/sandbox/gt)/(" + rigAlt + ")/[^\\s`'\"<>()\\[\\],;]*)"),
+	}
+}
+
+// otherRigPath is one path a text names inside another rig's directory.
+type otherRigPath struct {
+	Rig  string
+	Path string
+}
+
+// otherRigPaths returns the paths in text that lie in a rig's directory, other
+// than own, in first-seen order and without duplicates. rigAlt names the rigs
+// to look for.
+func otherRigPaths(text, rigAlt, own string) []otherRigPath {
+	var out []otherRigPath
+	seen := map[string]bool{}
+	for _, re := range otherRigPathPatterns(rigAlt) {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			path, rig := strings.TrimRight(m[1], ".:"), m[2]
+			if rig == own || seen[path] {
+				continue
+			}
+			seen[path] = true
+			out = append(out, otherRigPath{Rig: rig, Path: path})
+		}
+	}
+	return out
+}
+
+// otherRigRefusals is the shape failure a bead earns for naming a path inside
+// another rig's directory. A polecat's sandbox holds only its own rig, so the
+// bead cannot read that path; the refusal says to split the work or to write the
+// fact into the bead. The Goal, Constraints, Gate and acceptance text is read,
+// one refusal per section that names such a path. Out of scope is not read: a
+// bead may say what it leaves to another rig.
+//
+// With the town's rig list the rig segment must be one of the other rigs. With
+// no list (an absent registry reads as an empty one) every rig-shaped segment
+// other than the bead's own is refused, so a town that cannot name its rigs
+// still holds a bead that sends a polecat into another rig (gt-qotsst). A Spec
+// that names no rig of its own is not checked.
+func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
+	// A caller that does not say which rig the bead belongs to (the findings
+	// filer, the tier sweep and the dashboard badge call LintShape without it)
+	// gives nothing to compare a path with, so the check does not run for it:
+	// refusing every rig-shaped path would refuse the bead's own rig too. The
+	// dispatch tick and gt spec lint always name the rig.
+	if strings.TrimSpace(s.Rig) == "" {
+		return nil
+	}
+	alt := genericRigName
+	if len(knownRigs(s)) > 0 {
+		others := otherRigs(s)
+		if len(others) == 0 {
+			return nil
+		}
+		alt = rigAlternation(others)
+	}
+	fields := []struct{ field, text string }{
+		{"## Goal", sections["goal"]},
+		{"## Constraints", sections["constraints"]},
+		{"## Gate", sections["gate"]},
+		{"acceptance", acceptanceText(s, sections)},
+	}
+	var out []Refusal
+	for _, f := range fields {
+		paths := otherRigPaths(f.text, alt, s.Rig)
+		if len(paths) == 0 {
+			continue
+		}
+		named := make([]string, 0, len(paths))
+		for _, p := range paths {
+			named = append(named, fmt.Sprintf("%s in the %s rig", p.Path, p.Rig))
+		}
+		out = append(out, Refusal{
+			Field:  f.field,
+			Reason: "names " + strings.Join(named, ", ") + ": split the work into one bead per rig, or write the fact into this bead with repo, commit, file and line",
+		})
+	}
+	return out
+}
+
 // Lint validates the shape of a work bead against the template. Every failure
 // is collected, in a fixed check order, so the one-line report always names
 // the same first field for the same bead and --json can list the rest:
@@ -576,7 +720,11 @@ func acceptanceDisagreement(field, section string) string {
 //     that section alone: every modify or read path must exist, a create path
 //     need not, and a section that does not parse is refused
 //     (gt-7t1im, gt-hgt9j.10)
-//  7. size: needs-planning label, a Size that says planning, or more than
+//  7. no Goal, Constraints, Gate or acceptance text names a path inside another
+//     rig's directory: a polecat's sandbox holds only its own rig. The rig list
+//     narrows the segments read as rigs; without it every other rig-shaped
+//     segment is refused (gt-qotsst)
+//  8. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused. A bead labeled overseer-only or operator-only may
 //     say one session of its owner instead (gt-hgt9j.13)
@@ -648,6 +796,7 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 			failures = append(failures, r)
 		}
 	}
+	failures = append(failures, otherRigRefusals(s, sections)...)
 	if len(failures) > 0 {
 		return refusal(failures...)
 	}
