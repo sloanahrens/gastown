@@ -1112,12 +1112,13 @@ consumers:
 `repo_path` is the field a script that runs git in each rig's repository
 consumes. When it is empty or missing, such a script must fail loudly rather
 than no-op (gt-chqi, gt-xxwx). A rig whose only working clone is at
-`<rig>/mayor/rig` has no `.repo.git` in this rule and reports `""`: the
-`mayor/rig` clone is no longer a candidate. Such a rig needs its clone moved
-under `<rig>/refinery/rig` or a bare `.repo.git` added (gt-3lvcjz.30). The daemon's git_hygiene patrol resolves its
-repository through `gitHygieneRepoPath` in `internal/daemon/git_hygiene.go`,
-which prefers the rig's shared bare repo (`.repo.git/`) to what this field
-reports.
+`<rig>/mayor/rig` reports `""`, because `mayor/rig` is no longer a candidate:
+move that clone under `<rig>/refinery/rig` or add a bare `.repo.git`
+(gt-3lvcjz.30). The daemon's git_hygiene patrol resolves its repository through
+`gitHygieneRepoPath` in `internal/daemon/git_hygiene.go`, which prefers the
+rig's shared bare repo (`.repo.git/`) to what this field reports. A rig it
+cannot resolve is logged as skipped and counted in the pass summary, not
+cleaned.
 
 ### Repository Guards
 

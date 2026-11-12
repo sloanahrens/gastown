@@ -582,6 +582,7 @@ test_scope	polecat	"bd close gt-x && go test ./..."	refuse	polecat 'go test' of 
 container_suite	polecat	"bd todo add \"x\""	allow		gt-gq3e23	15c34025ef4c6d1d1172d06958c0c0fb3830fc3eb3a098e5931a5f61e327a0ff
 dangerous	polecat	"bd todo add \"x\""	allow		gt-gq3e23	15c34025ef4c6d1d1172d06958c0c0fb3830fc3eb3a098e5931a5f61e327a0ff
 test_scope	polecat	"bd todo add \"x\""	allow		gt-gq3e23	15c34025ef4c6d1d1172d06958c0c0fb3830fc3eb3a098e5931a5f61e327a0ff
+# The three rows below share one stamp: the stamp column is guardSourceHash, the sha256 of the tap_guard sources and the parser, and these rows were judged against the same guard version (gt-3lvcjz.30).
 dangerous	crew	"grep -rn TODO {town}/gastown/mayor"	refuse	a rig's worktree dir	gt-3lvcjz.30	25525f031f423304e4beab561ac41d7fd14ab181c83c76ba884e86cec8e048e3
 container_suite	polecat	"grep -rn TODO {town}/gastown/mayor"	allow		gt-3lvcjz.30	25525f031f423304e4beab561ac41d7fd14ab181c83c76ba884e86cec8e048e3
 test_scope	polecat	"grep -rn TODO {town}/gastown/mayor"	allow		gt-3lvcjz.30	25525f031f423304e4beab561ac41d7fd14ab181c83c76ba884e86cec8e048e3

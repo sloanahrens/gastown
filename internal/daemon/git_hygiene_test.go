@@ -41,7 +41,8 @@ func TestGitHygieneRepoPath(t *testing.T) {
 		name string
 		// layout is what the rig root holds: "bare" for the shared .repo.git,
 		// "emptybare" for a directory with that name and no repository behind
-		// it, "clone" for a refinery/rig working tree.
+		// it, "clone" for a refinery/rig working tree, "legacy" for a
+		// mayor/rig working tree the layout no longer offers as a clone.
 		layout []string
 		want   string // the repository to clean, relative to the rig root; "" for none
 	}{
@@ -50,6 +51,8 @@ func TestGitHygieneRepoPath(t *testing.T) {
 		{name: "working clone only", layout: []string{"clone"}, want: filepath.Join("refinery", "rig")},
 		{name: "empty .repo.git beside the working clone", layout: []string{"emptybare", "clone"}, want: filepath.Join("refinery", "rig")},
 		{name: "empty .repo.git directory only", layout: []string{"emptybare"}, want: ""},
+		{name: "legacy mayor/rig clone only", layout: []string{"legacy"}, want: ""},
+		{name: "legacy mayor/rig clone beside the bare repo", layout: []string{"bare", "legacy"}, want: ".repo.git"},
 		{name: "no repository", layout: nil, want: ""},
 	}
 	for _, tt := range tests {
@@ -65,6 +68,8 @@ func TestGitHygieneRepoPath(t *testing.T) {
 				case "emptybare":
 					// The directory name with nothing behind it (gt-nm4b9).
 					mustMkdirAll(t, filepath.Join(rigRoot, ".repo.git"))
+				case "legacy":
+					mustMkdirAll(t, filepath.Join(rigRoot, "mayor", "rig", ".git"))
 				default:
 					mustMkdirAll(t, filepath.Join(rigRoot, "refinery", "rig", ".git"))
 				}
@@ -609,6 +614,52 @@ func TestRunGitHygiene_CleansTheBareRepoWhenTheRigAlsoHasAClone(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), bare) {
 		t.Errorf("log does not name the bare repo %s:\n%s", bare, logs.String())
+	}
+}
+
+// A rig that has only the legacy mayor/rig clone has no repository the patrol
+// cleans. The pass logs it, counts it in the summary and leaves its clone alone,
+// while the rig with a shared bare repo is still cleaned (gt-3lvcjz.30).
+func TestRunGitHygiene_LogsAndCountsALegacyMayorOnlyRig(t *testing.T) {
+	t.Parallel()
+	d, feed, logs := newGitHygieneDaemon(t, "r1", "legacy")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/polecat/merged", base)
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/done", base)
+
+	legacy := filepath.Join(d.config.TownRoot, "legacy", "mayor", "rig")
+	f.Clone(t, origin, legacy)
+	f.SetRef(t, legacy, "refs/heads/done", base)
+
+	d.runGitHygiene()
+
+	if got := f.Ref(bare, "refs/heads/done"); got != "" {
+		t.Errorf("r1 local done = %q, want the merged branch deleted", got)
+	}
+	legacyBranches, err := d.gitAt(legacy).ListBranches("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"done", "main"}; !slices.Equal(legacyBranches, want) {
+		t.Errorf("legacy mayor/rig branches = %v, want %v: the patrol must not clean a legacy clone", legacyBranches, want)
+	}
+	if !strings.Contains(logs.String(), "git_hygiene: rig legacy: skipped, no legacy/.repo.git and no working clone") {
+		t.Errorf("log does not name the skipped legacy rig:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "1 repo(s):") || !strings.Contains(logs.String(), "1 rig(s) skipped") {
+		t.Errorf("log lacks the summary counting the skipped rig:\n%s", logs.String())
+	}
+	if len(feed.payloads) != 0 {
+		t.Errorf("feed = %v, want no failed cycle: r1 has a repository", feed.payloads)
 	}
 }
 
