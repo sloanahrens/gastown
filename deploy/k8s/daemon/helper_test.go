@@ -151,7 +151,7 @@ func TestHelperCarriesNoEnvAndNoAlias(t *testing.T) {
 	}
 	for _, c := range h.Spec.Containers {
 		if len(c.Env) != 0 {
-			t.Errorf("the container %q carries the environment %q, want none", c.Name, c.Env)
+			t.Errorf("the container %q carries the environment %v, want none", c.Name, c.Env)
 		}
 	}
 
@@ -212,7 +212,7 @@ func TestHelperIsTheSeedHelperPod(t *testing.T) {
 		t.Errorf("the helper's image = %q, want the digest %q", c.Image, testImage)
 	}
 	if len(c.Args) != 0 || len(c.Env) != 0 {
-		t.Errorf("the helper's container carries args %q and env %q; it runs sleep and nothing else", c.Args, c.Env)
+		t.Errorf("the helper's container carries args %q and env %v; it runs sleep and nothing else", c.Args, c.Env)
 	}
 	if got, want := c.Command, []string{"sleep", HelperSleepBound}; !slices.Equal(got, want) {
 		t.Errorf("the helper's command = %q, want %q", got, want)
