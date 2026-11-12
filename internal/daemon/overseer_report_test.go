@@ -884,7 +884,7 @@ func TestTriggerOverseerReport(t *testing.T) {
 // overrun guard judges: a bead a seat handed to a second seat is dated from its
 // first sling, not from the sling that reached the seat holding it, and a seat
 // holding no bead has no row (gt-tzbtf). The fixture stamps a seat actor
-// because a sling by a seat is a handoff; a sling by anyone else starts a new
+// because a sling by a seat is a handoff; a sling by a hand actor starts a new
 // run (gt-m14shr).
 func TestOverseerSeatWorkDatesTheBeadsDispatch(t *testing.T) {
 	t.Parallel()

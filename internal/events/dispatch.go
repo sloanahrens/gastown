@@ -8,8 +8,9 @@ import (
 
 // SpecDispatchActor is the actor the spec dispatcher stamps its slings with,
 // repeating internal/cmd's SpecDispatchActor (a test in internal/cmd holds the
-// two equal). It is not a seat, so its sling starts a fresh dispatch run
-// (DispatchStart, gt-m14shr).
+// two equal). It is not a seat: its sling to a seat other than the bead's last
+// one starts a fresh dispatch run, and a repeat sling to the seat that already
+// holds the bead keeps the run (DispatchStart, gt-m14shr).
 const SpecDispatchActor = "daemon/spec-dispatch"
 
 // DispatchStart returns when bead's current run was dispatched: the earliest
@@ -18,12 +19,16 @@ const SpecDispatchActor = "daemon/spec-dispatch"
 // TypeDone ends the run, whatever exit its payload's status names; so do
 // TypeBeadClosed and TypeOverrunStop.
 //
-// A sling by an actor that is not a seat identity ("<rig>/polecats/<name>")
-// ends the run before it too, though no event recorded that end: the dispatcher,
-// the overseer or a hand sling hands the bead to a new run, and the time the
-// previous run spent is not the new holder's to answer for (gt-m14shr). A sling
-// by a seat is a seat-to-seat handoff, so the clock stays the bead's and moving
-// it between seats cannot restart it.
+// A sling by a seat identity ("<rig>/polecats/<name>") is a seat-to-seat
+// handoff: the clock stays the bead's, so moving it between seats cannot
+// restart it. A sling by the spec dispatcher keeps the run when it names the
+// seat the bead was last slung to, and ends the run before it when it names
+// another: a repeat on a dispatcher tick must never restart the clock, or a
+// re-slung bead would never overrun, while a bead returned to the pool and
+// dispatched to a new seat starts over. Any other actor — the overseer, a crew
+// actor, a hand sling the log could not name — ends the run before it too,
+// though no event recorded that end, repeat to the same seat included: the time
+// the previous run spent is not the new holder's to answer for (gt-m14shr).
 //
 // The second return is false when the log holds no such sling.
 func DispatchStart(evs []Event, bead string) (time.Time, bool) {
@@ -45,7 +50,8 @@ func DispatchStarts(evs []Event) map[string]time.Time {
 // the log can keep the clock current from the lines appended since its last
 // read instead of re-reading the whole file (the dashboard's summary poll,
 // gt-tzbtf). The run a bead's clock dates ends at a done, a close or an overrun
-// stop, and at a sling by an actor that is not a seat.
+// stop, at a dispatcher sling that moves the bead to another seat, and at a
+// sling by any actor that is neither a seat nor the dispatcher.
 type DispatchClock struct {
 	// ends is each bead's latest run end. starts holds the slings since it, in
 	// time order: the earliest is the clock, and a later one is what a run end
@@ -54,6 +60,9 @@ type DispatchClock struct {
 	// whose runs are not ended, which is a handful for any bead the log keeps.
 	ends   map[string]time.Time
 	starts map[string][]dispatchPoint
+	// targets is the seat each bead was last slung to, so a dispatcher sling to
+	// a different seat can be told from a repeat to the seat that holds it.
+	targets map[string]string
 }
 
 // dispatchPoint is one sling filed in a bead's start list: when it was written,
@@ -65,14 +74,18 @@ type dispatchPoint struct {
 
 // NewDispatchClock returns an empty clock.
 func NewDispatchClock() *DispatchClock {
-	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string][]dispatchPoint{}}
+	return &DispatchClock{
+		ends:    map[string]time.Time{},
+		starts:  map[string][]dispatchPoint{},
+		targets: map[string]string{},
+	}
 }
 
 // Add folds evs into the clock, in log order. Adding the same events again
 // changes nothing: a sling already filed is not filed twice, and an end is
-// only a boundary. A sling by an actor that is not a seat ends the bead's run
-// before it first, so it dates the run it starts (DispatchStart); a sling by a
-// seat is a handoff and keeps the run.
+// only a boundary. A sling by a seat is a handoff and keeps the run; a sling by
+// the dispatcher to another seat, and a sling by any other actor, ends the
+// bead's run before it first, so it dates the run it starts (DispatchStart).
 func (c *DispatchClock) Add(evs []Event) {
 	for _, ev := range evs {
 		c.add(ev)
@@ -92,13 +105,28 @@ func (c *DispatchClock) add(ev Event) {
 			return
 		}
 		target, _ := ev.Payload["target"].(string)
-		if !polecatSeat(ev.Actor) {
-			// Only a seat hands the bead on with its run intact. Anyone else —
-			// the dispatcher, the overseer, a crew actor, a hand sling whose
-			// actor the log could not name — starts a new run, so the time the
-			// previous one spent is not the new holder's; a hand sling that
-			// inherited it was stopped 35s in (gt-m14shr).
+		switch {
+		case polecatSeat(ev.Actor):
+			// A seat hands the bead on with the run it holds, so a
+			// seat-to-seat move keeps the clock (gt-m14shr).
+		case ev.Actor == SpecDispatchActor:
+			// A repeat sling to the seat that already holds the bead is the
+			// same run, so a bead re-slung on every dispatcher tick cannot
+			// restart its clock; a sling to another seat means the bead went
+			// back to the pool and starts over (gt-3ga5l). A sling naming no
+			// seat cannot show the bead moved, so it keeps the run too.
+			if prev, ok := c.targets[bead]; ok && target != "" && prev != target {
+				c.EndRun(bead, ts)
+			}
+		default:
+			// The overseer, a crew actor, a hand sling whose actor the log
+			// could not name: the same as a bead returned to the pool, even to
+			// the seat that already holds it. The time the previous run spent
+			// is not the new holder's to answer for (gt-m14shr).
 			c.EndRun(bead, ts)
+		}
+		if target != "" {
+			c.targets[bead] = target
 		}
 		c.addStart(bead, ts, target)
 	case TypeDone, TypeBeadClosed, TypeOverrunStop:
@@ -249,14 +277,14 @@ func runEndTime(ev Event) (time.Time, error) {
 	return eventTime(ev)
 }
 
-// polecatSeat reports whether actor is a seat identity, the
-// "<rig>/polecats/<name>" form role.Actor builds for a polecat. A sling it
-// wrote is a seat-to-seat handoff; every other actor is a dispatcher, an
-// overseer, a crew member or a hand sling the log could not name, and its sling
-// starts a new run (gt-m14shr). The form is matched strictly — a rig name, the
-// literal "polecats" and a polecat name, with nothing around them — because a
-// sling carries whatever actor its writer recorded, and a value that merely
-// resembles a seat must start a new run rather than inherit the old clock.
+// polecatSeat reports whether actor is a seat identity: exactly the
+// "<rig>/polecats/<name>" form role.Actor(role.Polecat, rig, name) builds for a
+// polecat, with a non-empty rig and name and the literal "polecats". A sling it
+// wrote is a seat-to-seat handoff that keeps the run; anything else, including a
+// real seat written in another form, is not a seat and its sling starts a new
+// run (gt-m14shr). The clock errs that way on purpose: a sling carries whatever
+// actor its writer recorded, and a value that merely resembles a seat must not
+// inherit a run it cannot show it holds.
 func polecatSeat(actor string) bool {
 	parts := strings.Split(actor, "/")
 	return len(parts) == 3 && parts[0] != "" && parts[1] == "polecats" && parts[2] != ""

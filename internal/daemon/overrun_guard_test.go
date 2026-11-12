@@ -883,7 +883,7 @@ func TestRunOverrunGuard_GateTimeBeforeARestartIsNotCarried(t *testing.T) {
 // on, even though that seat has held it only a few minutes. A done event ends
 // that run, so a bead dispatched again after it is judged from the new dispatch
 // (gt-tzbtf). The fixture stamps a seat actor because a sling by a seat is a
-// handoff; a sling by anyone else starts a new run (gt-m14shr).
+// handoff; a sling by a hand actor starts a new run (gt-m14shr).
 func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
 	t.Parallel()
 	line := func(ts, typ, bead, target string) string {
@@ -985,6 +985,66 @@ func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
 	}
 }
 
+// A hand sling starts a new run clock (gt-m14shr): the overseer hand-slung
+// gt-8r17fp with actor "unknown" three hours after the dispatcher's sling, and
+// the guard stopped the seat 35s later on the earlier run's clock. The guard
+// must date the run from the hand sling and leave the seat alone, then police
+// that new clock like any other.
+func TestRunOverrunGuard_AHandSlingStartsANewRunClock(t *testing.T) {
+	t.Parallel()
+	line := func(ts, typ, actor string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":%q,"payload":{"bead":"gt-aaa11","target":"gastown/polecats/rictus"}}`,
+			ts, typ, actor)
+	}
+	for _, tt := range []struct {
+		name   string
+		now    time.Time
+		nudges []string
+		stops  []string
+	}{
+		{
+			// Three hours after the dispatcher's sling but three minutes after
+			// the hand sling: the run is the hand sling's, so the guard acts on
+			// nothing. On the clock of the run the hand sling ended, the seat
+			// is far past the stop threshold here.
+			name: "the hand sling's own run is not overdue",
+			now:  time.Date(2026, 10, 13, 12, 3, 0, 0, time.UTC),
+		},
+		{
+			// The same clock past its stop threshold still stops the seat, so
+			// the hand sling starts a run and does not exempt it.
+			name:  "the hand sling's run is still policed",
+			now:   time.Date(2026, 10, 13, 12, 21, 0, 0, time.UTC),
+			stops: []string{"gastown/rictus"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			body := strings.Join([]string{
+				line("2026-10-13T09:00:00Z", events.TypeSling, events.SpecDispatchActor),
+				line("2026-10-13T12:00:00Z", events.TypeSling, "unknown"),
+			}, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(d.config.TownRoot, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11"})
+			f.now = tt.now
+			seams := f.seams()
+			seams.slungAt = (&overrunSlungReader{d: d}).slungAt
+
+			d.runOverrunGuard(seams)
+
+			if !slices.Equal(f.nudges, tt.nudges) {
+				t.Errorf("nudges = %v, want %v", f.nudges, tt.nudges)
+			}
+			if !slices.Equal(f.stops, tt.stops) {
+				t.Errorf("stops = %v, want %v", f.stops, tt.stops)
+			}
+		})
+	}
+}
+
 func TestRunOverrunGuard_UndatedSeatIsLeftAlone(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
@@ -1015,7 +1075,7 @@ func TestRunOverrunGuard_DisabledDoesNothing(t *testing.T) {
 // to a second seat is still dated from its first dispatch, and a done event
 // ends that run, so a bead dispatched again after it starts over (gt-tzbtf).
 // The fixture stamps a seat actor because a sling by a seat is a handoff; a
-// sling by anyone else starts a new run (gt-m14shr).
+// sling by a hand actor starts a new run (gt-m14shr).
 func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
