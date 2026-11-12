@@ -66,21 +66,27 @@ func SandboxTranscriptFolder(rig, polecat string) string {
 }
 
 // CopiedSandboxTranscripts lists the transcripts a seat's copy holds under the
-// seat's sandbox project folder, as paths in the copy. Only regular files are
-// listed, since the copy comes from an untrusted sandbox. A missing copy holds
-// none; a copy that cannot be read is an error, not an empty list, and a seat
-// whose names are not plain names has no copy to name.
-func CopiedSandboxTranscripts(townRoot, rig, polecat string) ([]string, error) {
+// seat's sandbox project folder, as paths in the copy, and how many transcripts
+// the cap left out of it. Only regular files are listed, since the copy comes
+// from an untrusted sandbox. A missing copy holds none; a copy that cannot be
+// read is an error, not an empty list, and a seat whose names are not plain
+// names has no copy to name.
+func CopiedSandboxTranscripts(townRoot, rig, polecat string) ([]string, int, error) {
 	if !plainPathName(rig) || !plainPathName(polecat) {
-		return nil, fmt.Errorf("seat %q/%q names no copy: its rig or polecat is not a plain name", rig, polecat)
+		return nil, 0, fmt.Errorf("seat %q/%q names no copy: its rig or polecat is not a plain name", rig, polecat)
 	}
-	dir := filepath.Join(SandboxTranscriptCopyDir(townRoot, rig, polecat), SandboxTranscriptFolder(rig, polecat))
+	copyDir := SandboxTranscriptCopyDir(townRoot, rig, polecat)
+	skipped, err := readSkippedByCap(copyDir)
+	if err != nil {
+		return nil, 0, err
+	}
+	dir := filepath.Join(copyDir, SandboxTranscriptFolder(rig, polecat))
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, skipped, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading the copied transcripts %s: %w", dir, err)
+		return nil, 0, fmt.Errorf("reading the copied transcripts %s: %w", dir, err)
 	}
 	var paths []string
 	for _, e := range entries {
@@ -89,7 +95,25 @@ func CopiedSandboxTranscripts(townRoot, rig, polecat string) ([]string, error) {
 		}
 		paths = append(paths, filepath.Join(dir, e.Name()))
 	}
-	return paths, nil
+	return paths, skipped, nil
+}
+
+// readSkippedByCap reads the cap record at the root of a copy: how many of the
+// seat's transcripts the cap left out. A copy with no record was not cut short.
+// A record that is not a count is an error, not a copy that was not cut.
+func readSkippedByCap(copyDir string) (int, error) {
+	raw, err := os.ReadFile(filepath.Join(copyDir, sandboxTranscriptMarker))
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading the cap record of the copied transcripts: %w", err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || n < 1 {
+		return 0, errors.New("the cap record of the copied transcripts is not a count of the files left out")
+	}
+	return n, nil
 }
 
 // copySeatTranscripts copies the transcripts rec's seat wrote into the seat's
@@ -102,20 +126,29 @@ func (b *openshellBackend) copySeatTranscripts(rec SandboxRecord) {
 		return
 	}
 	dest := SandboxTranscriptCopyDir(b.townRoot, rec.Rig, rec.Polecat)
-	if err := pruneTranscriptCopies(filepath.Dir(filepath.Dir(dest)), time.Now()); err != nil {
+	if err := pruneTranscriptCopies(filepath.Dir(filepath.Dir(dest)), b.clock()); err != nil {
 		b.warn("sandbox %s: pruning old transcript copies failed: %v", rec.Session, err)
 	}
 	if err := os.RemoveAll(dest); err != nil {
 		b.warn("sandbox %s: clearing its transcript copy failed, so it is not copied: %v", rec.Session, err)
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxDownloadTimeout)
+	defer cancel()
+	listed, err := b.listSeatTranscripts(ctx, rec)
+	if isSandboxNotFound(err) {
+		// A sandbox that is already gone has no transcripts to copy: its delete goes on.
+		return
+	}
+	if err != nil {
+		b.warn("sandbox %s: copying its transcripts out failed, so its seat end cannot read them: %v", rec.Session, err)
+		return
+	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		b.warn("sandbox %s: creating its transcript copy failed, so it is not copied: %v", rec.Session, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sandboxDownloadTimeout)
-	defer cancel()
-	skipped, err := b.downloadSeatTranscripts(ctx, rec, dest)
+	skipped, err := b.downloadSeatTranscripts(ctx, rec, listed, dest)
 	if err != nil {
 		// A partial copy would read as the seat's whole transcript set.
 		err = errors.Join(err, os.RemoveAll(dest))
@@ -135,20 +168,32 @@ func (b *openshellBackend) capLimit() int64 {
 	return sandboxTranscriptCap
 }
 
-// downloadSeatTranscripts downloads the transcripts rec's seat wrote into dest,
-// one file per download, so nothing past the cap is ever written. Each file keeps
-// its sandbox modification time, which the seat end reads to tell the seat's own
-// transcripts from its predecessor's. It returns how many of the seat's transcripts
-// the cap left out, and records that count at the root of dest.
-func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec SandboxRecord, dest string) (int, error) {
+// clock is the time the copies are pruned against: the test clock when one is
+// set, else the wall clock.
+func (b *openshellBackend) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// listSeatTranscripts lists the transcripts inside rec's sandbox. A listing that
+// fails, or does not parse, is an error: a missing line would be a silently
+// partial copy.
+func (b *openshellBackend) listSeatTranscripts(ctx context.Context, rec SandboxRecord) ([]sandboxTranscript, error) {
 	out, _, err := b.cli.Exec(ctx, rec.Session, nil, sandboxListing, nil)
 	if err != nil {
-		return 0, fmt.Errorf("listing its transcripts: %w", err)
+		return nil, fmt.Errorf("listing its transcripts: %w", err)
 	}
-	files, err := parseSandboxListing(string(out))
-	if err != nil {
-		return 0, err
-	}
+	return parseSandboxListing(string(out))
+}
+
+// downloadSeatTranscripts downloads the listed transcripts rec's seat wrote into
+// dest, one file per download, so nothing past the cap is ever written. Each file
+// keeps its sandbox modification time, which the seat end reads to tell the seat's
+// own transcripts from its predecessor's. It returns how many of the seat's
+// transcripts the cap left out, and records that count at the root of dest.
+func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec SandboxRecord, files []sandboxTranscript, dest string) (int, error) {
 	keep, skipped := selectSandboxTranscripts(files, rec.CreatedAt, b.capLimit())
 	for _, f := range keep {
 		local := filepath.Join(dest, filepath.FromSlash(f.rel))
@@ -253,7 +298,9 @@ func selectSandboxTranscripts(files []sandboxTranscript, since time.Time, limit 
 	var kept []sandboxTranscript
 	var total int64
 	for i, f := range own {
-		if total+f.size > limit {
+		// total never exceeds limit, so limit-total cannot overflow, while total+f.size
+		// would wrap for a size the sandbox reported near the top of int64.
+		if f.size > limit-total {
 			return kept, len(own) - i
 		}
 		total += f.size

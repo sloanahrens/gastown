@@ -19,8 +19,8 @@ import (
 // A sandbox seat's work usage is read from the transcripts its own Claude
 // sessions wrote, and written as the seat ends. A sandbox seat's transcripts are
 // the copy its sandbox was copied to before it was deleted (session.
-// CopiedSandboxTranscripts); a seat with no copy reads the host's Claude project
-// directories for its host worktree. The worktree goes with the seat's
+// session.CopiedSandboxTranscripts); a seat with no copy reads the host's Claude
+// project directories for its host worktree. The worktree goes with the seat's
 // directories, so the record is written before they are removed. A reused
 // worktree keeps its predecessor's transcripts: those last written before the
 // seat started are left out. A seat with none writes no record, and its end logs
@@ -95,11 +95,12 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	clone := polecat.SandboxSeatHostDirsFor(filepath.Join(h.town(), rig), rig, name).ClonePath
 	// The copy taken from the sandbox before it was deleted is read first: the
 	// sandbox's own transcripts are the seat's, and the host holds none of them.
-	paths, err := session.CopiedSandboxTranscripts(h.town(), rig, name)
+	paths, skippedByCap, err := session.CopiedSandboxTranscripts(h.town(), rig, name)
 	if err != nil {
 		return "", nil, fmt.Errorf("listing its copied transcripts: %w", err)
 	}
-	if len(paths) == 0 {
+	fromCopy := len(paths) > 0
+	if !fromCopy {
 		paths, err = list(h.town(), clone)
 		if err != nil {
 			return "", nil, fmt.Errorf("listing its transcripts: %w", err)
@@ -159,6 +160,11 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	usageDir := filepath.Join(constants.TownRuntimePath(h.town()), "usage")
 	if err := write(usageDir, rec, ids); err != nil {
 		return "", nil, errors.Join(err, errors.Join(readErrs...))
+	}
+	// The cap cut the oldest of the seat's transcripts from the copy, so the record
+	// leaves them out and says so.
+	if fromCopy && skippedByCap > 0 {
+		readErrs = append(readErrs, fmt.Errorf("transcript copy cut by the cap: %d files skipped", skippedByCap))
 	}
 	return usageattrib.WorkRecordPath(usageDir, landing.BeadID), errors.Join(readErrs...), nil
 }

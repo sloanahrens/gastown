@@ -138,6 +138,9 @@ type openshellBackend struct {
 	// transcriptCap is the most a seat's transcript copy keeps; zero is
 	// sandboxTranscriptCap. Tests set it.
 	transcriptCap int64
+	// now is the clock the transcript copies are pruned against; nil is time.Now.
+	// Tests set it.
+	now func() time.Time
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)

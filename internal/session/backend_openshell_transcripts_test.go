@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -108,7 +109,7 @@ func TestOpenShellOpsDeleteCopiesTheTranscriptsBeforeTheDelete(t *testing.T) {
 	if got := calls[down][len(calls[down])-2:]; !reflect.DeepEqual(got, []string{remote, filepath.Join(copyDir, seatFolder())}) {
 		t.Errorf("download = %v, want the transcript into the seat's copy folder", calls[down])
 	}
-	copied, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
+	copied, _, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,9 +184,12 @@ func TestOpenShellOpsDeleteCopyDownloadsOnlyWhatTheCapKeeps(t *testing.T) {
 	if got := strings.TrimSpace(string(marker)); got != "1" {
 		t.Errorf("cap record = %q, want the one file left out", got)
 	}
-	copied, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
+	copied, skipped, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if skipped != 1 {
+		t.Errorf("copy reports %d files cut by the cap, want the one left out", skipped)
 	}
 	var names []string
 	for _, p := range copied {
@@ -294,7 +298,7 @@ func TestOpenShellOpsDeleteRecordedCopiesBeforeItsDelete(t *testing.T) {
 	if down < 0 || del < 0 || down > del {
 		t.Fatalf("openshell calls = %v, want the copy before the delete on the record path", calls)
 	}
-	copied, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
+	copied, _, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +312,7 @@ func TestOpenShellOpsDeleteRemovesCopiesOlderThanAWeek(t *testing.T) {
 	fake := &sandbox.Fake{}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
 	b.cli.Run = copyingRunner(fake, "", nil)
+	b.now = func() time.Time { return seatBase }
 	writeOpsRecord(t, b)
 
 	rigDir := filepath.Dir(SandboxTranscriptCopyDir(b.townRoot, openshellTestRig, "x"))
@@ -318,8 +323,12 @@ func TestOpenShellOpsDeleteRemovesCopiesOlderThanAWeek(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	eightDays := time.Now().Add(-8 * 24 * time.Hour)
+	eightDays := seatBase.Add(-8 * 24 * time.Hour)
 	if err := os.Chtimes(stale, eightDays, eightDays); err != nil {
+		t.Fatal(err)
+	}
+	oneDay := seatBase.Add(-24 * time.Hour)
+	if err := os.Chtimes(fresh, oneDay, oneDay); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Delete(openshellTestSession); err != nil {
@@ -401,7 +410,7 @@ func TestCopiedSandboxTranscriptsSkipsLinks(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "real.jsonl"), filepath.Join(dir, "link.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	paths, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat)
+	paths, _, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,10 +422,10 @@ func TestCopiedSandboxTranscriptsSkipsLinks(t *testing.T) {
 func TestCopiedSandboxTranscriptsReadsNothingWithoutACopyAndRefusesANonPlainSeat(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	if paths, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat); err != nil || len(paths) != 0 {
+	if paths, _, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat); err != nil || len(paths) != 0 {
 		t.Fatalf("no copy: paths %v, err %v, want none and no error", paths, err)
 	}
-	if _, err := CopiedSandboxTranscripts(town, openshellTestRig, "../escape"); err == nil {
+	if _, _, err := CopiedSandboxTranscripts(town, openshellTestRig, "../escape"); err == nil {
 		t.Fatal("a polecat name that steps out of the transcripts dir was read")
 	}
 }
@@ -432,7 +441,7 @@ func TestCopiedSandboxTranscriptsRefusesACopyItCannotRead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(copyDir, SandboxTranscriptFolder(openshellTestRig, openshellTestPolecat)), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat); err == nil {
+	if _, _, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat); err == nil {
 		t.Fatal("an unreadable copy listed as holding none, want the read failure")
 	}
 }
@@ -573,6 +582,58 @@ func TestOpenShellOpsDeleteCapRecordThatCannotBeWrittenFailsTheCopy(t *testing.T
 	}
 	if _, err := os.Stat(copyDir); !os.IsNotExist(err) {
 		t.Errorf("a copy with no cap record left behind: stat err = %v", err)
+	}
+}
+
+func TestOpenShellOpsDeleteCopyRefusesASizeThatOverflowsTheCap(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.transcriptCap = 10
+	// The listing reports the older transcript at the top of int64. Added to the
+	// newer 4-byte one, it wraps below the cap, so the check must refuse it by
+	// comparing against the room left, not by summing.
+	small, huge := seatRemote("small.jsonl"), seatRemote("huge.jsonl")
+	listing := listingLine(small, seatBase.Add(-time.Hour), 4) + listingLine(huge, seatBase.Add(-2*time.Hour), math.MaxInt64)
+	b.cli.Run = copyingRunner(fake, listing, map[string]string{small: "ssss", huge: "hhhh"})
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	writeSeatRecord(t, b, seatBase.Add(-4*time.Hour))
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got, want := downloadedRemotes(fake.Calls()), []string{small}; !reflect.DeepEqual(got, want) {
+		t.Errorf("downloads = %v, want only the transcript that fits the cap: %v", got, want)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "1 older files") {
+		t.Fatalf("warnings = %q, want one line saying the cap left one file out", warnings)
+	}
+}
+
+func TestOpenShellOpsDeleteOfAGoneSandboxCopiesNothingAndWarnsNothing(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 1")},
+		Stderr: map[string]string{"exec": "sandbox not found: " + openshellTestSession},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.cli.Run = copyingRunner(fake, "", nil)
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	writeOpsRecord(t, b)
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete = %v, want a sandbox that is already gone to delete as success", err)
+	}
+	if callIndex(fake.Calls(), "download") >= 0 {
+		t.Fatalf("openshell calls = %v, want no download from a sandbox that is gone", fake.Calls())
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %q, want none for a sandbox that is already gone", warnings)
+	}
+	if _, err := os.Stat(SandboxTranscriptCopyDir(b.townRoot, openshellTestRig, openshellTestPolecat)); !os.IsNotExist(err) {
+		t.Errorf("copy made for a sandbox that is gone: stat err = %v", err)
 	}
 }
 
