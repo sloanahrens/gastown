@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// TestCrewDoneFlagsMustMatchPresentWorktree: with the worktree present, a crew
+// TestIntegrationCrewDoneFlagsMustMatchPresentWorktree: with the worktree present, a crew
 // submission's --branch and --head are checked against the worktree's own
 // branch and HEAD before anything else runs. Matching flags pass that check
 // and go on to the bead lookup; a branch or HEAD that differs refuses there,
 // so the gated path never submits a commit the caller did not name (gt-pyh5p6).
-func TestCrewDoneFlagsMustMatchPresentWorktree(t *testing.T) {
+func TestIntegrationCrewDoneFlagsMustMatchPresentWorktree(t *testing.T) {
 	dir := t.TempDir()
 	remote := filepath.Join(dir, "origin.git")
 	testRunGit(t, dir, "init", "--bare", remote)
