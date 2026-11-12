@@ -439,7 +439,7 @@ flowchart TB
 
 **Guards against silent failure.** Safety checks return one of three answers: pass, fail or unknown. A check that could not read its input never reports pass. This rule closes the old class of defects where "could not check" looked the same as "checked and fine".
 
-**Stop switches.** The *dispatch hold* file stops new work from being handed out. The *ESTOP* files stop dispatch and restarts for the whole town or for one rig. Neither signals a running session. The overseer owns the hold and the operator alone owns the ESTOP files.
+**Stop switches.** The *dispatch hold* file stops new work from being handed out. The *landing hold* file, `landing.hold` at the town root, stops new landing passes while polecats keep working and submitting: the pass in flight finishes. The daemon reads it each heartbeat, and its first line is the reason the health line and the Landings pane show as `landings paused`. A file that exists but cannot be read holds. The *ESTOP* files stop dispatch and restarts for the whole town or for one rig. Neither signals a running session. The overseer owns the dispatch hold and the landing hold, and the operator alone owns the ESTOP files.
 
 **What humans do by hand.** Some acts are reserved for a person on purpose: changing a CI workflow file, pushing release and teardown tags, holding and rotating the Forgejo admin and cloud admin credentials, copying the reviewed `images` workflow into place, and applying new cluster manifests. Some of these acts go through the *auth broker*, `gt-approve`, which runs as its own macOS user, `gt-forge`. Each run is for one named rule: the broker mints one token for it, the operator types the confirmation, the broker revokes the token when the run ends, and the run is logged. The rules in use cover Forgejo provisioning and resync, the cutover and probe programs, and the sources secret. An agent never holds the admin credential.
 
@@ -463,6 +463,7 @@ Facts that change are read, not written down.
 | Which rigs exist and their sessions | `gt rig list` |
 | How many polecats may run, and of which kind | `polecat_pool` in `settings/config.json` |
 | Is dispatch held or stopped | `~/gt/seat-refill.hold`, `~/gt/ESTOP`, `~/gt/ESTOP.<rig>` (presence is the signal) |
+| Are new landing passes paused | `~/gt/landing.hold` (presence is the signal) |
 | What the daemon runs in the cluster | `kubectl --context colima-gt-control -n gt get deploy,pvc,secret` |
 | The sandboxes in use | `kubectl --kubeconfig <town>/.runtime/sbx-k8s/kubeconfig -n openshell get pods` |
 | What needs a human | the dashboard's Attention pane, or `gt attention` |

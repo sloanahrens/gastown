@@ -55,7 +55,9 @@ func Effective(r Report, now time.Time, staleAfter time.Duration) Verdict {
 	return r.Verdict
 }
 
-// Line renders the one-line signal: the verdict, the tick age, and then
+// Line renders the one-line signal: the verdict, the tick age, the landing
+// pause when one stands (it is the reason no landing starts, so it is named
+// whatever the verdict), and then
 //
 //   - green: the day's landing count;
 //   - stale: the verdict the stale report carried;
@@ -69,6 +71,9 @@ func Effective(r Report, now time.Time, staleAfter time.Duration) Verdict {
 func Line(r Report, now time.Time, staleAfter time.Duration) string {
 	v := Effective(r, now, staleAfter)
 	head := fmt.Sprintf("%s tick %s ago", strings.ToUpper(string(v)), Short(now.Sub(r.At)))
+	if r.LandingPaused != "" {
+		head += fmt.Sprintf(" (landings paused: %s)", r.LandingPaused)
+	}
 	if v != r.Verdict {
 		return fmt.Sprintf("%s (stale; last %s)", head, r.Verdict)
 	}

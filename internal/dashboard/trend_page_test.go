@@ -265,7 +265,8 @@ func TestLandingsSectionShowsForAQueueAlone(t *testing.T) {
 	for _, want := range []string{
 		"const hours = (t && t.hours) || [];",
 		"const waiting = queuedLandings(s, recent);",
-		"if (!hours.length && !waiting.length && !s.polecats) { sec.hidden = true; trendClear(box); return; }",
+		"const paused = t && t.landings_paused;",
+		"if (!hours.length && !waiting.length && !s.polecats && !paused) { sec.hidden = true; trendClear(box); return; }",
 		"if (!hours.length) {",
 		"const q = landingTable(s, names, recent, waiting);",
 	} {

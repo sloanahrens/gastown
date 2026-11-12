@@ -40,6 +40,23 @@ func TestLineGreen(t *testing.T) {
 	}
 }
 
+// TestLineNamesALandingPause: the line says why no landing starts while the
+// overseer's landing hold stands, and the report carries that reason from its
+// inputs (gt-ckc93z).
+func TestLineNamesALandingPause(t *testing.T) {
+	t.Parallel()
+	r := Report{At: ago(40 * time.Second), Verdict: Green, Landed: intp(7), LandingPaused: "overseer: drain the queue"}
+	if got, want := Line(r, now, DefaultStaleAfter), "GREEN tick 40s ago (landings paused: overseer: drain the queue), 7 landed/24h"; got != want {
+		t.Errorf("Line = %q, want %q", got, want)
+	}
+
+	in := inputs(healthy())
+	in.LandingPaused = "overseer: drain the queue"
+	if got := Compute(context.Background(), in).LandingPaused; got != "overseer: drain the queue" {
+		t.Errorf("Compute dropped the landing pause: report carries %q", got)
+	}
+}
+
 func TestLineStaleIsUnknown(t *testing.T) {
 	t.Parallel()
 	r := Report{At: ago(15 * time.Minute), Verdict: Green, Landed: intp(1)}

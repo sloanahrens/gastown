@@ -625,6 +625,18 @@ type Trend struct {
 	// Velocity is the story-point velocity the Landings pane shows, nil until
 	// its reader reports.
 	Velocity *Velocity `json:"velocity,omitempty"`
+	// LandingsPaused is the overseer's landing hold, nil when no pause stands
+	// (gt-ckc93z).
+	LandingsPaused *LandingsPause `json:"landings_paused,omitempty"`
+}
+
+// LandingsPause is the landing hold the Landings pane names. Reason is the hold
+// file's first line. Unknown is set when the health report that carries the
+// pause could not be read, so the pane says the pause is unknown rather than
+// clear.
+type LandingsPause struct {
+	Reason  string `json:"reason,omitempty"`
+	Unknown bool   `json:"unknown,omitempty"`
 }
 
 // Velocity is the story-point velocity of the landings: points landed per hour,

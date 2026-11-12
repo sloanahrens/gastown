@@ -1713,6 +1713,14 @@ function loadSummary(loads) {
   return "load · now " + now.toFixed(1) + " · 24 hour average " + avg.toFixed(1) + " · peak " + Math.max(...vals).toFixed(1) + " · " + vals.length + " of 24 hours recorded (only while a page is open)";
 }
 
+// landingsPauseNote says the overseer's landing hold stands and why, or that the
+// hold is unknown because the health report could not be read. Polecats keep
+// working under the hold, so the note says so.
+function landingsPauseNote(p) {
+  if (p.unknown) return el("div", "warnc", "landings pause unknown: the health report could not be read");
+  return el("div", "warnc", "landings paused: " + p.reason + " (polecats keep working)");
+}
+
 // trendClear empties the Landings body except the Polecats section. That section
 // is part of the page's markup and renderPolecats draws it, so a landings redraw
 // leaves it attached: a redraw that moved it would drop a reader's text selection
@@ -1736,9 +1744,11 @@ function renderTrend(s) {
   // reason to show the section (gt-zc45r). The Polecats section lives in this
   // block too, so a seats reading alone is reason to show it.
   const waiting = queuedLandings(s, recent);
-  if (!hours.length && !waiting.length && !s.polecats) { sec.hidden = true; trendClear(box); return; }
+  const paused = t && t.landings_paused;
+  if (!hours.length && !waiting.length && !s.polecats && !paused) { sec.hidden = true; trendClear(box); return; }
   sec.hidden = false;
   trendClear(box);
+  if (paused) box.prepend(landingsPauseNote(paused));
   const names = polecatNames(s.polecats);
   // Nothing has landed in the window: the pane is the queue alone, rather than
   // the day's figures and charts drawn from a reading nobody has made yet.

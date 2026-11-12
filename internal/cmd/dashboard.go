@@ -608,6 +608,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			cachedTitle := func(rig, id string) (string, bool) { return beadReads.cachedTitle(id) }
 			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, names, crew, polecatTimes, rigOfBead, cachedTitle, recentLandingRows)
 			tr.Recent = withBackoffRows(recent, backoff.get(), title, names.who)
+			tr.LandingsPaused = dashboardLandingsPause(townRoot, now)
 			return tr
 		},
 		LoadSample: loads.append,
@@ -667,6 +668,24 @@ func dashboardClassName(c tailClass) string {
 }
 
 var dashboardVerdicts = []string{"green", "degraded", "red", "unknown"}
+
+// dashboardLandingsPause is the landing hold the Landings pane names, read from
+// the health report gt status --line reads. A report that cannot be read, or
+// is stale with no pause on it, is unknown rather than clear: the pane must not
+// show landings running when nothing has ruled out a pause (gt-ckc93z).
+func dashboardLandingsPause(townRoot string, now time.Time) *dashboard.LandingsPause {
+	_, v, rep := townstatus.HealthView(townRoot, now)
+	if rep == nil {
+		return &dashboard.LandingsPause{Unknown: true}
+	}
+	if rep.LandingPaused != "" {
+		return &dashboard.LandingsPause{Reason: rep.LandingPaused}
+	}
+	if v == townhealth.VerdictUnknown {
+		return &dashboard.LandingsPause{Unknown: true}
+	}
+	return nil
+}
 
 // dashboardHealth is gt status --line: the daemon's report, read from disk.
 func dashboardHealth(townRoot string) dashboard.Health {
