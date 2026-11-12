@@ -44,11 +44,11 @@ func (d *Daemon) drainForShutdown(sigChan <-chan os.Signal) os.Signal {
 	idle := d.landingHolds.hold(landingHoldShutdownDrain)
 	queued, slingsIdle := d.specSlings.stop()
 	d.reportNotStartedSlings(queued)
+	landing := d.landingPasses.Load() > 0
+	slings := d.specSlings.list()
 	if d.onDrainHold != nil {
 		d.onDrainHold()
 	}
-	landing := d.landingPasses.Load() > 0
-	slings := d.specSlings.list()
 	if !landing && len(slings) == 0 {
 		d.logger.Println("draining for shutdown: no landing pass in flight")
 		return nil
