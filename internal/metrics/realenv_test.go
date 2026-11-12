@@ -182,6 +182,9 @@ func TestRealEnvReadsTheTown(t *testing.T) {
 	if !reflect.DeepEqual(real.Extract.BeadDirs, wantDirs) {
 		t.Errorf("BeadDirs = %q, want %q", real.Extract.BeadDirs, wantDirs)
 	}
+	if got, want := real.Extract.JevLog, filepath.Join(town, ".runtime", "jev", "dispatch.jsonl"); got != want {
+		t.Errorf("JevLog = %q, want the town's dispatch log %q", got, want)
+	}
 
 	// The cached diff is answered from the cache file, so reading it runs
 	// nothing: a command here means the cache was not used.
