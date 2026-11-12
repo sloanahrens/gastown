@@ -45,7 +45,7 @@ var jevLandingColumns = []string{"jev_fits20", "jev_size"}
 // storyPointLandingColumns are the bead's story-point labels as the landing
 // carries them: sp is the estimate (sp:N) and sp_rung names the inputs it was
 // made from (sp-rung:<rung>). They are read from the bead's labels, so a bead
-// the estimate never labelled keeps both cells empty. They come after the Jev
+// the estimate never labeled keeps both cells empty. They come after the Jev
 // columns, append-only.
 var storyPointLandingColumns = []string{"sp", "sp_rung"}
 

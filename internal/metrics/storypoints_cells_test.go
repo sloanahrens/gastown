@@ -39,7 +39,7 @@ func TestStoryPointCellsReadTheLabels(t *testing.T) {
 
 // TestStoryPointCellsNameUnreadableLabels: a sp: or sp-rung: label that does not
 // parse, and two labels of one kind that disagree, leave the cell empty and are
-// named in the footer, so the bead is unknown rather than read as unlabelled.
+// named in the footer, so the bead is unknown rather than read as unlabeled.
 func TestStoryPointCellsNameUnreadableLabels(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
