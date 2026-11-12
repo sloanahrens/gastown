@@ -1215,6 +1215,11 @@ parked seat does not refuse), logging actor and reason in
 `.runtime/supervisor/actions.jsonl`. Crew sessions are skipped unless
 `--crew` is given; the overseer session is never killed.
 
+To pause new landing passes while polecats keep working, the overseer writes
+`<town>/landing.hold`. Before writing or removing it, read [Stop
+switches](architecture.md#the-security-model): it states what the file pauses and
+what an unreadable file does.
+
 Before writing or releasing a dispatch hold — a marker on a bead's own record
 that parks it out of automatic dispatch — read [Dispatch
 holds](concepts/dispatch-holds.md): it states the write form of each marker and

@@ -164,6 +164,10 @@ type Report struct {
 	// answer. The exec-tax field carries its verdict; this is the number a
 	// reader compares between reports (gt-2ycne.1).
 	ExecTaxMS *float64 `json:"exec_tax_ms,omitempty"`
+	// LandingPaused is the reason the overseer's landing hold stands, "" when
+	// no pause is on. The line and the dashboard's Landings pane say why no
+	// landing starts (gt-ckc93z).
+	LandingPaused string `json:"landing_paused,omitempty"`
 }
 
 // Limits is a degraded and a red threshold. A zero limit never trips.
@@ -665,6 +669,10 @@ type Inputs struct {
 	// unknown start.
 	DaemonStarted time.Time
 
+	// LandingPaused is the reason the overseer's landing hold stands, "" when
+	// no pause is on; Compute copies it to the report (gt-ckc93z).
+	LandingPaused string
+
 	Dolt        Dolt
 	ExecTax     ExecTax
 	Load        Load
@@ -692,7 +700,7 @@ var errNotWired = errors.New("no source wired")
 // Compute builds the report. It runs every source once, in order, on the
 // calling goroutine.
 func Compute(ctx context.Context, in Inputs) Report {
-	r := Report{At: in.Now}
+	r := Report{At: in.Now, LandingPaused: in.LandingPaused}
 	h, hErr := hostReading(ctx, in)
 	r.Fields = append(r.Fields, dolt(ctx, in))
 	et, ms := execTax(ctx, in, h)

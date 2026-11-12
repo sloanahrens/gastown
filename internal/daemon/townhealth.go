@@ -118,7 +118,8 @@ func execTaxState(r *townhealth.Report, th townhealth.Thresholds) exectax.State 
 func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *townhealth.Report) townhealth.Inputs {
 	s.now = now
 	return townhealth.Inputs{
-		Now: now, Thresholds: th, Prev: prev, DaemonStarted: s.daemonStarted(),
+		LandingPaused: s.d.landingPausedReason(),
+		Now:           now, Thresholds: th, Prev: prev, DaemonStarted: s.daemonStarted(),
 		Dolt: s, ExecTax: s, Load: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
 		Backups: s, Mains: s, Promotions: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s,
 		LandingInfra: s,

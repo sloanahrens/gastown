@@ -900,6 +900,12 @@ type Daemon struct {
 	// a stale om has been blocked too long (gt-0hsf6). The landing workers
 	// finish the pass in flight and start no new one while any hold is taken.
 	landingHolds landingHolds
+	// landingHoldFile is what the landing.hold file last said, read by the
+	// landing-hold-file heartbeat step (landing_hold_file.go, gt-ckc93z).
+	landingHoldFile landingHoldFileState
+	// landingHoldOpen opens landing.hold for that step; nil uses os.Open. A test
+	// seam, as the other probe seams on the Daemon are (landing_hold_file.go).
+	landingHoldOpen landingHoldOpener
 
 	// upgradeTickWaiting is true while the restart waits on the spec dispatch
 	// tick in flight with the drain deferred, where the restart's landing hold
@@ -2618,6 +2624,12 @@ var heartbeatSteps = []heartbeatStep{
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an
 	// E-stopped town still wants to know its main is red.
 	{name: "tier-sweep", run: (*Daemon).triggerTierSweep},
+
+	// Keep the landing hold the overseer's landing.hold file asks for, so the
+	// landing workers start no new pass while it stands (gt-ckc93z). It reads
+	// the file and stops no work, so it is not lifecycle. Before townhealth,
+	// which reports the pause.
+	{name: "landing-hold-file", run: (*Daemon).checkLandingHoldFile},
 
 	// Compute the town health report and write the one health file gt
 	// status --line reads (gt-s3rec.2). Last, so it sees this tick's Dolt
