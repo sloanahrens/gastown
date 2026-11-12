@@ -649,33 +649,16 @@ func TestCacheTrimMirrorImage(t *testing.T) {
 	tests := []struct {
 		name     string
 		registry string
-		polecat  string
 		want     string
-		refused  bool
 	}{
-		{"the mirror and the file's digest", cacheTrimMirror, cacheTrimForgejoPolecat, cacheTrimMirror + "/gastown-polecat" + digest, false},
-		{"no image_registry", "", cacheTrimForgejoPolecat, "", true},
-		{"a reference with no digest", cacheTrimMirror, "forgejo:3000/bot-registry/gastown-polecat:dev", "", true},
+		{"the mirror host the setting names", cacheTrimMirror, cacheTrimMirror + "/gastown-polecat" + digest},
+		{"another mirror host", "registry.sandbox:5000", "registry.sandbox:5000/gastown-polecat" + digest},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
-			if tc.registry != "" {
-				f.setImageRegistry(tc.registry)
-			}
-			got, err := f.d.cacheTrimMirrorImage(tc.polecat)
-			if tc.refused {
-				if err == nil {
-					t.Fatalf("cacheTrimMirrorImage(%q) = %q, want a refusal", tc.polecat, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("cacheTrimMirrorImage(%q): %v", tc.polecat, err)
-			}
-			if got != tc.want {
-				t.Errorf("cacheTrimMirrorImage(%q) = %q, want %q", tc.polecat, got, tc.want)
+			if got := cacheTrimMirrorImage(tc.registry, cacheTrimForgejoPolecat); got != tc.want {
+				t.Errorf("cacheTrimMirrorImage(%q, %q) = %q, want %q", tc.registry, cacheTrimForgejoPolecat, got, tc.want)
 			}
 		})
 	}

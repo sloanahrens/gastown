@@ -436,16 +436,13 @@ func (d *Daemon) cacheTrimImage(ctx context.Context) (string, bool, error) {
 		d.cacheTrimClearAlert(ctx, cacheTrimNoMirrorKey, "no values file names a polecat image to mirror")
 		return "", false, nil
 	}
-	if cfg := tierSweepRunnerConfig(d.patrolConfig); cfg == nil || cfg.ImageRegistry == "" {
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil || cfg.ImageRegistry == "" {
 		d.cacheTrimReportNoMirror(ctx, values.Polecat)
 		return "", false, nil
 	}
 	d.cacheTrimClearAlert(ctx, cacheTrimNoMirrorKey, "image_registry is set")
-	image, err := d.cacheTrimMirrorImage(values.Polecat)
-	if err != nil {
-		return "", false, err
-	}
-	return image, true, nil
+	return cacheTrimMirrorImage(cfg.ImageRegistry, values.Polecat), true, nil
 }
 
 // cacheTrimReportNoMirror raises the alert for a values file whose image_registry
@@ -462,19 +459,12 @@ func (d *Daemon) cacheTrimReportNoMirror(ctx context.Context, polecat string) {
 // cacheTrimMirrorImage is the sandbox mirror's reference to the polecat image
 // digest the values file names: the host image_registry names, the repository
 // the polecat-image step publishes to (publishPolecatDevTag reads the same
-// setting), and the file's digest. cacheTrimImage answers an unset setting
-// before it gets here, so an unset host reaching this function is refused, not
-// named as a mirror it does not have.
-func (d *Daemon) cacheTrimMirrorImage(polecat string) (string, error) {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
-	if cfg == nil || cfg.ImageRegistry == "" {
-		return "", fmt.Errorf("the values file names the polecat image %s, but image_registry names no sandbox mirror to pull it from", polecat)
-	}
-	_, digest, ok := strings.Cut(polecat, "@")
-	if !ok || !imagevalues.ValidDigest(digest) {
-		return "", fmt.Errorf("the values file's polecat image %s carries no sha256 digest", polecat)
-	}
-	return cfg.ImageRegistry + "/" + imagevalues.PolecatImage + "@" + digest, nil
+// setting), and the file's digest. The caller has checked that registry is set,
+// and imagevalues refused a polecat reference without a digest when it loaded
+// the file, so the digest follows the reference's '@'.
+func cacheTrimMirrorImage(registry, polecat string) string {
+	_, digest, _ := strings.Cut(polecat, "@")
+	return registry + "/" + imagevalues.PolecatImage + "@" + digest
 }
 
 // cacheTrimPreflight refuses a kubeconfig that does not resolve the sandbox
