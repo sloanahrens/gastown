@@ -40,6 +40,11 @@ var cutoverPrechecks = []string{
 type Target struct {
 	Name string
 	Path string
+	// KeepOld, when set, is a second name install gives the file it replaces: a
+	// hard link made beside it, in the target's own directory. The native om is
+	// run through it, so the config never names a dated file and rollback does
+	// not move it (gt-xj8mo5).
+	KeepOld string
 }
 
 // Files is the filesystem the cutover reads and changes. The command uses the
@@ -50,6 +55,8 @@ type Files interface {
 	CreateTemp(dir, pattern string) (TempFile, error)
 	Rename(oldpath, newpath string) error
 	Remove(path string) error
+	// Link makes newpath a second name for the file at oldpath.
+	Link(oldpath, newpath string) error
 }
 
 // TempFile is the new file the wrapper is written to before it is renamed into
@@ -81,6 +88,7 @@ func (osFiles) ReadFile(path string) ([]byte, error)             { return os.Rea
 func (osFiles) CreateTemp(dir, pattern string) (TempFile, error) { return os.CreateTemp(dir, pattern) }
 func (osFiles) Rename(oldpath, newpath string) error             { return os.Rename(oldpath, newpath) }
 func (osFiles) Remove(path string) error                         { return os.Remove(path) }
+func (osFiles) Link(oldpath, newpath string) error               { return os.Link(oldpath, newpath) }
 
 // InstallConfig is one cutover run.
 type InstallConfig struct {
@@ -255,18 +263,27 @@ func checkTargets(targets []Target) ([]Target, error) {
 			return nil, fmt.Errorf("gtwrap: %s is named twice", path)
 		}
 		names[t.Name], paths[path] = true, true
-		checked = append(checked, Target{Name: t.Name, Path: path})
+		keep := t.KeepOld
+		if keep != "" {
+			keep = filepath.Clean(keep)
+		}
+		checked = append(checked, Target{Name: t.Name, Path: path, KeepOld: keep})
 	}
 	return checked, nil
 }
 
 // preflight refuses when a change cannot be made safely: every target must hold
 // a regular file to replace, no dated file may exist, no target's path may be
-// another target's dated or aside name, and every tool must answer in the image.
+// another target's dated or aside name, a second name install is asked to keep
+// for the old file must be free and overlap no other name, and every tool must
+// answer in the image.
 func preflight(files Files, doctor Doctor, stamp string, targets []Target) error {
 	paths := map[string]bool{}
 	for _, t := range targets {
 		paths[filepath.Clean(t.Path)] = true
+	}
+	if err := checkKeepNames(targets, stamp); err != nil {
+		return err
 	}
 	for _, t := range targets {
 		info, err := files.Stat(t.Path)
@@ -285,6 +302,9 @@ func preflight(files Files, doctor Doctor, stamp string, targets []Target) error
 				return fmt.Errorf("gtwrap: %s would be the file another target replaces", name)
 			}
 		}
+		if err := checkKeepOld(files, t); err != nil {
+			return err
+		}
 		if _, err := files.Stat(dated(t, stamp)); err == nil {
 			return fmt.Errorf("gtwrap: %s already exists, so a cutover with stamp %s already ran; name a new stamp", dated(t, stamp), stamp)
 		} else if !errors.Is(err, fs.ErrNotExist) {
@@ -295,6 +315,52 @@ func preflight(files Files, doctor Doctor, stamp string, targets []Target) error
 		if err := doctor.InImage(t.Name); err != nil {
 			return fmt.Errorf("gtwrap: %s does not answer in the daemon image: %w", t.Name, err)
 		}
+	}
+	return nil
+}
+
+// checkKeepNames is every name the run uses for a file: each target's path,
+// dated name and aside name, and each second name asked for. A second name that
+// is any of the others would be taken by one tool's swap and replaced or refused
+// by another's, in an order that depends on the target list, so preflight
+// refuses the overlap before any change.
+func checkKeepNames(targets []Target, stamp string) error {
+	claimed := map[string]bool{}
+	for _, t := range targets {
+		for _, name := range []string{filepath.Clean(t.Path), dated(t, stamp), aside(t, stamp)} {
+			claimed[name] = true
+		}
+	}
+	seen := map[string]string{}
+	for _, t := range targets {
+		if t.KeepOld == "" {
+			continue
+		}
+		if claimed[t.KeepOld] {
+			return fmt.Errorf("gtwrap: --keep-old %s=%s is a name install or rollback uses for a tool's file or its dated or aside copy", t.Name, t.KeepOld)
+		}
+		if other, dup := seen[t.KeepOld]; dup {
+			return fmt.Errorf("gtwrap: --keep-old names %s for both %s and %s", t.KeepOld, other, t.Name)
+		}
+		seen[t.KeepOld] = t.Name
+	}
+	return nil
+}
+
+// checkKeepOld refuses a second name for the old file that cannot be made: it
+// must be free and in the target's own directory (one filesystem, so the link
+// holds). That it overlaps no other name is checkKeepNames' check.
+func checkKeepOld(files Files, t Target) error {
+	if t.KeepOld == "" {
+		return nil
+	}
+	if filepath.Dir(t.KeepOld) != filepath.Dir(t.Path) {
+		return fmt.Errorf("gtwrap: --keep-old %s=%s is not in %s, the directory of %s; name a file beside it", t.Name, t.KeepOld, filepath.Dir(t.Path), t.Path)
+	}
+	if _, err := files.Stat(t.KeepOld); err == nil {
+		return fmt.Errorf("gtwrap: --keep-old %s=%s already exists; install does not replace a file there", t.Name, t.KeepOld)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("gtwrap: look for %s: %w", t.KeepOld, err)
 	}
 	return nil
 }
@@ -421,7 +487,20 @@ func placeAll(files Files, doctor Doctor, out io.Writer, stamp string, targets [
 func swapIn(files Files, t Target, staged, stamp string) error {
 	kept := dated(t, stamp)
 	if err := files.Rename(t.Path, kept); err != nil {
-		return fmt.Errorf("gtwrap: keep %s as %s: %w", t.Path, kept, err)
+		cause := fmt.Errorf("gtwrap: keep %s as %s: %w", t.Path, kept, err)
+		if errors.Is(err, fs.ErrPermission) {
+			// The first change to a target is this rename, so a refusal here has
+			// changed nothing for it. On the Mac the usual cause is the
+			// immutable flag the old installer set (gt-vya0s), which nothing
+			// here can read portably or should clear.
+			cause = fmt.Errorf("%w; %s may carry the macOS immutable flag (ls -lO shows uchg): clear it with `chflags nouchg %s` as an operator step, then run install again; nothing was changed for %s", cause, t.Path, shellQuote(t.Path), t.Name)
+		}
+		return cause
+	}
+	if t.KeepOld != "" {
+		if err := files.Link(kept, t.KeepOld); err != nil {
+			return fmt.Errorf("gtwrap: give %s a second name %s: %w", kept, t.KeepOld, err)
+		}
 	}
 	if err := files.Rename(staged, t.Path); err != nil {
 		return fmt.Errorf("gtwrap: rename the wrapper into place at %s: %w", t.Path, err)
@@ -495,6 +574,15 @@ func (r *installRun) stop(failed Target, cause error) error {
 // the only rename install makes onto a path that holds a file.
 func putBack(files Files, t Target, stamp string) error {
 	kept := dated(t, stamp)
+	// The second name install made for the old file goes first: the old file is
+	// back where it was, and a name left beside it would be a stray.
+	if t.KeepOld != "" {
+		if _, err := files.Stat(t.KeepOld); err == nil {
+			if err := files.Remove(t.KeepOld); err != nil {
+				return fmt.Errorf("gtwrap: remove %s: %w", t.KeepOld, err)
+			}
+		}
+	}
 	if err := files.Rename(kept, t.Path); err != nil {
 		return fmt.Errorf("gtwrap: rename %s back over %s: %w", kept, t.Path, err)
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -95,5 +96,50 @@ func TestIntegrationRollbackPutsARealFileBack(t *testing.T) {
 	}
 	if _, err := os.Stat(kept); !os.IsNotExist(err) {
 		t.Errorf("%s still exists after the restore", kept)
+	}
+}
+
+// TestIntegrationInstallExplainsAFlaggedFile installs over a real file that
+// carries the macOS immutable flag, as the operator's gt and om did. The kernel
+// refuses the rename, and install must say why and name the command that clears
+// the flag, with the file untouched. The flag is set and cleared with the
+// system's own chflags; it skips where that tool or the flag is not there.
+func TestIntegrationInstallExplainsAFlaggedFile(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the immutable flag install explains is the Mac's")
+	}
+	chflags, err := exec.LookPath("chflags")
+	if err != nil {
+		t.Skip("no chflags on this host")
+	}
+	dir := t.TempDir()
+	gt := filepath.Join(dir, "gt")
+	if err := os.WriteFile(gt, []byte("old gt\n"), 0o755); err != nil {
+		t.Fatalf("write the old gt: %v", err)
+	}
+	if out, err := exec.Command(chflags, "uchg", gt).CombinedOutput(); err != nil { //nolint:gosec // G204: chflags is the system tool and gt a temp file
+		t.Skipf("the host refuses the immutable flag: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command(chflags, "nouchg", gt).Run() }) //nolint:gosec // G204: as above
+	source := filepath.Join(t.TempDir(), "gt-wrap")
+	if err := os.WriteFile(source, []byte("#!/bin/sh\necho stub wrapper\n"), 0o755); err != nil {
+		t.Fatalf("write the stub wrapper: %v", err)
+	}
+
+	var out strings.Builder
+	err = Install(InstallConfig{Source: source, Stamp: testStamp, Targets: []Target{{Name: "gt", Path: gt}}, Doctor: &fakeDoctor{}, Out: &out})
+	if err == nil {
+		t.Fatalf("Install over a flagged file succeeded:\n%s", out.String())
+	}
+	for _, want := range []string{"immutable flag", "chflags nouchg", "nothing was changed for gt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error lacks %q: %v", want, err)
+		}
+	}
+	if got, _ := os.ReadFile(gt); string(got) != "old gt\n" {
+		t.Errorf("%s holds %q, want it untouched", gt, got)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("%s holds %d entries after a refused install, want only gt", dir, len(entries))
 	}
 }

@@ -90,6 +90,15 @@ func (f *memFiles) Rename(oldpath, newpath string) error {
 	return nil
 }
 
+func (f *memFiles) Link(oldpath, newpath string) error {
+	file, ok := f.files[oldpath]
+	if !ok {
+		return &fs.PathError{Op: "link", Path: oldpath, Err: fs.ErrNotExist}
+	}
+	f.files[newpath] = file
+	return nil
+}
+
 func (f *memFiles) Remove(path string) error {
 	if _, ok := f.files[path]; !ok {
 		return &fs.PathError{Op: "remove", Path: path, Err: fs.ErrNotExist}
@@ -457,4 +466,63 @@ func TestCLIRunRollbackReportsWhatItCouldNotRestore(t *testing.T) {
 	if !strings.Contains(h.stderr.String(), path+".pre-wrap-"+cutoverStamp) {
 		t.Errorf("stderr %q does not name the missing dated file", h.stderr)
 	}
+}
+
+func TestCLIInstallKeepOld(t *testing.T) {
+	t.Parallel()
+	setup := func(t *testing.T) *harness {
+		t.Helper()
+		h := newHarness(t)
+		h.files.add("/tools/om", "old om", 0o755)
+		h.files.add("/tools/gt", "old gt", 0o755)
+		h.files.add("/src/gt-wrap", "the wrapper", 0o755)
+		h.surface.executable = func() (string, error) { return "/src/gt-wrap", nil }
+		h.surface.newDoctor = func(string) gtwrap.Doctor { return cutoverDoctorFake{} }
+		return h
+	}
+
+	t.Run("gives the old file a second name", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--target", "om=/tools/om", "--keep-old", "om=/tools/om-native")
+		if exit != 0 {
+			t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+		}
+		if got := h.files.data("/tools/om-native"); got != "old om" {
+			t.Errorf("/tools/om-native holds %q, want the old om", got)
+		}
+		if got := h.files.data("/tools/om"); got != "the wrapper" {
+			t.Errorf("/tools/om holds %q, want the wrapper", got)
+		}
+	})
+
+	refusals := map[string][]string{
+		"a tool that is not a target": {"--target", "om=/tools/om", "--keep-old", "gt=/tools/gt-keep"},
+		"one tool twice":              {"--target", "om=/tools/om", "--keep-old", "om=/tools/a", "--keep-old", "om=/tools/b"},
+		"a value that is not a pair":  {"--target", "om=/tools/om", "--keep-old", "om"},
+	}
+	for name, args := range refusals {
+		t.Run("refuses "+name, func(t *testing.T) {
+			t.Parallel()
+			h := setup(t)
+			argv := append([]string{"gt-wrap", "install", "--stamp", cutoverStamp}, args...)
+			if exit := h.run(argv...); exit != 1 {
+				t.Fatalf("run = %d, want 1; stdout: %s", exit, h.stdout)
+			}
+			if !strings.Contains(h.stderr.String(), "--keep-old") {
+				t.Errorf("stderr does not name --keep-old: %s", h.stderr)
+			}
+			if got := h.files.data("/tools/om"); got != "old om" {
+				t.Errorf("/tools/om holds %q, want it untouched", got)
+			}
+		})
+	}
+
+	t.Run("rollback takes no --keep-old", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		if exit := h.run("gt-wrap", "rollback", "--stamp", cutoverStamp, "--target", "om=/tools/om", "--keep-old", "om=/tools/x"); exit != 1 {
+			t.Fatalf("run = %d, want 1", exit)
+		}
+	})
 }

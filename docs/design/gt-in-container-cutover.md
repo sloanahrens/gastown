@@ -45,6 +45,30 @@ stops, and prints one line per tool. A tool it cannot put back is named, with
 the command that puts its original file back by hand and the rollback command
 for it.
 
+Before install, on the Mac, clear the immutable flag on gt and om. The old
+installer set it (`chflags uchg`, gt-vya0s) so a stray write could not replace a
+production binary; `ls -lO` shows `uchg`. A flagged file cannot be renamed, so
+install would stop at its first target. Run `chflags nouchg <path>` on each
+flagged tool as an approved operator step. The flag is not set again: the reason
+for it, a local polecat that overwrote the binary, is gone, since polecats run in
+sandboxes with no access to the Mac's files, and after the cutover the installed
+files are the wrapper. Preflight cannot read the flag portably, so install does
+not check for it. When the first rename of a tool is refused for permission,
+install says the file may carry the flag, names the `chflags nouchg` command, and
+says nothing was changed for that tool; every tool already placed is put back.
+
+`--keep-old name=path` gives that tool's old file a second name, a hard link in
+the same directory (so on one filesystem), made right after the old file is
+renamed to its dated name. Use it for om:
+`--keep-old om=/Users/operator/go/bin/om-native`, and set `native.om.path` to
+that path once. It stays valid after install and after rollback, since it is the
+same file as the dated old om and then the restored om, so the config never names
+a stamp. A native path that is a tool's own installed path would run the wrapper
+itself, and the wrapper refuses it. Install refuses a second name that is any
+tool's path, dated name or aside name, or is asked for twice, before it changes
+anything. Delete the second name and the dated files together after the quiet
+week.
+
 On success the last lines install prints are the exact rollback command and the
 dated files it kept. Keep them.
 
