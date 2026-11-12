@@ -3,8 +3,9 @@
 // tool and of the environment that crosses, and the reader of a worktree's
 // branch and HEAD. The commands themselves are a Runner behind that decision,
 // so the decision is a pure function a test drives with no container.
-// cmd/gt-wrap decides which calls change: it adds gt done's worktree facts
-// (withWorktreeFacts) before the call is planned.
+// cmd/gt-wrap decides which calls change: before the call is planned it adds
+// gt done's worktree facts (withWorktreeFacts) and, for the kubernetes target,
+// turns a Mac file argument into stdin (fileArgs).
 package gtwrap
 
 import "io"
