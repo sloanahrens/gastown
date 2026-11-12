@@ -655,8 +655,17 @@ func otherRigPaths(text, rigAlt, own string) []otherRigPath {
 // With the town's rig list the rig segment must be one of the other rigs. With
 // no list (an absent registry reads as an empty one) every rig-shaped segment
 // other than the bead's own is refused, so a town that cannot name its rigs
-// still holds a bead that sends a polecat into another rig (gt-qotsst).
+// still holds a bead that sends a polecat into another rig (gt-qotsst). A Spec
+// that names no rig of its own is not checked.
 func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
+	// A caller that does not say which rig the bead belongs to (the findings
+	// filer, the tier sweep and the dashboard badge call LintShape without it)
+	// gives nothing to compare a path with, so the check does not run for it:
+	// refusing every rig-shaped path would refuse the bead's own rig too. The
+	// dispatch tick and gt spec lint always name the rig.
+	if strings.TrimSpace(s.Rig) == "" {
+		return nil
+	}
 	alt := genericRigName
 	if len(knownRigs(s)) > 0 {
 		others := otherRigs(s)

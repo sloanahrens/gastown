@@ -856,6 +856,24 @@ func TestOtherRigEmptyListStillRefusesPath(t *testing.T) {
 	}
 }
 
+// TestOtherRigNotCheckedWithoutTheBeadsRig pins that a Spec which names no rig
+// of its own earns no other-rig refusal, with or without the town's list: the
+// LintShape callers outside the dispatcher (the findings filer, the tier sweep,
+// the dashboard badge) build such a Spec, and a path into any rig, the bead's
+// own included, must not turn their beads unshaped.
+func TestOtherRigNotCheckedWithoutTheBeadsRig(t *testing.T) {
+	t.Parallel()
+	for name, rigs := range map[string][]string{"no list": nil, "with the list": {"gastown", "om"}} {
+		for _, path := range []string{"~/gt/gastown/internal/cli/cli.go", "~/gt/om/internal/cli/cli.go"} {
+			s := otherRigSpec("Change "+path+" to read the flag.", rigs...)
+			s.Rig = ""
+			if v := LintShape(s, defaultTemplate()); !v.Clean() {
+				t.Errorf("%s, no rig of its own, path %s: refused: %s", name, path, v.Line("gt-good"))
+			}
+		}
+	}
+}
+
 // TestOtherRigListNarrowsTheSegments pins that with the town's list a segment
 // that is not a rig passes, so a path under the town root's own directories is
 // not named a rig; with no list every other segment is refused.
