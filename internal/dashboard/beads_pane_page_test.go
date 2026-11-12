@@ -3,6 +3,7 @@ package dashboard
 import (
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,26 @@ func pageColumnKeys(t *testing.T) (left, right []string) {
 	return keys(cols[1]), keys(cols[2])
 }
 
+// beadsPageColumns is the grid's column order as the operator laid it out
+// (gt-70ortp). It is the one place this file pins where a pane sits: the Beads
+// tests take the pane above Beads from it instead of restating that pair.
+func beadsPageColumns() (left, right []string) {
+	return []string{"birds", "attention", "events", "cost", "rigs", "tiersweep", "beads"},
+		[]string{"news", "machine", "cloud", "forgejo", "om", "jev", "mango"}
+}
+
+// paneAbove is the key directly before key in panes. It fails the test when
+// key is absent or first, so a missing pane cannot pass as a match.
+func paneAbove(t *testing.T, panes []string, key string) string {
+	t.Helper()
+
+	at := slices.Index(panes, key)
+	if at < 1 {
+		t.Fatalf("%v has no %s pane after another pane", panes, key)
+	}
+	return panes[at-1]
+}
+
 // The Beads pane sits in the left column directly under Tier sweeps, the
 // operator's layout for the dashboard (gt-70ortp). The check reads the
 // embedded markup's column order, not the source text around one id.
@@ -42,22 +63,12 @@ func TestBeadsPaneSitsDirectlyUnderTierSweeps(t *testing.T) {
 	t.Parallel()
 
 	left, right := pageColumnKeys(t)
-	at := -1
-	for i, key := range left {
-		if key == "beads" {
-			at = i
-		}
+	wantLeft, _ := beadsPageColumns()
+	if got, want := paneAbove(t, left, "beads"), paneAbove(t, wantLeft, "beads"); got != want {
+		t.Errorf("the pane above beads in the left column is %q, want %s", got, want)
 	}
-	if at < 1 {
-		t.Fatalf("the left column holds %v, want the beads pane in it", left)
-	}
-	if left[at-1] != "tiersweep" {
-		t.Errorf("the pane above beads in the left column is %q, want tiersweep", left[at-1])
-	}
-	for _, key := range right {
-		if key == "beads" {
-			t.Error("the beads pane is also in the right column")
-		}
+	if slices.Contains(right, "beads") {
+		t.Error("the beads pane is also in the right column")
 	}
 }
 
@@ -68,8 +79,7 @@ func TestOtherPanesKeepTheirColumnsAndOrder(t *testing.T) {
 	t.Parallel()
 
 	left, right := pageColumnKeys(t)
-	wantLeft := []string{"birds", "attention", "events", "cost", "rigs", "tiersweep", "beads"}
-	wantRight := []string{"news", "machine", "cloud", "forgejo", "om", "jev", "mango"}
+	wantLeft, wantRight := beadsPageColumns()
 	if !reflect.DeepEqual(left, wantLeft) {
 		t.Errorf("the left column holds %v, want %v", left, wantLeft)
 	}
@@ -86,16 +96,8 @@ func TestBeadsFoldFollowsTierSweepsOnThePage(t *testing.T) {
 
 	dom := newPageDOM(t)
 	keys := dom.foldKeys(t)
-	at := -1
-	for i, key := range keys {
-		if key == "beads" {
-			at = i
-		}
-	}
-	if at < 1 {
-		t.Fatalf("the page folds sections %v, want a beads section", keys)
-	}
-	if keys[at-1] != "tiersweep" {
-		t.Errorf("the page folds %q directly before beads, want tiersweep", keys[at-1])
+	wantLeft, _ := beadsPageColumns()
+	if got, want := paneAbove(t, keys, "beads"), paneAbove(t, wantLeft, "beads"); got != want {
+		t.Errorf("the page folds %q directly before beads, want %s", got, want)
 	}
 }
