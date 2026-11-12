@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"text/template"
@@ -207,18 +206,23 @@ func StaleCommands(workspacePath string) []string {
 // real value instead of drifting independently. A zero exitTimeout leaves
 // launchd's own default in effect (only meaningful on darwin).
 func ProvisionSupervisor(townRoot string, exitTimeout time.Duration) (string, error) {
+	return realHost.provisionSupervisor(townRoot, exitTimeout)
+}
+
+// provisionSupervisor is ProvisionSupervisor for the host h describes.
+func (h supervisorHost) provisionSupervisor(townRoot string, exitTimeout time.Duration) (string, error) {
 	data, err := supervisorData(townRoot, exitTimeout)
 	if err != nil {
 		return "", err
 	}
 
-	switch runtime.GOOS {
+	switch h.goos {
 	case "darwin":
-		return provisionLaunchd(data)
+		return h.provisionLaunchd(data)
 	case "linux":
 		return provisionSystemd(data)
 	default:
-		return fmt.Sprintf("Supervisor auto-configuration skipped on %s (not supported yet)", runtime.GOOS), nil
+		return fmt.Sprintf("Supervisor auto-configuration skipped on %s (not supported yet)", h.goos), nil
 	}
 }
 
@@ -481,8 +485,8 @@ func (h supervisorHost) status() string {
 // provisionLaunchd writes the launchd plist on macOS. launchd loads a
 // LaunchAgent from the user's LaunchAgents directory at login; gt writes the
 // file and does not load it.
-func provisionLaunchd(data SupervisorData) (string, error) {
-	plistPath, err := LaunchdPlistPath()
+func (h supervisorHost) provisionLaunchd(data SupervisorData) (string, error) {
+	plistPath, err := h.launchdPlistPath()
 	if err != nil {
 		return "", err
 	}
