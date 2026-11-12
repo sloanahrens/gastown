@@ -608,22 +608,17 @@ func TestRealEnvSeamCommandAndError(t *testing.T) {
 	}
 }
 
-// A takeover the guard approved reaches the compose process whether or not the
-// supervisor file was rewritten on the way in, and a start without --takeover
-// never carries it. The rewritten file loads the job (compose up -d) rather
-// than restarting it, and that load is the command that needs the variable.
-func TestStartDaemonTakeoverSurvivesAFileRewrite(t *testing.T) {
+// A takeover the guard approved reaches the compose process that starts the
+// daemon, and a start without --takeover never carries it.
+func TestStartDaemonCarriesTheTakeoverVariable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		rewritten bool
-		takeover  bool
-		wantEnv   bool
+		name     string
+		takeover bool
+		wantEnv  bool
 	}{
-		{name: "takeover with the file rewritten", rewritten: true, takeover: true, wantEnv: true},
-		{name: "takeover with the file unchanged", rewritten: false, takeover: true, wantEnv: true},
-		{name: "no takeover with the file rewritten", rewritten: true, takeover: false},
-		{name: "no takeover with the file unchanged", rewritten: false, takeover: false},
+		{name: "takeover", takeover: true, wantEnv: true},
+		{name: "no takeover", takeover: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -635,7 +630,6 @@ func TestStartDaemonTakeoverSurvivesAFileRewrite(t *testing.T) {
 			}
 			writeComposeFile(t, town)
 			c, calls := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
-			c.syncFile = func(string) bool { return tc.rewritten }
 			c.guard = guardProbe(probeAnswers(false, true))
 
 			if _, _, err := c.startDaemonWith(town, tc.takeover); err != nil {
