@@ -127,6 +127,7 @@ func readDevTag(ctx context.Context, c *registry.Client, repo string) devTagStat
 // PUT under the dev tag. The result is read back, and a dev tag that does not read
 // back as the source is put back as it was.
 func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
+	pc := d.patrol()
 	repo := imagevalues.PolecatImage
 	running := d.polecatDevTagRunningCommit()
 	if !imagevalues.ValidCommit(running) {
@@ -161,10 +162,10 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 	// commit.
 	// The setting is checked here as well as at load: its host and path reach a
 	// request URL, so a value the validator refuses is never sent.
-	if err := d.patrol().ValidatePolecatImageSource(); err != nil {
+	if err := pc.ValidatePolecatImageSource(); err != nil {
 		return devTagFailure(host, running, dev, err.Error())
 	}
-	ciRepo := d.patrol().PolecatImageSource()
+	ciRepo := pc.PolecatImageSource()
 	// The validator above refuses a setting with no repository path, so the split
 	// always has one.
 	ciHost, ciPath, _ := strings.Cut(ciRepo, "/")

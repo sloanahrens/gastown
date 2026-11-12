@@ -242,6 +242,7 @@ func (d *Daemon) updateTriggerEnabled() bool {
 // job is due: an install builds the whole binary and can wait minutes for a
 // container-gate slot, so inline it would stall the heartbeat.
 func (d *Daemon) triggerRebuildGT() {
+	pc := d.patrol()
 	if !d.isPatrolActive("rebuild_gt") {
 		return
 	}
@@ -257,7 +258,7 @@ func (d *Daemon) triggerRebuildGT() {
 	now := d.clk().Now()
 	armed, installNow := d.rebuildGTPendingRequest()
 	lastRun, found, loadErr := loadPatrolLastRun(d.config.TownRoot, "rebuild_gt")
-	dec := patrolDueFromLastRun(lastRun, found, loadErr, "", now, rebuildGTInterval(d.patrol()))
+	dec := patrolDueFromLastRun(lastRun, found, loadErr, "", now, rebuildGTInterval(pc))
 	// A request armed by a landing pass makes the job due on its own: an
 	// install is the point of the drain signal, and the interval it would
 	// otherwise wait out is what leaves the merge inert (gt-3qmv4.1).
@@ -277,7 +278,7 @@ func (d *Daemon) triggerRebuildGT() {
 	// binary installed. A request held inside the window stays armed and logs
 	// once per wait.
 	if armed && !installNow && !dec.due {
-		window := rebuildGTMinInterval(d.patrol())
+		window := rebuildGTMinInterval(pc)
 		if age, installed := d.rebuildGTInstallAge(now); installed && age < window {
 			if d.rebuildGTWindowLogged.CompareAndSwap(false, true) {
 				d.logger.Printf("rebuild_gt: install requested %s after the last install; waiting for the %s window", age.Round(time.Second), window)

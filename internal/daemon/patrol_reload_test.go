@@ -197,3 +197,104 @@ func TestPatrolConfigGoneSectionKeepsConfigInForce(t *testing.T) {
 		t.Error("the missing config raised no failure")
 	}
 }
+
+// swapPatrolAfterFirstRead makes a reload land between a reader's first read of
+// the patrol config and its next one: the first patrol() call returns the config
+// in force, and the config is then swapped for one with no Patrols section.
+func swapPatrolAfterFirstRead(d *Daemon) {
+	swapped := false
+	d.onPatrolRead = func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		d.patrolMu.Lock()
+		d.patrolConfig = &DaemonPatrolConfig{}
+		d.patrolMu.Unlock()
+	}
+}
+
+// A reader that reads the patrol config more than once takes one snapshot: a
+// reload between its check and its read cannot leave it with a config that has
+// no Patrols section (the nil dereference), and it reports the config it started
+// with.
+func TestPatrolReaderTakesOneSnapshotAcrossAReload(t *testing.T) {
+	t.Parallel()
+	d, _, _ := patrolReloadTown(t, "hm-sync")
+	limit := 7
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{ArchiveCommitLimit: &limit},
+	}}
+	swapPatrolAfterFirstRead(d)
+
+	commit, _, err := d.maintenanceArchiveLimits()
+	if err != nil {
+		t.Fatalf("maintenanceArchiveLimits: %v", err)
+	}
+	if commit != limit {
+		t.Errorf("commit limit = %d, want %d from the config the reader started with", commit, limit)
+	}
+}
+
+// The archive directory reader checks the config and then reads it: a reload
+// between the two keeps the reader on the config it checked.
+func TestPatrolArchiveDirReaderTakesOneSnapshotAcrossAReload(t *testing.T) {
+	t.Parallel()
+	d, _, _ := patrolReloadTown(t, "hm-sync")
+	dir := t.TempDir()
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{ArchiveDir: dir},
+	}}
+	swapPatrolAfterFirstRead(d)
+
+	got, err := d.maintenanceArchiveDir()
+	if err != nil {
+		t.Fatalf("maintenanceArchiveDir: %v", err)
+	}
+	if got != dir {
+		t.Errorf("archive dir = %q, want %q from the config the reader started with", got, dir)
+	}
+}
+
+// Size and mtime alone miss a same-size edit inside one mtime tick, so the
+// bytes decide: an edit that keeps both the length and the mtime is still
+// reloaded.
+func TestPatrolConfigSameSizeSameMtimeEditIsSeen(t *testing.T) {
+	t.Parallel()
+	d, _, _ := patrolReloadTown(t, "hm-sync")
+	step := patrolConfigStep(t)
+	settings := filepath.Join(d.config.TownRoot, "settings", "config.json")
+	before, err := os.Stat(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writePatrolSettings(t, settings, []string{"xm-sync"})
+	if err := os.Chtimes(settings, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	step(d)
+
+	if !d.isPatrolActive("hm-sync") {
+		t.Error("hm-sync is still held after a same-size edit in the same mtime tick: the reload missed the edit")
+	}
+}
+
+// A reload logs one line naming the source, and says that daemon.env is not
+// applied again: the values were applied to the process at start.
+func TestPatrolConfigReloadLogsLineAndDaemonEnvNote(t *testing.T) {
+	t.Parallel()
+	d, logs, _ := patrolReloadTown(t, "hm-sync")
+	step := patrolConfigStep(t)
+
+	writePatrolSettings(t, filepath.Join(d.config.TownRoot, "settings", "config.json"), nil)
+	step(d)
+
+	out := logs.String()
+	if !strings.Contains(out, "patrol config reloaded from") {
+		t.Errorf("log %q has no reload line", out)
+	}
+	if !strings.Contains(out, "daemon.env is applied at start and is not re-applied on reload") {
+		t.Errorf("reload log %q does not say daemon.env is not re-applied", out)
+	}
+}

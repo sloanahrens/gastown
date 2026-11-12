@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -19,13 +20,15 @@ const configParseFailedKey = "config-parse-failed"
 var errPatrolConfigGone = errors.New("the file no longer holds a patrol config")
 
 // patrolFileStamp is one file as the reload step compares it between
-// heartbeats: whether it exists, and its modification time and size. A file
-// that cannot be stat'ed reads as absent, so one that becomes unreadable
-// changes the stamp, and the reload reports it through the read.
+// heartbeats: whether it exists, its modification time and size, and a SHA-256
+// of its bytes. A file that cannot be stat'ed reads as absent, so one that
+// becomes unreadable changes the stamp, and the reload reports it through the
+// read.
 type patrolFileStamp struct {
 	present bool
 	modNano int64
 	size    int64
+	sum     [sha256.Size]byte
 }
 
 // patrolStamp is the pair of files the patrol config is read from: the town
@@ -56,17 +59,31 @@ func statPatrolFile(path string) patrolFileStamp {
 	if err != nil {
 		return patrolFileStamp{}
 	}
-	return patrolFileStamp{present: true, modNano: info.ModTime().UnixNano(), size: info.Size()}
+	stamp := patrolFileStamp{present: true, modNano: info.ModTime().UnixNano(), size: info.Size()}
+	// A same-size edit inside one mtime tick leaves both unchanged on a
+	// filesystem with coarse timestamps, so the bytes decide as well. A read
+	// that fails leaves the hash zero, so a file that stops reading changes the
+	// stamp, and the reload reads it and reports the error.
+	if data, err := os.ReadFile(path); err == nil {
+		stamp.sum = sha256.Sum256(data)
+	}
+	return stamp
 }
 
 // patrol returns the patrol config in force. Every reader takes it here, never
 // the field, so a reload is seen whole: a reader gets one config, never a
-// half-swapped one. A value a reader keeps across ticks, such as an interval
-// read once at start or the Dolt server manager's config, holds until restart.
+// half-swapped one. A reader that uses the config more than once takes it into
+// a local once, so one pass sees one config. A value a reader keeps across
+// ticks, such as an interval read once at start or the Dolt server manager's
+// config, holds until restart.
 func (d *Daemon) patrol() *DaemonPatrolConfig {
 	d.patrolMu.RLock()
-	defer d.patrolMu.RUnlock()
-	return d.patrolConfig
+	cfg := d.patrolConfig
+	d.patrolMu.RUnlock()
+	if d.onPatrolRead != nil {
+		d.onPatrolRead()
+	}
+	return cfg
 }
 
 // currentPatrolFailure returns the reload failure in force, or nil.

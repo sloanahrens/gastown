@@ -247,7 +247,8 @@ func (d *Daemon) runCloudCheckPatrol() {
 // rather than on every check tick. An exit 0 that wrote no status is a failed
 // run: the status the dashboard shows is then an earlier run's, not this one's.
 func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
-	keyFile := s.keyFile(cloudCheckSettings(d.patrol()))
+	pc := d.patrol()
+	keyFile := s.keyFile(cloudCheckSettings(pc))
 	// The check cannot reach the cloud without the key, and a run without it
 	// would report every project as unreachable. Say so once and run nothing.
 	_, err := s.stat(keyFile)
@@ -264,7 +265,7 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	defer cancel()
 
 	statusPath := cloudCheckStatusPath(d.config.TownRoot)
-	command := cloudCheckCommand(d.patrol())
+	command := cloudCheckCommand(pc)
 	before := cloudCheckStatusFileOf(statusPath)
 	err = s.run(ctx, command, []string{cloudCheckQuietArg, cloudCheckJSONArg, statusPath}, []string{cloudCheckKeyEnv + "=" + keyFile})
 	elapsed := s.now().Sub(started).Round(time.Millisecond)

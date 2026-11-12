@@ -150,6 +150,7 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 // (maintenance_request.go). An archive-now request runs only the history
 // archive pass and answers it (scheduled_maintenance_archive_request.go).
 func (d *Daemon) runScheduledMaintenance() {
+	pc := d.patrol()
 	files := osRequestFiles{}
 	dir := update.Dir(d.config.TownRoot)
 
@@ -224,7 +225,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	// run too.
 	cycleDeferred := !requested && d.updateTriggerEnabled()
 
-	window := maintenanceWindow(d.patrol())
+	window := maintenanceWindow(pc)
 	if window == "" && !requested {
 		d.logger.Printf("scheduled_maintenance: no window configured, skipping")
 		return
@@ -346,7 +347,7 @@ func (d *Daemon) runScheduledMaintenance() {
 		}
 	}
 	d.logger.Printf("scheduled_maintenance: %s, %d database(s) discovered", where, len(databases))
-	if keys := deprecatedMaintenanceKeys(d.patrol()); len(keys) > 0 {
+	if keys := deprecatedMaintenanceKeys(pc); len(keys) > 0 {
 		d.logger.Printf("scheduled_maintenance: WARNING: deprecated config ignored — patrols.scheduled_maintenance.{%s} "+
 			"have no effect; the schedule is weekly gc plus the old-gen trigger (gt-8z769.3)", strings.Join(keys, ","))
 	}

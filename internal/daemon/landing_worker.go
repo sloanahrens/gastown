@@ -258,8 +258,11 @@ func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
 	announced := false
 	for {
 		if d.isPatrolActive("landing_worker") {
+			// Each pass takes its own snapshot: the rig list follows a reload
+			// (gt-6frjqf), while the interval above keeps its start-time value.
+			pc := d.patrol()
 			if !announced {
-				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingRigLandTimeout(d.patrol()))
+				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingRigLandTimeout(pc))
 				announced = true
 			}
 			// The om the workers review with is a per-daemon reading, not a
@@ -270,7 +273,7 @@ func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
 			// So is the watch over the deploys that run after these landings
 			// (deploy_watch.go): it polls the same rigs' repositories.
 			d.startDeployWatch()
-			for _, rigName := range landingWorkerRigs(d.patrol(), d.getKnownRigs()) {
+			for _, rigName := range landingWorkerRigs(pc, d.getKnownRigs()) {
 				lw.mu.Lock()
 				if !lw.running[rigName] {
 					lw.running[rigName] = true
@@ -483,6 +486,7 @@ func seatAssignee(reader beadReader) func(beadID string) (string, error) {
 
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
+	pc := d.patrol()
 	townRoot := d.config.TownRoot
 	// A rejected gate keeps its whole job log under the town runtime (gt-wwqx8),
 	// and GateLogDir resolves that directory from the town root and rig name. An
@@ -545,7 +549,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	bd := landworker.RetryBeads{Inner: beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))}
 	out := landingLogWriter{logf: d.logger.Printf}
-	cfg := landingWorkerConfig(d.patrol())
+	cfg := landingWorkerConfig(pc)
 	if cfg == nil {
 		cfg = &LandingWorkerConfig{}
 	}
@@ -563,7 +567,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// The rig's om directory holds the transient verdict files and the rounds
 	// ledgers that outlive them, both named after the work bead (gt-yphcl).
 	omDir := filepath.Join(townRoot, ".runtime", "landing-om", rigName)
-	if landingReviewEnabled(d.patrol()) {
+	if landingReviewEnabled(pc) {
 		home, _ := os.UserHomeDir()
 		omPath := resolveOMPath(cfg.OMPath, exec.LookPath, home)
 		if _, err := os.Stat(omPath); err != nil && filepath.IsAbs(omPath) {
@@ -759,7 +763,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Reverts:           redMain,
 		WatchTarget:       watchBranch,
 		MainState:         mainState,
-		LandTimeout:       landingRigLandTimeout(d.patrol()),
+		LandTimeout:       landingRigLandTimeout(pc),
 		Logf:              d.logger.Printf,
 		Escalate: func(beadID, message string) {
 			d.escalateAlert(landingPersonKey(bd, beadID), "landing_worker", message)

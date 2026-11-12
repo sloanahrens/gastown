@@ -1115,6 +1115,7 @@ func (d *Daemon) tierSweepStampOwed(rig string, since time.Time) {
 // so the restart does not cost the hour, and a run of landings cannot cost the
 // tiers their gate.
 func (d *Daemon) runTierSweep() bool {
+	pc := d.patrol()
 	if d.tierSweepDeferForRestart(d.clk().Now()) {
 		return false
 	}
@@ -1122,9 +1123,9 @@ func (d *Daemon) runTierSweep() bool {
 	// what asked it to start, and a reader dating the silence has the
 	// due-ness the trigger used (gt-gg9hv.37).
 	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(),
-		d.clk().Now(), tierSweepInterval(d.patrol()))
+		d.clk().Now(), tierSweepInterval(pc))
 	d.logger.Printf("tier_sweep: cycle started (due: %s)", dec.note)
-	rigs := tierSweepRigs(d.patrol(), d.getKnownRigs())
+	rigs := tierSweepRigs(pc, d.getKnownRigs())
 	if len(rigs) == 0 {
 		d.logger.Printf("tier_sweep: no rig configured to sweep; nothing to do")
 		return true

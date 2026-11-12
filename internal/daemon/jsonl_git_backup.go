@@ -202,6 +202,7 @@ func JsonlBackupRepo(townRoot string, cfg *DaemonPatrolConfig) (path string, fro
 // and commits/pushes to a git repository.
 // Non-fatal: errors are logged but don't stop the daemon.
 func (d *Daemon) syncJsonlGitBackup() {
+	pc := d.patrol()
 	if !d.isPatrolActive("jsonl_git_backup") {
 		return
 	}
@@ -222,14 +223,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 	cycle := d.startDogCycle("jsonl_git_backup")
 	defer cycle.close()
 
-	config := d.patrol().Patrols.JsonlGitBackup
+	config := pc.Patrols.JsonlGitBackup
 
 	// Resolve git repo path. Default lives under TownRoot (matches vitals.go's
 	// display path and where JSONL exports actually land) — NOT $HOME, which
 	// silently diverges from TownRoot whenever the town isn't rooted at
 	// $HOME/gt directly, leaving this patrol permanently unable to find its
 	// own target directory (gt-kme).
-	gitRepo, fromSetting := JsonlBackupRepo(d.config.TownRoot, d.patrol())
+	gitRepo, fromSetting := JsonlBackupRepo(d.config.TownRoot, pc)
 	d.jsonlRepoLogOnce.Do(func() {
 		source := "default"
 		if fromSetting {

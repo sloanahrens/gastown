@@ -362,16 +362,17 @@ func (d *Daemon) triggerOverrunGuard() {
 // In dry-run mode nothing is sent, stopped or written, and the log says what
 // would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
+	pc := d.patrol()
 	if !d.isPatrolActive("overrun_guard") {
 		return
 	}
 	if s.now == nil {
 		s.now = time.Now
 	}
-	nudgeAfter, stopAfter := overrunGuardThresholds(d.patrol())
-	scheduledStopAfter := overrunScheduledStopAfter(d.patrol())
+	nudgeAfter, stopAfter := overrunGuardThresholds(pc)
+	scheduledStopAfter := overrunScheduledStopAfter(pc)
 	dry := false
-	if cfg := overrunGuardConfig(d.patrol()); cfg != nil {
+	if cfg := overrunGuardConfig(pc); cfg != nil {
 		dry = cfg.DryRun
 	}
 	// An unset gate seam is no exemption: every seat's time counts.
@@ -384,7 +385,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if escalationWaiting == nil {
 		escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
 	}
-	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(d.patrol()))
+	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(pc))
 	maxGateTotal := overrunMaxGateTotal(stopAfter)
 	maxEscalationTotal := overrunMaxEscalationTotal(stopAfter)
 	// The escalation read is logged once per tick, not once per seat: a failed

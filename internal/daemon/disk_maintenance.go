@@ -463,9 +463,10 @@ func (due diskMaintDue) selection(targets map[string]diskmaint.Target) []string 
 // runs nothing rather than quietly on a clock the town never asked for
 // (gt-kdbzb).
 func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
+	pc := d.patrol()
 	due := diskMaintDue{scheduled: map[string]bool{}}
 	var errs []error
-	if cfg := diskMaintenanceSettings(d.patrol()); cfg != nil {
+	if cfg := diskMaintenanceSettings(pc); cfg != nil {
 		for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
 			// A target given a cadence never runs on the daily window, whether
 			// that cadence is due or unreadable: falling back would run it on a
@@ -489,7 +490,7 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 	// The cache trim is due from its own last run in any window, or from a
 	// failed run's retry. A malformed setting is refused and the trim runs
 	// nothing, as a target's would (gt-gg9hv.24.2).
-	if every, err := diskMaintenanceCacheTrimEvery(d.patrol()); err != nil {
+	if every, err := diskMaintenanceCacheTrimEvery(pc); err != nil {
 		errs = append(errs, err)
 	} else if d.diskMaintSchedule.cacheTrimDue(now, every) {
 		due.cacheTrim = true
@@ -497,7 +498,7 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 	if !shouldRunMaintenanceCycle(now, d.diskMaintenanceSettledAt()) {
 		return due, errs
 	}
-	window := diskMaintenanceWindow(d.patrol())
+	window := diskMaintenanceWindow(pc)
 	if isInMaintenanceWindow(now, window) {
 		due.daily = true
 		return due, errs

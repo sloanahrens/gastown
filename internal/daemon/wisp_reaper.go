@@ -160,6 +160,7 @@ func (d *Daemon) triggerWispReaper() {
 // reapWisps is the thin orchestrator for the wisp_reaper patrol: it runs the
 // sweep inline and records each step on the cycle's receipt.
 func (d *Daemon) reapWisps() {
+	pc := d.patrol()
 	if !d.isPatrolActive("wisp_reaper") {
 		return
 	}
@@ -175,10 +176,10 @@ func (d *Daemon) reapWisps() {
 		d.recordPatrolRun(&d.wispReaperRun, "wisp_reaper", time.Now())
 	}()
 
-	config := d.patrol().Patrols.WispReaper
-	maxAge := wispReaperMaxAge(d.patrol())
-	deleteAge := wispDeleteAge(d.patrol())
-	staleIssueAge := wispReaperStaleIssueAge(d.patrol())
+	config := pc.Patrols.WispReaper
+	maxAge := wispReaperMaxAge(pc)
+	deleteAge := wispDeleteAge(pc)
+	staleIssueAge := wispReaperStaleIssueAge(pc)
 
 	cycle := d.startDogCycle("wisp_reaper")
 	defer cycle.close()

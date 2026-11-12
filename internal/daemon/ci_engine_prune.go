@@ -541,9 +541,10 @@ func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duratio
 // guard keeps one pass in flight, and the pass re-reads the due check when it
 // starts.
 func (d *Daemon) runCIEnginePruneTick() {
+	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	now := s.now()
-	_, configured, err := ciCacheTrimContext(d.patrol())
+	_, configured, err := ciCacheTrimContext(pc)
 	if !configured {
 		return
 	}
@@ -551,7 +552,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	every, _, _, err := ciEnginePruneSettings(d.patrol())
+	every, _, _, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -559,7 +560,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 	if !d.diskMaintSchedule.trimDue(ciEnginePruneName, now, every) {
 		return
 	}
-	mode, err := diskMaintenanceMode(d.patrol())
+	mode, err := diskMaintenanceMode(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -605,13 +606,14 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 // checked, fails the run after the rest have run, and the next run plans again
 // from what is left.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
+	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	_, maxAge, keepRepos, err := ciEnginePruneSettings(d.patrol())
+	_, maxAge, keepRepos, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false
 	}
-	kubeContext, _, err := ciCacheTrimContext(d.patrol())
+	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciEnginePruneLogf("context", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false

@@ -424,15 +424,16 @@ func (d *Daemon) runCompactorDog() bool {
 // Split out from runCompactorDog so a test drives the whole cycle, alarms
 // included, from probes it controls — offline, with no Dolt server.
 func (d *Daemon) runCompactorDogWith(p compactorProbes) bool {
+	pc := d.patrol()
 	if !d.isPatrolActive("compactor_dog") {
 		return true
 	}
 
-	commitThreshold := compactorDogThreshold(d.patrol())
+	commitThreshold := compactorDogThreshold(pc)
 	d.logger.Printf("compactor_dog: starting monitoring cycle (commit_threshold=%d size_threshold=%s)",
 		commitThreshold, formatBytes(compactorSizeThreshold))
 
-	warnDeprecatedCompactorConfig(d, compactorDogConfig(d.patrol()))
+	warnDeprecatedCompactorConfig(d, compactorDogConfig(pc))
 
 	cycle := d.startDogCycle("compactor_dog")
 	defer cycle.close()

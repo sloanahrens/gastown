@@ -130,6 +130,10 @@ type Daemon struct {
 	// patrolStamp is what the patrol config's files looked like when they were
 	// last read. Heartbeat goroutine only, and New.
 	patrolStamp patrolStamp
+	// onPatrolRead is a test seam: it runs after each patrol() read, outside
+	// the lock, so a test can swap the config between a reader's check and its
+	// next read.
+	onPatrolRead func()
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
@@ -1699,6 +1703,7 @@ func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.D
 
 // Run starts the daemon main loop.
 func (d *Daemon) Run() (err error) {
+	pc := d.patrol()
 	pid := os.Getpid()
 	startupComplete := false
 	defer func() {
@@ -1858,7 +1863,7 @@ func (d *Daemon) Run() (err error) {
 	var jsonlGitBackupTicker *time.Ticker
 	var jsonlGitBackupChan <-chan time.Time
 	if d.isPatrolActive("jsonl_git_backup") {
-		interval := jsonlGitBackupInterval(d.patrol())
+		interval := jsonlGitBackupInterval(pc)
 		jsonlGitBackupTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		jsonlGitBackupChan = jsonlGitBackupTicker.C
 		defer jsonlGitBackupTicker.Stop()
@@ -1874,7 +1879,7 @@ func (d *Daemon) Run() (err error) {
 	// shape as jsonl_git_backup: due-ness comes from the persisted last run.
 	var townStateBackupChan <-chan time.Time
 	if d.isPatrolActive("town_state_backup") {
-		interval := townStateBackupInterval(d.patrol())
+		interval := townStateBackupInterval(pc)
 		townStateTicker := time.NewTicker(shortPatrolCheckTick(interval))
 		townStateBackupChan = townStateTicker.C
 		defer townStateTicker.Stop()
@@ -1891,7 +1896,7 @@ func (d *Daemon) Run() (err error) {
 	var wispReaperTicker *time.Ticker
 	var wispReaperChan <-chan time.Time
 	if d.isPatrolActive("wisp_reaper") {
-		interval := wispReaperInterval(d.patrol())
+		interval := wispReaperInterval(pc)
 		wispReaperTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		wispReaperChan = wispReaperTicker.C
 		defer wispReaperTicker.Stop()
@@ -1906,7 +1911,7 @@ func (d *Daemon) Run() (err error) {
 	var doctorDogTicker *time.Ticker
 	var doctorDogChan <-chan time.Time
 	if d.isPatrolActive("doctor_dog") {
-		interval := doctorDogInterval(d.patrol())
+		interval := doctorDogInterval(pc)
 		doctorDogTicker = time.NewTicker(interval)
 		doctorDogChan = doctorDogTicker.C
 		defer doctorDogTicker.Stop()
@@ -1921,7 +1926,7 @@ func (d *Daemon) Run() (err error) {
 	var compactorDogTicker *time.Ticker
 	var compactorDogChan <-chan time.Time
 	if d.isPatrolActive("compactor_dog") {
-		interval := compactorDogInterval(d.patrol())
+		interval := compactorDogInterval(pc)
 		compactorDogTicker = time.NewTicker(compactorDogTickInterval)
 		compactorDogChan = compactorDogTicker.C
 		defer compactorDogTicker.Stop()
@@ -1943,7 +1948,7 @@ func (d *Daemon) Run() (err error) {
 	var checkpointDogTicker *time.Ticker
 	var checkpointDogChan <-chan time.Time
 	if d.isPatrolActive("checkpoint_dog") {
-		interval := checkpointDogInterval(d.patrol())
+		interval := checkpointDogInterval(pc)
 		checkpointDogTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		checkpointDogChan = checkpointDogTicker.C
 		defer checkpointDogTicker.Stop()
@@ -1959,7 +1964,7 @@ func (d *Daemon) Run() (err error) {
 	var overrunGuardTicker *time.Ticker
 	var overrunGuardChan <-chan time.Time
 	if d.isPatrolActive("overrun_guard") {
-		interval := overrunGuardInterval(d.patrol())
+		interval := overrunGuardInterval(pc)
 		overrunGuardTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		overrunGuardChan = overrunGuardTicker.C
 		defer overrunGuardTicker.Stop()
@@ -1976,7 +1981,7 @@ func (d *Daemon) Run() (err error) {
 	var landingInfraTicker *time.Ticker
 	var landingInfraChan <-chan time.Time
 	if d.isPatrolActive("landing_infra") {
-		interval := landingInfraInterval(d.patrol())
+		interval := landingInfraInterval(pc)
 		landingInfraTicker = time.NewTicker(interval)
 		landingInfraChan = landingInfraTicker.C
 		defer landingInfraTicker.Stop()
@@ -1993,11 +1998,11 @@ func (d *Daemon) Run() (err error) {
 	var scheduledMaintenanceTicker *time.Ticker
 	var scheduledMaintenanceChan <-chan time.Time
 	if d.isPatrolActive("scheduled_maintenance") {
-		interval := maintenanceCheckInterval(d.patrol())
+		interval := maintenanceCheckInterval(pc)
 		scheduledMaintenanceTicker = time.NewTicker(interval)
 		scheduledMaintenanceChan = scheduledMaintenanceTicker.C
 		defer scheduledMaintenanceTicker.Stop()
-		window := maintenanceWindow(d.patrol())
+		window := maintenanceWindow(pc)
 		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
 	}
 
@@ -2012,7 +2017,7 @@ func (d *Daemon) Run() (err error) {
 		diskMaintChan = diskMaintTicker.C
 		defer diskMaintTicker.Stop()
 		d.logger.Printf("Disk maintenance ticker started (check interval %v, window %s, mode %s)",
-			diskMaintCheckInterval, diskMaintenanceWindow(d.patrol()), diskMaintenanceModeOrDefault(d.patrol()))
+			diskMaintCheckInterval, diskMaintenanceWindow(pc), diskMaintenanceModeOrDefault(pc))
 	}
 
 	// Start the hm_sync ticker if configured. It runs the town's `hm sync`
@@ -2052,7 +2057,7 @@ func (d *Daemon) Run() (err error) {
 		scheduledSlingsTicker = time.NewTicker(scheduledSlingsTickInterval)
 		scheduledSlingsChan = scheduledSlingsTicker.C
 		defer scheduledSlingsTicker.Stop()
-		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrol().Patrols.ScheduledSlings.Entries))
+		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(pc.Patrols.ScheduledSlings.Entries))
 		// Catch up at startup rather than waiting for the first tick: the
 		// ticker is fresh on every start, so restarts closer together than
 		// scheduledSlingsTickInterval would otherwise never evaluate a
@@ -2067,7 +2072,7 @@ func (d *Daemon) Run() (err error) {
 	var specDispatchTicker *time.Ticker
 	var specDispatchChan <-chan time.Time
 	if d.isPatrolActive("spec_dispatch") {
-		interval := specDispatchInterval(d.patrol())
+		interval := specDispatchInterval(pc)
 		// The idle rule's consecutive-tick gap is a multiple of the cadence the
 		// ticker actually runs at (gt-icmdq).
 		d.dispatchIdle.setInterval(interval)
@@ -2087,7 +2092,7 @@ func (d *Daemon) Run() (err error) {
 	var overseerReportTicker *time.Ticker
 	var overseerReportChan <-chan time.Time
 	if d.isPatrolActive("overseer_report") {
-		interval := overseerReportInterval(d.patrol())
+		interval := overseerReportInterval(pc)
 		overseerReportTicker = time.NewTicker(overseerReportTickEvery(interval))
 		overseerReportChan = overseerReportTicker.C
 		defer overseerReportTicker.Stop()
@@ -2115,7 +2120,7 @@ func (d *Daemon) Run() (err error) {
 	var findingsFilerTicker *time.Ticker
 	var findingsFilerChan <-chan time.Time
 	if d.isPatrolActive("findings_filer") {
-		interval := findingsFilerInterval(d.patrol())
+		interval := findingsFilerInterval(pc)
 		findingsFilerTicker = time.NewTicker(interval)
 		findingsFilerChan = findingsFilerTicker.C
 		defer findingsFilerTicker.Stop()
@@ -2127,7 +2132,7 @@ func (d *Daemon) Run() (err error) {
 	var patrolScanTicker *time.Ticker
 	var patrolScanChan <-chan time.Time
 	if d.isPatrolActive("patrol_scan") {
-		interval := patrolScanInterval(d.patrol())
+		interval := patrolScanInterval(pc)
 		patrolScanTicker = time.NewTicker(interval)
 		patrolScanChan = patrolScanTicker.C
 		defer patrolScanTicker.Stop()
@@ -2140,7 +2145,7 @@ func (d *Daemon) Run() (err error) {
 	var resourceSamplerTicker *time.Ticker
 	var resourceSamplerChan <-chan time.Time
 	if d.isPatrolActive("resource_sampler") {
-		interval := resourceSamplerInterval(d.patrol())
+		interval := resourceSamplerInterval(pc)
 		resourceSamplerTicker = time.NewTicker(interval)
 		resourceSamplerChan = resourceSamplerTicker.C
 		defer resourceSamplerTicker.Stop()
