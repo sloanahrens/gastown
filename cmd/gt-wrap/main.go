@@ -75,6 +75,8 @@ type surface struct {
 	newDoctor func(town string) gtwrap.Doctor
 	// native runs the calls the config names for the Mac; nil refuses them.
 	native gtwrap.Process
+	// git reads the caller's worktree for gt done; nil refuses gt done.
+	git gtwrap.Git
 }
 
 func main() {
@@ -113,6 +115,7 @@ func osSurface() surface {
 			return cutoverDoctor{town: town, shell: gtwrap.OSShell{}, read: os.ReadFile, report: os.Stderr}
 		},
 		native: gtwrap.OSProcess{},
+		git:    gtwrap.OSGit,
 	}
 }
 
@@ -158,6 +161,10 @@ func run(argv []string, s surface) int {
 	dir, err := s.getwd()
 	if err != nil {
 		return fail(s.stderr, fmt.Errorf("gtwrap: get the working directory to run the tool in: %w", err))
+	}
+	args, err = withWorktreeFacts(name, args, dir, s)
+	if err != nil {
+		return fail(s.stderr, err)
 	}
 	call, err := gtwrap.Plan(name, args, s.environ(), dir, s.stdinTTY)
 	if err != nil {
