@@ -122,8 +122,8 @@ func attentionCases() []attentionCase {
 			key: "host-mem:late", clear: 20 * time.Minute},
 		{name: "a legacy ack hides the self-clear window", kind: attention.KindHostMem,
 			key: "host-mem:legacy", clear: 10 * time.Minute, legacyAck: true},
-		{name: "a standing item with no disposition is left unlabeled", kind: attention.KindHostMem,
-			key: "host-mem:open"},
+		{name: "a standing item past its window with no disposition is false", kind: attention.KindHostMem,
+			key: "host-mem:open", want: map[string]bool{"clears_on_its_own": false}, wantRule: "still-open-past-window"},
 		{name: "a bead with a note is not quiet", kind: attention.KindEscalation,
 			key: "esc:hq-16", bead: "hq-16", clear: 5 * time.Minute,
 			issue: &beads.Issue{ID: "hq-16", Status: "closed", Notes: "looked at it"}},
@@ -245,8 +245,12 @@ func beadsOf(cases []attentionCase) fakeBeads {
 	return fakeBeads{issues: issues}
 }
 
+// attentionNow is the scorecard's clock in the tests: after every case's raise
+// and its self-clear window.
+var attentionNow = attentionBase.Add(100 * time.Hour)
+
 func newAttentionTestAdapter(town string, b beadShower) *attentionAdapter {
-	return &attentionAdapter{town: town, beads: b, lines: map[string]jevattention.Line{}}
+	return &attentionAdapter{town: town, beads: b, lines: map[string]jevattention.Line{}, now: func() time.Time { return attentionNow }}
 }
 
 // caseID is the battery line ID of case i, the one Parse gives it.
@@ -327,6 +331,70 @@ func TestAttentionDispositionWinsOverMechanism(t *testing.T) {
 	lr := rep.Lines[0]
 	if !sameLabels(lr.Labels, map[string]bool{"needs_human": true}) || lr.Rule != "ack:needed-human" {
 		t.Fatalf("labels %v by %q, want only needs_human by ack:needed-human", lr.Labels, lr.Rule)
+	}
+}
+
+// A standing item whose self-clear window has passed did not clear on its own,
+// whether it was acked by a person or never acked.
+func TestAttentionClearsOnItsOwnFalseWhenStillOpenAfterTheWindow(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	cases := []attentionCase{
+		{name: "unacked", kind: attention.KindHostMem, key: "host-mem:unacked"},
+		{name: "acked by a person", kind: attention.KindHostMem, key: "host-mem:acked", legacyAck: true},
+	}
+	writeAttentionTown(t, town, cases)
+
+	// The second life was raised an hour after the first, so a clock 16 minutes
+	// past the second raise is past both windows.
+	a := newAttentionTestAdapter(town, beadsOf(cases))
+	a.now = func() time.Time { return attentionBase.Add(time.Hour + 16*time.Minute) }
+	rep, err := Build(context.Background(), a, time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	byID := map[string]LineReport{}
+	for _, lr := range rep.Lines {
+		byID[lr.ID] = lr
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lr, ok := byID[caseID(c, i)]
+			if !ok {
+				t.Fatalf("no line for %s", c.key)
+			}
+			if !sameLabels(lr.Labels, map[string]bool{"clears_on_its_own": false}) || lr.Rule != "still-open-past-window" {
+				t.Errorf("labels %v by %q, want clears_on_its_own false by still-open-past-window", lr.Labels, lr.Rule)
+			}
+		})
+	}
+}
+
+// A standing item inside its self-clear window has not yet had a chance to
+// clear on its own, so it stays unlabeled. The window's end counts as inside,
+// as it does for a cleared item.
+func TestAttentionClearsOnItsOwnUnlabeledInsideTheWindow(t *testing.T) {
+	t.Parallel()
+	for _, age := range []time.Duration{10 * time.Minute, selfClearWindow} {
+		t.Run(age.String(), func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			c := attentionCase{name: "standing", kind: attention.KindHostMem, key: "host-mem:young"}
+			writeAttentionTown(t, town, []attentionCase{c})
+
+			a := newAttentionTestAdapter(town, beadsOf([]attentionCase{c}))
+			a.now = func() time.Time { return attentionBase.Add(age) }
+			rep, err := Build(context.Background(), a, time.Time{})
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			if len(rep.Lines) != 1 {
+				t.Fatalf("got %d lines, want 1", len(rep.Lines))
+			}
+			if lr := rep.Lines[0]; lr.Labeled || lr.Rule != "" {
+				t.Errorf("labeled %v by %q, want unlabeled", lr.Labels, lr.Rule)
+			}
+		})
 	}
 }
 

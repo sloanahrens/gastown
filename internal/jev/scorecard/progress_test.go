@@ -178,48 +178,48 @@ func TestProgressLabelRules(t *testing.T) {
 			bead:     "gt-p01",
 			nudge:    progressBase,
 			landed:   at(15 * time.Minute),
-			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qLooping: false, qDriftedFromBead: false},
-			wantRule: ruleProgressLanded,
+			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qLooping: false, qDriftedFromBead: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "a landing at the window's end still counts",
 			bead:     "gt-p02",
 			nudge:    progressBase,
 			landed:   at(20 * time.Minute),
-			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qLooping: false, qDriftedFromBead: false},
-			wantRule: ruleProgressLanded,
+			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qLooping: false, qDriftedFromBead: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "a landing after the window does not count, so remaining is false",
 			bead:     "gt-p03",
 			nudge:    progressBase,
 			landed:   at(21 * time.Minute),
-			want:     map[QuestionID]bool{qRemaining: false},
-			wantRule: ruleProgressNotLanded,
+			want:     map[QuestionID]bool{qRemaining: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "a landing before the nudge is an earlier sling, so remaining is false",
 			bead:     "gt-p04",
 			nudge:    progressBase,
 			landed:   at(-5 * time.Minute),
-			want:     map[QuestionID]bool{qRemaining: false},
-			wantRule: ruleProgressNotLanded,
+			want:     map[QuestionID]bool{qRemaining: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "a stop at or after the nudge is no progress and not done",
 			bead:     "gt-p05",
 			nudge:    progressBase,
 			stop:     progressStop{StoppedAt: at(20 * time.Minute)},
-			want:     map[QuestionID]bool{qMakingProgress: false, qRemaining: false, qLooping: true},
-			wantRule: ruleProgressNotLanded + "+" + ruleProgressStopped,
+			want:     map[QuestionID]bool{qMakingProgress: false, qRemaining: false, qLooping: true, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressStopped + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "a stop from an earlier sling does not label progress, but remaining is false",
 			bead:     "gt-p06",
 			nudge:    progressBase,
 			stop:     progressStop{StoppedAt: at(-time.Hour)},
-			want:     map[QuestionID]bool{qRemaining: false},
-			wantRule: ruleProgressNotLanded,
+			want:     map[QuestionID]bool{qRemaining: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "gate time charged since the nudge is blocked on the environment",
@@ -234,8 +234,8 @@ func TestProgressLabelRules(t *testing.T) {
 			bead:     "gt-p08",
 			nudge:    progressBase,
 			stop:     progressStop{GateSpent: 4 * time.Minute, GateSeenAt: at(-time.Minute)},
-			want:     map[QuestionID]bool{qRemaining: false},
-			wantRule: ruleProgressNotLanded,
+			want:     map[QuestionID]bool{qRemaining: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:     "a landing and a gate wait both label, joined in order",
@@ -250,8 +250,8 @@ func TestProgressLabelRules(t *testing.T) {
 			name:     "a bead that has not landed has remaining false",
 			bead:     "gt-p10",
 			nudge:    progressBase,
-			want:     map[QuestionID]bool{qRemaining: false},
-			wantRule: ruleProgressNotLanded,
+			want:     map[QuestionID]bool{qRemaining: false, qBlockedOnEnvironment: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressNoGateWait,
 		},
 		{
 			name:  "a line younger than 30 minutes stays unlabeled",
@@ -287,6 +287,52 @@ func TestProgressLabelRules(t *testing.T) {
 				t.Errorf("label = %+v, want labels %v by rule %q", lab, c.want, c.wantRule)
 			}
 		})
+	}
+}
+
+// Once the nudge's window has passed with no gate time charged since the nudge,
+// the seat was not blocked on the environment: a missing overrun record and a
+// stop that charged no gate time both say so.
+func TestProgressBlockedOnEnvironmentFalseWithoutAGateCharge(t *testing.T) {
+	t.Parallel()
+	at := func(d time.Duration) time.Time { return progressBase.Add(d) }
+	cases := []progressCase{
+		{bead: "gt-b01", nudge: progressBase},
+		{bead: "gt-b02", nudge: progressBase, stop: progressStop{StoppedAt: at(5 * time.Minute)}},
+	}
+	town := t.TempDir()
+	notes := writeProgressTown(t, town, cases)
+	for _, c := range cases {
+		t.Run(c.bead, func(t *testing.T) {
+			got, set := probeLabel(t, town, notes, c, qBlockedOnEnvironment)
+			if !set || got {
+				t.Errorf("blocked_on_environment set=%v value=%v, want set to false", set, got)
+			}
+		})
+	}
+}
+
+// Inside the window a gate charge may still come, so blocked_on_environment is
+// left unlabeled. A line is labeled only once it has settled, which in practice
+// is after its window has passed; this test settles the item by its own time
+// and holds the clock inside the window, so only the window check is in play.
+func TestProgressBlockedOnEnvironmentUnlabeledWhileTheWindowIsOpen(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	c := progressCase{bead: "gt-b03", nudge: progressBase}
+	notes := writeProgressTown(t, town, []progressCase{c})
+	a := newProgressTestAdapter(town, notes, progressBase.Add(10*time.Minute))
+	item, err := a.Parse(mustMarshal(t, progressLine(c)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.Time = progressBase.Add(-time.Hour)
+	lab, err := a.Label(context.Background(), item)
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if got, set := lab.Labels[qBlockedOnEnvironment]; set {
+		t.Errorf("blocked_on_environment labeled %v by %q while the window is open, want unlabeled", got, lab.Rule)
 	}
 }
 
@@ -484,7 +530,7 @@ func TestProgressDriftLabelNamesItsRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ruleProgressNotLanded + "+" + ruleProgressScope
+	want := ruleProgressNotLanded + "+" + ruleProgressScope + "+" + ruleProgressNoGateWait
 	if lab.Rule != want {
 		t.Errorf("rule = %q, want %q", lab.Rule, want)
 	}
@@ -601,8 +647,9 @@ func TestProgressVersion1LinesAreNotScored(t *testing.T) {
 	}
 }
 
-// A bead the store no longer has is unlabeled, not an error.
-func TestProgressBeadNotFoundIsUnlabeled(t *testing.T) {
+// A bead the store no longer has takes no remaining label, and is not an error.
+// Its overrun record is still read, and the record is what labels the wait.
+func TestProgressBeadNotFoundTakesNoStateLabels(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	// The bead is not in the store, so its notes read as not found: there is
@@ -615,8 +662,11 @@ func TestProgressBeadNotFoundIsUnlabeled(t *testing.T) {
 		t.Fatal(err)
 	}
 	lab, err := a.Label(context.Background(), item)
-	if err != nil || lab.Labeled {
-		t.Errorf("Label = %+v, %v; want unlabeled and no error", lab, err)
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if !reflect.DeepEqual(lab.Labels, map[QuestionID]bool{qBlockedOnEnvironment: false}) || lab.Rule != ruleProgressNoGateWait {
+		t.Errorf("label = %+v, want only blocked_on_environment false by %s", lab, ruleProgressNoGateWait)
 	}
 }
 

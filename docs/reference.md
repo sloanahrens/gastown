@@ -2085,8 +2085,9 @@ id `--json` reports are in `internal/jev/scorecard/attention.go`. A rule that
 labels `routine_action_fixes` is not counted on a line that gave no answer for
 it: the battery dropped the question at set 2.
 
-An item still standing with no disposition is unlabeled, as is one whose life
-the queue files no longer hold. A bead read that fails for any reason other
+An item still standing with no disposition is `clears_on_its_own` false once its
+15-minute self-clear window has passed (`still-open-past-window`), and unlabeled
+inside it; one whose life the queue files no longer hold is unlabeled. A bead read that fails for any reason other
 than not-found fails the report.
 
 The `landing` battery reads `.runtime/jev/landing.jsonl`. A landing's label
@@ -2422,7 +2423,9 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
   stop.
 - `blocked_on_environment` true when the overrun record charged gate time seen
   at or after the nudge (`progress:gate-wait`). Network waits are not recorded,
-  so no rule labels them.
+  so no rule labels them. Once the nudge's 20-minute window has passed with no
+  such charge, it is false (`progress:no-gate-wait-after-window`); inside the
+  window it is unlabeled, since a charge may still come.
 - `looping` true when the overrun guard stopped the seat at or after the nudge
   and the stop was not charged to gate time (`progress:stopped-by-overrun`). A
   stop charged to gate time is the environment's wait, not the seat repeating a

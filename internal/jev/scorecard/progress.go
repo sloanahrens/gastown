@@ -35,6 +35,9 @@ const (
 	ruleProgressNotLanded = "progress:not-landed-in-window"
 	ruleProgressStopped   = "progress:stopped-by-overrun"
 	ruleProgressGateWait  = "progress:gate-wait"
+	// ruleProgressNoGateWait labels a nudge whose window passed with no gate
+	// time charged since it: the seat was not waiting on the environment.
+	ruleProgressNoGateWait = "progress:no-gate-wait-after-window"
 	// ruleProgressScope is a proxy for drift, not ground truth: a refusal that
 	// names scope is evidence the work left the bead, and nothing cheaper is
 	// recorded (gt-tpv79).
@@ -173,7 +176,8 @@ func (a *progressAdapter) Parse(raw []byte) (Item, error) {
 //     environment caused says nothing about the seat repeating itself. A bead
 //     the store no longer holds takes no looping label either;
 //  4. an overrun record whose gate time was charged at or after the nudge sets
-//     blocked_on_environment true;
+//     blocked_on_environment true; once the window has passed with no such
+//     charge, blocked_on_environment is false instead;
 //  5. a MERGE REJECTION block written after the nudge whose own words name
 //     scope drift sets drifted_from_bead true.
 //
@@ -238,6 +242,11 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	if gateCharged(stop, nudged) {
 		labels[qBlockedOnEnvironment] = true
 		rules = append(rules, ruleProgressGateWait)
+	} else if a.now().Sub(nudged) > progressWindow {
+		// The window is still open until its end, so a charge may yet come; only
+		// a window that has passed with none says the seat was not blocked.
+		labels[qBlockedOnEnvironment] = false
+		rules = append(rules, ruleProgressNoGateWait)
 	}
 	if len(labels) == 0 {
 		return Labeling{}, nil
