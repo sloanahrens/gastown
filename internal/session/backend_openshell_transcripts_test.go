@@ -450,6 +450,35 @@ func TestCopiedSandboxTranscriptsRefusesACopyItCannotRead(t *testing.T) {
 	}
 }
 
+func TestCopiedSandboxTranscriptsRefusesACapRecordItCannotRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the cap record is cannot be read as one, so the copy
+	// is refused rather than read as a copy the cap did not cut.
+	marker := filepath.Join(SandboxTranscriptCopyDir(town, openshellTestRig, openshellTestPolecat), sandboxTranscriptMarker)
+	if err := os.MkdirAll(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat); err == nil {
+		t.Error("a cap record that cannot be read was not refused")
+	}
+}
+
+func TestCopiedSandboxTranscriptsRefusesACapRecordThatIsNotACount(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	copyDir := SandboxTranscriptCopyDir(town, openshellTestRig, openshellTestPolecat)
+	if err := os.MkdirAll(copyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copyDir, sandboxTranscriptMarker), []byte("many\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := CopiedSandboxTranscripts(town, openshellTestRig, openshellTestPolecat); err == nil {
+		t.Error("a cap record that is not a count was not refused")
+	}
+}
+
 func TestOpenShellOpsDeleteWarnsWhenTheTranscriptsDirCannotBeRead(t *testing.T) {
 	t.Parallel()
 	fake := &sandbox.Fake{}
