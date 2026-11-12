@@ -168,6 +168,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/forgejoresync/refs.go` `gitCommandIn`
 - `internal/gtwrap/docker.go` `OSShell.Attach`
 - `internal/gtwrap/docker.go` `OSShell.Capture`
+- `internal/gtwrap/native.go` `OSProcess.Run`
 - `internal/hmhints/hmhints.go` `ExecRunner`
 - `internal/holdclaim/holdclaim.go` `Kubectl`
 - `internal/polecat/imagectx/imagectx.go` `runArgv`
