@@ -30,5 +30,3 @@ internal/hoststat/top_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the host CP
 internal/polecatimage/stat_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the image cache reads atime through Stat_t; deleted after the gt-wrap cutover
 internal/procid/start_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: StartToken reads kinfo_proc through sysctl; deleted after the gt-wrap cutover
 internal/templates/supervisor_state.go	launchctl	1	pending-deletion	remaining launchd references: the supervisor state reads the launchd job for gt daemon status and gt doctor
-internal/util/diskspace_darwin.go	darwin	1	pending-deletion	gt-a2uug4.21: the disk-space read runs diskutil; deleted with the read
-internal/util/diskspace_darwin.go	diskutil	3	pending-deletion	lsof and diskutil reads: the disk-space read runs diskutil info

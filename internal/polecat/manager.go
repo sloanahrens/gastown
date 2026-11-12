@@ -222,7 +222,7 @@ type Manager struct {
 	// style.PrintWarning. A test records what a removal said.
 	warn func(format string, args ...any)
 	// diskSpace reports the free space at a path; nil means
-	// util.CheckDiskSpace, which runs diskutil on macOS.
+	// util.CheckDiskSpace.
 	diskSpace func(path string) (util.DiskSpaceLevel, string, error)
 	// runSetup runs setup_command's shell; nil runs it for real
 	// (runSetupProcess). Tests record the call instead.

@@ -1,20 +1,15 @@
 package util
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
 
-// noAPFS stands in for diskutil where there is none: the query fails and
-// the statfs numbers stand.
-func noAPFS(string) (uint64, uint64, error) { return 0, 0, errors.New("no APFS container") }
-
 func TestGetDiskSpace_CurrentDir(t *testing.T) {
 	t.Parallel()
-	info, err := getDiskSpace(".", noAPFS)
+	info, err := GetDiskSpace(".")
 	if err != nil {
-		t.Fatalf("getDiskSpace(\".\") failed: %v", err)
+		t.Fatalf("GetDiskSpace(\".\") failed: %v", err)
 	}
 
 	if info.TotalBytes == 0 {

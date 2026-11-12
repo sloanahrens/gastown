@@ -20,7 +20,6 @@ internal/doctor # sdk_check_test.go fakes the darwin path
 internal/daemon # /Library tool paths and launchd supervisor states in the unit tests
 internal/binaryinstall # codesign signing of the installed binary
 internal/installer # codesign; sign_darwin_integration_test.go builds only for darwin
-internal/util # diskspace_darwin_test.go builds only for darwin
 internal/testutil # runtime.GOOS darwin branch in doltserver_owner_test.go
 internal/session # the polecat image seed builds a GOOS=darwin step in polecat_image_seed_test.go
 internal/polecat # /Library tool paths in gatesuite_test.go
