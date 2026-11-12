@@ -101,21 +101,22 @@ func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps m
 	return analyseErr
 }
 
-// recordInstallRegimeEvents appends one install regime event for every receipt
-// the town's regime log does not hold, so an install is in the log the hour it
-// lands without a person typing it. A receipt file or line the run cannot use
-// prints one line and the other receipts still record; a record the log cannot
-// take fails the step, and the hour with it, rather than leaving installs
-// silently unrecorded.
+// recordInstallRegimeEvents appends one install regime event for every applied
+// receipt the town's regime log does not hold, so an install is in the log the
+// hour it lands without a person typing it. A receipt line the run cannot use
+// prints one line and the other receipts still record. A receipts file the run
+// cannot read fails the step, and the hour with it, after the other receipts are
+// recorded. A record the log cannot take also fails the step, and it stops the
+// step there.
 func recordInstallRegimeEvents(out io.Writer, env metrics.Env, actor string) error {
 	res, err := metrics.RecordInstallReceipts(env, actor, func(line string) {
 		fmt.Fprintln(out, "[town-metrics] "+line)
 	})
-	if err != nil {
-		return fmt.Errorf("install regime events: %w", err)
-	}
 	if res.Recorded > 0 {
 		fmt.Fprintf(out, "[town-metrics] recorded %d install regime events (%d already recorded)\n", res.Recorded, res.Skipped)
+	}
+	if err != nil {
+		return fmt.Errorf("install regime events: %w", err)
 	}
 	return nil
 }

@@ -55,12 +55,9 @@ func runRegimeRecord(d regimeDeps, in regimeFlags, out io.Writer) error {
 	return nil
 }
 
-// runRegimeBackfill records every install receipt the regime log does not hold
-// yet and writes the day's backfill file: the moves the town made before the
-// runtime record and the seat models settings put in force at the sandbox move.
-// One command covers the history the review found missing (gt-b2pgqo): the
-// installs from the receipts, the 2026-10-29 sandbox move, the 2026-11-10 pod
-// move, and the seat classes.
+// runRegimeBackfill records every applied install receipt the regime log does not
+// hold yet and writes the day's backfill file. The moves and the seat rule live
+// in internal/metrics/backfill.go.
 func runRegimeBackfill(d regimeDeps, actorFlag string, out io.Writer) error {
 	actor := strings.TrimSpace(actorFlag)
 	if actor == "" {
@@ -154,14 +151,13 @@ func newRegimeCommand(find func() (string, error), now func() time.Time, actor f
 		Short: "Record the install receipts and the changes known before the regime record",
 		Long: `Record the town's regime history that no one typed into the record.
 
-The install receipts under the town's daemon directory become one install event
-each in .runtime/metrics/regime-events.jsonl, and a receipt the log already
-holds is skipped, so the command records nothing on a second run.
+The applied install receipts under the town's daemon directory become one install
+event each in .runtime/metrics/regime-events.jsonl; a receipt the log already
+holds is skipped, so the command records nothing on a second run. A receipts
+file it cannot read fails the command after the other receipts are recorded, and
+the backfill file is not written.
 .runtime/metrics/regime-events-backfill-<day>.jsonl then holds the changes no
-receipt carries: the 2026-10-29 move of the seats into sandboxes, the 2026-11-10
-move of the daemon into the control cluster, and a seat_model event for each seat
-in settings/config.json's polecat_pool.seats, naming the model its agent config
-gives at the sandbox move.
+receipt carries. docs/metrics.md lists them.
 
 The town-metrics hour runs the receipts half on its own, so the log stays current
 in the pod; this command is for the history before it.`,

@@ -93,8 +93,8 @@ func TestRegimeBackfillWritesTheMovesAndTheSeats(t *testing.T) {
 		seats[rec.Reason] = rec.AfterRef
 	}
 	want := map[string]string{
-		"sbx-flash seat runs deepseek-flash[1m]": "deepseek-flash[1m]",
-		"sbx-haiku seat runs claude-haiku-5-5":   "claude-haiku-5-5",
+		"sbx-flash seat runs deepseek-flash[1m]": "sbx-flash=deepseek-flash[1m]",
+		"sbx-haiku seat runs claude-haiku-5-5":   "sbx-haiku=claude-haiku-5-5",
 	}
 	for reason, model := range want {
 		if seats[reason] != model {
@@ -132,6 +132,42 @@ func TestRegimeBackfillWritesTheMovesAndTheSeats(t *testing.T) {
 	}
 }
 
+// Two seats on one model are two seat events, and the reader counts both: the
+// seat is part of each event's identity, so the reader's duplicate rule does not
+// fold them into one.
+func TestRegimeBackfillKeepsEachSeatOnTheSameModel(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownFile(t, filepath.Join(town, "settings", "config.json"), `{
+	  "agents": {
+	    "sbx-a": {"command": "claude", "args": ["--model", "claude-haiku-5-5"]},
+	    "sbx-b": {"command": "claude", "args": ["--model", "claude-haiku-5-5"]}
+	  },
+	  "polecat_pool": {"seats": {"sbx-a": {}, "sbx-b": {}}}
+	}`)
+	env := Env{Town: town, ReadFile: os.ReadFile}
+	path, n, err := RegimeBackfill(env, time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC), "backfill")
+	if err != nil {
+		t.Fatalf("RegimeBackfill: %v", err)
+	}
+	if n != 4 {
+		t.Fatalf("wrote %d events, want the 2 moves and the 2 seats", n)
+	}
+	events, err := ReadRegimeEvents(OSEnv(town))
+	if err != nil {
+		t.Fatalf("ReadRegimeEvents: %v", err)
+	}
+	seatEvents := 0
+	for _, ev := range events {
+		if strings.HasPrefix(ev.What, "seat_model: ") {
+			seatEvents++
+		}
+	}
+	if seatEvents != 2 {
+		t.Fatalf("the reader found %d seat events in %s, want 2: %#v", seatEvents, path, events)
+	}
+}
+
 // A town with no settings file still gets the moves: no seats are known, which
 // is not a seat list the backfill refuses.
 func TestRegimeBackfillWithoutSettingsWritesTheMoves(t *testing.T) {
@@ -157,21 +193,30 @@ func TestRegimeBackfillRefusesUnreadableSettings(t *testing.T) {
 	town := t.TempDir()
 	writeTownFile(t, filepath.Join(town, "settings", "config.json"), `{"polecat_pool": `)
 	env := Env{Town: town, ReadFile: os.ReadFile}
-	path, _, err := RegimeBackfill(env, time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC), "backfill")
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	_, _, err := RegimeBackfill(env, now, "backfill")
 	if err == nil || !strings.Contains(err.Error(), "settings/config.json") {
 		t.Fatalf("err = %v, want the unreadable settings file named", err)
 	}
+	path := backfillPath(town, now)
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("a refused backfill left %s behind (%v)", path, statErr)
 	}
 }
 
-// A backfill with no reader is a wiring error, not a town with no seats.
+// A backfill with no reader is a wiring error, not a town with no seats, and it
+// writes no file.
 func TestRegimeBackfillRequiresAReader(t *testing.T) {
 	t.Parallel()
-	_, _, err := RegimeBackfill(Env{Town: t.TempDir()}, time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC), "backfill")
+	town := t.TempDir()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	_, _, err := RegimeBackfill(Env{Town: town}, now, "backfill")
 	if err == nil || !strings.Contains(err.Error(), "ReadFile") {
 		t.Fatalf("err = %v, want the unwired-reader refusal", err)
+	}
+	path := backfillPath(town, now)
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("a refused backfill left %s behind (%v)", path, statErr)
 	}
 }
 
@@ -195,10 +240,12 @@ func TestRegimeBackfillRefusesNoActor(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	env := Env{Town: town, ReadFile: os.ReadFile}
-	path, _, err := RegimeBackfill(env, time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC), " ")
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	_, _, err := RegimeBackfill(env, now, " ")
 	if err == nil || !strings.Contains(err.Error(), "no actor") {
 		t.Fatalf("err = %v, want the missing-actor refusal", err)
 	}
+	path := backfillPath(town, now)
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("a refused backfill left %s behind (%v)", path, statErr)
 	}
@@ -298,10 +345,14 @@ func TestWriteRegimeBackfillDrivesItsFailures(t *testing.T) {
 	records := []RegimeEventRecord{{
 		TS: time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC), Kind: "platform", Reason: "moved", Actor: "backfill",
 	}}
+	// A step the failure under test must not reach renames nothing: reaching it
+	// is itself a failure.
+	unreachedRename := func(string, string) error { return errors.New("rename reached") }
 	file := func(f *backfillFakeFile) backfillWrite {
 		return backfillWrite{
 			encode: json.Marshal,
 			open:   func(string, int, os.FileMode) (backfillFile, error) { return f, nil },
+			rename: func(string, string) error { return nil },
 		}
 	}
 	tests := []struct {
@@ -314,6 +365,7 @@ func TestWriteRegimeBackfillDrivesItsFailures(t *testing.T) {
 			seams: backfillWrite{
 				encode: func(any) ([]byte, error) { return nil, errors.New("encode failed") },
 				open:   func(string, int, os.FileMode) (backfillFile, error) { return &backfillFakeFile{written: -1}, nil },
+				rename: unreachedRename,
 			},
 			want: "encoding",
 		},
@@ -322,12 +374,22 @@ func TestWriteRegimeBackfillDrivesItsFailures(t *testing.T) {
 			seams: backfillWrite{
 				encode: json.Marshal,
 				open:   func(string, int, os.FileMode) (backfillFile, error) { return nil, errors.New("permission denied") },
+				rename: unreachedRename,
 			},
 			want: "opening",
 		},
 		{name: "the write fails", seams: file(&backfillFakeFile{writeErr: errors.New("disk full")}), want: "writing"},
 		{name: "the write is short", seams: file(&backfillFakeFile{written: 1}), want: "short write"},
 		{name: "the close fails", seams: file(&backfillFakeFile{written: -1, closeErr: errors.New("flush failed")}), want: "closing"},
+		{
+			name: "the rename fails",
+			seams: backfillWrite{
+				encode: json.Marshal,
+				open:   func(string, int, os.FileMode) (backfillFile, error) { return &backfillFakeFile{written: -1}, nil },
+				rename: func(string, string) error { return errors.New("rename refused") },
+			},
+			want: "replacing",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,6 +400,34 @@ func TestWriteRegimeBackfillDrivesItsFailures(t *testing.T) {
 				t.Fatalf("err = %v, want it to name %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// A day's file whose replacement fails is left as it was: the lines go to a
+// temporary file that is renamed over it only once written, so a failed backfill
+// never leaves the day's file empty or half written.
+func TestWriteRegimeBackfillKeepsTheDayFileWhenTheReplaceFails(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "regime-events-backfill-20261111.jsonl")
+	const earlier = `{"ts":"2026-10-29T00:00:00Z","kind":"platform"}` + "\n"
+	if err := os.WriteFile(path, []byte(earlier), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records := []RegimeEventRecord{{
+		TS: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC), Kind: "platform", Reason: "moved", Actor: "backfill",
+	}}
+	seams := hostBackfillWrite()
+	seams.rename = func(string, string) error { return errors.New("rename refused") }
+	_, err := writeRegimeBackfillWith(path, records, seams)
+	if err == nil || !strings.Contains(err.Error(), "replacing") {
+		t.Fatalf("err = %v, want the failed replacement named", err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != earlier {
+		t.Fatalf("day file = %q, want the earlier file kept as it was", data)
 	}
 }
 
@@ -357,11 +447,12 @@ func TestWriteRegimeBackfillRefusesADirectoryItCannotMake(t *testing.T) {
 	}
 }
 
-// A path that is already a directory cannot be opened for writing.
+// The temporary file the lines are written to cannot be opened when a directory
+// sits at its path, and the open is the error named.
 func TestWriteRegimeBackfillRefusesAFileItCannotOpen(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "regime-events-backfill-20261111.jsonl")
-	if err := os.MkdirAll(path, 0o700); err != nil {
+	if err := os.MkdirAll(path+".tmp", 0o700); err != nil {
 		t.Fatal(err)
 	}
 	_, err := writeRegimeBackfill(path, []RegimeEventRecord{{

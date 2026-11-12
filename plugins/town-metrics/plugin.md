@@ -49,21 +49,17 @@ lock), and the steps in `internal/cmd/metrics_snapshot.go`,
    `<town>/.runtime/metrics/bd-daily.jsonl`, so the tracker's counts, ages and
    shape outlive the Dolt history flatten; `internal/metrics/bdsnap.go` holds
    what a line carries and what a gap means.
-3. Records the install receipts the regime log does not hold, so an install is a
-   regime event the hour it lands with no one typing it. Each receipt in
-   `daemon/install-receipts.jsonl` and `daemon/install-om-receipts.jsonl`
-   becomes one `install` line in `<town>/.runtime/metrics/regime-events.jsonl`
-   under the actor `town-metrics`; a receipt the log holds is skipped, so the
-   step records nothing after the first hour. A receipts file or line the run
-   cannot read prints one `[town-metrics]` line and the other receipts still
-   record (`internal/metrics/receipts.go`).
+3. Records the applied install receipts into the regime log under the actor
+   `town-metrics` (`internal/metrics/receipts.go`; the rules are in
+   `docs/metrics.md`).
 4. Runs the analysis and prints either
    `analyse <ts>: <n> landings, <t> targets -> <panel>` or a not-due line, which
    is what an hour that is not a day's boundary looks like.
 5. Exits with the first failing step's error, so every step always runs. A
    source that fails inside the snapshot is an `errors` entry in the record, not
-   a failure here; only a failed append, or a regime record the log cannot take,
-   exits non-zero, and the daemon escalates that once under
+   a failure here; only a failed step exits non-zero (a failed append, an
+   unreadable receipts file, or a regime record the log cannot take), and the
+   daemon escalates that once under
    `plugin:town-metrics:failed`, which the next good run closes.
 
 The analysis is a no-op on most hours: it reads a stamp, and a stamp younger
@@ -79,9 +75,7 @@ Run it directly, from inside the town or with `GT_TOWN_ROOT` set:
 
 Its tests are Go: `internal/metrics/townlock_test.go` (the lock is held until
 released, records the holder's pid, and is not blocked by a dead run's leftover),
-`internal/metrics/receipts_test.go` (a receipt becomes one event, a second run
-records none, and an unreadable file or line costs only itself),
-`internal/cmd/metrics_run_test.go` (a held lock skips the hour and appends
-nothing; the regime step records the receipts under `town-metrics`), and
+`internal/metrics/receipts_test.go` (the receipt step), `internal/cmd/metrics_run_test.go`
+(a held lock skips the hour and appends nothing), and
 `main_test.go` here (the entry point runs `gt metrics run`, and a gt missing from
 PATH fails the hour instead of skipping it).

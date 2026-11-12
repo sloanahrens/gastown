@@ -31,12 +31,14 @@ Done when the array parses and holds the new entry, and no earlier entry was cha
 That list feeds the report's timeline. The metrics analysis also reads the town's
 own record, and no one types into it:
 
-- `gt metrics run`, the town-metrics hour, turns each receipt in
+- `gt metrics run`, the town-metrics hour, turns each applied receipt in
   `daemon/install-receipts.jsonl` and `daemon/install-om-receipts.jsonl` into one
-  `install` line of `<town>/.runtime/metrics/regime-events.jsonl`. A receipt the
-  log already holds is skipped, so a second hour records nothing. A receipts file
-  or line the run cannot read is one report line, and the other receipts still
-  record.
+  `install` line of `<town>/.runtime/metrics/regime-events.jsonl`. Only an
+  `installed` receipt is a change: a refused, noop or failed receipt records
+  nothing and stays in the receipts file. A receipt the log already holds is
+  skipped, so a second hour records nothing. A receipt line the run cannot read
+  is one report line. A receipts file the run cannot read fails the hour's step
+  after the other receipts are recorded, so the hour exits non-zero.
 - `gt regime record --kind <kind> --reason "<text>"` appends any other change
   live. Use it at the directive, gate, seat-model or pool change.
 - `gt regime backfill` records the receipts the log does not hold and writes
@@ -44,7 +46,8 @@ own record, and no one types into it:
   changes no receipt carries: the 2026-10-29 move of the seats into sandboxes,
   the 2026-11-10 move of the daemon into the control cluster, and a `seat_model`
   event for each seat in `settings/config.json`'s `polecat_pool.seats`, naming
-  the model its agent config gives. Run it in the pod; running it again writes
+  the model its agent config gives, with `after_ref` `<agent>=<model>` so two
+  seats on one model stay two events. Run it in the pod; running it again writes
   the same day's file with the same events.
 - `gt regime check` reads all of them with the analysis's reader before an
   install carries a new shape to it.

@@ -133,20 +133,20 @@ func TestRecordInstallRegimeEventsRecordsTheReceipts(t *testing.T) {
 	}
 }
 
-// The hour's regime step fails with the sync's error, so the hour is escalated
+// The hour's regime step fails with the wiring error, so the hour is escalated
 // rather than reading a town it could not record as clean.
-func TestRecordInstallRegimeEventsReturnsTheSyncError(t *testing.T) {
+func TestRecordInstallRegimeEventsReturnsTheWiringError(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	err := recordInstallRegimeEvents(&out, metrics.Env{Town: t.TempDir()}, townMetricsActor)
 	if err == nil || !strings.Contains(err.Error(), "install regime events") || !strings.Contains(err.Error(), "ReadFile") {
-		t.Fatalf("err = %v, want the sync's wiring error under the step's name", err)
+		t.Fatalf("err = %v, want the wiring error under the step's name", err)
 	}
 }
 
-// A receipts file the hour cannot read prints one line and does not fail the
-// step: the other receipts still record.
-func TestRecordInstallRegimeEventsReportsAnUnreadableFile(t *testing.T) {
+// A receipts file the hour cannot read fails the step, so the hour exits non-zero,
+// and the other receipts still record first.
+func TestRecordInstallRegimeEventsReturnsAnUnreadableFileAndRecordsTheRest(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	// A directory where the installer's receipts file would be is a read the
@@ -155,22 +155,19 @@ func TestRecordInstallRegimeEventsReportsAnUnreadableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeHourFile(t, town, "daemon/install-om-receipts.jsonl",
-		`{"commit":"om987","event":"noop","ts":"2026-11-11T01:30:00Z"}`+"\n")
+		`{"commit":"om987","event":"installed","ts":"2026-11-11T01:30:00Z"}`+"\n")
 
 	var out bytes.Buffer
-	if err := recordInstallRegimeEvents(&out, metrics.OSEnv(town), townMetricsActor); err != nil {
-		t.Fatalf("recordInstallRegimeEvents: %v", err)
+	err := recordInstallRegimeEvents(&out, metrics.OSEnv(town), townMetricsActor)
+	if err == nil || !strings.Contains(err.Error(), "install regime events") || !strings.Contains(err.Error(), "install-receipts.jsonl") {
+		t.Fatalf("err = %v, want the unreadable receipts file named under the step's name", err)
 	}
-	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("output = %q, want the one report line and the recorded line", out.String())
+	if !strings.Contains(out.String(), "recorded 1 install regime events") {
+		t.Fatalf("output = %q, want the readable receipt counted", out.String())
 	}
-	if !strings.Contains(lines[0], "install-receipts.jsonl") {
-		t.Fatalf("first line = %q, want it to name the unreadable receipts file", lines[0])
-	}
-	data, err := os.ReadFile(metrics.RegimeEventsPath(town))
-	if err != nil {
-		t.Fatalf("reading the record: %v", err)
+	data, readErr := os.ReadFile(metrics.RegimeEventsPath(town))
+	if readErr != nil {
+		t.Fatalf("reading the record: %v", readErr)
 	}
 	if !strings.Contains(string(data), `"after_ref":"om987"`) {
 		t.Fatalf("record = %q, want the readable receipt recorded", data)

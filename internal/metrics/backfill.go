@@ -99,6 +99,10 @@ func RegimeBackfill(env Env, now time.Time, actor string) (string, int, error) {
 // whose town agent config names a model, at the sandbox move. A seat whose
 // agent names no model is left out, as the snapshot's seat_models column leaves
 // it out: its default is the agent's, not a value the settings state.
+//
+// The event's after_ref is the seat and its model ("agent=model"), not the model
+// alone: the reader counts two records with one kind, ts and after_ref once, so
+// two seats on one model would otherwise collapse into one event.
 func seatModelRecords(env Env, actor string) ([]RegimeEventRecord, error) {
 	settings, err := configReadSettings(env)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -124,7 +128,7 @@ func seatModelRecords(env Env, actor string) ([]RegimeEventRecord, error) {
 		records = append(records, RegimeEventRecord{
 			TS:       regimeSandboxMoveAt,
 			Kind:     "seat_model",
-			AfterRef: model,
+			AfterRef: agent + "=" + model,
 			Reason:   agent + " seat runs " + model,
 			Actor:    actor,
 			Source:   filepath.ToSlash(configSettingsFile),
@@ -140,18 +144,19 @@ type backfillFile interface {
 	Close() error
 }
 
-// backfillWrite is the file's way to the disk: it encodes the lines and opens
-// the file. The production values are json.Marshal and os.OpenFile. The struct
-// exists so a test drives the encode, write, short-write and close failures a
-// host cannot be made to produce.
+// backfillWrite is the file's way to the disk: it encodes the lines, opens the
+// file and renames it into place. The production values are json.Marshal,
+// os.OpenFile and os.Rename. The struct exists so a test drives the encode,
+// write, short-write, close and rename failures a host cannot be made to produce.
 type backfillWrite struct {
 	encode func(any) ([]byte, error)
 	open   func(name string, flag int, perm os.FileMode) (backfillFile, error)
+	rename func(oldpath, newpath string) error
 }
 
 // hostBackfillWrite is the process's own encoder and filesystem.
 func hostBackfillWrite() backfillWrite {
-	return backfillWrite{encode: json.Marshal, open: openBackfillFile}
+	return backfillWrite{encode: json.Marshal, open: openBackfillFile, rename: os.Rename}
 }
 
 // openBackfillFile opens the backfill file for writing.
@@ -169,9 +174,13 @@ func writeRegimeBackfill(path string, records []RegimeEventRecord) (int, error) 
 	return writeRegimeBackfillWith(path, records, hostBackfillWrite())
 }
 
-// writeRegimeBackfillWith is writeRegimeBackfill through seams. A failed write
-// still closes the file, and a close failure is an error so a backfill the host
-// did not keep is not reported as written.
+// writeRegimeBackfillWith is writeRegimeBackfill through seams. The lines go to
+// path plus ".tmp", which is renamed over path only once they are written and
+// closed, so a failed write leaves the day's file as it was. A failed write
+// leaves the .tmp behind; the reader reads only names ending in ".jsonl", and the
+// next run truncates it. A failed write still closes the file, and a close
+// failure is an error so a backfill the host did not keep is not reported as
+// written.
 func writeRegimeBackfillWith(path string, records []RegimeEventRecord, seams backfillWrite) (int, error) {
 	lines, n, err := backfillLines(records, seams.encode)
 	if err != nil {
@@ -180,20 +189,24 @@ func writeRegimeBackfillWith(path string, records []RegimeEventRecord, seams bac
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return 0, fmt.Errorf("regime backfill: creating %s: %w", filepath.Dir(path), err)
 	}
-	f, err := seams.open(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	tmp := path + ".tmp"
+	f, err := seams.open(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return 0, fmt.Errorf("regime backfill: opening %s: %w", path, err)
+		return 0, fmt.Errorf("regime backfill: opening %s: %w", tmp, err)
 	}
 	written, werr := f.Write(lines)
 	cerr := f.Close()
 	if werr != nil {
-		return 0, fmt.Errorf("regime backfill: writing %s: %w", path, werr)
+		return 0, fmt.Errorf("regime backfill: writing %s: %w", tmp, werr)
 	}
 	if written != len(lines) {
-		return 0, fmt.Errorf("regime backfill: writing %s: %w", path, io.ErrShortWrite)
+		return 0, fmt.Errorf("regime backfill: writing %s: %w", tmp, io.ErrShortWrite)
 	}
 	if cerr != nil {
-		return 0, fmt.Errorf("regime backfill: closing %s: %w", path, cerr)
+		return 0, fmt.Errorf("regime backfill: closing %s: %w", tmp, cerr)
+	}
+	if err := seams.rename(tmp, path); err != nil {
+		return 0, fmt.Errorf("regime backfill: replacing %s: %w", path, err)
 	}
 	return n, nil
 }

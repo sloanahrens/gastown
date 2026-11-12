@@ -33,12 +33,12 @@ func installReceiptsEnv(town string, files map[string]string, fail map[string]er
 	}
 }
 
-// installReceiptLine is one receipt the installer writes: the fields a regime
-// event is made from, and the ones it is not.
+// installReceiptLine is one applied receipt the gt installer writes: the fields a
+// regime event is made from, and the ones it is not.
 const installReceiptLine = `{"commit":"abc123","duration_s":12,"event":"installed","merged_at":null,"prev_commit":"def456","reason":null,"source":"manual","ts":"2026-11-10T12:00:00Z"}`
 
-// omReceiptLine is one receipt the om installer writes.
-const omReceiptLine = `{"commit":"om987","duration_s":3,"event":"noop","prev_commit":null,"reason":"already-installed","source":"manual","ts":"2026-11-11T01:30:00Z"}`
+// omReceiptLine is one applied receipt the om installer writes.
+const omReceiptLine = `{"commit":"om987","duration_s":3,"event":"installed","prev_commit":null,"reason":null,"source":"manual","ts":"2026-11-11T01:30:00Z"}`
 
 // recordedInstallRecords reads the town's runtime record back as records.
 func recordedInstallRecords(t *testing.T, town string) []RegimeEventRecord {
@@ -54,7 +54,7 @@ func recordedInstallRecords(t *testing.T, town string) []RegimeEventRecord {
 	return records
 }
 
-// A sync writes one install event per receipt, from both files, with the
+// A sync writes one install event per applied receipt, from both files, with the
 // receipt's commits as the refs either side of the change; a second run writes
 // nothing, because the log already holds every event.
 func TestRecordInstallReceiptsWritesOneEventPerReceiptAndNoneOnSecondRun(t *testing.T) {
@@ -88,7 +88,7 @@ func TestRecordInstallReceiptsWritesOneEventPerReceiptAndNoneOnSecondRun(t *test
 	}{
 		"2026-11-09T08:00:00Z": {before: "", after: "aaa111", reason: "installed aaa111", source: "daemon/install-receipts.jsonl"},
 		"2026-11-10T12:00:00Z": {before: "aaa111", after: "bbb222", reason: "installed bbb222", source: "daemon/install-receipts.jsonl"},
-		"2026-11-11T01:30:00Z": {before: "", after: "om987", reason: "noop om987 (already-installed)", source: "daemon/install-om-receipts.jsonl"},
+		"2026-11-11T01:30:00Z": {before: "", after: "om987", reason: "installed om987", source: "daemon/install-om-receipts.jsonl"},
 	}
 	for _, rec := range records {
 		key := rec.TS.Format(time.RFC3339)
@@ -116,22 +116,65 @@ func TestRecordInstallReceiptsWritesOneEventPerReceiptAndNoneOnSecondRun(t *test
 	}
 }
 
-// A receipt the sync cannot use is reported on one line and the receipts beside
-// it still record, in both the file and the line.
-func TestRecordInstallReceiptsReportsAnUnusableReceiptAndRecordsTheRest(t *testing.T) {
+// A receipt that did not apply an install is not a change to the regime: a
+// refused, noop or failed run records no event, and nothing is reported about it.
+// Each event is driven alone, so the log is never written.
+func TestRecordInstallReceiptsRecordsNoEventForANotAppliedReceipt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		event string
+		line  string
+	}{
+		{
+			name:  "a refused run",
+			event: "refused",
+			line:  `{"commit":"aaa111","event":"refused","prev_commit":"def456","reason":"lock-busy","ts":"2026-11-10T12:00:00Z"}`,
+		},
+		{
+			name:  "a noop run",
+			event: "noop",
+			line:  `{"commit":"aaa111","event":"noop","prev_commit":null,"reason":"already-installed","ts":"2026-11-10T12:00:00Z"}`,
+		},
+		{
+			name:  "a failed run",
+			event: "failed",
+			line:  `{"commit":"aaa111","event":"failed","prev_commit":"def456","reason":"build-failed","ts":"2026-11-10T12:00:00Z"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			files := map[string]string{"daemon/install-receipts.jsonl": tc.line + "\n"}
+			var logged []string
+			res, err := RecordInstallReceipts(installReceiptsEnv(town, files, nil), "ace",
+				func(line string) { logged = append(logged, line) })
+			if err != nil {
+				t.Fatalf("sync: %v", err)
+			}
+			if res.Recorded != 0 || res.Skipped != 0 {
+				t.Fatalf("sync = %+v, want nothing recorded or skipped for a %s receipt", res, tc.event)
+			}
+			if len(logged) != 0 {
+				t.Fatalf("logged %q, want nothing for a %s receipt", logged, tc.event)
+			}
+			if _, statErr := os.Stat(RegimeEventsPath(town)); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("a %s receipt wrote the regime log (%v)", tc.event, statErr)
+			}
+		})
+	}
+}
+
+// A receipt line the sync cannot use is reported on one line and the receipts
+// beside it still record.
+func TestRecordInstallReceiptsReportsAnUnusableLineAndRecordsTheRest(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		files   map[string]string
-		fail    map[string]error
 		wantMsg []string
 	}{
-		{
-			name:    "a receipts file that cannot be read",
-			files:   map[string]string{"daemon/install-om-receipts.jsonl": omReceiptLine + "\n"},
-			fail:    map[string]error{"daemon/install-receipts.jsonl": errors.New("permission denied")},
-			wantMsg: []string{"install-receipts.jsonl", "permission denied"},
-		},
 		{
 			name: "a line that is not a JSON object",
 			files: map[string]string{
@@ -169,7 +212,7 @@ func TestRecordInstallReceiptsReportsAnUnusableReceiptAndRecordsTheRest(t *testi
 			t.Parallel()
 			town := t.TempDir()
 			var logged []string
-			res, err := RecordInstallReceipts(installReceiptsEnv(town, tc.files, tc.fail), "ace",
+			res, err := RecordInstallReceipts(installReceiptsEnv(town, tc.files, nil), "ace",
 				func(line string) { logged = append(logged, line) })
 			if err != nil {
 				t.Fatalf("sync: %v", err)
@@ -192,6 +235,31 @@ func TestRecordInstallReceiptsReportsAnUnusableReceiptAndRecordsTheRest(t *testi
 	}
 }
 
+// A receipts file that cannot be read is an error, and the receipts in the other
+// file still record: the error comes back after they are written, not instead of
+// them, and nothing is logged for it.
+func TestRecordInstallReceiptsReturnsAnUnreadableFileAndRecordsTheRest(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	files := map[string]string{"daemon/install-om-receipts.jsonl": omReceiptLine + "\n"}
+	fail := map[string]error{"daemon/install-receipts.jsonl": errors.New("permission denied")}
+	var logged []string
+	res, err := RecordInstallReceipts(installReceiptsEnv(town, files, fail), "ace",
+		func(line string) { logged = append(logged, line) })
+	if err == nil || !strings.Contains(err.Error(), "install-receipts.jsonl") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("err = %v, want the unreadable receipts file named with its reason", err)
+	}
+	if res.Recorded != 1 {
+		t.Fatalf("recorded = %d, want the readable file's receipt recorded", res.Recorded)
+	}
+	if len(logged) != 0 {
+		t.Fatalf("logged %q, want the file error returned, not logged", logged)
+	}
+	if got := recordedInstallRecords(t, town); len(got) != 1 || got[0].AfterRef != "om987" {
+		t.Fatalf("records = %#v, want the om receipt recorded", got)
+	}
+}
+
 // Two receipts that make the same event are recorded once: the reader counts
 // the duplicate once, so the log holds it once.
 func TestRecordInstallReceiptsCountsARepeatedReceiptOnce(t *testing.T) {
@@ -211,6 +279,32 @@ func TestRecordInstallReceiptsCountsARepeatedReceiptOnce(t *testing.T) {
 	}
 	if got := recordedInstallRecords(t, town); len(got) != 1 {
 		t.Fatalf("%d records, want 1", len(got))
+	}
+}
+
+// A sync that finds the regime log held by another run is refused before it reads
+// the log, and appends nothing; once the holder lets go, the sync records.
+func TestRecordInstallReceiptsRefusesAHeldLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	files := map[string]string{"daemon/install-receipts.jsonl": installReceiptLine + "\n"}
+	holder, err := AcquireTownLock(RegimeEventsPath(town) + ".lock")
+	if err != nil {
+		t.Fatalf("holding the log: %v", err)
+	}
+	env := installReceiptsEnv(town, files, nil)
+	if _, err := RecordInstallReceipts(env, "ace", nil); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("err = %v, want the held log refused", err)
+	}
+	if _, statErr := os.Stat(RegimeEventsPath(town)); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("a refused sync wrote the regime log (%v)", statErr)
+	}
+	if err := holder.Release(); err != nil {
+		t.Fatalf("releasing the log: %v", err)
+	}
+	res, err := RecordInstallReceipts(env, "ace", nil)
+	if err != nil || res.Recorded != 1 {
+		t.Fatalf("sync after release = %+v, %v; want 1 recorded", res, err)
 	}
 }
 
