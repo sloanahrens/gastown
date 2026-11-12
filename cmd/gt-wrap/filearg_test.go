@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -66,22 +67,32 @@ func TestRunFileArgRefusals(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
-		args func(dir string) []string
+		args func(t *testing.T, dir string) []string
 		want string
 	}{
-		{"two files", func(dir string) []string {
+		{"two files", func(t *testing.T, dir string) []string {
 			return []string{"bd", "create", "--body-file", writeMacFile(t, dir, "a.md", "a"), "--design-file", writeMacFile(t, dir, "b.md", "b")}
 		}, "names two files"},
-		{"file with --stdin", func(dir string) []string {
+		{"file with --stdin", func(t *testing.T, dir string) []string {
 			return []string{"bd", "create", "--stdin", "--body-file", writeMacFile(t, dir, "a.md", "a")}
 		}, "stdin is already in use"},
-		{"missing file", func(dir string) []string {
+		{"missing file", func(t *testing.T, dir string) []string {
 			return []string{"bd", "create", "--body-file", filepath.Join(dir, "gone.md")}
 		}, "cannot read"},
-		{"directory", func(dir string) []string {
+		{"directory", func(t *testing.T, dir string) []string {
 			return []string{"bd", "create", "--body-file", dir}
 		}, "cannot read"},
-		{"file the tool opens as a path", func(dir string) []string {
+		{"over the size limit on disk", func(t *testing.T, dir string) []string {
+			return []string{"bd", "create", "--body-file", writeMacFile(t, dir, "big.md", strings.Repeat("x", maxFileArgBytes+1))}
+		}, "larger than the 1048576-byte limit"},
+		{"not a regular file", func(t *testing.T, dir string) []string {
+			link := filepath.Join(dir, "fifo.md")
+			if err := syscall.Mkfifo(link, 0o600); err != nil {
+				t.Fatalf("mkfifo: %v", err)
+			}
+			return []string{"bd", "create", "--body-file", link}
+		}, "not a regular file"},
+		{"file the tool opens as a path", func(t *testing.T, dir string) []string {
 			return []string{"bd", "create", "-f", writeMacFile(t, dir, "plan.md", "p")}
 		}, "names a Mac file the pod cannot read"},
 	} {
@@ -89,7 +100,7 @@ func TestRunFileArgRefusals(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t)
 			h.writeConfig(t, kubernetesConfig)
-			exit := h.run(tc.args(h.town)...)
+			exit := h.run(tc.args(t, h.town)...)
 			if exit != 1 || h.fake.launched || !strings.Contains(h.stderr.String(), tc.want) {
 				t.Fatalf("run = %d, launched %v, stderr %q; want exit 1, no launch, and %q", exit, h.fake.launched, h.stderr, tc.want)
 			}
@@ -118,5 +129,40 @@ func TestRunNoFileArgUntouched(t *testing.T) {
 	}
 	if want := []string{"bd", "create", "--body-file", path}; !slices.Equal(d.fake.call.Argv, want) || d.fake.call.Stdin != nil {
 		t.Errorf("docker target got argv %q, stdin %v; want the call unchanged", d.fake.call.Argv, d.fake.call.Stdin)
+	}
+}
+
+// TestRunFileArgSizeBoundIsCheckedOnTheBytesRead: a file whose stat says it is
+// small but whose read returns more than the bound is refused, so a file that
+// grows between the two reads is not sent.
+func TestRunFileArgSizeBoundIsCheckedOnTheBytesRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, kubernetesConfig)
+	path := writeMacFile(t, h.town, "grows.md", "small")
+	read := h.surface.readFile
+	h.surface.readFile = func(name string) ([]byte, error) {
+		if name == path {
+			return []byte(strings.Repeat("x", maxFileArgBytes+1)), nil
+		}
+		return read(name)
+	}
+	exit := h.run("bd", "create", "--body-file", path)
+	if exit != 1 || h.fake.launched || !strings.Contains(h.stderr.String(), "cannot read") || !strings.Contains(h.stderr.String(), "byte limit") {
+		t.Fatalf("run = %d, launched %v, stderr %q; want exit 1, no launch and the size refusal", exit, h.fake.launched, h.stderr)
+	}
+}
+
+// TestRunFileArgSizeBoundAtTheLimitIsSent: a file of exactly the bound is sent whole.
+func TestRunFileArgSizeBoundAtTheLimitIsSent(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, kubernetesConfig)
+	path := writeMacFile(t, h.town, "edge.md", strings.Repeat("x", maxFileArgBytes))
+	if exit := h.run("bd", "create", "--body-file", path); exit != 0 {
+		t.Fatalf("run = %d; stderr: %s", exit, h.stderr)
+	}
+	if got, _ := io.ReadAll(h.fake.call.Stdin); len(got) != maxFileArgBytes {
+		t.Errorf("stdin = %d bytes, want %d", len(got), maxFileArgBytes)
 	}
 }

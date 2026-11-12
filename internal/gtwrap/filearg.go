@@ -79,26 +79,63 @@ func classifyBd(command, sub, flag, value string) argKind {
 	return argPlain
 }
 
+// valueFlags take their value from the next argument when it is not attached.
+// Their values are skipped when the command words are read, so a path is never
+// taken for a subcommand.
+var valueFlags = map[string]bool{
+	"--body-file": true, "--description-file": true, "--design-file": true, "--reason-file": true,
+	"-f": true, "--file": true, "--graph": true, "--metadata": true, "--from-file": true,
+	"--ids-file": true, "-i": true, "--input": true, "-o": true, "--output": true,
+	"--template": true, "--from-export": true,
+}
+
+// fileShorthands are the one-letter file flags of the command, for the attached
+// forms pflag accepts: "-fFILE", "-f=FILE" and a group such as "-xf FILE".
+func fileShorthands(tool, command, sub string) string {
+	switch {
+	case tool == "bd" && (bdFileCommands[command] || bdFileCommands[command+" "+sub] || command == "create"):
+		return "f"
+	case tool == "bd" && command == "import":
+		return "i"
+	case tool == "bd" && command == "export":
+		return "o"
+	case tool == "gt" && command == "session" && sub == "inject":
+		return "f"
+	}
+	return ""
+}
+
 // ScanFileArgs finds the Mac files a bd or gt call names and rewrites the ones
 // the tool can read from stdin. It returns the arguments with that file's value
 // replaced by "-" and the file, or the arguments unchanged and a nil file when
 // the call names none. The pod cannot read a Mac path, so a call is refused
-// when it names a file the tool opens as a path, two files, or a file together
-// with a stdin the caller already supplied by --stdin or a "-" value. Other
-// tools pass unchanged.
+// when it names a file the tool opens as a path, two files, a file together
+// with a stdin the caller already supplied by --stdin or a "-" value, or a
+// token that cannot be classified safely. Other tools pass unchanged.
 //
-// The command is the first non-flag word and the subcommand the second, so a
-// global flag that takes a value must come after them.
+// pflag lets a file flag carry its value in these forms, all scanned here:
+// "--flag value", "--flag=value", "-f value", "-f=value" and "-fvalue". A group
+// of shorthands that holds a file letter after the first ("-xf value",
+// "-xfvalue", "-xf=value") cannot be told from a value-taking shorthand's value
+// without knowing every shorthand of the tool, so the call is refused: it fails
+// closed rather than passing a Mac path through. Nothing after "--" is a flag.
+//
+// The command is the first non-flag word and the subcommand the second, not
+// counting the values of the file flags above, so any other global flag that
+// takes a value must come after them.
 func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg, err error) {
 	if tool != "bd" && tool != "gt" {
 		return args, nil, nil
 	}
 	var words []string
-	for _, a := range args {
-		if len(words) == 2 {
-			break
-		}
-		if !strings.HasPrefix(a, "-") {
+	for i := 0; i < len(args) && len(words) < 2; i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			i = len(args)
+		case valueFlags[a]:
+			i++
+		case !strings.HasPrefix(a, "-"):
 			words = append(words, a)
 		}
 	}
@@ -109,16 +146,39 @@ func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg
 	if len(words) > 1 {
 		sub = words[1]
 	}
+	shorthands := fileShorthands(tool, command, sub)
 
 	out := append([]string(nil), args...)
 	var files []FileArg
 	stdinUsed := false
 	for i := 0; i < len(out); i++ {
-		flag, value, inline := out[i], "", false
-		if strings.HasPrefix(flag, "-") {
-			// --flag=value, and -f=value for a shorthand, which pflag accepts too.
-			if name, v, ok := strings.Cut(flag, "="); ok && len(name) > 1 {
-				flag, value, inline = name, v, true
+		if out[i] == "--" {
+			break
+		}
+		flag, value, inline, sep := out[i], "", false, ""
+		switch {
+		case strings.HasPrefix(flag, "--"):
+			if name, v, ok := strings.Cut(flag, "="); ok {
+				flag, value, inline, sep = name, v, true, "="
+			}
+		case strings.HasPrefix(flag, "-") && len(flag) > 2:
+			name, _, _ := strings.Cut(flag[1:], "=")
+			at := -1
+			if shorthands != "" {
+				at = strings.IndexAny(name, shorthands)
+			}
+			switch {
+			case at == 0:
+				flag, value, inline = flag[:2], out[i][2:], true
+				if rest, ok := strings.CutPrefix(value, "="); ok {
+					value, sep = rest, "="
+				}
+			case at > 0:
+				return nil, nil, fmt.Errorf("gt-wrap: %s groups shorthands with the file flag -%c; pass them as separate flags", out[i], name[at])
+			default:
+				if n, v, ok := strings.Cut(flag, "="); ok {
+					flag, value, inline, sep = n, v, true, "="
+				}
 			}
 		}
 		if !inline && i+1 < len(out) {
@@ -137,7 +197,7 @@ func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg
 			} else if value != "" {
 				files = append(files, FileArg{Flag: flag, Path: value})
 				if inline {
-					out[i] = flag + "=-"
+					out[i] = flag + sep + "-"
 				} else {
 					out[i+1] = "-"
 				}
