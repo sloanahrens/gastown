@@ -18,8 +18,8 @@ import (
 
 // A sandbox seat's work usage is read from the transcripts its own Claude
 // sessions wrote, and written as the seat ends. A sandbox seat's transcripts are
-// the copy its sandbox was copied to before it was deleted (session.
-// session.CopiedSandboxTranscripts); a seat with no copy reads the host's Claude
+// the copy its sandbox was copied to before it was deleted
+// (session.CopiedSandboxTranscripts); a seat with no copy reads the host's Claude
 // project directories for its host worktree. The worktree goes with the seat's
 // directories, so the record is written before they are removed. A reused
 // worktree keeps its predecessor's transcripts: those last written before the
@@ -100,6 +100,11 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		return "", nil, fmt.Errorf("listing its copied transcripts: %w", err)
 	}
 	fromCopy := len(paths) > 0
+	if !fromCopy && skippedByCap > 0 {
+		// The cap left out every transcript the copy would have held: the record is
+		// not written, and the reason names the cap rather than a missing copy.
+		return "", nil, fmt.Errorf("its transcript copy holds none of its transcripts: the cap left out all %d of them", skippedByCap)
+	}
 	if !fromCopy {
 		paths, err = list(h.town(), clone)
 		if err != nil {

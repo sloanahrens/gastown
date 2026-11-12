@@ -134,3 +134,40 @@ func TestSeatEndNamesTheCapWhenTheCopyWasCutShort(t *testing.T) {
 		t.Fatalf("usage lines = %q, want the record written as incomplete, naming the cap", lines)
 	}
 }
+
+// TestSeatEndNamesTheCapWhenItLeftOutEveryTranscript: a copy the cap left empty
+// (every transcript larger than the room left) writes no record, and the reason
+// names the cap, not a missing copy; the host's directories are not read.
+func TestSeatEndNamesTheCapWhenItLeftOutEveryTranscript(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+
+	copyDir := session.SandboxTranscriptCopyDir(f.town, endRig, endPolecat)
+	if err := os.MkdirAll(copyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copyDir, "skipped-by-cap"), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.host.seatUsage.list = func(_, _ string) ([]string, error) {
+		t.Error("the host's Claude directories were read although the cap explains the empty copy")
+		return nil, nil
+	}
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("the finished seat was not removed")
+	}
+	lines := usageLogLines(logs.String())
+	if len(lines) != 1 || !strings.Contains(lines[0], "is not written") || !strings.Contains(lines[0], "the cap left out all 3 of them") {
+		t.Fatalf("usage lines = %q, want one refusal naming the cap", lines)
+	}
+}

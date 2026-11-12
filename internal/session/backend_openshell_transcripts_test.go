@@ -208,6 +208,45 @@ func TestOpenShellOpsDeleteCopyDownloadsOnlyWhatTheCapKeeps(t *testing.T) {
 	}
 }
 
+func TestOpenShellOpsDeleteCopyLeavesOtherProjectFoldersOutOfTheCap(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.transcriptCap = 10
+	// Another project folder holds newer, larger files than the seat's own. They
+	// are not the seat's: they must neither be downloaded nor use up the cap, and
+	// the seat's own older transcript is kept whole with no cap record.
+	other := sandboxProjectsDir + "/-sandbox-elsewhere/"
+	listing := listingLine(other+"big.jsonl", seatBase.Add(-30*time.Minute), 8) +
+		listingLine(other+"bigger.jsonl", seatBase.Add(-20*time.Minute), 8) +
+		listingLine(seatRemote("own.jsonl"), seatBase.Add(-time.Hour), 4)
+	b.cli.Run = copyingRunner(fake, listing, map[string]string{
+		other + "big.jsonl":     "xxxxxxxx",
+		other + "bigger.jsonl":  "yyyyyyyy",
+		seatRemote("own.jsonl"): "oooo",
+	})
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	writeSeatRecord(t, b, seatBase.Add(-4*time.Hour))
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got, want := downloadedRemotes(fake.Calls()), []string{seatRemote("own.jsonl")}; !reflect.DeepEqual(got, want) {
+		t.Errorf("downloads = %v, want only the seat's own folder: %v", got, want)
+	}
+	_, skipped, err := CopiedSandboxTranscripts(b.townRoot, openshellTestRig, openshellTestPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 0 {
+		t.Errorf("copy reports %d files cut by the cap, want none: other folders do not count", skipped)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %q, want none", warnings)
+	}
+}
+
 func TestOpenShellOpsDeleteCopyKeepsEachTranscriptsSandboxMtime(t *testing.T) {
 	t.Parallel()
 	fake := &sandbox.Fake{}

@@ -177,15 +177,34 @@ func (b *openshellBackend) clock() time.Time {
 	return time.Now()
 }
 
-// listSeatTranscripts lists the transcripts inside rec's sandbox. A listing that
-// fails, or does not parse, is an error: a missing line would be a silently
-// partial copy.
+// listSeatTranscripts lists the transcripts of rec's seat inside its sandbox:
+// only those under the seat's own project folder, so another folder's files can
+// neither use up the cap nor be counted as left out by it. A listing that fails,
+// or does not parse, is an error: a missing line would be a silently partial copy.
 func (b *openshellBackend) listSeatTranscripts(ctx context.Context, rec SandboxRecord) ([]sandboxTranscript, error) {
 	out, _, err := b.cli.Exec(ctx, rec.Session, nil, sandboxListing, nil)
 	if err != nil {
 		return nil, fmt.Errorf("listing its transcripts: %w", err)
 	}
-	return parseSandboxListing(string(out))
+	all, err := parseSandboxListing(string(out))
+	if err != nil {
+		return nil, err
+	}
+	return seatFolderTranscripts(all, SandboxTranscriptFolder(rec.Rig, rec.Polecat)), nil
+}
+
+// seatFolderTranscripts keeps the listed transcripts under folder, the seat's
+// project folder under the projects directory, its subagents' subfolders
+// included.
+func seatFolderTranscripts(files []sandboxTranscript, folder string) []sandboxTranscript {
+	prefix := folder + "/"
+	var own []sandboxTranscript
+	for _, f := range files {
+		if strings.HasPrefix(f.rel, prefix) {
+			own = append(own, f)
+		}
+	}
+	return own
 }
 
 // downloadSeatTranscripts downloads the listed transcripts rec's seat wrote into
