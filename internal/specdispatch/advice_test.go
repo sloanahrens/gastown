@@ -86,6 +86,99 @@ func TestAdviceExcludedLabelWarns(t *testing.T) {
 	}
 }
 
+// otherRigAdviceSpec is adviceSpec as a bead of the gastown rig in a town of the
+// rigs named (gt-qotsst).
+func otherRigAdviceSpec(constraints string, rigs ...string) Spec {
+	s := adviceSpec("Fix the parser.", constraints, "- [ ] the parser reads the file")
+	s.Rig = "gastown"
+	s.TownRigs = rigs
+	return s
+}
+
+// TestOtherRigAdviceOneLinePerRead pins the advisory: a Constraints line that
+// reads something in another rig gets one advice line naming that rig, and the
+// bead is not refused for it.
+func TestOtherRigAdviceOneLinePerRead(t *testing.T) {
+	t.Parallel()
+	s := otherRigAdviceSpec("Read the code in the om rig before you change the parser.", "gastown", "om", "beads")
+	got := Advice(s)
+	if len(got) != 1 {
+		t.Fatalf("Advice() = %q, want one line", got)
+	}
+	if !strings.Contains(got[0], "in the om rig") || !strings.Contains(got[0], "split that read") {
+		t.Errorf("advice does not name the read and the split: %q", got[0])
+	}
+	if v := LintShape(s, defaultTemplate()); !v.Clean() {
+		t.Errorf("a read in another rig refused the bead: %s", v.Line("gt-adv"))
+	}
+}
+
+// TestOtherRigAdviceSilentForMention pins that a rig named as a tool the code
+// calls gets neither advice nor a refusal.
+func TestOtherRigAdviceSilentForMention(t *testing.T) {
+	t.Parallel()
+	s := otherRigAdviceSpec("Run om review on the diff before you land it.", "gastown", "om", "beads")
+	if got := Advice(s); len(got) != 0 {
+		t.Fatalf("Advice() = %q, want none", got)
+	}
+	if v := LintShape(s, defaultTemplate()); !v.Clean() {
+		t.Errorf("a tool mention refused the bead: %s", v.Line("gt-adv"))
+	}
+}
+
+// TestOtherRigAdviceSilentForOwnRigAndNoRead pins the two silent cases: a read
+// in the bead's own rig, and a rig named with no read word.
+func TestOtherRigAdviceSilentForOwnRigAndNoRead(t *testing.T) {
+	t.Parallel()
+	for _, constraints := range []string{
+		"Read the code in the gastown rig.",
+		"Use the code in the om rig.",
+	} {
+		if got := Advice(otherRigAdviceSpec(constraints, "gastown", "om")); len(got) != 0 {
+			t.Errorf("Advice(%q) = %q, want none", constraints, got)
+		}
+	}
+}
+
+// TestOtherRigAdviceIgnoresOutOfScopeAndPartialNames pins that the advisory
+// reads Goal and Constraints only, and that a rig name inside "from" or
+// "command" is not the rig om.
+func TestOtherRigAdviceIgnoresOutOfScopeAndPartialNames(t *testing.T) {
+	t.Parallel()
+	s := otherRigAdviceSpec("Go.", "gastown", "om")
+	s.Description = strings.Replace(s.Description, "None.", "Read the code in the om rig.", 1)
+	if got := Advice(s); len(got) != 0 {
+		t.Fatalf("out-of-scope read advised: %q", got)
+	}
+	for _, constraints := range []string{
+		"Read from the command log in the omega rig.",
+		"Read the xom repo and the command output.",
+	} {
+		if got := Advice(otherRigAdviceSpec(constraints, "gastown", "om")); len(got) != 0 {
+			t.Errorf("Advice(%q) = %q, want none", constraints, got)
+		}
+	}
+}
+
+// TestOtherRigAdviceSaysWhenTheListIsUnread pins that a bead naming another
+// rig's path or read, with no rig list passed, gets one line saying the check
+// did not run, and a bead naming no other rig gets none.
+func TestOtherRigAdviceSaysWhenTheListIsUnread(t *testing.T) {
+	t.Parallel()
+	for _, constraints := range []string{
+		"Read ~/gt/om/internal/cli/cli.go for the flag.",
+		"Read the code in the om rig.",
+	} {
+		got := Advice(otherRigAdviceSpec(constraints))
+		if len(got) != 1 || got[0] != adviceRigUncheckedText {
+			t.Errorf("Advice(%q) = %q, want the not-checked line", constraints, got)
+		}
+	}
+	if got := Advice(otherRigAdviceSpec("Read the parser source.")); len(got) != 0 {
+		t.Errorf("Advice() = %q, want none for a bead naming no rig", got)
+	}
+}
+
 // TestAdviceExcludedLabelOnePerLabel pins that each excluded label gets its
 // own line rather than one line naming only the first.
 func TestAdviceExcludedLabelOnePerLabel(t *testing.T) {

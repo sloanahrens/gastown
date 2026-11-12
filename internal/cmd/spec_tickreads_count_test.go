@@ -442,6 +442,21 @@ func specTickTownWithHold(t *testing.T) string {
 	return root
 }
 
+// TestSpecTickFailsOnAnUnreadableRigRegistry pins the tick's other-rig input: a
+// registry that will not load fails the tick before any bead is read, so the
+// tick never slings a bead the other-rig check exists to hold (gt-qotsst).
+func TestSpecTickFailsOnAnUnreadableRigRegistry(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, specTickSettings, specTickDaemon)
+	if err := os.WriteFile(filepath.Join(root, "mayor", "rigs.json"), []byte(`{"version":1,"rigs":`), 0o644); err != nil {
+		t.Fatalf("corrupting the rig registry: %v", err)
+	}
+	_, err := runSpecTickForTest(t, root, "", true)
+	if err == nil || !strings.Contains(err.Error(), "rig list") {
+		t.Fatalf("tick over an unreadable rig registry = %v, want a rig-list error", err)
+	}
+}
+
 // The roster the tick draws, through its production wiring over a fake, counts
 // the seats the per-seat read counts, and the reads it made are exactly the bd
 // reads that reached the store, so the tick's cost line is the store's count

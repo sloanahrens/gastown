@@ -105,7 +105,7 @@ func newVerdictTick(t *testing.T, n int) *verdictTick {
 	memory := newSpecAnnotatedTick(v.root, "daemon-1", func(string) beads.Client { return nil }).memory
 	v.env = v.wire(f, newSpecCandidateVerdicts(memory,
 		specCandidateInputsFor(f.env().Template, f.env().ShapeGate, f.env().MaxPriority,
-			func(string) *specdispatch.TargetTree { return nil })))
+			func(string) *specdispatch.TargetTree { return nil }, nil)))
 	return v
 }
 
@@ -206,6 +206,27 @@ func (v *verdictTick) childRead(_ string, ids []string) (map[string][]*beads.Iss
 // candidate in one grouped view: a child added to a childless parent does not
 // move the parent's row, so the memory cannot say the parent is still childless
 // (gt-km9jt, gt-qcl61).
+// TestSpecCandidateVerdictsKeyOnTheRigList pins that a verdict is keyed on the
+// town's rig names: the same rig under another rig list is another input, so a
+// verdict stored before the other-rig check is decided again, and the same list
+// in another order is not (gt-qotsst).
+func TestSpecCandidateVerdictsKeyOnTheRigList(t *testing.T) {
+	t.Parallel()
+	none := func(string) *specdispatch.TargetTree { return nil }
+	tmpl := specdispatch.LoadTemplate("")
+	inputs := func(rigs []string) specCandidateInputs {
+		return specCandidateInputsFor(tmpl, "warn", 2, none, rigs)("gastown")
+	}
+	before := inputs(nil)
+	withOm := inputs([]string{"gastown", "om"})
+	if before == withOm {
+		t.Fatalf("a verdict under no rig list and under [gastown om] has the same key: %+v", before)
+	}
+	if again := inputs([]string{"gastown", "om"}); again != withOm {
+		t.Errorf("the same rig list keyed differently: %+v and %+v", again, withOm)
+	}
+}
+
 func TestSpecCandidateVerdictsSecondTickReadsNoEdgesButChildren(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, specCandidateFixtureSize)
@@ -333,7 +354,7 @@ func TestSpecCandidateVerdictsAreRereadWhenTheRulesChange(t *testing.T) {
 
 	tighter := v.retownWith(newFakeVerdictTown(v), newSpecCandidateVerdicts(v.env.Verdicts.memory,
 		specCandidateInputsFor(specdispatch.Template{Sections: append(append([]string(nil), v.env.Template.Sections...), "Notes"), Source: "built-in"},
-			v.env.ShapeGate, v.env.MaxPriority, func(string) *specdispatch.TargetTree { return nil })))
+			v.env.ShapeGate, v.env.MaxPriority, func(string) *specdispatch.TargetTree { return nil }, nil)))
 	tighter.Template = specdispatch.Template{Sections: append(append([]string(nil), v.env.Template.Sections...), "Notes"), Source: "built-in"}
 
 	r := runSpecDispatchCycle(tighter)

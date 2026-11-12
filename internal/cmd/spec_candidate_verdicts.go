@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -48,6 +49,10 @@ type specCandidateInputs struct {
 	// Target is a digest of the branch inventory the lint checked Constraints
 	// paths against.
 	Target string `json:"target"`
+	// Rigs is the town's rig names the lint's other-rig check read, joined in
+	// sorted order: a verdict reached with another rig list is another verdict,
+	// so a verdict stored before the check existed is decided again (gt-qotsst).
+	Rigs string `json:"rigs"`
 }
 
 // specCandidateEdges marks a record written since a tick stopped remembering
@@ -95,10 +100,12 @@ func newSpecCandidateVerdicts(memory *specAnnotated, inputs func(rig string) spe
 }
 
 // specCandidateInputsFor is the inputs factory a tick uses: the loaded
-// template, the town's gate and ceiling, and the rig's target inventory.
-// target is the tick's own per-rig cache, so a digest is computed once a tick.
-func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPriority int, target func(rig string) *specdispatch.TargetTree) func(rig string) specCandidateInputs {
+// template, the town's gate and ceiling, the rig's target inventory, and the
+// town's rig names. target is the tick's own per-rig cache, so a digest is
+// computed once a tick. rigs is the sorted list specTownRigs reads.
+func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPriority int, target func(rig string) *specdispatch.TargetTree, rigs []string) func(rig string) specCandidateInputs {
 	template := specTemplateKey(tmpl)
+	rigKey := strings.Join(rigs, ",")
 	targets := map[string]string{}
 	return func(rig string) specCandidateInputs {
 		key, ok := targets[rig]
@@ -106,7 +113,7 @@ func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPri
 			key = specTargetKey(target(rig))
 			targets[rig] = key
 		}
-		return specCandidateInputs{Template: template, ShapeGate: shapeGate, MaxPriority: maxPriority, Target: key}
+		return specCandidateInputs{Template: template, ShapeGate: shapeGate, MaxPriority: maxPriority, Target: key, Rigs: rigKey}
 	}
 }
 

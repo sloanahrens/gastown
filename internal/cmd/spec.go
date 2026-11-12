@@ -715,6 +715,12 @@ type specHoldKnobs struct {
 	// peer naming a file, which holds its cluster rather than reading the peer
 	// as next.
 	Target func(beadID string) *specdispatch.TargetTree
+	// Rig names beadID's own rig, for the lint's other-rig check (gt-qotsst).
+	// Nil names no rig, so every known rig counts as another for the peer.
+	Rig func(beadID string) string
+	// TownRigs is the town's rig names the other-rig check reads, sorted
+	// (gt-qotsst). Nil is a list the lint cannot check paths against.
+	TownRigs []string
 	// Warn is where a question left unanswered because its inputs would not
 	// read says so; nil falls back to specHoldWarn, so a knob set built by hand
 	// cannot make an unanswered question silent.
@@ -742,6 +748,15 @@ func (k specHoldKnobs) target(beadID string) *specdispatch.TargetTree {
 	return k.Target(beadID)
 }
 
+// rig asks the knob set for beadID's own rig. A set built without the reader
+// answers "", which the other-rig check reads as no rig of its own.
+func (k specHoldKnobs) rig(beadID string) string {
+	if k.Rig == nil {
+		return ""
+	}
+	return k.Rig(beadID)
+}
+
 // specHoldKnobsFrom reads the knobs from the town's settings — the same keys
 // runSpecDispatch reads them from. The second result is false when those
 // settings will not load, which leaves the hold question unanswered rather
@@ -754,6 +769,11 @@ func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 		warnSpecHoldUnread(warn, "town settings "+path, err)
 		return specHoldKnobs{}, false
 	}
+	rigs, err := specTownRigs(townRoot)
+	if err != nil {
+		warnSpecHoldUnread(warn, "the town's rig list", err)
+		return specHoldKnobs{}, false
+	}
 	sd := loadSpecDispatchConfig(townRoot)
 	knobs := specHoldKnobs{
 		Warn:        warn,
@@ -761,6 +781,8 @@ func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 		Backoff:     func(beadID string) string { return dispatch.StartupBackoff(townRoot, beadID) },
 		Target:      cachedSpecTarget(townRoot, openRigTree),
+		Rig:         func(beadID string) string { return specBeadRig(townRoot, beadID) },
+		TownRigs:    rigs,
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff {
 		knobs.Template = specdispatch.LoadTemplate(specTemplatePath(sd))
@@ -855,6 +877,8 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff && !spec.HasLabel(specdispatch.ShapeWaivedLabel) {
 		spec.Target = knobs.target(peer.ID)
+		spec.Rig = knobs.rig(peer.ID)
+		spec.TownRigs = knobs.TownRigs
 		if verdict := specdispatch.Lint(spec, knobs.Template); !verdict.Clean() {
 			// The first refusal, as the lint's own one-line verdict names it:
 			// the whole ShapeNote can run to every missing section, and this
@@ -1065,8 +1089,41 @@ func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, 
 	if err != nil {
 		return spec, err
 	}
+	// The rig list is read here and not defaulted: a registry that will not
+	// load refuses the lint, since the other-rig check cannot answer without it
+	// (gt-qotsst).
+	rigs, err := specTownRigs(townRoot)
+	if err != nil {
+		return spec, fmt.Errorf("cannot read the town's rig list: %w", err)
+	}
+	spec.Rig = specBeadRig(townRoot, beadID)
+	spec.TownRigs = rigs
 	spec.Target = specLintTarget(townRoot, beadID, open)
 	return specWithBlockerCreates(spec, read, beadID)
+}
+
+// specBeadRig is the rig beadID belongs to, by its ID prefix: the rig the lint's
+// other-rig check treats as the bead's own. Empty for a town bead or an unknown
+// prefix (gt-qotsst).
+func specBeadRig(townRoot, beadID string) string {
+	return beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(beadID))
+}
+
+// specTownRigs is the town's rig names, sorted, from the rig registry. A town
+// with no registry has none; a registry that will not load is an error, never
+// an empty list, so the other-rig check does not pass for want of one
+// (gt-qotsst).
+func specTownRigs(townRoot string) ([]string, error) {
+	rc, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(rc.Rigs))
+	for name := range rc.Rigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // specLintTarget is the target-branch inventory gt spec lint checks beadID's
@@ -1688,6 +1745,9 @@ type specDispatchEnv struct {
 	// lint's path check (gt-7t1im). Nil asks nothing, which is what a test of
 	// some other hold wants; the tick itself always wires it.
 	Target func(rig string) *specdispatch.TargetTree
+	// TownRigs is the town's rig names, sorted, the lint's other-rig check reads
+	// (gt-qotsst). A tick sets it once from the rig registry; nil checks no rig.
+	TownRigs []string
 	// BlockerRead reads a bead's spec and the ids of its open blockers, the
 	// walk specdispatch.Spec.BlockerCreates is filled from: the paths an open
 	// transitive blocker creates pass the lint's Files check (gt-hgt9j.12).
@@ -2003,6 +2063,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			verdict = remembered.Shape
 		} else {
 			full.Target = env.target(c.Rig)
+			// The other-rig check reads the bead's own rig and the town's list
+			// (gt-qotsst): a bead naming another rig's path is held here.
+			full.Rig = c.Rig
+			full.TownRigs = env.TownRigs
 			// A Files path an open blocker creates passes the path check
 			// (gt-hgt9j.12). A blocker the walk could not read leaves the
 			// check unanswered, so the bead is held for a later tick with the
@@ -3102,6 +3166,13 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	if err != nil {
 		return specDispatchReport{}, err
 	}
+	// A registry that will not load fails the tick: a tick that dispatched
+	// without the other-rig check would sling the beads it exists to hold
+	// (gt-qotsst).
+	townRigs, err := specTownRigs(townRoot)
+	if err != nil {
+		return specDispatchReport{}, fmt.Errorf("cannot read the town's rig list: %w", err)
+	}
 	tmplPath := specTemplatePath(sd)
 	perTick := defaultSpecMaxPerTick
 	if sd != nil && sd.MaxPerTick > 0 {
@@ -3158,7 +3229,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	// The shape-and-label verdicts of the candidates the scan already read,
 	// kept across the daemon's ticks beside the annotations (gt-km9jt).
 	verdicts := newSpecCandidateVerdicts(annotations.memory,
-		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, targetOf))
+		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, targetOf, townRigs))
 	// The tick's children read, grouped per rig once the board is known.
 	var children func(beadID string) ([]specdispatch.Child, error)
 	env := specDispatchEnv{
@@ -3276,7 +3347,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		OMThreshold: func(rig string) (float64, error) {
 			return land.OMThreshold(filepath.Join(townRoot, rig))
 		},
-		Target: targetOf,
+		Target:   targetOf,
+		TownRigs: townRigs,
 		// A blocker the walk reads is served from this tick's ledger when the
 		// candidate's own row already read it (gt-hgt9j.12).
 		BlockerRead: specBlockerRead(reads, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }),

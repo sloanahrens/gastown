@@ -38,6 +38,20 @@ const adviceFailureText = "the Goal or Constraints mentions %q but no acceptance
 // through Advice, so they never read this constant.
 const adviceExcludedLabelText = "the dispatcher will not take this bead: it wears label %s"
 
+// adviceOtherRigText is the sentence Advice returns for a Goal or Constraints
+// line that reads something in another rig's repository. It names the rig
+// twice: once for the read, once for the bead that would take it.
+const adviceOtherRigText = "the Goal or Constraints says to read or check something in the %s rig: a polecat's sandbox holds only its own rig, so split that read into a bead for the %s rig or write the fact into this bead with repo, commit, file and line"
+
+// adviceRigUncheckedText is the sentence Advice returns when the town's rig list
+// was not passed and the text names another rig, so the other-rig check could
+// not run. The gap is stated rather than passed over (gt-qotsst).
+const adviceRigUncheckedText = "the other-rig check did not run: the town's rig list was not passed, so the other rig named here is not checked"
+
+// otherRigVerbRe matches the words that make a rig mention a read: "read the
+// code in the om rig" names a read, "om review" does not.
+var otherRigVerbRe = regexp.MustCompile(`(?i)\b(?:read|reads|reading|check|checks|checking|find|finds|finding)\b`)
+
 // Advice returns the lint's advisories for s: one-line notes that name a gap
 // worth closing without refusing the bead. It is pure — it reads s and the
 // package's excluded-label list, nothing else — so a caller can print advice
@@ -55,6 +69,11 @@ const adviceExcludedLabelText = "the dispatcher will not take this bead: it wear
 // readiness. Advice names each such label on its own line, matching the
 // label as Spec.HasLabel does; the labels are read from ExcludedLabels(), so
 // the advice and the dispatcher cannot disagree on the set.
+//
+// The other-rig advisory: a Goal or Constraints line that reads something "in
+// the <rig> rig" for another rig gets one line, since the rig's repository is
+// not in this sandbox. With no rig list passed, a text that names another rig
+// gets one line saying the check did not run.
 func Advice(s Spec) []string {
 	sections := Sections(s.Description)
 	trigger := strings.Join([]string{sections["goal"], sections["constraints"]}, "\n")
@@ -62,6 +81,7 @@ func Advice(s Spec) []string {
 	if match := adviceTriggerRe.FindString(trigger); match != "" && !adviceNamesFailure(s, sections) {
 		advice = append(advice, fmt.Sprintf(adviceFailureText, strings.ToLower(match)))
 	}
+	advice = append(advice, otherRigAdvice(s, sections)...)
 	for _, label := range ExcludedLabels() {
 		if s.HasLabel(label) {
 			advice = append(advice, fmt.Sprintf(adviceExcludedLabelText, label))
@@ -80,4 +100,46 @@ func adviceNamesFailure(s Spec, sections map[string]string) bool {
 		}
 	}
 	return false
+}
+
+// otherRigPhrase matches a line that places a read in a rig's repository: "in
+// the om rig", "from the om rig", "the om repo". The rig name sits between
+// spaces, so "from" and "command" never match "om". rigAlt is the rig name, or
+// a name pattern when the rig list is unread.
+func otherRigPhrase(rigAlt string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)(?:\b(?:in|from)\s+(?:the\s+)?` + rigAlt + `\s+(?:rig|repo)\b|\bthe\s+` + rigAlt + `\s+repo\b)`)
+}
+
+// rigReadLine reports whether a line of text both places a read in the rig
+// rigAlt names and carries a read word. A rig named with no read word is a
+// mention, not a read.
+func rigReadLine(text, rigAlt string) bool {
+	phrase := otherRigPhrase(rigAlt)
+	for _, line := range strings.Split(text, "\n") {
+		if otherRigVerbRe.MatchString(line) && phrase.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// otherRigAdvice is the other-rig advisory: one line per other rig the Goal or
+// Constraints reads in, or one line saying the check did not run when the rig
+// list was not passed and the bead names another rig's path or read.
+func otherRigAdvice(s Spec, sections map[string]string) []string {
+	readText := sections["goal"] + "\n" + sections["constraints"]
+	if len(knownRigs(s)) == 0 {
+		refusedText := strings.Join([]string{sections["goal"], sections["constraints"], sections["gate"], acceptanceText(s, sections)}, "\n")
+		if len(otherRigPaths(refusedText, genericRigName, s.Rig)) > 0 || rigReadLine(readText, genericRigName) {
+			return []string{adviceRigUncheckedText}
+		}
+		return nil
+	}
+	var advice []string
+	for _, rig := range otherRigs(s) {
+		if rigReadLine(readText, regexp.QuoteMeta(rig)) {
+			advice = append(advice, fmt.Sprintf(adviceOtherRigText, rig, rig))
+		}
+	}
+	return advice
 }

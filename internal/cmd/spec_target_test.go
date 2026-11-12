@@ -192,6 +192,53 @@ func TestSpecDispatchSlingsABeadWhosePathsAreOnTheTarget(t *testing.T) {
 // gt spec lint asks for the bead's rig inventory, and a town bead or a bead
 // with no rig is held with the error named rather than passed as clean
 // (gt-7t1im).
+// TestSpecForLintNamesTheBeadsRigAndTheTownsRigs pins the other-rig inputs the
+// lint reads: the bead's own rig from its prefix, and the registry's rig names.
+// A registry that will not load fails the lint rather than passing it
+// (gt-qotsst).
+func TestSpecForLintNamesTheBeadsRigAndTheTownsRigs(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n" + `{"prefix":"om-","path":"om/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := filepath.Join(townRoot, "mayor", "rigs.json")
+	if err := os.MkdirAll(filepath.Dir(registry), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registry, []byte(`{"version":1,"rigs":{"om":{},"gastown":{}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const description = "## Goal\nA thing exists.\n\n## Constraints\nChange ~/gt/om/internal/cli/cli.go to read the flag.\n\n## Out of scope\nNothing else.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR"
+	show := func(id string) (specdispatch.Spec, error) {
+		return specdispatch.Spec{ID: id, Title: "Add a thing", Type: "task", Status: "open", Description: description, Acceptance: "- [ ] one"}, nil
+	}
+	spec, err := specForLint(townRoot, "gt-bead", show, unexpectedBlockerRead(t), openRigTree)
+	if err != nil {
+		t.Fatalf("specForLint: %v", err)
+	}
+	if spec.Rig != "gastown" {
+		t.Errorf("Rig = %q, want gastown", spec.Rig)
+	}
+	if !slices.Equal(spec.TownRigs, []string{"gastown", "om"}) {
+		t.Errorf("TownRigs = %q, want the registry's names sorted", spec.TownRigs)
+	}
+	if v := specdispatch.Lint(spec, specdispatch.LoadTemplate("")); v.Route != specdispatch.RouteRefuse || !strings.Contains(v.Line("gt-bead"), "om") {
+		t.Errorf("the lint did not refuse the other-rig path: %s", v.Line("gt-bead"))
+	}
+
+	if err := os.WriteFile(registry, []byte(`{"version":1,"rigs":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := specForLint(townRoot, "gt-bead", show, unexpectedBlockerRead(t), openRigTree); err == nil {
+		t.Fatal("specForLint with an unreadable rig registry passed, want an error")
+	}
+}
+
 func TestSpecForLintCarriesTheBeadsTargetInventory(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
