@@ -395,6 +395,10 @@ type patrolScanHost struct {
 	// sandboxDeleter deletes a sandbox and its record when nil:
 	// session.SandboxDeleter. A seat end removes an errored sandbox through it.
 	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
+	// sandboxEndedMarker asks a held sandbox whether its ended marker is set
+	// when nil: session.SandboxEndedMarkerPresent. A seam for the unit tier,
+	// which has no gateway to exec in (gt-yck7hz).
+	sandboxEndedMarker func(gateway, name string) (bool, error)
 	// writePendingSeatEnd is writePendingSandboxSeatEnd when nil: it records a
 	// seat kept for the jev_rules ask so a later pass offers its end again
 	// (gt-381oj). A seam for the write that fails, which a town's filesystem
