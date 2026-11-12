@@ -24,7 +24,6 @@
 # the file no longer reaches. Do not add a line for new code: macOS-only code
 # lives in devops gt-mac-watch, not in gt.
 internal/cmd/process_start_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the capacity scan's process start token reads sysctl; deleted after the gt-wrap cutover
-internal/config/daemon_steps.go	launchctl	2	pending-deletion	remaining launchd references: the rebuild_gt and update step descriptions name launchctl
 internal/daemon/pressure_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the daemon's load average reads sysctl; deleted after the gt-wrap cutover
 internal/hoststat/top_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the host CPU sample runs macOS top; deleted after the gt-wrap cutover
 internal/polecatimage/stat_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the image cache reads atime through Stat_t; deleted after the gt-wrap cutover
