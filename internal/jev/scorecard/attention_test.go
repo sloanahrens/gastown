@@ -192,8 +192,18 @@ func writeAttentionTown(t *testing.T, town string, cases []attentionCase) {
 	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
 
 	writeEvents(t, town, events)
+	writeAttentionState(t, town, attentionNow)
 	writeJSONLines(t, attention.AcksHistoryPath(town), history)
 	writeJSONLines(t, jevattention.LogPath(town), lines)
+}
+
+// writeAttentionState writes the queue state the daemon last ticked at, which is
+// the time a standing item's window is read against.
+func writeAttentionState(t *testing.T, town string, tick time.Time) {
+	t.Helper()
+	if err := attention.WriteState(town, attention.State{Updated: tick}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeEvents(t *testing.T, town string, events []attention.Event) {
@@ -245,12 +255,12 @@ func beadsOf(cases []attentionCase) fakeBeads {
 	return fakeBeads{issues: issues}
 }
 
-// attentionNow is the scorecard's clock in the tests: after every case's raise
-// and its self-clear window.
+// attentionNow is the daemon's last tick the tests write into state.json: after
+// every case's raise and its self-clear window.
 var attentionNow = attentionBase.Add(100 * time.Hour)
 
 func newAttentionTestAdapter(town string, b beadShower) *attentionAdapter {
-	return &attentionAdapter{town: town, beads: b, lines: map[string]jevattention.Line{}, now: func() time.Time { return attentionNow }}
+	return &attentionAdapter{town: town, beads: b, lines: map[string]jevattention.Line{}}
 }
 
 // caseID is the battery line ID of case i, the one Parse gives it.
@@ -345,10 +355,10 @@ func TestAttentionClearsOnItsOwnFalseWhenStillOpenAfterTheWindow(t *testing.T) {
 	}
 	writeAttentionTown(t, town, cases)
 
-	// The second life was raised an hour after the first, so a clock 16 minutes
-	// past the second raise is past both windows.
+	// The second life was raised an hour after the first, so a daemon tick 16
+	// minutes past the second raise is past both windows.
+	writeAttentionState(t, town, attentionBase.Add(time.Hour+16*time.Minute))
 	a := newAttentionTestAdapter(town, beadsOf(cases))
-	a.now = func() time.Time { return attentionBase.Add(time.Hour + 16*time.Minute) }
 	rep, err := Build(context.Background(), a, time.Time{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -382,8 +392,8 @@ func TestAttentionClearsOnItsOwnUnlabeledInsideTheWindow(t *testing.T) {
 			c := attentionCase{name: "standing", kind: attention.KindHostMem, key: "host-mem:young"}
 			writeAttentionTown(t, town, []attentionCase{c})
 
+			writeAttentionState(t, town, attentionBase.Add(age))
 			a := newAttentionTestAdapter(town, beadsOf([]attentionCase{c}))
-			a.now = func() time.Time { return attentionBase.Add(age) }
 			rep, err := Build(context.Background(), a, time.Time{})
 			if err != nil {
 				t.Fatalf("Build: %v", err)
@@ -395,6 +405,27 @@ func TestAttentionClearsOnItsOwnUnlabeledInsideTheWindow(t *testing.T) {
 				t.Errorf("labeled %v by %q, want unlabeled", lr.Labels, lr.Rule)
 			}
 		})
+	}
+}
+
+// A standing item in a queue whose state holds no daemon tick has no logged time
+// to read its window against, so it stays unlabeled however old its raise.
+func TestAttentionClearsOnItsOwnUnlabeledWithoutAQueueTick(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	c := attentionCase{name: "standing", kind: attention.KindHostMem, key: "host-mem:untick"}
+	writeAttentionTown(t, town, []attentionCase{c})
+	writeAttentionState(t, town, time.Time{})
+
+	rep, err := Build(context.Background(), newAttentionTestAdapter(town, beadsOf([]attentionCase{c})), time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(rep.Lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(rep.Lines))
+	}
+	if lr := rep.Lines[0]; lr.Labeled || lr.Rule != "" {
+		t.Errorf("labeled %v by %q, want unlabeled", lr.Labels, lr.Rule)
 	}
 }
 

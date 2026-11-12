@@ -2087,8 +2087,10 @@ it: the battery dropped the question at set 2.
 
 An item still standing with no disposition is `clears_on_its_own` false once its
 15-minute self-clear window has passed (`still-open-past-window`), and unlabeled
-inside it; one whose life the queue files no longer hold is unlabeled. A bead
-read that fails for any reason other than not-found fails the report.
+inside it. The window is read against the daemon's last tick in `state.json`, not
+the clock at scoring; a `state.json` with no tick leaves the item unlabeled. One
+whose life the queue files no longer hold is unlabeled. A bead read that fails for
+any reason other than not-found fails the report.
 
 The `landing` battery reads `.runtime/jev/landing.jsonl`. A landing's labels come
 from the om verdict on its bead's first attempt in
@@ -2417,9 +2419,10 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
   stop.
 - `blocked_on_environment` true when the overrun record charged gate time seen
   at or after the nudge (`progress:gate-wait`). Network waits are not recorded,
-  so no rule labels them. Once the nudge's 20-minute window has passed with no
-  such charge, it is false (`progress:no-gate-wait-after-window`); inside the
-  window it is unlabeled, since a charge may still come.
+  so no rule labels them. Once the nudge's 20-minute window has passed with an
+  overrun record and no such charge, it is false (`progress:no-gate-wait-after-window`);
+  inside the window it is unlabeled, since a charge may still come. A nudge with
+  no overrun record is unlabeled, since its absence says nothing about gate time.
 - `looping` true when the overrun guard stopped the seat at or after the nudge
   and the stop was not charged to gate time (`progress:stopped-by-overrun`). A
   stop charged to gate time is the environment's wait, not the seat repeating a
