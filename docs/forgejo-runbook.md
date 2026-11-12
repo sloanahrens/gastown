@@ -200,6 +200,10 @@ Before a rig's cutover its gate workflow is on the GitHub `main` — landed
 through the old path first, so Forgejo never falls back to
 `.github/workflows` — and its runner image can run that gate.
 
+The `forgejo-probe-go` broker rule is not installed yet: the operator must first
+install the probe binary and pin its sha256 in the broker policy, a human gesture
+at a sitting.
+
 `sudo -u gt-forge gt-approve run forgejo-probe-go -- <rig> --repo OWNER/NAME`
 proves the last of those before anything changes: it clones the rig's GitHub
 `main`, pushes it to the rig's Forgejo copy as `land/probe-<rig>` from a

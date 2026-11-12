@@ -14,6 +14,14 @@ var gitScrubbedVars = []string{"GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"}
 // git child the Forgejo tools start is built from it, so no child inherits a
 // credential or a repository pin. A credential is a name ending in _TOKEN. HOME and
 // PATH are kept: the rig's hooks, ssh and the credential helpers need the real ones.
+//
+// Recorded departure (overseer, gt-tpg0p.93): the approved scrub was the admin
+// token's two names; this drops every *_TOKEN name, deny by default. It is safe
+// because no git child here reads a token from its environment: git takes its
+// credential from the remote URL or from a credential helper, and the helper
+// (gt git-credential-forgejo) reads a token file named by flag.
+// TestIntegrationGitAuthenticatesWithTheTokenVariablesStripped proves a real git
+// call still authenticates through gitCommandIn with the variables stripped.
 func GitChildEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, kv := range environ {
