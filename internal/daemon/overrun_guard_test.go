@@ -1218,7 +1218,8 @@ func TestOverrunSeatFor_ReadsTheEscalatedRunEnd(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), "furiosa"), "node", time.Now())
+	created := time.Date(2026, 11, 2, 1, 20, 0, 0, time.UTC)
+	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), "furiosa"), "node", created)
 
 	seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", "furiosa")
 	if !ok {
@@ -1226,6 +1227,59 @@ func TestOverrunSeatFor_ReadsTheEscalatedRunEnd(t *testing.T) {
 	}
 	if !seat.EscalatedEnd.Equal(ended) {
 		t.Errorf("EscalatedEnd = %v, want the ESCALATED RUN END block's time %v", seat.EscalatedEnd, ended)
+	}
+	if !seat.SessionStart.Equal(created) {
+		t.Errorf("SessionStart = %v, want the tmux session creation time %v", seat.SessionStart, created)
+	}
+}
+
+// The seat's start is the tmux session creation time, which is what lets the
+// guard forgive a run whose fresh session started long after its bead was
+// slung (gt-i6recg). A creation time tmux cannot answer leaves the start zero
+// and keeps the seat: an unreadable stamp must not hide a polecat whose run
+// may be over.
+func TestOverrunSeatFor_ReadsTheSessionCreationTime(t *testing.T) {
+	t.Parallel()
+	created := testEpoch.Add(-20 * time.Minute)
+	for _, tt := range []struct {
+		name       string
+		createdErr error
+		wantStart  time.Time
+	}{
+		{
+			name:      "the session creation time dates the seat's start",
+			wantStart: created,
+		},
+		{
+			name:       "an unreadable creation time leaves the start zero and keeps the seat",
+			createdErr: errNoSessionDate,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, buf := newOverrunDaemon(t, false)
+			tm := newFakeTmux(newFixedClock())
+			tm.createdErr = tt.createdErr
+			d.tmux = tm
+			d.openWorkBeads = workBeadStore{"gt-aaa11": {ID: "gt-aaa11"}}.open
+
+			seatFor := supervisor.SeatFor("gastown", string(constants.RolePolecat), "furiosa")
+			if _, err := intent.Update(d.config.TownRoot, supervisor.IntentSeat(seatFor), func(r *intent.Record) error {
+				r.WorkBead = "gt-aaa11"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), "furiosa"), "node", created)
+
+			seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", "furiosa")
+			if !ok {
+				t.Fatalf("a readable seat was dropped:\n%s", buf.String())
+			}
+			if !seat.SessionStart.Equal(tt.wantStart) {
+				t.Errorf("SessionStart = %v, want %v", seat.SessionStart, tt.wantStart)
+			}
+		})
 	}
 }
 
