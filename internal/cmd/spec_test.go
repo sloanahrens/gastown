@@ -293,6 +293,9 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return nil
 		},
 		Roster: func() (specRoster, error) { return f.roster, f.rosterErr },
+		// The fake town has no seat picture to re-read, so every planned sling
+		// passes the recount; a test that wants one sets it.
+		RecountSeat: func(agent string) (int, int, error) { return 0, 0, nil },
 		Annotate: func(id, key, text string) error {
 			for _, n := range f.notes[id] {
 				if strings.HasPrefix(n, key) {
@@ -1828,6 +1831,94 @@ func TestSpecRunPendingSlingsReleasesTheSeatASlingLeftEmpty(t *testing.T) {
 			}
 			if got := budget.LiveTotal; got != tc.wantLive {
 				t.Errorf("live total = %d, want %d", got, tc.wantLive)
+			}
+		})
+	}
+}
+
+// A tick plans its slings from a roster read 15 to 25 s earlier, so a seat it
+// showed free can be taken by the time the sling starts. Each sling recounts its
+// seat just before it starts: one that no longer fits is skipped with the count
+// it saw and hands its charged seat back; one that still fits runs as before; and
+// a recount that cannot read the seats is reported while the sling runs, since
+// the sling's own pool check still counts (gt-cx16fq).
+func TestSpecPendingSlingRecountsItsSeatBeforeItStarts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		recount   func(agent string) (int, int, error)
+		wantSling bool
+		wantLine  string // the skip line, when the sling is skipped
+		wantErr   string // the error line, when the recount cannot read
+	}{
+		{
+			name:     "the seat was taken since the roster",
+			recount:  func(string) (int, int, error) { return 2, 2, nil },
+			wantLine: "gt-a: no seat (recounted 2/2 before the sling)",
+		},
+		{
+			name:      "the seat still has room",
+			recount:   func(string) (int, int, error) { return 1, 2, nil },
+			wantSling: true,
+		},
+		{
+			name:      "the seats cannot be read",
+			recount:   func(string) (int, int, error) { return 0, 2, errors.New("tmux: boom") },
+			wantSling: true,
+			wantErr:   "gt-a: cannot list the seats before the sling (tmux: boom); dispatching anyway",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+			env := f.env()
+			asked := ""
+			env.RecountSeat = func(agent string) (int, int, error) {
+				asked = agent
+				return tc.recount(agent)
+			}
+			budget := specdispatch.Budget{
+				Seats: []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2}},
+				Now:   specTestNow,
+			}
+			// The charge the collection loop made for this candidate.
+			budget.Bump("deepseek-flash", specTestNow)
+			pending := []specPendingSling{{
+				id:    "gt-a",
+				c:     specCandidate{Spec: f.specs["gt-a"], Rig: "gastown"},
+				seat:  specdispatch.SeatChoice{Agent: "deepseek-flash", Reason: "seat deepseek-flash 2/2"},
+				entry: specDispatchEntry{Bead: "gt-a", Rig: "gastown", Agent: "deepseek-flash"},
+			}}
+			var report specDispatchReport
+			specRunPendingSlings(env, pending, &report, &budget)
+			if asked != "deepseek-flash" {
+				t.Errorf("the recount asked about %q, want the planned seat's agent", asked)
+			}
+			if gotSling := len(f.slung) == 1; gotSling != tc.wantSling {
+				t.Fatalf("sling started = %v, want %v (report %+v)", gotSling, tc.wantSling, report)
+			}
+			if tc.wantSling {
+				if len(report.Dispatched) != 1 {
+					t.Errorf("dispatched = %+v, want the sling's line", report.Dispatched)
+				}
+				if budget.Seats[0].Live != 1 || budget.LiveTotal != 1 {
+					t.Errorf("seat live = %d, total = %d, want the charge kept for 1", budget.Seats[0].Live, budget.LiveTotal)
+				}
+			} else {
+				if len(report.Skipped) != 1 || report.Skipped[0].Line != tc.wantLine {
+					t.Errorf("skipped = %+v, want only %q", report.Skipped, tc.wantLine)
+				}
+				if budget.Seats[0].Live != 0 || budget.LiveTotal != 0 {
+					t.Errorf("seat live = %d, total = %d, want the seat handed back", budget.Seats[0].Live, budget.LiveTotal)
+				}
+			}
+			if tc.wantErr == "" {
+				if len(report.Errors) != 0 {
+					t.Errorf("errors = %v, want none", report.Errors)
+				}
+			} else if len(report.Errors) != 1 || report.Errors[0] != tc.wantErr {
+				t.Errorf("errors = %v, want only %q", report.Errors, tc.wantErr)
 			}
 		})
 	}

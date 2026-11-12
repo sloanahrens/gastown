@@ -60,6 +60,14 @@ func TestChoosePoolAgent(t *testing.T) {
 	pinnedFlashCrashed := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash"), s("deepseek-flash")}
 	pinnedOnlyCrashed := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash")}
 	sonnetCrashed := []poolSession{{name: "dead/gastown/ember", agent: "claude-sonnet", deadHooked: true}}
+	// A full seat filled by another sling's claim, and one whose sources are a
+	// live session, a crashed seat and a claim side by side, and one that adds a
+	// seat mid-landing (gt-cx16fq).
+	cappedThree := seatPool("deepseek-flash", 3)
+	flashClaimed := []poolSession{s("deepseek-flash"), {name: "pool-claim/c1", agent: "deepseek-flash", claim: true}}
+	flashCrashedClaimed := []poolSession{s("deepseek-flash"), {name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, {name: "pool-claim/c1", agent: "deepseek-flash", claim: true}}
+	landing := poolSession{name: "landing/gastown/ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember", landing: true}
+	flashLandingClaimed := []poolSession{s("deepseek-flash"), landing, {name: "pool-claim/c1", agent: "deepseek-flash", claim: true}}
 
 	const flashCap = "polecat_pool.seats.deepseek-flash.cap"
 	cases := []struct {
@@ -78,7 +86,7 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"empty town takes the first seat", capped, "", nil, "deepseek-flash", "pool: seat 1/2 -> deepseek-flash", false, ""},
 		{"other agents' sessions do not count", capped, "", oneTaken, "deepseek-flash", "pool: seat 2/2 -> deepseek-flash", false, ""},
 		{"a full pool refuses", capped, "", full, "deepseek-flash", "pool: full (2/2) -> no seat for deepseek-flash", true, flashCap},
-		{"a full pool names the dead-hooked seat that filled it", capped, "", crashed, "deepseek-flash", "pool: full (2/2, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
+		{"a full pool names the dead-hooked seat that filled it", capped, "", crashed, "deepseek-flash", "pool: full (2/2: 1 session, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
 		{"a request for a seat's agent is held by its cap", capped, "deepseek-flash", full, "deepseek-flash", "pool: full (2/2) -> no seat for deepseek-flash", true, flashCap},
 		{"a request for an agent with no seat stands untouched", capped, "claude-sonnet", full, "", "", false, ""},
 		{"a request for the second seat's agent is admitted by that seat's cap", twoSeats, "claude-sonnet", full, "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
@@ -92,12 +100,15 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"a pinned-only seat filled by a dead-hooked polecat is skipped for the open seat", pinnedFirst, "", pinnedFlashCrashed, "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
 		{"a dead-hooked polecat on the open seat leaves the pinned-only seat skipped", pinnedFirst, "", sonnetCrashed, "claude-sonnet", "pool: seat 2/2 -> claude-sonnet", false, ""},
 		{"a pinned-only pool whose seat a dead-hooked polecat fills refuses an unnamed sling", pinnedOnly, "", pinnedOnlyCrashed, "", "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent", true, "polecat_pool.seats"},
-		{"a sling naming a pinned-only seat is held by its cap, counting the dead-hooked polecat", pinnedOnly, "deepseek-flash", pinnedOnlyCrashed, "deepseek-flash", "pool: full (2/2, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
+		{"a sling naming a pinned-only seat is held by its cap, counting the dead-hooked polecat", pinnedOnly, "deepseek-flash", pinnedOnlyCrashed, "deepseek-flash", "pool: full (2/2: 1 session, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
+		{"a full seat names the claim of another sling inside its count", capped, "", flashClaimed, "deepseek-flash", "pool: full (2/2: 1 session, 1 claim) -> no seat for deepseek-flash", true, flashCap},
+		{"a full seat names every source of its count", cappedThree, "", flashCrashedClaimed, "deepseek-flash", "pool: full (3/3: 1 session, 1 dead-hooked, 1 claim) -> no seat for deepseek-flash", true, flashCap},
+		{"a seat mid-landing is named beside the claim and session in the count", cappedThree, "", flashLandingClaimed, "deepseek-flash", "pool: full (3/3: 1 session, 1 mid-landing, 1 claim) -> no seat for deepseek-flash", true, flashCap},
 		{"a request that names no agent is refused when every seat is full", twoSeats, "", bothFull, "", "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent", true, "polecat_pool.seats"},
 		{"a request that names no agent on a one-seat pool is refused by that closed seat", closed, "", nil, "deepseek-flash", "pool: closed (cap 0) -> no seat for deepseek-flash", true, "polecat_pool.seats.deepseek-flash.cap"},
 		{"retired local keys change nothing", retiredLocal, "", oneTaken, "deepseek-flash", "pool: seat 2/2 -> deepseek-flash", false, ""},
 		{"a seat with room answers to the town's total", totaled, "", underTotal, "deepseek-flash", "pool: total full (3/3 across every seat) -> no seat for deepseek-flash", true, "polecat_pool.max_total"},
-		{"the town's total counts a dead-hooked seat, so a restart cannot push past it", totaled, "", totaledCrashed, "deepseek-flash", "pool: total full (3/3 across every seat) -> no seat for deepseek-flash", true, "polecat_pool.max_total"},
+		{"the town's total counts a dead-hooked seat, so a restart cannot push past it", totaled, "", totaledCrashed, "deepseek-flash", "pool: total full (3/3 across every seat: 2 sessions, 1 dead-hooked) -> no seat for deepseek-flash", true, "polecat_pool.max_total"},
 		{"the town's total answers a request for another agent", totaled, "claude-sonnet", underTotal, "claude-sonnet", "pool: total full (3/3 across every seat) -> no seat for claude-sonnet", true, "polecat_pool.max_total"},
 		{"under the total the per-agent cap decides", totaled, "", oneTaken, "deepseek-flash", "pool: seat 2/3 -> deepseek-flash", false, ""},
 		{"the town's total holds a pool with no seats", &config.PolecatPool{MaxTotal: intPtr(1)}, "", full, "the default agent", "pool: total full (2/1 across every seat) -> no seat for the default agent", true, "polecat_pool.max_total"},
@@ -1356,7 +1367,7 @@ func TestSeatDecisionStillAtomicCountAndClaim(t *testing.T) {
 		switch {
 		case d.err == nil && d.agent == claimAgent:
 			admitted++
-		case errors.As(d.err, &bp) && strings.Contains(d.reason, "pool: full (1/1)"):
+		case errors.As(d.err, &bp) && strings.Contains(d.reason, "pool: full (1/1"):
 			refused++
 		default:
 			t.Fatalf("decision %d: unexpected outcome %q (%s) %v", i+1, d.agent, d.reason, d.err)
@@ -1412,8 +1423,8 @@ func TestPoolSeatClaimsHoldTheCapForConcurrentSlings(t *testing.T) {
 	if !errors.Is(err, errPoolBackpressure) {
 		t.Fatalf("the third sling must refuse, not overfill the pool: got %q (%s) %v", agent, reason, err)
 	}
-	if !strings.Contains(reason, "pool: full (2/2)") {
-		t.Errorf("the refusal must count the capped seat: %q", reason)
+	if !strings.Contains(reason, "pool: full (2/2: 2 claims)") {
+		t.Errorf("the refusal must count the capped seat and name its claims: %q", reason)
 	}
 	if claims := w.claims(t); len(claims) != 2 {
 		t.Errorf("a refused sling claims no seat, got %v", claims)
@@ -2084,7 +2095,9 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, errPoolBackpressure) || !strings.Contains(reason, "pool: full (1/1)") {
+			// The count is the assertion; which source filled it varies by row
+			// (a session, a claim, a landing seat).
+			if !errors.Is(err, errPoolBackpressure) || !strings.Contains(reason, "pool: full (1/1") {
 				t.Fatalf("admission must refuse the %d seat(s) the picture shows taken: got %q (%s) %v",
 					c.wantOccupied, agent, reason, err)
 			}
@@ -2473,7 +2486,7 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 			if refused != (c.wantSeats > 0) {
 				t.Fatalf("refused = %v, want %v (%s)", refused, c.wantSeats > 0, reason)
 			}
-			if c.wantSeats > 0 && (!strings.Contains(reason, "pool: full (1/1, 1 dead-hooked)") || raise != "polecat_pool.seats.deepseek-flash.cap") {
+			if c.wantSeats > 0 && (!strings.Contains(reason, "pool: full (1/1: 1 dead-hooked)") || raise != "polecat_pool.seats.deepseek-flash.cap") {
 				t.Fatalf("the refusal names the dead-hooked seat: %q raise=%q", reason, raise)
 			}
 		})
@@ -2578,7 +2591,7 @@ func TestChoosePoolAgentSeatWindows(t *testing.T) {
 		{"a one-seat pool whose seat is pinned-only refuses an unnamed sling even by day", pinnedWindowOnly, "", nil, chicagoAt(t, 12, 0), "", everySeat, true, "polecat_pool.seats"},
 		{"a one-seat pool pinned-only and full from a dead-hooked polecat names no dead-hooked count for an unnamed sling", pinnedWindowOnly, "", flashCrashedFull, chicagoAt(t, 12, 0), "", everySeat, true, "polecat_pool.seats"},
 		{"a sling naming a pinned-only shut seat is admitted by the cap alone", pinnedWindow, "deepseek-flash", nil, chicagoAt(t, 21, 0), "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
-		{"a sling naming a pinned-only shut seat is held by its cap, naming the dead-hooked polecat", pinnedWindow, "deepseek-flash", flashCrashedFull, chicagoAt(t, 21, 0), "deepseek-flash", "pool: full (3/3, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
+		{"a sling naming a pinned-only shut seat is held by its cap, naming the dead-hooked polecat", pinnedWindow, "deepseek-flash", flashCrashedFull, chicagoAt(t, 21, 0), "deepseek-flash", "pool: full (3/3: 2 sessions, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
 		{"a window that does not parse reads as shut", badRange, "", nil, chicagoAt(t, 12, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
 	}
 	for _, c := range cases {
