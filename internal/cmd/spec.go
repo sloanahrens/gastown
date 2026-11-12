@@ -719,7 +719,8 @@ type specHoldKnobs struct {
 	// Nil names no rig, so every known rig counts as another for the peer.
 	Rig func(beadID string) string
 	// TownRigs is the town's rig names the other-rig check reads, sorted
-	// (gt-qotsst). Nil is a list the lint cannot check paths against.
+	// (gt-qotsst). Nil still refuses a path into another rig; it only leaves
+	// the prose advisory unable to name the rigs.
 	TownRigs []string
 	// Warn is where a question left unanswered because its inputs would not
 	// read says so; nil falls back to specHoldWarn, so a knob set built by hand
@@ -1747,7 +1748,8 @@ type specDispatchEnv struct {
 	// some other hold wants; the tick itself always wires it.
 	Target func(rig string) *specdispatch.TargetTree
 	// TownRigs is the town's rig names, sorted, the lint's other-rig check reads
-	// (gt-qotsst). A tick sets it once from the rig registry; nil checks no rig.
+	// (gt-qotsst). A tick sets it once from the rig registry; nil leaves the
+	// prose advisory unable to name a rig, and paths are still refused.
 	TownRigs []string
 	// BlockerRead reads a bead's spec and the ids of its open blockers, the
 	// walk specdispatch.Spec.BlockerCreates is filled from: the paths an open
@@ -3167,9 +3169,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	if err != nil {
 		return specDispatchReport{}, err
 	}
-	// A registry that will not load fails the tick: a tick that dispatched
-	// without the other-rig check would sling the beads it exists to hold
-	// (gt-qotsst).
+	// A registry that will not load fails the tick, so the rig names the
+	// advisory reads are never taken as none by mistake (gt-qotsst).
 	townRigs, err := specTownRigs(townRoot)
 	if err != nil {
 		return specDispatchReport{}, fmt.Errorf("cannot read the town's rig list: %w", err)
