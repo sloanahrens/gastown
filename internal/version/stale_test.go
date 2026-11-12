@@ -38,6 +38,126 @@ func TestCheckStaleBinary_NoCommit(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBareRepoReadsOriginMain pins the main a rig's bare repo is
+// judged against: refs/remotes/origin/main, the ref the daemon fetches and the
+// landing worker pushes to. refs/heads/main there has no writer, so it is never
+// the compare ref or a build-branch candidate; with no origin/main the check
+// reports an error rather than reading it.
+func TestCheckStaleBareRepoReadsOriginMain(t *testing.T) {
+	t.Parallel()
+	t.Run("compares against origin/main over a stale refs/heads/main", func(t *testing.T) {
+		t.Parallel()
+		g, r := newRepo(t)
+		r.bare = true
+		old := r.commit("a.go", "1")
+		fresh := r.commit("b.go", "2")
+		r.setRef("refs/heads/main", old)
+		r.setRef("refs/remotes/origin/main", fresh)
+
+		info := g.checker(old).checkStale(repoDir)
+		if info.Error != nil {
+			t.Fatalf("checkStale: %v", info.Error)
+		}
+		if info.CompareRef != "origin/main" || info.RepoCommit != fresh {
+			t.Fatalf("CompareRef=%q RepoCommit=%s, want origin/main at %s", info.CompareRef, ShortCommit(info.RepoCommit), ShortCommit(fresh))
+		}
+		if !info.IsStale || !info.IsForward {
+			t.Fatalf("IsStale=%v IsForward=%v, want stale and forward against origin/main", info.IsStale, info.IsForward)
+		}
+	})
+
+	t.Run("a binary only on the stale refs/heads/main is not fresh", func(t *testing.T) {
+		t.Parallel()
+		g, r := newRepo(t)
+		r.bare = true
+		r.commit("a.go", "1")
+		r.checkoutNew("other")
+		fresh := r.commit("b.go", "2")
+		r.head = "refs/heads/main"
+		old := r.commit("c.go", "3")
+		r.setRef("refs/remotes/origin/main", fresh)
+
+		info := g.checker(old).checkStale(repoDir)
+		if info.Error != nil {
+			t.Fatalf("checkStale: %v", info.Error)
+		}
+		if info.CompareRef != "origin/main" || info.RepoCommit != fresh || !info.IsStale {
+			t.Fatalf("CompareRef=%q RepoCommit=%s IsStale=%v, want stale against origin/main at %s", info.CompareRef, ShortCommit(info.RepoCommit), info.IsStale, ShortCommit(fresh))
+		}
+	})
+
+	t.Run("no origin/main is an error, not refs/heads/main", func(t *testing.T) {
+		t.Parallel()
+		g, r := newRepo(t)
+		r.bare = true
+		tip := r.commit("a.go", "1")
+
+		info := g.checker(tip).checkStale(repoDir)
+		if info.Error == nil || !strings.Contains(info.Error.Error(), buildsrc.BareMainRef) {
+			t.Fatalf("Error = %v, want one naming %s", info.Error, buildsrc.BareMainRef)
+		}
+		if info.CompareRef != "" {
+			t.Fatalf("CompareRef = %q, want none without origin/main", info.CompareRef)
+		}
+	})
+}
+
+// TestCheckStaleBareProbeFailure pins that a failed --is-bare-repository probe
+// is reported, never read as "not bare": falling through would compare against
+// refs/heads/main, the dead ref this check exists to stop reading (gt-zcbkkc).
+func TestCheckStaleBareProbeFailure(t *testing.T) {
+	t.Parallel()
+	t.Run("a failed probe on main is an error, not refs/heads/main", func(t *testing.T) {
+		t.Parallel()
+		g, r := newRepo(t)
+		tip := r.commit("a.go", "1")
+		g.fault(errExit128, "rev-parse", "--is-bare-repository")
+
+		info := g.checker(tip).checkStale(repoDir)
+		if info.Error == nil {
+			t.Fatalf("Error = nil, want the failed bare probe reported")
+		}
+		if info.CompareRef == "main" {
+			t.Fatalf("CompareRef = %q, want the dead refs/heads/main never read", info.CompareRef)
+		}
+	})
+
+	t.Run("a failed probe on a feature checkout is an error", func(t *testing.T) {
+		t.Parallel()
+		g, r := newRepo(t)
+		r.commit("a.go", "1")
+		r.checkoutNew("feat/x")
+		tip := r.commit("b.go", "2")
+		g.fault(errExit128, "rev-parse", "--is-bare-repository")
+
+		info := g.checker(tip).checkStale(repoDir)
+		if info.Error == nil {
+			t.Fatalf("Error = nil, want the failed bare probe reported")
+		}
+		if info.CompareRef != "" {
+			t.Fatalf("CompareRef = %q, want no ref from a failed probe", info.CompareRef)
+		}
+	})
+}
+
+// TestBuildBranchCandidatesBareProbeError pins the candidate builder's half of
+// gt-zcbkkc: with the bare probe failed it reports an error and offers no
+// candidates, rather than offering refs/heads/main from an unknown repo shape.
+func TestBuildBranchCandidatesBareProbeError(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit("a.go", "1")
+	g.fault(errExit128, "rev-parse", "--is-bare-repository")
+
+	candidates, err := g.checker("").buildBranchCandidates(repoDir)
+	if err == nil {
+		t.Fatalf("err = nil, want the failed bare probe reported")
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %v, want none from a failed probe", candidates)
+	}
+}
+
 func TestCheckStaleBinary_NotAGitRepo(t *testing.T) {
 	t.Parallel()
 	g, r := newRepo(t)
@@ -555,6 +675,17 @@ func TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch(t *testing.T) {
 	}
 }
 
+// resolved returns resolveBuildBranchRef's ref and whether one was found,
+// failing the test on the error a failed bare probe reports.
+func resolved(t *testing.T, c checker, repoDir, binaryCommit string) (buildBranchRef, bool) {
+	t.Helper()
+	ref, ok, err := c.resolveBuildBranchRef(repoDir, binaryCommit)
+	if err != nil {
+		t.Fatalf("resolveBuildBranchRef: %v", err)
+	}
+	return ref, ok
+}
+
 func TestResolveBuildBranchRef(t *testing.T) {
 	t.Parallel()
 
@@ -564,7 +695,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		c1 := r.commit("a.go", "1")
 		r.branch("carry/operational")
 		r.checkoutNew("feat/x")
-		ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1)
+		ref, ok := resolved(t, g.checker(c1), repoDir, c1)
 		if !ok || ref.display != "carry/operational" || ref.ref != "refs/heads/carry/operational" || ref.commit != c1 {
 			t.Errorf("got (%+v,%v), want carry/operational at %s", ref, ok, c1)
 		}
@@ -577,7 +708,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.checkoutNew("carry/operational")
 		carryOnly := r.commit("b.go", "fork work")
 		r.checkoutNew("feat/x")
-		ref, ok := g.checker(carryOnly).resolveBuildBranchRef(repoDir, carryOnly)
+		ref, ok := resolved(t, g.checker(carryOnly), repoDir, carryOnly)
 		if !ok || ref.display != "carry/operational" || ref.commit != carryOnly {
 			t.Errorf("got (%+v,%v), want carry/operational at %s", ref, ok, carryOnly)
 		}
@@ -590,7 +721,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.renameBranch("feature/only")
 		r.branch("carry/a")
 		r.branch("carry/b")
-		if ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1); ok {
+		if ref, ok := resolved(t, g.checker(c1), repoDir, c1); ok {
 			t.Errorf("got (%+v,%v), want no ref for ambiguous carry/*", ref, ok)
 		}
 	})
@@ -601,7 +732,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		c1 := r.commit("a.go", "1")
 		r.renameBranch("feature/only")
 		r.setRef("refs/remotes/origin/main", c1)
-		ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1)
+		ref, ok := resolved(t, g.checker(c1), repoDir, c1)
 		if !ok || ref.display != "origin/main" || ref.ref != "refs/remotes/origin/main" || ref.commit != c1 {
 			t.Errorf("got (%+v,%v), want origin/main at %s", ref, ok, c1)
 		}
@@ -616,7 +747,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.setRef("refs/heads/main", old)
 		r.checkoutNew("feat/x")
 
-		ref, ok := g.checker(old).resolveBuildBranchRef(repoDir, old)
+		ref, ok := resolved(t, g.checker(old), repoDir, old)
 		if !ok || ref.display != "origin/main" || ref.commit != fresh {
 			t.Errorf("got (%+v,%v), want fresher origin/main at %s", ref, ok, fresh)
 		}
@@ -636,7 +767,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.checkout("main")
 		r.checkoutNew("feat/x")
 
-		ref, ok := g.checker(base).resolveBuildBranchRef(repoDir, base)
+		ref, ok := resolved(t, g.checker(base), repoDir, base)
 		if !ok || ref.display != "upstream/main" || ref.commit != upstreamTip {
 			t.Errorf("got (%+v,%v), want upstream/main at %s", ref, ok, upstreamTip)
 		}
@@ -649,7 +780,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.renameBranch("feature/only")
 		r.setRef("refs/remotes/origin/carry/operational", c1)
 
-		ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1)
+		ref, ok := resolved(t, g.checker(c1), repoDir, c1)
 		if !ok || ref.display != "origin/carry/operational" || ref.ref != "refs/remotes/origin/carry/operational" || ref.commit != c1 {
 			t.Errorf("got (%+v,%v), want origin/carry/operational at %s", ref, ok, c1)
 		}
@@ -664,7 +795,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.setRef("refs/heads/origin/main", old)
 		r.setRef("refs/remotes/origin/main", fresh)
 
-		ref, ok := g.checker(old).resolveBuildBranchRef(repoDir, old)
+		ref, ok := resolved(t, g.checker(old), repoDir, old)
 		if !ok || ref.display != "origin/main" || ref.ref != "refs/remotes/origin/main" || ref.commit != fresh {
 			t.Errorf("got (%+v,%v), want remote origin/main at %s", ref, ok, fresh)
 		}
@@ -676,7 +807,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		r.commit("a.go", "1")
 		r.checkoutNew("feat/x")
 		orphan := r.commit("b.go", "2")
-		if ref, ok := g.checker(orphan).resolveBuildBranchRef(repoDir, orphan); ok {
+		if ref, ok := resolved(t, g.checker(orphan), repoDir, orphan); ok {
 			t.Errorf("got (%+v,%v), want no ref when no build branch contains the binary", ref, ok)
 		}
 	})

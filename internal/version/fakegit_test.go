@@ -58,7 +58,10 @@ type fakeRepo struct {
 	head    string            // full refname HEAD points at; "" when detached
 	detach  string            // commit id when detached
 	remotes map[string]string // remote name -> repo dir; "" = unreachable
-	calls   [][]string
+	// bare marks a bare repository, such as a rig's .repo.git: it has no
+	// worktree, and its HEAD branch (refs/heads/main) has no writer.
+	bare  bool
+	calls [][]string
 }
 
 func newFakeGit(t testing.TB) *fakeGit {
@@ -338,7 +341,16 @@ var errUnsupported = errors.New("fake git: unsupported command")
 func (r *fakeRepo) dispatch(args []string) (string, error) {
 	switch {
 	case eq(args, "rev-parse", "--is-inside-work-tree"):
+		if r.bare {
+			return "false\n", nil
+		}
 		return "true\n", nil
+
+	case eq(args, "rev-parse", "--is-bare-repository"):
+		if r.bare {
+			return "true\n", nil
+		}
+		return "false\n", nil
 
 	case len(args) == 5 && eq(args[:4], "rev-parse", "--verify", "--quiet", "--end-of-options"):
 		rev, ok := strings.CutSuffix(args[4], "^{commit}")

@@ -288,6 +288,19 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 		} else if ref, ok := c.resolveMainRemoteRef(repoDir, branch); ok {
 			info.CompareRef = ref.display
 			compareCommit = ref.commit
+		} else if bare, err := c.isBareRepo(repoDir); err != nil {
+			// A failed bare probe is not a worktree verdict: report it rather
+			// than falling through to refs/heads/main, the ref this check
+			// exists to stop reading (gt-zcbkkc).
+			info.Error = err
+			return info
+		} else if bare {
+			// A rig's bare repo has no worktree, so the branch its HEAD names has
+			// no writer there: refs/heads/main is stale. resolveMainRemoteRef has
+			// just found no origin/main, so the check cannot answer and says so
+			// rather than comparing against the dead branch (gt-zcbkkc).
+			info.Error = fmt.Errorf("bare repo %s has no %s to compare against", repoDir, buildsrc.BareMainRef)
+			return info
 		} else {
 			info.CompareRef = branch
 			compareCommit, err = c.resolveGitCommit(repoDir, "HEAD")
@@ -308,14 +321,23 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 		// against the bare main alone: a fallback would read the checkout's cached
 		// origin/main, which is not the ref this check trusts.
 		if !detached && !c.isAncestor(repoDir, binaryCommit, compareCommit) {
-			if ref, ok := c.resolveBuildBranchRef(repoDir, binaryCommit); ok {
+			ref, ok, err := c.resolveBuildBranchRef(repoDir, binaryCommit)
+			if err != nil {
+				info.Error = err
+				return info
+			}
+			if ok {
 				info.CompareRef = ref.display
 				compareCommit = ref.commit
 			}
 		}
 	} else {
 		// Resolve a real build-branch ref instead of the feature HEAD.
-		ref, ok := c.resolveBuildBranchRef(repoDir, binaryCommit)
+		ref, ok, err := c.resolveBuildBranchRef(repoDir, binaryCommit)
+		if err != nil {
+			info.Error = err
+			return info
+		}
 		if !ok {
 			info.Skipped = true
 			info.SkipReason = "source worktree not on a build branch and no build-branch ref found to compare against"
@@ -432,8 +454,9 @@ func (c checker) isDetached(repoDir string) bool {
 
 // detachedMainTip returns the bare repo's main commit and whether a detached
 // build checkout is on main: HEAD is that commit or an ancestor of it. The main
-// is read from the bare repo, the ref buildsrc.Ensure follows, so the check
-// reads no remote. An unresolvable HEAD or main is not on main.
+// is read from the bare repo at its refs/remotes/origin/main, the ref
+// buildsrc.Ensure follows, so the check reads no remote. An unresolvable HEAD
+// or main is not on main.
 func (c checker) detachedMainTip(repoDir string) (string, bool) {
 	bare, ok := buildsrc.BareRepoOf(repoDir)
 	if !ok {
@@ -443,7 +466,7 @@ func (c checker) detachedMainTip(repoDir string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	tip, err := c.resolveGitCommit(bare, "refs/heads/main")
+	tip, err := c.resolveGitCommit(bare, buildsrc.BareMainRef)
 	if err != nil {
 		return "", false
 	}
@@ -531,9 +554,13 @@ func (c checker) fetchRemoteBranch(repoDir, remote, branch string) bool {
 // Candidate refs are fully qualified to avoid branch/tag shadowing. Among refs
 // that contain the binary commit, choose the freshest descendant; only use the
 // candidate order below to break truly diverged ties.
-func (c checker) resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranchRef, bool) {
+func (c checker) resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranchRef, bool, error) {
+	candidates, err := c.buildBranchCandidates(repoDir)
+	if err != nil {
+		return buildBranchRef{}, false, err
+	}
 	var usable []buildBranchRef
-	for _, candidate := range c.buildBranchCandidates(repoDir) {
+	for _, candidate := range candidates {
 		commit, err := c.resolveGitCommit(repoDir, candidate.ref)
 		if err != nil || !c.isAncestor(repoDir, binaryCommit, commit) {
 			continue
@@ -542,7 +569,7 @@ func (c checker) resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranc
 		usable = append(usable, candidate)
 	}
 	if len(usable) == 0 {
-		return buildBranchRef{}, false
+		return buildBranchRef{}, false, nil
 	}
 
 	frontier := make([]buildBranchRef, 0, len(usable))
@@ -561,7 +588,7 @@ func (c checker) resolveBuildBranchRef(repoDir, binaryCommit string) (buildBranc
 			frontier = append(frontier, candidate)
 		}
 	}
-	return frontier[0], true
+	return frontier[0], true, nil
 }
 
 // resolveMainRemoteRef looks up the remote-tracking ref for branch (the
@@ -582,7 +609,11 @@ func (c checker) resolveMainRemoteRef(repoDir, branch string) (buildBranchRef, b
 	return buildBranchRef{}, false
 }
 
-func (c checker) buildBranchCandidates(repoDir string) []buildBranchRef {
+func (c checker) buildBranchCandidates(repoDir string) ([]buildBranchRef, error) {
+	bare, err := c.isBareRepo(repoDir)
+	if err != nil {
+		return nil, err
+	}
 	candidates := make([]buildBranchRef, 0, 10)
 	for _, pattern := range []string{
 		"refs/heads/carry/",
@@ -598,10 +629,28 @@ func (c checker) buildBranchCandidates(repoDir string) []buildBranchRef {
 		buildBranchRef{ref: "refs/remotes/upstream/master", display: "upstream/master"},
 		buildBranchRef{ref: "refs/remotes/origin/main", display: "origin/main"},
 		buildBranchRef{ref: "refs/remotes/origin/master", display: "origin/master"},
-		buildBranchRef{ref: "refs/heads/main", display: "main"},
-		buildBranchRef{ref: "refs/heads/master", display: "master"},
 	)
-	return candidates
+	// A rig's bare repo has no worktree and no writer for refs/heads/main, so a
+	// bare main is only ever a remote-tracking ref; there the dead local branch
+	// is not a candidate (gt-zcbkkc).
+	if !bare {
+		candidates = append(candidates,
+			buildBranchRef{ref: "refs/heads/main", display: "main"},
+			buildBranchRef{ref: "refs/heads/master", display: "master"},
+		)
+	}
+	return candidates, nil
+}
+
+// isBareRepo reports whether dir is a bare repository, such as a rig's
+// .repo.git. A failed probe is an error, not a worktree verdict: the caller
+// reports it rather than reading refs/heads/main.
+func (c checker) isBareRepo(dir string) (bool, error) {
+	output, err := c.output(dir, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		return false, fmt.Errorf("checking whether %s is a bare repo: %w", dir, err)
+	}
+	return strings.TrimSpace(string(output)) == "true", nil
 }
 
 func (c checker) resolveGitCommit(repoDir, rev string) (string, error) {
@@ -718,8 +767,8 @@ func getRepoRoot(getenv func(string) string, toplevel func() string) (string, er
 }
 
 // isGitRepo checks if a directory is a git repository: a worktree, or a bare
-// repository such as a rig's .repo.git, whose refs/heads/main is the build
-// branch. A worktree answers --is-inside-work-tree and a bare repository
+// repository such as a rig's .repo.git, whose refs/remotes/origin/main is the
+// build branch. A worktree answers --is-inside-work-tree and a bare repository
 // answers --is-bare-repository; the first is false for the second.
 func (c checker) isGitRepo(dir string) bool {
 	output, err := c.output(dir, "rev-parse", "--is-inside-work-tree")

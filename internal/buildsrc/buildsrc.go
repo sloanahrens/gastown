@@ -1,8 +1,9 @@
 // Package buildsrc owns the job-owned build checkout: the clone that builds and
 // gate commands run in once a rig's mayor/rig working tree is gone. Each rig
 // gets one under the town's .runtime directory, cloned from the rig's bare
-// repo and moved to the bare repo's main (or to a named commit) on every call.
-// Nothing here writes to the bare repo or to the rig's own checkout.
+// repo and moved to the bare repo's main, its refs/remotes/origin/main (or to a
+// named commit), on every call. Nothing here writes to the bare repo or to the
+// rig's own checkout.
 package buildsrc
 
 import (
@@ -24,6 +25,12 @@ import (
 // dirRel is the directory under the town root that holds one build checkout
 // per rig.
 const dirRel = ".runtime/build-src"
+
+// BareMainRef is the ref holding a rig's bare repo main. The daemon fetches
+// origin/main into the bare repo and the landing worker pushes there; nothing
+// writes refs/heads/main in a rig's .repo.git, so that ref is stale and a
+// reader of the bare repo's main takes this one.
+const BareMainRef = "refs/remotes/origin/main"
 
 // BaseDirRel is the build-checkout base directory relative to the town root, in
 // the platform's separator: <town>/<BaseDirRel()> holds one checkout per rig.
@@ -75,9 +82,11 @@ func BareRepoOf(repoDir string) (string, bool) {
 // Ensure returns the build checkout of rig, detached at rev: "" for the bare
 // repo's main, or a full commit sha the bare repo has. Calls for one rig are
 // serialized. A call for the bare repo's main first points the checkout's
-// origin/main at the bare repo's main, and a call for a commit fetches it, so a
-// commit that landed since the last call is there. Neither reads the network:
-// every fetch names the bare repo's path.
+// origin/main at the bare repo's origin/main, and a call for a commit fetches
+// it, so a commit that landed since the last call is there. Neither reads the
+// network: every fetch names the bare repo's path. A bare repo without
+// origin/main fails the fetch, and that error is returned: Ensure never checks
+// out refs/heads/main, which a rig's bare repo does not keep current.
 func Ensure(ctx context.Context, townRoot, rig, rev string) (string, error) {
 	return ensure(ctx, execGit, townRoot, rig, rev)
 }
@@ -118,7 +127,8 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 	target := rev
 	if rev == "" {
 		// origin/main is the ref the rebuild's preflight compares HEAD with, so it
-		// is brought to the bare repo's main on every call, the fast path included.
+		// is brought to the bare repo's origin/main on every call, the fast path
+		// included.
 		if err := refreshOriginMain(ctx, run, bare, dir); err != nil {
 			return "", err
 		}
@@ -141,22 +151,26 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 }
 
 // refreshOriginMain points the checkout's refs/remotes/origin/main at the bare
-// repo's main. The source is the bare repo's path, not the origin remote, so the
-// fetch reads the rig's bare repo on this host and reaches no network.
+// repo's refs/remotes/origin/main, the ref the daemon fetches and the landing
+// worker pushes to. The source is the bare repo's path, not the origin remote,
+// so the fetch reads the rig's bare repo on this host and reaches no network. A
+// bare repo without origin/main fails the fetch, which is this reader's "no
+// main" error.
 func refreshOriginMain(ctx context.Context, run gitFunc, bare, dir string) error {
-	refspec := "+refs/heads/main:refs/remotes/origin/main"
+	refspec := "+" + BareMainRef + ":" + BareMainRef
 	if err := run(ctx, fetchTimeout, dir, "fetch", "--quiet", "--no-tags", "--", bare, refspec); err != nil {
 		return fmt.Errorf("fetching main of %s into %s: %w", bare, dir, err)
 	}
 	return nil
 }
 
-// atBareMain reports whether dir is detached at origin/main, which refreshOriginMain
-// has just pointed at the bare repo's main: the state ensure leaves a checkout in
-// after a checkout of main. The runner returns no output, so the comparison is by
-// ancestry in both directions, which holds exactly when the two are the same
-// commit. A check that fails reports false, so the caller takes the full path,
-// which reports the failure instead of returning a checkout it could not check.
+// atBareMain reports whether dir is detached at origin/main, which
+// refreshOriginMain has just pointed at the bare repo's origin/main: the state
+// Ensure leaves a checkout in after a checkout of main. The runner returns no
+// output, so the comparison is by ancestry in both directions, which holds
+// exactly when the two are the same commit. A check that fails reports false,
+// so the caller takes the full path, which reports the failure instead of
+// returning a checkout it could not check.
 func atBareMain(ctx context.Context, run gitFunc, dir string) bool {
 	// symbolic-ref exits non-zero when HEAD is detached. A checkout on a branch,
 	// even one at main's commit, is not the detached state, so it takes the full path.

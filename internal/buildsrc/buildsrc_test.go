@@ -60,9 +60,10 @@ func hasVerb(calls []string, verb string) bool {
 
 // TestEnsureRefreshesOriginMainFromTheBareRepo pins the refresh on every call
 // for the bare repo's main. The checkout's origin/main is fetched from the bare
-// repo's path before anything else, the fast path included, so it is the only
-// fetch a call for main makes. Only the full path checks out, and every other
-// state takes it.
+// repo's refs/remotes/origin/main before anything else, the fast path included,
+// so it is the only fetch a call for main makes; refs/heads/main in a rig's
+// bare repo has no writer and is never the source. Only the full path checks
+// out, and every other state takes it.
 func TestEnsureRefreshesOriginMainFromTheBareRepo(t *testing.T) {
 	t.Parallel()
 	// notRef answers a call that exits non-zero, as git does for a failed check.
@@ -116,7 +117,7 @@ func TestEnsureRefreshesOriginMainFromTheBareRepo(t *testing.T) {
 				t.Fatalf("ensure returned %s, want %s", got, dir)
 			}
 			fetches := argvWithVerb(git.argv, "fetch")
-			wantFetch := []string{"fetch", "--quiet", "--no-tags", "--", bare, "+refs/heads/main:refs/remotes/origin/main"}
+			wantFetch := []string{"fetch", "--quiet", "--no-tags", "--", bare, "+refs/remotes/origin/main:refs/remotes/origin/main"}
 			if len(fetches) != 1 || !slices.Equal(fetches[0], wantFetch) {
 				t.Fatalf("fetches %v, want exactly one %v", fetches, wantFetch)
 			}

@@ -35,8 +35,10 @@ func tailRepoGit(t *testing.T, dir string, args ...string) string {
 // tailRepoRig makes a town whose gastown rig has the rig's bare repo, with main
 // at binary, and the rig's build checkout cloned at binary. The bare repo then
 // moves on to a second and third commit, which only it holds: the stale
-// checkout is what a build checkout nobody has moved looks like. It returns the
-// town root, the binary's commit, the second commit and main's tip.
+// checkout is what a build checkout nobody has moved looks like. The bare
+// repo's main is refs/remotes/origin/main, the ref the readers follow, and the
+// fixture moves that to the tip. It returns the town root, the binary's commit,
+// the second commit and main's tip.
 func tailRepoRig(t *testing.T) (townRoot, binary, second, tip string) {
 	t.Helper()
 	townRoot = t.TempDir()
@@ -70,6 +72,10 @@ func tailRepoRig(t *testing.T) (townRoot, binary, second, tip string) {
 	second = commit("b.go")
 	tip = commit("c.go")
 	tailRepoGit(t, work, "push", "-q", bare, "main")
+	// refs/heads/main in a rig's bare repo has no writer and is frozen where
+	// the last clone left it; origin/main is the current one.
+	tailRepoGit(t, bare, "update-ref", "refs/heads/main", binary)
+	tailRepoGit(t, bare, "update-ref", "refs/remotes/origin/main", tip)
 	return townRoot, binary, second, tip
 }
 

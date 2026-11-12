@@ -49,10 +49,21 @@ func detachedRig(t *testing.T) (townRoot, bare, work, tip string) {
 	work = t.TempDir()
 	detachedGit(t, work, "init", "-q")
 	detachedGit(t, work, "checkout", "-q", "-b", "main")
-	detachedCommit(t, work, "a.go")
+	first := detachedCommit(t, work, "a.go")
 	detachedCommit(t, work, "b.go")
-	detachedGit(t, work, "push", "-q", bare, "main")
+	pushMain(t, work, bare)
+	// A rig's bare repo keeps refs/heads/main at an old commit: nothing writes
+	// it. Its main is refs/remotes/origin/main, which the daemon fetches.
+	detachedGit(t, bare, "update-ref", "refs/heads/main", first)
 	return townRoot, bare, work, detachedGit(t, work, "rev-parse", "HEAD")
+}
+
+// pushMain pushes work's main to the bare repo's refs/remotes/origin/main, the
+// ref the build readers follow. refs/heads/main is never pushed to: a rig's
+// bare repo does not keep it current.
+func pushMain(t *testing.T, work, bare string) {
+	t.Helper()
+	detachedGit(t, work, "push", "-q", bare, "HEAD:refs/remotes/origin/main")
 }
 
 // detachedCommit writes file and commits it in dir, returning the new commit.
@@ -137,7 +148,7 @@ func TestIntegrationCheckStaleFreshDetachedReadsBareMainWithoutNetwork(t *testin
 	detachedGit(t, dir, "remote", "set-url", "origin", filepath.Join(townRoot, "unreachable.git"))
 
 	detachedCommit(t, work, "c.go")
-	detachedGit(t, work, "push", "-q", bare, "main")
+	pushMain(t, work, bare)
 	newTip := detachedGit(t, work, "rev-parse", "HEAD")
 	if got := ensureBuildCheckout(t, townRoot); got != dir {
 		t.Fatalf("Ensure moved the checkout: %s, want %s", got, dir)
@@ -161,7 +172,7 @@ func TestIntegrationCheckStaleFreshDetachedReadsBareMainWithoutNetwork(t *testin
 	// The bare main moves on. The checkout is not re-ensured, so the verdict has
 	// to come from the bare repo itself, which is the only place the new tip is.
 	detachedCommit(t, work, "d.go")
-	detachedGit(t, work, "push", "-q", bare, "main")
+	pushMain(t, work, bare)
 	behind := checker{git: realGit, commit: newTip}.checkStaleFresh(dir)
 	if behind.Error != nil || behind.Skipped {
 		t.Fatalf("checkStaleFresh after the bare main moved: error %v, skipped %q", behind.Error, behind.SkipReason)
