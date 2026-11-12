@@ -218,26 +218,40 @@ func (k Kubectl) checkTool(pod string) error {
 }
 
 // podWalkUpScript runs the tool in the nearest directory the pod has at or above
-// the caller's mapped directory. It stops at podTownRoot, so a walk never leaves
-// the town, and when the town root itself is absent it refuses in one line naming
-// it. A walk that ends anywhere but the mapped directory names the caller's Mac
-// directory in GT_CALLER_CWD, since the tool reads its identity there and the
-// process directory is only an ancestor. Every directory crosses as a positional
-// parameter, so a path holding a space or a quote stays one word.
+// the caller's mapped directory, and never above podTownRoot. A target outside the
+// root, a target with a .. step, an absent root, a walk that finds no directory,
+// and a directory the shell cannot enter each refuse in one line and exit 125, so
+// the tool did not start; otherwise the tool's own exit status passes through. A
+// walk that ends anywhere but the mapped directory names the caller's Mac directory
+// in GT_CALLER_CWD, since the tool reads its identity there and the process
+// directory is only an ancestor. Every directory crosses as a positional parameter,
+// so a path holding a space or a quote stays one word.
 const podWalkUpScript = `target=$1; root=$2; caller=$3; shift 3
-d=$target
-while [ ! -d "$d" ] && [ "$d" != "$root" ]; do
-  d=$(dirname "$d")
-done
-if [ ! -d "$d" ]; then
-  echo "gtwrap: the pod town root $root is not a directory, so the tool did not run" >&2
-  exit 1
+refuse() { echo "gtwrap: $1, so the tool did not run" >&2; exit 125; }
+case $target in
+  "$root"|"$root"/*) ;;
+  *) refuse "$target is not under the pod town root $root" ;;
+esac
+case $target in
+  */..|*/../*) refuse "$target has a .. step" ;;
+esac
+if [ ! -d "$root" ]; then
+  refuse "the pod town root $root is not a directory"
 fi
+d=$target
+while [ ! -d "$d" ]; do
+  p=$(dirname "$d")
+  if [ -z "$p" ] || [ "$p" = "$d" ]; then
+    refuse "no directory at or above $target is in the pod"
+  fi
+  d=$p
+done
 if [ "$d" != "$target" ]; then
   GT_CALLER_CWD=$caller
   export GT_CALLER_CWD
 fi
-cd "$d" && exec "$@"`
+cd "$d" 2>/dev/null || refuse "cannot enter $d"
+exec "$@"`
 
 // execArgv is the kubectl command line that runs call in pod, in dir. The env
 // assignments travel as an env command's arguments, since kubectl exec forwards no

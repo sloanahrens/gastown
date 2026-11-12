@@ -354,6 +354,7 @@ func envMap(env expand.Environ) map[string]string {
 func TestPodLaunchWalksToNearestExistingAncestor(t *testing.T) {
 	t.Parallel()
 	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{
+		podTownRoot:              true,
 		podTownRoot + "/gastown": true,
 	}}
 	var note bytes.Buffer
@@ -428,7 +429,7 @@ func TestPodLaunchSetsCallerCwdOnlyWhenWalked(t *testing.T) {
 }
 
 // TestPodLaunchRefusesWhenTownRootAbsent: when even the pod town root is absent,
-// the wrapper refuses in one line naming it, exits 1, and the tool does not start.
+// the wrapper refuses in one line naming it, exits 125, and the tool does not start.
 func TestPodLaunchRefusesWhenTownRootAbsent(t *testing.T) {
 	t.Parallel()
 	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{}}
@@ -437,8 +438,8 @@ func TestPodLaunchRefusesWhenTownRootAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch returned an error: %v", err)
 	}
-	if exit != 1 {
-		t.Fatalf("Launch = %d, want 1", exit)
+	if exit != 125 {
+		t.Fatalf("Launch = %d, want 125", exit)
 	}
 	if len(pod.runs) != 0 {
 		t.Fatalf("the tool ran in %q, want it not to start", pod.runs[0].dir)
