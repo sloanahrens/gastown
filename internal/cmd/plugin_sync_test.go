@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/plugin"
 )
 
 // writeTestPlugin creates <dir>/<name>/plugin.md.
@@ -28,12 +32,26 @@ func markTestTown(t *testing.T, dir string) {
 	writeFile(t, filepath.Join(dir, "mayor", "town.json"), `{"name":"test-town"}`)
 }
 
+// buildCheckoutDir is the gastown build checkout under townRoot, where
+// buildsrc.Ensure puts it in production.
+func buildCheckoutDir(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "build-src", "gastown")
+}
+
+// fixedBuild is a build-checkout resolver that answers with dir, standing in
+// for buildsrc.Ensure so no git runs.
+func fixedBuild(dir string) plugin.BuildCheckoutFunc {
+	return func(_ context.Context, _, _, _ string) (string, error) {
+		return dir, nil
+	}
+}
+
 // runPluginSyncFor runs gt plugin sync for townRoot from source ("" finds
-// the town's checkout) and returns what it printed.
+// the town's gastown build checkout) and returns what it printed.
 func runPluginSyncFor(t *testing.T, townRoot, source string) string {
 	t.Helper()
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, source: source, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), source: source, out: &out, errOut: io.Discard}
 	if err := r.run(); err != nil {
 		t.Errorf("runPluginSync() error = %v", err)
 	}
@@ -51,7 +69,7 @@ func TestRunPluginSync_ReadsTownCheckoutNotWorkingDirectoryClone(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	writeTestPlugin(t, filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins"), "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(buildCheckoutDir(townRoot), "plugins"), "current-plugin", "current")
 	// Runtime copy already matches the town's checkout: nothing to copy, and
 	// the run must still report which source it read.
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
@@ -66,8 +84,8 @@ func TestRunPluginSync_ReadsTownCheckoutNotWorkingDirectoryClone(t *testing.T) {
 
 	out := runPluginSyncFor(t, townRoot, "")
 
-	canonical := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
-	if !strings.Contains(out, canonical) || !strings.Contains(out, "mayor rig checkout") {
+	canonical := filepath.Join(buildCheckoutDir(townRoot), "plugins")
+	if !strings.Contains(out, canonical) || !strings.Contains(out, "gastown build checkout") {
 		t.Errorf("sync did not report the town's checkout as its source; output:\n%s", out)
 	}
 	if strings.Contains(out, clone) {
@@ -85,7 +103,7 @@ func TestRunPluginSync_SourceFlagIsLabelledExplicit(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	writeTestPlugin(t, filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins"), "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(buildCheckoutDir(townRoot), "plugins"), "current-plugin", "current")
 
 	elsewhere := t.TempDir()
 	writeTestPlugin(t, elsewhere, "handed-plugin", "handed")
@@ -104,13 +122,13 @@ func TestRunPluginSync_DryRunNamesExtraWithoutClean(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourcePlugins := filepath.Join(buildCheckoutDir(townRoot), "plugins")
 	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
 
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, dryRun: true, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, out: &out, errOut: io.Discard}
 	if err := r.run(); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
@@ -131,13 +149,13 @@ func TestRunPluginSync_ReportsExtraItLeaves(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourcePlugins := filepath.Join(buildCheckoutDir(townRoot), "plugins")
 	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
 
 	var out, errOut bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, out: &out, errOut: &errOut}
+	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), out: &out, errOut: &errOut}
 	if err := r.run(); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
@@ -158,13 +176,13 @@ func TestRunPluginSync_DryRunCleanProtectsUnshippedExtra(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourcePlugins := filepath.Join(buildCheckoutDir(townRoot), "plugins")
 	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
 
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, dryRun: true, clean: true, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, clean: true, out: &out, errOut: io.Discard}
 	if err := r.run(); err == nil {
 		t.Fatalf("run() = nil, want the protected-plugin error; output:\n%s", out.String())
 	}
@@ -180,6 +198,36 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// A failed build checkout fails the sync and copies nothing, even with a legacy
+// mayor/rig checkout holding plugins: there is no fallback to it.
+func TestRunPluginSync_BuildCheckoutErrorFailsWithoutFallback(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	writeTestPlugin(t, filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins"), "legacy-plugin", "legacy")
+
+	errBuild := errors.New("bare repo missing")
+	failing := func(_ context.Context, _, _, _ string) (string, error) { return "", errBuild }
+	var out bytes.Buffer
+	r := pluginSyncRun{townRoot: townRoot, build: failing, out: &out, errOut: io.Discard}
+	if err := r.run(); !errors.Is(err, errBuild) {
+		t.Fatalf("run() error = %v, want it to wrap %v; output:\n%s", err, errBuild, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "plugins", "legacy-plugin")); err == nil {
+		t.Error("sync copied the legacy checkout's plugin after the build checkout failed")
+	}
+}
+
+// The help names the build checkout the default source is read from.
+func TestPluginSyncHelpNamesBuildCheckout(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(pluginSyncCmd.Long, ".runtime/build-src/gastown/plugins") {
+		t.Errorf("gt plugin sync help does not name the build checkout:\n%s", pluginSyncCmd.Long)
+	}
+}
+
 // The real sync leaves a runtime copy holding edits the source never had and
 // exits non-zero. The dry run previewed it as "content differs" and exited 0.
 func TestPluginSyncDryRunReportsProtected(t *testing.T) {
@@ -187,12 +235,12 @@ func TestPluginSyncDryRunReportsProtected(t *testing.T) {
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
-	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	sourcePlugins := filepath.Join(buildCheckoutDir(townRoot), "plugins")
 	writeTestPlugin(t, sourcePlugins, "edited-plugin", "source text")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "edited-plugin", "hand edit")
 
 	var out, errOut bytes.Buffer
-	dry := pluginSyncRun{townRoot: townRoot, dryRun: true, out: &out, errOut: &errOut}
+	dry := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, out: &out, errOut: &errOut}
 	dryErr := dry.run()
 	if dryErr == nil {
 		t.Fatalf("dry run returned nil for a plugin holding runtime edits; output:\n%s", out.String())
@@ -207,14 +255,14 @@ func TestPluginSyncDryRunReportsProtected(t *testing.T) {
 		t.Errorf("stderr = %q, want the edited file named", errOut.String())
 	}
 
-	realErr := pluginSyncRun{townRoot: townRoot, out: io.Discard, errOut: io.Discard}.run()
+	realErr := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), out: io.Discard, errOut: io.Discard}.run()
 	if realErr == nil || realErr.Error() != dryErr.Error() {
 		t.Errorf("dry run error = %v, real run error = %v; want the same", dryErr, realErr)
 	}
 
 	// --force discards the edits, so the preview is a plain diff again.
 	out.Reset()
-	forced := pluginSyncRun{townRoot: townRoot, dryRun: true, force: true, out: &out, errOut: io.Discard}
+	forced := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, force: true, out: &out, errOut: io.Discard}
 	if err := forced.run(); err != nil {
 		t.Fatalf("--force dry run error = %v", err)
 	}

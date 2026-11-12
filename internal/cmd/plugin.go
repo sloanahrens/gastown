@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/plugin"
@@ -127,9 +129,9 @@ var pluginSyncCmd = &cobra.Command{
 	Short: "Sync plugins from source repo to runtime directories",
 	Long: `Copy plugins from the gastown source repository to runtime plugin directories.
 
-By default the source is the town's own gastown checkout:
-<town>/gastown/mayor/rig/plugins, then the legacy crew/den and gastown/plugins
-layouts. The working directory is never consulted — a checkout you happen to
+By default the source is the plugins directory of the gastown build checkout,
+<town>/.runtime/build-src/gastown/plugins, which is kept at the gastown rig's
+main. The working directory is never consulted — a checkout you happen to
 be standing in is not the town's source of truth (gt-nc7q). Pass --source to
 read a directory of your choosing.
 
@@ -624,17 +626,20 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 		clean:    pluginSyncClean,
 		dryRun:   pluginSyncDryRun,
 		force:    pluginSyncForce,
+		build:    buildsrc.Ensure,
 		out:      os.Stdout,
 		errOut:   os.Stderr,
 	}.run()
 }
 
 // pluginSyncRun is one gt plugin sync: the town, the --source, --clean,
-// --dry-run and --force flags, and where output goes.
+// --dry-run and --force flags, the build-checkout resolver the source comes
+// from when --source is not given, and where output goes.
 type pluginSyncRun struct {
 	townRoot             string
 	source               string
 	clean, dryRun, force bool
+	build                plugin.BuildCheckoutFunc
 	out, errOut          io.Writer
 }
 
@@ -645,7 +650,7 @@ func (r pluginSyncRun) run() error {
 	sourceDir := r.source
 	sourceRule := "explicit --source"
 	if sourceDir == "" {
-		src, err := plugin.FindGastownSource(townRoot)
+		src, err := plugin.FindGastownSource(context.Background(), townRoot, r.build)
 		if err != nil {
 			return err
 		}

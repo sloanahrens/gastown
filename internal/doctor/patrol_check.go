@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/plugin"
 )
@@ -275,6 +277,9 @@ type PatrolPluginDriftCheck struct {
 	targetDir string
 	// syncPlugins is the sync the repair runs; nil means plugin.SyncPlugins.
 	syncPlugins func(sourceDir, targetDir string, clean bool) (*plugin.SyncResult, error)
+	// build resolves the gastown build checkout the source is read from. The
+	// constructor sets buildsrc.Ensure; tests set a fake.
+	build plugin.BuildCheckoutFunc
 }
 
 // NewPatrolPluginDriftCheck creates a new plugin drift check.
@@ -287,6 +292,7 @@ func NewPatrolPluginDriftCheck() *PatrolPluginDriftCheck {
 				CheckCategory:    CategoryPatrol,
 			},
 		},
+		build: buildsrc.Ensure,
 	}
 }
 
@@ -294,14 +300,14 @@ func NewPatrolPluginDriftCheck() *PatrolPluginDriftCheck {
 func (c *PatrolPluginDriftCheck) Run(ctx *CheckContext) *CheckResult {
 	c.targetDir = filepath.Join(ctx.TownRoot, "plugins")
 
-	src, err := plugin.FindGastownSource(ctx.TownRoot)
+	src, err := plugin.FindGastownSource(context.Background(), ctx.TownRoot, c.build)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: "cannot verify plugin drift",
 			Details: []string{err.Error()},
-			FixHint: "Verify the gastown rig checkout exists at <town>/gastown/mayor/rig, or run 'gt plugin sync --source <dir>'",
+			FixHint: "Verify the gastown build checkout exists at <town>/.runtime/build-src/gastown, or run 'gt plugin sync --source <dir>'",
 		}
 	}
 	sourceDir := src.Dir

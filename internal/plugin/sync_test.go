@@ -1,12 +1,12 @@
 package plugin
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -341,197 +341,71 @@ func TestDetectDrift_ExtraInTarget(t *testing.T) {
 	}
 }
 
-// writeRigsJSON writes a minimal mayor/rigs.json with a single rig entry.
-func writeRigsJSON(t *testing.T, townRoot, rigName, localRepo string) {
-	t.Helper()
-	mayorDir := filepath.Join(townRoot, "mayor")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	data := fmt.Sprintf(`{"version":1,"rigs":{%q:{"git_url":"https://example.com/%s.git","local_repo":%q,"added_at":"2026-01-01T00:00:00Z"}}}`,
-		rigName, rigName, localRepo)
-	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(data), 0644); err != nil {
-		t.Fatal(err)
+// buildCall is one call a fake build-checkout resolver received.
+type buildCall struct{ townRoot, rig, rev string }
+
+// fakeBuild is a BuildCheckoutFunc that records each call in calls and answers
+// with checkout and err.
+func fakeBuild(checkout string, err error, calls *[]buildCall) BuildCheckoutFunc {
+	return func(_ context.Context, townRoot, rig, rev string) (string, error) {
+		*calls = append(*calls, buildCall{townRoot, rig, rev})
+		return checkout, err
 	}
 }
 
-func TestRigCheckoutRoot_IgnoresLocalRepoOverride(t *testing.T) {
+// The source is <checkout>/plugins, asked of the gastown rig at the bare repo's
+// main (rev ""), and the rule names the build checkout.
+func TestFindGastownSource_ReadsPluginsUnderBuildCheckout(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	override := filepath.Join(t.TempDir(), "elsewhere", "gastown-checkout")
-	writeRigsJSON(t, townRoot, "gastown", override)
+	checkout := filepath.Join(townRoot, ".runtime", "build-src", "gastown")
+	var calls []buildCall
 
-	got := rigCheckoutRoot(townRoot, "gastown")
-	want := filepath.Join(townRoot, "gastown")
-	if got != want {
-		t.Errorf("rigCheckoutRoot() = %q, want town checkout %q (LocalRepo %q must not win)", got, want, override)
-	}
-}
-
-func TestRigCheckoutRoot_DefaultsToTownRootRigName(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	// No rigs.json at all.
-	got := rigCheckoutRoot(townRoot, "gastown")
-	want := filepath.Join(townRoot, "gastown")
-	if got != want {
-		t.Errorf("rigCheckoutRoot() = %q, want default %q", got, want)
-	}
-}
-
-func TestFindGastownSource_LocatesMayorRigPlugins(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	pluginsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
-	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	createTestPlugin(t, pluginsDir, "some-plugin", "+++\nname = \"some-plugin\"\n+++\nbody", nil)
-
-	got, err := FindGastownSource(townRoot)
+	got, err := FindGastownSource(context.Background(), townRoot, fakeBuild(checkout, nil, &calls))
 	if err != nil {
 		t.Fatalf("FindGastownSource() error = %v", err)
 	}
-	if got.Dir != pluginsDir {
-		t.Errorf("FindGastownSource().Dir = %q, want %q", got.Dir, pluginsDir)
+	if want := filepath.Join(checkout, "plugins"); got.Dir != want {
+		t.Errorf("FindGastownSource().Dir = %q, want %q", got.Dir, want)
 	}
-	if got.Rule != "mayor rig checkout" {
-		t.Errorf("FindGastownSource().Rule = %q, want %q", got.Rule, "mayor rig checkout")
+	if got.Rule != "gastown build checkout" {
+		t.Errorf("FindGastownSource().Rule = %q, want %q", got.Rule, "gastown build checkout")
+	}
+	if want := []buildCall{{townRoot, "gastown", ""}}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("build calls = %v, want %v", calls, want)
 	}
 }
 
-func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
+// A resolver error fails the lookup and names the error. A legacy
+// mayor/rig checkout with plugins is left unread: there is no fallback.
+func TestFindGastownSource_ResolverErrorFailsWithNoFallback(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	// No mayor/rig/plugins — only the legacy crew/den/plugins layout exists.
-	legacyDir := filepath.Join(townRoot, "gastown", "crew", "den", "plugins")
-	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+	legacy := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins", "legacy")
+	if err := os.MkdirAll(legacy, 0755); err != nil {
 		t.Fatal(err)
 	}
-	createTestPlugin(t, legacyDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nbody", nil)
-
-	got, err := FindGastownSource(townRoot)
-	if err != nil {
-		t.Fatalf("FindGastownSource() error = %v", err)
-	}
-	if got.Dir != legacyDir {
-		t.Errorf("FindGastownSource().Dir = %q, want legacy path %q", got.Dir, legacyDir)
-	}
-}
-
-// gt-2l1lr: a developer's --local-repo clone with a root plugins/ directory
-// must not become the sync source while the town's own checkout has plugins.
-func TestFindGastownSourcePrefersTownCheckoutOverLocalRepo(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
-	writeRigsJSON(t, townRoot, "gastown", localRepo)
-
-	localPlugins := filepath.Join(localRepo, "plugins")
-	if err := os.MkdirAll(localPlugins, 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(legacy, "plugin.md"), []byte("+++\nname = \"legacy\"\n+++\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	createTestPlugin(t, localPlugins, "x", "+++\nname = \"x\"\n+++\nbody", nil)
+	errBuild := errors.New("bare repo missing")
+	var calls []buildCall
 
-	townPlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
-	if err := os.MkdirAll(townPlugins, 0755); err != nil {
-		t.Fatal(err)
+	got, err := FindGastownSource(context.Background(), townRoot, fakeBuild("", errBuild, &calls))
+	if !errors.Is(err, errBuild) {
+		t.Fatalf("FindGastownSource() error = %v, want it to wrap %v", err, errBuild)
 	}
-	createTestPlugin(t, townPlugins, "y", "+++\nname = \"y\"\n+++\nbody", nil)
-
-	got, err := FindGastownSource(townRoot)
-	if err != nil {
-		t.Fatalf("FindGastownSource() error = %v", err)
-	}
-	if got.Dir != townPlugins {
-		t.Errorf("FindGastownSource().Dir = %q, want town checkout %q, not local repo %q", got.Dir, townPlugins, localPlugins)
+	if got.Dir != "" {
+		t.Errorf("FindGastownSource().Dir = %q after a resolver error, want no source", got.Dir)
 	}
 }
 
-func TestFindGastownSource_FallsBackToLocalRepoWhenTownHasNoPlugins(t *testing.T) {
+// Without a resolver the source cannot be found, so the lookup refuses rather
+// than reading any directory.
+func TestFindGastownSource_NilResolverIsAnError(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
-	writeRigsJSON(t, townRoot, "gastown", localRepo)
-
-	localPlugins := filepath.Join(localRepo, "plugins")
-	if err := os.MkdirAll(localPlugins, 0755); err != nil {
-		t.Fatal(err)
-	}
-	createTestPlugin(t, localPlugins, "x", "+++\nname = \"x\"\n+++\nbody", nil)
-
-	got, err := FindGastownSource(townRoot)
-	if err != nil {
-		t.Fatalf("FindGastownSource() error = %v", err)
-	}
-	if got.Dir != localPlugins {
-		t.Errorf("FindGastownSource().Dir = %q, want local repo fallback %q", got.Dir, localPlugins)
-	}
-}
-
-// gt-ll0ar: the error must name every root that was probed, so a reader who
-// has a plugin source in the LocalRepo clone is not told to look only at the
-// town checkout.
-func TestFindGastownSource_ErrorNamesEveryProbedRoot(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	townGastown := filepath.Join(townRoot, "gastown")
-	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
-	writeRigsJSON(t, townRoot, "gastown", localRepo)
-
-	_, err := FindGastownSource(townRoot)
-	if err == nil {
-		t.Fatal("FindGastownSource() error = nil, want error when no source exists")
-	}
-	for _, want := range []string{townGastown, localRepo, "--source"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
-		}
-	}
-}
-
-func TestFindGastownSource_ErrorNamesTownRootOnce(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	townGastown := filepath.Join(townRoot, "gastown")
-	// The registered LocalRepo is the town checkout itself: no second probe.
-	writeRigsJSON(t, townRoot, "gastown", townGastown)
-
-	_, err := FindGastownSource(townRoot)
-	if err == nil {
-		t.Fatal("FindGastownSource() error = nil, want error when no source exists")
-	}
-	if got := strings.Count(err.Error(), townGastown); got != 1 {
-		t.Errorf("error %q names %q %d times, want once", err, townGastown, got)
-	}
-}
-
-func TestFindGastownSource_LocalRepoFallbackUsesLegacyLayouts(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
-	writeRigsJSON(t, townRoot, "gastown", localRepo)
-
-	legacyDir := filepath.Join(localRepo, "crew", "den", "plugins")
-	if err := os.MkdirAll(legacyDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	createTestPlugin(t, legacyDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nbody", nil)
-
-	got, err := FindGastownSource(townRoot)
-	if err != nil {
-		t.Fatalf("FindGastownSource() error = %v", err)
-	}
-	if got.Dir != legacyDir {
-		t.Errorf("FindGastownSource().Dir = %q, want local repo legacy layout %q", got.Dir, legacyDir)
-	}
-}
-
-func TestFindGastownSource_NoneFoundReturnsError(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir() // Empty: no gastown checkout anywhere.
-	if _, err := FindGastownSource(townRoot); err == nil {
-		t.Error("FindGastownSource() error = nil, want error when no source exists")
+	if _, err := FindGastownSource(context.Background(), t.TempDir(), nil); err == nil {
+		t.Error("FindGastownSource(nil resolver) error = nil, want error")
 	}
 }
 
