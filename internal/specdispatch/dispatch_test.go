@@ -252,6 +252,44 @@ func TestEligibleHonorsTheConfiguredCeiling(t *testing.T) {
 	}
 }
 
+// A type or priority refusal is reported as a skip line even on a bead that
+// wears no board-carried label, because the operator filed it expecting the
+// dispatcher to take it and the dry run has to say why it did not (gt-jr5elm).
+// The kind, status and hold refusals stay silent: they are the bead's own state
+// or kind, and would print one line per agent bead per tick.
+func TestReportableRefusalNamesTypeAndPriorityOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		edit func(*Spec)
+		want bool
+	}{
+		{"chore type", func(s *Spec) { s.Type = "chore" }, true},
+		{"docs type", func(s *Spec) { s.Type = "docs" }, true},
+		{"priority past the ceiling", func(s *Spec) { s.Priority = 5 }, true},
+		{"unscored priority", func(s *Spec) { s.Priority = -1 }, true},
+		{"epic kind", func(s *Spec) { s.Type = "epic" }, false},
+		{"wisp kind", func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, false},
+		{"agent label kind", func(s *Spec) { s.Labels = []string{"gt:agent"} }, false},
+		{"assigned", func(s *Spec) { s.Assignee = "gastown/polecats/ruby" }, false},
+		{"deferred", func(s *Spec) { s.Status = "deferred" }, false},
+		{"in progress", func(s *Spec) { s.Status = "in_progress" }, false},
+		{"crew-only label", func(s *Spec) { s.Labels = []string{CrewOnlyLabel} }, false},
+		{"hold on the record", func(s *Spec) { s.Labels = []string{"needs-human"} }, false},
+	}
+	for _, tc := range cases {
+		s := goodSpec()
+		tc.edit(&s)
+		ok, why := Eligible(s, 2)
+		if ok {
+			t.Fatalf("%s: eligible, want a refusal", tc.name)
+		}
+		if got := ReportableRefusal(why); got != tc.want {
+			t.Errorf("%s: ReportableRefusal(%q) = %v, want %v", tc.name, why, got, tc.want)
+		}
+	}
+}
+
 func TestIsDispatchType(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

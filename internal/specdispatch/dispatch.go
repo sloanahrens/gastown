@@ -204,6 +204,18 @@ func Eligible(s Spec, maxPriority int) (bool, string) {
 	return true, ""
 }
 
+// ReportableRefusal reports whether an Eligible refusal, given its reason, is
+// one the tick reports as a skip line on a bead that wears no board-carried
+// label: a type the dispatcher does not take, or a priority past the ceiling.
+// An operator files a chore or a backlog bead expecting the dispatcher to take
+// it, so the tick log and the dry run have to name the refusal. The other
+// refusals are the bead's own state or kind (assigned, deferred, an agent or
+// epic bead), and reporting them would print a line per bead per tick
+// (gt-jr5elm).
+func ReportableRefusal(why string) bool {
+	return strings.HasPrefix(why, "type ") || strings.HasPrefix(why, "priority ")
+}
+
 // Order sorts candidates deterministically: priority (P0 first), then
 // created_at (oldest first), then id.
 func Order(specs []Spec) {

@@ -3630,8 +3630,10 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 			// board-carried label is reported instead: the operator's label is
 			// what holds the bead, so the tick log and the dry run say so
 			// rather than leaving the bead an unexplained absence (gt-k1g3e).
+			// A type or priority refusal is reported too, for the same reason:
+			// the operator filed the bead expecting a seat (gt-jr5elm).
 			if ok, why := specdispatch.Eligible(s, maxPriority); !ok {
-				if specdispatch.BoardCarried(s) {
+				if specdispatch.BoardCarried(s) || specdispatch.ReportableRefusal(why) {
 					read.Skipped = append(read.Skipped, specDispatchEntry{Bead: s.ID, Rig: name, Line: fmt.Sprintf("%s: %s (%s)", s.ID, specdispatch.SkipNotEligible, why)})
 				}
 				continue
