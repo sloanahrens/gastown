@@ -836,10 +836,12 @@ func (d *Daemon) pairReadyRig(name, tokenDir string, tokenErr error) pairReadyRi
 }
 
 // pairReadyBareClone opens the rig's bare clone, which the daemon keeps and
-// this check only reads. A rig with no clone there has none: the check falls
-// back to the Forgejo comparison rather than calling every green unreadable. A
-// stat failure other than not-exist opens the git anyway, so a clone that is
-// there but cannot be read still fails closed.
+// this check only reads. The landing worker fetches that clone on every pass,
+// so within a pass it is current; this check never fetches. A rig with no
+// clone there has none: the check falls back to the Forgejo comparison rather
+// than calling every green unreadable. A stat failure other than not-exist
+// opens the git anyway, so a clone that is there but cannot be read still fails
+// closed.
 func (d *Daemon) pairReadyBareClone(name string) pairReadyGit {
 	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, name))
 	if _, err := os.Stat(repo); errors.Is(err, fs.ErrNotExist) {

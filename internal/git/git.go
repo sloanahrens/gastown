@@ -3362,17 +3362,20 @@ func (g *Git) FirstParentContains(commit, descendant string) (bool, error) {
 	return false, nil
 }
 
-// IsAncestor checks if ancestor is an ancestor of descendant.
+// IsAncestor checks if ancestor is an ancestor of descendant. merge-base
+// --is-ancestor exits 0 for an ancestor and 1 for one it is not; any other
+// failure — an unreadable repository (128), a bad name — is an error, never a
+// quiet "not an ancestor". The exit status is read from the error, not matched
+// as text: "exit status 128" contains "exit status 1".
 func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)
-	if err != nil {
-		// Exit code 1 means not an ancestor, not an error
-		if strings.Contains(err.Error(), "exit status 1") {
-			return false, nil
-		}
-		return false, err
+	if err == nil {
+		return true, nil
 	}
-	return true, nil
+	if exitCode(err) == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 // HasObject reports whether the repository holds the commit sha names. cat-file
