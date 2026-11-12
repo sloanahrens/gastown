@@ -2054,10 +2054,10 @@ func tailGitAncestryIn(townRoot string, why *dashWhyLog, stat func(string) (fs.F
 
 // tailDeployRepo is the repository the deploy tracker's ancestry check and the
 // main picture read: <town>/gastown/.repo.git, the bare repo every landing
-// refreshes, whose refs/heads/main is main. A town without one reads the source
-// checkout GetRepoRootForTown finds instead, and fellBack names that checkout
-// and the reason. Any other failure to look at the bare repo is an error, not
-// a fallback: an unreadable path is unknown, not absent.
+// refreshes, whose refs/remotes/origin/main is main. A town without one reads
+// the source checkout GetRepoRootForTown finds instead, and fellBack names that
+// checkout and the reason. Any other failure to look at the bare repo is an
+// error, not a fallback: an unreadable path is unknown, not absent.
 func tailDeployRepo(townRoot string, stat func(string) (fs.FileInfo, error)) (repo, fellBack string, err error) {
 	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "gastown"))
 	info, err := stat(bare)

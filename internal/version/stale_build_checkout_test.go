@@ -11,18 +11,21 @@ const (
 )
 
 // newBuildCheckout makes a checkout at dir whose origin is the rig's bare repo,
-// with main at c1 then c2 pushed to it, so the bare main and the checkout's
-// origin/main are both c2. HEAD is detached at c2. It returns the fake and the
-// two commits.
+// with main at c1 then c2 pushed to it. The bare main is c2, carried at
+// refs/remotes/origin/main, the ref a fetch from origin leaves there; the
+// bare's refs/heads/main, which has no writer, is left at c1. HEAD is detached
+// at c2. It returns the fake and the two commits.
 func newBuildCheckout(t *testing.T, dir string) (g *fakeGit, r *fakeRepo, c1, c2 string) {
 	t.Helper()
 	g = newFakeGit(t)
 	r = g.repo(dir)
-	g.repo(buildCheckoutBare)
+	bare := g.repo(buildCheckoutBare)
 	r.addRemote("origin", buildCheckoutBare)
 	c1 = r.commit("a.go", "1")
 	c2 = r.commit("b.go", "2")
 	r.push("origin", "main", "main")
+	bare.setRef("refs/remotes/origin/main", c2)
+	bare.setRef("refs/heads/main", c1)
 	r.head = ""
 	r.detach = c2
 	return g, r, c1, c2
@@ -105,8 +108,9 @@ func TestCheckStaleBuildCheckoutIsJudgedAgainstTheBareMain(t *testing.T) {
 }
 
 // TestCheckStaleBuildCheckoutWhenItsMainOrHeadIsUnreadableIsOffMain pins the
-// refusals: a build checkout whose bare repo has no main, or whose HEAD names no
-// commit, is not on main, even at a commit the cached origin/main would name.
+// refusals: a build checkout whose bare repo has no origin/main, or whose HEAD
+// names no commit, is not on main, even at a commit the cached origin/main
+// would name.
 func TestCheckStaleBuildCheckoutWhenItsMainOrHeadIsUnreadableIsOffMain(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -114,8 +118,8 @@ func TestCheckStaleBuildCheckoutWhenItsMainOrHeadIsUnreadableIsOffMain(t *testin
 		breaks func(g *fakeGit, c2 string)
 	}{
 		{
-			name:   "the bare repo has no main",
-			breaks: func(g *fakeGit, _ string) { delete(g.repos[buildCheckoutBare].refs, "refs/heads/main") },
+			name:   "the bare repo has no origin/main",
+			breaks: func(g *fakeGit, _ string) { delete(g.repos[buildCheckoutBare].refs, "refs/remotes/origin/main") },
 		},
 		{
 			name: "HEAD names no commit",
@@ -161,7 +165,9 @@ func TestCheckStaleBinaryFreshReadsTheBareMainWithoutFetching(t *testing.T) {
 			t.Parallel()
 			g, r, _, c2 := newBuildCheckout(t, buildCheckoutDir)
 			if tc.moveBare {
-				g.repos[buildCheckoutBare].commit("d.go", "4")
+				bare := g.repos[buildCheckoutBare]
+				next := bare.commitWithParents([]string{"d.go", "4"}, bare.refs["refs/remotes/origin/main"])
+				bare.setRef("refs/remotes/origin/main", next)
 			}
 
 			info := g.checker(c2).checkStaleFresh(buildCheckoutDir)

@@ -36,7 +36,9 @@ func buildsrcGit(t *testing.T, dir string, args ...string) string {
 }
 
 // buildsrcRig makes a town whose gastown rig has a bare repo with two commits
-// on main, and returns the town root and main's tip.
+// on main, and returns the town root and main's tip. The bare repo carries main
+// at refs/remotes/origin/main, the ref the daemon fetches and buildsrc.Ensure
+// follows; the refs/heads/main the push writes is not read.
 func buildsrcRig(t *testing.T) (townRoot, tip string) {
 	t.Helper()
 	townRoot = t.TempDir()
@@ -53,7 +55,9 @@ func buildsrcRig(t *testing.T) (townRoot, tip string) {
 	buildsrcGit(t, work, "add", "-A")
 	buildsrcGit(t, work, "commit", "-q", "-m", "second")
 	buildsrcGit(t, work, "push", "-q", bare, "main")
-	return townRoot, buildsrcGit(t, work, "rev-parse", "HEAD")
+	tip = buildsrcGit(t, work, "rev-parse", "HEAD")
+	buildsrcGit(t, bare, "update-ref", "refs/remotes/origin/main", tip)
+	return townRoot, tip
 }
 
 // TestIntegrationRebuildGTOnMainRealBuildCheckout drives the preflight's branch
@@ -95,8 +99,8 @@ func TestIntegrationRebuildGTOnMainRealBuildCheckout(t *testing.T) {
 				}
 				old := buildsrcGit(t, dir, "rev-parse", "HEAD")
 				next := buildsrcGit(t, dir, "commit-tree", old+"^{tree}", "-p", old, "-m", "next")
-				buildsrcGit(t, dir, "push", "-q", bare, next+":refs/heads/main")
-				buildsrcGit(t, dir, "fetch", "-q", "--no-tags", "--", bare, "+refs/heads/main:refs/remotes/origin/main")
+				buildsrcGit(t, dir, "push", "-q", bare, next+":refs/remotes/origin/main")
+				buildsrcGit(t, dir, "fetch", "-q", "--no-tags", "--", bare, "+refs/remotes/origin/main:refs/remotes/origin/main")
 			},
 			wantWhy: "not on main branch (detached at ",
 		},

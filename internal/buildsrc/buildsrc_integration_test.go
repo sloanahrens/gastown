@@ -38,12 +38,16 @@ func runGit(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// seedBare makes a bare repo at bare with one commit on main and returns it.
+// seedBare makes a bare repo at bare with one commit on both refs a rig's bare
+// repo carries: refs/heads/main, which nothing writes after this, and
+// refs/remotes/origin/main, which the daemon fetches and the landing worker
+// pushes to. It returns the commit.
 func seedBare(t *testing.T, bare string) string {
 	t.Helper()
 	runGit(t, "init", "--bare", "--quiet", "--initial-branch=main", bare)
 	first := commit(t, bare, "", "first")
 	runGit(t, "--git-dir="+bare, "update-ref", "refs/heads/main", first)
+	runGit(t, "--git-dir="+bare, "update-ref", "refs/remotes/origin/main", first)
 	return first
 }
 
@@ -91,7 +95,7 @@ func TestIntegrationEnsureFollowsBareMainAcrossCalls(t *testing.T) {
 		t.Fatalf("first call HEAD = %s (detached %v), want detached at %s", got, detached, first)
 	}
 
-	second := advance(t, bare, "refs/heads/main", "second")
+	second := advance(t, bare, "refs/remotes/origin/main", "second")
 	dir2, err := Ensure(context.Background(), town, "gastown", "")
 	if err != nil {
 		t.Fatalf("second Ensure: %v", err)
@@ -101,6 +105,50 @@ func TestIntegrationEnsureFollowsBareMainAcrossCalls(t *testing.T) {
 	}
 	if got, _ := headOf(t, dir2); got != second {
 		t.Fatalf("second call HEAD = %s, want the new bare main %s", got, second)
+	}
+	// The checkout followed origin/main, not refs/heads/main, which is still
+	// the untouched first commit the way a rig's bare repo leaves it.
+	if stale := runGit(t, "--git-dir="+bare, "rev-parse", "refs/heads/main"); stale != first {
+		t.Fatalf("refs/heads/main = %s, want the untouched old %s", stale, first)
+	}
+}
+
+// TestIntegrationEnsureChecksOutOriginMainOverAStaleHeadsMain pins the ref
+// Ensure reads: a bare repo whose refs/heads/main is old and whose
+// refs/remotes/origin/main is new is checked out at the new commit, in the call
+// that makes the clone.
+func TestIntegrationEnsureChecksOutOriginMainOverAStaleHeadsMain(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	bare := filepath.Join(town, "gastown", ".repo.git")
+	first := seedBare(t, bare)
+	second := advance(t, bare, "refs/remotes/origin/main", "second")
+
+	dir, err := Ensure(context.Background(), town, "gastown", "")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if got, detached := headOf(t, dir); got != second || !detached {
+		t.Fatalf("HEAD = %s (detached %v), want detached at origin/main %s (refs/heads/main is %s)", got, detached, second, first)
+	}
+}
+
+// TestIntegrationEnsureRefusesABareRepoWithoutOriginMain pins the refusal: a
+// bare repo whose only main is the writerless refs/heads/main is not read, so
+// Ensure("") returns the fetch error instead of checking that branch out.
+func TestIntegrationEnsureRefusesABareRepoWithoutOriginMain(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	bare := filepath.Join(town, "gastown", ".repo.git")
+	seedBare(t, bare)
+	runGit(t, "--git-dir="+bare, "update-ref", "-d", "refs/remotes/origin/main")
+
+	dir, err := Ensure(context.Background(), town, "gastown", "")
+	if err == nil {
+		t.Fatalf("Ensure checked out %s and returned no error", dir)
+	}
+	if !strings.Contains(err.Error(), bare) {
+		t.Fatalf("error %q does not name the bare repo %s", err, bare)
 	}
 }
 
@@ -119,7 +167,7 @@ func TestIntegrationEnsureRefreshesStaleOriginMainOnTheFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure: %v", err)
 	}
-	second := advance(t, bare, "refs/heads/main", "second")
+	second := advance(t, bare, "refs/remotes/origin/main", "second")
 	if _, err := Ensure(context.Background(), town, "gastown", ""); err != nil {
 		t.Fatalf("second Ensure: %v", err)
 	}
