@@ -69,7 +69,7 @@ func writePolicyRoot(t *testing.T, policies map[string]string) string {
 
 func TestForgejoEndpointForGateway(t *testing.T) {
 	t.Parallel()
-	dockerProfile := config.SandboxProfile{Image: "gastown-polecat:dev", Policy: "docker.yaml"}
+	dockerProfile := config.SandboxProfile{Image: "gastown-polecat:dev", Policy: "docker.yaml", Gateway: "openshell"}
 	k8sProfile := config.SandboxProfile{
 		Image:            "gastown-polecat:dev",
 		Policy:           "k8s.yaml",
@@ -185,7 +185,7 @@ func TestForgejoEndpointForGateway(t *testing.T) {
 func TestForgejoEndpointFromShippedPolicies(t *testing.T) {
 	t.Parallel()
 	ts := &config.TownSettings{Sandboxes: map[string]config.SandboxProfile{
-		"polecat-default": {Image: "i", Policy: "deploy/polecat/policy.yaml"},
+		"polecat-default": {Gateway: "openshell", Image: "i", Policy: "deploy/polecat/policy.yaml"},
 		"polecat-k8s": {
 			Image:            "i",
 			Policy:           "deploy/k8s/policy/kind.yaml",
@@ -454,7 +454,7 @@ func TestStampResourceVersion(t *testing.T) {
 func TestExecuteSandboxEndpoint(t *testing.T) {
 	t.Parallel()
 	ts := &config.TownSettings{Sandboxes: map[string]config.SandboxProfile{
-		"polecat-default": {Image: "i", Policy: "docker.yaml"},
+		"polecat-default": {Gateway: "openshell", Image: "i", Policy: "docker.yaml"},
 		"polecat-k8s": {
 			Image:            "i",
 			Policy:           "k8s.yaml",

@@ -1824,7 +1824,7 @@ func NewEscalationConfig() *EscalationConfig {
 // leaves ForgejoHost empty so the backend falls back to ControlPlaneHost;
 // Validate checks the rest.
 type SandboxProfile struct {
-	Gateway          string   `json:"gateway"` // openshell gateway name, required outside a seat; a seat defaults to "openshell"
+	Gateway          string   `json:"gateway"` // gateway name, required outside a seat; a seat defaults to "k8s"
 	Image            string   `json:"image"`   // OCI reference, required
 	Policy           string   `json:"policy"`  // path relative to the rig repo root, required
 	Providers        []string `json:"providers,omitempty"`
@@ -1869,7 +1869,7 @@ type SandboxResources struct {
 
 // Defaults for the SandboxProfile fields a profile may leave unset.
 const (
-	defaultSandboxGateway          = "openshell"
+	defaultSandboxGateway          = "k8s"
 	defaultSandboxControlPlaneHost = "host.docker.internal"
 )
 
@@ -1881,8 +1881,8 @@ const (
 )
 
 // WithDefaults returns p with the unset defaulted fields filled in. Seats
-// applies it to a seat's profile before validating, which keeps the gateway a
-// seat that names none has always run on (gt-rb4sf4).
+// applies it to a seat's profile before validating, so a seat's profile that
+// names no gateway runs on the k8s gateway (gt-rb4sf4).
 func (p SandboxProfile) WithDefaults() SandboxProfile {
 	if p.Gateway == "" {
 		p.Gateway = defaultSandboxGateway

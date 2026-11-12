@@ -39,13 +39,13 @@ func TestProfileIDTable(t *testing.T) {
 	}
 }
 
-func TestGtDefaultGatewayIsNamedOpenshell(t *testing.T) {
+func TestGtDefaultGatewayIsK8s(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{}
 	if err := (Gt{Run: fake, Root: "/src/gt"}).CheckEndpoint(); err != nil {
 		t.Fatalf("CheckEndpoint: %v", err)
 	}
-	want := "gt sandbox endpoint --gateway openshell --root /src/gt"
+	want := "gt sandbox endpoint --gateway k8s --root /src/gt"
 	if len(fake.calls) != 1 || fake.calls[0] != want {
 		t.Errorf("calls = %q, want [%q]", fake.calls, want)
 	}

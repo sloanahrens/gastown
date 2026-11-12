@@ -40,7 +40,7 @@ bind: the host, port and allowed_ips the sandboxes on that gateway reach
 Forgejo at.
 
 The gateway is the one a sandbox profile in settings/config.json names (a
-profile with no gateway is on the default gateway, "openshell"). Its host is
+profile with no gateway is on the default gateway, "k8s"). Its host is
 the profile's control_plane_host. Its port and allowed_ips are the endpoint of
 the policy file the profile names whose host is that host and whose rules are
 the git smart-HTTP paths (.git/info/refs). Two profiles on one gateway must

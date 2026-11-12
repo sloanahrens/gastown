@@ -401,7 +401,7 @@ func TestSeatsBackendAndSandbox(t *testing.T) {
 
 // A profile no seat runs on is still a profile in the town's settings, so it
 // must name its gateway: nothing else validates it, and no defaults apply. A
-// profile a seat runs on keeps the behaviour it had, gateway default included
+// profile a seat runs on takes the k8s gateway default when it names none
 // (gt-rb4sf4).
 func TestSeatsSandboxProfileGateway(t *testing.T) {
 	t.Parallel()
@@ -421,7 +421,7 @@ func TestSeatsSandboxProfileGateway(t *testing.T) {
 			wantErr: "sandboxes.orphan.gateway: required; name the gateway the profile runs on",
 		},
 		{
-			name: "a seat's profile that names no gateway still runs where it did",
+			name: "a seat's profile that names no gateway runs on the k8s default",
 			profiles: map[string]SandboxProfile{
 				"polecat-default": {Image: "i", Policy: "deploy/p.yaml"},
 			},
@@ -592,7 +592,7 @@ func TestSandboxProfileWithDefaults(t *testing.T) {
 	t.Parallel()
 
 	got := SandboxProfile{Image: "i", Policy: "p"}.WithDefaults()
-	if got.Gateway != "openshell" || got.ControlPlaneHost != "host.docker.internal" {
+	if got.Gateway != "k8s" || got.ControlPlaneHost != "host.docker.internal" {
 		t.Fatalf("defaults = %q, %q", got.Gateway, got.ControlPlaneHost)
 	}
 	if got.ForgejoHost != "" {

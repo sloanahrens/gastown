@@ -17,7 +17,7 @@ func TestSessionBackendForAgentFollowsTheSeat(t *testing.T) {
 		"claude-haiku":           {Cap: 1},
 		"deepseek-flash-sandbox": {Cap: 1, Backend: config.BackendOpenShell, Sandbox: "polecat-default"},
 	}}
-	ts.Sandboxes = map[string]config.SandboxProfile{"polecat-default": {Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml", Providers: []string{"deepseek"}, ForgejoHost: "forgejo.internal"}}
+	ts.Sandboxes = map[string]config.SandboxProfile{"polecat-default": {Gateway: "openshell", Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml", Providers: []string{"deepseek"}, ForgejoHost: "forgejo.internal"}}
 	town := t.TempDir()
 
 	b, err := sessionBackendForAgent(ts, town, "claude-haiku", host)
