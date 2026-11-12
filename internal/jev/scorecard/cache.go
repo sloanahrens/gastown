@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -176,6 +177,10 @@ type Cache struct {
 	WriteFile func(path string, data []byte, perm os.FileMode) error
 	// ReadFile reads the document's bytes at path. Nil means os.ReadFile.
 	ReadFile func(path string) ([]byte, error)
+	// Lock takes an exclusive lock on the file at path and returns the func
+	// that releases it. Nil means a flock on path, which waits until the lock
+	// is free.
+	Lock func(path string) (unlock func() error, err error)
 }
 
 // Write stores doc at path, creating the parent directory if it is missing.
@@ -299,8 +304,14 @@ func HistoryRowFor(at time.Time, window string, doc CacheDoc, fresh map[string]b
 }
 
 // AppendHistory appends row to the history at path and drops every row older
-// than HistoryRetention at now. A line that does not parse as a dated row is
-// kept as it was written, so the writer never destroys what it cannot read.
+// than HistoryRetention at now. The read and the write run under a lock on
+// <path>.lock, so two refreshes that finish together cannot each rewrite the
+// file from the copy they read and lose the other's row.
+//
+// A line that does not parse as a dated row is moved to <path>.corrupt rather
+// than kept, so it cannot block ReadHistory. The move appends to that file
+// before the history is rewritten, so a line is never lost; if the rewrite then
+// fails, the same line is copied to the sidecar again on the next refresh.
 //
 // A failure is written to log as one line and is not returned: the refresh
 // that calls this has already written the cache, and a history that cannot be
@@ -314,7 +325,30 @@ func (c Cache) AppendHistory(path string, row HistoryRow, now time.Time, log io.
 	}
 }
 
-func (c Cache) appendHistory(path string, row HistoryRow, now time.Time) error {
+// corruptHistoryPath is the sidecar that holds the history lines moved aside
+// because they did not parse as dated rows.
+func corruptHistoryPath(path string) string {
+	return path + ".corrupt"
+}
+
+func (c Cache) appendHistory(path string, row HistoryRow, now time.Time) (err error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating the scorecard history directory for %s: %w", path, err)
+	}
+	lock := c.Lock
+	if lock == nil {
+		lock = flockFile
+	}
+	unlock, err := lock(path + ".lock")
+	if err != nil {
+		return fmt.Errorf("locking the scorecard history %s: %w", path, err)
+	}
+	defer func() {
+		if uerr := unlock(); uerr != nil && err == nil {
+			err = fmt.Errorf("unlocking the scorecard history %s: %w", path, uerr)
+		}
+	}()
+
 	read := c.ReadFile
 	if read == nil {
 		read = os.ReadFile
@@ -324,15 +358,18 @@ func (c Cache) appendHistory(path string, row HistoryRow, now time.Time) error {
 		return fmt.Errorf("reading the scorecard history %s: %w", path, err)
 	}
 	cutoff := now.Add(-HistoryRetention)
-	var out bytes.Buffer
+	var out, corrupt bytes.Buffer
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var dated struct {
-			At time.Time `json:"at"`
+		parsed, perr := parseHistoryLine(string(line))
+		if perr != nil {
+			corrupt.Write(line)
+			corrupt.WriteByte('\n')
+			continue
 		}
-		if json.Unmarshal(line, &dated) == nil && !dated.At.IsZero() && dated.At.Before(cutoff) {
+		if parsed.At.Before(cutoff) {
 			continue
 		}
 		out.Write(line)
@@ -344,8 +381,10 @@ func (c Cache) appendHistory(path string, row HistoryRow, now time.Time) error {
 	}
 	out.Write(encoded)
 	out.WriteByte('\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating the scorecard history directory for %s: %w", path, err)
+	if corrupt.Len() > 0 {
+		if err := appendBytes(corruptHistoryPath(path), corrupt.Bytes()); err != nil {
+			return fmt.Errorf("moving unparseable scorecard history lines to %s: %w", corruptHistoryPath(path), err)
+		}
 	}
 	write := c.WriteFile
 	if write == nil {
@@ -355,6 +394,42 @@ func (c Cache) appendHistory(path string, row HistoryRow, now time.Time) error {
 		return fmt.Errorf("writing the scorecard history %s: %w", path, err)
 	}
 	return nil
+}
+
+// appendBytes appends data to the file at path, creating it if it is missing.
+func appendBytes(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	return errors.Join(werr, f.Close())
+}
+
+// flockFile takes an exclusive flock on path, creating the file if it is
+// missing, and returns the func that releases it. It blocks until the lock is
+// free. gofrs/flock is used rather than internal/lock, whose flock is unix-only
+// (flock_unix.go).
+func flockFile(path string) (func() error, error) {
+	fl := flock.New(path)
+	if err := fl.Lock(); err != nil {
+		return nil, err
+	}
+	return fl.Unlock, nil
+}
+
+// parseHistoryLine decodes one line of the history. A line is a row only when
+// it parses and carries an at, which is the test both ReadHistory and the
+// writer apply.
+func parseHistoryLine(line string) (HistoryRow, error) {
+	var row HistoryRow
+	if err := json.Unmarshal([]byte(line), &row); err != nil {
+		return HistoryRow{}, fmt.Errorf("does not parse: %w", err)
+	}
+	if row.At.IsZero() {
+		return HistoryRow{}, errors.New("has no at")
+	}
+	return row, nil
 }
 
 // ReadHistory loads every row of the history at path, oldest first. A missing
@@ -377,12 +452,9 @@ func (c Cache) ReadHistory(path string) ([]HistoryRow, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var row HistoryRow
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			return nil, fmt.Errorf("%w %s: line %d: %w", ErrCorruptHistory, path, i+1, err)
-		}
-		if row.At.IsZero() {
-			return nil, fmt.Errorf("%w %s: line %d has no at", ErrCorruptHistory, path, i+1)
+		row, err := parseHistoryLine(line)
+		if err != nil {
+			return nil, fmt.Errorf("%w %s: line %d %w", ErrCorruptHistory, path, i+1, err)
 		}
 		rows = append(rows, row)
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -76,8 +77,8 @@ func TestHistorySkipsAReusedOrKeptBlock(t *testing.T) {
 	}
 }
 
-// A row older than HistoryRetention is dropped on the next write, a row inside
-// it is kept, and a line that is not a dated row is kept as it was written.
+// A row older than HistoryRetention is dropped on the next write, and a row
+// inside it is kept. A line that is not a dated row is moved to the sidecar.
 func TestHistoryTrimsToNinetyDays(t *testing.T) {
 	t.Parallel()
 	path := HistoryPath(t.TempDir())
@@ -99,11 +100,219 @@ func TestHistoryTrimsToNinetyDays(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("history has %d lines, want 3 (recent, unparseable, new):\n%s", len(lines), data)
+	if len(lines) != 2 {
+		t.Fatalf("history has %d lines, want 2 (recent, new):\n%s", len(lines), data)
 	}
-	if lines[0] != mustJSON(t, recent) || lines[1] != "not a dated row" {
-		t.Errorf("kept lines = %q, want the recent row and the unparseable line in order", lines[:2])
+	if lines[0] != mustJSON(t, recent) {
+		t.Errorf("first kept line = %q, want the recent row", lines[0])
+	}
+	corrupt, err := os.ReadFile(corruptHistoryPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(corrupt) != "not a dated row\n" {
+		t.Errorf("sidecar = %q, want the unparseable line", corrupt)
+	}
+}
+
+// A line that does not parse, or parses without an at, is moved to the sidecar
+// by the write, so ReadHistory reads the history after it without an error.
+func TestHistoryMovesUnparseableLinesAside(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	recent := HistoryRow{At: historyNow.Add(-time.Hour), Since: "7d"}
+	cache := Cache{}
+	seed := []string{mustJSON(t, recent), "{not json", `{"since":"7d"}`}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(seed, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.ReadHistory(path); err == nil {
+		t.Fatal("ReadHistory accepted the seeded file, want the unparseable lines refused")
+	}
+
+	cache.AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, nil)
+
+	rows, err := cache.ReadHistory(path)
+	if err != nil {
+		t.Fatalf("reading the history after the write: %v", err)
+	}
+	if len(rows) != 2 || !rows[0].At.Equal(recent.At) || !rows[1].At.Equal(historyNow) {
+		t.Errorf("rows after the write = %+v, want the recent row and the new one", rows)
+	}
+	corrupt, err := os.ReadFile(corruptHistoryPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(corrupt) != "{not json\n{\"since\":\"7d\"}\n" {
+		t.Errorf("sidecar = %q, want both unparseable lines in order", corrupt)
+	}
+}
+
+// When the unparseable lines cannot be moved aside, the history is left as it
+// was, so no line is dropped; the failure costs one log line.
+func TestHistoryKeepsLinesWhenQuarantineFails(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	recent := HistoryRow{At: historyNow.Add(-time.Hour), Since: "7d"}
+	seed := mustJSON(t, recent) + "\nnot a dated row\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the sidecar belongs makes its append fail.
+	if err := os.Mkdir(corruptHistoryPath(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+
+	(Cache{}).AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, &log)
+
+	if got := strings.Count(log.String(), "\n"); got != 1 {
+		t.Errorf("log has %d lines, want one: %q", got, log.String())
+	}
+	if !strings.Contains(log.String(), "moving unparseable scorecard history lines") {
+		t.Errorf("log %q does not name the quarantine failure", log.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != seed {
+		t.Errorf("history changed after a failed quarantine:\n%s", data)
+	}
+}
+
+// The read and the write of one append run inside the history lock, in that
+// order, and the lock is released after the write.
+func TestHistoryAppendHoldsLockAcrossReadAndWrite(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	var events []string
+	cache := Cache{
+		Lock: func(lockPath string) (func() error, error) {
+			if lockPath != path+".lock" {
+				t.Errorf("locked %s, want %s", lockPath, path+".lock")
+			}
+			events = append(events, "lock")
+			return func() error {
+				events = append(events, "unlock")
+				return nil
+			}, nil
+		},
+		ReadFile: func(string) ([]byte, error) {
+			events = append(events, "read")
+			return nil, os.ErrNotExist
+		},
+		WriteFile: func(string, []byte, os.FileMode) error {
+			events = append(events, "write")
+			return nil
+		},
+	}
+
+	cache.AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, nil)
+
+	want := []string{"lock", "read", "write", "unlock"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Errorf("events = %v, want %v", events, want)
+	}
+}
+
+// A lock that cannot be taken refuses the append: nothing is read or written,
+// and the failure costs one log line.
+func TestHistoryLockFailureLeavesHistory(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	cache := Cache{
+		Lock: func(string) (func() error, error) { return nil, errors.New("lock refused") },
+		ReadFile: func(string) ([]byte, error) {
+			t.Error("history read without the lock")
+			return nil, os.ErrNotExist
+		},
+		WriteFile: func(string, []byte, os.FileMode) error {
+			t.Error("history written without the lock")
+			return nil
+		},
+	}
+	var log bytes.Buffer
+
+	cache.AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, &log)
+
+	if !strings.Contains(log.String(), "lock refused") {
+		t.Errorf("log %q does not name the lock failure", log.String())
+	}
+}
+
+// The default lock cannot be taken when its lock file is a directory: the
+// append costs one log line and writes no history.
+func TestHistoryDefaultLockFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	if err := os.MkdirAll(path+".lock", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+
+	(Cache{}).AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, &log)
+
+	if !strings.Contains(log.String(), "locking the scorecard history") {
+		t.Errorf("log %q does not name the lock failure", log.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("history file exists after a lock failure: %v", err)
+	}
+}
+
+// A lock that fails to release costs one log line, so the failure is never
+// silent.
+func TestHistoryUnlockFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	cache := Cache{
+		Lock: func(string) (func() error, error) {
+			return func() error { return errors.New("unlock refused") }, nil
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+	}
+	var log bytes.Buffer
+
+	cache.AppendHistory(path, HistoryRow{At: historyNow, Since: "7d"}, historyNow, &log)
+
+	if got := strings.Count(log.String(), "\n"); got != 1 {
+		t.Errorf("log has %d lines, want one: %q", got, log.String())
+	}
+	if !strings.Contains(log.String(), "unlocking the scorecard history") || !strings.Contains(log.String(), "unlock refused") {
+		t.Errorf("log %q does not name the unlock failure", log.String())
+	}
+}
+
+// Appends from many refreshes at once each leave their row: none is lost to a
+// read that another append's write overtook.
+func TestHistoryConcurrentAppendsKeepEveryRow(t *testing.T) {
+	t.Parallel()
+	path := HistoryPath(t.TempDir())
+	const appends = 16
+	var wg sync.WaitGroup
+	for i := range appends {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			at := historyNow.Add(time.Duration(i) * time.Minute)
+			(Cache{}).AppendHistory(path, HistoryRow{At: at, Since: "7d"}, historyNow, nil)
+		}()
+	}
+	wg.Wait()
+
+	rows, err := (Cache{}).ReadHistory(path)
+	if err != nil {
+		t.Fatalf("reading the history: %v", err)
+	}
+	if len(rows) != appends {
+		t.Errorf("history has %d rows, want %d", len(rows), appends)
 	}
 }
 
