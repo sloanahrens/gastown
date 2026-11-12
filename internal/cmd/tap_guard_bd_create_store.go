@@ -670,19 +670,38 @@ func (g bdCreateStoreGuard) judgeDB(dbPath string) string {
 // bdCreateVerbs are the bd subcommands that file a new bead.
 var bdCreateVerbs = map[string]bool{"create": true, "new": true, "q": true}
 
+// bdCreateSubVerbs are the bd subcommands that file a new bead only with a
+// second word: `bd todo add "x"` is `bd create "x"`, and `bd swarm create x`
+// files a swarm molecule of beads. The key is the first word and the value the
+// second. Only those two second words are judged, so `bd todo` alone and
+// `bd todo done x-1` are not. bdCreateSpelled, which reads an unreadable
+// command, still matches only bd then create: an unreadable `bd todo add` is
+// allowed unless its text also spells a create.
+var bdCreateSubVerbs = map[string]string{"todo": "add", "swarm": "create"}
+
 // isBdCreateSegment reports whether segment's command word is bd and its
-// subcommand one of bdCreateVerbs, so `bd list` and `gt escalate "bd create"`
-// (which runs no bd) are not judged.
+// subcommand files a bead: one of bdCreateVerbs, or a bdCreateSubVerbs word
+// followed by its second word. `bd list` and `gt escalate "bd create"` (which
+// runs no bd) are not judged.
 func isBdCreateSegment(segment []string) bool {
 	tokens := bdCloseCommandTokens(segment)
 	if len(tokens) == 0 || !isBdCommandWord(tokens[0]) {
 		return false
 	}
 	rest := tokens[1:]
-	if i := bdSubcommandIndex(rest); i >= 0 {
-		return bdCreateVerbs[rest[i]]
+	i := bdSubcommandIndex(rest)
+	if i < 0 {
+		return false
 	}
-	return false
+	if bdCreateVerbs[rest[i]] {
+		return true
+	}
+	second, ok := bdCreateSubVerbs[rest[i]]
+	if !ok {
+		return false
+	}
+	j := bdSubcommandIndex(rest[i+1:])
+	return j >= 0 && rest[i+1+j] == second
 }
 
 // inlineAssignment returns the value the last leading assignment of name in
