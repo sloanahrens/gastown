@@ -34,8 +34,9 @@ the runner starts it here with `GT_TOWN_ROOT` set, which is where that command
 resolves the town from. Everything the hour does is Go:
 `internal/cmd/metrics_run.go` (the hour), `internal/metrics/townlock.go` (the
 lock), and the steps in `internal/cmd/metrics_snapshot.go`,
-`internal/metrics/receipts.go` and `internal/cmd/metrics_analysis.go`.
-`gt metrics run` does five things and nothing more:
+`internal/metrics/receipts.go`, `internal/cmd/jev_dataset.go` (the dataset
+refresh) and `internal/cmd/metrics_analysis.go`. `gt metrics run` does three
+things and nothing more:
 
 1. Takes the single-flight lock `<town>/.runtime/town-metrics.lock` with a
    non-blocking `flock(2)`. The file holds the pid of the run that owns it. The
@@ -43,19 +44,15 @@ lock), and the steps in `internal/cmd/metrics_snapshot.go`,
    daemon killed leaves nothing to take over and there is no stale-lock path. A
    lock a live run holds prints a skipped line and exits 0, which records the
    run as skipped rather than as an overlap failure.
-2. Runs the snapshot and passes its output through unchanged. The snapshot's
-   receipt line is the hour's record. The snapshot step also appends each rig's
-   line for the local day that just ended to
-   `<town>/.runtime/metrics/bd-daily.jsonl`, so the tracker's counts, ages and
-   shape outlive the Dolt history flatten; `internal/metrics/bdsnap.go` holds
-   what a line carries and what a gap means.
-3. Records the applied install receipts into the regime log under the actor
-   `town-metrics` (`internal/metrics/receipts.go`; the rules are in
-   `docs/metrics.md`).
-4. Runs the analysis and prints either
-   `analyse <ts>: <n> landings, <t> targets -> <panel>` or a not-due line, which
-   is what an hour that is not a day's boundary looks like.
-5. Exits with the first failing step's error, so every step always runs. A
+2. Runs the hour's steps and passes their outputs through unchanged. The steps
+   and their order are in `gt metrics run --help`. The snapshot's receipt line
+   is the hour's record. The snapshot step also appends each rig's line for the
+   local day that just ended to `<town>/.runtime/metrics/bd-daily.jsonl`, so the
+   tracker's counts, ages and shape outlive the Dolt history flatten;
+   `internal/metrics/bdsnap.go` holds what a line carries and what a gap means.
+   The install receipts are recorded into the regime log under the actor
+   `town-metrics` (the rules are in `docs/metrics.md`).
+3. Exits with the first failing step's error, so every step always runs. A
    source that fails inside the snapshot is an `errors` entry in the record, not
    a failure here; only a failed step exits non-zero (a failed append, an
    unreadable receipts file, or a regime record the log cannot take), and the

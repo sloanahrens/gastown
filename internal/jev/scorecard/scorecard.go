@@ -206,6 +206,18 @@ func readItems(path string, parse func([]byte) ([]Item, error), since time.Time)
 	return items, skipped, true, nil
 }
 
+// Questions lists, in name order, the questions the read's items answer with a
+// usable answer: the ones Build reports and a dataset can export.
+func Questions(read Reading) []QuestionID {
+	kinds := questionKinds(read.Items)
+	ids := make([]QuestionID, 0, len(kinds))
+	for id := range kinds {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
 // questionKinds maps each question to the kind of its first usable answer. A
 // question with no answer of any kind is left out.
 func questionKinds(items []Item) map[QuestionID]string {
