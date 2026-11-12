@@ -15,7 +15,7 @@ import (
 // A crew session whose worktree is not in this process (a pod, where the
 // caller's Mac path does not exist) names the submission with --branch and
 // --head instead. The branch and head are the facts the worktree would have
-// supplied, so nothing in the worktree is read: the rig's canonical clone
+// supplied, so nothing in the worktree is read: the rig's bare repository
 // reads origin/<branch> and the head commit, and the local gate cannot run
 // here (gt-pyh5p6).
 
@@ -79,9 +79,13 @@ func isFullCommitID(s string) bool {
 }
 
 // runDoneCrewFromFlags submits a crew branch named by --branch and --head.
-// It reads the town and rig from the environment and the caller's directory
-// name, never the worktree, and runs the submission against the rig's
-// canonical clone.
+// The town is the one above the PROCESS's own directory (Options.ProcessDir),
+// never the caller's: the caller's directory is a Mac path this process may
+// not have, and it names the role and the display only. The rig comes from
+// the bead's prefix routing alone. Neither GT_RIG nor GT_TOWN_ROOT is read, so
+// no variable the caller sets can steer which town or rig the submission
+// lands in. It never reads the worktree, and runs the submission against the
+// rig's bare repository.
 func runDoneCrewFromFlags(opts Options, getenv func(string) string) error {
 	branch, head, err := crewFlagFacts(opts)
 	if err != nil {
@@ -91,18 +95,13 @@ func runDoneCrewFromFlags(opts Options, getenv func(string) string) error {
 		return err
 	}
 
-	// The caller's directory may be absent here, so it only names a town
-	// when a workspace marker is found above it; GT_TOWN_ROOT covers the rest.
-	cwd, err := opts.getwd()()
-	if err != nil {
-		return fmt.Errorf("gt done: current directory unavailable: %w", err)
+	processDir := strings.TrimSpace(opts.ProcessDir)
+	if processDir == "" {
+		return fmt.Errorf("gt done: this process's working directory is unavailable, so a --branch/--head submission cannot find its town")
 	}
-	townRoot, _ := workspace.Find(cwd)
+	townRoot, _ := workspace.Find(processDir)
 	if townRoot == "" {
-		townRoot = workspace.TownRootFromEnv(getenv)
-	}
-	if townRoot == "" {
-		return fmt.Errorf("gt done: not in a Gas Town workspace and GT_TOWN_ROOT is unset")
+		return fmt.Errorf("gt done: no Gas Town workspace above this process's directory %s; a --branch/--head submission finds its town there, not from the caller's directory", processDir)
 	}
 
 	issueID := firstNonEmpty(opts.Bead, opts.Issue)
@@ -115,12 +114,9 @@ func runDoneCrewFromFlags(opts Options, getenv func(string) string) error {
 		return fmt.Errorf("gt done: crew branch %s names no bead; pass --bead <id>", branch)
 	}
 
-	rigName := strings.TrimSpace(getenv("GT_RIG"))
-	if rigName == "" {
-		rigName = beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(issueID))
-	}
-	if rigName == "" || rigName == "." || rigName == ".." || strings.ContainsAny(rigName, `/\`) {
-		return fmt.Errorf("gt done: no rig names bead %s; set GT_RIG to the rig", issueID)
+	rigName := beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(issueID))
+	if rigName == "" || rigName == "." || rigName == ".." || strings.ContainsAny(rigName, "/\\") {
+		return fmt.Errorf("gt done: no rig names bead %s in the town's routes", issueID)
 	}
 
 	// The rig's shared bare repository is the one clone every town copy holds
@@ -144,7 +140,7 @@ func runDoneCrewFromFlags(opts Options, getenv func(string) string) error {
 
 // submitCrewAbsentForLanding marks a crew branch ready to land when the
 // worktree is not in this process. origin/<branch> must be at head, read
-// from the run's repo, the rig's canonical clone. The worktree's own gate
+// from the run's repo, the rig's bare repository. The worktree's own gate
 // cannot run here, so the output says so and the bead is marked the same way
 // the gated path marks it.
 func submitCrewAbsentForLanding(r *doneRun, head string) error {

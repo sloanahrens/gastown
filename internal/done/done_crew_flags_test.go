@@ -13,7 +13,7 @@ import (
 
 // absentCrewRun is a crew submission whose worktree is not in this process:
 // the run's directory is named but never created, and the repo is the
-// harness's fake of the rig's canonical clone, which holds origin's tip.
+// harness's fake of the rig's bare repository, which holds origin's tip.
 func absentCrewRun(t *testing.T) (*submitHarness, *bytes.Buffer) {
 	t.Helper()
 	h := newCrewSubmitHarness(t)

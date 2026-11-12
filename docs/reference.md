@@ -290,7 +290,9 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 `gt:ready-to-land` label. It pushes nothing and rebases nothing.
 The flags apply only when the caller's directory is absent from the process (a pod): then
 `gt done --bead <id> --branch <b> --head <sha>` names the submission instead of the worktree,
-both flags or neither. It reads origin from the rig's shared bare repository (`<town>/<rig>/.repo.git`),
+both flags or neither. The town is the one above the process's own directory and the rig comes from the
+bead's prefix routes: `GT_TOWN_ROOT` and `GT_RIG` are not read. It reads origin from the rig's shared bare
+repository (`<town>/<rig>/.repo.git`),
 requires origin at `<sha>` (exit 11 otherwise), and runs no local gate: it prints `presubmit not
 run` and `uncommitted work not checked`, and the bead is marked the same way (gt-pyh5p6). With the
 worktree present the flags must equal its branch and HEAD (a mismatch refuses), and the normal

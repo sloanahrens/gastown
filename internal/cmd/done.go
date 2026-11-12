@@ -159,6 +159,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 		Branch:              doneBranch,
 		Head:                doneHead,
 		WorktreeAbsent:      byFlags,
+		ProcessDir:          doneCwd(),
 		AllowReverts:        doneAllowReverts,
 		AllowThrowawayPaths: doneAllowThrowawayPaths,
 		PreVerified:         donePreVerified,
@@ -190,7 +191,9 @@ func runDone(cmd *cobra.Command, args []string) error {
 // present in this process: gt done fetches, rebases, gates and pushes there.
 // The one exception is a crew submission that names its branch and head while
 // its worktree is absent from this process: its facts come from the flags, so
-// the directory only names the role, and byFlags is true (gt-pyh5p6). With the
+// the caller's directory names the role and the display only, the town comes
+// from the process's own directory (done.Options.ProcessDir), and byFlags is
+// true (gt-pyh5p6). With the
 // worktree present the flags are checked against it and the worktree rule
 // applies, so the local gate runs. A lone flag, or a flagged call from a
 // non-crew session, takes the worktree rule and is refused by done.Run.

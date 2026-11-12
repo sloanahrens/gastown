@@ -75,6 +75,11 @@ type Options struct {
 	// so Branch and Head are the whole submission and nothing in the worktree
 	// is read (the pod case).
 	WorktreeAbsent bool
+	// ProcessDir is the process's own working directory. A Branch/Head
+	// submission with the worktree absent finds its town above it, because
+	// Getwd is the caller's directory, which a variable the caller sets can
+	// name. Empty refuses.
+	ProcessDir string
 	// CloneRepo opens the git surface of the rig's shared bare repository for a
 	// Branch/Head submission, which reads and writes nothing in the caller's
 	// worktree. Nil is the real git.

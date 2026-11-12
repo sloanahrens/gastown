@@ -2,6 +2,7 @@ package done
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,19 +10,30 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// flagsTown is a town with a mayor directory, the marker workspace.Find reads,
+// and the process directory a flags submission starts in.
+func flagsTown(t *testing.T) (townRoot, processDir string) {
+	t.Helper()
+	townRoot = t.TempDir()
+	processDir = filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.MkdirAll(processDir, 0o755); err != nil {
+		t.Fatalf("mkdir process dir: %v", err)
+	}
+	return townRoot, processDir
+}
+
 // TestCrewFlagsRefusals: each refusal on the --branch/--head path stops the
 // submission before the bead, the rig's clone or origin is touched. Each
 // case names the caller's environment and the text the refusal carries.
 func TestCrewFlagsRefusals(t *testing.T) {
 	t.Parallel()
 	fullHead := strings.Repeat("a1", 20)
-	townRoot := t.TempDir()
-	absent := filepath.Join(townRoot, "gastown", "crew", "operator")
-	baseEnv := map[string]string{
-		"BD_ACTOR":     crewTestActor,
-		"GT_TOWN_ROOT": townRoot,
-		"GT_RIG":       "gastown",
-	}
+	_, processDir := flagsTown(t)
+	absent := filepath.Join(t.TempDir(), "gastown", "crew", "operator")
+	baseEnv := map[string]string{"BD_ACTOR": crewTestActor}
 	withEnv := func(kv map[string]string) map[string]string {
 		env := map[string]string{}
 		for k, v := range baseEnv {
@@ -40,45 +52,38 @@ func TestCrewFlagsRefusals(t *testing.T) {
 	}{
 		{
 			name: "branch without head",
-			opts: Options{Branch: crewTestBranch, Bead: "bd-source", Getwd: absentDir(absent)},
+			opts: Options{Branch: crewTestBranch, Bead: "bd-source", Getwd: absentDir(absent), ProcessDir: processDir},
 			env:  baseEnv,
 			want: "go together",
 		},
 		{
 			name: "git env override",
-			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent)},
+			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent), ProcessDir: processDir},
 			env:  withEnv(map[string]string{"GIT_DIR": "/elsewhere/.git"}),
 			want: "unset GIT_DIR",
 		},
 		{
-			name: "current directory unavailable",
-			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source",
-				Getwd: func() (string, error) { return "", errors.New("cwd removed") }},
+			name: "process directory unavailable",
+			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent)},
 			env:  baseEnv,
-			want: "current directory unavailable",
+			want: "working directory is unavailable",
 		},
 		{
-			name: "no town and no GT_TOWN_ROOT",
-			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(t.TempDir())},
-			env:  withEnv(map[string]string{"GT_TOWN_ROOT": ""}),
-			want: "GT_TOWN_ROOT is unset",
+			name: "no town above the process directory",
+			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent), ProcessDir: t.TempDir()},
+			env:  baseEnv,
+			want: "no Gas Town workspace above this process's directory",
 		},
 		{
 			name: "branch names no bead",
-			opts: Options{Branch: "crew/operator/misc", Head: fullHead, Getwd: absentDir(absent)},
+			opts: Options{Branch: "crew/operator/misc", Head: fullHead, Getwd: absentDir(absent), ProcessDir: processDir},
 			env:  baseEnv,
 			want: "names no bead",
 		},
 		{
 			name: "no rig for the bead",
-			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent)},
-			env:  withEnv(map[string]string{"GT_RIG": ""}),
-			want: "no rig names bead bd-source",
-		},
-		{
-			name: "rig name is a path",
-			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent)},
-			env:  withEnv(map[string]string{"GT_RIG": "../elsewhere"}),
+			opts: Options{Branch: crewTestBranch, Head: fullHead, Bead: "bd-source", Getwd: absentDir(absent), ProcessDir: processDir},
+			env:  baseEnv,
 			want: "no rig names bead bd-source",
 		},
 	} {
@@ -89,6 +94,41 @@ func TestCrewFlagsRefusals(t *testing.T) {
 				t.Fatalf("runDoneCrewFromFlags err = %v, want a refusal containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestCrewFlagsIgnoreCallerSuppliedTownAndRig: the town and the rig do not
+// come from variables the caller sets, nor from the caller's directory. A
+// town named by GT_TOWN_ROOT, a rig named by GT_RIG and a caller directory
+// inside a town all lead nowhere when the process directory has no town above
+// it, and a GT_RIG naming a path adds nothing to a bead no route names.
+func TestCrewFlagsIgnoreCallerSuppliedTownAndRig(t *testing.T) {
+	t.Parallel()
+	fullHead := strings.Repeat("a1", 20)
+	callerTown, _ := flagsTown(t)
+	env := map[string]string{
+		"BD_ACTOR":     crewTestActor,
+		"GT_TOWN_ROOT": callerTown,
+		"GT_RIG":       "gastown",
+	}
+	err := runDoneCrewFromFlags(Options{
+		Branch: crewTestBranch, Head: fullHead, Bead: "bd-source",
+		Getwd:      absentDir(filepath.Join(callerTown, "gastown", "crew", "operator")),
+		ProcessDir: t.TempDir(),
+	}, crewEnv(env))
+	if err == nil || !strings.Contains(err.Error(), "no Gas Town workspace above this process's directory") {
+		t.Fatalf("err = %v, want the process-directory town refusal, whatever GT_TOWN_ROOT and the caller's directory name", err)
+	}
+
+	_, processDir := flagsTown(t)
+	env["GT_RIG"] = "../elsewhere"
+	err = runDoneCrewFromFlags(Options{
+		Branch: crewTestBranch, Head: fullHead, Bead: "bd-source",
+		Getwd:      absentDir(filepath.Join(callerTown, "gastown", "crew", "operator")),
+		ProcessDir: processDir,
+	}, crewEnv(env))
+	if err == nil || !strings.Contains(err.Error(), "no rig names bead bd-source") {
+		t.Fatalf("err = %v, want the routed-rig refusal, whatever GT_RIG names", err)
 	}
 }
 
