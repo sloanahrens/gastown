@@ -14,6 +14,8 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // DispatchBattery is the dispatch battery's name, the --battery value that
@@ -38,6 +40,13 @@ const (
 	qTouchesDaemon      QuestionID = "touches_daemon"
 	qSize               QuestionID = "size"
 )
+
+// sizeLargePoints is the points at which a landing's size reads large. It is
+// 34 points on the story-points scale (internal/storypoints/points.go), which
+// is over 27.5 minutes of polecat time. The cut follows the scale rather than a
+// minutes figure of its own, so Jev, story points and the dashboard agree on
+// one definition (gt-eele9q).
+const sizeLargePoints = 34
 
 // Verdicts om writes to reviews.jsonl that judged a tree.
 const (
@@ -87,6 +96,11 @@ type dispatchAdapter struct {
 	// shown holds the beads Prefetch read in one batch, by id. showBead reads a
 	// bead missing from it the one-at-a-time way.
 	shown map[string]*beads.Issue
+	// latest holds each bead's latest landing record in the rig's landings
+	// file, read once by loadLandings. latestErr is that read's failure.
+	latest       map[string]landings.Record
+	latestLoaded bool
+	latestErr    error
 }
 
 // Prefetch reads every placed bead in one batch. A scorecard over an empty log
@@ -162,8 +176,8 @@ func (a *dispatchAdapter) Parse(raw []byte) (Item, error) {
 	return item, nil
 }
 
-// Label joins one placement to its three label sources. A source that cannot
-// be read is an error, so the report fails rather than reading as unlabeled.
+// Label joins one placement to its label sources. A source that cannot be
+// read is an error, so the report fails rather than reading as unlabeled.
 func (a *dispatchAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	if !a.reviewsLoaded {
 		if err := a.loadReviews(); err != nil {
@@ -183,6 +197,14 @@ func (a *dispatchAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 		review = &r
 	}
 	labels, rules := dispatchLabels(review, a.reworked[item.ID], issue, overrun)
+	size, sizeRule, sized, err := a.sizeLabel(item.ID)
+	if err != nil {
+		return Labeling{}, err
+	}
+	if sized {
+		labels[qSize] = size
+		rules = append(rules, sizeRule)
+	}
 	if len(labels) == 0 {
 		return Labeling{}, nil
 	}
@@ -211,6 +233,63 @@ func (a *dispatchAdapter) loadReviews() error {
 		}
 	}
 	a.reviewsLoaded = true
+	return nil
+}
+
+// sizeLabel labels a placement's size from the measured points of its latest
+// landing record: large at sizeLargePoints or more, small below it. The points
+// come from storypoints.Actual, so a bound time, a zero time and a time the
+// scale refuses are unlabeled, and so is a crew landing, which has no seat and
+// leaves Agent empty. It reports whether it labeled the item, and the rule that
+// fired.
+func (a *dispatchAdapter) sizeLabel(bead string) (bool, string, bool, error) {
+	if err := a.loadLandings(); err != nil {
+		return false, "", false, err
+	}
+	rec, ok := a.latest[bead]
+	if !ok || rec.Agent == "" {
+		return false, "", false, nil
+	}
+	points, weighted := storypoints.Actual(rec.PolecatSecs, rec.PolecatLowerBound, rec.PolecatUpperBound)
+	if !weighted {
+		return false, "", false, nil
+	}
+	return points >= sizeLargePoints, "landing:points", true, nil
+}
+
+// loadLandings reads the rig's landings file once and keeps each bead's latest
+// record, the one the landing's sp-actual is read from. A line that is not a
+// record is an error, not a skipped line: it could be the bead's own record,
+// and a corrupt record must not read as a bead that never landed.
+func (a *dispatchAdapter) loadLandings() error {
+	if a.latestLoaded {
+		return a.latestErr
+	}
+	a.latestLoaded = true
+	a.latest = map[string]landings.Record{}
+	a.latestErr = a.readLandings()
+	return a.latestErr
+}
+
+// readLandings fills latest from the rig's landings file. landings.Path refuses
+// only a rig name that could leave the directory, and the rig is a constant, so
+// its error shares the read's return rather than getting one of its own.
+func (a *dispatchAdapter) readLandings() error {
+	path, err := landings.Path(a.town, dispatch.RigName)
+	var recs []landings.Record
+	var bad []string
+	if err == nil {
+		recs, bad, err = (&landings.Reader{Path: path}).ReadNew()
+	}
+	if err != nil {
+		return fmt.Errorf("reading the landings file: %w", err)
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("reading the landings file: %d line(s) are not landing records", len(bad))
+	}
+	for _, r := range recs {
+		a.latest[r.Bead] = r
+	}
 	return nil
 }
 
