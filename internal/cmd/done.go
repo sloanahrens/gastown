@@ -73,6 +73,9 @@ Examples:
   gt done --status ESCALATED           # Signal blocker, submit nothing
   gt done --status DEFERRED            # Pause work, submit nothing
   gt done --bead gt-abc                # Crew: submit the pushed branch for gt-abc
+  gt done --bead gt-abc --branch crew/x/gt-abc --head <sha>
+                                       # Crew, worktree not in this process: submit
+                                       # the pushed branch at <sha>, read from origin
   gt done --finding "the retry never resets its counter"
                                        # Record a defect met outside this task`,
 	RunE:         runDone,
@@ -95,6 +98,11 @@ var (
 	// doneBead and donePreVerified are crew submission flags (gt-3e7tk).
 	doneBead        string
 	donePreVerified bool
+
+	// doneBranch and doneHead are the crew submission facts for a worktree
+	// that is not in this process; both or neither (gt-pyh5p6).
+	doneBranch string
+	doneHead   string
 )
 
 // The command layer's indirections for gt done's agent-bead write (the close
@@ -130,43 +138,73 @@ func init() {
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 	doneCmd.Flags().StringVar(&doneBead, "bead", "", "Crew: the work bead to submit (default: parse from the branch name)")
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Crew only: skip the local presubmit gate (the landing worker still gates the merged tree)")
+	doneCmd.Flags().StringVar(&doneBranch, "branch", "", "Crew only, with --head: the pushed branch to submit, for a worktree not in this process (the local gate does not run)")
+	doneCmd.Flags().StringVar(&doneHead, "head", "", "Crew only, with --branch: the full commit id origin must have the branch at")
 	doneCmd.Flags().StringArrayVar(&doneFindings, "finding", nil, "Polecat: report a defect met outside your task; recorded as a FINDING: comment on the source bead (repeatable, up to 5)")
 
 	rootCmd.AddCommand(doneCmd)
 }
 
 func runDone(cmd *cobra.Command, args []string) error {
-	// gt done fetches, rebases, gates and pushes in the caller's worktree, so
-	// it refuses before any of that when the directory is not in this process.
-	cwd, err := callercwd.Require()
+	cwd, byFlags, err := doneCallerDir(doneBranch, doneHead, os.Getenv)
 	if err != nil {
 		return err
 	}
+	opts := done.Options{
+		Status:              doneStatus,
+		Issue:               doneIssue,
+		CleanupStatus:       doneCleanupStatus,
+		Target:              doneTarget,
+		Bead:                doneBead,
+		Branch:              doneBranch,
+		Head:                doneHead,
+		AllowReverts:        doneAllowReverts,
+		AllowThrowawayPaths: doneAllowThrowawayPaths,
+		PreVerified:         donePreVerified,
+		Findings:            doneFindings,
+		Env:                 os.Getenv,
+		Getwd:               func() (string, error) { return cwd, nil },
+		Detect:              detectDoneAgent,
+		RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+			return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
+		},
+		RecordFindings: func(cwd, issueID string, findings []string) {
+			recordDoneFindings(os.Stderr, cwd, issueID, findings, done.OpenSourceStore)
+		},
+		LocalGate:   doneLocalGate,
+		RetryDelays: pushLandingRetryDelays,
+		Sleep:       doneRetrySleep,
+	}
+	if byFlags {
+		// The stale-base check fetches in the caller's worktree, which is not
+		// in this process; the flags carry the facts the submission needs.
+		return done.Run(opts)
+	}
 	return submitWithStaleBaseWarning(os.Stderr, git.NewGit(cwd), func() error {
-		return done.Run(done.Options{
-			Status:              doneStatus,
-			Issue:               doneIssue,
-			CleanupStatus:       doneCleanupStatus,
-			Target:              doneTarget,
-			Bead:                doneBead,
-			AllowReverts:        doneAllowReverts,
-			AllowThrowawayPaths: doneAllowThrowawayPaths,
-			PreVerified:         donePreVerified,
-			Findings:            doneFindings,
-			Env:                 os.Getenv,
-			Getwd:               func() (string, error) { return cwd, nil },
-			Detect:              detectDoneAgent,
-			RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
-				return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
-			},
-			RecordFindings: func(cwd, issueID string, findings []string) {
-				recordDoneFindings(os.Stderr, cwd, issueID, findings, done.OpenSourceStore)
-			},
-			LocalGate:   doneLocalGate,
-			RetryDelays: pushLandingRetryDelays,
-			Sleep:       doneRetrySleep,
-		})
+		return done.Run(opts)
 	})
+}
+
+// doneCallerDir is the directory gt done acts for. It is refused unless it is
+// present in this process: gt done fetches, rebases, gates and pushes there.
+// The one exception is a crew submission that names its branch and head: its
+// facts come from the flags, so the directory only names the role, and
+// byFlags is true (gt-pyh5p6). A lone flag, or a flagged call from a
+// non-crew session, takes the worktree rule and is refused by done.Run.
+func doneCallerDir(branch, head string, getenv func(string) string) (cwd string, byFlags bool, err error) {
+	if branch == "" && head == "" {
+		cwd, err = callercwd.Require()
+		return cwd, false, err
+	}
+	cwd, err = callercwd.Getwd()
+	if err != nil {
+		return "", false, err
+	}
+	if branch != "" && head != "" && done.IsCrewRun(getenv, cwd) {
+		return cwd, true, nil
+	}
+	cwd, err = callercwd.Require()
+	return cwd, false, err
 }
 
 // detectDoneAgent is internal/cmd's role detection behind done.Detect. The

@@ -121,6 +121,9 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 	if exitType != ExitCompleted {
 		return fmt.Errorf("gt done --status %s is for polecats; a crew session has no Witness to signal (submit with plain gt done)", exitType)
 	}
+	if opts.Branch != "" || opts.Head != "" {
+		return runDoneCrewFromFlags(opts, getenv)
+	}
 	cwd, err := opts.getwd()()
 	if err != nil {
 		return fmt.Errorf("gt done: current directory unavailable: %w", err)
@@ -174,26 +177,44 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 
 	r := newCrewDoneRun(getenv, gitUserName, gitRoot, townRoot, rigName, branch, issueID)
 	r.g = g
-	if rigName != "" {
-		rigPath := filepath.Join(townRoot, rigName)
-		rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
-		if cfgErr != nil {
-			rig.WarnRigConfigOnce(rigPath, cfgErr)
-		}
-		if rigCfg != nil && rigCfg.DefaultBranch != "" {
-			r.defaultBranch = rigCfg.DefaultBranch
-		}
-	}
 	r.opts = doneOptions{target: opts.Target, preVerified: opts.PreVerified}
+	if def := crewRigDefaultBranch(townRoot, rigName); def != "" {
+		r.defaultBranch = def
+	}
+	r.deps = crewSubmitDeps(r, opts, g)
+	return submitCrewForLanding(r)
+}
+
+// crewRigDefaultBranch is the rig's configured default branch, or "" when the
+// rig names none (or has no name): the caller keeps its own default.
+func crewRigDefaultBranch(townRoot, rigName string) string {
+	if rigName == "" {
+		return ""
+	}
+	rigPath := filepath.Join(townRoot, rigName)
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg == nil {
+		return ""
+	}
+	return rigCfg.DefaultBranch
+}
+
+// crewSubmitDeps wires a crew run's collaborators: repo is the git surface the
+// submission reads (the worktree's, or the rig's canonical clone's), and the
+// rest is the town's routed bd, the gate and the seat seams.
+func crewSubmitDeps(r *doneRun, opts Options, repo doneRepo) doneSubmitDeps {
 	localGate, sleep, _ := submitSeams(opts)
-	r.deps = doneSubmitDeps{
-		repo: g,
+	return doneSubmitDeps{
+		repo: repo,
 		source: func(id string) (*beads.Issue, beads.Client, error) {
 			// Route from the town, not the worktree: a crew worktree's own
 			// .beads may be the source repo's, not the town's.
 			// bd records the submission's label and notes as written by
 			// the run's sender, the session's own identity (gt-i817y).
-			info, err := resolveSubmitSourceIssueIn(townRoot, id, func(cwd, beadsDir string) beads.Client {
+			info, err := resolveSubmitSourceIssueIn(r.townRoot, id, func(cwd, beadsDir string) beads.Client {
 				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(r.sender)
 			})
 			if err != nil {
@@ -207,7 +228,7 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		// `gt polecat list` does; a registry that cannot be read still maps
 		// every rig to the default prefix, so the pure-Go seam stays total.
 		polecatSeat: func(assignee string) (string, bool) {
-			reg, regErr := session.BuildPrefixRegistryFromTown(townRoot)
+			reg, regErr := session.BuildPrefixRegistryFromTown(r.townRoot)
 			if regErr != nil {
 				reg = session.NewPrefixRegistry()
 			}
@@ -219,7 +240,6 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		},
 		enqueueNudge: nudge.Enqueue,
 	}
-	return submitCrewForLanding(r)
 }
 
 // newCrewDoneRun is the run a crew submission runs as. Its sender is the
@@ -293,12 +313,10 @@ func standDownCrewHolder(r *doneRun, issue *beads.Issue, bd beads.Client, head s
 	}
 }
 
-// submitCrewForLanding marks a crew branch ready to land. The branch must
-// already be on origin at HEAD: crew push their own work, so gt done reads
-// the tip back rather than pushing. It writes, in order, the submission
-// comment, the READY TO LAND block and the gt:ready-to-land label, so a
-// labeled bead always says what to land. It never lands anything.
-func submitCrewForLanding(r *doneRun) error {
+// checkCrewSubmitRun refuses a crew run that names no branch to submit, no
+// bead to mark, or no identity to attribute the submission to. It is the
+// first check of every crew submission, before any read or write.
+func checkCrewSubmitRun(r *doneRun) error {
 	if r.branch == r.defaultBranch || r.branch == "master" {
 		return fmt.Errorf("cannot submit the %s/master branch for landing; commit on a crew branch and push it", r.defaultBranch)
 	}
@@ -308,6 +326,18 @@ func submitCrewForLanding(r *doneRun) error {
 	if r.sender == "" {
 		// Nobody to attribute the submission to: refuse before any write.
 		return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
+	}
+	return nil
+}
+
+// submitCrewForLanding marks a crew branch ready to land. The branch must
+// already be on origin at HEAD: crew push their own work, so gt done reads
+// the tip back rather than pushing. It writes, in order, the submission
+// comment, the READY TO LAND block and the gt:ready-to-land label, so a
+// labeled bead always says what to land. It never lands anything.
+func submitCrewForLanding(r *doneRun) error {
+	if err := checkCrewSubmitRun(r); err != nil {
+		return err
 	}
 	repo := r.deps.repo
 	workStatus, err := repo.CheckUncommittedWork()
@@ -368,6 +398,14 @@ func submitCrewForLanding(r *doneRun) error {
 		return err
 	}
 
+	return markCrewSubmitted(r, issue, bd, target, head)
+}
+
+// markCrewSubmitted writes a crew submission's three records in order, the
+// submission comment, the READY TO LAND block and the label, then prints the
+// outcome. Every caller has already verified the branch is on origin at head
+// and gated it (or said why it did not).
+func markCrewSubmitted(r *doneRun, issue *beads.Issue, bd beads.Client, target, head string) error {
 	comment := fmt.Sprintf("Submitted for landing: %s @ %s onto %s", land.NoteField(r.branch), head, land.NoteField(target))
 	if err := bd.AddCommentAs(r.issueID, r.sender, comment); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("could not record the submission on %s", r.issueID), err)

@@ -65,6 +65,15 @@ type Options struct {
 	Target string
 	// Bead is the crew work bead to submit (--bead). Crew only.
 	Bead string
+	// Branch and Head are the crew submission facts for a caller whose
+	// worktree is not in this process (--branch, --head): the pushed branch
+	// and the commit it must be at on origin. Crew only, and given together.
+	Branch string
+	Head   string
+	// CloneRepo opens the git surface of the rig's canonical clone for a
+	// Branch/Head submission, which reads and writes nothing in the caller's
+	// worktree. Nil is the real git.
+	CloneRepo func(dir string) doneRepo
 	// AllowReverts submits a branch that undoes content already merged to the
 	// target (refused by default).
 	AllowReverts bool
