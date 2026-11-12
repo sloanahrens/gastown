@@ -28,9 +28,11 @@ type fakeFiles struct {
 	// replaced is each path a rename replaced, in order.
 	replaced []string
 	next     int
+	// links is every Link call in order: "old new".
+	links []string
 	// errFor makes an operation fail: op is "stat", "read", "create",
-	// "rename", "remove", "write", "chmod" or "close", and path is what it
-	// names, with a rename naming "old -> new". nil fails nothing.
+	// "rename", "remove", "write", "chmod", "close" or "link", and path is what
+	// it names, with a rename or a link naming "old -> new". nil fails nothing.
 	errFor func(op, path string) error
 }
 
@@ -109,6 +111,22 @@ func (f *fakeFiles) Rename(oldpath, newpath string) error {
 		f.replaced = append(f.replaced, newpath)
 	}
 	delete(f.files, oldpath)
+	f.files[newpath] = file
+	return nil
+}
+
+func (f *fakeFiles) Link(oldpath, newpath string) error {
+	if err := f.err("link", oldpath+" -> "+newpath); err != nil {
+		return err
+	}
+	file, ok := f.files[oldpath]
+	switch {
+	case !ok:
+		return &fs.PathError{Op: "link", Path: oldpath, Err: fs.ErrNotExist}
+	case f.has(newpath):
+		return &fs.PathError{Op: "link", Path: newpath, Err: fs.ErrExist}
+	}
+	f.links = append(f.links, oldpath+" "+newpath)
 	f.files[newpath] = file
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/gtwrap"
@@ -93,6 +94,10 @@ func parseCutover(command string, args []string) (cutoverOptions, error) {
 	set.StringVar(&options.stamp, "stamp", "", "the stamp the dated files and the rollback use (yyyymmdd-hhmm)")
 	set.StringVar(&options.dir, "dir", "", "the directory holding the four tools")
 	set.Var(&named, "target", "name=path; the file one tool replaces; repeatable")
+	var keep targetList
+	if command == installCmd {
+		set.Var(&keep, "keep-old", "name=path; a second name for the old file of that tool, beside it; repeatable")
+	}
 	if err := set.Parse(args); err != nil {
 		return options, fmt.Errorf("gtwrap: %s: %w", command, err)
 	}
@@ -109,7 +114,30 @@ func parseCutover(command string, args []string) (cutoverOptions, error) {
 		}
 		options.targets = append(options.targets, target)
 	}
+	for _, value := range keep {
+		name, path, err := parseKeepOld(value)
+		if err != nil {
+			return options, err
+		}
+		i := slices.IndexFunc(options.targets, func(t gtwrap.Target) bool { return t.Name == name })
+		if i < 0 {
+			return options, fmt.Errorf("gtwrap: --keep-old %q names %s, which is not a --target", value, name)
+		}
+		if options.targets[i].KeepOld != "" {
+			return options, fmt.Errorf("gtwrap: --keep-old names %s twice", name)
+		}
+		options.targets[i].KeepOld = path
+	}
 	return options, nil
+}
+
+// parseKeepOld reads one --keep-old value as name=path.
+func parseKeepOld(value string) (name, path string, err error) {
+	name, path, ok := strings.Cut(value, "=")
+	if !ok || name == "" || path == "" {
+		return "", "", fmt.Errorf("gtwrap: --keep-old %q is not name=path", value)
+	}
+	return name, path, nil
 }
 
 // targetList collects repeated --target values in the order they are given.
