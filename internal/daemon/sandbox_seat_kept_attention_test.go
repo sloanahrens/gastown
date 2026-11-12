@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,31 @@ func TestKeptSeatAttentionFailsOnAnUnreadableRecord(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "capable.json") {
 		t.Errorf("error %q does not name the unreadable record", err)
+	}
+}
+
+// A store that cannot be listed fails the collection with the listing error and
+// no items, so the previous tick's items stand rather than clearing as an empty
+// queue.
+func TestKeptSeatAttentionFailsOnAStoreThatCannotBeListed(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	dir := keptSandboxSeatsDir(f.d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the store's directory should be: a listing of it fails.
+	if err := os.WriteFile(dir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := collectorFor(t, f.src, attention.KindSandboxSeatKept)
+
+	items, err := c.collect(context.Background())
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("collector err = %v, want the listing error", err)
+	}
+	if items != nil {
+		t.Errorf("items = %+v beside an unlistable store, want none", items)
 	}
 }
 
