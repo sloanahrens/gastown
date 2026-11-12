@@ -80,9 +80,10 @@ const (
 	overrunStopped
 )
 
-// dispatchAdapter scores the dispatch log. Its labels come from three sources:
+// dispatchAdapter scores the dispatch log. Its labels come from four sources:
 // the first attempt's om verdict in reviews.jsonl, the overrun guard's record
-// per bead, and the bead itself (its close reason, labels and status).
+// per bead, the bead itself (its close reason, labels and status), and the
+// bead's latest record in the rig's landings file, which gives its size.
 type dispatchAdapter struct {
 	town      string
 	openBeads func() (beadReader, error)
