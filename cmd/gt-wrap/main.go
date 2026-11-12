@@ -73,6 +73,8 @@ type surface struct {
 	files gtwrap.Files
 	// newDoctor builds install's doctor for a town.
 	newDoctor func(town string) gtwrap.Doctor
+	// native runs the calls the config names for the Mac; nil refuses them.
+	native gtwrap.Process
 }
 
 func main() {
@@ -110,6 +112,7 @@ func osSurface() surface {
 		newDoctor: func(town string) gtwrap.Doctor {
 			return cutoverDoctor{town: town, shell: gtwrap.OSShell{}, read: os.ReadFile, report: os.Stderr}
 		},
+		native: gtwrap.OSProcess{},
 	}
 }
 
@@ -127,6 +130,15 @@ func run(argv []string, s surface) int {
 		return fail(s.stderr, err)
 	}
 	args := argv[1:]
+	nat, native := cfg.Native[name]
+	if native && diagnose {
+		if status := reportNative(s.stdout, nat, s.stat); status != 0 {
+			return status
+		}
+	}
+	if native && nat.Covers(args) {
+		return runNative(nat, args, s)
+	}
 	town, err := townFor(cfg, s)
 	if err != nil {
 		// --doctor still answers when there is no town: a diagnosis of down with
@@ -166,6 +178,8 @@ func run(argv []string, s surface) int {
 type targetConfig struct {
 	Target string
 	Kube   kubeConfig
+	// Native holds the tools the config runs on the Mac, by tool name.
+	Native map[string]gtwrap.Native
 }
 
 // kubeConfig is the kubernetes target's fields in the config file. Only that
@@ -195,7 +209,8 @@ func configTarget(s surface) (targetConfig, error) {
 		return targetConfig{}, fmt.Errorf("gtwrap: read the target config file %s: %w", path, err)
 	}
 	var cfg struct {
-		Target string `json:"target"`
+		Target string                 `json:"target"`
+		Native map[string]nativeEntry `json:"native"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return targetConfig{}, fmt.Errorf("gtwrap: parse the target config file %s: %w", path, err)
@@ -203,7 +218,11 @@ func configTarget(s surface) (targetConfig, error) {
 	if cfg.Target == "" {
 		return targetConfig{}, fmt.Errorf("gtwrap: the target config file %s names no target; write {\"target\": %q} there, or delete the file to use %q", path, defaultTarget, defaultTarget)
 	}
-	out := targetConfig{Target: cfg.Target}
+	native, err := nativeTools(cfg.Native, path)
+	if err != nil {
+		return targetConfig{}, err
+	}
+	out := targetConfig{Target: cfg.Target, Native: native}
 	if cfg.Target != kubernetesTarget {
 		return out, nil
 	}

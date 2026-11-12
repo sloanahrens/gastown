@@ -59,6 +59,12 @@ The kubernetes target reads its four fields only when it is named, and refuses a
 - `BEADS_DOLT_SERVER_HOST=host.docker.internal` is set in the pod as in the container. The Deployment carries the matching host alias.
 - `kubectl exec` forwards no environment, so the forwarded variables travel as `env NAME=VALUE` arguments, in the argv of the Mac's kubectl process and of the pod's `env` process. The kubernetes target therefore drops every name that carries a credential word (`TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE`, `KEY`) under any prefix, and every name in `UnforwardedCredentialEnvVars`, with one stderr note naming the names and never their values. That includes `GT_DOLT_PASSWORD`, which the `GT_` family forwards to docker: the container keeps its own Secrets, so the pod still has it. Decided 2026-11-11 after review: the overseer's spec says credentials never reach the argv and the other forwarded names may cross. The docker target is unchanged.
 
+### Native om calls
+
+The config's `native` key runs `om` on the Mac instead of through the target: `"native": {"om": {"path": "/absolute/path/om", "subcommands": ["review"]}}`, in the same file as `target`, which the file must still name. A call whose first argument is a listed subcommand runs the binary at `path` in the caller's directory, with the caller's whole environment, stdin, stdout and stderr, and its exit status passes through unchanged. The call never reaches the target, since the target would read the pod's tree, not the caller's worktree. Every other `om` call still reaches the target.
+
+Only `om` is accepted; a `native` key naming any other tool refuses the file. A `path` that is empty, relative, unreadable or not an executable file refuses the native call with one line naming `native.om.path`, and the call does not fall back to the target. `--doctor` for `om` prints `native: <path> (exists)`, or `native: "<path>" (not runnable): <reason>` and exits 1.
+
 ## The one town copy (2026-11-11)
 
 Decided by the operator at 10:35 on 2026-11-11: the persistent claim is the one town copy, and the Mac stops being a town. The Mac keeps no town of its own; its `gt`, `bd`, `om` and `hm` reach the one copy through the kubernetes target. The daemon has run in the control cluster since 2026-11-10.
