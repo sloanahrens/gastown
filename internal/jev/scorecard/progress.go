@@ -176,8 +176,9 @@ func (a *progressAdapter) Parse(raw []byte) (Item, error) {
 //     environment caused says nothing about the seat repeating itself. A bead
 //     the store no longer holds takes no looping label either;
 //  4. an overrun record whose gate time was charged at or after the nudge sets
-//     blocked_on_environment true; once the window has passed with no such
-//     charge, blocked_on_environment is false instead;
+//     blocked_on_environment true; once the window has passed with such a record
+//     and no such charge, blocked_on_environment is false instead. No record at
+//     all leaves it unlabeled;
 //  5. a MERGE REJECTION block written after the nudge whose own words name
 //     scope drift sets drifted_from_bead true.
 //
@@ -205,7 +206,7 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 			return Labeling{}, fmt.Errorf("reading the notes of %s: %w", line.Bead, err)
 		}
 	}
-	stop, err := readOverrunStop(a.town, line.Bead)
+	stop, found, err := readOverrunStop(a.town, line.Bead)
 	if err != nil {
 		return Labeling{}, err
 	}
@@ -242,9 +243,10 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	if gateCharged(stop, nudged) {
 		labels[qBlockedOnEnvironment] = true
 		rules = append(rules, ruleProgressGateWait)
-	} else if a.now().Sub(nudged) > progressWindow {
+	} else if found && a.now().Sub(nudged) > progressWindow {
 		// The window is still open until its end, so a charge may yet come; only
-		// a window that has passed with none says the seat was not blocked.
+		// a window that has passed with a record and no charge says the seat was
+		// not blocked. No record leaves it unlabeled: nothing says it was not.
 		labels[qBlockedOnEnvironment] = false
 		rules = append(rules, ruleProgressNoGateWait)
 	}
@@ -397,19 +399,20 @@ type progressStop struct {
 }
 
 // readOverrunStop reads the overrun guard's record for bead. A missing record
-// is the zero stop; a record that cannot be read is an error.
-func readOverrunStop(town, bead string) (progressStop, error) {
+// reports found false, so its absence is not read as a stop that charged no
+// gate time; a record that cannot be read is an error.
+func readOverrunStop(town, bead string) (progressStop, bool, error) {
 	path := filepath.Join(constants.TownRuntimePath(town), "overrun-guard", bead+".json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return progressStop{}, nil
+		return progressStop{}, false, nil
 	}
 	if err != nil {
-		return progressStop{}, fmt.Errorf("reading the overrun record for %s: %w", bead, err)
+		return progressStop{}, false, fmt.Errorf("reading the overrun record for %s: %w", bead, err)
 	}
 	var st progressStop
 	if err := json.Unmarshal(data, &st); err != nil {
-		return progressStop{}, fmt.Errorf("parsing the overrun record for %s: %w", bead, err)
+		return progressStop{}, false, fmt.Errorf("parsing the overrun record for %s: %w", bead, err)
 	}
-	return st, nil
+	return st, true, nil
 }

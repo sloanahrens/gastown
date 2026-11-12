@@ -44,7 +44,7 @@ type beadShower interface {
 
 func init() {
 	Register(AttentionBattery, func(townRoot string) Adapter {
-		return &attentionAdapter{town: townRoot, beads: beads.New(townRoot), lines: map[string]jevattention.Line{}, now: time.Now}
+		return &attentionAdapter{town: townRoot, beads: beads.New(townRoot), lines: map[string]jevattention.Line{}}
 	})
 }
 
@@ -54,8 +54,10 @@ func init() {
 type attentionAdapter struct {
 	town  string
 	beads beadShower
-	// now is the clock a standing item's window is read against.
-	now func() time.Time
+	// asOf is the daemon's last tick of the queue state, read by load. A standing
+	// item's window is read against it, not the clock, so a label depends on the
+	// logged data. Zero when no state was ever written.
+	asOf time.Time
 	// lines holds each parsed line by item ID, so Label has the line's key,
 	// kind, bead and commit. Build parses every line before it labels any.
 	lines map[string]jevattention.Line
@@ -140,8 +142,11 @@ func (a *attentionAdapter) Label(ctx context.Context, item Item) (Labeling, erro
 	}
 	if rec.ClearedAt == nil {
 		// Still standing: nothing cleared it, so once its window has passed it
-		// did not clear on its own. An ack of any kind does not change that.
-		if a.now().Sub(rec.FirstSeen) > selfClearWindow {
+		// did not clear on its own. An ack of any kind does not change that. The
+		// window is read against the daemon's last logged tick: a queue state
+		// never written has a zero tick, which is never past the window, so the
+		// item stays unlabeled.
+		if a.asOf.After(rec.FirstSeen.Add(selfClearWindow)) {
 			return askedLabels(item, Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QClearsOnItsOwn: false}, Rule: ruleStillOpenPastWindow}), nil
 		}
 		return Labeling{}, nil
@@ -179,6 +184,7 @@ func (a *attentionAdapter) load() error {
 	for _, r := range snap.Items {
 		a.records[r.Key] = append(a.records[r.Key], r)
 	}
+	a.asOf = snap.State.Updated
 	a.history = history
 	a.loaded = true
 	return nil
