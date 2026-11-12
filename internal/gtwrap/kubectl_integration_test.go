@@ -51,11 +51,11 @@ func TestIntegrationKubernetesTargetReachesTheDaemonPod(t *testing.T) {
 	}
 }
 
-// TestPodWalkUpScriptRun runs podWalkUpScript under the real sh, in a town root the
-// test owns, so each refusal and the tool's own status come from the shell itself.
-// The unit tier's fake pod stands in for the tool with a no-op, so it cannot give
-// the tool an exit status.
-func TestPodWalkUpScriptRun(t *testing.T) {
+// TestIntegrationPodWalkUpScriptRun runs podWalkUpScript under the real sh, in a town
+// root the test owns, so each refusal and the tool's own status come from the shell
+// itself. The unit tier's fake pod stands in for the tool with a no-op, so it cannot
+// give the tool an exit status.
+func TestIntegrationPodWalkUpScriptRun(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Fatalf("sh is not on PATH: %v", err)
