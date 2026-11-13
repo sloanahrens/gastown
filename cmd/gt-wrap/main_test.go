@@ -54,8 +54,11 @@ type harness struct {
 	kubeBuilt bool
 	kubeCfg   kubeConfig
 	kubeTool  string
-	stdout    *bytes.Buffer
-	stderr    *bytes.Buffer
+	// bdBuilt and bdCfg record the bdgateway target's build.
+	bdBuilt bool
+	bdCfg   bdGatewayConfig
+	stdout  *bytes.Buffer
+	stderr  *bytes.Buffer
 }
 
 func newHarness(t *testing.T) *harness {
@@ -95,6 +98,11 @@ func newHarness(t *testing.T) *harness {
 		newKubectl: func(town string, kube kubeConfig, tool string) target {
 			h.builtTown = town
 			h.kubeBuilt, h.kubeCfg, h.kubeTool = true, kube, tool
+			return h.fake
+		},
+		newBdGateway: func(town string, cfg bdGatewayConfig) target {
+			h.builtTown = town
+			h.bdBuilt, h.bdCfg = true, cfg
 			return h.fake
 		},
 	}
