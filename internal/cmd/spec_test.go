@@ -295,7 +295,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Roster: func() (specRoster, error) { return f.roster, f.rosterErr },
 		// The fake town has no seat picture to re-read, so every planned sling
 		// passes the recount; a test that wants one sets it.
-		RecountSeat: func(agent string) (int, int, error) { return 0, 0, nil },
+		RecountSeat: func(agent string) (specSeatRecount, error) { return specSeatRecount{}, nil },
 		Annotate: func(id, key, text string) error {
 			for _, n := range f.notes[id] {
 				if strings.HasPrefix(n, key) {
@@ -1846,24 +1846,33 @@ func TestSpecPendingSlingRecountsItsSeatBeforeItStarts(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
-		recount   func(agent string) (int, int, error)
+		recount   func(agent string) (specSeatRecount, error)
 		wantSling bool
 		wantLine  string // the skip line, when the sling is skipped
 		wantErr   string // the error line, when the recount cannot read
 	}{
 		{
 			name:     "the seat was taken since the roster",
-			recount:  func(string) (int, int, error) { return 2, 2, nil },
+			recount:  func(string) (specSeatRecount, error) { return specSeatRecount{Seat: 2, Cap: 2}, nil },
 			wantLine: "gt-a: no seat (recounted 2/2 before the sling)",
 		},
 		{
-			name:      "the seat still has room",
-			recount:   func(string) (int, int, error) { return 1, 2, nil },
+			name: "the town's total was reached since the roster",
+			recount: func(string) (specSeatRecount, error) {
+				return specSeatRecount{Seat: 1, Cap: 2, Total: 3, MaxTotal: 3}, nil
+			},
+			wantLine: "gt-a: no seat (recounted 3/3 across every seat before the sling)",
+		},
+		{
+			name: "the seat still has room",
+			recount: func(string) (specSeatRecount, error) {
+				return specSeatRecount{Seat: 1, Cap: 2, Total: 2, MaxTotal: 3}, nil
+			},
 			wantSling: true,
 		},
 		{
 			name:      "the seats cannot be read",
-			recount:   func(string) (int, int, error) { return 0, 2, errors.New("tmux: boom") },
+			recount:   func(string) (specSeatRecount, error) { return specSeatRecount{Cap: 2}, errors.New("tmux: boom") },
 			wantSling: true,
 			wantErr:   "gt-a: cannot list the seats before the sling (tmux: boom); dispatching anyway",
 		},
@@ -1874,7 +1883,7 @@ func TestSpecPendingSlingRecountsItsSeatBeforeItStarts(t *testing.T) {
 			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
 			env := f.env()
 			asked := ""
-			env.RecountSeat = func(agent string) (int, int, error) {
+			env.RecountSeat = func(agent string) (specSeatRecount, error) {
 				asked = agent
 				return tc.recount(agent)
 			}
