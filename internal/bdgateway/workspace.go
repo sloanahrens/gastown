@@ -334,7 +334,7 @@ func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 		return "", fmt.Errorf("%w: creating the temp tree: %v", ErrWorkspaceSwap, err)
 	}
 	if err := s.writeTree(tmp, doc.Files); err != nil {
-		return "", errors.Join(err, s.removeTree(tmp, "the temp tree"))
+		return "", errors.Join(err, s.removeTempTree(tmp))
 	}
 	if err := s.swap(tmp); err != nil {
 		return "", err
@@ -372,21 +372,21 @@ func (s *WorkspaceStore) swap(tmp string) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if err := s.fs.rename(tmp, s.root); err != nil {
-			return errors.Join(fmt.Errorf("%w: publishing the first tree: %v", ErrWorkspaceSwap, err), s.removeTree(tmp, "the temp tree"))
+			return errors.Join(fmt.Errorf("%w: publishing the first tree: %v", ErrWorkspaceSwap, err), s.removeTempTree(tmp))
 		}
 		return nil
 	case err != nil:
-		return errors.Join(fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceSwap, err), s.removeTree(tmp, "the temp tree"))
+		return errors.Join(fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceSwap, err), s.removeTempTree(tmp))
 	}
 	if err := s.fs.rename(s.root, old); err != nil {
-		return errors.Join(fmt.Errorf("%w: moving the live tree aside: %v", ErrWorkspaceSwap, err), s.removeTree(tmp, "the temp tree"))
+		return errors.Join(fmt.Errorf("%w: moving the live tree aside: %v", ErrWorkspaceSwap, err), s.removeTempTree(tmp))
 	}
 	if err := s.fs.rename(tmp, s.root); err != nil {
 		joined := []error{fmt.Errorf("%w: publishing the new tree: %v", ErrWorkspaceSwap, err)}
 		if restoreErr := s.fs.rename(old, s.root); restoreErr != nil {
 			joined = append(joined, fmt.Errorf("restoring the previous tree: %v", restoreErr))
 		}
-		joined = append(joined, s.removeTree(tmp, "the temp tree"))
+		joined = append(joined, s.removeTempTree(tmp))
 		return errors.Join(joined...)
 	}
 	return nil
@@ -417,11 +417,11 @@ func (s *WorkspaceStore) sweep() error {
 	return nil
 }
 
-// removeTree removes path, wrapping a failure with why it was being removed.
-// Callers join the error onto the one that already failed the push.
-func (s *WorkspaceStore) removeTree(path, why string) error {
+// removeTempTree removes an abandoned temp tree. Callers join the error onto
+// the one that already failed the push.
+func (s *WorkspaceStore) removeTempTree(path string) error {
 	if err := s.fs.removeAll(path); err != nil {
-		return fmt.Errorf("removing %s: %v", why, err)
+		return fmt.Errorf("removing the temp tree: %v", err)
 	}
 	return nil
 }
