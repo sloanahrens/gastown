@@ -63,6 +63,10 @@ type DispatchClock struct {
 	// targets is the seat each bead was last slung to, so a dispatcher sling to
 	// a different seat can be told from a repeat to the seat that holds it.
 	targets map[string]string
+	// ended is the dispatch of the run each bead's latest run end closed: the
+	// earliest start EndRun dropped. A landing reads it, because the seat's own
+	// done event has already ended the run the landing came from (StartBefore).
+	ended map[string]time.Time
 }
 
 // dispatchPoint is one sling filed in a bead's start list: when it was written,
@@ -78,6 +82,7 @@ func NewDispatchClock() *DispatchClock {
 		ends:    map[string]time.Time{},
 		starts:  map[string][]dispatchPoint{},
 		targets: map[string]string{},
+		ended:   map[string]time.Time{},
 	}
 }
 
@@ -195,7 +200,12 @@ func (c *DispatchClock) EndRun(bead string, at time.Time) {
 	}
 	c.ends[bead] = at
 	s := c.starts[bead]
+	// The run this end closes is dispatched at the earliest start it drops;
+	// that is the clock a landing reads back (StartBefore). A run the log holds
+	// no sling for leaves nothing to read.
+	delete(c.ended, bead)
 	if i := sort.Search(len(s), func(i int) bool { return !s[i].at.Before(at) }); i > 0 {
+		c.ended[bead] = s[0].at
 		s = s[i:]
 	}
 	if len(s) == 0 {
@@ -224,6 +234,27 @@ func (c *DispatchClock) StartSince(bead string, end time.Time) (time.Time, bool)
 		return rework, true
 	}
 	return end, true
+}
+
+// StartBefore returns when the run bead was working under at before was
+// dispatched: the earliest sling of the run the bead's latest run end at or
+// before before closed, and when that end closed a run the log holds no sling
+// for, the sling of the run still open at before. It is the clock a landing
+// reads, where the seat's own done event has already ended the run the landing
+// came from — a done ends a run, so the clock read at the landing would be the
+// empty run after it (DispatchedBy, gt-v7ptp). A bead with no run at all at
+// before has no clock from this call.
+func (c *DispatchClock) StartBefore(bead string, before time.Time) (time.Time, bool) {
+	if end, ok := c.ends[bead]; ok && !end.After(before) {
+		if at, ok := c.ended[bead]; ok {
+			return at, true
+		}
+	}
+	at, ok := c.Start(bead)
+	if !ok || at.After(before) {
+		return time.Time{}, false
+	}
+	return at, true
 }
 
 // Start returns when bead's current run was dispatched, false when no sling

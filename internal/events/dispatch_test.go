@@ -281,6 +281,105 @@ func TestDispatchStartIgnoresASlingDatedBeforeTheRunEnd(t *testing.T) {
 	}
 }
 
+// StartBefore is the clock a landing reads: the dispatch of the run the bead's
+// latest run end at or before the landing closed, because the seat's own done
+// event has already ended the run the landing came from (gt-04hbp5). A run the
+// log holds no sling for has no clock, whatever its end: the rework's sling is
+// not read back as the landing's, and the end is not read as a dispatch.
+func TestDispatchClockStartBefore(t *testing.T) {
+	t.Parallel()
+	handSling := func(at string) Event { return dispatchSlingEv(at, "gt-a", "overseer", "gastown/nux") }
+	for _, tt := range []struct {
+		name   string
+		evs    []Event
+		bead   string
+		before string
+		want   string
+		ok     bool
+	}{
+		{
+			name:   "the run the done event closed",
+			evs:    []Event{handSling(t9), dispatchEv(TypeDone, t10, "gt-a")},
+			bead:   "gt-a",
+			before: t11,
+			want:   t9,
+			ok:     true,
+		},
+		{
+			name:   "the run still open",
+			evs:    []Event{handSling(t9)},
+			bead:   "gt-a",
+			before: t11,
+			want:   t9,
+			ok:     true,
+		},
+		{
+			name: "the latest run that ended before the landing",
+			evs: []Event{
+				handSling(t9), dispatchEv(TypeDone, t10, "gt-a"),
+				handSling(t11), dispatchEv(TypeDone, t12, "gt-a"),
+				handSling(t12),
+			},
+			bead:   "gt-a",
+			before: t12,
+			want:   t11,
+			ok:     true,
+		},
+		{
+			name:   "the run open after an end whose run the log holds no sling for",
+			evs:    []Event{dispatchEv(TypeDone, t10, "gt-a"), handSling(t11)},
+			bead:   "gt-a",
+			before: t12,
+			want:   t11,
+			ok:     true,
+		},
+		{
+			name:   "a sling after before is not the run working then",
+			evs:    []Event{dispatchEv(TypeDone, t10, "gt-a"), handSling(t11)},
+			bead:   "gt-a",
+			before: t10,
+			ok:     false,
+		},
+		{
+			name: "a later hand sling ends the run whose clock was kept",
+			evs: []Event{
+				handSling(t9), dispatchEv(TypeDone, t10, "gt-a"), handSling(t11),
+			},
+			bead:   "gt-a",
+			before: "2026-10-27T11:30:00Z",
+			want:   t11,
+			ok:     true,
+		},
+		{
+			name:   "a sling after the landing is not read",
+			evs:    []Event{handSling(t9), dispatchEv(TypeDone, t12, "gt-a")},
+			bead:   "gt-a",
+			before: t11,
+			ok:     false,
+		},
+		{
+			name:   "a bead the log never held",
+			evs:    []Event{handSling(t9)},
+			bead:   "gt-none",
+			before: t11,
+			ok:     false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add(tt.evs)
+			got, ok := clock.StartBefore(tt.bead, mustTime(t, tt.before))
+			if ok != tt.ok {
+				t.Fatalf("found = %t (start %v), want %t", ok, got, tt.ok)
+			}
+			if tt.ok && !got.Equal(mustTime(t, tt.want)) {
+				t.Errorf("start = %v, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 // A run ended outside the log — a submission for landing, whose done event can
 // be lost — starts its successor at the first sling dated at or after that end,
 // so a rework slung after a landing rejection is dated from its re-sling. A

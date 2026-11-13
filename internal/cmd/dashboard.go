@@ -452,7 +452,13 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		return nil, nil, err
 	}
 	whyLog := newDashWhyLog(dashboardLogf(out))
-	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog)
+	// The dispatch clock the Age column reads and the overrun guard judges, one
+	// reader for the panel's whole life so each poll reads only the log's
+	// appended lines (gt-tzbtf). The deploy tracker reads it too, for a landing
+	// the daemon log holds no dispatch line for (gt-04hbp5), so it is built
+	// before the tracker.
+	dispatches := events.NewDispatchReader(townRoot)
+	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog, dispatches)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, kinds: allTailKinds(), cutoff: cutoff, loc: loc, now: time.Now,
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
@@ -491,10 +497,6 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// reads the bead's submission comment through the same lookup (gt-6ua0sn).
 	submitters := newDashSubmitters(townRoot, dashboardLogf(out)).withSubmittedBy(submittedBy)
 	seatCache := newDashSeatCache()
-	// The dispatch clock the Age column reads and the overrun guard judges, one
-	// reader for the panel's whole life so each poll reads only the log's
-	// appended lines (gt-tzbtf).
-	dispatches := events.NewDispatchReader(townRoot)
 	// Who holds a bead, read once per row: the Landings pane's live rows and
 	// the om panel's running reviews both name a landing's polecat, and they
 	// ask the same reader for it.
@@ -616,16 +618,23 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 }
 
 // dashboardDeploys builds the deploy tracker the Landings pane reads: the
-// town's ship definitions, and the horizon the pane's table needs.
+// town's ship definitions, the events journal's dispatch clock for a landing
+// the daemon log holds no dispatch line for, and the horizon the pane's table
+// needs.
 //
 // The table spans a whole day of landings while the feed's own window is the
 // --since it was started with. Without the horizon a row older than that
 // window has no record, so its Ship cell draws a dash however it shipped
-// (gt-b5hw2). why logs which repository the ancestry check reads; nil logs nothing.
-func dashboardDeploys(townRoot string, rigOf func(bead string) string, cutoff time.Time, staging tailShipStaging, why *dashWhyLog) *tailDeploys {
+// (gt-b5hw2). why logs which repository the ancestry check reads; nil logs
+// nothing. dispatches is the panel's one dispatch reader; nil leaves hand-slung
+// landings undated.
+func dashboardDeploys(townRoot string, rigOf func(bead string) string, cutoff time.Time, staging tailShipStaging, why *dashWhyLog, dispatches *events.DispatchReader) *tailDeploys {
 	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, why), cutoff)
 	deploys.setShipDefinitions(tailRestartRig(townRoot), rigOf, staging)
 	deploys.setHorizon(trendHours * time.Hour)
+	if dispatches != nil {
+		deploys.setSlungClock(dispatches.StartBefore)
+	}
 	return deploys
 }
 

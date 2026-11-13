@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // --- ship definitions: gastown ships on the daemon restart, app rigs on their
@@ -388,13 +390,184 @@ func TestTailDeploys_LogCutoffReachesTheHorizon(t *testing.T) {
 	}
 }
 
+// --- a hand-slung landing is dated by the events journal, the clock the
+// Polecats table reads a seat's sling from: the daemon log holds no dispatch
+// line for a bead the operator slung while dispatch was held (gt-04hbp5) ---
+
+// shipSlungFake is the events journal's dispatch clock in a test: the sling
+// each bead was given, the error a reader whose log cannot be read answers, and
+// the bound every question carried.
+type shipSlungFake struct {
+	slings map[string]time.Time
+	err    error
+	asked  map[string]time.Time
+}
+
+func (f *shipSlungFake) slung(bead string, before time.Time) (time.Time, bool, error) {
+	if f.asked == nil {
+		f.asked = map[string]time.Time{}
+	}
+	f.asked[bead] = before
+	if f.err != nil {
+		// A failed read hands back no reading the tracker may use, whatever the
+		// value beside it says.
+		return f.slings[bead], true, f.err
+	}
+	at, ok := f.slings[bead]
+	return at, ok, nil
+}
+
+// handSlungTracker is the dashboard's tracker in a test: the town's ship
+// definitions, the table's horizon, and journal in place of the dispatch
+// reader.
+func handSlungTracker(journal tailDispatchSlung, table map[string]string, ancestor tailAncestry) *tailDeploys {
+	track := shipDeployTracker(ancestor, table, nil, at("2026-09-30T12:00:00Z"))
+	track.setSlungClock(journal)
+	return track
+}
+
+// TestTailDeploys_HandSlungLandingShipsFromTheJournal: a gastown landing with
+// no spec_dispatch line is dated by its journal sling — pending while the
+// installed commit lacks its landed sha, and a ship time once a daemon start
+// installs a commit that carries it.
+func TestTailDeploys_HandSlungLandingShipsFromTheJournal(t *testing.T) {
+	t.Parallel()
+	journal := &shipSlungFake{slings: map[string]time.Time{"gt-h": at("2026-09-30T13:00:00Z")}}
+	track := handSlungTracker(journal.slung, map[string]string{"gt-h": "gastown"}, fakeTailAncestry("1111aaaa 2222bbbb"))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-h: landed 1111aaaa on origin/main (patch-id 1)"),
+		// This start installs a commit that does not carry the landing.
+		daemonAt("2026-09-30T13:04:00Z", "daemon-start: running 3333cccc"),
+	})
+	if ship := track.shipStatus("gastown", "gt-h"); ship.Secs != nil || !ship.Pending || ship.Via != tailShipViaDeploy {
+		t.Fatalf("ship before the landing's commit shipped = %+v; want pending via deploy", ship)
+	}
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:09:00Z", "daemon-start: running 2222bbbb"),
+	})
+	// 13:00 sling -> 13:09 deploy.
+	if ship := track.shipStatus("gastown", "gt-h"); ship.Secs == nil || *ship.Secs != 540 || ship.Pending || ship.Via != tailShipViaDeploy {
+		t.Fatalf("ship = %+v; want 540s via deploy", ship)
+	}
+	if before := journal.asked["gt-h"]; !before.Equal(at("2026-09-30T13:03:00Z")) {
+		t.Errorf("journal asked for a sling before %v; want the landing time %v", before, at("2026-09-30T13:03:00Z"))
+	}
+}
+
+// TestTailDeploys_DispatchLineWinsOverTheJournal: a landing with a dispatch
+// line keeps that line's time, and the journal is not asked for it.
+func TestTailDeploys_DispatchLineWinsOverTheJournal(t *testing.T) {
+	t.Parallel()
+	// The journal would date the bead five minutes earlier than the log line.
+	journal := &shipSlungFake{slings: map[string]time.Time{"gt-1": at("2026-09-30T12:55:00Z")}}
+	track := handSlungTracker(journal.slung, map[string]string{"gt-1": "gastown"}, fakeTailAncestry("1111aaaa 2222bbbb"))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:00:00Z", "spec_dispatch: dispatched: gt-1: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-1: landed 1111aaaa on origin/main (patch-id 1)"),
+		daemonAt("2026-09-30T13:04:00Z", "daemon-start: running 2222bbbb"),
+	})
+	if ship := track.shipStatus("gastown", "gt-1"); ship.Secs == nil || *ship.Secs != 240 {
+		t.Fatalf("ship = %+v; want 240s from the dispatch line", ship)
+	}
+	if before, asked := journal.asked["gt-1"]; asked {
+		t.Errorf("journal was asked (before %v) for a bead the daemon log dispatched", before)
+	}
+}
+
+// TestTailDeploys_JournalSlingAfterTheLandingIsIgnored: a sling the journal
+// dates after the landing is the rework loop, and a bead with neither a sling
+// nor a dispatch line has no ship fields — the row is a dash, as before.
+func TestTailDeploys_JournalSlingAfterTheLandingIsIgnored(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		journal *shipSlungFake
+	}{
+		{name: "a rework sling after the landing", journal: &shipSlungFake{slings: map[string]time.Time{"gt-r": at("2026-09-30T13:10:00Z")}}},
+		{name: "no sling and no dispatch line", journal: &shipSlungFake{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			track := handSlungTracker(tc.journal.slung, map[string]string{"gt-r": "gastown"}, fakeTailAncestry("1111aaaa 2222bbbb"))
+			track.observe([]tailLine{
+				daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-r: landed 1111aaaa on origin/main (patch-id 1)"),
+				daemonAt("2026-09-30T13:04:00Z", "daemon-start: running 2222bbbb"),
+			})
+			if ship := track.shipStatus("gastown", "gt-r"); ship.Secs != nil || ship.Pending || ship.Via != "" {
+				t.Fatalf("ship = %+v; want no ship fields", ship)
+			}
+		})
+	}
+}
+
+// TestTailDeploys_UnlandedBeadIsNotAskedOfTheJournal: the journal dates a
+// landing, so a bead the tracker holds no landed time for is not asked about —
+// there is no landing for the answer to be before.
+func TestTailDeploys_UnlandedBeadIsNotAskedOfTheJournal(t *testing.T) {
+	t.Parallel()
+	journal := &shipSlungFake{slings: map[string]time.Time{"gt-n": at("2026-09-30T13:00:00Z")}}
+	track := handSlungTracker(journal.slung, map[string]string{"gt-n": "gastown"}, fakeTailAncestry())
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:02:00Z", "landing_worker: [land] gt-n: merged 0f0f onto origin/main (aaaa) as 1111aaaa; gating the merged tree"),
+	})
+	if ship := track.shipStatus("gastown", "gt-n"); ship.Secs != nil || ship.Pending || ship.Via != "" {
+		t.Fatalf("ship = %+v; want no ship fields for a bead with no landing", ship)
+	}
+	if before, asked := journal.asked["gt-n"]; asked {
+		t.Errorf("journal was asked (before %v) for a bead with no landed time", before)
+	}
+}
+
+// TestTailDeploys_JournalErrorLeavesNoShipFields: a journal that cannot be read
+// leaves the row without a ship time and does not fail the table.
+func TestTailDeploys_JournalErrorLeavesNoShipFields(t *testing.T) {
+	t.Parallel()
+	journal := &shipSlungFake{
+		slings: map[string]time.Time{"gt-e": at("2026-09-30T13:00:00Z")},
+		err:    errors.New("reading the town events log: permission denied"),
+	}
+	track := handSlungTracker(journal.slung, map[string]string{"gt-e": "gastown"}, fakeTailAncestry("1111aaaa 2222bbbb"))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-e: landed 1111aaaa on origin/main (patch-id 1)"),
+		daemonAt("2026-09-30T13:04:00Z", "daemon-start: running 2222bbbb"),
+	})
+	rows := buildRecentLandings(fixedNow(),
+		[]omRecord{omTestRec("gt-e", "approve", 0.9, "daemon", at("2026-09-30T13:03:00Z"))},
+		nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, 30)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d (%+v); want the table built with the unread journal", len(rows), rows)
+	}
+	if r := rows[0]; r.ShipSecs != nil || r.ShipPending || r.ShipVia != "" {
+		t.Fatalf("row ship = %v via %q pending %v; want a dash", r.ShipSecs, r.ShipVia, r.ShipPending)
+	}
+}
+
+// TestDashboardDeploys_DatesAHandSlungLandingFromTheJournal: the tracker the
+// dashboard builds is the one its dispatch reader answers, not just a tracker
+// handed the seam in a test.
+func TestDashboardDeploys_DatesAHandSlungLandingFromTheJournal(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	appendFile(t, filepath.Join(town, events.EventsFile),
+		`{"ts":"2026-09-30T13:00:00Z","source":"gt","type":"sling","actor":"overseer","payload":{"bead":"gt-h","target":"gastown/opal"}}`+"\n"+
+			`{"ts":"2026-09-30T13:03:00Z","source":"gt","type":"done","actor":"gastown/polecats/opal","payload":{"bead":"gt-h"}}`+"\n")
+	track := dashboardDeploys(town, shipRigOf(map[string]string{"gt-h": "gastown"}), at("2026-09-30T12:00:00Z"), nil, nil, events.NewDispatchReader(town))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:04:00Z", "landing_worker: [land] gt-h: landed 1111aaaa on origin/main (patch-id 1)"),
+	})
+	// The journal's sling dates the row, so it reads pending before any restart.
+	if ship := track.shipStatus("gastown", "gt-h"); ship.Secs != nil || !ship.Pending || ship.Via != tailShipViaDeploy {
+		t.Fatalf("ship = %+v; want pending from the journal's sling", ship)
+	}
+}
+
 // TestDashboardDeploys_ReadsBackToTheLandingsTable: the tracker the Landings
 // pane is served by is the one given the table's horizon — the wiring, not
 // just the tracker, is what keeps the Ship column off a dash.
 func TestDashboardDeploys_ReadsBackToTheLandingsTable(t *testing.T) {
 	t.Parallel()
 	cutoff := time.Now().Add(-2 * time.Hour)
-	track := dashboardDeploys(t.TempDir(), shipRigOf(nil), cutoff, nil, nil)
+	track := dashboardDeploys(t.TempDir(), shipRigOf(nil), cutoff, nil, nil, nil)
 	if got := track.horizon; got != trendHours*time.Hour {
 		t.Fatalf("horizon = %v; want the Landings table's %v", got, trendHours*time.Hour)
 	}
