@@ -18,13 +18,14 @@ func (m *Manager) environ() []string {
 	return os.Environ()
 }
 
-// rigBD is the bd surface rig setup runs: init, config and the
-// repository-fingerprint migration. A *beads.Beads from beads.NewPlain
+// rigBD is the bd surface rig setup runs: init, config, the issue prefix and
+// the repository-fingerprint migration. A *beads.Beads from beads.NewPlain
 // provides it, sending exactly the argv, directory and environment given.
 type rigBD interface {
 	InitDatabase(opts beads.InitOptions) error
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
+	SetIssuePrefix(prefix string) error
 	MigrateRepoID() error
 }
 

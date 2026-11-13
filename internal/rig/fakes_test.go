@@ -54,7 +54,7 @@ func remoteRepo(t *testing.T, f *gitfake.Fake, dir string, files map[string]stri
 }
 
 // bdCall is one bd call the manager made: the directory and environment
-// it ran with, the verb ("init", "config get", "config set", "migrate"),
+// it ran with, the verb ("init", "config get", "config set", "rename-prefix", "migrate"),
 // the config key and value, and init's options.
 type bdCall struct {
 	Dir  string
@@ -122,6 +122,21 @@ func (f fakeBDAt) ConfigGet(key string) (string, error) {
 func (f fakeBDAt) ConfigSet(key, value string) error {
 	_, err := f.b.call(bdCall{Dir: f.dir, Env: f.env, Verb: "config set", Args: []string{key, value}})
 	return err
+}
+
+// SetIssuePrefix records the rename-prefix call bd runs for it, and on success
+// stores the prefix where config get reads it back, as bd persists it.
+func (f fakeBDAt) SetIssuePrefix(prefix string) error {
+	if _, err := f.b.call(bdCall{Dir: f.dir, Env: f.env, Verb: "rename-prefix", Args: []string{"--config-only", prefix + "-"}}); err != nil {
+		return err
+	}
+	f.b.mu.Lock()
+	defer f.b.mu.Unlock()
+	if f.b.config == nil {
+		f.b.config = map[string]string{}
+	}
+	f.b.config["issue_prefix"] = prefix
+	return nil
 }
 
 func (f fakeBDAt) MigrateRepoID() error {
