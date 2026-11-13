@@ -423,6 +423,38 @@ func TestMangoNotCheckableKeepsAReasonItCannotName(t *testing.T) {
 	}
 }
 
+// The footer names each side's landings by runtime era beside its range, in era
+// order and without an era that holds no landing, so a verdict reads with the
+// regimes it was drawn from.
+func TestMangoFooterNamesTheErasOfEachSide(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	target := mangoPageTarget("rejected_before_landing", 48, false, "", 0, 0, 0.25, MangoNoSignal)
+	m := mangoPageState(MangoFresh, "fresh", target)
+	m["train"] = map[string]any{"from": "2026-09-05", "to": "2026-10-17"}
+	m["holdout"] = map[string]any{"from": "2026-10-17", "to": "2026-10-24"}
+	m["train_eras"] = map[string]any{"pod": 209, "pre-sandbox": 10, "sandbox": 0}
+	m["holdout_eras"] = map[string]any{"pod": 90}
+	dom.call(t, "renderMango", map[string]any{"mango": m})
+
+	foot := mangoTexts(t, dom, "mgfoot")
+	if len(foot) != 1 {
+		t.Fatalf("the panel draws %d footers, want one", len(foot))
+	}
+	for _, want := range []string{
+		"train 2026-09-05 to 2026-10-17 (pre-sandbox 10, pod 209)",
+		"holdout 2026-10-17 to 2026-10-24 (pod 90)",
+	} {
+		if !strings.Contains(foot[0], want) {
+			t.Errorf("the footer %q has no %q", foot[0], want)
+		}
+	}
+	if strings.Contains(foot[0], "sandbox 0") {
+		t.Errorf("the footer %q names an era with no landing", foot[0])
+	}
+}
+
 // A target with no box carries the panel's footer: the columns the landings
 // table lacks, the days the train and holdout split covers, and the no-box
 // line naming the target, so a no-signal row reads as "no box found" rather

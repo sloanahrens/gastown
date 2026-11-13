@@ -265,7 +265,8 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	joinHeader, joined, cov := Join(columns, rows, snaps, o.MaxAge)
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
 	weekly := panelWeekly(joined, o.Reportf)
-	targets, split, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
+	eras := SplitByEra(joined, readEraCuts(env))
+	targets, split, err := analyseTargets(ctx, env, o, joinHeader, eras, explainOnly)
 	if err != nil {
 		return res, err
 	}
@@ -276,6 +277,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		Events:         panelEvents(env, o.Reportf),
 		MissingColumns: panelMissingColumns(joinHeader),
 		Split:          split,
+		SplitEras:      panelEras(eras),
 	}, now)
 	panelJSON, err := json.MarshalIndent(panel, "", "  ")
 	if err != nil {
@@ -635,15 +637,15 @@ func writeFile(path string, r io.Reader) error {
 
 // analyseTargets runs the mango stage for every target whose training split
 // holds MangoMinSupport positives, and reports every target's split counts
-// either way. It also reports the day range the split covered. The split is
-// cut from the landings alone, so every target shares it and it is dated once
-// here, not from whichever target happens to come first.
-func analyseTargets(ctx context.Context, env Env, o AnalysisOptions, header []string, rows []Row, explainOnly []string) ([]TargetResult, PanelSplit, error) {
+// either way. It also reports the day range the split covered. The caller cut the
+// eras once for the whole analysis, so the panel and every target read the same
+// split, and the day range is taken from that split rather than from whichever
+// target happens to come first.
+func analyseTargets(ctx context.Context, env Env, o AnalysisOptions, header []string, eras EraSplit, explainOnly []string) ([]TargetResult, PanelSplit, error) {
 	results := make([]TargetResult, 0, len(mangoTargets))
-	train, holdout := SplitByDate(rows, defaultTrainFraction)
-	split := panelSplit(train, holdout)
+	split := panelSplit(eras.Train, eras.Holdout)
 	for _, target := range mangoTargets {
-		p := Prepare(header, rows, explainOnly, target)
+		p := Prepare(header, eras, explainOnly, target)
 		if p.TrainPositives < MangoMinSupport {
 			results = append(results, skipTarget(target, p))
 			continue

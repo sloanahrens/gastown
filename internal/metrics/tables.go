@@ -45,7 +45,7 @@ type DiffSource interface {
 func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Rework, diffs DiffSource,
 	beadsByID map[string]BeadRow, usage map[string]Usage, overrun map[string]bool, rounds map[string]int,
 	eras map[string][]OMEra, shapedIDs map[string]bool, stamps StageStamps,
-	jev map[string]dispatch.Line, dropped *Dropped) ([]Row, error) {
+	jev map[string]dispatch.Line, cuts EraCuts, dropped *Dropped) ([]Row, error) {
 	rows := make([]Row, 0, len(ledger))
 	for _, l := range ledger {
 		rw, ok := rework[l.Bead]
@@ -137,6 +137,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"sp_estimated_at":         stampCell(b.EstimatedAt),
 			"om_rounds":               roundsCell(rounds[l.Bead]),
 			"polecat_attempts":        polecatAttemptsCell(l),
+			"runtime_era":             runtimeEra(cuts, l.LandedAt),
 		})
 	}
 	return rows, nil

@@ -4438,9 +4438,13 @@ function mangoFooter(m) {
   if (cols.length) parts.push("the table lacks " + cols.join(", "));
   // Both ends of a side are its range; half a range is not drawn.
   const span = s => (s && typeof s.from === "string" && typeof s.to === "string" && s.from && s.to) ? (s.from === s.to ? s.from : s.from + " to " + s.to) : "";
-  const train = span(m.train), holdout = span(m.holdout);
-  if (train) parts.push("train " + train);
-  if (holdout) parts.push("holdout " + holdout);
+  // Each side's landings by runtime era, earliest era first, so the footer names
+  // the regimes the verdicts were measured across.
+  const eras = c => ["pre-sandbox", "sandbox", "pod", "unknown"].filter(e => c && typeof c[e] === "number" && c[e] > 0).map(e => e + " " + c[e]).join(", ");
+  const withEras = (label, s, c) => s ? label + " " + s + (eras(c) ? " (" + eras(c) + ")" : "") : "";
+  const train = withEras("train", span(m.train), m.train_eras), holdout = withEras("holdout", span(m.holdout), m.holdout_eras);
+  if (train) parts.push(train);
+  if (holdout) parts.push(holdout);
   const boxless = (Array.isArray(m.targets) ? m.targets : [])
     .filter(t => t && t.verdict !== "not-yet" && !t.best_box)
     .map(t => t.label || t.target)

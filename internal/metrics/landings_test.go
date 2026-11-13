@@ -118,7 +118,7 @@ func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
 		t.Errorf("landingColumns starts %v, want the pinned header %v", got, legacy)
 	}
-	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns)
+	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns, eraLandingColumns)
 	if got := landingColumns[len(legacy):]; !slices.Equal(got, want) {
 		t.Errorf("appended columns = %v, want %v", got, want)
 	}
@@ -285,7 +285,7 @@ func TestSeatClassFromTheAgentName(t *testing.T) {
 func buildLedgerLandings(t *testing.T, ledger []LedgerRow, beads map[string]BeadRow, usage map[string]Usage, stamps StageStamps) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
-		beads, usage, nil, nil, nil, nil, stamps, nil, &Dropped{})
+		beads, usage, nil, nil, nil, nil, stamps, nil, defaultEraCuts(), &Dropped{})
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
 		"jev_fits20", "jev_size", "sp", "sp_rung", "sp_minutes", "sp_estimated_at",
-		"om_rounds", "polecat_attempts",
+		"om_rounds", "polecat_attempts", "runtime_era",
 	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))

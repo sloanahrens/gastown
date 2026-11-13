@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -113,6 +114,38 @@ func TestMangoReadsTheCollectedPanel(t *testing.T) {
 	}
 	if got := m.Targets[2]; !got.Skipped || got.Verdict != MangoNotYet || got.BestBox != "" {
 		t.Errorf("a skipped target reads %+v", got)
+	}
+}
+
+// The panel's era counts reach the page for each side of the split, and a panel
+// from before they existed reads with none.
+func TestMangoReadsTheEraCounts(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "mango_panel.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := ReadMango(mangoFixture(t, string(raw)), mangoNow); m.TrainEras != nil || m.HoldoutEras != nil {
+		t.Errorf("a panel with no era counts reads train %v holdout %v, want none", m.TrainEras, m.HoldoutEras)
+	}
+
+	var panel map[string]any
+	if err := json.Unmarshal(raw, &panel); err != nil {
+		t.Fatal(err)
+	}
+	panel["train_eras"] = map[string]int{"pre-sandbox": 10, "pod": 209}
+	panel["holdout_eras"] = map[string]int{"pod": 90}
+	withEras, err := json.Marshal(panel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := ReadMango(mangoFixture(t, string(withEras)), mangoNow)
+	if want := map[string]int{"pre-sandbox": 10, "pod": 209}; !maps.Equal(m.TrainEras, want) {
+		t.Errorf("train eras %v, want %v", m.TrainEras, want)
+	}
+	if want := map[string]int{"pod": 90}; !maps.Equal(m.HoldoutEras, want) {
+		t.Errorf("holdout eras %v, want %v", m.HoldoutEras, want)
 	}
 }
 

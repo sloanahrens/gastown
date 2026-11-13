@@ -75,6 +75,16 @@ type PanelSplit struct {
 	Train, Holdout PanelSpan
 }
 
+// PanelEras is the landings of each runtime era on each side of the split, so
+// the page can say which regimes a verdict's train and holdout were drawn from.
+// Unknown counts the landings whose landed_at names no instant, which sit on
+// neither side, and Cuts describes the era cuts the split was made under.
+type PanelEras struct {
+	Train, Holdout map[string]int
+	Unknown        int
+	Cuts           string
+}
+
 // PanelMeta is the panel's context outside its targets: how many landings the
 // analysis read, how many hours of snapshots it joined, the weekly series, the
 // regime events, the columns the table lacked and the days the split covered.
@@ -92,6 +102,8 @@ type PanelMeta struct {
 	MissingColumns []string
 	// Split is the day range each side of the split covered.
 	Split PanelSplit
+	// SplitEras counts each side of the split's landings by runtime era.
+	SplitEras PanelEras
 }
 
 // Panel is the panel.json the dashboard reads. Its keys are the dashboard
@@ -110,11 +122,20 @@ type Panel struct {
 	MissingColumns []string `json:"missing_columns,omitempty"`
 	// Train and Holdout are the day ranges the split cut, so the page can date
 	// each verdict. Absent for a side with no dated landing.
-	Train   *PanelSpan    `json:"train,omitempty"`
-	Holdout *PanelSpan    `json:"holdout,omitempty"`
-	Weekly  []PanelWeek   `json:"weekly"`
-	Events  []PanelEvent  `json:"events"`
-	Targets []PanelTarget `json:"targets"`
+	Train   *PanelSpan `json:"train,omitempty"`
+	Holdout *PanelSpan `json:"holdout,omitempty"`
+	// TrainEras and HoldoutEras count each side's landings by runtime era
+	// (pre-sandbox, sandbox, pod), so each verdict names the regimes it was
+	// measured across. Absent for a side with no landing.
+	TrainEras   map[string]int `json:"train_eras,omitempty"`
+	HoldoutEras map[string]int `json:"holdout_eras,omitempty"`
+	// UnknownEras counts the landings whose landed_at names no instant; they sit
+	// on neither side of the split. EraCuts names where each era cut came from.
+	UnknownEras int           `json:"unknown_eras,omitempty"`
+	EraCuts     string        `json:"era_cuts,omitempty"`
+	Weekly      []PanelWeek   `json:"weekly"`
+	Events      []PanelEvent  `json:"events"`
+	Targets     []PanelTarget `json:"targets"`
 }
 
 // PanelTarget is one target's line in the panel. A skipped target carries its
@@ -179,6 +200,8 @@ func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 	if !meta.Split.Holdout.empty() {
 		p.Holdout = &meta.Split.Holdout
 	}
+	p.TrainEras, p.HoldoutEras = meta.SplitEras.Train, meta.SplitEras.Holdout
+	p.UnknownEras, p.EraCuts = meta.SplitEras.Unknown, meta.SplitEras.Cuts
 	for _, t := range results {
 		p.Targets = append(p.Targets, panelTarget(t))
 	}

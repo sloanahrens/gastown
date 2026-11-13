@@ -156,7 +156,7 @@ func TestPrepareDropsEachRule(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p := Prepare(tc.header, splitRows(3), tc.explain, tc.target)
+			p := Prepare(tc.header, SplitByEra(splitRows(3), defaultEraCuts()), tc.explain, tc.target)
 			if got := strings.Join(p.Predictors, ","); got != strings.Join(tc.predictor, ",") {
 				t.Errorf("predictors = %s, want %s", got, strings.Join(tc.predictor, ","))
 			}
@@ -175,7 +175,7 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	// the extract does not compare an estimate's write time with the dispatch, so
 	// an estimate written after dispatch can reach a predictor. Only the report
 	// applies that check (it scores on sp_estimated_at, which is explain-only).
-	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,sp_minutes,unknown_metric"
+	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,sp_minutes,runtime_era,unknown_metric"
 	tests := []struct {
 		target string
 		want   string
@@ -186,7 +186,7 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.target, func(t *testing.T) {
 			t.Parallel()
-			p := Prepare(header, splitRows(10), explainOnlyColumns, tc.target)
+			p := Prepare(header, SplitByEra(splitRows(10), defaultEraCuts()), explainOnlyColumns, tc.target)
 			if got := strings.Join(p.Predictors, ","); got != tc.want {
 				t.Errorf("predictors = %s, want %s", got, tc.want)
 			}
@@ -210,7 +210,7 @@ func TestPrepareCountsPositivesFromTheTargetCell(t *testing.T) {
 	rows[5]["manual_rescue"] = "1" // another target's positive is not this target's
 	rows[2]["rejected_before_landing"] = ""
 
-	p := Prepare(landingColumns, rows, nil, "rejected_before_landing")
+	p := Prepare(landingColumns, SplitByEra(rows, defaultEraCuts()), nil, "rejected_before_landing")
 	if len(p.Train) != 7 {
 		t.Fatalf("train = %d rows, want the 0.7 split's 7", len(p.Train))
 	}
@@ -237,7 +237,7 @@ func TestPrepareCountsAPositiveWrittenAnotherWay(t *testing.T) {
 	rows[4]["rejected_before_landing"] = "false"
 	rows[8]["rejected_before_landing"] = "1.0"
 
-	p := Prepare(landingColumns, rows, nil, "rejected_before_landing")
+	p := Prepare(landingColumns, SplitByEra(rows, defaultEraCuts()), nil, "rejected_before_landing")
 	if p.TrainPositives != 2 {
 		t.Errorf("train positives = %d, want 2 (rows 0 and 1)", p.TrainPositives)
 	}
@@ -255,7 +255,7 @@ func TestPrepareWithoutPositivesLeavesTheDateEmpty(t *testing.T) {
 	for _, r := range rows {
 		r["reached_overrun_stop"] = "0"
 	}
-	p := Prepare(landingColumns, rows, nil, "reached_overrun_stop")
+	p := Prepare(landingColumns, SplitByEra(rows, defaultEraCuts()), nil, "reached_overrun_stop")
 	if p.TrainPositives != 0 || p.HoldoutPositives != 0 {
 		t.Errorf("positives = %d/%d, want none", p.TrainPositives, p.HoldoutPositives)
 	}
