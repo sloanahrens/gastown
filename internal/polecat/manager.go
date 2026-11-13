@@ -1139,7 +1139,7 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 
 // resumeFetchTimeout bounds the fetch of a resume branch. That fetch carries a
 // whole branch's history, not the small targeted query git.RemoteQueryTimeout
-// bounds, so a slow link must not cut it at the query's 30 seconds (gt-nh02an).
+// bounds, so a slow link must not cut it at the remote-query bound (gt-nh02an).
 const resumeFetchTimeout = 2 * time.Minute
 
 // addWithOptionsLocked performs the expensive parts of polecat creation

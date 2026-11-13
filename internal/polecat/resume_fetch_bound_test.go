@@ -41,7 +41,7 @@ func recordResumeFetchesOn(mgr *Manager, w *world, log *resumeFetchLog) {
 
 // TestAddNamedWithOptions_ResumeFetchUsesTheBranchFetchBound pins gt-nh02an: the
 // create path's resume fetch is a whole-branch fetch, so it carries the
-// resume bound, not the 30 seconds FetchBranch applies to a remote query.
+// resume bound, not the remote-query bound FetchBranch applies.
 func TestAddNamedWithOptions_ResumeFetchUsesTheBranchFetchBound(t *testing.T) {
 	t.Parallel()
 	mgr, mayorRig, _, w := canonicalRig(t)
