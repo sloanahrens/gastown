@@ -494,8 +494,17 @@ func TestTownHealthPostLandMode(t *testing.T) {
 	writeJSONFile(t, RedMainStatePath(d.config.TownRoot, "gastown"), landworker.MainState{
 		LastGreen: "aaaa", LastRun: "aaaa", LastGreenAt: now.Add(-time.Hour),
 	})
+	// The rig repository holds a workflow on main that posts the context the
+	// settings name below, so a read of that context is not UNKNOWN.
+	f := useGitfake(t, d)
+	repo := filepath.Join(d.config.TownRoot, "gastown", ".repo.git")
+	f.InitBare(t, repo)
+	f.SetRef(t, repo, "refs/remotes/origin/main", f.Commit(t, repo, "main", "main's tip", map[string]string{
+		"README.md":                 "# gastown\n",
+		".forgejo/workflows/ci.yml": "name: ci\non: push\njobs:\n  post-land:\n    runs-on: ci-base\n",
+	}))
 
-	read := func() townhealth.RigMain {
+	readRig := func() townhealth.RigMain {
 		t.Helper()
 		ms, err := s.Mains()
 		if err != nil {
@@ -505,6 +514,14 @@ func TestTownHealthPostLandMode(t *testing.T) {
 			t.Fatalf("Mains() = %+v, want the one landing rig", ms)
 		}
 		return ms[0]
+	}
+	read := func() townhealth.RigMain {
+		t.Helper()
+		got := readRig()
+		if got.Err != nil {
+			t.Fatalf("Mains() Err = %v, want none", got.Err)
+		}
+		return got
 	}
 
 	if got := read(); got.PostLand != (townhealth.PostLandCheck{}) {
@@ -521,21 +538,21 @@ func TestTownHealthPostLandMode(t *testing.T) {
 	}
 
 	writeJSONFile(t, settings, map[string]any{"type": "rig-settings", "version": 1,
-		"merge_queue": map[string]any{"post_land_status_context": "ci / post-land"}})
-	if got := read().PostLand; got != (townhealth.PostLandCheck{Context: "ci / post-land"}) {
+		"merge_queue": map[string]any{"post_land_status_context": "ci / post-land (push)"}})
+	if got := read().PostLand; got != (townhealth.PostLandCheck{Context: "ci / post-land (push)"}) {
 		t.Errorf("PostLand with a context = %+v, want the context alone", got)
 	}
 
 	writeJSONFile(t, settings, map[string]any{"type": "rig-settings", "version": 1,
-		"merge_queue": map[string]any{"post_land_command": "true", "post_land_status_context": "ci / post-land"}})
-	if got := read().PostLand; got != (townhealth.PostLandCheck{Command: "true", Context: "ci / post-land"}) {
+		"merge_queue": map[string]any{"post_land_command": "true", "post_land_status_context": "ci / post-land (push)"}})
+	if got := read().PostLand; got != (townhealth.PostLandCheck{Command: "true", Context: "ci / post-land (push)"}) {
 		t.Errorf("PostLand with both = %+v, want both, the context deciding", got)
 	}
 
 	if err := os.WriteFile(settings, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(); got.Err == nil {
+	if got := readRig(); got.Err == nil {
 		t.Errorf("PostLand with an unreadable settings file = %+v, want the read error rather than no setting", got)
 	}
 }
