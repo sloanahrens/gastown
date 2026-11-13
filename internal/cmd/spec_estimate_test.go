@@ -474,6 +474,58 @@ func TestSpecEstimateRefusesOutsideATown(t *testing.T) {
 	}
 }
 
+// The command's production wiring, not only its refusal: the town is found, the
+// estimator is handed the rig the bead's ID prefix routes to (specBeadRig), and
+// the labels and the note land in the store the wiring was given.
+func TestSpecEstimateWiringCarriesTheBeadsRigAndWritesTheStore(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(town, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db := specEstimateSeed()
+	stub := specEstimateOK()
+	var gotRig string
+	var storeFor []string
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+
+	err := runSpecEstimateWired(cmd, []string{"gt-est"},
+		func() (string, error) { return town, nil },
+		func(townRoot, beadID string) specEstimateStore {
+			storeFor = []string{townRoot, beadID}
+			return db
+		},
+		func(ctx context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error) {
+			gotRig = deps.Rig
+			return stub.run(ctx, deps, issue)
+		})
+	if err != nil {
+		t.Fatalf("runSpecEstimateWired: %v", err)
+	}
+	if gotRig != "gastown" {
+		t.Errorf("the estimator got rig %q, want gastown (the rig the gt- prefix routes to)", gotRig)
+	}
+	if !slices.Equal(storeFor, []string{town, "gt-est"}) {
+		t.Errorf("the store was built for %v, want the town and the bead", storeFor)
+	}
+	labels := specEstimateLabelsOn(t, db)
+	for _, want := range []string{"sp:5", "sp-rung:shape-jev", "sp-minutes:6.3"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("labels = %v, want %s", labels, want)
+		}
+	}
+	if comments := specEstimateCommentsOn(t, db); len(comments) != 1 || !strings.HasPrefix(comments[0], "SP ESTIMATE v1 sp:5 rung:shape-jev") {
+		t.Errorf("comments = %v, want the one estimate note", comments)
+	}
+}
+
 // writeSpecEstimateDaemon makes a temp town whose patrol config is body:
 // mayor/daemon.json, the file daemon.ReadPatrolConfig loads.
 func writeSpecEstimateDaemon(t *testing.T, body string) string {

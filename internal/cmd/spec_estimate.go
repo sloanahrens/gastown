@@ -133,19 +133,33 @@ func runSpecEstimate(cmd *cobra.Command, args []string) error {
 // runSpecEstimateFrom is runSpecEstimate with the town-root lookup given, so a
 // test drives its refusal without depending on the working directory.
 func runSpecEstimateFrom(cmd *cobra.Command, args []string, findTown func() (string, error)) error {
+	return runSpecEstimateWired(cmd, args, findTown,
+		func(townRoot, beadID string) specEstimateStore {
+			return beads.New(resolveBeadDirFromTownRoot(townRoot, beadID))
+		},
+		estimate.Estimate)
+}
+
+// runSpecEstimateWired is the command's production wiring with the store and
+// the estimator given: it finds the town, builds the inputs from the town's
+// settings and the bead's rig, and runs the estimate. A test drives the whole
+// wiring through a fake store and a stub estimator.
+func runSpecEstimateWired(cmd *cobra.Command, args []string, findTown func() (string, error),
+	newStore func(townRoot, beadID string) specEstimateStore,
+	estimateFn func(ctx context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error)) error {
 	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
 	beadID := args[0]
 	run := specEstimateRunner{
-		Estimate: estimate.Estimate,
+		Estimate: estimateFn,
 		Deps: func() (estimate.Deps, error) {
 			return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), cmd.ErrOrStderr())
 		},
 	}
 	opts := specEstimateOpts{Force: specEstimateForce, DryRun: specEstimateDryRun, JSON: specEstimateJSON}
-	return runSpecEstimateOn(cmd.OutOrStdout(), beadID, beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)), opts, run)
+	return runSpecEstimateOn(cmd.OutOrStdout(), beadID, newStore(townRoot, beadID), opts, run)
 }
 
 // runSpecEstimateOn is runSpecEstimate with the store and the runner given, so
