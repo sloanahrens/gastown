@@ -649,19 +649,18 @@ func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 	}
 }
 
-// pointerFS is a town whose worktree pointer at pointer fails to be stat'd when
-// lstatErr is set, and to be opened when openErr is set. It implements
-// fs.ReadLinkFS, so fs.Lstat calls its Lstat rather than opening the file.
+// pointerFS is a town whose entries fail at named paths: a stat fails at the
+// lstatErr paths and an open at the openErr paths. It implements fs.ReadLinkFS,
+// so fs.Lstat calls its Lstat rather than opening the file.
 type pointerFS struct {
 	fs.FS
-	pointer  string
-	lstatErr error
-	openErr  error
+	lstatErr map[string]error
+	openErr  map[string]error
 }
 
 func (f pointerFS) Lstat(name string) (fs.FileInfo, error) {
-	if name == f.pointer && f.lstatErr != nil {
-		return nil, &fs.PathError{Op: "lstat", Path: name, Err: f.lstatErr}
+	if err, ok := f.lstatErr[name]; ok {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: err}
 	}
 	return fs.Lstat(f.FS, name)
 }
@@ -671,41 +670,47 @@ func (f pointerFS) ReadLink(name string) (string, error) {
 }
 
 func (f pointerFS) Open(name string) (fs.File, error) {
-	if name == f.pointer && f.openErr != nil {
-		return nil, &fs.PathError{Op: "open", Path: name, Err: f.openErr}
+	if err, ok := f.openErr[name]; ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
 	return f.FS.Open(name)
 }
 
 // TestRewriteRefusesAWorktreePointerThatCannotBeRead drives the bare repository's
-// worktree pointer through each read the walk makes. The control runs the same
-// town with no failure, so a pass that errors for another reason cannot pass the
-// injected rows.
+// worktree entries through each read the walk makes: the worktree directory is
+// listed for its kept copies, and the pointer is stat'd and then read. The
+// control runs the same town with no failure, so a pass that errors for another
+// reason cannot pass the injected rows. Each injected row names the path that
+// failed.
 func TestRewriteRefusesAWorktreePointerThatCannotBeRead(t *testing.T) {
 	t.Parallel()
-	const pointer = "rig/.repo.git/worktrees/w/gitdir"
+	const (
+		dir     = "rig/.repo.git/worktrees/w"
+		pointer = dir + "/gitdir"
+	)
 	town := fstest.MapFS{pointer: {Data: []byte(rewriteOldRoot + "\n")}}
 	cases := []struct {
 		name string
 		fsys pointerFS
-		fail bool
+		want string
 	}{
-		{name: "control with no failure", fsys: pointerFS{FS: town, pointer: pointer}},
-		{name: "stat fails", fsys: pointerFS{FS: town, pointer: pointer, lstatErr: errInjected}, fail: true},
-		{name: "open fails", fsys: pointerFS{FS: town, pointer: pointer, openErr: errInjected}, fail: true},
+		{name: "control with no failure", fsys: pointerFS{FS: town}},
+		{name: "worktree directory cannot be listed", fsys: pointerFS{FS: town, openErr: map[string]error{dir: errInjected}}, want: dir},
+		{name: "pointer cannot be stat'd", fsys: pointerFS{FS: town, lstatErr: map[string]error{pointer: errInjected}}, want: pointer},
+		{name: "pointer cannot be read", fsys: pointerFS{FS: town, openErr: map[string]error{pointer: errInjected}}, want: pointer},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := rewriteWith(tc.fsys, t.TempDir(), rewriteQuery(), false, hostRewriteFiles())
-			if !tc.fail {
+			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("rewriteWith with no failure = %v, want nil", err)
 				}
 				return
 			}
-			if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), pointer) {
-				t.Fatalf("rewriteWith = %v, want the injected failure naming %s", err, pointer)
+			if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("rewriteWith = %v, want the injected failure naming %s", err, tc.want)
 			}
 		})
 	}
