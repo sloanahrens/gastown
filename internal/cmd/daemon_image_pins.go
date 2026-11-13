@@ -220,7 +220,7 @@ func validateDaemonImagePinsFlags(f daemonImagePinsFlags, evalSymlinks func(stri
 			return fmt.Errorf("%s %q is not an existing directory", p.flag, p.value)
 		}
 		if daemonimage.IsCanonicalClone(resolved) {
-			return fmt.Errorf("%s %q is or lies inside a canonical clone (.../mayor/rig): the refresh reads that checkout's origin/main, and the canonical clone is never touched", p.flag, p.value)
+			return fmt.Errorf("%s %q is or lies inside a canonical clone: the refresh reads that checkout's origin/main, and the canonical clone is never touched", p.flag, p.value)
 		}
 	}
 	return nil
