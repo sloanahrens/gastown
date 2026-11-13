@@ -17,11 +17,13 @@ const (
 	nativeGtTool = "gt"
 )
 
-// gtHostCommands are the gt command paths that run on the Mac because each reads
-// or prints something only the Mac has, so the daemon pod would answer with its
-// own paths or refuse. town forward plist prints the launchd job whose log paths
-// are under the Mac's ~/gt/daemon; maint plan and maint apply read the Mac's
-// Docker contexts, worktrees, backups and disk (gt-aea89k).
+// gtHostCommands are the gt command paths that run on the Mac because each needs
+// state only the Mac has, which the daemon pod would answer with its own paths or
+// refuse. town forward plist prints the launchd job whose log paths are under the
+// Mac's ~/gt/daemon. maint plan reads the Mac's Docker contexts, worktrees,
+// backups and disk, and maint apply changes them, so it runs in the caller's
+// directory with the caller's whole environment and acts on the caller's town
+// (gt-aea89k).
 var gtHostCommands = []string{"town forward plist", "maint plan", "maint apply"}
 
 // Native is a tool the config runs on the Mac instead of in the daemon image. The
