@@ -90,10 +90,11 @@ func (t *SandboxTrace) Note(note string) {
 // and the summary's reader is a terminal that would act on it.
 var ansiCSI = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]`)
 
-// noteLine is note as the summary can carry it: one line, its escape sequences
-// removed whole and its whitespace runs and other control characters collapsed
-// to a single space, cut to traceNoteMax runes and marked with an ellipsis when
-// longer.
+// noteLine is note as the summary can carry it: one line, its CSI escape
+// sequences (ansiCSI) removed whole and its whitespace runs and other control
+// characters, which include the lead byte of any other escape sequence,
+// collapsed to a single space, cut to traceNoteMax runes and marked with an
+// ellipsis when longer.
 func noteLine(note string) string {
 	note = ansiCSI.ReplaceAllString(note, "")
 	note = strings.Map(func(r rune) rune {
