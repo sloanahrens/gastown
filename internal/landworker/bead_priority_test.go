@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/land"
 )
 
 // TestPassRecordsTheBeadsPriority: the landing request carries the priority
@@ -34,12 +33,12 @@ func (nilShow) Show(string) (*beads.Issue, error) {
 	return nil, nil
 }
 
-// TestPassLandsWithNoPriorityWhenThePriorityReadFails: the priority read is the
-// only bead read that sees the failing store, and the landing still happens with
-// the priority left nil. A read that fails logs one line; a read that answers
-// with no issue leaves the priority nil without a line, since nothing failed
-// (gt-tnml1k).
-func TestPassLandsWithNoPriorityWhenThePriorityReadFails(t *testing.T) {
+// TestPassLandsWithNoBeadPriorityWhenTheReadFails: the store is swapped before
+// the pass, so the test does not depend on where in the pass a bead read
+// happens, and the landing still happens with the priority left nil. A
+// priority read that fails logs one line; one that answers with no issue leaves
+// the priority nil without a line, since nothing failed (gt-tnml1k, gt-y7g62j).
+func TestPassLandsWithNoBeadPriorityWhenTheReadFails(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -59,17 +58,7 @@ func TestPassLandsWithNoPriorityWhenThePriorityReadFails(t *testing.T) {
 			h := newHarness(t)
 			h.seedReady(t, "gt-abc")
 			logs := h.captureLogs()
-			// The agent-bead hook runs just before the priority read, and nothing
-			// reads the store between it and the lander, so the swapped store is
-			// seen by that read alone. The lander puts the working store back.
-			h.w.AgentBeadID = func(string) string {
-				h.w.Beads = tc.store(h)
-				return ""
-			}
-			h.lander.fn = func(_ int, _ land.Work) (land.Result, error) {
-				h.w.Beads = h.bd
-				return land.Result{LandedCommit: spLanded, PatchID: "pppppppppp"}, nil
-			}
+			h.w.Beads = tc.store(h)
 			rep := h.w.Pass(context.Background())
 			if rep.Landed != 1 || rep.Failed != 0 {
 				t.Fatalf("report %v; want the landing counted and nothing failed", rep)

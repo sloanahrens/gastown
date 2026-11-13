@@ -192,6 +192,14 @@ func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newRealLandFixture(t))
 }
 
+// TestIntegrationRecordCarriesPriorityAndLandingRecord runs the priority and
+// estimate record over real git, where the landing merges and pushes for real
+// before the record is written (gt-nxn93f).
+func TestIntegrationRecordCarriesPriorityAndLandingRecord(t *testing.T) {
+	t.Parallel()
+	recordCarriesPriorityAndEstimate(t, newRealLandFixture(t))
+}
+
 // TestIntegrationLandRecoversUnrecordedSquashLanding: the squash recovery over
 // real git, where the patch a landing wrote and the patch of the head it
 // merged are two diffs git patch-id has to agree on for the landing to be
