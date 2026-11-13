@@ -374,6 +374,21 @@ func TestLogWriterFailurePaths(t *testing.T) {
 			},
 		},
 		{
+			name: "stat and close",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				closeBoom := errors.New("close boom")
+				w.openFile = func(string) (logFile, error) {
+					return &fakeFile{statErr: boom, closeErr: closeBoom}, nil
+				}
+				err := w.open()
+				if !errors.Is(err, boom) || !errors.Is(err, closeBoom) {
+					t.Errorf("open = %v, want both failures", err)
+				}
+				return err
+			},
+		},
+		{
 			name: "write",
 			run: func(t *testing.T) error {
 				w := newLogWriter("call.log", 100, 3)

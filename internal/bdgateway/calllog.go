@@ -400,7 +400,11 @@ func (w *logWriter) open() error {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		// Both failures matter and both are reported: the close error would
+		// otherwise vanish behind the stat error.
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
 		return fmt.Errorf("bdgateway: stat call log: %w", err)
 	}
 	w.file = f
