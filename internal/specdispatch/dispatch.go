@@ -156,17 +156,8 @@ const (
 // operator keeps. A negative priority is an unscored bead, which is never
 // dispatched.
 func Eligible(s Spec, maxPriority int) (bool, string) {
-	status := strings.ToLower(strings.TrimSpace(s.Status))
-	switch {
-	case status == "deferred":
-		return false, "deferred"
-	case status != "open":
-		return false, "status " + status
-	case strings.TrimSpace(s.Assignee) != "":
-		return false, "assigned to " + s.Assignee
-	}
-	if why := NotWorkBead(s); why != "" {
-		return false, "not a work bead: " + why
+	if why := stateRefusal(s); why != "" {
+		return false, why
 	}
 	if !IsDispatchType(s.Type) {
 		return false, "type " + strings.ToLower(strings.TrimSpace(s.Type))
@@ -204,15 +195,29 @@ func Eligible(s Spec, maxPriority int) (bool, string) {
 	return true, ""
 }
 
-// ReportableRefusal reports whether an Eligible refusal, given its reason, is
-// one the tick reports as a skip line on a bead that wears no board-carried
-// label: a type the dispatcher does not take. An operator files a chore
-// expecting the dispatcher to take it, so the tick log and the dry run have to
-// name the refusal. The other refusals are the bead's own state, kind or
-// backlog priority, and reporting them would print a line per bead per tick
-// (gt-jr5elm). A backlog bead past the priority ceiling is not reported.
-func ReportableRefusal(why string) bool {
-	return strings.HasPrefix(why, "type ")
+// stateRefusal is the reason a bead's own status, assignee or kind refuses it,
+// or "" when none does. Eligible asks it before the type check, so
+// ReportableRefusal asks it too.
+func stateRefusal(s Spec) string {
+	status := strings.ToLower(strings.TrimSpace(s.Status))
+	switch {
+	case status == "deferred":
+		return "deferred"
+	case status != "open":
+		return "status " + status
+	case strings.TrimSpace(s.Assignee) != "":
+		return "assigned to " + s.Assignee
+	}
+	if why := NotWorkBead(s); why != "" {
+		return "not a work bead: " + why
+	}
+	return ""
+}
+
+// ReportableRefusal reports whether Eligible refuses s because its type is one
+// the dispatcher does not take.
+func ReportableRefusal(s Spec) bool {
+	return stateRefusal(s) == "" && !IsDispatchType(s.Type)
 }
 
 // Order sorts candidates deterministically: priority (P0 first), then

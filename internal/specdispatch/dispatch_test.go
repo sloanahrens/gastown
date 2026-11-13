@@ -276,16 +276,19 @@ func TestReportableRefusalNamesTypeOnly(t *testing.T) {
 		{"in progress", func(s *Spec) { s.Status = "in_progress" }, false},
 		{"crew-only label", func(s *Spec) { s.Labels = []string{CrewOnlyLabel} }, false},
 		{"hold on the record", func(s *Spec) { s.Labels = []string{"needs-human"} }, false},
+		{"assigned chore", func(s *Spec) { s.Type = "chore"; s.Assignee = "gastown/polecats/ruby" }, false},
+		{"deferred chore", func(s *Spec) { s.Type = "chore"; s.Status = "deferred" }, false},
+		{"chore that is not a work bead", func(s *Spec) { s.Type = "chore"; s.Ephemeral = true }, false},
 	}
 	for _, tc := range cases {
 		s := goodSpec()
 		tc.edit(&s)
 		ok, why := Eligible(s, 2)
 		if ok {
-			t.Fatalf("%s: eligible, want a refusal", tc.name)
+			t.Fatalf("%s: eligible, want a refusal (%q)", tc.name, why)
 		}
-		if got := ReportableRefusal(why); got != tc.want {
-			t.Errorf("%s: ReportableRefusal(%q) = %v, want %v", tc.name, why, got, tc.want)
+		if got := ReportableRefusal(s); got != tc.want {
+			t.Errorf("%s: ReportableRefusal = %v, want %v (Eligible said %q)", tc.name, got, tc.want, why)
 		}
 	}
 }
