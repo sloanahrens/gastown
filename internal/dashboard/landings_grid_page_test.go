@@ -95,11 +95,11 @@ func TestLandingsRowsDrawOneLinePerOutcome(t *testing.T) {
 		t.Fatalf("the table drew %d rows, want the queued, running, rejected, failing and landed ones", len(rows))
 	}
 	want := []oneLineRow{
-		{Cells: 10, ID: "gt-queued", Pill: "P1", Title: "gastown · a bead waiting to land"},
-		{Cells: 10, ID: "gt-running", Pill: "–"},
-		{Cells: 10, ID: "gt-rejected", Pill: "P2", Title: "a rejected bead"},
-		{Cells: 10, ID: "gt-failing", Pill: "P3", Title: "a failing bead"},
-		{Cells: 10, ID: "gt-landed", Pill: "P4", Title: "a landed bead"},
+		{Cells: 11, ID: "gt-queued", Pill: "P1", Title: "gastown · a bead waiting to land"},
+		{Cells: 11, ID: "gt-running", Pill: "–"},
+		{Cells: 11, ID: "gt-rejected", Pill: "P2", Title: "a rejected bead"},
+		{Cells: 11, ID: "gt-failing", Pill: "P3", Title: "a failing bead"},
+		{Cells: 11, ID: "gt-landed", Pill: "P4", Title: "a landed bead"},
 	}
 	for i, w := range want {
 		if rows[i].Cells != w.Cells {
@@ -121,8 +121,9 @@ func TestLandingsRowsDrawOneLinePerOutcome(t *testing.T) {
 }
 
 // The two tables read as one format: the Polecats table heads Polecat, Model,
-// Bead, State and Age, the Landings table heads When, then the same Polecat,
-// Model, Bead and State columns, then Polecat time, Score, Gate, om and Ship;
+// Bead, State, Age and Points, the Landings table heads When, then the same
+// Polecat, Model, Bead and State columns, then Polecat time, Points, Score,
+// Gate, om and Ship;
 // and every drawn row fills exactly the columns its table heads (gt-ultode).
 func TestTheLandingsTableHeadsTheSeatTablesColumns(t *testing.T) {
 	t.Parallel()
@@ -153,11 +154,11 @@ func TestTheLandingsTableHeadsTheSeatTablesColumns(t *testing.T) {
 	}
 
 	seatHead := read(`document.getElementById("polecats")`)
-	if got, want := strings.Join(seatHead, "|"), "Polecat|Model|Bead|State|Age"; got != want {
+	if got, want := strings.Join(seatHead, "|"), "Polecat|Model|Bead|State|Age|Points"; got != want {
 		t.Errorf("the Polecats table heads %q, want %q", got, want)
 	}
 	landHead := read(`document.getElementById("trend")`)
-	if got, want := strings.Join(landHead, "|"), "When|Polecat|Model|Bead|State|Polecat time|Score|Gate|om|Ship"; got != want {
+	if got, want := strings.Join(landHead, "|"), "When|Polecat|Model|Bead|State|Polecat time|Points|Score|Gate|om|Ship"; got != want {
 		t.Errorf("the Landings table heads %q, want %q", got, want)
 	}
 
@@ -210,8 +211,8 @@ func TestEveryLandingsFigureSurvivesTheOneLine(t *testing.T) {
   var tbl = __find(document.getElementById("trend"), ".ltable"), tr = tbl.children[1];
   function part(e) { return e ? {text: e.textContent, title: e.title || ""} : null; }
   return {bead: part(tr.children[3]), risk: part(__find(tr.children[3], ".warnc")),
-          ptime: part(tr.children[5]), score: part(tr.children[6]), gate: part(tr.children[7]),
-          om: part(tr.children[8]), ship: part(tr.children[9])};
+          ptime: part(tr.children[5]), score: part(tr.children[7]), gate: part(tr.children[8]),
+          om: part(tr.children[9]), ship: part(tr.children[10])};
 })())`)
 	if err != nil {
 		t.Fatalf("reading the drawn figures: %v", err)
