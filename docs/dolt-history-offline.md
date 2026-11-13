@@ -141,14 +141,17 @@ are the procedure it ran. Nothing here touches the live server on port 3307.
    point `bd` at the host's address. `--network container:gt-rehearsal` puts
    `bd` in the copy's namespace, where the server listens on 3306. Write the
    metadata file (modelled on `.beads/metadata.json`) with the fields `bd`
-   reads to find a server-mode store:
+   reads to find a server-mode store, and the port in `dolt-server.port`
+   beside it (`bd` reads the port from that file, not from metadata.json):
 
    ```bash
    mkdir -p "$SCRATCH/beads"
-   printf '%s\n' '{"backend": "dolt", "dolt_mode": "server", "dolt_database": "gt", "dolt_server_host": "127.0.0.1", "dolt_server_port": 3306}' > "$SCRATCH/beads/metadata.json"
+   printf '%s\n' '{"backend": "dolt", "dolt_mode": "server", "dolt_database": "gt", "dolt_server_host": "127.0.0.1"}' > "$SCRATCH/beads/metadata.json"
+   printf '%s' '3306' > "$SCRATCH/beads/dolt-server.port"
    docker run --rm --network container:gt-rehearsal \
-     -v "$SCRATCH/beads/metadata.json:/work/.beads/metadata.json:ro" -w /work \
-     <image with bd> bd show <id>
+     -v "$SCRATCH/beads/metadata.json:/work/.beads/metadata.json:ro" \
+     -v "$SCRATCH/beads/dolt-server.port:/work/.beads/dolt-server.port:ro" \
+     -w /work <image with bd> bd show <id>
    ```
 
    `<image with bd>` is any image that carries the `bd` binary, such as the

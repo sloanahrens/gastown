@@ -488,9 +488,19 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot strin
 	}
 
 	host := metadata.DoltServerHost
-	port := metadata.DoltServerPort
 	if host == "" {
 		host = "127.0.0.1"
+	}
+	// The port file wins; the deprecated key is the fallback until a port file
+	// exists (gt-49f3pn).
+	port := 0
+	if portData, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port")); err == nil {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(string(portData))); err == nil && parsed > 0 {
+			port = parsed
+		}
+	}
+	if port == 0 {
+		port = metadata.DoltServerPort
 	}
 	if port == 0 {
 		// The town's endpoint, the port Start/Stop/Status use (gt-y3pgh.3).

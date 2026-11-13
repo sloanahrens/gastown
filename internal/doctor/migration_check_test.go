@@ -50,7 +50,8 @@ func setupRigMetadata(t *testing.T, townRoot, rigName, doltDatabase string) {
 	}
 }
 
-// setupServerMetadata creates a .beads/metadata.json with optional host/port fields.
+// setupServerMetadata creates a .beads/metadata.json with an optional host and
+// writes the port to dolt-server.port, the file the port is read from.
 func setupServerMetadata(t *testing.T, beadsDir, host string, port int) {
 	t.Helper()
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -64,15 +65,15 @@ func setupServerMetadata(t *testing.T, beadsDir, host string, port int) {
 	if host != "" {
 		meta["dolt_server_host"] = host
 	}
-	if port != 0 {
-		meta["dolt_server_port"] = port
-	}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		t.Fatalf("marshaling metadata: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
 		t.Fatalf("writing metadata: %v", err)
+	}
+	if port != 0 {
+		writePortFile(t, beadsDir, port)
 	}
 }
 
@@ -159,6 +160,71 @@ func TestGetServerAddr(t *testing.T) {
 			addr, ok := check.getServerAddr(beadsDir, townRoot)
 			if ok != tt.wantOK {
 				t.Fatalf("getServerAddr() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if addr != tt.wantAddr {
+				t.Errorf("getServerAddr() = %q, want %q", addr, tt.wantAddr)
+			}
+		})
+	}
+}
+
+// TestGetServerAddrWithoutThePortKey verifies the probed address takes its port
+// from dolt-server.port before the deprecated metadata.json key, and falls back
+// to the town's port when there is neither (gt-49f3pn).
+func TestGetServerAddrWithoutThePortKey(t *testing.T) {
+	t.Parallel()
+	check := NewDoltServerReachableCheck()
+
+	tests := []struct {
+		name     string
+		metadata string
+		portFile string // empty: no dolt-server.port
+		wantAddr string
+	}{
+		{
+			name:     "port file names the port",
+			metadata: `{"dolt_mode":"server","dolt_server_host":"10.0.0.5"}`,
+			portFile: "4411",
+			wantAddr: "10.0.0.5:4411",
+		},
+		{
+			name:     "no port file falls back to the town's port",
+			metadata: `{"dolt_mode":"server","dolt_server_host":"10.0.0.5"}`,
+			wantAddr: "10.0.0.5:3307",
+		},
+		{
+			name:     "key and a different port file: the file wins",
+			metadata: `{"dolt_mode":"server","dolt_server_port":4407}`,
+			portFile: "4411",
+			wantAddr: "127.0.0.1:4411",
+		},
+		{
+			name:     "key only: the key is the fallback",
+			metadata: `{"dolt_mode":"server","dolt_server_port":4407}`,
+			wantAddr: "127.0.0.1:4407",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := endpointTown(t) // the town's port is 3307
+			beadsDir := filepath.Join(townRoot, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(tt.metadata), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if tt.portFile != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(tt.portFile), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			addr, ok := check.getServerAddr(beadsDir, townRoot)
+			if !ok {
+				t.Fatal("getServerAddr() ok = false, want true")
 			}
 			if addr != tt.wantAddr {
 				t.Errorf("getServerAddr() = %q, want %q", addr, tt.wantAddr)
@@ -331,7 +397,6 @@ func writeServerMetadata(t *testing.T, beadsDir, database, host string, port int
 		"dolt_mode":        "server",
 		"dolt_database":    database,
 		"dolt_server_host": host,
-		"dolt_server_port": port,
 	}
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -340,6 +405,7 @@ func writeServerMetadata(t *testing.T, beadsDir, database, host string, port int
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePortFile(t, beadsDir, port)
 }
 
 func TestDoltOrphanedDatabaseCheck_NoOrphans(t *testing.T) {

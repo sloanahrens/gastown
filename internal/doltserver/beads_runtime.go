@@ -46,13 +46,16 @@ func ReadBeadsRuntimeConfig(beadsDir string) (cfg BeadsRuntimeConfig, ok bool) {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	port := metadata.DoltServerPort
-	if port == 0 {
-		if data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port")); err == nil {
-			if parsed, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && parsed > 0 {
-				port = parsed
-			}
+	// The port file wins; the deprecated key is the fallback until a port file
+	// exists (gt-49f3pn).
+	port := 0
+	if data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port")); err == nil {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && parsed > 0 {
+			port = parsed
 		}
+	}
+	if port == 0 && metadata.DoltServerPort > 0 {
+		port = metadata.DoltServerPort
 	}
 	if port == 0 {
 		port = DefaultPort

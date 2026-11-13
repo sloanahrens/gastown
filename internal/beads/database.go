@@ -311,6 +311,8 @@ func readDoltMetadata(beadsDir string) doltMetadata {
 		return meta
 	}
 	meta.Host = strings.TrimSpace(raw.DoltServerHost)
+	// The port file wins. The deprecated key is read only while no port file
+	// exists, for a rig EnsureMetadata has not reached yet (gt-49f3pn).
 	if meta.Port == "" && raw.DoltServerPort > 0 {
 		meta.Port = strconv.Itoa(raw.DoltServerPort)
 	}

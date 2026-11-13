@@ -2,12 +2,14 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -15,20 +17,13 @@ import (
 // StaleDoltPortCheck detects stale Dolt port files that point to wrong ports.
 // This can cause bd commands to fail with "database not found" errors when
 // they connect to the wrong Dolt server.
-// It also checks metadata.json files for port consistency with the running server.
+// Fix also removes the deprecated dolt_server_port key from metadata.json.
 type StaleDoltPortCheck struct {
 	FixableCheck
-	stalePorts    []stalePortInfo
-	staleMetadata []staleMetadataInfo
+	stalePorts []stalePortInfo
 }
 
 type stalePortInfo struct {
-	path        string
-	port        int
-	correctPort int
-}
-
-type staleMetadataInfo struct {
 	path        string
 	port        int
 	correctPort int
@@ -47,10 +42,10 @@ func NewStaleDoltPortCheck() *StaleDoltPortCheck {
 	}
 }
 
-// Run checks for stale Dolt port files and metadata.json port consistency.
+// Run checks for stale Dolt port files. metadata.json carries no port this
+// check judges: bd reads the port from the port file (gt-49f3pn).
 func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 	c.stalePorts = nil
-	c.staleMetadata = nil
 
 	// Get the correct port from the town's Dolt endpoint. A town that names
 	// none has no port to compare against: skip rather than assume one, since
@@ -93,21 +88,6 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Check metadata.json files for port consistency
-	metadataFiles := c.findMetadataFiles(ctx.TownRoot)
-	for _, metaFile := range metadataFiles {
-		port := c.getPortFromMetadata(metaFile)
-		if port > 0 && port != correctPort {
-			c.staleMetadata = append(c.staleMetadata, staleMetadataInfo{
-				path:        metaFile,
-				port:        port,
-				correctPort: correctPort,
-			})
-			relPath, _ := filepath.Rel(ctx.TownRoot, metaFile)
-			details = append(details, fmt.Sprintf("metadata.json %s has port %d (should be %d)", relPath, port, correctPort))
-		}
-	}
-
 	// Also check for stale dolt config directories with wrong ports
 	staleConfigs := c.findStaleDoltConfigs(ctx.TownRoot, correctPort)
 	for _, config := range staleConfigs {
@@ -115,7 +95,7 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 		details = append(details, fmt.Sprintf("Stale Dolt config directory: %s (contains wrong port configuration)", relPath))
 	}
 
-	if len(c.stalePorts) == 0 && len(c.staleMetadata) == 0 && len(staleConfigs) == 0 {
+	if len(c.stalePorts) == 0 && len(staleConfigs) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -126,13 +106,17 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d stale port file(s), %d stale metadata.json(s), %d stale config dir(s)", len(c.stalePorts), len(c.staleMetadata), len(staleConfigs)),
+		Message: fmt.Sprintf("%d stale port file(s), %d stale config dir(s)", len(c.stalePorts), len(staleConfigs)),
 		Details: details,
 		FixHint: "Run 'gt doctor fix stale-dolt-port' to fix port inconsistencies",
 	}
 }
 
-// Fix removes stale Dolt port files and fixes metadata.json port mismatches.
+// Fix removes stale Dolt port files and removes the deprecated dolt_server_port
+// key from metadata.json files that carry it (gt-49f3pn). The key goes only
+// where the same beads directory has a port file, which Fix writes from the
+// town's endpoint when none is left; with neither, the key is bd's only port
+// source and is kept, and the file is reported.
 func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 	// Remove stale port files
 	for _, info := range c.stalePorts {
@@ -141,14 +125,18 @@ func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
-	// Fix metadata.json files with wrong ports
-	for _, info := range c.staleMetadata {
-		if err := c.fixMetadataPort(info.path, info.correctPort); err != nil {
-			return fmt.Errorf("could not fix metadata.json %s: %w", info.path, err)
+	correctPort := c.getCorrectPort(ctx)
+
+	// Every file is tried: one unparseable metadata.json is reported but does
+	// not stop the key coming out of the others (gt-49f3pn).
+	var errs []error
+	for _, metaFile := range c.findMetadataFiles(ctx.TownRoot) {
+		if err := c.removeDeprecatedPort(metaFile, correctPort); err != nil {
+			errs = append(errs, fmt.Errorf("could not fix metadata.json %s: %w", metaFile, err))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // getCorrectPort returns the town's Dolt port from the config resolver
@@ -239,25 +227,12 @@ func (c *StaleDoltPortCheck) findMetadataFiles(townRoot string) []string {
 	return files
 }
 
-// getPortFromMetadata reads the dolt_server_port from a metadata.json file.
-func (c *StaleDoltPortCheck) getPortFromMetadata(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-
-	var metadata struct {
-		DoltServerPort int `json:"dolt_server_port"`
-	}
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return 0
-	}
-
-	return metadata.DoltServerPort
-}
-
-// fixMetadataPort updates the dolt_server_port in a metadata.json file.
-func (c *StaleDoltPortCheck) fixMetadataPort(path string, correctPort int) error {
+// removeDeprecatedPort deletes the dolt_server_port key from a metadata.json
+// file, preserving every other field. A file without the key is not rewritten.
+// The key is deleted only once the beads directory holds a port file: an
+// existing one, or one written here from correctPort. With neither (no town
+// endpoint) the key stays, since it is the only port source there.
+func (c *StaleDoltPortCheck) removeDeprecatedPort(path string, correctPort int) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -268,15 +243,36 @@ func (c *StaleDoltPortCheck) fixMetadataPort(path string, correctPort int) error
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return err
 	}
+	if _, ok := metadata["dolt_server_port"]; !ok {
+		return nil
+	}
 
-	// Update the port
-	metadata["dolt_server_port"] = correctPort
+	portFile := filepath.Join(filepath.Dir(path), "dolt-server.port")
+	if !hasPortFile(portFile) {
+		if correctPort <= 0 {
+			return errors.New("dolt_server_port kept: no port file to replace it and no town endpoint to write one from")
+		}
+		if err := atomicfile.WriteFile(portFile, []byte(strconv.Itoa(correctPort)), 0644); err != nil {
+			return fmt.Errorf("writing dolt-server.port before removing the key: %w", err)
+		}
+	}
+	delete(metadata, "dolt_server_port")
 
-	// Write back
 	newData, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return err
 	}
 
 	return os.WriteFile(path, newData, 0644)
+}
+
+// hasPortFile reports whether path holds a usable port. A file that does not
+// parse is not a port source, so the caller replaces it.
+func hasPortFile(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	return err == nil && port > 0
 }
