@@ -767,3 +767,73 @@ func TestPlanSameCommitDifferentCommitsStillInstall(t *testing.T) {
 		})
 	}
 }
+
+// TestPodTargetInstallsTheImagesFileCommit: a pod target installs the commit its
+// images file records, not main's tip. Main keeps moving while the pair for one
+// green commit is rolled, and the digest install refuses a file whose commit is
+// not the run's target; the Job's run failed on exactly that (gt-h36j1y).
+func TestPodTargetInstallsTheImagesFileCommit(t *testing.T) {
+	t.Parallel()
+	const installed = "0e8ccc35add1623ed0e08e3a9d72e3d1f535ce49"
+	const imagesCommit = "fda3fa1aa921511beed3a0fcb6b7243958930764"
+	const mainSHA = "c8c9de6f5f66de384ddddaa5433e8036febc177a"
+	p := &fakeProbes{installed: installed, main: mainSHA, published: true}
+
+	steps, target, err := BuildPlan(context.Background(), p, PlanOptions{PodTarget: true, ImagesCommit: imagesCommit})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if target.SHA != imagesCommit {
+		t.Errorf("target SHA = %s, want the images file's commit %s", target.SHA, imagesCommit)
+	}
+	if target.MainSHA != mainSHA {
+		t.Errorf("target MainSHA = %s, want main's tip %s kept for the report", target.MainSHA, mainSHA)
+	}
+	if p.queriedSHA != imagesCommit {
+		t.Errorf("the image was queried for %s, want the images file's commit %s", p.queriedSHA, imagesCommit)
+	}
+	install := stepNamed(t, steps, StepInstall)
+	if !install.WillRun {
+		t.Errorf("install WillRun = false, want true (reason %q)", install.Reason)
+	}
+	if !strings.Contains(install.Reason, "the images file's commit fda3fa1") {
+		t.Errorf("install reason = %q, want it to name the images file's commit", install.Reason)
+	}
+}
+
+// TestPodTargetSkipsInstallWhenThePodAlreadyRunsIt: the pod's daemon already runs
+// the images file's commit and its image is published, so there is nothing to
+// install.
+func TestPodTargetSkipsInstallWhenThePodAlreadyRunsIt(t *testing.T) {
+	t.Parallel()
+	const imagesCommit = "fda3fa1aa921511beed3a0fcb6b7243958930764"
+	p := &fakeProbes{installed: "fda3fa1aa", main: "c8c9de6f5f66de384ddddaa5433e8036febc177a", published: true}
+
+	steps := planFor(t, p, PlanOptions{PodTarget: true, ImagesCommit: imagesCommit})
+	install := stepNamed(t, steps, StepInstall)
+	if install.WillRun {
+		t.Errorf("install WillRun = true, want false: the pod already runs %s (reason %q)", imagesCommit, install.Reason)
+	}
+	if !strings.Contains(install.Reason, "installed build equals the images file's commit") {
+		t.Errorf("install reason = %q, want the already-installed reason", install.Reason)
+	}
+}
+
+// TestHostTargetStillTargetsMainTip: without a pod target the images commit is
+// ignored and the target is main's tip exactly as before.
+func TestHostTargetStillTargetsMainTip(t *testing.T) {
+	t.Parallel()
+	const mainSHA = "c8c9de6f5f66de384ddddaa5433e8036febc177a"
+	p := &fakeProbes{installed: "0e8ccc35a", main: mainSHA, published: true, backup: true}
+
+	steps, target, err := BuildPlan(context.Background(), p, PlanOptions{ImagesCommit: "fda3fa1aa921511beed3a0fcb6b7243958930764"})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if target.SHA != mainSHA {
+		t.Errorf("target SHA = %s, want main's tip %s for a host target", target.SHA, mainSHA)
+	}
+	if reason := stepNamed(t, steps, StepInstall).Reason; !strings.Contains(reason, "differs from main c8c9de6") {
+		t.Errorf("install reason = %q, want the main wording", reason)
+	}
+}

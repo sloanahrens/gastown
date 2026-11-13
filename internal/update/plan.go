@@ -32,6 +32,13 @@ type PlanOptions struct {
 	Only      map[StepName]bool
 	Force     bool
 	PodTarget bool
+	// ImagesCommit is the commit the run's --images values file records. A pod
+	// target installs that commit, not main's tip: main moves while the pair for
+	// one green commit is rolled, and the digest install refuses a file whose
+	// commit is not the run's target. Main's tip is still read, and the plan
+	// carries it as Target.MainSHA for the report. Empty means the target is
+	// main's tip, as it is for every run without a pod target.
+	ImagesCommit string
 }
 
 // podMaintenanceReason is the maintenance step's reason for a pod target: the
@@ -73,9 +80,13 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 	if mainSHA == "" {
 		return nil, target, errors.New("MainSHA: the probe returned an empty sha")
 	}
-	target = Target{SHA: mainSHA, InstalledSHA: installed}
+	targetSHA, targetName := mainSHA, "main"
+	if c := strings.TrimSpace(o.ImagesCommit); o.PodTarget && c != "" {
+		targetSHA, targetName = c, "the images file's commit"
+	}
+	target = Target{SHA: targetSHA, InstalledSHA: installed, MainSHA: mainSHA}
 
-	published, err := p.ImagePublished(ctx, mainSHA)
+	published, err := p.ImagePublished(ctx, targetSHA)
 	if err != nil {
 		return nil, target, fmt.Errorf("ImagePublished: %w", err)
 	}
@@ -97,7 +108,7 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 		maintenance, maintenanceReason = planMaintenance(commits, events, backup, gcDue, gcReason)
 	}
 
-	install, installReason := planInstall(installed, mainSHA, published, o.Force)
+	install, installReason := planInstall(installed, targetSHA, targetName, published, o.Force)
 
 	followReason := "no install is planned"
 	if install {
@@ -127,16 +138,16 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 // installed build is current when its sha names the same commit as main, so a
 // short installed sha matches main's full one; sameCommit holds that rule, and
 // values under seven characters never match, so an unknown build is replaced.
-func planInstall(installed, mainSHA string, published, force bool) (bool, string) {
+func planInstall(installed, targetSHA, targetName string, published, force bool) (bool, string) {
 	switch {
-	case !sameCommit(installed, mainSHA):
-		return true, fmt.Sprintf("installed build %s differs from main %s", shortSHA(installed), shortSHA(mainSHA))
+	case !sameCommit(installed, targetSHA):
+		return true, fmt.Sprintf("installed build %s differs from %s %s", shortSHA(installed), targetName, shortSHA(targetSHA))
 	case !published:
-		return true, fmt.Sprintf("the image for main %s is not published", shortSHA(mainSHA))
+		return true, fmt.Sprintf("the image for %s %s is not published", targetName, shortSHA(targetSHA))
 	case force:
 		return true, "install forced"
 	default:
-		return false, "installed build equals main"
+		return false, "installed build equals " + targetName
 	}
 }
 

@@ -1037,3 +1037,43 @@ func TestUpdateRollbackAcceptsPodInCluster(t *testing.T) {
 		t.Errorf("rollback patch annotation = %q, want the recorded polecat %q", got, f.previous.Polecat)
 	}
 }
+
+// TestUpdatePodInstalledProbeReadsTheDaemonPod: the plan's installed build for a
+// pod target is the build the daemon's pod runs, read through kubectl exec, not
+// the build of the process running the update (the update Job runs the NEW
+// image, so its own build would read as already installed, gt-h36j1y).
+func TestUpdatePodInstalledProbeReadsTheDaemonPod(t *testing.T) {
+	t.Parallel()
+	run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+		return "gt version " + rollbackNewCommit + " built on test\n", 0, nil
+	}
+	own := stubPlanProbes{installed: "the-jobs-own-build"}
+	deps, err := podDaemonDeps(updateSeams{PodRun: run}, update.Deps{Probes: own}, &podDaemonTarget{Context: podSwapContext, Namespace: podSwapNamespace, Deployment: k8sdaemon.Name})
+	if err != nil {
+		t.Fatalf("podDaemonDeps: %v", err)
+	}
+	got, err := deps.Probes.InstalledSHA(context.Background())
+	if err != nil {
+		t.Fatalf("InstalledSHA: %v", err)
+	}
+	if got != rollbackNewCommit {
+		t.Errorf("InstalledSHA = %q, want the pod's build %q", got, rollbackNewCommit)
+	}
+	if main, _ := deps.Probes.MainSHA(context.Background()); main != own.main {
+		t.Errorf("MainSHA = %q, want the run's own probe %q", main, own.main)
+	}
+}
+
+// stubPlanProbes is update.Probes with fixed answers, for the pod probe test.
+type stubPlanProbes struct{ installed, main string }
+
+func (s stubPlanProbes) InstalledSHA(context.Context) (string, error) { return s.installed, nil }
+func (s stubPlanProbes) MainSHA(context.Context) (string, error)      { return s.main, nil }
+func (s stubPlanProbes) ArchiveBehind(context.Context) (int, int, error) {
+	return 0, 0, nil
+}
+func (s stubPlanProbes) BackupToday(context.Context) (bool, error) { return true, nil }
+func (s stubPlanProbes) GCDue(context.Context) (bool, string, error) {
+	return false, "", nil
+}
+func (s stubPlanProbes) ImagePublished(context.Context, string) (bool, error) { return true, nil }
