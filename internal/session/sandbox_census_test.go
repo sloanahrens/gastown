@@ -9,7 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+// censusGuard bounds each wait a census test makes on a goroutine it started.
+// A test that passes returns long before it; the guard only turns a hang into a
+// failure that names the step.
+const censusGuard = 5 * time.Second
 
 // censusGateway is the openshell a census test drives. It answers `sandbox
 // list` from listing, fails the first listErrs list calls, and counts the list
@@ -262,6 +268,14 @@ func TestSlingCensus(t *testing.T) {
 		}
 		gw := &censusGateway{listing: listingOf(rows), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 		censusTown(t, gw, names)
+		// Release the blocked list on every path, so a failure above does not
+		// leave the seats' goroutines waiting on it.
+		var release sync.Once
+		openGate := func() { release.Do(func() { close(gw.gate) }) }
+		t.Cleanup(openGate)
+		// A seat whose answer is already kept, read while the list is blocked.
+		known := seatKey("gt-rig-known", "show-environment", []string{"GT_ROLE"})
+		installedCensus().keep(known, "GT_ROLE=rig/polecats/known")
 		var p seatProbes
 		var wg sync.WaitGroup
 		errs := make(chan error, len(names))
@@ -272,11 +286,27 @@ func TestSlingCensus(t *testing.T) {
 				errs <- readSeat(name, &p)
 			}(n)
 		}
-		<-gw.entered
+		select {
+		case <-gw.entered:
+		case <-time.After(censusGuard):
+			t.Fatalf("no list call reached the gateway within %s", censusGuard)
+		}
 		// The first read is inside the list call. A census lock held across
 		// that call would block this lookup until the gate opens.
-		installedCensus().cached("gt-rig-s00\x00show-environment\x00GT_ROLE")
-		close(gw.gate)
+		lookup := make(chan bool, 1)
+		go func() {
+			_, ok := installedCensus().cached(known)
+			lookup <- ok
+		}()
+		select {
+		case ok := <-lookup:
+			if !ok {
+				t.Error("cache lookup during the in-flight list found no kept answer for the known seat")
+			}
+		case <-time.After(censusGuard):
+			t.Fatalf("the census lock was held across the list call: a cache lookup did not return within %s", censusGuard)
+		}
+		openGate()
 		wg.Wait()
 		close(errs)
 		for err := range errs {
