@@ -319,11 +319,13 @@ recorded pair back.
 
 --pod-context and --pod-namespace, given together, name the Deployment of a
 daemon that runs as a pod: the pair moves that Deployment, and the daemon's
-build is read from its pod rather than the state file. --pod-in-cluster with
---pod-namespace names the same Deployment with no context, for a job that runs
-in the cluster the pod is in. A pod run takes no dispatch hold and plans
-neither the drain nor the lift: the pod's daemon finishes its landing step and
-starts nothing new when it is stopped.
+build is read from its pod rather than the state file. A pod target's install
+needs --images: only an image pair moves the pod's daemon, so a run that would
+install without one is refused, and --skip install runs the other steps.
+--pod-in-cluster with --pod-namespace names the same Deployment with no
+context, for a job that runs in the cluster the pod is in. A pod run takes no
+dispatch hold and plans neither the drain nor the lift: the pod's daemon
+finishes its landing step and starts nothing new when it is stopped.
 
 Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 5 when another run holds the lock, 130 when interrupted.`,

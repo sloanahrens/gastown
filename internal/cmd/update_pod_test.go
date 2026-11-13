@@ -535,6 +535,23 @@ func TestUpdatePodRollbackHelpNamesTheFlags(t *testing.T) {
 	}
 }
 
+// TestUpdatePodHelpSaysThePodInstallNeedsImages: gt update --help says a pod
+// target's install needs --images, since a run that would install without one
+// is refused. Without it an operator reads the pod flags and expects the host
+// install to move the pod's daemon.
+func TestUpdatePodHelpSaysThePodInstallNeedsImages(t *testing.T) {
+	t.Parallel()
+	seams := updateSeams{FindTownRoot: func() (string, error) { return t.TempDir(), nil }}
+	out, err := runPodCommand(t, seams, "--help")
+	if err != nil {
+		t.Fatalf("gt update --help: %v", err)
+	}
+	want := "needs --images"
+	if !strings.Contains(out, want) {
+		t.Errorf("gt update help does not say the pod install needs --images; want %q in:\n%s", want, out)
+	}
+}
+
 func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 	t.Parallel()
 
