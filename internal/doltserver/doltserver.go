@@ -1863,22 +1863,27 @@ func (h *host) killVerified(pid int, verifyErr error) error {
 }
 
 // stopOrphanedServer stops a server IsRunning reported whose data directory
-// is gone. When Stop refuses or fails it force-kills — but only a verified
-// dolt of this town. A PID that is not this town's dolt means the pid file is
-// stale: it is removed and nothing is signaled (gt-p7zy0, gt-l9s6f).
-func (h *host) stopOrphanedServer(townRoot string, pid int) {
-	stopErr := h.Stop(townRoot)
-	if stopErr == nil || pid <= 0 {
-		return
+// is gone, and reports whether it is gone afterwards. When Stop refuses or
+// fails it force-kills — but only a verified dolt of this town. A PID that is
+// not this town's dolt means the pid file is stale: it is removed and nothing
+// is signaled (gt-p7zy0, gt-l9s6f). A kill that leaves the process alive is
+// not a stop.
+func (h *host) stopOrphanedServer(townRoot string, pid int) bool {
+	if stopErr := h.Stop(townRoot); stopErr == nil {
+		return true
+	}
+	if pid <= 0 {
+		return false
 	}
 	if err := h.killTownDolt(townRoot, pid); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
 		if IsStalePIDFileErr(err) {
 			_ = os.Remove(h.DefaultConfig(townRoot).PidFile)
 		}
-		return
+		return false
 	}
 	h.wait(100 * time.Millisecond)
+	return !h.processAlive(pid)
 }
 
 // evictPortSquatter force-kills a dolt holding port that IsRunning did not
@@ -3408,14 +3413,19 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 	// Check if server is running
 	running, runningPID, _ := h.IsRunning(townRoot)
 
-	if running {
-		// If the data directory doesn't exist, the server is orphaned (e.g., user
-		// deleted ~/gt and re-ran gt install while an old server was still running).
-		// Stop the orphaned server and fall through to the offline init path.
+	if running && runningPID > 0 {
+		// If the data directory doesn't exist, a server gt owns is orphaned (e.g.,
+		// user deleted ~/gt and re-ran gt install while an old server was still
+		// running). Stop it and fall through to the offline init path. Only a stop
+		// that happened clears running: a server with no local PID is not ours to
+		// stop (Stop would docker-stop an external container), and offline init
+		// would register the rig where the live server never reads it (gt-rfxs85).
 		if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
-			h.stopOrphanedServer(townRoot, runningPID)
-			running = false
+			running = !h.stopOrphanedServer(townRoot, runningPID)
+			if running {
+				fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) did not stop; creating the database on the live server\n", runningPID)
+			}
 		}
 	}
 
