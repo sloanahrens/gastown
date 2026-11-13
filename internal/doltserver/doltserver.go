@@ -4554,6 +4554,8 @@ func RepairWorkspace(townRoot string, ws BrokenWorkspace) (string, error) {
 // correct for rigs whose Dolt database name matches their directory name.
 // Callers that know the rig uses a short DB prefix (e.g. "be" for "beads_el")
 // should pass it as doltDatabase so metadata.json gets the right value.
+// It also writes the dolt-server.port file bd reads the port from, or removes a
+// stale one when the town names no endpoint.
 func (h *host) EnsureMetadata(townRoot, rigName string, doltDatabase ...string) error {
 	// Use FindOrCreateRigBeadsDir to atomically resolve and create the directory,
 	// avoiding the TOCTOU race where the directory state changes between
@@ -4572,8 +4574,10 @@ func EnsureMetadata(townRoot, rigName string, doltDatabase ...string) error {
 }
 
 // EnsureMetadataForBeadsDir writes or updates metadata.json in a known beads
-// directory. It only writes local config and does not require the Dolt server or
-// database to exist, so callers can leave a recoverable rig behind after partial
+// directory, and writes the dolt-server.port file beside it that names the
+// town's endpoint (or removes that file when the town names none). It only
+// writes local config and does not require the Dolt server or database to
+// exist, so callers can leave a recoverable rig behind after partial
 // initialization failures.
 func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, doltDatabase ...string) error {
 	if beadsDir == "" {
@@ -4623,7 +4627,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// bd dials the port dolt-server.port names, so the file names only an
 	// endpoint the town writes on disk. A port the host injects, or the default,
 	// is not the town's endpoint (gt-k3kb52). One resolver decides both whether
-	// the file is written and which port it holds.
+	// the file is written or removed and which port it holds.
 	filePort := 0
 	if persisted, named := h.resolvePersistedEndpoint(townRoot); named {
 		filePort = persisted.Port
@@ -4687,8 +4691,8 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	}
 
 	// Fast path: avoid rewriting metadata.json when already correct. The port
-	// file is written on this path too, so a current metadata.json still gets
-	// it (gt-2r2och).
+	// file is written or removed on this path too, so a current metadata.json
+	// still gets it (gt-2r2och).
 	if !changed {
 		return writeDoltPortFile(beadsDir, filePort)
 	}
@@ -4718,15 +4722,18 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 // writeDoltPortFile writes the decimal port to beadsDir/dolt-server.port, the
 // source bd reads the port from (gt-2r2och). It rewrites the file only when its
 // content differs, so an unchanged port leaves the file's mtime alone. A port of
-// 0 writes nothing (gt-y3pgh.3): the caller passes 0 for a town that names no
-// endpoint on disk (gt-k3kb52). A file already there is not removed when a
-// later call passes 0: nothing deletes it, so a town that stops naming its
-// endpoint keeps the last port it named (gt-k3kb52).
+// 0 removes the file, and any removal failure but the file being absent is
+// returned: the caller passes 0 for a town that names no endpoint on disk
+// (gt-k3kb52), and the port file must not outlive the endpoint it named
+// (gt-22vrye).
 func writeDoltPortFile(beadsDir string, port int) error {
+	portPath := filepath.Join(beadsDir, "dolt-server.port")
 	if port <= 0 {
+		if err := os.Remove(portPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing dolt-server.port: %w", err)
+		}
 		return nil
 	}
-	portPath := filepath.Join(beadsDir, "dolt-server.port")
 	want := []byte(strconv.Itoa(port))
 	if data, err := os.ReadFile(portPath); err == nil && bytes.Equal(data, want) {
 		return nil
