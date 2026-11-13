@@ -41,7 +41,10 @@ For COMPLETED, gt done:
    READY TO LAND notes block naming branch, head and target)
 6. Records completion on the agent bead and retires the session
 
-A polecat cannot skip the gate, and gt done never lands directly.
+A polecat cannot skip the gate, and gt done never lands directly. A polecat's
+COMPLETED submit is also refused while a major or critical finding of the last
+LOCAL ROUND on its work bead has no answer: fix it, then answer it with
+gt review-preview reply.
 
 Crew (GT_ROLE or BD_ACTOR <rig>/crew/<name>, or run from a <rig>/crew/<name>
 worktree with no polecat identity) submit a
@@ -173,6 +176,9 @@ func runDone(cmd *cobra.Command, args []string) error {
 		RecordFindings: func(cwd, issueID string, findings []string) {
 			recordDoneFindings(os.Stderr, cwd, issueID, findings, done.OpenSourceStore)
 		},
+		// The local-round gate checks the work bead done.Run resolves for this
+		// submit, before the submit writes anything (gt-mxz8kx).
+		LocalRound:  localRoundGate(doneStatus, liveLocalRoundCheck(cwd), os.Stderr),
 		LocalGate:   doneLocalGate,
 		RetryDelays: pushLandingRetryDelays,
 		Sleep:       doneRetrySleep,

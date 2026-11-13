@@ -127,6 +127,14 @@ type Options struct {
 	// refusal. Nil skips the write.
 	RecordFindings func(cwd, issueID string, findings []string)
 
+	// LocalRound is the gate on a polecat's COMPLETED submit that refuses while
+	// the last LOCAL ROUND on the work bead leaves a blocking finding unanswered
+	// (gt-mxz8kx). Run calls it once with the work bead it resolved for this
+	// submit (empty when none resolved) and the branch, after the findings are
+	// recorded and before the heartbeat, the rebase, the push and the READY TO
+	// LAND block; an error refuses the submit. Nil skips the gate.
+	LocalRound func(issueID, branch string) error
+
 	// LocalGate builds the local pre-submit gate for a rig. Nil is the real
 	// land gate. The command layer supplies its own indirection so cmd-level
 	// integration tests can substitute a recording gate.
