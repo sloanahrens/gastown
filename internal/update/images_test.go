@@ -271,6 +271,37 @@ func TestInstallRefusesWithoutAReadOfTheRunningPair(t *testing.T) {
 	}
 }
 
+// TestRecordedRunningPair is the container daemon's read of the pair it runs: the
+// current pair its record holds. A record that cannot be read is an error, never
+// an empty pair, which would read as nothing to restore.
+func TestRecordedRunningPair(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the record's current pair is the pair the daemon runs", func(t *testing.T) {
+		t.Parallel()
+		ledger := &fakeImageLedger{rec: ImageRecord{Current: oldPair, Previous: newPair}}
+		pair, err := (RecordedRunningPair{Ledger: ledger}).RunningPair(context.Background())
+		if err != nil {
+			t.Fatalf("RunningPair: %v", err)
+		}
+		if pair != oldPair {
+			t.Errorf("RunningPair = %+v, want the record's current pair %+v", pair, oldPair)
+		}
+	})
+
+	t.Run("an unreadable record is an error, not an empty pair", func(t *testing.T) {
+		t.Parallel()
+		ledger := &fakeImageLedger{readErr: errors.New("images.json is unreadable")}
+		pair, err := (RecordedRunningPair{Ledger: ledger}).RunningPair(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "reading the daemon image record") {
+			t.Fatalf("RunningPair = %+v, %v; want the unreadable record refused", pair, err)
+		}
+		if pair != (ImagePair{}) {
+			t.Errorf("RunningPair returned %+v with the error, want no pair", pair)
+		}
+	})
+}
+
 // TestInstallAcceptsARecordedClusterPair: a record left by a restored pod install
 // holds the images the Deployment ran and no commit. The next install accepts it
 // rather than refusing it as damaged, and reads the same pair from the daemon.

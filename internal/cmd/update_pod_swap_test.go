@@ -303,6 +303,19 @@ func TestPodDaemonSwapRefusesAnUnreadableDashboardRead(t *testing.T) {
 func TestPodDaemonSwapReadsTheRunningPair(t *testing.T) {
 	t.Parallel()
 
+	t.Run("a swap with no runner refuses before any command", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		swap := podSwapFor(fake)
+		swap.Run = nil
+		if _, err := swap.RunningPair(context.Background()); err == nil || !strings.Contains(err.Error(), "no command runner wired") {
+			t.Fatalf("RunningPair error = %v, want the missing runner refused", err)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("commands = %+v, want none", fake.calls)
+		}
+	})
+
 	t.Run("the read names the Deployment in the swap's context and namespace", func(t *testing.T) {
 		t.Parallel()
 		fake := &podSwapFake{}
