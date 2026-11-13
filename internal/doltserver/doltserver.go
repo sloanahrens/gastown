@@ -4646,12 +4646,14 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 			existing["dolt_server_host"] = wantHost
 			changed = true
 		}
-	}
-	// The deprecated dolt_server_port key is never written: bd warns on it
-	// and it can leak across projects. An existing one is removed (gt-49f3pn).
-	if _, ok := existing["dolt_server_port"]; ok {
-		delete(existing, "dolt_server_port")
-		changed = true
+		// The deprecated dolt_server_port key is never written: bd warns on it
+		// and it can leak across projects. An existing one is removed, only
+		// here, where the port file carries the same port (gt-49f3pn). A town
+		// without an endpoint keeps it: it would be the only port source.
+		if _, ok := existing["dolt_server_port"]; ok {
+			delete(existing, "dolt_server_port")
+			changed = true
+		}
 	}
 
 	// Fast path: avoid rewriting metadata.json when already correct. The port

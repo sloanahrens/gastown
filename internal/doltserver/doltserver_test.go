@@ -2234,6 +2234,31 @@ func TestEnsureMetadataNoPortNoPortFile(t *testing.T) {
 	}
 }
 
+// TestEnsureMetadataNoPortKeepsTheKey verifies that a town without an endpoint
+// does not drop an existing dolt_server_port key: it writes no port file, so the
+// key would be the only port source left (gt-49f3pn).
+func TestEnsureMetadataNoPortKeepsTheKey(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	if err := os.WriteFile(metaPath, []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"hq","dolt_server_port":4407}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata failed for a town without an endpoint: %v", err)
+	}
+	if got := readJSONMap(t, metaPath)["dolt_server_port"]; got != float64(4407) {
+		t.Errorf("dolt_server_port = %v, want 4407 kept: no port file was written", got)
+	}
+}
+
 // TestEnsureMetadata_RepairsWrongDoltDatabase verifies that EnsureMetadata
 // corrects a metadata.json where dolt_database points to the wrong database
 // (e.g., "beads_gt" instead of "gastown"). This is the primary fix for the
