@@ -917,7 +917,8 @@ func TestDoltHistoryDocHasARehearsalSection(t *testing.T) {
 // the bd container reaches the copy's server. The copy publishes on the host's
 // loopback only, so bd joins the copy's network namespace and reads the server
 // on its in-namespace port, with the metadata fields bd reads for a server-mode
-// store (gt-p973x4).
+// store and the port in dolt-server.port, the file bd reads the port from
+// (gt-p973x4, gt-49f3pn).
 func TestDoltHistoryDocRehearsalBdReachesTheCopy(t *testing.T) {
 	t.Parallel()
 	section := historyDocSection(t, "## Rehearse on a copy first")
@@ -926,7 +927,7 @@ func TestDoltHistoryDocRehearsalBdReachesTheCopy(t *testing.T) {
 	for _, want := range []string{
 		"--network container:gt-rehearsal",
 		`"dolt_server_host": "127.0.0.1"`,
-		`"dolt_server_port": 3306`,
+		`printf '%s' '3306' > "$SCRATCH/beads/dolt-server.port"`,
 		`"dolt_database": "gt"`,
 		`"dolt_mode": "server"`,
 	} {
