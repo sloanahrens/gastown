@@ -591,3 +591,6 @@ test_scope	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db860
 dangerous	polecat	"rm -rf / # cleanup"	refuse	filesystem destruction	gt-6pbp0y	ed89e6f03d3a33a33df1b850f095305498a7a96b0d96e28bf940dfd5b3306ff5
 container_suite	polecat	"rm -rf / # cleanup"	allow		gt-6pbp0y	ed89e6f03d3a33a33df1b850f095305498a7a96b0d96e28bf940dfd5b3306ff5
 test_scope	polecat	"rm -rf / # cleanup"	allow		gt-6pbp0y	ed89e6f03d3a33a33df1b850f095305498a7a96b0d96e28bf940dfd5b3306ff5
+container_suite	polecat	"cat /proc/self/environ"	allow		gt-p0y85u	2e1eb74bd5665a4a053dc0aeb40de4886de00bd2a3d14f0dc879d49da2cf7377
+dangerous	polecat	"cat /proc/self/environ"	allow		gt-p0y85u	2e1eb74bd5665a4a053dc0aeb40de4886de00bd2a3d14f0dc879d49da2cf7377
+test_scope	polecat	"cat /proc/self/environ"	allow		gt-p0y85u	2e1eb74bd5665a4a053dc0aeb40de4886de00bd2a3d14f0dc879d49da2cf7377
