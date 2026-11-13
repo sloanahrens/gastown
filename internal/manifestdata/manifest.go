@@ -79,6 +79,12 @@ type DirNames struct {
 // daemon/. The rollback replays them onto the Mac tree with gt town state export
 // --rollback and import --merge-newer. The tag sits on whole rows, so the replay
 // carries all of daemon/, not only the two files named above (gt-gg9hv.68).
+//
+// The three sentinel rows (seat-refill.hold, ESTOP, ESTOP.<rig>) share one
+// fact, stated here once: the pod reads the copy in its own town-state claim
+// each tick, so a file in the Mac town directory has no effect on the pod, and
+// the Docker compose container, which binds the host town, sees a Mac write.
+// Each row's why says only what is particular to it (gt-mwt3s5).
 func Default(dirs DirNames) *Manifest {
 	return &Manifest{Entries: []Entry{
 		// Town-level state the daemon writes.
@@ -92,9 +98,9 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "plugins", Owner: OwnerDaemon, Why: "installed plugins the daemon loads"},
 		{Path: ".claude-town", Owner: OwnerDaemon, Why: "the daemon's liveness probe reads session transcripts under it (internal/liveness)"},
 		{Path: "settings", Owner: OwnerShared, Why: "edited by gt config daemon, read by the daemon (gt-yjzepk.4)"},
-		{Path: "seat-refill.hold", Owner: OwnerShared, Why: "the overseer's dispatch hold, placed in the pod's town root; the pod reads the file in its own town-state claim each tick; a copy in the Mac town directory has no effect on the pod, and the Docker compose container, which binds the host town, sees a Mac write; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it"},
-		{Path: "ESTOP", Owner: OwnerShared, Why: "the town-wide ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; the pod reads the file in its own claim each tick; a copy in the Mac town directory has no effect on the pod, and the Docker compose container, which binds the host town, sees a Mac write; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it"},
-		{Path: "ESTOP.<rig>", Owner: OwnerShared, Why: "the per-rig ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; the pod reads the file in its own claim each tick; a copy in the Mac town directory has no effect on the pod, and the Docker compose container, which binds the host town, sees a Mac write; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it"},
+		{Path: "seat-refill.hold", Owner: OwnerShared, Why: "the overseer's dispatch hold, placed in the pod's town root; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it"},
+		{Path: "ESTOP", Owner: OwnerShared, Why: "the town-wide ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it"},
+		{Path: "ESTOP.<rig>", Owner: OwnerShared, Why: "the per-rig ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it"},
 		{Path: ".events.jsonl.lock", Owner: OwnerDaemon, Why: "the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave"},
 		{Path: ".dolt-archive", Owner: OwnerDaemon, Why: "the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into"},
 		{Path: ".beads-wisp", Owner: OwnerDaemon, Why: "the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads"},
