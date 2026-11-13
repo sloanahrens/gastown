@@ -280,4 +280,12 @@ You typically do not run `Dockerfile.e2e` directly. CI does.
 
 ## CI integration
 
-The Docker-backed test and integration workflows under `.github/workflows/` are `e2e.yml`, `ci.yml`, and `nightly-integration.yml`. `e2e.yml` builds and runs `Dockerfile.e2e` on its scheduled and manual triggers, which is where install-flow regressions surface. `ci.yml` and `nightly-integration.yml` pre-pull `dolthub/dolt-sql-server` images for tests that need a Dolt server outside a full Gas Town environment. `update-nix-flake.yml` also uses a disposable Docker container for Nix hash computation. The production runtime `Dockerfile` is not used by CI.
+The repository has two CI setups. No workflow builds the root `Dockerfile`, the production runtime image.
+
+- `.github/workflows/ci.yml` runs on pushes and pull requests to `main`. On pull requests it rejects a committed `.beads/issues.jsonl`. Its `gate` job installs Dolt and bd, then runs `make gate`, which needs no Docker.
+- `.forgejo/workflows/` runs the town's own CI on the Forgejo host:
+  - `gate.yml` runs `make gate` on pushes to `land/**`.
+  - `images.yml` builds the daemon and polecat images from `deploy/daemon/Dockerfile` and `deploy/polecat/Dockerfile` on pushes to `green/**`.
+  - `post-land.yml` runs `scripts/post-land-shell.sh` with `GT_TEST_DOCKER=0` on pushes to `main`.
+
+No workflow runs `Dockerfile.e2e`. `make test-e2e-container` is the only target that builds and runs it, so it is run by hand.
