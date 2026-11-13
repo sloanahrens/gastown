@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -422,7 +424,7 @@ func (f *shipSlungFake) slung(bead string, before time.Time) (time.Time, bool, e
 // reader.
 func handSlungTracker(journal tailDispatchSlung, table map[string]string, ancestor tailAncestry) *tailDeploys {
 	track := shipDeployTracker(ancestor, table, nil, at("2026-09-30T12:00:00Z"))
-	track.setSlungClock(journal)
+	track.setSlungClock(journal, nil)
 	return track
 }
 
@@ -539,6 +541,55 @@ func TestTailDeploys_JournalErrorLeavesNoShipFields(t *testing.T) {
 	}
 	if r := rows[0]; r.ShipSecs != nil || r.ShipPending || r.ShipVia != "" {
 		t.Fatalf("row ship = %v via %q pending %v; want a dash", r.ShipSecs, r.ShipVia, r.ShipPending)
+	}
+}
+
+// TestTailDeploys_JournalErrorIsTracedOnce: a journal that cannot be read is
+// traced in the why-log, one line per change rather than one per row read, so
+// an undated landing is not a dash with no reason anywhere (gt-oz9qn2).
+func TestTailDeploys_JournalErrorIsTracedOnce(t *testing.T) {
+	t.Parallel()
+	var logged []string
+	why := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	journal := &shipSlungFake{err: errors.New("reading the town events log: permission denied")}
+	track := handSlungTracker(journal.slung, map[string]string{"gt-e": "gastown"}, fakeTailAncestry("1111aaaa 2222bbbb"))
+	track.setSlungClock(journal.slung, why)
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-e: landed 1111aaaa on origin/main (patch-id 1)"),
+	})
+	track.shipStatus("gastown", "gt-e")
+	track.shipStatus("gastown", "gt-e")
+	if len(logged) != 1 {
+		t.Fatalf("why-log lines = %q; want one line for a journal that stays unreadable", logged)
+	}
+	if !strings.Contains(logged[0], dashJournalDispatchSource+" read failed") || !strings.Contains(logged[0], "permission denied") {
+		t.Fatalf("why-log line = %q; want the journal's read failure and its reason", logged[0])
+	}
+}
+
+// TestDashboardDeploys_TracesAnUnreadableJournal: the tracker the dashboard
+// builds is given the why-log too, so a journal it cannot read is traced where
+// the dashboard's other failed reads are, and the row is still left without a
+// ship time (gt-oz9qn2).
+func TestDashboardDeploys_TracesAnUnreadableJournal(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the events file belongs: a log that cannot be read,
+	// not one with nothing in it.
+	if err := os.Mkdir(filepath.Join(town, events.EventsFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	why := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	track := dashboardDeploys(town, shipRigOf(map[string]string{"gt-u": "gastown"}), at("2026-09-30T12:00:00Z"), nil, why, events.NewDispatchReader(town))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-u: landed 1111aaaa on origin/main (patch-id 1)"),
+	})
+	if ship := track.shipStatus("gastown", "gt-u"); ship.Secs != nil || ship.Pending || ship.Via != "" {
+		t.Fatalf("ship = %+v; want no ship fields from an unreadable journal", ship)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], dashJournalDispatchSource+" read failed") {
+		t.Fatalf("why-log lines = %q; want the unreadable journal traced", logged)
 	}
 }
 
