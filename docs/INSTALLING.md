@@ -4,6 +4,12 @@ Complete setup guide for Gas Town multi-agent orchestrator.
 
 For the shortest path, use `brew install gastown` on macOS or the Docker setup in [docker.md](docker.md). Homebrew installs `gt`, `bd`, and `dolt` together. Docker supplies the runtime tools inside the container. The native/source paths below are for hosts where you install and run `gt` directly.
 
+## The live town is not a host install
+
+The live town runs in the control cluster, not on a machine you install onto. Its daemon is the `daemon` Deployment: one replica under the `Recreate` strategy, so two daemons never write the same town at once. Its dashboard is a separate Deployment. A new image reaches them by the roll in [architecture.md](architecture.md), which is done by hand today. On the Mac, `gt`, `bd`, `om` and `hm` are the `gt-wrap` binary, which runs each tool inside the daemon pod, so the steps below do not describe the live town.
+
+The steps below are for a person who runs Gas Town on their own machine. Where they say `gt daemon` or `gt up`, they mean a daemon or services on that machine.
+
 ## Prerequisites
 
 ### Required
@@ -159,10 +165,10 @@ cost lands on every landing gate, and the daemon reports it as its `exec-tax`
 field, RED over `operational.health.exec_tax_red`.
 
 A tmux server started from Terminal.app inherits Terminal's exemption. The
-daemon does not: its supervisor starts it (launchd on a host-supervised town,
-the container in the live town since 2026-11-04), and it is the parent of every
-landing gate, so until the grant exists each gate exec pays the full scan. What
-exempts it is a Developer Tools grant on `~/.local/bin/gt`.
+daemon does not: its supervisor starts it (a pod in the control cluster in the
+live town), and it is the parent of every landing gate, so until the grant
+exists each gate exec pays the full scan. What exempts it is a Developer Tools
+grant on `~/.local/bin/gt`.
 
 Add the grant once, after the first signed install:
 
@@ -244,7 +250,7 @@ gt rig add myproject https://github.com/you/repo.git
 ```bash
 cd ~/gt
 
-gt up                  # Start all services. Use gt down or gt shutdown for stopping. 
+gt up                  # Host install only: start all services on this machine. Use gt down or gt shutdown for stopping. 
 
 gt doctor              # Read-only health checks
 gt doctor fix <check>  # Repair one check doctor reported
@@ -262,16 +268,16 @@ flags or another Anthropic-compatible backend.
 gt config agent list
 
 # Create an alias (aliases can encode model/thinking flags)
-gt config agent set claude-haiku "claude --model haiku --dangerously-skip-permissions"
+gt config agent set <agent-alias> "claude --model haiku --dangerously-skip-permissions"
 
 # Set the town default agent (used when a rig doesn't specify one)
-gt config default-agent claude-haiku
+gt config default-agent <agent-alias>
 ```
 
 You can also override the agent per command without changing defaults:
 
 ```bash
-gt sling gt-abc12 myproject --agent claude-haiku
+gt sling gt-abc12 myproject --agent <agent-alias>
 ```
 
 ## Minimal Mode vs Full Stack Mode
@@ -318,9 +324,10 @@ gt peek myproject/<polecat>
 
 #### Auto-Restart on Crash/Boot (Optional)
 
-The live town has been container-supervised since 2026-11-04: `gt daemon status` shows `Supervised: container gt-daemon`, and the daemon is stopped and started with `gt daemon stop` and `gt daemon start`. A town that runs gt on a Linux host can have the daemon auto-restart if it crashes and start automatically on login/boot by handing it to systemd; macOS has no gt supervisor (gt-a2uug4.15 removed the launchd commands), so the Mac's daemon runs in its container.
+The live town's daemon is the pod in the control cluster, not a host daemon, so the `gt daemon stop` and `gt daemon start` commands here do not stop or start it. On a host install, a town that runs gt on a Linux host can have the daemon auto-restart if it crashes and start automatically on login/boot by handing it to systemd. macOS has no gt supervisor (gt-a2uug4.15 removed the launchd commands), so a Mac host install starts its daemon by hand with `gt daemon start`.
 
 ```bash
+# Host daemon only. The live town's daemon is the pod, not this command.
 # If a manually-started daemon is running, stop it first — enable-supervisor
 # refuses while daemon.lock is held, to avoid a systemd respawn loop racing
 # the manual daemon for the lock.
