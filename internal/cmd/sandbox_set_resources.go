@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -23,6 +25,7 @@ var (
 	sandboxSetResourcesRequests string
 	sandboxSetResourcesLimits   string
 	sandboxSetResourcesDryRun   bool
+	sandboxSetResourcesTownRoot string
 )
 
 var sandboxSetResourcesCmd = &cobra.Command{
@@ -43,18 +46,27 @@ Requests and limits are kubernetes-driver fields; a docker profile refuses them.
 
 --dry-run prints the change and writes nothing.
 
+The town is named by --town-root, else GT_TOWN_ROOT, else the town the working
+directory is in. --town-root wins outright. When GT_TOWN_ROOT is set and the
+working directory is in a different town, the command refuses and writes
+nothing, so a run from a scratch town cannot change the live one. A run that
+writes or dry-runs prints the town root and the settings file it changes; a
+refusal names both towns in its error.
+
 The file is written atomically and the previous copy is kept beside it as
-<file>.bak-<timestamp>; the newest 30 and the last 7 days are kept. No daemon
-restart is needed: the profile is read from the file on each spawn and each
-dispatcher tick, so the change applies to sandboxes created after it.`,
+<file>.bak-<timestamp>; the newest 30 and the last 7 days are kept. The change
+applies to the next sandbox a seat starts: each spawn reads the profile from
+settings/config.json when it picks the seat's backend. A sandbox already running
+keeps the size it started with. No daemon restart is needed.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSandboxSetResourcesCmd(cmd.OutOrStdout(), workspace.FindFromCwdOrError, args[0], sandboxSetResourcesFlags{
+		return runSandboxSetResourcesCmd(cmd.OutOrStdout(), processSetResourcesTown, args[0], sandboxSetResourcesFlags{
 			requests:    sandboxSetResourcesRequests,
 			requestsSet: cmd.Flags().Changed("requests"),
 			limits:      sandboxSetResourcesLimits,
 			limitsSet:   cmd.Flags().Changed("limits"),
 			dryRun:      sandboxSetResourcesDryRun,
+			townRoot:    sandboxSetResourcesTownRoot,
 		})
 	},
 }
@@ -68,12 +80,23 @@ type sandboxSetResourcesFlags struct {
 	limits      string
 	limitsSet   bool
 	dryRun      bool
+	townRoot    string
 }
 
-// runSandboxSetResourcesCmd parses the flags, then finds the town and runs the
+// setResourcesTownResolver names the town a run changes, given the --town-root
+// value ("" when the flag is not given).
+type setResourcesTownResolver func(flagTown string) (string, error)
+
+// processSetResourcesTown resolves the town from the process's working directory
+// and environment.
+func processSetResourcesTown(flagTown string) (string, error) {
+	return resolveSetResourcesTown(flagTown, os.Getwd, os.Getenv)
+}
+
+// runSandboxSetResourcesCmd parses the flags, then names the town and runs the
 // change. The flags are read first, so a bad value is refused without looking
-// for a town. find is workspace.FindFromCwdOrError in production.
-func runSandboxSetResourcesCmd(w io.Writer, find func() (string, error), name string, f sandboxSetResourcesFlags) error {
+// for a town. resolve is processSetResourcesTown in production.
+func runSandboxSetResourcesCmd(w io.Writer, resolve setResourcesTownResolver, name string, f sandboxSetResourcesFlags) error {
 	var edits []sandboxResourceEdit
 	if f.requestsSet {
 		e, err := parseSandboxResourceFlag("requests", f.requests)
@@ -89,17 +112,117 @@ func runSandboxSetResourcesCmd(w io.Writer, find func() (string, error), name st
 		}
 		edits = append(edits, e...)
 	}
-	townRoot, err := find()
+	townRoot, err := resolve(f.townRoot)
 	if err != nil {
 		return err
 	}
 	return runSandboxSetResources(w, townRoot, name, edits, f.dryRun)
 }
 
+// resolveSetResourcesTown names the town a run changes. cwd and getenv are the
+// process's working directory and environment, passed in so a test can name them.
+//
+//  1. --town-root names the town. The working directory is not compared.
+//  2. Else GT_TOWN_ROOT names it. If the working directory is in a town, that
+//     town must be GT_TOWN_ROOT, or the run is refused: the two disagree and only
+//     the caller knows which one is meant.
+//  3. Else the town the working directory is in.
+//
+// A named root must hold the town's settings file and be a town. Nothing is
+// written here.
+func resolveSetResourcesTown(flagTown string, cwd func() (string, error), getenv func(string) string) (string, error) {
+	if flagTown != "" {
+		root, err := requireSetResourcesTown(flagTown)
+		if err != nil {
+			return "", fmt.Errorf("--town-root %s: %w", flagTown, err)
+		}
+		return root, nil
+	}
+	if envRoot := workspace.TownRootFromEnv(getenv); envRoot != "" {
+		root, err := requireSetResourcesTown(envRoot)
+		if err != nil {
+			return "", fmt.Errorf("GT_TOWN_ROOT %s: %w", envRoot, err)
+		}
+		here, err := townAboveWorkingDir(cwd)
+		if err != nil {
+			return "", fmt.Errorf("GT_TOWN_ROOT names %s but the working directory cannot be checked against it: %w; pass --town-root <dir> to name the town", root, err)
+		}
+		if here == "" {
+			return root, nil
+		}
+		same, err := sameTownDir(here, root)
+		if err != nil {
+			return "", err
+		}
+		if !same {
+			return "", fmt.Errorf("GT_TOWN_ROOT names %s but the working directory is in the town %s; pass --town-root <dir> to say which one to change", root, here)
+		}
+		return root, nil
+	}
+	here, err := townAboveWorkingDir(cwd)
+	if err != nil {
+		return "", err
+	}
+	if here == "" {
+		return "", workspace.ErrNotFound
+	}
+	return here, nil
+}
+
+// requireSetResourcesTown returns dir as an absolute path if it holds the town's
+// settings file and is a town; otherwise it names what is missing.
+func requireSetResourcesTown(dir string) (string, error) {
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolving path: %w", err)
+	}
+	settings := config.TownSettingsPath(root)
+	if _, err := os.Stat(settings); err != nil {
+		return "", fmt.Errorf("no town settings at %s: %w", settings, err)
+	}
+	ok, err := workspace.IsWorkspace(root)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s is not a town: it has no %s", root, workspace.PrimaryMarker)
+	}
+	return root, nil
+}
+
+// townAboveWorkingDir returns the town the working directory is in, or "" when
+// it is in none. An unreadable working directory is an error, not "no town".
+func townAboveWorkingDir(cwd func() (string, error)) (string, error) {
+	dir, err := cwd()
+	if err != nil {
+		return "", fmt.Errorf("getting current directory: %w", err)
+	}
+	root, err := workspace.Find(dir)
+	if err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+// sameTownDir reports whether a and b are the same directory once symlinks are
+// resolved.
+func sameTownDir(a, b string) (bool, error) {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false, fmt.Errorf("resolving %s: %w", a, err)
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false, fmt.Errorf("resolving %s: %w", b, err)
+	}
+	return filepath.Clean(ra) == filepath.Clean(rb), nil
+}
+
 func init() {
 	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesRequests, "requests", "", "Requests to set: cpu=<quantity>, memory=<quantity>, or both")
 	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesLimits, "limits", "", "Limits to set: cpu=<quantity>, memory=<quantity>, or both")
 	sandboxSetResourcesCmd.Flags().BoolVar(&sandboxSetResourcesDryRun, "dry-run", false, "Print the change and write nothing")
+	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesTownRoot, "town-root", "", "The town to change: its directory holds settings/config.json. Wins over GT_TOWN_ROOT and the working directory")
 	sandboxCmd.AddCommand(sandboxSetResourcesCmd)
 }
 
@@ -178,6 +301,7 @@ func runSandboxSetResources(w io.Writer, townRoot, name string, edits []sandboxR
 		if err != nil {
 			return err
 		}
+		printSandboxTown(w, townRoot, path)
 		printSandboxResourceChange(w, name, plan)
 		fmt.Fprintln(w, "dry run: nothing written")
 		return nil
@@ -191,7 +315,14 @@ func runSandboxSetResources(w io.Writer, townRoot, name string, edits []sandboxR
 	if backup != "" {
 		fmt.Fprintf(w, "previous file kept at %s\n", backup)
 	}
+	printSandboxTown(w, townRoot, path)
 	return nil
+}
+
+// printSandboxTown names the town and the settings file a run changes, so a
+// run from the wrong town is visible in its output.
+func printSandboxTown(w io.Writer, townRoot, path string) {
+	fmt.Fprintf(w, "town root: %s; file: %s\n", townRoot, path)
 }
 
 // writeSandboxResources plans the change against the settings file as it is

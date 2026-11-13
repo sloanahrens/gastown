@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // sandboxResourcesSettings holds a kubernetes profile with requests and limits,
@@ -364,7 +365,7 @@ func TestSandboxSetResourcesDryRunRefusesWhatAWriteWould(t *testing.T) {
 // are good.
 func TestSandboxSetResourcesCommandReadsFlagsBeforeTheTown(t *testing.T) {
 	t.Parallel()
-	noTown := func() (string, error) { return "", errors.New("no town here") }
+	noTown := func(string) (string, error) { return "", errors.New("no town here") }
 	for _, tc := range []struct {
 		name  string
 		flags sandboxSetResourcesFlags
@@ -385,12 +386,12 @@ func TestSandboxSetResourcesCommandReadsFlagsBeforeTheTown(t *testing.T) {
 	}
 }
 
-// The command writes the town its finder returns: the profile changes in that
+// The command writes the town its resolver names: the profile changes in that
 // town's settings file, and the output says what changed.
 func TestSandboxSetResourcesCommandWritesTheTownItFinds(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, sandboxResourcesSettings, "")
-	found := func() (string, error) { return root, nil }
+	found := func(string) (string, error) { return root, nil }
 	var out bytes.Buffer
 
 	err := runSandboxSetResourcesCmd(&out, found, "polecat-k8s", sandboxSetResourcesFlags{requests: "cpu=500m", requestsSet: true})
@@ -406,5 +407,207 @@ func TestSandboxSetResourcesCommandWritesTheTownItFinds(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "sandboxes.polecat-k8s.requests.cpu: 1 -> 500m") {
 		t.Errorf("output = %q, want the cpu change", out.String())
+	}
+}
+
+// sandboxResourcesTown is a town the resolver accepts: the settings file and the
+// town marker. poolTestTown writes only the settings file.
+func sandboxResourcesTown(t *testing.T, settings string) string {
+	t.Helper()
+	root := poolTestTown(t, settings, "")
+	marker := filepath.Join(root, workspace.PrimaryMarker)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// townResolverAt is the resolver the command runs, given the working directory
+// and the value of GT_TOWN_ROOT ("" for unset).
+func townResolverAt(cwd, envRoot string) setResourcesTownResolver {
+	return func(flagTown string) (string, error) {
+		return resolveSetResourcesTown(flagTown, func() (string, error) { return cwd, nil }, func(key string) string {
+			if key == "GT_TOWN_ROOT" {
+				return envRoot
+			}
+			return ""
+		})
+	}
+}
+
+// With GT_TOWN_ROOT naming the town the working directory is in, only that
+// town's settings change, and a copy appears beside them; another town on the
+// machine is untouched.
+func TestSandboxSetResourcesTownFromEnvWritesOnlyThatTown(t *testing.T) {
+	t.Parallel()
+	named := sandboxResourcesTown(t, sandboxResourcesSettings)
+	decoy := sandboxResourcesTown(t, sandboxResourcesSettings)
+	decoyBefore := poolTestRawSettings(t, decoy)
+	var out bytes.Buffer
+
+	err := runSandboxSetResourcesCmd(&out, townResolverAt(filepath.Join(named, "mayor"), named), "polecat-k8s", sandboxSetResourcesFlags{requests: "cpu=500m", requestsSet: true})
+	if err != nil {
+		t.Fatalf("set-resources: %v", err)
+	}
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(named))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ts.Sandboxes["polecat-k8s"].Requests; got == nil || got.CPU != "500m" {
+		t.Errorf("named town requests = %+v, want cpu 500m", got)
+	}
+	if len(sandboxResourcesBackups(t, named)) != 1 {
+		t.Errorf("named town backups = %v, want one .bak- copy", sandboxResourcesBackups(t, named))
+	}
+	if got := poolTestRawSettings(t, decoy); got != decoyBefore {
+		t.Errorf("decoy town settings changed: %q -> %q", decoyBefore, got)
+	}
+	if len(sandboxResourcesBackups(t, decoy)) != 0 {
+		t.Errorf("decoy town got a backup: %v", sandboxResourcesBackups(t, decoy))
+	}
+}
+
+// When GT_TOWN_ROOT and the working directory name different towns, the run is
+// refused and both towns' settings are left as they were.
+func TestSandboxSetResourcesTownRefusesAWorkingDirectoryInAnotherTown(t *testing.T) {
+	t.Parallel()
+	named := sandboxResourcesTown(t, sandboxResourcesSettings)
+	here := sandboxResourcesTown(t, sandboxResourcesSettings)
+	namedBefore, hereBefore := poolTestRawSettings(t, named), poolTestRawSettings(t, here)
+	var out bytes.Buffer
+
+	err := runSandboxSetResourcesCmd(&out, townResolverAt(filepath.Join(here, "mayor"), named), "polecat-k8s", sandboxSetResourcesFlags{requests: "cpu=500m", requestsSet: true})
+	if err == nil {
+		t.Fatal("set-resources = nil, want a refusal: GT_TOWN_ROOT and the working directory name different towns")
+	}
+	if !strings.Contains(err.Error(), named) || !strings.Contains(err.Error(), here) {
+		t.Errorf("refusal = %v, want it to name %s and %s", err, named, here)
+	}
+	if got := poolTestRawSettings(t, named); got != namedBefore {
+		t.Errorf("GT_TOWN_ROOT town changed on a refusal")
+	}
+	if got := poolTestRawSettings(t, here); got != hereBefore {
+		t.Errorf("working-directory town changed on a refusal")
+	}
+	if len(sandboxResourcesBackups(t, named))+len(sandboxResourcesBackups(t, here)) != 0 {
+		t.Errorf("a refusal kept a copy")
+	}
+}
+
+// --town-root names the town outright: it is written even when the working
+// directory is in another town, and that town is left alone.
+func TestSandboxSetResourcesTownFlagWinsOverTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	flagged := sandboxResourcesTown(t, sandboxResourcesSettings)
+	here := sandboxResourcesTown(t, sandboxResourcesSettings)
+	hereBefore := poolTestRawSettings(t, here)
+	var out bytes.Buffer
+
+	err := runSandboxSetResourcesCmd(&out, townResolverAt(filepath.Join(here, "mayor"), ""), "polecat-k8s", sandboxSetResourcesFlags{requests: "cpu=500m", requestsSet: true, townRoot: flagged})
+	if err != nil {
+		t.Fatalf("set-resources: %v", err)
+	}
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(flagged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ts.Sandboxes["polecat-k8s"].Requests; got == nil || got.CPU != "500m" {
+		t.Errorf("--town-root town requests = %+v, want cpu 500m", got)
+	}
+	if got := poolTestRawSettings(t, here); got != hereBefore {
+		t.Errorf("working-directory town changed under --town-root")
+	}
+}
+
+// With no --town-root and no GT_TOWN_ROOT, a working directory in no town is not
+// a town to change: the run names GT_TOWN_ROOT, when it is set.
+func TestSandboxSetResourcesTownFromEnvWhenTheWorkingDirectoryIsInNoTown(t *testing.T) {
+	t.Parallel()
+	named := sandboxResourcesTown(t, sandboxResourcesSettings)
+	namedBefore := poolTestRawSettings(t, named)
+	var out bytes.Buffer
+
+	err := runSandboxSetResourcesCmd(&out, townResolverAt(t.TempDir(), named), "polecat-k8s", sandboxSetResourcesFlags{requests: "cpu=500m", requestsSet: true})
+	if err != nil {
+		t.Fatalf("set-resources: %v", err)
+	}
+	if got := poolTestRawSettings(t, named); got == namedBefore {
+		t.Errorf("GT_TOWN_ROOT town settings did not change")
+	}
+}
+
+// Each root the resolver refuses names what it could not use, and writes nothing.
+func TestSandboxSetResourcesTownRefusals(t *testing.T) {
+	t.Parallel()
+	plain := t.TempDir()
+	envTown := sandboxResourcesTown(t, sandboxResourcesSettings)
+	settingsOnly := poolTestTown(t, sandboxResourcesSettings, "")
+	markerOnly := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(markerOnly, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markerOnly, workspace.PrimaryMarker), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		flag string
+		env  string
+		cwd  func() (string, error)
+		want []string
+	}{
+		{"--town-root with no settings file", markerOnly, "", nil, []string{markerOnly, "no town settings"}},
+		{"--town-root that is not a town", settingsOnly, "", nil, []string{settingsOnly, "not a town"}},
+		{"GT_TOWN_ROOT with no settings file", "", markerOnly, func() (string, error) { return plain, nil }, []string{"GT_TOWN_ROOT", markerOnly, "no town settings"}},
+		{"GT_TOWN_ROOT that is not a town", "", settingsOnly, func() (string, error) { return plain, nil }, []string{"GT_TOWN_ROOT", settingsOnly, "not a town"}},
+		{"GT_TOWN_ROOT with an unreadable working directory", "", envTown, func() (string, error) { return "", errors.New("cwd gone") }, []string{"GT_TOWN_ROOT", "--town-root", "cwd gone"}},
+		{"no town and no GT_TOWN_ROOT", "", "", func() (string, error) { return plain, nil }, []string{"not in a Gas Town workspace"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cwd := tc.cwd
+			if cwd == nil {
+				cwd = func() (string, error) { return plain, nil }
+			}
+			_, err := resolveSetResourcesTown(tc.flag, cwd, func(key string) string {
+				if key == "GT_TOWN_ROOT" {
+					return tc.env
+				}
+				return ""
+			})
+			if err == nil {
+				t.Fatal("resolve = nil, want a refusal")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal = %v, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// A dry run and a real run both print the town root and the settings file they
+// change, so a run from the wrong town shows in its output.
+func TestSandboxSetResourcesTownIsPrinted(t *testing.T) {
+	t.Parallel()
+	root := sandboxResourcesTown(t, sandboxResourcesSettings)
+	want := "town root: " + root + "; file: " + config.TownSettingsPath(root)
+	var dry, wrote bytes.Buffer
+
+	if err := sandboxResourcesEdits(t, root, "polecat-k8s", "requests", "cpu=500m", true, &dry); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !strings.Contains(dry.String(), want) {
+		t.Errorf("dry-run output = %q, want it to contain %q", dry.String(), want)
+	}
+	if err := sandboxResourcesEdits(t, root, "polecat-k8s", "requests", "cpu=500m", false, &wrote); err != nil {
+		t.Fatalf("set-resources: %v", err)
+	}
+	if !strings.Contains(wrote.String(), want) {
+		t.Errorf("output = %q, want it to contain %q", wrote.String(), want)
 	}
 }
