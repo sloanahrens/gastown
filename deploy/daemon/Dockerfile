@@ -54,6 +54,7 @@ COPY --chmod=0755 gt /usr/local/bin/gt
 COPY --chmod=0755 bd /usr/local/bin/bd
 COPY --chmod=0755 om /usr/local/bin/om
 COPY --chmod=0755 trackerd /usr/local/bin/trackerd
+COPY --chmod=0755 trackerbackup /usr/local/bin/trackerbackup
 
 # hm, the two devops reporters and the devops cloud check, cross-compiled for
 # linux/arm64 by BuildTools from the commits the deployer pins. They sit in

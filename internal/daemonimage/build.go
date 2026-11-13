@@ -1,7 +1,8 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
-// host: the linux/arm64 gt, bd, om and trackerd binaries the image runs
-// (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned claude CLI
-// om's reviewer runs (gt-qpeei.35), and the image built from them (gt-qpeei.16).
+// host: the linux/arm64 gt, bd, om, trackerd and trackerbackup binaries the
+// image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned
+// claude CLI om's reviewer runs (gt-qpeei.35), and the image built from them
+// (gt-qpeei.16).
 // Every command it runs and every download it makes is one injected call, so the
 // gate proves what a build runs without Docker, a running daemon, a cluster or
 // the network.
@@ -40,18 +41,20 @@ const DockerContext = "desktop-linux"
 // The package each binary is built from, inside its source tree. gt and bd are
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
 // to the package polecat-image builds, and BDPackage to bdbuild.Package.
-// TrackerdPackage is a main package in the tracker module, built in
-// TrackerdModuleDir rather than at the checkout root.
+// TrackerdPackage and TrackerbackupPackage are main packages in the tracker
+// module, built in TrackerdModuleDir rather than at the checkout root.
 const (
-	GTPackage       = "./cmd/gt"
-	BDPackage       = "./cmd/bd"
-	OMPackage       = "./cmd/om"
-	TrackerdPackage = "./cmd/trackerd"
+	GTPackage            = "./cmd/gt"
+	BDPackage            = "./cmd/bd"
+	OMPackage            = "./cmd/om"
+	TrackerdPackage      = "./cmd/trackerd"
+	TrackerbackupPackage = "./cmd/trackerbackup"
 )
 
-// TrackerdModuleDir is the directory of the gt checkout trackerd is built in.
-// tracker/ is its own Go module, so a build run from the checkout root cannot
-// name its packages: the main module does not contain them (gt-voam40).
+// TrackerdModuleDir is the gt checkout's directory that trackerd and
+// trackerbackup are built in. tracker/ is its own Go module, so a build run
+// from the checkout root cannot name its packages: the main module does not
+// contain them (gt-voam40).
 const TrackerdModuleDir = "tracker"
 
 // The -X stamps the gt and bd binaries are built with. gt reports the short form
@@ -223,10 +226,11 @@ var imagePlugins = []plugin{
 	{name: "town-metrics", pkg: "./plugins/town-metrics"},
 }
 
-// BuildBinaries writes gt, bd, om and trackerd to b.Out and returns their paths
-// in that order. Every refusal comes before the first build runs, so a refused call
-// writes nothing. Each binary is built in a clean worktree of its commit and is
-// staged under b.Out until all three have built, so a build that fails returns
+// BuildBinaries writes gt, bd, om, trackerd and trackerbackup to b.Out and
+// returns their paths in that order. Every refusal comes before the first build
+// runs, so a refused call writes nothing. Each binary is built in a clean
+// worktree of its commit and is staged under b.Out until every binary has built,
+// so a build that fails returns
 // its error and no paths, and leaves nothing in b.Out. A bd or om checkout that
 // is not named is fetched from its pin into b.Out first, and the fetched tree is
 // removed when the call returns.
@@ -272,6 +276,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
 		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage, moduleDir: TrackerdModuleDir},
+		{name: "trackerbackup", src: b.GTSrc, commit: gtCommit, pkg: TrackerbackupPackage, moduleDir: TrackerdModuleDir},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
 	if err != nil {
@@ -769,6 +774,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	lines = append(lines, om.fetch...)
 	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
 	lines = append(lines, fmt.Sprintf("build trackerd: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
+	lines = append(lines, fmt.Sprintf("build trackerbackup: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerbackup"), TrackerbackupPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	for _, p := range imagePlugins {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}
@@ -1088,17 +1094,17 @@ func (b Builder) stageKnownHosts() error {
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: each of the image's binaries (gt, bd, om, claude, the toolNames and
-// ClientToolNames), each of imagePlugins and each of mangoNames once, at the path
-// under b.Out its COPY reads. Docker would report a missing or misplaced one only
-// after the package install ran, so it is caught here first, against what the
-// caller passed.
+// not read: each of the image's binaries (gt, bd, om, trackerd, trackerbackup,
+// claude, the toolNames and ClientToolNames), each of imagePlugins and each of
+// mangoNames once, at the path under b.Out its COPY reads. Docker would report a
+// missing or misplaced one only after the package install ran, so it is caught
+// here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
 	// rels is each binary's COPY source relative to the build context; want holds
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append(append([]string{"gt", "bd", "om", "trackerd", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
+	for _, name := range append(append([]string{"gt", "bd", "om", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
 		rels[name] = name
 		want = append(want, name)
 	}
