@@ -124,10 +124,10 @@ func TestIntegrationRunLocalRoundGateChecksTheResolvedBead(t *testing.T) {
 	}
 }
 
-// TestDoneLocalRoundWritesNothingOnRefusal: a submit the local-round gate
+// TestIntegrationDoneLocalRoundWritesNothingOnRefusal: a submit the local-round gate
 // refuses returns the refusal and writes neither the READY TO LAND block nor
 // the ready-to-land label to the work bead (gt-mxz8kx).
-func TestDoneLocalRoundWritesNothingOnRefusal(t *testing.T) {
+func TestIntegrationDoneLocalRoundWritesNothingOnRefusal(t *testing.T) {
 	res := runRefusedByLocalRound(t, "")
 	if !errors.Is(res.err, errLocalRoundRefused) {
 		t.Fatalf("Run = %v, want the local-round refusal", res.err)
