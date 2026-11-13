@@ -26,7 +26,7 @@ A needs a cluster credential on the Mac, which B avoids. The operator chose A be
 
 gt-mac-watch runs as the operator's login user. It calls `kubectl --context colima-gt-control -n gt exec -i deploy/daemon -c daemon -- sh -c 'cat > P.tmp && mv P.tmp P'` (devops `cmd/gt-mac-watch/watch.go`, the `kubectl` argv near line 208; the context is a flag defaulting to `colima-gt-control`, `main.go:64`). That context is the Mac's own kubeconfig entry for the control cluster, which is cluster admin. The program uses it only to write `probes.json`, but the credential it holds can do anything in the cluster, and a bug or a compromised job on the Mac inherits all of it. The daemon container also gets a shell command run inside it by that path.
 
-Narrower, as a follow-up: a ServiceAccount `mac-watch` whose Role in namespace gt allows `get` and `list` on pods and `create` on pods/exec, and nothing else, with a kubeconfig minted from it for the launchd job (gt-a2uug4.22, held). A rule by pod name is not possible because the Deployment generates the daemon pod's name. This was not tested against the cluster.
+Narrower, now in the tree: `deploy/k8s/mac-watch-rbac.yaml` holds the ServiceAccount `mac-watch`, the Role in namespace gt that allows `get` and `list` on pods and `create` on pods/exec and nothing else, and the RoleBinding that grants it (gt-a2uug4.22). A rule by pod name is not possible because the Deployment generates the daemon pod's name. The daemon does not apply the file: applying it, minting a token or a kubeconfig from the ServiceAccount and pointing gt-mac-watch at that kubeconfig are the operator's and devops' steps. None of it was tested against the cluster.
 
 ## Failure modes
 
