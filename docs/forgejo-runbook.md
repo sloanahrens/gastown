@@ -230,7 +230,7 @@ order and the reason for each step. It refuses while a `gt:ready-to-land` bead
 is queued. `--dry-run` prints every command and writes nothing.
 
 The Go port of step 5 (`internal/forgejocut`, gt-tpg0p.48) repoints `origin` in the
-rig's bare repository, in `mayor/rig` and in every crew clone, then sets
+rig's bare repository and in every crew clone, then sets
 `registry.rigs.<rig>.git_url` in `mayor/town.json`. It is the live step of the
 cutover: run it only after the promote key exists and the first L3 checks have
 passed, never from a landing. Each repoint logs the origin it replaced, and the
