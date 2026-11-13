@@ -171,6 +171,46 @@ func TestHoldStaleEveryHoldLabelRaises(t *testing.T) {
 	}
 }
 
+// An append-only release log keeps its hold label by design, so it raises no
+// item at any age and costs no dependency read; the read is what a bead under
+// the one-day rule would otherwise cost.
+func TestHoldStaleSkipsReleaseLog(t *testing.T) {
+	t.Parallel()
+	for _, age := range []time.Duration{25 * time.Hour, 73 * time.Hour} {
+		t.Run(age.String(), func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, holdStaleNow)
+			holdStaleStore(f, heldBead("gt-log01", age, []string{"held", "release-log"}, openBlocker))
+			shown := f.src.holdBead
+			reads := 0
+			f.src.holdBead = func(ctx context.Context, rig, id string) (*beads.Issue, error) {
+				reads++
+				return shown(ctx, rig, id)
+			}
+
+			if items := holdStaleItems(t, f); len(items) != 0 {
+				t.Errorf("items = %+v, want none for a release-log bead", items)
+			}
+			if reads != 0 {
+				t.Errorf("dependency reads = %d, want 0 for a release-log bead", reads)
+			}
+		})
+	}
+}
+
+// Without the release-log label the same bead is judged as before: held over
+// three days it raises one high item.
+func TestHoldStaleJudgesBeadWithoutReleaseLog(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, holdStaleNow)
+	holdStaleStore(f, heldBead("gt-log02", 73*time.Hour, []string{"held"}, openBlocker))
+
+	items := holdStaleItems(t, f)
+	if len(items) != 1 || items[0].Severity != attention.SeverityHigh || items[0].Bead != "gt-log02" {
+		t.Errorf("items = %+v, want one high item on gt-log02", items)
+	}
+}
+
 // A bead wearing two hold labels raises one item, and its summary names both.
 func TestHoldStaleOneBeadOneItemAcrossLabels(t *testing.T) {
 	t.Parallel()
