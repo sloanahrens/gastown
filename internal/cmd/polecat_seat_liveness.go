@@ -11,13 +11,14 @@ import (
 type liveSeatCounter func(polecatName string) bool
 
 // newLiveSeatCounter builds the cap's seat question for one rig. mgr is the
-// polecat manager the sling already opened; it is never nil on the sling path
-// (openSlingRig fails instead). The agent-bead read goes through it, so the
-// sling's open memo answers a bead the seat listing already read (gt-atlmw2),
-// and with no memo open it reads bd as before. agentBeadID names
-// the directory's agent bead, sessionName its session (which is also its
-// sandbox's name), and probe tells a sandbox seat from a host seat and asks the
-// gateway whether that sandbox still exists.
+// polecat manager the sling already opened; the sling path never passes nil
+// (openSlingRig fails instead), and a nil manager counts the seat rather than
+// panicking. The agent-bead read goes through mgr, so the sling's open memo
+// answers a bead the seat listing already read (gt-atlmw2); with no memo open
+// it reads bd as before. agentBeadID names the directory's agent bead,
+// sessionName its session (which is also its sandbox's name), and probe tells
+// a sandbox seat from a host seat and asks the gateway whether that sandbox
+// still exists.
 //
 // A directory counts unless every read agrees it is a sandbox seat whose
 // sandbox is gone: no agent bead, an unreadable bead, a seat the probe cannot
@@ -28,7 +29,7 @@ type liveSeatCounter func(polecatName string) bool
 func newLiveSeatCounter(mgr *polecat.Manager, agentBeadID func(polecatName string) string,
 	sessionName func(polecatName string) string, probe sandboxSeatProbe) liveSeatCounter {
 	return func(name string) bool {
-		if probe == nil {
+		if mgr == nil || probe == nil {
 			return true
 		}
 		_, fields, err := mgr.ReadAgentBead(agentBeadID(name))

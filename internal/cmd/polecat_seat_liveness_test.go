@@ -123,6 +123,7 @@ func TestPolecatSeatLiveness(t *testing.T) {
 		{"unreadable agent bead counts", livenessManager(t, unreadable), livenessSandboxProbe(false, nil), true},
 		{"no agent bead counts", livenessManager(t, newLivenessStore()), livenessSandboxProbe(false, nil), true},
 		{"no probe counts", livenessManager(t, livenessSeatStore(t, livenessAgent)), nil, true},
+		{"no manager counts", nil, livenessSandboxProbe(false, nil), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -156,24 +157,22 @@ func TestPolecatSeatLivenessAsksForTheSeat(t *testing.T) {
 
 // TestPolecatSeatLivenessReadsThroughTheSlingMemo: the cap asks the manager for
 // the seat's agent bead, so the sling's open memo serves a bead the seat
-// listing already read. A read that bypassed the memo would pay the store a
-// second time for the same seat (gt-atlmw2).
+// listing already read. The cap asks twice; a read that bypassed the memo
+// would pay the store a second time for the same seat, and a read that
+// bypassed the manager would not pay the store at all (gt-atlmw2).
 func TestPolecatSeatLivenessReadsThroughTheSlingMemo(t *testing.T) {
 	t.Parallel()
 	store := livenessSeatStore(t, livenessAgent)
 	mgr := livenessManager(t, store)
+	counter := livenessCounter(mgr, livenessSandboxProbe(false, nil))
+
 	end := mgr.ShareAgentBeadReads()
 	defer end()
 
-	// The sling's seat listing reads the bead first.
-	if _, _, err := mgr.ReadAgentBead(livenessBeadID); err != nil {
-		t.Fatalf("ReadAgentBead: %v", err)
-	}
-
-	// The cap's question about the directory is answered from that read, and
-	// still tells a gone sandbox from a live one.
-	if livenessCounter(mgr, livenessSandboxProbe(false, nil))(livenessPolecat) {
-		t.Error("sandbox-gone seat counted as live")
+	for i := 0; i < 2; i++ {
+		if counter(livenessPolecat) {
+			t.Fatalf("question %d: sandbox-gone seat counted as live", i+1)
+		}
 	}
 	if got := store.count(livenessBeadID); got != 1 {
 		t.Errorf("agent bead read from the store %d times, want 1: the cap read past the sling memo", got)
@@ -184,7 +183,8 @@ func TestPolecatSeatLivenessReadsThroughTheSlingMemo(t *testing.T) {
 // function, not the counter helper: the seat question realIdleReuseEnv builds
 // for the cap must ask the sling's polecat manager, so a bead the seat listing
 // already read is not read from the store again (gt-atlmw2). A read that
-// bypassed the manager's memo would pay the store a second time.
+// bypassed the manager's memo pays the store a second time; one that bypassed
+// the manager does not pay this store at all.
 func TestRealIdleReuseEnvSeatReadSharesTheSlingMemo(t *testing.T) {
 	t.Parallel()
 	rigPath := filepath.Join(t.TempDir(), "gastown")
@@ -192,8 +192,8 @@ func TestRealIdleReuseEnvSeatReadSharesTheSlingMemo(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &rig.Rig{Name: "gastown", Path: rigPath}
-	// A host agent: the real probe classifies it from the seat map, so the
-	// question never reaches a gateway.
+	// A host agent: the temp town has no seat map, so the probe answers "host"
+	// without asking a gateway.
 	store := livenessSeatStore(t, "deepseek-flash")
 	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), store)
 	env := realIdleReuseEnv(nil, r, filepath.Dir(rigPath), "gastown", func(string) {}, mgr)
@@ -201,15 +201,14 @@ func TestRealIdleReuseEnvSeatReadSharesTheSlingMemo(t *testing.T) {
 	end := mgr.ShareAgentBeadReads()
 	defer end()
 
-	// The sling's seat listing reads the bead first.
-	if _, _, err := mgr.ReadAgentBead(livenessBeadID); err != nil {
-		t.Fatalf("ReadAgentBead: %v", err)
-	}
-
-	if !env.seatLive(livenessPolecat) {
-		t.Error("host seat not counted")
+	// The cap asks twice about one seat: the first question reads the store,
+	// the second must be answered from the memo.
+	for i := 0; i < 2; i++ {
+		if !env.seatLive(livenessPolecat) {
+			t.Fatalf("question %d: host seat not counted", i+1)
+		}
 	}
 	if got := store.count(livenessBeadID); got != 1 {
-		t.Errorf("agent bead read from the store %d times, want 1: realIdleReuseEnv does not ask the sling's manager", got)
+		t.Errorf("agent bead read from the store %d times, want 1: realIdleReuseEnv does not ask the sling's manager through its memo", got)
 	}
 }
