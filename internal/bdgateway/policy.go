@@ -37,9 +37,9 @@ const (
 	ClassAdmin VerbClass = "admin"
 )
 
-// TokenClass is the class a gateway token authenticates its caller as. The
-// token directory (G3) names each file `<class>.<caller>.token` with one of
-// these values and the caller it speaks as.
+// TokenClass is the class a gateway token authenticates its caller as; the
+// token file format (G3) names one of these values and the caller the token
+// speaks as.
 type TokenClass string
 
 const (

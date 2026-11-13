@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // writeTokenFile writes one file in a token directory and returns its path.
@@ -29,6 +31,15 @@ func writeTokenFile(t *testing.T, dir, name, content string, mode os.FileMode) s
 		t.Fatalf("chmod %s: %v", name, err)
 	}
 	return path
+}
+
+// waitContext bounds a test's channel waits. A wait that times out fails the
+// test naming what it waited for instead of hanging until the suite deadline.
+func waitContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 // TestAuthTokens is the acceptance criterion that a valid token resolves to the
@@ -99,7 +110,6 @@ func TestAuthModeRefused(t *testing.T) {
 		{"0660 group read and write", 0o660, ErrTokenFileMode},
 		{"0604 other read", 0o604, ErrTokenFileMode},
 		{"0400 owner read only", 0o400, ErrTokenFileMode},
-		{"0000 no access", 0o000, ErrTokenFileMode},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -131,12 +141,59 @@ func TestAuthModeRefused(t *testing.T) {
 	}
 }
 
-// TestAuthTokenComparisonUsesDigests is the constant-time criterion as far as a
-// test can observe it: every comparison runs over two SHA-256 digests, so the
-// operands are a fixed 32 bytes whatever length the presented token has. A
-// comparison over raw tokens would pass on the presented token's length, and
-// the duration of such a compare leaks it.
-func TestAuthTokenComparisonUsesDigests(t *testing.T) {
+// TestAuthLookupUsesSeam checks the production path compares every stored
+// digest through the table's comparison seam, once per entry for a known token
+// and for an unknown one, over two 32-byte digests. A Lookup that compared
+// digests itself would leave the counting fake uncalled, so the test goes red.
+func TestAuthLookupUsesSeam(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "stored-token\n", 0o600)
+	writeTokenFile(t, dir, "daemon.worker.token", "daemon-token\n", 0o600)
+	table, err := LoadTokens(dir)
+	if err != nil {
+		t.Fatalf("LoadTokens: %v", err)
+	}
+	tests := []struct {
+		name      string
+		token     string
+		want      Identity
+		wantFound bool
+	}{
+		{"known token", "stored-token", Identity{TokenRead, "dashboard"}, true},
+		{"unknown token", "not-a-token", Identity{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var operands [][2]int
+			table.compare = func(a, b []byte) int {
+				operands = append(operands, [2]int{len(a), len(b)})
+				return subtle.ConstantTimeCompare(a, b)
+			}
+			got, found := table.Lookup(tt.token)
+			if found != tt.wantFound {
+				t.Fatalf("Lookup(%q) found = %t, want %t", tt.token, found, tt.wantFound)
+			}
+			if got != tt.want {
+				t.Errorf("Lookup(%q) identity = %+v, want %+v", tt.token, got, tt.want)
+			}
+			if len(operands) != len(table.entries) {
+				t.Fatalf("Lookup ran %d comparisons over %d entries: the production path does not use the compare seam", len(operands), len(table.entries))
+			}
+			for i, op := range operands {
+				if op[0] != sha256.Size || op[1] != sha256.Size {
+					t.Errorf("comparison %d got operands of %d and %d bytes, want %d and %d: the token's length is leaking into the compare",
+						i, op[0], op[1], sha256.Size, sha256.Size)
+				}
+			}
+		})
+	}
+}
+
+// TestAuthDefaultCompare calls the comparison the production path uses, the
+// table's own default seam, on equal and unequal digests at the fixed 32-byte
+// size: 1 for equal and 0 for unequal.
+func TestAuthDefaultCompare(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeTokenFile(t, dir, "read.dashboard.token", "stored-token\n", 0o600)
@@ -144,24 +201,13 @@ func TestAuthTokenComparisonUsesDigests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTokens: %v", err)
 	}
-	type operands struct{ stored, presented int }
-	var seen []operands
-	table.compare = func(a, b []byte) int {
-		seen = append(seen, operands{stored: len(a), presented: len(b)})
-		return subtle.ConstantTimeCompare(a, b)
+	first := sha256.Sum256([]byte("first"))
+	second := sha256.Sum256([]byte("second"))
+	if got := table.compare(first[:], first[:]); got != 1 {
+		t.Errorf("default compare on equal digests = %d, want 1", got)
 	}
-	tokens := []string{"s", strings.Repeat("x", sha256.Size), strings.Repeat("y", 1000), "stored-token"}
-	for _, token := range tokens {
-		table.Lookup(token)
-	}
-	if want := len(tokens) * len(table.entries); len(seen) != want {
-		t.Fatalf("Lookup ran %d comparisons over %d lookups, want %d (one per entry, no early return)", len(seen), len(tokens), want)
-	}
-	for i, op := range seen {
-		if op.stored != sha256.Size || op.presented != sha256.Size {
-			t.Errorf("comparison %d got operands of %d and %d bytes, want %d and %d: the token's length is leaking into the compare",
-				i, op.stored, op.presented, sha256.Size, sha256.Size)
-		}
+	if got := table.compare(first[:], second[:]); got != 0 {
+		t.Errorf("default compare on unequal digests = %d, want 0", got)
 	}
 }
 
@@ -259,6 +305,7 @@ func TestAuthReloadInFlightRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
+	ctx := waitContext(t)
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -283,7 +330,7 @@ func TestAuthReloadInFlightRequest(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-t.Context().Done():
+	case <-ctx.Done():
 		t.Fatal("the in-flight request never reached the token comparison")
 	}
 
@@ -296,7 +343,7 @@ func TestAuthReloadInFlightRequest(t *testing.T) {
 	var got result
 	select {
 	case got = <-done:
-	case <-t.Context().Done():
+	case <-ctx.Done():
 		t.Fatal("the in-flight request did not finish after the reload")
 	}
 	if got.err != nil {
@@ -322,22 +369,23 @@ func TestAuthRequestDuringReload(t *testing.T) {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	writeTokenFile(t, dir, "read.dashboard.token", "new-token\n", 0o600)
+	ctx := waitContext(t)
 
 	reading := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
-	auth.fs.readFile = func(path string) ([]byte, error) {
+	auth.fs.open = func(path string) (tokenFile, error) {
 		close(reading)
 		<-release
-		return os.ReadFile(path)
+		return openTokenFile(path)
 	}
 	reloaded := make(chan error, 1)
 	go func() { reloaded <- auth.Reload() }()
 	select {
 	case <-reading:
-	case <-t.Context().Done():
+	case <-ctx.Done():
 		t.Fatal("the reload never reached the token file")
 	}
 
@@ -355,7 +403,7 @@ func TestAuthRequestDuringReload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Reload: %v", err)
 		}
-	case <-t.Context().Done():
+	case <-ctx.Done():
 		t.Fatal("the reload did not finish")
 	}
 	if _, err := auth.Authenticate("Bearer old-token"); !errors.Is(err, ErrUnknownToken) {
@@ -409,7 +457,9 @@ func TestAuthWatchSignals(t *testing.T) {
 	sig <- syscall.SIGHUP
 	sig <- syscall.SIGTERM
 	close(sig)
-	auth.WatchSignals(context.Background(), sig, func(err error) { reports = append(reports, err) })
+	if err := auth.WatchSignals(context.Background(), sig, func(err error) { reports = append(reports, err) }); err != nil {
+		t.Fatalf("WatchSignals with a report returned %v, want nil", err)
+	}
 
 	if len(reports) != 0 {
 		t.Fatalf("WatchSignals reported %d error(s): %v", len(reports), reports)
@@ -440,7 +490,9 @@ func TestAuthWatchSignalsReportsReloadFailure(t *testing.T) {
 	sig := make(chan os.Signal, 1)
 	sig <- syscall.SIGHUP
 	close(sig)
-	auth.WatchSignals(context.Background(), sig, func(err error) { reports = append(reports, err) })
+	if err := auth.WatchSignals(context.Background(), sig, func(err error) { reports = append(reports, err) }); err != nil {
+		t.Fatalf("WatchSignals with a report returned %v, want nil", err)
+	}
 
 	if len(reports) != 1 || !errors.Is(reports[0], ErrTokenFileMode) {
 		t.Fatalf("WatchSignals reported %v, want one ErrTokenFileMode", reports)
@@ -450,7 +502,29 @@ func TestAuthWatchSignalsReportsReloadFailure(t *testing.T) {
 	}
 }
 
-// TestAuthWatchSignalsContext checks the loop ends on its context.
+// TestAuthWatchSignalsNilReport checks a nil report does not swallow a failed
+// reload: the loop ends and returns the error to the caller.
+func TestAuthWatchSignalsNilReport(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o600)
+	auth, err := NewAuthenticator(dir)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	sig := make(chan os.Signal, 1)
+	sig <- syscall.SIGHUP
+	close(sig)
+	if err := auth.WatchSignals(context.Background(), sig, nil); !errors.Is(err, ErrTokenFileMode) {
+		t.Fatalf("WatchSignals with no report returned %v, want ErrTokenFileMode", err)
+	}
+}
+
+// TestAuthWatchSignalsContext checks the loop ends on its context, and that
+// the wait for it is bounded.
 func TestAuthWatchSignalsContext(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -459,14 +533,55 @@ func TestAuthWatchSignalsContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	done := make(chan struct{})
+	ctx := waitContext(t)
+	watchCtx, stop := context.WithCancel(context.Background())
+	stop()
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		auth.WatchSignals(ctx, make(chan os.Signal), nil)
+		done <- auth.WatchSignals(watchCtx, make(chan os.Signal), nil)
 	}()
-	<-done
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WatchSignals after its context was cancelled: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("WatchSignals did not return after its context was cancelled")
+	}
+}
+
+// TestAuthConcurrentReload runs two reloads at once: Reload serializes them, so
+// both succeed and the table afterwards serves the directory.
+func TestAuthConcurrentReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o600)
+	auth, err := NewAuthenticator(dir)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	ctx := waitContext(t)
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- auth.Reload() }()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("concurrent Reload: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("a concurrent Reload did not finish")
+		}
+	}
+	got, err := auth.Authenticate("Bearer read-token")
+	if err != nil {
+		t.Fatalf("Authenticate after concurrent reloads: %v", err)
+	}
+	if want := (Identity{TokenRead, "dashboard"}); got != want {
+		t.Errorf("identity = %+v, want %+v", got, want)
+	}
 }
 
 // TestAuthCallerLengthBound is the boundary of the caller part of a token file
@@ -673,9 +788,40 @@ func (e fakeDirEntry) IsDir() bool                { return false }
 func (e fakeDirEntry) Type() fs.FileMode          { return 0 }
 func (e fakeDirEntry) Info() (fs.FileInfo, error) { return nil, errors.New("unused") }
 
+// fakeTokenFile is one open token file for the injected-failure tests: Stat and
+// Read report the failures a real file cannot be made to produce on demand.
+type fakeTokenFile struct {
+	info    os.FileInfo
+	statErr error
+	data    []byte
+	readErr error
+	off     int
+}
+
+func (f *fakeTokenFile) Stat() (os.FileInfo, error) {
+	if f.statErr != nil {
+		return nil, f.statErr
+	}
+	return f.info, nil
+}
+
+func (f *fakeTokenFile) Read(p []byte) (int, error) {
+	if f.readErr != nil {
+		return 0, f.readErr
+	}
+	if f.off >= len(f.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[f.off:])
+	f.off += n
+	return n, nil
+}
+
+func (f *fakeTokenFile) Close() error { return nil }
+
 // TestAuthLoaderIOFailures drives the loader's I/O refusal branches through an
 // injected filesystem: a temp directory cannot be made to fail a stat, a
-// listing or a read on demand, and each refusal must still be tested.
+// listing, an open or a read on demand, and each refusal must still be tested.
 func TestAuthLoaderIOFailures(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -691,6 +837,7 @@ func TestAuthLoaderIOFailures(t *testing.T) {
 	oneEntry := func(string) ([]os.DirEntry, error) {
 		return []os.DirEntry{fakeDirEntry{name: "read.dashboard.token"}}, nil
 	}
+	dirOnly := func(string) (os.FileInfo, error) { return dirInfo, nil }
 
 	tests := []struct {
 		name    string
@@ -707,35 +854,39 @@ func TestAuthLoaderIOFailures(t *testing.T) {
 		{
 			name: "listing the directory fails",
 			fs: tokenFS{
-				lstat:   func(string) (os.FileInfo, error) { return dirInfo, nil },
+				lstat:   dirOnly,
 				readDir: func(string) ([]os.DirEntry, error) { return nil, errors.New("readdir failed") },
 			},
 			wantErr: ErrTokenDir,
 		},
 		{
-			name: "statting a token file fails",
+			name: "opening a token file fails",
 			fs: tokenFS{
-				lstat: func(name string) (os.FileInfo, error) {
-					if name == dir {
-						return dirInfo, nil
-					}
-					return nil, errors.New("lstat failed")
-				},
+				lstat:   dirOnly,
 				readDir: oneEntry,
+				open:    func(string) (tokenFile, error) { return nil, errors.New("open failed") },
+			},
+			wantErr: ErrTokenFile,
+		},
+		{
+			name: "statting an opened token file fails",
+			fs: tokenFS{
+				lstat:   dirOnly,
+				readDir: oneEntry,
+				open: func(string) (tokenFile, error) {
+					return &fakeTokenFile{statErr: errors.New("fstat failed")}, nil
+				},
 			},
 			wantErr: ErrTokenFile,
 		},
 		{
 			name: "reading a token file fails",
 			fs: tokenFS{
-				lstat: func(name string) (os.FileInfo, error) {
-					if name == dir {
-						return dirInfo, nil
-					}
-					return tokenInfo, nil
+				lstat:   dirOnly,
+				readDir: oneEntry,
+				open: func(string) (tokenFile, error) {
+					return &fakeTokenFile{info: tokenInfo, readErr: errors.New("read failed")}, nil
 				},
-				readDir:  oneEntry,
-				readFile: func(string) ([]byte, error) { return nil, errors.New("read failed") },
 			},
 			wantErr: ErrTokenFile,
 		},

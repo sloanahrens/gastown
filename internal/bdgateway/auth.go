@@ -6,16 +6,18 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
 
-// Identity is what a bearer token authenticates to, both halves read from the
-// token's file name (docs/design/bd-container.md, "Token classes").
+// Identity is what a bearer token authenticates to, read from the token file
+// name (docs/design/bd-container.md, "Token classes").
 type Identity struct {
 	Class  TokenClass
 	Caller string
@@ -40,9 +42,8 @@ var (
 	// ErrUnknownToken is Authenticate's refusal of a well-formed token no file
 	// holds.
 	ErrUnknownToken = errors.New("bdgateway: unknown bearer token")
-	// ErrTokenFileName is LoadTokens' refusal of a token file name that is not
-	// <class>.<caller>.token, or whose caller is not 1 to 64 lowercase letters,
-	// digits, '-' or '_'.
+	// ErrTokenFileName is LoadTokens' refusal of a file name that is not a
+	// token file name.
 	ErrTokenFileName = errors.New("bdgateway: token file name must be <class>.<caller>.token")
 	// ErrTokenDir is LoadTokens' refusal of a directory it cannot list: missing,
 	// not a directory, or a symlink.
@@ -65,13 +66,19 @@ var (
 	ErrNoTokens = errors.New("bdgateway: token directory holds no tokens")
 )
 
+// The token file format is `<class>.<caller>.token`: one file per token, the
+// class part one of the TokenClass values, the caller part 1 to 64 lowercase
+// letters, digits, '-' or '_'. The file name resolves both what the token may
+// run and which caller it speaks as, so a request names neither.
+
 // TokenTable is one immutable snapshot of the token directory: the identities
-// its `<class>.<caller>.token` files name, and the digest of each token.
+// its token files name, and the SHA-256 digest of each token.
 type TokenTable struct {
 	entries []tokenEntry
-	// compare is the token comparison Lookup runs. Production uses
-	// constantTimeDigestCompare; a test replaces it to observe the operands or
-	// to hold one comparison open while the table is swapped.
+	// compare is the token comparison Lookup and loadTokens run, over two
+	// sha256.Size digests. Production uses subtle.ConstantTimeCompare; a test
+	// replaces it to count the comparisons or to hold one open while the table
+	// is swapped.
 	compare func(a, b []byte) int
 }
 
@@ -81,13 +88,12 @@ type tokenEntry struct {
 	digest   [sha256.Size]byte
 }
 
-// constantTimeDigestCompare compares two SHA-256 digests. Both operands are
-// always sha256.Size bytes, the whole of each is compared, and no byte decides
-// the result before the rest are read: crypto/subtle.ConstantTimeCompare's
-// early return on different lengths never runs, and a comparison's duration
-// does not say how much of a token matched.
-func constantTimeDigestCompare(a, b []byte) int {
-	return subtle.ConstantTimeCompare(a, b)
+// tokenFile is one open token file. The loader stats and reads this same
+// handle, so the mode and type it checks are the ones it reads.
+type tokenFile interface {
+	Stat() (os.FileInfo, error)
+	Read([]byte) (int, error)
+	Close() error
 }
 
 // tokenFS is the file operations the token loader performs. Production uses
@@ -95,19 +101,24 @@ func constantTimeDigestCompare(a, b []byte) int {
 // directory cannot be made to produce on demand, so every refusal branch has a
 // test.
 type tokenFS struct {
-	lstat    func(string) (os.FileInfo, error)
-	readDir  func(string) ([]os.DirEntry, error)
-	readFile func(string) ([]byte, error)
+	lstat   func(string) (os.FileInfo, error)
+	readDir func(string) ([]os.DirEntry, error)
+	open    func(string) (tokenFile, error)
 }
 
 // osTokenFS is tokenFS over the real filesystem.
-var osTokenFS = tokenFS{lstat: os.Lstat, readDir: os.ReadDir, readFile: os.ReadFile}
+var osTokenFS = tokenFS{lstat: os.Lstat, readDir: os.ReadDir, open: openTokenFile}
 
-// LoadTokens reads dir's `<class>.<caller>.token` files into a new TokenTable.
-// The caller is part of the file name, so the token itself resolves which
-// caller a request speaks as. Non-token files (README, editor droppings) are
-// ignored. Every refusal names the file or directory and what was wrong; none
-// echoes a token.
+// openTokenFile opens a token file without following a symlink, so the checks
+// and the read see the same file.
+func openTokenFile(path string) (tokenFile, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+}
+
+// LoadTokens reads dir's token files into a new TokenTable. The caller is part
+// of the file name, so the token itself resolves which caller a request speaks
+// as. Non-token files (README, editor droppings) are ignored. Every refusal
+// names the file or directory and what was wrong; none echoes a token.
 func LoadTokens(dir string) (*TokenTable, error) {
 	return loadTokens(osTokenFS, dir)
 }
@@ -128,7 +139,7 @@ func loadTokens(fs tokenFS, dir string) (*TokenTable, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: read %s: %v", ErrTokenDir, dir, err)
 	}
-	table := &TokenTable{compare: constantTimeDigestCompare}
+	table := &TokenTable{compare: subtle.ConstantTimeCompare}
 	for _, dirent := range dirents {
 		name := dirent.Name()
 		if !strings.HasSuffix(name, ".token") {
@@ -201,23 +212,29 @@ func validCaller(caller string) bool {
 	return true
 }
 
-// readTokenDigest returns the SHA-256 digest of the token path holds. It checks
-// the file with Lstat, so a symlink is refused rather than followed, and
-// requires mode 0600 exactly: a token readable by anyone else is refused with
-// the mode named and the token left unread. Surrounding whitespace is trimmed,
-// so a file written with a trailing newline works.
+// readTokenDigest returns the SHA-256 digest of the token path holds. It opens
+// the file once and stats and reads that same handle, so the mode and type
+// checked are the ones read; the open refuses a symlink rather than following
+// it. The mode must be 0600 exactly: a token readable by anyone else is refused
+// with the mode named and the token left unread. Surrounding whitespace is
+// trimmed, so a file written with a trailing newline works.
 func readTokenDigest(fs tokenFS, path string) ([sha256.Size]byte, error) {
 	var digest [sha256.Size]byte
-	info, err := fs.lstat(path)
+	f, err := fs.open(path)
+	if err != nil {
+		return digest, fmt.Errorf("%w: %s: %v", ErrTokenFile, path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	switch {
 	case err != nil:
 		return digest, fmt.Errorf("%w: %s: %v", ErrTokenFile, path, err)
 	case !info.Mode().IsRegular():
-		return digest, fmt.Errorf("%w: %s is not a regular file (a symlink or a directory)", ErrTokenFile, path)
+		return digest, fmt.Errorf("%w: %s is not a regular file", ErrTokenFile, path)
 	case info.Mode().Perm() != 0o600:
 		return digest, fmt.Errorf("%w: %s has mode %04o", ErrTokenFileMode, path, info.Mode().Perm())
 	}
-	b, err := fs.readFile(path)
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return digest, fmt.Errorf("%w: read %s: %v", ErrTokenFile, path, err)
 	}
@@ -248,8 +265,11 @@ func (t *TokenTable) Lookup(token string) (Identity, bool) {
 // Authenticator holds the current token table behind an atomic pointer, so a
 // reload swaps it and a request keeps the table it loaded until it returns.
 type Authenticator struct {
-	dir   string
-	fs    tokenFS
+	dir string
+	fs  tokenFS
+	// mu serializes Reload, so two reloads cannot interleave and a table is
+	// always built whole.
+	mu    sync.Mutex
 	table atomic.Pointer[TokenTable]
 }
 
@@ -266,9 +286,12 @@ func NewAuthenticator(dir string) (*Authenticator, error) {
 
 // Reload builds a table from the token directory and swaps it in. A failed
 // load leaves the current table in place, so a bad rotation refuses the reload
-// instead of locking every caller out. The directory is read off the request
-// path, so requests keep being served by the current table throughout.
+// instead of locking every caller out. Reload holds a.mu, so concurrent
+// reloads serialize. The directory is read off the request path, so requests
+// keep being served by the current table throughout.
 func (a *Authenticator) Reload() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	table, err := loadTokens(a.fs, a.dir)
 	if err != nil {
 		return err
@@ -341,20 +364,24 @@ func (a *Authenticator) HandleSignal(sig os.Signal) error {
 }
 
 // WatchSignals calls HandleSignal for each signal read from sig until ctx is
-// done or sig is closed. A failed reload is reported and does not stop the
-// loop: the old table stays in service until a later reload succeeds. The
+// done or sig is closed. A failed reload is handed to report and does not stop
+// the loop: the old table stays in service until a later reload succeeds. A nil
+// report is not a silent drop: the failure ends the loop and is returned. The
 // process's own signal channel and os/signal.Notify are the gateway's to wire
 // (cmd/bdgw, task G6).
-func (a *Authenticator) WatchSignals(ctx context.Context, sig <-chan os.Signal, report func(error)) {
+func (a *Authenticator) WatchSignals(ctx context.Context, sig <-chan os.Signal, report func(error)) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case s, ok := <-sig:
 			if !ok {
-				return
+				return nil
 			}
-			if err := a.HandleSignal(s); err != nil && report != nil {
+			if err := a.HandleSignal(s); err != nil {
+				if report == nil {
+					return err
+				}
 				report(err)
 			}
 		}
