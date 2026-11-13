@@ -1,10 +1,10 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
 // host: the linux/arm64 gt, bd, om and trackerd binaries the image runs
-// (gt-qpeei.9), the
-// image's cgo-built mango (gt-wznahy), the pinned claude CLI om's reviewer runs
-// (gt-qpeei.35), and the image built from them (gt-qpeei.16). Every command it
-// runs and every download it makes is one injected call, so the gate proves what
-// a build runs without Docker, a running daemon, a cluster or the network.
+// (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned claude CLI
+// om's reviewer runs (gt-qpeei.35), and the image built from them (gt-qpeei.16).
+// Every command it runs and every download it makes is one injected call, so the
+// gate proves what a build runs without Docker, a running daemon, a cluster or
+// the network.
 package daemonimage
 
 import (
@@ -40,8 +40,8 @@ const DockerContext = "desktop-linux"
 // The package each binary is built from, inside its source tree. gt and bd are
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
 // to the package polecat-image builds, and BDPackage to bdbuild.Package.
-// TrackerdPackage is built from the gt checkout at the gt commit, like gt, with
-// no stamp.
+// TrackerdPackage is a main package in the tracker module, built in
+// TrackerdModuleDir rather than at the checkout root.
 const (
 	GTPackage       = "./cmd/gt"
 	BDPackage       = "./cmd/bd"
@@ -195,8 +195,8 @@ func (b Builder) fileOps() fileOps {
 // It is a local tag only; nothing pulls this image by name.
 func ImageTag(rev string) string { return "gt-daemon:" + rev }
 
-// binary is one of the builds BuildBinaries makes: the checkout it is built from, the commit
-// of that checkout it is built at, and the package and stamp it is built with.
+// binary is one of the builds BuildBinaries makes: the checkout it is built from,
+// the commit of that checkout, and the package and stamp it is built with.
 type binary struct {
 	name, src, commit, pkg, ldflags string
 	// moduleDir is the directory of the clean worktree the compile runs in,
