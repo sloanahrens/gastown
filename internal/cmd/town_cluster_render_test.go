@@ -943,9 +943,9 @@ func TestApplyObjectsRefusesWhatItCannotOrder(t *testing.T) {
 }
 
 // TestApplyObjectsRanksTheTrackerBackupClaimWithTheCronJob holds the one claim
-// applyObjects ranks out of the claims' place: the tracker-backup claim mounts
-// only the dump's CronJob, so it ranks with the CronJob after trackerd's
-// Deployment, and every other claim keeps the claims' rank.
+// applyObjects lifts out of the claims' place: the tracker-backup claim ranks
+// with the CronJob, so it applies after trackerd's Deployment, and every other
+// claim keeps the claims' rank.
 func TestApplyObjectsRanksTheTrackerBackupClaimWithTheCronJob(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
