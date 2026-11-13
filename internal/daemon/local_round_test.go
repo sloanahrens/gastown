@@ -16,6 +16,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // roundClock is the fixed time every block and bound day is taken from.
@@ -784,13 +786,104 @@ func TestStartLocalRoundPatrolsNeedsADaemonConfig(t *testing.T) {
 	d.startLocalRoundPatrols()
 }
 
-func TestRunLocalRoundPatrolStopsWhenTheRigIsRefused(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	d := newLocalRoundRigDaemon(t, townRoot, false)
-	d.ctx = context.Background()
+// cancelOnEscalate records each escalation as the recorder does, then cancels
+// the context: the start alert is the last thing a refused rig's first tick does,
+// so the loop's next look at the context ends it.
+type cancelOnEscalate struct {
+	*notifyfake.Recorder
+	cancel context.CancelFunc
+}
 
-	d.runLocalRoundPatrol("gastown")
+func (c cancelOnEscalate) Escalate(ctx context.Context, e notify.Escalation) error {
+	err := c.Recorder.Escalate(ctx, e)
+	c.cancel()
+	return err
+}
+
+// TestRunLocalRoundPatrolEndsWithTheDaemonWhileARigIsRefused bounds the loop: a
+// refused rig keeps its patrol goroutine until the daemon's context ends, and
+// that end raises the rig's start alert first. A loop that ignores the context
+// fails at the 5 s bound rather than hanging the gate.
+func TestRunLocalRoundPatrolEndsWithTheDaemonWhileARigIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := notifyfake.New()
+	d := &Daemon{
+		logger:   discardLogger,
+		config:   &Config{TownRoot: t.TempDir()},
+		notifier: cancelOnEscalate{Recorder: rec, cancel: cancel},
+		ctx:      ctx,
+	}
+	bound, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		d.runLocalRoundPatrol("gastown")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-bound.Done():
+		t.Fatal("the patrol kept running after the daemon's context ended")
+	}
+	escalations := rec.Escalations()
+	if len(escalations) != 1 || escalations[0].Escalation.Fingerprint != localRoundRigKey("gastown") {
+		t.Fatalf("escalations = %+v; want one start alert under the rig's key", escalations)
+	}
+}
+
+func TestLocalRoundStartFailureRaisesAnAlert(t *testing.T) {
+	t.Parallel()
+	rec := notifyfake.New()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: t.TempDir()}, notifier: rec}
+	beadStore := &fakeRoundBeads{issues: []*beads.Issue{{ID: "gt-ryp1ff", Notes: "LOCAL ROUND REQUEST head=abcdef1"}}}
+	reviewer := &fakeRoundReviewer{findings: []land.Finding{oneFinding}}
+	refused := errors.New("rig repository /town/a/.repo.git: no such file")
+	repaired := false
+	a := &localRoundRigPatrol{d: d, rig: "a", build: func(string) (*LocalRoundPatrol, error) {
+		if !repaired {
+			return nil, refused
+		}
+		return newRoundPatrol(t, beadStore, reviewer), nil
+	}}
+	// Rig b has its own bead, so only rig a's request is served by a's patrol.
+	bStore := &fakeRoundBeads{issues: []*beads.Issue{{ID: "gt-b00000", Notes: "LOCAL ROUND REQUEST head=abcdef1"}}}
+	b := &localRoundRigPatrol{d: d, rig: "b", build: func(string) (*LocalRoundPatrol, error) {
+		return newRoundPatrol(t, bStore, reviewer), nil
+	}}
+	ctx := context.Background()
+
+	a.tick(ctx)
+	a.tick(ctx)
+	b.tick(ctx)
+
+	escalations := rec.Escalations()
+	if len(escalations) != 1 {
+		t.Fatalf("escalations = %d; want one start alert, for rig a only", len(escalations))
+	}
+	got := escalations[0].Escalation
+	if got.Fingerprint != localRoundRigKey("a") {
+		t.Fatalf("alert key = %q; want %q", got.Fingerprint, localRoundRigKey("a"))
+	}
+	if !strings.Contains(got.Reason, refused.Error()) {
+		t.Fatalf("alert reason %q does not name the refusal %q", got.Reason, refused.Error())
+	}
+	if clears := rec.Clears(); len(clears) != 0 {
+		t.Fatalf("clears = %+v before a build landed; want none", clears)
+	}
+
+	repaired = true
+	a.tick(ctx)
+
+	clears := rec.Clears()
+	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{localRoundRigKey("a")}) {
+		t.Fatalf("clears = %+v; want one clear of rig a's start alert once its build landed", clears)
+	}
+	if !strings.Contains(beadStore.issues[0].Notes, "LOCAL ROUND (1): head=abcdef1 at=") {
+		t.Fatalf("the rebuilt patrol did not serve the request; notes:\n%s", beadStore.issues[0].Notes)
+	}
 }
 
 // allowedPatrolFields are every dependency the patrol holds. A new one fails

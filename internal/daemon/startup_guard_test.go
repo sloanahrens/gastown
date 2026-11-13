@@ -669,6 +669,7 @@ func runCanceledStart(t *testing.T, town string, env map[string]string, probe Ow
 		clock:      clockwork.NewFakeClockAt(guardNow),
 		ownerProbe: probe,
 	}
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.cancel()
 	return d.Run()

@@ -70,6 +70,7 @@ func startParkedZoneStart(t *testing.T, env map[string]string, clock clockwork.C
 		startupLog    string
 		startupLoaded []string
 	)
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 	d.seams.cleanupLegacySockets = func(string) (int, int) {
 		// Snapshot on the daemon's own goroutine at the park point, so the
 		// test reads the start-up log as it stood before the park and never

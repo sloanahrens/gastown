@@ -295,18 +295,84 @@ func (d *Daemon) startLocalRoundPatrols() {
 	}
 }
 
-// runLocalRoundPatrol ticks one rig's patrol until the daemon stops.
-func (d *Daemon) runLocalRoundPatrol(rigName string) {
-	p, err := d.newRigLocalRoundPatrol(rigName)
-	if err != nil {
-		d.logger.Printf("local_round: %s: not starting: %v", rigName, err)
+// localRoundAlertSeverity is how loud a patrol that cannot start is: the same
+// severity the cache trim's own alerts use.
+const localRoundAlertSeverity = "medium"
+
+// localRoundRigPatrol is one rig's patrol across ticks. It is built on the first
+// tick that can build it and rebuilt on each tick until it can, so a rig fixed
+// while the daemon runs starts without a restart. A build that fails raises one
+// alert under the rig's key; the alert is cleared when a build lands.
+type localRoundRigPatrol struct {
+	d      *Daemon
+	rig    string
+	build  func(rig string) (*LocalRoundPatrol, error)
+	patrol *LocalRoundPatrol
+	// alertOpen is whether this process has the rig's start alert open. It is
+	// memory only, as the cache trim's open alerts are: a restart forgets one,
+	// and gt escalate clear closes it.
+	alertOpen bool
+}
+
+// localRoundRigKey is the alert key of one rig's patrol that cannot start: one
+// key per rig, so a second failure for the rig records onto the open alert.
+func localRoundRigKey(rig string) string {
+	return "local-round-rig:" + rig
+}
+
+// tick builds the patrol if no build has landed yet, then serves one tick. A
+// build that fails is alerted and the tick ends; the next tick builds again.
+func (r *localRoundRigPatrol) tick(ctx context.Context) {
+	if r.patrol == nil {
+		p, err := r.build(r.rig)
+		if err != nil {
+			r.startFailed(ctx, err)
+			return
+		}
+		r.patrol = p
+		r.d.logger.Printf("local_round: %s: patrol started", r.rig)
+	}
+	r.clearStartFailure(ctx)
+	r.patrol.Tick(ctx)
+}
+
+// startFailed raises the rig's start alert once. The mark is set before the
+// send, so a send that fails is still cleared by the later build that lands.
+func (r *localRoundRigPatrol) startFailed(ctx context.Context, err error) {
+	if r.alertOpen {
 		return
 	}
-	d.logger.Printf("local_round: %s: patrol started", rigName)
+	key := localRoundRigKey(r.rig)
+	r.alertOpen = true
+	r.d.logger.Printf("local_round: %s: not starting: %v", r.rig, err)
+	message := fmt.Sprintf("the local_round patrol cannot start for rig %s: %v. Local round requests on its beads get no answer until this is fixed.", r.rig, err)
+	if sendErr := r.d.escalateAlertSeverityCtx(ctx, localRoundAlertSeverity, key, "local_round", message); sendErr != nil {
+		r.d.logger.Printf("local_round: %s: the alert for the patrol that cannot start was not sent: %v", r.rig, sendErr)
+	}
+}
+
+// clearStartFailure clears the rig's start alert once a build has landed. The
+// mark is dropped only when the clear lands, so a failed clear is retried on the
+// next tick. A rig with no open alert is not sent a clear.
+func (r *localRoundRigPatrol) clearStartFailure(ctx context.Context) {
+	if !r.alertOpen {
+		return
+	}
+	if err := r.d.clearAlertsCtx(ctx, "the local_round patrol started for "+r.rig, localRoundRigKey(r.rig)); err != nil {
+		r.d.logger.Printf("local_round: %s: the start alert was not cleared: %v", r.rig, err)
+		return
+	}
+	r.alertOpen = false
+}
+
+// runLocalRoundPatrol ticks one rig's patrol until the daemon stops, rebuilding
+// it on each tick while its build is refused.
+func (d *Daemon) runLocalRoundPatrol(rigName string) {
+	r := &localRoundRigPatrol{d: d, rig: rigName, build: d.newRigLocalRoundPatrol}
 	ticker := time.NewTicker(localRoundInterval)
 	defer ticker.Stop()
 	for {
-		p.Tick(d.ctx)
+		r.tick(d.ctx)
 		select {
 		case <-d.ctx.Done():
 			return

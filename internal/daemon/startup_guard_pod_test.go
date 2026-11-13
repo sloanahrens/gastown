@@ -89,6 +89,7 @@ func runPodStart(t *testing.T, town string, env map[string]string) (string, erro
 	}
 	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
 	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.cancel()
 	err := d.Run()

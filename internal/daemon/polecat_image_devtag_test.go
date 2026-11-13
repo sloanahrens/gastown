@@ -569,6 +569,7 @@ func TestPolecatImageDevTagRunsBesideTheLoop(t *testing.T) {
 	}
 	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
 	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 	useGitfake(t, d)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

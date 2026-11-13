@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -41,15 +42,21 @@ type daemonSeams struct {
 	// reads through it to pin that an unchanged file is not reparsed.
 	readPatrolConfig func(townRoot string) (*DaemonPatrolConfig, error)
 	// startLocalRoundPatrols starts the local round patrols at Run. nil is the
-	// production start; a Run test replaces it so no patrol ticks bd.
+	// production start, which panics inside a test binary: a Run test replaces
+	// it so no patrol ticks bd.
 	startLocalRoundPatrols func(d *Daemon)
 }
 
 // runStartLocalRoundPatrols starts the local round patrols, or the test's stand-in.
+// Inside a test binary the production start panics instead, so a Run test that
+// forgets to replace it fails loudly rather than ticking bd on the host.
 func (s daemonSeams) runStartLocalRoundPatrols(d *Daemon) {
 	if s.startLocalRoundPatrols != nil {
 		s.startLocalRoundPatrols(d)
 		return
+	}
+	if testing.Testing() {
+		panic("local_round patrols started in a unit test: set d.seams.startLocalRoundPatrols")
 	}
 	d.startLocalRoundPatrols()
 }
