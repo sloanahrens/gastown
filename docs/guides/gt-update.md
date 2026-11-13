@@ -205,7 +205,10 @@ finds the first and starts nothing.
 - On, a roll is due by the rules above and only when a pair-ready commit is
   ahead of the running commit. A commit with only one of its two images
   published, or one equal to or older than the running commit, starts nothing.
-- A Job the cluster already holds for the commit counts as already launched.
+- A Job the cluster already holds for the commit counts as already launched,
+  whether it is running, completed or failed. So a commit whose Job failed is
+  not rolled again by the daemon. To retry it, delete that Job first:
+  `kubectl -n gt delete job gt-update-<sha12>`.
 - A create the cluster refuses, or does not answer within 30 seconds, starts
   nothing and is logged with its reason. The next attempt waits one minute, then
   doubles the wait to five minutes. The Job's name makes the retry safe: a create

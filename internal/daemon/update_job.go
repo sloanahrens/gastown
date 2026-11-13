@@ -18,12 +18,6 @@ import (
 	"github.com/steveyegge/gastown/internal/update"
 )
 
-// kubernetesServiceHostEnv is the variable the kubelet sets in every pod. A
-// daemon that reads it runs as a pod, and a roll it starts must outlive the pod
-// it replaces, so the roll runs as a Job in the cluster rather than as a child
-// of this process.
-const kubernetesServiceHostEnv = "KUBERNETES_SERVICE_HOST"
-
 // updateJobNamePrefix names the Job a pod roll creates: gt-update-<sha12> for
 // the green commit it rolls to. The same commit names the same Job, so a second
 // launch of one commit finds the first.
@@ -110,11 +104,6 @@ func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest [
 		return errUpdateJobExists
 	}
 	return fmt.Errorf("kubectl create for %s exited %d", name, exit)
-}
-
-// inClusterFromEnv reports whether the environment getenv reads names a pod.
-func inClusterFromEnv(getenv func(string) string) bool {
-	return getenv(kubernetesServiceHostEnv) != ""
 }
 
 // updateJobName is the Job name for the green commit sha.
@@ -317,6 +306,10 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 	case errors.Is(err, errUpdateJobNoAnswer):
 		wait := d.noteUpdateJobFailure(now)
 		d.logger.Printf("update: launch of the update Job timed out after %s; not launched; not retrying for %s", d.updateJobBound(), wait)
+	case errors.Is(err, errUpdateJobOutstanding):
+		// An earlier create is still out on the cluster. That is a wait, not a
+		// refused launch of this commit, so it does not raise the failure count.
+		d.logger.Printf("update: waiting on an outstanding Job create; %s not started", updateJobName(sha))
 	case err != nil:
 		wait := d.noteUpdateJobFailure(now)
 		d.logger.Printf("update: launch of the update Job failed: %v; not launched; not retrying for %s", err, wait)

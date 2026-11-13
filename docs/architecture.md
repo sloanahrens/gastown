@@ -145,7 +145,7 @@ The daemon is one long-running program. It does not think about code. It keeps t
 - **Patrols.** Small checks for stalled agents, stuck landings, full disks, slow database calls, a silent overseer and the like. Each patrol writes its findings into the attention queue.
 - **Maintenance.** The nightly Dolt backup and the other housekeeping run in a scheduled window.
 - **Tier sweeps.** The hourly run of the slow test tiers.
-- **Update.** The update patrol, off until `daemon.patrols.update.enabled` is set. In a pod it starts a roll as a Kubernetes Job, not a child process, because the roll replaces the pod that would own the child. What that Job can reach is in the header of `deploy/k8s/update-rbac.yaml`.
+- **Update.** The update patrol, off until `daemon.patrols.update.enabled` is set. In a pod it starts the roll as a Kubernetes Job; `docs/guides/gt-update.md` has the pod facts, and `deploy/k8s/update-rbac.yaml` has what that Job can reach.
 
 The Deployment runs exactly one replica with the `Recreate` strategy, because two daemons must never write the same town at once. It has no shutdown hook. On `SIGTERM` it gets a grace period long enough to finish the landing it is in.
 

@@ -28,6 +28,13 @@ func InClusterWithoutContext(environ []string, context string, hasContext func(n
 	return host != "" && !hasContext(context)
 }
 
+// InClusterHost reports whether the environment getenv reads names a pod: the
+// kubelet sets envInClusterHost in every pod. It is the signal for a process
+// that runs in the cluster and must not assume a kubeconfig context.
+func InClusterHost(getenv func(string) string) bool {
+	return getenv(envInClusterHost) != ""
+}
+
 // KubeconfigHasContext returns a lookup that reads the kubeconfig files environ
 // names (KUBECONFIG, a path list, else HOME/.kube/config) with read, and says
 // whether any of them names a context. A file that cannot be read or parsed

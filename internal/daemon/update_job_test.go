@@ -32,7 +32,8 @@ const testUpdateJobBound = time.Minute
 // daemon made, with the request timeout each one carried. refuse, when set, is
 // what every create returns instead. hang, when set, makes each create signal
 // entered and then wait: for its context to end, or with ignoreCtx for release,
-// the way a cluster that never answers would.
+// the way a cluster that never answers would. A hung create always ends when the
+// test releases the cluster at cleanup, so a failed test leaves no goroutine.
 type fakeUpdateJob struct {
 	calls    []string
 	timeouts []time.Duration
@@ -54,8 +55,12 @@ func (f *fakeUpdateJob) CreateJob(ctx context.Context, name string, manifest []b
 			<-f.release
 			return errors.New("released after the bound")
 		}
-		<-ctx.Done()
-		return context.Cause(ctx)
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-f.release:
+			return errors.New("released by the test")
+		}
 	}
 	if f.refuse != nil {
 		return f.refuse
@@ -426,9 +431,9 @@ func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
 		defer close(done)
 		r.d.triggerUpdate()
 	}()
-	<-r.cluster.entered // the create is in flight, and its deadline is already on the clock
+	awaitOrFail(t, r.cluster.entered, "the create to reach the cluster") // in flight, its deadline already on the clock
 	clock.Advance(testUpdateJobBound)
-	<-done
+	awaitOrFail(t, done, "the heartbeat to return at the create's deadline")
 
 	name := "gt-update-" + r.commits[2][:12]
 	assert.Equal(t, []string{name}, r.cluster.calls)
@@ -441,7 +446,9 @@ func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
 
 // TestUpdateJobHungCreateIsNotStacked: a create that ignores its context is
 // abandoned at the deadline, and the next attempt, past its backoff, does not
-// start a second create while the first is still out.
+// start a second create while the first is still out. That attempt is a wait on
+// the outstanding create: it is logged as one and does not count as a failed
+// launch, so no backoff is noted for it.
 func TestUpdateJobHungCreateIsNotStacked(t *testing.T) {
 	t.Parallel()
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
@@ -456,27 +463,26 @@ func TestUpdateJobHungCreateIsNotStacked(t *testing.T) {
 		defer close(done)
 		r.d.triggerUpdate()
 	}()
-	<-r.cluster.entered
+	awaitOrFail(t, r.cluster.entered, "the first create to reach the cluster")
 	clock.Advance(testUpdateJobBound)
-	<-done
+	awaitOrFail(t, done, "the heartbeat to return at the first create's deadline")
 
-	// Past the backoff, the next attempt either refuses at once, or starts a second
-	// create that the test abandons at its deadline. Only the second is a failure.
+	// Past the backoff, the next attempt must return at once with the outstanding
+	// refusal. A second create would hang on the cluster until the test released
+	// it, and then the wait on second fails naming the step.
 	clock.Advance(updateJobBackoff(1))
+	before := r.logs.Len()
 	second := make(chan struct{})
 	go func() {
 		defer close(second)
 		r.d.triggerUpdate()
 	}()
-	select {
-	case <-second:
-	case <-r.cluster.entered:
-		clock.Advance(testUpdateJobBound)
-		<-second
-	}
+	awaitOrFail(t, second, "the second attempt to return without a create while the first is out")
 
+	secondLog := r.logs.String()[before:]
 	assert.Len(t, r.cluster.calls, 1, "a second create started while the first was outstanding")
-	assert.Contains(t, r.logs.String(), "an earlier create of the update Job has not returned")
+	assert.Contains(t, secondLog, "waiting on an outstanding Job create")
+	assert.NotContains(t, secondLog, "not retrying for", "an outstanding create was counted as a failed launch")
 }
 
 // TestUpdateJobRefusalsBackOff: each consecutive refusal doubles the wait before
@@ -824,23 +830,4 @@ func TestKubectlUpdateJobRefusesNoRequestTimeout(t *testing.T) {
 	assert.Contains(t, err.Error(), "no request timeout")
 	_, statErr := os.Stat(filepath.Join(dir, name+".yaml"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "the manifest was written for a create that was refused")
-}
-
-// TestInClusterFromEnv: a pod is a process the kubelet gave KUBERNETES_SERVICE_HOST.
-func TestInClusterFromEnv(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		env  map[string]string
-		want bool
-	}{
-		{name: "unset", env: map[string]string{}, want: false},
-		{name: "set", env: map[string]string{kubernetesServiceHostEnv: "10.0.0.1"}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, inClusterFromEnv(func(k string) string { return tt.env[k] }))
-		})
-	}
 }

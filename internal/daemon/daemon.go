@@ -1618,7 +1618,7 @@ func New(config *Config) (*Daemon, error) {
 		// process environment here, in the one constructor production runs,
 		// keeps the burst sampler from reading it (burst_sampler.go).
 		containerMode: containerModeFromEnv(os.Getenv),
-		podMode:       inClusterFromEnv(os.Getenv),
+		podMode:       sweeprunner.InClusterHost(os.Getenv),
 		envShadowed:   envShadowed,
 	}
 
