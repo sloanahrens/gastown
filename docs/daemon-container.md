@@ -1024,9 +1024,9 @@ daemon's state and the configuration `find`.** What was seen: the `find` printed
 backups of `settings/config.json`; the diff of those backups showed the pool and
 patrol settings changed; and the live daemon was restarted twice, at times that
 match installs. That is consistent with the live town's own
-operation and not with L2, but it is not proven by these readings. The commands
+operation and not with L2, but it is not proven by these readings. The command
 under [Checks that the live town was not touched](#checks-that-the-live-town-was-not-touched)
-are the way to prove it. On a quiet town both boxes hold. The run's evidence (landing
+is the way to prove it. On a quiet town both boxes hold. The run's evidence (landing
 log, scratch commits, the container's credential config, the baseline and the
 readings) is recorded on the program bead gt-qpeei.
 
