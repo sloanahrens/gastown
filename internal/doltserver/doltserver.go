@@ -2332,12 +2332,23 @@ func (h *host) Start(townRoot string) error {
 	}
 
 	if running {
-		// If data directory doesn't exist, this is an orphaned server (e.g., user
-		// deleted ~/gt and re-ran gt install). Kill it so we can start fresh.
+		// If data directory doesn't exist, a server gt owns is orphaned (e.g.,
+		// user deleted ~/gt and re-ran gt install). Stop it so we can start
+		// fresh. Only a local PID is gt's to stop: a server reached over TCP
+		// alone (a container port forward, a remote host) is the town's live
+		// endpoint, and a stop that did not take leaves it holding that
+		// endpoint — neither may fall through to a second server (gt-8oc5pa,
+		// gt-rfxs85).
 		if _, statErr := os.Stat(config.DataDir); os.IsNotExist(statErr) {
+			if pid <= 0 {
+				fmt.Fprintf(os.Stderr, "Warning: the Dolt endpoint answers at port %d but data directory %s does not exist and gt owns no local process to stop; keeping it\n", config.Port, config.DataDir)
+				return nil
+			}
 			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
-			h.stopOrphanedServer(townRoot, pid)
-			// Fall through to start a new server
+			if !h.stopOrphanedServer(townRoot, pid) {
+				return fmt.Errorf("orphaned Dolt server (PID %d) did not stop; not starting a second server on port %d", pid, config.Port)
+			}
+			// Stopped: fall through to start a new server
 		} else {
 			// Server is running with valid data dir — check if it's an imposter
 			// (e.g., bd launched its own dolt server from a different data directory).
