@@ -153,11 +153,13 @@ var tsPattern = regexp.MustCompile(`^(\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{1,2}:\d{1
 // ParseTS parses a transcript timestamp as the UTC instant it names. A numeric offset is applied in
 // every form — extended "+02:00", basic "+0200", hour-only "+02" — where the Python reference drops
 // the zone, so comparisons and the CDT hour are on the instant the timestamp names rather than the
-// wall clock taken as UTC. "Z", "z" and no zone are UTC. A suffix that names no applyable instant
-// (trailing text, a space before the zone, an out-of-range offset) is dropped and the first 19 bytes
-// read as the wall clock, as the reference does, so such a form leaves its record complete instead
-// of dropping the record's usage. Only a string whose first 19 bytes are not a transcript timestamp
-// is an error.
+// wall clock taken as UTC. "Z", "z" and no zone are UTC. A suffix that names no zone at all (trailing
+// text, a dot with no fraction) is dropped and the first 19 bytes read as the wall clock, as the
+// reference does, so such a form leaves its record complete. A suffix that is shaped like an offset
+// (a sign and a digit, after any blanks) but that tsPattern cannot apply (a space before the zone,
+// "+24:00", "+02:60") is an error: reading it as the wall clock would misdate the record by the
+// offset with no signal, and the CDT price hour with it, so the record is flagged incomplete
+// instead. A string whose first 19 bytes are not a transcript timestamp is an error.
 func ParseTS(ts string) (time.Time, error) {
 	m := tsPattern.FindStringSubmatch(ts)
 	if m == nil {
@@ -192,8 +194,16 @@ func parseTSReference(ts string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("timestamp %q is not a transcript timestamp", ts)
 	}
+	if offsetShapedSuffix.MatchString(ts[len(prefix):]) {
+		return time.Time{}, fmt.Errorf("timestamp %q has an offset that cannot be applied", ts)
+	}
 	return t, nil
 }
+
+// offsetShapedSuffix is what follows the first 19 bytes when it looks like a numeric zone offset:
+// an optional fraction, optional blanks, a sign and a digit. The reference read such a suffix as the wall clock; ParseTS
+// refuses it instead, because that reading is off by the offset.
+var offsetShapedSuffix = regexp.MustCompile(`^(?:\.\d*)?\s*[+-]\d`)
 
 // twoDigits is the value of the two ASCII digits tsPattern admits in an offset group.
 func twoDigits(s string) int { return int(s[0]-'0')*10 + int(s[1]-'0') }

@@ -523,19 +523,17 @@ func TestParseTSIsAnInstant(t *testing.T) {
 	}
 }
 
-// TestParseTSReadsUnreadableSuffixAsWallClock: a suffix that names no applyable instant makes the
-// timestamp neither an error nor a zone. The reference strptime read the first 19 bytes and dropped
-// the rest, and so does this; the record stays complete instead of losing its usage. A numeric
-// offset the reader can apply is never dropped (see TestParseTSIsAnInstant).
+// TestParseTSReadsUnreadableSuffixAsWallClock: a suffix that names no zone makes the timestamp
+// neither an error nor a zone. The reference strptime read the first 19 bytes and dropped the rest,
+// and so does this; the record stays complete instead of losing its usage. A numeric offset the
+// reader can apply is never dropped (see TestParseTSIsAnInstant), and one it cannot apply is an
+// error (see TestParseTSRefusesAnOffsetItCannotApply).
 func TestParseTSReadsUnreadableSuffixAsWallClock(t *testing.T) {
 	t.Parallel()
 	want := time.Date(2026, 10, 12, 18, 53, 57, 0, time.UTC)
 	for _, ts := range []string{
-		"2026-10-12T18:53:57Zjunk",   // trailing text
-		"2026-10-12T18:53:57.",       // a dot with no fraction
-		"2026-10-12T18:53:57 +02:00", // a space before the zone
-		"2026-10-12T18:53:57+24:00",  // offset hours out of range
-		"2026-10-12T18:53:57+02:60",  // offset minutes out of range
+		"2026-10-12T18:53:57Zjunk", // trailing text
+		"2026-10-12T18:53:57.",     // a dot with no fraction
 	} {
 		got, err := ParseTS(ts)
 		if err != nil {
@@ -544,6 +542,24 @@ func TestParseTSReadsUnreadableSuffixAsWallClock(t *testing.T) {
 		}
 		if !got.Equal(want) {
 			t.Errorf("ParseTS(%q) = %v, want %v", ts, got, want)
+		}
+	}
+}
+
+// TestParseTSRefusesAnOffsetItCannotApply: a suffix shaped like an offset that tsPattern cannot
+// apply is an error, never the wall clock. Reading "+02:60" as 18:53:57 UTC would be off by the
+// offset with the record left complete, and the CDT price hour wrong with no signal (gt-gkzfab).
+func TestParseTSRefusesAnOffsetItCannotApply(t *testing.T) {
+	t.Parallel()
+	for _, ts := range []string{
+		"2026-10-12T18:53:57 +02:00", // a space before the zone
+		"2026-10-12T18:53:57+24:00",  // offset hours out of range
+		"2026-10-12T18:53:57+02:60",  // offset minutes out of range
+		"2026-10-12T18:53:57-0260",   // basic form, minutes out of range
+		"2026-10-12T18:53:57.5 -02",  // a fraction, a blank before the zone
+	} {
+		if got, err := ParseTS(ts); err == nil {
+			t.Errorf("ParseTS(%q) = %v, want an error: the offset cannot be applied", ts, got)
 		}
 	}
 }
