@@ -747,13 +747,14 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	}
 	if pod != nil {
 		// The pod's pair is checked once the swap reports it: its daemon's image
-		// ids, the registry's dev tag, and then the values file goes into the pod.
+		// ids, the sandbox registry's dev tag read through the daemon pod, and
+		// then the values file goes into the pod.
 		install.PairCheck = podPairCheck{
 			Run:        seams.PodRun,
 			Target:     *pod,
-			Images:     seams.Images,
-			TownRoot:   townRoot,
 			ValuesPath: path,
+			Clock:      deps.Clock,
+			Sleep:      deps.Sleep,
 		}.Check
 	}
 	return install, nil

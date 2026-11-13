@@ -117,9 +117,11 @@ func podListJSON(pods ...podPairPod) string {
 
 // podPairKubectl stands in for kubectl against a daemon pod. A patch puts the
 // daemon on the commit of the daemon digest it names. A get answers the pod list
-// pods, or fails with getExit and the output a secret would be in. runErr fails
-// every command as the runner would; failWord makes the command carrying that
-// word exit 1. Every call is recorded.
+// pods, or fails with getExit and the output a secret would be in. The dev tag
+// read answers devTag, or a tag at the pair's digest when it is empty, and
+// exits devTagExit when that is set. runErr fails every command as the runner
+// would; failWord makes the command carrying that word exit 1. Every call is
+// recorded.
 type podPairKubectl struct {
 	calls   []podPairCall
 	commits map[string]string
@@ -132,6 +134,8 @@ type podPairKubectl struct {
 	getExit        int
 	runErr         error
 	failWord       string
+	devTag         string
+	devTagExit     int
 }
 
 func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
@@ -143,6 +147,14 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 		return podSwapOutput, 1, nil
 	}
 	switch {
+	case containsArg(args, "polecat-devtag"):
+		if k.devTagExit != 0 {
+			return podSwapOutput, k.devTagExit, nil
+		}
+		if k.devTag != "" {
+			return k.devTag, 0, nil
+		}
+		return podPairDevTagJSON(true, testDigestOf(podPairManifest)), 0, nil
 	case containsArg(args, "patch"):
 		var patch podSwapPatchBody
 		if err := json.Unmarshal([]byte(args[len(args)-1]), &patch); err != nil {
@@ -242,6 +254,16 @@ func (r podPairRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(bytes.NewReader(r.body)), Request: req}, nil
 }
 
+// podPairDevTagJSON is the one line `gt daemon polecat-devtag` prints, encoded
+// through the type the command itself writes.
+func podPairDevTagJSON(present bool, digest string) string {
+	b, err := json.Marshal(polecatDevTagRead{Present: present, Digest: digest})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 // podPairTarget is the Deployment every pair check in this file names.
 func podPairTarget() podDaemonTarget {
 	return podDaemonTarget{Context: podSwapContext, Namespace: podSwapNamespace, Deployment: k8sdaemon.Name}
@@ -261,57 +283,35 @@ func podPairValuesFile(t *testing.T) (string, []byte) {
 	return path, data
 }
 
-// TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold holds each refusal to its
-// own row: the read that fails, and the registry's dev tag. The pods' image ids
-// are judged in TestUpdatePodPairCheckJudgesEveryDaemonPod. Every refusal names
-// its step and writes nothing into the pod.
+// TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold holds the daemon pod read
+// to its own refusals. The pods' image ids are judged in
+// TestUpdatePodPairCheckJudgesEveryDaemonPod, and the dev tag in
+// TestPodPairDevTag. Every refusal names its step and writes nothing into the pod.
 func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
 		name    string
-		pods    []podPairPod
 		raw     string
 		getExit int
-		body    []byte
 		want    string
 	}{
 		{
 			name:    "the read of the daemon pods exits nonzero",
 			getExit: 1,
-			body:    podPairManifest,
 			want:    "exited 1",
 		},
 		{
 			name: "the read of the daemon pods is not a pod list",
 			raw:  "a read that is not JSON",
-			body: podPairManifest,
 			want: "is not a pod list",
-		},
-		{
-			name: "the dev tag names another polecat digest",
-			pods: podPairHealthy(),
-			body: []byte("a rebuilt polecat manifest"),
-			want: "is digest",
-		},
-		{
-			name: "the registry holds no dev tag",
-			pods: podPairHealthy(),
-			body: nil,
-			want: "holds no dev tag",
 		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			path, _ := podPairValuesFile(t)
-			kube := &podPairKubectl{pods: row.pods, raw: row.raw, getExit: row.getExit}
-			check := podPairCheck{
-				Run:        kube.run,
-				Target:     podPairTarget(),
-				Images:     podPairImages(row.body),
-				TownRoot:   t.TempDir(),
-				ValuesPath: path,
-			}
+			kube := &podPairKubectl{raw: row.raw, getExit: row.getExit}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path}
 			err := check.Check(context.Background(), podPairPair)
 			if err == nil {
 				t.Fatal("Check accepted the pair, want a refusal")
@@ -396,7 +396,7 @@ func TestUpdatePodPairCheckJudgesEveryDaemonPod(t *testing.T) {
 			t.Parallel()
 			path, _ := podPairValuesFile(t)
 			kube := &podPairKubectl{pods: row.pods}
-			check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path}
 			err := check.Check(context.Background(), podPairPair)
 			if row.want == "" {
 				if err != nil {
@@ -424,7 +424,7 @@ func TestUpdatePodPairCheckRefusesAValuesFileThatNoLongerHoldsThePair(t *testing
 	t.Parallel()
 	path, _ := podPairValuesFile(t)
 	kube := &podPairKubectl{pods: podPairHealthy()}
-	check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
+	check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path}
 	other := podPairPair
 	other.Commit = strings.Repeat("c", 40)
 	if err := check.Check(context.Background(), other); err == nil || !strings.Contains(err.Error(), "no longer holds the pair") {
@@ -435,51 +435,34 @@ func TestUpdatePodPairCheckRefusesAValuesFileThatNoLongerHoldsThePair(t *testing
 	}
 }
 
-// TestUpdatePodPairCheckRefusesAnUnreadableInput holds the check's inputs to
-// refusals: a values file that does not read or parse, and a registry or viewer
-// credential the dev tag cannot be read through. Each refusal comes before any
-// write into the pod.
-func TestUpdatePodPairCheckRefusesAnUnreadableInput(t *testing.T) {
+// TestUpdatePodPairCheckRefusesAnUnreadableValuesFile holds the check's one
+// local input to its refusals: a values file that does not read or parse. Each
+// refusal comes before any command runs, so nothing is written into the pod.
+func TestUpdatePodPairCheckRefusesAnUnreadableValuesFile(t *testing.T) {
 	t.Parallel()
 	garbage := filepath.Join(t.TempDir(), "garbage.yaml")
 	if err := os.WriteFile(garbage, []byte("daemon: [unterminated\n"), 0o600); err != nil {
 		t.Fatalf("write the garbage file: %v", err)
 	}
-	valid, _ := podPairValuesFile(t)
-	badRegistry := podPairImages(podPairManifest)
-	badRegistry.Registry = func(string) (imagevalues.Registry, error) {
-		return imagevalues.Registry{}, errors.New("no rig names a registry")
-	}
-	badCredential := podPairImages(podPairManifest)
-	badCredential.Credentials = func() (string, string, error) {
-		return "", "", errors.New("no token file")
-	}
-	failingRegistry := podPairImages(podPairManifest)
-	failingRegistry.HTTPClient = &http.Client{Transport: podPairRegistry{status: http.StatusInternalServerError}}
 	rows := []struct {
-		name   string
-		path   string
-		images updateImagesSeams
-		want   string
+		name string
+		path string
+		want string
 	}{
-		{name: "the registry answers an error for the dev tag", path: valid, images: failingRegistry, want: "reading the dev tag of the polecat image"},
-		{name: "the values file is missing", path: filepath.Join(t.TempDir(), "missing.yaml"), images: podPairImages(podPairManifest), want: "reading the values file for the pod check"},
-		{name: "the values file does not parse", path: garbage, images: podPairImages(podPairManifest), want: "the values file for the pod check"},
-		{name: "no registry reader is wired", path: valid, images: updateImagesSeams{}, want: "no registry reader is wired"},
-		{name: "the registry cannot be resolved", path: valid, images: badRegistry, want: "reading the registry for the pod's dev tag check"},
-		{name: "the viewer credential cannot be read", path: valid, images: badCredential, want: "reading the viewer credential"},
+		{name: "the values file is missing", path: filepath.Join(t.TempDir(), "missing.yaml"), want: "reading the values file for the pod check"},
+		{name: "the values file does not parse", path: garbage, want: "the values file for the pod check"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			kube := &podPairKubectl{pods: podPairHealthy()}
-			check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: row.images, TownRoot: t.TempDir(), ValuesPath: row.path}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: row.path}
 			err := check.Check(context.Background(), podPairPair)
 			if err == nil || !strings.Contains(err.Error(), row.want) {
 				t.Fatalf("Check error = %v, want it to name %q", err, row.want)
 			}
-			if kube.wroteToPod() {
-				t.Errorf("a refused input wrote into the pod: calls = %+v", kube.calls)
+			if len(kube.calls) != 0 {
+				t.Errorf("a refused values file ran commands: calls = %+v", kube.calls)
 			}
 		})
 	}
@@ -498,15 +481,15 @@ func TestUpdatePodPairCheckStopsAtEachFailedStep(t *testing.T) {
 		commands int
 	}{
 		{name: "the runner cannot run the pod read", kube: podPairKubectl{runErr: errors.New("kubectl is not installed")}, want: "running kubectl for the pod's read of the daemon pods", commands: 1},
-		{name: "the update directory cannot be made in the pod", kube: podPairKubectl{pods: podPairHealthy(), failWord: "mkdir"}, want: "creation of the update directory exited 1", commands: 2},
-		{name: "the values file cannot be copied into the pod", kube: podPairKubectl{pods: podPairHealthy(), failWord: "tee"}, want: "copy of the values file exited 1", commands: 3},
+		{name: "the update directory cannot be made in the pod", kube: podPairKubectl{pods: podPairHealthy(), failWord: "mkdir"}, want: "creation of the update directory exited 1", commands: 3},
+		{name: "the values file cannot be copied into the pod", kube: podPairKubectl{pods: podPairHealthy(), failWord: "tee"}, want: "copy of the values file exited 1", commands: 4},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			path, _ := podPairValuesFile(t)
 			kube := row.kube
-			check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path}
 			err := check.Check(context.Background(), podPairPair)
 			if err == nil || !strings.Contains(err.Error(), row.want) {
 				t.Fatalf("Check error = %v, want it to name %q", err, row.want)
@@ -522,37 +505,148 @@ func TestUpdatePodPairCheckStopsAtEachFailedStep(t *testing.T) {
 }
 
 // TestUpdatePodPairCheckWritesTheValuesFileIntoThePod holds the success path to
-// its commands: the pods are read, the update directory is made in the pod, and
-// the values file's bytes go into the pod on stdin.
+// its commands: the pods are read, the dev tag is read in the daemon container,
+// the update directory is made in the pod, and the values file's bytes go into
+// the pod on stdin.
 func TestUpdatePodPairCheckWritesTheValuesFileIntoThePod(t *testing.T) {
 	t.Parallel()
 	path, data := podPairValuesFile(t)
 	kube := &podPairKubectl{pods: podPairHealthy()}
-	check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
+	check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path}
 	if err := check.Check(context.Background(), podPairPair); err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 
 	dir := update.Dir(k8sdaemon.TownRootPath)
 	prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
-	if len(kube.calls) != 3 {
-		t.Fatalf("calls = %+v, want the pod read, the directory, then the copy", kube.calls)
+	if len(kube.calls) != 4 {
+		t.Fatalf("calls = %+v, want the pod read, the dev tag read, the directory, then the copy", kube.calls)
 	}
 	get := kube.calls[0]
 	if !slices.Equal(get.args[:len(prefix)], prefix) || !slices.Contains(get.args, "app.kubernetes.io/name="+k8sdaemon.Name) {
 		t.Errorf("read argv = %q, want the daemon pods by label in the namespace", get.args)
 	}
-	mkdir := kube.calls[1]
+	devTag := kube.calls[1]
+	devTagWant := append(slices.Clone(prefix), "exec", "deployment/"+k8sdaemon.Name, "-c", k8sdaemon.Name, "--")
+	devTagWant = append(devTagWant, polecatDevTagCommand...)
+	if !slices.Equal(devTag.args, devTagWant) {
+		t.Errorf("dev tag argv = %q, want %q", devTag.args, devTagWant)
+	}
+	mkdir := kube.calls[2]
 	if want := append(slices.Clone(prefix), "exec", "deployment/"+k8sdaemon.Name, "--", "mkdir", "-p", dir); !slices.Equal(mkdir.args, want) {
 		t.Errorf("mkdir argv = %q, want %q", mkdir.args, want)
 	}
-	copyCall := kube.calls[2]
+	copyCall := kube.calls[3]
 	want := append(slices.Clone(prefix), "exec", "-i", "deployment/"+k8sdaemon.Name, "--", "tee", filepath.Join(dir, podImagesValuesName))
 	if !slices.Equal(copyCall.args, want) {
 		t.Errorf("copy argv = %q, want %q", copyCall.args, want)
 	}
 	if string(copyCall.stdin) != string(data) {
 		t.Errorf("copy stdin = %q, want the values file's bytes %q", copyCall.stdin, data)
+	}
+}
+
+// TestPodPairDevTag holds the dev tag check to the sandbox registry read in the
+// daemon pod: a tag at the pair's digest, a tag at another digest, an absent
+// tag, and a read that fails. Each refusal names the state it last saw after the
+// wait and writes nothing into the pod.
+func TestPodPairDevTag(t *testing.T) {
+	t.Parallel()
+	otherDigest := testDigestOf([]byte("another polecat manifest"))
+	rows := []struct {
+		name       string
+		devTag     string
+		devTagExit int
+		want       string
+	}{
+		{name: "the tag names the pair's polecat digest"},
+		{name: "the tag names another digest", devTag: podPairDevTagJSON(true, otherDigest), want: "names digest " + otherDigest},
+		{name: "the tag is absent", devTag: podPairDevTagJSON(false, ""), want: "has no dev tag"},
+		{name: "the read fails", devTagExit: 1, want: "could not be read"},
+		{name: "the read does not answer JSON", devTag: "gt version 0123456789ab built on test", want: "did not answer JSON"},
+		{name: "the read names no digest", devTag: `{"present":true,"digest":"not-a-digest"}`, want: "named no sha256 digest"},
+		{
+			name:   "a kubectl warning surrounds the answer",
+			devTag: "Warning: something the cluster said\n" + podPairDevTagJSON(true, testDigestOf(podPairManifest)) + "\nWarning: and another",
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			path, _ := podPairValuesFile(t)
+			kube := &podPairKubectl{pods: podPairHealthy(), devTag: row.devTag, devTagExit: row.devTagExit}
+			clock := &rollbackTestClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path, Clock: clock, Sleep: clock.sleep}
+			err := check.Check(context.Background(), podPairPair)
+			if row.want == "" {
+				if err != nil {
+					t.Fatalf("Check: %v, want the tag's digest accepted", err)
+				}
+				if !kube.wroteToPod() {
+					t.Errorf("a matching tag wrote nothing into the pod: calls = %+v", kube.calls)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("Check error = %v, want it to name %q", err, row.want)
+			}
+			if !strings.Contains(err.Error(), "after waiting") {
+				t.Errorf("error = %q, want the bound named: a tag still being copied is waited for", err)
+			}
+			if strings.Contains(err.Error(), podSwapOutput) {
+				t.Errorf("error %q carries a command's output", err)
+			}
+			if kube.wroteToPod() {
+				t.Errorf("a refused tag wrote into the pod: calls = %+v", kube.calls)
+			}
+		})
+	}
+}
+
+// TestPodPairDevTagNotFromTownRegistry holds the check to the registry the
+// daemon publishes the dev tag to: the town's Forgejo registry is wired to
+// refuse every read, and the check still passes because the daemon pod reports
+// the pair's digest. A check that went back to reading townImageRegistry fails
+// here (gt-5yh32c).
+func TestPodPairDevTagNotFromTownRegistry(t *testing.T) {
+	t.Parallel()
+	path, _ := podPairValuesFile(t)
+	kube := &podPairKubectl{pods: podPairHealthy()}
+	refused := podPairImages(podPairManifest)
+	refused.Registry = func(string) (imagevalues.Registry, error) {
+		return imagevalues.Registry{}, errors.New("the pair check read the town's Forgejo registry")
+	}
+	refused.Credentials = func() (string, string, error) {
+		return "", "", errors.New("the pair check read the viewer credential")
+	}
+	refused.HTTPClient = &http.Client{Transport: podPairRegistry{status: http.StatusInternalServerError}}
+	clock := &rollbackTestClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
+	deps := update.Deps{Clock: clock, Sleep: clock.sleep}
+	seams := updateSeams{
+		PodRun:   kube.run,
+		Images:   refused,
+		Notifier: func(string) notify.Notifier { return notifyfake.New() },
+	}
+	target := podPairTarget()
+	installer, err := digestInstaller(seams, t.TempDir(), deps, path, &target, io.Discard)
+	if err != nil {
+		t.Fatalf("digestInstaller: %v", err)
+	}
+	install, ok := installer.(*update.DigestInstaller)
+	if !ok {
+		t.Fatalf("installer = %T, want the digest installer", installer)
+	}
+	if err := install.PairCheck(context.Background(), podPairPair); err != nil {
+		t.Fatalf("PairCheck: %v, want the pair accepted from the daemon pod's read", err)
+	}
+	read := false
+	for _, call := range kube.calls {
+		if containsArg(call.args, "polecat-devtag") {
+			read = true
+		}
+	}
+	if !read {
+		t.Errorf("the check never read the dev tag in the daemon pod: calls = %+v", kube.calls)
 	}
 }
 
