@@ -1372,15 +1372,17 @@ func sandboxSecretsReadTokens(command string) []string {
 var sandboxSecretsHeaderKeywords = map[string]bool{"for": true, "case": true, "select": true}
 
 // sandboxSecretsParsedUnsafe reports whether command has a shape whose words the
-// parsed reading drops: a here-document (its body is in the parse, not the
-// tokens), a [[ ]] expression, or a for, case or select header. The environ-path
-// check reads those words as text, so the command is read by shellTokenize
-// instead. The rule reads the command text, because the parsed tokens lack the
-// very structure it has to detect; it only ever sends a command to the reading
-// the guard used before this move, so a rule that is too broad costs the parsed
-// reading and never strictness.
+// parsed reading drops or leaves as written: a here-document (its body is in the
+// parse, not the tokens), a [[ ]] expression, a for, case or select header, or a
+// command or process substitution, which parsedTokens keeps as one raw word with
+// its quotes and backslashes intact. The environ-path check reads those words as
+// text, so the command is read by shellTokenize instead. The rule reads the
+// command text, because the parsed tokens lack the very structure it has to
+// detect; it only ever sends a command to the reading the guard used before this
+// move, so a rule that is too broad costs the parsed reading and never
+// strictness.
 func sandboxSecretsParsedUnsafe(command string) bool {
-	if sandboxSecretsHasHeredoc(command) || strings.Contains(command, "[[") {
+	if sandboxSecretsHasHeredoc(command) || sandboxSecretsHasSubstitution(command) || strings.Contains(command, "[[") {
 		return true
 	}
 	for _, w := range strings.FieldsFunc(command, func(r rune) bool {
@@ -1391,6 +1393,18 @@ func sandboxSecretsParsedUnsafe(command string) bool {
 		}
 	}
 	return false
+}
+
+// sandboxSecretsHasSubstitution reports whether command holds the opener of a
+// command substitution ($( or a backquote, sandboxSecretsRunsSubstitution) or a
+// process substitution (<( or >(, which bash runs from a file descriptor).
+// parsedTokens keeps each of these as one raw word, so a path the shell builds
+// inside one is not a path the parsed reading can see (gt-p0y85u). The check
+// reads the text, so a substitution inside single quotes also routes to
+// shellTokenize: that costs the parsed reading, not strictness.
+func sandboxSecretsHasSubstitution(command string) bool {
+	return sandboxSecretsRunsSubstitution(command) ||
+		strings.Contains(command, "<(") || strings.Contains(command, ">(")
 }
 
 // sandboxSecretsHasHeredoc reports whether command holds a here-document
