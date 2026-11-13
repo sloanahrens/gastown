@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,33 @@ func (m BranchNameMeta) GeneratedAt() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.UnixMilli(ms), true
+}
+
+// branchStampClock hands out the base-36 UnixMilli stamp that generated branch
+// names carry. Each stamp is max(now, last+1), so two names built in one
+// millisecond never share a stamp: a repair that follows an add inside the
+// same millisecond would otherwise collide on an existing branch.
+type branchStampClock struct {
+	mu   sync.Mutex
+	last int64 // last stamp handed out, in UnixMilli
+}
+
+// processBranchStamps is the sequence every Manager in this process draws
+// from, so Managers built separately still never repeat a stamp.
+var processBranchStamps = &branchStampClock{}
+
+// next returns the stamp for the time now reports, bumped past the last one
+// handed out. A bumped stamp runs ahead of the clock until the clock catches
+// up, so GeneratedAt can report a time later than the real one.
+func (c *branchStampClock) next(now func() time.Time) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ms := now().UnixMilli()
+	if ms <= c.last {
+		ms = c.last + 1
+	}
+	c.last = ms
+	return strconv.FormatInt(ms, 36)
 }
 
 // FormatGeneratedBranchName returns the canonical generated polecat branch.

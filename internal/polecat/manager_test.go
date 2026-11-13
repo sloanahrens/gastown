@@ -1289,6 +1289,48 @@ func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 	}
 }
 
+// TestBuildBranchName_SameMillisecondNamesDiffer covers gt-srpy8g: a forced
+// repair that builds its branch name in the same millisecond as the add that
+// created the polecat must not reproduce that name.
+func TestBuildBranchName_SameMillisecondNamesDiffer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		template string
+	}{
+		{name: "default_format", template: ""},
+		{name: "timestamp_template", template: "feature/{name}-{timestamp}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			w := newWorld()
+			w.InitRepo(t, tmpDir)
+
+			r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+			wispCfg := wisp.NewConfig(filepath.Dir(r.Path), r.Name)
+			if tt.template != "" {
+				if err := wispCfg.Set("polecat_branch_template", tt.template); err != nil {
+					t.Fatalf("set wisp template: %v", err)
+				}
+			} else if err := wispCfg.Unset("polecat_branch_template"); err != nil {
+				t.Fatalf("unset wisp template: %v", err)
+			}
+
+			m := newTestManager(r, w, nil, newNoDatabaseDB())
+			fixed := time.UnixMilli(1_800_000_000_000)
+			m.now = func() time.Time { return fixed }
+
+			first := m.buildBranchName("alpha", "gt-123")
+			second := m.buildBranchName("alpha", "gt-123")
+			if first == second {
+				t.Fatalf("two names built in one millisecond are both %q, want different names", first)
+			}
+		})
+	}
+}
+
 func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 	t.Parallel()
 	checkAddWithOptions_NoPrimeMDCreatedLocally(t, fakeAddBeads)

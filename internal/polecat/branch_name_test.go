@@ -101,6 +101,68 @@ func TestParseBranchName(t *testing.T) {
 	}
 }
 
+// stampMillis decodes a stamp branchStampClock.next returned.
+func stampMillis(t *testing.T, stamp string) int64 {
+	t.Helper()
+	ms, err := strconv.ParseInt(stamp, 36, 64)
+	if err != nil {
+		t.Fatalf("stamp %q is not a base-36 integer: %v", stamp, err)
+	}
+	return ms
+}
+
+func TestBranchStampClock_NextIsStrictlyIncreasing(t *testing.T) {
+	t.Parallel()
+	base := time.UnixMilli(1_800_000_000_000)
+	tests := []struct {
+		name   string
+		second time.Duration // clock reading for the second stamp, after base
+		want   int64         // second stamp in ms, after base
+	}{
+		{name: "same millisecond bumps by one", second: 0, want: 1},
+		{name: "clock went backwards bumps by one", second: -5 * time.Millisecond, want: 1},
+		{name: "clock advanced keeps its own reading", second: 10 * time.Millisecond, want: 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// A local clock, so no other test moves its last stamp.
+			c := &branchStampClock{}
+			first := stampMillis(t, c.next(func() time.Time { return base }))
+			if first != base.UnixMilli() {
+				t.Fatalf("first stamp = %d, want the clock reading %d", first, base.UnixMilli())
+			}
+			at := base.Add(tt.second)
+			second := stampMillis(t, c.next(func() time.Time { return at }))
+			if want := base.UnixMilli() + tt.want; second != want {
+				t.Fatalf("second stamp = %d, want %d", second, want)
+			}
+		})
+	}
+}
+
+func TestBranchStampClock_StampParsesAsGeneratedAt(t *testing.T) {
+	t.Parallel()
+	base := time.UnixMilli(1_800_000_000_000)
+	c := &branchStampClock{}
+	now := func() time.Time { return base }
+	c.next(now)
+	// The second call at the same millisecond is bumped one millisecond past the clock.
+	stamp := c.next(now)
+
+	meta, ok := ParseGeneratedBranchName(FormatGeneratedBranchName("alpha", "gt-abc", stamp))
+	if !ok {
+		t.Fatalf("ParseGeneratedBranchName did not parse a branch built from stamp %q", stamp)
+	}
+	got, ok := meta.GeneratedAt()
+	if !ok {
+		t.Fatalf("GeneratedAt() ok = false for stamp %q, want true", stamp)
+	}
+	if want := base.Add(time.Millisecond); !got.Equal(want) {
+		t.Fatalf("GeneratedAt() = %v, want %v", got, want)
+	}
+}
+
 func TestBranchNameMetaGeneratedAt(t *testing.T) {
 	t.Parallel()
 	now := time.Now().Truncate(time.Millisecond)
