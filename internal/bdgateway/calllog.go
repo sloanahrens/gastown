@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -39,12 +41,22 @@ const (
 	// maxVerbLen bounds a verb: bd's longest command word is shorter, and the
 	// bound keeps a long token from being stored as a verb at all.
 	maxVerbLen = 32
+	// unparsedVerb is the verb an argv the policy scanner cannot place is
+	// counted under, so an unreadable call is still visible in Stats.
+	unparsedVerb = "unparsed"
+	// maxFieldBytes bounds the class and caller strings: the caller writes
+	// X-Gt-Caller, so a long one must not grow a line without bound.
+	maxFieldBytes = 64
 )
 
 // CallLogOptions configures a CallLog.
 type CallLogOptions struct {
 	// Dir is the mounted log volume's directory; it is created if missing.
 	Dir string
+	// Policy is the loaded verbs file whose scanner reads argv for the log, so
+	// the log and the policy can never disagree about which token is a flag, a
+	// flag's value or an operand. It is required.
+	Policy *Policy
 	// MaxBytes is the size the live file may not exceed when the next line would
 	// cross it; zero means DefaultCallLogSize.
 	MaxBytes int64
@@ -87,9 +99,9 @@ type Stats struct {
 	// log was closed, the line could not be marshaled, or the writer could not
 	// store it.
 	Dropped uint64 `json:"dropped"`
-	// Verbs counts calls by their verb, the first operand of argv when it is a
-	// command word. Its key set is bounded: past maxVerbKeys distinct verbs,
-	// calls are counted under otherVerb.
+	// Verbs counts calls by their verb, the first command word of argv. An argv
+	// the scanner cannot place is counted under unparsedVerb. The key set is
+	// bounded: past maxVerbKeys distinct verbs, calls fall under otherVerb.
 	Verbs map[string]uint64 `json:"verbs"`
 }
 
@@ -127,6 +139,7 @@ type CallLog struct {
 
 	now      func() time.Time
 	prefixes map[string]bool
+	policy   *Policy
 }
 
 // NewCallLog opens the live log in opts.Dir and starts its writer.
@@ -139,6 +152,9 @@ func NewCallLog(opts CallLogOptions) (*CallLog, error) {
 func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) {
 	if opts.Dir == "" {
 		return nil, errors.New("bdgateway: call log needs a directory")
+	}
+	if opts.Policy == nil {
+		return nil, errors.New("bdgateway: call log needs the policy that scans argv")
 	}
 	prefixes, err := prefixSet(opts.BeadPrefixes)
 	if err != nil {
@@ -174,6 +190,7 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 		done:     make(chan struct{}),
 		now:      now,
 		prefixes: prefixes,
+		policy:   opts.Policy,
 		verbs:    make(map[string]uint64),
 	}
 	go l.run(w)
@@ -213,8 +230,8 @@ func (l *CallLog) Log(rec CallRecord) {
 	parsed := l.parseArgv(rec.Argv)
 	e := entry{
 		TS:         l.now().UTC().Format(time.RFC3339Nano),
-		Class:      rec.Class,
-		Caller:     rec.Caller,
+		Class:      boundText(rec.Class),
+		Caller:     boundText(rec.Caller),
 		Verb:       parsed.verb,
 		Flags:      parsed.flags,
 		Beads:      parsed.beads,
@@ -334,74 +351,48 @@ func (l *CallLog) drop() {
 	l.mu.Unlock()
 }
 
-// parsedArgv is the part of argv the log keeps.
-type parsedArgv struct {
-	verb     string
-	flags    []string
-	beads    []string
-	operands int
+// logParts is the part of argv a line keeps.
+type logParts struct {
+	verb  string
+	flags []string
+	beads []string
 }
 
-// parseArgv keeps the first operand as the verb, every flag's name, and the
-// operands that are bead ids. A flag's value is never kept, whether or not it
-// resembles an id: argv carries bead titles and comment bodies, and dropping a
-// misplaced id is safer than logging a title.
+// parseArgv reads argv with the policy's own scanner, so the log and the policy
+// can never disagree about which token is a flag, a flag's value or an operand.
+// It keeps the first command word as the verb, each flag's name (never a
+// value), and the operands that are bead ids. Operands that are not bead ids —
+// titles, descriptions, comment bodies — are never kept; a command flag's arity
+// is not in bd's tree, so an id-shaped token after one is read as an operand and
+// kept.
 //
-// Which token is a flag and which is a flag's value follows bd's own root
-// parse, the same rules the policy uses: a known root flag's arity decides
-// whether it takes the next token, an attached value (--db=beads, -Cdir) takes
-// none, and "--" ends the options. A command flag's arity is not in bd's command
-// tree, so its next token is dropped as a possible value rather than risk
-// logging free text; the cost is an id used that way (gt-itjuwu review).
-func (l *CallLog) parseArgv(argv []string) parsedArgv {
-	p := parsedArgv{flags: []string{}, beads: []string{}}
-	pastSeparator := false
-	for i := 0; i < len(argv); i++ {
-		arg := argv[i]
-		switch {
-		case pastSeparator:
-			p.addOperand(arg, l.prefixes)
-		case arg == "--":
-			pastSeparator = true
-		case isFlagToken(arg):
-			for _, f := range flagNames(arg) {
-				if bareFlag.MatchString(f.name) {
-					p.flags = append(p.flags, f.spelling)
-				}
-			}
-			kind, known, attached := rootFlag(arg)
-			switch {
-			case attached:
-				// The value is glued to the flag, so the next token is not it.
-			case known && kind == flagValue:
-				i++ // bd's root flag takes the next token as its value
-			case known:
-				// A boolean root flag consumes nothing, so a bead id after it
-				// is an operand and is kept.
-			case i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-"):
-				i++ // an unknown flag's next token may be its value: drop it
-			}
-		default:
-			p.addOperand(arg, l.prefixes)
+// An argv the scanner cannot place yields no flags and no ids and is counted
+// under unparsedVerb, so an unreadable call is visible rather than blank
+// (gt-itjuwu review).
+func (l *CallLog) parseArgv(argv []string) logParts {
+	parts := logParts{flags: []string{}, beads: []string{}}
+	scan, err := l.policy.scanArgs(argv)
+	if err != nil {
+		parts.verb = unparsedVerb
+		return parts
+	}
+	if len(scan.words) > 0 && isVerb(scan.words[0]) {
+		parts.verb = scan.words[0]
+	}
+	for _, flag := range scan.flags {
+		// A clustered shorthand may be part of the first one's value, so only
+		// the first in a token is a name for certain.
+		if flag.clustered || !bareFlag.MatchString(flag.name) {
+			continue
+		}
+		parts.flags = append(parts.flags, flag.spelling)
+	}
+	for _, operand := range scan.operands {
+		if isBeadID(operand, l.prefixes) {
+			parts.beads = append(parts.beads, operand)
 		}
 	}
-	return p
-}
-
-// addOperand names the verb from the first operand when it is a bounded command
-// word, and records later operands that are bead ids. A first operand that is
-// not a command word names no verb and keys no counter.
-func (p *parsedArgv) addOperand(arg string, prefixes map[string]bool) {
-	if p.operands == 0 {
-		p.operands++
-		if isVerb(arg) {
-			p.verb = arg
-		}
-		return
-	}
-	if isBeadID(arg, prefixes) {
-		p.beads = append(p.beads, arg)
-	}
+	return parts
 }
 
 // isVerb reports whether token may be stored and counted as a verb: a bd
@@ -419,9 +410,20 @@ func isBeadID(token string, prefixes map[string]bool) bool {
 	return beadSuffixRe.MatchString(rest)
 }
 
-// isFlagToken reports a flag rather than an operand; a lone "-" is an operand.
-func isFlagToken(arg string) bool {
-	return len(arg) > 1 && arg[0] == '-'
+// boundText strips control characters and truncates s to maxFieldBytes without
+// splitting a rune.
+func boundText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > maxFieldBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // logFile is the part of *os.File the writer uses; a test substitutes one whose

@@ -310,11 +310,11 @@ func parseVerbClass(s string) (VerbClass, error) {
 // (scanArgs) reads both the verb words and the flags, so the class check and
 // the flag check cannot disagree about which tokens are flags.
 func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
-	words, flags, err := p.scanArgs(argv)
+	scan, err := p.scanArgs(argv)
 	if err != nil {
 		return Verb{}, err
 	}
-	name := p.verbName(words)
+	name := p.verbName(scan.words)
 	v, ok := p.verbs[name]
 	if !ok {
 		return Verb{}, fmt.Errorf("%w: %q", ErrVerbNotAllowed, name)
@@ -322,17 +322,28 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 	if !Allowed(class, v.Class) {
 		return Verb{}, fmt.Errorf("%w: %s token may not run %s (%s)", ErrClassDenied, class, v.Name(), v.Class)
 	}
-	if flag, ok := p.refusedFlag(v, flags); ok {
+	if flag, ok := p.refusedFlag(v, scan.flags); ok {
 		return Verb{}, fmt.Errorf("%w: %s on %s", ErrFlagRefused, flag.spelling, v.Name())
 	}
 	return v, nil
 }
 
+// scanResult is what one scanArgs pass read from argv. words are the command
+// words, flags the flags in option position, and operands every positional
+// argument the command words do not cover, including those after "--". The
+// call log reads operands for the bead ids among them (gt-itjuwu).
+type scanResult struct {
+	words    []string
+	flags    []flagToken
+	operands []string
+}
+
 // scanArgs reads argv once the way bd's root parse does, returning the command
-// words and the flags in option position, or ErrAmbiguousVerb when a token
-// cannot be placed. One scan decides both, because a token one check reads as a
-// value the other must not read as a flag: in "--format -- --db=/x show",
-// --format takes "--" as its value and --db is a flag bd acts on.
+// words, the flags in option position and the operands, or ErrAmbiguousVerb
+// when a token cannot be placed. One scan decides all three, because a token
+// one check reads as a value the other must not read as a flag: in "--format --
+// --db=/x show", --format takes "--" as its value and --db is a flag bd acts
+// on.
 //
 // The rules are cobra's stripFlags over the root flag set. "--" in option
 // position ends the options: the rest of argv is positional, never a flag, and
@@ -346,24 +357,28 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 // A flag outside bdRootFlags is a command flag whose arity the tree does not
 // record. Before the verb is settled, or with a following token that starts
 // with "-", its value cannot be told from a flag, so the call is refused.
-func (p *Policy) scanArgs(argv []string) ([]string, []flagToken, error) {
-	words := make([]string, 0, maxPathWords)
-	var flags []flagToken
+func (p *Policy) scanArgs(argv []string) (scanResult, error) {
+	var res scanResult
+	res.words = make([]string, 0, maxPathWords)
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
 		if arg == "--" {
+			// The rest is positional, never a flag and never a command word.
+			res.operands = append(res.operands, argv[i+1:]...)
 			break
 		}
 		if arg == "" || arg == "-" {
 			continue
 		}
 		if !strings.HasPrefix(arg, "-") {
-			if p.extends(words) {
-				words = append(words, arg)
+			if p.extends(res.words) {
+				res.words = append(res.words, arg)
+			} else {
+				res.operands = append(res.operands, arg)
 			}
 			continue
 		}
-		flags = append(flags, flagNames(arg)...)
+		res.flags = append(res.flags, flagNames(arg)...)
 		kind, known, attached := rootFlag(arg)
 		switch {
 		case attached:
@@ -373,12 +388,12 @@ func (p *Policy) scanArgs(argv []string) ([]string, []flagToken, error) {
 		case known:
 			// A boolean root flag: the next argument is not its value.
 		case i+1 < len(argv) && strings.HasPrefix(argv[i+1], "-"):
-			return nil, nil, ambiguousFlag(arg)
-		case p.extends(words):
-			return nil, nil, ambiguousFlag(arg)
+			return scanResult{}, ambiguousFlag(arg)
+		case p.extends(res.words):
+			return scanResult{}, ambiguousFlag(arg)
 		}
 	}
-	return words, flags, nil
+	return res, nil
 }
 
 // ambiguousFlag is the refusal for a flag the scan cannot place.
@@ -458,6 +473,13 @@ func (p *Policy) refusedFlag(v Verb, flags []flagToken) (flagToken, bool) {
 type flagToken struct {
 	name     string
 	spelling string
+	// clustered marks a shorthand that follows another in the same token:
+	// pflag groups boolean shorthands, so "-qv" names both, but when the first
+	// takes a value the rest of the token is that value, so the letters of
+	// "-nfoo" are foo. The policy checks every clustered name so a refused flag
+	// is never missed; the call log keeps only the first, so a value never
+	// reaches a line as flag names (gt-itjuwu).
+	clustered bool
 }
 
 // flagNames returns the flags a dash-prefixed token in option position asks
@@ -465,6 +487,7 @@ type flagToken struct {
 // "db" as --db. A single dash starts shorthands, which pflag may group, so
 // each letter is a name until one that takes a value ends the flags, the rest
 // of the token being that value: "-qC" names q and C, "-Cdir" names C only.
+// Every name after the first in the token is marked clustered.
 func flagNames(arg string) []flagToken {
 	if len(arg) < 2 || arg[0] != '-' {
 		return nil
@@ -483,7 +506,7 @@ func flagNames(arg string) []flagToken {
 			break
 		}
 		name := string(c)
-		tokens = append(tokens, flagToken{name: name, spelling: "-" + name})
+		tokens = append(tokens, flagToken{name: name, spelling: "-" + name, clustered: len(tokens) > 0})
 		if bdRootFlags["-"+name] == flagValue {
 			break // the rest of the token is this shorthand's value
 		}

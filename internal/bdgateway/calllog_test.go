@@ -18,10 +18,34 @@ func fixedNow() time.Time {
 	return time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 }
 
+// callLogPolicy is the verbs file the log's scanner reads: enough verbs to settle
+// the command words the tests use, and one longer path so "dep add" scans as
+// two words.
+func callLogPolicy(t *testing.T) *Policy {
+	t.Helper()
+	p, err := ParsePolicy(strings.NewReader(`{
+		"source": "test",
+		"refused_flags": ["db"],
+		"verbs": [
+			{"path": "show", "class": "read"},
+			{"path": "list", "class": "read"},
+			{"path": "create", "class": "write"},
+			{"path": "update", "class": "write"},
+			{"path": "dep", "class": "write"},
+			{"path": "dep add", "class": "write"}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	return p
+}
+
 func testOptions(t *testing.T) CallLogOptions {
 	t.Helper()
 	return CallLogOptions{
 		Dir:          t.TempDir(),
+		Policy:       callLogPolicy(t),
 		BeadPrefixes: []string{"gt", "hq"},
 		Now:          fixedNow,
 	}
@@ -144,7 +168,11 @@ func TestCallLogDrop(t *testing.T) {
 	rec := CallRecord{Class: "daemon", Caller: "c", Argv: []string{"show", "gt-itjuwu"}, Duration: time.Millisecond}
 
 	l.Log(rec) // the writer takes this one and parks inside the hook
-	<-taken    // the writer holds it, so the queue is empty and the buffer free
+	select {
+	case <-taken: // the writer holds it, so the queue is empty and the buffer free
+	case <-t.Context().Done():
+		t.Fatal("the writer did not take the first line")
+	}
 	l.Log(rec) // fills the one-slot buffer
 	l.Log(rec) // full: dropped
 	l.Log(rec) // full: dropped
@@ -249,6 +277,81 @@ func TestCallLogStats(t *testing.T) {
 	}
 }
 
+// TestCallLogUnparsedCounted checks an argv the scanner refuses is counted, so
+// a call the log cannot read is visible in Stats rather than silently absent.
+func TestCallLogUnparsedCounted(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"--if-status", "open", "show", "gt-a"}})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := l.Stats().Verbs[unparsedVerb]; got != 1 {
+		t.Errorf("verbs[%s] = %d, want 1", unparsedVerb, got)
+	}
+}
+
+// TestCallLogAfterClose checks a line logged after Close is dropped and counted
+// rather than blocking on or writing to the closed queue.
+func TestCallLogAfterClose(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"show", "gt-a"}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-t.Context().Done():
+		t.Fatal("Log after Close blocked")
+	}
+	if got := l.Stats(); got.Calls != 1 || got.Dropped != 1 {
+		t.Errorf("Stats = calls %d dropped %d, want 1 and 1", got.Calls, got.Dropped)
+	}
+}
+
+// TestCallLogBoundedFields checks the class and caller, which the caller
+// writes, are bounded and stripped of control characters before they reach a
+// line.
+func TestCallLogBoundedFields(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "daemon\x1b", Caller: "ab\x00\x07cd\nef", Argv: []string{"show", "gt-a"}})
+	long := strings.Repeat("a", 100)
+	l.Log(CallRecord{Class: "daemon", Caller: long, Argv: []string{"show", "gt-a"}})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	lines := readLines(t, filepath.Join(opts.Dir, DefaultCallLogName))
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+	first := decodeLine(t, lines[0])
+	if first["caller"] != "abcdef" || first["class"] != "daemon" {
+		t.Errorf("class, caller = %v, %v; want daemon, abcdef", first["class"], first["caller"])
+	}
+	if got := decodeLine(t, lines[1])["caller"]; got != long[:maxFieldBytes] {
+		t.Errorf("long caller = %v (len %d), want %d bytes", got, len(fmt.Sprint(got)), maxFieldBytes)
+	}
+}
+
 // TestCallLogWriteError checks a failed write is reported by Close, not read as
 // a clean log.
 func TestCallLogWriteError(t *testing.T) {
@@ -345,7 +448,7 @@ func TestCallLogFilesystemRefused(t *testing.T) {
 	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	if l, err := NewCallLog(CallLogOptions{Dir: notDir, BeadPrefixes: []string{"gt"}}); err == nil {
+	if l, err := NewCallLog(CallLogOptions{Dir: notDir, Policy: callLogPolicy(t), BeadPrefixes: []string{"gt"}}); err == nil {
 		l.Close()
 		t.Fatal("NewCallLog over a file succeeded, want an error")
 	}
@@ -354,7 +457,7 @@ func TestCallLogFilesystemRefused(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(logDir, DefaultCallLogName), 0o755); err != nil {
 		t.Fatalf("make directory: %v", err)
 	}
-	if l, err := NewCallLog(CallLogOptions{Dir: logDir, BeadPrefixes: []string{"gt"}}); err == nil {
+	if l, err := NewCallLog(CallLogOptions{Dir: logDir, Policy: callLogPolicy(t), BeadPrefixes: []string{"gt"}}); err == nil {
 		l.Close()
 		t.Fatal("NewCallLog over a directory named call.log succeeded, want an error")
 	}
@@ -540,9 +643,10 @@ func TestCallLogOptionsRefused(t *testing.T) {
 		name string
 		opts CallLogOptions
 	}{
-		{name: "no directory", opts: CallLogOptions{BeadPrefixes: []string{"gt"}}},
-		{name: "no bead prefixes", opts: CallLogOptions{Dir: t.TempDir()}},
-		{name: "bad bead prefix", opts: CallLogOptions{Dir: t.TempDir(), BeadPrefixes: []string{"Gt-"}}},
+		{name: "no directory", opts: CallLogOptions{Policy: callLogPolicy(t), BeadPrefixes: []string{"gt"}}},
+		{name: "no policy", opts: CallLogOptions{Dir: t.TempDir(), BeadPrefixes: []string{"gt"}}},
+		{name: "no bead prefixes", opts: CallLogOptions{Dir: t.TempDir(), Policy: callLogPolicy(t)}},
+		{name: "bad bead prefix", opts: CallLogOptions{Dir: t.TempDir(), Policy: callLogPolicy(t), BeadPrefixes: []string{"Gt-"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -588,10 +692,34 @@ func TestCallLogArgvParse(t *testing.T) {
 			beads: []string{"gt-itjuwu"},
 		},
 		{
-			name:  "title that looks like an id after a flag stays out",
+			// bd's tree records no arity for a command flag, so the scanner
+			// cannot tell --title's value from an operand: an id-shaped token
+			// stays, free text does not.
+			name:  "free text after a command flag stays out, id-shaped token is kept",
 			argv:  []string{"create", "--title", "gt-fake", "refactor-sling"},
 			verb:  "create",
 			flags: []string{"--title"},
+			beads: []string{"gt-fake"},
+		},
+		{
+			name:  "boolean command flag keeps the bead id after it",
+			argv:  []string{"list", "--ready", "gt-abc"},
+			verb:  "list",
+			flags: []string{"--ready"},
+			beads: []string{"gt-abc"},
+		},
+		{
+			name:  "clustered short token logs its first name only",
+			argv:  []string{"update", "gt-a", "-nfoo"},
+			verb:  "update",
+			flags: []string{"-n"},
+			beads: []string{"gt-a"},
+		},
+		{
+			name:  "argv the scanner cannot place is unparsed",
+			argv:  []string{"--if-status", "open", "show", "gt-a"},
+			verb:  unparsedVerb,
+			flags: []string{},
 			beads: []string{},
 		},
 		{
