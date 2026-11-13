@@ -193,6 +193,10 @@ type Manager struct {
 	// agentMemo is the agent beads one sling's reuse step has read, open only
 	// between ShareAgentBeadReads and its end func; nil reads bd every time.
 	agentMemo *agentBeadMemo
+	// sessionReader answers the has-session reads of the seat listing and the
+	// reuse, open only between ShareSessionProbes and its end func; nil asks
+	// tmux every time.
+	sessionReader SessionReader
 	// spawnGraceWindow is the window a dispatched-but-not-yet-live polecat is
 	// read as spawning rather than stalled (see SpawnGrace). Resolved once at
 	// construction from the town's witness thresholds.
@@ -2877,7 +2881,7 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 	}
 
 	sessionName := m.sessionName(name)
-	running, err := m.tmux.HasSession(sessionName)
+	running, err := m.hasSession(sessionName)
 	if err != nil || !running {
 		return nil
 	}
@@ -4218,7 +4222,7 @@ func (m *Manager) polecatSessionState(name string) (running bool, stale bool) {
 	}
 
 	sessionName := m.sessionName(name)
-	running, err := m.tmux.HasSession(sessionName)
+	running, err := m.hasSession(sessionName)
 	if err != nil || !running {
 		return false, false
 	}

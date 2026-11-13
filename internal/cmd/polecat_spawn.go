@@ -1039,10 +1039,20 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// paying for a new worktree.
 	// The memo lets the seat listing and the reuse of the seat it picks share
 	// one bd read of each agent bead; it is dropped when the reuse step ends.
+	// The has-session reads of the same listing and reuse go through the sling's
+	// census too (gt-9qh6wp): a Ready seat's answer is kept for the sling, a seat
+	// whose listing or record cannot be read takes its probe as before, and a
+	// seat the gateway does not list is answered not live with no probe.
 	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
+	var sessionProbes polecat.SessionReader
+	if t != nil {
+		sessionProbes = censusHasSession{tmux: t}
+	}
+	endSessionProbes := polecatMgr.ShareSessionProbes(sessionProbes)
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
 		realIdleReuseEnv(t, r, townRoot, rigName, opts.step), townRoot, rigName,
 		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
+	endSessionProbes()
 	endAgentBeadReads()
 	if err != nil {
 		return nil, err
