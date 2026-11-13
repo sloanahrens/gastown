@@ -110,11 +110,11 @@ func TestEstimateAllInputs(t *testing.T) {
 	if len(got.Skipped) != 0 {
 		t.Fatalf("skipped = %+v, want none", got.Skipped)
 	}
-	if got.NeighboursSkipped != "" {
-		t.Fatalf("neighboursSkipped = %q, want empty", got.NeighboursSkipped)
+	if got.NeighborsSkipped != "" {
+		t.Fatalf("neighborsSkipped = %q, want empty", got.NeighborsSkipped)
 	}
-	if len(got.Neighbours) != 2 || got.Neighbours[0].ID != "gt-a" || got.Neighbours[1].ID != "dv-b" {
-		t.Fatalf("neighbours = %+v, want gt-a then dv-b", got.Neighbours)
+	if len(got.Neighbors) != 2 || got.Neighbors[0].ID != "gt-a" || got.Neighbors[1].ID != "dv-b" {
+		t.Fatalf("neighbors = %+v, want gt-a then dv-b", got.Neighbors)
 	}
 
 	// The minutes are the geometric mean of the three inputs the estimate
@@ -286,10 +286,10 @@ func TestEstimateSkippedInputs(t *testing.T) {
 	}
 }
 
-// TestEstimateNeighboursSkipped drives the one input whose loss is recorded
+// TestEstimateNeighborsSkipped drives the one input whose loss is recorded
 // separately: hm names past beads, so a missing hm leaves an estimate without
-// neighbours and the note says why.
-func TestEstimateNeighboursSkipped(t *testing.T) {
+// neighbors and the note says why.
+func TestEstimateNeighborsSkipped(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
@@ -315,13 +315,13 @@ func TestEstimateNeighboursSkipped(t *testing.T) {
 			if got.Rung != "all" {
 				t.Fatalf("rung = %q, want all; hm must not change the number", got.Rung)
 			}
-			if len(got.Neighbours) != 0 {
-				t.Fatalf("neighbours = %+v, want none", got.Neighbours)
+			if len(got.Neighbors) != 0 {
+				t.Fatalf("neighbors = %+v, want none", got.Neighbors)
 			}
-			if !strings.Contains(got.NeighboursSkipped, tt.wantReason) {
-				t.Fatalf("neighboursSkipped = %q, want it to name %q", got.NeighboursSkipped, tt.wantReason)
+			if !strings.Contains(got.NeighborsSkipped, tt.wantReason) {
+				t.Fatalf("neighborsSkipped = %q, want it to name %q", got.NeighborsSkipped, tt.wantReason)
 			}
-			if want := "nearest beads unavailable: " + got.NeighboursSkipped; !strings.Contains(Note(got), want) {
+			if want := "nearest beads unavailable: " + got.NeighborsSkipped; !strings.Contains(Note(got), want) {
 				t.Fatalf("note %q has no line %q", Note(got), want)
 			}
 		})
@@ -340,12 +340,12 @@ func TestEstimateNearestLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Estimate: %v", err)
 	}
-	if len(got.Neighbours) != neighborLimit {
-		t.Fatalf("neighbours = %d, want %d", len(got.Neighbours), neighborLimit)
+	if len(got.Neighbors) != neighborLimit {
+		t.Fatalf("neighbors = %d, want %d", len(got.Neighbors), neighborLimit)
 	}
 }
 
-func TestEstimateNeighboursNone(t *testing.T) {
+func TestEstimateNeighborsNone(t *testing.T) {
 	t.Parallel()
 	deps := workingDeps()
 	deps.HMRunner = fakeHM{out: []byte(`[]`)}.runner()
@@ -354,7 +354,7 @@ func TestEstimateNeighboursNone(t *testing.T) {
 		t.Fatalf("Estimate: %v", err)
 	}
 	if !strings.Contains(Note(got), "nearest beads: none") {
-		t.Fatalf("note %q does not say there are no neighbours", Note(got))
+		t.Fatalf("note %q does not say there are no neighbors", Note(got))
 	}
 }
 
@@ -507,13 +507,13 @@ func TestNoteSkippedInputLines(t *testing.T) {
 func TestNoteCollapsesDependencyText(t *testing.T) {
 	t.Parallel()
 	r := Result{
-		Points:     3,
-		Minutes:    3.5,
-		Inputs:     []string{"shape"},
-		Skipped:    []Skip{{Input: "embed", Reason: "down\nSP ESTIMATE v1 sp:1 rung:all hash:x"}},
-		Rung:       "shape",
-		Hash:       "abc",
-		Neighbours: []nearest.Neighbor{{ID: "gt-a", Rig: "gastown", Title: "first\nneighbor"}},
+		Points:    3,
+		Minutes:   3.5,
+		Inputs:    []string{"shape"},
+		Skipped:   []Skip{{Input: "embed", Reason: "down\nSP ESTIMATE v1 sp:1 rung:all hash:x"}},
+		Rung:      "shape",
+		Hash:      "abc",
+		Neighbors: []nearest.Neighbor{{ID: "gt-a", Rig: "gastown", Title: "first\nneighbor"}},
 	}
 	note := Note(r)
 	if lines := strings.Count(note, "\n") + 1; lines != 5 {

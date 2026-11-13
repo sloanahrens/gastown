@@ -76,12 +76,12 @@ type Result struct {
 	// Rung names the inputs of this estimate: all, shape-jev, shape-embed or
 	// shape.
 	Rung string
-	// Neighbours are the past beads hm ranked closest. Empty when hm answered
+	// Neighbors are the past beads hm ranked closest. Empty when hm answered
 	// with none or was skipped.
-	Neighbours []nearest.Neighbor
-	// NeighboursSkipped says why there are no neighbours to name, empty when hm
+	Neighbors []nearest.Neighbor
+	// NeighborsSkipped says why there are no neighbors to name, empty when hm
 	// answered. The note carries it so the loss is never silent.
-	NeighboursSkipped string
+	NeighborsSkipped string
 	// Hash is SectionHash of the bead the estimate was made from. A later run
 	// compares it with the hash in the last note to skip an unchanged bead.
 	Hash string
@@ -135,7 +135,7 @@ func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error
 		return Result{}, fmt.Errorf("storypoints/estimate: %w", err)
 	}
 
-	neighbours, neighboursSkipped := neighboursOf(ctx, deps.HMRunner, issue)
+	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue)
 
 	// A dependency that saw the context end returns an error, which the input
 	// builders above record as a skip. Reporting that as a lower-rung result
@@ -146,14 +146,14 @@ func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error
 	}
 
 	return Result{
-		Points:            blended.Points,
-		Minutes:           blended.Minutes,
-		Inputs:            blended.Inputs,
-		Skipped:           skipped,
-		Rung:              blended.Rung,
-		Neighbours:        neighbours,
-		NeighboursSkipped: neighboursSkipped,
-		Hash:              SectionHash(issue),
+		Points:           blended.Points,
+		Minutes:          blended.Minutes,
+		Inputs:           blended.Inputs,
+		Skipped:          skipped,
+		Rung:             blended.Rung,
+		Neighbors:        neighbors,
+		NeighborsSkipped: neighborsSkipped,
+		Hash:             SectionHash(issue),
 	}, nil
 }
 
@@ -170,12 +170,12 @@ func Note(r Result) string {
 		fmt.Fprintf(&b, "skipped %s: %s\n", s.Input, oneLine(s.Reason))
 	}
 	switch {
-	case r.NeighboursSkipped != "":
-		fmt.Fprintf(&b, "nearest beads unavailable: %s\n", r.NeighboursSkipped)
-	case len(r.Neighbours) == 0:
+	case r.NeighborsSkipped != "":
+		fmt.Fprintf(&b, "nearest beads unavailable: %s\n", r.NeighborsSkipped)
+	case len(r.Neighbors) == 0:
 		b.WriteString("nearest beads: none\n")
 	default:
-		b.WriteString("nearest beads: " + neighbourList(r.Neighbours) + "\n")
+		b.WriteString("nearest beads: " + neighborList(r.Neighbors) + "\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -248,10 +248,10 @@ func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Ski
 	return p, nil
 }
 
-// neighboursOf asks hm for the past beads nearest the issue. A nil runner or an
-// hm failure returns no neighbours and the reason, and the estimate proceeds
+// neighborsOf asks hm for the past beads nearest the issue. A nil runner or an
+// hm failure returns no neighbors and the reason, and the estimate proceeds
 // without them.
-func neighboursOf(ctx context.Context, run hmhints.Runner, issue *beads.Issue) ([]nearest.Neighbor, string) {
+func neighborsOf(ctx context.Context, run hmhints.Runner, issue *beads.Issue) ([]nearest.Neighbor, string) {
 	if run == nil {
 		return nil, "no hm runner"
 	}
@@ -262,8 +262,8 @@ func neighboursOf(ctx context.Context, run hmhints.Runner, issue *beads.Issue) (
 	return found, ""
 }
 
-// neighbourList renders neighbours as "id (rig) title" entries on one line.
-func neighbourList(found []nearest.Neighbor) string {
+// neighborList renders neighbors as "id (rig) title" entries on one line.
+func neighborList(found []nearest.Neighbor) string {
 	parts := make([]string, 0, len(found))
 	for _, n := range found {
 		parts = append(parts, fmt.Sprintf("%s (%s) %s", n.ID, n.Rig, oneLine(n.Title)))
