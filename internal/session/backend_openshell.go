@@ -50,6 +50,9 @@ const (
 	workspaceArchiveName    = "workspace.tgz"
 	readyInterval           = 2 * time.Second
 	readyPolls              = 150 // five minutes at readyInterval
+	// unschedulableGiveUp is how long a pod the scheduler cannot place may stay
+	// Unschedulable before the wait gives up on it, well inside readyPolls.
+	unschedulableGiveUp = 90 * time.Second
 )
 
 // sandboxDroppedEnv are the host's credential and host-only variables. An
@@ -1093,9 +1096,26 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 	})
 }
 
+// sandboxUnschedulableError is the placement failure awaitReady returns when the
+// scheduler has held the sandbox's pod Unschedulable past unschedulableGiveUp.
+// Prepare's rollback then deletes the pod and releases its seat, and the error
+// reaches the sling that started the session, which rolls its hook back.
+type sandboxUnschedulableError struct {
+	Sandbox, Message string
+	Waited           time.Duration
+}
+
+func (e *sandboxUnschedulableError) Error() string {
+	return fmt.Sprintf("sandbox %s unschedulable for %s, giving up its placement: %s", e.Sandbox, e.Waited.Round(time.Second), e.Message)
+}
+
 // awaitReady polls the sandbox until its Ready condition is True. The pause
 // between polls goes through b.wait, so a test records it instead of sleeping.
+// A pod the scheduler has held Unschedulable for unschedulableGiveUp ends the
+// wait early with a sandboxUnschedulableError; a pod that is scheduled but not
+// yet Ready keeps the readyPolls bound.
 func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
+	unreadableWarned := false
 	for polls := 1; ; polls++ {
 		st, err := b.cli.Get(ctx, name)
 		if err != nil {
@@ -1103,6 +1123,9 @@ func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
 		}
 		if st.Ready {
 			return nil
+		}
+		if waited, stuck := b.unschedulableFor(name, st, &unreadableWarned); stuck {
+			return &sandboxUnschedulableError{Sandbox: name, Message: st.UnschedulableMsg, Waited: waited}
 		}
 		if polls == readyPolls {
 			if !st.ReadyKnown {
@@ -1114,6 +1137,26 @@ func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
 			return err
 		}
 	}
+}
+
+// unschedulableFor reports how long the pod behind st has been Unschedulable and
+// whether that has reached unschedulableGiveUp. A pod that is not Unschedulable
+// is never given up on. One whose transition time cannot be read keeps the
+// readiness bound and is warned about once per wait (unreadableWarned), so an
+// unreadable condition never shortens the wait.
+func (b *openshellBackend) unschedulableFor(name string, st sandbox.Status, unreadableWarned *bool) (time.Duration, bool) {
+	if !st.Unschedulable {
+		return 0, false
+	}
+	if st.UnschedulableSince.IsZero() {
+		if !*unreadableWarned {
+			*unreadableWarned = true
+			b.warn("sandbox %s: its PodScheduled condition is Unschedulable with no readable transition time; keeping the readiness wait", name)
+		}
+		return 0, false
+	}
+	waited := b.clock().Sub(st.UnschedulableSince)
+	return waited, waited >= unschedulableGiveUp
 }
 
 // run executes argv inside the sandbox and discards its output.
