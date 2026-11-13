@@ -221,8 +221,8 @@ finds the first and starts nothing.
 The Job's pod runs the commit's images through `gt update images` and then
 `gt update`, as the `gt-update` ServiceAccount. The RBAC it runs under, and what
 the daemon's grant to create Jobs reaches, are in the header of
-`deploy/k8s/update-rbac.yaml`; `deploy/k8s/update-admission.yaml` is the
-ValidatingAdmissionPolicy that bounds that grant to a Job the roll rendered.
+`deploy/k8s/update-rbac.yaml`; what bounds the grant is in the header of
+`deploy/k8s/update-admission.yaml`.
 
 #### Proof before the switch is turned on
 

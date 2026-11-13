@@ -6,8 +6,9 @@
 #
 # It bounds exactly these fields, and no others: the Job's name starts gt-update-;
 # the pod runs as the gt-update ServiceAccount and carries its token; the host
-# network, PID and IPC namespaces are off; nodeName, nodeSelector, tolerations and
-# runtimeClassName are unset; the pod securityContext sets no run-as identity,
+# network, PID and IPC namespaces are off; nodeName, nodeSelector, tolerations,
+# runtimeClassName, hostAliases, dnsConfig, shareProcessNamespace and hostUsers
+# are unset; the pod securityContext sets no run-as identity,
 # group, sysctl or security profile; the priority class is gt-control-plane and the
 # restart policy Never; the pod has exactly one update container and one images init
 # container, with the image, command, arguments, environment and mounts the renderer
@@ -204,7 +205,10 @@ spec:
         no hostPath
     # The pod fields the renderer leaves unset or sets to one value. nodeName,
     # nodeSelector, tolerations and runtimeClassName would place the pod on a chosen
-    # node or runtime; the pod securityContext would change the user, groups, sysctls
+    # node or runtime; hostAliases and dnsConfig would redirect the names the pod
+    # resolves (the Forgejo and daemon hosts among them); shareProcessNamespace and
+    # hostUsers would change what the pod's processes can see and which user they
+    # map to; the pod securityContext would change the user, groups, sysctls
     # or security profile the pinned command runs under; and the daemon image runs as
     # its own user, so the renderer sets no run-as identity. The API server may
     # default the pod securityContext to an empty object, so this checks its fields,
@@ -214,6 +218,10 @@ spec:
         !has(object.spec.template.spec.nodeSelector) &&
         !has(object.spec.template.spec.tolerations) &&
         !has(object.spec.template.spec.runtimeClassName) &&
+        !has(object.spec.template.spec.hostAliases) &&
+        !has(object.spec.template.spec.dnsConfig) &&
+        !has(object.spec.template.spec.shareProcessNamespace) &&
+        !has(object.spec.template.spec.hostUsers) &&
         (!has(object.spec.template.spec.securityContext) ||
         (!has(object.spec.template.spec.securityContext.runAsNonRoot) &&
         !has(object.spec.template.spec.securityContext.runAsUser) &&
@@ -230,6 +238,7 @@ spec:
       message: >-
         the Job's pod may set only the ServiceAccount token, priority class and
         restart policy the renderer sets, with no node placement, runtime class,
+        host alias, DNS config, shared process namespace, user namespace setting,
         run-as identity, group, sysctl or security profile
 ---
 apiVersion: admissionregistration.k8s.io/v1

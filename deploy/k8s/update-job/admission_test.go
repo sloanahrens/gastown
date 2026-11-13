@@ -190,6 +190,10 @@ func admissionPodExpr(t *testing.T, pod PodSpec) string {
 		"!has(object.spec.template.spec.nodeSelector)",
 		"!has(object.spec.template.spec.tolerations)",
 		"!has(object.spec.template.spec.runtimeClassName)",
+		"!has(object.spec.template.spec.hostAliases)",
+		"!has(object.spec.template.spec.dnsConfig)",
+		"!has(object.spec.template.spec.shareProcessNamespace)",
+		"!has(object.spec.template.spec.hostUsers)",
 		"(!has(object.spec.template.spec.securityContext) || " +
 			"(!has(object.spec.template.spec.securityContext.runAsNonRoot) && " +
 			"!has(object.spec.template.spec.securityContext.runAsUser) && " +
@@ -605,7 +609,7 @@ func admissionEncodedProblems(raw []byte) []string {
 		return []string{"the Job holds no spec.template.spec"}
 	}
 	var problems []string
-	for _, key := range []string{"hostNetwork", "hostPID", "hostIPC", "nodeName", "nodeSelector", "tolerations", "runtimeClassName"} {
+	for _, key := range []string{"hostNetwork", "hostPID", "hostIPC", "nodeName", "nodeSelector", "tolerations", "runtimeClassName", "hostAliases", "dnsConfig", "shareProcessNamespace", "hostUsers"} {
 		if _, found := pod[key]; found {
 			problems = append(problems, fmt.Sprintf("the Job's pod sets %s, which the policy refuses", key))
 		}
@@ -1048,6 +1052,42 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 			return docs
 		},
 		want: "validation 4",
+	},
+	{
+		name: "a hostAliases admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.hostAliases)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a dnsConfig admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.dnsConfig)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a shareProcessNamespace admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.shareProcessNamespace)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a hostUsers admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.hostUsers)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
 	},
 	{
 		name: "a nodeName admitted",
