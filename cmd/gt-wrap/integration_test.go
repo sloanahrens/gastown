@@ -92,7 +92,7 @@ func wrapperEnv(t *testing.T) []string {
 		dir = parent
 	}
 	if town == "" {
-		t.Skipf("no town root above %s, so there is no town to run against", dir)
+		t.Fatalf("no town root above %s, so there is no town to run against", dir)
 	}
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".config", "gt")
