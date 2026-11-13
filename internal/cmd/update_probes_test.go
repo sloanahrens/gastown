@@ -55,7 +55,7 @@ func TestUpdateProbeInstalledAndMainSHA(t *testing.T) {
 	t.Run("main parses the first field of the first line", func(t *testing.T) {
 		t.Parallel()
 		run := &updateProbeRun{output: "deadbeefdeadbeef\trefs/heads/main\n"}
-		probes := newUpdateProbes(updateProbeEnv{RepoRoot: "/town/repo", Run: run.run})
+		probes := newUpdateProbes(updateProbeEnv{TownRoot: "/town", Run: run.run})
 
 		sha, err := probes.MainSHA(ctx)
 		if err != nil {
@@ -64,7 +64,7 @@ func TestUpdateProbeInstalledAndMainSHA(t *testing.T) {
 		if sha != "deadbeefdeadbeef" {
 			t.Errorf("main sha = %q, want the first field", sha)
 		}
-		want := "git -C /town/repo ls-remote origin refs/heads/main"
+		want := "git --git-dir /town/gastown/.repo.git ls-remote origin refs/heads/main"
 		if len(run.calls) != 1 || run.calls[0] != want {
 			t.Errorf("ran %v, want [%q]", run.calls, want)
 		}
@@ -78,7 +78,7 @@ func TestUpdateProbeInstalledAndMainSHA(t *testing.T) {
 	t.Run("main refuses a failed ls-remote", func(t *testing.T) {
 		t.Parallel()
 		run := &updateProbeRun{exit: 2}
-		probes := newUpdateProbes(updateProbeEnv{RepoRoot: "/town/repo", Run: run.run})
+		probes := newUpdateProbes(updateProbeEnv{TownRoot: "/town", Run: run.run})
 		if _, err := probes.MainSHA(ctx); err == nil {
 			t.Error("a nonzero ls-remote exit reported no error")
 		}
@@ -87,7 +87,7 @@ func TestUpdateProbeInstalledAndMainSHA(t *testing.T) {
 	t.Run("main refuses empty output", func(t *testing.T) {
 		t.Parallel()
 		run := &updateProbeRun{output: "\n"}
-		probes := newUpdateProbes(updateProbeEnv{RepoRoot: "/town/repo", Run: run.run})
+		probes := newUpdateProbes(updateProbeEnv{TownRoot: "/town", Run: run.run})
 		if _, err := probes.MainSHA(ctx); err == nil {
 			t.Error("empty ls-remote output reported no error")
 		}
@@ -96,7 +96,7 @@ func TestUpdateProbeInstalledAndMainSHA(t *testing.T) {
 	t.Run("main refuses a run error", func(t *testing.T) {
 		t.Parallel()
 		run := &updateProbeRun{err: errors.New("git is not installed")}
-		probes := newUpdateProbes(updateProbeEnv{RepoRoot: "/town/repo", Run: run.run})
+		probes := newUpdateProbes(updateProbeEnv{TownRoot: "/town", Run: run.run})
 		if _, err := probes.MainSHA(ctx); err == nil {
 			t.Error("a git run error reported no error")
 		}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/version"
@@ -267,7 +268,7 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	if err != nil {
 		// No gt source checkout: there is no binary for an install to move,
 		// which is how rebuild_gt's own cycle reads the same town. Main's sha
-		// cannot be read either, so record the missing checkout rather than
+		// is not read on this path, so record the missing checkout rather than
 		// leave MainSHA empty for the failed-run hold to read as unknown
 		// (gt-fj9n1).
 		facts.SourceMissing = true
@@ -283,7 +284,7 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 		// and a run that fails before the installer never fetches. The hold
 		// compares the failed run's target with the tip the run itself reads, so
 		// the same failed run cannot restart (gt-tb5vx).
-		facts.MainSHA = d.updateRemoteMainSHA(now, repoRoot)
+		facts.MainSHA = d.updateRemoteMainSHA(now, d.config.TownRoot)
 	}
 	facts.MainMoved = info.IsStale
 	if !info.IsStale {
@@ -298,14 +299,15 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	return facts, nil
 }
 
-// updateRemoteMainSHA reads main's tip from origin the way the run does, bounded
-// by updateRemoteTimeout. A failed read returns empty, which the hold reads as
-// an unknown main: it holds and names the by-hand command rather than comparing
-// against a ref it cannot trust. A failure starts updateRemoteBackoff, so a read
-// inside it makes no ls-remote call and leaves main unknown from the remembered
-// failure. The outage is logged when it starts and its recovery when a read
-// answers again, not on every heartbeat.
-func (d *Daemon) updateRemoteMainSHA(now time.Time, repoRoot string) string {
+// updateRemoteMainSHA reads main's tip from origin the way the run does, through
+// the rig's bare repository under townRoot, bounded by updateRemoteTimeout. A
+// failed read returns empty, which the hold reads as an unknown main: it holds
+// and names the by-hand command rather than comparing against a ref it cannot
+// trust. A failure starts updateRemoteBackoff, so a read inside it makes no
+// ls-remote call and leaves main unknown from the remembered failure. The outage
+// is logged when it starts and its recovery when a read answers again, not on
+// every heartbeat.
+func (d *Daemon) updateRemoteMainSHA(now time.Time, townRoot string) string {
 	if d.updateRemoteInBackoff(now) {
 		return ""
 	}
@@ -315,7 +317,7 @@ func (d *Daemon) updateRemoteMainSHA(now time.Time, repoRoot string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), updateRemoteTimeout)
 	defer cancel()
-	sha, err := update.RemoteMainSHA(ctx, run, repoRoot)
+	sha, err := update.RemoteMainSHA(ctx, run, constants.RigBareRepoPath(filepath.Join(townRoot, "gastown")))
 	if err != nil {
 		d.noteRemoteMainFailure(now, err)
 		return ""

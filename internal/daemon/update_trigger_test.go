@@ -354,13 +354,17 @@ type updateRemoteFake struct {
 	output string
 	exit   int
 	err    error
+	// argv is the last command the runner saw, so a test can check which
+	// repository the read goes through.
+	argv string
 	// deadline is how much of the call's context bound was left when the runner
 	// saw it, so a test can check the bound the hold puts on the read.
 	deadline time.Duration
 }
 
-func (f *updateRemoteFake) run(ctx context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
+func (f *updateRemoteFake) run(ctx context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 	f.calls++
+	f.argv = name + " " + strings.Join(args, " ")
 	if deadline, ok := ctx.Deadline(); ok {
 		f.deadline = time.Until(deadline)
 	}
@@ -423,6 +427,10 @@ func TestUpdateFactsRemoteMainSHAForAFailedRun(t *testing.T) {
 			}
 			if remote.calls != tt.wantCalls {
 				t.Errorf("ls-remote calls = %d, want %d", remote.calls, tt.wantCalls)
+			}
+			wantArgv := "git --git-dir " + filepath.Join(d.config.TownRoot, "gastown", ".repo.git") + " ls-remote origin refs/heads/main"
+			if remote.calls > 0 && remote.argv != wantArgv {
+				t.Errorf("ran %q, want %q", remote.argv, wantArgv)
 			}
 		})
 	}
