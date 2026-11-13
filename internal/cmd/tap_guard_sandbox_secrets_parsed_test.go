@@ -148,6 +148,7 @@ func TestSandboxSecretsProductionReader(t *testing.T) {
 		reading sandboxSecretsReader
 	}{
 		{"a readable command with no unsafe shape is read by the parser", "cat /proc/self/environ 2>/dev/null", parsed},
+		{"a plain environ read is read by the parser", "cat /proc/1/environ", parsed},
 		{"an unreadable command falls back to the text reading", `echo "unterminated`, shellTokenize},
 		{"a here-document falls back to the text reading", "cat > f <<EOF\nx\nEOF", shellTokenize},
 		{"a [[ ]] expression falls back to the text reading", "[[ -f x ]]", shellTokenize},
@@ -156,6 +157,10 @@ func TestSandboxSecretsProductionReader(t *testing.T) {
 		{"a select header falls back to the text reading", "select x in 1; do echo $x; done", shellTokenize},
 		{"a single '<' is not a here-document", "echo a<b", parsed},
 		{"a here-string keeps the parsed reading", "cat <<< /proc/self/environ", parsed},
+		{"a command substitution falls back to the text reading", "echo $(cat /proc/self/environ)", shellTokenize},
+		{"a backtick substitution falls back to the text reading", "echo `cat /proc/self/environ`", shellTokenize},
+		{"a process substitution falls back to the text reading", "cat <(cat /proc/self/environ)", shellTokenize},
+		{"an ordinary command with no substitution keeps the parsed reading", "echo hi", parsed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,6 +168,34 @@ func TestSandboxSecretsProductionReader(t *testing.T) {
 			got := sandboxSecretsReadTokens(tt.command)
 			if want := tt.reading(tt.command); !slices.Equal(got, want) {
 				t.Errorf("sandboxSecretsReadTokens(%q) = %q, want %q", tt.command, got, want)
+			}
+		})
+	}
+}
+
+// TestSandboxSecretsSubstitutionReadsPathAsText pins the verdict on the quoted
+// and escaped environ spellings inside a substitution. parsedTokens keeps a
+// substitution as one raw word, so these read an environment block only through
+// the text reading sandboxSecretsParsedUnsafe routes them to (gt-p0y85u).
+func TestSandboxSecretsSubstitutionReadsPathAsText(t *testing.T) {
+	t.Parallel()
+	const want = "it reads a process's environment block"
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"a quoted directory in a substitution", "echo $(cat /pro''c/1/environ)"},
+		{"a quoted directory in an assignment", "x=$(cat /pro''c/1/environ)"},
+		{"a quoted directory in backticks", "echo `cat /pro''c/1/environ`"},
+		{"a quoted name in a substitution", "echo $(cat /proc/1/envi''ron)"},
+		{"an escaped name in a substitution", `echo $(cat /proc/1/en\viron)`},
+		{"a quoted directory in a process substitution", "cat <(cat /pro''c/1/environ)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sandboxSecretsReason(tt.command); got != want {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want %q", tt.command, got, want)
 			}
 		})
 	}

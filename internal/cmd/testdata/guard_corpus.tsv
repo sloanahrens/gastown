@@ -597,3 +597,6 @@ test_scope	polecat	"cat /proc/self/environ"	allow		gt-p0y85u	2e1eb74bd5665a4a053
 dangerous	polecat	"(while true; do gt slot status; done) &"	refuse	Never poll the slot	gt-q590oi	1ea482b389dd74c50b33f4b19e9f2cf86965b14eb4bfbfc8f06cfeff6a8a85e4
 container_suite	polecat	"(while true; do gt slot status; done) &"	allow		gt-q590oi	1ea482b389dd74c50b33f4b19e9f2cf86965b14eb4bfbfc8f06cfeff6a8a85e4
 test_scope	polecat	"(while true; do gt slot status; done) &"	allow		gt-q590oi	1ea482b389dd74c50b33f4b19e9f2cf86965b14eb4bfbfc8f06cfeff6a8a85e4
+container_suite	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
+dangerous	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
+test_scope	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
