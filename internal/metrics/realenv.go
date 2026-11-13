@@ -146,13 +146,21 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	if opts.Run == nil {
 		return real, errors.New("real env: RealEnvOptions.Run is unset")
 	}
-	home, err := homeDir(opts.Home, opts.HomeDir)
-	if err != nil {
-		return real, fmt.Errorf("real env: %w", err)
-	}
 	getenv := opts.Getenv
 	if getenv == nil {
 		getenv = os.Getenv
+	}
+	// The claude workspace resolves first, through the home lookup it falls
+	// back to, so a home directory that cannot be found is refused with the
+	// workspace named (config.ClaudeConfigDirFrom, gt-1z0dia).
+	findHome := func() (string, error) { return homeDir(opts.Home, opts.HomeDir) }
+	claudeDir, err := config.ClaudeConfigDirFrom(getenv, findHome)
+	if err != nil {
+		return real, fmt.Errorf("real env: claude workspace: %w", err)
+	}
+	home, err := findHome()
+	if err != nil {
+		return real, fmt.Errorf("real env: %w", err)
 	}
 	files := opts.Files.withHostDefaults()
 	town := townRoot(opts.Town, getenv(envTown), home)
@@ -228,10 +236,6 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	// CLAUDE_CONFIG_DIR else home/.claude. It is listed only where it is one: the
 	// pod's own config dir holds no beads database, so handing it to bd would
 	// make the daily run report the whole source as a gap (gt-1z0dia).
-	claudeDir, err := config.ClaudeConfigDirFrom(getenv, func() (string, error) { return home, nil })
-	if err != nil {
-		return real, fmt.Errorf("real env: claude workspace: %w", err)
-	}
 	listed, err := claudeBeadWorkspace(files, claudeDir)
 	if err != nil {
 		return real, fmt.Errorf("real env: claude workspace: %w", err)

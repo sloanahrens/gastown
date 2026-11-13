@@ -527,13 +527,29 @@ func TestRealEnvNeedsARunner(t *testing.T) {
 
 func TestRealEnvStopsWhenTheHomeCannotBeFound(t *testing.T) {
 	t.Parallel()
-	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
-	_, err := RealEnv(context.Background(), RealEnvOptions{
-		Today: "smoke", Town: t.TempDir(), DocsDir: t.TempDir(), Run: runner.run,
-		HomeDir: func() (string, error) { return "", errors.New("no home directory") },
-	})
-	if err == nil || !strings.Contains(err.Error(), "no home directory") {
-		t.Errorf("RealEnv error = %v, want the home lookup refused", err)
+	for _, tc := range []struct {
+		name   string
+		getenv func(string) string
+		want   string
+	}{
+		// Without CLAUDE_CONFIG_DIR the home is the claude workspace's own path,
+		// so the refusal names the workspace it could not resolve.
+		{"unset, the refusal names the claude workspace", noEnv, "real env: claude workspace: no home directory"},
+		// With CLAUDE_CONFIG_DIR set the workspace needs no home; the town's own
+		// defaults still do.
+		{"set, the refusal is the home lookup's", configDirEnv("/cfg"), "real env: no home directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
+			_, err := RealEnv(context.Background(), RealEnvOptions{
+				Today: "smoke", Town: t.TempDir(), DocsDir: t.TempDir(), Getenv: tc.getenv, Run: runner.run,
+				HomeDir: func() (string, error) { return "", errors.New("no home directory") },
+			})
+			if err == nil || err.Error() != tc.want {
+				t.Errorf("RealEnv error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
