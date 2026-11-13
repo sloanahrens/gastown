@@ -232,6 +232,34 @@ func TestDispatchReaderKeepsAnEndRecordedOutsideTheLog(t *testing.T) {
 	}
 }
 
+// StartBefore answers from the log on the call, without the caller having
+// polled first: the dashboard asks it for a hand-slung landing, whose daemon log
+// holds no dispatch line, and the run that ended in that landing's submission is
+// what it must date (gt-04hbp5).
+func TestDispatchReaderStartBeforeReadsTheLogOnTheCall(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	appendLog(t, town, logLine(TypeSling, t9, "gt-a")+"\n"+logLine(TypeDone, t10, "gt-a")+"\n")
+
+	got, ok, err := NewDispatchReader(town).StartBefore("gt-a", mustTime(t, t11))
+	if err != nil || !ok || !got.Equal(mustTime(t, t9)) {
+		t.Fatalf("StartBefore = %v (%t, %v), want the sling the done event closed, %s", got, ok, err, t9)
+	}
+}
+
+// An unreadable log is StartBefore's error, not a bead with no sling: the
+// dashboard draws the landing without a ship time rather than a guessed one.
+func TestDispatchReaderStartBeforeRefusesAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	bad := t.TempDir()
+	if err := os.Mkdir(filepath.Join(bad, EventsFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewDispatchReader(bad).StartBefore("gt-a", mustTime(t, t11)); err == nil {
+		t.Fatal("StartBefore read an unreadable log as one with no sling")
+	}
+}
+
 // A town with no log has dispatched nothing; a log that cannot be read is an
 // error, so the dashboard marks the reading unavailable instead of drawing
 // every seat as young.

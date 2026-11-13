@@ -1612,6 +1612,12 @@ type tailDeploys struct {
 	// as the whole of the read, which is what gt tail's stream wants.
 	horizon time.Duration
 
+	// slung answers the events journal's dispatch clock, for a landing the
+	// daemon log holds no dispatch line for: a bead slung by hand rather than
+	// by the spec dispatcher (gt-04hbp5). Unset leaves the tracker reading the
+	// daemon log alone, which is what gt tail's stream wants.
+	slung tailDispatchSlung
+
 	mu      sync.Mutex
 	records map[string]*tailDeployRecord
 	order   []string // first-seen order, which for landed beads is landing order
@@ -1621,6 +1627,13 @@ type tailDeploys struct {
 // commit. ok is false for a rig with no staging ship definition — a repository
 // that could not be read, or one with no staging runs.
 type tailShipStaging func(rig, commit string, landed time.Time) (dashboard.StagingShip, bool)
+
+// tailDispatchSlung answers when the run a bead landed from was slung, read
+// from the events journal: the dispatch of the run its latest run end at or
+// before before closed, or of the run still open then. ok is false when the
+// journal holds no such sling, and an error is a journal that cannot be read:
+// the landing is then shown without a ship time, never with a guessed one.
+type tailDispatchSlung func(bead string, before time.Time) (time.Time, bool, error)
 
 // newTailDeploys returns a tracker that reads the daemon log back to the
 // run's cutoff, from the run's clock, and answers deployment with ancestor.
@@ -1641,6 +1654,15 @@ func (t *tailDeploys) setShipDefinitions(restartRig string, rigOf func(bead stri
 // own window, which is what gt tail's stream — bounded by --since — wants.
 func (t *tailDeploys) setHorizon(horizon time.Duration) {
 	t.horizon = horizon
+}
+
+// setSlungClock gives the tracker the events journal's dispatch clock, the
+// record the Polecats table dates a seat's sling from. It is what dates a
+// landing the daemon log has no dispatch line for — a bead the operator slung by
+// hand while dispatch was held (gt-04hbp5). A tracker nobody gives one reads
+// the daemon log alone, which is what gt tail's stream wants.
+func (t *tailDeploys) setSlungClock(slung tailDispatchSlung) {
+	t.slung = slung
 }
 
 // inRestartRig reports whether a bead's landings ship when the daemon restart
@@ -1861,8 +1883,9 @@ const (
 // bead in an app rig is shipped by the staging deploy that covered it; a bead
 // in a rig with no ship definition reports nothing, and the table shows a dash
 // rather than a landing that looks about to ship. A bead with no dispatch line
-// (hand-slung) has no total to report, and neither has a landing whose rig the
-// tracker does not know.
+// is dated from the events journal, the clock the Polecats table reads a seat's
+// sling from, and has no total to report when neither record dates it — as has
+// a landing whose rig the tracker does not know.
 func (t *tailDeploys) shipStatus(rig, bead string) tailShip {
 	if t == nil {
 		return tailShip{}
@@ -1875,6 +1898,18 @@ func (t *tailDeploys) shipStatus(rig, bead string) tailShip {
 	}
 	dispatched, landed, sha, deployed := r.dispatchTime(), r.landed, r.sha, r.deployed
 	t.mu.Unlock()
+	// A landing the daemon log gives no dispatch for — a bead the operator
+	// slung by hand — is dated by the events journal, asked outside the
+	// tracker's lock as the ancestry checks are. A sling the journal dates after
+	// the landing is the rework loop, not this landing's start, and a journal
+	// that cannot be read leaves the row without a ship time rather than
+	// inventing one.
+	if dispatched.IsZero() && !landed.IsZero() && t.slung != nil {
+		at, ok, err := t.slung(bead, landed)
+		if err == nil && ok && at.Before(landed) {
+			dispatched = at
+		}
+	}
 	if dispatched.IsZero() {
 		return tailShip{}
 	}

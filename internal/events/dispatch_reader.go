@@ -117,6 +117,24 @@ func (r *DispatchReader) StartSince(bead string, end time.Time) (time.Time, bool
 	return r.clock.StartSince(bead, end)
 }
 
+// StartBefore returns when the run bead was working under at before was
+// dispatched (DispatchClock.StartBefore), read from the clock the log builds.
+// Unlike StartSince the caller need not have polled first: the log is read on
+// the call, so a reader that has not answered Starts yet still answers here, and
+// a log that cannot be read is this call's error. The dashboard reads it for a
+// landing whose daemon log holds no dispatch line (gt-04hbp5), and shows the
+// landing without a ship time rather than with a guessed one.
+func (r *DispatchReader) StartBefore(bead string, before time.Time) (time.Time, bool, error) {
+	if _, err := r.Starts(); err != nil {
+		return time.Time{}, false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Starts built the clock above, so this read has one to answer from.
+	at, ok := r.clock.StartBefore(bead, before)
+	return at, ok, nil
+}
+
 // applyEnds folds the ends recorded outside the log into a clock just built or
 // extended from it.
 func (r *DispatchReader) applyEnds() {
