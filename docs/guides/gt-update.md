@@ -231,10 +231,9 @@ through the Job, with the overseer watching:
 
 1. Apply the update manifests: `deploy/k8s/update-rbac.yaml`,
    `deploy/k8s/update-admission.yaml`, and the Job and the suspended CronJob
-   `gt-update` rendered from `deploy/k8s/update-job`. The cluster must serve
-   `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy (Kubernetes 1.30
-   or later); `kubectl api-resources --api-group=admissionregistration.k8s.io`
-   lists what it serves.
+   `gt-update` rendered from `deploy/k8s/update-job`. Before you apply the
+   policy, read the cluster-version requirement in the header of
+   `deploy/k8s/update-admission.yaml`; that header carries the check command.
 2. Start the roll from the suspended CronJob, which copies its template:
 
    ```bash

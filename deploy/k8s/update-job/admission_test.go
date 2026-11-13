@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -167,10 +169,47 @@ func admissionContainerExpr(t *testing.T, c Container) string {
 		admissionArgsExpr(t, c.Args),
 		admissionEnvExpr(t),
 		"!has(c.envFrom)",
+		"!has(c.ports)",
 		admissionNoElevationExpr(),
 		admissionNoExecExpr(),
 		admissionMountsExpr(t, c.VolumeMounts),
 	}, " && ")
+}
+
+// admissionPodExpr is the bound on the pod fields the policy pins: nodeName,
+// nodeSelector, tolerations and runtimeClassName unset, a pod securityContext with
+// no run-as identity, group, sysctl or security profile, and the token automount,
+// priority class and restart policy the renderer sets. The renderer models only the
+// last three, so the rest are the renderer's silence stated as a refusal; the API
+// server's empty `securityContext: {}` default is why the clause tests the fields
+// and not the object.
+func admissionPodExpr(t *testing.T, pod PodSpec) string {
+	t.Helper()
+	parts := []string{
+		"!has(object.spec.template.spec.nodeName)",
+		"!has(object.spec.template.spec.nodeSelector)",
+		"!has(object.spec.template.spec.tolerations)",
+		"!has(object.spec.template.spec.runtimeClassName)",
+		"(!has(object.spec.template.spec.securityContext) || " +
+			"(!has(object.spec.template.spec.securityContext.runAsNonRoot) && " +
+			"!has(object.spec.template.spec.securityContext.runAsUser) && " +
+			"!has(object.spec.template.spec.securityContext.runAsGroup) && " +
+			"!has(object.spec.template.spec.securityContext.fsGroup) && " +
+			"!has(object.spec.template.spec.securityContext.supplementalGroups) && " +
+			"!has(object.spec.template.spec.securityContext.sysctls) && " +
+			"!has(object.spec.template.spec.securityContext.seccompProfile) && " +
+			"!has(object.spec.template.spec.securityContext.selinuxOptions))",
+	}
+	if pod.AutomountServiceAccountToken == nil {
+		parts = append(parts, "!has(object.spec.template.spec.automountServiceAccountToken)")
+	} else {
+		parts = append(parts,
+			"has(object.spec.template.spec.automountServiceAccountToken)",
+			fmt.Sprintf("object.spec.template.spec.automountServiceAccountToken == %t", *pod.AutomountServiceAccountToken))
+	}
+	return strings.Join(append(parts,
+		"object.spec.template.spec.priorityClassName == "+celString(t, pod.PriorityClassName),
+		"object.spec.template.spec.restartPolicy == "+celString(t, pod.RestartPolicy)), " && ")
 }
 
 // admissionValidations is every validation the policy must carry, in order, built
@@ -180,6 +219,7 @@ func admissionContainerExpr(t *testing.T, c Container) string {
 func admissionValidations(t *testing.T) []string {
 	t.Helper()
 	v := admissionValues()
+	pod := jobSpec(v).Template.Spec
 	return []string{
 		fmt.Sprintf("object.metadata.name.startsWith(%s)", celString(t, JobNamePrefix)),
 		fmt.Sprintf("object.spec.template.spec.serviceAccountName == %[1]s && "+
@@ -199,6 +239,7 @@ func admissionValidations(t *testing.T) []string {
 			"(v.name == %[3]s && has(v.secret) && v.secret.secretName == %[4]s && !has(v.hostPath)))",
 			celString(t, TownStateVolume), celString(t, k8sdaemon.TownStateClaim),
 			celString(t, ViewerTokenVolume), celString(t, ViewerTokenSecret)),
+		admissionPodExpr(t, pod),
 	}
 }
 
@@ -539,11 +580,13 @@ func admissionMapField(m map[string]any, key string) (map[string]any, bool) {
 }
 
 // admissionEncodedProblems names every pod field the policy refuses that the
-// renderer's types do not model, read from the encoded Job: the host namespaces, a
-// container securityContext, envFrom, lifecycle hook or probe, and an env
-// valueFrom. A renderer change that added one of them would otherwise pass the
-// typed checks and reach the cluster, where the policy would refuse the daemon's
-// own Job.
+// renderer's types do not model, read from the encoded Job: the host namespaces,
+// nodeName, nodeSelector, tolerations and runtimeClassName, the pod
+// securityContext's identity, group, sysctl and profile fields, a container
+// securityContext, envFrom, ports, lifecycle hook or probe, an env valueFrom, and
+// any volume source other than a claim or a Secret. A renderer change that added
+// one of them would otherwise pass the typed checks and reach the cluster, where
+// the policy would refuse the daemon's own Job.
 func admissionEncodedProblems(raw []byte) []string {
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
@@ -562,11 +605,13 @@ func admissionEncodedProblems(raw []byte) []string {
 		return []string{"the Job holds no spec.template.spec"}
 	}
 	var problems []string
-	for _, key := range []string{"hostNetwork", "hostPID", "hostIPC"} {
+	for _, key := range []string{"hostNetwork", "hostPID", "hostIPC", "nodeName", "nodeSelector", "tolerations", "runtimeClassName"} {
 		if _, found := pod[key]; found {
 			problems = append(problems, fmt.Sprintf("the Job's pod sets %s, which the policy refuses", key))
 		}
 	}
+	problems = append(problems, admissionEncodedSecurityContextProblems(pod)...)
+	problems = append(problems, admissionEncodedVolumeProblems(pod)...)
 	for _, field := range []string{"containers", "initContainers"} {
 		list, ok := pod[field].([]any)
 		if !ok {
@@ -579,7 +624,7 @@ func admissionEncodedProblems(raw []byte) []string {
 				problems = append(problems, fmt.Sprintf("a %s entry is not a container", field))
 				continue
 			}
-			for _, key := range []string{"securityContext", "envFrom", "lifecycle", "livenessProbe", "readinessProbe", "startupProbe"} {
+			for _, key := range []string{"securityContext", "envFrom", "ports", "lifecycle", "livenessProbe", "readinessProbe", "startupProbe"} {
 				if _, found := c[key]; found {
 					problems = append(problems, fmt.Sprintf("container %v sets %s, which the policy refuses", c["name"], key))
 				}
@@ -606,21 +651,79 @@ func admissionEncodedProblems(raw []byte) []string {
 	return problems
 }
 
+// admissionEncodedSecurityContextProblems names each pod securityContext field the
+// policy refuses, since the renderer's types do not model a pod securityContext and
+// a renderer change adding one would otherwise reach the cluster. The API server's
+// empty `{}` default is why the fields are checked, not the object.
+func admissionEncodedSecurityContextProblems(pod map[string]any) []string {
+	raw, found := pod["securityContext"]
+	if !found {
+		return nil
+	}
+	sc, ok := raw.(map[string]any)
+	if !ok {
+		return []string{"the Job's pod securityContext is not a mapping"}
+	}
+	var problems []string
+	for _, key := range []string{"runAsNonRoot", "runAsUser", "runAsGroup", "fsGroup", "supplementalGroups", "sysctls", "seccompProfile", "selinuxOptions"} {
+		if _, found := sc[key]; found {
+			problems = append(problems, fmt.Sprintf("the Job's pod securityContext sets %s, which the policy refuses", key))
+		}
+	}
+	return problems
+}
+
+// admissionEncodedVolumeProblems holds every volume to the two kinds the policy
+// admits. The renderer's Volume type models only a claim and a Secret, so any other
+// source key is a renderer change the policy would refuse, hostPath first.
+func admissionEncodedVolumeProblems(pod map[string]any) []string {
+	raw, found := pod["volumes"]
+	if !found {
+		return nil
+	}
+	volumes, ok := raw.([]any)
+	if !ok {
+		return []string{"the Job's pod volumes are not a list"}
+	}
+	var problems []string
+	for _, item := range volumes {
+		v, ok := item.(map[string]any)
+		if !ok {
+			problems = append(problems, "a volume is not a mapping")
+			continue
+		}
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			switch key {
+			case "name", "persistentVolumeClaim", "secret":
+			default:
+				problems = append(problems, fmt.Sprintf("volume %v sets %s, which the policy does not admit (only a claim and a Secret)", v["name"], key))
+			}
+		}
+	}
+	return problems
+}
+
 // updateAdmissionJobProblems names every way the rendered Job departs from what
-// the policy's expressions require: the daemon's name, the ServiceAccount, the one
-// container and one init container the renderer sets with their image, command,
-// arguments and environment, exactly the two volumes, and no pod field the policy
-// refuses in the encoded Job.
+// the policy's expressions require: the daemon's name, the ServiceAccount and the
+// other pod fields the renderer sets, the one container and one init container the
+// renderer sets with their image, command, arguments and environment, exactly the
+// two volumes, and no pod field the policy refuses in the encoded Job.
 func updateAdmissionJobProblems(job Job) []string {
 	var problems []string
 	pod := job.Spec.Template.Spec
+	v := admissionValues()
 	if !strings.HasPrefix(job.Metadata.Name, JobNamePrefix) {
 		problems = append(problems, fmt.Sprintf("the Job's name %q does not start %q", job.Metadata.Name, JobNamePrefix))
 	}
 	if pod.ServiceAccountName != ServiceAccountName {
 		problems = append(problems, fmt.Sprintf("the Job's pod runs as %q, want %q", pod.ServiceAccountName, ServiceAccountName))
 	}
-	v := admissionValues()
+	problems = append(problems, admissionJobPodProblems(pod, jobSpec(v).Template.Spec)...)
 	if len(pod.Containers) != 1 {
 		problems = append(problems, fmt.Sprintf("the Job's pod runs %d containers, want the one update container", len(pod.Containers)))
 	} else {
@@ -669,6 +772,32 @@ func admissionJobVolumeProblems(pod PodSpec) []string {
 		}
 	}
 	return problems
+}
+
+// admissionJobPodProblems holds the Job's token automount, priority class and
+// restart policy to the renderer's, since the policy pins each to what the renderer
+// sets. The pod fields the renderer does not model are checked on the encoded Job.
+func admissionJobPodProblems(got, want PodSpec) []string {
+	var problems []string
+	if admissionBool(got.AutomountServiceAccountToken) != admissionBool(want.AutomountServiceAccountToken) {
+		problems = append(problems, fmt.Sprintf("the Job's pod automountServiceAccountToken is %s, want %s",
+			admissionBool(got.AutomountServiceAccountToken), admissionBool(want.AutomountServiceAccountToken)))
+	}
+	if got.PriorityClassName != want.PriorityClassName {
+		problems = append(problems, fmt.Sprintf("the Job's pod priorityClassName is %q, want %q", got.PriorityClassName, want.PriorityClassName))
+	}
+	if got.RestartPolicy != want.RestartPolicy {
+		problems = append(problems, fmt.Sprintf("the Job's pod restartPolicy is %q, want %q", got.RestartPolicy, want.RestartPolicy))
+	}
+	return problems
+}
+
+// admissionBool renders a *bool for a problem message: unset, true or false.
+func admissionBool(p *bool) string {
+	if p == nil {
+		return "unset"
+	}
+	return strconv.FormatBool(*p)
 }
 
 // TestUpdateAdmissionPolicy holds the manifest to its shape: the policy and binding
@@ -795,7 +924,7 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 			docs[0].Spec.Validations = docs[0].Spec.Validations[:len(docs[0].Spec.Validations)-1]
 			return docs
 		},
-		want: "validations, want 6",
+		want: "validations, want 7",
 	},
 	{
 		name: "no message on a validation",
@@ -910,6 +1039,89 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 			return docs
 		},
 		want: "validation 6",
+	},
+	{
+		name: "a container port admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"!has(c.ports)", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "a nodeName admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.nodeName)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a nodeSelector admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.nodeSelector)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a toleration admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.tolerations)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a runtime class admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.runtimeClassName)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "a pod runAsUser admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"!has(object.spec.template.spec.securityContext.runAsUser)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "the token automount unpinned",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"has(object.spec.template.spec.automountServiceAccountToken)", "true", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "another priority class",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"object.spec.template.spec.priorityClassName == 'gt-control-plane'",
+				"object.spec.template.spec.priorityClassName == 'system-node-critical'", 1)
+			return docs
+		},
+		want: "validation 7",
+	},
+	{
+		name: "another restart policy",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[6].Expression = strings.Replace(docs[0].Spec.Validations[6].Expression,
+				"object.spec.template.spec.restartPolicy == 'Never'",
+				"object.spec.template.spec.restartPolicy == 'OnFailure'", 1)
+			return docs
+		},
+		want: "validation 7",
 	},
 	{
 		name: "validationActions Warn",
@@ -1097,6 +1309,24 @@ func TestUpdateAdmissionJobRefusesAnotherJob(t *testing.T) {
 			want: "runs as",
 		},
 		{
+			name: "the token automount off",
+			edit: func(j *Job) {
+				off := false
+				j.Spec.Template.Spec.AutomountServiceAccountToken = &off
+			},
+			want: "automountServiceAccountToken",
+		},
+		{
+			name: "another priority class",
+			edit: func(j *Job) { j.Spec.Template.Spec.PriorityClassName = "system-node-critical" },
+			want: "priorityClassName",
+		},
+		{
+			name: "another restart policy",
+			edit: func(j *Job) { j.Spec.Template.Spec.RestartPolicy = "OnFailure" },
+			want: "restartPolicy",
+		},
+		{
 			name: "a third volume",
 			edit: func(j *Job) {
 				j.Spec.Template.Spec.Volumes = append(j.Spec.Template.Spec.Volumes,
@@ -1191,9 +1421,10 @@ func admissionTestContainer(t *testing.T, pod map[string]any, field string, i in
 }
 
 // TestUpdateAdmissionEncodedJobRefusesAPodField drives the encoded-Job check: a Job
-// that carried a host namespace, a container securityContext or envFrom, or an env
-// valueFrom is named, so a renderer change adding one of them fails here and not on
-// the cluster.
+// that carried a host namespace, a node placement or runtime class, a pod or
+// container securityContext, envFrom, a port, a lifecycle hook or probe, an env
+// valueFrom, or another volume kind is named, so a renderer change adding one of
+// them fails here and not on the cluster.
 func TestUpdateAdmissionEncodedJobRefusesAPodField(t *testing.T) {
 	t.Parallel()
 	for _, r := range []struct {
@@ -1205,6 +1436,57 @@ func TestUpdateAdmissionEncodedJobRefusesAPodField(t *testing.T) {
 			name: "a host namespace",
 			edit: func(t *testing.T, pod map[string]any) { pod["hostNetwork"] = true },
 			want: "hostNetwork",
+		},
+		{
+			name: "a nodeName",
+			edit: func(t *testing.T, pod map[string]any) { pod["nodeName"] = "node-1" },
+			want: "nodeName",
+		},
+		{
+			name: "a nodeSelector",
+			edit: func(t *testing.T, pod map[string]any) {
+				pod["nodeSelector"] = map[string]any{"gt.dev/pool": "core"}
+			},
+			want: "nodeSelector",
+		},
+		{
+			name: "a toleration",
+			edit: func(t *testing.T, pod map[string]any) {
+				pod["tolerations"] = []any{map[string]any{"key": "gt.dev/update", "operator": "Exists"}}
+			},
+			want: "tolerations",
+		},
+		{
+			name: "a runtime class",
+			edit: func(t *testing.T, pod map[string]any) { pod["runtimeClassName"] = "gvisor" },
+			want: "runtimeClassName",
+		},
+		{
+			name: "a pod securityContext",
+			edit: func(t *testing.T, pod map[string]any) {
+				pod["securityContext"] = map[string]any{"runAsUser": 0}
+			},
+			want: "securityContext",
+		},
+		{
+			name: "a container port",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "containers", 0)["ports"] = []any{
+					map[string]any{"containerPort": 22, "hostPort": 22},
+				}
+			},
+			want: "ports",
+		},
+		{
+			name: "a hostPath volume",
+			edit: func(t *testing.T, pod map[string]any) {
+				volumes, ok := pod["volumes"].([]any)
+				if !ok || len(volumes) == 0 {
+					t.Fatal("the Job holds no volumes")
+				}
+				volumes[0] = map[string]any{"name": TownStateVolume, "hostPath": map[string]any{"path": "/"}}
+			},
+			want: "hostPath",
 		},
 		{
 			name: "a container securityContext",
