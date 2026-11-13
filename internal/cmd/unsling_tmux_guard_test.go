@@ -5,10 +5,13 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // tmuxScope names the code gt unsling resolves its target through, which must
@@ -37,51 +40,250 @@ var tmuxReachNames = map[string]bool{
 	"resolveTargetAgentFn": true,
 }
 
+// tmuxReachWords are the camelCase words that name a pane or
+// working-directory helper. A whole word is matched, not a substring, so
+// panelWidth and companyPanel are not reaches while getSessionPane and
+// GetPaneWorkDir are, and a pair of adjacent words that spells one
+// (sessionWorkDir) is a match too.
+var tmuxReachWords = map[string]bool{
+	"pane":     true,
+	"panes":    true,
+	"workdir":  true,
+	"workdirs": true,
+}
+
 // tmuxReach is one reference in guarded code to a tmux, pane or
 // working-directory helper.
 type tmuxReach struct {
+	file string
 	fn   string
 	name string
 	line int
 }
 
-// reachesTmux reports whether an identifier names a pane or working-directory
-// helper, matched without case so a getSessionPane or GetPaneWorkDir is caught.
-func reachesTmux(name string) bool {
-	lower := strings.ToLower(name)
-	return tmuxReachNames[name] || strings.Contains(lower, "pane") || strings.Contains(lower, "workdir")
+// tmuxPackage is the Go source of every file one scan walks, keyed by file
+// name. Following a call needs the callee's source, which may live in another
+// file.
+type tmuxPackage map[string][]byte
+
+// readTmuxPackage reads the non-test Go sources in dir, the package a scan
+// follows calls through.
+func readTmuxPackage(t *testing.T, dir string) tmuxPackage {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	pkg := tmuxPackage{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		pkg[name] = src
+	}
+	if len(pkg) == 0 {
+		t.Fatalf("no Go sources in %s", dir)
+	}
+	return pkg
 }
 
-// scanTmuxReaches parses src, the Go source of file, and reports every reference
-// inside sc's scope to a tmux helper. It also returns the names of the functions
-// the file declares, so a caller can check the scan saw what it must.
-func scanTmuxReaches(file string, src []byte, sc tmuxScope) ([]tmuxReach, []string, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parsing %s: %w", file, err)
+// identWords splits a Go identifier into its lower-cased camelCase words:
+// getSessionPane is get session pane, GetPaneWorkDir is get pane work dir.
+func identWords(name string) []string {
+	var words []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			words = append(words, strings.ToLower(cur.String()))
+			cur.Reset()
+		}
 	}
+	for _, r := range name {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			flush()
+			continue
+		}
+		if unicode.IsUpper(r) {
+			flush()
+		}
+		cur.WriteRune(r)
+	}
+	flush()
+	return words
+}
 
-	var declared []string
-	var reaches []tmuxReach
-	inspect := func(fn string, root ast.Node) {
-		ast.Inspect(root, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SelectorExpr:
-				// A call through the tmux package is a reach whatever its name.
-				if id, ok := x.X.(*ast.Ident); ok && id.Name == "tmux" {
-					reaches = append(reaches, tmuxReach{fn, "tmux." + x.Sel.Name, fset.Position(x.Pos()).Line})
-					return false
-				}
-			case *ast.Ident:
-				if reachesTmux(x.Name) {
-					reaches = append(reaches, tmuxReach{fn, x.Name, fset.Position(x.Pos()).Line})
-				}
-			}
+// paneHelperName reports whether name spells a pane or working-directory helper,
+// matched by camelCase word so getSessionPane and GetPaneWorkDir are caught and
+// panelWidth is not. Two words that spell one are matched too, so sessionWorkDir
+// is caught: the name spells workdir wherever the capital falls.
+func paneHelperName(name string) bool {
+	words := identWords(name)
+	for i, w := range words {
+		if tmuxReachWords[w] {
 			return true
-		})
+		}
+		if i+1 < len(words) && tmuxReachWords[w+words[i+1]] {
+			return true
+		}
+	}
+	return false
+}
+
+// reachName reports whether name on its own is a reach: a pane or
+// working-directory helper, or a name resolveTargetAgent is reached through.
+func reachName(name string) bool {
+	return tmuxReachNames[name] || paneHelperName(name)
+}
+
+// tmuxScan is one scan's state: the package functions and methods a call may
+// lead to, the file each is declared in, and the declarations already walked,
+// so a cycle ends.
+type tmuxScan struct {
+	fset     *token.FileSet
+	funcs    map[string][]*ast.FuncDecl
+	methods  map[string][]*ast.FuncDecl
+	declFile map[*ast.FuncDecl]string
+	visited  map[*ast.FuncDecl]bool
+	reaches  []tmuxReach
+}
+
+// follow walks the body of every package function name declares, unless the
+// name is itself a reach: that is already reported, and walking it would report
+// the tmux call inside the helper the guard exists to catch.
+func (s *tmuxScan) follow(name string) {
+	if tmuxReachNames[name] || paneHelperName(name) {
+		return
+	}
+	for _, fd := range s.funcs[name] {
+		if s.visited[fd] {
+			continue
+		}
+		s.visited[fd] = true
+		s.walk(s.declFile[fd], name, fd)
+	}
+}
+
+// followMethod walks the body of every package method named name. A selector
+// call does not say which type its receiver holds without type information, so
+// every method of that name is followed; a method already walked ends there,
+// and a name that is itself a reach ends it too: the selector rule already
+// reports it, and its body is the tmux call the guard exists to catch.
+func (s *tmuxScan) followMethod(name string) {
+	if paneHelperName(name) {
+		return
+	}
+	for _, fd := range s.methods[name] {
+		if s.visited[fd] {
+			continue
+		}
+		s.visited[fd] = true
+		s.walk(s.declFile[fd], name, fd)
+	}
+}
+
+// walk records every tmux reach under root, which file declares as fn, and
+// follows each package function or method root calls, so a reach one hop away
+// is reported too. A reach is a call through the tmux package, a reference to
+// a name in tmuxReachNames, a call or selector whose name spells a pane or
+// working-directory helper, or a bare reference to a package function that
+// spells one. A local variable that happens to be called pane is none of them.
+func (s *tmuxScan) walk(file, fn string, root ast.Node) {
+	report := func(name string, pos token.Pos) {
+		s.reaches = append(s.reaches, tmuxReach{file, fn, name, s.fset.Position(pos).Line})
+	}
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			// A call through the tmux package is a reach whatever its name.
+			if id, ok := x.X.(*ast.Ident); ok && id.Name == "tmux" {
+				report("tmux."+x.Sel.Name, x.Pos())
+				return false
+			}
+			// A selector's Sel is a field or method, never a package function,
+			// so it is not followed. A pane or working-directory method there
+			// is still a reach, and returning without visiting Sel would miss it.
+			if paneHelperName(x.Sel.Name) {
+				report(x.Sel.Name, x.Sel.Pos())
+			}
+			ast.Inspect(x.X, visit)
+			return false
+		case *ast.CallExpr:
+			switch fun := x.Fun.(type) {
+			case *ast.Ident:
+				if reachName(fun.Name) {
+					// A direct call to a reach name is a reach: following it
+					// would instead report the tmux call inside the helper itself.
+					report(fun.Name, fun.Pos())
+				} else {
+					s.follow(fun.Name)
+				}
+				// The callee is judged here, so walk the arguments only.
+				for _, a := range x.Args {
+					ast.Inspect(a, visit)
+				}
+				return false
+			case *ast.SelectorExpr:
+				// A method call is followed into the methods of that name. The
+				// selector rule still judges the call, so inspecting on reports
+				// a pane method and walks the receiver and arguments.
+				s.followMethod(fun.Sel.Name)
+			}
+		case *ast.Ident:
+			// A bare reference to a reach name is a reach only when the name
+			// declares a package function: a local variable called pane and a
+			// WorkDir field key are not references to a helper.
+			if tmuxReachNames[x.Name] || (paneHelperName(x.Name) && len(s.funcs[x.Name]) > 0) {
+				report(x.Name, x.Pos())
+			}
+		}
+		return true
+	}
+	ast.Inspect(root, visit)
+}
+
+// scanTmuxReaches parses pkg and reports every reference inside sc's scope to a
+// tmux helper, following calls into the package functions it names. It also
+// returns the names of the functions sc's file declares, so a caller can check
+// the scan saw what it must.
+func scanTmuxReaches(pkg tmuxPackage, sc tmuxScope) ([]tmuxReach, []string, error) {
+	fset := token.NewFileSet()
+	files := make(map[string]*ast.File, len(pkg))
+	funcs := map[string][]*ast.FuncDecl{}
+	methods := map[string][]*ast.FuncDecl{}
+	declFile := map[*ast.FuncDecl]string{}
+	for _, name := range slices.Sorted(maps.Keys(pkg)) {
+		f, err := parser.ParseFile(fset, name, pkg[name], parser.SkipObjectResolution)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parsing %s: %w", name, err)
+		}
+		files[name] = f
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			declFile[fd] = name
+			if fd.Recv == nil {
+				funcs[fd.Name.Name] = append(funcs[fd.Name.Name], fd)
+			} else {
+				methods[fd.Name.Name] = append(methods[fd.Name.Name], fd)
+			}
+		}
 	}
 
+	f, ok := files[sc.file]
+	if !ok {
+		return nil, nil, fmt.Errorf("scope names %s, which the package does not hold", sc.file)
+	}
+
+	s := &tmuxScan{fset: fset, funcs: funcs, methods: methods, declFile: declFile, visited: map[*ast.FuncDecl]bool{}}
+	var declared []string
 	for _, d := range f.Decls {
 		fd, isFunc := d.(*ast.FuncDecl)
 		if isFunc {
@@ -89,30 +291,28 @@ func scanTmuxReaches(file string, src []byte, sc tmuxScope) ([]tmuxReach, []stri
 		}
 		switch {
 		case isFunc && (sc.wholeFile || slices.Contains(sc.funcs, fd.Name.Name)):
-			inspect(fd.Name.Name, fd)
+			s.visited[fd] = true
+			s.walk(sc.file, fd.Name.Name, fd)
 		case !isFunc && sc.wholeFile:
-			inspect("(file scope)", d)
+			s.walk(sc.file, "(file scope)", d)
 		}
 	}
-	return reaches, declared, nil
+	return s.reaches, declared, nil
 }
 
 // TestUnslingSourceNeverReachesTmux fails when the code gt unsling resolves its
 // target through names a pane or working-directory helper, a tmux call, or
-// resolveTargetAgent.
+// resolveTargetAgent, including through a package function it calls.
 func TestUnslingSourceNeverReachesTmux(t *testing.T) {
 	t.Parallel()
+	pkg := readTmuxPackage(t, ".")
 	for _, sc := range unslingTmuxScopes {
-		src, err := os.ReadFile(sc.file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reaches, _, err := scanTmuxReaches(sc.file, src, sc)
+		reaches, _, err := scanTmuxReaches(pkg, sc)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, r := range reaches {
-			t.Errorf("%s:%d: %s calls %s; unsling must resolve its target without tmux", sc.file, r.line, r.fn, r.name)
+			t.Errorf("%s:%d: %s reaches %s; unsling must resolve its target without tmux", r.file, r.line, r.fn, r.name)
 		}
 	}
 }
@@ -127,60 +327,309 @@ func TestUnslingTmuxScanReportsAnAddedCall(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
+		pkg  tmuxPackage
 		sc   tmuxScope
-		src  string
 		want []string
 	}{
 		{
 			name: "pane call added to a guarded function is reported",
-			sc:   sling,
-			src: `package cmd
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
 
 func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
 	_, err := getSessionPane(target)
 	return "", err
 }
-`,
-			want: []string{"resolveTargetAgentID calls getSessionPane"},
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches getSessionPane"},
 		},
 		{
 			name: "same call in resolveTargetAgent is outside the scope",
-			sc:   sling,
-			src: `package cmd
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
 
 func resolveTargetAgent(target string) (string, error) {
 	_, err := getSessionPane(target)
 	return "", err
 }
-`,
+`)},
+			sc:   sling,
 			want: nil,
 		},
 		{
 			name: "tmux package call added to unsling.go is reported",
-			sc:   unsling,
-			src: `package cmd
+			pkg: tmuxPackage{"unsling.go": []byte(`package cmd
 
 func unslingExtra() {
 	_ = tmux.NewTmux()
 }
-`,
-			want: []string{"unslingExtra calls tmux.NewTmux"},
+`)},
+			sc:   unsling,
+			want: []string{"unslingExtra reaches tmux.NewTmux"},
+		},
+		{
+			name: "a local variable named pane is not a reach",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	pane := target
+	if pane == "" {
+		return "", nil
+	}
+	return pane, nil
+}
+`)},
+			sc:   sling,
+			want: nil,
+		},
+		{
+			name: "a reference to resolveTargetAgent is reported without a call",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	resolve := resolveTargetAgent
+	_, _, _, err := resolve(target)
+	return "", err
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches resolveTargetAgent"},
+		},
+		{
+			name: "a method call to a pane helper is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	_, err := t.GetPaneWorkDir(target)
+	return "", err
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches GetPaneWorkDir"},
+		},
+		{
+			name: "a direct call to resolveTargetAgent is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	_, _, _, err := resolveTargetAgent(target)
+	return "", err
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches resolveTargetAgent"},
+		},
+		{
+			name: "a direct call to resolveTargetAgentFn is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	_, _, _, err := resolveTargetAgentFn(target)
+	return "", err
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches resolveTargetAgentFn"},
+		},
+		{
+			name: "a helper spelled by two camelCase words is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	return sessionWorkDir("session", target), nil
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches sessionWorkDir"},
+		},
+		{
+			name: "a pane helper referenced as a value is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func getSessionPane(sessionName string) (string, error) { return sessionName, nil }
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	lookup := getSessionPane
+	_, err := lookup(target)
+	return "", err
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches getSessionPane"},
+		},
+		{
+			name: "a field named WorkDir is not a reach",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	plan := struct{ WorkDir string }{WorkDir: target}
+	_ = plan
+	return "", nil
+}
+`)},
+			sc:   sling,
+			want: nil,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			reaches, _, err := scanTmuxReaches(tc.sc.file, []byte(tc.src), tc.sc)
+			reaches, _, err := scanTmuxReaches(tc.pkg, tc.sc)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var got []string
 			for _, r := range reaches {
-				got = append(got, fmt.Sprintf("%s calls %s", r.fn, r.name))
+				got = append(got, fmt.Sprintf("%s reaches %s", r.fn, r.name))
 			}
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("scan reported %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestUnslingTmuxScanFollowsCalls: a guarded function that calls a package
+// function is guarded through it. A pane call one call away is reported with
+// the helper that makes it, across files too, and a call cycle ends.
+func TestUnslingTmuxScanFollowsCalls(t *testing.T) {
+	t.Parallel()
+	sling := unslingTmuxScopes[1]
+
+	for _, tc := range []struct {
+		name string
+		pkg  tmuxPackage
+		want []string
+	}{
+		{
+			name: "helper in the same file",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	return helper(target), nil
+}
+
+func helper(target string) string {
+	_, err := getSessionPane(target)
+	return err.Error()
+}
+`)},
+			want: []string{"helper reaches getSessionPane"},
+		},
+		{
+			name: "helper in another file",
+			pkg: tmuxPackage{
+				"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	return helper(target), nil
+}
+`),
+				"handoff.go": []byte(`package cmd
+
+func helper(target string) string {
+	_, err := getSessionPane(target)
+	return err.Error()
+}
+`),
+			},
+			want: []string{"helper reaches getSessionPane"},
+		},
+		{
+			name: "method call is followed",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+type resolver struct{}
+
+func (r resolver) resolve(target string) (string, error) {
+	_, err := getSessionPane(target)
+	return "", err
+}
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	var r resolver
+	_, err := r.resolve(target)
+	return "", err
+}
+`)},
+			want: []string{"resolve reaches getSessionPane"},
+		},
+		{
+			name: "a method named for a pane helper is reported, not followed",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+type resolver struct{}
+
+func (r resolver) getSessionPane(target string) string {
+	_ = tmux.NewTmux()
+	return target
+}
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	var r resolver
+	return r.getSessionPane(target), nil
+}
+`)},
+			want: []string{"resolveTargetAgentID reaches getSessionPane"},
+		},
+		{
+			name: "call cycle ends",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	return helperA(target), nil
+}
+
+func helperA(target string) string { return helperB(target) }
+
+func helperB(target string) string {
+	_, err := getSessionPane(target)
+	if nil != err {
+		return helperA(target)
+	}
+	return ""
+}
+`)},
+			want: []string{"helperB reaches getSessionPane"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reaches, _, err := scanTmuxReaches(tc.pkg, sling)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, r := range reaches {
+				got = append(got, fmt.Sprintf("%s reaches %s", r.fn, r.name))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("scan reported %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTmuxReachWords: a helper is named by a whole camelCase word, not by a
+// substring, so a panel or a company name is not one, and two words that spell
+// one still name it wherever the capital falls.
+func TestTmuxReachWords(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: "getSessionPane", want: true},
+		{name: "GetPaneWorkDir", want: true},
+		{name: "pane", want: true},
+		{name: "listPanes", want: true},
+		{name: "workdirPath", want: true},
+		{name: "sessionWorkDir", want: true},
+		{name: "panelWidth", want: false},
+		{name: "companyPanel", want: false},
+		{name: "panel", want: false},
+	} {
+		if got := paneHelperName(tc.name); got != tc.want {
+			t.Errorf("paneHelperName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -190,9 +639,21 @@ func TestUnslingTmuxScanRefusesUnparseableSource(t *testing.T) {
 	t.Parallel()
 	const broken = "package cmd\n\nfunc resolveTargetAgentID( {\n"
 
-	_, _, err := scanTmuxReaches("sling_target.go", []byte(broken), unslingTmuxScopes[1])
+	_, _, err := scanTmuxReaches(tmuxPackage{"sling_target.go": []byte(broken)}, unslingTmuxScopes[1])
 	if err == nil || !strings.Contains(err.Error(), "sling_target.go") {
 		t.Fatalf("scanTmuxReaches on unparseable source = %v, want an error naming sling_target.go", err)
+	}
+}
+
+// TestUnslingTmuxScanRefusesAMissingScopeFile: a scope naming a file the
+// package does not hold is an error, never an empty scan of nothing.
+func TestUnslingTmuxScanRefusesAMissingScopeFile(t *testing.T) {
+	t.Parallel()
+
+	pkg := tmuxPackage{"unsling.go": []byte("package cmd\n")}
+	_, _, err := scanTmuxReaches(pkg, unslingTmuxScopes[1])
+	if err == nil || !strings.Contains(err.Error(), "sling_target.go") {
+		t.Fatalf("scanTmuxReaches with sling_target.go missing = %v, want an error naming sling_target.go", err)
 	}
 }
 
@@ -201,12 +662,9 @@ func TestUnslingTmuxScanRefusesUnparseableSource(t *testing.T) {
 // gone blind reports nothing and would pass the source test.
 func TestUnslingTmuxScanSeesTheGuardedFunctions(t *testing.T) {
 	t.Parallel()
+	pkg := readTmuxPackage(t, ".")
 	for _, sc := range unslingTmuxScopes {
-		src, err := os.ReadFile(sc.file)
-		if err != nil {
-			t.Fatalf("reading %s: %v", sc.file, err)
-		}
-		_, declared, err := scanTmuxReaches(sc.file, src, sc)
+		_, declared, err := scanTmuxReaches(pkg, sc)
 		if err != nil {
 			t.Fatal(err)
 		}
