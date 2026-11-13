@@ -2841,6 +2841,22 @@ type EnvVar struct {
 	ValueFrom *EnvVarSource `yaml:"valueFrom,omitempty"`
 }
 
+// MarshalYAML keeps a literal entry's value in the manifest even when it is
+// empty, so a variable set to "" renders as `value: ""` and a reader can tell
+// it from one whose value was never given (gt-n11o4p). A Secret-backed entry
+// carries no value.
+func (e EnvVar) MarshalYAML() (any, error) {
+	written := struct {
+		Name      string        `yaml:"name"`
+		Value     *string       `yaml:"value,omitempty"`
+		ValueFrom *EnvVarSource `yaml:"valueFrom,omitempty"`
+	}{Name: e.Name, ValueFrom: e.ValueFrom}
+	if e.ValueFrom == nil {
+		written.Value = &e.Value
+	}
+	return written, nil
+}
+
 // EnvVarSource is where one environment value comes from.
 type EnvVarSource struct {
 	SecretKeyRef *SecretKeySelector `yaml:"secretKeyRef,omitempty"`

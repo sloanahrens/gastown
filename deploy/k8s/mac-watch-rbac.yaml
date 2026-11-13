@@ -1,17 +1,7 @@
-# The cluster access the Mac's gt-mac-watch publishes with (gt-a2uug4.22): the
-# mac-watch ServiceAccount in the gt namespace, the Role that lets it exec into
-# the daemon pod, and the RoleBinding that grants it. The launchd job writes
-# probes.json by running kubectl exec into the daemon container
-# (docs/design/pod-host-probes.md, Credential scope). Before this file it ran as
-# cluster admin through the operator's kubeconfig, so a bug or a compromised job
-# on the Mac held the whole cluster. The rule reaches the pods it needs and no
-# further: a rule cannot name the daemon pod, because its Deployment generates
-# the name, so get and list on pods reach every pod in gt.
-#
-# This file is not applied by the daemon. Applying it, minting a token or a
-# kubeconfig from the ServiceAccount and pointing gt-mac-watch at that kubeconfig
-# are the operator's and devops' steps. TestMacWatchRBACRules and
-# TestMacWatchRBACRefusesWidening hold the file to this one job's reads.
+# The grant the Mac's gt-mac-watch publishes probes.json through (gt-a2uug4.22):
+# get and list on pods in gt, create on pods/exec, for one ServiceAccount,
+# Role and RoleBinding. A rule cannot name the daemon pod because its Deployment
+# generates the name; before changing a grant, read docs/design/pod-host-probes.md.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
