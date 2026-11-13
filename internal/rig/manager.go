@@ -1682,7 +1682,12 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		// ours is already-set, and any other refusal is a failure.
 		if prefixErr := bd.ConfigSet("issue_prefix", prefix); prefixErr != nil {
 			current, getErr := bd.ConfigGet("issue_prefix")
-			if getErr != nil || current != prefix {
+			if getErr != nil {
+				// The read-back failed, so the refusal cannot be shown to be
+				// harmless: name both, or the refusal hides why the store was unreadable.
+				return fmt.Errorf("bd config set issue_prefix failed: %s; reading issue_prefix back also failed: %w", bdErrOutput(prefixErr), getErr)
+			}
+			if current != prefix {
 				return fmt.Errorf("bd config set issue_prefix failed: %s", bdErrOutput(prefixErr))
 			}
 		}

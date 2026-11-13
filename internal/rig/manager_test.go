@@ -720,6 +720,9 @@ func TestInitBeadsAcceptsIssuePrefixRefusalWhenStoredPrefixMatches(t *testing.T)
 			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "bd config set issue_prefix failed")) {
 				t.Fatalf("InitBeads = %v, want the refused issue_prefix to fail", err)
 			}
+			if tc.getErr != nil && (err == nil || !strings.Contains(err.Error(), tc.getErr.Error())) {
+				t.Fatalf("InitBeads = %v, want the read-back error %q named so the failure can be diagnosed", err, tc.getErr)
+			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("InitBeads: %v", err)
 			}
