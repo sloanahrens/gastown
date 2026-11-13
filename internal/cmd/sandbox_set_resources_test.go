@@ -425,16 +425,29 @@ func sandboxResourcesTown(t *testing.T, settings string) string {
 	return root
 }
 
-// townResolverAt is the resolver the command runs, given the working directory
-// and the value of GT_TOWN_ROOT ("" for unset).
-func townResolverAt(cwd, envRoot string) setResourcesTownResolver {
-	return func(flagTown string) (string, error) {
-		return resolveSetResourcesTown(flagTown, func() (string, error) { return cwd, nil }, func(key string) string {
+// townEnvAt is the resolver's environment for a test: the working directory and
+// the value of GT_TOWN_ROOT ("" for unset) are given, the workspace functions
+// are the real ones.
+func townEnvAt(cwd, envRoot string) townEnv {
+	return townEnv{
+		cwd: func() (string, error) { return cwd, nil },
+		getenv: func(key string) string {
 			if key == "GT_TOWN_ROOT" {
 				return envRoot
 			}
 			return ""
-		})
+		},
+		find:     workspace.Find,
+		isTown:   workspace.IsWorkspace,
+		realpath: filepath.EvalSymlinks,
+	}
+}
+
+// townResolverAt is the resolver the command runs, given the working directory
+// and the value of GT_TOWN_ROOT ("" for unset).
+func townResolverAt(cwd, envRoot string) setResourcesTownResolver {
+	return func(flagTown string) (string, error) {
+		return resolveSetResourcesTown(flagTown, townEnvAt(cwd, envRoot))
 	}
 }
 
@@ -540,10 +553,14 @@ func TestSandboxSetResourcesTownFromEnvWhenTheWorkingDirectoryIsInNoTown(t *test
 }
 
 // Each root the resolver refuses names what it could not use, and writes nothing.
+// Each failure the resolver can meet names what it could not use, and writes
+// nothing. The environment is injected so every failure branch is driven.
 func TestSandboxSetResourcesTownRefusals(t *testing.T) {
 	t.Parallel()
 	plain := t.TempDir()
 	envTown := sandboxResourcesTown(t, sandboxResourcesSettings)
+	hereTown := sandboxResourcesTown(t, sandboxResourcesSettings)
+	hereCwd := filepath.Join(hereTown, "mayor")
 	settingsOnly := poolTestTown(t, sandboxResourcesSettings, "")
 	markerOnly := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(markerOnly, "mayor"), 0o755); err != nil {
@@ -552,32 +569,29 @@ func TestSandboxSetResourcesTownRefusals(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(markerOnly, workspace.PrimaryMarker), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	failing := errors.New("injected failure")
 	for _, tc := range []struct {
 		name string
 		flag string
-		env  string
-		cwd  func() (string, error)
+		env  townEnv
 		want []string
 	}{
-		{"--town-root with no settings file", markerOnly, "", nil, []string{markerOnly, "no town settings"}},
-		{"--town-root that is not a town", settingsOnly, "", nil, []string{settingsOnly, "not a town"}},
-		{"GT_TOWN_ROOT with no settings file", "", markerOnly, func() (string, error) { return plain, nil }, []string{"GT_TOWN_ROOT", markerOnly, "no town settings"}},
-		{"GT_TOWN_ROOT that is not a town", "", settingsOnly, func() (string, error) { return plain, nil }, []string{"GT_TOWN_ROOT", settingsOnly, "not a town"}},
-		{"GT_TOWN_ROOT with an unreadable working directory", "", envTown, func() (string, error) { return "", errors.New("cwd gone") }, []string{"GT_TOWN_ROOT", "--town-root", "cwd gone"}},
-		{"no town and no GT_TOWN_ROOT", "", "", func() (string, error) { return plain, nil }, []string{"not in a Gas Town workspace"}},
+		{"--town-root is relative", "relative/town", townEnvAt(plain, ""), []string{"--town-root", "not an absolute path"}},
+		{"--town-root with no settings file", markerOnly, townEnvAt(plain, ""), []string{markerOnly, "no town settings"}},
+		{"--town-root that is not a town", settingsOnly, townEnvAt(plain, ""), []string{settingsOnly, "not a town"}},
+		{"--town-root whose town check fails", envTown, withIsTown(townEnvAt(plain, ""), failing), []string{"injected failure"}},
+		{"GT_TOWN_ROOT with no settings file", "", townEnvAt(plain, markerOnly), []string{"GT_TOWN_ROOT", markerOnly, "no town settings"}},
+		{"GT_TOWN_ROOT that is not a town", "", townEnvAt(plain, settingsOnly), []string{"GT_TOWN_ROOT", settingsOnly, "not a town"}},
+		{"GT_TOWN_ROOT with an unreadable working directory", "", withCwd(townEnvAt(plain, envTown), failing), []string{"GT_TOWN_ROOT", "--town-root", "injected failure"}},
+		{"GT_TOWN_ROOT with a failed walk from the working directory", "", withFind(townEnvAt(plain, envTown), failing), []string{"GT_TOWN_ROOT", "injected failure"}},
+		{"GT_TOWN_ROOT that cannot be resolved", "", withRealpath(townEnvAt(hereCwd, envTown), envTown), []string{"resolving " + envTown, "injected failure"}},
+		{"the working-directory town cannot be resolved", "", withRealpath(townEnvAt(hereCwd, envTown), hereTown), []string{"resolving " + hereTown, "injected failure"}},
+		{"no town and an unreadable working directory", "", withCwd(townEnvAt(plain, ""), failing), []string{"getting current directory", "injected failure"}},
+		{"no town and no GT_TOWN_ROOT", "", townEnvAt(plain, ""), []string{"not in a Gas Town workspace"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cwd := tc.cwd
-			if cwd == nil {
-				cwd = func() (string, error) { return plain, nil }
-			}
-			_, err := resolveSetResourcesTown(tc.flag, cwd, func(key string) string {
-				if key == "GT_TOWN_ROOT" {
-					return tc.env
-				}
-				return ""
-			})
+			_, err := resolveSetResourcesTown(tc.flag, tc.env)
 			if err == nil {
 				t.Fatal("resolve = nil, want a refusal")
 			}
@@ -588,6 +602,33 @@ func TestSandboxSetResourcesTownRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withCwd, withFind, withIsTown and withRealpath return env with one of its
+// dependencies failing: realpath fails only for the path given.
+func withCwd(env townEnv, err error) townEnv {
+	env.cwd = func() (string, error) { return "", err }
+	return env
+}
+
+func withFind(env townEnv, err error) townEnv {
+	env.find = func(string) (string, error) { return "", err }
+	return env
+}
+
+func withIsTown(env townEnv, err error) townEnv {
+	env.isTown = func(string) (bool, error) { return false, err }
+	return env
+}
+
+func withRealpath(env townEnv, failOn string) townEnv {
+	env.realpath = func(path string) (string, error) {
+		if path == failOn {
+			return "", errors.New("injected failure")
+		}
+		return filepath.EvalSymlinks(path)
+	}
+	return env
 }
 
 // A dry run and a real run both print the town root and the settings file they

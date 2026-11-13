@@ -90,7 +90,7 @@ type setResourcesTownResolver func(flagTown string) (string, error)
 // processSetResourcesTown resolves the town from the process's working directory
 // and environment.
 func processSetResourcesTown(flagTown string) (string, error) {
-	return resolveSetResourcesTown(flagTown, os.Getwd, os.Getenv)
+	return resolveSetResourcesTown(flagTown, processTownEnv())
 }
 
 // runSandboxSetResourcesCmd parses the flags, then names the town and runs the
@@ -119,8 +119,29 @@ func runSandboxSetResourcesCmd(w io.Writer, resolve setResourcesTownResolver, na
 	return runSandboxSetResources(w, townRoot, name, edits, f.dryRun)
 }
 
-// resolveSetResourcesTown names the town a run changes. cwd and getenv are the
-// process's working directory and environment, passed in so a test can name them.
+// townEnv is what the town resolver reads from outside itself: the working
+// directory, the environment, the workspace walk and marker check, and symlink
+// resolution. processTownEnv is the process's; a test injects a failure in any.
+type townEnv struct {
+	cwd      func() (string, error)
+	getenv   func(string) string
+	find     func(dir string) (string, error)
+	isTown   func(dir string) (bool, error)
+	realpath func(path string) (string, error)
+}
+
+// processTownEnv is the town resolver's view of the running process.
+func processTownEnv() townEnv {
+	return townEnv{
+		cwd:      os.Getwd,
+		getenv:   os.Getenv,
+		find:     workspace.Find,
+		isTown:   workspace.IsWorkspace,
+		realpath: filepath.EvalSymlinks,
+	}
+}
+
+// resolveSetResourcesTown names the town a run changes.
 //
 //  1. --town-root names the town. The working directory is not compared.
 //  2. Else GT_TOWN_ROOT names it. If the working directory is in a town, that
@@ -128,29 +149,29 @@ func runSandboxSetResourcesCmd(w io.Writer, resolve setResourcesTownResolver, na
 //     the caller knows which one is meant.
 //  3. Else the town the working directory is in.
 //
-// A named root must hold the town's settings file and be a town. Nothing is
-// written here.
-func resolveSetResourcesTown(flagTown string, cwd func() (string, error), getenv func(string) string) (string, error) {
+// A named root must be an absolute path that holds the town's settings file and
+// is a town. Nothing is written here.
+func resolveSetResourcesTown(flagTown string, env townEnv) (string, error) {
 	if flagTown != "" {
-		root, err := requireSetResourcesTown(flagTown)
+		root, err := requireSetResourcesTown(env, flagTown)
 		if err != nil {
 			return "", fmt.Errorf("--town-root %s: %w", flagTown, err)
 		}
 		return root, nil
 	}
-	if envRoot := workspace.TownRootFromEnv(getenv); envRoot != "" {
-		root, err := requireSetResourcesTown(envRoot)
+	if envRoot := workspace.TownRootFromEnv(env.getenv); envRoot != "" {
+		root, err := requireSetResourcesTown(env, envRoot)
 		if err != nil {
 			return "", fmt.Errorf("GT_TOWN_ROOT %s: %w", envRoot, err)
 		}
-		here, err := townAboveWorkingDir(cwd)
+		here, err := townAboveWorkingDir(env)
 		if err != nil {
 			return "", fmt.Errorf("GT_TOWN_ROOT names %s but the working directory cannot be checked against it: %w; pass --town-root <dir> to name the town", root, err)
 		}
 		if here == "" {
 			return root, nil
 		}
-		same, err := sameTownDir(here, root)
+		same, err := sameTownDir(env, here, root)
 		if err != nil {
 			return "", err
 		}
@@ -159,7 +180,7 @@ func resolveSetResourcesTown(flagTown string, cwd func() (string, error), getenv
 		}
 		return root, nil
 	}
-	here, err := townAboveWorkingDir(cwd)
+	here, err := townAboveWorkingDir(env)
 	if err != nil {
 		return "", err
 	}
@@ -169,18 +190,19 @@ func resolveSetResourcesTown(flagTown string, cwd func() (string, error), getenv
 	return here, nil
 }
 
-// requireSetResourcesTown returns dir as an absolute path if it holds the town's
-// settings file and is a town; otherwise it names what is missing.
-func requireSetResourcesTown(dir string) (string, error) {
-	root, err := filepath.Abs(dir)
-	if err != nil {
-		return "", fmt.Errorf("resolving path: %w", err)
+// requireSetResourcesTown returns dir, cleaned, if it is an absolute path that
+// holds the town's settings file and is a town; otherwise it names what is
+// missing.
+func requireSetResourcesTown(env townEnv, dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("%s is not an absolute path", dir)
 	}
+	root := filepath.Clean(dir)
 	settings := config.TownSettingsPath(root)
 	if _, err := os.Stat(settings); err != nil {
 		return "", fmt.Errorf("no town settings at %s: %w", settings, err)
 	}
-	ok, err := workspace.IsWorkspace(root)
+	ok, err := env.isTown(root)
 	if err != nil {
 		return "", err
 	}
@@ -192,26 +214,26 @@ func requireSetResourcesTown(dir string) (string, error) {
 
 // townAboveWorkingDir returns the town the working directory is in, or "" when
 // it is in none. An unreadable working directory is an error, not "no town".
-func townAboveWorkingDir(cwd func() (string, error)) (string, error) {
-	dir, err := cwd()
+func townAboveWorkingDir(env townEnv) (string, error) {
+	dir, err := env.cwd()
 	if err != nil {
 		return "", fmt.Errorf("getting current directory: %w", err)
 	}
-	root, err := workspace.Find(dir)
+	root, err := env.find(dir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("finding the town above %s: %w", dir, err)
 	}
 	return root, nil
 }
 
 // sameTownDir reports whether a and b are the same directory once symlinks are
 // resolved.
-func sameTownDir(a, b string) (bool, error) {
-	ra, err := filepath.EvalSymlinks(a)
+func sameTownDir(env townEnv, a, b string) (bool, error) {
+	ra, err := env.realpath(a)
 	if err != nil {
 		return false, fmt.Errorf("resolving %s: %w", a, err)
 	}
-	rb, err := filepath.EvalSymlinks(b)
+	rb, err := env.realpath(b)
 	if err != nil {
 		return false, fmt.Errorf("resolving %s: %w", b, err)
 	}
@@ -222,7 +244,7 @@ func init() {
 	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesRequests, "requests", "", "Requests to set: cpu=<quantity>, memory=<quantity>, or both")
 	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesLimits, "limits", "", "Limits to set: cpu=<quantity>, memory=<quantity>, or both")
 	sandboxSetResourcesCmd.Flags().BoolVar(&sandboxSetResourcesDryRun, "dry-run", false, "Print the change and write nothing")
-	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesTownRoot, "town-root", "", "The town to change: its directory holds settings/config.json. Wins over GT_TOWN_ROOT and the working directory")
+	sandboxSetResourcesCmd.Flags().StringVar(&sandboxSetResourcesTownRoot, "town-root", "", "The town to change, as an absolute path to its directory (it holds settings/config.json). Wins over GT_TOWN_ROOT and the working directory")
 	sandboxCmd.AddCommand(sandboxSetResourcesCmd)
 }
 
