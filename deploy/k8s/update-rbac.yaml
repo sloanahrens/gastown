@@ -3,17 +3,34 @@
 # grants it. A daemon that runs as a pod is moved by four kinds of kubectl call: a
 # read of whether the dashboard's Deployment exists, a strategic patch of the
 # daemon's Deployment and of the dashboard's, the rollout waits on both, and an exec
-# into the daemon's pod to read the build. All of them reach wider than the one call
-# each needs, because a rule cannot bound them to one object. The Deployment rule's
-# list and watch cannot be bound to one Deployment name, so its get and patch reach
-# every Deployment in gt too, the dashboard's included. The pods rules reach every
-# pod in gt, because the exec resolves its pod from the Deployment's selector, so the
-# pod's name is not known when the grant is written.
+# into the daemon's pod to read the build. The Deployment rule names the two
+# Deployments it moves, daemon and dashboard, so its get, list, watch and patch reach
+# no other Deployment in gt. kubectl rollout status sends a metadata.name field
+# selector on its list and watch, which the API server authorizes by the name, so
+# the rollout waits are bound too. The pods rules reach every pod in gt, because the
+# exec resolves its pod from the Deployment's selector, so the pod's name is not known
+# when the grant is written.
 #
-# This file is not applied by the daemon. The operator's apply step comes with the
-# Job bead that uses it. TestPodUpdateRBACManifestParses,
-# TestPodUpdateRBACCoversEveryRead and TestPodUpdateRBACGrantsNothingElse hold it to
-# the reads in internal/update/testdata/pod-update-reads.golden.
+# The gt-update-launch Role lets the daemon's ServiceAccount create, get, list, watch
+# and delete Jobs in gt, so the daemon can start the roll as a Job that outlives the
+# pod it replaces. WHAT THIS REACHES: through a Job the daemon can (1) run a pod as
+# the gt-update ServiceAccount and use its grants above (patch and get on the
+# Deployments daemon and dashboard, get and list pods, create pods/exec in gt); (2)
+# mount any Secret in gt, because the kubelet mounts what the pod's own spec names,
+# which includes gt-cloud-check-gcp, the cloud check's key, which the daemon pod
+# mounts only when the operator's key file is set; (3) run any image the nodes can
+# pull. WHY ACCEPTED: the daemon is the town's own control process, it already mounts
+# most of the Secrets in gt, and the roll must outlive the pod it replaces, so it
+# needs a creator other than that pod. WHAT BOUNDS IT: namespace gt only, and the
+# verbs on jobs only. The rendered Job template (deploy/k8s/update-job) is what the
+# daemon creates, but nothing enforces that. FOLLOW-UP, not in this change: a
+# ValidatingAdmissionPolicy that pins the Job's serviceAccountName, volumes and image.
+#
+# This file is not applied by the daemon. The operator's apply step applies it with
+# the Job's manifests. TestPodUpdateRBACManifestParses, TestPodUpdateRBACCoversEveryRead
+# and TestPodUpdateRBACGrantsNothingElse hold the gt-update Role to the reads in
+# internal/update/testdata/pod-update-reads.golden, and TestPodUpdateLaunchRBAC holds
+# the launch Role to its grants.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -27,9 +44,10 @@ metadata:
   namespace: gt
 rules:
   # The strategic patch, the rollout wait, the dashboard's existence read and the
-  # exec's Deployment read.
+  # exec's Deployment read, each bound to the two Deployments the roll moves.
   - apiGroups: ["apps"]
     resources: ["deployments"]
+    resourceNames: ["daemon", "dashboard"]
     verbs: ["get", "list", "watch", "patch"]
   # The exec's pod read, and the list of the pods its Deployment's selector matches.
   - apiGroups: [""]
@@ -52,4 +70,30 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: gt-update
+    namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-update-launch
+  namespace: gt
+rules:
+  # The daemon creates the update's Job from the CronJob's template, and reads,
+  # watches and deletes the Jobs it made.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-update-launch
+  namespace: gt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-update-launch
+subjects:
+  - kind: ServiceAccount
+    name: daemon
     namespace: gt
