@@ -2,7 +2,6 @@ package doltserver
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,33 +9,6 @@ import (
 	"syscall"
 	"testing"
 )
-
-// captureStderr runs fn and returns what it wrote to os.Stderr. A test that
-// uses it does not run in parallel: os.Stderr is process-wide.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w //testpolicy:allow no-global-swap — os.Stderr is where the warnings are written; the test asserts them
-	func() {
-		defer func() { os.Stderr = old }() //testpolicy:allow no-global-swap — restores the os.Stderr swapped above
-		fn()
-	}()
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return string(out)
-}
 
 // initRigOrphanHost is the host for an InitRig whose town has no data
 // directory, with the issue_prefix seams stubbed so the rig's registration
@@ -114,9 +86,8 @@ func TestInitRig_OwnedOrphanThatStopsGoesOffline(t *testing.T) {
 // not treated as stopped: InitRig keeps it and registers the rig over SQL, and
 // makes no offline directory next to a server that is still running. The
 // warning says why the server was kept (gt-8oc5pa).
-//
-//testpolicy:allow parallel — captures the process-wide os.Stderr the warning is written to
 func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
+	t.Parallel()
 	const port = 4562
 	f := withDoltIdentity(newFakeHost().townPort(port)).on("dolt *", fakeReply{}).on("dolt init", fakeReply{})
 	townRoot := testTown(t)
@@ -126,10 +97,10 @@ func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 	f.procs[pid].ignoresKILL = true
 	f.mu.Unlock()
 	h := initRigOrphanHost(f)
+	var warnings strings.Builder
+	h.warn = &warnings
 
-	var result InitRigResult
-	var err error
-	stderr := captureStderr(t, func() { result, err = h.InitRig(townRoot, "forkrig") })
+	result, err := h.InitRig(townRoot, "forkrig")
 	if err != nil {
 		t.Fatalf("InitRig: %v", err)
 	}
@@ -148,8 +119,8 @@ func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 	if strings.Contains(strings.Join(f.commands(), "\n"), "docker stop") {
 		t.Errorf("docker stop ran for a server gt does not run in a container")
 	}
-	if !strings.Contains(stderr, "did not stop; creating the database on the live server") {
-		t.Errorf("stderr = %q, want the warning that the orphan did not stop", stderr)
+	if !strings.Contains(warnings.String(), "did not stop; creating the database on the live server") {
+		t.Errorf("warnings = %q, want the warning that the orphan did not stop", warnings.String())
 	}
 }
 
@@ -157,14 +128,15 @@ func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 // dolt: Stop refuses it and the forced kill is skipped, so the process and its
 // pid file are left alone and the rig is registered on the live server
 // (gt-8oc5pa).
-//
-//testpolicy:allow parallel — captures the process-wide os.Stderr the warning is written to
 func TestInitRig_UnverifiableOrphanKillIsRefused(t *testing.T) {
+	t.Parallel()
 	const port = 4565
 	f := withDoltIdentity(newFakeHost().townPort(port)).on("dolt *", fakeReply{}).on("dolt init", fakeReply{})
 	f.reachable[fmt.Sprintf("127.0.0.1:%d", port)] = true
 	townRoot := testTown(t)
 	h := initRigOrphanHost(f)
+	var warnings strings.Builder
+	h.warn = &warnings
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	holder := f.spawn(fakeProc{}) // alive, no argv and no readable cwd
 	pidFile := writePIDFile(t, h, townRoot, holder)
@@ -172,9 +144,7 @@ func TestInitRig_UnverifiableOrphanKillIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var result InitRigResult
-	var err error
-	stderr := captureStderr(t, func() { result, err = h.InitRig(townRoot, "forkrig") })
+	result, err := h.InitRig(townRoot, "forkrig")
 	if err != nil {
 		t.Fatalf("InitRig: %v", err)
 	}
@@ -193,8 +163,8 @@ func TestInitRig_UnverifiableOrphanKillIsRefused(t *testing.T) {
 	if got := f.ranMatching("dolt init"); len(got) != 0 {
 		t.Errorf("offline dolt init ran beside a live server: %q", got)
 	}
-	if want := fmt.Sprintf("not force-killing PID %d", holder); !strings.Contains(stderr, want) {
-		t.Errorf("stderr = %q, want the refused-kill warning %q", stderr, want)
+	if want := fmt.Sprintf("not force-killing PID %d", holder); !strings.Contains(warnings.String(), want) {
+		t.Errorf("warnings = %q, want the refused-kill warning %q", warnings.String(), want)
 	}
 }
 
@@ -226,7 +196,7 @@ func TestStart_OwnedOrphanThatStaysUpDoesNotStartASecondServer(t *testing.T) {
 }
 
 // A server reachable over TCP alone (pid 0) is the town's live endpoint, not
-// an orphan gt may stop: Start keeps it and starts nothing beside it
+// an orphan gt may stop: Start keeps it, says so, and starts nothing beside it
 // (gt-8oc5pa).
 func TestStart_UnownedServerWithoutDataDirIsNotStopped(t *testing.T) {
 	t.Parallel()
@@ -234,8 +204,11 @@ func TestStart_UnownedServerWithoutDataDirIsNotStopped(t *testing.T) {
 	f := newFakeHost().townPort(port)
 	f.reachable[fmt.Sprintf("127.0.0.1:%d", port)] = true
 	townRoot := testTown(t)
+	h := f.host()
+	var warnings strings.Builder
+	h.warn = &warnings
 
-	if err := f.host().Start(townRoot); err != nil {
+	if err := h.Start(townRoot); err != nil {
 		t.Fatalf("Start = %v, want nil: the endpoint server is the live one", err)
 	}
 	if len(f.signals) != 0 {
@@ -249,5 +222,8 @@ func TestStart_UnownedServerWithoutDataDirIsNotStopped(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(townRoot, ".dolt-data")); !os.IsNotExist(err) {
 		t.Errorf("data directory exists (stat err %v), want it absent", err)
+	}
+	if got := warnings.String(); !strings.Contains(got, "gt owns no local process to stop; keeping it") {
+		t.Errorf("warnings = %q, want the warning that the endpoint was kept", got)
 	}
 }

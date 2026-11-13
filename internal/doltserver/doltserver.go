@@ -1876,7 +1876,7 @@ func (h *host) stopOrphanedServer(townRoot string, pid int) bool {
 		return false
 	}
 	if err := h.killTownDolt(townRoot, pid); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
+		h.warnf("Warning: not force-killing PID %d: %v\n", pid, err)
 		if IsStalePIDFileErr(err) {
 			_ = os.Remove(h.DefaultConfig(townRoot).PidFile)
 		}
@@ -2341,10 +2341,10 @@ func (h *host) Start(townRoot string) error {
 		// gt-rfxs85).
 		if _, statErr := os.Stat(config.DataDir); os.IsNotExist(statErr) {
 			if pid <= 0 {
-				fmt.Fprintf(os.Stderr, "Warning: the Dolt endpoint answers at port %d but data directory %s does not exist and gt owns no local process to stop; keeping it\n", config.Port, config.DataDir)
+				h.warnf("Warning: the Dolt endpoint answers at port %d but data directory %s does not exist and gt owns no local process to stop; keeping it\n", config.Port, config.DataDir)
 				return nil
 			}
-			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
+			h.warnf("Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
 			if !h.stopOrphanedServer(townRoot, pid) {
 				return fmt.Errorf("orphaned Dolt server (PID %d) did not stop; not starting a second server on port %d", pid, config.Port)
 			}
@@ -3432,10 +3432,10 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 		// stop (Stop would docker-stop an external container), and offline init
 		// would register the rig where the live server never reads it (gt-rfxs85).
 		if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
+			h.warnf("Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
 			running = !h.stopOrphanedServer(townRoot, runningPID)
 			if running {
-				fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) did not stop; creating the database on the live server\n", runningPID)
+				h.warnf("Warning: Dolt server (PID %d) did not stop; creating the database on the live server\n", runningPID)
 			}
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -21,7 +22,8 @@ import (
 // host is the machine the adapter manages Dolt on (docs/testing.md, "Seams
 // for external tools"): the environment it reads, the commands it runs (dolt,
 // lsof, ps, bd), the processes it starts and signals, the TCP it probes, the
-// SQL connections it opens and the clock it waits on. Every function that
+// SQL connections it opens, the warnings it writes and the clock it waits on.
+// Every function that
 // touches one of those is a method of host; the exported function of the
 // same name runs it on std, the real machine. A test builds a host whose
 // fields answer in process, so the adapter's own logic (argument building,
@@ -74,6 +76,10 @@ type host struct {
 	// bdRunner runs the bd calls bdFor makes in place of a bd process, with the
 	// environment each would start with; nil is the real bd.
 	bdRunner func(ctx context.Context, dir string, env, args []string) (stdout, stderr []byte, err error)
+	// warn is where the adapter's warnings go; nil is os.Stderr. A test reads
+	// the warnings it asserts from its own buffer instead of swapping the
+	// process-wide os.Stderr.
+	warn io.Writer
 	// doltEndpoint is the town's Dolt endpoint (config.ResolveDoltEndpoint).
 	doltEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
 	// persistedEndpoint is the endpoint every non-container process uses, the one
@@ -84,6 +90,16 @@ type host struct {
 
 // std is the real machine.
 var std = &host{probeTimeout: productionProbeTimeout}
+
+// warnf writes a warning to this host's warnings sink: h.warn, or the
+// process's stderr when the host names none.
+func (h *host) warnf(format string, args ...any) {
+	w := h.warn
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, format, args...)
+}
 
 // hostCall is one command a host runs: its argv (name first), directory,
 // environment (nil inherits the process's) and stdin.
