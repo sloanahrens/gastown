@@ -341,17 +341,53 @@ func TestPatrolScanSandboxRecordsBoundsTmuxProbes(t *testing.T) {
 	}
 }
 
+// A tmux error keeps every record untouched: the probe cannot say the session
+// is gone, so the pass neither asks the gateway nor deletes anything, and it
+// logs why for each record. The next tick judges them again (gt-0vb2fy).
+func TestPatrolScanSandboxRecordsKeepsEverythingWhenTmuxErrors(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	writeOldRecords(t, town, clk, []string{"gt-a", "gt-b"})
+	tm := newFakeTmux(clk)
+	tm.hasErr = errors.New("tmux: no server")
+	var logs strings.Builder
+	gatewayAsked, removeCalls := 0, 0
+	h := &patrolScanHost{
+		d: &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), tmux: tm, clock: clk},
+		sandboxExists: func(_, _ string) (bool, error) {
+			gatewayAsked++
+			return false, nil // the answer that would delete if it were asked
+		},
+		removeSandboxRecord: func(_, _ string) error {
+			removeCalls++
+			return nil
+		},
+		sandboxRecordBudget: 10,
+	}
+
+	h.patrolScanSandboxRecords()
+
+	if gatewayAsked != 0 || removeCalls != 0 {
+		t.Errorf("gateway asked %d times, records removed %d times, want 0 and 0 on a tmux error", gatewayAsked, removeCalls)
+	}
+	out := logs.String()
+	for _, name := range []string{"gt-a", "gt-b"} {
+		if want := "sandbox record " + name + " kept: cannot ask tmux whether the session is live"; !strings.Contains(out, want) {
+			t.Errorf("log lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 // The failure branches keep what they cannot judge and never stop the pass: a
-// gateway error keeps its record, a tmux error is logged and the gateway still
-// decides, and a removal that fails is logged while the next record is still
-// judged and removed.
+// gateway error keeps its record, and a removal that fails is logged while the
+// next record is still judged and removed.
 func TestPatrolScanSandboxRecordsFailureBranches(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	clk := newFixedClock()
 	writeOldRecords(t, town, clk, []string{"gt-a", "gt-b", "gt-c", "gt-d"})
 	tm := newFakeTmux(clk)
-	tm.hasErr = errors.New("tmux: no server")
 	var logs strings.Builder
 	var removed []string
 	h := &patrolScanHost{
@@ -381,7 +417,6 @@ func TestPatrolScanSandboxRecordsFailureBranches(t *testing.T) {
 	for _, want := range []string{
 		"gt-a kept: cannot ask gateway",
 		"gt-b: removing it failed: disk full",
-		"cannot ask tmux, treating it as not live",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)

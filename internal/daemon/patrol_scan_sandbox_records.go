@@ -84,12 +84,15 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			continue
 		}
 		checked++
-		// A tmux error counts as not live: the patrol still requires the
-		// sandbox's own answer before it deletes, as it always has (gt-0vb2fy).
+		// A tmux error is no proof the session is gone, so the record is kept
+		// and judged again next tick: the same fail-closed rule the landing
+		// path follows (gt-0vb2fy).
 		live, err := h.sandboxSeatSessionLive(name)
 		if err != nil {
-			h.d.logger.Printf("patrol_scan: sandbox record %s: cannot ask tmux, treating it as not live and asking the gateway: %v", name, err)
-		} else if live {
+			h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask tmux whether the session is live: %v", name, err)
+			continue
+		}
+		if live {
 			continue
 		}
 		exists, err := h.sandboxStillExists(rec.Gateway, name)
