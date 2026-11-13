@@ -390,6 +390,49 @@ func TestIntegrationRigAddInitializesBeads(t *testing.T) {
 	}
 }
 
+// TestIntegrationInitBeadsAcceptsAnAlreadyStoredPrefix initializes a rig's
+// beads twice against real bd: the re-run's rename-prefix meets a store whose
+// prefix is already ours, so InitBeads must accept bd's answer there and the
+// stored prefix must still read back (gt-adxi4m).
+func TestIntegrationInitBeadsAcceptsAnAlreadyStoredPrefix(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, doltEnv := testutil.LeaseScratchDoltContainerEnv(t)
+	townRoot := setupTestTown(t)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
+	gitURL := createTestGitRepo(t, "prefixinit")
+
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	if err != nil {
+		t.Fatalf("load rigs.json: %v", err)
+	}
+	mgr := rig.NewManager(townRoot, rigsConfig, git.NewGit(townRoot))
+	if _, err := mgr.AddRig(rig.AddRigOptions{
+		Name:        "prefixinit",
+		GitURL:      gitURL,
+		BeadsPrefix: "pi",
+	}); err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	rigPath := filepath.Join(townRoot, "prefixinit")
+	if err := mgr.InitBeads(rigPath, "pi", "prefixinit"); err != nil {
+		t.Fatalf("InitBeads over a store whose prefix is already set: %v", err)
+	}
+
+	beadsDir := filepath.Join(rigPath, ".beads")
+	stored, err := beads.NewPlain(rigPath, append(append([]string{}, doltEnv...), "BEADS_DIR="+beadsDir)).ConfigGet("issue_prefix")
+	if err != nil {
+		t.Fatalf("bd config get issue_prefix: %v", err)
+	}
+	if stored != "pi" {
+		t.Errorf("stored issue_prefix = %q, want pi", stored)
+	}
+}
+
 // TestIntegrationRigAddUpdatesRoutes verifies that routes.jsonl is updated
 // with the new rig's route.
 func TestIntegrationRigAddUpdatesRoutes(t *testing.T) {
