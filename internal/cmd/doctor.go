@@ -368,6 +368,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Patrol system checks
 	d.Register(doctor.NewPatrolHooksWiredCheck())
+	d.Register(doctor.NewRigConfigCoverageCheck()) // Unparked rigs missing from the daemon's rig lists or settings (gt-mrdxio)
 	d.Register(doctor.NewPatrolNotStuckCheck())
 	d.Register(doctor.NewPatrolPluginsAccessibleCheck())
 	d.Register(doctor.NewPatrolPluginDriftCheck())
