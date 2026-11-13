@@ -2703,6 +2703,12 @@ type SpecDispatchConfig struct {
 type StoryPointsConfig struct {
 	EmbedderURL   string `json:"embedder_url,omitempty"`
 	EmbedderModel string `json:"embedder_model,omitempty"`
+
+	// Shadow runs the estimate on each bead the dispatcher is about to sling,
+	// before the sling, and changes nothing else: the sling goes ahead whatever
+	// the estimate says, and an estimate that fails or runs past its timeout is
+	// one logged line (gt-5d9k2f.14). Off by default.
+	Shadow bool `json:"shadow,omitempty"`
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
@@ -2717,6 +2723,12 @@ func (c *SpecDispatchConfig) InFlightCap() int {
 		return DefaultSpecMaxInFlight
 	}
 	return c.MaxInFlight
+}
+
+// StoryPointsShadow reports whether the shadow estimate runs before each sling
+// (story_points.shadow). A nil block, or one that leaves shadow unset, is off.
+func (c *SpecDispatchConfig) StoryPointsShadow() bool {
+	return c != nil && c.StoryPoints != nil && c.StoryPoints.Shadow
 }
 
 // ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a

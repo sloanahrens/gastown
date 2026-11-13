@@ -1774,6 +1774,17 @@ type specDispatchEnv struct {
 	// name the phase each one was made under (gt-139dp). Nil counts no phase,
 	// which is what a test of what the tick decided wants.
 	Reads *specTickReads
+	// StoryPointShadow runs the shadow estimate on each bead just before its
+	// sling (story_points.shadow, gt-5d9k2f.14). Off by default; a failed or
+	// timed-out estimate logs one line and the sling goes ahead.
+	StoryPointShadow bool
+	// StoryPointEstimate is the estimate the shadow runs for a bead, under a
+	// context the tick cancels on timeout. Production is specStoryPointEstimate.
+	StoryPointEstimate func(ctx context.Context, beadID string) error
+	// After is the timer the shadow estimate's timeout waits on; nil is
+	// time.After. A test injects one that fires at once, so no wall clock is
+	// read.
+	After func(d time.Duration) <-chan time.Time
 }
 
 // specLedgerFile is the verdict ledger's two file operations, so a test can
@@ -2310,6 +2321,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		if ok, why := specdispatch.Eligible(latest, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: %s", id, specStaleReason, why)})
 			continue
+		}
+		// The shadow estimate (gt-5d9k2f.14) runs on a bead the tick has
+		// decided to sling, after its last-moment re-read and before the sling.
+		// It changes nothing the sling reads: a failure or a timeout is one
+		// logged line, and the bead is slung as it would be without the setting.
+		if env.StoryPointShadow {
+			if line := specStoryPointShadow(env, id); line != "" {
+				report.Notices = append(report.Notices, line)
+			}
 		}
 		// Collected now, slung below: the seat is taken on the budget at once
 		// so the next candidate's choice sees it, and the slings of one tick
@@ -3370,6 +3390,11 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		TownRoot: townRoot,
 
 		Reads: reads,
+
+		// The shadow estimate reads its setting from the same block as the
+		// other spec_dispatch knobs, and has no environment variable (gt-5d9k2f.14).
+		StoryPointShadow:   sd.StoryPointsShadow(),
+		StoryPointEstimate: specStoryPointEstimate(townRoot),
 
 		Background: specDispatchBackground,
 		InFlight:   inFlight,
