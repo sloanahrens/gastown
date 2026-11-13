@@ -1854,7 +1854,7 @@ func (d *Daemon) Run() (err error) {
 
 	// Local round patrols (gt-ryp1ff): one per rig, serving the polecats' LOCAL
 	// ROUND REQUEST notes; the daemon.local_round switch gates each request.
-	d.startLocalRoundPatrols()
+	d.seams.runStartLocalRoundPatrols(d)
 
 	// The boot gate's poller (gt-niooz0): its own goroutine asks the probes
 	// until they all answer, and ends with the daemon's context. The landing

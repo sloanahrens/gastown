@@ -53,15 +53,16 @@ type localRoundTree struct {
 }
 
 // LocalRoundPatrol serves LOCAL ROUND REQUEST notes with the landing reviewer
-// and writes no verdict (gt-ryp1ff). Each tick it reads the open beads, and for
-// each request that no block answers, oldest first and one at a time, it runs
-// one round and appends either a LOCAL ROUND block or an unavailable line.
+// and writes no verdict (gt-ryp1ff). Each tick it reads the open and in_progress
+// beads, and for each request that no block answers, oldest first and one at a
+// time, it runs one round and appends either a LOCAL ROUND block or an
+// unavailable line.
 //
 // Every effect is a function field, so a test drives the patrol with fakes and
 // starts no om, git or daemon. The patrol holds no verdict store, review log or
 // rounds ledger: a round's findings go only into the bead's notes.
 type LocalRoundPatrol struct {
-	// ListRequests returns the open beads whose notes may carry a request.
+	// ListRequests returns the open and in_progress beads whose notes may carry a request.
 	ListRequests func() ([]*beads.Issue, error)
 	// Comments returns one bead's comments, the decisions the review reads.
 	Comments func(bead string) ([]beads.Comment, error)
@@ -91,6 +92,8 @@ type LocalRoundPatrol struct {
 
 // Tick serves every pending request once. A request that fails is answered
 // with an unavailable line, so the next tick finds it answered and moves on.
+// The switch is read per request, after the listing, on purpose: a disabled
+// switch still answers each request unavailable, and that needs the listing.
 func (p *LocalRoundPatrol) Tick(ctx context.Context) {
 	issues, err := p.ListRequests()
 	if err != nil {
@@ -140,8 +143,14 @@ func (p *LocalRoundPatrol) serve(ctx context.Context, issue *beads.Issue, head s
 		return
 	}
 	// The fetch, comment and operator errors are not written: they can carry a
-	// command's output, so the answer names the step that failed instead.
+	// command's output, so the answer names the step that failed instead. A
+	// bead id that cannot name a ref is the one fetch error named, since the id
+	// is the request's own.
 	tree, err := p.Fetch(issue.ID, head)
+	if errors.Is(err, errLocalRoundBeadRef) {
+		unavailable(err.Error())
+		return
+	}
 	if err != nil {
 		unavailable("could not fetch the head")
 		return
@@ -158,6 +167,9 @@ func (p *LocalRoundPatrol) serve(ctx context.Context, issue *beads.Issue, head s
 		return
 	}
 	in := land.BuildReviewInput(issue, comments, op, land.AcceptedRisksText(comments, op), "", tree.Base, head, tree.Dir, tree.Repo)
+	// BuildReviewInput already carries the MERGE REJECTION findings
+	// (review_input.go), so the previous LOCAL ROUND block's findings follow
+	// them and no second parser reads the rejection notes.
 	in.PriorFindings = append(in.PriorFindings, localRoundPriorFindings(issue.Notes)...)
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	findings, err := land.RunLocalRound(rctx, p.Reviewer, in)
@@ -303,6 +315,17 @@ func (d *Daemon) runLocalRoundPatrol(rigName string) {
 	}
 }
 
+// listLocalRoundRequests returns the beads a request is served from: one bd
+// query for the open and in_progress beads, and never a closed one. A request
+// is written by the seat or crew working the bead, so its bead is usually
+// in_progress; "open" in the work item means the note is unserved, not the
+// bead's status.
+func listLocalRoundRequests(list func(statuses ...beads.IssueStatus) ([]*beads.Issue, error)) func() ([]*beads.Issue, error) {
+	return func() ([]*beads.Issue, error) {
+		return list(beads.StatusOpen, beads.StatusInProgress)
+	}
+}
+
 // newRigLocalRoundPatrol wires the production seams for one rig. The reviewer
 // is an OMReviewer with no verdict store, so a round writes no verdict.
 func (d *Daemon) newRigLocalRoundPatrol(rigName string) (*LocalRoundPatrol, error) {
@@ -350,7 +373,7 @@ func (d *Daemon) newRigLocalRoundPatrol(rigName string) (*LocalRoundPatrol, erro
 	bd := beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))
 	g := git.NewGit(repoPath)
 	return &LocalRoundPatrol{
-		ListRequests: func() ([]*beads.Issue, error) { return bd.ListIssueStatuses(beads.StatusOpen, beads.StatusInProgress) },
+		ListRequests: listLocalRoundRequests(bd.ListIssueStatuses),
 		Comments:     bd.Comments,
 		AppendNote:   bd.AppendNotes,
 		Fetch:        localRoundFetcher(g, g, workRoot, remote, target, d.logger.Printf),
@@ -380,9 +403,20 @@ type localRoundGit interface {
 	UpdateRef(ref, commit string) error
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
-	WorktreePrune() error
 	MergeBase(a, b string) (string, error)
 }
+
+// localRoundBeadRefRE is the shape a bead id must have to name a ref: the id is
+// written into refs/local-round/<bead>, so a slash, a space or ".." would name
+// another ref.
+var localRoundBeadRefRE = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)+(\.[0-9]+)*$`)
+
+// localRoundBeadRefMax is the longest bead id the round writes into a ref name.
+const localRoundBeadRefMax = 64
+
+// errLocalRoundBeadRef refuses a bead id that cannot name a ref. The error is
+// wrapped with the id, so the answer can name it.
+var errLocalRoundBeadRef = errors.New("is not valid for a ref name")
 
 // localRoundFetcher returns the production Fetch. The head must already be a
 // commit in the rig repository, which a pushed polecat branch makes it; the
@@ -392,6 +426,9 @@ type localRoundGit interface {
 // handed to the review as the repository that holds the base.
 func localRoundFetcher(g localRoundGit, repo land.Repo, workRoot, remote, target string, logf func(string, ...any)) func(bead, head string) (localRoundTree, error) {
 	return func(bead, head string) (localRoundTree, error) {
+		if !localRoundBeadRefRE.MatchString(bead) || len(bead) > localRoundBeadRefMax {
+			return localRoundTree{}, fmt.Errorf("bead id %q %w", bead, errLocalRoundBeadRef)
+		}
 		if _, err := g.Rev(head + "^{commit}"); err != nil {
 			return localRoundTree{}, fmt.Errorf("head %s is not a commit in the rig repository; push the branch first", head)
 		}
@@ -402,14 +439,13 @@ func localRoundFetcher(g localRoundGit, repo land.Repo, workRoot, remote, target
 		if err != nil {
 			return localRoundTree{}, fmt.Errorf("creating the local round worktree dir under %s failed", workRoot)
 		}
+		// Cleanup removes only the worktree this round made. A repository-wide
+		// prune is not this round's to run: it touches every worktree of the rig.
 		// Cleanup logs the step that failed, not its error text, which can carry
 		// a command's output.
 		cleanup := func() {
 			if err := g.WorktreeRemove(dir, true); err != nil {
 				logf("local_round: %s: worktree remove of %s failed", bead, dir)
-			}
-			if err := g.WorktreePrune(); err != nil {
-				logf("local_round: %s: worktree prune failed", bead)
 			}
 			if err := os.RemoveAll(dir); err != nil {
 				logf("local_round: %s: removing %s failed", bead, dir)

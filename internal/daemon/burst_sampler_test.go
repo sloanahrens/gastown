@@ -543,6 +543,7 @@ func TestRunStartsTheBurstSampler(t *testing.T) {
 	}
 	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
 	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 	d.newResourceSampler = func(string, resourcesampler.Clock, time.Duration) resourceTicker {
 		return &fakeResourceTicker{}
 	}

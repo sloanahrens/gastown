@@ -40,6 +40,18 @@ type daemonSeams struct {
 	// a file's stamp changed. nil is ReadPatrolConfig; the unit tier counts the
 	// reads through it to pin that an unchanged file is not reparsed.
 	readPatrolConfig func(townRoot string) (*DaemonPatrolConfig, error)
+	// startLocalRoundPatrols starts the local round patrols at Run. nil is the
+	// production start; a Run test replaces it so no patrol ticks bd.
+	startLocalRoundPatrols func(d *Daemon)
+}
+
+// runStartLocalRoundPatrols starts the local round patrols, or the test's stand-in.
+func (s daemonSeams) runStartLocalRoundPatrols(d *Daemon) {
+	if s.startLocalRoundPatrols != nil {
+		s.startLocalRoundPatrols(d)
+		return
+	}
+	d.startLocalRoundPatrols()
 }
 
 // readPatrol reads the patrol config for the heartbeat reload.

@@ -3,9 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -374,6 +377,51 @@ func TestLocalRoundPriorBlockSurvivesAnUnavailableLine(t *testing.T) {
 	}
 }
 
+func TestLocalRoundPriorFindingsCarryRejectionAndLocalRound(t *testing.T) {
+	t.Parallel()
+	rejected := []land.Finding{
+		{ID: "r1", Severity: "major", Path: "b.go", Line: 7, Title: "race"},
+		{ID: "r2", Severity: "minor", Path: "c.go", Line: 9, Title: "typo"},
+	}
+	rejection := land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: string(land.RejectReview), Reason: "om requested changes",
+		Branch: "polecat/x", Target: "main", MR: "gt-ryp1ff", Findings: rejected,
+	})
+	block := land.FormatLocalRound(1, "abcdef1", []land.Finding{oneFinding}, roundClock)
+	const request = "\nLOCAL ROUND REQUEST head=1234567"
+	cases := []struct {
+		name  string
+		notes string
+		want  []string
+	}{
+		{name: "rejection then a local round", notes: rejection + "\n" + block + request, want: []string{"r1", "r2", oneFinding.ID}},
+		{name: "rejection only", notes: rejection + request, want: []string{"r1", "r2"}},
+		{name: "local round only", notes: block + request, want: []string{oneFinding.ID}},
+		{name: "neither", notes: strings.TrimPrefix(request, "\n"), want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			beadStore := &fakeRoundBeads{issues: []*beads.Issue{{ID: "gt-ryp1ff", Notes: tc.notes}}}
+			reviewer := &fakeRoundReviewer{}
+			p := newRoundPatrol(t, beadStore, reviewer)
+
+			p.Tick(context.Background())
+
+			if len(reviewer.inputs) != 1 {
+				t.Fatalf("reviewer ran %d times; want 1", len(reviewer.inputs))
+			}
+			var got []string
+			for _, f := range reviewer.inputs[0].PriorFindings {
+				got = append(got, f.ID)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("PriorFindings = %v; want %v (rejection findings first, then the local round's)", got, tc.want)
+			}
+		})
+	}
+}
+
 // fakeLocalRoundGit is the rig repository a round's fetch reads and writes.
 // Each error field makes its call fail with that error.
 type fakeLocalRoundGit struct {
@@ -382,11 +430,17 @@ type fakeLocalRoundGit struct {
 	removeErr                          error
 	refs                               map[string]string
 	removed                            []string
+	// calls counts every git call, so a test can assert none was made.
+	calls int
 }
 
-func (f *fakeLocalRoundGit) Rev(string) (string, error) { return f.rev, f.revErr }
+func (f *fakeLocalRoundGit) Rev(string) (string, error) {
+	f.calls++
+	return f.rev, f.revErr
+}
 
 func (f *fakeLocalRoundGit) UpdateRef(ref, commit string) error {
+	f.calls++
 	if f.updateErr != nil {
 		return f.updateErr
 	}
@@ -394,16 +448,21 @@ func (f *fakeLocalRoundGit) UpdateRef(ref, commit string) error {
 	return nil
 }
 
-func (f *fakeLocalRoundGit) WorktreeAddDetached(string, string) error { return f.addErr }
+func (f *fakeLocalRoundGit) WorktreeAddDetached(string, string) error {
+	f.calls++
+	return f.addErr
+}
 
 func (f *fakeLocalRoundGit) WorktreeRemove(path string, _ bool) error {
+	f.calls++
 	f.removed = append(f.removed, path)
 	return f.removeErr
 }
 
-func (f *fakeLocalRoundGit) WorktreePrune() error { return f.removeErr }
-
-func (f *fakeLocalRoundGit) MergeBase(string, string) (string, error) { return f.base, f.baseErr }
+func (f *fakeLocalRoundGit) MergeBase(string, string) (string, error) {
+	f.calls++
+	return f.base, f.baseErr
+}
 
 // gitOutput stands for what a failing git call carries; no error may echo it.
 var gitOutput = errors.New("fatal: SECRET-OUTPUT")
@@ -480,13 +539,118 @@ func TestLocalRoundFetchCleanupLogsWithoutGitOutput(t *testing.T) {
 		t.Fatalf("fetch: %v", err)
 	}
 	tree.Cleanup()
-	if len(logged) != 2 {
-		t.Fatalf("cleanup logged %d lines; want the remove and the prune named", len(logged))
+	if len(logged) != 1 {
+		t.Fatalf("cleanup logged %d lines; want the one failed remove named", len(logged))
 	}
 	for _, line := range logged {
 		if strings.Contains(line, "SECRET-OUTPUT") {
 			t.Fatalf("cleanup logs git's output: %q", line)
 		}
+	}
+}
+
+func TestLocalRoundFetchRefusesABeadIdThatIsNoRefName(t *testing.T) {
+	t.Parallel()
+	// The id is written into refs/local-round/<bead>, so each of these would name
+	// another ref or a path, and the 65-character id is past the ref bound.
+	for _, bead := range []string{"..", "gt x", "gt-@{x", "-gt-abc", "gt-a/b", `gt-a\b`, "gt-abc..def", "gt-" + strings.Repeat("a", 62)} {
+		t.Run(bead, func(t *testing.T) {
+			t.Parallel()
+			g := &fakeLocalRoundGit{rev: "abcdef1", base: "base1", refs: map[string]string{}}
+			fetch := localRoundFetcher(g, nil, t.TempDir(), "origin", "main", func(string, ...any) {})
+
+			_, err := fetch(bead, "abcdef1")
+			if err == nil || !strings.Contains(err.Error(), "is not valid for a ref name") {
+				t.Fatalf("fetch error = %v; want the bead id refused as no ref name", err)
+			}
+			if g.calls != 0 || len(g.refs) != 0 {
+				t.Fatalf("the refused id made %d git calls and wrote %d refs; want neither", g.calls, len(g.refs))
+			}
+		})
+	}
+}
+
+func TestLocalRoundFetchAcceptsTheBeadIdShapes(t *testing.T) {
+	t.Parallel()
+	for _, bead := range []string{"gt-ryp1ff", "gt-3lvcjz.24", "gt-wisp-abc"} {
+		t.Run(bead, func(t *testing.T) {
+			t.Parallel()
+			g := &fakeLocalRoundGit{rev: "abcdef1", base: "base1", refs: map[string]string{}}
+			fetch := localRoundFetcher(g, nil, t.TempDir(), "origin", "main", func(string, ...any) {})
+
+			tree, err := fetch(bead, "abcdef1")
+			if err != nil {
+				t.Fatalf("fetch: %v", err)
+			}
+			tree.Cleanup()
+			if got := g.refs["refs/local-round/"+bead]; got != "abcdef1" {
+				t.Fatalf("private ref = %q; want the head", got)
+			}
+		})
+	}
+}
+
+func TestLocalRoundCleanupRemovesOnlyItsOwnWorktree(t *testing.T) {
+	t.Parallel()
+	g := &fakeLocalRoundGit{rev: "abcdef1", base: "base1", refs: map[string]string{}}
+	fetch := localRoundFetcher(g, nil, t.TempDir(), "origin", "main", func(string, ...any) {})
+
+	first, err := fetch("gt-aaa", "abcdef1")
+	if err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	second, err := fetch("gt-bbb", "abcdef1")
+	if err != nil {
+		t.Fatalf("second fetch: %v", err)
+	}
+	if first.Dir == second.Dir {
+		t.Fatalf("two rounds share the worktree %s", first.Dir)
+	}
+
+	first.Cleanup()
+	if len(g.removed) != 1 || g.removed[0] != first.Dir {
+		t.Fatalf("first cleanup removed %v; want exactly its own worktree %s", g.removed, first.Dir)
+	}
+	second.Cleanup()
+	if len(g.removed) != 2 || g.removed[1] != second.Dir {
+		t.Fatalf("second cleanup removed %v; want exactly its own worktree %s after the first", g.removed, second.Dir)
+	}
+}
+
+func TestLocalRoundListsOpenAndInProgressOnly(t *testing.T) {
+	t.Parallel()
+	store := []*beads.Issue{
+		{ID: "gt-open", Status: string(beads.StatusOpen)},
+		{ID: "gt-busy", Status: string(beads.StatusInProgress)},
+		{ID: "gt-done", Status: "closed"},
+	}
+	var asked []beads.IssueStatus
+	// bd answers a status query with the beads of those statuses, as the real
+	// lister does.
+	bdList := func(statuses ...beads.IssueStatus) ([]*beads.Issue, error) {
+		asked = statuses
+		var out []*beads.Issue
+		for _, issue := range store {
+			if slices.Contains(statuses, beads.IssueStatus(issue.Status)) {
+				out = append(out, issue)
+			}
+		}
+		return out, nil
+	}
+
+	got, err := listLocalRoundRequests(bdList)()
+	if err != nil {
+		t.Fatalf("listing: %v", err)
+	}
+	var ids []string
+	for _, issue := range got {
+		ids = append(ids, issue.ID)
+	}
+	if !slices.Equal(ids, []string{"gt-open", "gt-busy"}) {
+		t.Fatalf("listed %v; want the open and in_progress beads, never the closed one", ids)
+	}
+	if !slices.Equal(asked, []beads.IssueStatus{beads.StatusOpen, beads.StatusInProgress}) {
+		t.Fatalf("asked bd for %v; want open and in_progress", asked)
 	}
 }
 
@@ -629,16 +793,105 @@ func TestRunLocalRoundPatrolStopsWhenTheRigIsRefused(t *testing.T) {
 	d.runLocalRoundPatrol("gastown")
 }
 
+// allowedPatrolFields are every dependency the patrol holds. A new one fails
+// TestLocalRoundNeverTouchesVerdictStores until someone decides it is not a
+// verdict store, the review log or the rounds ledger.
+var allowedPatrolFields = []string{"ListRequests", "Comments", "AppendNote", "Fetch", "Reviewer", "Bound", "Config", "Operator", "Paused", "Now", "Logf"}
+
 func TestLocalRoundNeverTouchesVerdictStores(t *testing.T) {
 	t.Parallel()
 	typ := reflect.TypeOf(LocalRoundPatrol{})
 	for i := range typ.NumField() {
-		field := typ.Field(i)
-		name := field.Type.String()
-		for _, store := range []string{"Verdict", "RoundsLedger", "ReviewLog", "Landings"} {
-			if strings.Contains(name, store) {
-				t.Fatalf("LocalRoundPatrol.%s has type %s; the patrol must not depend on a %s", field.Name, name, store)
-			}
+		if name := typ.Field(i).Name; !slices.Contains(allowedPatrolFields, name) {
+			t.Fatalf("LocalRoundPatrol.%s is not an allowed dependency; decide whether it is a verdict store, review log or rounds ledger first", name)
 		}
+	}
+}
+
+// roundTreeState maps each file under root to its size and mtime, so a test
+// can tell what a tick wrote.
+func roundTreeState(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files[rel] = fmt.Sprintf("%d %d", info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	return files
+}
+
+func TestLocalRoundTickWritesNoVerdictOrLedger(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	promoteRigConfig(t, townRoot, "gastown", localRoundRigKeyFile)
+	d := newLocalRoundRigDaemon(t, townRoot, true)
+	d.patrolConfig.LocalRoundSetting = &config.LocalRoundConfig{Enabled: true}
+	p, err := d.newRigLocalRoundPatrol("gastown")
+	if err != nil {
+		t.Fatalf("newRigLocalRoundPatrol: %v", err)
+	}
+	// The bead reads and writes, the fetch and the reviewer are fakes. The fetch
+	// writes the rig's git refs, which this check does not cover. The bound,
+	// operator and pause reads are the production ones over the town.
+	beadStore := &fakeRoundBeads{issues: []*beads.Issue{{ID: "gt-ryp1ff", Notes: "LOCAL ROUND REQUEST head=abcdef1"}}}
+	p.ListRequests = beadStore.list
+	p.Comments = beadStore.commentsOf
+	p.AppendNote = beadStore.appendNote
+	p.Fetch = func(string, string) (localRoundTree, error) {
+		return localRoundTree{Dir: t.TempDir(), Base: "base", Cleanup: func() {}}, nil
+	}
+	p.Reviewer = &fakeRoundReviewer{findings: []land.Finding{oneFinding}}
+	before := roundTreeState(t, townRoot)
+
+	p.Tick(context.Background())
+
+	if !strings.Contains(beadStore.issues[0].Notes, "LOCAL ROUND (1): head=abcdef1 at=") {
+		t.Fatalf("the tick did not serve the request with a block; notes:\n%s", beadStore.issues[0].Notes)
+	}
+	// The bound is the one file a round may write under the town.
+	boundDir := filepath.Join(".runtime", "local-round-bound")
+	after := roundTreeState(t, townRoot)
+	for rel, state := range after {
+		if strings.HasPrefix(rel, boundDir) {
+			continue
+		}
+		if before[rel] != state {
+			t.Fatalf("the tick wrote %s; a round writes no verdict, review log or rounds ledger", rel)
+		}
+	}
+	for rel := range before {
+		if _, ok := after[rel]; !ok {
+			t.Fatalf("the tick removed %s", rel)
+		}
+	}
+}
+
+func TestRunStartsLocalRoundPatrolsThroughItsSeam(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: discardLogger}
+	var started []*Daemon
+	d.seams.startLocalRoundPatrols = func(got *Daemon) { started = append(started, got) }
+
+	d.seams.runStartLocalRoundPatrols(d)
+
+	if len(started) != 1 || started[0] != d {
+		t.Fatalf("the seam ran %d times; want once with the daemon", len(started))
 	}
 }

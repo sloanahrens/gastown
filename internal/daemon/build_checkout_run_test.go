@@ -51,6 +51,7 @@ func buildCheckoutPodRun(t *testing.T, town string, fullSHA func() (string, erro
 	}
 	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
 	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.cancel()
 	err := d.Run()
