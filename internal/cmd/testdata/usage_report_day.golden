@@ -1,0 +1,7 @@
+usage by day, 2026-11-12T12:00:00Z to 2026-11-13T12:00:00Z
+DAY         CALLS  CLAUDE_UNCACHED  DEEPSEEK_EST_USD  SUB_SHARE
+2026-11-12  1      25               0.0000            0.0000
+2026-11-13  9      225              0.0123            0.1872
+unmatched sessions: 2
+incomplete records: 1
+records with no end time: 1

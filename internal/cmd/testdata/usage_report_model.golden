@@ -1,0 +1,7 @@
+usage by model, 2026-11-12T12:00:00Z to 2026-11-13T12:00:00Z
+MODEL              CALLS  CLAUDE_UNCACHED  DEEPSEEK_EST_USD  SUB_SHARE
+claude-sonnet-5-5  7      250              0.0000            -
+deepseek-flash     3      0                0.0123            -
+unmatched sessions: 2
+incomplete records: 1
+records with no end time: 1

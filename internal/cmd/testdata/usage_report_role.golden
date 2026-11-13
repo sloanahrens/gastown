@@ -1,0 +1,8 @@
+usage by role, 2026-11-12T12:00:00Z to 2026-11-13T12:00:00Z
+ROLE         CALLS  CLAUDE_UNCACHED  DEEPSEEK_EST_USD  SUB_SHARE
+deep-review  1      25               0.0000            0.0000
+om-review    2      60               0.0000            0.0000
+polecat      7      165              0.0123            0.1914
+unmatched sessions: 2
+incomplete records: 1
+records with no end time: 1

@@ -48,6 +48,7 @@ func init() {
 		Entry{Path: "usage attrib", Group: "cost", Use: "Use this to see which beads the town's Claude usage was spent on, one record per bead."},
 		Entry{Path: "usage attrib scan", Group: "cost", Use: "Use this to bring each bead's usage record up to date from the seat transcripts and the events, before you read its token totals."},
 		Entry{Path: "usage attrib show", Group: "cost", Use: "Use this to read one bead's token totals, models and estimated cost from its usage record."},
+		Entry{Path: "usage report", Group: "cost", Use: "Use this to see how much Claude and DeepSeek usage each role, model, bead or day spent over the last days, from the usage records."},
 		Entry{Path: "usage sample", Group: "internal", Use: "Use this when the status line hook passes a rate-limit reading, to record a plan usage sample."},
 		Entry{Path: "version", Group: "host", Use: "Use this to confirm which gt version and build this machine is running, before you report a bug.", Check: "gt version --short prints the version"},
 	)

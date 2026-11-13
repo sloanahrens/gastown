@@ -222,7 +222,7 @@ func WorkRecordPath(usageDir, bead string) string {
 // recordPath is <usageDir>/beads/<bead>.<kind>.json, with the bead cleaned so no bead name
 // can reach outside the beads directory.
 func recordPath(usageDir, bead, kind string) string {
-	return filepath.Join(usageDir, "beads", unsafeFileChars.ReplaceAllString(bead, "_")+"."+kind+".json")
+	return filepath.Join(usageDir, recordsSubdir, unsafeFileChars.ReplaceAllString(bead, "_")+"."+kind+".json")
 }
 
 // writeMu serializes Write within this process, so two goroutines of one daemon cannot
