@@ -655,6 +655,9 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 			}
 			return &beads.Issue{ID: id, Status: "open", Labels: []string{"gt:rig", "status:docked"}}, nil
 		},
+		// The fake fails a non-matching id, so it can drive the retry; the seam
+		// keeps that retry from waiting out the real pause.
+		rigStatusSleep: func(time.Duration) {},
 	}
 	operational, reason := d.isRigOperational(rigName)
 	if operational || reason != "rig is docked (global)" {
