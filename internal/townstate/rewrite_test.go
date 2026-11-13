@@ -222,11 +222,11 @@ func TestRewriteUndoRestoresTheKeptCopies(t *testing.T) {
 	}
 }
 
-// TestRewriteRefusesAKeptCopyAnywhereTheWalkEnters plants a kept copy where a
+// TestRewriteRefusesAKeptCopyWhereItWouldWriteNothing plants a kept copy where a
 // rewrite would otherwise write nothing, beside a file of a skipped class, and in
 // a nested rig directory. A dry run and an apply both refuse, naming the copy,
 // and neither writes the town.
-func TestRewriteRefusesAKeptCopyAnywhereTheWalkEnters(t *testing.T) {
+func TestRewriteRefusesAKeptCopyWhereItWouldWriteNothing(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -272,6 +272,164 @@ func TestRewriteRefusesAKeptCopyAnywhereTheWalkEnters(t *testing.T) {
 			}
 			if after := rewriteTree(t, root); !mapsEqual(after, before) {
 				t.Error("the refused runs wrote the town")
+			}
+		})
+	}
+}
+
+// TestRewriteRefusesAStrayKeptCopyAnywhere plants a kept copy in each place the
+// kept-copy search enters: the logs, events and runtime directories the rewrite
+// walk skips, and a directory six levels down. A dry run and an apply both refuse
+// on it, naming its path, and write nothing.
+func TestRewriteRefusesAStrayKeptCopyAnywhere(t *testing.T) {
+	t.Parallel()
+	for _, kept := range []string{
+		"logs/daemon.log.pre-rewrite",
+		"events/feed.pre-rewrite",
+		".runtime/usage/run.json.pre-rewrite",
+		"a/b/c/d/e/f/notes.md.pre-rewrite",
+	} {
+		t.Run(kept, func(t *testing.T) {
+			t.Parallel()
+			root := writeRewriteTown(t, []rewriteTownFile{
+				{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+				{kept, "kept\n"},
+			})
+			before := rewriteTree(t, root)
+			for _, apply := range []bool{false, true} {
+				_, err := Rewrite(root, rewriteQuery(), apply)
+				if err == nil || !strings.Contains(err.Error(), kept) ||
+					!strings.Contains(err.Error(), "a previous rewrite was not undone or cleaned: run --undo or delete them") {
+					t.Fatalf("Rewrite(apply=%v) = %v, want a refusal naming %s", apply, err, kept)
+				}
+			}
+			if after := rewriteTree(t, root); !mapsEqual(after, before) {
+				t.Error("the refused runs wrote the town")
+			}
+		})
+	}
+}
+
+// TestRewriteSkipsTheGitAndDoltTreesForKeptCopies plants a kept copy in the two
+// trees the kept-copy search does not enter, a git directory and a Dolt data
+// directory. The run proceeds and rewrites the class file.
+func TestRewriteSkipsTheGitAndDoltTreesForKeptCopies(t *testing.T) {
+	t.Parallel()
+	for _, kept := range []string{".git/config.pre-rewrite", ".dolt-data-x/table.pre-rewrite"} {
+		t.Run(kept, func(t *testing.T) {
+			t.Parallel()
+			root := writeRewriteTown(t, []rewriteTownFile{
+				{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+				{kept, "kept\n"},
+			})
+			report, err := Rewrite(root, rewriteQuery(), true)
+			if err != nil {
+				t.Fatalf("Rewrite with a kept copy in %s = %v, want the run to proceed", kept, err)
+			}
+			if len(report.Files) != 1 {
+				t.Errorf("Rewrite changed %d files, want settings/config.json alone", len(report.Files))
+			}
+			if got := readRewriteFile(t, root, "settings/config.json"); got != `{"town_root":"`+rewriteNewRoot+`"}` {
+				t.Errorf("the run did not rewrite settings/config.json: %s", got)
+			}
+		})
+	}
+}
+
+// TestRewriteDoesNotEnterASymlinkedDirectory reaches a kept copy only through a
+// symlink to a directory outside the town. The search does not follow the link,
+// so the run proceeds.
+func TestRewriteDoesNotEnterASymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteTown(t, []rewriteTownFile{
+		{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+	})
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "notes.pre-rewrite"), []byte("kept\n"), 0o644); err != nil {
+		t.Fatalf("writing the kept copy outside the town: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatalf("planting the symlink: %v", err)
+	}
+	report, err := Rewrite(root, rewriteQuery(), true)
+	if err != nil {
+		t.Fatalf("Rewrite past a symlinked directory = %v, want the run to proceed", err)
+	}
+	if len(report.Files) != 1 {
+		t.Errorf("Rewrite changed %d files, want settings/config.json alone", len(report.Files))
+	}
+}
+
+// TestUndoRestoresAMissingRewrittenFile removes a rewritten file between the
+// apply and the undo. The undo creates it again from its kept copy, with the
+// original bytes and mode, reports it as recreated, and removes the copy.
+func TestUndoRestoresAMissingRewrittenFile(t *testing.T) {
+	t.Parallel()
+	const (
+		rel      = "settings/config.json"
+		original = `{"town_root":"` + rewriteOldRoot + `"}`
+	)
+	root := writeRewriteTown(t, []rewriteTownFile{{rel, original}})
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Stat(full)
+	if err != nil {
+		t.Fatalf("reading the mode of %s: %v", rel, err)
+	}
+	if _, err := Rewrite(root, rewriteQuery(), true); err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	if err := os.Remove(full); err != nil {
+		t.Fatalf("removing the rewritten file: %v", err)
+	}
+
+	report, err := Undo(root)
+	if err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if want := []RewriteRestored{{Path: rel, Recreated: true}}; !slices.Equal(report.Undone, want) {
+		t.Errorf("Undo reported %+v, want %+v", report.Undone, want)
+	}
+	if got := readRewriteFile(t, root, rel); got != original {
+		t.Errorf("Undo recreated %s with %q, want the original bytes", rel, got)
+	}
+	after, err := os.Stat(full)
+	if err != nil {
+		t.Fatalf("reading the recreated %s: %v", rel, err)
+	}
+	if after.Mode().Perm() != info.Mode().Perm() {
+		t.Errorf("Undo recreated %s with mode %v, want %v", rel, after.Mode().Perm(), info.Mode().Perm())
+	}
+	if backups := rewriteBackups(t, root); len(backups) != 0 {
+		t.Errorf("Undo left the kept copies %v", backups)
+	}
+}
+
+// TestRewriteOwnerMatchesOnlyAWholeAccountName runs the owner replacement over
+// each repository form beside a longer name, a name that contains the owner, and
+// a host that ends in the form's text. Only the whole owner in a form is replaced.
+func TestRewriteOwnerMatchesOnlyAWholeAccountName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+		n    int
+	}{
+		{name: "forgejo form", in: `forgejo:3000/sloan/gt`, want: `forgejo:3000/gastown/gt`, n: 1},
+		{name: "ssh form", in: `git@forgejo:3000/sloan/gt.git`, want: `git@forgejo:3000/gastown/gt.git`, n: 1},
+		{name: "quoted form", in: `"sloan/gt"`, want: `"gastown/gt"`, n: 1},
+		{name: "longer name after the forgejo form", in: `forgejo:3000/sloanx/gt`, want: `forgejo:3000/sloanx/gt`},
+		{name: "name ending in the owner", in: `forgejo:3000/xsloan/gt`, want: `forgejo:3000/xsloan/gt`},
+		{name: "longer name in the quoted form", in: `"sloanx/gt`, want: `"sloanx/gt`},
+		{name: "name ending in the owner before a quote", in: `x"sloan/gt`, want: `x"sloan/gt`},
+		{name: "host ending in the forgejo form", in: `myforgejo:3000/sloan/gt`, want: `myforgejo:3000/sloan/gt`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, n := rewriteContent([]byte(tc.in), rewriteQuery())
+			if string(got) != tc.want || n != tc.n {
+				t.Errorf("rewriteContent(%q) = %q, %d; want %q, %d", tc.in, got, n, tc.want, tc.n)
 			}
 		})
 	}
@@ -629,7 +787,7 @@ func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 			name: "worktree list fails",
 			root: dir,
 			fsys: failingFS{FS: repoTown, readDirErr: map[string]error{"rig/.repo.git/worktrees": boom}},
-			want: "reading rig/.repo.git/worktrees",
+			want: "walking rig/.repo.git/worktrees",
 		},
 		{
 			name: "worktree pointer is visited",
@@ -677,8 +835,8 @@ func (f pointerFS) Open(name string) (fs.File, error) {
 }
 
 // TestRewriteRefusesAWorktreePointerThatCannotBeRead drives the bare repository's
-// worktree entries through each read the walk makes: the worktree directory is
-// listed for its kept copies, and the pointer is stat'd and then read. The
+// worktree entries through each read the passes make: the kept-copy search lists
+// the worktree directory, and the rewrite walk stats the pointer and then reads it. The
 // control runs the same town with no failure, so a pass that errors for another
 // reason cannot pass the injected rows. Each injected row names the path that
 // failed.

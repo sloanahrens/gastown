@@ -15,19 +15,20 @@ var townStateRewriteCmd = &cobra.Command{
 	Use:   "rewrite",
 	Short: "Rewrite the town root and the Forgejo owner in a claim's config and git pointer files",
 	Long: `Replace the old town root with the new one, and the old Forgejo owner with the
-new one, in the files of one town directory: the town and rig settings and
-config, the mayor files, the daemon configuration, each .beads redirect, routes
-and metadata file, and the git pointer files. internal/townstate names the
-classes and the skipped files in one place.
+new one, in the files of one town directory. The files it changes are listed in
+internal/townstate (RewriteClasses); everything else is left alone, and the
+summary names what was skipped.
 
 Run it on a copy: the claim mounted in a helper Pod, or a scratch directory.
 Dry run is the default and prints each file with the number of replacements it
 would make. With --apply each changed file is written atomically, its original
 bytes kept as <file>.pre-rewrite beside it, and the command then scans the
 classes and exits non-zero naming any file that still holds an old value. With
---undo the kept copies are restored byte for byte. Any run, dry or applied,
-refuses while the town holds a file named <file>.pre-rewrite, so a second
---apply refuses and writes nothing until that copy is undone or removed.
+--undo the kept copies are restored byte for byte, and a rewritten file that is
+missing is created again from its copy; --undo takes no root or owner flags.
+Any run, dry or applied, refuses while the town holds a file named
+<file>.pre-rewrite outside its git and Dolt trees, so a second --apply refuses
+and writes nothing until that copy is undone or removed.
 
 A root matches only as a whole path, so a directory whose name starts with the
 old root's characters is not rewritten. The owner matches only in the two
@@ -102,12 +103,19 @@ func runTownStateRewriteIn(env townStateRewriteEnv) error {
 		return errors.New("rewrite: --apply and --undo do different things; give one")
 	}
 	if env.undo {
+		if env.fromRoot != "" || env.toRoot != "" || env.fromOwner != "" || env.toOwner != "" {
+			return errors.New("rewrite: --undo restores the kept copies and takes no root or owner flags")
+		}
 		report, err := townstate.Undo(env.town)
 		if err != nil {
 			return err
 		}
-		for _, p := range report.Undone {
-			fmt.Fprintf(env.out, "restored %s\n", p)
+		for _, r := range report.Undone {
+			if r.Recreated {
+				fmt.Fprintf(env.out, "restored %s (the rewritten file was missing)\n", r.Path)
+				continue
+			}
+			fmt.Fprintf(env.out, "restored %s\n", r.Path)
 		}
 		fmt.Fprintf(env.out, "rewrite: restored %d file(s)\n", len(report.Undone))
 		return nil

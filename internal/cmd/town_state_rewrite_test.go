@@ -266,6 +266,65 @@ func TestTownStateRewriteCommandRefuses(t *testing.T) {
 	}
 }
 
+// TestTownStateRewriteUndoTakesNoRootOrOwnerFlags gives each root and owner flag
+// with --undo. The command refuses before it reads the town.
+func TestTownStateRewriteUndoTakesNoRootOrOwnerFlags(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteCmdTown(t)
+	cases := []struct {
+		name string
+		edit func(*townStateRewriteEnv)
+	}{
+		{name: "from-root", edit: func(e *townStateRewriteEnv) { e.fromRoot = rewriteCmdOldRoot }},
+		{name: "to-root", edit: func(e *townStateRewriteEnv) { e.toRoot = rewriteCmdNewRoot }},
+		{name: "from-owner", edit: func(e *townStateRewriteEnv) { e.fromOwner = "sloan" }},
+		{name: "to-owner", edit: func(e *townStateRewriteEnv) { e.toOwner = "gastown" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := townStateRewriteEnv{town: root, undo: true, out: &bytes.Buffer{}}
+			tc.edit(&env)
+			err := runTownStateRewriteIn(env)
+			if err == nil || !strings.Contains(err.Error(), "--undo restores the kept copies and takes no root or owner flags") {
+				t.Fatalf("runTownStateRewriteIn = %v, want a refusal naming the undo's flags", err)
+			}
+		})
+	}
+}
+
+// TestTownStateRewriteUndoNamesARecreatedFile applies the rewrite, deletes the
+// rewritten class file, and undoes it. The undo recreates the file from its copy
+// and says so on its output line.
+func TestTownStateRewriteUndoNamesARecreatedFile(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteCmdTown(t)
+	before := rewriteCmdTree(t, root)
+	if err := runTownStateRewriteIn(townStateRewriteEnv{
+		town:     root,
+		fromRoot: rewriteCmdOldRoot,
+		toRoot:   rewriteCmdNewRoot,
+		apply:    true,
+		out:      &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "settings", "config.json")); err != nil {
+		t.Fatalf("removing the rewritten file: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runTownStateRewriteIn(townStateRewriteEnv{town: root, undo: true, out: &out}); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	if want := "restored settings/config.json (the rewritten file was missing)"; !strings.Contains(out.String(), want) {
+		t.Errorf("undo output %q does not contain %q", out.String(), want)
+	}
+	if after := rewriteCmdTree(t, root); !mapsSame(after, before) {
+		t.Errorf("undo did not restore the town: %v", after)
+	}
+}
+
 // mapsSame reports whether two string-keyed maps hold the same entries.
 func mapsSame(a, b map[string]string) bool {
 	if len(a) != len(b) {
