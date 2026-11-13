@@ -1583,15 +1583,16 @@ func trackerLabels() map[string]string {
 	}
 }
 
-// trackerBackupCronJob is the nightly dump: a CronJob whose pod copies trackerbackup
-// out of the daemon image and runs it in the postgres image, writing the dumps to
-// the tracker-backup claim. The pod takes no ServiceAccount token, and no volume of
-// the Mac or the town. Its run is bounded by the Job's deadline, and a run that
-// starts while one is still going is forbidden, so two dumps never overlap.
+// trackerBackupCronJob renders the nightly tracker dump: an init container copies
+// trackerbackup out of the daemon image into an emptyDir, and the main container
+// runs it in the postgres image, so the dump uses that image's pg_dump. The dump
+// lands on the tracker-backup claim, the only volume besides that emptyDir.
 //
-// The postgres image runs as root and reads the claim as root, so the pod sets no
-// runAsNonRoot. The DSN reaches trackerbackup only through the Secret's dsn key, in
-// an environment variable, never in an argument.
+// The pod takes no ServiceAccount token and mounts no host path.
+// ConcurrencyPolicy Forbid and the Job's deadline stop two dumps overlapping and
+// end a hung pg_dump. The postgres image runs as root and reads the claim as root,
+// so the pod sets no runAsNonRoot. The DSN reaches trackerbackup only through the
+// Secret's dsn key, in an environment variable, never in an argument.
 func trackerBackupCronJob(v Values, namespace string) CronJob {
 	automount := false
 	return CronJob{
