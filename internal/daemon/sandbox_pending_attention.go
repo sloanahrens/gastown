@@ -149,7 +149,25 @@ var errSandboxPendingNoAnswer = fmt.Errorf("no answer within %s", sandboxPending
 // the read is abandoned at that point whether or not the runner honors its
 // context, so one hung cluster costs one read (gt-hlo2ac). A read that outlives
 // its deadline returns an error, and the caller keeps the previous items.
+//
+// An abandoned runner goroutine stays alive until the runner returns; that is
+// the one bound on the leak. Until then the namespace's read is outstanding, and
+// a later tick does not start a second read of it: it returns an error and keeps
+// the previous items, so a hung cluster holds at most one goroutine per namespace.
 func (d *Daemon) pendingSandboxRead(ctx context.Context, kubeconfig, namespace string) ([]byte, error) {
+	if outstanding, ok := d.sandboxPendingReads[namespace]; ok {
+		select {
+		case <-outstanding:
+		default:
+			return nil, fmt.Errorf("the pod list for namespace %s is still outstanding from an earlier tick", namespace)
+		}
+	}
+	if d.sandboxPendingReads == nil {
+		d.sandboxPendingReads = make(map[string]chan struct{})
+	}
+	returned := make(chan struct{})
+	d.sandboxPendingReads[namespace] = returned
+
 	readCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	deadline := d.clk().AfterFunc(sandboxPendingReadTimeout, func() { cancel(errSandboxPendingNoAnswer) })
@@ -160,6 +178,7 @@ func (d *Daemon) pendingSandboxRead(ctx context.Context, kubeconfig, namespace s
 	}
 	done := make(chan reply, 1)
 	go func() {
+		defer close(returned)
 		out, err := d.cacheTrimKubectl(readCtx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json", fmt.Sprintf("--request-timeout=%s", sandboxPendingRequestTimeout))
 		done <- reply{out, err}
 	}()
