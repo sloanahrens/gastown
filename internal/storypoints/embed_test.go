@@ -175,6 +175,43 @@ func TestOllamaEmbedderReturnsTheVector(t *testing.T) {
 	}
 }
 
+func TestEmbedEndpointJoinsThePath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		base string
+	}{
+		{"base URL without a trailing slash", "http://ollama.test"},
+		{"base URL with a trailing slash", "http://ollama.test/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			e := OllamaEmbedder{
+				URL:     tt.base,
+				Model:   "qwen3",
+				Dim:     3,
+				Timeout: 5 * time.Second,
+				HTTP: &http.Client{Transport: embedTransport(func(r *http.Request) (*http.Response, error) {
+					got = r.URL.Path
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"embeddings":[[0.5,-1,2]]}`)),
+						Header:     make(http.Header),
+					}, nil
+				})},
+			}
+			if _, err := e.Embed(context.Background(), "x"); err != nil {
+				t.Fatalf("Embed: %v", err)
+			}
+			if got != "/api/embed" {
+				t.Errorf("request path = %q, want %q", got, "/api/embed")
+			}
+		})
+	}
+}
+
 func TestOllamaEmbedderRefusesABadReply(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -259,8 +296,14 @@ func TestOllamaEmbedderRefusesABadURL(t *testing.T) {
 			return nil, errors.New("unexpected request")
 		})},
 	}
-	if _, err := e.Embed(context.Background(), "x"); err == nil {
+	_, err := e.Embed(context.Background(), "x")
+	if err == nil {
 		t.Fatal("Embed with an unparseable URL returned nil error; want an error")
+	}
+	// The message tells this refusal, made while the endpoint is built, from a
+	// failure later, when a request is sent.
+	if !strings.Contains(err.Error(), "build embed endpoint") {
+		t.Errorf("error %q does not say the endpoint could not be built", err)
 	}
 }
 
@@ -355,6 +398,19 @@ func TestEmbeddingMinutesRefusals(t *testing.T) {
 				t.Fatalf("EmbeddingMinutes = %v, nil error; want an error", got)
 			}
 		})
+	}
+}
+
+func TestEmbeddingMinutesUnderflowIsAnError(t *testing.T) {
+	t.Parallel()
+	// exp(-1000) underflows to zero, which is not a prediction.
+	w := synthEmbeddingWeights(t, []float64{-1000}, 0)
+	got, err := w.EmbeddingMinutes([]float32{1})
+	if err == nil {
+		t.Fatalf("EmbeddingMinutes = %v, nil error; want an error", got)
+	}
+	if !strings.Contains(err.Error(), "underflow") {
+		t.Errorf("error %q does not say the result underflowed", err)
 	}
 }
 
