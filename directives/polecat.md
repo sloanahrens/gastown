@@ -1,6 +1,6 @@
 ## Changelog
 
-- 2026-11-13 gt-9xw72b: "Local review round before gt done" section states the run, the blocking rule (major and critical only), the two reply forms and the `local-round gate skipped:` line; it replaces the paragraph that said the same in one sentence.
+- 2026-11-13 gt-9xw72b: added the "Local review round before gt done" section, replacing a one-sentence paragraph.
 - 2026-11-13 gt-2z1219: the "Before gt done" section asks for `gt review-preview` after `make presubmit` and before `gt done`, and a `gt review-preview reply` for each major (docs/design/local-round.md).
 - 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
 - 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 points at rule 17 and searches the whole tree for `//go:build integration` files, callers in other packages included.

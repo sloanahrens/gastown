@@ -764,6 +764,33 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 	}
 }
 
+// The wide grid sets the numeric cells right, so the figures line up down their
+// columns. Below 640 px the rows stack and every cell reads left under its
+// label, but the numeric cells' right alignment is the more specific rule and
+// outranks the row-wide left alignment; the stacked layout needs its own
+// left-alignment rule for them, or only the figures read right and pull away
+// from their labels (gt-1wygvr).
+func TestNumericCellsReadLeftInTheStackedLayout(t *testing.T) {
+	t.Parallel()
+
+	if got := declOf(t, topRule(t, ".ltrow .n"), "text-align"); got != "right" {
+		t.Errorf("the wide layout sets the numeric cells' text-align to %q, want right so the figures line up down the grid's columns", got)
+	}
+
+	positioned := false
+	for _, rule := range landingsConditionalRules(t) {
+		if !strings.Contains(rule.At, "max-width:640px") || !strings.Contains(rule.Sel, ".ltrow") {
+			continue
+		}
+		if selectsClass(rule.Sel, "n") && rule.Decls["text-align"] == "left" {
+			positioned = true
+		}
+	}
+	if !positioned {
+		t.Error("no max-width:640px rule sets text-align:left on the landings rows' numeric cells, so at 470 px only the figures read right, away from their labels")
+	}
+}
+
 // The stub's element.children answers what a browser's HTMLCollection does: a
 // length, an index and iteration, and no array methods. The Landings pane once
 // called children.forEach, which throws in a browser and stopped the table
