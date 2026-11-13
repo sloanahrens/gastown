@@ -500,6 +500,11 @@ func TestUnslingCommandNeverAsksTmux(t *testing.T) {
 	store := beadsfake.New()
 	is := seedAssigned(t, store, polecat, beads.IssueStatusHooked)
 
+	// Precondition: the polecat holds the bead, so the hook check below is not vacuous.
+	if hooked, err := firstActiveWorkID(store, polecat); err != nil || hooked != is.ID {
+		t.Fatalf("before unsling firstActiveWorkID(%s) = (%q, %v), want (%q, nil)", polecat, hooked, err, is.ID)
+	}
+
 	deps := unslingDepsFor(store)
 	deps.townRoot = func() (string, error) { return t.TempDir(), nil }
 	if err := runUnslingDeps(&cobra.Command{}, []string{is.ID, polecat}, false, false, deps); err != nil {
@@ -510,8 +515,13 @@ func TestUnslingCommandNeverAsksTmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
-	if got.Status != "open" || got.Assignee != "" {
-		t.Errorf("bead after unsling = (status %q, assignee %q), want (open, \"\")", got.Status, got.Assignee)
+	if got.Status != string(beads.StatusOpen) || got.Assignee != "" {
+		t.Errorf("bead after unsling = (status %q, assignee %q), want (%s, \"\")", got.Status, got.Assignee, beads.StatusOpen)
+	}
+
+	// The hook as gt hook reads it: no active work is left assigned to the polecat.
+	if hooked, err := firstActiveWorkID(store, polecat); err != nil || hooked != "" {
+		t.Errorf("after unsling firstActiveWorkID(%s) = (%q, %v), want (\"\", nil): the hook is not cleared", polecat, hooked, err)
 	}
 }
 
