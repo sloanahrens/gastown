@@ -7,8 +7,8 @@ import (
 )
 
 // TestReadBeadsRuntimeConfigWithoutThePortKey verifies the port comes from
-// dolt-server.port with the deprecated metadata.json key absent, and that a
-// leftover key alone no longer sets it (gt-49f3pn).
+// dolt-server.port, which wins over the deprecated metadata.json key, and that
+// the key is only the fallback while no port file exists (gt-49f3pn).
 func TestReadBeadsRuntimeConfigWithoutThePortKey(t *testing.T) {
 	t.Parallel()
 
@@ -30,9 +30,15 @@ func TestReadBeadsRuntimeConfigWithoutThePortKey(t *testing.T) {
 			wantPort: DefaultPort,
 		},
 		{
-			name:     "a leftover key does not set the port",
+			name:     "key and a different port file: the file wins",
 			metadata: `{"backend":"dolt","dolt_mode":"server","dolt_server_port":4407}`,
-			wantPort: DefaultPort,
+			portFile: "4411",
+			wantPort: 4411,
+		},
+		{
+			name:     "key only: the key is the fallback",
+			metadata: `{"backend":"dolt","dolt_mode":"server","dolt_server_port":4407}`,
+			wantPort: 4407,
 		},
 	}
 

@@ -169,8 +169,8 @@ func TestGetServerAddr(t *testing.T) {
 }
 
 // TestGetServerAddrWithoutThePortKey verifies the probed address takes its port
-// from dolt-server.port, never from the deprecated metadata.json key, and falls
-// back to the town's port when there is no port file (gt-49f3pn).
+// from dolt-server.port before the deprecated metadata.json key, and falls back
+// to the town's port when there is neither (gt-49f3pn).
 func TestGetServerAddrWithoutThePortKey(t *testing.T) {
 	t.Parallel()
 	check := NewDoltServerReachableCheck()
@@ -193,9 +193,15 @@ func TestGetServerAddrWithoutThePortKey(t *testing.T) {
 			wantAddr: "10.0.0.5:3307",
 		},
 		{
-			name:     "a leftover key does not set the port",
+			name:     "key and a different port file: the file wins",
 			metadata: `{"dolt_mode":"server","dolt_server_port":4407}`,
-			wantAddr: "127.0.0.1:3307",
+			portFile: "4411",
+			wantAddr: "127.0.0.1:4411",
+		},
+		{
+			name:     "key only: the key is the fallback",
+			metadata: `{"dolt_mode":"server","dolt_server_port":4407}`,
+			wantAddr: "127.0.0.1:4407",
 		},
 	}
 
