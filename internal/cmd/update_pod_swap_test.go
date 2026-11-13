@@ -24,20 +24,23 @@ type podSwapCall struct {
 }
 
 // podSwapFake records the commands a swap runs. The verb field names the
-// kubectl subcommand that fails; exit and err are what it returns.
+// kubectl subcommand that fails; exit and err are what it returns. A deployment
+// set narrows the failure to commands that name that Deployment.
 type podSwapFake struct {
-	calls []podSwapCall
-	verb  string
-	exit  int
-	err   error
+	calls      []podSwapCall
+	verb       string
+	deployment string
+	exit       int
+	err        error
 }
 
 func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 	f.calls = append(f.calls, podSwapCall{name: name, args: args})
-	for _, a := range args {
-		if a == f.verb {
-			return podSwapOutput, f.exit, f.err
-		}
+	if f.deployment != "" && !containsArg(args, "deployment/"+f.deployment) {
+		return podSwapOutput, 0, nil
+	}
+	if containsArg(args, f.verb) {
+		return podSwapOutput, f.exit, f.err
 	}
 	return podSwapOutput, 0, nil
 }
@@ -85,7 +88,11 @@ type podSwapPatchBody struct {
 	} `json:"spec"`
 }
 
-func TestUpdatePodSwapPatchesBothImagesInOneCommand(t *testing.T) {
+// TestUpdatePodSwapMovesBothDeploymentsInOrder holds the swap's four commands: the
+// daemon's patch, the dashboard's patch, then the wait on each rollout. The daemon's
+// patch carries the polecat annotation; the dashboard's carries only the daemon
+// image, and no annotation, so the annotations it already has stay.
+func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 	t.Parallel()
 	fake := &podSwapFake{}
 
@@ -93,45 +100,50 @@ func TestUpdatePodSwapPatchesBothImagesInOneCommand(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	if len(fake.calls) != 2 {
-		t.Fatalf("commands = %+v, want exactly one patch then the rollout wait", fake.calls)
+	if len(fake.calls) != 4 {
+		t.Fatalf("commands = %+v, want the daemon's patch, the dashboard's patch, then both rollout waits", fake.calls)
 	}
-	patches := 0
-	for _, c := range fake.calls {
-		if containsArg(c.args, "patch") {
-			patches++
+	prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
+	patchArgs := func(deployment string) []string {
+		return append(slices.Clone(prefix), "patch", "deployment/"+deployment, "--type=strategic", "-p")
+	}
+	rolloutArgs := func(deployment string) []string {
+		return append(slices.Clone(prefix), "rollout", "status", "deployment/"+deployment, "--timeout=5m0s")
+	}
+	checkPatch := func(t *testing.T, args []string, deployment string) podSwapPatchBody {
+		t.Helper()
+		shape := patchArgs(deployment)
+		if len(args) != len(shape)+1 || !slices.Equal(args[:len(shape)], shape) {
+			t.Fatalf("patch argv = %q, want %q and one body", args, shape)
 		}
-	}
-	if patches != 1 {
-		t.Fatalf("patch commands = %d, want exactly one carrying both images", patches)
+		var body podSwapPatchBody
+		if err := json.Unmarshal([]byte(args[len(shape)]), &body); err != nil {
+			t.Fatalf("patch body is not JSON: %v", err)
+		}
+		return body
 	}
 
-	patch := fake.calls[0]
-	wantPrefix := []string{"--context", podSwapContext, "-n", podSwapNamespace, "patch", "deployment/" + k8sdaemon.Name, "--type=strategic", "-p"}
-	if len(patch.args) != len(wantPrefix)+1 {
-		t.Fatalf("patch argv = %q, want the prefix %q and one body", patch.args, wantPrefix)
-	}
-	if got := strings.Join(patch.args[:len(wantPrefix)], " "); got != strings.Join(wantPrefix, " ") {
-		t.Fatalf("patch argv starts %q, want %q", got, strings.Join(wantPrefix, " "))
-	}
-	var body podSwapPatchBody
-	if err := json.Unmarshal([]byte(patch.args[len(wantPrefix)]), &body); err != nil {
-		t.Fatalf("patch body is not JSON: %v", err)
-	}
-	if got := body.Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; got != podSwapPolecatRef {
+	daemon := checkPatch(t, fake.calls[0].args, k8sdaemon.Name)
+	if got := daemon.Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; got != podSwapPolecatRef {
 		t.Errorf("polecat annotation = %q, want the pair's polecat digest", got)
 	}
-	if len(body.Spec.Template.Spec.Containers) != 1 {
-		t.Fatalf("containers = %+v, want the daemon container alone", body.Spec.Template.Spec.Containers)
-	}
-	if c := body.Spec.Template.Spec.Containers[0]; c.Name != k8sdaemon.Name || c.Image != podSwapDigestRef {
-		t.Errorf("container = %+v, want %s on the pair's daemon digest", c, k8sdaemon.Name)
+	if c := daemon.Spec.Template.Spec.Containers; len(c) != 1 || c[0].Name != k8sdaemon.Name || c[0].Image != podSwapDigestRef {
+		t.Errorf("daemon containers = %+v, want %s on the pair's daemon digest alone", c, k8sdaemon.Name)
 	}
 
-	rollout := fake.calls[1]
-	want := []string{"--context", podSwapContext, "-n", podSwapNamespace, "rollout", "status", "deployment/" + k8sdaemon.Name, "--timeout=5m0s"}
-	if got := strings.Join(rollout.args, " "); got != strings.Join(want, " ") {
-		t.Errorf("rollout argv = %q, want %q", got, strings.Join(want, " "))
+	dashboard := checkPatch(t, fake.calls[1].args, k8sdaemon.DashboardName)
+	if c := dashboard.Spec.Template.Spec.Containers; len(c) != 1 || c[0].Name != k8sdaemon.DashboardName || c[0].Image != podSwapDigestRef {
+		t.Errorf("dashboard containers = %+v, want %s on the pair's daemon digest alone", c, k8sdaemon.DashboardName)
+	}
+	if got := dashboard.Spec.Template.Metadata.Annotations; len(got) != 0 {
+		t.Errorf("dashboard annotations = %v, want none, so the pod template's own annotations are kept", got)
+	}
+
+	if !slices.Equal(fake.calls[2].args, rolloutArgs(k8sdaemon.Name)) {
+		t.Errorf("third command = %q, want the daemon's rollout wait %q", fake.calls[2].args, rolloutArgs(k8sdaemon.Name))
+	}
+	if !slices.Equal(fake.calls[3].args, rolloutArgs(k8sdaemon.DashboardName)) {
+		t.Errorf("fourth command = %q, want the dashboard's rollout wait %q", fake.calls[3].args, rolloutArgs(k8sdaemon.DashboardName))
 	}
 }
 
@@ -155,8 +167,8 @@ func TestPodDaemonSwapAcceptsANameAtTheDNSLabelLimit(t *testing.T) {
 	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(fake.calls) != 2 {
-		t.Errorf("commands = %d, want 2 at the limit", len(fake.calls))
+	if len(fake.calls) != 4 {
+		t.Errorf("commands = %d, want 4 at the limit", len(fake.calls))
 	}
 }
 
@@ -169,9 +181,16 @@ func TestPodDaemonSwapUsesTheNamedDeployment(t *testing.T) {
 	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	for _, c := range fake.calls {
-		if !strings.Contains(strings.Join(c.args, " "), "deployment/daemon-canary") {
-			t.Errorf("command %v does not name the configured Deployment", c.args)
+	// The daemon's patch and rollout wait name the configured Deployment; the
+	// dashboard's patch and wait name the dashboard's, whatever the daemon is.
+	for _, i := range []int{0, 2} {
+		if !containsArg(fake.calls[i].args, "deployment/daemon-canary") {
+			t.Errorf("command %v does not name the configured Deployment", fake.calls[i].args)
+		}
+	}
+	for _, i := range []int{1, 3} {
+		if !containsArg(fake.calls[i].args, "deployment/"+k8sdaemon.DashboardName) {
+			t.Errorf("command %v does not name the dashboard Deployment", fake.calls[i].args)
 		}
 	}
 }
@@ -299,6 +318,31 @@ func TestPodDaemonSwapStopsWhenThePatchCannotEncode(t *testing.T) {
 	}
 }
 
+// TestPodDaemonSwapStopsWhenTheDashboardPatchCannotEncode holds the second body's
+// encoding: the daemon's body encodes, the dashboard's does not, and no command
+// runs, so the daemon is not moved before the dashboard's patch is known to build.
+func TestPodDaemonSwapStopsWhenTheDashboardPatchCannotEncode(t *testing.T) {
+	t.Parallel()
+	fake := &podSwapFake{}
+	swap := podSwapFor(fake)
+	encodes := 0
+	swap.marshal = func(v any) ([]byte, error) {
+		encodes++
+		if encodes > 1 {
+			return nil, errors.New("encode refused")
+		}
+		return json.Marshal(v)
+	}
+
+	err := swap.Apply(context.Background(), podSwapPair)
+	if err == nil || !strings.Contains(err.Error(), "encoding the dashboard's pod patch") {
+		t.Fatalf("Apply error = %v, want the dashboard patch encoding named", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("commands = %+v, want none when the dashboard patch cannot be built", fake.calls)
+	}
+}
+
 func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -308,28 +352,46 @@ func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 		wantCalls int
 	}{
 		{
-			name:      "a failing patch step stops before the rollout",
-			fake:      podSwapFake{verb: "patch", exit: 1},
+			name:      "a failing daemon patch stops before the dashboard is patched",
+			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.Name, exit: 1},
 			wantStep:  "the daemon's patch exited 1",
 			wantCalls: 1,
 		},
 		{
-			name:      "a failing rollout step is named as the rollout",
-			fake:      podSwapFake{verb: "rollout", exit: 1},
-			wantStep:  "the daemon's rollout status exited 1",
+			name:      "a failing dashboard patch stops before the rollout waits",
+			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.DashboardName, exit: 1},
+			wantStep:  "the dashboard's patch exited 1",
 			wantCalls: 2,
 		},
 		{
-			name:      "a patch command that cannot start is named as the patch",
-			fake:      podSwapFake{verb: "patch", err: errors.New("kubectl not found")},
+			name:      "a failing daemon rollout stops before the dashboard's wait",
+			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.Name, exit: 1},
+			wantStep:  "the daemon's rollout status exited 1",
+			wantCalls: 3,
+		},
+		{
+			name:      "a failing dashboard rollout is named as the dashboard's rollout",
+			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.DashboardName, exit: 1},
+			wantStep:  "the dashboard's rollout status exited 1",
+			wantCalls: 4,
+		},
+		{
+			name:      "a daemon patch command that cannot start is named as the daemon's patch",
+			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.Name, err: errors.New("kubectl not found")},
 			wantStep:  "the daemon's patch",
 			wantCalls: 1,
 		},
 		{
-			name:      "a rollout command that cannot start is named as the rollout",
-			fake:      podSwapFake{verb: "rollout", err: errors.New("kubectl not found")},
-			wantStep:  "the daemon's rollout status",
+			name:      "a dashboard patch command that cannot start is named as the dashboard's patch",
+			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.DashboardName, err: errors.New("kubectl not found")},
+			wantStep:  "the dashboard's patch",
 			wantCalls: 2,
+		},
+		{
+			name:      "a rollout command that cannot start is named as the rollout",
+			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.Name, err: errors.New("kubectl not found")},
+			wantStep:  "the daemon's rollout status",
+			wantCalls: 3,
 		},
 	}
 	for _, tt := range tests {
@@ -366,8 +428,8 @@ func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
 		if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
-		if len(fake.calls) != 2 {
-			t.Fatalf("commands = %+v, want the patch then the rollout wait", fake.calls)
+		if len(fake.calls) != 4 {
+			t.Fatalf("commands = %+v, want both patches then both rollout waits", fake.calls)
 		}
 		for _, c := range fake.calls {
 			if containsArg(c.args, "--context") {
@@ -377,11 +439,11 @@ func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
 				t.Errorf("command %v does not start with the namespace", c.args)
 			}
 		}
-		if !containsArg(fake.calls[0].args, "patch") {
-			t.Errorf("first command %v is not the patch", fake.calls[0].args)
+		if !containsArg(fake.calls[0].args, "patch") || !containsArg(fake.calls[1].args, "patch") {
+			t.Errorf("first two commands %v are not the patches", fake.calls[:2])
 		}
-		if !containsArg(fake.calls[1].args, "rollout") {
-			t.Errorf("second command %v is not the rollout wait", fake.calls[1].args)
+		if !containsArg(fake.calls[2].args, "rollout") || !containsArg(fake.calls[3].args, "rollout") {
+			t.Errorf("last two commands %v are not the rollout waits", fake.calls[2:])
 		}
 	})
 

@@ -28,10 +28,18 @@ type podDaemonKubectl struct {
 	commits map[string]string
 	running string
 	pods    []podPairPod
+	// failOnce is a kubectl step, such as "patch deployment/dashboard", whose first
+	// command exits 1. failed records that it did.
+	failOnce string
+	failed   bool
 }
 
 func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
 	k.calls = append(k.calls, args)
+	if k.failOnce != "" && !k.failed && strings.Contains(strings.Join(args, " "), k.failOnce) {
+		k.failed = true
+		return "", 1, nil
+	}
 	switch {
 	case containsArg(args, "patch"):
 		joined := strings.Join(args, " ")
@@ -85,12 +93,13 @@ func runPodCommand(t *testing.T, seams updateSeams, args ...string) (string, err
 // wiredInstall is what a run's Run seam received when a digest install was
 // asked for: the deps the run was built with.
 type wiredInstall struct {
-	deps    update.Deps
-	opts    update.Options
-	compose *rollbackTestSwap
-	verify  *rollbackTestSwap
-	kube    *podDaemonKubectl
-	host    *podHostInstaller
+	deps     update.Deps
+	opts     update.Options
+	compose  *rollbackTestSwap
+	verify   *rollbackTestSwap
+	kube     *podDaemonKubectl
+	host     *podHostInstaller
+	townRoot string
 }
 
 // podHostInstaller stands in for the run's host install and counts the calls. A
@@ -129,10 +138,11 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 	// wait sees the commit it applied; a separate fake would never report it.
 	compose := &rollbackTestSwap{}
 	got := wiredInstall{
-		compose: compose,
-		verify:  compose,
-		kube:    &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, pods: podPairHealthy()},
-		host:    &podHostInstaller{},
+		townRoot: townRoot,
+		compose:  compose,
+		verify:   compose,
+		kube:     &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, pods: podPairHealthy()},
+		host:     &podHostInstaller{},
 	}
 	seams := updateSeams{
 		FindTownRoot: func() (string, error) { return townRoot, nil },
@@ -578,6 +588,79 @@ func TestUpdatePodRollbackUsesThePodSeams(t *testing.T) {
 	}
 	if !strings.Contains(out, f.previous.Daemon) || !strings.Contains(out, f.previous.Polecat) {
 		t.Errorf("output %q does not name both restored images", out)
+	}
+}
+
+// TestUpdatePodHalfMovedPairIsRestoredToThePrevious holds a pair that moves the
+// daemon and then fails on the dashboard: the install fails, and the restore
+// moves both Deployments back to the recorded previous pair, which the ledger then
+// names as running. The daemon is left on the new pair until the restore, so the
+// restore must reach the dashboard too.
+func TestUpdatePodHalfMovedPairIsRestoredToThePrevious(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		failOnce string
+		wantStep string
+	}{
+		{name: "a failed dashboard patch", failOnce: "patch deployment/" + k8sdaemon.DashboardName, wantStep: "the dashboard's patch exited 1"},
+		{name: "a failed dashboard rollout", failOnce: "rollout status deployment/" + k8sdaemon.DashboardName, wantStep: "the dashboard's rollout status exited 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+			oldDaemon := "registry.internal:5000/town/gastown-daemon@sha256:" + strings.Repeat("d", 64)
+			oldPolecat := "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("a", 64)
+			previous := update.ImagePair{Daemon: oldDaemon, Polecat: oldPolecat, Commit: rollbackOldCommit}
+			got.kube.commits[oldDaemon] = rollbackOldCommit
+			got.kube.failOnce = tt.failOnce
+			ledger := update.FileImageLedger{Dir: update.Dir(got.townRoot)}
+			if err := ledger.Write(update.ImageRecord{Current: previous, Previous: previous}); err != nil {
+				t.Fatalf("record the previous pair: %v", err)
+			}
+
+			res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
+			if err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if verdict := update.ClassifyInstall(res); verdict == update.ResultOK {
+				t.Fatalf("ClassifyInstall = %q, want the failed step to fail the install: %+v", verdict, res)
+			}
+			if !strings.Contains(res.Reason, tt.wantStep) || !strings.Contains(res.Reason, "restored "+oldDaemon) {
+				t.Errorf("install reason = %q, want it to name %q and the restored daemon", res.Reason, tt.wantStep)
+			}
+
+			// lastPatch decodes the last patch the run sent to a Deployment. A patch
+			// body is the last argument of its command.
+			lastPatch := func(deployment string) podSwapPatchBody {
+				t.Helper()
+				for i := len(got.kube.calls) - 1; i >= 0; i-- {
+					args := got.kube.calls[i]
+					if containsArg(args, "patch") && containsArg(args, "deployment/"+deployment) {
+						var body podSwapPatchBody
+						if err := json.Unmarshal([]byte(args[len(args)-1]), &body); err != nil {
+							t.Fatalf("patch body is not JSON: %v", err)
+						}
+						return body
+					}
+				}
+				t.Fatalf("no patch of deployment/%s was run: calls = %v", deployment, got.kube.calls)
+				return podSwapPatchBody{}
+			}
+			if c := lastPatch(k8sdaemon.Name).Spec.Template.Spec.Containers; len(c) != 1 || c[0].Image != oldDaemon {
+				t.Errorf("last daemon patch containers = %+v, want the previous daemon %q", c, oldDaemon)
+			}
+			if annotation := lastPatch(k8sdaemon.Name).Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; annotation != oldPolecat {
+				t.Errorf("last daemon patch annotation = %q, want the previous polecat %q", annotation, oldPolecat)
+			}
+			if c := lastPatch(k8sdaemon.DashboardName).Spec.Template.Spec.Containers; len(c) != 1 || c[0].Image != oldDaemon {
+				t.Errorf("last dashboard patch containers = %+v, want the previous daemon %q", c, oldDaemon)
+			}
+			if rec, err := ledger.Read(); err != nil || !samePairs(rec, update.ImageRecord{Current: previous, Previous: previous}) {
+				t.Errorf("ledger after the restore = %+v (err %v), want the previous pair as both current and previous", rec, err)
+			}
+		})
 	}
 }
 

@@ -27,14 +27,15 @@ func isDNSLabel(name string) bool {
 }
 
 // podDaemonSwap puts a digest install's pair in force on a daemon that runs as a
-// pod. Apply sends one strategic-merge patch to the Deployment: the daemon
-// container's image and the pod template's polecat image annotation, so the pair
-// moves as one rollout. It then waits for the rollout, so the caller's wait,
-// restore and escalation work as they do for the container daemon. Apply refuses
-// a pair whose daemon or polecat is not a digest reference, and a swap missing
-// its context, namespace or rollout timeout, before any command runs. A failed
-// step is named by the step and its exit, never by the command's output, which
-// can hold a secret.
+// pod. Apply moves two Deployments to the pair: the daemon's, whose container
+// takes the daemon image and whose pod template takes the polecat image
+// annotation, and the dashboard's, whose container takes the daemon image. It
+// patches both, then waits for both rollouts, so the pair moves as one step and
+// the caller's wait, restore and escalation work as they do for the container
+// daemon. Apply refuses a pair whose daemon or polecat is not a digest reference,
+// and a swap missing its context, namespace or rollout timeout, before any
+// command runs. A failed step is named by the step and its exit, never by the
+// command's output, which can hold a secret.
 type podDaemonSwap struct {
 	// Context is the kubectl context the Deployment runs in. Required unless
 	// InCluster, and refused with it.
@@ -44,8 +45,9 @@ type podDaemonSwap struct {
 	InCluster bool
 	// Namespace is the namespace the Deployment runs in. Required.
 	Namespace string
-	// Deployment is the Deployment whose daemon container takes the image. Empty
-	// means the daemon's own Deployment name, k8sdaemon.Name.
+	// Deployment is the daemon's Deployment, whose daemon container takes the
+	// image. Empty means the daemon's own Deployment name, k8sdaemon.Name. The
+	// dashboard's Deployment is always k8sdaemon.DashboardName.
 	Deployment string
 	// Run runs kubectl. Every command Apply makes goes through it.
 	Run update.RunFunc
@@ -58,45 +60,71 @@ type podDaemonSwap struct {
 
 var _ update.ImageSwap = podDaemonSwap{}
 
-// Apply patches the Deployment with the pair, then waits for the rollout. The
-// patch and the wait run in that order, and a failure stops the swap at the step
-// that failed.
+// Apply patches the daemon's Deployment, then the dashboard's, with the pair, and
+// then waits for each rollout. Both bodies are encoded before any command runs,
+// and a failed step stops the swap at that step. The caller restores the previous
+// pair through this same Apply, which moves both Deployments back.
 func (s podDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) error {
 	if err := s.validate(pair); err != nil {
 		return err
 	}
-	patch, err := s.patch(pair)
+	daemonPatch, err := s.daemonPatch(pair)
 	if err != nil {
 		return fmt.Errorf("encoding the daemon's pod patch: %w", err)
 	}
-	deployment := s.deployment()
-	if err := s.kubectl(ctx, "patch", "patch", "deployment/"+deployment, "--type=strategic", "-p", patch); err != nil {
+	dashboardPatch, err := s.dashboardPatch(pair)
+	if err != nil {
+		return fmt.Errorf("encoding the dashboard's pod patch: %w", err)
+	}
+	daemon, dashboard := s.deployment(), k8sdaemon.DashboardName
+	timeout := "--timeout=" + s.RolloutTimeout.String()
+	if err := s.kubectl(ctx, "the daemon's patch", "patch", "deployment/"+daemon, "--type=strategic", "-p", daemonPatch); err != nil {
 		return err
 	}
-	return s.kubectl(ctx, "rollout status", "rollout", "status", "deployment/"+deployment, "--timeout="+s.RolloutTimeout.String())
+	if err := s.kubectl(ctx, "the dashboard's patch", "patch", "deployment/"+dashboard, "--type=strategic", "-p", dashboardPatch); err != nil {
+		return err
+	}
+	if err := s.kubectl(ctx, "the daemon's rollout status", "rollout", "status", "deployment/"+daemon, timeout); err != nil {
+		return err
+	}
+	return s.kubectl(ctx, "the dashboard's rollout status", "rollout", "status", "deployment/"+dashboard, timeout)
 }
 
-// patch is the strategic-merge patch that puts pair in force: the daemon
-// container's image and the pod template's polecat image annotation, which the
-// rendered pod projects into its polecat image file. The container is matched by
-// its name, the daemon's own. Map keys encode in sorted order, so the patch is the
-// same bytes for the same pair.
-func (s podDaemonSwap) patch(pair update.ImagePair) (string, error) {
+// daemonPatch is the strategic-merge patch that puts pair in force on the daemon's
+// Deployment: the daemon container's image and the pod template's polecat image
+// annotation, which the rendered pod projects into its polecat image file.
+func (s podDaemonSwap) daemonPatch(pair update.ImagePair) (string, error) {
+	return s.encode(podTemplatePatch(map[string]string{k8sdaemon.PolecatImageAnnotation: pair.Polecat}, k8sdaemon.Name, pair.Daemon))
+}
+
+// dashboardPatch is the strategic-merge patch that puts the daemon image of pair on
+// the dashboard's container. It sets no annotation, so the pod template's own
+// annotations, such as a hand restart's, are kept.
+func (s podDaemonSwap) dashboardPatch(pair update.ImagePair) (string, error) {
+	return s.encode(podTemplatePatch(nil, k8sdaemon.DashboardName, pair.Daemon))
+}
+
+// podTemplatePatch is the body that sets container's image, by name, in a
+// Deployment's pod template, and the template's annotations when given. A nil map
+// leaves the annotations out, since a null annotation would remove them.
+func podTemplatePatch(annotations map[string]string, container, image string) map[string]any {
+	template := map[string]any{
+		"spec": map[string]any{
+			"containers": []map[string]string{{"name": container, "image": image}},
+		},
+	}
+	if annotations != nil {
+		template["metadata"] = map[string]any{"annotations": annotations}
+	}
+	return map[string]any{"spec": map[string]any{"template": template}}
+}
+
+// encode is the JSON of a patch body. Map keys encode in sorted order, so the same
+// body is the same bytes.
+func (s podDaemonSwap) encode(body map[string]any) (string, error) {
 	marshal := s.marshal
 	if marshal == nil {
 		marshal = json.Marshal
-	}
-	body := map[string]any{
-		"spec": map[string]any{
-			"template": map[string]any{
-				"metadata": map[string]any{
-					"annotations": map[string]string{k8sdaemon.PolecatImageAnnotation: pair.Polecat},
-				},
-				"spec": map[string]any{
-					"containers": []map[string]string{{"name": k8sdaemon.Name, "image": pair.Daemon}},
-				},
-			},
-		},
 	}
 	data, err := marshal(body)
 	if err != nil {
@@ -189,16 +217,17 @@ func checkPodDigest(what, ref string) error {
 }
 
 // kubectl runs one kubectl step against the swap's context and namespace, or in
-// the cluster when the swap is InCluster. A nonzero exit or a Run error is named
-// by step; the command's output is not.
+// the cluster when the swap is InCluster. step names the step, such as "the
+// daemon's patch". A nonzero exit or a Run error is named by step; the command's
+// output is not.
 func (s podDaemonSwap) kubectl(ctx context.Context, step string, args ...string) error {
 	argv := append(podKubectlPrefix(s.Context, s.Namespace, s.InCluster), args...)
 	_, exit, err := s.Run(ctx, "", nil, "kubectl", argv...)
 	if err != nil {
-		return fmt.Errorf("running kubectl for the daemon's %s: %w", step, err)
+		return fmt.Errorf("running kubectl for %s: %w", step, err)
 	}
 	if exit != 0 {
-		return fmt.Errorf("kubectl for the daemon's %s exited %d", step, exit)
+		return fmt.Errorf("kubectl for %s exited %d", step, exit)
 	}
 	return nil
 }
