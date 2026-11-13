@@ -22,8 +22,8 @@ worker is the only route to main
 
 ## Where to read next
 
-- [architecture.md](architecture.md) - every moving part of the town and how one piece of work travels from an idea to a published commit.
-- [glossary.md](glossary.md) - the terms: MEOW, GUPP, NDI, town and rig.
-- [why-these-features.md](why-these-features.md) - the rationale: the work ledger, attribution, work history and capability-based routing.
-- [concepts/polecat-lifecycle.md](concepts/polecat-lifecycle.md) - the polecat's three lifecycle layers and its operating states.
-- [reference.md](reference.md) - technical reference for Gas Town internals.
+- Before changing how any part of the town works, read [architecture.md](architecture.md) - every moving part of the town and how one piece of work travels from an idea to a published commit.
+- When a term in a doc or a command name is unfamiliar, check [glossary.md](glossary.md) - the terms: MEOW, GUPP, NDI, town and rig.
+- When you want the reason a feature exists, read [why-these-features.md](why-these-features.md) - the rationale: the work ledger, attribution, work history and capability-based routing.
+- Before reasoning about what a polecat does between sessions, read [concepts/polecat-lifecycle.md](concepts/polecat-lifecycle.md) - the polecat's three lifecycle layers and its operating states.
+- When you configure the town, run a command, or write a formula, read [reference.md](reference.md) - technical reference for Gas Town internals.
