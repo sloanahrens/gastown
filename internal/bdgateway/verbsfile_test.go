@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/bdshim"
 	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
@@ -70,10 +69,10 @@ func sortedVerbNames(p *Policy) []string {
 }
 
 // TestVerbsFileMatchesCommandTree: every verb deploy/bd/verbs.json allows runs
-// in the bd the repository's command tree records, and every verb the shim
-// answers has a policy entry. A bd upgrade that renames a verb, or a handler
-// added without a policy row, therefore fails this gate instead of failing a
-// call behind the gateway.
+// in the bd the repository's command tree records. A bd upgrade that renames a
+// verb therefore fails this gate instead of failing a call behind the gateway.
+// internal/bdshim tests the other half, that every verb the shim answers is in
+// the file, beside the handler registry it can read.
 func TestVerbsFileMatchesCommandTree(t *testing.T) {
 	t.Parallel()
 	p := loadDeployPolicy(t)
@@ -94,23 +93,6 @@ func TestVerbsFileMatchesCommandTree(t *testing.T) {
 		}
 		t.Errorf("deploy/bd/verbs.json allows %q, which bd's command tree does not run: %s", name, detail)
 	}
-
-	for _, verb := range bdshim.HandlerVerbs() {
-		if !policyCoversVerb(p, verb) {
-			t.Errorf("bdshim answers %q, but deploy/bd/verbs.json has no path that starts with it", verb)
-		}
-	}
-}
-
-// policyCoversVerb reports whether any allowed path names verb as its first
-// word.
-func policyCoversVerb(p *Policy, verb string) bool {
-	for _, v := range p.verbs {
-		if len(v.Path) > 0 && v.Path[0] == verb {
-			return true
-		}
-	}
-	return false
 }
 
 // TestRefusedFlagsExistInCommandTree: every refused flag is a persistent bd
@@ -141,18 +123,37 @@ func TestRefusedFlagsExistInCommandTree(t *testing.T) {
 	}
 }
 
-// TestLeadingValueFlagsMatchCommandTree: the flags the resolver skips a value
-// for are the bd tree's value-taking persistent flags, so a bd upgrade that
-// moves one cannot make the gateway read a value as the verb.
-func TestLeadingValueFlagsMatchCommandTree(t *testing.T) {
+// TestRootFlagsMatchCommandTree: the resolver's flag table is the bd tree's
+// persistent flags, split into value-taking by the same list the command-tree
+// scan uses. A bd upgrade that adds, drops or retypes a persistent flag fails
+// here rather than shifting the verb words at the gateway.
+func TestRootFlagsMatchCommandTree(t *testing.T) {
 	t.Parallel()
-	got := make([]string, 0, len(leadingValueFlags))
-	for name := range leadingValueFlags {
-		got = append(got, name)
+	_, snap, err := cmdtree.LoadBdTree()
+	if err != nil {
+		t.Fatalf("LoadBdTree: %v", err)
 	}
-	sort.Strings(got)
-	want := cmdtree.BdGlobalValueFlagNames()
-	if !slices.Equal(got, want) {
-		t.Fatalf("leadingValueFlags = %v, want bd's value-taking persistent flags %v", got, want)
+
+	var valueFlags, longFlags []string
+	for spelling, kind := range bdRootFlags {
+		if kind == flagValue {
+			valueFlags = append(valueFlags, spelling)
+		}
+		if spelling == "-C" {
+			continue
+		}
+		if !strings.HasPrefix(spelling, "--") {
+			t.Errorf("bdRootFlags holds %q, which is neither -C nor a long flag", spelling)
+			continue
+		}
+		longFlags = append(longFlags, strings.TrimPrefix(spelling, "--"))
+	}
+	sort.Strings(longFlags)
+	if !slices.Equal(longFlags, snap.PersistentFlags) {
+		t.Errorf("bdRootFlags long names = %v, want bd's persistent flags %v", longFlags, snap.PersistentFlags)
+	}
+	sort.Strings(valueFlags)
+	if want := cmdtree.BdGlobalValueFlagNames(); !slices.Equal(valueFlags, want) {
+		t.Errorf("bdRootFlags value-taking flags = %v, want %v", valueFlags, want)
 	}
 }

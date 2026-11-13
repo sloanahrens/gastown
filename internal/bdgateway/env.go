@@ -2,17 +2,17 @@ package bdgateway
 
 import "fmt"
 
-// callerEnv is the environment the gateway forwards from the caller. The design
-// (docs/design/bd-container.md, "Environment allowlist") names exactly these
-// names; everything else, including the gateway's own BEADS_DIR, the Dolt
+// callerEnv is the environment the gateway forwards from the caller: exactly
+// the names the design (docs/design/bd-container.md, "Environment allowlist")
+// accepts. Everything else, including the gateway's own BEADS_DIR, the Dolt
 // endpoint, the tracker credential and HOME, is the gateway's to compute and is
 // never taken from a request.
 //
-// A name outside the list is dropped, never forwarded: the bead's constraint
-// (gt-m76aet) settles this where the design's protocol paragraph says refused,
-// so a caller with a stale environment still gets its call rather than an error
-// about a variable it did not mean to send. BD_ALLOW_NEW_DATABASE therefore
-// never reaches bd, and init is not served to any class anyway.
+// A name outside the list is dropped, never forwarded, so a caller with a stale
+// environment still gets its call rather than an error about a variable it did
+// not mean to send. The design's protocol paragraph says the gateway refuses
+// such a name; this policy drops it. BD_ALLOW_NEW_DATABASE therefore never
+// reaches bd, and init is not served to any class anyway.
 var callerEnv = map[string]bool{
 	"BD_ACTOR":            true,
 	"BEADS_ACTOR":         true,

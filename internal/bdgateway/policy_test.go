@@ -49,6 +49,7 @@ func TestPolicyClassCheck(t *testing.T) {
 		{"daemon token runs a read verb", TokenDaemon, []string{"show"}, nil},
 		{"operator token runs a read verb", TokenOperator, []string{"show"}, nil},
 		{"read token cannot run a write verb", TokenRead, []string{"update"}, ErrClassDenied},
+		{"read token cannot reach a write verb behind a value flag", TokenRead, []string{"--format", "show", "create"}, ErrClassDenied},
 		{"daemon token runs a write verb", TokenDaemon, []string{"update"}, nil},
 		{"operator token runs a write verb", TokenOperator, []string{"update"}, nil},
 		{"read token cannot run an admin verb", TokenRead, []string{"config", "set"}, ErrClassDenied},
@@ -100,12 +101,12 @@ func TestPolicyRefusedFlags(t *testing.T) {
 		wantErr error
 		wantMsg string
 	}{
-		{"refused flag, attached value", TokenRead, []string{"show", "--db=beads"}, ErrFlagRefused, "--db"},
-		{"refused flag, separate value", TokenRead, []string{"show", "--db", "beads"}, ErrFlagRefused, "--db"},
-		{"refused shorthand", TokenRead, []string{"show", "-C", "gastown"}, ErrFlagRefused, "--C"},
-		{"refused shorthand with attached value", TokenRead, []string{"show", "-Cgastown"}, ErrFlagRefused, "--C"},
-		{"refused shorthand in a group", TokenRead, []string{"show", "-qC"}, ErrFlagRefused, "--C"},
-		{"per-verb refused flag", TokenDaemon, []string{"create", "--graph", "g.dot"}, ErrFlagRefused, "--graph"},
+		{"refused flag, attached value", TokenRead, []string{"show", "--db=beads"}, ErrFlagRefused, "refused: --db on show"},
+		{"refused flag, separate value", TokenRead, []string{"show", "--db", "beads"}, ErrFlagRefused, "refused: --db on show"},
+		{"refused shorthand", TokenRead, []string{"show", "-C", "gastown"}, ErrFlagRefused, "refused: -C on show"},
+		{"refused shorthand with attached value", TokenRead, []string{"show", "-Cgastown"}, ErrFlagRefused, "refused: -C on show"},
+		{"refused shorthand in a group", TokenRead, []string{"show", "-qC"}, ErrFlagRefused, "refused: -C on show"},
+		{"per-verb refused flag", TokenDaemon, []string{"create", "--graph", "g.dot"}, ErrFlagRefused, "refused: --graph on create"},
 		{"per-verb flag is not global", TokenRead, []string{"show", "--graph", "g.dot"}, nil, ""},
 		{"allowed flag", TokenRead, []string{"show", "--json"}, nil, ""},
 		{"nothing after the separator is a flag", TokenRead, []string{"show", "--", "--db"}, nil, ""},
@@ -124,9 +125,11 @@ func TestPolicyRefusedFlags(t *testing.T) {
 	}
 }
 
-// TestPolicyVerbResolution: the longest listed path wins, a leading bd
-// persistent flag and its value are read past, and a verb the file omits is
-// refused by name.
+// TestPolicyVerbResolution: the resolver reads argv the way bd's root parse
+// does, so the verb it class-checks is the verb bd dispatches. The longest
+// listed path wins, a value-taking flag's value is never a verb word, a flag
+// the policy cannot place before the verb is refused rather than guessed, and a
+// verb the file omits is refused by name.
 func TestPolicyVerbResolution(t *testing.T) {
 	t.Parallel()
 	p := testPolicy(t)
@@ -141,8 +144,17 @@ func TestPolicyVerbResolution(t *testing.T) {
 		{"id is not a second verb word", []string{"comments", "gt-abc"}, "comments", nil},
 		{"two-word verb", []string{"comments", "add", "gt-abc"}, "comments add", nil},
 		{"longest prefix wins", []string{"config", "get", "issue_prefix"}, "config get", nil},
-		{"leading flag before the verb", []string{"--allow-stale", "version"}, "version", nil},
 		{"leading value flag and its value", []string{"--actor", "town/crew/dipper", "show"}, "show", nil},
+		{"value flag takes a verb-shaped value", []string{"--format", "show", "create"}, "create", nil},
+		{"attached value is the flag's own", []string{"--format=show", "create"}, "create", nil},
+		{"boolean flag leaves the next word", []string{"--json", "show"}, "show", nil},
+		{"unknown flag before the verb is refused", []string{"--allow-stale", "version"}, "", ErrAmbiguousVerb},
+		{"unknown shorthand before the verb is refused", []string{"-q", "show"}, "", ErrAmbiguousVerb},
+		{"command flag before the verb is refused", []string{"--graph", "show", "create"}, "", ErrAmbiguousVerb},
+		{"flag after the verb cannot change it", []string{"update", "--assignee", "bob", "show"}, "update", nil},
+		{"empty argument is not a word", []string{"", "show"}, "show", nil},
+		{"separator ends the command words", []string{"--", "show"}, "", ErrVerbNotAllowed},
+		{"an alias the file does not list is refused", []string{"new", "gt-abc"}, "", ErrVerbNotAllowed},
 		{"unknown verb is refused by name", []string{"dolt", "push"}, "", ErrVerbNotAllowed},
 		{"no verb at all", []string{"--json"}, "", ErrVerbNotAllowed},
 	}
@@ -165,6 +177,43 @@ func TestPolicyVerbResolution(t *testing.T) {
 	// The refusal names the verb word, so an operator can see what was refused.
 	if _, err := p.Authorize(TokenOperator, []string{"dolt", "push"}); err == nil || !strings.Contains(err.Error(), "\"dolt\"") {
 		t.Errorf("unknown-verb error = %v, want it to name dolt", err)
+	}
+}
+
+// TestPolicyShorthandValue: -C takes the next argument as its value, so a
+// directory named like a verb is not read as one. The policy here does not
+// refuse -C, so the matched verb shows how the scan read it.
+func TestPolicyShorthandValue(t *testing.T) {
+	t.Parallel()
+	p, err := ParsePolicy(strings.NewReader(`{
+		"refused_flags": ["db"],
+		"verbs": [
+			{"path": "show", "class": "read"},
+			{"path": "town", "class": "read"}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	cases := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"separate value", []string{"-C", "town", "show"}, "show"},
+		{"glued value", []string{"-Ctown", "show"}, "show"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := p.Authorize(TokenRead, tc.argv)
+			if err != nil {
+				t.Fatalf("Authorize(%q) = %v, want %q", tc.argv, err, tc.want)
+			}
+			if got := v.Name(); got != tc.want {
+				t.Errorf("Authorize(%q) matched %q, want %q", tc.argv, got, tc.want)
+			}
+		})
 	}
 }
 

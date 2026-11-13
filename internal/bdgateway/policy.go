@@ -21,7 +21,8 @@ import (
 // The file is the authority, never a default: a verb it does not list is
 // refused by name, and a token class or verb class the code does not know is
 // refused too, so a typo in the file narrows the surface rather than widening
-// it.
+// it. The verb comes from argv read the way bd's own root parse reads it
+// (verbWords), so the class check applies to the verb bd will run.
 
 // VerbClass is what running a bd verb may do to the store.
 type VerbClass string
@@ -65,28 +66,63 @@ var (
 	// ErrBadVerbsFile is a verbs file ParsePolicy refuses: malformed JSON, a
 	// class or name outside its spelling, a duplicate, or an empty list.
 	ErrBadVerbsFile = errors.New("bdgateway: bad verbs file")
+	// ErrAmbiguousVerb is argv whose verb the policy cannot name the way bd's
+	// own parse would, because a flag before the verb is one the policy cannot
+	// place. It refuses rather than guess: a flag it read as boolean where bd
+	// reads a value (or the reverse) would class-check one verb while bd runs
+	// another.
+	ErrAmbiguousVerb = errors.New("bdgateway: cannot tell which verb these arguments run")
 )
 
 // maxPathWords bounds a verb path. bd's deepest verb gt calls is three words
 // ("mol wisp list"), and the resolver tries at most this many words.
 const maxPathWords = 3
 
-// leadingValueFlags are bd's persistent flags that take the next argument as
-// their value, so the verb scan does not read that value as the verb. They are
-// the value-taking persistent flags of bd 1.2.2 in
-// internal/cmdtree/bd-command-tree.json; TestLeadingValueFlagsMatchCommandTree
-// holds the two lists equal, so a bd upgrade that changes one fails the gate.
-var leadingValueFlags = map[string]bool{
-	"--actor":            true,
-	"--cpu-profile":      true,
-	"--database":         true,
-	"--db":               true,
-	"-C":                 true,
-	"--directory":        true,
-	"--dolt-auto-commit": true,
-	"--format":           true,
-	"--machine":          true,
-	"--mem-profile":      true,
+// flagKind is how bd's root command reads a flag's argument.
+type flagKind int
+
+const (
+	// flagBool takes no value, so the word after it is a command word.
+	flagBool flagKind = iota
+	// flagValue takes the next argument as its value, so that argument is
+	// never a command word.
+	flagValue
+)
+
+// bdRootFlags is every flag bd's root command knows, by its spelling on a
+// command line, with whether it consumes the next argument. bd dispatches on
+// the words left after its root flags are removed, so the resolver has to
+// remove exactly the words bd does: reading a value-taking flag as boolean (or
+// the reverse) shifts the verb words and can class-check one verb while bd runs
+// another.
+//
+// The long names are bd's persistent flags in
+// internal/cmdtree/bd-command-tree.json and the value-taking set is the one the
+// command-tree scan uses (cmdtree.BdGlobalValueFlagNames), which is the only
+// description of bd's root flags this repository holds. -C is --directory's
+// shorthand, the one short flag listed there; another short token is refused
+// rather than guessed, because the tree records no shorthands.
+// TestRootFlagsMatchCommandTree holds this map to both lists.
+var bdRootFlags = map[string]flagKind{
+	"--actor":            flagValue,
+	"--cpu-profile":      flagValue,
+	"--database":         flagValue,
+	"--db":               flagValue,
+	"-C":                 flagValue,
+	"--directory":        flagValue,
+	"--dolt-auto-commit": flagValue,
+	"--format":           flagValue,
+	"--machine":          flagValue,
+	"--mem-profile":      flagValue,
+
+	"--global":             flagBool,
+	"--ignore-schema-skew": flagBool,
+	"--json":               flagBool,
+	"--no-color":           flagBool,
+	"--quiet":              flagBool,
+	"--readonly":           flagBool,
+	"--sandbox":            flagBool,
+	"--verbose":            flagBool,
 }
 
 // Verb is one allowlisted verb: the path words that name it, the class that may
@@ -270,10 +306,14 @@ func parseVerbClass(s string) (VerbClass, error) {
 // verb's class, and no flag on argv is refused for the verb or for every verb.
 // It returns the matched verb so the caller can log its path and class.
 //
-// argv is bd's arguments, never "bd" and never a shell string. Leading bd
-// persistent flags are read past, and nothing after "--" is a flag.
+// argv is bd's arguments, never "bd" and never a shell string. bd root flags
+// are read the way bd reads them, and nothing after "--" is a flag.
 func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
-	name := p.verbName(argv)
+	words, err := p.verbWords(argv)
+	if err != nil {
+		return Verb{}, err
+	}
+	name := p.verbName(words)
 	v, ok := p.verbs[name]
 	if !ok {
 		return Verb{}, fmt.Errorf("%w: %q", ErrVerbNotAllowed, name)
@@ -282,18 +322,89 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 		return Verb{}, fmt.Errorf("%w: %s token may not run %s (%s)", ErrClassDenied, class, v.Name(), v.Class)
 	}
 	if flag, ok := p.refusedFlag(v, argv); ok {
-		return Verb{}, fmt.Errorf("%w: --%s on %s", ErrFlagRefused, flag, v.Name())
+		return Verb{}, fmt.Errorf("%w: %s on %s", ErrFlagRefused, flag.spelling, v.Name())
 	}
 	return v, nil
 }
 
-// verbName returns the listed verb path argv names, or the first word to name
+// verbWords returns the words bd's root command would read as command words
+// for argv, or ErrAmbiguousVerb when a flag before the last of them is one the
+// policy cannot place. It follows cobra's stripFlags, which bd's root runs
+// before matching a subcommand: "--" ends the parse; a long flag with an
+// attached value ("--db=beads") and a glued shorthand ("-Cdir") carry theirs
+// already; a known boolean flag leaves the next argument alone; a known
+// value-taking flag takes it, whatever it looks like.
+//
+// Once no listed verb path extends the words read so far, a later flag cannot
+// change the verb, so the rest of argv is not the resolver's concern.
+func (p *Policy) verbWords(argv []string) ([]string, error) {
+	words := make([]string, 0, maxPathWords)
+	for i := 0; i < len(argv) && p.extends(words); i++ {
+		arg := argv[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "" || arg == "-" {
+			// cobra reads neither as a command word; a bare "-" is passed to
+			// the command, not read as a flag with a value.
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			words = append(words, arg)
+			continue
+		}
+		_, ok, consumes := rootFlag(arg)
+		if !ok {
+			return nil, fmt.Errorf("%w: %q is not a bd root flag the policy can place", ErrAmbiguousVerb, arg)
+		}
+		if consumes {
+			i++ // the next argument is this flag's value
+		}
+	}
+	return words, nil
+}
+
+// extends reports whether a listed verb path has words as a strict prefix, so
+// a word after them can still name a longer verb.
+func (p *Policy) extends(words []string) bool {
+	if len(words) >= maxPathWords {
+		return false
+	}
+	for _, v := range p.verbs {
+		if len(v.Path) > len(words) && slices.Equal(v.Path[:len(words)], words) {
+			return true
+		}
+	}
+	return false
+}
+
+// rootFlag classifies one dash-prefixed argument. known is false for a flag
+// outside bdRootFlags; consumes reports whether the flag takes the following
+// argument as its value.
+func rootFlag(arg string) (kind flagKind, known, consumes bool) {
+	if strings.HasPrefix(arg, "--") {
+		name, _, attached := strings.Cut(arg, "=")
+		kind, ok := bdRootFlags[name]
+		if !ok {
+			return 0, false, false
+		}
+		return kind, true, kind == flagValue && !attached
+	}
+	switch {
+	case arg == "-C":
+		return flagValue, true, true
+	case strings.HasPrefix(arg, "-C"):
+		return flagValue, true, false
+	}
+	return 0, false, false
+}
+
+// verbName returns the listed verb path words name, or the first word to name
 // in a refusal when nothing matches. The longest listed prefix wins, so "mol
 // wisp list" resolves to its read row while "mol wisp <formula>" falls back to
 // the write row for "mol wisp", and "comments gt-abc" resolves to "comments"
 // because "comments gt-abc" is not listed.
-func (p *Policy) verbName(argv []string) string {
-	words := nonFlagWords(argv, maxPathWords)
+func (p *Policy) verbName(words []string) string {
 	for n := len(words); n >= 1; n-- {
 		name := strings.Join(words[:n], " ")
 		if _, ok := p.verbs[name]; ok {
@@ -306,53 +417,41 @@ func (p *Policy) verbName(argv []string) string {
 	return words[0]
 }
 
-// nonFlagWords returns up to limit words of argv that are not flags, skipping
-// the value of a bd persistent flag that takes one. It stops at "--": nothing
-// after it is a flag or, in bd's parse, a command word.
-func nonFlagWords(argv []string, limit int) []string {
-	words := make([]string, 0, limit)
-	for i := 0; i < len(argv) && len(words) < limit; i++ {
-		arg := argv[i]
-		if arg == "--" {
-			break
-		}
-		if strings.HasPrefix(arg, "-") {
-			if leadingValueFlags[arg] {
-				i++ // the next argument is this flag's value
-			}
-			continue
-		}
-		words = append(words, arg)
-	}
-	return words
-}
-
 // refusedFlag returns the first flag on argv that is refused for v or for every
-// verb, or false when none is. Nothing after "--" is a flag. The scan does not
-// know which flags take free text, so a value spelled like a refused flag (a
-// title of "--db", say) is refused too; the call is retryable with the value
-// attached (--title=--db), and refusing is the safe side.
-func (p *Policy) refusedFlag(v Verb, argv []string) (string, bool) {
-	for i := 0; i < len(argv); i++ {
-		arg := argv[i]
+// verb, with its spelling as written, or false when none is. Nothing after "--"
+// is a flag. The scan does not use the flag classification the verb resolver
+// does, because a refused flag must be caught wherever it appears: a value
+// spelled like a refused flag (a title of "--db", say) is refused too. The call
+// is retryable with the value attached (--title=--db), and refusing is the safe
+// side.
+func (p *Policy) refusedFlag(v Verb, argv []string) (flagToken, bool) {
+	for _, arg := range argv {
 		if arg == "--" {
 			break
 		}
-		for _, name := range flagNames(arg) {
-			if p.refusedFlags[name] || slices.Contains(v.FlagsRefused, name) {
-				return name, true
+		for _, flag := range flagNames(arg) {
+			if p.refusedFlags[flag.name] || slices.Contains(v.FlagsRefused, flag.name) {
+				return flag, true
 			}
 		}
 	}
-	return "", false
+	return flagToken{}, false
 }
 
-// flagNames returns the flag names a dash-prefixed token asks for, without
-// their dashes or value: "--db=beads" and "--db" both name "db". A single dash
-// starts shorthands, which pflag may group, so every leading letter is a name:
+// flagToken is one flag a dash-prefixed argument asks for: its name without
+// dashes, and the spelling it appeared as, so a refusal names -C rather than
+// --C.
+type flagToken struct {
+	name     string
+	spelling string
+}
+
+// flagNames returns the flags a dash-prefixed token asks for, without their
+// values: "--db=beads" and "--db" both name "db" as --db. A single dash starts
+// shorthands, which pflag may group, so every leading letter is a name:
 // "-C/town" names "C" and "-qC" names "q" and "C". A bare "-" is stdin, not a
 // flag, and a token with no letter is not one either.
-func flagNames(arg string) []string {
+func flagNames(arg string) []flagToken {
 	if len(arg) < 2 || arg[0] != '-' {
 		return nil
 	}
@@ -361,17 +460,17 @@ func flagNames(arg string) []string {
 		if i := strings.IndexByte(name, '='); i >= 0 {
 			name = name[:i]
 		}
-		return []string{name}
+		return []flagToken{{name: name, spelling: "--" + name}}
 	}
 	// The letters run until the first non-letter, which starts an attached
 	// value, or an "=".
-	var names []string
+	var tokens []flagToken
 	for i := 1; i < len(arg); i++ {
 		c := arg[i]
 		if !(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') {
 			break
 		}
-		names = append(names, string(c))
+		tokens = append(tokens, flagToken{name: string(c), spelling: "-" + string(c)})
 	}
-	return names
+	return tokens
 }
