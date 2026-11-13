@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -48,10 +49,10 @@ Requests and limits are kubernetes-driver fields; a docker profile refuses them.
 
 The town is named by --town-root, else GT_TOWN_ROOT, else the town the working
 directory is in. --town-root wins outright. When GT_TOWN_ROOT is set and the
-working directory is in a different town, the command refuses and writes
-nothing, so a run from a scratch town cannot change the live one. A run that
-writes or dry-runs prints the town root and the settings file it changes; a
-refusal names both towns in its error.
+working directory is in a different town, the command refuses and writes nothing, so a
+run from a scratch town cannot change the live one; that refusal names both
+towns. A run that writes or dry-runs prints the town root and the settings file
+it changes.
 
 The file is written atomically and the previous copy is kept beside it as
 <file>.bak-<timestamp>; the newest 30 and the last 7 days are kept. The change
@@ -130,10 +131,12 @@ type townEnv struct {
 	realpath func(path string) (string, error)
 }
 
-// processTownEnv is the town resolver's view of the running process.
+// processTownEnv is the town resolver's view of the running process. The working
+// directory is the caller's (callercwd), so a gt run from the Mac wrapper names
+// the town the user is in, not the container's.
 func processTownEnv() townEnv {
 	return townEnv{
-		cwd:      os.Getwd,
+		cwd:      callercwd.Getwd,
 		getenv:   os.Getenv,
 		find:     workspace.Find,
 		isTown:   workspace.IsWorkspace,
