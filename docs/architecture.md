@@ -193,6 +193,10 @@ The workflow files in Forgejo are protected: only a human account may change the
 
 The dashboard is a second Deployment of the same image. It serves one read-only page. A single hub polls the town's files on its own clock and pushes the result to every open browser tab, so a second tab costs nothing and a page nobody has open costs nothing. Nothing publishes it. The operator reaches it with a `kubectl port-forward` from the Mac to the dashboard Deployment (local port 8788 to the pod's 8787) and opens the page in a browser tab. The panes include: Attention, Birds, Beads, Cloud (with Deploys), Cost, Events, Forgejo, Landings (with Polecats), Machine, om review, Rigs and Tier sweeps.
 
+### The tracker
+
+The tracker is an issue service the town owns: `trackerd`, a Postgres-backed program rendered beside the daemon and the dashboard when `gt town cluster render --tracker` runs in a live render. The render names the Secret whose `dsn` key holds the connection string and never reads the DSN. `--tracker-backup` adds the nightly dump: a CronJob whose pod runs `trackerbackup` in the postgres image the caller names, writes the dumps into the `tracker-backup` claim, keeps the newest few, and forbids a run that starts while one is still going. Before relying on a dump, read [Restoring the tracker database from a nightly dump](tracker-restore.md), which copies one out and restores it.
+
 ## The data plane
 
 The data plane is where facts live. Four stores matter.
