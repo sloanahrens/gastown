@@ -312,6 +312,21 @@ func TestOpenShellOpsDeleteFailureKeepsTheRecord(t *testing.T) {
 	}
 }
 
+// A Delete of a sandbox with no record whose delete fails reports the failure:
+// there is no seat to end, and no record is dropped to hide it.
+func TestOpenShellOpsDeleteWithoutARecordReportsAFailedDelete(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"delete": errors.New("exit status 1")},
+		Stderr: map[string]string{"delete": "connection refused"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+
+	if err := b.Delete(openshellTestSession); err == nil {
+		t.Fatal("Delete = nil, want the failed delete reported")
+	}
+}
+
 func TestOpenShellOpsHooksAreWiredToTheRecordBackend(t *testing.T) {
 	t.Parallel()
 	// A nil check passes for a hook pointed at anything, so compare the

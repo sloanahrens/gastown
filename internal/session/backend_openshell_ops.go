@@ -409,6 +409,53 @@ func (b *openshellBackend) Stop(session string) error {
 	return b.cli.Stop(context.Background(), session)
 }
 
+// seatSandboxDelete is what a caller of deleteSeatSandbox needs beyond the
+// record: whether a failed transcript copy stops the delete, and whether the
+// seat's tracker token ends with its sandbox.
+type seatSandboxDelete struct {
+	// stopOnCopyFailure makes a failed transcript copy stop the delete and be
+	// returned: a spawn over an ended seat must not delete a sandbox whose
+	// transcript it could not recover. The patrol warns and deletes anyway.
+	stopOnCopyFailure bool
+	// revoke ends the tracker token of the seat the record names. A spawn over
+	// an ended seat keeps it for the sandbox it is about to create
+	// (gt-p85pw.84).
+	revoke bool
+}
+
+// deleteSeatSandbox deletes the sandbox rec describes: the seat's transcripts
+// are saved first, then the sandbox is deleted, and its tracker token ends when
+// d.revoke. It is the one delete sequence the three recorded-seat callers share
+// (Delete, the patrol's record delete and createOrReplaceEndedSeat); the caller
+// removes the record afterwards. A failed delete returns *sandboxDeleteFailed,
+// so a caller with wording of its own for that step can tell it from a failed
+// transcript copy; its message is the gateway error's.
+func (b *openshellBackend) deleteSeatSandbox(rec SandboxRecord, d seatSandboxDelete) error {
+	if d.stopOnCopyFailure {
+		if err := b.saveSeatTranscripts(rec); err != nil {
+			return err
+		}
+	} else {
+		b.copySeatTranscripts(rec)
+	}
+	if err := b.deleteSandbox(rec.Session); err != nil {
+		return &sandboxDeleteFailed{err}
+	}
+	if d.revoke {
+		b.revokeSeat(rec)
+	}
+	return nil
+}
+
+// sandboxDeleteFailed is deleteSeatSandbox's failure at the gateway's delete
+// step. Its message and unwrap are the gateway error's, so a caller that
+// returns it unchanged reports what it always did; one whose wording names the
+// step tells it from a transcript-copy failure.
+type sandboxDeleteFailed struct{ err error }
+
+func (e *sandboxDeleteFailed) Error() string { return e.err.Error() }
+func (e *sandboxDeleteFailed) Unwrap() error { return e.err }
+
 // Delete copies the sandbox's transcripts out, then removes the sandbox and its
 // registry record, and ends the tracker token of the seat it ran. A sandbox
 // that is already gone counts as deleted and still ends the token; any other
@@ -423,14 +470,13 @@ func (b *openshellBackend) Delete(session string) error {
 		return fmt.Errorf("sandbox %s: reading its record to find its seat's token: %w", session, err)
 	}
 	if hasRec {
-		b.copySeatTranscripts(rec)
-	}
-	if err := b.deleteSandbox(session); err != nil {
-		return err
-	}
-	if hasRec {
-		b.revokeSeat(rec)
+		if err := b.deleteSeatSandbox(rec, seatSandboxDelete{revoke: true}); err != nil {
+			return err
+		}
 	} else {
+		if err := b.deleteSandbox(session); err != nil {
+			return err
+		}
 		b.warn("sandbox %s has no record, so its seat is unknown and no tracker token is revoked", session)
 	}
 	routing.forget(session)
@@ -442,12 +488,7 @@ func (b *openshellBackend) Delete(session string) error {
 // already gone still ends its seat, and a failed delete revokes nothing, since
 // the sandbox may still run.
 func (b *openshellBackend) deleteRecorded(rec SandboxRecord) error {
-	b.copySeatTranscripts(rec)
-	if err := b.deleteSandbox(rec.Session); err != nil {
-		return err
-	}
-	b.revokeSeat(rec)
-	return nil
+	return b.deleteSeatSandbox(rec, seatSandboxDelete{revoke: true})
 }
 
 // revokeSeat ends the tracker token of the seat rec names. A failed revoke is a

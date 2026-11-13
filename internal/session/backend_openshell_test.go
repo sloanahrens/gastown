@@ -1531,7 +1531,7 @@ func TestOpenShellCheckSandboxGTRefusesWhenTheSourceCheckoutIsUnknown(t *testing
 // A create the gateway refuses asks whether the name is held, and a name no
 // sandbox holds leaves the create's own failure standing: nothing is deleted and
 // nothing further runs (gt-vgm971).
-func TestOpenShellPrepareCreateFailureWithTheNameFreeMakesNoFurtherCalls(t *testing.T) {
+func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	fake := &sandbox.Fake{

@@ -1021,11 +1021,12 @@ func (b *openshellBackend) createOrReplaceEndedSeat(ctx context.Context, create 
 	// The old seat's transcripts are saved before the delete, and a copy or a
 	// delete that fails stops the spawn: the sandbox is left for the patrol
 	// rather than deleted with the transcript it held unrecovered.
-	if err := b.saveSeatTranscripts(rec); err != nil {
+	if err := b.deleteSeatSandbox(rec, seatSandboxDelete{stopOnCopyFailure: true}); err != nil {
+		var deleteFailed *sandboxDeleteFailed
+		if errors.As(err, &deleteFailed) {
+			return fmt.Errorf("%w; deleting the ended sandbox holding the name: %v", createErr, deleteFailed.err)
+		}
 		return fmt.Errorf("%w; %v", createErr, err)
-	}
-	if err := b.deleteSandbox(create.Name); err != nil {
-		return fmt.Errorf("%w; deleting the ended sandbox holding the name: %v", createErr, err)
 	}
 	// The seat token is not ended: Prepare's trackerFor already ensured this
 	// seat's token for the new sandbox, and ending it here would revoke the
