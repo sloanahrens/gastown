@@ -173,8 +173,8 @@ func TestBuildRecordIncomplete(t *testing.T) {
 		{"session with no id is skipped and not counted", factsIn("ws-a"), []SessionUsage{sessA, noID}, false, 1000011, 0.456},
 		{"session read partly", factsIn("ws-a"), []SessionUsage{partial}, false, 7, 0},
 		{"unparseable timestamp keeps tokens, drops cost", factsIn("ws-a"), []SessionUsage{badTS}, false, 1000000, 0},
-		// A basic-format offset ("+0200") was read by the reference and must not make the record
-		// incomplete; its tokens and cost stay counted.
+		// A basic-format offset ("+0200") names its instant: the record stays complete and its
+		// tokens and cost stay counted.
 		{"reference timestamp form stays complete", factsIn("ws-a"), []SessionUsage{{ID: "s-basic", Complete: true, Main: []Message{
 			msg("x4", "deepseek-flash", "2026-10-12T18:55:00+0200", 1000000, 0, 2000000, 500000),
 		}}}, true, 1000000, 0.456},
