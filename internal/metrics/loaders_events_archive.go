@@ -20,12 +20,13 @@ import (
 // events-<database>.csv.gz per database under one directory, each with a header
 // and one row per event. The daemon's history archive names each day's file
 // events-<database>-<UTC date>.csv.gz, and a day's export overlaps the one before
-// it (the lookback window), so an event can sit in two files; each event id is
-// counted once. LoadBeadChangesArchive rolls the rows up to one
-// BeadChangeRow per bead, and WriteBeadChangesCSV publishes them for a dataset
-// loader. A bead created before the archive's retention start has no created
-// event; its creation time is then the created_at inside an updated row's
-// old_value, which is the issue as it stood before that change.
+// it (the lookback window), so an event can sit in two files; it is counted once,
+// and the ids kept to match a repeat are pruned to that window, outside which
+// the writer never repeats an event (gt-7nxj4). LoadBeadChangesArchive rolls the
+// rows up to one BeadChangeRow per bead, and WriteBeadChangesCSV publishes them
+// for a dataset loader. A bead created before the archive's retention start has
+// no created event; its creation time is then the created_at inside an updated
+// row's old_value, which is the issue as it stood before that change.
 //
 // Every row the loader refuses is recorded in the Dropped log with its file and
 // row number, so the row counts a report publishes always account for the
@@ -36,6 +37,12 @@ import (
 const (
 	eventsArchivePrefix = "events-"
 	eventsArchiveSuffix = ".csv.gz"
+
+	// archiveDedupeWindow is how far back before the newest row counted an
+	// archive file re-reads, mirroring internal/daemon's eventsArchiveLookback
+	// (gt-7nxj4). An event id can only repeat inside it, so the loader keeps
+	// dedupe state to one window of rows instead of every id of the archive.
+	archiveDedupeWindow = 24 * time.Hour
 )
 
 // archiveDatePart is the UTC date the daemon appends to a dated events file's
@@ -111,11 +118,12 @@ type BeadChangeRow struct {
 // fsys and returns one BeadChangeRow per database and issue id, sorted by
 // database then issue id. A file is events-<database>.csv.gz or the daemon's
 // dated events-<database>-<UTC date>.csv.gz. An event id already counted from
-// another file is recorded in dropped and not counted again. A row it cannot
-// parse is recorded in dropped and the other rows still load; a file it cannot
-// read is recorded as failed, and the rows that did load are returned beside an
-// error naming that file. A directory that cannot be listed is an error, since
-// no rows there does not mean no changes were archived.
+// another file is counted once, and every repeat is reported as one Dropped
+// line. A row it cannot parse is recorded in dropped and the other rows still
+// load; a file it cannot read is recorded as failed, and the rows that did load
+// are returned beside an error naming that file. A directory that cannot be
+// listed is an error, since no rows there does not mean no changes were
+// archived.
 //
 // Only the files this load failed count against it: a caller may share one
 // Dropped between loaders.
@@ -131,20 +139,33 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 	if err != nil {
 		return nil, fmt.Errorf("events archive: listing %s: %w", dir, err)
 	}
+	whole := archiveWholeExports(entries)
 	aggs := make(map[string]*beadChangeAgg)
-	seen := make(map[string]bool)
+	seen := make(map[string]map[string]time.Time)
+	newest := make(map[string]time.Time)
+	var repeats archiveRepeats
 	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, eventsArchivePrefix) || !strings.HasSuffix(name, eventsArchiveSuffix) {
+		if !isArchiveFile(entry) {
 			continue
 		}
+		name := entry.Name()
 		filePath := path.Join(dir, name)
 		database, ok := archiveFileDatabase(name)
 		if !ok {
 			dropped.Fail("archive:"+filePath, "file name names no database")
 			continue
 		}
-		readEventsArchiveFile(fsys, filePath, database, aggs, seen, dropped)
+		ids := seen[database]
+		if ids == nil {
+			ids = make(map[string]time.Time)
+			seen[database] = ids
+		}
+		if !whole[database] {
+			pruneArchiveSeen(ids, newest[database])
+		}
+		if at := readEventsArchiveFile(fsys, filePath, database, aggs, ids, dropped, &repeats); at.After(newest[database]) {
+			newest[database] = at
+		}
 	}
 	rows := make([]BeadChangeRow, 0, len(aggs))
 	for _, agg := range aggs {
@@ -156,6 +177,9 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 		}
 		return rows[i].IssueID < rows[j].IssueID
 	})
+	if repeats.count > 0 {
+		dropped.Add(repeats.source, repeats.reason())
+	}
 	if failed := dropped.Failed[failedBefore:]; len(failed) > 0 {
 		return rows, fmt.Errorf("events archive: %d file(s) not read in full, rows are partial: %s",
 			len(failed), strings.Join(failed, ", "))
@@ -166,13 +190,99 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 // archiveFileDatabase returns the database an events archive file belongs to:
 // events-<db>.csv.gz, or events-<db>-<8-digit UTC date>.csv.gz. The date is
 // parsed from the right, so a database name that extends a shorter one is never
-// mistaken for it. It reports false when the name holds no database.
+// mistaken for it. A database part that is empty or starts or ends with a dash
+// is ambiguous — the dash cannot be told from the separator around it — so it
+// reports false, as it does for a name holding no database.
 func archiveFileDatabase(name string) (string, bool) {
-	stem := strings.TrimSuffix(strings.TrimPrefix(name, eventsArchivePrefix), eventsArchiveSuffix)
-	if i := strings.LastIndex(stem, "-"); i > 0 && archiveDatePart.MatchString(stem[i+1:]) {
-		stem = stem[:i]
+	stem := archiveFileStem(name)
+	if archiveFileDated(name) {
+		stem = stem[:strings.LastIndex(stem, "-")]
 	}
-	return stem, stem != ""
+	if stem == "" || strings.HasPrefix(stem, "-") || strings.HasSuffix(stem, "-") {
+		return "", false
+	}
+	return stem, true
+}
+
+// archiveFileStem is an archive file's name between its prefix and its suffix.
+func archiveFileStem(name string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(name, eventsArchivePrefix), eventsArchiveSuffix)
+}
+
+// archiveFileDated reports whether an archive file name carries the daemon's
+// UTC date, as events-<db>-<date>.csv.gz does.
+func archiveFileDated(name string) bool {
+	stem := archiveFileStem(name)
+	i := strings.LastIndex(stem, "-")
+	return i >= 0 && archiveDatePart.MatchString(stem[i+1:])
+}
+
+// isArchiveFile reports whether an entry is an archive file the loader reads.
+func isArchiveFile(entry fs.DirEntry) bool {
+	name := entry.Name()
+	return !entry.IsDir() && strings.HasPrefix(name, eventsArchivePrefix) && strings.HasSuffix(name, eventsArchiveSuffix)
+}
+
+// archiveWholeExports lists the databases the directory holds an undated
+// events-<db>.csv.gz export of. That export is the whole table, and a directory
+// that also holds dated files can repeat any of its rows, so the loader keeps
+// every id it counts for such a database: the lookback window is a promise only
+// the daemon's dated archive keeps (gt-7nxj4).
+func archiveWholeExports(entries []fs.DirEntry) map[string]bool {
+	whole := make(map[string]bool)
+	for _, entry := range entries {
+		if !isArchiveFile(entry) {
+			continue
+		}
+		if database, ok := archiveFileDatabase(entry.Name()); ok && !archiveFileDated(entry.Name()) {
+			whole[database] = true
+		}
+	}
+	return whole
+}
+
+// pruneArchiveSeen drops the ids of events older than the window an archive
+// file re-reads. newest is the database's newest row counted before this file,
+// never the file about to be read: its rows may run hours past a repeat it also
+// carries.
+func pruneArchiveSeen(seen map[string]time.Time, newest time.Time) {
+	if newest.IsZero() {
+		return
+	}
+	windowStart := newest.Add(-archiveDedupeWindow)
+	for id, at := range seen {
+		if at.Before(windowStart) {
+			delete(seen, id)
+		}
+	}
+}
+
+// archiveRepeats is the load's count of rows that repeated an event id counted
+// earlier, with the first one's place. The archive's lookback overlap makes a
+// repeat expected, so the load reports one Dropped line for all of them rather
+// than one per row, which a re-import would grow to the archive's size.
+type archiveRepeats struct {
+	count   int
+	source  string
+	row     int
+	eventID string
+}
+
+func (r *archiveRepeats) add(source string, row int, eventID string) {
+	if r.count == 0 {
+		r.source, r.row, r.eventID = source, row, eventID
+	}
+	r.count++
+}
+
+// reason is the load's one Dropped line: where the first repeat was, and how
+// many rows in all repeated an earlier event.
+func (r *archiveRepeats) reason() string {
+	reason := fmt.Sprintf("row %d: event id %s is already counted from another file", r.row, r.eventID)
+	if r.count > 1 {
+		reason += fmt.Sprintf("; %d rows in all repeated an earlier event", r.count)
+	}
+	return reason
 }
 
 // beadChangeAgg is one bead's counts and earliest stamps while its rows are
@@ -232,14 +342,15 @@ func (a *beadChangeAgg) finish() BeadChangeRow {
 	return row
 }
 
-// readEventsArchiveFile reads one gzip CSV and folds its rows into aggs. seen
-// holds the database and id of every row already counted, across files.
-func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*beadChangeAgg, seen map[string]bool, dropped *Dropped) {
+// readEventsArchiveFile reads one gzip CSV and folds its rows into aggs,
+// returning the newest created_at it counted. seen holds the event ids already
+// counted for the database, and repeats counts the rows that repeated one.
+func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*beadChangeAgg, seen map[string]time.Time, dropped *Dropped, repeats *archiveRepeats) time.Time {
 	source := "archive:" + path
 	f, err := fsys.Open(path)
 	if err != nil {
 		dropped.Fail(source, fmt.Sprintf("opening: %v", err))
-		return
+		return time.Time{}
 	}
 	// The file is only read, and a gzip checksum failure surfaces from Read at
 	// the end of the stream, not from either Close.
@@ -247,21 +358,22 @@ func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*b
 	zr, err := gzip.NewReader(f)
 	if err != nil {
 		dropped.Fail(source, fmt.Sprintf("not gzip: %v", err))
-		return
+		return time.Time{}
 	}
 	defer func() { _ = zr.Close() }()
-	readEventsArchiveCSV(csv.NewReader(zr), source, database, aggs, seen, dropped)
+	return readEventsArchiveCSV(csv.NewReader(zr), source, database, aggs, seen, dropped, repeats)
 }
 
-// readEventsArchiveCSV reads the header and every record of one archive file.
-// A row whose id seen already holds was counted already, in this file or an
-// earlier one: it is recorded in dropped and not folded in again. A row with an
-// empty id has no key to match, so it is folded in as read.
-func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[string]*beadChangeAgg, seen map[string]bool, dropped *Dropped) {
+// readEventsArchiveCSV reads the header and every record of one archive file
+// and returns the newest created_at it counted. A row whose id seen already
+// holds was counted already, in this file or an earlier one: repeats records it
+// for the load's one-line report and the row is not folded in again. A row with
+// an empty id has no key to match, so it is folded in as read.
+func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[string]*beadChangeAgg, seen map[string]time.Time, dropped *Dropped, repeats *archiveRepeats) time.Time {
 	header, err := r.Read()
 	if err != nil {
 		dropped.Fail(source, fmt.Sprintf("header: %v", err))
-		return
+		return time.Time{}
 	}
 	columns := make(map[string]int, len(header))
 	for i, name := range header {
@@ -275,12 +387,13 @@ func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[strin
 	}
 	if len(missing) > 0 {
 		dropped.Fail(source, "header is missing columns: "+strings.Join(missing, ", "))
-		return
+		return time.Time{}
 	}
+	var newest time.Time
 	for n := 2; ; n++ {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
-			return
+			return newest
 		}
 		if err != nil {
 			// encoding/csv reports a malformed record — a wrong field count, a
@@ -297,20 +410,22 @@ func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[strin
 				continue
 			}
 			dropped.Fail(source, fmt.Sprintf("row %d: %v; later rows not read", n, err))
-			return
+			return newest
 		}
 		ev, err := parseArchiveEvent(rec, columns)
 		if err != nil {
 			dropped.Add(source, fmt.Sprintf("row %d: %v", n, err))
 			continue
 		}
-		key := database + "\x00" + ev.id
 		if ev.id != "" {
-			if seen[key] {
-				dropped.Add(source, fmt.Sprintf("row %d: event id %s is already counted from another file", n, ev.id))
+			if _, counted := seen[ev.id]; counted {
+				repeats.add(source, n, ev.id)
 				continue
 			}
-			seen[key] = true
+			seen[ev.id] = ev.at
+		}
+		if ev.at.After(newest) {
+			newest = ev.at
 		}
 		agg := aggs[database+"\x00"+ev.issue]
 		if agg == nil {

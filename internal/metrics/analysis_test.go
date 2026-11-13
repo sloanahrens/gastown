@@ -890,7 +890,6 @@ func TestAnalysePublishesThePanelWhenTheTrendCannotBeBuilt(t *testing.T) {
 	}
 }
 
-// callWith is the first recorded call whose argv[0] is name.
 // archiveDirWith writes files into a fresh history archive directory and returns
 // its path.
 func archiveDirWith(t *testing.T, files map[string][]byte) string {
@@ -1064,6 +1063,7 @@ func TestPublishBeadChangesNamesAStaleTableItCannotRemove(t *testing.T) {
 	}
 }
 
+// callWith is the first recorded call whose argv[0] is name.
 func callWith(calls []recordedCall, name string) *recordedCall {
 	for i, call := range calls {
 		if call.argv[0] == name {

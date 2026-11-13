@@ -792,6 +792,141 @@ func TestBeadChangesCountsAnEventOnceAcrossDatedFiles(t *testing.T) {
 	}
 }
 
+// The ids a repeat is matched against are kept for the window the archive
+// re-reads, not for the whole archive: a repeat older than the newest row by
+// more than the window is outside anything the writer produces, and is counted
+// as the new event it looks like.
+func TestBeadChangesCountsARepeatBeyondTheWindowAgain(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown-20261101.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("7", "gt-1", "label_added", "alice", "", "", "2026-10-01T00:00:00Z"),
+			archiveRowWithID("8", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-05T00:00:00Z"),
+		}),
+		"events-gastown-20261103.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("7", "gt-1", "label_added", "alice", "", "", "2026-10-01T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	row := findBeadChange(t, rows, "gastown", "gt-1")
+	if row.LabelAddedCount != 2 {
+		t.Errorf("LabelAddedCount = %d, want 2: the repeat is older than the window the loader keeps ids for", row.LabelAddedCount)
+	}
+	if dropped.Count() != 0 {
+		t.Errorf("dropped = %+v, want none: an id outside the window is not seen as a repeat", dropped.Items)
+	}
+}
+
+// The window is measured from the rows counted before the file, not from the
+// rows inside it: a run that missed days re-reads an old event and writes much
+// newer rows into the same file, and the old event is still counted once.
+func TestBeadChangesKeepsABackdatedRepeatInTheNextFile(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown-20261002.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "", "2026-10-02T00:00:00Z"),
+		}),
+		"events-gastown-20261025.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("9", "gt-1", "closed", "alice", "", "", "2026-10-25T00:00:00Z"),
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "", "2026-10-02T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	row := findBeadChange(t, rows, "gastown", "gt-1")
+	if row.LabelAddedCount != 1 {
+		t.Errorf("LabelAddedCount = %d, want 1: the newer row beside the repeat does not move the window before the file", row.LabelAddedCount)
+	}
+	if dropped.Count() != 1 {
+		t.Fatalf("dropped = %+v, want the one repeat logged", dropped.Items)
+	}
+	if got := dropped.Items[0]; got.Source != "archive:archive/events-gastown-20261025.csv.gz" {
+		t.Errorf("drop = %+v, want it logged against the later file", got)
+	}
+}
+
+// A repeat is expected where the lookback overlaps, so the load reports every
+// repeat as one Dropped line naming the first, not one line per row: a full
+// re-import would otherwise fill the log with the archive it repeated.
+func TestBeadChangesLogsRepeatsAsOneDrop(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown-20261101.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "", "2026-10-01T01:00:00Z"),
+			archiveRowWithID("3", "gt-1", "closed", "alice", "", "", "2026-10-01T02:00:00Z"),
+		}),
+		"events-gastown-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "", "2026-10-01T01:00:00Z"),
+			archiveRowWithID("3", "gt-1", "closed", "alice", "", "", "2026-10-01T02:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	row := findBeadChange(t, rows, "gastown", "gt-1")
+	if row.CreatedAt != "2026-10-01T00:00:00Z" || row.LabelAddedCount != 1 || row.ClosedAt != "2026-10-01T02:00:00Z" {
+		t.Errorf("row = %+v, want each of the three events counted once", row)
+	}
+	if dropped.Count() != 1 {
+		t.Fatalf("dropped = %+v, want one line for the three repeats", dropped.Items)
+	}
+	got := dropped.Items[0]
+	if got.Source != "archive:archive/events-gastown-20261102.csv.gz" || !strings.Contains(got.Reason, "event id 1") {
+		t.Errorf("drop = %+v, want the first repeat named against the later file", got)
+	}
+	if !strings.Contains(got.Reason, "3 rows in all") {
+		t.Errorf("drop reason = %q, want it to count the three repeats", got.Reason)
+	}
+}
+
+// A file whose database part is empty or starts or ends with a dash cannot be
+// told apart from the separator around it, so the loader refuses the name
+// rather than publish rows under a database nobody has.
+func TestBeadChangesRefusesADashOnlyDatabaseName(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events--.csv.gz":         eventsArchive(t, nil),
+		"events--20261102.csv.gz": eventsArchive(t, nil),
+		"events-town-.csv.gz":     eventsArchive(t, nil),
+		"events-gastown.csv.gz": eventsArchive(t, [][]string{
+			archiveRow("gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err == nil {
+		t.Fatalf("load returned no error, want one naming the files whose database part is a dash")
+	}
+	for _, want := range []string{"events--.csv.gz", "events--20261102.csv.gz", "events-town-.csv.gz"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("load error = %q, want it to name %q", err, want)
+		}
+	}
+	if len(rows) != 1 || rows[0].Database != "gastown" {
+		t.Fatalf("rows = %+v, want only gastown's", rows)
+	}
+	wantFailed := []string{
+		"archive:archive/events--.csv.gz",
+		"archive:archive/events--20261102.csv.gz",
+		"archive:archive/events-town-.csv.gz",
+	}
+	if !reflect.DeepEqual(dropped.Failed, wantFailed) {
+		t.Errorf("failed = %v, want %v", dropped.Failed, wantFailed)
+	}
+}
+
 // A dated file's database is the name before its eight-digit date; a name whose
 // last part is not a date is the whole database.
 func TestBeadChangesReadsTheDatabaseOfADatedFile(t *testing.T) {
