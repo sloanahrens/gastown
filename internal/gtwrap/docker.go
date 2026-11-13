@@ -73,6 +73,11 @@ type Shell interface {
 	// AttachStdin is Attach with stdin read from the given reader instead of the
 	// caller's. A nil reader means the caller's stdin.
 	AttachStdin(argv []string, env []string, stdin io.Reader) (exit int, err error)
+	// AttachStreams is Attach with stdin read from the given reader and the
+	// command's stdout and stderr written to the given writers. The kubernetes
+	// target routes the tool's output through a rewriter this way when the pod
+	// town root and the Mac's differ. A nil reader means the caller's stdin.
+	AttachStreams(argv []string, env []string, stdin io.Reader, stdout, stderr io.Writer) (exit int, err error)
 	// Capture runs argv and returns its stdout and exit status. ctx bounds the
 	// run: when it ends, the command is stopped. An error means it did not run.
 	Capture(ctx context.Context, argv []string) (stdout string, exit int, err error)
@@ -373,10 +378,17 @@ func (s OSShell) Attach(argv []string, env []string) (int, error) {
 
 // AttachStdin is Attach with stdin read from the given reader; nil reads the
 // wrapper's own stdin.
-func (OSShell) AttachStdin(argv []string, env []string, stdin io.Reader) (int, error) {
+func (s OSShell) AttachStdin(argv []string, env []string, stdin io.Reader) (int, error) {
+	return s.AttachStreams(argv, env, stdin, os.Stdout, os.Stderr)
+}
+
+// AttachStreams is Attach with stdin read from the given reader and output written
+// to the given writers. A writer that is not the caller's own file makes the
+// command's output a pipe, which is what the kubernetes target needs to rewrite it.
+func (OSShell) AttachStreams(argv []string, env []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), env...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, os.Stdout, os.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	if stdin == nil {
 		cmd.Stdin = os.Stdin
 	}

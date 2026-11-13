@@ -72,6 +72,10 @@ func (f *fakeShell) AttachStdin(argv []string, env []string, _ io.Reader) (int, 
 	return f.Attach(argv, env)
 }
 
+func (f *fakeShell) AttachStreams(argv []string, env []string, _ io.Reader, _, _ io.Writer) (int, error) {
+	return f.Attach(argv, env)
+}
+
 func (f *fakeShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	f.captured = append(f.captured, argv)
 	_, bounded := ctx.Deadline()
