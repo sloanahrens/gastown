@@ -120,3 +120,39 @@ func TestSandboxTraceNilRunsThePhaseButTimesNothing(t *testing.T) {
 		t.Fatalf("nil trace Summary() = %q, want empty", got)
 	}
 }
+
+// A note rides on the phase recorded last, after its duration, so a wait's
+// reason sits beside the phase it explains.
+func TestSandboxTraceNoteAnnotatesThePhaseRecordedLast(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("create", func() error { clock.Advance(time.Second); return nil })
+	trace.Phase("ready", func() error { clock.Advance(4 * time.Second); return nil })
+	trace.Note("DependenciesNotReady: Pod is pending")
+
+	if got, want := trace.Summary(), "create 1s, ready 4s (DependenciesNotReady: Pod is pending), total 5s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// An empty note, a trace with no phase, and a nil trace all leave the summary
+// as it was: a wait with no reason adds nothing to the log.
+func TestSandboxTraceNoteIsANoOpWithoutAPhaseOrText(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Note("nothing yet")
+	if got := trace.Summary(); got != "" {
+		t.Fatalf("Summary() before any phase = %q, want empty", got)
+	}
+
+	trace.Phase("ready", func() error { clock.Advance(time.Second); return nil })
+	trace.Note("")
+	if got, want := trace.Summary(), "ready 1s, total 1s"; got != want {
+		t.Fatalf("Summary() after an empty note = %q, want %q", got, want)
+	}
+
+	var nilTrace *SandboxTrace
+	nilTrace.Note("ignored")
+}
