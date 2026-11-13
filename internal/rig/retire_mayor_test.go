@@ -617,7 +617,7 @@ func TestRetireMayorOSFSLstatSeesADanglingSymlink(t *testing.T) {
 	t.Parallel()
 	link := filepath.Join(t.TempDir(), "rig")
 	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		t.Fatalf("creating a dangling symlink: %v", err)
 	}
 	exists, isDir, err := (OSRetireFS{}).Lstat(link)
 	if err != nil || !exists || isDir {
