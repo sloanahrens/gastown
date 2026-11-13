@@ -112,6 +112,33 @@ func TestStaleDoltPortCheckIgnoresTheDeprecatedPort(t *testing.T) {
 	}
 }
 
+// TestStaleDoltPortCheck_FixReportsAnUnreadableMetadata verifies that Fix fails
+// on a metadata.json it cannot parse, naming the file, and leaves it untouched,
+// rather than reporting success having cleaned nothing (gt-49f3pn).
+func TestStaleDoltPortCheck_FixReportsAnUnreadableMetadata(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  port: 3307\n")
+	const broken = `{"dolt_server_port":`
+	metaFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", broken)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("Fix() succeeded on an unparseable metadata.json, want an error")
+	}
+	if !strings.Contains(err.Error(), metaFile) {
+		t.Errorf("Fix() error = %v, want it to name %s", err, metaFile)
+	}
+	data, err := os.ReadFile(metaFile)
+	if err != nil || string(data) != broken {
+		t.Errorf("unparseable metadata.json must be left as it was, got %q (err %v)", data, err)
+	}
+}
+
 // TestStaleDoltPortCheck_FixRemovesTheKeyAndStalePort verifies that Fix() removes
 // a stale port file and the deprecated key, and that the town is then consistent.
 func TestStaleDoltPortCheck_FixRemovesTheKeyAndStalePort(t *testing.T) {
