@@ -75,11 +75,11 @@ way, `--keep-old gt=/Users/operator/go/bin/gt-native`, and set `native.gt.path`
 to that path with `"subcommands": ["town forward plist", "maint plan", "maint apply"]`:
 those calls print the launchd job's Mac log paths and read the Mac's Docker
 contexts, which the pod lacks (gt-aea89k). Every other gt command reaches the pod
-as before. A native path that is a
-tool's own installed path would run the wrapper itself, and the wrapper refuses it. Install refuses a second name that is any
-tool's path, dated name or aside name, or is asked for twice, before it changes
-anything. Delete the second name and the dated files together after the quiet
-week.
+as before. A native path that is a tool's own installed path would run the
+wrapper itself, and the wrapper refuses it. Install refuses a second name that
+is any tool's path, dated name or aside name, or is asked for twice, before it
+changes anything. Delete the second name and the dated files together after the
+quiet week.
 
 To replace the installed wrappers with a newer build, run `gt-wrap install` again
 from the new gt-wrap with a new stamp and the same `--target` paths, and no
