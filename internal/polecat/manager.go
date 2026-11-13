@@ -3376,14 +3376,21 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 // seatLandingRecorded reports whether polecat name's submitted work is recorded
 // as landed (gt-jhz3t0). An unreadable intent record or landing log reads as
 // not landed, so the seat keeps counting toward capacity: a count that cannot
-// be read holds the seat rather than freeing it.
+// be read holds the seat rather than freeing it. That answer is not silent: a
+// seat held because nobody could read its record is something an operator has
+// to look at, so each read failure is warned about (gt-ap2y66).
 func (m *Manager) seatLandingRecorded(name string) bool {
 	rec, err := intent.Read(m.townRoot, intentSeat(m.rig.Name, name))
 	if err != nil {
+		m.warnf("could not read seat %s's intent record, so its landing is unknown and the seat stays counted: %v", name, err)
 		return false
 	}
 	landed, err := SubmissionLanded(m.townRoot, m.rig.Name, rec)
-	return err == nil && landed
+	if err != nil {
+		m.warnf("could not read seat %s's landing record, so its landing is unknown and the seat stays counted: %v", name, err)
+		return false
+	}
+	return landed
 }
 
 func (m *Manager) workstateInputForPolecat(name string, state State, issue string) WorkstateInput {
