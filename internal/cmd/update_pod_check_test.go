@@ -125,6 +125,7 @@ type podPairKubectl struct {
 	commits  map[string]string
 	running  string
 	pods     []podPairPod
+	raw      string
 	getExit  int
 	runErr   error
 	failWord string
@@ -149,6 +150,9 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 	case containsArg(args, "get"):
 		if k.getExit != 0 {
 			return podSwapOutput, k.getExit, nil
+		}
+		if k.raw != "" {
+			return k.raw, 0, nil
 		}
 		return podListJSON(k.pods...), 0, nil
 	}
@@ -247,6 +251,7 @@ func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 	rows := []struct {
 		name    string
 		pods    []podPairPod
+		raw     string
 		getExit int
 		body    []byte
 		want    string
@@ -256,6 +261,12 @@ func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 			getExit: 1,
 			body:    podPairManifest,
 			want:    "exited 1",
+		},
+		{
+			name: "the read of the daemon pods is not a pod list",
+			raw:  "a read that is not JSON",
+			body: podPairManifest,
+			want: "is not a pod list",
 		},
 		{
 			name: "the dev tag names another polecat digest",
@@ -274,7 +285,7 @@ func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			path, _ := podPairValuesFile(t)
-			kube := &podPairKubectl{pods: row.pods, getExit: row.getExit}
+			kube := &podPairKubectl{pods: row.pods, raw: row.raw, getExit: row.getExit}
 			check := podPairCheck{
 				Run:        kube.run,
 				Target:     podPairTarget(),
