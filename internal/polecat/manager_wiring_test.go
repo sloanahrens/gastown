@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -78,5 +79,29 @@ func TestNewManagerNamesSessionsFromTheCallersPrefixes(t *testing.T) {
 	}
 	if got := NewManager(r, nil, nil, nil).sessionName("nux"); got != session.DefaultPrefix+"-nux" {
 		t.Fatalf("NewManager(nil).sessionName = %q, want the default prefix", got)
+	}
+}
+
+// TestNewManagerAgentBeadsAreDualScoped is the wiring guard for the sling's
+// seat-liveness read (gt-atlmw2). NewManager must hand the manager the two
+// values openPolecatBeads builds: the plain work-bead client, and the
+// agent-scoped client beads.ForAgentBead wraps around it. Every unit test
+// builds its manager with NewManagerWithStore, which uses one client for both,
+// so this is what pins the production construction. NewManager runs no bd.
+func TestNewManagerAgentBeadsAreDualScoped(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "rig", Path: t.TempDir()}
+	m := NewManager(r, nil, nil, nil)
+
+	work, ok := m.beads.(beads.Client)
+	if !ok {
+		t.Fatalf("work-bead store is %T, not a beads.Client", m.beads)
+	}
+	if beads.ForAgentBead(work) == work {
+		t.Fatal("work-bead client is agent-scoped, want the plain store")
+	}
+	agents := m.agentBeads()
+	if beads.ForAgentBead(agents) != agents {
+		t.Fatalf("agent-bead client %T is not agent-scoped: the seat read would lose the dual-scope resolution beads.ForAgentBead adds", agents)
 	}
 }

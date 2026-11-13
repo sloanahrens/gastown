@@ -73,6 +73,14 @@ func (m *Manager) readAgentBead(agentID string) (*beads.Issue, *beads.AgentField
 	return issue, fields, nil
 }
 
+// ReadAgentBead reads one agent bead through the open sling memo, if there is
+// one, and from bd otherwise. It is readAgentBead's exported face for callers
+// outside this package: the cap's seat question asks it so a bead the seat
+// listing already read is not read from bd again (gt-atlmw2).
+func (m *Manager) ReadAgentBead(agentID string) (*beads.Issue, *beads.AgentFields, error) {
+	return m.readAgentBead(agentID)
+}
+
 // forgetAgentBead drops agentID from the open memo, so the next read goes to bd.
 func (m *Manager) forgetAgentBead(agentID string) {
 	if memo := m.agentMemo.Load(); memo != nil {
