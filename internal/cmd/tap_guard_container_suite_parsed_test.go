@@ -117,6 +117,13 @@ func containerSuiteCommands(t *testing.T) []string {
 	return commands
 }
 
+// containerSuiteVerdict judges command through the production refuse/allow
+// path, in proc, with the session's container opt-in.
+func containerSuiteVerdict(proc guardProcess, command string) string {
+	reason, _ := evaluateContainerSuiteCommand(proc, command, proc.getenv(dockerTestsEnv))
+	return reason
+}
+
 // containerSuiteLoosenings returns one failure for each readable command whose
 // wrap decisions under read are less strict than shellTokenize's: a compound
 // command read as simple, or an assignment prefix read as none. A failure is a
@@ -136,19 +143,44 @@ func containerSuiteLoosenings(commands []string, read containerSuiteReader) []st
 	return failures
 }
 
-// TestContainerSuiteParsedVerdictNeverLoosens proves, over every command the
-// parser reads, that the wrap decisions read through parsedTokens are never less
-// strict than the shellTokenize reading. A reading that drops the separator
-// tokens must fail the same property, and must change the printed advice.
+// TestContainerSuiteParsedVerdictNeverLoosens proves two halves: the guard's
+// refuse/allow verdict on each of its corpus rows is the verdict the row
+// records, and the wrap decisions read through parsedTokens are never less
+// strict than the shellTokenize reading, over every command the parser reads.
+// The first half ties the property to the guard's decision, since the advice is
+// printed only after a refusal; the second holds the line an operator copies. A
+// reading that drops the separator tokens must fail the second half, and must
+// change the printed advice.
 func TestContainerSuiteParsedVerdictNeverLoosens(t *testing.T) {
 	t.Parallel()
+	fixture := newGuardCorpusFixture(t)
+	proc := fixture.process(t, corpusPolecat)
 	commands := containerSuiteCommands(t)
+
+	refused := 0
+	for _, row := range loadGuardCorpus(t) {
+		if row.guard != corpusContainerSuite {
+			continue
+		}
+		verdict, reason := fixture.judge(t, row)
+		if verdict != row.verdict {
+			t.Errorf("container-suite verdict on %q is %s (reason %q), want %s",
+				row.command, verdict, reason, row.verdict)
+		}
+		if verdict == corpusRefuse {
+			refused++
+		}
+	}
+	if refused == 0 {
+		t.Fatal("no container_suite corpus row is refused; the property judged no verdict")
+	}
+
 	if failures := containerSuiteLoosenings(commands, containerSuiteReadTokens); len(failures) != 0 {
 		for _, f := range failures {
 			t.Errorf("parsed reading is less strict than shellTokenize for %q", f)
 		}
 	}
-	t.Logf("%d commands checked", len(commands))
+	t.Logf("%d commands checked, %d container_suite corpus rows refused", len(commands), refused)
 
 	t.Run("dropping the separator handling is caught", func(t *testing.T) {
 		t.Parallel()
@@ -161,13 +193,16 @@ func TestContainerSuiteParsedVerdictNeverLoosens(t *testing.T) {
 			t.Error("a reading without separators passed the property; the property does not hold the separators")
 		}
 		// The same mutation through the production wrap: the chained command
-		// is printed bare instead of under sh -c.
-		const command = "go test ./internal/beads && echo ok"
-		const want = "gt slot run --role gastown/polecats/rictus -- sh -c 'go test ./internal/beads && echo ok'"
+		// the guard refuses is printed bare instead of under sh -c.
+		const command = "echo ok && GT_TEST_DOCKER=1 go test ./internal/beads/..."
+		if reason := containerSuiteVerdict(proc, command); reason == "" {
+			t.Fatalf("the guard allows %q; the mutation does not exercise a refusal", command)
+		}
+		const want = "gt slot run --role gastown/polecats/rictus -- sh -c 'echo ok && GT_TEST_DOCKER=1 go test ./internal/beads/...'"
 		if got := containerSuiteWrapWith(command, containerSuiteWrapRoleForTest, containerSuiteReadTokens); got != want {
 			t.Errorf("production wrap of %q = %s, want %s", command, got, want)
 		}
-		const bare = "gt slot run --role gastown/polecats/rictus -- go test ./internal/beads && echo ok"
+		const bare = "gt slot run --role gastown/polecats/rictus -- echo ok && GT_TEST_DOCKER=1 go test ./internal/beads/..."
 		if got := containerSuiteWrapWith(command, containerSuiteWrapRoleForTest, dropSeparators); got != bare {
 			t.Errorf("mutated wrap of %q = %s, want the bare line %s", command, got, bare)
 		}

@@ -3022,6 +3022,12 @@ func containerSuiteWrapWith(command, gtRole string, read containerSuiteReader) s
 // the separators those commands carry, so the compound test on its tokens would
 // miss a second command that the wrap has to keep under the slot. shellTokenize
 // stays only until gt-crn9gu retires it.
+//
+// The move to this reader changed no command's refuse/allow verdict
+// (gt-37c9aw). The verdict is evaluateContainerSuiteScript's, read from the
+// parsed script; this reader builds only the wrap line printed after a
+// refusal, so it can make that line too weak and cannot make a refusal
+// disappear. TestContainerSuiteParsedVerdictNeverLoosens pins both halves.
 func containerSuiteReadTokens(command string) []string {
 	tokens, readable := parsedTokens(command)
 	if !readable || containerSuiteParsedUnsafe(command) {
