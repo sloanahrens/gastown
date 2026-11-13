@@ -2451,12 +2451,16 @@ func (g *Git) Remotes() ([]string, error) {
 }
 
 // ConfigGet returns the value of a git config key.
-// Returns empty string if the key is not set.
+// Returns empty string if the key is not set. Any other failure, such as an
+// unreadable config file (exit 128), is an error: the key's state is unknown.
 func (g *Git) ConfigGet(key string) (string, error) {
 	out, err := g.run("config", "--get", key)
 	if err != nil {
 		// git config --get returns exit code 1 if key not found
-		return "", nil
+		if exitCode(err) == 1 {
+			return "", nil
+		}
+		return "", err
 	}
 	return out, nil
 }
