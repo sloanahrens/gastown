@@ -219,8 +219,8 @@ const (
 // (patrols.landing_worker.work_root) and the agent env blocks' GOTMPDIR and
 // TMPDIR need no change at the move (gt-gg9hv.30).
 const (
-	TownRootPath    = "/Users/sloan/gt"
-	LandingWorkPath = "/Users/sloan/gt-landing.noindex"
+	TownRootPath    = manifestdata.PodTownRoot
+	LandingWorkPath = manifestdata.PodLandingWorkPath
 	TempPath        = "/Users/Shared/gt-gotmp.noindex"
 )
 
@@ -398,7 +398,7 @@ const (
 	// DoltBackupPath is where the compose file mounts the host's Dolt backups.
 	// The pod mounts the same path: the dolt-backup claim, or the host directory
 	// DoltBackupHostPath names. GT_DOLT_BACKUP_ROOT names it in the live pod.
-	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
+	DoltBackupPath = manifestdata.PodDoltBackupPath
 	// OMConfigSubPath is the om config's path inside the town-state volume, which
 	// the pod mounts at manifestdata.LiveOMConfigPath. It is no Secret: the config
 	// carries no credential, and the row it sits in is private.
@@ -406,7 +406,7 @@ const (
 	// ClaudeBeadsRoot is the host's ~/.claude/.beads, which the compose daemon binds
 	// read-write. The pod mounts nothing there (TestClaudeBeadsDirIsMountedOrDropped),
 	// and the Deployment's head comment names the root (noClaudeBeadsComment).
-	ClaudeBeadsRoot = "/Users/sloan/.claude/.beads"
+	ClaudeBeadsRoot = manifestdata.PodClaudeBeadsRoot
 	// noHostAliasComment is the Deployment's head comment when the pod carries no
 	// gateway alias, so a reader of the manifest knows the Dolt name does not
 	// resolve in this pod rather than assuming it does.

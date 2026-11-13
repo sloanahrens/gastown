@@ -100,6 +100,7 @@ func osSurface() surface {
 		newKubectl: func(town string, kube kubeConfig, tool string) target {
 			return gtwrap.Kubectl{
 				Town:       town,
+				PodRoot:    kube.PodRoot,
 				Context:    kube.Context,
 				Namespace:  kube.Namespace,
 				Deployment: kube.Deployment,
@@ -195,12 +196,14 @@ type targetConfig struct {
 }
 
 // kubeConfig is the kubernetes target's fields in the config file. Only that
-// target reads them, and each must be named.
+// target reads them, and each must be named. PodRoot is the file's pod_town_root,
+// set by configTarget rather than parsed here; empty means the compiled-in root.
 type kubeConfig struct {
 	Context    string `json:"context"`
 	Namespace  string `json:"namespace"`
 	Deployment string `json:"deployment"`
 	Container  string `json:"container"`
+	PodRoot    string `json:"-"`
 }
 
 // configTarget reads the target the config file names, and docker when the file
@@ -221,14 +224,19 @@ func configTarget(s surface) (targetConfig, error) {
 		return targetConfig{}, fmt.Errorf("gtwrap: read the target config file %s: %w", path, err)
 	}
 	var cfg struct {
-		Target string                 `json:"target"`
-		Native map[string]nativeEntry `json:"native"`
+		Target      string                 `json:"target"`
+		Native      map[string]nativeEntry `json:"native"`
+		PodTownRoot *string                `json:"pod_town_root"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return targetConfig{}, fmt.Errorf("gtwrap: parse the target config file %s: %w", path, err)
 	}
 	if cfg.Target == "" {
 		return targetConfig{}, fmt.Errorf("gtwrap: the target config file %s names no target; write {\"target\": %q} there, or delete the file to use %q", path, defaultTarget, defaultTarget)
+	}
+	podRoot, err := podTownRootOf(cfg.PodTownRoot, path)
+	if err != nil {
+		return targetConfig{}, err
 	}
 	native, err := nativeTools(cfg.Native, path)
 	if err != nil {
@@ -241,6 +249,7 @@ func configTarget(s surface) (targetConfig, error) {
 	if err := json.Unmarshal(data, &out.Kube); err != nil {
 		return targetConfig{}, fmt.Errorf("gtwrap: parse the kubernetes target fields in %s: %w", path, err)
 	}
+	out.Kube.PodRoot = podRoot
 	for _, field := range []struct{ name, value string }{
 		{"context", out.Kube.Context},
 		{"namespace", out.Kube.Namespace},
@@ -252,6 +261,20 @@ func configTarget(s surface) (targetConfig, error) {
 		}
 	}
 	return out, nil
+}
+
+// podTownRootOf reads the file's pod_town_root. An absent key is "", so the
+// compiled-in pod root applies. A value must be an absolute, clean path, since the
+// pod walk-up script joins directories under it; a relative or empty value refuses
+// the file, naming the key, rather than mapping onto a root the pod does not have.
+func podTownRootOf(v *string, file string) (string, error) {
+	if v == nil {
+		return "", nil
+	}
+	if !filepath.IsAbs(*v) || filepath.Clean(*v) != *v {
+		return "", fmt.Errorf("gtwrap: the target config file %s sets \"pod_town_root\" to %q, which is not an absolute, clean path; set it to the pod's town root, or delete the key to use the compiled-in root", file, *v)
+	}
+	return *v, nil
 }
 
 // openTarget builds the target the config names. An unknown name refuses rather

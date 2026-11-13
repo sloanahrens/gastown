@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/gtwrap"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // kubernetesConfig is a complete kubernetes target in the config file.
@@ -135,6 +139,140 @@ func TestDoctorExitsOneWhenTheKubernetesLadderIsDown(t *testing.T) {
 	}
 	if !strings.Contains(h.stdout.String(), "rung: down") || !strings.Contains(h.stdout.String(), "kubectl is not on PATH") {
 		t.Fatalf("report %q does not show the down rung and its reason", h.stdout)
+	}
+}
+
+// podRecorder is the pod's shell for these tests: the ladder's probes answer as a
+// healthy cluster does, and each exec the wrapper attaches is recorded, so a test
+// reads the root and directory arguments the walk-up script was given.
+type podRecorder struct {
+	attached [][]string
+}
+
+func (p *podRecorder) Attach(argv []string, _ []string) (int, error) {
+	p.attached = append(p.attached, argv)
+	return 0, nil
+}
+
+func (p *podRecorder) AttachStdin(argv []string, env []string, _ io.Reader) (int, error) {
+	return p.Attach(argv, env)
+}
+
+func (p *podRecorder) Capture(_ context.Context, argv []string) (string, int, error) {
+	line := strings.Join(argv, " ")
+	switch {
+	case strings.Contains(line, " --raw /readyz"):
+		return "ok", 0, nil
+	case strings.Contains(line, " deployment "):
+		return `{"app":"daemon"}`, 0, nil
+	case strings.Contains(line, " pods "):
+		return "daemon-0", 0, nil
+	}
+	return "", 1, fmt.Errorf("unexpected probe: %s", line)
+}
+
+// newPodHarness is the harness with the real kubernetes target built over a
+// podRecorder, so the config's pod_town_root reaches gtwrap.Kubectl as it does in
+// the wrapper.
+func newPodHarness(t *testing.T, config string) (*harness, *podRecorder) {
+	t.Helper()
+	h := newHarness(t)
+	h.writeConfig(t, config)
+	pod := &podRecorder{}
+	h.surface.newKubectl = func(town string, kube kubeConfig, tool string) target {
+		h.kubeBuilt, h.kubeCfg, h.kubeTool = true, kube, tool
+		return gtwrap.Kubectl{
+			Town:       town,
+			PodRoot:    kube.PodRoot,
+			Context:    kube.Context,
+			Namespace:  kube.Namespace,
+			Deployment: kube.Deployment,
+			Container:  kube.Container,
+			Tool:       tool,
+			Shell:      pod,
+			LookPath:   func(string) (string, error) { return "/usr/local/bin/kubectl", nil },
+			Note:       h.stderr,
+		}
+	}
+	return h, pod
+}
+
+// kubernetesConfigWith is the complete kubernetes config with extra top-level keys
+// appended, the keys the wrapper reads beside the target's own fields.
+func kubernetesConfigWith(extra string) string {
+	return `{"target": "kubernetes", "context": "colima-gt-control", "namespace": "gt", "deployment": "daemon", "container": "daemon", ` + extra + `}`
+}
+
+// TestConfigPodTownRoot: pod_town_root replaces the compiled-in pod root for the
+// mapping of the working directory and the walk-up's root and caller arguments; an
+// absent key keeps the compiled-in root; a value that is not an absolute clean path
+// refuses the file and names the key, under either target.
+func TestConfigPodTownRoot(t *testing.T) {
+	t.Parallel()
+	t.Run("a set key maps the Mac town onto the configured root", func(t *testing.T) {
+		t.Parallel()
+		h, pod := newPodHarness(t, kubernetesConfigWith(`"pod_town_root": "/town"`))
+		dir := filepath.Join(h.home, "gt", "rig", "x")
+		h.surface.getwd = func() (string, error) { return dir, nil }
+		if exit := h.run("gt", "status", "--line"); exit != 0 {
+			t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+		}
+		if len(pod.attached) != 1 {
+			t.Fatalf("attached %d execs, want 1", len(pod.attached))
+		}
+		argv := pod.attached[0]
+		if got := argv[len(argv)-6]; got != "/town/rig/x" {
+			t.Fatalf("the mapped directory argument is %q, want %q", got, "/town/rig/x")
+		}
+		if got := argv[len(argv)-5]; got != "/town" {
+			t.Fatalf("the root argument is %q, want the configured root %q", got, "/town")
+		}
+		if got := argv[len(argv)-4]; got != dir {
+			t.Fatalf("the caller's directory argument is %q, want %q", got, dir)
+		}
+	})
+	t.Run("an absent key keeps the compiled-in root", func(t *testing.T) {
+		t.Parallel()
+		h, pod := newPodHarness(t, kubernetesConfig)
+		dir := filepath.Join(h.home, "gt", "rig", "x")
+		h.surface.getwd = func() (string, error) { return dir, nil }
+		if exit := h.run("gt", "status", "--line"); exit != 0 {
+			t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+		}
+		if h.kubeCfg.PodRoot != "" {
+			t.Fatalf("the target was built with pod root %q, want none so the compiled-in root applies", h.kubeCfg.PodRoot)
+		}
+		argv := pod.attached[0]
+		if got := argv[len(argv)-6]; got != manifestdata.PodTownRoot+"/rig/x" {
+			t.Fatalf("the mapped directory argument is %q, want %q", got, manifestdata.PodTownRoot+"/rig/x")
+		}
+		if got := argv[len(argv)-5]; got != manifestdata.PodTownRoot {
+			t.Fatalf("the root argument is %q, want the compiled-in root %q", got, manifestdata.PodTownRoot)
+		}
+	})
+	refusals := []struct {
+		name   string
+		config string
+	}{
+		{name: "a relative value under kubernetes", config: kubernetesConfigWith(`"pod_town_root": "town"`)},
+		{name: "an empty value under kubernetes", config: kubernetesConfigWith(`"pod_town_root": ""`)},
+		{name: "a trailing slash under kubernetes", config: kubernetesConfigWith(`"pod_town_root": "/town/"`)},
+		{name: "a relative value under docker", config: `{"target": "docker", "pod_town_root": "town"}`},
+	}
+	for _, tt := range refusals {
+		t.Run("refuses "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			h, pod := newPodHarness(t, tt.config)
+			if exit := h.run("gt", "status", "--line"); exit != 1 {
+				t.Fatalf("run = %d, want 1", exit)
+			}
+			if !strings.Contains(h.stderr.String(), `"pod_town_root"`) {
+				t.Fatalf("stderr %q does not name the key pod_town_root", h.stderr)
+			}
+			if h.kubeBuilt || h.targetSet || len(pod.attached) != 0 {
+				t.Fatal("a target was built or a tool ran for a config with a refused pod_town_root")
+			}
+		})
 	}
 }
 
