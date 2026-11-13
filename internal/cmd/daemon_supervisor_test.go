@@ -2225,7 +2225,7 @@ func TestRestartDaemon_ContainerRestartIsNotProvenByAnythingLess(t *testing.T) {
 	good := stateReading{state: containerOwnerState(later, true)}
 	baseline := stateReading{state: containerOwnerState(restartBaselineStart, true)}
 	otherOwner := containerOwnerState(later, true)
-	other := daemon.Owner{Kind: "launchd", ID: templates.LaunchdLabel}
+	other := daemon.Owner{Kind: "launchd", ID: "com.gastown.daemon"}
 	otherOwner.Owner = &other
 	cases := []struct {
 		name      string

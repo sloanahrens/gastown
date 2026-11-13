@@ -383,31 +383,10 @@ func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 	}
 }
 
-// The launchd kind is retired. A plist an older gt wrote for this town, with a
-// value a repair used to rewrite, is not repaired: this build repairs no
-// supervisor file, and a launchd plist is not one it writes.
-func TestSupervisorFileRepair_LaunchdPlistIsNeverRepaired(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	body := "<plist version=\"1.0\">\n<dict>\n    <key>WorkingDirectory</key>\n    <string>" + town + "</string>\n    <key>ProcessType</key>\n    <string>Background</string>\n</dict>\n</plist>\n"
-	path := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", town)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if repair || content != "" {
-		t.Errorf("SupervisorFileRepair() = (%q, %v) for a launchd plist, want (\"\", false)", content, repair)
-	}
-}
-
-// SupervisorFileContent renders nothing for a kind this build does not write,
-// the launchd kind included, nor the empty kind a host with no supported
-// supervisor reports — rather than erroring on it, since that is an ordinary
-// host.
+// SupervisorFileContent renders nothing for a kind this build does not write
+// (the retired launchd name included), nor the empty kind a host with no
+// supported supervisor reports — rather than erroring on it, since that is an
+// ordinary host.
 func TestSupervisorFileContent_UnknownKind(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"", "upstart", "launchd", "launchd "} {
@@ -429,7 +408,6 @@ func TestSupervisorStatus(t *testing.T) {
 		goos, want string
 		pathSuffix string
 	}{
-		{"darwin", "launchd", filepath.Join("Library", "LaunchAgents", "com.gastown.daemon.plist")},
 		{"linux", "systemd", filepath.Join("data", "systemd", "user", "gastown-daemon.service")},
 	} {
 		t.Run(tt.goos, func(t *testing.T) {

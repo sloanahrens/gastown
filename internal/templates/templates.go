@@ -313,9 +313,9 @@ func (h supervisorHost) systemdUnitPath() (string, error) {
 }
 
 // SupervisorStatus reports which external supervisor is configured for the
-// daemon on this host, by checking for the presence of the launchd plist
-// (macOS) or systemd user unit (Linux). Returns "launchd", "systemd", or
-// "none". Never errors — a path resolution failure is treated as "none".
+// daemon on this host, by checking for the presence of the systemd user unit
+// (Linux). Returns "systemd" or "none"; a macOS host has no supervisor file
+// any longer. Never errors — a path resolution failure is treated as "none".
 // This is the file-presence reading; SupervisorStatusLine is the one that
 // says what the job is doing (gt-sq9e).
 func SupervisorStatus() string {

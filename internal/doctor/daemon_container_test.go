@@ -145,7 +145,7 @@ func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 			Running:        true,
 			LastHeartbeat:  time.Now().Add(-time.Minute),
 			HeartbeatCount: 3,
-			Owner:          &daemon.Owner{Kind: "launchd", ID: templates.LaunchdLabel},
+			Owner:          &daemon.Owner{Kind: "launchd", ID: "com.gastown.daemon"},
 		}, job: containerRunning(), want: StatusError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
