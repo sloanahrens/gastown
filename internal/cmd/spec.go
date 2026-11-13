@@ -1676,13 +1676,13 @@ type specDispatchEnv struct {
 	// that rig's red-main beads, never any other bead (gt-zkdwt).
 	RevertInFlight func(rig string) *specdispatch.Revert
 	Roster         func() (specRoster, error)
-	// RecountSeat recounts the seat agent's sling would take, just before the
+	// RecountSeat recounts the room an agent's sling would take, just before the
 	// sling starts: the occupancy read the sling itself passes to routeWith, so
-	// a seat that appeared since the roster read is seen before the sling spends
-	// its setup on a refusal (gt-cx16fq). It returns the seats occupied now and
-	// the agent's cap; a cap of 0 leaves the sling's own check to decide. Nil
-	// recounts nothing, which is a tick with no seat picture to re-read.
-	RecountSeat func(agent string) (n, cap int, err error)
+	// a seat or a town total filled since the roster read is seen before the
+	// sling spends its setup on a refusal (gt-cx16fq). A cap of 0 is no bound
+	// and leaves the sling's own check to decide. Nil recounts nothing, which is
+	// a tick with no seat picture to re-read.
+	RecountSeat func(agent string) (specSeatRecount, error)
 	// Annotate adds text as a comment unless the bead already carries a
 	// comment starting with key, so each kind of note lands once.
 	Annotate func(beadID, key, text string) error
@@ -2630,26 +2630,44 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 	}
 }
 
-// specSlingWithRecount recounts the seat the planned sling will take, then
+// specSeatRecount is the room picture a recount reads just before a sling: the
+// agent's seat and the town's total, each with its cap. A cap of 0 bounds
+// nothing, so an agent with no seat (or a closed one) answers only the town's
+// total, and an absent max_total leaves the seat's cap to decide.
+type specSeatRecount struct {
+	Seat     int
+	Cap      int
+	Total    int
+	MaxTotal int
+}
+
+// specSlingWithRecount recounts the room the planned sling will take, then
 // starts it. The roster is a snapshot read 15 to 25 s before the slings, so a
-// seat it showed free can be taken by the time the sling counts: the sling then
-// spends its setup and is refused at the pool check (gt-cx16fq). A recount that
-// finds the seat gone skips the sling before it starts, and the skip hands the
-// charged seat back. A recount that cannot read the seats is reported and the
-// sling runs as before, since the sling's own pool check still counts.
+// seat or a town total it showed free can be filled by the time the sling
+// counts: the sling then spends its setup and is refused at the pool check
+// (gt-cx16fq). A recount that finds no room skips the sling before it starts,
+// and the skip hands the charged seat back. The town's total is answered first,
+// as choosePoolAgent decides it. A recount that cannot read the seats is
+// reported and the sling runs as before, since the sling's own pool check still
+// counts.
 func specSlingWithRecount(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 	start := env.Now()
 	if env.RecountSeat != nil {
-		n, cap, err := env.RecountSeat(p.seat.Agent)
+		r, err := env.RecountSeat(p.seat.Agent)
+		skip := func(line string) specSlingOutcome {
+			entry := p.entry
+			entry.Line = line
+			return specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true, took: env.Now().Sub(start)}
+		}
 		switch {
 		case err != nil:
 			o := specSlingOne(env, p)
 			o.recountErr = fmt.Sprintf("%s: cannot list the seats before the sling (%v); dispatching anyway", p.id, err)
 			return o
-		case cap > 0 && n >= cap:
-			entry := p.entry
-			entry.Line = fmt.Sprintf("%s: no seat (recounted %d/%d before the sling)", p.id, n, cap)
-			return specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true, took: env.Now().Sub(start)}
+		case r.MaxTotal > 0 && r.Total >= r.MaxTotal:
+			return skip(fmt.Sprintf("%s: no seat (recounted %d/%d across every seat before the sling)", p.id, r.Total, r.MaxTotal))
+		case r.Cap > 0 && r.Seat >= r.Cap:
+			return skip(fmt.Sprintf("%s: no seat (recounted %d/%d before the sling)", p.id, r.Seat, r.Cap))
 		}
 	}
 	return specSlingOne(env, p)
@@ -3003,14 +3021,17 @@ func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSe
 // specRecountSeatFor is the tick's seat recount over one town: the occupancy read
 // a sling passes to routeWith (snapshotOccupied over the picture
 // specDispatchRoster kept), taken again just before each planned sling starts
-// (specSlingWithRecount, gt-cx16fq). It returns the seats the agent holds now and
-// its cap; an agent with no seat, or one whose cap is 0, has no room question to
-// ask here, and the sling's own check answers it.
-func specRecountSeatFor(townRoot string, pool *config.PolecatPool, lister func() sessionLister, snapshot *atomic.Pointer[poolSeatSnapshot], now func() time.Time) func(agent string) (int, int, error) {
-	return func(agent string) (int, int, error) {
-		seat, ok := poolSeatOf(pool, agent)
-		if !ok || seat.Cap <= 0 {
-			return 0, 0, nil
+// (specSlingWithRecount, gt-cx16fq). It returns the agent's seat and cap and the
+// town's live polecats against max_total. An agent with no seat, or one whose
+// cap is 0, still answers the town's total: a request for any agent adds one of
+// the polecats max_total bounds (gt-bcpj5). The caps are known even when the
+// listing fails, so they ride with the error, which says the counts are not.
+func specRecountSeatFor(townRoot string, pool *config.PolecatPool, lister func() sessionLister, snapshot *atomic.Pointer[poolSeatSnapshot], now func() time.Time) func(agent string) (specSeatRecount, error) {
+	return func(agent string) (specSeatRecount, error) {
+		seat, hasSeat := poolSeatOf(pool, agent)
+		maxTotal := pool.GetMaxTotal()
+		if (!hasSeat || seat.Cap <= 0) && maxTotal <= 0 {
+			return specSeatRecount{}, nil
 		}
 		seats := poolSeatSnapshot{}
 		if kept := snapshot.Load(); kept != nil {
@@ -3018,9 +3039,13 @@ func specRecountSeatFor(townRoot string, pool *config.PolecatPool, lister func()
 		}
 		sessions, err := snapshotOccupied(seats, poolSeatAgentFor(townRoot), lister, sandboxSeatDeathsFor(townRoot), now)()
 		if err != nil {
-			return 0, seat.Cap, err
+			return specSeatRecount{Cap: seat.Cap, MaxTotal: maxTotal}, err
 		}
-		return poolSeatCount(agent, sessions), seat.Cap, nil
+		r := specSeatRecount{Total: poolHeldCount(sessions), MaxTotal: maxTotal}
+		if hasSeat {
+			r.Seat, r.Cap = poolSeatCount(agent, sessions), seat.Cap
+		}
+		return r, nil
 	}
 }
 

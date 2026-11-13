@@ -247,9 +247,10 @@ func TestSpecTickRosterReadsSlingSideOnceAndCountsTheSpawn(t *testing.T) {
 
 // TestSpecRecountSeatReadsTheSlingOccupancy runs the tick's production recount
 // wiring over fakes: it counts what the sling's own read would (the live
-// sessions, plus the roster's dead-hooked seats), asks no room question for an
-// agent with no seat, and reads a failed listing as an error rather than an
-// empty pool (gt-cx16fq).
+// sessions, plus the roster's dead-hooked seats), reads the town's total beside
+// the seat and for an agent with no seat, asks no room question for a town with
+// no cap, and reads a failed listing as an error rather than an empty pool
+// (gt-cx16fq, gt-uwnv23).
 func TestSpecRecountSeatReadsTheSlingOccupancy(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -258,41 +259,60 @@ func TestSpecRecountSeatReadsTheSlingOccupancy(t *testing.T) {
 		intent.Record{Agent: "claude-sonnet"})
 	live := map[string]string{"GT_ROLE": "gastown/polecats/live", "GT_AGENT": "claude-sonnet"}
 	pool := seatPool("claude-sonnet", 1)
+	seatTotaled := seatPool("claude-sonnet", 1)
+	seatTotaled.MaxTotal = intPtr(2)
+	noSeatTotaled := &config.PolecatPool{MaxTotal: intPtr(2)}
 
 	cases := []struct {
 		name     string
+		pool     *config.PolecatPool
 		lister   *fakeLister
 		snapshot []poolSession
 		agent    string
-		wantN    int
-		wantCap  int
+		want     specSeatRecount
 		wantErr  string
 	}{
 		{
-			name:    "the live session the sling counts",
-			lister:  &fakeLister{sessions: map[string]map[string]string{"gt-live": live}},
-			agent:   "claude-sonnet",
-			wantN:   1,
-			wantCap: 1,
+			name:   "the live session the sling counts",
+			pool:   pool,
+			lister: &fakeLister{sessions: map[string]map[string]string{"gt-live": live}},
+			agent:  "claude-sonnet",
+			want:   specSeatRecount{Seat: 1, Cap: 1, Total: 1},
 		},
 		{
 			name:     "the roster's dead-hooked seat is carried",
+			pool:     pool,
 			lister:   &fakeLister{},
 			snapshot: []poolSession{{name: "dead/gastown/gone", agent: "claude-sonnet", rig: "gastown", polecat: "gone", deadHooked: true}},
 			agent:    "claude-sonnet",
-			wantN:    1,
-			wantCap:  1,
+			want:     specSeatRecount{Seat: 1, Cap: 1, Total: 1},
 		},
 		{
 			name:   "an agent with no seat has no room question",
+			pool:   pool,
 			lister: &fakeLister{},
 			agent:  "claude-haiku",
 		},
 		{
+			name:   "the town's total is read beside the seat",
+			pool:   seatTotaled,
+			lister: &fakeLister{sessions: map[string]map[string]string{"gt-live": live}},
+			agent:  "claude-sonnet",
+			want:   specSeatRecount{Seat: 1, Cap: 1, Total: 1, MaxTotal: 2},
+		},
+		{
+			name:   "an agent with no seat still answers the town's total",
+			pool:   noSeatTotaled,
+			lister: &fakeLister{sessions: map[string]map[string]string{"gt-live": live}},
+			agent:  "claude-haiku",
+			want:   specSeatRecount{Total: 1, MaxTotal: 2},
+		},
+		{
 			name:    "a failed listing is an error, not an empty pool",
+			pool:    pool,
 			lister:  &fakeLister{err: errors.New("tmux down")},
 			agent:   "claude-sonnet",
-			wantCap: 1,
+			want:    specSeatRecount{Cap: 1},
 			wantErr: "tmux down",
 		},
 	}
@@ -303,8 +323,8 @@ func TestSpecRecountSeatReadsTheSlingOccupancy(t *testing.T) {
 			if tc.snapshot != nil {
 				snap.Store(&poolSeatSnapshot{sessions: tc.snapshot})
 			}
-			recount := specRecountSeatFor(town, pool, func() sessionLister { return tc.lister }, &snap, time.Now)
-			n, cap, err := recount(tc.agent)
+			recount := specRecountSeatFor(town, tc.pool, func() sessionLister { return tc.lister }, &snap, time.Now)
+			got, err := recount(tc.agent)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("recount error = %v, want it to contain %q", err, tc.wantErr)
@@ -312,8 +332,8 @@ func TestSpecRecountSeatReadsTheSlingOccupancy(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("recount: %v", err)
 			}
-			if n != tc.wantN || cap != tc.wantCap {
-				t.Errorf("recount = %d/%d, want %d/%d", n, cap, tc.wantN, tc.wantCap)
+			if got != tc.want {
+				t.Errorf("recount = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

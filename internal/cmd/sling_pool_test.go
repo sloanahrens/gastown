@@ -1367,7 +1367,7 @@ func TestSeatDecisionStillAtomicCountAndClaim(t *testing.T) {
 		switch {
 		case d.err == nil && d.agent == claimAgent:
 			admitted++
-		case errors.As(d.err, &bp) && strings.Contains(d.reason, "pool: full (1/1"):
+		case errors.As(d.err, &bp) && strings.Contains(d.reason, "pool: full (1/1: 1 claim)"):
 			refused++
 		default:
 			t.Fatalf("decision %d: unexpected outcome %q (%s) %v", i+1, d.agent, d.reason, d.err)
