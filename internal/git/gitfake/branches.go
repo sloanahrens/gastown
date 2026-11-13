@@ -460,6 +460,25 @@ func (h *handle) Cherry(upstream, head string) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+// MergeCommitsAhead is git rev-list --count --merges base..branch: the merge
+// commits on branch that are not on base, which Cherry cannot report because
+// it lists non-merge commits only.
+func (h *handle) MergeCommitsAhead(base, branch string) (int, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	b, hd, err := h.resolveRange(base, branch, "rev-list", "--count", "--merges", base+".."+branch)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, c := range h.f.rangeCommits(b, hd) {
+		if len(c.parents) > 1 {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // CommitLandedOnTarget is *git.Git's verdict: the commit is the target's
 // tip, an ancestor of it, or every one of its own patches is already there
 // by patch-id (a queue that rebases preserves content, not SHAs).

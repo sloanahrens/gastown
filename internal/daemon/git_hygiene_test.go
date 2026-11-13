@@ -915,10 +915,10 @@ func TestRunGitHygiene_KeepsEmptyCrewBranchWhoseTipTimeFails(t *testing.T) {
 	}
 }
 
-// An empty cherry output only clears a crew branch of holding merge-only
-// content once the branch tip is known to be an ancestor of the base. When that
-// ancestry check fails the branch is kept, as every unknown answer keeps it.
-func TestRunGitHygiene_KeepsEmptyCrewBranchWhenTheAncestryCheckFails(t *testing.T) {
+// An empty cherry output clears a crew branch of holding unlanded non-merge
+// commits, but not of holding merges: the merge count decides that, and when
+// it cannot be read the branch is kept, as every unknown answer keeps it.
+func TestRunGitHygiene_KeepsEmptyCrewBranchWhenTheMergeCheckFails(t *testing.T) {
 	t.Parallel()
 	d, _, logs := newGitHygieneDaemon(t, "r1")
 	f := useGitfake(t, d)
@@ -938,15 +938,51 @@ func TestRunGitHygiene_KeepsEmptyCrewBranchWhenTheAncestryCheckFails(t *testing.
 		t.Fatal(err)
 	}
 	d.clock = clockwork.NewFakeClockAt(tip.Add(2 * time.Hour))
-	withGit(d, func(g daemonGit) daemonGit { return isAncestorFails{g} })
+	withGit(d, func(g daemonGit) daemonGit { return mergeCountFails{g} })
 
 	d.runGitHygiene()
 
 	if got := f.Ref(origin, "refs/heads/crew/empty"); got != base {
-		t.Errorf("origin crew/empty = %q, want the branch kept at %s when the ancestry check fails", got, base)
+		t.Errorf("origin crew/empty = %q, want the branch kept at %s when the merge check fails", got, base)
 	}
-	if !strings.Contains(logs.String(), "keep origin/crew/empty: cannot tell whether it has landed: ancestry: boom") {
-		t.Errorf("log does not report the failed ancestry check:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "keep origin/crew/empty: cannot tell whether it has landed: merges: boom") {
+		t.Errorf("log does not report the failed merge check:\n%s", logs.String())
+	}
+}
+
+// A crew branch whose non-merge commits were all landed on main by patch (so
+// cherry marks each "-") and whose tip is therefore not an ancestor is reaped
+// once its tip is older than the interval: only a merge beyond the base keeps
+// a branch past the age rule (gt-eyy06f).
+func TestRunGitHygiene_ReapsRebaseLandedCrewBranch(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/rebased", base)
+	rebased := f.Commit(t, origin, "crew/rebased", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	f.Commit(t, origin, "main", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{GitHygiene: &PatrolConfig{Interval: "1h"}}}
+	tip, err := d.gitAt(origin).CommitTime(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.clock = clockwork.NewFakeClockAt(tip.Add(2 * time.Hour))
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/rebased"); got != "" {
+		t.Errorf("origin crew/rebased = %q, want the patch-equivalent branch older than the interval deleted", got)
+	}
+	if !strings.Contains(logs.String(), "1 crew branch(es) deleted") {
+		t.Errorf("log does not count the reaped patch-equivalent branch:\n%s", logs.String())
 	}
 }
 
@@ -1014,11 +1050,11 @@ func TestRunGitHygiene_KeepsLandedCrewBranchWhenTheDeleteIsRefused(t *testing.T)
 	}
 }
 
-// isAncestorFails is a daemonGit whose ancestry check always errors.
-type isAncestorFails struct{ daemonGit }
+// mergeCountFails is a daemonGit whose merge-commit count always errors.
+type mergeCountFails struct{ daemonGit }
 
-func (isAncestorFails) IsAncestor(ancestor, descendant string) (bool, error) {
-	return false, errors.New("ancestry: boom")
+func (mergeCountFails) MergeCommitsAhead(base, branch string) (int, error) {
+	return 0, errors.New("merges: boom")
 }
 
 // commitTimeFails is a daemonGit whose CommitTime always errors.

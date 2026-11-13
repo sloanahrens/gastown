@@ -335,17 +335,14 @@ func settleOriginRef(g daemonGit, branch, want string) error {
 }
 
 // crewKeepReason says why origin's crew branch at hash is kept, or returns ""
-// when it has landed: every commit on it has a patch-equivalent on origin's
-// default branch. An error means the answer is unknown, and the caller keeps
-// the branch. A branch with no commit beyond the default counts as landed only
-// once its tip is older than the patrol interval, so a branch cut a moment ago
-// is not reaped.
-//
-// git cherry lists non-merge commits only, so an empty output also covers a
-// branch whose commits beyond the base are all merges: a merge can carry
-// content (its conflict resolution) that no patch on the base reproduces. Only
-// a tip the base already contains has nothing beyond it, and only that branch
-// is reaped by age (gt-eyy06f).
+// when it can be reaped: every non-merge commit on it has a patch-equivalent
+// on origin's default branch, and it has no merge commit beyond that branch.
+// git cherry answers the first question but lists non-merge commits only, so it
+// cannot answer the second: a merge can carry content (its conflict
+// resolution) that no patch on the base reproduces. A branch with no commit at
+// all beyond the base is reaped only once its tip is older than the patrol
+// interval, so a branch cut a moment ago is not reaped. An error means the
+// answer is unknown, and the caller keeps the branch (gt-eyy06f).
 func (d *Daemon) crewKeepReason(g daemonGit, basesErr error, def, hash string, interval time.Duration) (string, error) {
 	if basesErr != nil {
 		return "", basesErr
@@ -361,11 +358,11 @@ func (d *Daemon) crewKeepReason(g daemonGit, basesErr error, def, hash string, i
 	if strings.TrimSpace(out) != "" {
 		return "", nil
 	}
-	addsNothing, err := g.IsAncestor(hash, base)
+	merges, err := g.MergeCommitsAhead(base, hash)
 	if err != nil {
 		return "", err
 	}
-	if !addsNothing {
+	if merges > 0 {
 		return "its only commits beyond " + base + " are merges, which cherry cannot judge", nil
 	}
 	tip, err := g.CommitTime(hash)

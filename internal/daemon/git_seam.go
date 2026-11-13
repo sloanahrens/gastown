@@ -91,6 +91,10 @@ type daemonGit interface {
 	// Cherry reads whether a branch's commits are on a base by patch identity,
 	// for the git_hygiene patrol's unpushed-work check.
 	Cherry(upstream, head string) (string, error)
+	// MergeCommitsAhead counts a branch's merge commits beyond a base, which
+	// Cherry cannot report: it lists non-merge commits only, and a merge can
+	// carry content no patch on the base reproduces (gt-eyy06f).
+	MergeCommitsAhead(base, branch string) (int, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	GC() error
 }

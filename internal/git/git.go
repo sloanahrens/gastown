@@ -3780,6 +3780,24 @@ func (g *Git) CommitsAhead(base, branch string) (int, error) {
 	return count, nil
 }
 
+// MergeCommitsAhead returns how many merge commits are on branch and not on
+// base (git rev-list --count --merges base..branch). git cherry lists
+// non-merge commits only, so a caller asking whether a branch's only unlanded
+// content is a merge asks this beside Cherry.
+func (g *Git) MergeCommitsAhead(base, branch string) (int, error) {
+	out, err := g.run("rev-list", "--count", "--merges", base+".."+branch)
+	if err != nil {
+		return 0, err
+	}
+
+	var count int
+	if _, err := fmt.Sscanf(out, "%d", &count); err != nil {
+		return 0, fmt.Errorf("parsing merge commit count: %w", err)
+	}
+
+	return count, nil
+}
+
 // CountCommitsBehind returns the number of commits that HEAD is behind the given ref.
 // For example, CountCommitsBehind("origin/main") returns how many commits
 // are on origin/main that are not on the current HEAD.
