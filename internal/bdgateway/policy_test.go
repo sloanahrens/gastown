@@ -109,7 +109,12 @@ func TestPolicyRefusedFlags(t *testing.T) {
 		{"per-verb refused flag", TokenDaemon, []string{"create", "--graph", "g.dot"}, ErrFlagRefused, "refused: --graph on create"},
 		{"per-verb flag is not global", TokenRead, []string{"show", "--graph", "g.dot"}, nil, ""},
 		{"allowed flag", TokenRead, []string{"show", "--json"}, nil, ""},
-		{"nothing after the separator is a flag", TokenRead, []string{"show", "--", "--db"}, nil, ""},
+		{"nothing after a real separator is a flag", TokenRead, []string{"show", "--", "--db"}, nil, ""},
+		{"refused flag after a separator that is a value", TokenRead, []string{"--format", "--", "--db", "/x", "show"}, ErrFlagRefused, "refused: --db on show"},
+		{"refused shorthand after a separator that is a value", TokenRead, []string{"--format", "--", "-C", "/x", "show"}, ErrFlagRefused, "refused: -C on show"},
+		{"refused flag attached after a separator that is a value", TokenRead, []string{"--format", "--", "--db=/x", "show"}, ErrFlagRefused, "refused: --db on show"},
+		{"refused shorthand whose value is a separator", TokenRead, []string{"show", "-C", "--", "dir"}, ErrFlagRefused, "refused: -C on show"},
+		{"unknown flag before a dash argument is ambiguous", TokenRead, []string{"show", "--thread", "--db"}, ErrAmbiguousVerb, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

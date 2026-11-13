@@ -22,7 +22,7 @@ import (
 // refused by name, and a token class or verb class the code does not know is
 // refused too, so a typo in the file narrows the surface rather than widening
 // it. The verb comes from argv read the way bd's own root parse reads it
-// (verbWords), so the class check applies to the verb bd will run.
+// (scanArgs), so the class check applies to the verb bd will run.
 
 // VerbClass is what running a bd verb may do to the store.
 type VerbClass string
@@ -306,10 +306,11 @@ func parseVerbClass(s string) (VerbClass, error) {
 // verb's class, and no flag on argv is refused for the verb or for every verb.
 // It returns the matched verb so the caller can log its path and class.
 //
-// argv is bd's arguments, never "bd" and never a shell string. bd root flags
-// are read the way bd reads them, and nothing after "--" is a flag.
+// argv is bd's arguments, never "bd" and never a shell string. One scan
+// (scanArgs) reads both the verb words and the flags, so the class check and
+// the flag check cannot disagree about which tokens are flags.
 func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
-	words, err := p.verbWords(argv)
+	words, flags, err := p.scanArgs(argv)
 	if err != nil {
 		return Verb{}, err
 	}
@@ -321,47 +322,68 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 	if !Allowed(class, v.Class) {
 		return Verb{}, fmt.Errorf("%w: %s token may not run %s (%s)", ErrClassDenied, class, v.Name(), v.Class)
 	}
-	if flag, ok := p.refusedFlag(v, argv); ok {
+	if flag, ok := p.refusedFlag(v, flags); ok {
 		return Verb{}, fmt.Errorf("%w: %s on %s", ErrFlagRefused, flag.spelling, v.Name())
 	}
 	return v, nil
 }
 
-// verbWords returns the words bd's root command would read as command words
-// for argv, or ErrAmbiguousVerb when a flag before the last of them is one the
-// policy cannot place. It follows cobra's stripFlags, which bd's root runs
-// before matching a subcommand: "--" ends the parse; a long flag with an
-// attached value ("--db=beads") and a glued shorthand ("-Cdir") carry theirs
-// already; a known boolean flag leaves the next argument alone; a known
-// value-taking flag takes it, whatever it looks like.
+// scanArgs reads argv once the way bd's root parse does, returning the command
+// words and the flags in option position, or ErrAmbiguousVerb when a token
+// cannot be placed. One scan decides both, because a token one check reads as a
+// value the other must not read as a flag: in "--format -- --db=/x show",
+// --format takes "--" as its value and --db is a flag bd acts on.
 //
-// Once no listed verb path extends the words read so far, a later flag cannot
-// change the verb, so the rest of argv is not the resolver's concern.
-func (p *Policy) verbWords(argv []string) ([]string, error) {
+// The rules are cobra's stripFlags over the root flag set. "--" in option
+// position ends the options: the rest of argv is positional, never a flag, and
+// names no command word. A known value-taking flag takes the next argument as
+// its value, even when that argument is "--" or starts with "-". An attached
+// value ("--db=beads", "-Cdir") is the token's own, so it consumes nothing more.
+// A known boolean flag consumes nothing. Once no listed verb path extends the
+// words read, a later word cannot change the verb, but every later flag still
+// counts for the refusal.
+//
+// A flag outside bdRootFlags is a command flag whose arity the tree does not
+// record. Before the verb is settled, or with a following token that starts
+// with "-", its value cannot be told from a flag, so the call is refused.
+func (p *Policy) scanArgs(argv []string) ([]string, []flagToken, error) {
 	words := make([]string, 0, maxPathWords)
-	for i := 0; i < len(argv) && p.extends(words); i++ {
+	var flags []flagToken
+	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
 		if arg == "--" {
 			break
 		}
 		if arg == "" || arg == "-" {
-			// cobra reads neither as a command word; a bare "-" is passed to
-			// the command, not read as a flag with a value.
 			continue
 		}
 		if !strings.HasPrefix(arg, "-") {
-			words = append(words, arg)
+			if p.extends(words) {
+				words = append(words, arg)
+			}
 			continue
 		}
-		_, ok, consumes := rootFlag(arg)
-		if !ok {
-			return nil, fmt.Errorf("%w: %q is not a bd root flag the policy can place", ErrAmbiguousVerb, arg)
-		}
-		if consumes {
-			i++ // the next argument is this flag's value
+		flags = append(flags, flagNames(arg)...)
+		kind, known, attached := rootFlag(arg)
+		switch {
+		case attached:
+			// The value is glued to the token; it consumes nothing after it.
+		case known && kind == flagValue:
+			i++ // the value is the next argument, whatever it looks like
+		case known:
+			// A boolean root flag: the next argument is not its value.
+		case i+1 < len(argv) && strings.HasPrefix(argv[i+1], "-"):
+			return nil, nil, ambiguousFlag(arg)
+		case p.extends(words):
+			return nil, nil, ambiguousFlag(arg)
 		}
 	}
-	return words, nil
+	return words, flags, nil
+}
+
+// ambiguousFlag is the refusal for a flag the scan cannot place.
+func ambiguousFlag(arg string) error {
+	return fmt.Errorf("%w: %q is not a bd root flag the policy can place", ErrAmbiguousVerb, arg)
 }
 
 // extends reports whether a listed verb path has words as a strict prefix, so
@@ -379,22 +401,24 @@ func (p *Policy) extends(words []string) bool {
 }
 
 // rootFlag classifies one dash-prefixed argument. known is false for a flag
-// outside bdRootFlags; consumes reports whether the flag takes the following
-// argument as its value.
-func rootFlag(arg string) (kind flagKind, known, consumes bool) {
+// outside bdRootFlags; attached reports that the token carries its value
+// already ("--db=beads", "-Cdir").
+func rootFlag(arg string) (kind flagKind, known, attached bool) {
 	if strings.HasPrefix(arg, "--") {
 		name, _, attached := strings.Cut(arg, "=")
 		kind, ok := bdRootFlags[name]
 		if !ok {
-			return 0, false, false
+			// The flag is unknown, but a token holding "=" carries its value
+			// whatever the flag's arity.
+			return 0, false, attached
 		}
-		return kind, true, kind == flagValue && !attached
+		return kind, true, attached
 	}
 	switch {
 	case arg == "-C":
-		return flagValue, true, true
-	case strings.HasPrefix(arg, "-C"):
 		return flagValue, true, false
+	case strings.HasPrefix(arg, "-C"):
+		return flagValue, true, true
 	}
 	return 0, false, false
 }
@@ -417,22 +441,12 @@ func (p *Policy) verbName(words []string) string {
 	return words[0]
 }
 
-// refusedFlag returns the first flag on argv that is refused for v or for every
-// verb, with its spelling as written, or false when none is. Nothing after "--"
-// is a flag. The scan does not use the flag classification the verb resolver
-// does, because a refused flag must be caught wherever it appears: a value
-// spelled like a refused flag (a title of "--db", say) is refused too. The call
-// is retryable with the value attached (--title=--db), and refusing is the safe
-// side.
-func (p *Policy) refusedFlag(v Verb, argv []string) (flagToken, bool) {
-	for _, arg := range argv {
-		if arg == "--" {
-			break
-		}
-		for _, flag := range flagNames(arg) {
-			if p.refusedFlags[flag.name] || slices.Contains(v.FlagsRefused, flag.name) {
-				return flag, true
-			}
+// refusedFlag returns the first flag in flags that is refused for v or for
+// every verb, with its spelling as written, or false when none is.
+func (p *Policy) refusedFlag(v Verb, flags []flagToken) (flagToken, bool) {
+	for _, flag := range flags {
+		if p.refusedFlags[flag.name] || slices.Contains(v.FlagsRefused, flag.name) {
+			return flag, true
 		}
 	}
 	return flagToken{}, false
@@ -446,11 +460,11 @@ type flagToken struct {
 	spelling string
 }
 
-// flagNames returns the flags a dash-prefixed token asks for, without their
-// values: "--db=beads" and "--db" both name "db" as --db. A single dash starts
-// shorthands, which pflag may group, so every leading letter is a name:
-// "-C/town" names "C" and "-qC" names "q" and "C". A bare "-" is stdin, not a
-// flag, and a token with no letter is not one either.
+// flagNames returns the flags a dash-prefixed token in option position asks
+// for. A long flag names itself up to "=": "--db=beads" and "--db" both name
+// "db" as --db. A single dash starts shorthands, which pflag may group, so
+// each letter is a name until one that takes a value ends the flags, the rest
+// of the token being that value: "-qC" names q and C, "-Cdir" names C only.
 func flagNames(arg string) []flagToken {
 	if len(arg) < 2 || arg[0] != '-' {
 		return nil
@@ -462,15 +476,17 @@ func flagNames(arg string) []flagToken {
 		}
 		return []flagToken{{name: name, spelling: "--" + name}}
 	}
-	// The letters run until the first non-letter, which starts an attached
-	// value, or an "=".
 	var tokens []flagToken
 	for i := 1; i < len(arg); i++ {
 		c := arg[i]
 		if !(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') {
 			break
 		}
-		tokens = append(tokens, flagToken{name: string(c), spelling: "-" + string(c)})
+		name := string(c)
+		tokens = append(tokens, flagToken{name: name, spelling: "-" + name})
+		if bdRootFlags["-"+name] == flagValue {
+			break // the rest of the token is this shorthand's value
+		}
 	}
 	return tokens
 }

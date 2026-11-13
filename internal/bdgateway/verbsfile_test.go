@@ -80,9 +80,16 @@ func TestVerbsFileMatchesCommandTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
+	for _, msg := range verbsAbsentFromTree(p, tree) {
+		t.Error(msg)
+	}
+}
 
-	names := sortedVerbNames(p)
-	for _, name := range names {
+// verbsAbsentFromTree returns one message per allowed verb the tree does not
+// run.
+func verbsAbsentFromTree(p *Policy, tree *cmdtree.Tree) []string {
+	var missing []string
+	for _, name := range sortedVerbNames(p) {
 		res := tree.Resolve(p.verbs[name].Path)
 		if res.OK {
 			continue
@@ -91,7 +98,30 @@ func TestVerbsFileMatchesCommandTree(t *testing.T) {
 		if res.HelpOnly {
 			detail = "stops on a help-only parent"
 		}
-		t.Errorf("deploy/bd/verbs.json allows %q, which bd's command tree does not run: %s", name, detail)
+		missing = append(missing, fmt.Sprintf("deploy/bd/verbs.json allows %q, which bd's command tree does not run: %s", name, detail))
+	}
+	return missing
+}
+
+// TestVerbsAbsentFromTreeFindsAMissingVerb drives the failing branch of the
+// command-tree gate with a verb bd does not hold, so a check that passes every
+// file cannot land unnoticed.
+func TestVerbsAbsentFromTreeFindsAMissingVerb(t *testing.T) {
+	t.Parallel()
+	p, err := ParsePolicy(strings.NewReader(`{"refused_flags": ["db"], "verbs": [
+		{"path": "show", "class": "read"},
+		{"path": "not-a-bd-verb", "class": "read"}
+	]}`))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	tree, _, err := cmdtree.LoadBdTree()
+	if err != nil {
+		t.Fatalf("LoadBdTree: %v", err)
+	}
+	missing := verbsAbsentFromTree(p, tree)
+	if len(missing) != 1 || !strings.Contains(missing[0], "not-a-bd-verb") {
+		t.Fatalf("verbsAbsentFromTree = %v, want one message naming not-a-bd-verb", missing)
 	}
 }
 
