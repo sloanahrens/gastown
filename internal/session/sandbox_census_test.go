@@ -220,7 +220,7 @@ func TestSlingCensus(t *testing.T) {
 	})
 
 	t.Run("an empty listing while the registry holds the seat is unknown, not absent", func(t *testing.T) {
-		gw := &censusGateway{listing: "No sandboxes found.\n"}
+		gw := &censusGateway{listing: listingOf(map[string]string{})}
 		censusTown(t, gw, []string{"gt-rig-s00"})
 		var p seatProbes
 		for read := 0; read < 2; read++ {

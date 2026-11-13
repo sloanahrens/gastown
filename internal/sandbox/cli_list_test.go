@@ -191,6 +191,22 @@ func TestCLIList(t *testing.T) {
 		})
 	}
 
+	t.Run("a listing that never ends is an error at the page bound", func(t *testing.T) {
+		t.Parallel()
+		calls := 0
+		run := func(_ context.Context, _ []string, _ []byte, _ []string) ([]byte, []byte, error) {
+			calls++
+			return []byte(fullPage(0, fmt.Sprintf("tok-%d", calls))), nil, nil
+		}
+		cli := &CLI{Gateway: "openshell", Run: run}
+		if _, err := cli.List(context.Background()); err == nil || !strings.Contains(err.Error(), "more than") {
+			t.Fatalf("List error = %v, want the page bound refused", err)
+		}
+		if calls != listMaxPages {
+			t.Errorf("made %d calls, want %d (the bound stops the loop)", calls, listMaxPages)
+		}
+	})
+
 	t.Run("a repeated continuation token is an error", func(t *testing.T) {
 		t.Parallel()
 		var seen []string
