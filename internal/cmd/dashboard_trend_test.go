@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -358,6 +359,43 @@ func TestBuildRecentLandingsKeepsEveryRowAndAsksTitlesOnlyForTheFirstTen(t *test
 	}
 	if rows[0].Bead != "gt-0" || rows[49].Bead != "gt-49" {
 		t.Errorf("not newest first: first %s last %s", rows[0].Bead, rows[49].Bead)
+	}
+}
+
+// A landed row carries the agent and priority its landing record holds, and a
+// record written without them leaves both absent from the row and the JSON
+// (gt-tnml1k).
+func TestBuildRecentLandingsCarriesAgentAndPriority(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	p1 := 1
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-new", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Minute), Agent: "claude-haiku", Priority: &p1}},
+		{Record: landings.Record{Bead: "gt-old", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Minute)}},
+	}
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, recentLandingRows)
+	if len(rows) != 2 || rows[0].Bead != "gt-new" {
+		t.Fatalf("rows = %+v, want gt-new then gt-old", rows)
+	}
+	if rows[0].Agent != "claude-haiku" || rows[0].Priority == nil || *rows[0].Priority != 1 {
+		t.Errorf("row with a record that carries both = agent %q, priority %v; want claude-haiku and 1", rows[0].Agent, rows[0].Priority)
+	}
+	if rows[1].Agent != "" || rows[1].Priority != nil {
+		t.Errorf("row with a record that carries neither = agent %q, priority %v; want both absent", rows[1].Agent, rows[1].Priority)
+	}
+	kept, err := json.Marshal(rows[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(kept), `"agent":"claude-haiku"`) || !strings.Contains(string(kept), `"priority":1`) {
+		t.Errorf("row JSON %s lacks the agent or priority key", kept)
+	}
+	bare, err := json.Marshal(rows[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bare), `"agent"`) || strings.Contains(string(bare), `"priority"`) {
+		t.Errorf("row JSON %s has an agent or priority key with no value", bare)
 	}
 }
 

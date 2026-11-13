@@ -793,6 +793,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	}
 	work.Head = tip
 	work.Agent = w.seatAgent(work.Worker)
+	work.Priority = w.beadPriority(issue.ID)
 	w.landOne(ctx, work, rep)
 }
 
@@ -901,6 +902,22 @@ func (w *Worker) seatAgent(polecat string) string {
 		return ""
 	}
 	return strings.TrimSpace(beads.ParseAgentFields(issue.Description).Agent)
+}
+
+// beadPriority is the landed bead's priority, read from the bead the way
+// writeSPActual reads it. A failed read is logged and leaves the priority nil:
+// the record carries none, and the landing stands (gt-tnml1k).
+func (w *Worker) beadPriority(id string) *int {
+	issue, err := w.Beads.Show(id)
+	if err != nil {
+		w.logf("%s: reading the bead's priority: %v; the landing records no priority", id, err)
+		return nil
+	}
+	if issue == nil {
+		return nil
+	}
+	p := issue.Priority
+	return &p
 }
 
 // polecatFromAssignee is the polecat name in "<rig>/polecats/<name>".

@@ -533,6 +533,14 @@ type LandingRow struct {
 	Rig     string    `json:"rig,omitempty"`
 	Title   string    `json:"title,omitempty"`
 	Polecat string    `json:"polecat,omitempty"`
+	// Agent is the agent the landing's polecat seat ran on, from the landing
+	// record. A crew landing, a running or rejected row, and a record written
+	// before the field existed leave it empty (gt-tnml1k).
+	Agent string `json:"agent,omitempty"`
+	// Priority is the landed bead's priority (0 is the highest), from the
+	// landing record. It is nil on a row with no record, or one written before
+	// the landing worker recorded it (gt-tnml1k).
+	Priority *int `json:"priority,omitempty"`
 	// Crew marks a row built on a crew session's branch, landed or still
 	// running: no polecat built it, so the Polecat cell says there is no
 	// polecat time rather than drawing a dash, which would look like missing
