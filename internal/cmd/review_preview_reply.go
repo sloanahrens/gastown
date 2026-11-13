@@ -54,15 +54,7 @@ type reviewPreviewReply struct {
 }
 
 func runReviewPreviewReply(cmd *cobra.Command, args []string) error {
-	fixed, err := cmd.Flags().GetBool("fixed")
-	if err != nil {
-		return err
-	}
-	disputed, err := cmd.Flags().GetBool("disputed")
-	if err != nil {
-		return err
-	}
-	text, err := cmd.Flags().GetString("message")
+	fixed, disputed, text, err := reviewPreviewReplyFlags(cmd)
 	if err != nil {
 		return err
 	}
@@ -70,11 +62,39 @@ func runReviewPreviewReply(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	cwd, err := callercwd.Require()
+	return runReviewPreviewReplyFrom(callercwd.Require, args[0], kind, text)
+}
+
+// reviewPreviewReplyFlags reads the reply's three flags off cmd. A command that
+// does not define them is refused, so the error names the wiring, not the user.
+func reviewPreviewReplyFlags(cmd *cobra.Command) (fixed, disputed bool, text string, err error) {
+	if fixed, err = cmd.Flags().GetBool("fixed"); err != nil {
+		return false, false, "", err
+	}
+	if disputed, err = cmd.Flags().GetBool("disputed"); err != nil {
+		return false, false, "", err
+	}
+	if text, err = cmd.Flags().GetString("message"); err != nil {
+		return false, false, "", err
+	}
+	return fixed, disputed, text, nil
+}
+
+// runReviewPreviewReplyFrom runs the reply in the directory resolve names. The
+// command passes callercwd.Require; a test passes a resolver that fails, so the
+// refusal runs with no git and no bd.
+func runReviewPreviewReplyFrom(resolve func() (string, error), finding, kind, text string) error {
+	cwd, err := resolve()
 	if err != nil {
 		return errors.New("no working directory")
 	}
-	repo := git.NewGit(cwd)
+	return runReviewPreviewReplyAt(git.NewGit(cwd), beads.New(cwd), finding, kind, text)
+}
+
+// runReviewPreviewReplyAt answers finding on the work bead the branch names. The
+// head the round is checked against is the branch's HEAD, and the notes are read
+// and the reply appended on that bead only.
+func runReviewPreviewReplyAt(repo reviewPreviewRepo, store reviewPreviewStore, finding, kind, text string) error {
 	branch, err := repo.CurrentBranch()
 	if err != nil {
 		return errors.New("could not read the current branch")
@@ -83,14 +103,13 @@ func runReviewPreviewReply(cmd *cobra.Command, args []string) error {
 	if !ok {
 		return fmt.Errorf("branch %s names no work bead", branch)
 	}
-	store := beads.New(cwd)
 	r := reviewPreviewReply{
 		bead:       bead,
 		branchHead: func() (string, error) { return repo.Rev("HEAD") },
 		readNotes:  func() (string, error) { return reviewPreviewNotes(bead, store.Show) },
 		appendNote: func(note string) error { return store.AppendNotes(bead, note) },
 	}
-	return r.run(args[0], kind, text)
+	return r.run(finding, kind, text)
 }
 
 // reviewPreviewReplyKind maps the two flags to the kind a reply carries. Exactly
