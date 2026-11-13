@@ -657,9 +657,10 @@ func TestInitBeadsWritesConfigOnFailure(t *testing.T) {
 	}
 }
 
-// When bd init succeeds, InitBeads sets issue_prefix explicitly:
-// bd init --prefix may not persist it.
-func TestInitBeadsSetsIssuePrefix(t *testing.T) {
+// bd refuses `config set issue_prefix` and persists the prefix only through
+// rename-prefix --config-only. When bd init leaves no prefix behind, InitBeads
+// must still persist it, or AddRig fails on the read-back.
+func TestInitBeadsSetsIssuePrefixWhenBDRefusesConfigSet(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
@@ -667,24 +668,35 @@ func TestInitBeadsSetsIssuePrefix(t *testing.T) {
 	}
 
 	manager, _, bd := testManager("", nil)
+	bd.fail = func(c bdCall) error {
+		if c.Verb == "config set" && len(c.Args) > 0 && c.Args[0] == "issue_prefix" {
+			return &beads.CLIError{
+				Args:   []string{"config", "set", "issue_prefix", "myrig"},
+				Stdout: []byte("{\n  \"error\": {\"kind\": \"internal\"}\n}\n"),
+				Stderr: []byte("Error: use bd rename-prefix\n"),
+				Err:    errors.New("exit status 1"),
+			}
+		}
+		return nil
+	}
 	if err := manager.InitBeads(rigPath, "myrig", ""); err != nil {
 		t.Fatalf("initBeads: %v", err)
 	}
-	if !slices.Contains(bd.argvs(), "config set issue_prefix myrig") {
-		t.Errorf("expected 'bd config set issue_prefix myrig', got:\n%s", strings.Join(bd.argvs(), "\n"))
+	if got := bd.config["issue_prefix"]; got != "myrig" {
+		t.Fatalf("stored issue_prefix = %q, want myrig; calls:\n%s", got, strings.Join(bd.argvs(), "\n"))
 	}
 }
 
-// bd refuses `config set issue_prefix` once bd init has persisted it, and the
-// refusal's wording differs by bd build. A refusal whose stored value already
-// matches the prefix is not a failure, whatever the refusal says.
+// bd can refuse a rename-prefix, and the refusal's wording differs by bd
+// build. A refusal whose stored value already matches the prefix is not a
+// failure, whatever the refusal says; a refusal over any other stored value is.
 func TestInitBeadsAcceptsIssuePrefixRefusalWhenStoredPrefixMatches(t *testing.T) {
 	t.Parallel()
 	const prefix = "myrig"
 	refusal := &beads.CLIError{
-		Args:   []string{"config", "set", "issue_prefix", prefix},
+		Args:   []string{"rename-prefix", "--config-only", prefix + "-"},
 		Stdout: []byte("{\n  \"error\": {\"kind\": \"internal\"}\n}\n"),
-		Stderr: []byte("Error: issue_prefix must be changed with bd rename-prefix\n"),
+		Stderr: []byte("Error: rename-prefix refused\n"),
 		Err:    errors.New("exit status 1"),
 	}
 	readErr := errors.New("bd config get: database not initialized")
@@ -711,13 +723,13 @@ func TestInitBeadsAcceptsIssuePrefixRefusalWhenStoredPrefixMatches(t *testing.T)
 				if c.Verb == "config get" && tc.getErr != nil {
 					return tc.getErr
 				}
-				if c.Verb == "config set" && len(c.Args) > 0 && c.Args[0] == "issue_prefix" {
+				if c.Verb == "rename-prefix" {
 					return refusal
 				}
 				return nil
 			}
 			err := manager.InitBeads(rigPath, "myrig", "")
-			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "bd config set issue_prefix failed")) {
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "bd rename-prefix --config-only failed")) {
 				t.Fatalf("InitBeads = %v, want the refused issue_prefix to fail", err)
 			}
 			if tc.getErr != nil && (err == nil || !strings.Contains(err.Error(), tc.getErr.Error())) {

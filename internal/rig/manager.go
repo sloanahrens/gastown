@@ -1674,21 +1674,22 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 			_ = bd.ConfigSet(cfg.key, cfg.value)
 		}
 
-		// Explicitly set issue_prefix config (bd init --prefix may not persist it in newer versions).
+		// Explicitly set issue_prefix (bd init --prefix may not persist it in newer versions).
 		// Without this, bd create and gt sling fail with "issue_prefix config is missing".
-		// bd >= 1.0.0 rejects this because init persists it directly. The refusal's wording
-		// differs by bd build and its stdout carries a JSON envelope, so match the stored
-		// value rather than the text: a refusal over a prefix that already reads back as
-		// ours is already-set, and any other refusal is a failure.
-		if prefixErr := bd.ConfigSet("issue_prefix", prefix); prefixErr != nil {
+		// bd config set refuses this key ("use bd rename-prefix"), so the prefix is written
+		// with rename-prefix --config-only, the one verb that writes it (SetIssuePrefix). The
+		// refusal's wording differs by bd build and its stdout carries a JSON envelope, so
+		// match the stored value rather than the text: a refusal over a prefix that already
+		// reads back as ours is already-set, and any other refusal is a failure.
+		if prefixErr := bd.SetIssuePrefix(prefix); prefixErr != nil {
 			current, getErr := bd.ConfigGet("issue_prefix")
 			if getErr != nil {
 				// The read-back failed, so the refusal cannot be shown to be
 				// harmless: name both, or the refusal hides why the store was unreadable.
-				return fmt.Errorf("bd config set issue_prefix failed: %s; reading issue_prefix back also failed: %w", beads.Summarize(prefixErr), getErr)
+				return fmt.Errorf("bd rename-prefix --config-only failed: %s; reading issue_prefix back also failed: %w", beads.Summarize(prefixErr), getErr)
 			}
 			if current != prefix {
-				return fmt.Errorf("bd config set issue_prefix failed: %s", beads.Summarize(prefixErr))
+				return fmt.Errorf("bd rename-prefix --config-only failed: %s", beads.Summarize(prefixErr))
 			}
 		}
 
