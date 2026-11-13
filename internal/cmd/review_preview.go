@@ -106,7 +106,7 @@ type reviewPreviewAnswer struct {
 	// answered is true when a LOCAL ROUND block for the head, or an unavailable
 	// block, follows the last request.
 	answered bool
-	// round is the block for the head. Set when answered with findings.
+	// round is the block for the head. Set when a block for the head answers.
 	round land.LocalRound
 	// reason is the daemon's reason when the answer is an unavailable block.
 	reason string
@@ -298,13 +298,20 @@ type reviewPreviewDeps struct {
 }
 
 func runReviewPreview(cmd *cobra.Command, _ []string) error {
-	cwd, err := callercwd.Require()
+	return runReviewPreviewFrom(callercwd.Require, cmd.OutOrStdout(), cmd.ErrOrStderr())
+}
+
+// runReviewPreviewFrom runs the preview in the directory resolve names. The
+// command passes callercwd.Require; a test passes a resolver that fails, so the
+// refusal runs with no git and no bd.
+func runReviewPreviewFrom(resolve func() (string, error), out, errOut io.Writer) error {
+	cwd, err := resolve()
 	if err != nil {
-		return reviewPreviewGiveUp(cmd.ErrOrStderr(), fmt.Sprintf("no working directory: %v", err))
+		return reviewPreviewGiveUp(errOut, fmt.Sprintf("no working directory: %v", err))
 	}
 	return runReviewPreviewAt(reviewPreviewDeps{
-		out:      cmd.OutOrStdout(),
-		errOut:   cmd.ErrOrStderr(),
+		out:      out,
+		errOut:   errOut,
 		repo:     git.NewGit(cwd),
 		store:    beads.New(cwd),
 		poll:     time.Sleep,

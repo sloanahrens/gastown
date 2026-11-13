@@ -524,6 +524,23 @@ func TestReviewPreviewWiresBranchHeadAndBead(t *testing.T) {
 	}
 }
 
+func TestReviewPreviewRefusesWithoutWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	err := runReviewPreviewFrom(func() (string, error) {
+		return "", errors.New("the caller's directory is not present here")
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("runReviewPreviewFrom() = %v, want nil: the preview never fails the submit", err)
+	}
+	if !strings.Contains(stderr.String(), "no working directory") || !strings.Contains(stderr.String(), reviewPreviewUnavailable) {
+		t.Errorf("stderr = %q, want the no-working-directory refusal", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want none", stdout.String())
+	}
+}
+
 func TestReviewPreviewWiringRefusesBeforeAnyWrite(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
