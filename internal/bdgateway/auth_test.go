@@ -51,9 +51,9 @@ func TestAuthTokens(t *testing.T) {
 		want    Identity
 		wantErr error
 	}{
-		{"read token", "Bearer read-token", Identity{ClassRead, "oncall-dashboard"}, nil},
-		{"daemon token", "Bearer daemon-token", Identity{ClassDaemon, "landing-worker"}, nil},
-		{"operator token", "Bearer operator-token", Identity{ClassOperator, "mac-wrapper"}, nil},
+		{"read token", "Bearer read-token", Identity{TokenRead, "oncall-dashboard"}, nil},
+		{"daemon token", "Bearer daemon-token", Identity{TokenDaemon, "landing-worker"}, nil},
+		{"operator token", "Bearer operator-token", Identity{TokenOperator, "mac-wrapper"}, nil},
 		{"no header", "", Identity{}, ErrNoToken},
 		{"bearer with no token", "Bearer ", Identity{}, ErrNoToken},
 		{"another scheme", "Basic dXNlcjpwYXNz", Identity{}, ErrNoToken},
@@ -234,7 +234,7 @@ func TestAuthReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new token after the reload: %v", err)
 	}
-	if got != (Identity{ClassRead, "dashboard"}) {
+	if got != (Identity{TokenRead, "dashboard"}) {
 		t.Errorf("new token identity = %+v, want the read/dashboard file's identity", got)
 	}
 
@@ -302,7 +302,7 @@ func TestAuthReloadInFlightRequest(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("the in-flight request failed after the reload: %v", got.err)
 	}
-	if want := (Identity{ClassRead, "dashboard"}); got.identity != want {
+	if want := (Identity{TokenRead, "dashboard"}); got.identity != want {
 		t.Errorf("the in-flight request returned %+v, want %+v", got.identity, want)
 	}
 	if _, err := auth.Authenticate("Bearer old-token"); !errors.Is(err, ErrUnknownToken) {
@@ -345,7 +345,7 @@ func TestAuthRequestDuringReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a request during the reload: %v", err)
 	}
-	if want := (Identity{ClassRead, "dashboard"}); got != want {
+	if want := (Identity{TokenRead, "dashboard"}); got != want {
 		t.Errorf("a request during the reload returned %+v, want %+v", got, want)
 	}
 
@@ -365,7 +365,7 @@ func TestAuthRequestDuringReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new token after the reload: %v", err)
 	}
-	if want := (Identity{ClassRead, "dashboard"}); got != want {
+	if want := (Identity{TokenRead, "dashboard"}); got != want {
 		t.Errorf("new token identity = %+v, want %+v", got, want)
 	}
 }
@@ -556,7 +556,7 @@ func TestAuthLoaderRefusals(t *testing.T) {
 				writeTokenFile(t, dir, "admin.dashboard.token", "admin-token\n", 0o600)
 				return dir
 			},
-			wantErr: ErrUnknownClass,
+			wantErr: ErrUnknownTokenClass,
 		},
 		{
 			name: "file name with no caller",
@@ -760,60 +760,33 @@ func TestAuthZeroValueRefuses(t *testing.T) {
 	}
 }
 
-// TestAuthClassAllows pins the class hierarchy: daemon may do what read may,
-// operator what daemon may, and an unknown class may do nothing.
-func TestAuthClassAllows(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		held     Class
-		required Class
-		want     bool
-	}{
-		{ClassRead, ClassRead, true},
-		{ClassRead, ClassDaemon, false},
-		{ClassRead, ClassOperator, false},
-		{ClassDaemon, ClassRead, true},
-		{ClassDaemon, ClassDaemon, true},
-		{ClassDaemon, ClassOperator, false},
-		{ClassOperator, ClassRead, true},
-		{ClassOperator, ClassDaemon, true},
-		{ClassOperator, ClassOperator, true},
-		{Class("admin"), ClassRead, false},
-		{ClassRead, Class("admin"), false},
-		{ClassRead, Class(""), false},
-	}
-	for _, tt := range tests {
-		t.Run(string(tt.held)+"->"+string(tt.required), func(t *testing.T) {
-			if got := tt.held.Allows(tt.required); got != tt.want {
-				t.Errorf("%q.Allows(%q) = %v, want %v", tt.held, tt.required, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestAuthRequire is the 403 path: a class that may not run the verb is
-// forbidden, and that refusal maps to 403.
+// TestAuthRequire is the 403 path: a token class that may not run the verb's
+// class is denied, and that refusal maps to 403.
 func TestAuthRequire(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
 		identity Identity
-		required Class
+		required VerbClass
 		wantErr  bool
 	}{
-		{"read may read", Identity{Class: ClassRead}, ClassRead, false},
-		{"read may not write", Identity{Class: ClassRead}, ClassDaemon, true},
-		{"daemon may read", Identity{Class: ClassDaemon}, ClassRead, false},
-		{"daemon may not configure", Identity{Class: ClassDaemon}, ClassOperator, true},
-		{"operator may configure", Identity{Class: ClassOperator}, ClassOperator, false},
+		{"read may read", Identity{Class: TokenRead}, ClassRead, false},
+		{"read may not write", Identity{Class: TokenRead}, ClassWrite, true},
+		{"read may not administer", Identity{Class: TokenRead}, ClassAdmin, true},
+		{"daemon may read", Identity{Class: TokenDaemon}, ClassRead, false},
+		{"daemon may write", Identity{Class: TokenDaemon}, ClassWrite, false},
+		{"daemon may not administer", Identity{Class: TokenDaemon}, ClassAdmin, true},
+		{"operator may read", Identity{Class: TokenOperator}, ClassRead, false},
+		{"operator may write", Identity{Class: TokenOperator}, ClassWrite, false},
+		{"operator may administer", Identity{Class: TokenOperator}, ClassAdmin, false},
 		{"zero identity may do nothing", Identity{}, ClassRead, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.identity.Require(tt.required)
 			if tt.wantErr {
-				if !errors.Is(err, ErrForbidden) {
-					t.Fatalf("Require(%q) error = %v, want ErrForbidden", tt.required, err)
+				if !errors.Is(err, ErrClassDenied) {
+					t.Fatalf("Require(%q) error = %v, want ErrClassDenied", tt.required, err)
 				}
 				if status := HTTPStatus(err); status != http.StatusForbidden {
 					t.Errorf("HTTPStatus(%v) = %d, want 403", err, status)
@@ -876,7 +849,9 @@ func TestHTTPStatus(t *testing.T) {
 		{"no error", nil, http.StatusOK},
 		{"no token", fmt.Errorf("wrapped: %w", ErrNoToken), http.StatusUnauthorized},
 		{"unknown token", ErrUnknownToken, http.StatusUnauthorized},
-		{"forbidden", fmt.Errorf("wrapped: %w", ErrForbidden), http.StatusForbidden},
+		{"class denied", fmt.Errorf("wrapped: %w", ErrClassDenied), http.StatusForbidden},
+		{"verb not allowed", ErrVerbNotAllowed, http.StatusForbidden},
+		{"flag refused", ErrFlagRefused, http.StatusForbidden},
 		{"unknown failure", errors.New("disk on fire"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {

@@ -14,65 +14,18 @@ import (
 	"syscall"
 )
 
-// Class is a gateway token class: what a caller holding the token may run.
-// The classes and what each may run are described in docs/design/bd-container.md,
-// "Token classes".
-type Class string
-
-const (
-	// ClassRead is the dashboard and monitor class: the read verbs only.
-	ClassRead Class = "read"
-	// ClassDaemon is the daemon, landing worker and plugin class: the read
-	// verbs and the write verbs gt makes.
-	ClassDaemon Class = "daemon"
-	// ClassOperator is the Mac wrapper class: everything daemon may, plus
-	// `config set` for issue_prefix.
-	ClassOperator Class = "operator"
-)
-
-// rank orders the classes by what they may run, and is 0 for a class this
-// package does not know, so an unknown class allows nothing.
-func (c Class) rank() int {
-	switch c {
-	case ClassRead:
-		return 1
-	case ClassDaemon:
-		return 2
-	case ClassOperator:
-		return 3
-	default:
-		return 0
-	}
-}
-
-// Allows reports whether a caller of class c may run what required requires.
-// An unknown class, held or required, allows nothing.
-func (c Class) Allows(required Class) bool {
-	r := required.rank()
-	return r > 0 && c.rank() >= r
-}
-
-// ParseClass returns the class called name, or ErrUnknownClass.
-func ParseClass(name string) (Class, error) {
-	c := Class(name)
-	if c.rank() == 0 {
-		return "", fmt.Errorf("%w: %q", ErrUnknownClass, name)
-	}
-	return c, nil
-}
-
 // Identity is what a bearer token authenticates to, both halves read from the
 // token's file name (docs/design/bd-container.md, "Token classes").
 type Identity struct {
-	Class  Class
+	Class  TokenClass
 	Caller string
 }
 
-// Require returns ErrForbidden unless the identity's class may run what
-// required names. The gateway answers the refusal with 403.
-func (i Identity) Require(required Class) error {
-	if !i.Class.Allows(required) {
-		return fmt.Errorf("%w: class %q may not run a %q call", ErrForbidden, i.Class, required)
+// Require returns ErrClassDenied unless the identity's token class may run a
+// verb of verbClass. The gateway answers the refusal with 403.
+func (i Identity) Require(verbClass VerbClass) error {
+	if !Allowed(i.Class, verbClass) {
+		return fmt.Errorf("%w: %s token may not run a %s verb", ErrClassDenied, i.Class, verbClass)
 	}
 	return nil
 }
@@ -87,11 +40,6 @@ var (
 	// ErrUnknownToken is Authenticate's refusal of a well-formed token no file
 	// holds.
 	ErrUnknownToken = errors.New("bdgateway: unknown bearer token")
-	// ErrForbidden is Require's refusal of a class that may not run the call.
-	ErrForbidden = errors.New("bdgateway: class may not run this call")
-	// ErrUnknownClass is LoadTokens' refusal of a token file name whose class
-	// part is not one of the classes.
-	ErrUnknownClass = errors.New("bdgateway: unknown token class")
 	// ErrTokenFileName is LoadTokens' refusal of a token file name that is not
 	// <class>.<caller>.token, or whose caller is not 1 to 64 lowercase letters,
 	// digits, '-' or '_'.
@@ -215,11 +163,22 @@ func tokenFileName(name string) (Identity, error) {
 	if !ok || !validCaller(caller) {
 		return Identity{}, fmt.Errorf("%w: file %s", ErrTokenFileName, name)
 	}
-	class, err := ParseClass(classPart)
+	class, err := parseTokenClass(classPart)
 	if err != nil {
 		return Identity{}, fmt.Errorf("%w: file %s", err, name)
 	}
 	return Identity{Class: class, Caller: caller}, nil
+}
+
+// parseTokenClass returns the token class called name, or ErrUnknownTokenClass.
+// The class part of a token file name goes through it, so a file naming a verb
+// class (write, admin) or a typo is refused rather than loaded.
+func parseTokenClass(name string) (TokenClass, error) {
+	c := TokenClass(name)
+	if _, ok := tokenClassRank(c); !ok {
+		return "", fmt.Errorf("%w: %q", ErrUnknownTokenClass, name)
+	}
+	return c, nil
 }
 
 // maxCallerBytes bounds the caller part of a token file name, so a name stays
@@ -354,17 +313,17 @@ func ParseBearer(header string) (string, error) {
 	return token, nil
 }
 
-// HTTPStatus maps an authentication or class refusal to the status the gateway
-// answers before any frame: 200 for no error, 401 for no or unknown token, 403
-// for a class that may not run the verb, and 500 for a failure this package
-// does not know. An unrecognized failure must not read as a success.
+// HTTPStatus maps an authentication, class or verb-policy refusal to the status
+// the gateway answers before any frame: 200 for no error, 401 for no or unknown
+// token, 403 for a verb, flag or class the policy refuses, and 500 for a failure
+// this package does not know. An unrecognized failure must not read as success.
 func HTTPStatus(err error) int {
 	switch {
 	case err == nil:
 		return http.StatusOK
 	case errors.Is(err, ErrNoToken), errors.Is(err, ErrUnknownToken):
 		return http.StatusUnauthorized
-	case errors.Is(err, ErrForbidden):
+	case errors.Is(err, ErrClassDenied), errors.Is(err, ErrVerbNotAllowed), errors.Is(err, ErrFlagRefused):
 		return http.StatusForbidden
 	default:
 		return http.StatusInternalServerError
