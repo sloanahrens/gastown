@@ -34,8 +34,23 @@ func crewHooksTown(t *testing.T, config *string) (string, string) {
 	return town, clone
 }
 
+// crewHooksRun runs the check on a town as a native gt on the Mac. The pod
+// variable is injected rather than read, because the test process itself can
+// run inside a pod, where the kubelet set it.
 func crewHooksRun(town string) *CheckResult {
-	return NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town})
+	return crewHooksRunWithPodEnv(town, "")
+}
+
+// crewHooksRunWithPodEnv runs the check with the pod variable set to host.
+func crewHooksRunWithPodEnv(town, host string) *CheckResult {
+	c := NewMacCrewHooksCheck()
+	c.getenv = func(key string) string {
+		if key == podEnv {
+			return host
+		}
+		return ""
+	}
+	return c.Run(&CheckContext{TownRoot: town})
 }
 
 // TestMacCrewHooksReportsADanglingPath: an absolute and a relative hooksPath that
@@ -205,6 +220,55 @@ func TestMacCrewHooksPassesHealthyClones(t *testing.T) {
 				t.Errorf("Details = %v, want none", res.Details)
 			}
 		})
+	}
+}
+
+// TestMacCrewHooksInAPodWarnsEvenWhenClonesAreHealthy: a pod sees only the crew
+// clone mounted there, so a scan that finds nothing is a WARNING naming the pod
+// and pointing at a native gt on the Mac. It is never a pass.
+func TestMacCrewHooksInAPodWarnsEvenWhenClonesAreHealthy(t *testing.T) {
+	t.Parallel()
+	config := "[core]\n\thooksPath = .githooks\n"
+	town, clone := crewHooksTown(t, &config)
+	if err := os.MkdirAll(filepath.Join(clone, ".githooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := crewHooksRunWithPodEnv(town, "10.0.0.1")
+	if res.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning: %+v", res.Status, res)
+	}
+	for _, want := range []string{"pod", "not the Mac crew clones", "cannot see"} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("Message = %q, want it to contain %q", res.Message, want)
+		}
+	}
+	if !strings.Contains(res.FixHint, "native gt on the Mac") {
+		t.Errorf("FixHint = %q, want a run on a native gt on the Mac", res.FixHint)
+	}
+}
+
+// TestMacCrewHooksInAPodStillReportsAFinding: a dangling hooksPath found in a pod
+// is the ERROR it is, with the repair, not the pod warning.
+func TestMacCrewHooksInAPodStillReportsAFinding(t *testing.T) {
+	t.Parallel()
+	config := "[core]\n\thooksPath = /nonexistent/gt-hhkgui/hooks\n"
+	town, clone := crewHooksTown(t, &config)
+
+	res := crewHooksRunWithPodEnv(town, "10.0.0.1")
+	if res.Status != StatusError {
+		t.Fatalf("Status = %v, want StatusError: %+v", res.Status, res)
+	}
+	if len(res.Details) != 1 {
+		t.Fatalf("Details = %v, want one finding", res.Details)
+	}
+	for _, want := range []string{
+		"dangling core.hooksPath /nonexistent/gt-hhkgui/hooks",
+		"repair: git -C " + clone + " config --unset core.hooksPath",
+	} {
+		if !strings.Contains(res.Details[0], want) {
+			t.Errorf("finding %q does not contain %q", res.Details[0], want)
+		}
 	}
 }
 
