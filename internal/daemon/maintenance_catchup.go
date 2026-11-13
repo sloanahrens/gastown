@@ -189,11 +189,12 @@ func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked 
 // pass that has one.
 // The backup still comes first: the gc never runs without one.
 //
-// Fail closed. A window that does not parse, an external server, an unreadable
-// state file, a quiet probe that cannot answer or a backup older than the
-// catch-up age all mean no gc; the check fires every 5 minutes, so a deferral
-// simply retries on a later tick. Only a cycle that ran to its end sets the
-// retry gap, and only a failed one escalates (maintenanceGCCycle does that).
+// Fail closed. A window that does not parse, a database list the server cannot
+// give, an unreadable state file, a quiet probe that cannot answer or a backup
+// older than the catch-up age all mean no gc; the check fires every 5 minutes,
+// so a deferral simply retries on a later tick. Only a cycle that ran to its
+// end sets the retry gap, and only a failed one escalates (maintenanceGCCycle
+// does that).
 // Nothing here counts toward the skipped-window streak and nothing sets the
 // cycle-completion time the window folds into lastMaintenanceRun: the next
 // window still takes its own backup and runs its own gc.
@@ -215,9 +216,7 @@ func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 	// Every condition below is one maybeCatchUpBackup looks at on this same
 	// tick and reports itself — a backup root it cannot read, a backup list it
 	// cannot parse, a backup too old, no databases — so the gc fails closed in
-	// silence rather than repeating it every 5 minutes. The external-server gate
-	// below is the gc's own: the catch-up backup still runs against an external
-	// server, but its data dir cannot be measured for a gc.
+	// silence rather than repeating it every 5 minutes.
 	s := d.maintenance()
 	root, err := s.backupRoot()
 	if err != nil {
@@ -232,11 +231,18 @@ func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 		// runs on its own goroutine, so the gc waits for a later tick.
 		return
 	}
-	if external {
-		return
-	}
+	// The due rule here is weekly already (catchUpGCDue), so an external
+	// server — the pod, whose data dir is the Mac's — changes only the list's
+	// source: the server names its databases over SQL, as the catch-up backup
+	// above reads them (gt-lc16x3).
 	dataDir := d.maintenanceDataDir()
-	databases, err := s.gcDatabases(dataDir)
+	localDataDir := !external
+	var databases []string
+	if localDataDir {
+		databases, err = s.gcDatabases(dataDir)
+	} else {
+		databases, err = s.serverDatabases(d)
+	}
 	if err != nil || len(databases) == 0 {
 		return
 	}
@@ -276,7 +282,7 @@ func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 		len(due), maintenanceCatchUpGCAge, strings.Join(due, ", "))
 	s.dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
-		res := d.maintenanceGCCycle(due, dataDir)
+		res := d.maintenanceGCCycle(due, dataDir, localDataDir)
 		d.logger.Printf("scheduled_maintenance: catch-up gc cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
 			// The town went busy behind the guard. The next 5-minute tick

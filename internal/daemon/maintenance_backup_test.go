@@ -416,11 +416,13 @@ func TestMaintenanceServerDatabasesRefusesAnUnusableClientDir(t *testing.T) {
 	}
 }
 
-// A scheduled tick with an external server skips the gc, takes the night's
-// backup from the server's list, and consumes the window once that backup ends.
-func TestScheduledMaintenanceExternalServerTakesBackupWithoutGC(t *testing.T) {
+// A scheduled tick with an external server takes the night's backup from the
+// server's list and then runs the gc over SQL: the server's data dir is not on
+// this host, so nothing is measured, due is the week alone, and both databases
+// (never gc'd) tie for the order, which goes by name (gt-lc16x3).
+func TestScheduledMaintenanceExternalServerTakesBackupThenGC(t *testing.T) {
 	t.Parallel()
-	d, logs := gcTestDaemon(t)
+	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.serverDBs = []string{"gt", "hq"} // the local data dir holds nothing
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
@@ -431,21 +433,17 @@ func TestScheduledMaintenanceExternalServerTakesBackupWithoutGC(t *testing.T) {
 	if strings.Join(f.backupCalls, ",") != "gt,hq" {
 		t.Errorf("backup calls = %v, want gt,hq from the server", f.backupCalls)
 	}
-	if len(f.gcCalls) != 0 {
-		t.Errorf("gc ran against an external server: %v", f.gcCalls)
+	if strings.Join(f.gcCalls, ",") != "gt,hq" {
+		t.Errorf("gc calls = %v, want gt,hq over SQL in name order", f.gcCalls)
 	}
-	if !strings.Contains(logs.String(), "gc needs a local server") {
-		t.Errorf("external skip not logged:\n%s", logs.String())
-	}
-	if !d.lastMaintenanceRun.IsZero() {
-		t.Errorf("window consumed before the backup was read back: lastMaintenanceRun = %v", d.lastMaintenanceRun)
+	if !d.lastMaintenanceRun.Equal(gcTestNow) {
+		t.Errorf("lastMaintenanceRun = %v, want the window consumed at %v", d.lastMaintenanceRun, gcTestNow)
 	}
 
-	// The next tick folds the finished backup into the window and does not
-	// run the night again.
+	// The next tick in the window does not run the night again.
 	d.runScheduledMaintenance()
-	if len(f.backupCalls) != 2 || len(f.gcCalls) != 0 {
-		t.Errorf("second tick: backup calls %v, gc calls %v; want the one backup and no gc", f.backupCalls, f.gcCalls)
+	if len(f.backupCalls) != 2 || len(f.gcCalls) != 2 {
+		t.Errorf("second tick: backup calls %v, gc calls %v; want neither repeated", f.backupCalls, f.gcCalls)
 	}
 	if !d.lastMaintenanceRun.Equal(gcTestNow) {
 		t.Errorf("lastMaintenanceRun = %v, want the window consumed at %v", d.lastMaintenanceRun, gcTestNow)
@@ -471,12 +469,11 @@ func TestScheduledMaintenanceExternalServerDeferredBackupKeepsWindowOpen(t *test
 
 	f.foreignPause = nil
 	d.runScheduledMaintenance()
-	if strings.Join(f.backupCalls, ",") != "hq" || len(f.gcCalls) != 0 {
-		t.Errorf("retry tick: backup calls %v, gc calls %v; want hq and no gc", f.backupCalls, f.gcCalls)
+	if strings.Join(f.backupCalls, ",") != "hq" || strings.Join(f.gcCalls, ",") != "hq" {
+		t.Errorf("retry tick: backup calls %v, gc calls %v; want hq and its gc", f.backupCalls, f.gcCalls)
 	}
 
-	// The tick after folds the finished backup into the window and runs no
-	// second night.
+	// The tick after folds the finished window and runs no second night.
 	d.runScheduledMaintenance()
 	if len(f.backupCalls) != 1 {
 		t.Errorf("window tick after the backup ended repeated it: %v", f.backupCalls)
@@ -600,7 +597,8 @@ func TestScheduledMaintenanceStandbyTakesExternalBackupWithoutGC(t *testing.T) {
 }
 
 // Tonight's night already on disk is not taken again against an external
-// server, and the window is consumed without a second copy.
+// server, the window is consumed without a second copy, and the gc that would
+// follow the night still runs once over SQL (gt-lc16x3).
 func TestScheduledMaintenanceExternalServerDoesNotRepeatTakenNight(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
@@ -618,8 +616,8 @@ func TestScheduledMaintenanceExternalServerDoesNotRepeatTakenNight(t *testing.T)
 	d.runScheduledMaintenance()
 	d.runScheduledMaintenance()
 
-	if len(f.backupCalls) != 0 || len(f.gcCalls) != 0 {
-		t.Errorf("taken night repeated: backup calls %v, gc calls %v", f.backupCalls, f.gcCalls)
+	if len(f.backupCalls) != 0 || strings.Join(f.gcCalls, ",") != "hq" {
+		t.Errorf("taken night: backup calls %v, gc calls %v; want no second copy and one gc of hq", f.backupCalls, f.gcCalls)
 	}
 	if !d.lastMaintenanceRun.Equal(gcTestNow) {
 		t.Errorf("lastMaintenanceRun = %v, want the window consumed at %v", d.lastMaintenanceRun, gcTestNow)

@@ -371,6 +371,11 @@ when either holds:
 - old-gen growth: `.dolt/noms/oldgen` is more than 20% larger than right after
   its last patrol gc.
 
+The old-gen trigger reads the server's data dir, so it applies where that dir
+is on the daemon's host. In the pod it is not: the weekly rule alone decides,
+the database list comes from the server over SQL, and the run records its time
+without a size (gt-lc16x3).
+
 Old-gen is the trigger because it is where history accumulates; a total-size
 trigger fires on growth gc cannot remove. The gt-kfzqa audit saw gt-DB read
 latency break stuck-agent-dog at 863 MiB under the old 2x size trigger; 20%

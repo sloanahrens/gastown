@@ -3441,10 +3441,11 @@ func TestArchiveLimitsRefuseABadSettingAtTheRead(t *testing.T) {
 	})
 }
 
-// With an external Dolt server the gc is skipped with one log line, and the
-// history archive still runs before the night's backup: the new commits are in
-// the archive file when the backup starts (gt-il6fuf).
-func TestMaintenanceArchiveRunsOnAnExternalServerAndSkipsGC(t *testing.T) {
+// With an external Dolt server the history archive still runs before the
+// night's backup — the new commits are in the archive file when the backup
+// starts (gt-il6fuf) — and the gc that follows the backup now runs too, over
+// SQL, with the server's list and the week alone deciding (gt-lc16x3).
+func TestMaintenanceArchiveRunsOnAnExternalServerBeforeBackupAndGC(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
@@ -3459,11 +3460,11 @@ func TestMaintenanceArchiveRunsOnAnExternalServerAndSkipsGC(t *testing.T) {
 
 	d.runScheduledMaintenance()
 
-	if len(f.gcCalls) != 0 {
-		t.Errorf("gc ran against an external server: %v", f.gcCalls)
+	if got := strings.Join(f.gcCalls, ","); got != "gt,hq" {
+		t.Errorf("gc calls = %q, want gt,hq after the backup, over SQL", got)
 	}
-	if n := strings.Count(logs.String(), "gc needs a local server"); n != 1 {
-		t.Errorf("gc skip lines = %d, want exactly one:\n%s", n, logs.String())
+	if strings.Contains(logs.String(), "gc needs a local server") {
+		t.Errorf("the old external skip is still logged:\n%s", logs.String())
 	}
 	want := [][]string{
 		archiveCSVHeader,
@@ -3475,9 +3476,9 @@ func TestMaintenanceArchiveRunsOnAnExternalServerAndSkipsGC(t *testing.T) {
 	if strings.Join(f.backupCalls, ",") != "gt,hq" {
 		t.Errorf("backup calls = %v, want gt,hq", f.backupCalls)
 	}
-	archiveAt, backupAt := slices.Index(f.events, "archive gt"), slices.Index(f.events, "backup gt")
-	if archiveAt < 0 || backupAt < 0 || archiveAt > backupAt {
-		t.Errorf("events = %v; want the archive of gt before its backup", f.events)
+	archiveAt, backupAt, gcAt := slices.Index(f.events, "archive gt"), slices.Index(f.events, "backup gt"), slices.Index(f.events, "gc gt")
+	if archiveAt < 0 || backupAt < 0 || gcAt < 0 || archiveAt > backupAt || backupAt > gcAt {
+		t.Errorf("events = %v; want the archive of gt, then its backup, then its gc", f.events)
 	}
 }
 

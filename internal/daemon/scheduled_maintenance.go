@@ -307,29 +307,33 @@ func (d *Daemon) runScheduledMaintenance() {
 		}
 		return
 	}
-	if external {
-		// The old-gen trigger reads the server's data dir from this host's
-		// disk; against a remote server it would read the wrong one, so the
-		// gc is skipped. The night's backup does not read that disk: the
-		// server writes it into the backup root, so a scheduled tick still
-		// takes it (startStandbyBackup) and consumes the window once it ends.
-		// The history archive reads over SQL, so that dispatch runs it first.
-		// A request that fails here changed nothing a later request must wait
-		// on.
-		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
-		if requested {
-			d.answerRequest(request, gcOutcomeFailed, "no local server can run the cycle: "+why)
+	// The Dolt server's data dir is on this host unless it is external: then it
+	// is the pod's gt-dolt on the Mac (gt-lc16x3), and the gc still runs over
+	// SQL — only the database list and "due" change source. The list comes from
+	// the server (SHOW DATABASES, the backup's own lister), and with no data
+	// dir here there is no old-gen size to read, so the cycle's week alone
+	// decides and records no sizes.
+	dataDir := d.maintenanceDataDir()
+	localDataDir := !external
+	var databases []string
+	if localDataDir {
+		databases, err = d.maintenance().gcDatabases(dataDir)
+	} else {
+		d.logger.Printf("scheduled_maintenance: %s — listing the databases from the server; the gc runs over SQL, due weekly only", why)
+		databases, err = d.maintenance().serverDatabases(d)
+	}
+	if err != nil || len(databases) == 0 {
+		if !requested && external {
+			// The server's list is the night's whole database set, backup
+			// included: a failed or empty one fails the night and escalates,
+			// as it did when the backup was the only work an external server
+			// took (startStandbyBackup).
+			d.maintenanceBackupFailed(externalDatabasesError(databases, err), "")
 			return
 		}
-		d.startStandbyBackup(window, "backup", external)
-		return
-	}
-	dataDir := d.maintenanceDataDir()
-	databases, err := d.maintenance().gcDatabases(dataDir)
-	if err != nil || len(databases) == 0 {
-		d.logger.Printf("scheduled_maintenance: no databases discovered in %s (err=%v)", dataDir, err)
+		d.logger.Printf("scheduled_maintenance: no databases discovered for %s (err=%v)", dataDir, err)
 		if requested {
-			detail := fmt.Sprintf("no databases discovered in %s", dataDir)
+			detail := fmt.Sprintf("no databases discovered for %s", dataDir)
 			if err != nil {
 				detail = fmt.Sprintf("%s: %v", detail, err)
 			}
@@ -361,7 +365,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	if window != "" {
 		windowEnd = maintenanceWindowEnd(now, window)
 	}
-	d.startMaintenanceGC(databases, windowEnd, requestedCycle)
+	d.startMaintenanceGC(databases, windowEnd, requestedCycle, localDataDir)
 	if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
 		d.lastMaintenanceRun = time.Unix(0, finished)
 	}

@@ -623,7 +623,9 @@ func TestCatchUpGCSkipsWhileAGCCycleIsRunning(t *testing.T) {
 
 // A missed backup is taken against an external server too: the server writes
 // the copy into the backup root, and its databases are listed through the
-// server, since the data dir is not this host's.
+// server, since the data dir is not this host's. The catch-up gc that follows
+// runs the same way, listed through the server and due weekly alone
+// (gt-lc16x3): each database's last gc is unrecorded here, so both are due.
 func TestBackupCatchUpRunsAgainstAnExternalServer(t *testing.T) {
 	t.Parallel()
 	d, f := catchUpDaemon(t)
@@ -636,14 +638,14 @@ func TestBackupCatchUpRunsAgainstAnExternalServer(t *testing.T) {
 	if strings.Join(f.backupCalls, ",") != "gt,hq" {
 		t.Errorf("backup calls = %v, want gt,hq listed through the server", f.backupCalls)
 	}
-	if f.serverCalls != 1 {
-		t.Errorf("server listed %d times, want 1", f.serverCalls)
+	if f.serverCalls != 2 {
+		t.Errorf("server listed %d times, want 2: once for the catch-up backup, once for the catch-up gc", f.serverCalls)
 	}
 	if b, ok, err := doltbackup.Newest(f.backupRoot); err != nil || !ok || !b.Has("gt") {
 		t.Errorf("no catch-up night holding gt: %+v (ok %v, err %v)", b, ok, err)
 	}
-	if len(f.gcCalls) != 0 {
-		t.Errorf("catch-up gc ran against an external server: %v", f.gcCalls)
+	if got := strings.Join(f.gcCalls, ","); got != "gt,hq" {
+		t.Errorf("catch-up gc calls = %q, want gt,hq over SQL, name order with no size to sort by", got)
 	}
 }
 

@@ -302,6 +302,24 @@ func TestMaintenanceWindowTickDefersWhenUpdateEnabled(t *testing.T) {
 	})
 }
 
+// The roll owns the pod's window too: with the update trigger on, a scheduled
+// tick over an external server takes no backup and runs no gc of its own — the
+// roll's maintenance request is what runs one (gt-lc16x3).
+func TestMaintenanceWindowPodTickDefersWhenUpdateEnabled(t *testing.T) {
+	t.Parallel()
+	d, f := requestDaemon(t, gcTestNow)
+	f.serverDBs = []string{"hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = updateOnWindow("03:00")
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 || len(f.backupCalls) != 0 || f.serverCalls != 0 {
+		t.Errorf("gc calls %v, backup calls %v, server listings %d with the update trigger on; want none",
+			f.gcCalls, f.backupCalls, f.serverCalls)
+	}
+}
+
 // TestCatchUpPathsIgnoreTheFeatureSwitch: a missed night is still caught up
 // outside the window with the update trigger on. The catch-ups are the safety
 // net for a missed window, not a scheduled cycle the update job owns.

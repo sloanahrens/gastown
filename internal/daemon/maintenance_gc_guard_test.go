@@ -186,7 +186,7 @@ func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 	if !ok {
 		t.Fatal("a task could not take the read side with no gc running")
 	}
-	res := d.maintenanceGCCycle([]string{"hq"}, "/unused")
+	res := d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
 	release()
 
 	if res.outcome != gcOutcomeDeferred || res.reason != "daemon Dolt task in flight" {
@@ -197,7 +197,7 @@ func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 	}
 
 	// Once the task is done the lock is free and gc runs.
-	res = d.maintenanceGCCycle([]string{"hq"}, "/unused")
+	res = d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
 	if res.outcome != gcOutcomeCompleted || len(f.gcCalls) != 1 {
 		t.Errorf("after release: outcome %v, gc calls %v", res.outcome, f.gcCalls)
 	}
@@ -222,7 +222,7 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 		return nil
 	}
 
-	d.maintenanceGCCycle([]string{"hq"}, "/unused")
+	d.maintenanceGCCycle([]string{"hq"}, "/unused", true)
 
 	for i, ok := range taskRan {
 		if ok {
@@ -355,20 +355,45 @@ func TestScheduledMaintenanceGCUsesDiscoveryNotCompactorList(t *testing.T) {
 	}
 }
 
-func TestScheduledMaintenanceGCSkipsExternalServer(t *testing.T) {
+// The pod's gc takes its database set from the server, not from a data dir
+// this host does not have: with local discovery naming a different database,
+// only the server's list is gc'd (gt-lc16x3).
+func TestScheduledMaintenanceGCRunsAgainstExternalServer(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	f.serverDBs = []string{"hq"}
+	d.maint.gcDatabases = func(string) ([]string, error) { return []string{"gt"}, nil }
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
 	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
-	if len(f.gcCalls) != 0 {
-		t.Errorf("gc ran against an external server: %v", f.gcCalls)
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %q, want hq from the server's list, not gt from the data dir", got)
+	}
+	if f.serverCalls != 1 {
+		t.Errorf("server listed %d times, want once", f.serverCalls)
 	}
 	if !strings.Contains(logs.String(), "externally managed") {
-		t.Errorf("external skip not logged:\n%s", logs.String())
+		t.Errorf("external gc not logged:\n%s", logs.String())
+	}
+}
+
+// The pod's run is refused while another cycle holds the flag, before it lists
+// anything: the same maintenanceGCRunning guard every cycle takes (gt-lc16x3).
+func TestScheduledMaintenancePodRefusesWhileCycleRunning(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.serverDBs = []string{"hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = gcModeConfig()
+	d.maintenanceGCRunning.Store(true)
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 || f.serverCalls != 0 {
+		t.Errorf("gc calls %v, server listings %d while a cycle held the flag; want none of either", f.gcCalls, f.serverCalls)
 	}
 }
 

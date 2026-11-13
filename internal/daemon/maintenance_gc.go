@@ -33,7 +33,10 @@ import (
 //   - weekly: its last patrol gc is at least maintenanceGCWeekly old, or it
 //     has none recorded;
 //   - old-gen growth: its old generation (.dolt/noms/oldgen) is more than
-//     maintenanceOldGenGrowth larger than right after its last gc.
+//     maintenanceOldGenGrowth larger than right after its last gc. This one
+//     reads the server's data dir, so it applies only where that dir is on
+//     this host; in the pod the server's data dir is the Mac's, the week alone
+//     decides, and no size is read (gt-lc16x3).
 //
 // Old-gen is the trigger because it is the growth: the 2026-09-29 offline
 // measurement (gt-8z769) showed a full gc reclaims almost nothing on a
@@ -105,6 +108,24 @@ func shouldGCDatabase(now, lastGC time.Time, oldGen, oldGenBaseline int64) (bool
 			formatBytes(oldGenBaseline), formatBytes(oldGen), since, (maintenanceOldGenGrowth-1)*100)
 	}
 	return false, fmt.Sprintf("last gc %v ago, old-gen %s vs %s after it", since, formatBytes(oldGen), formatBytes(oldGenBaseline))
+}
+
+// shouldGCDatabaseWithoutOldGenSize applies the weekly trigger alone, for a
+// database whose old generation this host cannot read: the Dolt server's data
+// dir is not on this host (the pod, gt-lc16x3), so its old-gen size is unknown,
+// not zero. Growth cannot be judged from an unknown size, and guessing one over
+// SQL would be a made-up trigger; a database this stale waits for the week and
+// nothing sooner. The growth trigger stays for a host where the directory is
+// readable.
+func shouldGCDatabaseWithoutOldGenSize(now, lastGC time.Time) (bool, string) {
+	if lastGC.IsZero() {
+		return true, "no patrol gc recorded yet"
+	}
+	since := now.Sub(lastGC).Round(time.Hour)
+	if now.Sub(lastGC) >= maintenanceGCWeekly {
+		return true, fmt.Sprintf("weekly: last gc %v ago", since)
+	}
+	return false, fmt.Sprintf("last gc %v ago (weekly only: the server's data dir is not on this host)", since)
 }
 
 // formatBytes renders a byte count in MiB for logs and escalations.
@@ -271,6 +292,19 @@ func recordMaintenanceGCRun(townRoot, db string, before, after gcMeasure, at tim
 		st.PostGCBytes[db] = after.total
 		st.PostGCOldGenBytes[db] = after.oldGen
 		st.ReclaimedBytes[db] = before.total - after.total
+		st.LastGC[db] = at
+	})
+	return err
+}
+
+// recordMaintenanceGCRunTime records that db's gc ran at at and nothing else.
+// It is the record for a host that cannot measure the server's data dir (the
+// pod): there is no before or after size, and writing zeros into the size and
+// old-gen baselines would turn "unknown" into "0" for the next host that can
+// read the directory, whose growth trigger would then fire on any old gen at
+// all (gt-lc16x3).
+func recordMaintenanceGCRunTime(townRoot, db string, at time.Time) error {
+	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
 		st.LastGC[db] = at
 	})
 	return err
@@ -586,7 +620,13 @@ type maintenanceGCResult struct {
 // maintenanceGCCycle measures every database, gc's the due ones largest
 // first, and re-checks the quiet-window guard and the pause marker before
 // each.
-func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintenanceGCResult {
+//
+// localDataDir says the Dolt server's data dir is on this host, so a
+// database's size and old-gen can be measured here. When it is false — the
+// pod, whose server is gt-dolt on the Mac — nothing is measured: no size for
+// the largest-first order, and "due" is the weekly rule alone
+// (shouldGCDatabaseWithoutOldGenSize).
+func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, localDataDir bool) maintenanceGCResult {
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: %v — treating every database as never gc'd", err)
@@ -595,17 +635,28 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 	now := d.maintenance().now()
 	var eligible []gcCandidate
 	for _, db := range databases {
-		m, err := d.maintenance().measure(dataDir, db)
-		if err != nil {
-			d.logger.Printf("scheduled_maintenance: %s: cannot measure size: %v — skipping", db, err)
-			continue
+		var m gcMeasure
+		var ok bool
+		var reason string
+		if localDataDir {
+			m, err = d.maintenance().measure(dataDir, db)
+			if err != nil {
+				d.logger.Printf("scheduled_maintenance: %s: cannot measure size: %v — skipping", db, err)
+				continue
+			}
+			ok, reason = shouldGCDatabase(now, st.LastGC[db], m.oldGen, st.PostGCOldGenBytes[db])
+		} else {
+			ok, reason = shouldGCDatabaseWithoutOldGenSize(now, st.LastGC[db])
 		}
-		ok, reason := shouldGCDatabase(now, st.LastGC[db], m.oldGen, st.PostGCOldGenBytes[db])
+		size := formatBytes(m.total)
+		if !localDataDir {
+			size = "size not readable from this host"
+		}
 		if !ok {
-			d.logger.Printf("scheduled_maintenance: %s: %s, %s — no gc", db, formatBytes(m.total), reason)
+			d.logger.Printf("scheduled_maintenance: %s: %s, %s — no gc", db, size, reason)
 			continue
 		}
-		d.logger.Printf("scheduled_maintenance: %s: %s, %s — gc due", db, formatBytes(m.total), reason)
+		d.logger.Printf("scheduled_maintenance: %s: %s, %s — gc due", db, size, reason)
 		eligible = append(eligible, gcCandidate{name: db, before: m})
 	}
 	if len(eligible) == 0 {
@@ -615,7 +666,8 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 	// Largest first: the run stops when the town gets busy or a gc fails, so
 	// the database that costs the most and reclaims the most takes the first
 	// quiet slot instead of being the one cut off (gt-ykyy6). Ties go by
-	// name, so the order never depends on discovery order.
+	// name, so the order never depends on discovery order — and with no size
+	// readable (the pod) every candidate ties, leaving name order.
 	sort.Slice(eligible, func(i, j int) bool {
 		if eligible[i].before.total != eligible[j].before.total {
 			return eligible[i].before.total > eligible[j].before.total
@@ -653,7 +705,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 			return defer_(i, "daemon Dolt task in flight")
 		}
 
-		err := d.maintenanceGCOne(parent, dataDir, c)
+		err := d.maintenanceGCOne(parent, dataDir, localDataDir, c)
 		d.doltMaintMu.Unlock()
 		// Only a canceled call is the shutdown's doing. Any other error that
 		// lands while the daemon is leaving (a Dolt failure, a timeout) is a
@@ -677,7 +729,10 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 // maintenanceGCOne pauses Dolt, runs one database's gc, unpauses, and records
 // the run. The pause marker is written before the gc call and removed after
 // it whatever the outcome; one the daemon cannot remove lapses at its until.
-func (d *Daemon) maintenanceGCOne(parent context.Context, dataDir string, c gcCandidate) error {
+//
+// localDataDir false (the pod) means no before or after size can be read; the
+// run is recorded by its time alone (recordMaintenanceGCRunTime).
+func (d *Daemon) maintenanceGCOne(parent context.Context, dataDir string, localDataDir bool, c gcCandidate) error {
 	s := d.maintenance()
 	start := s.now()
 	marker := doltpause.Marker{
@@ -697,8 +752,13 @@ func (d *Daemon) maintenanceGCOne(parent context.Context, dataDir string, c gcCa
 		}
 	}()
 
-	d.logger.Printf("scheduled_maintenance: gc %s: %s; CALL dolt_gc('--full') (before %s, old-gen %s)",
-		c.name, d.maintenanceGCDemand(), formatBytes(c.before.total), formatBytes(c.before.oldGen))
+	if localDataDir {
+		d.logger.Printf("scheduled_maintenance: gc %s: %s; CALL dolt_gc('--full') (before %s, old-gen %s)",
+			c.name, d.maintenanceGCDemand(), formatBytes(c.before.total), formatBytes(c.before.oldGen))
+	} else {
+		d.logger.Printf("scheduled_maintenance: gc %s: %s; CALL dolt_gc('--full') (size not readable: the server's data dir is not on this host)",
+			c.name, d.maintenanceGCDemand())
+	}
 	d.maintenanceGCOverdueEscalated.Store(false)
 	d.maintenanceGCCallStartedAt.Store(time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(parent, maintenanceGCTimeout)
@@ -709,6 +769,14 @@ func (d *Daemon) maintenanceGCOne(parent context.Context, dataDir string, c gcCa
 	if err != nil {
 		d.logger.Printf("scheduled_maintenance: gc %s FAILED after %v: %v — stopping this run", c.name, elapsed, err)
 		return fmt.Errorf("failed after %v: %w", elapsed, err)
+	}
+
+	if !localDataDir {
+		d.logger.Printf("scheduled_maintenance: gc %s: done in %v (no size to re-measure: the server's data dir is not on this host)", c.name, elapsed)
+		if err := recordMaintenanceGCRunTime(d.config.TownRoot, c.name, s.now()); err != nil {
+			d.logger.Printf("scheduled_maintenance: WARNING: cannot record gc of %s: %v", c.name, err)
+		}
+		return nil
 	}
 
 	after, err := s.measure(dataDir, c.name)
@@ -753,7 +821,11 @@ func (d *Daemon) maintenanceDataDir() string {
 // (maintenance_request.go). The run id is published while the cycle runs so a
 // tick that finds it in flight can tell a request it is serving from a newer
 // one (answerBusyRequest).
-func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, request *update.RequestFile) {
+//
+// localDataDir is the tick's external-server answer inverted: false means the
+// server's data dir is not on this host (the pod), so the cycle decides "due"
+// by the week alone.
+func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, request *update.RequestFile, localDataDir bool) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("scheduled_maintenance: previous gc cycle still running — skipping this tick")
 		return
@@ -763,8 +835,17 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		d.maintenanceGCRequestRunID.Store(request.RunID)
 	}
 	dataDir := d.maintenanceDataDir()
-	d.logger.Printf("scheduled_maintenance: gc cycle — weekly, or old-gen >%.0f%% since last gc; data_dir=%s",
-		(maintenanceOldGenGrowth-1)*100, dataDir)
+	if localDataDir {
+		d.logger.Printf("scheduled_maintenance: gc cycle — weekly, or old-gen >%.0f%% since last gc; data_dir=%s",
+			(maintenanceOldGenGrowth-1)*100, dataDir)
+	} else {
+		// The pod: the server's data dir is the Mac's, so neither the old-gen
+		// trigger nor the size has a source here and the week alone decides
+		// (gt-lc16x3). No size is read over SQL: the compactor's SQL path
+		// reports none either (compactor_dog.go sets sizeUnchecked with no
+		// data dir), and a guessed size would be a made-up trigger.
+		d.logger.Printf("scheduled_maintenance: gc cycle — weekly only: the server's data dir is not on this host, so no old-gen trigger")
+	}
 
 	d.maintenance().dispatch(func() {
 		defer func() {
@@ -800,7 +881,7 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)
 		if res.outcome == gcOutcomeCompleted {
-			res = d.maintenanceGCCycle(d.gcDatabasesAfterArchive(databases, unarchived), dataDir)
+			res = d.maintenanceGCCycle(d.gcDatabasesAfterArchive(databases, unarchived), dataDir, localDataDir)
 		}
 		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
