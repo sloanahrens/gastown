@@ -229,9 +229,14 @@ type attentionSources struct {
 	escalations func(ctx context.Context) ([]*beads.Issue, error)
 	rework      func(ctx context.Context, rig string) ([]*beads.Issue, error)
 	reworkNote  func(ctx context.Context, rig, id string) (string, error)
-	slots       func() (slot.Report, error)
-	pidAlive    func(pid int) bool
-	bdLatency   func(ctx context.Context) (time.Duration, error)
+	// holdRigs is the rigs the hold-stale collector reads; holdBeads lists one
+	// hold label's beads in a rig; holdBead shows one bead, for its dependencies.
+	holdRigs  func() []string
+	holdBeads func(ctx context.Context, rig, label string) ([]*beads.Issue, error)
+	holdBead  func(ctx context.Context, rig, id string) (*beads.Issue, error)
+	slots     func() (slot.Report, error)
+	pidAlive  func(pid int) bool
+	bdLatency func(ctx context.Context) (time.Duration, error)
 	// escalationBead reads the work bead an escalation record names in its
 	// related_bead field: the owner the item names comes from it.
 	escalationBead func(ctx context.Context, id string) (*beads.Issue, error)
@@ -689,6 +694,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A kept sandbox seat past its window (gt-l38v7r). The owns predicate
 		// keeps only its own items when the read fails.
 		{kind: attention.KindSandboxSeatKept, collect: s.collectKeptSandboxSeats, owns: keptSandboxSeatItem},
+		// A held bead nobody has released (gt-j669b4.19). The owns predicate
+		// keeps only its own items when a list or show fails.
+		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},
 	}, s.questionCollectors()...)
 }
 
@@ -769,6 +777,13 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 			return "", err
 		}
 		return is.Notes, nil
+	}
+	s.holdRigs = d.getKnownRigs
+	s.holdBeads = func(_ context.Context, rig, label string) ([]*beads.Issue, error) {
+		return d.rigWorkBeads(rig).List(beads.ListOptions{Label: label, Priority: -1, Limit: 0})
+	}
+	s.holdBead = func(_ context.Context, rig, id string) (*beads.Issue, error) {
+		return d.rigWorkBeads(rig).Show(id)
 	}
 	s.slots = func() (slot.Report, error) {
 		pool := slot.PoolFromConfig(d.loadOperationalConfig().GetContainerGateConfig())

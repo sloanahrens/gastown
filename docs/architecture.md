@@ -385,7 +385,7 @@ flowchart LR
         C1["landing stuck,<br/>red main,<br/>rejected twice"]
         C2["polecat stalls,<br/>queue stuck,<br/>direct push"]
         C3["tier sweep red,<br/>host disk and memory,<br/>slow database"]
-        C4["overseer silent,<br/>dispatch idle,<br/>questions"]
+        C4["overseer silent,<br/>dispatch idle,<br/>questions,<br/>stale holds"]
         C5["escalations<br/>filed by agents"]
     end
     COLLECT --> REC["Reconcile<br/>keep first_seen,<br/>drop what cleared"]

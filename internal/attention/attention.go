@@ -148,6 +148,10 @@ const (
 	// than the jev_rules ask for longer than the window, so the seat holds its
 	// pool slot and worktree while the reason stands (gt-l38v7r).
 	KindSandboxSeatKept Kind = "sandbox-seat-kept"
+	// KindHoldStale: a bead wears a hold label (overseer-only, needs-overseer or
+	// held) and nobody has released it: over one day with every dependency
+	// closed, or over three days whatever its dependencies (gt-j669b4.19).
+	KindHoldStale Kind = "hold-stale"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -165,17 +169,19 @@ func Kinds() []Kind {
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
+		KindHoldStale,
 	}
 }
 
 // Severity is how loud an item is. The values match the alerts.jsonl schema
-// gt tail's watch source reads: low or high.
+// gt tail's watch source reads: low, medium or high.
 type Severity string
 
 // Severities, lowest first.
 const (
-	SeverityLow  Severity = "low"
-	SeverityHigh Severity = "high"
+	SeverityLow    Severity = "low"
+	SeverityMedium Severity = "medium"
+	SeverityHigh   Severity = "high"
 )
 
 // Item is one condition that holds now. Key is the item's stable identity:

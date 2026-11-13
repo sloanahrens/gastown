@@ -134,6 +134,9 @@ var ruleOwners = map[string]Owner{
 	// A kept sandbox seat is the town's own seat to look at: the overseer reads
 	// the keep reason and acts on it before a person is woken (gt-l38v7r).
 	RuleSandboxSeatKept: OwnerOverseer,
+	// A stale hold is the overseer's to release: it reads the hold's reason and
+	// releases the label or closes the bead (gt-j669b4.19).
+	RuleHoldStale: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
