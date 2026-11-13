@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,55 @@ func TestPoolOccupancyIgnoresALandedSeat(t *testing.T) {
 				t.Fatalf("occupied seats = %v, want %v", names, c.want)
 			}
 		})
+	}
+}
+
+// TestWithoutLandedSeatsHoldsASeatWhoseRecordCannotBeRead: a seat whose intent
+// record cannot be read is not known to be landed, so the filter holds it. The
+// hold is not silent: the record read reports the failure once, naming the seat,
+// which is also how the seat-class read reports the same record (gt-r0kwus).
+func TestWithoutLandedSeatsHoldsASeatWhoseRecordCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ruby"}
+	if err := os.MkdirAll(filepath.Dir(seat.Path(town)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seat.Path(town), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	read := poolSeatRecordTo(town, &out)
+	sessions := []poolSession{{name: "gt-ruby", agent: "deepseek-flash", rig: "gastown", polecat: "ruby"}}
+
+	got, err := withoutLandedSeats(town, read, sessions)
+	if err != nil {
+		t.Fatalf("withoutLandedSeats err = %v; want the seat held, not a refusal", err)
+	}
+	if len(got) != 1 || got[0].name != "gt-ruby" {
+		t.Fatalf("withoutLandedSeats = %+v; want the seat held", got)
+	}
+	want := "warning: gastown/ruby's seat record cannot be read, holding its seat"
+	if warnings := out.String(); strings.Count(warnings, want) != 1 {
+		t.Fatalf("warning wrote %q; want exactly one line naming gastown/ruby", warnings)
+	}
+}
+
+// TestWithoutLandedSeatsHoldsEverySeatWithNoTown: a caller with no town to read
+// has no record for any seat, which is a read failure rather than an empty
+// record, and the landed filter holds the seat on it.
+func TestWithoutLandedSeatsHoldsEverySeatWithNoTown(t *testing.T) {
+	t.Parallel()
+	if _, err := poolSeatRecord(nil, "gastown", "ruby"); err == nil {
+		t.Fatal("poolSeatRecord with no reader = nil error; want the read failure")
+	}
+	sessions := []poolSession{{name: "gt-ruby", agent: "deepseek-flash", rig: "gastown", polecat: "ruby"}}
+	got, err := withoutLandedSeats("", nil, sessions)
+	if err != nil {
+		t.Fatalf("withoutLandedSeats err = %v; want the seat held", err)
+	}
+	if len(got) != 1 || got[0].name != "gt-ruby" {
+		t.Fatalf("withoutLandedSeats = %+v; want the seat held", got)
 	}
 }
 

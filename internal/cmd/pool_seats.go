@@ -127,7 +127,10 @@ func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatD
 // poolOccupiedSessionsProbed is poolOccupiedSessions with the number of seats
 // the dead-hooked walk probed returned beside the seats (gt-gg9hv.73).
 func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, int, error) {
-	live, err := listPolecatSessionsWith(t, poolSeatAgentFor(townRoot), disposition, now())
+	// One record read serves both seat reads of the picture, so the seat-class
+	// read and the landed read see the same answer for a seat and warn once.
+	seatRecords := poolSeatRecordFor(townRoot)
+	live, err := listPolecatSessionsWith(t, poolSeatAgentFrom(seatRecords, townRoot), disposition, now())
 	if err != nil {
 		return nil, 0, &poolOccupancyError{sessions: true, err: err}
 	}
@@ -140,11 +143,57 @@ func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition po
 	if err != nil {
 		return nil, probed, &poolOccupancyError{err: err}
 	}
-	occupied, err := withoutLandedSeats(townRoot, append(append(live, dead...), landing...))
+	occupied, err := withoutLandedSeats(townRoot, seatRecords, append(append(live, dead...), landing...))
 	if err != nil {
 		return nil, probed, &poolOccupancyError{err: err}
 	}
 	return occupied, probed, nil
+}
+
+// poolSeatRecordFunc reads one seat's intent record for the pool's occupancy
+// decision. The seat's class (poolSeatAgentFrom) and whether its submitted work
+// is landed (withoutLandedSeats) share one read of it, so both answer a record
+// that cannot be read the same way: the zero record and the error, with the
+// failure reported once (poolSeatRecordTo). Every caller holds the seat on that
+// answer: an unreadable record is not a seat known to be free.
+type poolSeatRecordFunc func(rigName, polecatName string) (intent.Record, error)
+
+// poolSeatRecordFor is the seat-record read a caller in townRoot wants, its
+// warnings on stderr; nil when there is no town to read (a test), which holds
+// every seat.
+func poolSeatRecordFor(townRoot string) poolSeatRecordFunc {
+	return poolSeatRecordTo(townRoot, os.Stderr)
+}
+
+// poolSeatRecordTo is poolSeatRecordFor with the writer its warning goes to.
+// The warning names the seat and says it is held, which is what both users of
+// this read do with the failure. It is written once per read: a reader serves
+// one occupancy read, so a bad record warns once per read rather than once per
+// session, and a picture that reads the same seat for its class and for its
+// landing warns once (gt-5h87d7).
+func poolSeatRecordTo(townRoot string, warnOut io.Writer) poolSeatRecordFunc {
+	if townRoot == "" {
+		return nil
+	}
+	warn := &onceWriter{w: warnOut}
+	return func(rigName, polecatName string) (intent.Record, error) {
+		rec, err := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+		if err != nil {
+			fmt.Fprintf(warn, "warning: %s/%s's seat record cannot be read, holding its seat: %v\n",
+				rigName, polecatName, err)
+			return intent.Record{}, err
+		}
+		return rec, nil
+	}
+}
+
+// poolSeatRecord reads one seat's record through a reader that may be nil: a
+// caller with no town to read has no record, which holds the seat.
+func poolSeatRecord(read poolSeatRecordFunc, rigName, polecatName string) (intent.Record, error) {
+	if read == nil {
+		return intent.Record{}, errors.New("no town to read the seat's record from")
+	}
+	return read(rigName, polecatName)
 }
 
 // withoutLandedSeats drops the polecat seats whose submitted work is recorded
@@ -154,18 +203,20 @@ func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition po
 // poolLandingSessions and is kept as it is. A seat that names no polecat holds
 // nothing this check reads, and is kept.
 //
-// A seat whose intent record cannot be read is not known to be landed, so it
-// is kept and counts; the seat-class read has already warned about that record
-// (poolSeatAgentTo). A landing log that cannot be read is an error, as it is
-// for a seat mid-landing.
-func withoutLandedSeats(townRoot string, sessions []poolSession) ([]poolSession, error) {
+// The record is read through read, the same reader the seat-class read uses
+// (poolSeatAgentFrom), so the two cannot disagree about a record that cannot be
+// read: the seat is not known to be landed, so it is kept and counts, and the
+// read has already reported the failure once (poolSeatRecordTo) rather than
+// holding the seat silently. A landing log that cannot be read is an error, as
+// it is for a seat mid-landing.
+func withoutLandedSeats(townRoot string, read poolSeatRecordFunc, sessions []poolSession) ([]poolSession, error) {
 	out := make([]poolSession, 0, len(sessions))
 	for _, s := range sessions {
 		if s.landing || s.rig == "" || s.polecat == "" {
 			out = append(out, s)
 			continue
 		}
-		rec, err := intent.Read(townRoot, intent.Seat{Rig: s.rig, Role: constants.RolePolecat, Name: s.polecat})
+		rec, err := poolSeatRecord(read, s.rig, s.polecat)
 		if err != nil {
 			out = append(out, s)
 			continue
@@ -854,20 +905,23 @@ func poolSeatAgentFor(townRoot string) poolSeatAgentFunc {
 // uncounted against every cap.
 //
 // A record that cannot be read is returned as the error, which
-// listPolecatSessionsWith counts under config.UnknownSeatAgent, and the reader
-// logs it once per reader: a reader serves one occupancy read, so a bad record
-// warns once per read rather than once per session.
+// listPolecatSessionsWith counts under config.UnknownSeatAgent. It comes through
+// poolSeatRecordTo, so the landed read (withoutLandedSeats) reads the same
+// record through the same reader and reports its failure the same way.
 func poolSeatAgentTo(townRoot string, warnOut io.Writer) poolSeatAgentFunc {
-	if townRoot == "" {
+	return poolSeatAgentFrom(poolSeatRecordTo(townRoot, warnOut), townRoot)
+}
+
+// poolSeatAgentFrom is poolSeatAgentTo over a record read the caller already
+// holds, so an occupancy read that asks for a seat's class and for its landing
+// pays one read of its record and one warning about it.
+func poolSeatAgentFrom(read poolSeatRecordFunc, townRoot string) poolSeatAgentFunc {
+	if read == nil {
 		return nil
 	}
-	warn := &onceWriter{w: warnOut}
 	return func(rigName, polecatName string) (string, error) {
-		seat := polecatIntentSeat(rigName, polecatName)
-		rec, err := intent.Read(townRoot, seat)
+		rec, err := poolSeatRecord(read, rigName, polecatName)
 		if err != nil {
-			fmt.Fprintf(warn, "warning: %s/%s's seat record cannot be read, counting the seat under %s: %v\n",
-				rigName, polecatName, config.UnknownSeatAgent, err)
 			return "", err
 		}
 		if agent := strings.TrimSpace(rec.Agent); agent != "" {
@@ -875,7 +929,7 @@ func poolSeatAgentTo(townRoot string, warnOut io.Writer) poolSeatAgentFunc {
 		}
 		// Read answers an empty record for a file that does not exist, so a
 		// live seat with no record reaches here too: its class is unknown.
-		if _, statErr := os.Stat(seat.Path(townRoot)); errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := os.Stat(polecatIntentSeat(rigName, polecatName).Path(townRoot)); errors.Is(statErr, os.ErrNotExist) {
 			return config.UnknownSeatAgent, nil
 		}
 		return "", nil
