@@ -22,18 +22,28 @@ type Probes interface {
 // entry, keeps just the named steps. Skip drops each named step along with the
 // steps that depend on it: skipping install also drops drain, restart, verify
 // and lift, and skipping drain also drops lift. Force plans an install even
-// when the installed build equals main and that image is published.
+// when the installed build equals main and that image is published. PodTarget
+// reports that the daemon runs as a pod: its Dolt stays on the host, so the
+// plan reads no host Dolt directory and plans the maintenance step not to run.
 type PlanOptions struct {
-	Skip  map[StepName]bool
-	Only  map[StepName]bool
-	Force bool
+	Skip      map[StepName]bool
+	Only      map[StepName]bool
+	Force     bool
+	PodTarget bool
 }
+
+// podMaintenanceReason is the maintenance step's reason for a pod target: the
+// maintenance cycle belongs to the host, where the Dolt server and its data
+// directories are, and the pod has neither.
+const podMaintenanceReason = "the daemon runs as a pod: its Dolt maintenance runs on the host"
 
 // BuildPlan decides which update steps have work and returns them in run order
 // with a reason for each, alongside the build the run targets. It does no I/O:
 // every fact comes from p. Both shas are trimmed of surrounding whitespace
 // before they are compared, queried and recorded. A probe that fails, or that
-// reports a blank sha, fails the plan with that probe named.
+// reports a blank sha, fails the plan with that probe named. A pod target is
+// asked none of the maintenance probes, since the Dolt data they read is not in
+// the pod: its maintenance step is planned not to run.
 func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Target, error) {
 	var target Target
 
@@ -59,21 +69,25 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 	if err != nil {
 		return nil, target, fmt.Errorf("ImagePublished: %w", err)
 	}
-	commits, events, err := p.ArchiveBehind(ctx)
-	if err != nil {
-		return nil, target, fmt.Errorf("ArchiveBehind: %w", err)
-	}
-	backup, err := p.BackupToday(ctx)
-	if err != nil {
-		return nil, target, fmt.Errorf("BackupToday: %w", err)
-	}
-	gcDue, gcReason, err := p.GCDue(ctx)
-	if err != nil {
-		return nil, target, fmt.Errorf("GCDue: %w", err)
+
+	maintenance, maintenanceReason := false, podMaintenanceReason
+	if !o.PodTarget {
+		commits, events, err := p.ArchiveBehind(ctx)
+		if err != nil {
+			return nil, target, fmt.Errorf("ArchiveBehind: %w", err)
+		}
+		backup, err := p.BackupToday(ctx)
+		if err != nil {
+			return nil, target, fmt.Errorf("BackupToday: %w", err)
+		}
+		gcDue, gcReason, err := p.GCDue(ctx)
+		if err != nil {
+			return nil, target, fmt.Errorf("GCDue: %w", err)
+		}
+		maintenance, maintenanceReason = planMaintenance(commits, events, backup, gcDue, gcReason)
 	}
 
 	install, installReason := planInstall(installed, mainSHA, published, o.Force)
-	maintenance, maintenanceReason := planMaintenance(commits, events, backup, gcDue, gcReason)
 
 	followReason := "no install is planned"
 	if install {

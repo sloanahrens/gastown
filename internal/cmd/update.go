@@ -389,6 +389,10 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	stopHeartbeat := startUpdateHeartbeat(ctx, deps.Store, ticker.C, deps.Clock, updateHeartbeatError(errOut))
 
 	opts := updateOptions(req, skip, only)
+	// A pod target plans its Dolt maintenance as not run, since the pod has no
+	// Dolt data; the host runs that cycle. The plan's other steps are planned as
+	// they are for any run.
+	opts.PodTarget = pod != nil
 	// Only the digest install skips the host install under a pod target. A pod
 	// target with the install step selected and no --images is refused before
 	// this point, by refusePodInstallWithoutImages.

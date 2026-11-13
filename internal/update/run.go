@@ -66,6 +66,10 @@ type Options struct {
 	// is. The install step still runs, since its digest swap is the install, and
 	// its plan line says the host install is skipped.
 	HostInstallSkipped string
+	// PodTarget reports that the run's daemon runs as a pod. The pod holds no
+	// Dolt data, so the plan leaves the maintenance cycle to the host that does
+	// and reads none of its directories.
+	PodTarget bool
 	// Source is the record's provenance: SourceManual (the default) or
 	// SourceDaemon.
 	Source string
@@ -81,7 +85,7 @@ type Options struct {
 // would start with and writes nothing. The error is a failed or invalid plan,
 // or a record that could not be written.
 func Run(ctx context.Context, d Deps, o Options) (State, error) {
-	steps, target, err := BuildPlan(ctx, d.Probes, PlanOptions{Skip: o.Skip, Only: o.Only, Force: o.Force})
+	steps, target, err := BuildPlan(ctx, d.Probes, PlanOptions{Skip: o.Skip, Only: o.Only, Force: o.Force, PodTarget: o.PodTarget})
 	if err != nil {
 		return State{}, err
 	}
