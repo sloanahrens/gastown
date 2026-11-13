@@ -96,7 +96,7 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	defer os.RemoveAll(stage)
 	env := bdbuild.Env(b.Environ)
 	for _, build := range builds {
-		if err := b.build(ctx, build, stage, env); err != nil {
+		if _, err := b.build(ctx, build, stage, env, nil); err != nil {
 			return nil, err
 		}
 	}

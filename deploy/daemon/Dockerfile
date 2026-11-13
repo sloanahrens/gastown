@@ -49,9 +49,12 @@ COPY --from=dolt /usr/local/bin/dolt /usr/local/bin/dolt
 
 # The town's binaries, cross-compiled at the rev the image is tagged with. The
 # COPY sources are entries of the build context, which BuildImage sets to the
-# output directory BuildBinaries wrote them to.
+# output directory BuildBinaries wrote them to. The bd on PATH is the shim: it
+# routes a tracker rig to the tracker and passes every other rig through to
+# bd.real beside it, which is the real bd (gt-q68hh2).
 COPY --chmod=0755 gt /usr/local/bin/gt
-COPY --chmod=0755 bd /usr/local/bin/bd
+COPY --chmod=0755 bd /usr/local/bin/bd.real
+COPY --chmod=0755 bdshim /usr/local/bin/bd
 COPY --chmod=0755 om /usr/local/bin/om
 COPY --chmod=0755 trackerd /usr/local/bin/trackerd
 COPY --chmod=0755 trackerbackup /usr/local/bin/trackerbackup

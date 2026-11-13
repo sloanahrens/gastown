@@ -133,7 +133,7 @@ func (f fakeImageBuilder) BuildBinaries(_ context.Context, rev string) ([]string
 	if err := f.step("binaries " + rev); err != nil {
 		return nil, err
 	}
-	return []string{"/out/gt", "/out/bd", "/out/om", "/out/trackerd", "/out/trackerbackup"}, nil
+	return []string{"/out/gt", "/out/bd", "/out/bdshim", "/out/om", "/out/trackerd", "/out/trackerbackup"}, nil
 }
 
 func (f fakeImageBuilder) BuildPlugins(_ context.Context, rev string) ([]string, error) {
@@ -230,7 +230,7 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 	const plugins = "/out/plugins/app-promote/app-promote,/out/plugins/town-metrics/town-metrics"
 	const hmTools = "/out/hm,/out/devops-reporter,/out/release-reporter"
 	const mango = "/out/mango/mango,/out/mango/mango.sha"
-	const image = "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/trackerd,/out/trackerbackup," + plugins + "," + hmTools + "," + mango + ",/out/claude,/out/openshell,/out/docker,/out/kubectl"
+	const image = "image " + imageTestRev + " /out/gt,/out/bd,/out/bdshim,/out/om,/out/trackerd,/out/trackerbackup," + plugins + "," + hmTools + "," + mango + ",/out/claude,/out/openshell,/out/docker,/out/kubectl"
 	all := []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "hm tools", "mango", "claude", "tools", image}
 	for _, tc := range []struct {
 		name      string
@@ -502,7 +502,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 	t.Parallel()
 	r := newImageRig(t)
-	for _, name := range []string{"gt", "bd", "om", "trackerd", "trackerbackup", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"} {
+	for _, name := range []string{"gt", "bd", "bdshim", "om", "trackerd", "trackerbackup", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"} {
 		if err := os.WriteFile(filepath.Join(r.flags.out, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -540,6 +540,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 
 	tag, err := b.BuildImage(context.Background(), imageTestRev, []string{
 		filepath.Join(r.flags.out, "gt"), filepath.Join(r.flags.out, "bd"),
+		filepath.Join(r.flags.out, "bdshim"),
 		filepath.Join(r.flags.out, "om"), filepath.Join(r.flags.out, "trackerd"), filepath.Join(r.flags.out, "trackerbackup"),
 		filepath.Join(r.flags.out, "claude"),
 		filepath.Join(r.flags.out, "hm"), filepath.Join(r.flags.out, "devops-reporter"), filepath.Join(r.flags.out, "release-reporter"),
