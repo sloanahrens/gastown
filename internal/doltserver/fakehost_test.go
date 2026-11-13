@@ -54,6 +54,9 @@ type fakeHost struct {
 	startExitErr error
 	// endpointPort, when set, is every town's Dolt endpoint port (townPort).
 	endpointPort int
+	// namesEndpoint, when set, makes every town name endpointPort on disk too
+	// (townNamesPort); otherwise a town names no endpoint on disk.
+	namesEndpoint bool
 }
 
 // fakeProc is one process: its argv, working directory and the loopback
@@ -109,7 +112,7 @@ func newFakeHost() *fakeHost {
 
 // host is the host whose seams answer from f.
 func (f *fakeHost) host() *host {
-	return &host{
+	h := &host{
 		lookupEnv:    f.lookupEnv,
 		environList:  f.environ,
 		run:          f.run,
@@ -127,6 +130,10 @@ func (f *fakeHost) host() *host {
 		doltEndpoint: f.doltEndpoint,
 		probeTimeout: f.probeTimeout,
 	}
+	if f.namesEndpoint {
+		h.persistedEndpoint = f.doltEndpoint
+	}
+	return h
 }
 
 // hungProbeTimeout is the deadline a probe scripted to hang gets: it only has
@@ -501,6 +508,17 @@ func (f *fakeHost) townPort(port int) *fakeHost {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.endpointPort = port
+	return f
+}
+
+// townNamesPort is townPort, and each town also names that endpoint on disk
+// (mayor/town.json), as a production town does, so dolt-server.port is written
+// for it (gt-k3kb52). townPort alone names none: the port is injected.
+func (f *fakeHost) townNamesPort(port int) *fakeHost {
+	f.townPort(port)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.namesEndpoint = true
 	return f
 }
 

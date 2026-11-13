@@ -125,6 +125,22 @@ func testTownRoot(t *testing.T) string {
 	return townRoot
 }
 
+// nameTownDoltPort gives the town at townRoot the Dolt endpoint port in
+// mayor/town.json, where a production town names its endpoint. The lifecycle
+// host injects the port; the town must name the same one on disk, or
+// dolt-server.port (which bd reads) is not written for it (gt-k3kb52).
+func nameTownDoltPort(t *testing.T, townRoot string, port int) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	townJSON := fmt.Sprintf(`{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"port":%d}}`, port)
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ps and lsof (or /proc) read a real process's argv, cwd and listening port
 // the way the identity checks expect, and a non-dolt port holder is never
 // signaled (gt-p7zy0).
@@ -300,6 +316,7 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 		h.bdEnvironList = bdEnvWithoutPoisonedDoltPorts
 		town := testTownRoot(t)
 		townRoot = town
+		nameTownDoltPort(t, town, doltPort(t, h))
 		t.Cleanup(func() { _, _ = h.ReapOwnedTestServers(town) })
 		// dolt init needs an identity; the harness's HOME is a fresh sandbox.
 		for _, kv := range [][2]string{{"user.name", "Test"}, {"user.email", "test@example.com"}} {
