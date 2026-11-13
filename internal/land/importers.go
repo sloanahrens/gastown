@@ -21,11 +21,11 @@ type LeftOut struct {
 	Reason string
 }
 
-// heavyImporters are the packages presubmit does not add wholesale as direct
-// importers, because each takes minutes to compile and run in full. The
-// Makefile presubmit comment names internal/cmd and internal/polecat, which its
-// guard tests run under -run; gt-cwkzxk adds internal/daemon. Each value is the
-// reason printed with the directory.
+// heavyImporters are the direct importers presubmit leaves out of its test run
+// because each takes minutes to compile and run in full. This map is the only
+// list: SelectImporters reports a match in LeftOut, and presubmit prints it with
+// this reason so the missed tests get run narrowed with -run. A direct importer
+// not listed here is tested.
 var heavyImporters = map[string]string{
 	"internal/cmd":     "takes minutes to run in full; run its tests the diff can affect, narrowed with -run",
 	"internal/daemon":  "takes minutes to run in full; run its tests the diff can affect, narrowed with -run",
