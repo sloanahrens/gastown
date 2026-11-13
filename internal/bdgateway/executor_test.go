@@ -428,35 +428,59 @@ func TestExecutorEnv(t *testing.T) {
 	}
 }
 
-// TestExecutorTimeoutValue: the head's timeout_ms becomes the call's bound; a
-// negative value and one that does not fit a Duration are refused, and zero
-// takes the executor's default.
+// TestExecutorTimeoutValue: the head's timeout_ms is the call's bound when it
+// names one, zero takes the executor's default, and a negative value or one
+// that does not fit a Duration is refused before a process starts.
 func TestExecutorTimeoutValue(t *testing.T) {
 	t.Parallel()
 	root := testWorkspace(t)
+	// The largest timeout_ms whose milliseconds fit a Duration, plus one. A
+	// Duration this long would be a negative (unbounded) deadline.
+	largestMS := int64(math.MaxInt64) / int64(time.Millisecond)
 	cases := []struct {
-		name string
-		ms   int
-		want time.Duration
+		name           string
+		headMS         int
+		defaultTimeout time.Duration
+		wantRefused    error
 	}{
-		{name: "the head's value", ms: 1500, want: 1500 * time.Millisecond},
-		{name: "zero takes the default", ms: 0, want: DefaultTimeout},
+		// An hour's default makes the head's 20 ms the only bound that can end
+		// this call quickly: an executor that ignored the head would fail here
+		// at the package timeout instead of passing.
+		{name: "the head's value over the default", headMS: 20, defaultTimeout: time.Hour},
+		{name: "zero takes the default", headMS: 0, defaultTimeout: 20 * time.Millisecond},
+		{name: "a negative value", headMS: -1, defaultTimeout: time.Hour, wantRefused: ErrBadTimeout},
+		{name: "over a Duration", headMS: int(largestMS) + 1, defaultTimeout: time.Hour, wantRefused: ErrBadTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newTestExecutor(t, root, &fakeRunner{})
-			if got, err := e.timeout(tc.ms); err != nil || got != tc.want {
-				t.Errorf("timeout(%d) = %s (%v), want %s", tc.ms, got, err, tc.want)
+			runner := &fakeRunner{queue: []Process{newBlockingFake("")}}
+			e, err := New(Options{
+				Binary:         "/opt/bd/bd",
+				WorkspaceRoot:  root,
+				Home:           "/home/bdgw",
+				Path:           "/usr/local/bin:/usr/bin:/bin",
+				DoltHost:       "gt-dolt",
+				DoltPort:       "3307",
+				DefaultTimeout: tc.defaultTimeout,
+				runner:         runner,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			err = e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: tc.headMS}, nil, io.Discard)
+			if tc.wantRefused != nil {
+				if !errors.Is(err, tc.wantRefused) {
+					t.Fatalf("Exec = %v, want %v", err, tc.wantRefused)
+				}
+				if got := len(runner.records()); got != 0 {
+					t.Errorf("runner started %d calls, want 0", got)
+				}
+				return
+			}
+			if !errors.Is(err, ErrTimeout) {
+				t.Errorf("Exec = %v, want ErrTimeout", err)
 			}
 		})
-	}
-	// The largest timeout_ms whose milliseconds fit a Duration, plus one.
-	largestMS := int64(math.MaxInt64) / int64(time.Millisecond)
-	for _, ms := range []int{-1, int(largestMS) + 1} {
-		e := newTestExecutor(t, root, &fakeRunner{})
-		if _, err := e.timeout(ms); !errors.Is(err, ErrBadTimeout) {
-			t.Errorf("timeout(%d) = %v, want ErrBadTimeout", ms, err)
-		}
 	}
 }
 

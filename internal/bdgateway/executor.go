@@ -23,8 +23,9 @@ const (
 	// DefaultMaxConcurrent caps bd processes running at once, the design's 16.
 	DefaultMaxConcurrent = 16
 
-	// DefaultTimeout bounds a call whose head names no timeout_ms. The class
-	// maximums (reads 30 s, writes 60 s) are the policy's (G2); this is the
+	// DefaultTimeout bounds a call whose head names no timeout_ms. The design's
+	// class maximums (reads 30 s, writes 60 s, list and ready 120 s) are applied
+	// by the server that knows the token class (G6) before Exec; this is the
 	// shortest of them, so a head that leaves timeout_ms out still cannot run
 	// without a bound.
 	DefaultTimeout = 30 * time.Second
@@ -360,23 +361,14 @@ func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) 
 	return dir, beadsDir, nil
 }
 
-// callerEnvKeys is the half of bd's environment the caller may set, the
-// design's allowlist. Everything else bd needs is computed by buildEnv, so a
-// caller cannot aim bd at another database, another home or another token;
-// BD_ALLOW_NEW_DATABASE is refused by the same rule, since init is not served.
-var callerEnvKeys = map[string]bool{
-	"BD_ACTOR":            true,
-	"BEADS_ACTOR":         true,
-	"BD_MACHINE":          true,
-	"BD_JSON_ENVELOPE":    true,
-	"BD_READONLY":         true,
-	"BD_DOLT_AUTO_COMMIT": true,
-}
-
 // buildEnv is bd's environment: the computed values first, then the caller's
-// allowlisted ones, sorted so one call's environment is the same every run.
-// A key outside the allowlist is refused rather than dropped, so the caller
-// learns it sent something the gateway does not take.
+// allowlisted ones, sorted so one call's environment is the same every run. The
+// allowlist is callerEnv (env.go), the one list the gateway screens with, so
+// the executor and the policy cannot drift apart; everything else bd needs is
+// computed here, so a caller cannot aim bd at another database, another home or
+// another token. A key outside the list is refused rather than dropped, so the
+// caller learns it sent something the gateway does not take; BD_ALLOW_NEW_DATABASE
+// is refused by the same rule, since init is not served.
 func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]string, error) {
 	env := []string{
 		"HOME=" + e.home,
@@ -389,7 +381,7 @@ func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]st
 	}
 	keys := make([]string, 0, len(fromCaller))
 	for k := range fromCaller {
-		if !callerEnvKeys[k] {
+		if !callerEnv[k] {
 			return nil, fmt.Errorf("%w: %q", ErrEnvNotAllowed, k)
 		}
 		keys = append(keys, k)
