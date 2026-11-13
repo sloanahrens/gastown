@@ -7,7 +7,9 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // The pool's seat cap for a crash restart (gt-02tcp).
@@ -128,6 +130,17 @@ func (h *patrolScanHost) seatLiveAgent(rig, name, sessionAgent string, pool *age
 	return pool.UnrecordedAgent(), nil
 }
 
+// seatLanded reports whether rig/name's submitted work is recorded as landed
+// (gt-jhz3t0). An unreadable intent record or landing log is an error, not a
+// seat read as free or held: the census cannot tell, so the restart waits.
+func (h *patrolScanHost) seatLanded(rig, name string) (bool, error) {
+	rec, err := intent.Read(h.town(), intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name})
+	if err != nil {
+		return false, fmt.Errorf("reading the intent record of %s/%s: %w", rig, name, err)
+	}
+	return polecat.SubmissionLanded(h.town(), rig, rec)
+}
+
 // recordedAgent is the agent the polecat's agent bead says its seat was
 // spawned on, "" when the bead names none or does not exist.
 func (h *patrolScanHost) recordedAgent(rig, name string) (string, error) {
@@ -179,6 +192,13 @@ func (h *patrolScanHost) livePolecatCensus(skipRole string, pool *agentconfig.Po
 		}
 		sessionAgent, _ := h.d.tmux.GetEnvironment(name, "GT_AGENT")
 		rig, polecatName, _ := strings.Cut(strings.TrimSpace(role), "/polecats/")
+		landed, err := h.seatLanded(rig, polecatName)
+		if err != nil {
+			return nil, 0, err
+		}
+		if landed {
+			continue // the seat's submitted work is recorded as landed: it holds no seat (gt-jhz3t0)
+		}
 		agent, err := h.seatLiveAgent(rig, polecatName, sessionAgent, pool)
 		if err != nil {
 			return nil, 0, err
