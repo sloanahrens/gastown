@@ -285,7 +285,7 @@ func TestSeatClassFromTheAgentName(t *testing.T) {
 func buildLedgerLandings(t *testing.T, ledger []LedgerRow, beads map[string]BeadRow, usage map[string]Usage, stamps StageStamps) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
-		beads, usage, nil, nil, nil, nil, stamps, nil, &Dropped{})
+		beads, usage, nil, nil, nil, nil, stamps, nil, defaultEraCuts(), &Dropped{})
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}

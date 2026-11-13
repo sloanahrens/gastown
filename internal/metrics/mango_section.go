@@ -183,8 +183,9 @@ func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSe
 	parts := make([]string, 0, len(mangoTargets)+1)
 	parts = append(parts, "### Weekly table profile\n\n"+mangoProfile(ctx, env, outDir, binary))
 	summary := make(map[string]MangoSummary, len(mangoTargets))
+	eras := SplitByEra(rows, readEraCuts(env))
 	for _, target := range mangoTargets {
-		p := Prepare(header, rows, explainOnly, target)
+		p := Prepare(header, eras, explainOnly, target)
 		if p.TrainPositives < o.MinPositives {
 			part := append(mangoHead(target, p),
 				fmt.Sprintf("Skipped: fewer than %d positives in train.", o.MinPositives))
@@ -281,7 +282,8 @@ func mangoHead(target string, p Prepared) []string {
 		fmt.Sprintf("Train: %d rows, %d positive. Holdout: %d rows, %d positive.",
 			len(p.Train), p.TrainPositives, len(p.Holdout), p.HoldoutPositives),
 		fmt.Sprintf("Train eras: %s. Holdout eras: %s.",
-			eraCountsText(eraCounts(p.Train)), eraCountsText(eraCounts(p.Holdout))),
+			eraCountsText(eraCounts(p.Train, p.Cuts)), eraCountsText(eraCounts(p.Holdout, p.Cuts))),
+		fmt.Sprintf("Era cuts: %s. Unknown landed_at, in neither side: %d.", p.Cuts.describe(), p.UnknownEra),
 	}
 	if p.LastPositiveAt != "" {
 		last := p.LastPositiveAt

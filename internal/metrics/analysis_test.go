@@ -559,7 +559,7 @@ func TestAnalyseTargetsReturnsTheMangoFailure(t *testing.T) {
 			return nil, errors.New("the mango container exited 125")
 		},
 	}
-	_, _, err := analyseTargets(context.Background(), env, AnalysisOptions{MangoBin: "/mango"}, header, rows, nil)
+	_, _, err := analyseTargets(context.Background(), env, AnalysisOptions{MangoBin: "/mango"}, header, SplitByEra(rows, defaultEraCuts()), nil)
 	if err == nil {
 		t.Fatal("analyseTargets reported no error with a mango stage that failed")
 	}

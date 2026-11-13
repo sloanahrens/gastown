@@ -260,7 +260,7 @@ func TestCheckHoldoutMeasuresATarget(t *testing.T) {
 	}
 	rows[8]["t"] = "1"
 	rows[9]["t"] = "0"
-	p := Prepare([]string{"landed_at", "rig", "t"}, rows, nil, "t")
+	p := Prepare([]string{"landed_at", "rig", "t"}, SplitByEra(rows, defaultEraCuts()), nil, "t")
 	boxes := []Box{{Cube: Cube{Ranges: []Range{{Column: "rig", Categories: []string{"a"}}}}, N: 40, Purity: 0.6}}
 	got := measureTarget("t", p, boxes, 1)
 	if got.TrainN != 7 || got.TrainPositives != 7 || got.HoldoutN != 3 || got.HoldoutPositives != 1 {
@@ -292,7 +292,7 @@ func TestMeasureTargetSplitsTheBestBoxOverEveryPreparedRow(t *testing.T) {
 		rows[i]["t"] = "0"
 	}
 	rows[8]["t"] = "1"
-	p := Prepare([]string{"landed_at", "rig", "t"}, rows, nil, "t")
+	p := Prepare([]string{"landed_at", "rig", "t"}, SplitByEra(rows, defaultEraCuts()), nil, "t")
 	boxes := []Box{{Cube: Cube{Ranges: []Range{
 		{Column: "rig", Categories: []string{"a"}},
 		{Column: "t", Min: 1, Max: 1},

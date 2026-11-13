@@ -263,6 +263,7 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		HandoffCache:  handoff,
 		BdShowCap:     defaultBdShowCap,
 		JevLog:        dispatch.LogPath(town),
+		EraCuts:       readEraCuts(OSEnv(town)),
 	}
 	return real, nil
 }

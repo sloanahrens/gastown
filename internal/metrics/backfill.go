@@ -39,6 +39,14 @@ var regimeSandboxMoveAt = time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
 // cluster: the start of the pod era (runtime_era.go).
 var regimePodMoveAt = time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
 
+// The reasons the two platform moves carry in the regime log. readEraCuts matches
+// a logged platform event on these, so a platform event with any other reason is
+// not an era boundary.
+const (
+	regimeSandboxMoveReason = "seats moved from the host into sandboxes"
+	regimePodMoveReason     = "daemon moved from the host into the control cluster"
+)
+
 // regimeBackfillMoves are the moves the town made before the runtime record
 // existed, so the analysis can cut a series at them. The record holds every
 // change `gt regime record` wrote since; a later move is recorded there live
@@ -48,13 +56,13 @@ var regimeBackfillMoves = []RegimeEventRecord{
 	{
 		TS:     regimeSandboxMoveAt,
 		Kind:   "platform",
-		Reason: "seats moved from the host into sandboxes",
+		Reason: regimeSandboxMoveReason,
 		Source: "mango-evaluation review",
 	},
 	{
 		TS:     regimePodMoveAt,
 		Kind:   "platform",
-		Reason: "daemon moved from the host into the control cluster",
+		Reason: regimePodMoveReason,
 		Source: "mango-evaluation review",
 	},
 }

@@ -36,7 +36,11 @@ const defaultTrainFraction = 0.7
 // float is implementation-defined. NaN has no nearer end, so it cuts at the
 // start, which is an empty train.
 func SplitByDate(rows []Row, trainFraction float64) (train, holdout []Row) {
-	ordered := sortedByLandedAt(rows)
+	return cutAt(sortedByLandedAt(rows), trainFraction)
+}
+
+// cutAt is SplitByDate for rows already ordered: the earliest share is train.
+func cutAt(ordered []Row, trainFraction float64) (train, holdout []Row) {
 	f := trainFraction
 	switch {
 	case math.IsNaN(f) || f < 0:
@@ -84,17 +88,22 @@ type Prepared struct {
 	// LastPositiveAt is the latest landed_at among the positives, empty when
 	// there is none.
 	LastPositiveAt string
+	// Cuts are the era cuts the split was made under, and UnknownEra counts the
+	// landings whose landed_at names no instant, which sit on neither side.
+	Cuts       EraCuts
+	UnknownEra int
 }
 
-// Prepare splits rows by runtime era (SplitByEra) and computes the predictor
-// columns and the target's positive counts.
+// Prepare takes the era split the caller cut once for the analysis and computes
+// the predictor columns and the target's positive counts. The split is not cut
+// again here, so every target trains and checks on the same landings.
 //
 // A column is dropped when the sidecar names it explain-only, when it is a
 // target, an identity or the duplicate, or when it defines this target. A
 // header column none of those name is carried as a predictor whether or not
 // this package knows it.
-func Prepare(header []string, rows []Row, explainOnly []string, target string) Prepared {
-	train, holdout := SplitByEra(rows)
+func Prepare(header []string, split EraSplit, explainOnly []string, target string) Prepared {
+	train, holdout := split.Train, split.Holdout
 	drop := make(map[string]bool, len(explainOnly)+len(mangoTargets)+len(mangoIdentity)+len(mangoDuplicate))
 	for _, c := range explainOnly {
 		drop[c] = true
@@ -119,6 +128,8 @@ func Prepare(header []string, rows []Row, explainOnly []string, target string) P
 		Holdout:    holdout,
 		Predictors: predictors,
 		Columns:    append(append([]string{}, predictors...), target),
+		Cuts:       split.Cuts,
+		UnknownEra: split.Unknown,
 	}
 	// landed_at sorts as text because the extract writes ISO timestamps.
 	for _, r := range train {

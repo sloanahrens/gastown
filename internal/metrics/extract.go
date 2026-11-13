@@ -74,6 +74,10 @@ type ExtractEnv struct {
 	EventLines []string
 	// Diffs is where a landing's size and spread come from.
 	Diffs DiffSource
+	// EraCuts are the runtime era cuts the runtime_era column is written under,
+	// read from the regime log by the wiring. The zero value asks for the backfill
+	// constants.
+	EraCuts EraCuts
 	// RunBd runs bd in a directory and returns its stdout.
 	RunBd BdRun
 	// BeadDirs is every directory bd is listed in: each rig's and the town's.
@@ -265,7 +269,11 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	if err != nil {
 		return res, err
 	}
-	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, rounds, eras, shaped, stamps, jev, dropped)
+	cuts := env.EraCuts
+	if cuts == (EraCuts{}) {
+		cuts = defaultEraCuts()
+	}
+	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, rounds, eras, shaped, stamps, jev, cuts, dropped)
 	if err != nil {
 		return res, err
 	}
