@@ -37,6 +37,7 @@ type BranchRepo interface {
 
 	Fetch(remote string) error
 	FetchBranch(remote, branch string) error
+	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
 	FetchPrune(remote string) error
 	Push(remote, branch string, force bool) error
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
