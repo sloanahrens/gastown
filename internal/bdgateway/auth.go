@@ -44,7 +44,7 @@ var (
 	ErrUnknownToken = errors.New("bdgateway: unknown bearer token")
 	// ErrTokenFileName is LoadTokens' refusal of a file name that is not a
 	// token file name.
-	ErrTokenFileName = errors.New("bdgateway: token file name must be <class>.<caller>.token")
+	ErrTokenFileName = errors.New("bdgateway: not a token file name")
 	// ErrTokenDir is LoadTokens' refusal of a directory it cannot list: missing,
 	// not a directory, or a symlink.
 	ErrTokenDir = errors.New("bdgateway: token directory is not usable")
@@ -109,10 +109,12 @@ type tokenFS struct {
 // osTokenFS is tokenFS over the real filesystem.
 var osTokenFS = tokenFS{lstat: os.Lstat, readDir: os.ReadDir, open: openTokenFile}
 
-// openTokenFile opens a token file without following a symlink, so the checks
-// and the read see the same file.
+// openTokenFile opens a token file. A symlink is followed on purpose: the files
+// of a Kubernetes Secret volume are symlinks into a swapped data directory, and
+// refusing them would refuse every token in the cluster. The checks and the
+// read use this one handle, so they see the file the link reaches.
 func openTokenFile(path string) (tokenFile, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	return os.Open(path)
 }
 
 // LoadTokens reads dir's token files into a new TokenTable. The caller is part
@@ -196,7 +198,8 @@ func parseTokenClass(name string) (TokenClass, error) {
 // a label a log line and a directory listing both show whole.
 const maxCallerBytes = 64
 
-// validCaller reports whether caller is a token file name's caller part:
+// validCaller reports whether caller is acceptable as the caller part of a
+// token file name (the token file format is described in the package comment):
 // 1 to 64 lowercase letters, digits, '-' or '_'.
 func validCaller(caller string) bool {
 	if caller == "" || len(caller) > maxCallerBytes {
@@ -214,8 +217,8 @@ func validCaller(caller string) bool {
 
 // readTokenDigest returns the SHA-256 digest of the token path holds. It opens
 // the file once and stats and reads that same handle, so the mode and type
-// checked are the ones read; the open refuses a symlink rather than following
-// it. The mode must be 0600 exactly: a token readable by anyone else is refused
+// checked are the ones read, and a symlink is followed to its target (see
+// openTokenFile). The mode must be 0600 exactly: a token readable by anyone else is refused
 // with the mode named and the token left unread. Surrounding whitespace is
 // trimmed, so a file written with a trailing newline works.
 func readTokenDigest(fs tokenFS, path string) (digest [sha256.Size]byte, err error) {
@@ -224,8 +227,8 @@ func readTokenDigest(fs tokenFS, path string) (digest [sha256.Size]byte, err err
 		return digest, fmt.Errorf("%w: %s: %v", ErrTokenFile, path, err)
 	}
 	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("%w: close %s: %v", ErrTokenFile, path, cerr)
+		if cerr := f.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("%w: close %s: %v", ErrTokenFile, path, cerr))
 		}
 	}()
 	info, err := f.Stat()
@@ -369,23 +372,28 @@ func (a *Authenticator) HandleSignal(sig os.Signal) error {
 // WatchSignals calls HandleSignal for each signal read from sig until ctx is
 // done or sig is closed. A failed reload is handed to report and does not stop
 // the loop: the old table stays in service until a later reload succeeds. A nil
-// report is not a silent drop: the failure ends the loop and is returned. The
+// report is not a silent drop either: the loop keeps running, and the latest
+// failure not cleared by a later successful reload is returned when it ends. The
 // process's own signal channel and os/signal.Notify are the gateway's to wire
 // (cmd/bdgw, task G6).
 func (a *Authenticator) WatchSignals(ctx context.Context, sig <-chan os.Signal, report func(error)) error {
+	var unreported error // the latest failure no report saw and no later reload cleared
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return unreported
 		case s, ok := <-sig:
 			if !ok {
-				return nil
+				return unreported
 			}
-			if err := a.HandleSignal(s); err != nil {
-				if report == nil {
-					return err
-				}
+			err := a.HandleSignal(s)
+			switch {
+			case err == nil && s == syscall.SIGHUP:
+				unreported = nil
+			case err != nil && report != nil:
 				report(err)
+			case err != nil:
+				unreported = err
 			}
 		}
 	}

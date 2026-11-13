@@ -315,7 +315,10 @@ func TestAuthReloadInFlightRequest(t *testing.T) {
 	loaded := auth.table.Load()
 	loaded.compare = func(a, b []byte) int {
 		close(entered)
-		<-release
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
 		return subtle.ConstantTimeCompare(a, b)
 	}
 
@@ -378,7 +381,10 @@ func TestAuthRequestDuringReload(t *testing.T) {
 	defer unblock()
 	auth.fs.open = func(path string) (tokenFile, error) {
 		close(reading)
-		<-release
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
 		return openTokenFile(path)
 	}
 	reloaded := make(chan error, 1)
@@ -719,11 +725,10 @@ func TestAuthLoaderRefusals(t *testing.T) {
 			wantErr: ErrTokenFileName,
 		},
 		{
-			name: "token file is a symlink",
+			name: "token file is a symlink to a directory",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				target := writeTokenFile(t, t.TempDir(), "real-token", "read-token\n", 0o600)
-				if err := os.Symlink(target, filepath.Join(dir, "read.dashboard.token")); err != nil {
+				if err := os.Symlink(t.TempDir(), filepath.Join(dir, "read.dashboard.token")); err != nil {
 					t.Fatalf("symlink: %v", err)
 				}
 				return dir
@@ -1024,4 +1029,91 @@ func TestHTTPStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuthLoadTokensFollowsSecretVolumeSymlinks: the files of a Kubernetes
+// Secret volume are symlinks, so a symlink to a regular 0600 file loads, and the
+// mode checked is the target's: a symlink to a wider file is still refused.
+func TestAuthLoadTokensFollowsSecretVolumeSymlinks(t *testing.T) {
+	t.Parallel()
+	good := t.TempDir()
+	target := writeTokenFile(t, t.TempDir(), "real-token", "read-token\n", 0o600)
+	if err := os.Symlink(target, filepath.Join(good, "read.dashboard.token")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	auth, err := NewAuthenticator(good)
+	if err != nil {
+		t.Fatalf("a symlinked token file was refused: %v", err)
+	}
+	if _, err := auth.Authenticate("Bearer read-token"); err != nil {
+		t.Errorf("token through a symlinked file: %v", err)
+	}
+
+	wide := t.TempDir()
+	wideTarget := writeTokenFile(t, t.TempDir(), "real-token", "read-token\n", 0o644)
+	if err := os.Symlink(wideTarget, filepath.Join(wide, "read.dashboard.token")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := NewAuthenticator(wide); !errors.Is(err, ErrTokenFileMode) {
+		t.Errorf("symlink to a 0644 file: got %v, want ErrTokenFileMode", err)
+	}
+}
+
+// TestAuthWatchSignalsNilReportKeepsRunning: with no report a failed reload does
+// not end the loop; a later successful reload clears it, and one that is never
+// cleared is returned when the loop ends.
+func TestAuthWatchSignalsNilReportKeepsRunning(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o600)
+	auth, err := NewAuthenticator(dir)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	opens := 0
+	auth.fs.open = func(path string) (tokenFile, error) {
+		opens++
+		if opens == 1 {
+			return nil, errors.New("injected open failure") // the first reload fails
+		}
+		return openTokenFile(path)
+	}
+	sig := make(chan os.Signal, 2)
+	sig <- syscall.SIGHUP // fails
+	sig <- syscall.SIGHUP // succeeds: the loop must still be reading
+	close(sig)
+	if err := auth.WatchSignals(context.Background(), sig, nil); err != nil {
+		t.Fatalf("a failure cleared by a later reload was returned: %v", err)
+	}
+	if opens != 2 {
+		t.Fatalf("token file opened %d times, want 2: the loop stopped at the first failure", opens)
+	}
+}
+
+// TestAuthTokenFileCloseErrorKeepsTheRefusal: a close error is joined to an
+// earlier refusal and does not replace or drop it.
+func TestAuthTokenFileCloseErrorKeepsTheRefusal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o644)
+	fs := osTokenFS
+	fs.open = func(path string) (tokenFile, error) {
+		f, err := openTokenFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return failingCloseFile{f}, nil
+	}
+	_, err := readTokenDigest(fs, filepath.Join(dir, "read.dashboard.token"))
+	if !errors.Is(err, ErrTokenFileMode) || !errors.Is(err, ErrTokenFile) {
+		t.Fatalf("got %v, want both the mode refusal and the close error", err)
+	}
+}
+
+// failingCloseFile is a token file whose Close fails.
+type failingCloseFile struct{ tokenFile }
+
+func (f failingCloseFile) Close() error {
+	_ = f.tokenFile.Close()
+	return errors.New("close failed")
 }
