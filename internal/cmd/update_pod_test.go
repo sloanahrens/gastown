@@ -904,14 +904,15 @@ func TestRunsInPod(t *testing.T) {
 }
 
 // TestPodInClusterPassesTheGuardInAPod: gt update --pod-in-cluster in a pod is
-// not refused by the guard; the run goes on to find the town.
+// not refused by the guard; the run goes on to find the town. --skip install
+// keeps the images refusal out of this run, so only the in-pod guard is tested.
 func TestPodInClusterPassesTheGuardInAPod(t *testing.T) {
 	t.Parallel()
 	seams := updateSeams{
 		FindTownRoot: func() (string, error) { return "", errors.New("the town was reached") },
 		InPod:        func() bool { return true },
 	}
-	_, err := runPodCommand(t, seams, "--pod-in-cluster", "--pod-namespace", podSwapNamespace)
+	_, err := runPodCommand(t, seams, "--skip", "install", "--pod-in-cluster", "--pod-namespace", podSwapNamespace)
 	if err == nil || !strings.Contains(err.Error(), "the town was reached") {
 		t.Fatalf("gt update --pod-in-cluster in a pod error = %v, want the run to reach the town", err)
 	}
