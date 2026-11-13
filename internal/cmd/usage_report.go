@@ -151,9 +151,12 @@ func reportFail(cmd *cobra.Command, err error) error {
 }
 
 // printUsageReport writes the report as a table of rows, then the three counts every report carries.
-// A table that cannot be written is an error, so the command never exits 0 over a partial report.
+// Every write to w is checked, so the command never exits 0 over a partial report: the header and the
+// counts directly, and the rows at a tabwriter Flush, since a five-cell row reaches w only there.
 func printUsageReport(w io.Writer, rep usageattrib.Report) error {
-	fmt.Fprintf(w, "usage by %s, %s to %s\n", rep.By, rep.From.Format(time.RFC3339), rep.To.Format(time.RFC3339))
+	if _, err := fmt.Fprintf(w, "usage by %s, %s to %s\n", rep.By, rep.From.Format(time.RFC3339), rep.To.Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("writing the report: %w", err)
+	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "%s\tCALLS\tCLAUDE_UNCACHED\tDEEPSEEK_EST_USD\tSUB_SHARE\n", strings.ToUpper(rep.By))
 	for _, r := range rep.Rows {
@@ -166,8 +169,17 @@ func printUsageReport(w io.Writer, rep usageattrib.Report) error {
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing the report: %w", err)
 	}
-	fmt.Fprintf(w, "unmatched sessions: %d\n", rep.Unmatched)
-	fmt.Fprintf(w, "incomplete records: %d\n", rep.Incomplete)
-	fmt.Fprintf(w, "records with no end time: %d\n", rep.Skipped)
+	for _, c := range []struct {
+		label string
+		count int
+	}{
+		{"unmatched sessions", rep.Unmatched},
+		{"incomplete records", rep.Incomplete},
+		{"records with no end time", rep.Skipped},
+	} {
+		if _, err := fmt.Fprintf(w, "%s: %d\n", c.label, c.count); err != nil {
+			return fmt.Errorf("writing the report: %w", err)
+		}
+	}
 	return nil
 }
