@@ -177,7 +177,8 @@ func TestTownStateRewriteReadsItsFlags(t *testing.T) {
 
 // TestTownStateRewriteUndoAndScanFailures drives the two errors the command
 // hands back from townstate: an undo it cannot run, and a post-apply scan that
-// cannot read a file it was asked to check.
+// cannot read a file it was asked to check. The failed scan still prints where
+// the originals are kept and what is left alone.
 func TestTownStateRewriteUndoAndScanFailures(t *testing.T) {
 	t.Parallel()
 	root := writeRewriteCmdTown(t)
@@ -194,6 +195,7 @@ func TestTownStateRewriteUndoAndScanFailures(t *testing.T) {
 	if err := os.WriteFile(binary, []byte(rewriteCmdOldRoot+"\x00"), 0o644); err != nil {
 		t.Fatalf("writing the binary file: %v", err)
 	}
+	var out bytes.Buffer
 	err := runTownStateRewriteIn(townStateRewriteEnv{
 		town:     root,
 		fromRoot: rewriteCmdOldRoot,
@@ -203,10 +205,15 @@ func TestTownStateRewriteUndoAndScanFailures(t *testing.T) {
 			Name:  "blobs",
 			Match: func(rel string) bool { return strings.HasSuffix(rel, ".bin") },
 		}),
-		out: &bytes.Buffer{},
+		out: &out,
 	})
 	if err == nil || !strings.Contains(err.Error(), "blob.bin holds a NUL byte") {
 		t.Fatalf("apply whose scan reads a binary file = %v, want a refusal naming the NUL byte", err)
+	}
+	for _, want := range []string{"each original is kept beside its file as <file>.pre-rewrite", "left alone:"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the failed scan's output %q does not contain %q", out.String(), want)
+		}
 	}
 }
 

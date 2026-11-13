@@ -36,10 +36,7 @@ const rewriteForgePrefix = "forgejo:3000/"
 // as internal/imagevalues holds it.
 var rewriteOwnerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
-// townMayorDir is the town's mayor directory name, which could not be spelled
-// with constants.DirMayor: every use of that identifier counts against the
-// <rig>/mayor/rig retirement (internal/mayorrig), and this file needs only the
-// directory name.
+// townMayorDir is the mayor directory's name; the shared constant is not used here (gt-3lvcjz.26).
 const townMayorDir = "mayor"
 
 // RewriteClass is one class of file a rewrite may change: its name for the
@@ -176,11 +173,10 @@ type RewriteReport struct {
 // replaces one operation to drive its failure without an unwritable directory on
 // the host.
 type rewriteFiles struct {
-	lstat     func(string) (fs.FileInfo, error)
-	openFile  func(string, int, fs.FileMode) (io.WriteCloser, error)
-	writeFile func(string, []byte, fs.FileMode) error
-	rename    func(string, string) error
-	remove    func(string) error
+	lstat    func(string) (fs.FileInfo, error)
+	openFile func(string, int, fs.FileMode) (io.WriteCloser, error)
+	rename   func(string, string) error
+	remove   func(string) error
 }
 
 // hostRewriteFiles is the seam backed by the host filesystem.
@@ -188,10 +184,7 @@ func hostRewriteFiles() rewriteFiles {
 	return rewriteFiles{
 		lstat: os.Lstat,
 		openFile: func(p string, flag int, perm fs.FileMode) (io.WriteCloser, error) {
-			return os.OpenFile(p, flag, perm) //nolint:gosec // G304: the backup name is the file's own path plus a fixed suffix
-		},
-		writeFile: func(p string, data []byte, perm fs.FileMode) error {
-			return os.WriteFile(p, data, perm) //nolint:gosec // G306: the bytes go to the file's own path plus a fixed suffix
+			return os.OpenFile(p, flag, perm) //nolint:gosec // G304: the path is a listed file's own path plus a fixed suffix
 		},
 		rename: os.Rename,
 		remove: os.Remove,
@@ -202,12 +195,12 @@ func hostRewriteFiles() rewriteFiles {
 // walks the town under root, reports each listed-class file that holds one, and
 // with apply writes the result: the original bytes are kept as
 // <file>.pre-rewrite and the new bytes replace the file atomically. A file with
-// no old value is not written, so a second apply changes nothing.
+// no old value is not written.
 //
-// Apply refuses before it writes anything when the town holds a kept copy and
-// the run has work to do: a previous run was neither undone nor cleaned, and
-// that copy is the only original. A run with nothing to change writes nothing,
-// so a second apply is a no-op beside the copies the first one kept.
+// The walk covers the directories walkRewrite enters, and refuses, in a dry run
+// as well as an apply, when any file it enters is named <file>.pre-rewrite: a
+// previous run was neither undone nor cleaned, and that copy is the only
+// original. Nothing is written in either case.
 func Rewrite(root string, q RewriteQuery, apply bool) (*RewriteReport, error) {
 	return rewriteWith(os.DirFS(root), root, q, apply, hostRewriteFiles())
 }
@@ -227,11 +220,6 @@ func rewriteWith(fsys fs.FS, root string, q RewriteQuery, apply bool, files rewr
 	var pending []rewriteTarget
 	var kept []string
 	err = walkRewrite(fsys, root, classes, func(t rewriteTarget) error {
-		if _, err := files.lstat(t.full + RewriteBackupSuffix); err == nil {
-			kept = append(kept, t.rel)
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("rewrite: checking for a kept copy of %s: %w", t.rel, err)
-		}
 		n, err := rewriteFileContent(fsys, &t, q)
 		if err != nil {
 			return err
@@ -242,9 +230,12 @@ func rewriteWith(fsys fs.FS, root string, q RewriteQuery, apply bool, files rewr
 		t.replacements = n
 		pending = append(pending, t)
 		return nil
-	})
+	}, func(rel string) { kept = append(kept, rel) })
 	if err != nil {
 		return nil, err
+	}
+	if len(kept) > 0 {
+		return nil, keptCopiesError(kept)
 	}
 	report := &RewriteReport{Classes: classNames(classes)}
 	for _, t := range pending {
@@ -252,10 +243,6 @@ func rewriteWith(fsys fs.FS, root string, q RewriteQuery, apply bool, files rewr
 	}
 	if !apply {
 		return report, nil
-	}
-	if len(pending) > 0 && len(kept) > 0 {
-		slices.Sort(kept)
-		return nil, fmt.Errorf("rewrite: %s already has a kept copy (%s); run --undo or remove it first", kept[0], kept[0]+RewriteBackupSuffix)
 	}
 	for _, t := range pending {
 		if err := keepAndReplace(files, t.rel, t.full, t.orig, t.new); err != nil {
@@ -284,18 +271,24 @@ func undoWith(fsys fs.FS, root string, files rewriteFiles) (*RewriteReport, erro
 	report := &RewriteReport{Classes: classNames(classes)}
 	err = walkRewrite(fsys, root, classes, func(t rewriteTarget) error {
 		backup := t.full + RewriteBackupSuffix
-		if _, err := files.lstat(backup); err != nil {
+		info, err := files.lstat(backup)
+		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
 			return fmt.Errorf("rewrite: checking for a kept copy of %s: %w", t.rel, err)
+		}
+		// A link or other non-file at the kept name would be renamed over the
+		// class file, so it is refused rather than restored.
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("rewrite: %s is not a regular file; not restoring it over %s", t.rel+RewriteBackupSuffix, t.rel)
 		}
 		if err := files.rename(backup, t.full); err != nil {
 			return fmt.Errorf("rewrite: restoring %s: %w", t.rel, err)
 		}
 		report.Undone = append(report.Undone, t.rel)
 		return nil
-	})
+	}, func(string) {})
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +336,7 @@ func scanWith(fsys fs.FS, root string, q RewriteQuery, classes []RewriteClass) (
 			remaining = append(remaining, t.rel)
 		}
 		return nil
-	})
+	}, func(string) {})
 	if err != nil {
 		return nil, err
 	}
@@ -409,10 +402,13 @@ func townRigs(fsys fs.FS) ([]string, error) {
 	return rigs, nil
 }
 
-// walkRewrite visits every listed-class regular file in fsys in path order. It
-// descends only where a class file or a worktree pointer can be: heavy
-// directories are skipped whole, and so is anything below rewriteMaxDepth.
-func walkRewrite(fsys fs.FS, root string, classes []RewriteClass, visit func(rewriteTarget) error) error {
+// walkRewrite visits every listed-class regular file in fsys in path order, and
+// calls keep with the path of every file it enters that is named <file>.pre-rewrite,
+// whatever its type. It descends only where a class file or a worktree pointer
+// can be: heavy directories are skipped whole, and so is anything below
+// rewriteMaxDepth. The directories a kept copy is looked for in are the ones it
+// descends into, so a copy in a skipped directory is not seen.
+func walkRewrite(fsys fs.FS, root string, classes []RewriteClass, visit func(rewriteTarget) error, keep func(string)) error {
 	return fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("rewrite: walking %s: %w", rel, err)
@@ -423,7 +419,7 @@ func walkRewrite(fsys fs.FS, root string, classes []RewriteClass, visit func(rew
 		full := filepath.Join(root, filepath.FromSlash(rel))
 		if d.IsDir() {
 			if d.Name() == constants.DirRepoGit {
-				if err := visitRepoGitPointers(fsys, rel, root, visit); err != nil {
+				if err := visitRepoGitPointers(fsys, rel, root, visit, keep); err != nil {
 					return err
 				}
 				return fs.SkipDir
@@ -432,6 +428,9 @@ func walkRewrite(fsys fs.FS, root string, classes []RewriteClass, visit func(rew
 				return fs.SkipDir
 			}
 			return nil
+		}
+		if strings.HasSuffix(rel, RewriteBackupSuffix) {
+			keep(rel)
 		}
 		if !d.Type().IsRegular() {
 			return nil
@@ -466,9 +465,10 @@ func skipRewriteDir(rel, name string) bool {
 
 // visitRepoGitPointers visits the worktree pointers of the bare repository at
 // rel/.repo.git: <rig>/.repo.git/worktrees/<name>/gitdir, whose entry is the
-// worktree's .git file. A bare repository without worktrees has none. The rest
-// of the object store is never entered.
-func visitRepoGitPointers(fsys fs.FS, rel, root string, visit func(rewriteTarget) error) error {
+// worktree's .git file. It also reports each kept copy in a worktree directory.
+// A bare repository without worktrees has none. The rest of the object store is
+// never entered.
+func visitRepoGitPointers(fsys fs.FS, rel, root string, visit func(rewriteTarget) error, keep func(string)) error {
 	worktrees := path.Join(rel, "worktrees")
 	entries, err := fs.ReadDir(fsys, worktrees)
 	if err != nil {
@@ -481,7 +481,17 @@ func visitRepoGitPointers(fsys fs.FS, rel, root string, visit func(rewriteTarget
 		if !e.IsDir() {
 			continue
 		}
-		entry := path.Join(worktrees, e.Name(), "gitdir")
+		dir := path.Join(worktrees, e.Name())
+		files, err := fs.ReadDir(fsys, dir)
+		if err != nil {
+			return fmt.Errorf("rewrite: reading %s: %w", dir, err)
+		}
+		for _, f := range files {
+			if strings.HasSuffix(f.Name(), RewriteBackupSuffix) {
+				keep(path.Join(dir, f.Name()))
+			}
+		}
+		entry := path.Join(dir, "gitdir")
 		info, err := fs.Lstat(fsys, entry)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -608,43 +618,70 @@ func rootBoundaryAfter(s string, i int) bool {
 // keepAndReplace writes out over full, keeping the original bytes in
 // <full>.pre-rewrite first. The new bytes are built beside the file and renamed
 // over it, so a reader sees the old file or the new one, never a partial write.
+// Both beside-files are created exclusively: a link or file already at either
+// name is refused, and never written through.
 func keepAndReplace(files rewriteFiles, rel, full string, orig, out []byte) error {
 	info, err := files.lstat(full)
 	if err != nil {
 		return fmt.Errorf("rewrite: reading %s: %w", rel, err)
 	}
+	perm := info.Mode().Perm()
 	backup := full + RewriteBackupSuffix
-	b, err := files.openFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
+	if err := writeNewFile(files, backup, orig, perm); err != nil {
 		return fmt.Errorf("rewrite: keeping a copy of %s as %s: %w", rel, filepath.Base(backup), err)
 	}
-	if _, err := b.Write(orig); err != nil {
-		if closeErr := b.Close(); closeErr != nil {
-			return fmt.Errorf("rewrite: keeping a copy of %s: %w", filepath.Base(backup), errors.Join(err, closeErr))
-		}
-		return fmt.Errorf("rewrite: keeping a copy of %s: %w", filepath.Base(backup), err)
-	}
-	if err := b.Close(); err != nil {
-		return fmt.Errorf("rewrite: keeping a copy of %s: %w", filepath.Base(backup), err)
-	}
 	tmp := full + rewriteTempSuffix
-	if err := files.writeFile(tmp, out, info.Mode().Perm()); err != nil {
-		return removeTemp(files, tmp, fmt.Errorf("rewrite: writing %s: %w", rel, err))
+	if err := writeNewFile(files, tmp, out, perm); err != nil {
+		return fmt.Errorf("rewrite: writing %s: %w", rel, err)
 	}
 	if err := files.rename(tmp, full); err != nil {
-		return removeTemp(files, tmp, fmt.Errorf("rewrite: replacing %s: %w", rel, err))
+		return removeCreated(files, tmp, fmt.Errorf("rewrite: replacing %s: %w", rel, err))
 	}
 	return nil
 }
 
-// removeTemp removes the temp file a failed write left and returns writeErr,
+// writeNewFile creates p exclusively and writes data to it. A file that already
+// exists is refused and left alone; a file this call created that does not hold
+// all of data is removed, so no partial copy is left to refuse the next run.
+func writeNewFile(files rewriteFiles, p string, data []byte, perm fs.FileMode) error {
+	b, err := files.openFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	_, err = b.Write(data)
+	if closeErr := b.Close(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	if err != nil {
+		return removeCreated(files, p, err)
+	}
+	return nil
+}
+
+// removeCreated removes the file a failed write left at p and returns writeErr,
 // joined with the removal error when a file stays behind that the operator has
-// to delete.
-func removeTemp(files rewriteFiles, tmp string, writeErr error) error {
-	if err := files.remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%w (removing %s also failed: %w)", writeErr, filepath.Base(tmp), err)
+// to delete. Only a file the caller created may be passed here.
+func removeCreated(files rewriteFiles, p string, writeErr error) error {
+	if err := files.remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w (removing %s also failed: %w)", writeErr, filepath.Base(p), err)
 	}
 	return writeErr
+}
+
+// rewriteListedKeptCopies is how many kept-copy paths keptCopiesError names.
+const rewriteListedKeptCopies = 10
+
+// keptCopiesError refuses a run because the town holds kept copies, naming at
+// most rewriteListedKeptCopies of them in path order.
+func keptCopiesError(kept []string) error {
+	slices.Sort(kept)
+	shown, more := kept, ""
+	if len(kept) > rewriteListedKeptCopies {
+		shown = kept[:rewriteListedKeptCopies]
+		more = fmt.Sprintf(" and %d more", len(kept)-rewriteListedKeptCopies)
+	}
+	return fmt.Errorf("rewrite: a previous rewrite was not undone or cleaned: %d kept copies (%s%s); run --undo or delete them",
+		len(kept), strings.Join(shown, ", "), more)
 }
 
 // topConfigMatch matches a town-level directory's JSON and YAML files, one

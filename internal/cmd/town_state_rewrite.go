@@ -24,10 +24,10 @@ Run it on a copy: the claim mounted in a helper Pod, or a scratch directory.
 Dry run is the default and prints each file with the number of replacements it
 would make. With --apply each changed file is written atomically, its original
 bytes kept as <file>.pre-rewrite beside it, and the command then scans the
-classes and exits non-zero naming any file that still holds an old value. A
-second --apply changes nothing. With --undo the kept copies are restored byte
-for byte. A run that has work to do refuses while the town holds a kept copy,
-until that copy is undone or removed.
+classes and exits non-zero naming any file that still holds an old value. With
+--undo the kept copies are restored byte for byte. Any run, dry or applied,
+refuses while the town holds a file named <file>.pre-rewrite, so a second
+--apply refuses and writes nothing until that copy is undone or removed.
 
 A root matches only as a whole path, so a directory whose name starts with the
 old root's characters is not rewritten. The owner matches only in the two
@@ -133,19 +133,22 @@ func runTownStateRewriteIn(env townStateRewriteEnv) error {
 	}
 	fmt.Fprintf(env.out, "rewrite: %s %d file(s), %d replacement(s)\n", verb, len(report.Files), replacements)
 	fmt.Fprintf(env.out, "classes: %s\n", strings.Join(report.Classes, "; "))
-	if env.apply {
-		remaining, err := townstate.Scan(env.town, q, env.scanClasses)
-		if err != nil {
-			return err
-		}
-		if len(remaining) > 0 {
-			return fmt.Errorf("rewrite: after the pass these files still hold an old value: %s", joinRewritePaths(remaining))
-		}
-		if len(report.Files) > 0 {
-			fmt.Fprintf(env.out, "rewrite: each original is kept beside its file as <file>%s\n", townstate.RewriteBackupSuffix)
-		}
+	// The kept-copy and left-alone lines print before the scan, so a scan that
+	// fails still tells the operator where the originals are.
+	if env.apply && len(report.Files) > 0 {
+		fmt.Fprintf(env.out, "rewrite: each original is kept beside its file as <file>%s\n", townstate.RewriteBackupSuffix)
 	}
 	fmt.Fprintf(env.out, "left alone: %s\n", strings.Join(townstate.RewriteSkipped, "; "))
+	if !env.apply {
+		return nil
+	}
+	remaining, err := townstate.Scan(env.town, q, env.scanClasses)
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 0 {
+		return fmt.Errorf("rewrite: after the pass these files still hold an old value: %s", joinRewritePaths(remaining))
+	}
 	return nil
 }
 

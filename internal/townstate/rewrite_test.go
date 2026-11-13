@@ -19,6 +19,9 @@ const (
 	rewriteNewOwner = "gastown"
 )
 
+// errInjected is the failure the pointer tests inject; they match it with errors.Is.
+var errInjected = errors.New("injected failure")
+
 // rewriteQuery is the query every rewrite test runs: the old root and owner this
 // town's files spell, and the ones the rename (gt-ipp4uy) sets.
 func rewriteQuery() RewriteQuery {
@@ -111,7 +114,8 @@ func rewriteClassCounts() map[string]int {
 // TestRewriteReplacesRootAndOwnerOnlyInTheListedClasses drives a scratch town
 // with one file of every class: the pass replaces the old root and owner in
 // each, leaves a name that merely starts with the old root's characters and
-// every file outside the classes alone, and a second apply changes nothing.
+// every file outside the classes alone, and a second apply refuses on the kept
+// copies the first one left, writing nothing.
 func TestRewriteReplacesRootAndOwnerOnlyInTheListedClasses(t *testing.T) {
 	t.Parallel()
 	root := writeRewriteTown(t, rewriteClassTown())
@@ -164,14 +168,10 @@ func TestRewriteReplacesRootAndOwnerOnlyInTheListedClasses(t *testing.T) {
 		t.Errorf("apply kept %d copies, want %d", len(backups), len(rewriteClassCounts()))
 	}
 
-	// A second apply finds nothing, writes nothing, and keeps no new copy.
+	// A second apply refuses on the kept copies, and writes nothing.
 	before := rewriteTree(t, root)
-	second, err := Rewrite(root, rewriteQuery(), true)
-	if err != nil {
-		t.Fatalf("second Rewrite: %v", err)
-	}
-	if len(second.Files) != 0 {
-		t.Errorf("the second apply changed %v, want nothing", second.Files)
+	if _, err := Rewrite(root, rewriteQuery(), true); err == nil || !strings.Contains(err.Error(), "kept copies") {
+		t.Errorf("the second apply = %v, want a refusal naming the kept copies", err)
 	}
 	if after := rewriteTree(t, root); !mapsEqual(after, before) {
 		t.Error("the second apply wrote the town")
@@ -204,21 +204,76 @@ func TestRewriteUndoRestoresTheKeptCopies(t *testing.T) {
 		t.Errorf("Undo left the kept copies %v", backups)
 	}
 
-	// A kept copy beside a file a new run would change refuses the run, and the
-	// other file the run would change is not written either.
+	// A kept copy anywhere in the town refuses the run, and no file the run would
+	// change is written.
 	stray := filepath.Join(root, "settings", "config.json"+RewriteBackupSuffix)
 	if err := os.WriteFile(stray, []byte("kept by hand\n"), 0o644); err != nil {
 		t.Fatalf("writing the kept copy: %v", err)
 	}
 	_, err = Rewrite(root, rewriteQuery(), true)
-	if err == nil || !strings.Contains(err.Error(), "settings/config.json already has a kept copy") {
-		t.Fatalf("Rewrite with a kept copy = %v, want a refusal naming settings/config.json", err)
+	if err == nil || !strings.Contains(err.Error(), "settings/config.json.pre-rewrite") {
+		t.Fatalf("Rewrite with a kept copy = %v, want a refusal naming settings/config.json.pre-rewrite", err)
 	}
 	if got := readRewriteFile(t, root, "gastown/config.json"); got != `{"dir":"`+rewriteOldRoot+`"}` {
 		t.Errorf("the refused run wrote gastown/config.json: %s", got)
 	}
 	if got, err := os.ReadFile(stray); err != nil || string(got) != "kept by hand\n" {
 		t.Errorf("the refused run overwrote the kept copy: %q, %v", got, err)
+	}
+}
+
+// TestRewriteRefusesAKeptCopyAnywhereTheWalkEnters plants a kept copy where a
+// rewrite would otherwise write nothing, beside a file of a skipped class, and in
+// a nested rig directory. A dry run and an apply both refuse, naming the copy,
+// and neither writes the town.
+func TestRewriteRefusesAKeptCopyAnywhereTheWalkEnters(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		files []rewriteTownFile
+		kept  string
+	}{
+		{
+			name: "beside a file with nothing to change",
+			files: []rewriteTownFile{
+				{"gastown/config.json", `{"dir":"/town"}`},
+				{"gastown/config.json.pre-rewrite", `{"dir":"` + rewriteOldRoot + `"}`},
+				{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+			},
+			kept: "gastown/config.json.pre-rewrite",
+		},
+		{
+			name: "beside a file of a skipped class",
+			files: []rewriteTownFile{
+				{"settings/notes.txt", rewriteOldRoot + " notes\n"},
+				{"settings/notes.txt.pre-rewrite", rewriteOldRoot + " notes\n"},
+				{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+			},
+			kept: "settings/notes.txt.pre-rewrite",
+		},
+		{
+			name: "in a nested rig directory",
+			files: []rewriteTownFile{
+				{"gastown/crew/eagle/notes.md.pre-rewrite", "kept\n"},
+				{"gastown/settings/config.json", `{"dir":"` + rewriteOldRoot + `"}`},
+			},
+			kept: "gastown/crew/eagle/notes.md.pre-rewrite",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeRewriteTown(t, tc.files)
+			before := rewriteTree(t, root)
+			for _, apply := range []bool{false, true} {
+				if _, err := Rewrite(root, rewriteQuery(), apply); err == nil || !strings.Contains(err.Error(), tc.kept) {
+					t.Fatalf("Rewrite(apply=%v) = %v, want a refusal naming %s", apply, err, tc.kept)
+				}
+			}
+			if after := rewriteTree(t, root); !mapsEqual(after, before) {
+				t.Error("the refused runs wrote the town")
+			}
+		})
 	}
 }
 
@@ -235,91 +290,108 @@ type closeOnlyError struct{ err error }
 func (w closeOnlyError) Write(p []byte) (int, error) { return len(p), nil }
 func (w closeOnlyError) Close() error                { return w.err }
 
+// atOpen returns a write seam edit that replaces the open of the one file whose
+// path ends in suffix with open; every other open is the host's.
+func atOpen(suffix string, open func() (io.WriteCloser, error)) func(*rewriteFiles) {
+	return func(f *rewriteFiles) {
+		host := f.openFile
+		f.openFile = func(p string, flag int, perm fs.FileMode) (io.WriteCloser, error) {
+			if strings.HasSuffix(p, suffix) {
+				return open()
+			}
+			return host(p, flag, perm)
+		}
+	}
+}
+
 // TestRewriteRefusesAWriteThatFails drives every write step of an apply: a
 // failure at any of them is returned, and the class file keeps its old bytes.
+// Each injected failure is keyed by path, so it reaches only the step it names.
 func TestRewriteRefusesAWriteThatFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	cases := []struct {
 		name string
-		edit func(*rewriteFiles)
+		edit func(*rewriteFiles, string)
 		want string
 	}{
 		{
-			name: "kept copy check",
-			edit: func(f *rewriteFiles) { f.lstat = func(string) (fs.FileInfo, error) { return nil, boom } },
-			want: "checking for a kept copy of settings/config.json",
-		},
-		{
-			name: "kept copy open",
-			edit: func(f *rewriteFiles) {
-				f.openFile = func(string, int, fs.FileMode) (io.WriteCloser, error) { return nil, boom }
-			},
-			want: "keeping a copy of settings/config.json as config.json.pre-rewrite",
-		},
-		{
-			name: "kept copy write",
-			edit: func(f *rewriteFiles) {
-				f.openFile = func(string, int, fs.FileMode) (io.WriteCloser, error) {
-					return writeError{closeErr: nil}, nil
-				}
-			},
-			want: "keeping a copy of config.json.pre-rewrite",
-		},
-		{
-			name: "kept copy write and close",
-			edit: func(f *rewriteFiles) {
-				f.openFile = func(string, int, fs.FileMode) (io.WriteCloser, error) {
-					return writeError{closeErr: boom}, nil
-				}
-			},
-			want: "keeping a copy of config.json.pre-rewrite",
-		},
-		{
-			name: "kept copy close",
-			edit: func(f *rewriteFiles) {
-				f.openFile = func(string, int, fs.FileMode) (io.WriteCloser, error) {
-					return closeOnlyError{err: boom}, nil
-				}
-			},
-			want: "keeping a copy of config.json.pre-rewrite",
-		},
-		{
-			name: "new bytes write",
-			edit: func(f *rewriteFiles) {
-				f.writeFile = func(string, []byte, fs.FileMode) error { return boom }
-			},
-			want: "writing",
-		},
-		{
-			name: "rename over the file",
-			edit: func(f *rewriteFiles) {
-				f.rename = func(string, string) error { return boom }
-			},
-			want: "replacing",
-		},
-		{
-			name: "removing the temp file",
-			edit: func(f *rewriteFiles) {
-				f.rename = func(string, string) error { return boom }
-				f.remove = func(string) error { return boom }
-			},
-			want: "removing config.json.rewrite-tmp also failed",
-		},
-		{
 			name: "reading the file's mode",
-			edit: func(f *rewriteFiles) {
-				calls := 0
-				host := os.Lstat
+			edit: func(f *rewriteFiles, root string) {
+				target := filepath.Join(root, "settings", "config.json")
+				host := f.lstat
 				f.lstat = func(p string) (fs.FileInfo, error) {
-					calls++
-					if calls > 1 {
+					if p == target {
 						return nil, boom
 					}
 					return host(p)
 				}
 			},
 			want: "reading settings/config.json",
+		},
+		{
+			name: "kept copy open",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(RewriteBackupSuffix, func() (io.WriteCloser, error) { return nil, boom })(f)
+			},
+			want: "keeping a copy of settings/config.json as config.json.pre-rewrite",
+		},
+		{
+			name: "kept copy write",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(RewriteBackupSuffix, func() (io.WriteCloser, error) { return writeError{}, nil })(f)
+			},
+			want: "keeping a copy of settings/config.json as config.json.pre-rewrite",
+		},
+		{
+			name: "kept copy write and close",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(RewriteBackupSuffix, func() (io.WriteCloser, error) { return writeError{closeErr: boom}, nil })(f)
+			},
+			want: "keeping a copy of settings/config.json as config.json.pre-rewrite",
+		},
+		{
+			name: "kept copy close",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(RewriteBackupSuffix, func() (io.WriteCloser, error) { return closeOnlyError{err: boom}, nil })(f)
+			},
+			want: "keeping a copy of settings/config.json as config.json.pre-rewrite",
+		},
+		{
+			name: "new bytes open",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(rewriteTempSuffix, func() (io.WriteCloser, error) { return nil, boom })(f)
+			},
+			want: "writing settings/config.json",
+		},
+		{
+			name: "new bytes write",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(rewriteTempSuffix, func() (io.WriteCloser, error) { return writeError{}, nil })(f)
+			},
+			want: "writing settings/config.json",
+		},
+		{
+			name: "new bytes close",
+			edit: func(f *rewriteFiles, _ string) {
+				atOpen(rewriteTempSuffix, func() (io.WriteCloser, error) { return closeOnlyError{err: boom}, nil })(f)
+			},
+			want: "writing settings/config.json",
+		},
+		{
+			name: "rename over the file",
+			edit: func(f *rewriteFiles, _ string) {
+				f.rename = func(string, string) error { return boom }
+			},
+			want: "replacing settings/config.json",
+		},
+		{
+			name: "removing the temp file",
+			edit: func(f *rewriteFiles, _ string) {
+				f.rename = func(string, string) error { return boom }
+				f.remove = func(string) error { return boom }
+			},
+			want: "removing config.json.rewrite-tmp also failed",
 		},
 	}
 	for _, tc := range cases {
@@ -329,7 +401,7 @@ func TestRewriteRefusesAWriteThatFails(t *testing.T) {
 				{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
 			})
 			files := hostRewriteFiles()
-			tc.edit(&files)
+			tc.edit(&files, root)
 			_, err := rewriteWith(os.DirFS(root), root, rewriteQuery(), true, files)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("rewriteWith = %v, want a refusal naming %q", err, tc.want)
@@ -338,6 +410,117 @@ func TestRewriteRefusesAWriteThatFails(t *testing.T) {
 				t.Errorf("the failed write changed the class file: %s", got)
 			}
 		})
+	}
+}
+
+// partialWriter is a created file that takes no bytes, as a disk that fills
+// before the first write does.
+type partialWriter struct{ io.WriteCloser }
+
+func (partialWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// TestRewriteRemovesAPartialFileItCreated drives a write that fails after the pass
+// has created the temp file: the file is removed, so no partial copy is left, and
+// the class file keeps its old bytes.
+func TestRewriteRemovesAPartialFileItCreated(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteTown(t, []rewriteTownFile{
+		{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+	})
+	files := hostRewriteFiles()
+	host := files.openFile
+	files.openFile = func(p string, flag int, perm fs.FileMode) (io.WriteCloser, error) {
+		f, err := host(p, flag, perm)
+		if err != nil || !strings.HasSuffix(p, rewriteTempSuffix) {
+			return f, err
+		}
+		return partialWriter{f}, nil
+	}
+	_, err := rewriteWith(os.DirFS(root), root, rewriteQuery(), true, files)
+	if err == nil || !strings.Contains(err.Error(), "writing settings/config.json") {
+		t.Fatalf("rewriteWith = %v, want a refusal naming settings/config.json", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "settings", "config.json"+rewriteTempSuffix)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the failed write left its temp file: %v", err)
+	}
+	if got := readRewriteFile(t, root, "settings/config.json"); got != `{"town_root":"`+rewriteOldRoot+`"}` {
+		t.Errorf("the failed write changed the class file: %s", got)
+	}
+}
+
+// TestRewriteRefusesALinkAtAnExclusiveName plants a link where the pass creates a
+// file. At the temp name the new bytes are built in, the apply refuses without
+// writing through the link. At the kept name the run refuses before it writes.
+// The link's target is never touched.
+func TestRewriteRefusesALinkAtAnExclusiveName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		link string
+		want string
+	}{
+		{name: "temp name", link: "settings/config.json.rewrite-tmp", want: "writing settings/config.json"},
+		{name: "kept name", link: "settings/config.json.pre-rewrite", want: "kept copies"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeRewriteTown(t, []rewriteTownFile{
+				{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+			})
+			target := filepath.Join(t.TempDir(), "outside.txt")
+			const outside = "outside the town\n"
+			if err := os.WriteFile(target, []byte(outside), 0o644); err != nil {
+				t.Fatalf("writing the link target: %v", err)
+			}
+			if err := os.Symlink(target, filepath.Join(root, filepath.FromSlash(tc.link))); err != nil {
+				t.Fatalf("planting the link: %v", err)
+			}
+			if _, err := Rewrite(root, rewriteQuery(), true); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Rewrite = %v, want a refusal naming %q", err, tc.want)
+			}
+			if got, err := os.ReadFile(target); err != nil || string(got) != outside {
+				t.Errorf("the link's target changed: %q, %v", got, err)
+			}
+			if got := readRewriteFile(t, root, "settings/config.json"); got != `{"town_root":"`+rewriteOldRoot+`"}` {
+				t.Errorf("the refused run changed the class file: %s", got)
+			}
+		})
+	}
+}
+
+// TestUndoRefusesAKeptNameThatIsNotARegularFile drives the undo over a kept name
+// a link has replaced: the link is not restored over the class file, and its
+// target is never touched.
+func TestUndoRefusesAKeptNameThatIsNotARegularFile(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteTown(t, []rewriteTownFile{
+		{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+	})
+	if _, err := Rewrite(root, rewriteQuery(), true); err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "outside.txt")
+	const outside = "outside the town\n"
+	if err := os.WriteFile(target, []byte(outside), 0o644); err != nil {
+		t.Fatalf("writing the link target: %v", err)
+	}
+	kept := filepath.Join(root, "settings", "config.json"+RewriteBackupSuffix)
+	if err := os.Remove(kept); err != nil {
+		t.Fatalf("removing the kept copy: %v", err)
+	}
+	if err := os.Symlink(target, kept); err != nil {
+		t.Fatalf("planting the link: %v", err)
+	}
+
+	if _, err := Undo(root); err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+		t.Fatalf("Undo = %v, want a refusal naming the kept copy", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != outside {
+		t.Errorf("the undo changed the link's target: %q, %v", got, err)
+	}
+	if got := readRewriteFile(t, root, "settings/config.json"); got != `{"town_root":"`+rewriteNewRoot+`"}` {
+		t.Errorf("the refused undo restored over the class file: %s", got)
 	}
 }
 
@@ -401,7 +584,7 @@ func TestRewriteQueryValidate(t *testing.T) {
 // TestRewriteRefusesWhatItCannotWalk drives the town and walk failures: a root
 // that is missing, relative or not a directory, a root whose listing fails, a
 // walk that fails inside a rig, a class file that cannot be read, and the bare
-// repository's worktree pointers when they cannot be listed or read.
+// repository's worktree listing when it cannot be read.
 func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -449,12 +632,6 @@ func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 			want: "reading rig/.repo.git/worktrees",
 		},
 		{
-			name: "worktree pointer cannot be read",
-			root: dir,
-			fsys: failingFS{FS: repoTown, statErr: map[string]error{"rig/.repo.git/worktrees/w/gitdir": boom}},
-			want: "reading rig/.repo.git/worktrees/w/gitdir",
-		},
-		{
 			name: "worktree pointer is visited",
 			root: dir,
 			fsys: fstest.MapFS{"rig/.repo.git/worktrees/w/gitdir": {Data: []byte(rewriteOldRoot + "\x00")}},
@@ -467,6 +644,68 @@ func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 			_, err := rewriteWith(tc.fsys, tc.root, rewriteQuery(), false, hostRewriteFiles())
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("rewriteWith = %v, want a refusal naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// pointerFS is a town whose worktree pointer at pointer fails to be stat'd when
+// lstatErr is set, and to be opened when openErr is set. It implements
+// fs.ReadLinkFS, so fs.Lstat calls its Lstat rather than opening the file.
+type pointerFS struct {
+	fs.FS
+	pointer  string
+	lstatErr error
+	openErr  error
+}
+
+func (f pointerFS) Lstat(name string) (fs.FileInfo, error) {
+	if name == f.pointer && f.lstatErr != nil {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: f.lstatErr}
+	}
+	return fs.Lstat(f.FS, name)
+}
+
+func (f pointerFS) ReadLink(name string) (string, error) {
+	return fs.ReadLink(f.FS, name)
+}
+
+func (f pointerFS) Open(name string) (fs.File, error) {
+	if name == f.pointer && f.openErr != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: f.openErr}
+	}
+	return f.FS.Open(name)
+}
+
+// TestRewriteRefusesAWorktreePointerThatCannotBeRead drives the bare repository's
+// worktree pointer through each read the walk makes. The control runs the same
+// town with no failure, so a pass that errors for another reason cannot pass the
+// injected rows.
+func TestRewriteRefusesAWorktreePointerThatCannotBeRead(t *testing.T) {
+	t.Parallel()
+	const pointer = "rig/.repo.git/worktrees/w/gitdir"
+	town := fstest.MapFS{pointer: {Data: []byte(rewriteOldRoot + "\n")}}
+	cases := []struct {
+		name string
+		fsys pointerFS
+		fail bool
+	}{
+		{name: "control with no failure", fsys: pointerFS{FS: town, pointer: pointer}},
+		{name: "stat fails", fsys: pointerFS{FS: town, pointer: pointer, lstatErr: errInjected}, fail: true},
+		{name: "open fails", fsys: pointerFS{FS: town, pointer: pointer, openErr: errInjected}, fail: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := rewriteWith(tc.fsys, t.TempDir(), rewriteQuery(), false, hostRewriteFiles())
+			if !tc.fail {
+				if err != nil {
+					t.Fatalf("rewriteWith with no failure = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), pointer) {
+				t.Fatalf("rewriteWith = %v, want the injected failure naming %s", err, pointer)
 			}
 		})
 	}
