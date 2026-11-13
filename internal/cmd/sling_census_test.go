@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,9 @@ type countingSeatLister struct {
 	fakeLister
 	mu    sync.Mutex
 	reads map[string]int // "verb session" -> probes answered
+	// failHas names the seats whose next has-session read fails, as a busy
+	// tmux server does; the entry is cleared by that failing read.
+	failHas map[string]bool
 }
 
 func (c *countingSeatLister) count(key string) {
@@ -41,6 +45,18 @@ func (c *countingSeatLister) GetEnvironment(name, key string) (string, error) {
 func (c *countingSeatLister) GetSessionCreatedTime(name string) (time.Time, error) {
 	c.count("session-created " + name)
 	return c.fakeLister.GetSessionCreatedTime(name)
+}
+
+func (c *countingSeatLister) HasSession(name string) (bool, error) {
+	c.count("has-session " + name)
+	c.mu.Lock()
+	fail := c.failHas[name]
+	delete(c.failHas, name)
+	c.mu.Unlock()
+	if fail {
+		return false, errors.New("tmux has-session: server busy")
+	}
+	return true, nil
 }
 
 func (c *countingSeatLister) readsOf(verb string) map[string]int {

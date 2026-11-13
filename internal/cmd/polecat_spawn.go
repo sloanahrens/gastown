@@ -969,10 +969,17 @@ func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Mana
 		return nil, nil, nil, fmt.Errorf("rig '%s' not found", rigName)
 	}
 
-	// The polecat manager carries tmux for session-aware allocation.
+	// The polecat manager carries tmux for session-aware allocation. Its
+	// has-session reads go through the sling's census (gt-9qh6wp): the seat
+	// listing, the reuse of the seat it picks and the fresh path's create
+	// probes ask each sandboxed seat once. A seat the census answers
+	// ErrSeatNotLive for is not live with no probe; a listing or record that
+	// cannot be read, or a probe that fails, takes the manager's own probe.
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	return r, t, supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling")), nil
+	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"))
+	mgr.SetSessionProbes(session.CensusSessionReader{Tmux: t})
+	return r, t, mgr, nil
 }
 
 func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, stores slingStores) (*SpawnedPolecatInfo, error) {

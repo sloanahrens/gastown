@@ -181,6 +181,16 @@ func (c *SandboxCensus) Forget(session string) {
 	}
 }
 
+// ForgetSandboxCensus drops what the installed census holds for session, and
+// does nothing when no census is installed. A process calls it where it creates
+// session, so the next read of that seat asks tmux again rather than reading the
+// answer it held before the session existed.
+func ForgetSandboxCensus(session string) {
+	if c := installedCensus(); c != nil {
+		c.Forget(session)
+	}
+}
+
 // censusRead answers the tmux read verb(args) on session through c. A session
 // with no sandbox record, or a census that cannot read its listing, takes the
 // per-seat probe as it always did. A Ready sandbox takes the probe once, and a
@@ -242,4 +252,24 @@ func BeginSandboxCensus(run sandbox.Runner) (end func()) {
 // for the cache.
 func SandboxCensusRead[T any](session, verb string, args []string, probe func() (T, error)) (T, error) {
 	return censusRead(installedCensus(), session, verb, args, probe)
+}
+
+// HasSessionProbe is the tmux read the census answers for a seat.
+type HasSessionProbe interface {
+	HasSession(name string) (bool, error)
+}
+
+// CensusSessionReader answers a seat's has-session read through the census
+// installed for this process, and through Tmux when no census is installed.
+// A sling installs it on the polecat manager it reads its rig through, so the
+// manager's seat-listing and reuse probes cost no extra openshell process.
+type CensusSessionReader struct {
+	Tmux HasSessionProbe
+}
+
+// HasSession answers the seat's has-session read from the census.
+func (r CensusSessionReader) HasSession(name string) (bool, error) {
+	return SandboxCensusRead(name, "has-session", nil, func() (bool, error) {
+		return r.Tmux.HasSession(name)
+	})
 }

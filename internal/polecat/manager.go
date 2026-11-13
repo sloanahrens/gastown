@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -193,6 +194,9 @@ type Manager struct {
 	// agentMemo is the agent beads one sling's reuse step has read, open only
 	// between ShareAgentBeadReads and its end func; nil reads bd every time.
 	agentMemo *agentBeadMemo
+	// sessionReader answers the manager's has-session reads once a sling sets
+	// it (SetSessionProbes); nil asks this manager's own tmux client.
+	sessionReader atomic.Pointer[sessionReaderSlot]
 	// spawnGraceWindow is the window a dispatched-but-not-yet-live polecat is
 	// read as spawning rather than stalled (see SpawnGrace). Resolved once at
 	// construction from the town's witness thresholds.
@@ -1046,7 +1050,7 @@ func (m *Manager) allocateAndAddPoolLocked(opts AddOptions) (string, *Polecat, e
 
 	// Kill any lingering tmux session for this name (gt-pqf9x)
 	if m.tmux != nil {
-		if alive, _ := m.tmux.HasSession(m.sessionName(name)); alive {
+		if alive, _ := m.hasSession(m.sessionName(name)); alive {
 			_ = m.killSession(name, "polecat allocate: lingering session of a reallocated name")
 		}
 	}
@@ -1116,7 +1120,7 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 	// Same fresh-incarnation hygiene as AllocateAndAdd (gt-pqf9x, gt-5mkr).
 	sessionName := m.sessionName(name)
 	if m.tmux != nil {
-		if alive, _ := m.tmux.HasSession(sessionName); alive {
+		if alive, _ := m.hasSession(sessionName); alive {
 			_ = m.killSession(name, "polecat add: lingering session of a reallocated name")
 		}
 	}
@@ -2133,7 +2137,7 @@ func (m *Manager) allocateNamePoolLocked() (string, error) {
 	// lingers (race between cleanup and allocation). This extra check ensures
 	// no stale session blocks the new polecat's session creation.
 	if m.tmux != nil {
-		if alive, _ := m.tmux.HasSession(m.sessionName(name)); alive {
+		if alive, _ := m.hasSession(m.sessionName(name)); alive {
 			_ = m.killSession(name, "polecat reserve: lingering session of a reallocated name")
 		}
 	}
@@ -2796,7 +2800,7 @@ func (m *Manager) releaseHolder(holderPath, branch, bead string) error {
 	}
 	if m.tmux != nil {
 		sessionName := m.sessionName(name)
-		running, err := m.tmux.HasSession(sessionName)
+		running, err := m.hasSession(sessionName)
 		if err != nil {
 			return fmt.Errorf("cannot tell whether polecat %s has a session: %w", name, err)
 		}
@@ -2877,7 +2881,7 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 	}
 
 	sessionName := m.sessionName(name)
-	running, err := m.tmux.HasSession(sessionName)
+	running, err := m.hasSession(sessionName)
 	if err != nil || !running {
 		return nil
 	}
@@ -2962,7 +2966,7 @@ func (m *Manager) reconcilePoolInternal() {
 		// the directories above still hold the names already in use.
 		for _, name := range m.namePool.SessionProbeNames() {
 			sessionName := m.sessionName(name)
-			hasSession, _ := m.tmux.HasSession(sessionName)
+			hasSession, _ := m.hasSession(sessionName)
 			if hasSession {
 				namesWithSessions = append(namesWithSessions, name)
 			}
@@ -4099,8 +4103,8 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	// never updated. Without this check, `gt polecat list` shows zombies as working.
 	// See: disk-space-resilience — all 5 polecats appeared "working" after sessions died.
 	//
-	// When tmux is nil (e.g., no tmux available or in tests), we cannot determine
-	// session state, so we must NOT assume the session is dead — default to alive.
+	// With no tmux client and no reader installed, we cannot determine session
+	// state, so we must NOT assume the session is dead — default to alive.
 	sessionRunning, sessionStale := m.polecatSessionState(name)
 	sessionDead := m.tmux != nil && (!sessionRunning || sessionStale)
 
@@ -4213,14 +4217,21 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 }
 
 func (m *Manager) polecatSessionState(name string) (running bool, stale bool) {
-	if m.tmux == nil {
+	// With neither a client nor a reader there is nothing to ask; with a reader
+	// alone it is the one asker, and a client alone is asked as before.
+	if m.tmux == nil && m.sessionReader.Load() == nil {
 		return false, false
 	}
 
 	sessionName := m.sessionName(name)
-	running, err := m.tmux.HasSession(sessionName)
+	running, err := m.hasSession(sessionName)
 	if err != nil || !running {
 		return false, false
+	}
+	if m.tmux == nil {
+		// The reader answered running, and there is no client to judge the
+		// process behind the session.
+		return true, false
 	}
 
 	return true, isSessionProcessDead(m.tmux, sessionName, filepath.Dir(m.rig.Path))
@@ -4547,7 +4558,7 @@ func (m *Manager) ensureLocalExcludes(worktreePath string) error {
 // the default tmux server when the manager has none.
 func (m *Manager) hasActiveSession(sessionName string) bool {
 	if m.tmux != nil {
-		running, err := m.tmux.HasSession(sessionName)
+		running, err := m.hasSession(sessionName)
 		return err == nil && running
 	}
 	return checkTmuxSession(sessionName)

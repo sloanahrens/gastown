@@ -120,6 +120,9 @@ type SessionManager struct {
 	// logf reports a launch line; nil writes it to stderr. A test supplies
 	// one to read the line without capturing the process's stderr.
 	logf func(format string, args ...any)
+	// nudgeWG tracks the startup-nudge checks launch starts in the background,
+	// so a test can wait for them instead of leaving one running past it.
+	nudgeWG sync.WaitGroup
 }
 
 // The two variables a seat on a tracker rig carries. The tracker client reads
@@ -939,6 +942,11 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, sessionWorkDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
+	// This is the one place the polecat package creates a tmux session: the
+	// census may hold this seat's answer from before it existed, so drop it here
+	// and let the next has-session read ask tmux (gt-9qh6wp). A backend may also
+	// drop it as it builds the sandbox; this drop is the one every backend gets.
+	session.ForgetSandboxCensus(sessionID)
 
 	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
 	// Declared pane identity replaces process-tree inference in IsRuntimeRunning
@@ -989,7 +997,11 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// Runs asynchronously: verifyStartupNudgeDelivery sleeps before checking, so a
 	// synchronous call would add ~25s to every successful polecat startup on the
 	// common gt sling path. Non-fatal: the witness zombie patrol handles unrecovered stalls.
-	go m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, startupNudgeContent)
+	m.nudgeWG.Add(1)
+	go func() {
+		defer m.nudgeWG.Done()
+		m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, startupNudgeContent)
+	}()
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
