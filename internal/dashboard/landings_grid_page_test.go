@@ -310,6 +310,68 @@ func TestRejectedAndFailingRowsKeepTheirDetailOnHover(t *testing.T) {
 	}
 }
 
+// The running landing's row keeps the live shade the old <tr> rows wore: the row
+// the grid draws carries the ltrow and live classes together, and the stylesheet
+// paints that pair rather than only a <tr>. Mutation: drop ".ltrow.live" from
+// the rule and nothing paints the running row in a browser, while every other
+// test still passes (gt-1wygvr).
+func TestARunningLandingsRowIsPaintedLive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", landingsOutcomes(now))
+
+	v, err := p.vm.RunString(`JSON.stringify((function () {
+  var tbl = __find(document.getElementById("trend"), ".ltable");
+  return tbl.children.__arr.slice(1).map(function (tr) { return tr.className || ""; });
+})())`)
+	if err != nil {
+		t.Fatalf("reading the drawn row classes: %v", err)
+	}
+	var classes []string
+	if err := json.Unmarshal([]byte(v.String()), &classes); err != nil {
+		t.Fatalf("reading the drawn row classes: %v", err)
+	}
+	if len(classes) != 5 {
+		t.Fatalf("the table drew %d rows, want the queued, running, rejected, failing and landed ones", len(classes))
+	}
+	for i, class := range classes {
+		if live, want := hasClassToken(class, "live"), i == 1; live != want {
+			t.Errorf("the row with class %q carries the live class %v, want %v: only the running landing is live", class, live, want)
+		}
+		if !hasClassToken(class, "ltrow") {
+			t.Errorf("the row with class %q does not carry the grid's ltrow class", class)
+		}
+	}
+
+	var backgrounds []string
+	for _, rule := range strings.Split(withoutMediaBlocks(pageStyle(t)), "}") {
+		sel, body, ok := strings.Cut(rule, "{")
+		if !ok {
+			continue
+		}
+		for _, one := range strings.Split(sel, ",") {
+			if !selectsClass(one, "ltrow") || !selectsClass(one, "live") {
+				continue
+			}
+			for _, decl := range strings.Split(body, ";") {
+				if prop, val, ok := strings.Cut(decl, ":"); ok && strings.TrimSpace(prop) == "background" {
+					backgrounds = append(backgrounds, strings.TrimSpace(val))
+				}
+			}
+		}
+	}
+	if len(backgrounds) == 0 {
+		t.Fatal("no rule paints a landings row carrying the live class, so the running landing loses its highlight on the grid")
+	}
+	for _, bg := range backgrounds {
+		if bg == "" {
+			t.Error("the live landings row's rule sets an empty background")
+		}
+	}
+}
+
 // The Polecat and Model tracks take their width from one set of custom
 // properties the two tables declare together: a rule that sets either width
 // must name both tables, and both templates must use them, so neither table can

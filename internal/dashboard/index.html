@@ -129,10 +129,8 @@ tr.live,.ltrow.live{background:#101a13}
    at wide widths every track may shrink to nothing, so a long bead title cannot
    carry a row past its panel. Below 640 px the four tracks other than the bead
    hold their content instead (see the rule below). */
-/* The Polecat and Model tracks take their width from one set of custom
-   properties the seat table and the landings table below it declare together,
-   so the two tables read as one format and a width changed here changes both
-   (gt-ultode). */
+/* The Polecat and Model tracks in the two tables below take their width from
+   these properties, so a width changed here changes both (gt-ultode). */
 .wtable,.ltable{--polecat-w:max-content;--model-w:max-content}
 .wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch) [points] minmax(0,max-content);gap:2px 8px;align-items:baseline}
 /* Below 640 px the four tracks other than the bead hold the width their text
@@ -222,11 +220,9 @@ section>h2 .r:not([hidden])+.foldsum{margin-left:0}
 .fev .a{color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fev .s{overflow-wrap:anywhere}
 .fev .rp{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The landings table draws its rows on the seat table's grid, so both read as
-   one format: the Polecat and Model tracks take the width the two tables declare
-   together (--polecat-w, --model-w above), the bead takes what is left, and
-   every row is a subgrid of the table so a header cell and the cells under it
-   cannot start at different places (gt-ultode). */
+/* The landings table draws its rows on the seat table's grid: the bead takes
+   what is left of the width, and every row is a subgrid of the table so a header
+   cell and the cells under it cannot start at different places (gt-ultode). */
 .ltable{display:grid;grid-template-columns:[when] minmax(0,max-content) [polecat] minmax(0,var(--polecat-w)) [model] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [ptime] minmax(0,max-content) [points] minmax(0,max-content) [score] minmax(0,max-content) [gate] minmax(0,max-content) [om] minmax(0,max-content) [ship] minmax(0,max-content);gap:2px 8px;align-items:baseline}
 .ltrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
 .ltrow.hrow{color:var(--dim);font-size:11px;border-top:0}
@@ -249,6 +245,10 @@ section>h2 .r:not([hidden])+.foldsum{margin-left:0}
   .ltrow{display:flex;flex-wrap:wrap;gap:2px 12px;padding:6px 0;border-top:1px solid var(--line)}
   .ltrow:first-child{display:none}
   .ltrow>*{display:block;overflow:visible;text-align:left;white-space:normal}
+  /* The numeric cells read right in the grid, and that rule outranks the
+     row-wide left alignment above; stacked, they read left with every other
+     cell so their label and value stay together. */
+  .ltrow .n{text-align:left}
   .ltrow .lbead{order:-1;flex:1 0 100%}
   .ltrow [data-label]::before{content:attr(data-label) " ";color:var(--dim);font-size:11px}
   .ltrow .lbead .ltitle{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -2069,10 +2069,8 @@ function labelCells(tr, cols, skip) {
 
 // LT_COLS is the Landings table's columns, left to right, the one list the
 // header and every row draw from, so a cell cannot be added to a row and not to
-// the header. The third field marks a reading the table sets right. The Polecat
-// and Model tracks take the width `.wtable,.ltable` declares together, the same
-// properties the seat table above sizes its Polecat and Model columns with
-// (gt-ultode); LT_BEAD is the cell that takes what width is left.
+// the header. The third field marks a reading the table sets right. LT_BEAD is
+// the cell that takes what width is left.
 const LT_COLS = [
   ["When", "when the landing was taken, or how long a queued bead has waited"],
   ["Polecat", "who built it: the polecat, or the crew member whose branch it was"],
