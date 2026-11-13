@@ -344,3 +344,72 @@ func TestDaemonImagePinsFlagsAreWired(t *testing.T) {
 		t.Errorf("pins command is %q with refresh bound %d", daemonImagePinsCmd.Name(), daemonimage.PinRefreshBehind)
 	}
 }
+
+// TestDaemonImagePinsRefusesBadInputBeforeReading drives each refusal the flag
+// checks make before any file is read: a relative pins path, a seed file that is
+// not there, a checkout inside a canonical clone, and a forge owner the URLs
+// cannot name. Each run writes neither file and names the input it refuses.
+func TestDaemonImagePinsRefusesBadInputBeforeReading(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		breakIt func(t *testing.T, r *pinsRefreshRig)
+		wantErr string
+	}{
+		{
+			name: "a relative pins path",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.flags.pins = filepath.Base(r.flags.pins)
+			},
+			wantErr: "is not absolute",
+		},
+		{
+			name: "a seed-pins file that is not there",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.flags.seedPins = filepath.Join(t.TempDir(), "absent-seed-pins")
+			},
+			wantErr: "is not an existing file",
+		},
+		{
+			name: "a checkout inside a canonical clone",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				canonical := filepath.Join(t.TempDir(), "mayor", "rig")
+				if err := os.MkdirAll(canonical, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				r.flags.devopsSrc = canonical
+			},
+			wantErr: "canonical clone",
+		},
+		{
+			name: "a forge owner the URLs cannot name",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.flags.forgeOwner = "no good/owner"
+			},
+			wantErr: "forge owner",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newPinsRefreshRig(t)
+			imagePath, seedPath := r.flags.pins, r.flags.seedPins
+			imageBefore := readPinsRefreshFile(t, imagePath)
+			seedBefore := readPinsRefreshFile(t, seedPath)
+			tc.breakIt(t, r)
+
+			err := r.run(true)
+			if err == nil {
+				t.Fatal("refresh --apply returned no error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not name %q", err, tc.wantErr)
+			}
+			if got := readPinsRefreshFile(t, imagePath); got != imageBefore {
+				t.Errorf("a refused refresh changed the image-pins file:\n%s", got)
+			}
+			if got := readPinsRefreshFile(t, seedPath); got != seedBefore {
+				t.Errorf("a refused refresh changed the seed-pins file:\n%s", got)
+			}
+		})
+	}
+}
