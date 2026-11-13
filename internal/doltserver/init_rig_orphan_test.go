@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -83,7 +84,8 @@ func TestInitRig_OwnedOrphanThatStopsGoesOffline(t *testing.T) {
 
 // An owned orphan that survives SIGTERM and SIGKILL is still running, so it is
 // not treated as stopped: InitRig keeps it and registers the rig over SQL, and
-// makes no offline directory next to a server that is still running.
+// makes no offline directory next to a server that is still running. The
+// warning says why the server was kept (gt-8oc5pa).
 func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 	t.Parallel()
 	const port = 4562
@@ -95,6 +97,8 @@ func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 	f.procs[pid].ignoresKILL = true
 	f.mu.Unlock()
 	h := initRigOrphanHost(f)
+	var warnings strings.Builder
+	h.warn = &warnings
 
 	result, err := h.InitRig(townRoot, "forkrig")
 	if err != nil {
@@ -114,5 +118,112 @@ func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(f.commands(), "\n"), "docker stop") {
 		t.Errorf("docker stop ran for a server gt does not run in a container")
+	}
+	if !strings.Contains(warnings.String(), "did not stop; creating the database on the live server") {
+		t.Errorf("warnings = %q, want the warning that the orphan did not stop", warnings.String())
+	}
+}
+
+// A live PID whose command line cannot be read is not provably this town's
+// dolt: Stop refuses it and the forced kill is skipped, so the process and its
+// pid file are left alone and the rig is registered on the live server
+// (gt-8oc5pa).
+func TestInitRig_UnverifiableOrphanKillIsRefused(t *testing.T) {
+	t.Parallel()
+	const port = 4565
+	f := withDoltIdentity(newFakeHost().townPort(port)).on("dolt *", fakeReply{}).on("dolt init", fakeReply{})
+	f.reachable[fmt.Sprintf("127.0.0.1:%d", port)] = true
+	townRoot := testTown(t)
+	h := initRigOrphanHost(f)
+	var warnings strings.Builder
+	h.warn = &warnings
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	holder := f.spawn(fakeProc{}) // alive, no argv and no readable cwd
+	pidFile := writePIDFile(t, h, townRoot, holder)
+	if err := SaveState(townRoot, &State{PID: holder, Port: port, DataDir: dataDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := h.InitRig(townRoot, "forkrig")
+	if err != nil {
+		t.Fatalf("InitRig: %v", err)
+	}
+	if !result.ServerWasRunning {
+		t.Errorf("ServerWasRunning = false, want true: the PID was never shown to be this town's dolt")
+	}
+	if got := f.signalsTo(holder); len(got) != 0 {
+		t.Errorf("signals to the unverifiable PID = %v, want none", got)
+	}
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Errorf("pid file removed for an unverified PID: %v", err)
+	}
+	if got := f.ranMatching("CREATE DATABASE `forkrig`"); len(got) != 1 {
+		t.Errorf("CREATE DATABASE commands = %q, want one on the live server", got)
+	}
+	if got := f.ranMatching("dolt init"); len(got) != 0 {
+		t.Errorf("offline dolt init ran beside a live server: %q", got)
+	}
+	if want := fmt.Sprintf("not force-killing PID %d", holder); !strings.Contains(warnings.String(), want) {
+		t.Errorf("warnings = %q, want the refused-kill warning %q", warnings.String(), want)
+	}
+}
+
+// A running server gt owns whose data directory is gone is an orphan Start
+// replaces. One that survives SIGTERM and SIGKILL still holds the endpoint, so
+// Start reports that it did not stop instead of starting a second server on
+// its port (gt-8oc5pa).
+func TestStart_OwnedOrphanThatStaysUpDoesNotStartASecondServer(t *testing.T) {
+	t.Parallel()
+	const port = 4564
+	f := newFakeHost().townPort(port)
+	townRoot := testTown(t)
+	pid := f.doltServer(townRoot, port)
+	f.mu.Lock()
+	f.procs[pid].ignoresTERM = true
+	f.procs[pid].ignoresKILL = true
+	f.mu.Unlock()
+
+	err := f.host().Start(townRoot)
+	if err == nil || !strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("Start = %v, want an error saying the orphan did not stop", err)
+	}
+	if len(f.started) != 0 {
+		t.Errorf("processes started = %d, want none beside the server that did not stop", len(f.started))
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, ".dolt-data")); !os.IsNotExist(err) {
+		t.Errorf("data directory exists (stat err %v), want it absent", err)
+	}
+}
+
+// A server reachable over TCP alone (pid 0) is the town's live endpoint, not
+// an orphan gt may stop: Start keeps it, says so, and starts nothing beside it
+// (gt-8oc5pa).
+func TestStart_UnownedServerWithoutDataDirIsNotStopped(t *testing.T) {
+	t.Parallel()
+	const port = 4563
+	f := newFakeHost().townPort(port)
+	f.reachable[fmt.Sprintf("127.0.0.1:%d", port)] = true
+	townRoot := testTown(t)
+	h := f.host()
+	var warnings strings.Builder
+	h.warn = &warnings
+
+	if err := h.Start(townRoot); err != nil {
+		t.Fatalf("Start = %v, want nil: the endpoint server is the live one", err)
+	}
+	if len(f.signals) != 0 {
+		t.Errorf("signals sent = %v, want none: gt owns no local process", f.signals)
+	}
+	if got := f.ranMatching("docker"); len(got) != 0 {
+		t.Errorf("docker ran against a server gt does not own: %q", got)
+	}
+	if len(f.started) != 0 {
+		t.Errorf("processes started = %d, want none beside a live endpoint", len(f.started))
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, ".dolt-data")); !os.IsNotExist(err) {
+		t.Errorf("data directory exists (stat err %v), want it absent", err)
+	}
+	if got := warnings.String(); !strings.Contains(got, "gt owns no local process to stop; keeping it") {
+		t.Errorf("warnings = %q, want the warning that the endpoint was kept", got)
 	}
 }

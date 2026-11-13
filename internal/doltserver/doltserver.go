@@ -1876,7 +1876,7 @@ func (h *host) stopOrphanedServer(townRoot string, pid int) bool {
 		return false
 	}
 	if err := h.killTownDolt(townRoot, pid); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
+		h.warnf("Warning: not force-killing PID %d: %v\n", pid, err)
 		if IsStalePIDFileErr(err) {
 			_ = os.Remove(h.DefaultConfig(townRoot).PidFile)
 		}
@@ -2332,12 +2332,23 @@ func (h *host) Start(townRoot string) error {
 	}
 
 	if running {
-		// If data directory doesn't exist, this is an orphaned server (e.g., user
-		// deleted ~/gt and re-ran gt install). Kill it so we can start fresh.
+		// If data directory doesn't exist, a server gt owns is orphaned (e.g.,
+		// user deleted ~/gt and re-ran gt install). Stop it so we can start
+		// fresh. Only a local PID is gt's to stop: a server reached over TCP
+		// alone (a container port forward, a remote host) is the town's live
+		// endpoint, and a stop that did not take leaves it holding that
+		// endpoint — neither may fall through to a second server (gt-8oc5pa,
+		// gt-rfxs85).
 		if _, statErr := os.Stat(config.DataDir); os.IsNotExist(statErr) {
-			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
-			h.stopOrphanedServer(townRoot, pid)
-			// Fall through to start a new server
+			if pid <= 0 {
+				h.warnf("Warning: the Dolt endpoint answers at port %d but data directory %s does not exist and gt owns no local process to stop; keeping it\n", config.Port, config.DataDir)
+				return nil
+			}
+			h.warnf("Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
+			if !h.stopOrphanedServer(townRoot, pid) {
+				return fmt.Errorf("orphaned Dolt server (PID %d) did not stop; not starting a second server on port %d", pid, config.Port)
+			}
+			// Stopped: fall through to start a new server
 		} else {
 			// Server is running with valid data dir — check if it's an imposter
 			// (e.g., bd launched its own dolt server from a different data directory).
@@ -3421,10 +3432,10 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 		// stop (Stop would docker-stop an external container), and offline init
 		// would register the rig where the live server never reads it (gt-rfxs85).
 		if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
+			h.warnf("Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
 			running = !h.stopOrphanedServer(townRoot, runningPID)
 			if running {
-				fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) did not stop; creating the database on the live server\n", runningPID)
+				h.warnf("Warning: Dolt server (PID %d) did not stop; creating the database on the live server\n", runningPID)
 			}
 		}
 	}
