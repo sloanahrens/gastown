@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-13 gt-k51hb1: the "Local review round before gt done" section points at docs/design/local-round.md for the reply forms instead of copying them, and internal/directives pins the section.
 - 2026-11-13 gt-9xw72b: added the "Local review round before gt done" section, replacing a one-sentence paragraph.
 - 2026-11-13 gt-2z1219: the "Before gt done" section asks for `gt review-preview` after `make presubmit` and before `gt done`, and a `gt review-preview reply` for each major (docs/design/local-round.md).
 - 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
@@ -165,7 +166,7 @@ After `make presubmit` and before `gt done`, run `gt review-preview` from your w
 
 `gt done` refuses while the last round has a major or critical finding with no reply. Minor and info findings never block, and a round marked unavailable, or no round at all, never blocks.
 
-Answer each blocking finding after its fix is committed: `gt review-preview reply <id> --fixed -m "<what changed>"` (refused while HEAD is still the round's head), or `gt review-preview reply <id> --disputed -m "<why the finding is wrong>"`. `gt review-preview --help` has the other flags. When a round's answer is unclear, read `docs/design/local-round.md` for the flow and failure rules.
+Answer each blocking finding after its fix is committed. Before replying, read `docs/design/local-round.md`, the design page for the local round: its Flow step 4 holds the reply forms and their flags, and its Failure rule is the one `gt done` applies. `gt review-preview --help` lists the other flags.
 
 If the branch names no work bead and none is hooked, `gt done` prints one line starting `local-round gate skipped:` and goes on. Then run `gt done`.
 
