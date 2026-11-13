@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -68,26 +69,81 @@ func (c podPairCheck) Check(ctx context.Context, pair update.ImagePair) error {
 	return c.writeValues(ctx, data)
 }
 
-// checkDaemonImage holds the daemon's pods to the values file's daemon digest:
-// there must be a pod that reports an image id, and every such id must carry the
-// digest.
+// checkDaemonImage judges every daemon pod on its own: a pod being deleted is
+// skipped, any other pod must be Running and report an image id whose digest is
+// the values file's daemon digest. The read is per pod, so a pod that reports no
+// id cannot pass beside one that does. A list with no pod left to judge fails.
 func (c podPairCheck) checkDaemonImage(ctx context.Context, daemon string) error {
-	digest := podRefDigest(daemon)
-	jsonpath := fmt.Sprintf("{.items[*].status.containerStatuses[?(@.name==%q)].imageID}", k8sdaemon.Name)
-	out, err := c.kubectl(ctx, "read of the daemon pods' image ids", nil, "get", "pods", "-l", podDaemonSelector, "-o", "jsonpath="+jsonpath)
+	out, err := c.kubectl(ctx, "read of the daemon pods", nil, "get", "pods", "-l", podDaemonSelector, "-o", "json")
 	if err != nil {
 		return err
 	}
-	ids := strings.Fields(out)
-	if len(ids) == 0 {
-		return errors.New("no daemon pod reports an image id for the daemon container")
+	var list podListing
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return errors.New("the daemon pods' read is not a pod list")
 	}
-	for _, id := range ids {
-		if !strings.Contains(id, digest) {
-			return fmt.Errorf("a daemon pod does not run the values file's daemon digest %s", digest)
+	want := podRefDigest(daemon)
+	judged := 0
+	for _, pod := range list.Items {
+		if pod.Metadata.DeletionTimestamp != nil {
+			continue
+		}
+		judged++
+		name := pod.Metadata.Name
+		if pod.Status.Phase != "Running" {
+			return fmt.Errorf("pod %s is in phase %q, not Running, so it cannot run the pair", name, pod.Status.Phase)
+		}
+		id := daemonImageID(pod)
+		if id == "" {
+			return fmt.Errorf("pod %s reports no image id", name)
+		}
+		got := podRefDigest(id)
+		if got == "" {
+			return fmt.Errorf("pod %s reports an image id that names no digest", name)
+		}
+		if got != want {
+			return fmt.Errorf("pod %s runs daemon digest %s, not the values file's %s", name, got, want)
 		}
 	}
+	if judged == 0 {
+		return errors.New("no daemon pod to verify")
+	}
 	return nil
+}
+
+// podListing is the part of `kubectl get pods -o json` the pair check reads.
+type podListing struct {
+	Items []podItem `json:"items"`
+}
+
+// podItem is one pod: its name and deletion mark, its phase, and its containers'
+// statuses.
+type podItem struct {
+	Metadata struct {
+		Name              string  `json:"name"`
+		DeletionTimestamp *string `json:"deletionTimestamp"`
+	} `json:"metadata"`
+	Status struct {
+		Phase             string            `json:"phase"`
+		ContainerStatuses []containerStatus `json:"containerStatuses"`
+	} `json:"status"`
+}
+
+// containerStatus is one container's status; ImageID is what the runtime ran.
+type containerStatus struct {
+	Name    string `json:"name"`
+	ImageID string `json:"imageID"`
+}
+
+// daemonImageID is the image id a pod reports for its daemon container, or "" when
+// the pod reports none for it.
+func daemonImageID(pod podItem) string {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == k8sdaemon.Name {
+			return status.ImageID
+		}
+	}
+	return ""
 }
 
 // checkPolecatTag reads the registry's dev tag of the polecat image through the
@@ -149,9 +205,13 @@ func (c podPairCheck) kubectl(ctx context.Context, step string, stdin []byte, ar
 	return out, nil
 }
 
-// podRefDigest is the digest part of a digest reference. The values file has
-// parsed, so the reference holds the '@' it is cut at.
+// podRefDigest is the digest after the last '@' of a reference. A pod's image id
+// may carry a runtime prefix before the reference, so the last '@' is the one that
+// starts the digest. A reference with no '@' has no digest: "".
 func podRefDigest(ref string) string {
-	_, digest, _ := strings.Cut(ref, "@")
-	return digest
+	i := strings.LastIndex(ref, "@")
+	if i < 0 {
+		return ""
+	}
+	return ref[i+1:]
 }

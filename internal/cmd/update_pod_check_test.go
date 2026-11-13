@@ -3,10 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -45,16 +47,84 @@ type podPairCall struct {
 	stdin []byte
 }
 
+// podPairPod is one daemon pod the fake reports. phase is the pod's phase; an
+// empty phase is Running. deleting sets the deletion mark. imageID is the image
+// id the pod reports for its daemon container: nil leaves the field out, a
+// pointer to "" reports an empty one.
+type podPairPod struct {
+	name     string
+	phase    string
+	deleting bool
+	imageID  *string
+}
+
+// runningPod is a live, Running pod that reports id for its daemon container.
+func runningPod(name, id string) podPairPod {
+	return podPairPod{name: name, phase: "Running", imageID: &id}
+}
+
+// podPairHealthy is the pod list of a daemon that runs the values file's pair.
+func podPairHealthy() []podPairPod {
+	return []podPairPod{runningPod("gastown-daemon-new", podSwapDigestRef)}
+}
+
+// podListJSON is the `kubectl get pods -o json` answer for pods. The list is
+// never null, so an empty list decodes as a list with no pods.
+func podListJSON(pods ...podPairPod) string {
+	type status struct {
+		Name    string  `json:"name"`
+		ImageID *string `json:"imageID,omitempty"`
+	}
+	type meta struct {
+		Name              string  `json:"name"`
+		DeletionTimestamp *string `json:"deletionTimestamp,omitempty"`
+	}
+	type podStatus struct {
+		Phase             string   `json:"phase"`
+		ContainerStatuses []status `json:"containerStatuses"`
+	}
+	type item struct {
+		Metadata meta      `json:"metadata"`
+		Status   podStatus `json:"status"`
+	}
+	list := struct {
+		Items []item `json:"items"`
+	}{Items: []item{}}
+	for _, p := range pods {
+		phase := p.phase
+		if phase == "" {
+			phase = "Running"
+		}
+		it := item{
+			Metadata: meta{Name: p.name},
+			Status: podStatus{
+				Phase:             phase,
+				ContainerStatuses: []status{{Name: k8sdaemon.Name, ImageID: p.imageID}},
+			},
+		}
+		if p.deleting {
+			ts := "2026-11-13T12:00:00Z"
+			it.Metadata.DeletionTimestamp = &ts
+		}
+		list.Items = append(list.Items, it)
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 // podPairKubectl stands in for kubectl against a daemon pod. A patch puts the
-// daemon on the commit of the daemon digest it names. A get answers imageIDs, or
-// fails with getExit and the output a secret would be in. runErr fails every
-// command as the runner would; failWord makes the command carrying that word
-// exit 1. Every call is recorded.
+// daemon on the commit of the daemon digest it names. A get answers the pod list
+// pods, or fails with getExit and the output a secret would be in. runErr fails
+// every command as the runner would; failWord makes the command carrying that
+// word exit 1. Every call is recorded.
 type podPairKubectl struct {
 	calls    []podPairCall
 	commits  map[string]string
 	running  string
-	imageIDs string
+	pods     []podPairPod
 	getExit  int
 	runErr   error
 	failWord string
@@ -80,7 +150,7 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 		if k.getExit != 0 {
 			return podSwapOutput, k.getExit, nil
 		}
-		return k.imageIDs, 0, nil
+		return podListJSON(k.pods...), 0, nil
 	}
 	return "", 0, nil
 }
@@ -169,29 +239,18 @@ func podPairValuesFile(t *testing.T) (string, []byte) {
 }
 
 // TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold holds each refusal to its
-// own row: the pod's image ids, the registry's dev tag, and the read that fails.
-// Every refusal names its step and writes nothing into the pod.
+// own row: the read that fails, and the registry's dev tag. The pods' image ids
+// are judged in TestUpdatePodPairCheckJudgesEveryDaemonPod. Every refusal names
+// its step and writes nothing into the pod.
 func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
-		name     string
-		imageIDs string
-		getExit  int
-		body     []byte
-		want     string
+		name    string
+		pods    []podPairPod
+		getExit int
+		body    []byte
+		want    string
 	}{
-		{
-			name:     "no daemon pod reports an image id",
-			imageIDs: "",
-			body:     podPairManifest,
-			want:     "no daemon pod reports an image id",
-		},
-		{
-			name:     "a daemon pod runs another daemon digest",
-			imageIDs: "registry.internal:5000/town/gastown-daemon@sha256:" + strings.Repeat("c", 64),
-			body:     podPairManifest,
-			want:     "does not run the values file's daemon digest",
-		},
 		{
 			name:    "the read of the daemon pods exits nonzero",
 			getExit: 1,
@@ -199,23 +258,23 @@ func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 			want:    "exited 1",
 		},
 		{
-			name:     "the dev tag names another polecat digest",
-			imageIDs: podSwapDigestRef,
-			body:     []byte("a rebuilt polecat manifest"),
-			want:     "is digest",
+			name: "the dev tag names another polecat digest",
+			pods: podPairHealthy(),
+			body: []byte("a rebuilt polecat manifest"),
+			want: "is digest",
 		},
 		{
-			name:     "the registry holds no dev tag",
-			imageIDs: podSwapDigestRef,
-			body:     nil,
-			want:     "holds no dev tag",
+			name: "the registry holds no dev tag",
+			pods: podPairHealthy(),
+			body: nil,
+			want: "holds no dev tag",
 		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			path, _ := podPairValuesFile(t)
-			kube := &podPairKubectl{imageIDs: row.imageIDs, getExit: row.getExit}
+			kube := &podPairKubectl{pods: row.pods, getExit: row.getExit}
 			check := podPairCheck{
 				Run:        kube.run,
 				Target:     podPairTarget(),
@@ -240,13 +299,101 @@ func TestUpdatePodPairCheckRefusesAPairThePodDoesNotHold(t *testing.T) {
 	}
 }
 
+// TestUpdatePodPairCheckJudgesEveryDaemonPod holds the image check to each pod
+// the list reports. A pod being deleted is skipped; any other pod must be Running
+// and report an id whose digest is the values file's. A list with no pod left to
+// judge fails. A passing row goes on to the copy into the pod; a refusing row
+// writes nothing.
+func TestUpdatePodPairCheckJudgesEveryDaemonPod(t *testing.T) {
+	t.Parallel()
+	ptr := func(s string) *string { return &s }
+	rows := []struct {
+		name string
+		pods []podPairPod
+		want string
+	}{
+		{
+			name: "every daemon pod runs the values file's digest",
+			pods: []podPairPod{runningPod("new-a", podSwapDigestRef), runningPod("new-b", podSwapDigestRef)},
+		},
+		{
+			name: "one pod runs another daemon digest",
+			pods: []podPairPod{runningPod("new-a", podSwapDigestRef), runningPod("old-b", podPairPrevDaemon)},
+			want: "pod old-b runs daemon digest",
+		},
+		{
+			name: "a pod reports an empty image id",
+			pods: []podPairPod{runningPod("new-a", "")},
+			want: "pod new-a reports no image id",
+		},
+		{
+			name: "a pod's image id field is absent",
+			pods: []podPairPod{{name: "new-a", phase: "Running"}},
+			want: "pod new-a reports no image id",
+		},
+		{
+			name: "the pod list is empty",
+			pods: nil,
+			want: "no daemon pod to verify",
+		},
+		{
+			name: "a pod's image id names no digest",
+			pods: []podPairPod{runningPod("new-a", "gastown-daemon:dev")},
+			want: "pod new-a reports an image id that names no digest",
+		},
+		{
+			name: "an old terminating pod beside a new matching pod",
+			pods: []podPairPod{{name: "old-a", phase: "Running", deleting: true, imageID: ptr(podPairPrevDaemon)}, runningPod("new-b", podSwapDigestRef)},
+		},
+		{
+			name: "an old terminating pod beside a new pod with no image id",
+			pods: []podPairPod{{name: "old-a", phase: "Running", deleting: true, imageID: ptr(podPairPrevDaemon)}, runningPod("new-b", "")},
+			want: "pod new-b reports no image id",
+		},
+		{
+			name: "a live pod that is not Running",
+			pods: []podPairPod{{name: "new-a", phase: "Pending", imageID: ptr(podSwapDigestRef)}},
+			want: `pod new-a is in phase "Pending", not Running`,
+		},
+		{
+			name: "only terminating pods remain",
+			pods: []podPairPod{{name: "old-a", phase: "Running", deleting: true, imageID: ptr(podPairPrevDaemon)}},
+			want: "no daemon pod to verify",
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			path, _ := podPairValuesFile(t)
+			kube := &podPairKubectl{pods: row.pods}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
+			err := check.Check(context.Background(), podPairPair)
+			if row.want == "" {
+				if err != nil {
+					t.Fatalf("Check: %v, want the pods judged clean", err)
+				}
+				if !kube.wroteToPod() {
+					t.Errorf("a passing pod list wrote nothing into the pod: calls = %+v", kube.calls)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("Check error = %v, want it to name %q", err, row.want)
+			}
+			if kube.wroteToPod() {
+				t.Errorf("a refused pod list wrote into the pod: calls = %+v", kube.calls)
+			}
+		})
+	}
+}
+
 // TestUpdatePodPairCheckRefusesAValuesFileThatNoLongerHoldsThePair holds the
 // check to the pair the swap put in force: a values file rewritten to another
 // commit is refused before any command runs.
 func TestUpdatePodPairCheckRefusesAValuesFileThatNoLongerHoldsThePair(t *testing.T) {
 	t.Parallel()
 	path, _ := podPairValuesFile(t)
-	kube := &podPairKubectl{imageIDs: podSwapDigestRef}
+	kube := &podPairKubectl{pods: podPairHealthy()}
 	check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
 	other := podPairPair
 	other.Commit = strings.Repeat("c", 40)
@@ -295,7 +442,7 @@ func TestUpdatePodPairCheckRefusesAnUnreadableInput(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
-			kube := &podPairKubectl{imageIDs: podSwapDigestRef}
+			kube := &podPairKubectl{pods: podPairHealthy()}
 			check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: row.images, TownRoot: t.TempDir(), ValuesPath: row.path}
 			err := check.Check(context.Background(), podPairPair)
 			if err == nil || !strings.Contains(err.Error(), row.want) {
@@ -320,9 +467,9 @@ func TestUpdatePodPairCheckStopsAtEachFailedStep(t *testing.T) {
 		want     string
 		commands int
 	}{
-		{name: "the runner cannot run the pod read", kube: podPairKubectl{runErr: errors.New("kubectl is not installed")}, want: "running kubectl for the pod's read of the daemon pods' image ids", commands: 1},
-		{name: "the update directory cannot be made in the pod", kube: podPairKubectl{imageIDs: podSwapDigestRef, failWord: "mkdir"}, want: "creation of the update directory exited 1", commands: 2},
-		{name: "the values file cannot be copied into the pod", kube: podPairKubectl{imageIDs: podSwapDigestRef, failWord: "tee"}, want: "copy of the values file exited 1", commands: 3},
+		{name: "the runner cannot run the pod read", kube: podPairKubectl{runErr: errors.New("kubectl is not installed")}, want: "running kubectl for the pod's read of the daemon pods", commands: 1},
+		{name: "the update directory cannot be made in the pod", kube: podPairKubectl{pods: podPairHealthy(), failWord: "mkdir"}, want: "creation of the update directory exited 1", commands: 2},
+		{name: "the values file cannot be copied into the pod", kube: podPairKubectl{pods: podPairHealthy(), failWord: "tee"}, want: "copy of the values file exited 1", commands: 3},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -350,7 +497,7 @@ func TestUpdatePodPairCheckStopsAtEachFailedStep(t *testing.T) {
 func TestUpdatePodPairCheckWritesTheValuesFileIntoThePod(t *testing.T) {
 	t.Parallel()
 	path, data := podPairValuesFile(t)
-	kube := &podPairKubectl{imageIDs: podSwapDigestRef}
+	kube := &podPairKubectl{pods: podPairHealthy()}
 	check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
 	if err := check.Check(context.Background(), podPairPair); err != nil {
 		t.Fatalf("Check: %v", err)
@@ -392,9 +539,9 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 	}
 	path, _ := podPairValuesFile(t)
 	kube := &podPairKubectl{
-		commits:  map[string]string{podSwapDigestRef: podPairCommit, podPairPrevDaemon: podPairPrevCommit},
-		running:  podPairPrevCommit,
-		imageIDs: podPairPrevDaemon,
+		commits: map[string]string{podSwapDigestRef: podPairCommit, podPairPrevDaemon: podPairPrevCommit},
+		running: podPairPrevCommit,
+		pods:    []podPairPod{runningPod("gastown-daemon-old", podPairPrevDaemon)},
 	}
 	clock := &rollbackTestClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
 	deps := update.Deps{
@@ -462,5 +609,50 @@ func TestBuildCommandCarriesTheRunStdin(t *testing.T) {
 	}
 	if plain := buildCommand(context.Background(), "", nil, "kubectl"); plain.Stdin != nil {
 		t.Errorf("a context with no stdin gave the command %T", plain.Stdin)
+	}
+}
+
+// TestNewRunFuncForwardsTheRunStdin holds the production RunFunc to the stdin its
+// context carries. It runs newRunFunc with an injected commandOutput that reads
+// the Stdin of the *exec.Cmd newRunFunc builds, the reader exec would hand the
+// child. The unit tier forbids a subprocess, so no command runs: the bytes a child
+// would read are read off the command, and that forwarding is what is under test.
+func TestNewRunFuncForwardsTheRunStdin(t *testing.T) {
+	t.Parallel()
+	data := []byte("daemon: sha256:e\n")
+	rows := []struct {
+		name string
+		ctx  context.Context
+		want []byte
+	}{
+		{name: "the carried bytes reach the command's stdin", ctx: withRunStdin(context.Background(), data), want: data},
+		{name: "a context with no stdin gives the command none", ctx: context.Background(), want: nil},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			var read []byte
+			output := func(cmd *exec.Cmd) ([]byte, error) {
+				if cmd.Stdin == nil {
+					return nil, nil
+				}
+				b, err := io.ReadAll(cmd.Stdin)
+				read = b
+				return b, err
+			}
+			out, exit, err := newRunFunc(output)(row.ctx, "", nil, "kubectl", "exec", "-i")
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if exit != 0 {
+				t.Fatalf("exit = %d, want 0", exit)
+			}
+			if string(read) != string(row.want) {
+				t.Errorf("command stdin = %q, want %q", read, row.want)
+			}
+			if out != string(row.want) {
+				t.Errorf("output = %q, want the bytes the command read %q", out, row.want)
+			}
+		})
 	}
 }

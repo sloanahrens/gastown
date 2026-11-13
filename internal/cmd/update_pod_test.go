@@ -21,14 +21,13 @@ import (
 // podDaemonKubectl stands in for kubectl against a daemon that runs as a pod. A
 // patch puts the daemon on the build of the daemon digest it names, and an exec
 // reports the build the pod runs, so the rollout wait reads the commit the patch
-// put in force. running is the build the pod runs before any patch. imageIDs is
-// the image id the daemon pod reports for its daemon container, which the pod's
-// pair check reads after the rollout.
+// put in force. running is the build the pod runs before any patch. pods is the
+// pod list the pair check reads after the rollout, one entry per daemon pod.
 type podDaemonKubectl struct {
-	calls    [][]string
-	commits  map[string]string
-	running  string
-	imageIDs string
+	calls   [][]string
+	commits map[string]string
+	running string
+	pods    []podPairPod
 }
 
 func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
@@ -42,7 +41,7 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 			}
 		}
 	case containsArg(args, "get"):
-		return k.imageIDs, 0, nil
+		return podListJSON(k.pods...), 0, nil
 	case containsArg(args, "exec"):
 		return "gt version " + k.running + " built on test\n", 0, nil
 	}
@@ -132,7 +131,7 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 	got := wiredInstall{
 		compose: compose,
 		verify:  compose,
-		kube:    &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, imageIDs: podSwapDigestRef},
+		kube:    &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, pods: podPairHealthy()},
 		host:    &podHostInstaller{},
 	}
 	seams := updateSeams{
