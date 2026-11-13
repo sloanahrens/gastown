@@ -83,7 +83,6 @@ Rig checks (with --rig flag):
   - rig-is-git-repo          Verify rig is a valid git repository
   - git-exclude-configured   Check .git/info/exclude has Gas Town dirs (fixable)
   - bare-repo-exists         Verify .repo.git exists when worktrees depend on it (fixable)
-  - mayor-clone-exists       Verify the rig has a repo: .repo.git or a mayor/rig/ clone (fixable)
   - polecat-clones-valid     Verify polecat directories are valid clones
   - beads-config-valid       Verify beads configuration (fixable)
   - harness-drift            Detect hand edits to deploy-managed harness files

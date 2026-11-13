@@ -769,54 +769,6 @@ func TestBeadsRedirectCheck_FixConflictingLocalBeads(t *testing.T) {
 	}
 }
 
-func TestMayorCloneExistsCheck_SharedBareRepoNeedsNoClone(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", ".repo.git"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	result := NewMayorCloneExistsCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
-
-	if result.Status != StatusOK {
-		t.Errorf("rig whose repo is .repo.git with no mayor/rig clone: %v %v, want OK",
-			result.Status, result.Details)
-	}
-}
-
-func TestMayorCloneExistsCheck_NoRepoAtAllIsStillReported(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	result := NewMayorCloneExistsCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
-
-	if result.Status != StatusWarning {
-		t.Errorf("rig with neither .repo.git nor mayor/rig: %v, want Warning", result.Status)
-	}
-}
-
-func TestMayorCloneExistsCheck_BareRepoPathHoldingAFileIsNotARepo(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	rigPath := filepath.Join(townRoot, "myrig")
-	if err := os.MkdirAll(rigPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".repo.git"), []byte("not a repo\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	result := NewMayorCloneExistsCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
-
-	if result.Status != StatusWarning {
-		t.Errorf("rig whose .repo.git is a file and has no mayor/rig clone: %v %v, want Warning",
-			result.Status, result.Details)
-	}
-}
-
 // hooksPathRig builds a rig named rigName holding one polecat clone at each
 // of rels (relative to the rig dir), and returns the check context over it.
 // A clone nested inside another must be listed before its parent: gitfake,

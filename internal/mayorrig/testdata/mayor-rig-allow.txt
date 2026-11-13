@@ -19,7 +19,6 @@ internal/beads/sling_context_scan.go	1	pending-retirement	sling context scan: lo
 internal/cmd/crew_fresh.go	1	pending-retirement	gt crew fresh: help text saying where the fetch runs, in mayor/rig or a polecat worktree
 internal/cmd/daemon_image.go	2	pending-retirement	gt daemon image: refuses a canonical mayor/rig clone as a source, in the flag help and the error text
 internal/cmd/directive.go	1	pending-retirement	gt directive help: the legacy fallback paragraph names the old gastown/mayor/rig/directives layer (landed by gt-3lvcjz.11)
-internal/cmd/doctor.go	1	pending-retirement	gt doctor: the check list text that names the mayor-clone-exists check's mayor/rig clone
 internal/cmd/gitinit.go	1	pending-retirement	gt init: the .gitignore template entry for mayor/rig
 internal/cmd/hooks_install.go	1	pending-retirement	gt hooks install: skips the constants.DirMayor directory name when it walks the rig directories
 internal/cmd/polecat.go	1	pending-retirement	gt polecat: opens the beads and git handles at the rig's mayor/rig checkout
@@ -37,12 +36,11 @@ internal/daemon/hm_skew.go	1	pending-retirement	daemon hm skew probe: the hm rig
 internal/daemon/om_skew.go	1	pending-retirement	daemon om skew probe: the om rig worktree path, om/mayor/rig
 internal/daemon/types.go	1	pending-retirement	daemon types: the daemon.json path under constants.DirMayor
 internal/daemonimage/build.go	1	pending-retirement	daemonimage build: the error text that refuses a mayor/rig clone as a build source
-internal/doctor/branch_check.go	1	pending-retirement	doctor branch check: the mayor/rig path in its checkout list
 internal/doctor/dolt_stray_servers_check.go	1	pending-retirement	doctor dolt stray servers check: the rig's mayor/rig/.beads path it scans
 internal/doctor/foreign_remote_check.go	1	pending-retirement	doctor foreign remote check: message naming mayor/rig as the place for rig remotes
 internal/doctor/hooks_path_all_rigs_check.go	1	pending-retirement	doctor hooks path check: the mayor/rig clone it checks for each rig
 internal/doctor/migration_check.go	1	pending-retirement	doctor migration check: the rig's mayor/rig/.beads directory
-internal/doctor/rig_check.go	14	pending-retirement	doctor rig check: the mayor/rig clone, its git state and beads redirect, and the messages and fix hints naming it
+internal/doctor/rig_check.go	11	pending-retirement	doctor rig check: the mayor/rig clone, its git state and beads redirect, and the messages and fix hints naming it
 internal/doctor/rig_config_sync_check.go	1	pending-retirement	doctor rig config sync check: the mayor/rig checkout whose config it syncs
 internal/doctor/sparse_checkout_check.go	1	pending-retirement	doctor sparse checkout check: the mayor/rig path it inspects
 internal/doctor/stale_beads_redirect_check.go	1	pending-retirement	doctor stale beads redirect check: the mayor/rig existence test and its .beads path

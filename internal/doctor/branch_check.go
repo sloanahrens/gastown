@@ -10,8 +10,7 @@ import (
 // CloneDivergenceCheck detects when git clones have drifted significantly apart.
 // This is an emergency condition - all clones should be tracking origin/main
 // and staying reasonably in sync. Divergence here is different from beads-sync
-// divergence, which is expected. A rig's unmaintained mayor/rig clone is not
-// one of them (unmaintainedMayorClone).
+// divergence, which is expected.
 type CloneDivergenceCheck struct {
 	BaseCheck
 }
@@ -52,9 +51,6 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 		info, err := c.getCloneInfo(ctx, path)
 		if err != nil {
 			continue // Skip problematic clones
-		}
-		if c.unmaintainedMayorClone(ctx, info) {
-			continue
 		}
 		infos = append(infos, info)
 	}
@@ -115,46 +111,6 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// unmaintainedMayorClone reports whether info is a mayor/rig clone the town
-// stopped working in: a clone that holds no commits of its own, so it is a
-// stale copy of the rig's shared .repo.git and nothing else (gt-9gnar).
-// Reporting its distance from origin/main buried the real divergence in
-// gt-s5zor. A clone holding its own commits is a working copy wherever it sits,
-// so that one keeps the check it has today.
-func (c *CloneDivergenceCheck) unmaintainedMayorClone(ctx *CheckContext, info cloneInfo) bool {
-	rig := mayorCloneRig(ctx.TownRoot, info.path)
-	if rig == "" {
-		return false
-	}
-	// The town's own gt source checkout is worked in whatever it holds: the
-	// installed binary is built from it and gt plugin sync takes the town's
-	// plugins out of it (internal/cmd/plugin.go), so a stale clone there ships
-	// stale plugins. It is the checkout holding the gt source, the marker
-	// version.hasGtSource reads, which keeps this rule on the clone's contents
-	// rather than on the name of a rig (gt-jx8sh).
-	if fileExists(filepath.Join(info.path, "cmd", "gt", "main.go")) {
-		return false
-	}
-	// HEAD is an ancestor of origin/main exactly when the clone holds no
-	// commits of its own.
-	base, err := ctx.git(info.path).MergeBase("HEAD", "origin/main")
-	return err == nil && base == info.headSHA
-}
-
-// mayorCloneRig is the rig whose mayor/rig clone path is, or "" when path is
-// one of the rig's other clones (a crew or polecat checkout).
-func mayorCloneRig(townRoot, path string) string {
-	rel, err := filepath.Rel(townRoot, path)
-	if err != nil {
-		return ""
-	}
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) != 3 || parts[1] != "mayor" || parts[2] != "rig" {
-		return ""
-	}
-	return parts[0]
-}
-
 // findAllClones finds all git clones in the workspace.
 func (c *CloneDivergenceCheck) findAllClones(townRoot string) []string {
 	var clones []string
@@ -170,18 +126,6 @@ func (c *CloneDivergenceCheck) findAllClones(townRoot string) []string {
 		}
 
 		rigPath := filepath.Join(townRoot, entry.Name())
-
-		// Check standard clone locations
-		locations := []string{
-			"mayor/rig",
-		}
-
-		for _, loc := range locations {
-			path := filepath.Join(rigPath, loc)
-			if c.isGitRepo(path) {
-				clones = append(clones, path)
-			}
-		}
 
 		// Add crew members
 		for _, path := range crewCloneDirs(filepath.Join(rigPath, "crew")) {
