@@ -145,7 +145,9 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if err != nil {
 		return exitDown, fmt.Errorf("gtwrap: the bd gateway at %s did not answer, so the call did not run: %w", g.URL, err)
 	}
-	defer resp.Body.Close()
+	// The response is fully read by refusal or by readFrames, so a close error
+	// cannot change the status the caller gets.
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return exitDown, g.refusal(resp)
 	}
@@ -227,11 +229,11 @@ func (g BdGateway) Doctor() (Diagnosis, error) {
 		diag.Reason = fmt.Sprintf("the bd gateway at %s did not answer, so nothing can run through it: %v", g.URL, err)
 		return diag, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// The body is drained so the connection can be reused. A read failure here
 	// cannot change the verdict: the status was already read, and the body is
 	// only a health answer.
-	io.Copy(io.Discard, io.LimitReader(resp.Body, gatewayBodyLimit))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gatewayBodyLimit))
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		diag.Rung = RungExec
