@@ -49,8 +49,11 @@ func productionDaemonPolecatDevTagSeams() daemonPolecatDevTagSeams {
 // newDaemonPolecatDevTagCmd builds `gt daemon polecat-devtag` over seams.
 func newDaemonPolecatDevTagCmd(seams daemonPolecatDevTagSeams) *cobra.Command {
 	return &cobra.Command{
-		Use:   "polecat-devtag",
-		Short: "Print the digest the sandbox registry's dev tag of the polecat image names",
+		Use: "polecat-devtag",
+		// Plumbing the update pair check runs through kubectl exec; no agent is
+		// told to reach for it, so it stays out of the task map.
+		Hidden: true,
+		Short:  "Print the digest the sandbox registry's dev tag of the polecat image names",
 		Long: `Print the digest the sandbox registry's dev tag of the polecat image names.
 
 The registry is the daemon's patrols.tier_sweep.runner.image_registry, the
