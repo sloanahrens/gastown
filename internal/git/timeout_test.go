@@ -3,6 +3,7 @@ package git
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -125,5 +126,37 @@ func TestErrTimedOutIsTheRunnerSentinel(t *testing.T) {
 	t.Parallel()
 	if !errors.Is(errTimedOut, ErrTimedOut) || !errors.Is(&timeoutError{command: "add"}, errTimedOut) {
 		t.Fatal("ErrTimedOut and the runner's timeout sentinel must match each other")
+	}
+}
+
+// FetchBranch fetches the branch without tags and under the remote-query
+// bound, so a stalled origin fails instead of holding the crew submit path.
+func TestFetchBranchIsBoundedAndSkipsTags(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{"fetch --no-tags origin main": ok("")})
+	if err := newTestGit(t, s).FetchBranch("origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	c, found := s.sentCall("fetch --no-tags origin main")
+	if !found || c.timeout != remoteQueryTimeout {
+		t.Errorf("fetch ran with timeout %v (found %v), want remoteQueryTimeout %v", c.timeout, found, remoteQueryTimeout)
+	}
+}
+
+// A FetchBranch killed at its bound names the remote and the branch, so the
+// caller's message says which fetch stalled, and still matches ErrTimedOut.
+func TestFetchBranchTimeoutNamesTheRemote(t *testing.T) {
+	t.Parallel()
+	g := &Git{workDir: t.TempDir(), exec: func(gitCall) (string, string, error) {
+		return "", "", errTimedOut
+	}}
+	err := g.FetchBranch("origin", "polecat/x")
+	if !errors.Is(err, ErrTimedOut) {
+		t.Fatalf("FetchBranch error = %v, want one matching ErrTimedOut", err)
+	}
+	for _, want := range []string{"origin", "polecat/x"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("FetchBranch error %q does not name %q", err, want)
+		}
 	}
 }
