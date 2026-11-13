@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -19,9 +20,10 @@ import (
 // updateAdmissionManifest is the ValidatingAdmissionPolicy and binding that bound
 // what a Job the daemon creates may be (gt-j571bu). The daemon's Role allows it to
 // create any Job in gt (deploy/k8s/update-rbac.yaml), and a Job's pod spec is chosen
-// by its creator, so the policy admits only the Job this package renders. The
-// expressions are held to this package's constants, so the renderer and the policy
-// cannot drift, and the rendered Job is held to the same constants.
+// by its creator, so the policy bounds the fields that carry that reach. The
+// expressions are built from this package's own output (the containers, their
+// environment, the constants), so the renderer and the policy cannot drift, and the
+// rendered Job is held to the same bounds.
 const updateAdmissionManifest = "../update-admission.yaml"
 
 // The names the manifest must use. updateAdmissionUser is the daemon's ServiceAccount
@@ -32,47 +34,133 @@ const (
 	updateAdmissionUser = "system:serviceaccount:" + k8sdaemon.DefaultNamespace + ":" + k8sdaemon.ServiceAccountName
 )
 
-// admissionImageRegexp is the image the policy admits: the daemon image
-// imagevalues names, by digest, from this town's registry and registry account.
-func admissionImageRegexp() string {
-	return "^forgejo:3000/bot-registry/" + imagevalues.DaemonImage + "@sha256:[0-9a-f]{64}$"
+// admissionImagePrefix is where the town publishes the daemon image: the registry
+// host and account the policy pins. The renderer accepts any repo@sha256 reference,
+// so this prefix and the digest shape are the policy's bound, not the renderer's.
+const admissionImagePrefix = "forgejo:3000/bot-registry/"
+
+// admissionImagePattern is the image the policy admits: the daemon image
+// imagevalues names, by digest, from admissionImagePrefix.
+func admissionImagePattern() string {
+	return "^" + admissionImagePrefix + imagevalues.DaemonImage + "@sha256:[0-9a-f]{64}$"
 }
 
-// admissionEnvGuard is the expression body that refuses a Secret read through a
-// container's environment, for one container bound to c. A volume pin does not reach
-// secretKeyRef or envFrom.secretRef, which name any Secret in the namespace.
-const admissionEnvGuard = "(!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))) && " +
-	"(!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef)))"
+// admissionImageRE is admissionImagePattern as a Go regexp, for holding the
+// rendered Job's image to the same bound the expressions state.
+var admissionImageRE = regexp.MustCompile(admissionImagePattern())
+
+// admissionValues is goldenValues with the namespace Build defaults, so the
+// containers built from it carry the arguments the daemon's Job does.
+func admissionValues() Values {
+	v := goldenValues()
+	v.Namespace = DefaultNamespace
+	return v
+}
+
+// celString is s as a CEL string literal. A value holding a quote or backslash
+// cannot travel in the policy's single-quoted literals, so it fails the test
+// rather than producing a manifest the API server would refuse.
+func celString(t *testing.T, s string) string {
+	t.Helper()
+	if strings.ContainsAny(s, `'\`) {
+		t.Fatalf("%q holds a quote or backslash, which a single-quoted CEL literal cannot carry", s)
+	}
+	return "'" + s + "'"
+}
+
+// celList is vs as a CEL list literal.
+func celList(t *testing.T, vs []string) string {
+	t.Helper()
+	lits := make([]string, len(vs))
+	for i, v := range vs {
+		lits[i] = celString(t, v)
+	}
+	return strings.Join(lits, ", ")
+}
+
+// admissionArgsExpr pins every argument to the renderer's, except the one slot the
+// caller chooses: an argument matching commitRE (the green commit) is bound to the
+// full-sha shape rather than to one commit.
+func admissionArgsExpr(t *testing.T, args []string) string {
+	t.Helper()
+	parts := []string{fmt.Sprintf("size(c.args) == %d", len(args))}
+	for i, a := range args {
+		if commitRE.MatchString(a) {
+			parts = append(parts, fmt.Sprintf("c.args[%d].matches('^[0-9a-f]{40}$')", i))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("c.args[%d] == %s", i, celString(t, a)))
+	}
+	return strings.Join(parts, " && ")
+}
+
+// admissionEnvExpr pins the environment to every variable containerEnv sets, with
+// its literal value, and refuses envFrom. A volume pin alone does not stop a Secret
+// entering through the environment, and GIT_CONFIG_VALUE_0 runs a command, so both
+// are pinned rather than only bounded.
+func admissionEnvExpr(t *testing.T) string {
+	t.Helper()
+	env := containerEnv()
+	parts := []string{"has(c.env)", fmt.Sprintf("size(c.env) == %d", len(env))}
+	for _, e := range env {
+		parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value == %s)",
+			celString(t, e.Name), celString(t, e.Value)))
+	}
+	return strings.Join(parts, " && ")
+}
+
+// admissionNoElevationExpr refuses a privileged container and added Linux
+// capabilities. The renderer sets no securityContext, but an empty one is not a
+// reason to refuse the Job, so only the elevations are named.
+func admissionNoElevationExpr() string {
+	return "(!has(c.securityContext) || " +
+		"((!has(c.securityContext.privileged) || !c.securityContext.privileged) && " +
+		"(!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || " +
+		"size(c.securityContext.capabilities.add) == 0)))"
+}
+
+// admissionContainerExpr is the bound on one container bound to c: the renderer's
+// name, the admitted image, the renderer's command and arguments, the pinned
+// environment, no envFrom and no elevation.
+func admissionContainerExpr(t *testing.T, c Container) string {
+	t.Helper()
+	return strings.Join([]string{
+		"c.name == " + celString(t, c.Name),
+		"c.image.matches(" + celString(t, admissionImagePattern()) + ")",
+		"c.command == [" + celList(t, c.Command) + "]",
+		admissionArgsExpr(t, c.Args),
+		admissionEnvExpr(t),
+		"!has(c.envFrom)",
+		admissionNoElevationExpr(),
+	}, " && ")
+}
 
 // admissionValidations is every validation the policy must carry, in order, built
-// from the renderer's constants. The check compares each stored expression to this
+// from the renderer's own output. The check compares each stored expression to this
 // list exactly (whitespace aside), so a weakened comparison, a dropped validation or
 // a changed name fails the test and not only a reader's eye.
-func admissionValidations() []string {
-	image := admissionImageRegexp()
+func admissionValidations(t *testing.T) []string {
+	t.Helper()
+	v := admissionValues()
 	return []string{
-		fmt.Sprintf("object.metadata.name.startsWith('%s')", JobNamePrefix),
-		fmt.Sprintf("object.spec.template.spec.serviceAccountName == '%[1]s' && "+
-			"(!has(object.spec.template.spec.serviceAccount) || object.spec.template.spec.serviceAccount == '%[1]s')",
-			ServiceAccountName),
+		fmt.Sprintf("object.metadata.name.startsWith(%s)", celString(t, JobNamePrefix)),
+		fmt.Sprintf("object.spec.template.spec.serviceAccountName == %[1]s && "+
+			"(!has(object.spec.template.spec.serviceAccount) || object.spec.template.spec.serviceAccount == %[1]s)",
+			celString(t, ServiceAccountName)),
 		"(!has(object.spec.template.spec.hostNetwork) || !object.spec.template.spec.hostNetwork) && " +
 			"(!has(object.spec.template.spec.hostPID) || !object.spec.template.spec.hostPID) && " +
 			"(!has(object.spec.template.spec.hostIPC) || !object.spec.template.spec.hostIPC)",
-		"object.spec.template.spec.containers.all(c, " +
-			"!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) && " +
-			"(!has(object.spec.template.spec.initContainers) || object.spec.template.spec.initContainers.all(c, " +
-			"!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged))",
+		"size(object.spec.template.spec.containers) == 1 && " +
+			"object.spec.template.spec.containers.all(c, " + admissionContainerExpr(t, updateContainer(v)) + ")",
+		"has(object.spec.template.spec.initContainers) && " +
+			"size(object.spec.template.spec.initContainers) == 1 && " +
+			"object.spec.template.spec.initContainers.all(c, " + admissionContainerExpr(t, imagesContainer(v)) + ")",
 		fmt.Sprintf("has(object.spec.template.spec.volumes) && size(object.spec.template.spec.volumes) == 2 && "+
 			"object.spec.template.spec.volumes.all(v, "+
-			"(v.name == '%[1]s' && has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == '%[2]s' && !has(v.hostPath)) || "+
-			"(v.name == '%[3]s' && has(v.secret) && v.secret.secretName == '%[4]s' && !has(v.hostPath)))",
-			TownStateVolume, k8sdaemon.TownStateClaim, ViewerTokenVolume, ViewerTokenSecret),
-		fmt.Sprintf("object.spec.template.spec.containers.all(c, c.image.matches('%[1]s')) && "+
-			"(!has(object.spec.template.spec.initContainers) || object.spec.template.spec.initContainers.all(c, c.image.matches('%[1]s')))",
-			image),
-		fmt.Sprintf("object.spec.template.spec.containers.all(c, %[1]s) && "+
-			"(!has(object.spec.template.spec.initContainers) || object.spec.template.spec.initContainers.all(c, %[1]s))",
-			admissionEnvGuard),
+			"(v.name == %[1]s && has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == %[2]s && !has(v.hostPath)) || "+
+			"(v.name == %[3]s && has(v.secret) && v.secret.secretName == %[4]s && !has(v.hostPath)))",
+			celString(t, TownStateVolume), celString(t, k8sdaemon.TownStateClaim),
+			celString(t, ViewerTokenVolume), celString(t, ViewerTokenSecret)),
 	}
 }
 
@@ -223,7 +311,8 @@ func admissionExprProblems(i int, got, want string) []string {
 // names, a policy of Fail on Job CREATE in batch/v1, the validations of
 // admissionValidations, and a binding that denies, for the daemon's ServiceAccount,
 // the Jobs in namespace gt.
-func updateAdmissionProblems(docs []admissionDoc) []string {
+func updateAdmissionProblems(t *testing.T, docs []admissionDoc) []string {
+	t.Helper()
 	var problems []string
 	for _, d := range docs {
 		switch d.Kind {
@@ -245,13 +334,14 @@ func updateAdmissionProblems(docs []admissionDoc) []string {
 	if len(policyProblems) > 0 || len(bindingProblems) > 0 {
 		return problems
 	}
-	problems = append(problems, admissionPolicyProblems(policy)...)
+	problems = append(problems, admissionPolicyProblems(t, policy)...)
 	return append(problems, admissionBindingProblems(binding, policy.Metadata.Name)...)
 }
 
 // admissionPolicyProblems names every way the policy's own rules differ from what
-// the renderer's constants require.
-func admissionPolicyProblems(policy admissionDoc) []string {
+// the renderer's output requires.
+func admissionPolicyProblems(t *testing.T, policy admissionDoc) []string {
+	t.Helper()
 	var problems []string
 	if got := policy.Spec.FailurePolicy; got != "Fail" {
 		problems = append(problems, fmt.Sprintf("failurePolicy is %q, want Fail: an unevaluated policy must refuse the Job, not admit it", got))
@@ -276,7 +366,7 @@ func admissionPolicyProblems(policy admissionDoc) []string {
 			}
 		}
 	}
-	want := admissionValidations()
+	want := admissionValidations(t)
 	if len(policy.Spec.Validations) != len(want) {
 		problems = append(problems, fmt.Sprintf("the policy holds %d validations, want %d", len(policy.Spec.Validations), len(want)))
 	}
@@ -316,18 +406,181 @@ func admissionBindingProblems(binding admissionDoc, policyName string) []string 
 	return problems
 }
 
-// updateAdmissionJobProblems names every way the rendered Job departs from the
-// volumes and ServiceAccount the policy's expressions are built from. The expressions
-// and the Job are checked against the same constants, so changing either fails the
-// test instead of leaving the policy rejecting the daemon's Job. The name prefix needs
-// no separate check: admissionValidations builds its expression from JobNamePrefix,
-// and the daemon names each Job it creates with that same constant.
+// admissionJobContainerProblems holds one rendered container to the policy's
+// bounds: the renderer's name, an image the regex admits, the renderer's command,
+// arguments whose green-commit slot is a full sha, and exactly the renderer's
+// environment.
+func admissionJobContainerProblems(got, want Container) []string {
+	var problems []string
+	if got.Name != want.Name {
+		problems = append(problems, fmt.Sprintf("container name %q, want %q", got.Name, want.Name))
+	}
+	if !admissionImageRE.MatchString(got.Image) {
+		problems = append(problems, fmt.Sprintf("container %q image %q is not the daemon image from %s by sha256 digest", got.Name, got.Image, admissionImagePrefix))
+	}
+	if strings.Join(got.Command, "\x00") != strings.Join(want.Command, "\x00") {
+		problems = append(problems, fmt.Sprintf("container %q command is %v, want %v", got.Name, got.Command, want.Command))
+	}
+	problems = append(problems, admissionJobArgsProblems(got, want)...)
+	problems = append(problems, admissionJobEnvProblems(got, want)...)
+	return problems
+}
+
+// admissionJobArgsProblems holds the Job's arguments to the shape the policy pins:
+// every argument equal to the renderer's, but a green-commit slot any full sha.
+func admissionJobArgsProblems(got, want Container) []string {
+	if len(got.Args) != len(want.Args) {
+		return []string{fmt.Sprintf("container %q has %d arguments, want the renderer's %d", got.Name, len(got.Args), len(want.Args))}
+	}
+	var problems []string
+	for i, w := range want.Args {
+		if commitRE.MatchString(w) {
+			if !commitRE.MatchString(got.Args[i]) {
+				problems = append(problems, fmt.Sprintf("container %q argument %d is %q, want a full lowercase sha", got.Name, i, got.Args[i]))
+			}
+			continue
+		}
+		if got.Args[i] != w {
+			problems = append(problems, fmt.Sprintf("container %q argument %d is %q, want %q", got.Name, i, got.Args[i], w))
+		}
+	}
+	return problems
+}
+
+// admissionJobEnvProblems holds the Job's environment to the four variables the
+// policy pins, by name and value.
+func admissionJobEnvProblems(got, want Container) []string {
+	var problems []string
+	if len(got.Env) != len(want.Env) {
+		problems = append(problems, fmt.Sprintf("container %q has %d environment variables, want the renderer's %d", got.Name, len(got.Env), len(want.Env)))
+	}
+	byName := map[string]string{}
+	for _, e := range got.Env {
+		byName[e.Name] = e.Value
+	}
+	if len(byName) != len(want.Env) {
+		problems = append(problems, fmt.Sprintf("container %q names %d distinct environment variables, want %d", got.Name, len(byName), len(want.Env)))
+	}
+	for _, w := range want.Env {
+		if v, ok := byName[w.Name]; !ok {
+			problems = append(problems, fmt.Sprintf("container %q sets no %s", got.Name, w.Name))
+		} else if v != w.Value {
+			problems = append(problems, fmt.Sprintf("container %q sets %s to %q, want %q", got.Name, w.Name, v, w.Value))
+		}
+	}
+	return problems
+}
+
+// admissionMapField returns m[key] as a mapping, and whether it was one.
+func admissionMapField(m map[string]any, key string) (map[string]any, bool) {
+	v, ok := m[key].(map[string]any)
+	return v, ok
+}
+
+// admissionEncodedProblems names every pod field the policy refuses that the
+// renderer's types do not model, read from the encoded Job: the host namespaces, a
+// container securityContext or envFrom, and an env valueFrom. A renderer change
+// that added one of them would otherwise pass the typed checks and reach the
+// cluster, where the policy would refuse the daemon's own Job.
+func admissionEncodedProblems(raw []byte) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return []string{fmt.Sprintf("the Job does not decode: %v", err)}
+	}
+	spec, ok := admissionMapField(doc, "spec")
+	if !ok {
+		return []string{"the Job holds no spec"}
+	}
+	template, ok := admissionMapField(spec, "template")
+	if !ok {
+		return []string{"the Job holds no spec.template"}
+	}
+	pod, ok := admissionMapField(template, "spec")
+	if !ok {
+		return []string{"the Job holds no spec.template.spec"}
+	}
+	var problems []string
+	for _, key := range []string{"hostNetwork", "hostPID", "hostIPC"} {
+		if _, found := pod[key]; found {
+			problems = append(problems, fmt.Sprintf("the Job's pod sets %s, which the policy refuses", key))
+		}
+	}
+	for _, field := range []string{"containers", "initContainers"} {
+		list, ok := pod[field].([]any)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("the Job's pod %s are not a list", field))
+			continue
+		}
+		for _, item := range list {
+			c, ok := item.(map[string]any)
+			if !ok {
+				problems = append(problems, fmt.Sprintf("a %s entry is not a container", field))
+				continue
+			}
+			for _, key := range []string{"securityContext", "envFrom"} {
+				if _, found := c[key]; found {
+					problems = append(problems, fmt.Sprintf("container %v sets %s, which the policy refuses", c["name"], key))
+				}
+			}
+			if raw, found := c["env"]; found {
+				env, ok := raw.([]any)
+				if !ok {
+					problems = append(problems, fmt.Sprintf("container %v environment is not a list", c["name"]))
+					continue
+				}
+				for _, e := range env {
+					entry, ok := e.(map[string]any)
+					if !ok {
+						problems = append(problems, fmt.Sprintf("container %v has an environment entry that is not a mapping", c["name"]))
+						continue
+					}
+					if _, found := entry["valueFrom"]; found {
+						problems = append(problems, fmt.Sprintf("container %v reads %v through valueFrom, which the policy refuses", c["name"], entry["name"]))
+					}
+				}
+			}
+		}
+	}
+	return problems
+}
+
+// updateAdmissionJobProblems names every way the rendered Job departs from what
+// the policy's expressions require: the daemon's name, the ServiceAccount, the one
+// container and one init container the renderer sets with their image, command,
+// arguments and environment, exactly the two volumes, and no pod field the policy
+// refuses in the encoded Job.
 func updateAdmissionJobProblems(job Job) []string {
 	var problems []string
 	pod := job.Spec.Template.Spec
+	if !strings.HasPrefix(job.Metadata.Name, JobNamePrefix) {
+		problems = append(problems, fmt.Sprintf("the Job's name %q does not start %q", job.Metadata.Name, JobNamePrefix))
+	}
 	if pod.ServiceAccountName != ServiceAccountName {
 		problems = append(problems, fmt.Sprintf("the Job's pod runs as %q, want %q", pod.ServiceAccountName, ServiceAccountName))
 	}
+	v := admissionValues()
+	if len(pod.Containers) != 1 {
+		problems = append(problems, fmt.Sprintf("the Job's pod runs %d containers, want the one update container", len(pod.Containers)))
+	} else {
+		problems = append(problems, admissionJobContainerProblems(pod.Containers[0], updateContainer(v))...)
+	}
+	if len(pod.InitContainers) != 1 {
+		problems = append(problems, fmt.Sprintf("the Job's pod runs %d init containers, want the one images init container", len(pod.InitContainers)))
+	} else {
+		problems = append(problems, admissionJobContainerProblems(pod.InitContainers[0], imagesContainer(v))...)
+	}
+	problems = append(problems, admissionJobVolumeProblems(pod)...)
+	var buf bytes.Buffer
+	if err := YAML(&buf, job); err != nil {
+		return append(problems, fmt.Sprintf("encoding the Job: %v", err))
+	}
+	return append(problems, admissionEncodedProblems(buf.Bytes())...)
+}
+
+// admissionJobVolumeProblems holds the rendered Job's volumes to the two the policy
+// names.
+func admissionJobVolumeProblems(pod PodSpec) []string {
+	var problems []string
 	if len(pod.Volumes) != 2 {
 		problems = append(problems, fmt.Sprintf("the Job mounts %d volumes, want the town-state claim and the viewer-token Secret only", len(pod.Volumes)))
 	}
@@ -361,16 +614,20 @@ func updateAdmissionJobProblems(job Job) []string {
 // real rendered Job is the Job those expressions admit.
 func TestUpdateAdmissionPolicy(t *testing.T) {
 	t.Parallel()
-	if problems := updateAdmissionProblems(loadUpdateAdmission(t)); len(problems) > 0 {
+	if problems := updateAdmissionProblems(t, loadUpdateAdmission(t)); len(problems) > 0 {
 		t.Errorf("%s: %s", updateAdmissionManifest, strings.Join(problems, "; "))
 	}
-	if problems := updateAdmissionJobProblems(mustBuild(t, goldenValues()).Job); len(problems) > 0 {
+	job := mustBuild(t, goldenValues()).Job
+	// The daemon renames the rendered Job before it creates it (updateJobName in
+	// internal/daemon): the name the policy admits is that renamed one.
+	job.Metadata.Name = JobNamePrefix + "0123456789ab"
+	if problems := updateAdmissionJobProblems(job); len(problems) > 0 {
 		t.Errorf("the rendered Job: %s", strings.Join(problems, "; "))
 	}
 }
 
-// updateAdmissionRefusal is an edit to the manifest, or to the rendered Job, that the
-// checks must refuse, and the text the refusal must name.
+// updateAdmissionRefusal is an edit to the manifest that the checks must refuse, and
+// the text the refusal must name.
 type updateAdmissionRefusal struct {
 	name string
 	edit func(t *testing.T, docs []admissionDoc) []admissionDoc
@@ -379,8 +636,8 @@ type updateAdmissionRefusal struct {
 
 // updateAdmissionRefusals is every weakening the checks must name: a document of
 // another kind, a renamed or missing policy or binding, an action that only warns, a
-// scope wider than Job creation, a validation that admits a wider Job, and a binding
-// that reaches another account or namespace.
+// scope wider than Job creation, a validation that admits a wider Job or a different
+// container, and a binding that reaches another account or namespace.
 var updateAdmissionRefusals = []updateAdmissionRefusal{
 	{
 		name: "an extra document",
@@ -476,7 +733,7 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 			docs[0].Spec.Validations = docs[0].Spec.Validations[:len(docs[0].Spec.Validations)-1]
 			return docs
 		},
-		want: "validations, want 7",
+		want: "validations, want 6",
 	},
 	{
 		name: "no message on a validation",
@@ -495,28 +752,75 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 		want: "validation 2",
 	},
 	{
-		name: "a third volume admitted",
+		name: "a second container admitted",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			docs[0].Spec.Validations[4].Expression = strings.Replace(docs[0].Spec.Validations[4].Expression, "size(object.spec.template.spec.volumes) == 2", "size(object.spec.template.spec.volumes) <= 3", 1)
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"size(object.spec.template.spec.containers) == 1", "size(object.spec.template.spec.containers) >= 1", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "an image outside the registry",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.ReplaceAll(docs[0].Spec.Validations[3].Expression, admissionImagePrefix, "")
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "another command",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"c.command == ['gt']", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "another environment value",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"e.value == '/run/gt/xdg'", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "a Secret through envFrom",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"!has(c.envFrom)", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "an added capability",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"size(c.securityContext.capabilities.add) == 0", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "another init container",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[4].Expression = strings.Replace(docs[0].Spec.Validations[4].Expression,
+				"c.name == 'images'", "true", 1)
 			return docs
 		},
 		want: "validation 5",
 	},
 	{
-		name: "an image outside the registry",
+		name: "a third volume admitted",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			docs[0].Spec.Validations[5].Expression = strings.ReplaceAll(docs[0].Spec.Validations[5].Expression, "forgejo:3000/bot-registry/", "")
+			docs[0].Spec.Validations[5].Expression = strings.Replace(docs[0].Spec.Validations[5].Expression,
+				"size(object.spec.template.spec.volumes) == 2", "size(object.spec.template.spec.volumes) <= 3", 1)
 			return docs
 		},
 		want: "validation 6",
-	},
-	{
-		name: "a Secret through env",
-		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			docs[0].Spec.Validations[6].Expression = strings.ReplaceAll(docs[0].Spec.Validations[6].Expression, "!has(e.valueFrom.secretKeyRef)", "true")
-			return docs
-		},
-		want: "validation 7",
 	},
 	{
 		name: "validationActions Warn",
@@ -601,7 +905,7 @@ func TestUpdateAdmissionPolicyRefusesWeakenings(t *testing.T) {
 	for _, r := range updateAdmissionRefusals {
 		t.Run(r.name, func(t *testing.T) {
 			t.Parallel()
-			problems := strings.Join(updateAdmissionProblems(r.edit(t, loadUpdateAdmission(t))), "; ")
+			problems := strings.Join(updateAdmissionProblems(t, r.edit(t, loadUpdateAdmission(t))), "; ")
 			if !strings.Contains(problems, r.want) {
 				t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
 			}
@@ -624,9 +928,10 @@ func TestUpdateAdmissionParserRefusesBadManifest(t *testing.T) {
 }
 
 // TestUpdateAdmissionJobRefusesAnotherJob holds the Job check to its refusals: a Job
-// with a third volume, another ServiceAccount, another Secret volume or a missing
-// town-state claim is named, so a renderer change cannot silently leave the policy
-// rejecting the daemon's own Job.
+// with a third volume, another container or init container, another image, command,
+// argument or environment variable, another ServiceAccount, another Secret volume or
+// a missing town-state claim is named, so a renderer change cannot silently leave
+// the policy rejecting the daemon's own Job.
 func TestUpdateAdmissionJobRefusesAnotherJob(t *testing.T) {
 	t.Parallel()
 	for _, r := range []struct {
@@ -635,17 +940,57 @@ func TestUpdateAdmissionJobRefusesAnotherJob(t *testing.T) {
 		want string
 	}{
 		{
+			name: "a second container",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers = append(j.Spec.Template.Spec.Containers, Container{Name: "extra"})
+			},
+			want: "containers",
+		},
+		{
+			name: "a second init container",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.InitContainers = append(j.Spec.Template.Spec.InitContainers, Container{Name: "extra"})
+			},
+			want: "init containers",
+		},
+		{
+			name: "another image",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].Image = "registry.example.test/gastown/daemon@sha256:" + strings.Repeat("0123456789abcdef", 4)
+			},
+			want: "not the daemon image",
+		},
+		{
+			name: "another command",
+			edit: func(j *Job) { j.Spec.Template.Spec.Containers[0].Command = []string{"sh"} },
+			want: "command",
+		},
+		{
+			name: "an added argument",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].Args = append(j.Spec.Template.Spec.Containers[0].Args, "--extra")
+			},
+			want: "arguments",
+		},
+		{
+			name: "an added environment variable",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].Env = append(j.Spec.Template.Spec.Containers[0].Env, EnvVar{Name: "EXTRA", Value: "x"})
+			},
+			want: "environment",
+		},
+		{
+			name: "another ServiceAccount",
+			edit: func(j *Job) { j.Spec.Template.Spec.ServiceAccountName = k8sdaemon.ServiceAccountName },
+			want: "runs as",
+		},
+		{
 			name: "a third volume",
 			edit: func(j *Job) {
 				j.Spec.Template.Spec.Volumes = append(j.Spec.Template.Spec.Volumes,
 					Volume{Name: "extra", PersistentVolumeClaim: &PVCVolumeSource{ClaimName: "extra"}})
 			},
 			want: "3 volumes",
-		},
-		{
-			name: "another ServiceAccount",
-			edit: func(j *Job) { j.Spec.Template.Spec.ServiceAccountName = k8sdaemon.ServiceAccountName },
-			want: "runs as",
 		},
 		{
 			name: "another Secret",
@@ -682,15 +1027,161 @@ func TestUpdateAdmissionJobRefusesAnotherJob(t *testing.T) {
 			},
 			want: "mounts no",
 		},
+		{
+			name: "another name",
+			edit: func(j *Job) { j.Metadata.Name = "gt-probe" },
+			want: "does not start",
+		},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			t.Parallel()
 			job := mustBuild(t, goldenValues()).Job
+			job.Metadata.Name = JobNamePrefix + "0123456789ab"
 			r.edit(&job)
 			problems := strings.Join(updateAdmissionJobProblems(job), "; ")
 			if !strings.Contains(problems, r.want) {
 				t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
 			}
 		})
+	}
+}
+
+// admissionTestPod returns the decoded Job's pod spec for a mutation.
+func admissionTestPod(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	spec, ok := admissionMapField(doc, "spec")
+	if !ok {
+		t.Fatal("the encoded Job holds no spec")
+	}
+	template, ok := admissionMapField(spec, "template")
+	if !ok {
+		t.Fatal("the encoded Job holds no spec.template")
+	}
+	pod, ok := admissionMapField(template, "spec")
+	if !ok {
+		t.Fatal("the encoded Job holds no spec.template.spec")
+	}
+	return pod
+}
+
+// admissionTestContainer returns one container of the decoded Job's pod spec.
+func admissionTestContainer(t *testing.T, pod map[string]any, field string, i int) map[string]any {
+	t.Helper()
+	list, ok := pod[field].([]any)
+	if !ok || i >= len(list) {
+		t.Fatalf("the encoded Job holds no %s[%d]", field, i)
+	}
+	c, ok := list[i].(map[string]any)
+	if !ok {
+		t.Fatalf("%s[%d] is not a container", field, i)
+	}
+	return c
+}
+
+// TestUpdateAdmissionEncodedJobRefusesAPodField drives the encoded-Job check: a Job
+// that carried a host namespace, a container securityContext or envFrom, or an env
+// valueFrom is named, so a renderer change adding one of them fails here and not on
+// the cluster.
+func TestUpdateAdmissionEncodedJobRefusesAPodField(t *testing.T) {
+	t.Parallel()
+	for _, r := range []struct {
+		name string
+		edit func(t *testing.T, pod map[string]any)
+		want string
+	}{
+		{
+			name: "a host namespace",
+			edit: func(t *testing.T, pod map[string]any) { pod["hostNetwork"] = true },
+			want: "hostNetwork",
+		},
+		{
+			name: "a container securityContext",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "containers", 0)["securityContext"] = map[string]any{"privileged": true}
+			},
+			want: "securityContext",
+		},
+		{
+			name: "a container envFrom",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "containers", 0)["envFrom"] = []any{map[string]any{"secretRef": map[string]any{"name": "other"}}}
+			},
+			want: "envFrom",
+		},
+		{
+			name: "an env valueFrom",
+			edit: func(t *testing.T, pod map[string]any) {
+				c := admissionTestContainer(t, pod, "initContainers", 0)
+				env, ok := c["env"].([]any)
+				if !ok || len(env) == 0 {
+					t.Fatal("the init container holds no environment")
+				}
+				env[0] = map[string]any{"name": "XDG_CONFIG_HOME", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "other", "key": "token"}}}
+			},
+			want: "valueFrom",
+		},
+		{
+			name: "containers that are not a list",
+			edit: func(t *testing.T, pod map[string]any) { pod["containers"] = "not a list" },
+			want: "are not a list",
+		},
+		{
+			name: "a container that is not a mapping",
+			edit: func(t *testing.T, pod map[string]any) { pod["containers"] = []any{"not a container"} },
+			want: "is not a container",
+		},
+		{
+			name: "an environment that is not a list",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "containers", 0)["env"] = "not a list"
+			},
+			want: "environment is not a list",
+		},
+		{
+			name: "an environment entry that is not a mapping",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "containers", 0)["env"] = []any{"not an entry"}
+			},
+			want: "not a mapping",
+		},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			if err := YAML(&buf, mustBuild(t, goldenValues()).Job); err != nil {
+				t.Fatalf("encoding the Job: %v", err)
+			}
+			var doc map[string]any
+			if err := yaml.Unmarshal(buf.Bytes(), &doc); err != nil {
+				t.Fatalf("decoding the Job: %v", err)
+			}
+			r.edit(t, admissionTestPod(t, doc))
+			mutated, err := yaml.Marshal(doc)
+			if err != nil {
+				t.Fatalf("encoding the mutated Job: %v", err)
+			}
+			problems := strings.Join(admissionEncodedProblems(mutated), "; ")
+			if !strings.Contains(problems, r.want) {
+				t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
+			}
+		})
+	}
+}
+
+// TestUpdateAdmissionEncodedJobRefusesWhatItCannotRead holds the encoded-Job check to
+// its refusals: a document that does not decode, and one with no pod spec, are
+// problems, never a clean read.
+func TestUpdateAdmissionEncodedJobRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, r := range []struct{ name, raw, want string }{
+		{name: "an undecodable document", raw: "kind: [\n", want: "does not decode"},
+		{name: "no spec", raw: "kind: Job\n", want: "the Job holds no spec"},
+		{name: "no template", raw: "spec: {}\n", want: "the Job holds no spec.template"},
+		{name: "no pod spec", raw: "spec:\n  template: {}\n", want: "the Job holds no spec.template.spec"},
+	} {
+		problems := strings.Join(admissionEncodedProblems([]byte(r.raw)), "; ")
+		if !strings.Contains(problems, r.want) {
+			t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
+		}
 	}
 }
