@@ -15,7 +15,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
-	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -474,24 +473,6 @@ func (c *daemonControl) townDaemonKind(townRoot string) (*config.DaemonPatrolCon
 	}
 	return cfg, kind == config.SupervisorContainer, nil
 }
-
-// containerDeploySupervisor is the production daemonimage.Supervisor: the
-// container town's start builder and the container its settings name. It is
-// built from the one containerComposeProject-validated settings read, so the
-// container name Deploy checks a render against is the one the start argv
-// recreates (gt-qpeei.25, gt-qpeei.30).
-type containerDeploySupervisor struct {
-	start     func() ([]string, error)
-	container string
-}
-
-var _ daemonimage.Supervisor = containerDeploySupervisor{}
-
-// StartArgv builds the container start argv, or the supervisor's refusal.
-func (s containerDeploySupervisor) StartArgv() ([]string, error) { return s.start() }
-
-// ContainerName is the container the town's settings name.
-func (s containerDeploySupervisor) ContainerName() string { return s.container }
 
 // containerStopped says whether a container's job state proves it is not
 // running: docker does not know it, or reports a state that is not running. A

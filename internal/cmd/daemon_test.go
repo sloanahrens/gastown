@@ -127,3 +127,15 @@ func TestDaemonRunExitMapsUnrequestedStopTo75(t *testing.T) {
 		t.Fatalf("exit code = %d, want 75 so launchd relaunches the daemon", code)
 	}
 }
+
+// TestDaemonScratchIsNotRegistered: the scratch rehearsal command was removed
+// with the Docker-hosted daemon era, so no `gt daemon scratch` subcommand may
+// be registered under daemonCmd.
+func TestDaemonScratchIsNotRegistered(t *testing.T) {
+	t.Parallel()
+	for _, c := range daemonCmd.Commands() {
+		if c.Name() == "scratch" {
+			t.Fatalf("gt daemon scratch is registered; the command should have been deleted")
+		}
+	}
+}

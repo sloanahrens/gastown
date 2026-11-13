@@ -673,12 +673,11 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	return nil
 }
 
-// refuseForeignComposeFile refuses to replace a compose file gt did not write,
-// for every command that writes one: `daemon compose write` and `daemon scratch
-// up` both call it, through their own read seam, before either writes. The
-// generated-file header at the first line is the mark: a file without it belongs
-// to the operator, and an unreadable file cannot be told apart from theirs, so
-// both need --force. A missing file is written as before.
+// refuseForeignComposeFile refuses to replace a compose file gt did not write.
+// `daemon compose write` calls it, through its own read seam, before it writes.
+// The generated-file header at the first line is the mark: a file without it
+// belongs to the operator, and an unreadable file cannot be told apart from
+// theirs, so both need --force. A missing file is written as before.
 func refuseForeignComposeFile(read func(path string) ([]byte, error), path string) error {
 	data, err := read(path)
 	switch {
@@ -690,6 +689,13 @@ func refuseForeignComposeFile(read func(path string) ([]byte, error), path strin
 		return fmt.Errorf("%s was not written by gt (its first line is not the generated-file header), so it is left alone; pass --force to replace it", path)
 	}
 	return nil
+}
+
+// pathWithin reports whether path is root or lies under it, by their cleaned
+// absolute spellings.
+func pathWithin(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // requireUnderTown refuses a kubeconfig that is not inside the town on resolved

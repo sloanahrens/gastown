@@ -2496,3 +2496,14 @@ func TestEnsureDaemon_StartRefusedWhileAConcurrentStarterWinsIsSuccess(t *testin
 		t.Fatalf("ensureDaemonWith = %v, want nil: a concurrent starter brought the daemon up", err)
 	}
 }
+
+func writeLiveFile(t *testing.T, live, rel, body string) {
+	t.Helper()
+	p := filepath.Join(live, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", rel, err)
+	}
+}
