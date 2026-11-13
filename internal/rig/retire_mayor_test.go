@@ -40,18 +40,21 @@ type fakeRetireFS struct {
 	// and Canonical do not.
 	links map[string]bool
 	// canon maps a symlinked prefix to the real path it stands for.
-	canon   map[string]string
-	errs    map[string]error
-	renames []string
+	canon map[string]string
+	// canonErrs fails Canonical alone, where errs would fail Lstat first.
+	canonErrs map[string]error
+	errs      map[string]error
+	renames   []string
 }
 
 func newFakeRetireFS() *fakeRetireFS {
 	return &fakeRetireFS{
-		dirs:  map[string]bool{},
-		files: map[string]string{},
-		links: map[string]bool{},
-		canon: map[string]string{},
-		errs:  map[string]error{},
+		dirs:      map[string]bool{},
+		files:     map[string]string{},
+		links:     map[string]bool{},
+		canon:     map[string]string{},
+		canonErrs: map[string]error{},
+		errs:      map[string]error{},
 	}
 }
 
@@ -73,6 +76,9 @@ func (f *fakeRetireFS) Lstat(path string) (bool, bool, error) {
 
 // Canonical applies the canon prefix mappings, or cleans the path.
 func (f *fakeRetireFS) Canonical(path string) (string, error) {
+	if err := f.canonErrs[path]; err != nil {
+		return "", err
+	}
 	if err := f.errs[path]; err != nil {
 		return "", err
 	}
@@ -168,6 +174,15 @@ func TestRetireMayorPlan(t *testing.T) {
 			setup:   retireBaseWorld,
 			rig:     "gastwn",
 			wantErr: "rig gastwn: no directory " + filepath.Join(retireTown, "gastwn"),
+		},
+		{
+			name: "rig directory that cannot be read is an error, not a missing rig",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.errs[retireRigPath] = errors.New("permission denied")
+			},
+			rig:     retireRig,
+			wantErr: "permission denied",
 		},
 		{
 			name: "dangling symlink at mayor/rig is present and renamed",
@@ -311,6 +326,16 @@ func TestRetireMayorPlan(t *testing.T) {
 			},
 			rig:         retireRig,
 			wantRefusal: retireRoutes + ":1",
+		},
+		{
+			name: "routes file whose mayor/rig cannot be resolved is an error, not a clean plan",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.files[retireRoutes] = "{\"path\":\"beads/mayor/rig\",\"prefix\":\"be-\"}\n"
+				f.canonErrs[retireFrom] = errors.New("permission denied")
+			},
+			rig:     retireRig,
+			wantErr: "permission denied",
 		},
 		{
 			name: "routes line that cannot be resolved is an error, not a clean plan",
@@ -581,6 +606,17 @@ func TestRetireMayorApply(t *testing.T) {
 		}
 	})
 
+	t.Run("apply refuses a plan that PlanRetireMayor did not make", func(t *testing.T) {
+		f := newFakeRetireFS()
+		plan := RetirePlan{From: retireFrom, To: retireTo}
+		if err := plan.Apply(f); err == nil {
+			t.Fatal("Apply = nil, want a refusal for a plan built by hand")
+		}
+		if len(f.renames) != 0 {
+			t.Errorf("renames = %v, want none", f.renames)
+		}
+	})
+
 	t.Run("apply on an already retired rig is not an error and renames nothing", func(t *testing.T) {
 		f := newFakeRetireFS()
 		f.dirs[retireRigPath] = true
@@ -637,6 +673,33 @@ func TestRetireMayorOSFSCanonicalFallsBackToTheCleanPath(t *testing.T) {
 	got, err := (OSRetireFS{}).Canonical(missing)
 	if err != nil || got != filepath.Clean(missing) {
 		t.Errorf("Canonical(%q) = %q, %v; want %q, nil", missing, got, err, filepath.Clean(missing))
+	}
+}
+
+// TestRetireMayorOSFSLstatReportsAnUnreadablePath checks that Lstat passes up an
+// error other than a missing path, such as a path under a regular file.
+func TestRetireMayorOSFSLstatReportsAnUnreadablePath(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := (OSRetireFS{}).Lstat(filepath.Join(file, "child")); err == nil {
+		t.Error("Lstat under a regular file = nil error, want one")
+	}
+}
+
+// TestRetireMayorOSFSCanonicalReportsAnUnreadablePath checks that Canonical
+// passes up an error other than a missing path, such as a path under a regular
+// file, rather than resolving it to its spelling.
+func TestRetireMayorOSFSCanonicalReportsAnUnreadablePath(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (OSRetireFS{}).Canonical(filepath.Join(file, "child")); err == nil {
+		t.Error("Canonical under a regular file = nil error, want one")
 	}
 }
 
