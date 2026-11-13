@@ -520,7 +520,7 @@ func TestRealEnvStopsOnAMalformedHistoryLine(t *testing.T) {
 
 func TestRealEnvNeedsARunner(t *testing.T) {
 	t.Parallel()
-	if _, err := RealEnv(context.Background(), RealEnvOptions{Town: t.TempDir()}); err == nil {
+	if _, err := RealEnv(context.Background(), RealEnvOptions{Town: t.TempDir(), Getenv: noEnv}); err == nil {
 		t.Fatal("RealEnv wired a town with no runner")
 	}
 }
@@ -881,6 +881,9 @@ func TestRealEnvDefaultsFromTheEnvironment(t *testing.T) {
 	if !slices.Contains(real.Extract.BeadDirs, town) {
 		t.Errorf("BeadDirs = %q, want the town %q listed", real.Extract.BeadDirs, town)
 	}
+	if len(real.Extract.BeadDirs) == 0 {
+		t.Fatal("BeadDirs is empty, want the config dir last")
+	}
 	if want := cfg; real.Extract.BeadDirs[len(real.Extract.BeadDirs)-1] != want {
 		t.Errorf("last bead dir = %q, want the %s dir %q: it holds a beads database and replaces the home's .claude", real.Extract.BeadDirs[len(real.Extract.BeadDirs)-1], "CLAUDE_CONFIG_DIR", want)
 	}
@@ -926,7 +929,7 @@ func TestRealEnvReadsCachesThatSaveCachesWrote(t *testing.T) {
 		t.Fatalf("SaveCaches: %v", err)
 	}
 	runner := &realRunner{answer: realGit(town)}
-	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Run: runner.run})
+	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Town: town, Home: home, Getenv: noEnv, Run: runner.run})
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
 	}
