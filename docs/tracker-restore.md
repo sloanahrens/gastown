@@ -11,8 +11,13 @@ hope, not a backup.
 
 ## What is on disk
 
+The nightly dump is written in the control cluster, not on the Mac. The
+`tracker-backup` CronJob in namespace `gt` runs `trackerbackup` at 03:30 each
+day, and the job's pod mounts the `tracker-backup` claim at `/backups`. The job
+keeps the newest seven dumps. Nothing is written to `~/gt-backups/tracker`.
+
 ```
-~/gt-backups/tracker/
+/backups/ (the tracker-backup claim)
   2026-10-28.dump           complete: pg_dump exited 0 with a non-empty file
   2026-10-29.dump.partial   a run in progress, or a run that was killed
 ```
@@ -20,6 +25,10 @@ hope, not a backup.
 A `.dump` file is one PostgreSQL custom-format archive of the whole `tracker`
 database. The runner publishes a night by renaming `<date>.dump.partial` to
 `<date>.dump`, so a name that still ends in `.partial` is never restorable.
+
+The claim is mounted only by the job's pods, and a pod exits when its run ends.
+This page has no command that copies a dump off the claim yet: `kubectl cp`
+needs a running pod that mounts it, and none does.
 
 ## 1. Pick a dump
 

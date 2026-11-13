@@ -45,7 +45,9 @@ the claims, the service account, the Forgejo Service, the bindings, the seed
 helper Pod (with --with-helper) and the Deployment. With --dashboard, the
 dashboard's Service and Deployment are written too, in the same order. With
 --tracker, trackerd's Service and Deployment follow the same way; the render
-names the Secret holding its DSN and never reads the DSN.
+names the Secret holding its DSN and never reads the DSN. With --tracker-backup
+too, the nightly dump's claim and CronJob follow them, and the render names the
+image the dump runs in.
 
 Secret documents are not written. The command prints, for each Secret the
 Deployment mounts, one kubectl line that creates it from the operator's existing
@@ -94,6 +96,8 @@ type clusterRenderFlags struct {
 	daemonClaudeDir    string
 	tracker            bool
 	trackerDSNSecret   string
+	trackerBackup      bool
+	trackerBackupImage string
 }
 
 var clusterRender clusterRenderFlags
@@ -183,6 +187,11 @@ func init() {
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerDSNSecret, "tracker-dsn-secret", "",
 		"the name of the Secret whose dsn key holds the tracker's connection string; the render prints the name and never reads the DSN; it needs --tracker")
 
+	townClusterRenderCmd.Flags().BoolVar(&clusterRender.trackerBackup, "tracker-backup", false,
+		"also write the nightly tracker dump beside trackerd: the tracker-backup claim and its CronJob, after trackerd's Deployment; it needs --tracker and --tracker-backup-image")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerBackupImage, "tracker-backup-image", "",
+		"the postgres image the nightly dump runs in, by digest; its pg_dump must match the server's major version; it needs --tracker-backup")
+
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
 }
@@ -244,6 +253,12 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--tracker needs --proxy-image: the socat relay that publishes trackerd runs that image, and an empty one has nothing to run")
 	case !f.tracker && strings.TrimSpace(f.trackerDSNSecret) != "":
 		return errors.New("--tracker-dsn-secret is for the tracker: name --tracker with it, or drop the flag")
+	case f.trackerBackup && !f.tracker:
+		return errors.New("--tracker-backup needs --tracker: the dump reads the DSN trackerd reads, so name --tracker with it, or drop the flag")
+	case f.trackerBackup && strings.TrimSpace(f.trackerBackupImage) == "":
+		return errors.New("--tracker-backup needs --tracker-backup-image: name the postgres image the dump runs in, or the CronJob has no image to run")
+	case !f.trackerBackup && strings.TrimSpace(f.trackerBackupImage) != "":
+		return errors.New("--tracker-backup-image is for the nightly dump: name --tracker-backup with it, or drop the flag")
 	case !filepath.IsAbs(f.configDir):
 		return fmt.Errorf("--config-dir %q must be an absolute path: the create commands are run from another directory", f.configDir)
 	case !filepath.IsAbs(f.openShellConfigDir):
@@ -363,6 +378,8 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		DaemonClaudeDir:         f.daemonClaudeDir,
 		Tracker:                 f.tracker,
 		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),
+		TrackerBackup:           f.trackerBackup,
+		TrackerBackupImage:      strings.TrimSpace(f.trackerBackupImage),
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token
@@ -433,6 +450,9 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if f.tracker {
 		fmt.Fprintf(d.out, "  %s\n", trackerSecretLine(strings.TrimSpace(f.trackerDSNSecret)))
 	}
+	if f.trackerBackup {
+		fmt.Fprintf(d.out, "  %s\n", trackerBackupLine(strings.TrimSpace(f.trackerBackupImage), strings.TrimSpace(f.trackerDSNSecret)))
+	}
 	if !f.rehearsal {
 		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
 		fmt.Fprintf(d.out, "  %s\n", podValuesCopyLine(namespace, townValues))
@@ -467,6 +487,7 @@ var applyRank = map[string]int{
 	"ClusterRoleBinding":    5,
 	"Pod":                   6,
 	"Deployment":            7,
+	"CronJob":               8,
 }
 
 // applyObject is one document of the apply set: its kind and name, its rank in
@@ -544,6 +565,11 @@ func applyObjects(stream []byte, marshal func(any) ([]byte, error)) ([]applyObje
 		if !ok {
 			return nil, fmt.Errorf("the rendered manifests hold a %s, which has no place in the apply order", head.Kind)
 		}
+		// The tracker-backup claim applies with the dump's CronJob, after
+		// trackerd's Deployment, not in the claims' place ahead of the daemon.
+		if head.Kind == "PersistentVolumeClaim" && head.Metadata.Name == k8sdaemon.TrackerBackupClaim {
+			rank = applyRank["CronJob"]
+		}
 		body, err := marshal(&doc)
 		if err != nil {
 			return nil, fmt.Errorf("encoding a rendered %s: %w", head.Kind, err)
@@ -606,6 +632,13 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 // render never sees the DSN.
 func trackerSecretLine(name string) string {
 	return fmt.Sprintf("trackerd reads its DSN from Secret %s under key %s: create it yourself before the apply; this render does not read it", name, k8sdaemon.TrackerDSNKey)
+}
+
+// trackerBackupLine names the image the nightly dump runs in and the Secret it
+// reads its DSN from, the one trackerd reads. It is a note, like trackerSecretLine:
+// the render never sees the DSN.
+func trackerBackupLine(image, secret string) string {
+	return fmt.Sprintf("the nightly tracker dump runs in image %s and reads its DSN from Secret %s under key %s, the same Secret trackerd reads; this render does not read it", image, secret, k8sdaemon.TrackerDSNKey)
 }
 
 // fromFileArg is one --from-file argument: the Secret key and the operator's
