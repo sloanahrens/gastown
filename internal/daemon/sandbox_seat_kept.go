@@ -16,8 +16,10 @@ import (
 )
 
 // A sandbox seat the daemon keeps for any reason but the jev_rules ask leaves a
-// durable record of the keep: the seat, its bead, the reason the end gave, and
-// when that reason began (gt-464nw6). Until now the keep was a log line only, so
+// durable record of the keep: the seat, its bead, the reason the end gave, when
+// that reason began (gt-464nw6), and the landing facts the end decided with, so
+// the patrol can offer the seat's end again once it has deleted the sandbox
+// that kept it (gt-cz5tdz). Until now the keep was a log line only, so
 // nothing could age it or name it in an attention item. One file per seat under
 // the town's runtime directory. The record is removed when the end decides the
 // seat is no longer kept. The jev_rules keep has its own record
@@ -35,10 +37,15 @@ type KeptSandboxSeat struct {
 }
 
 // keptSandboxSeatRecord is what one file holds. The path is the seat's identity.
+// Landing holds the landing facts the end that kept the seat decided with, so
+// the patrol can offer the seat's end again once it has deleted the sandbox
+// that kept it (gt-cz5tdz). A record written before the facts were kept has
+// none, and the patrol completes no end from it.
 type keptSandboxSeatRecord struct {
-	Bead   string    `json:"bead"`
-	Reason string    `json:"reason"`
-	Since  time.Time `json:"since"`
+	Bead    string              `json:"bead"`
+	Reason  string              `json:"reason"`
+	Since   time.Time           `json:"since"`
+	Landing *sandboxSeatLanding `json:"landing,omitempty"`
 }
 
 // keptSandboxSeatsDir is <town>/.runtime/sandbox-seat-kept.
