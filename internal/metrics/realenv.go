@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 )
@@ -222,7 +223,24 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	for _, rig := range Rigs {
 		beadDirs = append(beadDirs, filepath.Join(town, rig))
 	}
-	beadDirs = append(beadDirs, town, filepath.Join(home, ".claude"))
+	beadDirs = append(beadDirs, town)
+	// The claude workspace is the config dir the town's agents use,
+	// CLAUDE_CONFIG_DIR else home/.claude. It is listed only where it is one: the
+	// pod's own config dir holds no beads database, so handing it to bd would
+	// make the daily run report the whole source as a gap (gt-1z0dia).
+	claudeDir, err := config.ClaudeConfigDirFrom(getenv, func() (string, error) { return home, nil })
+	if err != nil {
+		return real, fmt.Errorf("real env: claude workspace: %w", err)
+	}
+	listed, err := claudeBeadWorkspace(files, claudeDir)
+	if err != nil {
+		return real, fmt.Errorf("real env: claude workspace: %w", err)
+	}
+	if listed {
+		beadDirs = append(beadDirs, claudeDir)
+	} else {
+		unreadable = append(unreadable, claudeSourceName+":"+claudeDir)
+	}
 
 	real.Extract = ExtractEnv{
 		LedgerLines:   ledger,
@@ -243,6 +261,33 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		JevLog:        dispatch.LogPath(town),
 	}
 	return real, nil
+}
+
+// claudeSourceName names the home-level claude workspace in the footer's
+// sources_unreadable, the list a source the wiring could not read is named in.
+const claudeSourceName = "claude"
+
+// claudeBeadWorkspace reports whether dir holds a beads workspace, the .beads
+// directory bd reads beside the beads it lists. A dir holding none is not a
+// source bd can list, and a dir that is not there at all is no source either;
+// both are reported as not a workspace rather than as an error, so the caller
+// can name the source instead of running bd into a failing listing. Any other
+// read failure is returned: an unreadable workspace never passes for an absent
+// one.
+func claudeBeadWorkspace(files RealFiles, dir string) (bool, error) {
+	entries, err := files.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Name == ".beads" && entry.IsDir {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // realBd is the extract's bd seam over the runner: bd in dir, its stdout, and
