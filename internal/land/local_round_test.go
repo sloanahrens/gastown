@@ -15,22 +15,25 @@ import (
 )
 
 // fakeBeadReviewer is the local round's reviewer seam: it keeps every input it
-// is given and answers with the verdict or error the test set. It obeys ctx, so
-// a round under an expired bound gets the deadline back the way the real
-// reviewer gives it.
+// is given and answers with the verdict or error the test set. It ignores ctx
+// on purpose, so a round under an expired bound reaches the deadline only if
+// RunLocalRound enforces the bound itself, not because the fake checked it.
+// onReview runs inside the call, before the verdict is returned, so a test can
+// make the bound expire while the review is in flight.
 type fakeBeadReviewer struct {
-	verdict Verdict
-	err     error
-	seen    []ReviewInput
+	verdict  Verdict
+	err      error
+	onReview func()
+	seen     []ReviewInput
 }
 
-func (f *fakeBeadReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, error) {
+func (f *fakeBeadReviewer) ReviewBead(_ context.Context, in ReviewInput) (Verdict, error) {
 	f.seen = append(f.seen, in)
+	if f.onReview != nil {
+		f.onReview()
+	}
 	if f.err != nil {
 		return Verdict{}, f.err
-	}
-	if err := ctx.Err(); err != nil {
-		return Verdict{}, err
 	}
 	return f.verdict, nil
 }
@@ -102,11 +105,13 @@ func TestRunLocalRoundPropagatesFailure(t *testing.T) {
 	t.Run("context deadline", func(t *testing.T) {
 		t.Parallel()
 		// The caller's bound has already expired: the deadline is in the past,
-		// so the test waits on no wall clock.
+		// so the test waits on no wall clock. The fake ignores ctx and would
+		// answer approve, so only the round's own check of the bound keeps its
+		// findings out.
 		start := time.Now()
 		ctx, cancel := context.WithDeadline(context.Background(), start.Add(-time.Second))
 		defer cancel()
-		r := &fakeBeadReviewer{verdict: Verdict{Verdict: VerdictApprove}}
+		r := &fakeBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Findings: []Finding{{ID: "f-1", Severity: "minor", Title: "late"}}}}
 
 		got, err := RunLocalRound(ctx, r, localRoundInput())
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -114,6 +119,33 @@ func TestRunLocalRoundPropagatesFailure(t *testing.T) {
 		}
 		if got != nil {
 			t.Errorf("RunLocalRound findings = %+v under an expired bound, want none", got)
+		}
+		if len(r.seen) != 0 {
+			t.Errorf("reviewer called %d times under an expired bound, want 0", len(r.seen))
+		}
+	})
+
+	t.Run("bound expires during the review", func(t *testing.T) {
+		t.Parallel()
+		// The review starts under a live bound and the fake cancels it before
+		// answering, the way a slow om outlives the caller's timeout: its
+		// findings are too late to be trusted.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r := &fakeBeadReviewer{
+			verdict:  Verdict{Verdict: VerdictApprove, Findings: []Finding{{ID: "f-1", Severity: "minor", Title: "late"}}},
+			onReview: cancel,
+		}
+
+		got, err := RunLocalRound(ctx, r, localRoundInput())
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunLocalRound error = %v, want context.Canceled", err)
+		}
+		if got != nil {
+			t.Errorf("RunLocalRound findings = %+v after the bound expired, want none", got)
+		}
+		if len(r.seen) != 1 {
+			t.Errorf("reviewer called %d times, want 1", len(r.seen))
 		}
 	})
 }
@@ -131,10 +163,54 @@ func TestRunLocalRoundRefusesNoReviewer(t *testing.T) {
 	}
 }
 
+// TestRunLocalRoundRefusesTypedNilReviewer: an interface holding a nil pointer
+// is a missing reviewer too, not a call into a nil receiver.
+func TestRunLocalRoundRefusesTypedNilReviewer(t *testing.T) {
+	t.Parallel()
+	var r *fakeBeadReviewer
+
+	got, err := RunLocalRound(context.Background(), r, localRoundInput())
+	if err == nil || got != nil {
+		t.Fatalf("RunLocalRound with a typed-nil reviewer = %+v, %v; want no findings and an error", got, err)
+	}
+	if !strings.Contains(err.Error(), "reviewer") {
+		t.Errorf("RunLocalRound error = %q, want it to name the missing reviewer", err)
+	}
+}
+
+// localRoundNames is every identifier RunLocalRound may name: its parameters,
+// results and locals, the helper that refuses a missing reviewer, and the
+// standard-library names those need. An identifier outside it — a verdict store,
+// the review log, the rounds ledger, or any symbol added later — fails the test
+// until it is deliberately added here, so a store cannot reach the round by a
+// name this list has never heard of.
+var localRoundNames = map[string]bool{
+	"RunLocalRound": true,
+	"ctx":           true,
+	"r":             true,
+	"in":            true,
+	"v":             true,
+	"err":           true,
+	"context":       true,
+	"Context":       true,
+	"BeadReviewer":  true,
+	"ReviewInput":   true,
+	"Finding":       true,
+	"error":         true,
+	"nil":           true,
+	"isNilReviewer": true,
+	"errors":        true,
+	"New":           true,
+	"Err":           true,
+	"ReviewBead":    true,
+	"Findings":      true,
+}
+
 // TestRunLocalRoundTakesNoStores: the round is a preview, so the verdict store,
 // the review log and the rounds ledger are outside it. The signature admits
-// only ctx, the reviewer and the ReviewInput, and no symbol in the function's
-// declaration names one of the three.
+// only ctx, the reviewer and the ReviewInput, and every identifier in the
+// function's declaration is one the preview's own allowlist names, so gaining
+// access to a store takes an edit here.
 func TestRunLocalRoundTakesNoStores(t *testing.T) {
 	t.Parallel()
 	fset := token.NewFileSet()
@@ -161,13 +237,22 @@ func TestRunLocalRoundTakesNoStores(t *testing.T) {
 		t.Errorf("RunLocalRound results = %v, want %v", got, want)
 	}
 
-	for _, name := range []string{"VerdictStore", "ReviewsFile", "RoundsLedger"} {
-		ast.Inspect(decl, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == name {
-				t.Errorf("RunLocalRound names %s at %s; the local round writes no verdict, review-log record or ledger round", name, fset.Position(id.Pos()))
-			}
+	seen := map[string]bool{}
+	ast.Inspect(decl, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok {
 			return true
-		})
+		}
+		seen[id.Name] = true
+		if !localRoundNames[id.Name] {
+			t.Errorf("RunLocalRound names %s at %s; the local round writes no verdict, review-log record or ledger round, so add the name to localRoundNames only if it reaches no store", id.Name, fset.Position(id.Pos()))
+		}
+		return true
+	})
+	for name := range localRoundNames {
+		if !seen[name] {
+			t.Errorf("localRoundNames entry %q matches no identifier; remove it so it cannot silently allow a future symbol", name)
+		}
 	}
 }
 
