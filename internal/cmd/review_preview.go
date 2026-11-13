@@ -305,11 +305,29 @@ func runReviewPreview(cmd *cobra.Command, _ []string) error {
 // command passes callercwd.Require; a test passes a resolver that fails, so the
 // refusal runs with no git and no bd.
 func runReviewPreviewFrom(resolve func() (string, error), out, errOut io.Writer) error {
+	return runReviewPreviewFromWith(resolve, out, errOut, reviewPreviewProductionBuild)
+}
+
+// reviewPreviewBuild builds the preview's dependencies for the directory cwd.
+type reviewPreviewBuild func(cwd string, out, errOut io.Writer) reviewPreviewDeps
+
+// runReviewPreviewFromWith runs the preview on the dependencies build makes for
+// the resolved directory. Tests pass a build over fakes, so the success path
+// runs with no git, no bd and no sleep; production passes
+// reviewPreviewProductionBuild.
+func runReviewPreviewFromWith(resolve func() (string, error), out, errOut io.Writer, build reviewPreviewBuild) error {
 	cwd, err := resolve()
 	if err != nil {
 		return reviewPreviewGiveUp(errOut, fmt.Sprintf("no working directory: %v", err))
 	}
-	return runReviewPreviewAt(reviewPreviewDeps{
+	return runReviewPreviewAt(build(cwd, out, errOut))
+}
+
+// reviewPreviewProductionBuild builds the git and the bd store a preview runs on
+// in a real worktree. Both are bound to cwd, the directory the caller's shell is
+// in, and the clock is the wall clock the wait is measured on.
+func reviewPreviewProductionBuild(cwd string, out, errOut io.Writer) reviewPreviewDeps {
+	return reviewPreviewDeps{
 		out:      out,
 		errOut:   errOut,
 		repo:     git.NewGit(cwd),
@@ -318,7 +336,7 @@ func runReviewPreviewFrom(resolve func() (string, error), out, errOut io.Writer)
 		now:      time.Now,
 		wait:     reviewPreviewWait,
 		interval: reviewPreviewPollEvery,
-	})
+	}
 }
 
 // runReviewPreviewAt wires the branch to its work bead and head, then runs the

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -521,6 +524,106 @@ func TestReviewPreviewWiresBranchHeadAndBead(t *testing.T) {
 				t.Errorf("stderr = %q, want none", stderr.String())
 			}
 		})
+	}
+}
+
+// TestReviewPreviewBuildsForTheResolvedDirectory drives the success path
+// runReviewPreviewFrom delegates to: the resolved directory is the one the
+// dependencies are built for, and the round on them is reported.
+func TestReviewPreviewBuildsForTheResolvedDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	repo := &fakePreviewRepo{branch: previewBranch, head: previewHead, originTip: previewHead}
+	store := &fakePreviewStore{issues: map[string]*beads.Issue{
+		"gt-jx66mp": {ID: "gt-jx66mp", Notes: previewRequest + "\n" + previewBlock(previewHead)},
+	}}
+	var built []string
+	var stdout, stderr bytes.Buffer
+
+	err := runReviewPreviewFromWith(
+		func() (string, error) { return dir, nil },
+		&stdout, &stderr,
+		func(cwd string, out, errOut io.Writer) reviewPreviewDeps {
+			built = append(built, cwd)
+			return reviewPreviewDeps{
+				out:    out,
+				errOut: errOut,
+				repo:   repo,
+				store:  store,
+				poll: func(time.Duration) {
+					t.Errorf("poll ran: the round on the bead answers the request at once")
+				},
+				now:      time.Now,
+				wait:     reviewPreviewWait,
+				interval: reviewPreviewPollEvery,
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("runReviewPreviewFromWith() = %v, want nil", err)
+	}
+	if len(built) != 1 || built[0] != dir {
+		t.Fatalf("built for %q, want the resolved directory %s once", built, dir)
+	}
+	if !strings.Contains(stdout.String(), "f1 major internal/cmd/review_preview.go:42 poll never ends") {
+		t.Errorf("stdout = %q, want the findings of the round on the bead", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want none", stderr.String())
+	}
+}
+
+// TestReviewPreviewProductionBuildBindsItsDirectory runs the production
+// constructor on a directory and on a second one: the git it builds reads the
+// branch of the first, and the bd store it builds reads that directory's beads.
+func TestReviewPreviewProductionBuildBindsItsDirectory(t *testing.T) {
+	t.Parallel()
+	work := t.TempDir()
+	writePreviewGitCheckout(t, work, previewBranch)
+	if err := os.MkdirAll(filepath.Join(work, ".beads"), 0o755); err != nil {
+		t.Fatalf("create the beads directory: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	d := reviewPreviewProductionBuild(work, &stdout, &stderr)
+	branch, err := d.repo.CurrentBranch()
+	if err != nil || branch != previewBranch {
+		t.Errorf("current branch = %q, %v, want %s: the git is not bound to %s", branch, err, previewBranch, work)
+	}
+	store, ok := d.store.(*beads.Beads)
+	if !ok {
+		t.Fatalf("store = %T, want the bd store", d.store)
+	}
+	if !store.IsBeadsRepo() {
+		t.Errorf("the bd store does not read %s: it finds no beads there", work)
+	}
+
+	elsewhere := t.TempDir()
+	otherDeps := reviewPreviewProductionBuild(elsewhere, &stdout, &stderr)
+	other, ok := otherDeps.store.(*beads.Beads)
+	if !ok {
+		t.Fatalf("store = %T, want the bd store", otherDeps.store)
+	}
+	if other.IsBeadsRepo() {
+		t.Errorf("the bd store built for %s reads a directory with beads, want its own empty one", elsewhere)
+	}
+}
+
+// writePreviewGitCheckout writes the files git reads for a plain checkout on
+// branch at dir, so CurrentBranch answers without spawning git.
+func writePreviewGitCheckout(t *testing.T, dir, branch string) {
+	t.Helper()
+	ref := filepath.Join(dir, ".git", "refs", "heads", filepath.FromSlash(branch))
+	if err := os.MkdirAll(filepath.Dir(ref), 0o755); err != nil {
+		t.Fatalf("create the branch ref directory: %v", err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(dir, ".git", "HEAD"): "ref: refs/heads/" + branch + "\n",
+		ref:                                previewHead + "\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
 	}
 }
 
