@@ -2037,7 +2037,10 @@ func TestEnsureMetadataDropsTheDeprecatedPort(t *testing.T) {
 		"dolt_server_port": 13729,
 		"project_id":       "keep-me",
 	}
-	data, _ := json.Marshal(carrying)
+	data, err := json.Marshal(carrying)
+	if err != nil {
+		t.Fatal(err)
+	}
 	metaPath := filepath.Join(beadsDir, "metadata.json")
 	if err := os.WriteFile(metaPath, data, 0600); err != nil {
 		t.Fatal(err)
