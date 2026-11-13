@@ -2,16 +2,16 @@ package bdgateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 )
@@ -31,37 +31,39 @@ func writeTokenFile(t *testing.T, dir, name, content string, mode os.FileMode) s
 	return path
 }
 
-// TestAuthTokens is the acceptance criterion that a valid token resolves to its
-// class and caller, and that an unknown or empty token is 401.
+// TestAuthTokens is the acceptance criterion that a valid token resolves to the
+// class and caller its file name gives, and that an unknown or empty token is
+// 401. The caller comes from the token file, so a token cannot speak as a
+// caller whose file it is not.
 func TestAuthTokens(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeTokenFile(t, dir, "read.token", "read-token\n", 0o600)
-	writeTokenFile(t, dir, "daemon.token", "daemon-token\n", 0o600)
-	writeTokenFile(t, dir, "operator.token", "operator-token\n", 0o600)
+	writeTokenFile(t, dir, "read.oncall-dashboard.token", "read-token\n", 0o600)
+	writeTokenFile(t, dir, "daemon.landing-worker.token", "daemon-token\n", 0o600)
+	writeTokenFile(t, dir, "operator.mac-wrapper.token", "operator-token\n", 0o600)
 	auth, err := NewAuthenticator(dir)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	tests := []struct {
-		name      string
-		header    string
-		caller    string
-		wantClass Class
-		wantErr   error
+		name    string
+		header  string
+		want    Identity
+		wantErr error
 	}{
-		{"read token", "Bearer read-token", "dashboard", ClassRead, nil},
-		{"daemon token", "Bearer daemon-token", "daemon.spec-tick", ClassDaemon, nil},
-		{"operator token", "Bearer operator-token", "mac.sloan-shell", ClassOperator, nil},
-		{"no header", "", "dashboard", "", ErrNoToken},
-		{"bearer with no token", "Bearer ", "dashboard", "", ErrNoToken},
-		{"another scheme", "Basic dXNlcjpwYXNz", "dashboard", "", ErrNoToken},
-		{"unknown token", "Bearer not-a-token", "dashboard", "", ErrUnknownToken},
-		{"prefix of a valid token", "Bearer read", "dashboard", "", ErrUnknownToken},
+		{"read token", "Bearer read-token", Identity{ClassRead, "oncall-dashboard"}, nil},
+		{"daemon token", "Bearer daemon-token", Identity{ClassDaemon, "landing-worker"}, nil},
+		{"operator token", "Bearer operator-token", Identity{ClassOperator, "mac-wrapper"}, nil},
+		{"no header", "", Identity{}, ErrNoToken},
+		{"bearer with no token", "Bearer ", Identity{}, ErrNoToken},
+		{"another scheme", "Basic dXNlcjpwYXNz", Identity{}, ErrNoToken},
+		{"unknown token", "Bearer not-a-token", Identity{}, ErrUnknownToken},
+		{"prefix of a valid token", "Bearer read", Identity{}, ErrUnknownToken},
+		{"a caller name is not a token", "Bearer oncall-dashboard", Identity{}, ErrUnknownToken},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := auth.Authenticate(tt.header, tt.caller)
+			got, err := auth.Authenticate(tt.header)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("Authenticate(%q) error = %v, want %v", tt.header, err, tt.wantErr)
@@ -74,11 +76,8 @@ func TestAuthTokens(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Authenticate(%q): %v", tt.header, err)
 			}
-			if got.Class != tt.wantClass {
-				t.Errorf("class = %q, want %q", got.Class, tt.wantClass)
-			}
-			if got.Caller != tt.caller {
-				t.Errorf("caller = %q, want %q", got.Caller, tt.caller)
+			if got != tt.want {
+				t.Errorf("Authenticate(%q) = %+v, want %+v", tt.header, got, tt.want)
 			}
 		})
 	}
@@ -105,13 +104,13 @@ func TestAuthModeRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeTokenFile(t, dir, "read.token", token+"\n", tt.mode)
+			writeTokenFile(t, dir, "read.dashboard.token", token+"\n", tt.mode)
 			auth, err := NewAuthenticator(dir)
 			if tt.wantErr == nil {
 				if err != nil {
 					t.Fatalf("NewAuthenticator: %v", err)
 				}
-				if _, err := auth.Authenticate("Bearer "+token, "dashboard"); err != nil {
+				if _, err := auth.Authenticate("Bearer " + token); err != nil {
 					t.Errorf("Authenticate with a 0600 file: %v", err)
 				}
 				return
@@ -122,7 +121,7 @@ func TestAuthModeRefused(t *testing.T) {
 			if strings.Contains(err.Error(), token) {
 				t.Errorf("error names the token: %v", err)
 			}
-			if !strings.Contains(err.Error(), "read.token") {
+			if !strings.Contains(err.Error(), "read.dashboard.token") {
 				t.Errorf("error does not name the file: %v", err)
 			}
 			if !strings.Contains(err.Error(), fmt.Sprintf("%04o", tt.mode)) {
@@ -132,98 +131,242 @@ func TestAuthModeRefused(t *testing.T) {
 	}
 }
 
-// TestAuthConstantTime is the acceptance criterion that the comparison uses
-// crypto/subtle.ConstantTimeCompare, asserted by a test that fails if the
-// compare is replaced. Constant time is not observable from outside the
-// process, so the test pins the call in TokenTable.Lookup, where the compare
-// lives: replacing it with == makes this test fail.
-func TestAuthConstantTime(t *testing.T) {
+// TestAuthTokenComparisonUsesDigests is the constant-time criterion as far as a
+// test can observe it: every comparison runs over two SHA-256 digests, so the
+// operands are a fixed 32 bytes whatever length the presented token has. A
+// comparison over raw tokens would pass on the presented token's length, and
+// the duration of such a compare leaks it.
+func TestAuthTokenComparisonUsesDigests(t *testing.T) {
 	t.Parallel()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "auth.go", nil, 0)
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "stored-token\n", 0o600)
+	table, err := LoadTokens(dir)
 	if err != nil {
-		t.Fatalf("parse auth.go: %v", err)
+		t.Fatalf("LoadTokens: %v", err)
 	}
-	var lookup *ast.FuncDecl
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "Lookup" || fn.Recv == nil || len(fn.Recv.List) != 1 {
-			continue
-		}
-		recv := fn.Recv.List[0].Type
-		if star, ok := recv.(*ast.StarExpr); ok {
-			recv = star.X
-		}
-		if ident, ok := recv.(*ast.Ident); ok && ident.Name == "TokenTable" {
-			lookup = fn
-		}
+	type operands struct{ stored, presented int }
+	var seen []operands
+	table.compare = func(a, b []byte) int {
+		seen = append(seen, operands{stored: len(a), presented: len(b)})
+		return subtle.ConstantTimeCompare(a, b)
 	}
-	if lookup == nil {
-		t.Fatal("auth.go has no TokenTable.Lookup method to pin")
+	tokens := []string{"s", strings.Repeat("x", sha256.Size), strings.Repeat("y", 1000), "stored-token"}
+	for _, token := range tokens {
+		table.Lookup(token)
 	}
-	found := false
-	ast.Inspect(lookup.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	if want := len(tokens) * len(table.entries); len(seen) != want {
+		t.Fatalf("Lookup ran %d comparisons over %d lookups, want %d (one per entry, no early return)", len(seen), len(tokens), want)
+	}
+	for i, op := range seen {
+		if op.stored != sha256.Size || op.presented != sha256.Size {
+			t.Errorf("comparison %d got operands of %d and %d bytes, want %d and %d: the token's length is leaking into the compare",
+				i, op.stored, op.presented, sha256.Size, sha256.Size)
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		if ok && pkg.Name == "subtle" && sel.Sel.Name == "ConstantTimeCompare" {
-			found = true
-		}
-		return true
-	})
-	if !found {
-		t.Fatal("TokenTable.Lookup does not call subtle.ConstantTimeCompare; a token compare that can exit on the first differing byte leaks how much matched")
 	}
 }
 
-// TestAuthReload is the acceptance criterion that a reload swaps the table
-// atomically: a token removed by the reload is 401 on its next request, and a
-// request that authenticated before the reload finishes on the identity it
-// already holds.
-func TestAuthReload(t *testing.T) {
+// TestAuthTokenMismatchRefused checks a token is accepted only when every byte
+// matches: one changed byte at any position, an extra byte, a missing byte and
+// a changed case are all unknown tokens.
+func TestAuthTokenMismatchRefused(t *testing.T) {
 	t.Parallel()
+	const token = "0123456789abcdef0123456789abcdef"
 	dir := t.TempDir()
-	writeTokenFile(t, dir, "read.token", "old-token\n", 0o600)
+	writeTokenFile(t, dir, "read.dashboard.token", token+"\n", 0o600)
 	auth, err := NewAuthenticator(dir)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	inFlight, err := auth.Authenticate("Bearer old-token", "dashboard")
+	if _, err := auth.Authenticate("Bearer " + token); err != nil {
+		t.Fatalf("the exact token is refused: %v", err)
+	}
+	flip := func(at int, b byte) string {
+		mutated := []byte(token)
+		mutated[at] = b
+		return string(mutated)
+	}
+	mutations := map[string]string{
+		"prefix":            token[:len(token)-1],
+		"suffix":            token[1:],
+		"one byte appended": token + "0",
+		"case changed":      strings.ToUpper(token),
+	}
+	for at := 0; at < len(token); at++ {
+		mutations[fmt.Sprintf("byte %d flipped", at)] = flip(at, token[at]^0xff)
+	}
+	for name, mutated := range mutations {
+		t.Run(name, func(t *testing.T) {
+			if _, err := auth.Authenticate("Bearer " + mutated); !errors.Is(err, ErrUnknownToken) {
+				t.Errorf("Authenticate(%q) error = %v, want ErrUnknownToken", mutated, err)
+			}
+		})
+	}
+}
+
+// TestAuthReload is the acceptance criterion that a reload swaps the table: a
+// token the reload removed is 401 on its next request, the new token works, and
+// an identity handed out before the reload still authorizes its call.
+func TestAuthReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "old-token\n", 0o600)
+	auth, err := NewAuthenticator(dir)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	verified, err := auth.Authenticate("Bearer old-token")
 	if err != nil {
 		t.Fatalf("Authenticate before the reload: %v", err)
 	}
 
-	writeTokenFile(t, dir, "read.token", "new-token\n", 0o600)
+	writeTokenFile(t, dir, "read.dashboard.token", "new-token\n", 0o600)
 	if err := auth.HandleSignal(syscall.SIGHUP); err != nil {
 		t.Fatalf("HandleSignal(SIGHUP): %v", err)
 	}
 
-	if err := inFlight.Require(ClassRead); err != nil {
-		t.Errorf("the identity a request authenticated with before the reload no longer authorizes its call: %v", err)
+	if err := verified.Require(ClassRead); err != nil {
+		t.Errorf("the identity a request verified before the reload no longer authorizes its call: %v", err)
 	}
-	if _, err := auth.Authenticate("Bearer old-token", "dashboard"); !errors.Is(err, ErrUnknownToken) {
+	if _, err := auth.Authenticate("Bearer old-token"); !errors.Is(err, ErrUnknownToken) {
 		t.Errorf("removed token's next request error = %v, want ErrUnknownToken", err)
 	}
-	got, err := auth.Authenticate("Bearer new-token", "dashboard")
+	got, err := auth.Authenticate("Bearer new-token")
 	if err != nil {
 		t.Fatalf("new token after the reload: %v", err)
 	}
-	if got.Class != ClassRead {
-		t.Errorf("new token class = %q, want %q", got.Class, ClassRead)
+	if got != (Identity{ClassRead, "dashboard"}) {
+		t.Errorf("new token identity = %+v, want the read/dashboard file's identity", got)
 	}
 
-	writeTokenFile(t, dir, "read.token", "third-token\n", 0o600)
+	writeTokenFile(t, dir, "read.dashboard.token", "third-token\n", 0o600)
 	if err := auth.HandleSignal(syscall.SIGTERM); err != nil {
 		t.Fatalf("HandleSignal(SIGTERM): %v", err)
 	}
-	if _, err := auth.Authenticate("Bearer new-token", "dashboard"); err != nil {
+	if _, err := auth.Authenticate("Bearer new-token"); err != nil {
 		t.Errorf("SIGTERM reloaded the table; only SIGHUP should: %v", err)
+	}
+}
+
+// TestAuthReloadInFlightRequest is the acceptance criterion that an in-flight
+// request finishes: a request paused inside the comparison of the table it
+// loaded returns that table's identity after a reload has swapped in a table
+// that no longer holds its token.
+func TestAuthReloadInFlightRequest(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "old-token\n", 0o600)
+	auth, err := NewAuthenticator(dir)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	loaded := auth.table.Load()
+	loaded.compare = func(a, b []byte) int {
+		close(entered)
+		<-release
+		return subtle.ConstantTimeCompare(a, b)
+	}
+
+	type result struct {
+		identity Identity
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		identity, err := auth.Authenticate("Bearer old-token")
+		done <- result{identity: identity, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-t.Context().Done():
+		t.Fatal("the in-flight request never reached the token comparison")
+	}
+
+	writeTokenFile(t, dir, "read.dashboard.token", "new-token\n", 0o600)
+	if err := auth.Reload(); err != nil {
+		t.Fatalf("Reload while a request is in flight: %v", err)
+	}
+	unblock()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-t.Context().Done():
+		t.Fatal("the in-flight request did not finish after the reload")
+	}
+	if got.err != nil {
+		t.Fatalf("the in-flight request failed after the reload: %v", got.err)
+	}
+	if want := (Identity{ClassRead, "dashboard"}); got.identity != want {
+		t.Errorf("the in-flight request returned %+v, want %+v", got.identity, want)
+	}
+	if _, err := auth.Authenticate("Bearer old-token"); !errors.Is(err, ErrUnknownToken) {
+		t.Errorf("removed token's next request error = %v, want ErrUnknownToken", err)
+	}
+}
+
+// TestAuthRequestDuringReload is the other half of the atomic swap: a request
+// that arrives while a reload is still reading the directory is served by the
+// table the reload has not yet replaced, and the swap lands whole afterwards.
+func TestAuthRequestDuringReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTokenFile(t, dir, "read.dashboard.token", "old-token\n", 0o600)
+	auth, err := NewAuthenticator(dir)
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	writeTokenFile(t, dir, "read.dashboard.token", "new-token\n", 0o600)
+
+	reading := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	auth.fs.readFile = func(path string) ([]byte, error) {
+		close(reading)
+		<-release
+		return os.ReadFile(path)
+	}
+	reloaded := make(chan error, 1)
+	go func() { reloaded <- auth.Reload() }()
+	select {
+	case <-reading:
+	case <-t.Context().Done():
+		t.Fatal("the reload never reached the token file")
+	}
+
+	got, err := auth.Authenticate("Bearer old-token")
+	if err != nil {
+		t.Fatalf("a request during the reload: %v", err)
+	}
+	if want := (Identity{ClassRead, "dashboard"}); got != want {
+		t.Errorf("a request during the reload returned %+v, want %+v", got, want)
+	}
+
+	unblock()
+	select {
+	case err := <-reloaded:
+		if err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+	case <-t.Context().Done():
+		t.Fatal("the reload did not finish")
+	}
+	if _, err := auth.Authenticate("Bearer old-token"); !errors.Is(err, ErrUnknownToken) {
+		t.Errorf("removed token's next request error = %v, want ErrUnknownToken", err)
+	}
+	got, err = auth.Authenticate("Bearer new-token")
+	if err != nil {
+		t.Fatalf("new token after the reload: %v", err)
+	}
+	if want := (Identity{ClassRead, "dashboard"}); got != want {
+		t.Errorf("new token identity = %+v, want %+v", got, want)
 	}
 }
 
@@ -233,7 +376,7 @@ func TestAuthReload(t *testing.T) {
 func TestAuthReloadFailureKeepsTable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := writeTokenFile(t, dir, "read.token", "read-token\n", 0o600)
+	path := writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o600)
 	auth, err := NewAuthenticator(dir)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
@@ -244,7 +387,7 @@ func TestAuthReloadFailureKeepsTable(t *testing.T) {
 	if err := auth.HandleSignal(syscall.SIGHUP); !errors.Is(err, ErrTokenFileMode) {
 		t.Fatalf("HandleSignal(SIGHUP) error = %v, want ErrTokenFileMode", err)
 	}
-	if _, err := auth.Authenticate("Bearer read-token", "dashboard"); err != nil {
+	if _, err := auth.Authenticate("Bearer read-token"); err != nil {
 		t.Errorf("the old table stopped serving after a failed reload: %v", err)
 	}
 }
@@ -254,12 +397,12 @@ func TestAuthReloadFailureKeepsTable(t *testing.T) {
 func TestAuthWatchSignals(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeTokenFile(t, dir, "read.token", "old-token\n", 0o600)
+	writeTokenFile(t, dir, "read.dashboard.token", "old-token\n", 0o600)
 	auth, err := NewAuthenticator(dir)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	writeTokenFile(t, dir, "read.token", "new-token\n", 0o600)
+	writeTokenFile(t, dir, "read.dashboard.token", "new-token\n", 0o600)
 
 	var reports []error
 	sig := make(chan os.Signal, 2)
@@ -271,10 +414,10 @@ func TestAuthWatchSignals(t *testing.T) {
 	if len(reports) != 0 {
 		t.Fatalf("WatchSignals reported %d error(s): %v", len(reports), reports)
 	}
-	if _, err := auth.Authenticate("Bearer old-token", "dashboard"); !errors.Is(err, ErrUnknownToken) {
+	if _, err := auth.Authenticate("Bearer old-token"); !errors.Is(err, ErrUnknownToken) {
 		t.Errorf("SIGHUP from WatchSignals did not reload: old token error = %v", err)
 	}
-	if _, err := auth.Authenticate("Bearer new-token", "dashboard"); err != nil {
+	if _, err := auth.Authenticate("Bearer new-token"); err != nil {
 		t.Errorf("new token after WatchSignals reload: %v", err)
 	}
 }
@@ -284,7 +427,7 @@ func TestAuthWatchSignals(t *testing.T) {
 func TestAuthWatchSignalsReportsReloadFailure(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := writeTokenFile(t, dir, "read.token", "read-token\n", 0o600)
+	path := writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o600)
 	auth, err := NewAuthenticator(dir)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
@@ -302,7 +445,7 @@ func TestAuthWatchSignalsReportsReloadFailure(t *testing.T) {
 	if len(reports) != 1 || !errors.Is(reports[0], ErrTokenFileMode) {
 		t.Fatalf("WatchSignals reported %v, want one ErrTokenFileMode", reports)
 	}
-	if _, err := auth.Authenticate("Bearer read-token", "dashboard"); err != nil {
+	if _, err := auth.Authenticate("Bearer read-token"); err != nil {
 		t.Errorf("the old table stopped serving after a reported reload failure: %v", err)
 	}
 }
@@ -311,7 +454,7 @@ func TestAuthWatchSignalsReportsReloadFailure(t *testing.T) {
 func TestAuthWatchSignalsContext(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeTokenFile(t, dir, "read.token", "read-token\n", 0o600)
+	writeTokenFile(t, dir, "read.dashboard.token", "read-token\n", 0o600)
 	auth, err := NewAuthenticator(dir)
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
@@ -324,6 +467,43 @@ func TestAuthWatchSignalsContext(t *testing.T) {
 		auth.WatchSignals(ctx, make(chan os.Signal), nil)
 	}()
 	<-done
+}
+
+// TestAuthCallerLengthBound is the boundary of the caller part of a token file
+// name: 64 bytes is a caller, 65 is refused as a file name.
+func TestAuthCallerLengthBound(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		caller  string
+		wantErr error
+	}{
+		{"64 byte caller", strings.Repeat("a", maxCallerBytes), nil},
+		{"65 byte caller", strings.Repeat("a", maxCallerBytes+1), ErrTokenFileName},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTokenFile(t, dir, "read."+tt.caller+".token", "read-token\n", 0o600)
+			auth, err := NewAuthenticator(dir)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("NewAuthenticator error = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewAuthenticator: %v", err)
+			}
+			got, err := auth.Authenticate("Bearer read-token")
+			if err != nil {
+				t.Fatalf("Authenticate: %v", err)
+			}
+			if got.Caller != tt.caller {
+				t.Errorf("caller = %q, want the file name's %q", got.Caller, tt.caller)
+			}
+		})
+	}
 }
 
 // TestAuthLoaderRefusals drives every refusal branch of the token directory
@@ -373,17 +553,62 @@ func TestAuthLoaderRefusals(t *testing.T) {
 			name: "unknown class in the file name",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				writeTokenFile(t, dir, "admin.token", "admin-token\n", 0o600)
+				writeTokenFile(t, dir, "admin.dashboard.token", "admin-token\n", 0o600)
 				return dir
 			},
 			wantErr: ErrUnknownClass,
+		},
+		{
+			name: "file name with no caller",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTokenFile(t, dir, "read.token", "read-token\n", 0o600)
+				return dir
+			},
+			wantErr: ErrTokenFileName,
+		},
+		{
+			name: "file name with an empty caller",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTokenFile(t, dir, "read..token", "read-token\n", 0o600)
+				return dir
+			},
+			wantErr: ErrTokenFileName,
+		},
+		{
+			name: "caller with a space",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTokenFile(t, dir, "read.dash board.token", "read-token\n", 0o600)
+				return dir
+			},
+			wantErr: ErrTokenFileName,
+		},
+		{
+			name: "caller with a dot",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTokenFile(t, dir, "read.dash.board.token", "read-token\n", 0o600)
+				return dir
+			},
+			wantErr: ErrTokenFileName,
+		},
+		{
+			name: "caller with an uppercase letter",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTokenFile(t, dir, "read.Dashboard.token", "read-token\n", 0o600)
+				return dir
+			},
+			wantErr: ErrTokenFileName,
 		},
 		{
 			name: "token file is a symlink",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				target := writeTokenFile(t, t.TempDir(), "real-token", "read-token\n", 0o600)
-				if err := os.Symlink(target, filepath.Join(dir, "read.token")); err != nil {
+				if err := os.Symlink(target, filepath.Join(dir, "read.dashboard.token")); err != nil {
 					t.Fatalf("symlink: %v", err)
 				}
 				return dir
@@ -394,7 +619,7 @@ func TestAuthLoaderRefusals(t *testing.T) {
 			name: "token file is a directory",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				if err := os.Mkdir(filepath.Join(dir, "read.token"), 0o700); err != nil {
+				if err := os.Mkdir(filepath.Join(dir, "read.dashboard.token"), 0o700); err != nil {
 					t.Fatalf("mkdir: %v", err)
 				}
 				return dir
@@ -405,7 +630,7 @@ func TestAuthLoaderRefusals(t *testing.T) {
 			name: "empty token file",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				writeTokenFile(t, dir, "read.token", "", 0o600)
+				writeTokenFile(t, dir, "read.dashboard.token", "", 0o600)
 				return dir
 			},
 			wantErr: ErrEmptyToken,
@@ -414,17 +639,17 @@ func TestAuthLoaderRefusals(t *testing.T) {
 			name: "whitespace-only token file",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				writeTokenFile(t, dir, "read.token", " \n\t\n", 0o600)
+				writeTokenFile(t, dir, "read.dashboard.token", " \n\t\n", 0o600)
 				return dir
 			},
 			wantErr: ErrEmptyToken,
 		},
 		{
-			name: "two classes holding the same token",
+			name: "two files holding the same token",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				writeTokenFile(t, dir, "daemon.token", "shared-token\n", 0o600)
-				writeTokenFile(t, dir, "operator.token", "shared-token\n", 0o600)
+				writeTokenFile(t, dir, "daemon.alpha.token", "shared-token\n", 0o600)
+				writeTokenFile(t, dir, "operator.beta.token", "shared-token\n", 0o600)
 				return dir
 			},
 			wantErr: ErrDuplicateToken,
@@ -464,7 +689,7 @@ func TestAuthLoaderIOFailures(t *testing.T) {
 		t.Fatalf("stat a 0600 file: %v", err)
 	}
 	oneEntry := func(string) ([]os.DirEntry, error) {
-		return []os.DirEntry{fakeDirEntry{name: "read.token"}}, nil
+		return []os.DirEntry{fakeDirEntry{name: "read.dashboard.token"}}, nil
 	}
 
 	tests := []struct {
@@ -530,7 +755,7 @@ func TestAuthLoaderIOFailures(t *testing.T) {
 func TestAuthZeroValueRefuses(t *testing.T) {
 	t.Parallel()
 	var auth Authenticator
-	if _, err := auth.Authenticate("Bearer anything", "caller"); !errors.Is(err, ErrUnknownToken) {
+	if _, err := auth.Authenticate("Bearer anything"); !errors.Is(err, ErrUnknownToken) {
 		t.Errorf("zero Authenticator error = %v, want ErrUnknownToken", err)
 	}
 }

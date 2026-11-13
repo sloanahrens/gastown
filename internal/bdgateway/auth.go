@@ -2,6 +2,7 @@ package bdgateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -60,10 +61,8 @@ func ParseClass(name string) (Class, error) {
 	return c, nil
 }
 
-// Identity is what a request's bearer token authenticates to: the token's
-// class, and the caller's own name from the X-Gt-Caller header. Caller is free
-// text (docs/design/bd-container.md, "The call log"), so only Class decides
-// what the request may run.
+// Identity is what a bearer token authenticates to, both halves read from the
+// token's file name (docs/design/bd-container.md, "Token classes").
 type Identity struct {
 	Class  Class
 	Caller string
@@ -90,9 +89,13 @@ var (
 	ErrUnknownToken = errors.New("bdgateway: unknown bearer token")
 	// ErrForbidden is Require's refusal of a class that may not run the call.
 	ErrForbidden = errors.New("bdgateway: class may not run this call")
-	// ErrUnknownClass is LoadTokens' refusal of a token file whose name is not
-	// one of the classes.
+	// ErrUnknownClass is LoadTokens' refusal of a token file name whose class
+	// part is not one of the classes.
 	ErrUnknownClass = errors.New("bdgateway: unknown token class")
+	// ErrTokenFileName is LoadTokens' refusal of a token file name that is not
+	// <class>.<caller>.token, or whose caller is not 1 to 64 lowercase letters,
+	// digits, '-' or '_'.
+	ErrTokenFileName = errors.New("bdgateway: token file name must be <class>.<caller>.token")
 	// ErrTokenDir is LoadTokens' refusal of a directory it cannot list: missing,
 	// not a directory, or a symlink.
 	ErrTokenDir = errors.New("bdgateway: token directory is not usable")
@@ -105,8 +108,8 @@ var (
 	// ErrEmptyToken is LoadTokens' refusal of a file that holds no token.
 	ErrEmptyToken = errors.New("bdgateway: token file holds no token")
 	// ErrDuplicateToken is LoadTokens' refusal of two files holding the same
-	// token: a token must name one class, or the class it resolves to would
-	// depend on file order.
+	// token: a token must name one identity, or which class and caller it
+	// resolves to would depend on file order.
 	ErrDuplicateToken = errors.New("bdgateway: two token files hold the same token")
 	// ErrNoTokens is LoadTokens' refusal of a directory holding no token file.
 	// An authenticator with no tokens refuses every request, so the gateway
@@ -114,16 +117,29 @@ var (
 	ErrNoTokens = errors.New("bdgateway: token directory holds no tokens")
 )
 
-// TokenTable is one immutable snapshot of the token directory: one token per
-// class, each read from a `<class>.token` file.
+// TokenTable is one immutable snapshot of the token directory: the identities
+// its `<class>.<caller>.token` files name, and the digest of each token.
 type TokenTable struct {
 	entries []tokenEntry
+	// compare is the token comparison Lookup runs. Production uses
+	// constantTimeDigestCompare; a test replaces it to observe the operands or
+	// to hold one comparison open while the table is swapped.
+	compare func(a, b []byte) int
 }
 
 type tokenEntry struct {
-	class Class
-	name  string
-	token []byte
+	identity Identity
+	name     string
+	digest   [sha256.Size]byte
+}
+
+// constantTimeDigestCompare compares two SHA-256 digests. Both operands are
+// always sha256.Size bytes, the whole of each is compared, and no byte decides
+// the result before the rest are read: crypto/subtle.ConstantTimeCompare's
+// early return on different lengths never runs, and a comparison's duration
+// does not say how much of a token matched.
+func constantTimeDigestCompare(a, b []byte) int {
+	return subtle.ConstantTimeCompare(a, b)
 }
 
 // tokenFS is the file operations the token loader performs. Production uses
@@ -139,11 +155,11 @@ type tokenFS struct {
 // osTokenFS is tokenFS over the real filesystem.
 var osTokenFS = tokenFS{lstat: os.Lstat, readDir: os.ReadDir, readFile: os.ReadFile}
 
-// LoadTokens reads dir's `<class>.token` files into a new TokenTable. The
-// caller name is not part of the file name: it is the request's X-Gt-Caller
-// header and reaches the Authenticator beside the token. Non-token files
-// (README, editor droppings) are ignored. Every refusal names the file or
-// directory and what was wrong; none echoes a token.
+// LoadTokens reads dir's `<class>.<caller>.token` files into a new TokenTable.
+// The caller is part of the file name, so the token itself resolves which
+// caller a request speaks as. Non-token files (README, editor droppings) are
+// ignored. Every refusal names the file or directory and what was wrong; none
+// echoes a token.
 func LoadTokens(dir string) (*TokenTable, error) {
 	return loadTokens(osTokenFS, dir)
 }
@@ -164,26 +180,26 @@ func loadTokens(fs tokenFS, dir string) (*TokenTable, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: read %s: %v", ErrTokenDir, dir, err)
 	}
-	table := &TokenTable{}
+	table := &TokenTable{compare: constantTimeDigestCompare}
 	for _, dirent := range dirents {
 		name := dirent.Name()
 		if !strings.HasSuffix(name, ".token") {
 			continue
 		}
-		class, err := ParseClass(strings.TrimSuffix(name, ".token"))
+		identity, err := tokenFileName(name)
 		if err != nil {
-			return nil, fmt.Errorf("%w: file %s", err, name)
+			return nil, err
 		}
-		token, err := readTokenFile(fs, filepath.Join(dir, name))
+		digest, err := readTokenDigest(fs, filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
 		for _, prev := range table.entries {
-			if subtle.ConstantTimeCompare(prev.token, token) == 1 {
+			if table.compare(prev.digest[:], digest[:]) == 1 {
 				return nil, fmt.Errorf("%w: %s and %s", ErrDuplicateToken, name, prev.name)
 			}
 		}
-		table.entries = append(table.entries, tokenEntry{class: class, name: name, token: token})
+		table.entries = append(table.entries, tokenEntry{identity: identity, name: name, digest: digest})
 	}
 	if len(table.entries) == 0 {
 		return nil, fmt.Errorf("%w: %s", ErrNoTokens, dir)
@@ -191,43 +207,79 @@ func loadTokens(fs tokenFS, dir string) (*TokenTable, error) {
 	return table, nil
 }
 
-// readTokenFile returns the token path holds. It checks the file with Lstat,
-// so a symlink is refused rather than followed, and requires mode 0600 exactly:
-// a token readable by anyone else is refused with the mode named and the token
-// left unread. Surrounding whitespace is trimmed, so a file written with a
-// trailing newline works.
-func readTokenFile(fs tokenFS, path string) ([]byte, error) {
+// tokenFileName returns the identity a token file name names: the class it may
+// run and the caller it speaks as.
+func tokenFileName(name string) (Identity, error) {
+	stem := strings.TrimSuffix(name, ".token")
+	classPart, caller, ok := strings.Cut(stem, ".")
+	if !ok || !validCaller(caller) {
+		return Identity{}, fmt.Errorf("%w: file %s", ErrTokenFileName, name)
+	}
+	class, err := ParseClass(classPart)
+	if err != nil {
+		return Identity{}, fmt.Errorf("%w: file %s", err, name)
+	}
+	return Identity{Class: class, Caller: caller}, nil
+}
+
+// maxCallerBytes bounds the caller part of a token file name, so a name stays
+// a label a log line and a directory listing both show whole.
+const maxCallerBytes = 64
+
+// validCaller reports whether caller is a token file name's caller part:
+// 1 to 64 lowercase letters, digits, '-' or '_'.
+func validCaller(caller string) bool {
+	if caller == "" || len(caller) > maxCallerBytes {
+		return false
+	}
+	for i := 0; i < len(caller); i++ {
+		c := caller[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// readTokenDigest returns the SHA-256 digest of the token path holds. It checks
+// the file with Lstat, so a symlink is refused rather than followed, and
+// requires mode 0600 exactly: a token readable by anyone else is refused with
+// the mode named and the token left unread. Surrounding whitespace is trimmed,
+// so a file written with a trailing newline works.
+func readTokenDigest(fs tokenFS, path string) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
 	info, err := fs.lstat(path)
 	switch {
 	case err != nil:
-		return nil, fmt.Errorf("%w: %s: %v", ErrTokenFile, path, err)
+		return digest, fmt.Errorf("%w: %s: %v", ErrTokenFile, path, err)
 	case !info.Mode().IsRegular():
-		return nil, fmt.Errorf("%w: %s is not a regular file (a symlink or a directory)", ErrTokenFile, path)
+		return digest, fmt.Errorf("%w: %s is not a regular file (a symlink or a directory)", ErrTokenFile, path)
 	case info.Mode().Perm() != 0o600:
-		return nil, fmt.Errorf("%w: %s has mode %04o", ErrTokenFileMode, path, info.Mode().Perm())
+		return digest, fmt.Errorf("%w: %s has mode %04o", ErrTokenFileMode, path, info.Mode().Perm())
 	}
 	b, err := fs.readFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %v", ErrTokenFile, path, err)
+		return digest, fmt.Errorf("%w: read %s: %v", ErrTokenFile, path, err)
 	}
 	token := strings.TrimSpace(string(b))
 	if token == "" {
-		return nil, fmt.Errorf("%w: %s", ErrEmptyToken, path)
+		return digest, fmt.Errorf("%w: %s", ErrEmptyToken, path)
 	}
-	return []byte(token), nil
+	return sha256.Sum256([]byte(token)), nil
 }
 
-// Lookup returns the class token authenticates to, and false for a token no
-// entry holds. Every entry is compared with crypto/subtle.ConstantTimeCompare
-// and the loop does not stop at a match, so a request's duration does not say
-// which class, if any, matched. Duplicate tokens are refused at load, so at
-// most one entry can match.
-func (t *TokenTable) Lookup(token string) (Class, bool) {
-	var match Class
+// Lookup returns the identity token authenticates to, and false for a token no
+// entry holds. Every entry is compared, and each comparison runs
+// constantTimeDigestCompare over two SHA-256 digests, so a request's duration
+// says neither how much of a token matched nor which entry did.
+func (t *TokenTable) Lookup(token string) (Identity, bool) {
+	digest := sha256.Sum256([]byte(token))
+	var match Identity
 	found := 0
 	for _, entry := range t.entries {
-		if subtle.ConstantTimeCompare(entry.token, []byte(token)) == 1 {
-			match = entry.class
+		if t.compare(entry.digest[:], digest[:]) == 1 {
+			match = entry.identity
 			found = 1
 		}
 	}
@@ -235,9 +287,10 @@ func (t *TokenTable) Lookup(token string) (Class, bool) {
 }
 
 // Authenticator holds the current token table behind an atomic pointer, so a
-// reload swaps it without a request ever seeing no table or a half-built one.
+// reload swaps it and a request keeps the table it loaded until it returns.
 type Authenticator struct {
 	dir   string
+	fs    tokenFS
 	table atomic.Pointer[TokenTable]
 }
 
@@ -245,7 +298,7 @@ type Authenticator struct {
 // directory it cannot load is an error: the gateway refuses to start with no
 // usable token table rather than come up refusing every request.
 func NewAuthenticator(dir string) (*Authenticator, error) {
-	a := &Authenticator{dir: dir}
+	a := &Authenticator{dir: dir, fs: osTokenFS}
 	if err := a.Reload(); err != nil {
 		return nil, err
 	}
@@ -254,9 +307,10 @@ func NewAuthenticator(dir string) (*Authenticator, error) {
 
 // Reload builds a table from the token directory and swaps it in. A failed
 // load leaves the current table in place, so a bad rotation refuses the reload
-// instead of locking every caller out.
+// instead of locking every caller out. The directory is read off the request
+// path, so requests keep being served by the current table throughout.
 func (a *Authenticator) Reload() error {
-	table, err := LoadTokens(a.dir)
+	table, err := loadTokens(a.fs, a.dir)
 	if err != nil {
 		return err
 	}
@@ -264,11 +318,11 @@ func (a *Authenticator) Reload() error {
 	return nil
 }
 
-// Authenticate returns the identity authorization authenticates to. The caller
-// is the request's X-Gt-Caller value and is carried without being trusted. A
-// missing, malformed or empty bearer token is ErrNoToken; a well-formed token
-// no file holds is ErrUnknownToken. Both are 401 (see HTTPStatus).
-func (a *Authenticator) Authenticate(authorization, caller string) (Identity, error) {
+// Authenticate returns the class and caller the bearer token authenticates to;
+// the request names neither. A missing, malformed or empty bearer token is
+// ErrNoToken; a well-formed token no file holds is ErrUnknownToken. Both are
+// 401 (see HTTPStatus).
+func (a *Authenticator) Authenticate(authorization string) (Identity, error) {
 	token, err := ParseBearer(authorization)
 	if err != nil {
 		return Identity{}, err
@@ -277,11 +331,11 @@ func (a *Authenticator) Authenticate(authorization, caller string) (Identity, er
 	if table == nil {
 		return Identity{}, fmt.Errorf("%w: no token table loaded", ErrUnknownToken)
 	}
-	class, ok := table.Lookup(token)
+	identity, ok := table.Lookup(token)
 	if !ok {
 		return Identity{}, ErrUnknownToken
 	}
-	return Identity{Class: class, Caller: caller}, nil
+	return identity, nil
 }
 
 // ParseBearer returns the token an Authorization header carries. The scheme is

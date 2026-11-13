@@ -173,8 +173,9 @@ every class: `init` is not served. The class forces `BD_READONLY=true` for
 ### Token classes
 
 Tokens are 32-byte random values in files, compared in constant time; the
-gateway reads a directory of `<class>.token` files and reloads on `SIGHUP`, so
-rotation needs no restart.
+gateway reads a directory of `<class>.<caller>.token` files, so the file name
+resolves both what a token may run and which caller it speaks as, and reloads
+on `SIGHUP`, so rotation needs no restart.
 
 | Class | Used by | May run |
 |---|---|---|
