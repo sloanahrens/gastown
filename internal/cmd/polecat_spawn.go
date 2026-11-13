@@ -1037,9 +1037,13 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 
 	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before
 	// paying for a new worktree.
+	// The memo lets the seat listing and the reuse of the seat it picks share
+	// one bd read of each agent bead; it is dropped when the reuse step ends.
+	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
 		realIdleReuseEnv(t, r, townRoot, rigName, opts.step), townRoot, rigName,
 		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
+	endAgentBeadReads()
 	if err != nil {
 		return nil, err
 	}
