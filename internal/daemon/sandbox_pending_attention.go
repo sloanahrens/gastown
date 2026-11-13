@@ -183,8 +183,12 @@ func (d *Daemon) pendingSandboxRead(ctx context.Context, kubeconfig, namespace s
 	}
 	done := make(chan reply, 1)
 	go func() {
-		defer close(returned)
 		out, err := d.cacheTrimKubectl(readCtx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json", fmt.Sprintf("--request-timeout=%s", sandboxPendingRequestTimeout))
+		// The runner has returned, so the namespace's read is no longer
+		// outstanding. This comes before the send: the caller can receive the reply
+		// and start the next tick's read at once, and a close that waited for the
+		// goroutine to finish would let that read find this one still outstanding.
+		close(returned)
 		done <- reply{out, err}
 	}()
 	select {
