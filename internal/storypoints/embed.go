@@ -124,6 +124,13 @@ func (e OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, erro
 	return vec, nil
 }
 
+// EmbeddingDimension is the length of the vector EmbeddingMinutes expects: the
+// weights' embedding dimension, 0 when w has no embedding ridge. A caller
+// wiring an embedder sizes its reply check with it.
+func (w Weights) EmbeddingDimension() int {
+	return len(w.embedCoef)
+}
+
 // EmbeddingMinutes is the embedding ridge's predicted polecat minutes for vec:
 // exp(intercept + dot(coef, vec)). It refuses a vector whose length is not the
 // weights' embedding dimension, and a result that is not a finite number.
