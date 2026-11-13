@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +12,11 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 // seedOverrunAgent stores gastown/polecats/<name>'s agent bead in the state and
@@ -542,5 +550,109 @@ func TestRunOverrunGuard_OpenEscalationAtThirtyMinutesDoesNotStop(t *testing.T) 
 	if len(f.stops) != 0 || len(f.handedBack) != 0 {
 		t.Fatalf("seat stopped 30 minutes after its ESCALATED exit with its escalation open: stops %v, handed back %v",
 			f.stops, f.handedBack)
+	}
+}
+
+// An answer that cannot be read is not used: the guard keeps the clock where
+// the stop left it and stops the seat rather than trust a time it could not
+// read, and the alarm names the failure once for the tick, not once per seat
+// (gt-bdlg6o).
+func TestRunOverrunGuard_UnreadableEscalationAnswerKeepsTheStopClock(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(21*time.Minute,
+		overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc1"},
+		overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-esc2"})
+	// The seam answers a time two hours out together with its error: the branch
+	// must drop that time, or the clock would restart in the seat's favour.
+	f.escalationAnsweredAt = func(overrunSeat) (time.Time, error) {
+		return overrunSlung.Add(2 * time.Hour), errors.New("bd list: connection refused")
+	}
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.stops) != 2 {
+		t.Errorf("stops = %v, want both seats stopped: an unreadable answer restarts no clock", f.stops)
+	}
+	if n := strings.Count(buf.String(), "cannot read the escalation answer"); n != 1 {
+		t.Errorf("the answer read failure was logged %d times, want once:\n%s", n, buf.String())
+	}
+}
+
+// The answer-restart path in a sandbox seat's shape: the run's end is only on
+// the bead's ESCALATED RUN END note, because a sandbox seat's done event dies
+// with its town (gt-1m9gr). The seat is read from that note, the dispatch clock
+// still holds the sling, the escalation was raised before the end and closed
+// after it, and the guard dates the clock from the close: no stop through 29
+// minutes after the answer, the stop at 30 (gt-bdlg6o).
+func TestRunOverrunGuard_SandboxSeatClockStartsAtTheAnswer(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	town := d.config.TownRoot
+	bd := newWorkBD(t)
+	d.openWorkBeads = bd.open
+	d.patrolConfig.Patrols.OverrunGuard.StopAfter = "30m"
+	const bead, seatName = "gt-sbx1", "dag"
+	seatAddr := "gastown/polecats/" + seatName
+
+	slung := time.Date(2026, 11, 12, 16, 42, 49, 0, time.UTC)
+	raised := time.Date(2026, 11, 12, 16, 44, 0, 0, time.UTC)
+	runEnd := time.Date(2026, 11, 12, 16, 46, 13, 0, time.UTC)
+	answered := time.Date(2026, 11, 12, 16, 48, 0, 0, time.UTC)
+
+	// The dispatch log holds the sling and nothing else; the run's end reaches
+	// the host only through the bead's note.
+	line := fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"gt","payload":{"bead":%q,"target":%q},"visibility":"both"}`,
+		slung.Format(time.RFC3339), events.TypeSling, bead, seatAddr)
+	if err := os.WriteFile(filepath.Join(town, events.EventsFile), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bd.db.Seed(beads.Issue{ID: bead, Status: "open", UpdatedAt: slung.Format(time.RFC3339),
+		Notes: land.FormatEscalatedEndNote(seatAddr, runEnd)})
+	title := bead + ": a decision"
+	bd.db.Seed(beads.Issue{ID: "hq-wisp-sbx", Status: "closed", Title: title, Labels: []string{"gt:escalation"},
+		CreatedAt: raised.Format(time.RFC3339), ClosedAt: answered.Format(time.RFC3339),
+		Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
+			Severity: "high", EscalatedBy: seatAddr, RelatedBead: bead})})
+
+	// A live seat holding the bead, as the guard sees a working sandbox seat.
+	tm := newFakeTmux(newFixedClock())
+	d.tmux = tm
+	seatFor := supervisor.SeatFor("gastown", string(constants.RolePolecat), seatName)
+	if _, err := intent.Update(town, supervisor.IntentSeat(seatFor), func(r *intent.Record) error {
+		r.WorkBead = bead
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), seatName), "node", slung)
+
+	seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", seatName)
+	if !ok {
+		t.Fatal("the sandbox seat was dropped")
+	}
+	if !seat.EscalatedEnd.Equal(runEnd) {
+		t.Fatalf("EscalatedEnd = %v, want the ESCALATED RUN END note's %v", seat.EscalatedEnd, runEnd)
+	}
+
+	f := newOverrunFake(0, seat)
+	tick := func(at time.Time) {
+		f.now = at
+		// The escalation read is per cycle, so the reader is built per tick.
+		r := newOverrunEscalationReader(d)
+		s := f.seams()
+		s.workingSeats = func() ([]overrunSeat, error) { return []overrunSeat{seat}, nil }
+		s.slungAt = (&overrunSlungReader{d: d}).slungAt
+		s.escalationAnsweredAt = r.answeredAt
+		d.runOverrunGuard(s)
+	}
+
+	tickEveryMinute(tick, answered.Add(time.Minute), answered.Add(29*time.Minute))
+	if len(f.stops) != 0 {
+		t.Fatalf("seat stopped 29 minutes after its answer: stops %v; the clock started at the run end", f.stops)
+	}
+	tick(answered.Add(30 * time.Minute))
+	if len(f.stops) != 1 {
+		t.Fatalf("seat not stopped 30 minutes after its answer: stops %v", f.stops)
 	}
 }
