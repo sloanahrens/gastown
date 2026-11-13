@@ -113,6 +113,10 @@ func TestRigRetireMayorRefusalNamesPathAndRenamesNothing(t *testing.T) {
 func TestRigRetireMayorAlreadyRetiredIsNotAnError(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+	// The rig directory exists and has no mayor/rig: that is what "already retired" means.
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	var out bytes.Buffer
 
 	if err := retireMayorRig(&out, rig.OSRetireFS{}, inTown(townRoot), "gastown", true, retireMayorClock); err != nil {

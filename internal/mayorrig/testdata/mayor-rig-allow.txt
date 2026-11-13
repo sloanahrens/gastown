@@ -55,7 +55,7 @@ internal/mail/router.go	1	pending-retirement	mail router: the constants.DirMayor
 internal/metrics/source_config.go	1	pending-retirement	metrics source config: the .om.json path under the rig's mayor/rig checkout
 internal/nudge/deliver/town.go	1	pending-retirement	nudge delivery: the constants.DirMayor target prefix, which is not the clone path
 internal/rig/manager.go	5	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
-internal/rig/retire_mayor.go	1	pending-retirement	rename step (retire-mayor): the RigMayorPath call that names the directory it renames
+internal/rig/retire_mayor.go	3	pending-retirement	rename step (retire-mayor): the RigMayorPath call and the DirMayor/DirRig names that build the directory it renames and the route suffix it matches
 internal/sandbox/skeleton.go	1	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
 internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the constants.DirMayor path to the rigs registry
 internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names in its path table

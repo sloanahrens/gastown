@@ -61,7 +61,7 @@ func retireMayorRig(w io.Writer, fsys rig.RetireFS, findTown func() (string, err
 	}
 	plan, err := rig.PlanRetireMayor(fsys, townRoot, rigName, clock)
 	if err != nil {
-		return fmt.Errorf("planning retire-mayor for rig %s: %w", rigName, err)
+		return fmt.Errorf("planning retire-mayor: %w", err)
 	}
 	if plan.AlreadyRetired {
 		fmt.Fprintf(w, "%s %s is absent: rig %s is already retired\n", style.Dim.Render("○"), plan.From, rigName)
