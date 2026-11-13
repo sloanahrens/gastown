@@ -79,7 +79,7 @@ The guard in `internal/podengine` is the source of truth for these rows; this ta
 | `internal/doltserver/doltserver.go` | `host.stopExternalContainer` | 2173 | `h.exec(exec.Command("docker", "stop", "-t", grace, name))` | stopping the external Dolt container with a grace period | needs-engine no bead yet | `internal/doltserver/doltserver.go:2714` (`Stop`) reaches it; the daemon stops Dolt through `dolt.go`; no pod gate |
 | `internal/doltserver/doltserver.go` | `host.containerRunningState` | 2189 | `out, err := h.probe("docker", "inspect", "-f", "{{.State.Running}}", name)` | whether the external Dolt container is running | needs-engine no bead yet | `internal/doltserver/doltserver.go:2221` (`ContainerRunning`) is the daemon's interface (`internal/daemon/dolt.go:192`); no pod gate |
 | `internal/doltserver/host.go` | `host.probe` | 238 | `cmd := exec.CommandContext(ctx, name, args...)` | whatever program the caller passes; on the daemon's path, `docker` from `containerRunningState` | needs-engine no bead yet | the program is a parameter, which the scan reads (gt-cesfam); `containerRunningState` (the row above) passes `"docker"` at `internal/doltserver/doltserver.go:2189`, so the daemon's container probe fails in the pod with no gate |
-| `internal/gtwrap/docker.go` | `Docker.dockerArgv` | 315 | `argv := []string{"docker"}` | the Mac wrapper's argv for one tool in the daemon image | mac-job | `internal/gtwrap/docker.go:157` runs it from the Mac wrapper's attach; `internal/daemon` does not import `gtwrap` |
+| `internal/gtwrap/docker.go` | `Docker.dockerArgv` | 320 | `argv := []string{"docker"}` | the Mac wrapper's argv for one tool in the daemon image | mac-job | `internal/gtwrap/docker.go:165` runs it from the Mac wrapper's attach; `internal/daemon` does not import `gtwrap` |
 | `internal/hoststat/hoststat.go` | `psOutput` | 159 | `out, err := exec.CommandContext(ctx, name, args...).Output()` | the process table, `ps` on macOS and `top` on linux (not an engine call) | degrades internal/hoststat/hoststat.go:160 the sample reports the process table unread | `psOutput` is the `ps` probe of `hostProbes` (`internal/hoststat/hoststat.go:84`); an error is returned with the output (line 160), and the sample reports the table unread |
 | `internal/installer/image.go` | `startImageWorker` | 595 | `cmd := exec.Command(exe, workerArgs(b)...)` | starts the sandbox image worker (not an engine call) | mac-job | `internal/installer/image.go:567` is the installer's caller; `internal/daemon` does not import `installer` |
 | `internal/jev/notes/wire.go` | `execHelp.Help` | 241 | `cmd := exec.CommandContext(ctx, exe, append(append([]string{}, path...), "--help")...)` | the installed binary's `--help` text (not an engine call) | degrades internal/jev/notes/wire.go:245 the help read fails and the notes pass gets the error | `internal/daemon/jev_notes.go:72` opens the notes pass with this helper (`wire.go:82`); an error with no output is returned to the pass (line 245) |
@@ -166,7 +166,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/doctor/daemon_check.go` `DaemonCheck.Fix`
 - `internal/doctor/hooks_live_fire_check.go` `runLiveFireClaude`
 - `internal/forgejoresync/refs.go` `gitCommandIn`
-- `internal/gtwrap/docker.go` `OSShell.AttachStdin`
+- `internal/gtwrap/docker.go` `OSShell.AttachStreams`
 - `internal/gtwrap/docker.go` `OSShell.Capture`
 - `internal/gtwrap/native.go` `OSProcess.Run`
 - `internal/hmhints/hmhints.go` `ExecRunner`
