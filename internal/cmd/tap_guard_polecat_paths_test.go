@@ -1258,7 +1258,7 @@ func TestScanCommandVars(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			vars := scanCommandVars(tc.command)
+			vars := scanCommandVars(tc.command, polecatPathsReadTokens)
 			for _, name := range tc.assigned {
 				if !vars.assigned[name] {
 					t.Errorf("scanCommandVars(%q): %s not seen as assigned", tc.command, name)

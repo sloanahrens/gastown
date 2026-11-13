@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -198,6 +199,112 @@ type polecatPathScope struct {
 	protectedBin []string // shared host binary dirs no polecat may write to (gt-tnts5)
 	vars         commandVars
 	proc         guardProcess
+	// read is the tokenizer this scope judges commands with; nil means
+	// polecatPathsReadTokens. It is a field so the mutation test hands the
+	// production judge a reading that loses a separator (see
+	// TestPolecatPathsParsedVerdictNeverLoosens).
+	read polecatPathsReader
+}
+
+// polecatPathsReader reads a command into the argv-like tokens this guard
+// judges a command line on.
+type polecatPathsReader func(command string) []string
+
+// polecatPathsReadTokens is the production reader: the parsedTokens reading of
+// gt-crn9gu. shellTokenize is the fallback for a command shellparse cannot
+// read, and for a command polecatPathsParsedUnsafe names. shellTokenize stays
+// only until gt-crn9gu retires it.
+func polecatPathsReadTokens(command string) []string {
+	tokens, readable := parsedTokens(command)
+	if !readable || polecatPathsParsedUnsafe(command) {
+		return shellTokenize(command)
+	}
+	return tokens
+}
+
+// polecatPathsCompoundMarkers are substrings of a command whose structure
+// parsedTokens does not keep as tokens: a brace or subshell group, a
+// substitution, a test expression, the bash pipe-and-stderr form, and a heredoc
+// (its operator and body are dropped).
+var polecatPathsCompoundMarkers = []string{"(", "{", "}", "`", "[[", "$[", "|&", "<<"}
+
+// polecatPathsCompoundKeywords are the words that open or close a compound
+// command. parsedTokens turns the structure inside one into nothing, so the
+// keywords are not tokens of the parsed reading — `for f in ...` loses the
+// `for` that scanCommandVars needs to see `f` assigned.
+var polecatPathsCompoundKeywords = map[string]bool{
+	"for": true, "while": true, "until": true, "if": true, "then": true,
+	"else": true, "elif": true, "fi": true, "do": true, "done": true,
+	"case": true, "esac": true, "select": true, "function": true,
+}
+
+// polecatPathsParsedUnsafe reports whether command has a shape the parsed
+// reading can read as simpler than the shell does, so the fallback reads it.
+// The shapes are the compound markers and keywords above, and a `#` that starts
+// a word, where the shell begins a comment and the two readings are not known
+// to agree. The rule reads the command text, because the parsed
+// tokens lack the very structure it has to detect. It only ever sends a command
+// to the reading the guard used before this move, so a rule that is too broad
+// costs the parsed reading and never strictness.
+func polecatPathsParsedUnsafe(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	for _, marker := range polecatPathsCompoundMarkers {
+		if strings.Contains(trimmed, marker) {
+			return true
+		}
+	}
+	words := strings.FieldsFunc(trimmed, func(r rune) bool {
+		return unicode.IsSpace(r) || r == ';' || r == '&' || r == '|'
+	})
+	for _, w := range words {
+		if polecatPathsCompoundKeywords[w] {
+			return true
+		}
+	}
+	return startsShellComment(trimmed)
+}
+
+// startsShellComment reports whether command holds a `#` that starts a word,
+// which is where the shell begins a comment: at the front, or after a blank, a
+// newline, `;`, `&` or `|`. A `#` inside a word (`a#b`), after `$` or `{`
+// (`$#`, `${#x}`), inside quotes, or escaped is a literal and is not matched.
+func startsShellComment(command string) bool {
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' && i+1 < len(command) {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#':
+			if i == 0 {
+				return true
+			}
+			switch command[i-1] {
+			case ' ', '\t', '\n', '\r', ';', '&', '|':
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commandTokens applies the reading this scope judges commands with; a scope
+// built without one (every production scope) uses polecatPathsReadTokens.
+func (s polecatPathScope) commandTokens(command string) []string {
+	if s.read == nil {
+		return polecatPathsReadTokens(command)
+	}
+	return s.read(command)
 }
 
 // evaluate reports why the hook payload must be blocked, or "" to allow it.
@@ -267,7 +374,7 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	// whole line, substitutions included (rule 6), so it is collected once here
 	// and inherited by the recursive calls below.
 	if s.vars.assigned == nil {
-		s.vars = scanCommandVars(stripped)
+		s.vars = scanCommandVars(stripped, s.commandTokens)
 	}
 	// A heredoc that matters here has a body, which means the command spans
 	// more than one line: the shared pattern also matches a bit-shift
@@ -276,7 +383,7 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	heredoc := strings.Contains(command, "\n") && heredocStartPattern.MatchString(command)
 
 	var groups [][][]string
-	for _, segment := range splitShellSegments(shellTokenize(stripped)) {
+	for _, segment := range splitShellSegments(s.commandTokens(stripped)) {
 		readings, ok := segmentReadings(segment)
 		if !ok {
 			return "a command's substitutions have too many readings to check — run the command in a form this guard can read"
@@ -1497,10 +1604,11 @@ var lookupAssignmentPattern = regexp.MustCompile("([A-Za-z_][A-Za-z0-9_]*)=[\"']
 // scanCommandVars collects the variable names a command line assigns. It reads
 // the tokenised line so a "NAME=" inside a commit message or a quoted argument
 // is not mistaken for an assignment, and strips heredoc bodies first for the
-// same reason (they are data on stdin).
-func scanCommandVars(command string) commandVars {
+// same reason (they are data on stdin). read is the scope's tokenizer, so the
+// scan sees the same reading as the rest of the guard.
+func scanCommandVars(command string, read polecatPathsReader) commandVars {
 	vars := commandVars{assigned: map[string]bool{}, lookup: map[string]bool{}}
-	tokens := shellTokenize(stripHeredocBodies(command))
+	tokens := read(stripHeredocBodies(command))
 	for i, token := range tokens {
 		if isEnvAssignment(token) {
 			name, _, _ := strings.Cut(token, "=")
