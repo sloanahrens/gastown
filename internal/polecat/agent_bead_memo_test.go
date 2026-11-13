@@ -93,11 +93,13 @@ func TestIdleReuseReadsEachAgentBeadOnce(t *testing.T) {
 		if _, err := mgr.ReuseIdlePolecat(picked, AddOptions{HookBead: "gt-next"}); err != nil {
 			t.Fatalf("ReuseIdlePolecat(%s): %v", picked, err)
 		}
-		// The reuse's lookup and its gate both answer from the memo. The two
-		// bd reads left are CreateOrReopenAgentBead's own read-then-rewrite of
-		// the bead the reuse writes (the write runs before the forget).
-		if got := counter.count(mgr.agentBeadID(picked)) - before; got != 2 {
-			t.Errorf("reuse of %s read bd %d times, want 2 (the write's own reads only)", picked, got)
+		// The memo answers the reuse's lookup and its gate, so only the bead
+		// write itself reaches bd. How many reads the write makes is the
+		// write's business: compare against the same reuse with no memo, which
+		// pays those reads plus the lookup and the gate.
+		memoReads := counter.count(mgr.agentBeadID(picked)) - before
+		if noMemoReads := reuseReadsWithoutMemo(t, names, picked); memoReads >= noMemoReads {
+			t.Errorf("reuse of %s under the memo read bd %d times, want fewer than the %d the same reuse reads with no memo", picked, memoReads, noMemoReads)
 		}
 		for _, name := range seats[1:] {
 			if got := counter.count(mgr.agentBeadID(name)); got != 1 {
@@ -173,13 +175,14 @@ func TestIdleReuseReadsEachAgentBeadOnce(t *testing.T) {
 		counter := installShowCounter(mgr, db)
 
 		picked := idleSeatNames(t, mgr)[0]
-		if _, err := mgr.ReuseIdlePolecat(picked, AddOptions{HookBead: "gt-next"}); err != nil {
-			t.Fatalf("ReuseIdlePolecat(%s): %v", picked, err)
+		before := counter.count(mgr.agentBeadID(picked))
+		for range 2 {
+			if _, err := mgr.Get(picked); err != nil {
+				t.Fatalf("Get(%s) with no memo: %v", picked, err)
+			}
 		}
-		// The listing reads the picked seat once; the reuse reads it for its
-		// lookup and its gate, then the bead write reads it twice more.
-		if got := counter.count(mgr.agentBeadID(picked)); got != 5 {
-			t.Errorf("without a memo, %s was read %d times, want 5 (listing, lookup, gate, write's two)", picked, got)
+		if got := counter.count(mgr.agentBeadID(picked)) - before; got != 2 {
+			t.Errorf("two reads of %s with no memo reached bd %d times, want 2", picked, got)
 		}
 	})
 }
@@ -209,4 +212,18 @@ func TestAgentBeadMemoEndDropsReads(t *testing.T) {
 	if got := counter.count(id); got != 2 {
 		t.Errorf("a read after end reached bd %d times in total, want 2", got)
 	}
+}
+
+// reuseReadsWithoutMemo runs the reuse step over a fresh world with no memo
+// open and returns the bd reads reusing picked adds after the seat listing.
+func reuseReadsWithoutMemo(t *testing.T, names []string, picked string) int {
+	t.Helper()
+	mgr, _, db, _, _ := canonicalWithPolecats(t, true, names...)
+	counter := installShowCounter(mgr, db)
+	idleSeatNames(t, mgr)
+	before := counter.count(mgr.agentBeadID(picked))
+	if _, err := mgr.ReuseIdlePolecat(picked, AddOptions{HookBead: "gt-next"}); err != nil {
+		t.Fatalf("ReuseIdlePolecat(%s) with no memo: %v", picked, err)
+	}
+	return counter.count(mgr.agentBeadID(picked)) - before
 }

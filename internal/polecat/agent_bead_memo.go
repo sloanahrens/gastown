@@ -52,13 +52,13 @@ func (c *agentBeadMemo) forget(agentID string) {
 // returns, so a read after the reuse sees what the reuse wrote. With no memo
 // open, every read goes to bd as before.
 func (m *Manager) ShareAgentBeadReads() (end func()) {
-	m.agentMemo = newAgentBeadMemo()
-	return func() { m.agentMemo = nil }
+	m.agentMemo.Store(newAgentBeadMemo())
+	return func() { m.agentMemo.Store(nil) }
 }
 
 // readAgentBead is beads.GetAgentBead through the open memo, if any.
 func (m *Manager) readAgentBead(agentID string) (*beads.Issue, *beads.AgentFields, error) {
-	memo := m.agentMemo
+	memo := m.agentMemo.Load()
 	if memo == nil {
 		return beads.GetAgentBead(m.agentBeads(), agentID)
 	}
@@ -75,7 +75,7 @@ func (m *Manager) readAgentBead(agentID string) (*beads.Issue, *beads.AgentField
 
 // forgetAgentBead drops agentID from the open memo, so the next read goes to bd.
 func (m *Manager) forgetAgentBead(agentID string) {
-	if m.agentMemo != nil {
-		m.agentMemo.forget(agentID)
+	if memo := m.agentMemo.Load(); memo != nil {
+		memo.forget(agentID)
 	}
 }

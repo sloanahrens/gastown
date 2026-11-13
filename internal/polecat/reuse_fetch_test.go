@@ -2,7 +2,10 @@ package polecat
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +16,8 @@ type fetchLog struct {
 	calls []string
 	// failFetch makes a full fetch of origin fail, as an offline remote does.
 	failFetch bool
+	// failBranch makes a branch fetch fail, as a branch origin lacks does.
+	failBranch bool
 }
 
 // fetchCountingRepo is a gitRepo whose fetches are recorded on log.
@@ -31,6 +36,9 @@ func (r fetchCountingRepo) Fetch(remote string) error {
 
 func (r fetchCountingRepo) FetchBranch(remote, branch string) error {
 	r.log.calls = append(r.log.calls, "fetch "+remote+" "+branch)
+	if r.log.failBranch {
+		return errors.New("fetch refused: no such branch")
+	}
 	return r.gitRepo.FetchBranch(remote, branch)
 }
 
@@ -67,6 +75,10 @@ func TestReuseFetchesOnce(t *testing.T) {
 		// want is the fetches the reuse path makes, in order. "<branch>" is
 		// the branch the case resumes.
 		want []string
+		// wantWarn is a substring of the one fetch warning the case emits;
+		// "" for a case whose fetches all succeed. "<branch>" is replaced
+		// as in want.
+		wantWarn string
 	}{
 		{
 			name: "no resume branch fetches origin once",
@@ -78,9 +90,10 @@ func TestReuseFetchesOnce(t *testing.T) {
 			want:     []string{"fetch origin"},
 		},
 		{
-			name:   "resume branch missing after the full fetch is fetched",
-			resume: "polecat/toast/resume-missing",
-			want:   []string{"fetch origin", "fetch origin <branch>"},
+			name:     "resume branch missing after the full fetch is fetched",
+			resume:   "polecat/toast/resume-missing",
+			want:     []string{"fetch origin", "fetch origin <branch>"},
+			wantWarn: "could not fetch resume branch <branch> on the bare repo",
 		},
 		{
 			name:          "failed full fetch leaves a stale ref, which is still fetched",
@@ -88,6 +101,7 @@ func TestReuseFetchesOnce(t *testing.T) {
 			staleOnOrigin: true,
 			failFetch:     true,
 			want:          []string{"fetch origin", "fetch origin <branch>"},
+			wantWarn:      "could not fetch origin for polecat toast",
 		},
 	}
 	for _, tt := range tests {
@@ -112,6 +126,10 @@ func TestReuseFetchesOnce(t *testing.T) {
 			}
 			log := &fetchLog{failFetch: tt.failFetch}
 			countFetchesOn(mgr, w, log)
+			var warns []string
+			mgr.warn = func(format string, args ...any) {
+				warns = append(warns, fmt.Sprintf(format, args...))
+			}
 
 			// A resume branch missing on origin fails the start-point check
 			// after the fetches; this test pins the fetches, not that check.
@@ -124,15 +142,73 @@ func TestReuseFetchesOnce(t *testing.T) {
 			if !reflect.DeepEqual(log.calls, want) {
 				t.Errorf("reuse fetches = %q, want %q", log.calls, want)
 			}
+
+			// A failed fetch is warned, and the warning is the case's only
+			// one: the branch retry happens either because the branch is
+			// missing or because the full fetch failed, and each says which
+			// fetch failed.
+			var fetchWarns []string
+			for _, warning := range warns {
+				if strings.Contains(warning, "fetch") {
+					fetchWarns = append(fetchWarns, warning)
+				}
+			}
+			wantWarn := replaceBranchPlaceholder(tt.wantWarn, resume)
+			if wantWarn == "" {
+				if len(fetchWarns) != 0 {
+					t.Errorf("reuse warned %q, want no fetch warning", fetchWarns)
+				}
+			} else if len(fetchWarns) != 1 || !strings.Contains(fetchWarns[0], wantWarn) {
+				t.Errorf("reuse fetch warnings = %q, want one carrying %q", fetchWarns, wantWarn)
+			}
 		})
 	}
 }
 
-// replaceBranchPlaceholder names the resumed branch in a wanted fetch, which
-// the table cannot know before the seat exists.
-func replaceBranchPlaceholder(call, branch string) string {
-	if call == "fetch origin <branch>" {
-		return "fetch origin " + branch
+// replaceBranchPlaceholder names the resumed branch in a wanted fetch or
+// warning, which the table cannot know before the seat exists.
+func replaceBranchPlaceholder(text, branch string) string {
+	return strings.ReplaceAll(text, "<branch>", branch)
+}
+
+// TestReuseFetchFallsBackToWorktree: with no bare repository under the rig,
+// the reuse path fetches from the worktree, and its warning names the repo it
+// really used: the worktree, not the bare repository that is missing.
+func TestReuseFetchFallsBackToWorktree(t *testing.T) {
+	t.Parallel()
+	mgr, bare, _, added, w := canonicalWithPolecats(t, true, "toast")
+	if err := os.RemoveAll(bare); err != nil {
+		t.Fatalf("remove the bare repo: %v", err)
 	}
-	return call
+	// Both fetches fail: the full fetch, and the branch retry it triggers.
+	log := &fetchLog{failFetch: true, failBranch: true}
+	countFetchesOn(mgr, w, log)
+	var warns []string
+	mgr.warn = func(format string, args ...any) {
+		warns = append(warns, fmt.Sprintf(format, args...))
+	}
+
+	// With no bare repo the seat's git state cannot be judged, so the reuse
+	// gate refuses; AllowRecovery on the seat's own branch is what lets the
+	// reuse run on, to the fetch it pins.
+	resume := added["toast"].Branch
+	// The reuse stops at the start-point check after the fetches; this test
+	// pins the fetches and their warnings, not that check.
+	_, _ = mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next", ResumeBranch: resume, AllowRecovery: true})
+
+	want := []string{"fetch origin", "fetch origin " + resume}
+	if !reflect.DeepEqual(log.calls, want) {
+		t.Errorf("reuse fetches = %q, want %q", log.calls, want)
+	}
+	var fetchWarns []string
+	for _, warning := range warns {
+		if strings.Contains(warning, "fetch") {
+			fetchWarns = append(fetchWarns, warning)
+		}
+	}
+	wantFull := "could not fetch origin for polecat toast"
+	wantBranch := "could not fetch resume branch " + resume + " on the worktree"
+	if len(fetchWarns) != 2 || !strings.Contains(fetchWarns[0], wantFull) || !strings.Contains(fetchWarns[1], wantBranch) {
+		t.Errorf("reuse fetch warnings = %q, want %q then %q", fetchWarns, wantFull, wantBranch)
+	}
 }
