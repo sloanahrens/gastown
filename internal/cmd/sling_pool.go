@@ -491,6 +491,28 @@ type sessionLister interface {
 
 var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 
+// censusLister is a sessionLister whose per-session reads of a sandboxed seat
+// go through the sling's census (session.SandboxCensusRead): a seat the census
+// has seen once is not asked again by the seat decision or the admission.
+// Outside a sling there is no census and every read is the probe it was.
+type censusLister struct {
+	sessionLister
+}
+
+// GetEnvironment answers the seat's GT_ROLE and other keys from the census.
+func (l censusLister) GetEnvironment(name, key string) (string, error) {
+	return session.SandboxCensusRead(name, "show-environment", []string{key}, func() (string, error) {
+		return l.sessionLister.GetEnvironment(name, key)
+	})
+}
+
+// GetSessionCreatedTime answers the seat's creation time from the census.
+func (l censusLister) GetSessionCreatedTime(name string) (time.Time, error) {
+	return session.SandboxCensusRead(name, "session-created", nil, func() (time.Time, error) {
+		return l.sessionLister.GetSessionCreatedTime(name)
+	})
+}
+
 // polecatDispositionFunc reads one polecat's own bead state for the pool. A nil
 // func is a pool that cannot read any polecat's state.
 type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, error)
@@ -1640,7 +1662,7 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // and that would put the count's bd reads inside the lock (gt-crkhv).
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
+		return poolOccupiedSessions(r.lister(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
 	}
 }
 
@@ -1674,7 +1696,14 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 // submission records in it — the seat its restart takes again, and the window
 // the dispatcher's roster runs for a whole tick (gt-0axfg).
 func (r *poolRouter) seatSnapshot() (poolSeatSnapshot, error) {
-	return poolSeatSnapshotWith(r.sessions(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now)
+	return poolSeatSnapshotWith(r.lister(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now)
+}
+
+// lister is the tmux source this router's seat reads take sessions from: the
+// router's sessions, read through the sling's census (censusLister), so the
+// seat decision and the admission probe each sandboxed seat once.
+func (r *poolRouter) lister() sessionLister {
+	return censusLister{r.sessions()}
 }
 
 // poolSeatSnapshot is the seat picture of one spec dispatch tick: the roster's
@@ -1830,10 +1859,10 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 	snapshot, snapErr := r.seatSnapshot()
 	if snapErr != nil {
 		return r.routeWithNotice(requested, true,
-			snapshotOccupied(poolSeatSnapshot{}, poolSeatAgentFor(r.townRoot), r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now),
+			snapshotOccupied(poolSeatSnapshot{}, poolSeatAgentFor(r.townRoot), r.lister, sandboxSeatDeathsFor(r.townRoot), r.now),
 			"pool: cannot read the seat picture ("+snapErr.Error()+"), counting live sessions only")
 	}
-	return r.routeWith(requested, true, snapshotOccupied(snapshot, poolSeatAgentFor(r.townRoot), r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now))
+	return r.routeWith(requested, true, snapshotOccupied(snapshot, poolSeatAgentFor(r.townRoot), r.lister, sandboxSeatDeathsFor(r.townRoot), r.now))
 }
 
 // routeWith is route over a given occupancy read. The spec dispatcher passes

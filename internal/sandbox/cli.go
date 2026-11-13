@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -262,6 +263,93 @@ func parseConditionTime(raw json.RawMessage) (time.Time, bool) {
 		return time.Unix(ts.Seconds, int64(ts.Nanos)).UTC(), true
 	}
 	return time.Time{}, false
+}
+
+// Entry is one row of `sandbox list`: the sandbox's name and its phase
+// (Ready, Provisioning, ...).
+type Entry struct {
+	Name, Phase string
+}
+
+// listPageSize is the rows one `sandbox list` call asks for. List follows the
+// continuation token whatever a page's length, so the size only sets the
+// number of calls.
+const listPageSize = 100
+
+// listMaxPages bounds the paging loop, so a gateway that keeps returning a
+// token cannot hold a sling in the loop.
+const listMaxPages = 1000
+
+// List reads every sandbox the gateway lists, in the default workspace the rest
+// of this file acts in: a listing across workspaces would count sandboxes that
+// Create, Get, Exec and Delete cannot reach. The only end of a listing is a
+// page with no continuation token: a short page that carries a token is
+// followed, because a gateway may return fewer rows than asked and still have
+// more behind it. It reads `-o json`: the table form prints the token on
+// stderr, where a stdout parse never sees it. A failed call is an error, and so
+// is a listing that cannot be read whole: output that is not a sandbox page, a
+// page with no sandboxes field, a row with no name or phase, a token that
+// repeats, or more than listMaxPages pages. An unknown listing must never read
+// as an empty one.
+func (c *CLI) List(ctx context.Context) ([]Entry, error) {
+	var out []Entry
+	token := ""
+	seen := map[string]bool{}
+	for page := 0; page < listMaxPages; page++ {
+		a := c.argv("sandbox", "list", "--page-size", strconv.Itoa(listPageSize), "--output", "json")
+		if token != "" {
+			a = append(a, "--page-token", token)
+		}
+		stdout, _, err := c.run(ctx, callTimeout, "sandbox list", a, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		rows, next, err := parseListPage(stdout)
+		if err != nil {
+			return nil, fmt.Errorf("openshell sandbox list: %w", err)
+		}
+		out = append(out, rows...)
+		if next == "" {
+			return out, nil
+		}
+		if seen[next] {
+			return nil, fmt.Errorf("openshell sandbox list: the continuation token repeated (%q)", next)
+		}
+		seen[next] = true
+		token = next
+	}
+	return nil, fmt.Errorf("openshell sandbox list: more than %d pages", listMaxPages)
+}
+
+// listPage is one `sandbox list -o json` reply. NextPageToken is empty on the
+// last page. Sandboxes is a pointer, so a reply with no sandboxes field is
+// refused rather than read as an empty page.
+type listPage struct {
+	NextPageToken string `json:"next_page_token"`
+	Sandboxes     *[]struct {
+		Name  string `json:"name"`
+		Phase string `json:"phase"`
+	} `json:"sandboxes"`
+}
+
+// parseListPage reads one page of `sandbox list -o json`: the name and phase of
+// each sandbox, and the token that asks for the next page.
+func parseListPage(stdout []byte) ([]Entry, string, error) {
+	var page listPage
+	if err := json.Unmarshal(stdout, &page); err != nil {
+		return nil, "", fmt.Errorf("the page is not a sandbox list: %w", err)
+	}
+	if page.Sandboxes == nil {
+		return nil, "", fmt.Errorf("the page has no sandboxes field")
+	}
+	entries := make([]Entry, 0, len(*page.Sandboxes))
+	for _, s := range *page.Sandboxes {
+		if s.Name == "" || s.Phase == "" {
+			return nil, "", fmt.Errorf("sandbox %q has no name or phase", s.Name)
+		}
+		entries = append(entries, Entry{Name: s.Name, Phase: s.Phase})
+	}
+	return entries, page.NextPageToken, nil
 }
 
 // Exists reports whether the gateway has a sandbox of that name. Only the

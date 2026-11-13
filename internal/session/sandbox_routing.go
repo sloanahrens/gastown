@@ -26,6 +26,9 @@ type sandboxRouting struct {
 	listTown  string
 	listMtime time.Time
 	listNames map[string]bool
+	// census is the sling process's read-once view of the sandbox seats, nil
+	// outside a sling (see BeginSandboxCensus).
+	census *SandboxCensus
 }
 
 var routing = &sandboxRouting{clients: map[string]*tmux.Tmux{}, findTown: defaultFindTown}
@@ -135,11 +138,30 @@ func (s *sandboxRouting) sessions() []string {
 	return names
 }
 
-// forget drops the cached client for session (after its sandbox is deleted).
+// forget drops the cached client for session (after its sandbox is deleted or
+// created), and whatever the installed census holds for it.
 func (s *sandboxRouting) forget(session string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.clients, session)
+	if s.census != nil {
+		s.census.Forget(session)
+	}
+}
+
+// setSandboxCensus installs c as the census every sandbox-seat read of this
+// process goes through, or removes it when c is nil (BeginSandboxCensus).
+func setSandboxCensus(c *SandboxCensus) {
+	routing.mu.Lock()
+	defer routing.mu.Unlock()
+	routing.census = c
+}
+
+// installedCensus is the census setSandboxCensus installed, nil if none.
+func installedCensus() *SandboxCensus {
+	routing.mu.Lock()
+	defer routing.mu.Unlock()
+	return routing.census
 }
 
 // ResetSandboxRoutingForTest points routing at townRoot and clears its
@@ -151,6 +173,7 @@ func ResetSandboxRoutingForTest(townRoot string) {
 	routing.resolved = true
 	routing.clients = map[string]*tmux.Tmux{}
 	routing.listTown, routing.listMtime, routing.listNames = "", time.Time{}, nil
+	routing.census = nil
 }
 
 // RoutedTmuxFor returns the tmux client that drives session: the routed
