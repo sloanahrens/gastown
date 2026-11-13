@@ -39,15 +39,23 @@ type fakeFile struct {
 
 func (f fakeFile) Mode() fs.FileMode { return f.mode }
 
+// nativeBd is the absolute path the tests give the native bd, as nativeOm is for om.
+const nativeBd = "/opt/bd/bin/bd"
+
 // withNativeOm answers stat for nativeOm as an executable file and leaves every
 // other path to the harness's stat, so the target still finds its town.
 func withNativeOm(h *harness) {
+	withNativeBinary(h, nativeOm)
+}
+
+// withNativeBinary answers stat for path as an executable file, for a native tool.
+func withNativeBinary(h *harness, path string) {
 	stat := h.surface.stat
-	h.surface.stat = func(path string) (os.FileInfo, error) {
-		if path == nativeOm {
+	h.surface.stat = func(p string) (os.FileInfo, error) {
+		if p == path {
 			return fakeFile{mode: 0o755}, nil
 		}
-		return stat(path)
+		return stat(p)
 	}
 }
 
@@ -256,11 +264,17 @@ func TestDoctorOmReportsNativePath(t *testing.T) {
 // state after the cutover when the config still names the installed om.
 func selfConfig(t *testing.T, h *harness) string {
 	t.Helper()
+	return selfConfigFor(t, h, omTool, "review")
+}
+
+// selfConfigFor is selfConfig for any native tool: its entry points at the wrapper.
+func selfConfigFor(t *testing.T, h *harness, tool string, subcommands ...string) string {
+	t.Helper()
 	self, err := h.surface.executable()
 	if err != nil {
 		t.Fatalf("find the stand-in wrapper: %v", err)
 	}
-	return nativeConfig(t, omNative(self, "review"))
+	return nativeConfig(t, map[string]any{tool: map[string]any{"path": self, "subcommands": subcommands}})
 }
 
 func TestRunNativeSelfPathRefused(t *testing.T) {
@@ -294,5 +308,120 @@ func TestDoctorNativeSelfPathDown(t *testing.T) {
 	}
 	if !strings.Contains(h.stdout.String(), "(not runnable)") || !strings.Contains(h.stdout.String(), "is this wrapper itself") {
 		t.Errorf("stdout %q does not report the native path as the wrapper", h.stdout)
+	}
+}
+
+// bdNative is the config entry for a native bd that names the given subcommands.
+func bdNative(path string, subcommands ...string) map[string]any {
+	return map[string]any{bdTool: map[string]any{"path": path, "subcommands": subcommands}}
+}
+
+func TestConfigNativeAcceptsBdHooksOnly(t *testing.T) {
+	t.Parallel()
+	t.Run("hooks loads", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		withNativeBinary(h, nativeBd)
+		h.writeConfig(t, nativeConfig(t, bdNative(nativeBd, "hooks")))
+		fp := &fakeProcess{}
+		h.surface.native = fp
+		if exit := h.run("bd", "hooks", "run", "pre-commit"); exit != 0 {
+			t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+		}
+		if !fp.ran {
+			t.Fatal("the native bd hooks run did not run")
+		}
+	})
+	refusals := []struct {
+		name    string
+		native  map[string]any
+		wantKey string
+	}{
+		{name: "a bd subcommand besides hooks", native: bdNative(nativeBd, "hooks", "show"), wantKey: "native.bd.subcommands"},
+		{name: "bd with only a non-hooks subcommand", native: bdNative(nativeBd, "show"), wantKey: "native.bd.subcommands"},
+		{name: "a tool other than om and bd", native: map[string]any{"hm": map[string]any{"path": nativeBd, "subcommands": []string{"hooks"}}}, wantKey: "native.hm"},
+	}
+	for _, tt := range refusals {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			withNativeBinary(h, nativeBd)
+			h.writeConfig(t, nativeConfig(t, tt.native))
+			fp := &fakeProcess{}
+			h.surface.native = fp
+			if exit := h.run("bd", "hooks", "run", "pre-commit"); exit != 1 {
+				t.Fatalf("run = %d, want 1", exit)
+			}
+			if !strings.Contains(h.stderr.String(), tt.wantKey) {
+				t.Fatalf("stderr %q does not name %q", h.stderr, tt.wantKey)
+			}
+			if fp.ran || h.fake.launched {
+				t.Fatal("a call ran from a config that refused it")
+			}
+		})
+	}
+}
+
+func TestRunBdHooksUseNativePath(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	withNativeBinary(h, nativeBd)
+	h.writeConfig(t, nativeConfig(t, bdNative(nativeBd, "hooks")))
+	caller := t.TempDir()
+	env := []string{"HOME=" + h.home, "PATH=/usr/bin", "BD_ACTOR=toast", "GT_TOWN_ROOT=" + h.town}
+	h.surface.getwd = func() (string, error) { return caller, nil }
+	h.surface.environ = func() []string { return env }
+	getenv := h.surface.getenv
+	h.surface.getenv = func(name string) string {
+		if name == "GT_TOWN_ROOT" {
+			return h.town
+		}
+		return getenv(name)
+	}
+	fp := &fakeProcess{exit: 3}
+	h.surface.native = fp
+
+	if exit := h.run("bd", "hooks", "run", "prepare-commit-msg", ".git/COMMIT_EDITMSG"); exit != 3 {
+		t.Fatalf("run = %d, want the native bd's 3; stderr: %s", exit, h.stderr)
+	}
+	if want := []string{nativeBd, "hooks", "run", "prepare-commit-msg", ".git/COMMIT_EDITMSG"}; !slices.Equal(fp.argv, want) {
+		t.Fatalf("native argv = %q, want %q", fp.argv, want)
+	}
+	if fp.dir != caller {
+		t.Fatalf("native ran in %q, want the caller's directory %q", fp.dir, caller)
+	}
+	if !slices.Equal(fp.env, env) {
+		t.Fatalf("native env = %q, want the caller's whole environment %q", fp.env, env)
+	}
+	if h.fake.launched || h.targetSet {
+		t.Fatal("bd hooks run reached the target")
+	}
+
+	for _, args := range [][]string{{"show", "x"}, {"hooks", "list"}} {
+		fp.ran = false
+		h.fake.launched = false
+		argv := append([]string{"bd"}, args...)
+		if exit := h.run(argv...); exit != 0 {
+			t.Fatalf("run(%q) = %d, want 0; stderr: %s", argv, exit, h.stderr)
+		}
+		if fp.ran {
+			t.Fatalf("%q ran natively; only hooks run is native", argv)
+		}
+		if !h.fake.launched || !slices.Equal(h.fake.call.Argv, argv) {
+			t.Fatalf("%q did not reach the target", argv)
+		}
+	}
+}
+
+func TestDoctorBdNativeSelfPathDown(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, selfConfigFor(t, h, bdTool, "hooks"))
+	h.fake.diag = gtwrap.Diagnosis{Rung: gtwrap.RungExec, Container: "gt-daemon", Image: "gt-daemon:1", Reason: "up"}
+	if exit := h.run("bd", "--doctor"); exit != 1 {
+		t.Fatalf("run = %d, want 1; stderr: %s", exit, h.stderr)
+	}
+	if !strings.Contains(h.stdout.String(), "native: ") || !strings.Contains(h.stdout.String(), "(not runnable)") || !strings.Contains(h.stdout.String(), "is this wrapper itself") {
+		t.Errorf("stdout %q does not report the native bd path as the wrapper", h.stdout)
 	}
 }

@@ -44,6 +44,30 @@ func TestNativeCoversOnlyItsSubcommands(t *testing.T) {
 	}
 }
 
+func TestNativeCoversBdHooksRunOnly(t *testing.T) {
+	t.Parallel()
+	n := Native{Tool: "bd", Path: "/usr/local/bin/bd", Subcommands: []string{"hooks"}}
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "hooks run", args: []string{"hooks", "run", "pre-commit"}, want: true},
+		{name: "hooks list", args: []string{"hooks", "list"}, want: false},
+		{name: "hooks alone", args: []string{"hooks"}, want: false},
+		{name: "show", args: []string{"show", "x"}, want: false},
+		{name: "run named after hooks", args: []string{"run", "hooks"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := n.Covers(tt.args); got != tt.want {
+				t.Fatalf("Covers(%q) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNativeCheckRefusesAPathThatCannotRun(t *testing.T) {
 	t.Parallel()
 	exe := filepath.Join(t.TempDir(), "om")
