@@ -253,8 +253,9 @@ func dangerousReadTokens(command string) []string {
 //   - a [[ ]] or $[ ] expression, whose words parsedTokens drops;
 //   - a bash pipe-and-stderr operator "|&", which parsedTokens does not keep;
 //   - a `#` that starts a word (a shell comment), whose end the two readings
-//     do not agree on: the shell joins the next line when the comment ends in
-//     a backslash, and parsedTokens drops the comment whole (gt-4otugt);
+//     spell differently: shellTokenize emits the newline after it as a
+//     separator, parsedTokens emits none, and a backslash before that newline
+//     is read by each on its own rule (gt-4otugt);
 //   - an ANSI-C string opened across a backslash-newline, which bash joins
 //     and the parser does not (dangerousANSICContinuation, gt-javvg).
 func dangerousParsedUnsafe(command string) bool {
