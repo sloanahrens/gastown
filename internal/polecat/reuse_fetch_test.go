@@ -180,7 +180,7 @@ func TestReuseFetchFallsBackToWorktree(t *testing.T) {
 	if err := os.RemoveAll(bare); err != nil {
 		t.Fatalf("remove the bare repo: %v", err)
 	}
-	// Both fetches fail, so the retry the failed full fetch triggers runs too.
+	// Both fetches fail: the full fetch, and the branch retry it triggers.
 	log := &fetchLog{failFetch: true, failBranch: true}
 	countFetchesOn(mgr, w, log)
 	var warns []string
@@ -192,16 +192,23 @@ func TestReuseFetchFallsBackToWorktree(t *testing.T) {
 	// gate refuses; AllowRecovery on the seat's own branch is what lets the
 	// reuse run on, to the fetch it pins.
 	resume := added["toast"].Branch
-	if _, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next", ResumeBranch: resume, AllowRecovery: true}); err != nil {
-		t.Logf("reuse errored after the fetches (this test pins the fetches): %v", err)
-	}
+	// The reuse stops at the start-point check after the fetches; this test
+	// pins the fetches and their warnings, not that check.
+	_, _ = mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next", ResumeBranch: resume, AllowRecovery: true})
 
 	want := []string{"fetch origin", "fetch origin " + resume}
 	if !reflect.DeepEqual(log.calls, want) {
 		t.Errorf("reuse fetches = %q, want %q", log.calls, want)
 	}
-	wantWarn := "could not fetch resume branch " + resume + " on the worktree"
-	if len(warns) != 2 || !strings.Contains(warns[1], wantWarn) {
-		t.Errorf("reuse warnings = %q, want the second carrying %q", warns, wantWarn)
+	var fetchWarns []string
+	for _, warning := range warns {
+		if strings.Contains(warning, "fetch") {
+			fetchWarns = append(fetchWarns, warning)
+		}
+	}
+	wantFull := "could not fetch origin for polecat toast"
+	wantBranch := "could not fetch resume branch " + resume + " on the worktree"
+	if len(fetchWarns) != 2 || !strings.Contains(fetchWarns[0], wantFull) || !strings.Contains(fetchWarns[1], wantBranch) {
+		t.Errorf("reuse fetch warnings = %q, want %q then %q", fetchWarns, wantFull, wantBranch)
 	}
 }
