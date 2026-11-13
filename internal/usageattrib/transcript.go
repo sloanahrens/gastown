@@ -144,18 +144,20 @@ func BaseModel(model string) string {
 const tsLayout = "2006-1-2T15:4:5"
 
 // tsPattern is a transcript timestamp: the strptime fields, an optional fraction (dropped, as the
-// Python does), and an optional zone, either Z or a numeric offset whose hours are 00 to 23 and
-// minutes 00 to 59. Groups: 1 the fields, 2 the sign of an offset, 3 its hours, 4 its minutes; all
-// empty for Z or no zone.
-var tsPattern = regexp.MustCompile(`^(\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{1,2}:\d{1,2})(?:\.\d+)?(?:Z|([+-])([01]\d|2[0-3]):([0-5]\d))?$`)
+// Python does), and an optional zone, either Z or z, or a numeric offset whose hours are 00 to 23
+// and minutes 00 to 59, written "+02:00", "+0200" or hour-only "+02". Groups: 1 the fields, 2 the
+// sign of an offset, 3 its hours, 4 its minutes (empty for an hour-only offset); all empty for Z, z
+// or no zone.
+var tsPattern = regexp.MustCompile(`^(\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{1,2}:\d{1,2})(?:\.\d+)?(?:[Zz]|([+-])([01]\d|2[0-3])(?::?([0-5]\d))?)?$`)
 
-// ParseTS parses a transcript timestamp as the UTC instant it names. A well-formed numeric offset
-// is applied where the Python reference drops it, so comparisons and the CDT hour are on the
-// instant; a timestamp with no zone is UTC. A suffix the reader cannot apply (a basic-format or
-// out-of-range offset, trailing text) is dropped and the first 19 bytes read as the wall clock, as
-// the reference does, so this stricter parse still reads every timestamp the reference accepted
-// rather than marking its whole record incomplete. Only a string whose first 19 bytes are not a
-// transcript timestamp is an error.
+// ParseTS parses a transcript timestamp as the UTC instant it names. A numeric offset is applied in
+// every form — extended "+02:00", basic "+0200", hour-only "+02" — where the Python reference drops
+// the zone, so comparisons and the CDT hour are on the instant the timestamp names rather than the
+// wall clock taken as UTC. "Z", "z" and no zone are UTC. A suffix that names no applyable instant
+// (trailing text, a space before the zone, an out-of-range offset) is dropped and the first 19 bytes
+// read as the wall clock, as the reference does, so such a form leaves its record complete instead
+// of dropping the record's usage. Only a string whose first 19 bytes are not a transcript timestamp
+// is an error.
 func ParseTS(ts string) (time.Time, error) {
 	m := tsPattern.FindStringSubmatch(ts)
 	if m == nil {
@@ -168,14 +170,19 @@ func ParseTS(ts string) (time.Time, error) {
 	if m[2] == "" {
 		return t, nil
 	}
-	off := time.Duration(twoDigits(m[3])*60+twoDigits(m[4])) * time.Minute
+	mins := 0
+	if m[4] != "" {
+		mins = twoDigits(m[4])
+	}
+	off := time.Duration(twoDigits(m[3])*60+mins) * time.Minute
 	if m[2] == "+" {
 		return t.Add(-off), nil
 	}
 	return t.Add(off), nil
 }
 
-// parseTSReference reads ts as the Python strptime does: the first 19 bytes, suffix dropped.
+// parseTSReference reads ts as the Python strptime does: the first 19 bytes, suffix dropped. It is
+// the last resort for a suffix tsPattern cannot apply, where the wall clock is the only reading.
 func parseTSReference(ts string) (time.Time, error) {
 	prefix := ts
 	if len(prefix) > 19 {
