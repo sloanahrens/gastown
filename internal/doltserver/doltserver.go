@@ -63,7 +63,9 @@ import (
 
 // EnsureDoltIdentity configures dolt global identity (user.name, user.email)
 // if not already set. Copies values from git config as a sensible default.
-// This must run before InitRig and Start, since dolt init requires identity.
+// dolt init requires an identity. InitRig calls this itself before it makes
+// the rig directory, so a rig add does not depend on gt install having run it.
+// gt install's preflight also calls it, and it must run before Start.
 func (h *host) EnsureDoltIdentity() error {
 	// Check each field independently to avoid creating duplicates with --add.
 	// Distinguish "key not found" (exit code 1, empty output) from dolt crashes.
