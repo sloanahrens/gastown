@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +169,119 @@ func TestSpecDispatchStoryPointShadowTimeoutLogsOneLineAndSlings(t *testing.T) {
 	}
 	if !strings.Contains(n[0], "no estimate within") {
 		t.Errorf("notice %q does not say the estimate timed out", n[0])
+	}
+}
+
+// TestSpecDispatchWireStoryPointShadowReadsTheDaemonConfig: the tick takes both
+// shadow fields from the daemon config's story_points block, through the tick's
+// own read of that file (gt-cgsivu).
+func TestSpecDispatchWireStoryPointShadowReadsTheDaemonConfig(t *testing.T) {
+	t.Parallel()
+	const shadowOn = `{"type":"daemon-patrol-config","version":1,` +
+		`"patrols":{"spec_dispatch":{"enabled":true,"interval":"60s","story_points":{"shadow":true}}}}`
+	for _, tc := range []struct {
+		name   string
+		daemon string
+		want   bool
+	}{
+		{"shadow on", shadowOn, true},
+		{"shadow off", specTickDaemon, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := poolTestTown(t, specTickSettings, tc.daemon)
+			_, sd, err := specTickTown(root)
+			if err != nil {
+				t.Fatalf("specTickTown: %v", err)
+			}
+			var env specDispatchEnv
+			specWireStoryPointShadow(&env, sd, root)
+			if env.StoryPointShadow != tc.want {
+				t.Errorf("StoryPointShadow = %v, want %v", env.StoryPointShadow, tc.want)
+			}
+			if env.StoryPointEstimate == nil {
+				t.Error("StoryPointEstimate = nil, want the production estimate")
+			}
+		})
+	}
+}
+
+// TestSpecDispatchStoryPointShadowNoEstimatorLogsOneLineAndSlings: a tick with
+// the setting on and no estimator says so once and slings the bead, rather
+// than failing on a nil call (gt-cgsivu).
+func TestSpecDispatchStoryPointShadowNoEstimatorLogsOneLineAndSlings(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.StoryPointShadow = true
+	env.StoryPointEstimate = nil
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "gt-a" {
+		t.Fatalf("slung %q with no estimator, want gt-a", got)
+	}
+	n := storyPointNotices(r.Notices)
+	if len(n) != 1 {
+		t.Fatalf("story points notices = %q, want exactly one line", n)
+	}
+	if !strings.Contains(n[0], "gt-a") || !strings.Contains(n[0], "no estimator is wired") {
+		t.Errorf("notice %q does not name the bead and the missing estimator", n[0])
+	}
+}
+
+// TestSpecDispatchStoryPointShadowWritesTheEstimate: the shadow estimate writes
+// the labels and the note the shadow report reads, and a bead with no usable
+// estimate gets its none note and the reason the tick logs (gt-cgsivu).
+func TestSpecDispatchStoryPointShadowWritesTheEstimate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		stub       *specEstimateStub
+		wantLabels []string
+		wantNote   string
+		wantErr    string
+	}{
+		{
+			name:       "an estimate is labeled and noted",
+			stub:       specEstimateOK(),
+			wantLabels: []string{"sp:5", "sp-rung:shape-jev", "sp-minutes:6.3"},
+			wantNote:   "SP ESTIMATE v1 sp:5 rung:shape-jev",
+		},
+		{
+			name:       "a bead with no usable estimate gets the none note",
+			stub:       &specEstimateStub{err: errors.New("embedder unreachable")},
+			wantLabels: []string{"sp-rung:none"},
+			wantNote:   "SP ESTIMATE v1 sp:none rung:none",
+			wantErr:    "no estimate: embedder unreachable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := specEstimateSeed()
+			run := specEstimateRunnerFor(tc.stub)
+			shadow := specStoryPointEstimateFor(
+				func(string) specEstimateStore { return db },
+				func(string) specEstimateRunner { return run })
+
+			err := shadow(context.Background(), "gt-est")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("shadow estimate: %v", err)
+				}
+			} else if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("shadow estimate = %v, want %q", err, tc.wantErr)
+			}
+			labels := specEstimateLabelsOn(t, db)
+			for _, want := range tc.wantLabels {
+				if !slices.Contains(labels, want) {
+					t.Errorf("labels = %v, want %s", labels, want)
+				}
+			}
+			comments := specEstimateCommentsOn(t, db)
+			if len(comments) != 1 || !strings.HasPrefix(comments[0], tc.wantNote) {
+				t.Errorf("comments = %v, want one beginning %q", comments, tc.wantNote)
+			}
+		})
 	}
 }
 

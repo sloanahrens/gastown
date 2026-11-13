@@ -3209,6 +3209,17 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	return runSpecDispatchAtWith(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv), specDispatchDryRun)
 }
 
+// specWireStoryPointShadow fills the tick's shadow estimate fields from the
+// town's dispatch config in one call, so the setting's read has a test of its
+// own: the operator hold stops a tick before the candidate loop that uses the
+// fields, so a whole-tick test cannot reach them (gt-cgsivu).
+func specWireStoryPointShadow(env *specDispatchEnv, sd *config.SpecDispatchConfig, townRoot string) {
+	// The shadow estimate reads its setting from the same block as the other
+	// spec_dispatch knobs, and has no environment variable (gt-5d9k2f.14).
+	env.StoryPointShadow = sd.StoryPointsShadow()
+	env.StoryPointEstimate = specStoryPointEstimate(townRoot)
+}
+
 // runSpecDispatchAtWith is runSpecDispatchAt with the daemon that started the
 // tick and the dry-run flag given, so a test drives the census wiring without
 // the process environment (gt-139dp).
@@ -3391,11 +3402,6 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 
 		Reads: reads,
 
-		// The shadow estimate reads its setting from the same block as the
-		// other spec_dispatch knobs, and has no environment variable (gt-5d9k2f.14).
-		StoryPointShadow:   sd.StoryPointsShadow(),
-		StoryPointEstimate: specStoryPointEstimate(townRoot),
-
 		Background: specDispatchBackground,
 		InFlight:   inFlight,
 
@@ -3413,6 +3419,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// candidate's own row already read it (gt-hgt9j.12).
 		BlockerRead: specBlockerRead(reads, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }),
 	}
+	specWireStoryPointShadow(&env, sd, townRoot)
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)
 	annotations.save()
