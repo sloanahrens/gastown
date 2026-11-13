@@ -64,6 +64,7 @@ func TestNativeCoversGtHostCommands(t *testing.T) {
 		{name: "maint plan colima", args: []string{"maint", "plan", "colima"}, want: true},
 		{name: "maint plan registry", args: []string{"maint", "plan", "registry"}, want: true},
 		{name: "maint plan sizes", args: []string{"maint", "plan", "sizes"}, want: true},
+		{name: "maint apply with no target", args: []string{"maint", "apply"}, want: true},
 		{name: "maint apply worktree", args: []string{"maint", "apply", "worktree"}, want: true},
 		{name: "maint plan baks", args: []string{"maint", "plan", "baks"}, want: true},
 		{name: "the maint group alone", args: []string{"maint"}, want: false},
