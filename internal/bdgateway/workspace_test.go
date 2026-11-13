@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1264,5 +1265,136 @@ func writeFileIn(t *testing.T, root, path, content string) {
 	}
 	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing %s: %v", target, err)
+	}
+}
+
+// TestWorkspaceCrashStates is the one table of the states a crash leaves beside
+// the live root. Each row sets a state up, pushes a document (valid or refused)
+// and asserts three things together: a recoverable previous tree is live and
+// readable afterwards even when the push is refused, a refused push never loses a
+// tree that existed, and the sweep removes only leftovers.
+func TestWorkspaceCrashStates(t *testing.T) {
+	t.Parallel()
+	valid := func() WorkspaceDocument {
+		files := testWorkspaceFiles("next")
+		return WorkspaceDocument{ManifestSHA: WorkspaceManifest(files), Files: files}
+	}
+	refused := func() WorkspaceDocument {
+		return WorkspaceDocument{ManifestSHA: "refused", Files: map[string]string{"not-served.txt": "x"}}
+	}
+	for _, tc := range []struct {
+		name string
+		// setup returns the store, its root and the tree that must be live after
+		// the push, or nil when the push replaces it.
+		setup     func(t *testing.T) (*WorkspaceStore, string, map[string]string)
+		doc       func() WorkspaceDocument
+		wantErr   bool
+		wantAfter func(t *testing.T, root string, prev map[string]string)
+	}{
+		{
+			name: "live and old: the old copy is a leftover and is swept",
+			setup: func(t *testing.T) (*WorkspaceStore, string, map[string]string) {
+				s, root := openTestStore(t)
+				pushWorkspace(t, s, testWorkspaceFiles("one"))
+				writeFileIn(t, filepath.Dir(root), filepath.Base(root)+".old/stale/file", "x")
+				return s, root, nil
+			},
+			doc: valid,
+			wantAfter: func(t *testing.T, root string, _ map[string]string) {
+				if got := readWorkspace(t, root); !reflect.DeepEqual(got, testWorkspaceFiles("next")) {
+					t.Errorf("the live tree is not the pushed one: %v", got)
+				}
+				wantOldIsPreviousTree(t, root)
+			},
+		},
+		{
+			name: "no live and old, push refused: the previous tree is restored",
+			setup: func(t *testing.T) (*WorkspaceStore, string, map[string]string) {
+				s, root, _, prev := lostLiveTree(t)
+				return s, root, prev
+			},
+			doc:     refused,
+			wantErr: true,
+			wantAfter: func(t *testing.T, root string, prev map[string]string) {
+				if got := readWorkspace(t, root); !reflect.DeepEqual(got, prev) {
+					t.Errorf("the previous tree was not restored by the refused push: got %v", got)
+				}
+			},
+		},
+		{
+			name: "no live and old, push valid: restored first, then replaced, nothing left over",
+			setup: func(t *testing.T) (*WorkspaceStore, string, map[string]string) {
+				s, root, _, _ := lostLiveTree(t)
+				return s, root, nil
+			},
+			doc: valid,
+			wantAfter: func(t *testing.T, root string, _ map[string]string) {
+				if got := readWorkspace(t, root); !reflect.DeepEqual(got, testWorkspaceFiles("next")) {
+					t.Errorf("the live tree is not the pushed one: %v", got)
+				}
+				wantOldIsPreviousTree(t, root)
+			},
+		},
+		{
+			name: "no live and no old, temp leftovers: nothing to recover, the push publishes",
+			setup: func(t *testing.T) (*WorkspaceStore, string, map[string]string) {
+				s, root := openTestStore(t)
+				writeFileIn(t, filepath.Dir(root), filepath.Base(root)+".new.abc/x/file", "x")
+				return s, root, nil
+			},
+			doc: valid,
+			wantAfter: func(t *testing.T, root string, _ map[string]string) {
+				if got := readWorkspace(t, root); !reflect.DeepEqual(got, testWorkspaceFiles("next")) {
+					t.Errorf("the live tree is not the pushed one: %v", got)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, root, prev := tc.setup(t)
+			_, err := s.Put(tc.doc())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Put error = %v, want error: %v", err, tc.wantErr)
+			}
+			tc.wantAfter(t, root, prev)
+		})
+	}
+}
+
+// TestWorkspaceErrorsDoNotEchoOnDiskNames: an error from the disk names the path
+// it failed on, which can be any length, and the store's error does not repeat it.
+func TestWorkspaceErrorsDoNotEchoOnDiskNames(t *testing.T) {
+	t.Parallel()
+	s, _ := openTestStore(t)
+	pushWorkspace(t, s, testWorkspaceFiles("one"))
+	long := strings.Repeat("x", 500)
+	s.fs.readDir = func(string) ([]os.DirEntry, error) {
+		return nil, &fs.PathError{Op: "open", Path: long, Err: errors.New("denied")}
+	}
+	files := testWorkspaceFiles("two")
+	_, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(files), Files: files})
+	if err == nil {
+		t.Fatal("Put succeeded although the store directory could not be read")
+	}
+	if strings.Contains(err.Error(), long) || len(err.Error()) > 300 {
+		t.Errorf("the error echoes the on-disk name or is unbounded (%d bytes): %.200s", len(err.Error()), err)
+	}
+	if !strings.Contains(err.Error(), "denied") {
+		t.Errorf("the error lost the cause: %v", err)
+	}
+}
+
+// wantOldIsPreviousTree asserts what a successful push leaves beside the root:
+// exactly the tree it replaced under the .old name, kept as the recovery copy
+// until the next push, and no temp tree or stale copy.
+func wantOldIsPreviousTree(t *testing.T, root string) {
+	t.Helper()
+	wantName := filepath.Base(root) + ".old"
+	if names := siblingNames(t, root); !reflect.DeepEqual(names, []string{wantName}) {
+		t.Fatalf("beside the root = %v, want only %s", names, wantName)
+	}
+	if got, want := readWorkspace(t, filepath.Join(filepath.Dir(root), wantName)), testWorkspaceFiles("one"); !reflect.DeepEqual(got, want) {
+		t.Errorf("the .old copy is not the tree the push replaced: %v", got)
 	}
 }

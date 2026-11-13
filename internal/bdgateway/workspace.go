@@ -204,6 +204,21 @@ func shown(text string) string {
 	return text[:max] + "..."
 }
 
+// fsMsg is the text of a filesystem error without the path it names: the
+// operation and the cause, bounded. An error from the disk echoes whatever name
+// is on it, which can be any length, and the response must not.
+func fsMsg(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return shown(pe.Op + ": " + pe.Err.Error())
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return shown(le.Op + ": " + le.Err.Error())
+	}
+	return shown(err.Error())
+}
+
 // workspaceFS is the store's filesystem seam. The real one is osWorkspaceFS;
 // tests replace one call to drive an error branch that a healthy disk cannot.
 type workspaceFS struct {
@@ -288,13 +303,13 @@ func (s *WorkspaceStore) recoverSwapped() (map[string]string, bool, error) {
 	if _, err := s.fs.lstat(s.root); err == nil {
 		return nil, false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, false, fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceRoot, err)
+		return nil, false, fmt.Errorf("%w: reading the live tree: %s", ErrWorkspaceRoot, fsMsg(err))
 	}
 	info, err := s.fs.lstat(s.oldPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	} else if err != nil {
-		return nil, false, fmt.Errorf("%w: reading the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
+		return nil, false, fmt.Errorf("%w: reading the tree a swap moved aside: %s", ErrWorkspaceRoot, fsMsg(err))
 	}
 	if !info.IsDir() {
 		return nil, false, fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, shown(s.oldPath()))
@@ -304,7 +319,7 @@ func (s *WorkspaceStore) recoverSwapped() (map[string]string, bool, error) {
 		return nil, false, err
 	}
 	if err := s.fs.rename(s.oldPath(), s.root); err != nil {
-		return nil, false, fmt.Errorf("%w: restoring the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
+		return nil, false, fmt.Errorf("%w: restoring the tree a swap moved aside: %s", ErrWorkspaceRoot, fsMsg(err))
 	}
 	return files, true, nil
 }
@@ -331,7 +346,7 @@ func (s *WorkspaceStore) readTreeAt(root string) (map[string]string, error) {
 		return map[string]string{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrWorkspaceRoot, err)
+		return nil, fmt.Errorf("%w: %s", ErrWorkspaceRoot, fsMsg(err))
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, shown(root))
@@ -339,7 +354,7 @@ func (s *WorkspaceStore) readTreeAt(root string) (map[string]string, error) {
 	files := map[string]string{}
 	total := 0
 	if err := s.readTreeDir(root, "", files, &total); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrWorkspaceRoot, err)
+		return nil, fmt.Errorf("%w: %s", ErrWorkspaceRoot, fsMsg(err))
 	}
 	return files, nil
 }
@@ -395,17 +410,14 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 // store writes anything; a failure while building or publishing leaves the
 // previous tree live (see swap).
 func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
-	manifest, err := validatedManifest(doc)
-	if err != nil {
-		return "", err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// A swap whose restore failed left the previous tree beside the root and no
-	// tree live (ErrWorkspaceLiveTreeLost). Recovering it here, before the sweep,
-	// puts that tree back under the root: the sweep then removes only a leftover
-	// copy, and a build failure below cannot discard the only one.
+	// tree live (ErrWorkspaceLiveTreeLost). Recovering it comes first, before the
+	// document is looked at and before anything is swept, so a push that is then
+	// refused still leaves the previous tree live, and the sweep removes only a
+	// leftover copy.
 	files, restored, err := s.recoverSwapped()
 	if err != nil {
 		return "", err
@@ -413,12 +425,20 @@ func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 	if restored {
 		s.manifest = WorkspaceManifest(files)
 	}
-	if err := s.sweep(); err != nil {
+	manifest, err := validatedManifest(doc)
+	if err != nil {
 		return "", err
+	}
+	// The sweep runs only once a live root exists: with none, a tree beside it
+	// is a copy the store could not recover, and it is never removed.
+	if _, err := s.fs.lstat(s.root); err == nil {
+		if err := s.sweep(); err != nil {
+			return "", err
+		}
 	}
 	tmp, err := s.fs.mkdirTemp(s.parent(), s.base()+".new.")
 	if err != nil {
-		return "", fmt.Errorf("%w: creating the temp tree: %v", ErrWorkspaceSwap, err)
+		return "", fmt.Errorf("%w: creating the temp tree: %s", ErrWorkspaceSwap, fsMsg(err))
 	}
 	if err := s.writeTree(tmp, doc.Files); err != nil {
 		return "", errors.Join(err, s.removeTempTree(tmp))
@@ -443,10 +463,10 @@ func (s *WorkspaceStore) writeTree(root string, files map[string]string) error {
 	for _, name := range slices.Sorted(maps.Keys(files)) {
 		target := filepath.Join(root, filepath.FromSlash(name))
 		if err := s.fs.mkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return fmt.Errorf("%w: creating %q: %v", ErrWorkspaceSwap, shown(name), err)
+			return fmt.Errorf("%w: creating %q: %s", ErrWorkspaceSwap, shown(name), fsMsg(err))
 		}
 		if err := s.fs.writeFile(target, []byte(files[name]), 0o600); err != nil {
-			return fmt.Errorf("%w: writing %q: %v", ErrWorkspaceSwap, shown(name), err)
+			return fmt.Errorf("%w: writing %q: %s", ErrWorkspaceSwap, shown(name), fsMsg(err))
 		}
 	}
 	return nil
@@ -467,19 +487,19 @@ func (s *WorkspaceStore) swap(tmp string) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if err := s.fs.rename(tmp, s.root); err != nil {
-			return errors.Join(fmt.Errorf("%w: publishing the first tree: %v", ErrWorkspaceSwap, err), s.removeTempTree(tmp))
+			return errors.Join(fmt.Errorf("%w: publishing the first tree: %s", ErrWorkspaceSwap, fsMsg(err)), s.removeTempTree(tmp))
 		}
 		return nil
 	case err != nil:
-		return errors.Join(fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceSwap, err), s.removeTempTree(tmp))
+		return errors.Join(fmt.Errorf("%w: reading the live tree: %s", ErrWorkspaceSwap, fsMsg(err)), s.removeTempTree(tmp))
 	}
 	if err := s.fs.rename(s.root, old); err != nil {
-		return errors.Join(fmt.Errorf("%w: moving the live tree aside: %v", ErrWorkspaceSwap, err), s.removeTempTree(tmp))
+		return errors.Join(fmt.Errorf("%w: moving the live tree aside: %s", ErrWorkspaceSwap, fsMsg(err)), s.removeTempTree(tmp))
 	}
 	if err := s.fs.rename(tmp, s.root); err != nil {
-		joined := []error{fmt.Errorf("%w: publishing the new tree: %v", ErrWorkspaceSwap, err)}
+		joined := []error{fmt.Errorf("%w: publishing the new tree: %s", ErrWorkspaceSwap, fsMsg(err))}
 		if restoreErr := s.fs.rename(old, s.root); restoreErr != nil {
-			joined = append(joined, fmt.Errorf("%w: the previous tree could not be restored: %v", ErrWorkspaceLiveTreeLost, restoreErr))
+			joined = append(joined, fmt.Errorf("%w: the previous tree could not be restored: %s", ErrWorkspaceLiveTreeLost, fsMsg(restoreErr)))
 		}
 		joined = append(joined, s.removeTempTree(tmp))
 		return errors.Join(joined...)
@@ -498,7 +518,7 @@ func (s *WorkspaceStore) sweep() error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("%w: reading the store directory: %v", ErrWorkspaceSwap, err)
+		return fmt.Errorf("%w: reading the store directory: %s", ErrWorkspaceSwap, fsMsg(err))
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -506,7 +526,7 @@ func (s *WorkspaceStore) sweep() error {
 			continue
 		}
 		if err := s.fs.removeAll(filepath.Join(s.parent(), name)); err != nil {
-			return fmt.Errorf("%w: removing the leftover tree %q: %v", ErrWorkspaceSwap, shown(name), err)
+			return fmt.Errorf("%w: removing the leftover tree %q: %s", ErrWorkspaceSwap, shown(name), fsMsg(err))
 		}
 	}
 	return nil
@@ -516,7 +536,7 @@ func (s *WorkspaceStore) sweep() error {
 // the one that already failed the push.
 func (s *WorkspaceStore) removeTempTree(path string) error {
 	if err := s.fs.removeAll(path); err != nil {
-		return fmt.Errorf("removing the temp tree: %v", err)
+		return fmt.Errorf("removing the temp tree: %s", fsMsg(err))
 	}
 	return nil
 }
