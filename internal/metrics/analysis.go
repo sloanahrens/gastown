@@ -348,13 +348,11 @@ func writeBeadChanges(dir string, archiveDir func() (string, error)) ([]DroppedI
 		return dropped.Items, err
 	}
 	var csv bytes.Buffer
-	if err := WriteBeadChangesCSV(&csv, rows, &dropped); err != nil {
-		return dropped.Items, err
+	err = WriteBeadChangesCSV(&csv, rows, &dropped)
+	if err == nil {
+		err = PublishAtomic(dir, beadChangesName, csv.Bytes())
 	}
-	if err := PublishAtomic(dir, beadChangesName, csv.Bytes()); err != nil {
-		return dropped.Items, err
-	}
-	return dropped.Items, nil
+	return dropped.Items, err
 }
 
 // readStamp reads when the last analysis published. A missing or unparseable

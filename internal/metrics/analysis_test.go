@@ -1020,6 +1020,21 @@ func TestAnalyseLoaderFailureKeepsTheOtherOutputs(t *testing.T) {
 	}
 }
 
+// A table the run cannot publish, because its directory does not exist, is an
+// error from the publish step, not a table that reads as written.
+func TestPublishBeadChangesReportsATableThatCannotBePublished(t *testing.T) {
+	t.Parallel()
+	archive := archiveDirWith(t, map[string][]byte{
+		"events-gastown-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+	})
+	missing := filepath.Join(t.TempDir(), analysisDirName)
+	if _, err := publishBeadChanges(missing, archiveResolver(archive)); err == nil {
+		t.Fatal("a table published into a directory that does not exist, want the publish failure")
+	}
+}
+
 // A stale table that cannot be removed is named in the error with the reason the
 // table was not written, so neither failure hides the other. A non-empty
 // directory in the table's place cannot be removed.
