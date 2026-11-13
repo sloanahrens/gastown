@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	"github.com/steveyegge/gastown/internal/polecat/imagectx"
@@ -47,19 +48,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "polecat-image: cannot read the working directory: %v\n", err)
 		return 1
 	}
+	// The owner is the setting's default: the build runs from a checkout and
+	// reads no live town, so every host expands the files the same way.
+	owner, err := config.ResolveForgeOwner("")
+	if err != nil {
+		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
+		return 1
+	}
 
-	imagePins, err := readFile(*pins, daemonimage.ParsePins)
+	imagePins, err := readFile(*pins, owner, daemonimage.ParsePins)
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1
 	}
 	bd := bdPin(imagePins)
-	seeds, err := readFile(*seedPins, seed.Pins)
+	seeds, err := readFile(*seedPins, owner, seed.Pins)
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1
 	}
-	urls, err := readFile(*seedURLs, imagectx.ParseSeedURLs)
+	urls, err := readFile(*seedURLs, owner, imagectx.ParseSeedURLs)
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1
@@ -90,14 +98,19 @@ func bdPin(pins []daemonimage.Pin) daemonimage.Pin {
 	return daemonimage.Pin{}
 }
 
-// readFile reads path and parses it with parse, naming the file in any error.
-func readFile[T any](path string, parse func([]byte) (T, error)) (T, error) {
+// readFile reads path, expands its {owner} placeholder with owner, and parses
+// it with parse, naming the file in any error.
+func readFile[T any](path, owner string, parse func([]byte) (T, error)) (T, error) {
 	var zero T
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return zero, fmt.Errorf("cannot read %s: %w", path, err)
 	}
-	v, err := parse(data)
+	text, err := config.ExpandForgeOwner(string(data), owner)
+	if err != nil {
+		return zero, fmt.Errorf("%s: %w", path, err)
+	}
+	v, err := parse([]byte(text))
 	if err != nil {
 		return zero, fmt.Errorf("%s: %w", path, err)
 	}

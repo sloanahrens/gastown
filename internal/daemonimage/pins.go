@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
 
@@ -45,7 +46,9 @@ var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // ParsePins parses an image-pins file: one "<name> <url> <commit>" per line,
 // with blank lines and "#" comments ignored. It refuses a file that does not
 // name each of PinNames exactly once, with a full commit and a credential-free
-// http(s) repository URL, and every refusal names its line.
+// http(s) repository URL, and every refusal names its line. A URL that still
+// holds the {owner} placeholder is refused: a reader expands the file with
+// config.ExpandForgeOwner before it parses (gt-ucigk3).
 func ParsePins(data []byte) ([]Pin, error) {
 	var pins []Pin
 	seen := make(map[string]bool, len(PinNames))
@@ -105,6 +108,9 @@ func isPinName(name string) bool {
 // names neither. No refusal echoes the URL, which may hold the credential it
 // refuses.
 func checkPinURL(raw string) error {
+	if err := config.RefuseUnexpandedForgeOwner("the pin url", raw); err != nil {
+		return err
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return errors.New("url does not parse")

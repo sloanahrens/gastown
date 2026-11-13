@@ -165,6 +165,11 @@ func validateTownConfig(c *TownConfig) error {
 	if c.Tracker != nil && (c.Tracker.Port < 1 || c.Tracker.Port > 65535) {
 		return fmt.Errorf("tracker.port %d is not a TCP port", c.Tracker.Port)
 	}
+	if c.Forge != nil && c.Forge.Owner != nil {
+		if err := ValidForgeOwner(*c.Forge.Owner); err != nil {
+			return fmt.Errorf("forge.owner: %w", err)
+		}
+	}
 	return nil
 }
 

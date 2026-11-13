@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
@@ -200,7 +201,7 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
 	}
-	pins, err := readImagePins(f.pins)
+	pins, err := readImagePins(f.pins, config.DefaultForgeOwner)
 	if err != nil {
 		return err
 	}
@@ -307,15 +308,21 @@ func runContextOnly(ctx context.Context, build imageBuilder, rev, ctxDir string,
 	return nil
 }
 
-// readImagePins reads and parses the pins file at path. A file that cannot be
-// read and one the parser refuses are both errors naming the path, so the
-// operator knows which file to fix.
-func readImagePins(path string) ([]daemonimage.Pin, error) {
+// readImagePins reads and parses the pins file at path, expanding its {owner}
+// placeholder with owner first. A file that cannot be read and one the parser
+// refuses are both errors naming the path, so the operator knows which file to
+// fix. The caller passes the setting's default: a build reads no live town, so
+// the expansion is the same on every host and from any checkout.
+func readImagePins(path, owner string) ([]daemonimage.Pin, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("--pins %q cannot be read: %w", path, err)
 	}
-	pins, err := daemonimage.ParsePins(body)
+	text, err := config.ExpandForgeOwner(string(body), owner)
+	if err != nil {
+		return nil, fmt.Errorf("--pins %q: %w", path, err)
+	}
+	pins, err := daemonimage.ParsePins([]byte(text))
 	if err != nil {
 		return nil, fmt.Errorf("--pins %q: %w", path, err)
 	}

@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/mod/modfile"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	"github.com/steveyegge/gastown/internal/polecat/seed"
@@ -124,7 +125,9 @@ var goVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
 var rigName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // ParseSeedURLs parses a seed-urls file: one "<rig> <url>" per line, with blank
-// lines and "#" comments ignored. A rig named twice is refused. The URL is not
+// lines and "#" comments ignored. A rig named twice is refused. A URL that still
+// holds the {owner} placeholder is refused: a reader expands the file with
+// config.ExpandForgeOwner before it parses (gt-ucigk3). The URL is otherwise not
 // checked here: FetchSource refuses a URL that carries a credential or is not
 // http(s), before any command runs.
 func ParseSeedURLs(data []byte) (map[string]string, error) {
@@ -140,6 +143,9 @@ func ParseSeedURLs(data []byte) (map[string]string, error) {
 		}
 		if _, dup := urls[fields[0]]; dup {
 			return nil, fmt.Errorf("line %d: rig %s is named twice", i+1, fields[0])
+		}
+		if err := config.RefuseUnexpandedForgeOwner("the seed-urls URL of rig "+fields[0], fields[1]); err != nil {
+			return nil, fmt.Errorf("line %d: %w", i+1, err)
 		}
 		urls[fields[0]] = fields[1]
 	}

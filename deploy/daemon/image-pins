@@ -1,9 +1,10 @@
 # <name> <url> <commit>: the four external sources `gt daemon image` builds from.
 # Each commit is the commit `gt daemon image` builds that source at. Each URL is
-# the rig's Forgejo remote, without a credential. The pin-drift guard refuses a
+# the rig's Forgejo remote, without a credential. {owner} is expanded from
+# forge.owner; see config.ForgeOwnerPlaceholder. The pin-drift guard refuses a
 # pin that is not an ancestor of the source's origin/main, more than 40 commits
 # behind it, or more than 7 days older than its tip.
-bd http://forgejo:3000/sloan/beads.git b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f
-om http://forgejo:3000/sloan/organic-mechanic.git 50bb8fb1964dda98a22697a6396a75a1fd7b000f
-hm http://forgejo:3000/sloan/history-man.git 7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb
-devops http://forgejo:3000/sloan/devops.git ca7072bbb76452e384af67cdca521d0155d66804
+bd http://forgejo:3000/{owner}/beads.git b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f
+om http://forgejo:3000/{owner}/organic-mechanic.git 50bb8fb1964dda98a22697a6396a75a1fd7b000f
+hm http://forgejo:3000/{owner}/history-man.git 7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb
+devops http://forgejo:3000/{owner}/devops.git ca7072bbb76452e384af67cdca521d0155d66804

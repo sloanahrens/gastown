@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -531,7 +532,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		return nil
 	}
 	r.deps.environ = []string{"PATH=/usr/bin", "DOCKER_CONTEXT=other", "DOCKER_HOST=tcp://elsewhere:2375", "HOME=/home/x"}
-	pins, err := readImagePins(r.flags.pins)
+	pins, err := readImagePins(r.flags.pins, config.DefaultForgeOwner)
 	if err != nil {
 		t.Fatalf("readImagePins: %v", err)
 	}
@@ -720,12 +721,43 @@ func TestDaemonImagePlanNamesThePins(t *testing.T) {
 	}
 }
 
+// TestOwnerPlaceholderExpandsInEachGoReader: readImagePins expands the pins
+// file's {owner} with the setting's default, so the URLs are the ones the file
+// named before the placeholder; the parser refuses a placeholder nothing
+// expanded (gt-ucigk3).
+func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
+	t.Parallel()
+	body := ""
+	for name, repo := range map[string]string{"bd": "beads", "om": "organic-mechanic", "hm": "history-man", "devops": "devops"} {
+		body += name + " http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git " + imageTestBDCommit + "\n"
+	}
+	path := filepath.Join(t.TempDir(), "image-pins")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pins, err := readImagePins(path, config.DefaultForgeOwner)
+	if err != nil {
+		t.Fatalf("readImagePins: %v", err)
+	}
+	for _, pin := range pins {
+		if want := "http://forgejo:3000/" + config.DefaultForgeOwner + "/"; !strings.HasPrefix(pin.URL, want) {
+			t.Errorf("%s pin URL = %q, want it under %s", pin.Name, pin.URL, want)
+		}
+	}
+	if _, err := daemonimage.ParsePins([]byte(body)); err == nil {
+		t.Error("ParsePins accepted a URL holding the unexpanded placeholder")
+	}
+	if _, err := readImagePins(path, ""); err == nil {
+		t.Error("readImagePins accepted an empty owner")
+	}
+}
+
 // A pins file that cannot be read is refused when it is read, not treated as
 // an empty pin set.
 func TestReadImagePinsRefusesAnUnreadableFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "absent")
-	if _, err := readImagePins(path); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+	if _, err := readImagePins(path, config.DefaultForgeOwner); err == nil || !strings.Contains(err.Error(), "cannot be read") {
 		t.Fatalf("readImagePins = %v, want an error naming the unreadable file", err)
 	}
 }

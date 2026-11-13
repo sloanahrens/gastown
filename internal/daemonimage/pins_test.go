@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
 )
@@ -94,6 +95,9 @@ func TestParseImagePins(t *testing.T) {
 			line(3, "names no host"), nil},
 		{"a url that does not parse", strings.Replace(validImagePins(), testPinURL("beads"), "http://[::1", 1),
 			line(3, "url does not parse"), nil},
+		{"a url holding the owner placeholder", strings.Replace(validImagePins(), testPinURL("beads"),
+			"http://forgejo:3000/"+config.ForgeOwnerPlaceholder+"/beads.git", 1),
+			line(3, "nothing expanded"), nil},
 		{"a line missing its name", strings.Replace(validImagePins(), "bd "+testPinURL("beads"), testPinURL("beads"), 1),
 			line(3, `want "<name> <url> <commit>"`), nil},
 		{"a line missing its commit", strings.Replace(validImagePins(), " "+pinBDCommit, "", 1),
@@ -348,7 +352,11 @@ func TestCommittedImagePinsParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	pins, err := ParsePins(body)
+	text, err := config.ExpandForgeOwner(string(body), config.DefaultForgeOwner)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	pins, err := ParsePins([]byte(text))
 	if err != nil {
 		t.Fatalf("%s: %v", path, err)
 	}
@@ -422,7 +430,11 @@ func TestCommittedPinsAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", seedPinsPath, err)
 	}
-	if err := agreeingPins(image, seed); err != nil {
+	text, err := config.ExpandForgeOwner(string(image), config.DefaultForgeOwner)
+	if err != nil {
+		t.Fatalf("%s: %v", PinsPath, err)
+	}
+	if err := agreeingPins([]byte(text), seed); err != nil {
 		t.Error(err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -209,7 +210,11 @@ func TestBDPinMatchesImagePins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", daemonimage.PinsPath, err)
 	}
-	if err := bdPinMatches(body, bdPin); err != nil {
+	text, err := config.ExpandForgeOwner(string(body), config.DefaultForgeOwner)
+	if err != nil {
+		t.Fatalf("%s: %v", daemonimage.PinsPath, err)
+	}
+	if err := bdPinMatches([]byte(text), bdPin); err != nil {
 		t.Error(err)
 	}
 }

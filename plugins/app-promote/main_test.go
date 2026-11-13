@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 const (
@@ -1968,5 +1970,72 @@ func TestPromoteResult(t *testing.T) {
 	}
 	if want := exec.ErrNotFound.Error(); out != want {
 		t.Errorf("promoteResult(a program that cannot start) = %q, want %q", out, want)
+	}
+}
+
+// TestOwnerPlaceholderExpandsInEachGoReader: app-promote expands the rig list's
+// {owner} with the town's forge.owner, so rigs.conf reads as it did before the
+// placeholder; a repository holding an unexpanded one is refused before any
+// request (gt-ucigk3).
+func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
+	t.Parallel()
+	const owner = "gastown"
+	h := newHarness(t)
+	h.write(h.in("town", "mayor", "town.json"),
+		`{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","forge":{"owner":"`+owner+`"}}`)
+	h.write(h.in("plugin", "rigs.conf"), rigName+" "+config.ForgeOwnerPlaceholder+"/fractals-nextjs\n")
+	h.state(rigName, older)
+	h.promotesGreen(owner+"/fractals-nextjs", rigName)
+	h.setJobs(buildJob, prodJob, jobsJob)
+
+	if code := h.run(); code != 0 {
+		t.Fatalf("exit %d, want 0; output:\n%s", code, h.output())
+	}
+	if !slices.Contains(h.promotes, "promote --rig "+rigName+" --sha "+green) {
+		t.Errorf("promoted %v, want the rig promoted at %s", h.promotes, green)
+	}
+	if got := h.calls("/repos/" + owner + "/fractals-nextjs/actions/runs"); got == 0 {
+		t.Errorf("no read under %s/fractals-nextjs; requests: %v", owner, h.requests)
+	}
+
+	placeholderRepo := config.ForgeOwnerPlaceholder + "/fractals-nextjs"
+	for _, tc := range []struct {
+		name string
+		call func(forgejo) error
+	}{
+		{"findRelease", func(f forgejo) error { _, _, err := f.findRelease(placeholderRepo); return err }},
+		{"tagSHA", func(f forgejo) error { _, _, err := f.tagSHA(placeholderRepo, "v1.0.0"); return err }},
+		{"jobs", func(f forgejo) error { _, err := f.jobs(placeholderRepo, "9"); return err }},
+		{"commitsAhead", func(f forgejo) error { _, err := f.commitsAhead(placeholderRepo, "a", "b"); return err }},
+	} {
+		t.Run(tc.name+" refuses an unexpanded repository", func(t *testing.T) {
+			bad := newHarness(t)
+			f := forgejo{apiURL: apiRoot, token: tokenText, do: bad.do}
+			if err := tc.call(f); err == nil {
+				t.Fatal("the read accepted a repository holding the placeholder")
+			}
+			if len(bad.requests) != 0 {
+				t.Errorf("an unexpanded repository made the reads %v, want none", bad.requests)
+			}
+		})
+	}
+}
+
+// TestRigListRefusesABadForgeOwner: a town whose forge.owner is not a usable
+// name refuses the run before any read, and the failure names the rig list
+// (gt-ucigk3).
+func TestRigListRefusesABadForgeOwner(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.write(h.in("town", "mayor", "town.json"),
+		`{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","forge":{"owner":""}}`)
+	if code := h.run(); code != 1 {
+		t.Fatalf("exit %d, want 1; output:\n%s", code, h.output())
+	}
+	if !strings.Contains(h.output(), "forge.owner") {
+		t.Errorf("the failure does not name forge.owner:\n%s", h.output())
+	}
+	if len(h.requests) != 0 {
+		t.Errorf("a refused forge.owner made the reads %v, want none", h.requests)
 	}
 }
