@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-13 gt-e25lc0: the "Local review round before gt done" section points at the design page's Failure rule instead of restating which findings block a submit; internal/directives pins the pointer.
 - 2026-11-13 gt-k51hb1: the "Local review round before gt done" section points at docs/design/local-round.md for the reply forms instead of copying them, and internal/directives pins the section.
 - 2026-11-13 gt-9xw72b: added the "Local review round before gt done" section, replacing a one-sentence paragraph.
 - 2026-11-13 gt-2z1219: the "Before gt done" section asks for `gt review-preview` after `make presubmit` and before `gt done`, and a `gt review-preview reply` for each major (docs/design/local-round.md).
@@ -164,9 +165,7 @@ Run these on your added lines, in the order om rejects most. A hit is a question
 
 After `make presubmit` and before `gt done`, run `gt review-preview` from your worktree on non-trivial work. It runs the daemon's local om round on your head and appends a LOCAL ROUND block to the work bead's notes.
 
-`gt done` refuses while the last round has a major or critical finding with no reply. Minor and info findings never block, and a round marked unavailable, or no round at all, never blocks.
-
-Answer each blocking finding after its fix is committed. Before replying, read `docs/design/local-round.md`, the design page for the local round: its Flow step 4 holds the reply forms and their flags, and its Failure rule is the one `gt done` applies. `gt review-preview --help` lists the other flags.
+Before you submit, read `docs/design/local-round.md`, the design page for the local round: its Failure rule is what `gt done` refuses and what it lets through, and its Flow step 4 holds the reply forms and their flags. Answer each finding that rule blocks on after its fix is committed. `gt review-preview --help` lists the other flags.
 
 If the branch names no work bead and none is hooked, `gt done` prints one line starting `local-round gate skipped:` and goes on. Then run `gt done`.
 

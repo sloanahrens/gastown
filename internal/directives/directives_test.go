@@ -257,10 +257,11 @@ func TestPolecatDirectiveChecklistPointsAtRule17(t *testing.T) {
 	})
 }
 
-// TestPolecatDirectiveLocalRoundSection pins gt-k51hb1: the "Local review round
-// before gt done" section states when to run the preview, what blocks a submit
+// TestPolecatDirectiveLocalRoundSection pins gt-k51hb1 and gt-e25lc0: the
+// "Local review round before gt done" section states when to run the preview
 // and what a skipped gate prints, and it points at docs/design/local-round.md
-// for the reply forms instead of restating syntax that page owns.
+// for the reply forms and the failure rule instead of restating syntax or gate
+// semantics that page owns.
 func TestPolecatDirectiveLocalRoundSection(t *testing.T) {
 	t.Parallel()
 	text := readDirective(t, "polecat.md")
@@ -275,7 +276,7 @@ func TestPolecatDirectiveLocalRoundSection(t *testing.T) {
 		phrase string
 	}{
 		{"when to run the preview", "After `make presubmit` and before `gt done`, run `gt review-preview`"},
-		{"the blocking rule", "`gt done` refuses while the last round has a major or critical finding with no reply"},
+		{"the failure-rule pointer", "its Failure rule is what `gt done` refuses and what it lets through"},
 		{"the skipped gate", "local-round gate skipped:"},
 		{"the source-of-truth pointer", "docs/design/local-round.md"},
 	} {
@@ -291,6 +292,18 @@ func TestPolecatDirectiveLocalRoundSection(t *testing.T) {
 		for _, copy := range []string{"gt review-preview reply <id>", "--fixed", "--disputed"} {
 			if strings.Contains(section, copy) {
 				t.Errorf("the local review round section restates the reply syntax docs/design/local-round.md owns: %q", copy)
+			}
+		}
+	})
+	t.Run("points at the failure rule instead of restating which findings block", func(t *testing.T) {
+		t.Parallel()
+		for _, copy := range []string{
+			"`gt done` refuses while the last round",
+			"Minor and info findings never block",
+			"no round at all, never blocks",
+		} {
+			if strings.Contains(section, copy) {
+				t.Errorf("the local review round section restates the failure rule docs/design/local-round.md owns: %q", copy)
 			}
 		}
 	})
