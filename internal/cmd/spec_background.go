@@ -110,20 +110,36 @@ func parseSpecInFlight(raw string) ([]specInFlight, error) {
 	return out, nil
 }
 
+// specInFlightByAgent counts the running slings per agent. It is the one
+// counter of the in-flight term: specLiveWithInFlight adds it to the roster's
+// live count for the seat choice, and the tick line names the same count apart
+// from the roster, so the two cannot disagree (gt-la4r78).
+func specInFlightByAgent(inFlight []specInFlight) map[string]int {
+	if len(inFlight) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(inFlight))
+	for _, f := range inFlight {
+		out[f.Agent]++
+	}
+	return out
+}
+
 // specLiveWithInFlight is the roster's live count with each running sling added
 // to its agent: the sling is filling a seat the roster may not show yet, and a
 // seat it already shows is counted twice until the sling returns. That errs
 // toward fewer slings, never more, and the sling is the slow part either way.
 func specLiveWithInFlight(live map[string]int, inFlight []specInFlight) map[string]int {
-	if len(inFlight) == 0 {
+	extra := specInFlightByAgent(inFlight)
+	if extra == nil {
 		return live
 	}
 	out := maps.Clone(live)
 	if out == nil {
 		out = map[string]int{}
 	}
-	for _, f := range inFlight {
-		out[f.Agent]++
+	for agent, n := range extra {
+		out[agent] += n
 	}
 	return out
 }

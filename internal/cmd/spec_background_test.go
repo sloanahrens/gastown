@@ -95,7 +95,9 @@ func TestBackgroundTickNeverSlingsARunningBeadOrSeatTwice(t *testing.T) {
 	}
 }
 
-// The seats a running sling fills are in the roster the tick reports.
+// The seats a running sling fills are in the roster the tick reports, named
+// apart from the roster's own live count: the seat is the one the sling took,
+// and the tick line says so rather than leaving the reading to arithmetic.
 func TestBackgroundTickRosterCountsTheRunningSling(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
@@ -103,8 +105,8 @@ func TestBackgroundTickRosterCountsTheRunningSling(t *testing.T) {
 	env := backgroundEnv(f)
 	env.InFlight = []specInFlight{{Bead: "gt-x", Rig: "gastown", Agent: "deepseek-flash"}}
 	r := runSpecDispatchCycle(env)
-	if !strings.Contains(r.Roster, "deepseek-flash 1/2") {
-		t.Fatalf("roster = %q, want the running sling counted on its seat", r.Roster)
+	if want := "deepseek-flash 1/2 (0 live + 1 in flight)"; r.Roster != want {
+		t.Fatalf("roster = %q, want %q", r.Roster, want)
 	}
 }
 
