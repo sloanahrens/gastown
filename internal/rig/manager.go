@@ -1676,12 +1676,14 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 
 		// Explicitly set issue_prefix config (bd init --prefix may not persist it in newer versions).
 		// Without this, bd create and gt sling fail with "issue_prefix config is missing".
-		// bd >= 1.0.0 rejects this with "cannot be set via 'bd config set'" because init persists
-		// it directly; treat that as already-set rather than a failure.
+		// bd >= 1.0.0 rejects this because init persists it directly. The refusal's wording
+		// differs by bd build and its stdout carries a JSON envelope, so match the stored
+		// value rather than the text: a refusal over a prefix that already reads back as
+		// ours is already-set, and any other refusal is a failure.
 		if prefixErr := bd.ConfigSet("issue_prefix", prefix); prefixErr != nil {
-			out := bdErrOutput(prefixErr)
-			if !strings.Contains(out, "cannot be set via") {
-				return fmt.Errorf("bd config set issue_prefix failed: %s", out)
+			current, getErr := bd.ConfigGet("issue_prefix")
+			if getErr != nil || current != prefix {
+				return fmt.Errorf("bd config set issue_prefix failed: %s", bdErrOutput(prefixErr))
 			}
 		}
 
