@@ -38,10 +38,10 @@ type Native struct {
 	Subcommands []string
 }
 
-// Covers reports whether a call of the tool with args runs natively. For bd only
-// hooks run is native, since the beads git hooks read the Mac's files. For gt only
-// a path in the host command set runs natively, so a gt entry cannot make any
-// other call native; every other gt call reaches the target.
+// Covers reports whether a call of the tool with args runs natively. For bd, only
+// "hooks run" is native, since the beads git hooks read the Mac's files. For gt,
+// only a path in the host command set runs natively, so a gt entry cannot make
+// any other call native; every other gt call reaches the target.
 func (n Native) Covers(args []string) bool {
 	switch n.Tool {
 	case nativeBdTool:
