@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-13 gt-2z1219: the "Before gt done" section asks for `gt review-preview` after `make presubmit` and before `gt done`, and a `gt review-preview reply` for each major (docs/design/local-round.md).
 - 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
 - 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 points at rule 17 and searches the whole tree for `//go:build integration` files, callers in other packages included.
 - 2026-11-01 gt-2iro9: added rule 16, one workspace per answer (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
@@ -156,5 +157,7 @@ Run these on your added lines, in the order om rejects most. A hit is a question
 9. Scope (9): `git diff --stat origin/main...HEAD` lists only files your Constraints name; go.mod changes carry a Rationale line.
 10. Workspace (16): for each record type the diff reads for one workspace, make the check rule 16 names and grep the diff for its workspace field: `D | grep -nE '^\+.*[Ww]orkspace'`; a read with no check is a question.
 11. Tier (17): apply rule 17 to every integration-tagged file your diff reaches, in any package, not only the one you changed: `grep -rl 'go:build integration' --include='*.go' .` lists them.
+
+After `make presubmit` and before `gt done`, run `gt review-preview` from your worktree, and answer each major or critical finding it prints with `gt review-preview reply <id> --fixed -m "<what changed>"` or `gt review-preview reply <id> --disputed -m "<reason>"`; then run `gt done`.
 
 Tick each acceptance box only after its test exists.
