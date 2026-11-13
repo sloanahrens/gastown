@@ -1,7 +1,8 @@
 // Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on the
-// owning account/gastown without any person seeing the token. It mints a
-// read:repository token for bot-viewer, checks that the token reads every
-// repository the image build fetches, and stores it only when all of them
+// owning account/gastown named by the town's forge.owner (--town-root, or the
+// setting's default when no town is named) without any person seeing the token.
+// It mints a read:repository token for bot-viewer, checks that the token reads
+// every repository the image build fetches, and stores it only when all of them
 // answer 200. The site-admin token comes from the environment the auth broker
 // sets ($GT_AUTH_FORGEJO_TOKEN, or $FORGEJO_ADMIN_TOKEN for a stand-in) or,
 // when the environment holds neither, from the FORGEJO_ADMIN_TOKEN= line of
@@ -11,9 +12,10 @@
 // checkState says what a check reads, prints and judges. The exit codes are 0
 // when the secret is stored, a dry run finishes or a check reads everything and
 // every read repository is readable; 1 when a step fails, a read fails or a
-// required repository is unreadable; and 2 when the command line is refused. An
-// unlisted secret is a state a check reports, not a failure, because the check
-// runs before the first real run, when the secret is absent.
+// required repository is unreadable; and 2 when the command line is refused,
+// including a --town-root with no town.json or whose forge.owner is not a usable
+// owner name. An unlisted secret is a state a check reports, not a failure,
+// because the check runs before the first real run, when the secret is absent.
 package main
 
 import (
@@ -32,13 +34,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 )
 
 // The secret the command stores, the repository it lands on, and the account and
-// scope of the token it mints.
+// scope of the token it mints. secretRepo is a repository of the town's
+// forge.owner, which the run reads through --town-root.
 const (
-	secretOwner     = "sloan"
 	secretRepo      = "gastown"
 	secretName      = "SOURCES_TOKEN"
 	viewerAccount   = forgejoprov.DefaultBotPrefix + "viewer"
@@ -90,6 +93,7 @@ type env struct {
 type options struct {
 	APIURL         string
 	AdminTokenFile string
+	TownRoot       string
 	DryRun         bool
 	Check          bool
 }
@@ -112,6 +116,11 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "forgejo-sources-secret: %v\n", err)
 		return forgejoprov.ExitUsage
 	}
+	owner, err := config.ResolveForgeOwner(opts.TownRoot)
+	if err != nil {
+		fmt.Fprintf(stderr, "forgejo-sources-secret: reading forge.owner for --town-root %q: %v\n", opts.TownRoot, err)
+		return forgejoprov.ExitUsage
+	}
 	secret, err := readAdminToken(env.Getenv, env.ReadFile, opts.AdminTokenFile)
 	if errors.Is(err, errNoTokenSource) {
 		fmt.Fprintf(stderr, "forgejo-sources-secret: %v\n", err)
@@ -123,11 +132,11 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 	}
 	admin := &forgejoprov.Client{API: opts.APIURL, HTTP: env.HTTP, Token: secret, Ctx: ctx}
 	if opts.Check {
-		return checkState(admin, stdout, stderr)
+		return checkState(admin, owner, stdout, stderr)
 	}
 	name := tokenName(env.Now())
 	if opts.DryRun {
-		printPlan(stdout, name)
+		printPlan(stdout, name, owner)
 		return forgejoprov.ExitOK
 	}
 
@@ -147,19 +156,19 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 	reader := admin.WithToken(value)
 	unreadable := map[string]int{}
 	for _, repo := range readRepos {
-		status, err := readRepoStatus(reader, repo)
+		status, err := readRepoStatus(reader, owner, repo)
 		if err != nil {
-			fmt.Fprintf(stdout, "%s/%s: request failed (no HTTP status)\n", secretOwner, repo)
+			fmt.Fprintf(stdout, "%s/%s: request failed (no HTTP status)\n", owner, repo)
 			unreadable[repo] = noReply
 			continue
 		}
-		fmt.Fprintf(stdout, "%s/%s: HTTP %d\n", secretOwner, repo, status)
+		fmt.Fprintf(stdout, "%s/%s: HTTP %d\n", owner, repo, status)
 		if status != http.StatusOK {
 			unreadable[repo] = status
 		}
 	}
 	if ctx.Err() != nil {
-		fmt.Fprintf(stderr, "forgejo-sources-secret: interrupted; nothing is stored on %s/%s (%s)\n", secretOwner, secretRepo, secretName)
+		fmt.Fprintf(stderr, "forgejo-sources-secret: interrupted; nothing is stored on %s/%s (%s)\n", owner, secretRepo, secretName)
 		revokeMinted(ctx, admin, name, stderr)
 		return forgejoprov.ExitFailure
 	}
@@ -171,28 +180,28 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 			}
 			switch {
 			case status == noReply:
-				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (no HTTP reply, a transport failure); nothing is stored for it\n", secretOwner, repo)
+				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (no HTTP reply, a transport failure); nothing is stored for it\n", owner, repo)
 			case status == http.StatusNotFound || status == http.StatusForbidden:
 				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s is not readable by %s; the operator should add %s as a read collaborator on %s/%s in the Forgejo UI, then run this again\n",
-					secretOwner, repo, viewerAccount, viewerAccount, secretOwner, repo)
+					owner, repo, viewerAccount, viewerAccount, owner, repo)
 			default:
-				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (HTTP %d); nothing is stored for it\n", secretOwner, repo, status)
+				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (HTTP %d); nothing is stored for it\n", owner, repo, status)
 			}
 		}
-		fmt.Fprintf(stderr, "forgejo-sources-secret: nothing stored on %s/%s (%s)\n", secretOwner, secretRepo, secretName)
+		fmt.Fprintf(stderr, "forgejo-sources-secret: nothing stored on %s/%s (%s)\n", owner, secretRepo, secretName)
 		revokeMinted(ctx, admin, name, stderr)
 		return forgejoprov.ExitFailure
 	}
 
-	if err := admin.SetRepoSecret(ctx, secretOwner, secretRepo, secretName, value); err != nil {
-		fmt.Fprintf(stderr, "forgejo-sources-secret: could not store %s on %s/%s: %v\n", secretName, secretOwner, secretRepo, err)
+	if err := admin.SetRepoSecret(ctx, owner, secretRepo, secretName, value); err != nil {
+		fmt.Fprintf(stderr, "forgejo-sources-secret: could not store %s on %s/%s: %v\n", secretName, owner, secretRepo, err)
 		if ctx.Err() != nil {
 			fmt.Fprintln(stderr, "forgejo-sources-secret: the run was interrupted during the store")
 		}
 		revokeMinted(ctx, admin, name, stderr)
 		return forgejoprov.ExitFailure
 	}
-	fmt.Fprintf(stdout, "RESULT: stored %s on %s/%s\n", secretName, secretOwner, secretRepo)
+	fmt.Fprintf(stdout, "RESULT: stored %s on %s/%s\n", secretName, owner, secretRepo)
 	return forgejoprov.ExitOK
 }
 
@@ -204,6 +213,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.APIURL, "api-url", forgejoprov.DefaultAPIURL, "Forgejo API root")
 	fs.StringVar(&opts.AdminTokenFile, "admin-token-file", "", "file holding FORGEJO_ADMIN_TOKEN=...; optional when $"+forgejoprov.BrokerTokenEnv+" or $FORGEJO_ADMIN_TOKEN is set")
+	fs.StringVar(&opts.TownRoot, "town-root", "", "town whose forge.owner names the repository owner; empty uses the setting's default "+config.DefaultForgeOwner)
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan; mint and store nothing")
 	fs.BoolVar(&opts.Check, "check", false, "read the secret, the collaborators and the tokens; mint, revoke and store nothing")
 	if err := fs.Parse(args); err != nil {
@@ -244,15 +254,15 @@ func tokenName(now time.Time) string {
 }
 
 // printPlan states what a real run would do, without any request.
-func printPlan(stdout io.Writer, name string) {
+func printPlan(stdout io.Writer, name, owner string) {
 	fmt.Fprintln(stdout, "dry run: nothing is minted, read or stored")
 	fmt.Fprintf(stdout, "account: %s\n", viewerAccount)
 	fmt.Fprintf(stdout, "scope: %s\n", tokenScope)
 	fmt.Fprintf(stdout, "token name: %s\n", name)
 	for _, repo := range readRepos {
-		fmt.Fprintf(stdout, "read check: %s/%s\n", secretOwner, repo)
+		fmt.Fprintf(stdout, "read check: %s/%s\n", owner, repo)
 	}
-	fmt.Fprintf(stdout, "target: %s/%s secret %s\n", secretOwner, secretRepo, secretName)
+	fmt.Fprintf(stdout, "target: %s/%s secret %s\n", owner, secretRepo, secretName)
 }
 
 // mintedName matches a token name this command mints. Only names of that shape are
@@ -271,36 +281,36 @@ var mintedName = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenNamePrefix) + `[
 // ExitOK when every read answered and every read repository is readable, ExitFailure when
 // a read failed or a required repository is unreadable. A failure's detail goes to stderr
 // and carries no reply body.
-func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
+func checkState(admin *forgejoprov.Client, owner string, stdout, stderr io.Writer) int {
 	code := forgejoprov.ExitOK
 
-	secrets, err := admin.ListRepoSecretNames(secretOwner, secretRepo)
+	secrets, err := admin.ListRepoSecretNames(owner, secretRepo)
 	if err != nil {
-		fmt.Fprintf(stderr, "forgejo-sources-secret: could not list the Actions secrets of %s/%s: %v\n", secretOwner, secretRepo, err)
+		fmt.Fprintf(stderr, "forgejo-sources-secret: could not list the Actions secrets of %s/%s: %v\n", owner, secretRepo, err)
 		code = forgejoprov.ExitFailure
 	} else {
 		state := "not listed"
 		if slices.Contains(secrets, secretName) {
 			state = "listed"
 		}
-		fmt.Fprintf(stdout, "%s/%s secret %s: %s\n", secretOwner, secretRepo, secretName, state)
+		fmt.Fprintf(stdout, "%s/%s secret %s: %s\n", owner, secretRepo, secretName, state)
 	}
 
 	for _, repo := range readRepos {
-		status, err := collaboratorStatus(admin, repo)
+		status, err := collaboratorStatus(admin, owner, repo)
 		switch {
 		case err != nil:
-			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s got no HTTP reply\n", secretOwner, repo)
+			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s got no HTTP reply\n", owner, repo)
 			code = forgejoprov.ExitFailure
 		case status == http.StatusNoContent:
-			fmt.Fprintf(stdout, "%s/%s: readable by %s (HTTP %d)\n", secretOwner, repo, viewerAccount, status)
+			fmt.Fprintf(stdout, "%s/%s: readable by %s (HTTP %d)\n", owner, repo, viewerAccount, status)
 		case status == http.StatusNotFound:
-			fmt.Fprintf(stdout, "%s/%s: not readable by %s (HTTP %d)\n", secretOwner, repo, viewerAccount, status)
+			fmt.Fprintf(stdout, "%s/%s: not readable by %s (HTTP %d)\n", owner, repo, viewerAccount, status)
 			fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s is not readable by %s; a real run refuses on it, so add %s as a read collaborator on %s/%s first\n",
-				secretOwner, repo, viewerAccount, viewerAccount, secretOwner, repo)
+				owner, repo, viewerAccount, viewerAccount, owner, repo)
 			code = forgejoprov.ExitFailure
 		default:
-			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s answered HTTP %d\n", secretOwner, repo, status)
+			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s answered HTTP %d\n", owner, repo, status)
 			code = forgejoprov.ExitFailure
 		}
 	}
@@ -323,8 +333,8 @@ func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
 
 // collaboratorStatus asks whether viewerAccount is a collaborator on the read repository
 // repo, with the admin token, and returns the status alone.
-func collaboratorStatus(admin *forgejoprov.Client, repo string) (int, error) {
-	path := "/repos/" + url.PathEscape(secretOwner) + "/" + url.PathEscape(repo) + "/collaborators/" + url.PathEscape(viewerAccount)
+func collaboratorStatus(admin *forgejoprov.Client, owner, repo string) (int, error) {
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/collaborators/" + url.PathEscape(viewerAccount)
 	status, _, err := admin.Do(http.MethodGet, path, nil)
 	return status, err
 }
@@ -354,8 +364,8 @@ func printTokenNames(stdout io.Writer, names []string) {
 
 // readRepoStatus asks for one repository with the minted token and returns the status
 // alone: the reply body is never read into the command's output.
-func readRepoStatus(reader *forgejoprov.Client, repo string) (int, error) {
-	path := "/repos/" + url.PathEscape(secretOwner) + "/" + url.PathEscape(repo)
+func readRepoStatus(reader *forgejoprov.Client, owner, repo string) (int, error) {
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
 	status, _, err := reader.Do(http.MethodGet, path, nil)
 	return status, err
 }

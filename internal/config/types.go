@@ -34,6 +34,10 @@ type TownConfig struct {
 	// gt config set tracker.port/tracker.host write it; resolve it with
 	// ResolveTrackerEndpoint.
 	Tracker *TrackerEndpoint `json:"tracker,omitempty"`
+	// Forge is the town's forge settings, whose owner names the Forgejo
+	// account every repository URL under the town carries. Read it with
+	// ResolveForgeOwner.
+	Forge *ForgeConfig `json:"forge,omitempty"`
 	// Registry is the rig registry, mayor/rigs.json's whole document, once
 	// gt config migrate moved it here (layout.go, gt-y3pgh.7). Its presence
 	// marks the two-file layout. Read it with LoadRigsConfig on the

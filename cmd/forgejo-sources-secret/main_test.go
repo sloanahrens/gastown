@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejotest"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
@@ -41,7 +43,8 @@ const mangoRepo = "mango"
 
 // testOwner is the neutral Forgejo owner a parser fixture names, the same neutral owner the
 // other packages' fixtures use. The command's own tests take the owner from production
-// secretOwner instead: the run builds every path it prints and requests from that constant.
+// config.DefaultForgeOwner instead: the run builds every path it prints and requests from
+// the setting's default.
 const testOwner = "owner"
 
 // sourceRepoFiles are the files that name the repositories the image build fetches, relative
@@ -86,7 +89,11 @@ func wantRepos(read func(string) (string, error)) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", file, err)
 		}
-		fileNames, err := sourceRepos(file, data, secretOwner)
+		expanded, err := config.ExpandForgeOwner(data, config.DefaultForgeOwner)
+		if err != nil {
+			return nil, fmt.Errorf("expand %s: %w", file, err)
+		}
+		fileNames, err := sourceRepos(file, expanded, config.DefaultForgeOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -225,10 +232,10 @@ func newSourcesFake(t *testing.T, value string) *forgejotest.Fake {
 		f.NewToken = func() string { return value }
 	}
 	for _, repo := range readRepos {
-		f.AddRepo(secretOwner + "/" + repo)
-		grant(t, f, secretOwner+"/"+repo)
+		f.AddRepo(config.DefaultForgeOwner + "/" + repo)
+		grant(t, f, config.DefaultForgeOwner+"/"+repo)
 	}
-	f.AddRepo(secretOwner + "/" + secretRepo)
+	f.AddRepo(config.DefaultForgeOwner + "/" + secretRepo)
 	f.ClearCalls()
 	return f
 }
@@ -400,12 +407,12 @@ func TestSourcesSecretStoresAfterAllOKReads(t *testing.T) {
 		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
 	}
 	for _, repo := range readRepos {
-		want := secretOwner + "/" + repo + ": HTTP 200\n"
+		want := config.DefaultForgeOwner + "/" + repo + ": HTTP 200\n"
 		if !strings.Contains(res.stdout, want) {
 			t.Fatalf("stdout lacks the status line %q:\n%s", want, res.stdout)
 		}
 	}
-	if !strings.HasSuffix(res.stdout, "RESULT: stored SOURCES_TOKEN on "+secretOwner+"/gastown\n") {
+	if !strings.HasSuffix(res.stdout, "RESULT: stored SOURCES_TOKEN on "+config.DefaultForgeOwner+"/gastown\n") {
 		t.Fatalf("stdout does not end with the RESULT line:\n%s", res.stdout)
 	}
 	if got := f.Token(viewerAccount, testName); got == "" {
@@ -423,12 +430,12 @@ func TestSourcesSecretStoresAfterAllOKReads(t *testing.T) {
 	if scopes, ok := f.TokenScopes(viewerAccount, testName); !ok || !slices.Equal(scopes, []string{tokenScope}) {
 		t.Fatalf("the minted token holds scopes %v (present %v), want exactly [%s]", scopes, ok, tokenScope)
 	}
-	if !slices.Equal(res.net.reads, []string{secretOwner + "/beads", secretOwner + "/organic-mechanic", secretOwner + "/history-man", secretOwner + "/devops", secretOwner + "/mango"}) {
+	if !slices.Equal(res.net.reads, []string{config.DefaultForgeOwner + "/beads", config.DefaultForgeOwner + "/organic-mechanic", config.DefaultForgeOwner + "/history-man", config.DefaultForgeOwner + "/devops", config.DefaultForgeOwner + "/mango"}) {
 		t.Fatalf("the reads made with the minted token were %v, want every read repository in order", res.net.reads)
 	}
-	stored, ok := f.Secret(secretOwner+"/"+secretRepo, secretName)
+	stored, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName)
 	if !ok || stored != f.Token(viewerAccount, testName) {
-		t.Fatal("the fake does not hold the minted token as SOURCES_TOKEN on " + secretOwner + "/gastown")
+		t.Fatal("the fake does not hold the minted token as SOURCES_TOKEN on " + config.DefaultForgeOwner + "/gastown")
 	}
 	if n := len(f.Violations()); n != 0 {
 		t.Fatalf("the run made %d request(s) the fake refused, want none", n)
@@ -448,18 +455,18 @@ func TestSourcesSecretRefusesAndRevokesOnAnUnreadableRepo(t *testing.T) {
 	}{
 		{
 			name:     "a repository answers 404",
-			statuses: map[string]int{secretOwner + "/organic-mechanic": http.StatusNotFound},
-			wantErr:  []string{secretOwner + "/organic-mechanic is not readable", "add bot-viewer as a read collaborator on " + secretOwner + "/organic-mechanic", "revoked the minted token " + testName},
+			statuses: map[string]int{config.DefaultForgeOwner + "/organic-mechanic": http.StatusNotFound},
+			wantErr:  []string{config.DefaultForgeOwner + "/organic-mechanic is not readable", "add bot-viewer as a read collaborator on " + config.DefaultForgeOwner + "/organic-mechanic", "revoked the minted token " + testName},
 		},
 		{
 			name:     "a repository answers 403",
-			statuses: map[string]int{secretOwner + "/history-man": http.StatusForbidden},
-			wantErr:  []string{secretOwner + "/history-man is not readable", "add bot-viewer as a read collaborator on " + secretOwner + "/history-man", "revoked the minted token " + testName},
+			statuses: map[string]int{config.DefaultForgeOwner + "/history-man": http.StatusForbidden},
+			wantErr:  []string{config.DefaultForgeOwner + "/history-man is not readable", "add bot-viewer as a read collaborator on " + config.DefaultForgeOwner + "/history-man", "revoked the minted token " + testName},
 		},
 		{
 			name:      "the store fails after the mint",
 			storeFail: http.StatusInternalServerError,
-			wantErr:   []string{"could not store SOURCES_TOKEN on " + secretOwner + "/gastown", "revoked the minted token " + testName},
+			wantErr:   []string{"could not store SOURCES_TOKEN on " + config.DefaultForgeOwner + "/gastown", "revoked the minted token " + testName},
 		},
 	}
 	for _, tc := range cases {
@@ -480,7 +487,7 @@ func TestSourcesSecretRefusesAndRevokesOnAnUnreadableRepo(t *testing.T) {
 			if _, ok := f.TokenScopes(viewerAccount, testName); ok {
 				t.Fatal("the minted token was not revoked")
 			}
-			if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+			if _, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName); ok {
 				t.Fatal("a secret was stored on a refused run")
 			}
 			if strings.Contains(res.stdout, "RESULT") {
@@ -513,7 +520,7 @@ func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
 		if _, ok := f.TokenScopes(viewerAccount, testName); ok {
 			t.Fatal("the minted token was left live after the interrupt")
 		}
-		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+		if _, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName); ok {
 			t.Fatal("a secret was stored after the interrupt")
 		}
 		if strings.Contains(res.stdout, "RESULT") {
@@ -529,12 +536,12 @@ func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
 			t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
 		}
 		for _, repo := range readRepos {
-			want := secretOwner + "/" + repo + ": request failed (no HTTP status)"
+			want := config.DefaultForgeOwner + "/" + repo + ": request failed (no HTTP status)"
 			if !strings.Contains(res.stdout, want) {
 				t.Fatalf("stdout lacks %q:\n%s", want, res.stdout)
 			}
 		}
-		if !strings.Contains(res.stderr, secretOwner+"/beads was not read (no HTTP reply, a transport failure)") {
+		if !strings.Contains(res.stderr, config.DefaultForgeOwner+"/beads was not read (no HTTP reply, a transport failure)") {
 			t.Fatalf("stderr does not name the transport failure:\n%s", res.stderr)
 		}
 		if out := res.stdout + res.stderr; strings.Contains(out, "HTTP 0") {
@@ -543,7 +550,7 @@ func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
 		if _, ok := f.TokenScopes(viewerAccount, testName); ok {
 			t.Fatal("the minted token was not revoked after the transport failure")
 		}
-		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+		if _, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName); ok {
 			t.Fatal("a secret was stored after a transport failure")
 		}
 	})
@@ -563,7 +570,7 @@ func TestSourcesSecretAlarmsWhenTheRevokeFails(t *testing.T) {
 		cancel    bool
 		mintLost  bool
 	}{
-		{name: "after a refusal", statuses: map[string]int{secretOwner + "/organic-mechanic": http.StatusNotFound}},
+		{name: "after a refusal", statuses: map[string]int{config.DefaultForgeOwner + "/organic-mechanic": http.StatusNotFound}},
 		{name: "after a failed store", storeFail: http.StatusInternalServerError},
 		{name: "after an interrupt", cancel: true},
 		{name: "after a mint lost in transport", mintLost: true},
@@ -621,7 +628,7 @@ func TestSourcesSecretRevokesAMintLostInTransport(t *testing.T) {
 		if _, ok := f.TokenScopes(viewerAccount, testName); ok {
 			t.Fatal("the token the server made after a lost reply was left live")
 		}
-		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+		if _, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName); ok {
 			t.Fatal("a secret was stored after a lost mint")
 		}
 	})
@@ -639,7 +646,7 @@ func TestSourcesSecretRevokesAMintLostInTransport(t *testing.T) {
 		if strings.Contains(res.stderr, "token still live") {
 			t.Fatalf("stderr alarms when no token was made:\n%s", res.stderr)
 		}
-		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+		if _, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName); ok {
 			t.Fatal("a secret was stored after a lost mint")
 		}
 	})
@@ -819,11 +826,11 @@ func TestSourcesSecretDryRunMintsNothing(t *testing.T) {
 		"account: " + viewerAccount,
 		"scope: " + tokenScope,
 		"token name: " + testName,
-		"read check: " + secretOwner + "/beads",
-		"read check: " + secretOwner + "/organic-mechanic",
-		"read check: " + secretOwner + "/history-man",
-		"read check: " + secretOwner + "/devops",
-		"target: " + secretOwner + "/gastown secret SOURCES_TOKEN",
+		"read check: " + config.DefaultForgeOwner + "/beads",
+		"read check: " + config.DefaultForgeOwner + "/organic-mechanic",
+		"read check: " + config.DefaultForgeOwner + "/history-man",
+		"read check: " + config.DefaultForgeOwner + "/devops",
+		"target: " + config.DefaultForgeOwner + "/gastown secret SOURCES_TOKEN",
 	} {
 		if !strings.Contains(res.stdout, want) {
 			t.Fatalf("the plan lacks %q:\n%s", want, res.stdout)
@@ -850,10 +857,10 @@ func TestSourcesSecretNeverPrintsTheToken(t *testing.T) {
 		storeFail int
 		wantOut   string
 	}{
-		{name: "success", wantOut: "RESULT: stored SOURCES_TOKEN on " + secretOwner + "/gastown"},
-		{name: "404 refusal", statuses: map[string]int{secretOwner + "/organic-mechanic": http.StatusNotFound}, wantOut: secretOwner + "/organic-mechanic is not readable"},
-		{name: "403 refusal", statuses: map[string]int{secretOwner + "/devops": http.StatusForbidden}, wantOut: secretOwner + "/devops is not readable"},
-		{name: "store refusal", storeFail: http.StatusInternalServerError, wantOut: "could not store SOURCES_TOKEN on " + secretOwner + "/gastown"},
+		{name: "success", wantOut: "RESULT: stored SOURCES_TOKEN on " + config.DefaultForgeOwner + "/gastown"},
+		{name: "404 refusal", statuses: map[string]int{config.DefaultForgeOwner + "/organic-mechanic": http.StatusNotFound}, wantOut: config.DefaultForgeOwner + "/organic-mechanic is not readable"},
+		{name: "403 refusal", statuses: map[string]int{config.DefaultForgeOwner + "/devops": http.StatusForbidden}, wantOut: config.DefaultForgeOwner + "/devops is not readable"},
+		{name: "store refusal", storeFail: http.StatusInternalServerError, wantOut: "could not store SOURCES_TOKEN on " + config.DefaultForgeOwner + "/gastown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -868,7 +875,7 @@ func TestSourcesSecretNeverPrintsTheToken(t *testing.T) {
 					t.Fatalf("the output carries the token value or its escaped form:\n%s", output)
 				}
 			}
-			for _, want := range []string{tc.wantOut, secretOwner + "/gastown", secretOwner + "/beads: HTTP "} {
+			for _, want := range []string{tc.wantOut, config.DefaultForgeOwner + "/gastown", config.DefaultForgeOwner + "/beads: HTTP "} {
 				if !strings.Contains(output, want) {
 					t.Fatalf("the output lacks %q:\n%s", want, output)
 				}
@@ -886,7 +893,7 @@ func TestSourcesSecretStoresTheLeakyValueUnchanged(t *testing.T) {
 	if res.code != forgejoprov.ExitOK {
 		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
 	}
-	if got, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); !ok || got != leakyValue {
+	if got, ok := f.Secret(config.DefaultForgeOwner+"/"+secretRepo, secretName); !ok || got != leakyValue {
 		t.Fatal("the stored secret is not the minted value that holds the quote, backslash and runes")
 	}
 }
@@ -969,12 +976,12 @@ func newCheckFake(t *testing.T, ungranted string) *forgejotest.Fake {
 	f := forgejotest.New()
 	f.ViewerExists = true
 	for _, repo := range readRepos {
-		f.AddRepo(secretOwner + "/" + repo)
+		f.AddRepo(config.DefaultForgeOwner + "/" + repo)
 		if repo != ungranted {
-			grant(t, f, secretOwner+"/"+repo)
+			grant(t, f, config.DefaultForgeOwner+"/"+repo)
 		}
 	}
-	f.AddRepo(secretOwner + "/" + secretRepo)
+	f.AddRepo(config.DefaultForgeOwner + "/" + secretRepo)
 	return f
 }
 
@@ -996,7 +1003,7 @@ func mintTokenNamed(t *testing.T, f *forgejotest.Fake, name string) {
 func TestSourcesSecretCheckReportsTheState(t *testing.T) {
 	t.Parallel()
 	f := newCheckFake(t, "")
-	f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+	f.Call(t, http.MethodPut, "/repos/"+config.DefaultForgeOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
 		forgejotest.JSONBody(map[string]string{"data": "stored-value-0a1b"}))
 	mintTokenNamed(t, f, testName)
 	mintTokenNamed(t, f, "sources-token-20261106-210000")
@@ -1011,12 +1018,12 @@ func TestSourcesSecretCheckReportsTheState(t *testing.T) {
 		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
 	}
 	for _, want := range []string{
-		secretOwner + "/gastown secret SOURCES_TOKEN: listed\n",
-		secretOwner + "/beads: readable by bot-viewer (HTTP 204)\n",
-		secretOwner + "/organic-mechanic: readable by bot-viewer (HTTP 204)\n",
-		secretOwner + "/history-man: readable by bot-viewer (HTTP 204)\n",
-		secretOwner + "/devops: readable by bot-viewer (HTTP 204)\n",
-		secretOwner + "/mango: readable by bot-viewer (HTTP 204)\n",
+		config.DefaultForgeOwner + "/gastown secret SOURCES_TOKEN: listed\n",
+		config.DefaultForgeOwner + "/beads: readable by bot-viewer (HTTP 204)\n",
+		config.DefaultForgeOwner + "/organic-mechanic: readable by bot-viewer (HTTP 204)\n",
+		config.DefaultForgeOwner + "/history-man: readable by bot-viewer (HTTP 204)\n",
+		config.DefaultForgeOwner + "/devops: readable by bot-viewer (HTTP 204)\n",
+		config.DefaultForgeOwner + "/mango: readable by bot-viewer (HTTP 204)\n",
 		"bot-viewer token: " + testName + "\n",
 		"bot-viewer token: sources-token-20261106-210000\n",
 	} {
@@ -1047,7 +1054,7 @@ func TestSourcesSecretCheckReportsTheState(t *testing.T) {
 // earlier real run would have.
 func storeCheckSecret(t *testing.T, f *forgejotest.Fake) {
 	t.Helper()
-	f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+	f.Call(t, http.MethodPut, "/repos/"+config.DefaultForgeOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
 		forgejotest.JSONBody(map[string]string{"data": "stored-value-0a1b"}))
 }
 
@@ -1080,13 +1087,13 @@ func TestSourcesSecretCheckUnreadableRepositoryExitsOne(t *testing.T) {
 			if tc.ungranted == "" {
 				return
 			}
-			if !strings.Contains(res.stdout, secretOwner+"/organic-mechanic: not readable by bot-viewer (HTTP 404)\n") {
+			if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/organic-mechanic: not readable by bot-viewer (HTTP 404)\n") {
 				t.Fatalf("stdout does not name organic-mechanic as not readable:\n%s", res.stdout)
 			}
-			if !strings.Contains(res.stderr, secretOwner+"/organic-mechanic is not readable by bot-viewer") {
+			if !strings.Contains(res.stderr, config.DefaultForgeOwner+"/organic-mechanic is not readable by bot-viewer") {
 				t.Fatalf("stderr does not name organic-mechanic as not readable:\n%s", res.stderr)
 			}
-			if !strings.Contains(res.stdout, secretOwner+"/beads: readable by bot-viewer (HTTP 204)\n") {
+			if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/beads: readable by bot-viewer (HTTP 204)\n") {
 				t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 			}
 			if n := len(f.Writes()); n != 0 {
@@ -1110,7 +1117,7 @@ func TestSourcesSecretCheckUnlistedSecretIsReportedAndExitsZero(t *testing.T) {
 	if res.code != forgejoprov.ExitOK {
 		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
 	}
-	if !strings.Contains(res.stdout, secretOwner+"/gastown secret SOURCES_TOKEN: not listed\n") {
+	if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/gastown secret SOURCES_TOKEN: not listed\n") {
 		t.Fatalf("stdout does not say the secret is not listed:\n%s", res.stdout)
 	}
 	if res.stderr != "" {
@@ -1138,10 +1145,10 @@ func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
 	if res.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
 	}
-	if !strings.Contains(res.stdout, secretOwner+"/gastown secret SOURCES_TOKEN: listed\n") {
+	if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/gastown secret SOURCES_TOKEN: listed\n") {
 		t.Fatalf("stdout does not say the secret is listed:\n%s", res.stdout)
 	}
-	if !strings.Contains(res.stdout, secretOwner+"/organic-mechanic: readable by bot-viewer (HTTP 204)\n") {
+	if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/organic-mechanic: readable by bot-viewer (HTTP 204)\n") {
 		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 	}
 	if !strings.Contains(res.stderr, "could not list the tokens of bot-viewer") || !strings.Contains(res.stderr, "HTTP 500") {
@@ -1168,16 +1175,16 @@ func TestSourcesSecretCheckRefusesANullListReply(t *testing.T) {
 	}{
 		{
 			name:       "the secret list replies null",
-			failSuffix: "/" + secretOwner + "/gastown/actions/secrets",
+			failSuffix: "/" + config.DefaultForgeOwner + "/gastown/actions/secrets",
 			body:       `null`,
-			wantErr:    "could not list the Actions secrets of " + secretOwner + "/gastown",
+			wantErr:    "could not list the Actions secrets of " + config.DefaultForgeOwner + "/gastown",
 			wantAbsent: "secret SOURCES_TOKEN: not listed",
 		},
 		{
 			name:       "the secret list replies an object",
-			failSuffix: "/" + secretOwner + "/gastown/actions/secrets",
+			failSuffix: "/" + config.DefaultForgeOwner + "/gastown/actions/secrets",
 			body:       `{"data":[]}`,
-			wantErr:    "could not list the Actions secrets of " + secretOwner + "/gastown",
+			wantErr:    "could not list the Actions secrets of " + config.DefaultForgeOwner + "/gastown",
 			wantAbsent: "secret SOURCES_TOKEN: not listed",
 		},
 		{
@@ -1227,7 +1234,7 @@ func TestSourcesSecretCheckReportsATransportFailure(t *testing.T) {
 	mintTokenNamed(t, f, testName)
 	net := &checkNetwork{
 		fake:       f,
-		failSuffix: "/" + secretOwner + "/history-man/collaborators/" + viewerAccount,
+		failSuffix: "/" + config.DefaultForgeOwner + "/history-man/collaborators/" + viewerAccount,
 		failErr:    errNoReply,
 	}
 
@@ -1236,15 +1243,15 @@ func TestSourcesSecretCheckReportsATransportFailure(t *testing.T) {
 	if res.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
 	}
-	if !strings.Contains(res.stderr, "the collaborator check on "+secretOwner+"/history-man got no HTTP reply") {
+	if !strings.Contains(res.stderr, "the collaborator check on "+config.DefaultForgeOwner+"/history-man got no HTTP reply") {
 		t.Fatalf("stderr does not name the transport failure:\n%s", res.stderr)
 	}
-	// The needle is the production owner, not a literal: secretOwner is the
+	// The needle is the production owner, not a literal: config.DefaultForgeOwner is the
 	// single source for the path the command prints.
-	if strings.Contains(res.stdout, secretOwner+"/history-man: ") {
+	if strings.Contains(res.stdout, config.DefaultForgeOwner+"/history-man: ") {
 		t.Fatalf("stdout reports a state for a repository whose check got no reply:\n%s", res.stdout)
 	}
-	if !strings.Contains(res.stdout, secretOwner+"/organic-mechanic: readable by bot-viewer (HTTP 204)") {
+	if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/organic-mechanic: readable by bot-viewer (HTTP 204)") {
 		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 	}
 }
@@ -1271,15 +1278,15 @@ func TestSourcesSecretCheckNeverPrintsAReply(t *testing.T) {
 		wantCode   int
 	}{
 		{name: "success", wantCode: forgejoprov.ExitOK},
-		{name: "secret list fails", failSuffix: "/" + secretOwner + "/gastown/actions/secrets", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
-		{name: "collaborator check fails", failSuffix: "/" + secretOwner + "/organic-mechanic/collaborators/" + viewerAccount, failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
+		{name: "secret list fails", failSuffix: "/" + config.DefaultForgeOwner + "/gastown/actions/secrets", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
+		{name: "collaborator check fails", failSuffix: "/" + config.DefaultForgeOwner + "/organic-mechanic/collaborators/" + viewerAccount, failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
 		{name: "token list fails", failSuffix: "/admin/users/" + viewerAccount + "/tokens", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCheckFake(t, "")
-			f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+			f.Call(t, http.MethodPut, "/repos/"+config.DefaultForgeOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
 				forgejotest.JSONBody(map[string]string{"data": leakyValue}))
 			mintTokenNamed(t, f, testName)
 			net := &checkNetwork{fake: f, failSuffix: tc.failSuffix, failStatus: tc.failStatus, failBody: faultBody}
@@ -1295,7 +1302,7 @@ func TestSourcesSecretCheckNeverPrintsAReply(t *testing.T) {
 					t.Fatalf("the output carries a reply body value %q:\n%s", form, output)
 				}
 			}
-			if !strings.Contains(res.stdout, secretOwner+"/beads: ") {
+			if !strings.Contains(res.stdout, config.DefaultForgeOwner+"/beads: ") {
 				t.Fatalf("stdout lacks the repository line for beads:\n%s", res.stdout)
 			}
 		})
@@ -1334,5 +1341,106 @@ func TestSourcesSecretTokenNameIsUTC(t *testing.T) {
 	local := time.Date(2026, 11, 6, 22, 35, 0, 0, time.FixedZone("UTC+2", 2*3600))
 	if got := tokenName(local); got != testName {
 		t.Fatalf("tokenName = %q, want %q", got, testName)
+	}
+}
+
+// writeForgeTown writes a town root whose mayor/town.json names owner as
+// forge.owner, and returns the root.
+func writeForgeTown(t *testing.T, owner string) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "mayor")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","forge":{"owner":"` + owner + `"}}`
+	if err := os.WriteFile(filepath.Join(dir, "town.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestSecretOwnerComesFromTheSetting: the owner in every repository path the run
+// prints and requests is the --town-root town's forge.owner (gt-ucigk3).
+func TestSecretOwnerComesFromTheSetting(t *testing.T) {
+	t.Parallel()
+	const owner = "gastown"
+	f := forgejotest.New()
+	f.ViewerExists = true
+	for _, repo := range readRepos {
+		f.AddRepo(owner + "/" + repo)
+		grant(t, f, owner+"/"+repo)
+	}
+	f.AddRepo(owner + "/" + secretRepo)
+	f.ClearCalls()
+
+	res := runCommand(t, f, nil, "--town-root", writeForgeTown(t, owner))
+	if res.code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
+	}
+	for _, repo := range readRepos {
+		want := owner + "/" + repo + ": HTTP 200\n"
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("stdout lacks the status line %q:\n%s", want, res.stdout)
+		}
+	}
+	if !strings.HasSuffix(res.stdout, "RESULT: stored "+secretName+" on "+owner+"/"+secretRepo+"\n") {
+		t.Errorf("stdout does not end with the setting's owner on the RESULT line:\n%s", res.stdout)
+	}
+	if _, ok := f.Secret(owner+"/"+secretRepo, secretName); !ok {
+		t.Errorf("the fake holds no %s on the setting's %s/%s", secretName, owner, secretRepo)
+	}
+	wantReads := make([]string, len(readRepos))
+	for i, repo := range readRepos {
+		wantReads[i] = owner + "/" + repo
+	}
+	if !slices.Equal(res.net.reads, wantReads) {
+		t.Errorf("read %v, want %v", res.net.reads, wantReads)
+	}
+}
+
+// TestSecretRefusesANamedTownWithNoTownJSON: a --town-root with no town.json is
+// refused before any request or store, so the secret never lands on the default
+// owner's account for a town that names no owner (gt-ucigk3).
+func TestSecretRefusesANamedTownWithNoTownJSON(t *testing.T) {
+	t.Parallel()
+	f := newSourcesFake(t, "")
+	res := runCommand(t, f, nil, "--town-root", t.TempDir())
+	if res.code != forgejoprov.ExitUsage {
+		t.Fatalf("exit %d, want the usage code %d; stderr: %s", res.code, forgejoprov.ExitUsage, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "has no town.json") {
+		t.Errorf("stderr does not name the missing town.json: %s", res.stderr)
+	}
+	if calls := f.CallLog(); len(calls) != 0 {
+		t.Errorf("a named town with no town.json made %d call(s), want none", len(calls))
+	}
+}
+
+// TestSecretOwnerRefusesABadSetting: an empty owner and one holding a slash each
+// refuse the run before it sends a request, and the refusal names forge.owner.
+func TestSecretOwnerRefusesABadSetting(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		owner string
+	}{
+		{"an empty owner", ""},
+		{"an owner with a slash", "org/team"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSourcesFake(t, "")
+			res := runCommand(t, f, nil, "--town-root", writeForgeTown(t, tc.owner))
+			if res.code != forgejoprov.ExitUsage {
+				t.Fatalf("exit %d, want the usage code %d; stderr: %s", res.code, forgejoprov.ExitUsage, res.stderr)
+			}
+			if !strings.Contains(res.stderr, "forge.owner") {
+				t.Errorf("stderr does not name forge.owner: %s", res.stderr)
+			}
+			if calls := f.CallLog(); len(calls) != 0 {
+				t.Errorf("a refused forge.owner made %d call(s), want none", len(calls))
+			}
+		})
 	}
 }

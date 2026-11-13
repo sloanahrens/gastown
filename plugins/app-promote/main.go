@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 const (
@@ -165,6 +167,10 @@ func promoteAll(e env) error {
 		}
 		return fmt.Errorf("cannot read the rig list at %s", rigsFile)
 	}
+	rigList, err := config.ExpandForgeOwnerFromTown(townRoot, list)
+	if err != nil {
+		return fmt.Errorf("%s: reading the town's forge.owner: %w", rigsFile, err)
+	}
 	token, err := viewerToken(e.getenv)
 	if err != nil {
 		return err
@@ -173,7 +179,7 @@ func promoteAll(e env) error {
 
 	checked, promoted := 0, 0
 	var failed []error
-	for _, line := range rigLines(string(list)) {
+	for _, line := range rigLines(rigList) {
 		rig, repo, job := splitRig(line)
 		if rig == "" || repo == "" {
 			return fmt.Errorf("%s: '%s %s' needs a rig and an owner/repo", rigsFile, rig, repo)
@@ -351,8 +357,22 @@ func (f forgejo) findRelease(repo string) (release, bool, error) {
 	return release{}, false, nil
 }
 
+// checkedRepo refuses a repository that still holds the owner placeholder, which
+// nothing expanded: the value is spliced into a request path, so an unexpanded
+// rigs.conf line is refused before any read.
+func checkedRepo(repo string) (string, error) {
+	if err := config.RefuseUnexpandedForgeOwner("the repository", repo); err != nil {
+		return "", err
+	}
+	return repo, nil
+}
+
 // runs reads one page of the deploy workflow's run list.
 func (f forgejo) runs(repo string, page int) ([]workflowRun, error) {
+	repo, err := checkedRepo(repo)
+	if err != nil {
+		return nil, err
+	}
 	_, body, err := f.get(fmt.Sprintf("/repos/%s/actions/runs?workflow_id=%s&limit=%d&page=%d",
 		repo, deployWorkflow, runsLimit, page), http.StatusOK)
 	if err != nil {
@@ -367,6 +387,10 @@ func (f forgejo) runs(repo string, page int) ([]workflowRun, error) {
 
 // tagSHA reads the commit a tag names, and whether the repo has that tag at all.
 func (f forgejo) tagSHA(repo, tag string) (string, bool, error) {
+	repo, err := checkedRepo(repo)
+	if err != nil {
+		return "", false, err
+	}
 	status, body, err := f.get(fmt.Sprintf("/repos/%s/tags/%s", repo, tag), http.StatusNotFound)
 	if err != nil {
 		return "", false, err
@@ -383,6 +407,10 @@ func (f forgejo) tagSHA(repo, tag string) (string, bool, error) {
 
 // jobs reads a run's jobs.
 func (f forgejo) jobs(repo, runID string) ([]runJob, error) {
+	repo, err := checkedRepo(repo)
+	if err != nil {
+		return nil, err
+	}
 	_, body, err := f.get(fmt.Sprintf("/repos/%s/actions/runs/%s/jobs", repo, runID), http.StatusOK)
 	if err != nil {
 		return nil, err
@@ -399,6 +427,10 @@ func (f forgejo) jobs(repo, runID string) ([]runJob, error) {
 // answer: nonzero is "head is ahead of base", zero is "head is base or an
 // ancestor of it".
 func (f forgejo) commitsAhead(repo, base, head string) (int, error) {
+	repo, err := checkedRepo(repo)
+	if err != nil {
+		return 0, err
+	}
 	_, body, err := f.get(fmt.Sprintf("/repos/%s/compare/%s...%s", repo, base, head), http.StatusOK)
 	if err != nil {
 		return 0, err

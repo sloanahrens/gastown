@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -531,7 +532,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		return nil
 	}
 	r.deps.environ = []string{"PATH=/usr/bin", "DOCKER_CONTEXT=other", "DOCKER_HOST=tcp://elsewhere:2375", "HOME=/home/x"}
-	pins, err := readImagePins(r.flags.pins)
+	pins, err := readImagePins(r.flags.pins, ownerIs(config.DefaultForgeOwner))
 	if err != nil {
 		t.Fatalf("readImagePins: %v", err)
 	}
@@ -573,12 +574,12 @@ func TestDaemonImageFlagsAreWired(t *testing.T) {
 		return nil
 	})
 	var _ *cobra.Command = c
-	c.SetArgs([]string{"--rev", "abc1234", "--out", "/o", "--gt-src", "/g", "--bd-src", "/b", "--om-src", "/m", "--hm-src", "/h", "--devops-src", "/d", "--mango-src", "/mg", "--mango-commit", "aabbccdd", "--pins", "/p"})
+	c.SetArgs([]string{"--rev", "abc1234", "--out", "/o", "--gt-src", "/g", "--bd-src", "/b", "--om-src", "/m", "--hm-src", "/h", "--devops-src", "/d", "--mango-src", "/mg", "--mango-commit", "aabbccdd", "--pins", "/p", "--forge-owner", "acme", "--town-root", "/t"})
 	c.SilenceUsage, c.SilenceErrors = true, true
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	want := daemonImageFlags{rev: "abc1234", out: "/o", gtSrc: "/g", bdSrc: "/b", omSrc: "/m", hmSrc: "/h", devopsSrc: "/d", mangoSrc: "/mg", mangoCommit: "aabbccdd", pins: "/p"}
+	want := daemonImageFlags{rev: "abc1234", out: "/o", gtSrc: "/g", bdSrc: "/b", omSrc: "/m", hmSrc: "/h", devopsSrc: "/d", mangoSrc: "/mg", mangoCommit: "aabbccdd", pins: "/p", forgeOwner: "acme", townRoot: "/t"}
 	if got != want {
 		t.Errorf("flags = %+v, want %+v (apply off by default)", got, want)
 	}
@@ -720,12 +721,163 @@ func TestDaemonImagePlanNamesThePins(t *testing.T) {
 	}
 }
 
+// TestDaemonImageOwnerIsFlagThenTownThenDefault: the pins' {owner} expands to
+// --forge-owner when it is set, else to --town-root's forge.owner, else to the
+// setting's default; a named town with no town.json refuses before anything runs
+// (gt-ucigk3).
+func TestDaemonImageOwnerIsFlagThenTownThenDefault(t *testing.T) {
+	t.Parallel()
+	gastownTown := imageTestTown(t, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","forge":{"owner":"gastown"}}`)
+	tests := []struct {
+		name       string
+		forgeOwner string
+		townRoot   string
+		want       string
+		wantErr    string
+	}{
+		{"the flag wins over the town", "acme", gastownTown, "acme", ""},
+		{"the town wins over the default", "", gastownTown, "gastown", ""},
+		{"neither gives the default", "", "", config.DefaultForgeOwner, ""},
+		{"a named town with no town.json is refused", "", imageTestTown(t, ""), "", "forge owner"},
+		{"a flag that is not an owner name is refused", "org/team", "", "", "forge owner"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			placeholder := strings.ReplaceAll(imagePinsText(), "/"+imageTestOwner+"/", "/"+config.ForgeOwnerPlaceholder+"/")
+			if err := os.WriteFile(r.flags.pins, []byte(placeholder), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r.flags.forgeOwner, r.flags.townRoot = tt.forgeOwner, tt.townRoot
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("runDaemonImage = %v, want a refusal naming %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runDaemonImage: %v", err)
+			}
+			if want := "pin bd: http://forgejo:3000/" + tt.want + "/beads.git at "; !strings.Contains(r.out.String(), want) {
+				t.Errorf("output lacks %q:\n%s", want, r.out.String())
+			}
+		})
+	}
+}
+
+// imageTestTown is a town root whose mayor/town.json holds townJSON; an empty
+// townJSON writes no town.json at all.
+func imageTestTown(t *testing.T, townJSON string) string {
+	t.Helper()
+	root := t.TempDir()
+	if townJSON == "" {
+		return root
+	}
+	path := filepath.Join(root, "mayor", "town.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(townJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestDaemonImageReadsTheTownOnlyForAPlaceholder: the town's forge.owner is read
+// only when the pins file holds {owner} and --forge-owner does not name it. The
+// town root here names no town.json, so a read of it refuses: a row that
+// succeeds did not read the town (gt-ucigk3).
+func TestDaemonImageReadsTheTownOnlyForAPlaceholder(t *testing.T) {
+	t.Parallel()
+	missingTown := imageTestTown(t, "")
+	tests := []struct {
+		name        string
+		placeholder bool
+		forgeOwner  string
+		want        string // the owner the pin URLs must name, when no error is wanted
+		wantErr     string
+	}{
+		{"no placeholder reads no town", false, "", imageTestOwner, ""},
+		{"a placeholder with the flag reads no town", true, "acme", "acme", ""},
+		{"a placeholder with no flag reads the town", true, "", "", "forge owner"},
+		{"a bad flag is refused even with no placeholder", false, "org/team", "", "forge owner"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			body := imagePinsText()
+			if tt.placeholder {
+				body = strings.ReplaceAll(body, "/"+imageTestOwner+"/", "/"+config.ForgeOwnerPlaceholder+"/")
+			}
+			if err := os.WriteFile(r.flags.pins, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r.flags.forgeOwner, r.flags.townRoot = tt.forgeOwner, missingTown
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("runDaemonImage = %v, want a refusal naming %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runDaemonImage: %v", err)
+			}
+			if want := "pin bd: http://forgejo:3000/" + tt.want + "/beads.git at "; !strings.Contains(r.out.String(), want) {
+				t.Errorf("output lacks %q:\n%s", want, r.out.String())
+			}
+		})
+	}
+}
+
+// ownerIs is the owner resolver a test hands readImagePins: it names owner and
+// reads no town.
+func ownerIs(owner string) func() (string, error) {
+	return func() (string, error) { return owner, nil }
+}
+
+// TestOwnerPlaceholderExpandsInEachGoReader: readImagePins expands the pins
+// file's {owner} with the setting's default, so the URLs are the ones the file
+// named before the placeholder; the parser refuses a placeholder nothing
+// expanded (gt-ucigk3).
+func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
+	t.Parallel()
+	body := ""
+	for name, repo := range map[string]string{"bd": "beads", "om": "organic-mechanic", "hm": "history-man", "devops": "devops"} {
+		body += name + " http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git " + imageTestBDCommit + "\n"
+	}
+	path := filepath.Join(t.TempDir(), "image-pins")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pins, err := readImagePins(path, ownerIs(config.DefaultForgeOwner))
+	if err != nil {
+		t.Fatalf("readImagePins: %v", err)
+	}
+	for _, pin := range pins {
+		if want := "http://forgejo:3000/" + config.DefaultForgeOwner + "/"; !strings.HasPrefix(pin.URL, want) {
+			t.Errorf("%s pin URL = %q, want it under %s", pin.Name, pin.URL, want)
+		}
+	}
+	if _, err := daemonimage.ParsePins([]byte(body)); err == nil {
+		t.Error("ParsePins accepted a URL holding the unexpanded placeholder")
+	}
+	if _, err := readImagePins(path, ownerIs("")); err == nil {
+		t.Error("readImagePins accepted an empty owner")
+	}
+}
+
 // A pins file that cannot be read is refused when it is read, not treated as
 // an empty pin set.
 func TestReadImagePinsRefusesAnUnreadableFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "absent")
-	if _, err := readImagePins(path); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+	if _, err := readImagePins(path, ownerIs(config.DefaultForgeOwner)); err == nil || !strings.Contains(err.Error(), "cannot be read") {
 		t.Fatalf("readImagePins = %v, want an error naming the unreadable file", err)
 	}
 }

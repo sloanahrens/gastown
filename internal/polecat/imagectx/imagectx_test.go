@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/polecat/seed"
 )
@@ -709,6 +710,7 @@ func TestParseSeedURLs(t *testing.T) {
 			map[string]string{"devops": "http://a.invalid/d.git", "beads": "http://a.invalid/b.git"}, ""},
 		{"a line with no URL", "devops\n", nil, "want \"<rig> <url>\""},
 		{"a rig named twice", "devops http://a.invalid/d.git\ndevops http://a.invalid/e.git\n", nil, "rig devops is named twice"},
+		{"a URL holding the owner placeholder", "devops http://a.invalid/" + config.ForgeOwnerPlaceholder + "/d.git\n", nil, "nothing expanded"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
