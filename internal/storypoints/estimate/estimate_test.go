@@ -411,6 +411,24 @@ func TestEstimateRefusals(t *testing.T) {
 	}
 }
 
+// TestEstimateRefusesABlendFailure drives the blend error the inputs Estimate
+// validates can never produce: a failing blend must reach the caller, not a
+// result with a missing number.
+func TestEstimateRefusesABlendFailure(t *testing.T) {
+	t.Parallel()
+	failed := errors.New("blend exploded")
+	blend := func(storypoints.Inputs) (storypoints.Blended, error) {
+		return storypoints.Blended{}, failed
+	}
+	got, err := estimateWith(context.Background(), workingDeps(), sampleBead(), blend)
+	if !errors.Is(err, failed) {
+		t.Fatalf("estimateWith error = %v, want %v", err, failed)
+	}
+	if got.Points != 0 || got.Rung != "" {
+		t.Fatalf("estimateWith = %+v, want no result", got)
+	}
+}
+
 // skippedLine returns the note's line for one skipped input.
 func skippedLine(note, input string) (string, bool) {
 	for _, line := range strings.Split(note, "\n") {

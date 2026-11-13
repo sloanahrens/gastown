@@ -93,6 +93,14 @@ type Result struct {
 // dependency lowers the rung instead of failing the estimate. A bead with no
 // text, or a canceled context, is an error and no result.
 func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error) {
+	return estimateWith(ctx, deps, issue, storypoints.Blend)
+}
+
+// estimateWith is Estimate with the blend step passed in. Every input Estimate
+// builds is checked before the blend, so a valid set of inputs cannot make
+// storypoints.Blend fail; the seam drives the refusal that would otherwise be
+// unreachable.
+func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func(storypoints.Inputs) (storypoints.Blended, error)) (Result, error) {
 	if issue == nil {
 		return Result{}, ErrNoBead
 	}
@@ -130,7 +138,7 @@ func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error
 		in.JevFits = &jevFits
 	}
 
-	blended, err := storypoints.Blend(in)
+	blended, err := blend(in)
 	if err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: %w", err)
 	}
