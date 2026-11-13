@@ -1,0 +1,236 @@
+package cmd
+
+import (
+	"slices"
+	"testing"
+)
+
+// sandboxSecretsCorpusRow is one command the property test judges, with the
+// verdict this guard answers for it. The rows cover the environ-path shapes the
+// parsed reading could flatten or drop: a path split by quotes, a command
+// substitution in the path, a git commit message, a here-document body, a for
+// header, a [[ ]] expression, and a path that follows a separator.
+type sandboxSecretsCorpusRow struct {
+	name    string
+	command string
+	blocked bool
+}
+
+func sandboxSecretsCorpusRows() []sandboxSecretsCorpusRow {
+	return []sandboxSecretsCorpusRow{
+		{"a proc environ read", "cat /proc/self/environ", true},
+		{"a path split by quotes", `cat "/proc/self/env"iron`, true},
+		{"a substitution in the path", "cat /proc/$(pgrep sh)/environ", true},
+		{"a path decoded from an ANSI-C string", `cat /proc/self/env$'\x69ron'`, true},
+		{"an ordinary command", "ls -l", false},
+		{"a git commit message naming the path", "git commit -m /proc/self/environ", false},
+		{"a path after a commit with no message", "git commit -m; /proc/self/environ", true},
+		{"a here-document body naming the path", "cat > f <<'EOF'\n/proc/self/environ\nEOF", true},
+		{"a for header naming the path", "for x in /proc/self/environ; do echo $x; done", true},
+		{"a case word naming the path", "case /proc/self/environ in *) echo x;; esac", true},
+		{"a test expression naming the path", "[[ -f /proc/self/environ ]]", true},
+		{"an unreadable command naming the path", `cat /proc/self/environ "unterminated`, true},
+		{"an unreadable command naming nothing", `echo "unterminated`, true},
+	}
+}
+
+// sandboxSecretsCommands is the property's command set: the differential's
+// command source (the guard corpus and the generated commands) and this guard's
+// own rows.
+func sandboxSecretsCommands(t *testing.T) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	var commands []string
+	add := func(c string) {
+		if !seen[c] {
+			seen[c] = true
+			commands = append(commands, c)
+		}
+	}
+	for _, c := range parsedTokensCommands(t) {
+		add(c)
+	}
+	for _, row := range sandboxSecretsCorpusRows() {
+		add(row.command)
+	}
+	return commands
+}
+
+// sandboxSecretsVerdictWith judges command as the guard does, through the
+// production path with one reading swapped in.
+func sandboxSecretsVerdictWith(command string, read sandboxSecretsReader) string {
+	return sandboxSecretsReasonWith(command, read)
+}
+
+// sandboxSecretsLoosenings returns one entry for each command the parser reads
+// whose verdict through read allows what shellTokenize's reading refuses. A
+// command shellTokenize refuses and read refuses too is not listed; a command
+// read refuses where shellTokenize allows is a tightening, which this move may
+// add.
+func sandboxSecretsLoosenings(commands []string, read sandboxSecretsReader) []string {
+	var failures []string
+	for _, c := range commands {
+		if _, readable := parsedTokens(c); !readable {
+			continue
+		}
+		if sandboxSecretsVerdictWith(c, shellTokenize) != "" && sandboxSecretsVerdictWith(c, read) == "" {
+			failures = append(failures, c)
+		}
+	}
+	return failures
+}
+
+// TestSandboxSecretsCorpusRows pins the verdict of this guard's own rows, so a
+// reading change that flips one of them is named rather than buried in the
+// property's aggregate.
+func TestSandboxSecretsCorpusRows(t *testing.T) {
+	t.Parallel()
+	for _, row := range sandboxSecretsCorpusRows() {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			reason := sandboxSecretsReason(row.command)
+			if got := reason != ""; got != row.blocked {
+				t.Errorf("sandboxSecretsReason(%q) blocked=%v (reason %q), want %v", row.command, got, reason, row.blocked)
+			}
+		})
+	}
+}
+
+// TestSandboxSecretsReadsThroughParsedTokens pins the verdict of commands the
+// guard judges through the production reader, including the ones it hands to
+// shellTokenize: a command the parser cannot read, and a command
+// sandboxSecretsParsedUnsafe names. Each verdict is also asserted equal to the
+// shellTokenize verdict, so the move cannot flip a command toward allowing.
+func TestSandboxSecretsReadsThroughParsedTokens(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"a readable environ read is refused", "cat /proc/self/environ", true},
+		{"a readable command that reads no environ stays allowed", "ls -l", false},
+		{"an unreadable command keeps the text reading of its seek", `cat /proc/self/environ "unterminated`, true},
+		{"an unreadable command is refused as before", `echo "unterminated`, true},
+		{"a here-document is routed to the text reading", "cat > f <<'EOF'\n/proc/self/environ\nEOF", true},
+		{"a for header is routed to the text reading", "for x in /proc/self/environ; do echo $x; done", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason := sandboxSecretsReason(tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("sandboxSecretsReason(%q) blocked=%v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			want := sandboxSecretsVerdictWith(tt.command, shellTokenize)
+			if (reason != "") != (want != "") {
+				t.Errorf("reading through sandboxSecretsReadTokens gives %q where shellTokenize gives %q for %q; the move changed a verdict",
+					reason, want, tt.command)
+			}
+		})
+	}
+}
+
+// TestSandboxSecretsProductionReader pins which reading the guard hands its
+// judge: the parsed one for a command the parser reads with no unsafe shape,
+// and the text one for a command it cannot read or one
+// sandboxSecretsParsedUnsafe names. Each row is a command whose two readings
+// differ, so the assertion sees which one answered.
+func TestSandboxSecretsProductionReader(t *testing.T) {
+	t.Parallel()
+	parsed := func(c string) []string {
+		tokens, _ := parsedTokens(c)
+		return tokens
+	}
+	tests := []struct {
+		name    string
+		command string
+		reading sandboxSecretsReader
+	}{
+		{"a readable command with no unsafe shape is read by the parser", "cat /proc/self/environ 2>/dev/null", parsed},
+		{"an unreadable command falls back to the text reading", `echo "unterminated`, shellTokenize},
+		{"a here-document falls back to the text reading", "cat > f <<EOF\nx\nEOF", shellTokenize},
+		{"a [[ ]] expression falls back to the text reading", "[[ -f x ]]", shellTokenize},
+		{"a for header falls back to the text reading", "for i in 1 2; do echo $i; done", shellTokenize},
+		{"a case header falls back to the text reading", "case x in a) echo b;; esac", shellTokenize},
+		{"a select header falls back to the text reading", "select x in 1; do echo $x; done", shellTokenize},
+		{"a single '<' is not a here-document", "echo a<b", parsed},
+		{"a here-string keeps the parsed reading", "cat <<< /proc/self/environ", parsed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sandboxSecretsReadTokens(tt.command)
+			if want := tt.reading(tt.command); !slices.Equal(got, want) {
+				t.Errorf("sandboxSecretsReadTokens(%q) = %q, want %q", tt.command, got, want)
+			}
+		})
+	}
+}
+
+// TestSandboxSecretsParsedVerdictNeverLoosens proves, over every command the
+// parser reads, that the guard's verdict through parsedTokens is never less
+// strict than the shellTokenize verdict. A command whose parsed reading would
+// allow what shellTokenize refuses is routed to shellTokenize by
+// sandboxSecretsParsedUnsafe, so the property holds for it too.
+func TestSandboxSecretsParsedVerdictNeverLoosens(t *testing.T) {
+	t.Parallel()
+	commands := sandboxSecretsCommands(t)
+	if failures := sandboxSecretsLoosenings(commands, sandboxSecretsReadTokens); len(failures) != 0 {
+		for _, f := range failures {
+			t.Errorf("parsed reading allows what shellTokenize refuses: %q", f)
+		}
+	}
+	// Every verdict the move changes, so the closing note can list them.
+	var changed []string
+	for _, c := range commands {
+		if _, readable := parsedTokens(c); !readable {
+			continue
+		}
+		old := sandboxSecretsVerdictWith(c, shellTokenize)
+		now := sandboxSecretsVerdictWith(c, sandboxSecretsReadTokens)
+		if (old != "") != (now != "") {
+			changed = append(changed, c)
+		}
+	}
+	t.Logf("%d commands checked, %d verdicts changed", len(commands), len(changed))
+	for _, c := range changed {
+		t.Logf("verdict changed: %q", c)
+	}
+
+	t.Run("the property fails without the fallback", func(t *testing.T) {
+		t.Parallel()
+		parsedOnly := func(c string) []string {
+			tokens, readable := parsedTokens(c)
+			if !readable {
+				return shellTokenize(c)
+			}
+			return tokens
+		}
+		if len(sandboxSecretsLoosenings(commands, parsedOnly)) == 0 {
+			t.Error("a reading with no fallback for unsafe shapes passed the property; the property does not hold the safety rule")
+		}
+	})
+
+	t.Run("dropping the separator handling is caught", func(t *testing.T) {
+		t.Parallel()
+		dropSeparators := func(c string) []string {
+			return slices.DeleteFunc(slices.Clone(sandboxSecretsReadTokens(c)), func(s string) bool {
+				return shellCommandSeparators[s]
+			})
+		}
+		if len(sandboxSecretsLoosenings(commands, dropSeparators)) == 0 {
+			t.Error("a reading without separators passed the property; the property does not hold the separators")
+		}
+		// The same mutation through the production judge: with the separator
+		// gone, the commit-message skip reads the next command's path as the
+		// message and drops it.
+		command := "git commit -m; /proc/self/environ"
+		if reason := sandboxSecretsReason(command); reason == "" {
+			t.Errorf("production reading does not refuse %q", command)
+		}
+		if reason := sandboxSecretsReasonWith(command, dropSeparators); reason != "" {
+			t.Errorf("reading without separators refuses %q as %q; the mutation is not the one the property catches", command, reason)
+		}
+	})
+}

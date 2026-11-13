@@ -312,7 +312,15 @@ func sandboxSecretsUnreadableReason(err error) string {
 // sandboxSecretsReason names why the command would print the environment or a
 // secret, or "" when it would not.
 func sandboxSecretsReason(command string) string {
-	if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(command)) {
+	return sandboxSecretsReasonWith(command, sandboxSecretsReadTokens)
+}
+
+// sandboxSecretsReasonWith judges command as sandboxSecretsReason does, reading
+// its tokens with read. The reader is a parameter so the mutation test drives
+// the production path with a reading that loses the separators (see
+// TestSandboxSecretsParsedVerdictNeverLoosens).
+func sandboxSecretsReasonWith(command string, read sandboxSecretsReader) string {
+	if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(command, read)) {
 		return "it reads a process's environment block"
 	}
 	reason, tooDeep := sandboxSecretsWalk(command, 0, nil)
@@ -1343,14 +1351,74 @@ func sandboxSecretsExpandsSecret(word string, expanded map[string]bool) bool {
 	return false
 }
 
+// sandboxSecretsReader reads a command into the argv-like tokens the
+// environ-path check judges it on.
+type sandboxSecretsReader func(command string) []string
+
+// sandboxSecretsReadTokens is the production reader: the parsedTokens reading of
+// gt-crn9gu. shellTokenize is the fallback for a command shellparse cannot read
+// and for a command sandboxSecretsParsedUnsafe names. shellTokenize is the
+// reading gt-crn9gu retires; it stays only until the last guard moves off it.
+func sandboxSecretsReadTokens(command string) []string {
+	tokens, readable := parsedTokens(command)
+	if !readable || sandboxSecretsParsedUnsafe(command) {
+		return shellTokenize(command)
+	}
+	return tokens
+}
+
+// sandboxSecretsHeaderKeywords head a construct whose leading words parsedTokens
+// leaves out: a for or select list, a case word.
+var sandboxSecretsHeaderKeywords = map[string]bool{"for": true, "case": true, "select": true}
+
+// sandboxSecretsParsedUnsafe reports whether command has a shape whose words the
+// parsed reading drops: a here-document (its body is in the parse, not the
+// tokens), a [[ ]] expression, or a for, case or select header. The environ-path
+// check reads those words as text, so the command is read by shellTokenize
+// instead. The rule reads the command text, because the parsed tokens lack the
+// very structure it has to detect; it only ever sends a command to the reading
+// the guard used before this move, so a rule that is too broad costs the parsed
+// reading and never strictness.
+func sandboxSecretsParsedUnsafe(command string) bool {
+	if sandboxSecretsHasHeredoc(command) || strings.Contains(command, "[[") {
+		return true
+	}
+	for _, w := range strings.FieldsFunc(command, func(r rune) bool {
+		return unicode.IsSpace(r) || r == ';' || r == '&' || r == '|'
+	}) {
+		if sandboxSecretsHeaderKeywords[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsHasHeredoc reports whether command holds a here-document
+// operator. A here-string (<<<) keeps its text in the parsed tokens, so it is
+// not one.
+func sandboxSecretsHasHeredoc(command string) bool {
+	for i := 0; i+1 < len(command); i++ {
+		if command[i] != '<' || command[i+1] != '<' {
+			continue
+		}
+		if i+2 < len(command) && command[i+2] == '<' {
+			i += 2
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // sandboxSecretsReadableText returns the command one segment at a time, as the environ-path
 // check reads it: quotes are gone and each segment's words are joined, so a path split by
 // quotes or by a substitution is still one path. Left out are a git commit's -m or --message
 // values, which git writes into the commit and opens no file for. A value that runs a
-// substitution stays in, because the shell runs the substitution.
-func sandboxSecretsReadableText(command string) string {
+// substitution stays in, because the shell runs the substitution. read supplies the tokens,
+// so a test can hand the production path a reading that loses the separators.
+func sandboxSecretsReadableText(command string, read sandboxSecretsReader) string {
 	var b strings.Builder
-	for _, segment := range splitShellSegments(shellTokenize(command)) {
+	for _, segment := range splitShellSegments(read(command)) {
 		skip := sandboxSecretsCommitMessages(segment)
 		for i, word := range segment {
 			if !skip[i] {
