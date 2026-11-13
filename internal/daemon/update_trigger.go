@@ -91,6 +91,10 @@ type updateTriggerState struct {
 	// jobOutstanding is closed when the last create the daemon abandoned returns;
 	// nil until one is abandoned.
 	jobOutstanding chan struct{}
+	// pendingVerdictBound overrides updatePendingVerdictBound for a test that
+	// shortens the wait on a pending main verdict; zero is the constant. Set before
+	// the heartbeat runs.
+	pendingVerdictBound time.Duration
 }
 
 // triggerUpdate is the heartbeat's update block: decide whether an update is
@@ -130,7 +134,7 @@ func (d *Daemon) triggerUpdate() {
 		// A pod's roll is the Job, gated on a pair-ready commit, and never the child.
 		// Pod mode wins over container mode: a child started here is the one the
 		// pod's replacement takes down, so none starts even with container mode set.
-		d.triggerPodUpdate(now, settings, reason)
+		d.triggerPodUpdate(now, settings, reason, facts)
 		return
 	}
 	d.clearUpdateNotDue()

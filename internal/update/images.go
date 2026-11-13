@@ -59,6 +59,48 @@ type ImageRecord struct {
 	Previous ImagePair `json:"previous"`
 }
 
+// The checks a digest install runs after the swap, named in a RollbackRecord.
+// The first two are the rollout wait: the swap must apply and the daemon must
+// report the new commit. The last two are the pair check's digest and tag reads.
+const (
+	CheckRollout        = "rollout"
+	CheckVersion        = "version"
+	CheckRunningDigests = "running-digests"
+	CheckRegistryTag    = "registry-tag"
+	// CheckPair is a pair check failure that names no check of its own, such as
+	// the values file no longer holding the pair. It is never read as a rollout.
+	CheckPair = "pair"
+)
+
+// RollbackRecord is what a digest install that put the previous pair back on a
+// failed check records: the check that failed and the pair restored. A rollback
+// whose restore failed is not recorded here; its escalation is the record.
+type RollbackRecord struct {
+	Check    string    `json:"check"`
+	Restored ImagePair `json:"restored"`
+}
+
+// PairCheckError is a pair check's failure with the check that failed, so the
+// rollback can name it. Its message is the check's own, unchanged.
+type PairCheckError struct {
+	Check string
+	Err   error
+}
+
+func (e PairCheckError) Error() string { return e.Err.Error() }
+
+func (e PairCheckError) Unwrap() error { return e.Err }
+
+// pairCheckName is the check a pair check's failure names, or CheckPair when the
+// failure names none.
+func pairCheckName(err error) string {
+	var pc PairCheckError
+	if errors.As(err, &pc) && pc.Check != "" {
+		return pc.Check
+	}
+	return CheckPair
+}
+
 // ImageLedger reads and writes the digest install's record.
 type ImageLedger interface {
 	Read() (ImageRecord, error)
@@ -295,10 +337,11 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 	if ctx.Err() != nil {
 		return InstallResult{}, ctx.Err()
 	}
+	check := CheckVersion
 	reason := fmt.Sprintf("the daemon did not report %s within the restart bound", shortSHA(sha))
 	switch {
 	case err != nil:
-		reason = "the daemon image swap failed: " + err.Error()
+		check, reason = CheckRollout, "the daemon image swap failed: "+err.Error()
 	case healthy:
 		if d.PairCheck == nil {
 			return res, nil
@@ -310,7 +353,7 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 		if checkErr == nil {
 			return res, nil
 		}
-		reason = "the daemon did not run the pair: " + checkErr.Error()
+		check, reason = pairCheckName(checkErr), "the daemon did not run the pair: "+checkErr.Error()
 	}
 	res.Event = "failed"
 	res.Exit = 1
@@ -319,6 +362,7 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 		return res, nil
 	}
 	res.Reason = reason + "; restored " + previous.Daemon
+	res.Rollback = &RollbackRecord{Check: check, Restored: previous}
 	return res, nil
 }
 

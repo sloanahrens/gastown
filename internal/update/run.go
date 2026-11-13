@@ -396,6 +396,14 @@ func (r *runner) install(i int) (Outcome, error) {
 	if err := r.endStep(i, result, installDetail(res, result, err)); err != nil {
 		return "", err
 	}
+	// The rollback is recorded on the run, so the daemon reads it from the
+	// state file the run ended with, not from this process's memory.
+	if res.Rollback != nil {
+		rb := *res.Rollback
+		if _, err := r.mutate(func(st *State) { st.Rollback = &rb }); err != nil {
+			return "", err
+		}
+	}
 	switch result {
 	case ResultOK:
 		return "", nil

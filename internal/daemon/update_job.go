@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +15,9 @@ import (
 	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -57,6 +60,8 @@ var errUpdateJobOutstanding = errors.New("an earlier create of the update Job ha
 // kubectlUpdateJob; a test injects a fake.
 type updateJobClient interface {
 	CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error
+	// ActiveJobs names the update Jobs the cluster has not yet seen finish.
+	ActiveJobs(ctx context.Context) ([]string, error)
 }
 
 // updateJobEncoder writes a rendered object as YAML. Production is
@@ -104,6 +109,66 @@ func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest [
 		return errUpdateJobExists
 	}
 	return fmt.Errorf("kubectl create for %s exited %d", name, exit)
+}
+
+// updateJobCondition is one entry of a Job's status.conditions.
+type updateJobCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+// updateJobFinished reports whether a Job's conditions say it has finished: a
+// Complete or a Failed condition with status True. Pod counts do not say it. A Job
+// with a failed pod keeps starting pods while its backoffLimit allows, so a
+// failed count alone is a roll still in progress.
+func updateJobFinished(conds []updateJobCondition) bool {
+	for _, c := range conds {
+		if (c.Type == "Complete" || c.Type == "Failed") && c.Status == "True" {
+			return true
+		}
+	}
+	return false
+}
+
+// ActiveJobs lists the update's Jobs in the update namespace and names those whose
+// conditions do not yet say they finished (updateJobFinished). A Job with no
+// status, one that is suspended, one with a pod still running and one between
+// retries are all active: a hold that read them as finished would start a second
+// roll over a roll still in progress. kubectl's answer is read by its shape only;
+// its output is not echoed.
+func (k kubectlUpdateJob) ActiveJobs(ctx context.Context) ([]string, error) {
+	out, exit, err := k.run(ctx, "", nil, "kubectl", "get", "jobs",
+		"-n", updatejob.DefaultNamespace, "-l", "app.kubernetes.io/name="+updatejob.Name, "-o", "json")
+	if err != nil {
+		return nil, fmt.Errorf("running kubectl get jobs: %w", err)
+	}
+	if exit != 0 {
+		return nil, fmt.Errorf("kubectl get jobs exited %d", exit)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				Conditions []updateJobCondition `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil, errors.New("the kubectl get jobs answer is not a Job list")
+	}
+	var active []string
+	for _, j := range list.Items {
+		if !strings.HasPrefix(j.Metadata.Name, updateJobNamePrefix) {
+			continue
+		}
+		if updateJobFinished(j.Status.Conditions) {
+			continue
+		}
+		active = append(active, j.Metadata.Name)
+	}
+	return active, nil
 }
 
 // updateJobName is the Job name for the green commit sha.
@@ -279,15 +344,20 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 // starts only when a pair-ready green commit is ahead of the running one, and it
 // starts as the Job the cluster runs, never as a child this process would lose
 // when the roll replaces it.
-func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string) {
+func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string, facts UpdateFacts) {
 	running, err := pairReadyRunningCommit(d.config.TownRoot)
 	if err != nil {
 		d.noteUpdateNotDue("running commit unreadable: " + err.Error())
 		return
 	}
-	sha, why := pairReadySHAForRoll(d.pairReady.observed(), running, d.pairReadyBareClone)
+	items := d.pairReady.observed()
+	sha, why := pairReadySHAForRoll(items, running, d.pairReadyBareClone)
 	if sha == "" {
 		d.noteUpdateNotDue(why)
+		return
+	}
+	if hold := d.updateRollHold(now, settings, facts, pairReadyRigFor(items, sha)); hold != "" {
+		d.noteUpdateNotDue(hold)
 		return
 	}
 	d.clearUpdateNotDue()
@@ -318,6 +388,135 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 		d.noteUpdateLaunch(now)
 		d.logger.Printf("update: created Job %s", updateJobName(sha))
 	}
+}
+
+// updateRollHold names the reason a pod roll to the pair-ready commit must not
+// start now, or "" when none holds. Every hold is read before a Job is created,
+// and a read that fails holds the roll rather than passing as clear:
+//   - an unfinished roll: a run is in progress (its heartbeat is fresh, or it
+//     launched inside the suppression window), or a gt-update-* Job is still active;
+//   - min_interval: the last run ended less than settings.MinInterval ago;
+//   - main's verdict: the post-land verdict of main's tip (mainVerdictHold).
+//
+// The failed-run hold on main's target is updateDue's, which runs before this.
+func (d *Daemon) updateRollHold(now time.Time, settings config.UpdateSettings, facts UpdateFacts, rig string) string {
+	if facts.Running {
+		return "an update run is in progress"
+	}
+	active, err := d.activeUpdateJobs()
+	if err != nil {
+		return "the update Jobs cannot be read: " + err.Error() + "; not starting a roll"
+	}
+	if len(active) > 0 {
+		return "update Job " + strings.Join(active, ", ") + " is still active; not starting a roll"
+	}
+	if !facts.LastEnded.IsZero() && now.Sub(facts.LastEnded) < settings.MinInterval {
+		return fmt.Sprintf("the last update run ended %s ago, inside min_interval %s; not starting a roll",
+			formatUpdateAge(now.Sub(facts.LastEnded)), settings.MinInterval)
+	}
+	if rig == "" {
+		return "no rig names the pair-ready commit, so main's verdict cannot be read; not starting a roll"
+	}
+	return d.mainVerdictHold(now, rig)
+}
+
+// updatePendingVerdictBound is how long main's tip may stay pending before a roll
+// holds on it. The post-land runner alarms a pending verdict once its
+// post_land_timeout passes (landworker.PostLandStatusDefaultTimeout unless the rig
+// sets merge_queue.post_land_timeout) and keeps the entry readable for its alarm
+// window after that. This bound sits above that default, so a verdict the runner
+// still allows passes and one it has alarmed holds. A rig whose timeout is longer
+// than this bound holds on verdicts the runner is still waiting for: raise the
+// bound with the timeout.
+const updatePendingVerdictBound = 90 * time.Minute
+
+// updatePendingBound is updatePendingVerdictBound, unless a test set
+// pendingVerdictBound to shorten it.
+func (d *Daemon) updatePendingBound() time.Duration {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	if d.updateTrigger.pendingVerdictBound > 0 {
+		return d.updateTrigger.pendingVerdictBound
+	}
+	return updatePendingVerdictBound
+}
+
+// mainVerdictHold names why a roll onto rig must wait for main's verdict, or ""
+// when main's tip is green or a young pending verdict. Main's tip is read from
+// origin, and its verdict from the rig's post-land runner. The rules:
+//   - red: hold, named with the tip;
+//   - pending: pass while young; a verdict pending past updatePendingBound holds,
+//     since a sweep that stalled is not a green;
+//   - unknown (no verdict recorded for the tip): hold;
+//   - a tip that cannot be resolved, a store that cannot be read, or no runner for
+//     the rig: hold, each with its own reason.
+func (d *Daemon) mainVerdictHold(now time.Time, rig string) string {
+	tip, err := d.rigMainTip(rig)
+	if err != nil {
+		return fmt.Sprintf("main's tip for %s cannot be resolved: %v; not starting a roll", rig, err)
+	}
+	v, err := d.rigVerdictOf(rig, tip)
+	if err != nil {
+		return fmt.Sprintf("main's verdict for %s cannot be read: %v; not starting a roll", rig, err)
+	}
+	switch v.State {
+	case landworker.CommitVerdictGreen:
+		return ""
+	case landworker.CommitVerdictRed:
+		return fmt.Sprintf("main is red at %s; not starting a roll onto it", greenRefShortSHA(tip))
+	case landworker.CommitVerdictPending:
+		age := now.Sub(v.Since)
+		if age > d.updatePendingBound() {
+			return fmt.Sprintf("main's verdict is still pending after %s; not starting a roll", formatUpdateAge(age))
+		}
+		return ""
+	}
+	return fmt.Sprintf("no post-land verdict is recorded for main's tip %s; not starting a roll", greenRefShortSHA(tip))
+}
+
+// rigMainTip is the tip of rig's main as origin reports it, read through the
+// rig's bare repository under a bound. It never fetches. A failed read is an
+// error, so a tip the daemon cannot read is never taken as green.
+func (d *Daemon) rigMainTip(rig string) (string, error) {
+	run := d.updateRemoteRun
+	if run == nil {
+		run = update.ExecRun
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateRemoteTimeout)
+	defer cancel()
+	return update.RemoteMainSHA(ctx, run, constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig)))
+}
+
+// rigVerdictOf is the post-land verdict of commit on rig, read from the rig's
+// post-land runner. A rig with no runner has no verdict to read.
+func (d *Daemon) rigVerdictOf(rig, commit string) (landworker.CommitVerdict, error) {
+	runner := d.postLandRunners.get(rig)
+	if runner == nil {
+		return landworker.CommitVerdict{}, fmt.Errorf("no post-land runner is wired for %s", rig)
+	}
+	return runner.VerdictOf(commit)
+}
+
+// activeUpdateJobs names the update Jobs the cluster still runs, under the same
+// bound as a create.
+func (d *Daemon) activeUpdateJobs() ([]string, error) {
+	if d.updateJob == nil {
+		return nil, errors.New("no cluster client is wired into this daemon")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d.updateJobBound())
+	defer cancel()
+	return d.updateJob.ActiveJobs(ctx)
+}
+
+// pairReadyRigFor is the rig of the pair-ready item for sha, or "" when none names
+// it.
+func pairReadyRigFor(items []attention.Item, sha string) string {
+	for _, it := range items {
+		if it.Kind == attention.KindDeployPairReady && it.SHA == sha {
+			return it.Rig
+		}
+	}
+	return ""
 }
 
 // updateJobBackingOff reports whether the last failed pod launch is recent

@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/landworker"
 )
 
 // testUpdateJobBound is the create deadline the tests shorten to. The daemon's
@@ -44,6 +45,17 @@ type fakeUpdateJob struct {
 	ignoreCtx bool
 	entered   chan struct{}
 	release   chan struct{}
+	// active is the update Jobs the cluster reports as not yet finished; listErr,
+	// when set, is what a list returns instead.
+	active  []string
+	listErr error
+}
+
+func (f *fakeUpdateJob) ActiveJobs(context.Context) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.active, nil
 }
 
 func (f *fakeUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
@@ -72,8 +84,19 @@ func (f *fakeUpdateJob) CreateJob(ctx context.Context, name string, manifest []b
 	return nil
 }
 
+// fakeMainState is the rig's durable main state as a test sets it: every load
+// answers st, or err when set. Save is never reached by a roll's read.
+type fakeMainState struct {
+	st  landworker.MainState
+	err error
+}
+
+func (f *fakeMainState) Load() (landworker.MainState, error) { return f.st, f.err }
+func (f *fakeMainState) Save(landworker.MainState) error     { return nil }
+
 // updateJobRig is a pod daemon over a town whose gastown bare clone holds three
-// commits on main, the running commit being the middle one.
+// commits on main, the running commit being the middle one. main's tip is
+// commits[2] as origin reports it (remote), and its verdict is what main holds.
 type updateJobRig struct {
 	d        *Daemon
 	logs     *bytes.Buffer
@@ -84,6 +107,8 @@ type updateJobRig struct {
 	git      pairReadyGit
 	commits  []string
 	clock    *clockwork.FakeClock
+	remote   *updateRemoteFake
+	main     *fakeMainState
 }
 
 // newUpdateJobRig builds the rig with cfg as the update block and the pod switch
@@ -108,10 +133,17 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
 	t.Cleanup(func() { close(cluster.release) })
 	d.updateJob = cluster
+	// The rig's main tip is commits[2] and its verdict is green unless a test says
+	// otherwise: the last run reached a verdict at the tip and passed.
+	remote := &updateRemoteFake{output: commits[2] + "\trefs/heads/main\n"}
+	d.updateRemoteRun = remote.run
+	main := &fakeMainState{st: landworker.MainState{LastRun: commits[2], LastGreen: commits[2]}}
+	d.postLandRunners.set("gastown", &landworker.PostLandRunner{Rig: "gastown", State: main})
 	writeRunningImages(t, town, commits[1])
 	return &updateJobRig{
 		d: d, logs: logs, cluster: cluster, launches: launches, town: town,
 		bare: bare, git: world.Open(bare).(pairReadyGit), commits: commits, clock: clock,
+		remote: remote, main: main,
 	}
 }
 
