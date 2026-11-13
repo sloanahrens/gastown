@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -584,6 +585,47 @@ func TestEscalationCloseStatePrunesUnlisted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The escalations seam returns a slice its caller owns. A pass sorts the ids it
+// judged, so two passes handed one slice used to reorder it underneath each
+// other: a data race under -race, and the caller's order changed (gt-wgqrz7).
+func TestEscalationCloseNudgeLeavesSharedSliceOrderAlone(t *testing.T) {
+	t.Parallel()
+	shared := []patrolscan.Escalation{
+		{ID: "hq-c", EscalatedBy: closeTestSeat, Open: true},
+		{ID: "hq-b", EscalatedBy: closeTestSeat, Open: true},
+		{ID: "hq-a", EscalatedBy: closeTestSeat, Open: true},
+	}
+	want := escalationCloseIDs(shared)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			seams := escalationCloseSeams{
+				escalations: func(string) ([]patrolscan.Escalation, error) { return shared, nil },
+				save:        func(escalationCloseState) error { return nil },
+				logf:        func(string, ...any) {},
+			}
+			runEscalationCloseNudges(seams, escalationCloseState{}, []string{"gastown"})
+		}()
+	}
+	wg.Wait()
+
+	if got := escalationCloseIDs(shared); !slices.Equal(got, want) {
+		t.Errorf("caller's slice reordered to %v, want %v", got, want)
+	}
+}
+
+// escalationCloseIDs is the ids of escs, in order.
+func escalationCloseIDs(escs []patrolscan.Escalation) []string {
+	ids := make([]string, len(escs))
+	for i, e := range escs {
+		ids[i] = e.ID
+	}
+	return ids
 }
 
 // Only the newest escalationCloseAnnouncedMax announced ids are kept, and the

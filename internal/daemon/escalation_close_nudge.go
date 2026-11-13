@@ -165,6 +165,9 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 			s.logf("escalation_close: %s: cannot read escalations, stopping this tick: %v", rig, err)
 			return false
 		}
+		// Sort a copy: the seam returns a slice its caller owns, and sorting it
+		// in place reorders memory another pass may be reading.
+		escs = slices.Clone(escs)
 		sort.Slice(escs, func(i, j int) bool { return escs[i].ID < escs[j].ID })
 		for _, e := range escs {
 			listed[e.ID] = true
