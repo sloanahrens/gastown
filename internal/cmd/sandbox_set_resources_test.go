@@ -555,11 +555,14 @@ func TestSandboxSetResourcesTownFromEnvWhenTheWorkingDirectoryIsInNoTown(t *test
 // The production resolver takes the working directory from the caller
 // (GT_CALLER_CWD, via callercwd), so a run from the Mac wrapper names the town the
 // user is in. The process directory here is the worktree, inside another town,
-// so reading it instead would resolve that town and fail the check. t.Setenv
-// sets the caller's directory for this test only; the test is not parallel.
+// so reading it instead would resolve that town and fail the check.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
 func TestSandboxSetResourcesProcessTownIsTheCallersDirectory(t *testing.T) {
 	town := sandboxResourcesTown(t, sandboxResourcesSettings)
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
 	t.Setenv("GT_CALLER_CWD", town)
+	//testpolicy:allow no-env — GT_TOWN_ROOT is cleared so the host's value cannot pick the town
 	t.Setenv("GT_TOWN_ROOT", "")
 
 	got, err := processSetResourcesTown("")
