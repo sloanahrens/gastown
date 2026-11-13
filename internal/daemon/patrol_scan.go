@@ -180,6 +180,7 @@ func (d *Daemon) runPatrolScan() {
 		}
 		d.reapAlertsIfEnabled(rigName, report, ledger)
 	}
+	d.nudgeClosedEscalations(env, rigs)
 	d.patrolScanTimerGates(env, rigs)
 	d.patrolScanGHGates(env, rigs)
 	d.patrolScanRogueBD()
@@ -706,6 +707,7 @@ func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation
 			Title:       is.Title,
 			RelatedBead: fields.RelatedBead,
 			Open:        !beads.IssueStatus(is.Status).IsTerminal(),
+			CloseReason: is.CloseReason,
 			CreatedAt:   beads.ParseIssueTime(is.CreatedAt),
 			ClosedAt:    beads.ParseIssueTime(is.ClosedAt),
 		})

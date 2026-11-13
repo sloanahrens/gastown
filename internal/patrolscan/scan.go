@@ -223,6 +223,10 @@ type Escalation struct {
 	RelatedBead string
 	// Open is true while the escalation has not been closed.
 	Open bool
+	// CloseReason is the reason the escalation was closed with, "" while it is
+	// open or when the closer gave none. The escalation close nudge carries it
+	// to the seat (gt-jx0s09).
+	CloseReason string
 	// CreatedAt and ClosedAt are when the escalation was raised and closed,
 	// zero when the record carries no such time. SeatAnsweredAt reads them.
 	CreatedAt, ClosedAt time.Time
