@@ -12,10 +12,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/testutil/usagefixture"
 )
-
-// reportNow is the report clock. The default window is the day before it.
-var reportNow = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 
 // reportCST is the zone a day is read in, a fixed UTC-6 so the test does not read the host's zone database.
 var reportCST = time.FixedZone("CST", -6*60*60)
@@ -45,41 +43,6 @@ func claudeUsage(calls, input, cacheCreation, output int64) dashboard.UsageModel
 
 func deepseekUsage(calls, input, output int64, estUSD float64) dashboard.UsageModel {
 	return dashboard.UsageModel{Calls: calls, Input: input, Output: output, EstCostUSD: estUSD}
-}
-
-// reportFixture is the town's records for a report at reportNow with the default one-day window:
-//   - gt-a: a polecat work run and its om review, both in the window, 25 and 5 minutes long;
-//   - gt-b: a polecat run on DeepSeek, in the window, 10 minutes long;
-//   - gt-c: a polecat run still incomplete, in the window: counted as incomplete, left out of the rows;
-//   - gt-d: a deep review ending the day before the newest day, in the window;
-//   - gt-old: a run a day older than the window: counted nowhere;
-//   - gt-z: a run with no end: counted as skipped.
-//
-// Two unmatched sessions were last written in the window and one before it.
-func reportFixture(t *testing.T) ([]dashboard.UsageRecord, []time.Time) {
-	t.Helper()
-	recs := []dashboard.UsageRecord{
-		reportRecord("gt-a", dashboard.UsageKindWork, dashboard.UsageClassPolecat, reportAt(t, "2026-11-13T10:00:00Z"), 1500, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(4, 100, 40, 25)}, 10),
-		reportRecord("gt-a", dashboard.UsageKindOM, dashboard.UsageClassOMReview, reportAt(t, "2026-11-13T09:30:00Z"), 300, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(2, 50, 0, 10)}, 0),
-		reportRecord("gt-b", dashboard.UsageKindWork, dashboard.UsageClassPolecat, reportAt(t, "2026-11-13T11:00:00Z"), 600, true,
-			map[string]dashboard.UsageModel{"deepseek-flash": deepseekUsage(3, 2000, 500, 0.0123)}, 500),
-		reportRecord("gt-c", dashboard.UsageKindWork, dashboard.UsageClassPolecat, reportAt(t, "2026-11-13T08:00:00Z"), 1800, false,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(9, 999, 0, 0)}, 0),
-		reportRecord("gt-d", dashboard.UsageKindWork, dashboard.UsageClassDeepReview, reportAt(t, "2026-11-12T13:00:00Z"), 400, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(1, 20, 0, 5)}, 0),
-		reportRecord("gt-old", dashboard.UsageKindWork, dashboard.UsageClassPolecat, reportAt(t, "2026-11-10T00:00:00Z"), 900, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(5, 1000, 0, 0)}, 0),
-		reportRecord("gt-z", dashboard.UsageKindWork, dashboard.UsageClassPolecat, time.Time{}, 900, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(7, 7, 0, 0)}, 0),
-	}
-	unmatched := []time.Time{
-		reportAt(t, "2026-11-13T05:00:00Z"),
-		reportAt(t, "2026-11-13T06:00:00Z"),
-		reportAt(t, "2026-11-01T00:00:00Z"),
-	}
-	return recs, unmatched
 }
 
 // wantRow is one expected row. sub is nil where the grouping has no subagent share.
@@ -121,8 +84,8 @@ func checkReport(t *testing.T, rep Report, want []wantRow) {
 
 func TestUsageReportGroupsFixtureRecords(t *testing.T) {
 	t.Parallel()
-	recs, unmatched := reportFixture(t)
-	from, to := reportNow.Add(-24*time.Hour), reportNow
+	recs, unmatched := usagefixture.Records(), usagefixture.Unmatched()
+	from, to := usagefixture.Now().Add(-24*time.Hour), usagefixture.Now()
 	cst := reportCST
 	tests := []struct {
 		name string
@@ -180,8 +143,8 @@ func TestUsageReportGroupsFixtureRecords(t *testing.T) {
 
 func TestUsageReportBeadAndOverFilters(t *testing.T) {
 	t.Parallel()
-	recs, unmatched := reportFixture(t)
-	from, to := reportNow.Add(-24*time.Hour), reportNow
+	recs, unmatched := usagefixture.Records(), usagefixture.Unmatched()
+	from, to := usagefixture.Now().Add(-24*time.Hour), usagefixture.Now()
 	tests := []struct {
 		name string
 		opts ReportOptions
@@ -232,7 +195,7 @@ func TestUsageReportOverIsStrictlyOver(t *testing.T) {
 			map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(1, 1, 0, 0)}, 0))
 	}
 	rep, err := BuildReport(recs, nil, ReportOptions{
-		From: reportNow.Add(-24 * time.Hour), To: reportNow, By: ByBead, Over: 20 * time.Minute,
+		From: usagefixture.Now().Add(-24 * time.Hour), To: usagefixture.Now(), By: ByBead, Over: 20 * time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +207,7 @@ func TestUsageReportOverIsStrictlyOver(t *testing.T) {
 
 func TestUsageReportWindowIncludesBothEnds(t *testing.T) {
 	t.Parallel()
-	from, to := reportNow.Add(-24*time.Hour), reportNow
+	from, to := usagefixture.Now().Add(-24*time.Hour), usagefixture.Now()
 	models := map[string]dashboard.UsageModel{"claude-sonnet-5-5": claudeUsage(1, 1, 0, 0)}
 	recs := []dashboard.UsageRecord{
 		reportRecord("gt-from", dashboard.UsageKindWork, dashboard.UsageClassPolecat, from, 60, true, models, 0),
@@ -291,7 +254,7 @@ func reportWriteFile(t *testing.T, path, data string) {
 func TestUsageReportReadRecordsDecodesEveryRecordFile(t *testing.T) {
 	t.Parallel()
 	usageDir := t.TempDir()
-	recs, _ := reportFixture(t)
+	recs := usagefixture.Records()
 	for _, r := range recs {
 		b, err := json.Marshal(r)
 		if err != nil {

@@ -12,71 +12,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/testutil/usagefixture"
 )
 
 var updateUsageReportGolden = flag.Bool("update-usage-report-golden", false, "rewrite the testdata/usage_report_*.golden files")
 
-// reportNow is the report clock. The default one-day window is the day before it.
-var reportNow = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
-
-// reportTown is a town whose usage records are the fixture of the usage report: two beads with Claude
-// runs, one DeepSeek run, one incomplete run, one run with no end, and one run a day older than the
-// window. Two unmatched sessions were last written in the window and one before it.
+// reportTown is a town whose usage records are usagefixture, written as the scan leaves them on disk:
+// one file per bead and kind, and unmatched.jsonl.
 func reportTown(t *testing.T) string {
 	t.Helper()
 	town := t.TempDir()
 	usageDir := filepath.Join(town, ".runtime", "usage")
-	recs := []dashboard.UsageRecord{
-		reportRecordFixture("gt-a", dashboard.UsageKindWork, dashboard.UsageClassPolecat, "2026-11-13T10:00:00Z", 1500, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Calls: 4, Input: 100, CacheCreation: 40, CacheRead: 900, Output: 25}}, 10),
-		reportRecordFixture("gt-a", dashboard.UsageKindOM, dashboard.UsageClassOMReview, "2026-11-13T09:30:00Z", 300, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Calls: 2, Input: 50, Output: 10}}, 0),
-		reportRecordFixture("gt-b", dashboard.UsageKindWork, dashboard.UsageClassPolecat, "2026-11-13T11:00:00Z", 600, true,
-			map[string]dashboard.UsageModel{"deepseek-flash": {Calls: 3, Input: 2000, Output: 500, EstCostUSD: 0.0123}}, 500),
-		reportRecordFixture("gt-c", dashboard.UsageKindWork, dashboard.UsageClassPolecat, "2026-11-13T08:00:00Z", 1800, false,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Calls: 9, Input: 999}}, 0),
-		reportRecordFixture("gt-d", dashboard.UsageKindWork, dashboard.UsageClassDeepReview, "2026-11-12T13:00:00Z", 400, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Calls: 1, Input: 20, Output: 5}}, 0),
-		reportRecordFixture("gt-old", dashboard.UsageKindWork, dashboard.UsageClassPolecat, "2026-11-10T00:00:00Z", 900, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Calls: 5, Input: 1000}}, 0),
-		reportRecordFixture("gt-z", dashboard.UsageKindWork, dashboard.UsageClassPolecat, "", 900, true,
-			map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Calls: 7, Input: 7}}, 0),
-	}
-	for _, r := range recs {
+	for _, r := range usagefixture.Records() {
 		b, err := json.Marshal(r)
 		if err != nil {
 			t.Fatal(err)
 		}
 		writeAttribFile(t, filepath.Join(usageDir, "beads", r.Bead+"."+r.Kind+".json"), string(b))
 	}
-	writeAttribFile(t, filepath.Join(usageDir, "unmatched.jsonl"),
-		`{"seat":"gastown/nux","session":"s1","last_write":"2026-11-13T05:00:00Z","reason":"no run of its seat holds its last write"}`+"\n"+
-			`{"seat":"gastown/nux","session":"s2","last_write":"2026-11-13T06:00:00Z","reason":"no run of its seat holds its last write"}`+"\n"+
-			`{"seat":"gastown/nux","session":"s3","last_write":"2026-11-01T00:00:00Z","reason":"no run of its seat holds its last write"}`+"\n")
+	writeAttribFile(t, filepath.Join(usageDir, "unmatched.jsonl"), usagefixture.UnmatchedJSONL())
 	return town
-}
-
-// reportRecordFixture is one usage record. An empty end is the zero time, a record with no end.
-func reportRecordFixture(bead, kind, class, end string, wallS int64, complete bool,
-	models map[string]dashboard.UsageModel, subUncached int64) dashboard.UsageRecord {
-	rec := dashboard.UsageRecord{
-		Bead: bead, Kind: kind, Class: class, Rig: "gastown", WallS: wallS, Complete: complete,
-		Models:    models,
-		Subagents: dashboard.UsageSubagents{Uncached: subUncached},
-	}
-	if end != "" {
-		rec.End = mustReportTime(end)
-	}
-	return rec
-}
-
-func mustReportTime(s string) time.Time {
-	ts, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		panic(err)
-	}
-	return ts
 }
 
 // reportDepsFor runs the report against town with the clock fixed at now. The zone is a fixed UTC-6
@@ -136,7 +91,7 @@ func compareReportGolden(t *testing.T, name, got string) {
 func TestUsageReportGoldenTextByGrouping(t *testing.T) {
 	t.Parallel()
 	town := reportTown(t)
-	d := reportDepsFor(town, reportNow)
+	d := reportDepsFor(town, usagefixture.Now())
 	for _, by := range []string{"role", "model", "bead", "day"} {
 		t.Run(by, func(t *testing.T) {
 			t.Parallel()
@@ -152,7 +107,7 @@ func TestUsageReportGoldenTextByGrouping(t *testing.T) {
 func TestUsageReportGoldenJSONByModel(t *testing.T) {
 	t.Parallel()
 	town := reportTown(t)
-	d := reportDepsFor(town, reportNow)
+	d := reportDepsFor(town, usagefixture.Now())
 	got, _, code := execUsageReport(t, d, "--by", "model", "--json")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
@@ -163,7 +118,7 @@ func TestUsageReportGoldenJSONByModel(t *testing.T) {
 func TestUsageReportCountsAlwaysPrinted(t *testing.T) {
 	t.Parallel()
 	town := reportTown(t)
-	d := reportDepsFor(town, reportNow)
+	d := reportDepsFor(town, usagefixture.Now())
 	// A bead with no record in the window still prints the three counts, with no rows.
 	got, _, code := execUsageReport(t, d, "--bead", "gt-missing")
 	if code != 0 {
@@ -179,7 +134,7 @@ func TestUsageReportCountsAlwaysPrinted(t *testing.T) {
 func TestUsageReportBeadAndOverFlagsKeepTheirRows(t *testing.T) {
 	t.Parallel()
 	town := reportTown(t)
-	d := reportDepsFor(town, reportNow)
+	d := reportDepsFor(town, usagefixture.Now())
 
 	bead, _, code := execUsageReport(t, d, "--by", "bead", "--bead", "gt-b")
 	if code != 0 || !strings.Contains(bead, "gt-b") || strings.Contains(bead, "gt-a") {
@@ -240,7 +195,7 @@ func TestUsageReportExitCodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town := tt.setup(t)
-			d := reportDepsFor(town, reportNow)
+			d := reportDepsFor(town, usagefixture.Now())
 			if town == "" {
 				d.townRoot = func() (string, error) { return "", errors.New("no town here") }
 			}
@@ -255,24 +210,54 @@ func TestUsageReportExitCodes(t *testing.T) {
 	}
 }
 
-// reportFailingWriter refuses every write, as a closed pipe does.
-type reportFailingWriter struct{}
+// reportRefusingWriter accepts every write except one whose text holds refuse, as a pipe that closes
+// partway through the report. The bytes it accepted are kept in buf.
+type reportRefusingWriter struct {
+	buf    bytes.Buffer
+	refuse string
+}
 
-func (reportFailingWriter) Write([]byte) (int, error) { return 0, errors.New("closed pipe") }
-
-func TestUsageReportWriteFailureExitsTwo(t *testing.T) {
-	t.Parallel()
-	cmd := newUsageReportCmd(reportDepsFor(reportTown(t), reportNow))
-	var errOut bytes.Buffer
-	cmd.SetOut(reportFailingWriter{})
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"--by", "role"})
-	err := cmd.Execute()
-	var exit *SilentExitError
-	if !errors.As(err, &exit) || exit.Code != 2 {
-		t.Fatalf("Execute error = %v, want exit 2", err)
+func (w *reportRefusingWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), w.refuse) {
+		return 0, errors.New("closed pipe")
 	}
-	if !strings.Contains(errOut.String(), "writing the report") {
-		t.Errorf("stderr = %q, want it to name the failed write", errOut.String())
+	return w.buf.Write(p)
+}
+
+// TestUsageReportPartialWriteExitsTwo holds a pipe that closes at each part of the report, table and
+// counts alike: a report that reached the reader only in part is never an exit 0.
+func TestUsageReportPartialWriteExitsTwo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		refuse string
+	}{
+		{name: "the header", refuse: "usage by"},
+		{name: "the table", refuse: "CALLS"},
+		{name: "the unmatched count", refuse: "unmatched sessions"},
+		{name: "the incomplete count", refuse: "incomplete records"},
+		{name: "the skipped count", refuse: "records with no end time"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := &reportRefusingWriter{refuse: tt.refuse}
+			cmd := newUsageReportCmd(reportDepsFor(reportTown(t), usagefixture.Now()))
+			var errOut bytes.Buffer
+			cmd.SetOut(w)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{"--by", "role"})
+			err := cmd.Execute()
+			var exit *SilentExitError
+			if !errors.As(err, &exit) || exit.Code != 2 {
+				t.Fatalf("Execute error = %v, want exit 2", err)
+			}
+			if !strings.Contains(errOut.String(), "writing the report") {
+				t.Errorf("stderr = %q, want it to name the failed write", errOut.String())
+			}
+			if strings.Contains(w.buf.String(), tt.refuse) {
+				t.Errorf("output holds %q though the writer refused it", tt.refuse)
+			}
+		})
 	}
 }
