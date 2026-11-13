@@ -1,8 +1,10 @@
 # Running Gas Town in Docker
 
+The Compose runtime (`Dockerfile`, `docker-compose.yml` and `docker-entrypoint.sh` at the repository root) hosts a separate, self-contained Gas Town workspace at `/gt`, for trying `gt` in isolation. It is not how the live town runs. The live town runs as the `daemon` and `dashboard` Deployments in the control cluster, described in [architecture.md](architecture.md). This page does not describe that setup.
+
 Gas Town ships two Docker images. The production runtime image hosts a sandboxed Gas Town workspace and is the focus of most of this document. The e2e testing image runs integration tests inside CI and is described in its own section near the end.
 
-Docker is one of two installation paths for Gas Town. The other path installs `gt` directly on your host machine. [INSTALLING.md](INSTALLING.md) covers the native install. The two paths are alternatives — pick one. Docker gives you stronger isolation and bundles every prerequisite. The native install puts `gt` directly on your host.
+To try Gas Town on your own machine, you can use the Compose runtime described here or install `gt` directly on your host machine. [INSTALLING.md](INSTALLING.md) covers the native install. Pick one: Docker gives you stronger isolation and bundles every prerequisite, while the native install puts `gt` directly on your host.
 
 ## What ships in the repository
 
