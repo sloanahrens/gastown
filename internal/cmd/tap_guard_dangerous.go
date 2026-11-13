@@ -252,6 +252,9 @@ func dangerousReadTokens(command string) []string {
 //   - a zsh loop form (repeat, foreach, end), the same loss;
 //   - a [[ ]] or $[ ] expression, whose words parsedTokens drops;
 //   - a bash pipe-and-stderr operator "|&", which parsedTokens does not keep;
+//   - a `#` that starts a word (a shell comment), whose end the two readings
+//     do not agree on: the shell joins the next line when the comment ends in
+//     a backslash, and parsedTokens drops the comment whole (gt-4otugt);
 //   - an ANSI-C string opened across a backslash-newline, which bash joins
 //     and the parser does not (dangerousANSICContinuation, gt-javvg).
 func dangerousParsedUnsafe(command string) bool {
@@ -266,7 +269,7 @@ func dangerousParsedUnsafe(command string) bool {
 			return true
 		}
 	}
-	return false
+	return startsShellComment(command)
 }
 
 // dangerousCompoundKeywords are the words that open or close a compound
@@ -281,16 +284,26 @@ var dangerousCompoundKeywords = map[string]bool{
 }
 
 // dangerousGroupMarker reports whether command holds a subshell or brace
-// group: a "(" that no substitution opened, or a "{" or "}". parsedTokens
-// drops the group's delimiters and keeps its commands, so the group is not
-// visible on the parsed tokens; a "(" of "$(", "<(", ">(" or a backquote is a
-// substitution, whose delimiters the parsed reading keeps as part of its word.
+// group: a "(" that no substitution opened, or a "{" or "}" outside a
+// ${...} parameter expansion. parsedTokens drops the group's delimiters and
+// keeps its commands, so the group is not visible on the parsed tokens; a "("
+// of "$(", "<(", ">(" or a backquote is a substitution, whose delimiters the
+// parsed reading keeps as part of its word, and a parameter expansion's braces
+// are the same kind of delimiter: the parsed reading keeps the whole
+// expansion as one word.
 func dangerousGroupMarker(command string) bool {
+	// parameterDepth counts the "${" that no "}" has closed yet.
+	parameterDepth := 0
 	for i := 0; i < len(command); i++ {
-		switch command[i] {
-		case '{', '}':
+		switch c := command[i]; {
+		case c == '$' && i+1 < len(command) && command[i+1] == '{':
+			parameterDepth++
+			i++
+		case c == '}' && parameterDepth > 0:
+			parameterDepth--
+		case c == '{' || c == '}':
 			return true
-		case '(':
+		case c == '(':
 			if i > 0 {
 				switch command[i-1] {
 				case '$', '<', '>', '`':

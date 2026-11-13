@@ -5,33 +5,34 @@ import (
 	"testing"
 )
 
-// dangerousCorpusRow is one command the property test judges, with the verdict
-// this guard answers for it through its production reader. The rows cover the
-// shapes the parsed reading could flatten or drop: a loop around the gate, a
-// group, a test expression, a substitution, a here-document written to a file,
-// and a command the parser cannot read.
+// dangerousCorpusRow is one of this guard's own corpus rows, with the verdict
+// the corpus records for it. The rows are read from guard_corpus.tsv, so a
+// command added to the corpus is judged here without a second list to edit.
 type dangerousCorpusRow struct {
 	name    string
 	command string
+	context string
 	blocked bool
 }
 
-func dangerousCorpusRows() []dangerousCorpusRow {
-	return []dangerousCorpusRow{
-		{"a for loop around gt done", "for i in 1 2 3; do gt done --status DEFERRED; done", true},
-		{"a while loop around the slot poll", "while true; do gt slot status; done", true},
-		{"a loop inside a subshell group", "(while true; do gt slot status; done) &", true},
-		{"a loop inside a substitution", "echo $(for i in 1; do gt done; done)", true},
-		{"a loop inside a here-document written to a file", "cat > /tmp/x <<'EOF'\n$(for i in 1; do gt done; done)\nEOF", true},
-		{"a here-document whose body is data", "cat > note.md <<'EOF'\ngt done\nEOF", false},
-		{"a test expression", "[[ -f f ]] && ls", false},
-		{"a single gt done", "gt done", false},
-		{"a plain command", "ls -l", false},
-		{"a force push", "git push --force origin main", true},
-		{"a privilege escalation", "sudo ls", true},
-		{"an unreadable command", `echo "unterminated`, true},
-		{"an unreadable command running the gate", `for i in 1 2; do gt done; done "`, true},
+func dangerousCorpusRows(t *testing.T) []dangerousCorpusRow {
+	t.Helper()
+	var rows []dangerousCorpusRow
+	for _, row := range loadGuardCorpus(t) {
+		if row.guard != corpusDangerous {
+			continue
+		}
+		rows = append(rows, dangerousCorpusRow{
+			name:    row.name(),
+			command: row.command,
+			context: row.context,
+			blocked: row.verdict == corpusRefuse,
+		})
 	}
+	if len(rows) == 0 {
+		t.Fatalf("%s has no %s rows", guardCorpusPath, corpusDangerous)
+	}
+	return rows
 }
 
 // dangerousCommands is the property's command set: the differential's command
@@ -50,7 +51,7 @@ func dangerousCommands(t *testing.T) []string {
 	for _, c := range parsedTokensCommands(t) {
 		add(c)
 	}
-	for _, row := range dangerousCorpusRows() {
+	for _, row := range dangerousCorpusRows(t) {
 		add(row.command)
 	}
 	return commands
@@ -80,17 +81,21 @@ func dangerousLoosenings(commands []string, read dangerousReader) []string {
 	return failures
 }
 
-// TestDangerousCorpusRows pins the verdict of this guard's own rows, so a
-// reading change that flips one of them is named rather than buried in the
-// property's aggregate.
+// TestDangerousCorpusRows pins the verdict of this guard's own corpus rows, so
+// a reading change that flips one of them is named rather than buried in the
+// property's aggregate. Each row is judged in the session its context column
+// names, exactly as TestGuardCorpusMatchesCurrentVerdicts judges it.
 func TestDangerousCorpusRows(t *testing.T) {
 	t.Parallel()
-	for _, row := range dangerousCorpusRows() {
+	fixture := newGuardCorpusFixture(t)
+	for _, row := range dangerousCorpusRows(t) {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
-			reason := dangerousVerdictWith(row.command, dangerousReadTokens)
+			sess := guardSession{proc: fixture.process(t, row.context), townRoot: fixture.town}
+			reason, _ := evaluateDangerousCommand(fixture.expand(row.command), 0, sess)
 			if got := reason != ""; got != row.blocked {
-				t.Errorf("dangerousReadTokens verdict on %q blocked=%v (reason %q), want %v", row.command, got, reason, row.blocked)
+				t.Errorf("dangerous verdict on %q in %s blocked=%v (reason %q), want %v",
+					row.command, row.context, got, reason, row.blocked)
 			}
 		})
 	}
@@ -164,6 +169,11 @@ func TestDangerousProductionReader(t *testing.T) {
 		{"a case statement falls back to the text reading", "case x in a) echo b;; esac", shellTokenize},
 		{"an if block falls back to the text reading", "if true; then echo a; fi", shellTokenize},
 		{"a test expression falls back to the text reading", "[[ -f x ]]", shellTokenize},
+		{"a brace group falls back to the text reading", "{ echo hi; }", shellTokenize},
+		{"a '#' that starts a word falls back to the text reading", "echo >f # note", shellTokenize},
+		{"a '#' inside a word is literal and keeps the parsed reading", "echo a#b >f", parsed},
+		{"a quoted '#' is literal and keeps the parsed reading", "echo '# note' >f", parsed},
+		{"a parameter expansion's braces keep the parsed reading", "echo ${x:-y} >f", parsed},
 		{"an ANSI-C string across a line continuation falls back to the text reading", "echo $\\\n'x'", shellTokenize},
 	}
 	for _, tt := range tests {
