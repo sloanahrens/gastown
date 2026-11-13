@@ -41,27 +41,45 @@ func TestCloneDivergenceCheck_StaleCrewCloneIsStillReported(t *testing.T) {
 	}
 }
 
-// TestCloneDivergenceCheck_MayorCloneIsNotScanned: the check no longer looks at
-// <rig>/mayor/rig at all, so a mayor/rig clone that is far behind, and holds
-// commits of its own, is not in the report.
-func TestCloneDivergenceCheck_MayorCloneIsNotScanned(t *testing.T) {
+// TestCloneDivergenceCheck_TownSourceCheckoutsAreNotScanned: findAllClones returns
+// neither <rig>/mayor/rig nor the town gt source checkout, although both are far
+// behind and hold commits of their own. The gt source drift report is retired.
+func TestCloneDivergenceCheck_TownSourceCheckoutsAreNotScanned(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
 	cloneBehind(t, f, filepath.Join(townRoot, "devops", "mayor", "rig"), 60, true)
+	cloneBehind(t, f, filepath.Join(townRoot, ".runtime", "build-src", "gastown"), 60, true)
+
+	clones := NewCloneDivergenceCheck().findAllClones(townRoot)
+
+	if len(clones) != 0 {
+		t.Errorf("findAllClones = %v, want none: mayor/rig and the town gt source are not scanned", clones)
+	}
+}
+
+// TestCloneDivergenceCheck_CrewWithoutCloneReportsNoClones: a crew directory
+// that holds no git clone is not a clone to check, so the check reports none.
+func TestCloneDivergenceCheck_CrewWithoutCloneReportsNoClones(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "devops", "crew", "operator"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
 
 	if result.Status != StatusOK || result.Message != "No clones found" {
-		t.Errorf("devops/mayor/rig 60 behind with its own work: %v %q %v, want OK 'No clones found'",
-			result.Status, result.Message, result.Details)
+		t.Errorf("crew dir with no clone: %v %q, want OK 'No clones found'", result.Status, result.Message)
 	}
 }
 
-// TestCloneDivergenceCheck_NoValidClonesMessageIsUnchanged pins the wording,
-// which gt-9gnar changed without a test (gt-jx8sh). A crew clone whose git
-// state cannot be read is skipped, which leaves no clone to report.
-func TestCloneDivergenceCheck_NoValidClonesMessageIsUnchanged(t *testing.T) {
+// TestCloneDivergenceCheck_UnreadableCloneIsSkipped: a crew clone whose git state
+// cannot be read is skipped, not fatal. Its .git is a directory the fake
+// repository does not hold, so reading its branch fails. The check then reports
+// 'No valid git clones found', the wording gt-9gnar changed without a test (gt-jx8sh).
+func TestCloneDivergenceCheck_UnreadableCloneIsSkipped(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
@@ -71,7 +89,7 @@ func TestCloneDivergenceCheck_NoValidClonesMessageIsUnchanged(t *testing.T) {
 
 	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
 
-	if result.Message != "No valid git clones found" {
-		t.Errorf("message = %q, want %q", result.Message, "No valid git clones found")
+	if result.Status != StatusOK || result.Message != "No valid git clones found" {
+		t.Errorf("unreadable clone: %v %q, want OK 'No valid git clones found'", result.Status, result.Message)
 	}
 }

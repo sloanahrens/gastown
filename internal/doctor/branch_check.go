@@ -111,7 +111,15 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// findAllClones finds all git clones in the workspace.
+// findAllClones finds the crew and polecat git clones of every rig.
+//
+// It does not scan <rig>/mayor/rig or the town's gt source checkout
+// (<town>/.runtime/build-src/gastown). The gt source drift report is retired on
+// purpose, not repointed: buildsrc.Ensure makes that checkout a job-owned build
+// checkout, detached at the daemon's own commit, and nobody works in it, so a
+// stale clone cannot ship stale plugins. Whether the installed binary
+// is behind main is the stale-binary check's question (gt-3lvcjz.23, gt-3lvcjz.31),
+// not clone-divergence's.
 func (c *CloneDivergenceCheck) findAllClones(townRoot string) []string {
 	var clones []string
 
