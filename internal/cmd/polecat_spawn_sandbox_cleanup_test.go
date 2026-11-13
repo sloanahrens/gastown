@@ -200,6 +200,46 @@ func TestPaneAfterStartDoesNotRetryAnOtherError(t *testing.T) {
 	}
 }
 
+// A transport error followed by any other lookup failure is a dead session at
+// that second try: the other error is not retried, and the session is killed
+// and its sandbox dropped once each.
+func TestPaneAfterStartStopsRetryingWhenATransportErrorTurnsIntoAnOtherError(t *testing.T) {
+	t.Parallel()
+	transport := errors.New("tmux display-message: Error: × transport error")
+	lookups := 0
+	getPane := func(string) (string, error) {
+		lookups++
+		if lookups == 1 {
+			return "", transport
+		}
+		return "", errors.New("can't find pane")
+	}
+	pauses := 0
+	var calls []string
+	var droppedCause error
+
+	pane, err := paneAfterStart("gt-gastown-box", getPane,
+		func(time.Duration) { pauses++ },
+		func() { calls = append(calls, "kill") },
+		func(cause error) error { calls = append(calls, "drop"); droppedCause = cause; return cause })
+
+	if pane != "" || err == nil {
+		t.Fatalf("pane=%q err=%v, want no pane and an error", pane, err)
+	}
+	if lookups != 2 {
+		t.Errorf("pane lookups = %d, want 2 (the transport retry, then the other error ends the retries)", lookups)
+	}
+	if pauses != 1 {
+		t.Errorf("paused %d times, want 1 (only before the transport retry)", pauses)
+	}
+	if want := []string{"kill", "drop"}; !slices.Equal(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+	if droppedCause == nil || !strings.Contains(droppedCause.Error(), "can't find pane") || strings.Contains(droppedCause.Error(), "tries") {
+		t.Errorf("cause=%v, want the startup-death error carrying the other error and not a retry count", droppedCause)
+	}
+}
+
 // recordingSeatCleaner is the supervisor surface a startup-death kill calls.
 type recordingSeatCleaner struct {
 	seat   supervisor.Seat

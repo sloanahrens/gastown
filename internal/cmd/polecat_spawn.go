@@ -1403,8 +1403,10 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 		style.PrintWarning("could not update issue status to in_progress: %v", err)
 	}
 
-	// Get pane — if this fails, the session may have died during startup.
-	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
+	// Get pane — a tmux transport error is retried before the session is read
+	// as dead (gt-mpztwi). If the lookup still fails, the session may have died
+	// during startup: kill the dead session to prevent "session already running"
+	// on next attempt (gt-jn40ft).
 	pane, err := paneAfterStart(s.SessionName, getSessionPane, time.Sleep,
 		func() { s.killStartupDeath(sup, actor) },
 		s.startupDeathRollback(session.SandboxDeleter, beads.New(townRoot), townRoot))
