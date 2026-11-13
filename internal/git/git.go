@@ -1155,9 +1155,14 @@ func (g *Git) FetchRefspecWithEnv(remote, refspec string, env []string) error {
 	return err
 }
 
-// FetchBranch fetches a specific branch from the remote.
+// FetchBranch fetches a specific branch from the remote, without tags and
+// bounded by the remote-query timeout. A timeout names the remote and the
+// branch, so a caller's message says which fetch stalled.
 func (g *Git) FetchBranch(remote, branch string) error {
-	_, err := g.run("fetch", remote, branch)
+	_, err := g.runWithTimeout(remoteQueryTimeout, "fetch", "--no-tags", remote, branch)
+	if errors.Is(err, ErrTimedOut) {
+		return fmt.Errorf("fetch %s %s: %w", remote, branch, err)
+	}
 	return err
 }
 
