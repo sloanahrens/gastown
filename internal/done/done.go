@@ -1107,6 +1107,16 @@ func Run(opts Options) error {
 		r.recordFindings(r.cwd, r.issueID, r.findings)
 	}
 
+	// The local-round gate checks the work bead this submit resolved above, so
+	// the gate and the submit can never name different beads (gt-mxz8kx). It
+	// runs before the heartbeat, the rebase, the push and the READY TO LAND
+	// block and label; a refusal leaves those untouched.
+	if opts.LocalRound != nil {
+		if err := opts.LocalRound(r.issueID, r.branch); err != nil {
+			return failRun(err)
+		}
+	}
+
 	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the agent is
 	// trusted until the heartbeat goes stale.
 	r.heartbeatSession = getenv("GT_SESSION")

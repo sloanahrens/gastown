@@ -42,8 +42,8 @@ For COMPLETED, gt done:
 6. Records completion on the agent bead and retires the session
 
 A polecat cannot skip the gate, and gt done never lands directly. A polecat's
-COMPLETED submit is also refused while a major finding of the last LOCAL ROUND
-on its work bead has no answer: fix it, then answer it with
+COMPLETED submit is also refused while a major or critical finding of the last
+LOCAL ROUND on its work bead has no answer: fix it, then answer it with
 gt review-preview reply.
 
 Crew (GT_ROLE or BD_ACTOR <rig>/crew/<name>, or run from a <rig>/crew/<name>
@@ -176,24 +176,21 @@ func runDone(cmd *cobra.Command, args []string) error {
 		RecordFindings: func(cwd, issueID string, findings []string) {
 			recordDoneFindings(os.Stderr, cwd, issueID, findings, done.OpenSourceStore)
 		},
+		// The local-round gate checks the work bead done.Run resolves for this
+		// submit, before the submit writes anything (gt-mxz8kx).
+		LocalRound:  localRoundGate(doneStatus, liveLocalRoundCheck(cwd), os.Stderr),
 		LocalGate:   doneLocalGate,
 		RetryDelays: pushLandingRetryDelays,
 		Sleep:       doneRetrySleep,
 	}
-	submit := func() error {
-		if byFlags {
-			// The stale-base check fetches in the caller's worktree, which is not
-			// in this process; the flags carry the facts the submission needs.
-			return done.Run(opts)
-		}
-		return submitWithStaleBaseWarning(os.Stderr, git.NewGit(cwd), func() error {
-			return done.Run(opts)
-		})
+	if byFlags {
+		// The stale-base check fetches in the caller's worktree, which is not
+		// in this process; the flags carry the facts the submission needs.
+		return done.Run(opts)
 	}
-	// The local-round gate runs before the submit writes anything (gt-mxz8kx).
-	return submitAfterLocalRound(func() error {
-		return gateDoneLocalRound(doneStatus, cwd, doneIssue, os.Getenv)
-	}, submit)
+	return submitWithStaleBaseWarning(os.Stderr, git.NewGit(cwd), func() error {
+		return done.Run(opts)
+	})
 }
 
 // doneCallerDir is the directory gt done acts for. It is refused unless it is

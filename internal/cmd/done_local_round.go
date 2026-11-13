@@ -3,19 +3,23 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
 // gt done refuses a COMPLETED submit while the last LOCAL ROUND on the work
 // bead leaves a blocking finding unanswered (gt-mxz8kx). A blocking finding is
-// a major (or critical) one; minor and info findings never block. It is
+// a major or a critical one; minor and info findings never block. It is
 // answered when the branch head has moved past the round's head and a LOCAL
-// ROUND REPLY for its id follows the block. There is no flag that skips it.
+// ROUND REPLY for its id follows the round's block. There is no flag that
+// skips it.
+//
+// done.Run resolves the work bead once and hands it to this gate (see
+// done.Options.LocalRound), so the gate checks the bead the submit submits.
 
 // localRoundSubmitCheck reads the work bead's notes and the branch head through
 // function fields, so the test drives it with fakes.
@@ -32,7 +36,7 @@ type localRoundSubmitCheck struct {
 func (c localRoundSubmitCheck) check(bead string) error {
 	notes, err := c.readNotes(bead)
 	if err != nil {
-		return fmt.Errorf("could not read the notes of %s: %w", bead, err)
+		return fmt.Errorf("local-round gate cannot read the notes of %s: %w", bead, err)
 	}
 	last, ok := lastLocalRoundLine(notes)
 	if !ok || unavailableBlockRE.MatchString(last) {
@@ -58,6 +62,10 @@ func (c localRoundSubmitCheck) check(bead string) error {
 	moved := !strings.HasPrefix(head, round.Head)
 	answered := map[string]bool{}
 	if moved {
+		// A reply line names no round, so it belongs to the round whose block
+		// it follows: ParseLocalRoundReplies reads the replies between this
+		// round's header and the next header. The last block's replies are the
+		// ones after it.
 		for _, r := range land.ParseLocalRoundReplies(notes, round.Round) {
 			answered[r.FindingID] = true
 		}
@@ -104,7 +112,7 @@ func blockingLocalRoundFindings(round land.LocalRound) []land.Finding {
 // and title, and says how to answer it. It carries no captured command output.
 func unansweredLocalRoundError(bead string, round int, open []land.Finding) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "gt done refused: %d major finding(s) of LOCAL ROUND (%d) on %s are unanswered:", len(open), round, bead)
+	fmt.Fprintf(&b, "gt done refused: %d major or critical finding(s) of LOCAL ROUND (%d) on %s are unanswered:", len(open), round, bead)
 	for _, f := range open {
 		fmt.Fprintf(&b, "\n  %s %s:%d %s", f.ID, f.Path, f.Line, f.Title)
 	}
@@ -112,46 +120,32 @@ func unansweredLocalRoundError(bead string, round int, open []land.Finding) erro
 	return errors.New(b.String())
 }
 
-// gateDoneLocalRound runs the local-round check for a polecat's COMPLETED
-// submit in cwd, before anything is written. A status other than COMPLETED
-// submits nothing, and a crew submit is not a polecat round, so both pass.
-// The work bead is the one --issue names, else the one the branch names, as
-// review-preview reply reads it.
-func gateDoneLocalRound(status, cwd, explicitIssue string, getenv func(string) string) error {
-	if strings.ToUpper(status) != ExitCompleted || done.IsCrewRun(getenv, cwd) {
-		return nil
+// localRoundGate is the gate done.Run calls with the work bead it resolved for
+// this submit. Only a COMPLETED submit is checked: an ESCALATED or DEFERRED
+// status submits nothing. When no bead resolved, the gate cannot read a round,
+// so it lets the submit go on and prints one notice line to stderr naming the
+// branch. A bead that resolved but whose notes cannot be read refuses, because
+// a gate that cannot read its subject must not wave work through.
+func localRoundGate(status string, check localRoundSubmitCheck, stderr io.Writer) func(issueID, branch string) error {
+	return func(issueID, branch string) error {
+		if strings.ToUpper(status) != ExitCompleted {
+			return nil
+		}
+		if issueID == "" {
+			fmt.Fprintf(stderr, "local-round gate skipped: branch %s names no work bead and no bead is hooked to this session\n", branch)
+			return nil
+		}
+		return check.check(issueID)
 	}
+}
+
+// liveLocalRoundCheck reads the notes of the work bead through the bead store
+// at cwd and the branch head of the worktree at cwd.
+func liveLocalRoundCheck(cwd string) localRoundSubmitCheck {
 	g := git.NewGit(cwd)
 	store := beads.New(cwd)
 	return localRoundSubmitCheck{
 		readNotes:  func(id string) (string, error) { return reviewPreviewNotes(id, store.Show) },
 		branchHead: func() (string, error) { return g.Rev("HEAD") },
-	}.checkFor(explicitIssue, g.CurrentBranch)
-}
-
-// checkFor runs check on the work bead: the explicit issue, else the one the
-// branch names. branch is read only when no issue was given.
-func (c localRoundSubmitCheck) checkFor(explicitIssue string, branch func() (string, error)) error {
-	if explicitIssue != "" {
-		return c.check(explicitIssue)
 	}
-	name, err := branch()
-	if err != nil {
-		return fmt.Errorf("getting current branch: %w", err)
-	}
-	bead, ok := reviewPreviewBeadFromBranch(name)
-	if !ok {
-		return fmt.Errorf("branch %s names no work bead, so gt done cannot read its LOCAL ROUND; pass --issue", name)
-	}
-	return c.check(bead)
-}
-
-// submitAfterLocalRound runs submit only when the local-round gate lets the
-// submit go on. A refusal returns before submit writes the READY TO LAND block
-// or the label.
-func submitAfterLocalRound(gate, submit func() error) error {
-	if err := gate(); err != nil {
-		return err
-	}
-	return submit()
 }
