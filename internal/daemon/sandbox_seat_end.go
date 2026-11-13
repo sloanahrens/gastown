@@ -385,6 +385,7 @@ func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLan
 // clearKeptSeat forgets the kept record of a seat the end has decided is no
 // longer kept. A removal that fails is logged, and the decision stands.
 func (h *patrolScanHost) clearKeptSeat(rig, name string) {
+	h.d.clearGatewayTally(rig, name)
 	if err := removeKeptSandboxSeat(h.town(), rig, name); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its kept record: %v", rig, name, err)
 	}
@@ -414,7 +415,9 @@ func (h *patrolScanHost) expirePendingSeatEnd(rig, name string) {
 // measureSandboxSeatEnd reads the facts the seat's end decides on. It runs
 // under the seat's lock, so each fact is the one a sling that holds the lock
 // would see. A fact that cannot be read comes back as the reason the seat is
-// kept, and nothing is decided from a partial read.
+// kept, and nothing is decided from a partial read. A gateway that does not
+// answer also leaves the seat's kept record with the landing facts, so the patrol
+// retries the gateway on each tick and can finish the seat's end (gt-7h38pd).
 func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandboxSeatLanding) (sandboxSeatEnd, string) {
 	fields, err := h.seatAgentFields(rig, name)
 	if err != nil {
@@ -439,6 +442,7 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 	if sandboxed {
 		exists, err := h.sandboxStillExists(seat.gateway, h.sessionName(rig, name))
 		if err != nil {
+			h.recordGatewayNoAnswer(rig, name, landing, false)
 			return sandboxSeatEnd{}, fmt.Sprintf("cannot ask gateway %q whether the sandbox is gone: %v", seat.gateway, err)
 		}
 		end.SandboxGone = !exists
@@ -446,10 +450,13 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 		if exists {
 			failed, err := h.sandboxFailed(seat.gateway, h.sessionName(rig, name))
 			if err != nil {
+				h.recordGatewayNoAnswer(rig, name, landing, false)
 				return sandboxSeatEnd{}, fmt.Sprintf("cannot ask gateway %q for the sandbox's phase: %v", seat.gateway, err)
 			}
 			end.SandboxErrored = failed
 		}
+		// Both questions were answered, so the gateway is no longer silent.
+		h.d.clearGatewayTally(rig, name)
 	}
 	rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
 	if err != nil {

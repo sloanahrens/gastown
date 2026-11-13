@@ -34,18 +34,24 @@ type KeptSandboxSeat struct {
 	Bead   string
 	Reason string
 	Since  time.Time
+	// Tries is how many patrol ticks the gateway has not answered for the seat
+	// (gt-7h38pd). Zero for every other keep.
+	Tries int
 }
 
 // keptSandboxSeatRecord is what one file holds. The path is the seat's identity.
 // Landing holds the landing facts the end that kept the seat decided with, so
 // the patrol can offer the seat's end again once it has deleted the sandbox
 // that kept it (gt-cz5tdz). A record written before the facts were kept has
-// none, and the patrol completes no end from it.
+// none, and the patrol completes no end from it. Tries counts the patrol ticks
+// that found the gateway silent while the seat was kept on its account
+// (gt-7h38pd).
 type keptSandboxSeatRecord struct {
 	Bead    string              `json:"bead"`
 	Reason  string              `json:"reason"`
 	Since   time.Time           `json:"since"`
 	Landing *sandboxSeatLanding `json:"landing,omitempty"`
+	Tries   int                 `json:"tries,omitempty"`
 }
 
 // keptSandboxSeatsDir is <town>/.runtime/sandbox-seat-kept.
@@ -99,6 +105,21 @@ func readKeptSandboxSeatRecord(path string) (keptSandboxSeatRecord, error) {
 	return rec, nil
 }
 
+// badKeptSeatKey names the seat whose record path KeptSandboxSeats returned as
+// bad, in gatewayTallyKey form, or "" when the path is not one seat's record.
+func badKeptSeatKey(townRoot, path string) string {
+	rel, err := filepath.Rel(keptSandboxSeatsDir(townRoot), path)
+	if err != nil {
+		return ""
+	}
+	rig, file, ok := strings.Cut(rel, string(filepath.Separator))
+	name, isJSON := strings.CutSuffix(file, ".json")
+	if !ok || !isJSON || strings.ContainsRune(name, filepath.Separator) {
+		return ""
+	}
+	return gatewayTallyKey(rig, name)
+}
+
 // KeptSandboxSeats is the seats the daemon keeps for a reason other than the
 // jev_rules ask under town, read from their records. A record that cannot be
 // read or decoded is returned in bad, by path, never skipped, and so is a rig
@@ -139,7 +160,7 @@ func KeptSandboxSeats(townRoot string) (seats []KeptSandboxSeat, bad []string, e
 				bad = append(bad, path)
 				continue
 			}
-			seats = append(seats, KeptSandboxSeat{Rig: rigEntry.Name(), Name: name, Bead: rec.Bead, Reason: rec.Reason, Since: rec.Since})
+			seats = append(seats, KeptSandboxSeat{Rig: rigEntry.Name(), Name: name, Bead: rec.Bead, Reason: rec.Reason, Since: rec.Since, Tries: rec.Tries})
 		}
 	}
 	sort.Slice(seats, func(i, j int) bool {

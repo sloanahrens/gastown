@@ -16,6 +16,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -65,6 +66,9 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	r.host = &patrolScanHost{d: d, sandboxExists: func(gateway, name string) (bool, error) {
 		r.asked = append(r.asked, gateway+"|"+name)
 		return o.exists, o.existsErr
+	}, sandboxStatus: func(string, string) (sandbox.Status, error) {
+		// A running sandbox: the phase question never reaches a real gateway.
+		return sandbox.Status{Phase: "Ready"}, nil
 	}, sandboxEndedMarker: func(gateway, name string) (bool, error) {
 		r.markerAsked = append(r.markerAsked, gateway+"|"+name)
 		return o.marker, o.markerErr
@@ -196,6 +200,7 @@ func TestPatrolScanSandboxRecordsRotateSoKeptRecordsDoNotStarveTheRest(t *testin
 					asked[name] = true
 					return present[name], nil
 				},
+				sandboxStatus:       readySandboxStatus,
 				sandboxEndedMarker:  func(string, string) (bool, error) { return false, nil },
 				sandboxRecordBudget: tt.budget,
 			}
@@ -222,6 +227,13 @@ func TestPatrolScanSandboxRecordsRotateSoKeptRecordsDoNotStarveTheRest(t *testin
 	}
 }
 
+// readySandboxStatus answers the gateway's phase question as a running sandbox,
+// so a record-pass test whose gateway has the sandbox never reaches a real
+// gateway through session.GatewaySandboxPhase (gt-7h38pd).
+func readySandboxStatus(string, string) (sandbox.Status, error) {
+	return sandbox.Status{Phase: "Ready"}, nil
+}
+
 // churnHost is a record pass over town whose gateway has every sandbox, so the
 // pass removes nothing and asked holds the names it judged, in order.
 func churnHost(town string, clk *clockwork.FakeClock, budget int, asked *[]string) *patrolScanHost {
@@ -231,6 +243,7 @@ func churnHost(town string, clk *clockwork.FakeClock, budget int, asked *[]strin
 			*asked = append(*asked, name)
 			return true, nil
 		},
+		sandboxStatus:       readySandboxStatus,
 		sandboxEndedMarker:  func(string, string) (bool, error) { return false, nil },
 		sandboxRecordBudget: budget,
 	}
