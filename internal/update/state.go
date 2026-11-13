@@ -105,6 +105,10 @@ type StepRecord struct {
 type Target struct {
 	SHA          string `json:"sha"`
 	InstalledSHA string `json:"installed_sha"`
+	// MainSHA is main's tip when the run read it, kept for the report: a pod
+	// target installs the commit its images file records, which is not main's
+	// tip once main has moved. Omitted from records written before it existed.
+	MainSHA string `json:"main_sha,omitempty"`
 }
 
 // HoldRecord says whether the run owns the dispatch hold file.

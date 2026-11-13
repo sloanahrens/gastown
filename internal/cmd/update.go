@@ -188,6 +188,24 @@ func (p podVerifyProbes) DaemonVersion(ctx context.Context) (string, error) {
 	return podDaemonCommit(ctx, p.run, p.target.Context, p.target.Namespace, p.target.Deployment, p.target.InCluster)
 }
 
+// podInstalledProbes is the run's plan probes with the installed build read from
+// the daemon's pod. Every other probe is the one the run already had. A run in
+// the update Job is a different build from the daemon it updates, so the build
+// the process runs is not the installed build.
+type podInstalledProbes struct {
+	update.Probes
+	target podDaemonTarget
+	run    update.RunFunc
+}
+
+// InstalledSHA is the build the pod's daemon runs, read through kubectl exec
+// under podProbeBound.
+func (p podInstalledProbes) InstalledSHA(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, podProbeBound)
+	defer cancel()
+	return podDaemonCommit(ctx, p.run, p.target.Context, p.target.Namespace, p.target.Deployment, p.target.InCluster)
+}
+
 // podDaemonDeps moves the run's daemon probe to the pod. Without a target the
 // deps are returned as they are, so a run without the flags reads the state file
 // as it always has.
@@ -199,6 +217,9 @@ func podDaemonDeps(seams updateSeams, deps update.Deps, pod *podDaemonTarget) (u
 		return update.Deps{}, errors.New("no pod command runner is wired")
 	}
 	deps.Verify = podVerifyProbes{VerifyProbes: deps.Verify, target: *pod, run: seams.PodRun}
+	if deps.Probes != nil {
+		deps.Probes = podInstalledProbes{Probes: deps.Probes, target: *pod, run: seams.PodRun}
+	}
 	return deps, nil
 }
 
@@ -395,6 +416,16 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	// Dolt data; the host runs that cycle. The plan's other steps are planned as
 	// they are for any run.
 	opts.PodTarget = pod != nil
+	// A pod target installs the commit its images file records: main's tip keeps
+	// moving while the pair for one green commit is rolled, and the digest install
+	// refuses a file for any other commit than the run's target.
+	if pod != nil && req.Images != "" {
+		values, err := imagevalues.Load(req.Images)
+		if err != nil {
+			return fmt.Errorf("the --images values file: %w", err)
+		}
+		opts.ImagesCommit = values.Commit
+	}
 	// Only the digest install skips the host install under a pod target. A pod
 	// target with the install step selected and no --images is refused before
 	// this point, by refusePodInstallWithoutImages.

@@ -73,6 +73,9 @@ type Options struct {
 	// so the plan runs neither the drain nor the lift, and the run takes no
 	// dispatch hold.
 	PodTarget bool
+	// ImagesCommit is the commit the run's --images values file records; a pod
+	// target installs it (see PlanOptions.ImagesCommit).
+	ImagesCommit string
 	// Source is the record's provenance: SourceManual (the default) or
 	// SourceDaemon.
 	Source string
@@ -88,7 +91,7 @@ type Options struct {
 // would start with and writes nothing. The error is a failed or invalid plan,
 // or a record that could not be written.
 func Run(ctx context.Context, d Deps, o Options) (State, error) {
-	steps, target, err := BuildPlan(ctx, d.Probes, PlanOptions{Skip: o.Skip, Only: o.Only, Force: o.Force, PodTarget: o.PodTarget})
+	steps, target, err := BuildPlan(ctx, d.Probes, PlanOptions{Skip: o.Skip, Only: o.Only, Force: o.Force, PodTarget: o.PodTarget, ImagesCommit: o.ImagesCommit})
 	if err != nil {
 		return State{}, err
 	}
