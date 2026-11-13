@@ -137,7 +137,13 @@ blocks end-to-end — slow, token-cost-bearing, not run by default).
 
 Use --check mac-town-state --pod-town <listing> to compare the Mac town's
 configuration files with the pod claim. The listing has one line per file in
-the claim, each line ` + doctor.PodTownListingFormat + `. The check refuses to run without --pod-town.`,
+the claim, each line ` + doctor.PodTownListingFormat + `. The check refuses to run without --pod-town.
+
+Use --check mac-crew-hooks to find a crew clone whose core.hooksPath points at
+a missing directory or whose .git/config cannot be read. It reads each main
+clone's .git/config without running git, needs no --pod-town, and never
+repairs. Run it on a native gt on the Mac: a pod town has no crew clones, so
+it warns there instead of passing.`,
 	RunE: runDoctor,
 }
 
@@ -184,6 +190,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// Opt-in: the check needs the pod claim's listing, which only the
 		// cutover operator has, so a default run never registers it.
 		d.Register(doctor.NewMacTownStateCheck(doctorPodTown))
+	}
+	if slices.Contains(names, doctor.MacCrewHooksCheckName) {
+		// Opt-in by name: on a pod town it finds no crew clones and warns, so a
+		// default run never registers it.
+		d.Register(doctor.NewMacCrewHooksCheck())
 	}
 	if err := selectDoctorChecks(d, names); err != nil {
 		return err
