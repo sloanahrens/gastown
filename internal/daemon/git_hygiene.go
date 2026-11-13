@@ -335,19 +335,27 @@ func settleOriginRef(g daemonGit, branch, want string) error {
 }
 
 // crewKeepReason says why origin's crew branch at hash is kept, or returns ""
-// when it can be reaped: every non-merge commit on it has a patch-equivalent
-// on origin's default branch, and it has no merge commit beyond that branch.
-// git cherry answers the first question but lists non-merge commits only, so it
-// cannot answer the second: a merge can carry content (its conflict
-// resolution) that no patch on the base reproduces. A branch with no commit at
-// all beyond the base is reaped only once its tip is older than the patrol
-// interval, so a branch cut a moment ago is not reaped. An error means the
-// answer is unknown, and the caller keeps the branch (gt-eyy06f).
+// when it can be reaped. A merge commit beyond origin's default branch keeps it
+// first: git cherry lists non-merge commits only, so it cannot judge a merge,
+// and a merge can carry content (its conflict resolution) that no patch on the
+// base reproduces. Otherwise a commit whose patch is on no base keeps it. Then
+// every non-merge commit beyond the base is patch-equivalent, and the branch is
+// reaped however old its tip is. A branch with no commit at all beyond the base
+// is reaped only once its tip is older than the patrol interval, so a branch cut
+// a moment ago is not reaped. An error means the answer is unknown, and the
+// caller keeps the branch (gt-eyy06f).
 func (d *Daemon) crewKeepReason(g daemonGit, basesErr error, def, hash string, interval time.Duration) (string, error) {
 	if basesErr != nil {
 		return "", basesErr
 	}
 	base := "origin/" + def
+	merges, err := g.MergeCommitsAhead(base, hash)
+	if err != nil {
+		return "", err
+	}
+	if merges > 0 {
+		return "it has a merge commit beyond " + base + ", which cherry cannot judge", nil
+	}
 	out, err := g.Cherry(base, hash)
 	if err != nil {
 		return "", err
@@ -357,13 +365,6 @@ func (d *Daemon) crewKeepReason(g daemonGit, basesErr error, def, hash string, i
 	}
 	if strings.TrimSpace(out) != "" {
 		return "", nil
-	}
-	merges, err := g.MergeCommitsAhead(base, hash)
-	if err != nil {
-		return "", err
-	}
-	if merges > 0 {
-		return "its only commits beyond " + base + " are merges, which cherry cannot judge", nil
 	}
 	tip, err := g.CommitTime(hash)
 	if err != nil {

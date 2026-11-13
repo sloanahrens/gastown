@@ -3782,8 +3782,8 @@ func (g *Git) CommitsAhead(base, branch string) (int, error) {
 
 // MergeCommitsAhead returns how many merge commits are on branch and not on
 // base (git rev-list --count --merges base..branch). git cherry lists
-// non-merge commits only, so a caller asking whether a branch's only unlanded
-// content is a merge asks this beside Cherry.
+// non-merge commits only, so a caller deciding whether a branch's content has
+// landed asks this first.
 func (g *Git) MergeCommitsAhead(base, branch string) (int, error) {
 	out, err := g.run("rev-list", "--count", "--merges", base+".."+branch)
 	if err != nil {
