@@ -48,7 +48,7 @@ func (p *PostLandRunner) VerdictOf(commit string) (CommitVerdict, error) {
 // A pending entry wins: a commit still on the pending list has not been decided,
 // even when an earlier run reached a verdict at it. Otherwise LastRun names the
 // newest commit a run reached a verdict at, and LastGreen tells that verdict's
-// colour.
+// color.
 func commitVerdictIn(st MainState, commit string) CommitVerdict {
 	if commit == "" {
 		return CommitVerdict{}
