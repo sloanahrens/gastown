@@ -230,10 +230,9 @@ var imagePlugins = []plugin{
 // returns their paths in that order. Every refusal comes before the first build
 // runs, so a refused call writes nothing. Each binary is built in a clean
 // worktree of its commit and is staged under b.Out until every binary has built,
-// so a build that fails returns
-// its error and no paths, and leaves nothing in b.Out. A bd or om checkout that
-// is not named is fetched from its pin into b.Out first, and the fetched tree is
-// removed when the call returns.
+// so a build that fails returns its error and no paths, and leaves nothing in
+// b.Out. A bd or om checkout that is not named is fetched from its pin into
+// b.Out first, and the fetched tree is removed when the call returns.
 func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build with")
