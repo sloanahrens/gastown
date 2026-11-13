@@ -190,6 +190,51 @@ Switching `enabled` to false hands the decision back: `rebuild_gt` makes install
 decisions again, and the maintenance window tick starts the nightly cycle in its
 own window (`patrols.scheduled_maintenance.window`) — the old `03:00` schedule.
 
+### In a pod: the roll starts as a Job
+
+A daemon that runs as a pod (`KUBERNETES_SERVICE_HOST` is set) does not start a
+roll as a child process. The roll replaces the pod that would own that child, so
+the daemon creates the roll as a Job in namespace `gt` instead. The Job is
+`gt-update-<sha12>`, rendered from `deploy/k8s/update-job` for one pair-ready
+green commit and run with the daemon image the values file records for the
+running commit. The same commit names the same Job, so a second launch of it
+finds the first and starts nothing.
+
+- The switch is the same `patrols.update.enabled`. Off, a pod creates no Job,
+  and the daemon logs `update: off in this pod` once per start.
+- On, a roll is due by the rules above and only when a pair-ready commit is
+  ahead of the running commit. A commit with only one of its two images
+  published, or one equal to or older than the running commit, starts nothing.
+- A Job the cluster already holds for the commit counts as already launched.
+- A daemon outside a pod keeps the detached `gt update --from-daemon` child.
+
+The Job's pod runs the commit's images through `gt update images` and then
+`gt update`, as the `gt-update` ServiceAccount. The RBAC it runs under, and what
+the daemon's grant to create Jobs reaches, are in the header of
+`deploy/k8s/update-rbac.yaml`.
+
+#### Proof before the switch is turned on
+
+Turn `patrols.update.enabled` on in a pod only after one roll has run by hand
+through the Job, with the overseer watching:
+
+1. Apply the update manifests: `deploy/k8s/update-rbac.yaml`, and the Job and
+   the suspended CronJob `gt-update` rendered from `deploy/k8s/update-job`.
+2. Start the roll from the suspended CronJob, which copies its template:
+
+   ```bash
+   kubectl -n gt create job --from=cronjob/gt-update gt-update-manual-<date>
+   ```
+
+   The template carries the green commit it was rendered for, so this roll goes
+   to that commit.
+3. Watch it through the swap, `kubectl -n gt logs -f job/gt-update-manual-<date>`,
+   through the rollout of both the `daemon` and `dashboard` Deployments, and
+   through the checks the run reports at its end.
+4. Confirm the daemon came back at the new pair: `gt version` in the daemon pod
+   reports the new build, and the dashboard runs the same image.
+5. Only then set `patrols.update.enabled` to true and restart the daemon.
+
 ## When it goes wrong
 
 The daemon raises three escalations at MEDIUM, under source `update`. Each key

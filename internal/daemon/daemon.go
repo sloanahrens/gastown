@@ -163,6 +163,9 @@ type Daemon struct {
 	// it to (*Daemon).launchUpdate; a test replaces it), the launch and refusal
 	// clocks, and the last settings error logged.
 	updateTrigger updateTriggerState
+	// updateJob creates the roll's Job in the cluster when the daemon runs as a
+	// pod (update_job.go). New wires the kubectl client; nil refuses a launch.
+	updateJob updateJobClient
 	// updateAlerts is the update job's alert latch (update_alerts.go): the
 	// keys this daemon run has raised and not yet cleared.
 	updateAlerts updateAlertLatch
@@ -1277,6 +1280,10 @@ type Daemon struct {
 	// process running the tests cannot change what an existing burst test
 	// samples (burst_sampler.go).
 	containerMode bool
+	// podMode says this daemon runs as a pod in the cluster (KUBERNETES_SERVICE_HOST
+	// set). New settles it once; a roll then starts as the update Job rather than a
+	// detached child that the pod's replacement would take down (update_job.go).
+	podMode bool
 
 	// envShadowed is the daemon.env keys applyDaemonEnv left out at start
 	// because the container's environment already set them (gt-ih19g6). The
@@ -1608,6 +1615,7 @@ func New(config *Config) (*Daemon, error) {
 		// process environment here, in the one constructor production runs,
 		// keeps the burst sampler from reading it (burst_sampler.go).
 		containerMode: containerModeFromEnv(os.Getenv),
+		podMode:       inClusterFromEnv(os.Getenv),
 		envShadowed:   envShadowed,
 	}
 
@@ -1620,6 +1628,9 @@ func New(config *Config) (*Daemon, error) {
 	d.checkpointRevertAlert = d.escalateAlert
 	// Bound rather than the method expression, whose type carries the receiver.
 	d.updateTrigger.launch = d.launchUpdate
+	if d.podMode {
+		d.updateJob = newKubectlUpdateJob(d.config.TownRoot)
+	}
 	// The Dolt image check asks the Dolt server itself for its version when
 	// docker cannot see the container's image (gt-w9wdav).
 	d.doltImage.serverVersion = d.doltServerVersion
