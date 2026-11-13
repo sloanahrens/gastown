@@ -3778,7 +3778,7 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 			// refusal is not, or it would print a line for every backlog bead on
 			// every tick.
 			if ok, why := specdispatch.Eligible(s, maxPriority); !ok {
-				if specdispatch.BoardCarried(s) || specdispatch.ReportableRefusal(why) {
+				if specdispatch.BoardCarried(s) || specdispatch.ReportableRefusal(s) {
 					read.Skipped = append(read.Skipped, specDispatchEntry{Bead: s.ID, Rig: name, Line: fmt.Sprintf("%s: %s (%s)", s.ID, specdispatch.SkipNotEligible, why)})
 				}
 				continue
