@@ -3435,6 +3435,13 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 	} else {
 		// Server not running: create directory and init manually.
 		// The database will be picked up when the server starts.
+		// dolt init refuses to run without a dolt identity, and only gt install's
+		// preflight sets one. A rig add outside install (AddRig called directly)
+		// has none, so set it here before the directory exists: a refusal leaves
+		// no partial rig directory behind. A no-op when dolt already has one (gt-kb8qnt).
+		if err := h.EnsureDoltIdentity(); err != nil {
+			return InitRigResult{}, fmt.Errorf("setting dolt identity before dolt init: %w", err)
+		}
 		if err := os.MkdirAll(rigDir, 0755); err != nil {
 			return InitRigResult{}, fmt.Errorf("creating rig directory: %w", err)
 		}
