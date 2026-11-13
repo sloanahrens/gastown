@@ -44,6 +44,17 @@ type fakeUpdateJob struct {
 	ignoreCtx bool
 	entered   chan struct{}
 	release   chan struct{}
+	// active is the update Jobs the cluster reports as not yet finished; listErr,
+	// when set, is what a list returns instead.
+	active  []string
+	listErr error
+}
+
+func (f *fakeUpdateJob) ActiveJobs(context.Context) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.active, nil
 }
 
 func (f *fakeUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
@@ -108,6 +119,8 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
 	t.Cleanup(func() { close(cluster.release) })
 	d.updateJob = cluster
+	// The rig's main is green unless a test says otherwise: no open red-main bead.
+	d.updateTrigger.redMain = func(string) (int, error) { return 0, nil }
 	writeRunningImages(t, town, commits[1])
 	return &updateJobRig{
 		d: d, logs: logs, cluster: cluster, launches: launches, town: town,

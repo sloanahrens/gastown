@@ -138,6 +138,11 @@ const (
 	// one the overseer has to act on (gt-l38v7r).
 	RuleSandboxSeatKept = "sandbox.seat_kept"
 
+	// RuleUpdateRolledBack is an update whose check failed after a swap, so the
+	// daemon was put back on its previous image: the pair the roll named did not
+	// hold, and the town runs the older one until the next roll (gt-9odoqa).
+	RuleUpdateRolledBack = "update.rolled_back"
+
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
@@ -240,6 +245,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A kept seat past its window holds a pool slot and a worktree while its
 	// reason stands: the overseer is woken to act on the reason (gt-l38v7r).
 	RuleSandboxSeatKept: flagsWake,
+	// A rolled-back update leaves the town on the older pair: the overseer is
+	// woken to read the failed check before the next roll is due (gt-9odoqa).
+	RuleUpdateRolledBack: flagsWake,
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
@@ -355,6 +363,7 @@ var kindRules = map[Kind]string{
 	KindImagesFailed:             RuleImagesFailed,
 	KindImagesUnknown:            RuleImagesUnknown,
 	KindSandboxSeatKept:          RuleSandboxSeatKept,
+	KindUpdateRolledBack:         RuleUpdateRolledBack,
 	KindHoldStale:                RuleHoldStale,
 	KindSandboxPending:           RuleSandboxPending,
 }

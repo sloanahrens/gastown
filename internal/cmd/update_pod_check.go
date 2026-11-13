@@ -61,10 +61,10 @@ func (c podPairCheck) Check(ctx context.Context, pair update.ImagePair) error {
 		return errors.New("the values file no longer holds the pair the swap put in force")
 	}
 	if err := c.checkDaemonImage(ctx, values.Daemon); err != nil {
-		return err
+		return update.PairCheckError{Check: update.CheckRunningDigests, Err: err}
 	}
 	if err := c.checkPolecatTag(ctx, values.Polecat); err != nil {
-		return err
+		return update.PairCheckError{Check: update.CheckRegistryTag, Err: err}
 	}
 	return c.writeValues(ctx, data)
 }

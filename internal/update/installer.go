@@ -64,6 +64,9 @@ type InstallResult struct {
 	Prev   string
 	Reason string
 	Exit   int
+	// Rollback is set when the install put the previous pair back after a failed
+	// check. Nil for every install that did not roll back.
+	Rollback *RollbackRecord
 }
 
 // RunFunc runs one command and reports its combined output and exit status.

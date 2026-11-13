@@ -703,6 +703,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A kept sandbox seat past its window (gt-l38v7r). The owns predicate
 		// keeps only its own items when the read fails.
 		{kind: attention.KindSandboxSeatKept, collect: s.collectKeptSandboxSeats, owns: keptSandboxSeatItem},
+		// The last run's rollback, read from its state file. The owns predicate
+		// keeps only this kind's items when the state cannot be read (gt-9odoqa).
+		{kind: attention.KindUpdateRolledBack, collect: s.collectUpdateRolledBack, owns: updateRolledBackOwned},
 		// A held bead nobody has released (gt-j669b4.19). The owns predicate
 		// keeps only its own items when a list or show fails.
 		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},

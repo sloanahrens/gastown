@@ -91,6 +91,11 @@ type updateTriggerState struct {
 	// jobOutstanding is closed when the last create the daemon abandoned returns;
 	// nil until one is abandoned.
 	jobOutstanding chan struct{}
+	// redMain counts the open red-main beads of a rig, the read a pod roll holds
+	// on. New wires it to listOpenRedMain; nil refuses every roll, since a daemon
+	// that cannot see main's state must not roll onto it. Set before the heartbeat
+	// runs, never after.
+	redMain func(rig string) (int, error)
 }
 
 // triggerUpdate is the heartbeat's update block: decide whether an update is
@@ -130,7 +135,7 @@ func (d *Daemon) triggerUpdate() {
 		// A pod's roll is the Job, gated on a pair-ready commit, and never the child.
 		// Pod mode wins over container mode: a child started here is the one the
 		// pod's replacement takes down, so none starts even with container mode set.
-		d.triggerPodUpdate(now, settings, reason)
+		d.triggerPodUpdate(now, settings, reason, facts)
 		return
 	}
 	d.clearUpdateNotDue()

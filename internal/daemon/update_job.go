@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +14,10 @@ import (
 
 	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -57,6 +60,8 @@ var errUpdateJobOutstanding = errors.New("an earlier create of the update Job ha
 // kubectlUpdateJob; a test injects a fake.
 type updateJobClient interface {
 	CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error
+	// ActiveJobs names the update Jobs the cluster has not yet seen finish.
+	ActiveJobs(ctx context.Context) ([]string, error)
 }
 
 // updateJobEncoder writes a rendered object as YAML. Production is
@@ -104,6 +109,46 @@ func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest [
 		return errUpdateJobExists
 	}
 	return fmt.Errorf("kubectl create for %s exited %d", name, exit)
+}
+
+// ActiveJobs lists the update's Jobs in the update namespace and names those with
+// neither a succeeded nor a failed pod. A Job with no pod yet has finished neither,
+// so it is active: a hold that reads it as finished would start a second roll over
+// it. kubectl's answer is read by its shape only; its output is not echoed.
+func (k kubectlUpdateJob) ActiveJobs(ctx context.Context) ([]string, error) {
+	out, exit, err := k.run(ctx, "", nil, "kubectl", "get", "jobs",
+		"-n", updatejob.DefaultNamespace, "-l", "app.kubernetes.io/name="+updatejob.Name, "-o", "json")
+	if err != nil {
+		return nil, fmt.Errorf("running kubectl get jobs: %w", err)
+	}
+	if exit != 0 {
+		return nil, fmt.Errorf("kubectl get jobs exited %d", exit)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				Succeeded int `json:"succeeded"`
+				Failed    int `json:"failed"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil, errors.New("the kubectl get jobs answer is not a Job list")
+	}
+	var active []string
+	for _, j := range list.Items {
+		if !strings.HasPrefix(j.Metadata.Name, updateJobNamePrefix) {
+			continue
+		}
+		if j.Status.Succeeded > 0 || j.Status.Failed > 0 {
+			continue
+		}
+		active = append(active, j.Metadata.Name)
+	}
+	return active, nil
 }
 
 // updateJobName is the Job name for the green commit sha.
@@ -279,15 +324,20 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 // starts only when a pair-ready green commit is ahead of the running one, and it
 // starts as the Job the cluster runs, never as a child this process would lose
 // when the roll replaces it.
-func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string) {
+func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string, facts UpdateFacts) {
 	running, err := pairReadyRunningCommit(d.config.TownRoot)
 	if err != nil {
 		d.noteUpdateNotDue("running commit unreadable: " + err.Error())
 		return
 	}
-	sha, why := pairReadySHAForRoll(d.pairReady.observed(), running, d.pairReadyBareClone)
+	items := d.pairReady.observed()
+	sha, why := pairReadySHAForRoll(items, running, d.pairReadyBareClone)
 	if sha == "" {
 		d.noteUpdateNotDue(why)
+		return
+	}
+	if hold := d.updateRollHold(now, settings, facts, pairReadyRigFor(items, sha)); hold != "" {
+		d.noteUpdateNotDue(hold)
 		return
 	}
 	d.clearUpdateNotDue()
@@ -318,6 +368,90 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 		d.noteUpdateLaunch(now)
 		d.logger.Printf("update: created Job %s", updateJobName(sha))
 	}
+}
+
+// updateRollHold names the reason a pod roll to the pair-ready commit must not
+// start now, or "" when none holds. Every hold is read before a Job is created,
+// and a read that fails holds the roll rather than passing as clear:
+//   - an unfinished roll: a run is in progress (its heartbeat is fresh, or it
+//     launched inside the suppression window), or a gt-update-* Job is still active;
+//   - min_interval: the last run ended less than settings.MinInterval ago;
+//   - main red: an open red-main bead on the rig the commit is in.
+//
+// The failed-run hold on main's target is updateDue's, which runs before this.
+func (d *Daemon) updateRollHold(now time.Time, settings config.UpdateSettings, facts UpdateFacts, rig string) string {
+	if facts.Running {
+		return "an update run is in progress"
+	}
+	active, err := d.activeUpdateJobs()
+	if err != nil {
+		return "the update Jobs cannot be read: " + err.Error() + "; not starting a roll"
+	}
+	if len(active) > 0 {
+		return "update Job " + strings.Join(active, ", ") + " is still active; not starting a roll"
+	}
+	if !facts.LastEnded.IsZero() && now.Sub(facts.LastEnded) < settings.MinInterval {
+		return fmt.Sprintf("the last update run ended %s ago, inside min_interval %s; not starting a roll",
+			formatUpdateAge(now.Sub(facts.LastEnded)), settings.MinInterval)
+	}
+	if rig == "" {
+		return "no rig names the pair-ready commit, so main's red state cannot be read; not starting a roll"
+	}
+	red, err := d.redMainCount(rig)
+	if err != nil {
+		return fmt.Sprintf("main's red state for %s cannot be read: %v; not starting a roll", rig, err)
+	}
+	if red > 0 {
+		return fmt.Sprintf("main is red on %s: %d open red-main bead(s); not starting a roll onto it", rig, red)
+	}
+	return ""
+}
+
+// activeUpdateJobs names the update Jobs the cluster still runs, under the same
+// bound as a create.
+func (d *Daemon) activeUpdateJobs() ([]string, error) {
+	if d.updateJob == nil {
+		return nil, errors.New("no cluster client is wired into this daemon")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d.updateJobBound())
+	defer cancel()
+	return d.updateJob.ActiveJobs(ctx)
+}
+
+// redMainCount is how many red-main beads are open on rig. An unwired read is an
+// error, so a daemon that cannot see main's state never starts a roll.
+func (d *Daemon) redMainCount(rig string) (int, error) {
+	d.updateTrigger.mu.Lock()
+	read := d.updateTrigger.redMain
+	d.updateTrigger.mu.Unlock()
+	if read == nil {
+		return 0, errors.New("no red-main read is wired into this daemon")
+	}
+	return read(rig)
+}
+
+// listOpenRedMain counts the open red-main beads of rig: the beads the red-main
+// owner files for a package that stays red on main and closes once main is green
+// again. It is the source the red-main attention rule reads.
+func (d *Daemon) listOpenRedMain(rig string) (int, error) {
+	issues, err := d.rigWorkBeads(rig).List(beads.ListOptions{
+		Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
+// pairReadyRigFor is the rig of the pair-ready item for sha, or "" when none names
+// it.
+func pairReadyRigFor(items []attention.Item, sha string) string {
+	for _, it := range items {
+		if it.Kind == attention.KindDeployPairReady && it.SHA == sha {
+			return it.Rig
+		}
+	}
+	return ""
 }
 
 // updateJobBackingOff reports whether the last failed pod launch is recent

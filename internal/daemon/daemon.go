@@ -1631,6 +1631,7 @@ func New(config *Config) (*Daemon, error) {
 	d.checkpointRevertAlert = d.escalateAlert
 	// Bound rather than the method expression, whose type carries the receiver.
 	d.updateTrigger.launch = d.launchUpdate
+	d.updateTrigger.redMain = d.listOpenRedMain
 	if d.podMode {
 		d.updateJob = newKubectlUpdateJob(d.config.TownRoot)
 	}

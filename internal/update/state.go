@@ -126,6 +126,9 @@ type State struct {
 	Current     StepName     `json:"current"`
 	Hold        HoldRecord   `json:"hold"`
 	Outcome     Outcome      `json:"outcome"`
+	// Rollback is set when this run's install put the daemon back on its previous
+	// pair after a failed check. A run that starts clears it.
+	Rollback *RollbackRecord `json:"rollback,omitempty"`
 }
 
 // Dir returns <town>/.runtime/update, where a run keeps its state file.

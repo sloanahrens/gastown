@@ -148,6 +148,10 @@ const (
 	// than the jev_rules ask for longer than the window, so the seat holds its
 	// pool slot and worktree while the reason stands (gt-l38v7r).
 	KindSandboxSeatKept Kind = "sandbox-seat-kept"
+	// KindUpdateRolledBack: the update's last run put the daemon back on its
+	// previous image after a check failed, so the daemon runs the pair from before
+	// the roll (gt-9odoqa). It clears when the next run starts.
+	KindUpdateRolledBack Kind = "update-rolled-back"
 	// KindHoldStale: a bead wears a hold label (overseer-only, needs-overseer or
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
@@ -173,7 +177,7 @@ func Kinds() []Kind {
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindSandboxPending,
+		KindHoldStale, KindSandboxPending, KindUpdateRolledBack,
 	}
 }
 
