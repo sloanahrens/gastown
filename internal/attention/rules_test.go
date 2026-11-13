@@ -58,6 +58,7 @@ func TestRuleFlagsAssignments(t *testing.T) {
 		RuleReviewBacklog,
 		RuleDeployPairReady,
 		RuleSandboxSeatKept,
+		RuleSandboxPending,
 	}
 	for _, r := range wake {
 		f, _ := Flags(r)

@@ -152,6 +152,10 @@ const (
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
 	KindHoldStale Kind = "hold-stale"
+	// KindSandboxPending: a sandbox pod has stayed Pending and unschedulable
+	// past the window, so no agent runs in it and the scheduler's own message
+	// names what the pod cannot get (gt-1gtq5g).
+	KindSandboxPending Kind = "sandbox-pending"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -169,7 +173,7 @@ func Kinds() []Kind {
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale,
+		KindHoldStale, KindSandboxPending,
 	}
 }
 

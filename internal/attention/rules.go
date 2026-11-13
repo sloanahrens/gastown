@@ -141,6 +141,10 @@ const (
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
+	// RuleSandboxPending is a sandbox pod Pending and unschedulable past the
+	// window: the scheduler's message says what the pod cannot get, and the
+	// seat's agent never starts until it is given (gt-1gtq5g).
+	RuleSandboxPending = "sandbox.pending"
 )
 
 var (
@@ -239,6 +243,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
+	// A sandbox pod the scheduler cannot place never starts its agent: the
+	// overseer is woken to give it the resources or fix its request (gt-1gtq5g).
+	RuleSandboxPending: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -349,6 +356,7 @@ var kindRules = map[Kind]string{
 	KindImagesUnknown:            RuleImagesUnknown,
 	KindSandboxSeatKept:          RuleSandboxSeatKept,
 	KindHoldStale:                RuleHoldStale,
+	KindSandboxPending:           RuleSandboxPending,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule
