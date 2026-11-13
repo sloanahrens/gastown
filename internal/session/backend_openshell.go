@@ -1124,7 +1124,7 @@ func (e *sandboxUnschedulableError) Is(target error) bool { return target == Err
 // wait early with a sandboxUnschedulableError; a pod that is scheduled but not
 // yet Ready keeps the readyPolls bound.
 func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
-	unreadableWarned := false
+	var unsched unschedulableWait
 	for polls := 1; ; polls++ {
 		st, err := b.cli.Get(ctx, name)
 		if err != nil {
@@ -1133,7 +1133,7 @@ func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
 		if st.Ready {
 			return nil
 		}
-		if waited, stuck := b.unschedulableFor(name, st, &unreadableWarned); stuck {
+		if waited, stuck := b.unschedulableFor(name, st, &unsched); stuck {
 			return &sandboxUnschedulableError{Sandbox: name, Message: st.UnschedulableMsg, Waited: waited}
 		}
 		if polls == readyPolls {
@@ -1148,24 +1148,42 @@ func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
 	}
 }
 
+// unschedulableWait is what one readiness wait carries from poll to poll.
+type unschedulableWait struct {
+	since  time.Time // this host's clock at the first poll that saw the pod Unschedulable
+	warned bool      // the unreadable-time warning has been logged
+}
+
 // unschedulableFor reports how long the pod behind st has been Unschedulable and
-// whether that has reached unschedulableGiveUp. A pod that is not Unschedulable
-// is never given up on. One whose transition time cannot be read keeps the
-// readiness bound and is warned about once per wait (unreadableWarned), so an
-// unreadable condition never shortens the wait.
-func (b *openshellBackend) unschedulableFor(name string, st sandbox.Status, unreadableWarned *bool) (time.Duration, bool) {
+// whether that has reached unschedulableGiveUp. The clock starts at the first
+// poll that reads the pod Unschedulable with a readable transition time, and it
+// is read on this host's clock, so the gateway's timestamp never sets the start:
+// clock skew between the two cannot shorten the bound. A pod that is not
+// Unschedulable restarts the clock. One whose transition time cannot be read
+// keeps the readiness bound and is warned about once per wait, so an unreadable
+// condition never shortens the wait.
+func (b *openshellBackend) unschedulableFor(name string, st sandbox.Status, w *unschedulableWait) (time.Duration, bool) {
 	if !st.Unschedulable {
+		w.since = time.Time{}
 		return 0, false
 	}
 	if st.UnschedulableSince.IsZero() {
-		if !*unreadableWarned {
-			*unreadableWarned = true
+		if !w.warned {
+			w.warned = true
 			b.warn("sandbox %s: its PodScheduled condition is Unschedulable with no readable transition time; keeping the readiness wait", name)
 		}
 		return 0, false
 	}
-	waited := b.clock().Sub(st.UnschedulableSince)
-	return waited, waited >= unschedulableGiveUp
+	now := b.clock()
+	if w.since.IsZero() {
+		w.since = now
+	}
+	waited := now.Sub(w.since)
+	if waited < unschedulableGiveUp {
+		return waited, false
+	}
+	b.warn("sandbox %s: PodScheduled has read Unschedulable since %s on the gateway; giving up its placement after %s", name, st.UnschedulableSince.Format(time.RFC3339), waited.Round(time.Second))
+	return waited, true
 }
 
 // run executes argv inside the sandbox and discards its output.

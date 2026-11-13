@@ -106,7 +106,7 @@ func TestOpenShellPrepareUnschedulableRollsBackThePodAndTheSeat(t *testing.T) {
 	}
 }
 
-func TestOpenShellPrepareKeepsWaitingForAScheduledPodPastTheBound(t *testing.T) {
+func TestOpenShellPrepareUnschedulableGateKeepsWaitingForAScheduledPodPastTheBound(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	base := time.Date(2026, 11, 13, 2, 0, 0, 0, time.UTC)
@@ -162,12 +162,43 @@ func TestOpenShellPrepareUnreadableUnschedulableTimeKeepsTheWaitAndWarnsOnce(t *
 	}
 }
 
-func TestOpenShellPrepareNeverGivesUpOnAClockThatReadsBackwards(t *testing.T) {
+// unschedulableWaitPauses is how many pauses a give-up at unschedulableGiveUp
+// takes when the clock starts at the first poll: the first poll is at zero, and
+// each pause adds readyInterval.
+const unschedulableWaitPauses = int(unschedulableGiveUp / readyInterval)
+
+func TestOpenShellPrepareUnschedulableGivesUpAtTheBoundOnTheHostClock(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	base := time.Date(2026, 11, 13, 2, 0, 0, 0, time.UTC)
-	// The gateway's transition time is ahead of this host's clock: the wait
-	// has not run at all, so it cannot have run past the bound.
+	// The gateway's transition time is an hour behind this host's clock. Taking
+	// the bound from that timestamp would give up on the first poll; the clock
+	// must start at the first poll instead.
+	fake := openshellPrepareFake(map[string]string{"get": unschedulableReply(base.Add(-time.Hour).Format(time.RFC3339))})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	clock := &readyClock{now: base}
+	setReadyClock(b, clock)
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	var unsched *sandboxUnschedulableError
+	if !errors.As(err, &unsched) {
+		t.Fatalf("err = %v, want the unschedulable placement failure", err)
+	}
+	if clock.waits != unschedulableWaitPauses {
+		t.Errorf("waits = %d, want %d: the give-up comes %s after the first poll", clock.waits, unschedulableWaitPauses, unschedulableGiveUp)
+	}
+	if got := clock.now.Sub(base); got != unschedulableGiveUp {
+		t.Errorf("the wait ended %s after the first poll, want %s", got, unschedulableGiveUp)
+	}
+}
+
+func TestOpenShellPrepareUnschedulableNeverGivesUpOnAClockThatReadsBackwards(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	base := time.Date(2026, 11, 13, 2, 0, 0, 0, time.UTC)
+	// The gateway's transition time is an hour ahead of this host's clock. The
+	// wait must not run for that hour on the first poll: the bound is the same
+	// 90 host-clock seconds from the first poll as with any other timestamp.
 	fake := openshellPrepareFake(map[string]string{"get": unschedulableReply(base.Add(time.Hour).Format(time.RFC3339))})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	clock := &readyClock{now: base}
@@ -175,10 +206,13 @@ func TestOpenShellPrepareNeverGivesUpOnAClockThatReadsBackwards(t *testing.T) {
 
 	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
 	var unsched *sandboxUnschedulableError
-	if errors.As(err, &unsched) {
-		t.Fatalf("err = %v, a transition time in the future must not shorten the wait", err)
+	if !errors.As(err, &unsched) {
+		t.Fatalf("err = %v, want the unschedulable placement failure", err)
 	}
-	if clock.waits != readyPolls-1 {
-		t.Errorf("waits = %d, want %d", clock.waits, readyPolls-1)
+	if clock.waits != unschedulableWaitPauses {
+		t.Errorf("waits = %d, want %d", clock.waits, unschedulableWaitPauses)
+	}
+	if got := clock.now.Sub(base); got != unschedulableGiveUp {
+		t.Errorf("the wait ended %s after the first poll, want %s", got, unschedulableGiveUp)
 	}
 }
