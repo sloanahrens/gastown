@@ -7,32 +7,83 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
+// nativeBdTool and nativeGtTool are the tools whose subcommands are narrowed: bd
+// to hooks run, and gt to the host command set below.
+const (
+	nativeBdTool = "bd"
+	nativeGtTool = "gt"
+)
+
+// gtHostCommands are the gt command paths that run on the Mac because each reads
+// or prints something only the Mac has, so the daemon pod would answer with its
+// own paths or refuse. town forward plist prints the launchd job whose log paths
+// are under the Mac's ~/gt/daemon; maint plan and maint apply read the Mac's
+// Docker contexts, worktrees, backups and disk (gt-aea89k).
+var gtHostCommands = []string{"town forward plist", "maint plan", "maint apply"}
+
 // Native is a tool the config runs on the Mac instead of in the daemon image. The
-// Mac holds the tool's own credentials and reads the caller's worktree, which the
-// image does not have, so a call it covers never reaches the target.
+// Mac has what the image does not: the tool's own credentials, the caller's
+// worktree, and the host's Docker contexts and file paths. A call it covers never
+// reaches the target.
 type Native struct {
 	// Tool is the tool the entry is for. Its config key is native.<Tool>.
 	Tool string
 	// Path is the tool's binary on the Mac. It must be absolute.
 	Path string
-	// Subcommands are the first arguments that select the native run. Any other
-	// call of the tool reaches the target.
+	// Subcommands are command paths: one or more words the call's arguments must
+	// open with. Any other call of the tool reaches the target.
 	Subcommands []string
 }
 
-// Covers reports whether a call of the tool with args runs natively. The beads
-// git hooks call `bd hooks run`, and that call needs the Mac's files, so for bd
-// only hooks run is native; the other hooks leaves and bd commands reach the target.
+// Covers reports whether a call of the tool with args runs natively. For bd only
+// hooks run is native, since the beads git hooks read the Mac's files. For gt only
+// a path in the host command set runs natively, so a gt entry cannot make any
+// other call native; every other gt call reaches the target.
 func (n Native) Covers(args []string) bool {
-	if len(args) == 0 || !slices.Contains(n.Subcommands, args[0]) {
+	switch n.Tool {
+	case nativeBdTool:
+		return len(args) > 1 && args[0] == "hooks" && args[1] == "run" && slices.Contains(n.Subcommands, "hooks")
+	case nativeGtTool:
+		return coversAny(args, n.Subcommands, GTHostCommand)
+	}
+	return coversAny(args, n.Subcommands, nil)
+}
+
+// coversAny reports whether args opens with one of paths, where path passes
+// allowed when it is set.
+func coversAny(args, paths []string, allowed func(string) bool) bool {
+	for _, path := range paths {
+		if allowed != nil && !allowed(path) {
+			continue
+		}
+		if opensWith(args, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// opensWith reports whether args opens with the words of path. A path of no words
+// covers nothing, so an empty entry runs no call.
+func opensWith(args []string, path string) bool {
+	words := strings.Fields(path)
+	if len(words) == 0 || len(args) < len(words) {
 		return false
 	}
-	if n.Tool == "bd" {
-		return len(args) > 1 && args[1] == "run"
-	}
-	return true
+	return slices.Equal(args[:len(words)], words)
+}
+
+// GTHostCommand reports whether path is a gt command path that runs on the Mac.
+func GTHostCommand(path string) bool {
+	return slices.Contains(gtHostCommands, path)
+}
+
+// GTHostCommandList renders the gt host command set for a refusal that names it.
+func GTHostCommandList() string {
+	return strings.Join(gtHostCommands, ", ")
 }
 
 // Check reports why Path cannot run: it is empty, relative, unreadable, or not an

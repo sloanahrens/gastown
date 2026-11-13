@@ -41,9 +41,9 @@ type Target struct {
 	Name string
 	Path string
 	// KeepOld, when set, is a second name install gives the file it replaces: a
-	// hard link made beside it, in the target's own directory. The native om is
-	// run through it, so the config never names a dated file and rollback does
-	// not move it (gt-xj8mo5).
+	// hard link made beside it, in the target's own directory. A native call runs
+	// the old tool through it, so the config never names a dated file and rollback
+	// does not move it (gt-xj8mo5).
 	KeepOld string
 }
 

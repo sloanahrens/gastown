@@ -42,6 +42,9 @@ func (f fakeFile) Mode() fs.FileMode { return f.mode }
 // nativeBd is the absolute path the tests give the native bd, as nativeOm is for om.
 const nativeBd = "/opt/bd/bin/bd"
 
+// nativeGt is the absolute path the tests give the native gt, as nativeOm is for om.
+const nativeGt = "/opt/gt/bin/gt"
+
 // withNativeOm answers stat for nativeOm as an executable file and leaves every
 // other path to the harness's stat, so the target still finds its town.
 func withNativeOm(h *harness) {
@@ -188,13 +191,13 @@ func TestConfigNativeRefusesBadEntries(t *testing.T) {
 			wantKey: "native.om.path",
 		},
 		{
-			name: "a tool other than om",
+			name: "a tool other than om, bd and gt",
 			config: func(t *testing.T) string {
 				return nativeConfig(t, map[string]any{
-					"gt": map[string]any{"path": nativeOm, "subcommands": []string{"status"}},
+					"hm": map[string]any{"path": nativeOm, "subcommands": []string{"status"}},
 				})
 			},
-			wantKey: "native.gt",
+			wantKey: "native.hm",
 		},
 		{
 			name: "no subcommand",
@@ -316,6 +319,11 @@ func bdNative(path string, subcommands ...string) map[string]any {
 	return map[string]any{bdTool: map[string]any{"path": path, "subcommands": subcommands}}
 }
 
+// gtNative is the config entry for a native gt that names the given command paths.
+func gtNative(path string, subcommands ...string) map[string]any {
+	return map[string]any{gtTool: map[string]any{"path": path, "subcommands": subcommands}}
+}
+
 func TestConfigNativeAcceptsBdHooksOnly(t *testing.T) {
 	t.Parallel()
 	t.Run("hooks loads", func(t *testing.T) {
@@ -423,5 +431,113 @@ func TestDoctorBdNativeSelfPathDown(t *testing.T) {
 	}
 	if !strings.Contains(h.stdout.String(), "native: ") || !strings.Contains(h.stdout.String(), "(not runnable)") || !strings.Contains(h.stdout.String(), "is this wrapper itself") {
 		t.Errorf("stdout %q does not report the native bd path as the wrapper", h.stdout)
+	}
+}
+
+func TestRunGtHostCommandsUseNativePath(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	withNativeBinary(h, nativeGt)
+	h.writeConfig(t, nativeConfig(t, gtNative(nativeGt, "town forward plist", "maint plan", "maint apply")))
+	caller := t.TempDir()
+	env := []string{"HOME=" + h.home, "PATH=/usr/bin", "GT_TOWN_ROOT=" + h.town}
+	h.surface.getwd = func() (string, error) { return caller, nil }
+	h.surface.environ = func() []string { return env }
+	getenv := h.surface.getenv
+	h.surface.getenv = func(name string) string {
+		if name == "GT_TOWN_ROOT" {
+			return h.town
+		}
+		return getenv(name)
+	}
+	fp := &fakeProcess{exit: 4}
+	h.surface.native = fp
+
+	for _, args := range [][]string{
+		{"town", "forward", "plist", "--service", "dashboard", "--context", "gt", "--port", "8080"},
+		{"maint", "plan", "nodes"},
+		{"maint", "apply", "worktree"},
+	} {
+		fp.ran = false
+		h.fake.launched = false
+		argv := append([]string{"gt"}, args...)
+		if exit := h.run(argv...); exit != 4 {
+			t.Fatalf("run(%q) = %d, want the native gt's 4; stderr: %s", argv, exit, h.stderr)
+		}
+		if !fp.ran {
+			t.Fatalf("%q did not run natively", argv)
+		}
+		if want := append([]string{nativeGt}, args...); !slices.Equal(fp.argv, want) {
+			t.Fatalf("native argv = %q, want %q", fp.argv, want)
+		}
+		if fp.dir != caller {
+			t.Fatalf("native ran in %q, want the caller's directory %q", fp.dir, caller)
+		}
+		if !slices.Equal(fp.env, env) {
+			t.Fatalf("native env = %q, want the caller's whole environment %q", fp.env, env)
+		}
+		if h.fake.launched {
+			t.Fatalf("%q reached the target", argv)
+		}
+	}
+
+	for _, args := range [][]string{{"pool", "show"}, {"status"}, {"town", "state"}} {
+		fp.ran = false
+		h.fake.launched = false
+		argv := append([]string{"gt"}, args...)
+		if exit := h.run(argv...); exit != 0 {
+			t.Fatalf("run(%q) = %d, want 0; stderr: %s", argv, exit, h.stderr)
+		}
+		if fp.ran {
+			t.Fatalf("%q ran natively; it is not in the host command set", argv)
+		}
+		if !h.fake.launched || !slices.Equal(h.fake.call.Argv, argv) {
+			t.Fatalf("%q did not reach the target", argv)
+		}
+	}
+}
+
+func TestConfigNativeRefusesAGtPathOutsideTheHostSet(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		native  map[string]any
+		wantKey string
+	}{
+		{name: "a gt leaf outside the set", native: gtNative(nativeGt, "status"), wantKey: "native.gt.subcommands"},
+		{name: "the town forward group alone", native: gtNative(nativeGt, "town forward"), wantKey: "native.gt.subcommands"},
+		{name: "one good path beside one outside the set", native: gtNative(nativeGt, "town forward plist", "maint"), wantKey: "native.gt.subcommands"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			withNativeBinary(h, nativeGt)
+			h.writeConfig(t, nativeConfig(t, tt.native))
+			fp := &fakeProcess{}
+			h.surface.native = fp
+			if exit := h.run("gt", "town", "forward", "plist"); exit != 1 {
+				t.Fatalf("run = %d, want 1", exit)
+			}
+			if !strings.Contains(h.stderr.String(), tt.wantKey) {
+				t.Fatalf("stderr %q does not name %q", h.stderr, tt.wantKey)
+			}
+			if fp.ran || h.fake.launched {
+				t.Fatal("a call ran from a config that refused it")
+			}
+		})
+	}
+}
+
+func TestDoctorGtNativeSelfPathDown(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, selfConfigFor(t, h, gtTool, "town forward plist"))
+	h.fake.diag = gtwrap.Diagnosis{Rung: gtwrap.RungExec, Container: "gt-daemon", Image: "gt-daemon:1", Reason: "up"}
+	if exit := h.run("gt", "--doctor"); exit != 1 {
+		t.Fatalf("run = %d, want 1; stderr: %s", exit, h.stderr)
+	}
+	if !strings.Contains(h.stdout.String(), "native: ") || !strings.Contains(h.stdout.String(), "(not runnable)") || !strings.Contains(h.stdout.String(), "is this wrapper itself") {
+		t.Errorf("stdout %q does not report the native gt path as the wrapper", h.stdout)
 	}
 }
