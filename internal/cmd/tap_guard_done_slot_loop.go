@@ -3,6 +3,7 @@ package cmd
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/shellparse"
 )
@@ -128,14 +129,82 @@ const doneSlotLoopMaxBodyDepth = 2
 // (see shellTokenize), and raw is the shell text the tokens came from — the
 // heredoc bodies a command writes to a file are only visible there.
 func matchesDoneSlotLoop(raw string, tokens, lowerTokens []string) (reason, alternative string) {
-	return matchesDoneSlotLoopDepth(raw, tokens, lowerTokens, 0)
+	return matchesDoneSlotLoopDepth(raw, tokens, lowerTokens, 0, doneSlotLoopReadTokens)
 }
 
-func matchesDoneSlotLoopDepth(raw string, tokens, lowerTokens []string, depth int) (reason, alternative string) {
-	if doneSlotLoopHasBlockingLoop(tokens, lowerTokens) || doneSlotLoopHasZshLoop(tokens, lowerTokens) {
+// doneSlotLoopReader reads a command into the argv-like tokens this rule judges
+// a heredoc body or a quoted payload on. It is a parameter of the *With
+// functions below, so the mutation test can hand the production rule a reading
+// that loses a separator.
+type doneSlotLoopReader func(command string) []string
+
+// doneSlotLoopReadTokens is the production reader: the parsedTokens reading of
+// gt-crn9gu. shellTokenize is the fallback for a command shellparse cannot
+// read, and for a command doneSlotLoopParsedUnsafe names. shellTokenize stays
+// only until gt-crn9gu retires it.
+func doneSlotLoopReadTokens(command string) []string {
+	tokens, readable := parsedTokens(command)
+	if !readable || doneSlotLoopParsedUnsafe(command) {
+		return shellTokenize(command)
+	}
+	return tokens
+}
+
+// doneSlotLoopCompoundMarkers are substrings of a command whose structure
+// parsedTokens does not keep as tokens: a brace or subshell group, a
+// substitution, a test expression, the bash pipe-and-stderr form, and a heredoc
+// (its operator and body are dropped).
+var doneSlotLoopCompoundMarkers = []string{"(", "{", "}", "`", "[[", "$[", "|&", "<<"}
+
+// doneSlotLoopCompoundKeywords are the words that open or close a compound
+// command. parsedTokens turns the structure inside one into nothing — the
+// keywords are not tokens of the parsed reading — so a loop written this way
+// could not be seen on its parsed tokens.
+var doneSlotLoopCompoundKeywords = map[string]bool{
+	"for": true, "while": true, "until": true, "do": true, "done": true,
+	"if": true, "then": true, "else": true, "elif": true, "fi": true,
+	"case": true, "esac": true, "select": true, "function": true,
+	"repeat": true, "foreach": true, "end": true,
+}
+
+// doneSlotLoopParsedUnsafe reports whether command has a shape the parsed
+// reading can read as simpler than the shell does, so the fallback reads it.
+// The shapes are the compound markers and keywords above. The rule reads the
+// command text, because the parsed tokens lack the very structure it has to
+// detect. It only ever sends a command to the reading the guard used before
+// this move, so a rule that is too broad costs the parsed reading and never
+// strictness.
+func doneSlotLoopParsedUnsafe(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	for _, marker := range doneSlotLoopCompoundMarkers {
+		if strings.Contains(trimmed, marker) {
+			return true
+		}
+	}
+	words := strings.FieldsFunc(trimmed, func(r rune) bool {
+		return unicode.IsSpace(r) || r == ';' || r == '&' || r == '|'
+	})
+	for _, w := range words {
+		if doneSlotLoopCompoundKeywords[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// doneSlotLoopVerdictWith judges command the way matchesDoneSlotLoop does, with
+// every body and payload read through read. It is the production path for the
+// property test: the same functions, one reading swapped.
+func doneSlotLoopVerdictWith(command string, read doneSlotLoopReader) (reason, alternative string) {
+	tokens := read(command)
+	return matchesDoneSlotLoopDepth(command, tokens, doneSlotLoopLower(tokens), 0, read)
+}
+
+func matchesDoneSlotLoopDepth(raw string, tokens, lowerTokens []string, depth int, read doneSlotLoopReader) (reason, alternative string) {
+	if doneSlotLoopHasBlockingLoop(tokens, lowerTokens) || doneSlotLoopHasZshLoop(tokens, lowerTokens, read) {
 		return doneSlotLoopReason, doneSlotLoopAlternative
 	}
-	if doneSlotLoopHasRepeater(tokens) {
+	if doneSlotLoopHasRepeater(tokens, read) {
 		return doneSlotLoopReason, doneSlotLoopAlternative
 	}
 	if depth >= doneSlotLoopMaxBodyDepth {
@@ -146,8 +215,8 @@ func matchesDoneSlotLoopDepth(raw string, tokens, lowerTokens []string, depth in
 		return doneSlotLoopUnreadableReason(err), ""
 	}
 	for _, body := range bodies {
-		bodyTokens := shellTokenize(body)
-		if r, alt := matchesDoneSlotLoopDepth(body, bodyTokens, doneSlotLoopLower(bodyTokens), depth+1); r != "" {
+		bodyTokens := read(body)
+		if r, alt := matchesDoneSlotLoopDepth(body, bodyTokens, doneSlotLoopLower(bodyTokens), depth+1, read); r != "" {
 			return r, alt
 		}
 	}
@@ -211,7 +280,7 @@ func doneSlotLoopHasBlockingLoop(tokens, lowerTokens []string) bool {
 // these with `}`, `done` or `end`, and a `repeat COUNT gt done` line has no
 // closer at all, so the depth walk above never sees them close (gt-yjep0,
 // gt-yx8jn). Each body is found on its own and judged as the command line it is.
-func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
+func doneSlotLoopHasZshLoop(tokens, lowerTokens []string, read doneSlotLoopReader) bool {
 	commandWords := doneSlotLoopSegmentCommandWords(tokens)
 	for i := range lowerTokens {
 		if !doneSlotLoopIsCommandWord(commandWords, i) {
@@ -228,7 +297,7 @@ func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
 		default:
 			continue
 		}
-		if doneSlotLoopExecutesGate(body) {
+		if doneSlotLoopExecutesGateWith(body, read) {
 			return true
 		}
 	}
@@ -439,14 +508,14 @@ func doneSlotLoopForeachBody(tokens, lowerTokens []string, commandWords map[int]
 // `gt done` once, after the pipeline has finished, and a command that merely
 // reads or writes the words ("rg -l Foo | xargs grep -n \"gt slot\"") runs the
 // gate nowhere (gt-7dxw review).
-func doneSlotLoopHasRepeater(tokens []string) bool {
+func doneSlotLoopHasRepeater(tokens []string, read doneSlotLoopReader) bool {
 	for _, segment := range splitShellSegments(tokens) {
 		word, args := doneSlotLoopCommandWord(segment)
 		word = strings.ToLower(word)
 		if !doneSlotLoopRepeaters[word] {
 			continue
 		}
-		if doneSlotLoopExecutesGate(doneSlotLoopWrapperPayload(word, args)) {
+		if doneSlotLoopExecutesGateWith(doneSlotLoopWrapperPayload(word, args), read) {
 			return true
 		}
 	}
@@ -469,13 +538,20 @@ func doneSlotLoopWrapperPayload(wrapper string, args []string) []string {
 }
 
 // doneSlotLoopExecutesGate reports whether a command line — a command word plus
-// its arguments — runs the gate. A quoted payload arrives as ONE token
-// (`xargs -I{} bash -c 'gt done'` tokenizes its payload to `gt done`), so a
-// token that still holds several words is split again and judged as the command
-// line it is. Launchers are followed the same way nestedCommands follows them.
+// its arguments — runs the gate, reading every payload it splits out through
+// doneSlotLoopReadTokens.
 func doneSlotLoopExecutesGate(tokens []string) bool {
+	return doneSlotLoopExecutesGateWith(tokens, doneSlotLoopReadTokens)
+}
+
+// doneSlotLoopExecutesGateWith is doneSlotLoopExecutesGate over the reading read
+// gives. A quoted payload arrives as ONE token (`xargs -I{} bash -c 'gt done'`
+// tokenizes its payload to `gt done`), so a token that still holds several
+// words is split again and judged as the command line it is. Launchers are
+// followed the same way nestedCommands follows them.
+func doneSlotLoopExecutesGateWith(tokens []string, read doneSlotLoopReader) bool {
 	if len(tokens) == 1 && strings.ContainsAny(tokens[0], " \t") {
-		return doneSlotLoopExecutesGate(shellTokenize(tokens[0]))
+		return doneSlotLoopExecutesGateWith(read(tokens[0]), read)
 	}
 	for _, segment := range splitShellSegments(tokens) {
 		word, args := doneSlotLoopCommandWord(doneSlotLoopLower(segment))
@@ -485,16 +561,16 @@ func doneSlotLoopExecutesGate(tokens []string) bool {
 				return true
 			}
 		case doneSlotLoopRepeaters[word]:
-			if doneSlotLoopExecutesGate(doneSlotLoopWrapperPayload(word, args)) {
+			if doneSlotLoopExecutesGateWith(doneSlotLoopWrapperPayload(word, args), read) {
 				return true
 			}
 		case shellInvokers[filepath.Base(word)]:
 			if payload, ok := doneSlotLoopShellPayload(args); ok &&
-				doneSlotLoopExecutesGate(shellTokenize(payload)) {
+				doneSlotLoopExecutesGateWith(read(payload), read) {
 				return true
 			}
 		case word == "eval":
-			if doneSlotLoopExecutesGate(shellTokenize(strings.Join(args, " "))) {
+			if doneSlotLoopExecutesGateWith(read(strings.Join(args, " ")), read) {
 				return true
 			}
 		}
