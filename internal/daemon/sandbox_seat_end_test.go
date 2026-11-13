@@ -104,6 +104,9 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 			f.deleted = append(f.deleted, rec.Session)
 			return nil
 		},
+		// The ended marker is not set unless a test says so: a held sandbox the
+		// seat end asks about must never reach the real gateway exec.
+		sandboxEndedMarker: func(string, string) (bool, error) { return false, nil },
 		removeSandboxSeatDirs: func(rigPath, rig, name string) (bool, error) {
 			if f.removeErr != nil {
 				return f.removeDeleted, f.removeErr
@@ -386,6 +389,197 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A landed seat whose gateway still holds its sandbox, with the ended marker
+// set, is ended at the landing (gt-0vb2fy). The seat end is the one the
+// after-landing hook runs. It calls the record deleter once with the seat's
+// record, drops the record, and removes the host directories, in that one call
+// and with no patrol pass.
+func TestSeatEndAtLandingDeletesTheSandboxWhenTheMarkerIsSet(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	sessionName := f.host.sessionName(endRig, endPolecat)
+	if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+		Session: sessionName, Rig: endRig, Polecat: endPolecat, Gateway: "k8s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+	var asked []string
+	f.host.sandboxEndedMarker = func(gateway, name string) (bool, error) {
+		asked = append(asked, gateway+"|"+name)
+		return true, nil
+	}
+	var deleted []session.SandboxRecord
+	f.host.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+		deleted = append(deleted, rec)
+		return nil
+	}
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end did not finish the seat whose sandbox its marker released")
+	}
+	if want := "deleted its held sandbox at the landing"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log %q does not say the landing deleted the sandbox (%q)", logs.String(), want)
+	}
+	if want := []string{"k8s|" + sessionName}; len(asked) != 1 || asked[0] != want[0] {
+		t.Errorf("ended marker asked %v, want %v", asked, want)
+	}
+	if len(deleted) != 1 || deleted[0].Session != sessionName || deleted[0].Gateway != "k8s" {
+		t.Errorf("record deleter called with %+v, want once with the seat's record %s", deleted, sessionName)
+	}
+	if _, ok, err := session.ReadSandboxRecord(f.town, sessionName); err != nil || ok {
+		t.Errorf("record after the seat end: present=%v err=%v, want dropped", ok, err)
+	}
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory is still there after the seat end")
+	}
+}
+
+// Every answer short of a set marker, and every failure on the way, leaves the
+// held sandbox and its record in place for the patrol. The seat is kept with the
+// reason it had before the landing ended held sandboxes, and the landing is not
+// failed (gt-0vb2fy).
+func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
+	t.Parallel()
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	tests := []struct {
+		name        string
+		landing     sandboxSeatLanding
+		marker      bool
+		markerErr   error
+		deleteErr   error
+		noRecord    bool
+		corruptRec  bool
+		wantAsked   bool
+		wantDeleted bool
+	}{
+		{
+			name: "a marker that is not set keeps the sandbox", landing: landed,
+			wantAsked: true,
+		},
+		{
+			name: "a marker that cannot be read keeps the sandbox", landing: landed,
+			markerErr: errors.New("exec failed"), wantAsked: true,
+		},
+		{
+			name: "unlanded work keeps the sandbox", marker: true,
+			landing: sandboxSeatLanding{BeadID: endBead, Branch: endBranch},
+		},
+		{
+			name: "a deleter that fails keeps the sandbox", landing: landed, marker: true,
+			deleteErr: errors.New("gateway unreachable"), wantAsked: true, wantDeleted: true,
+		},
+		{
+			name: "a sandbox with no record is left for the patrol", landing: landed, marker: true,
+			noRecord: true,
+		},
+		{
+			name: "an unreadable record keeps the sandbox", landing: landed, marker: true,
+			corruptRec: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			sessionName := f.host.sessionName(endRig, endPolecat)
+			switch {
+			case tt.corruptRec:
+				path := filepath.Join(session.SandboxRegistryDir(f.town), sessionName+".json")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case !tt.noRecord:
+				if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+					Session: sessionName, Rig: endRig, Polecat: endPolecat, Gateway: "k8s",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var logs strings.Builder
+			f.host.d.logger = log.New(&logs, "", 0)
+			f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+			var asked, deleted int
+			f.host.sandboxEndedMarker = func(string, string) (bool, error) {
+				asked++
+				return tt.marker, tt.markerErr
+			}
+			f.host.sandboxDeleter = func(_ string, _ session.SandboxRecord) error {
+				deleted++
+				return tt.deleteErr
+			}
+
+			if f.host.endFinishedSandboxSeat(endRig, endPolecat, tt.landing) {
+				t.Error("the seat end removed a seat whose sandbox is still held")
+			}
+			if got := asked > 0; got != tt.wantAsked {
+				t.Errorf("ended marker asked = %v, want %v", got, tt.wantAsked)
+			}
+			if got := deleted > 0; got != tt.wantDeleted {
+				t.Errorf("record deleter called = %v, want %v", got, tt.wantDeleted)
+			}
+			if !tt.noRecord && !tt.corruptRec {
+				if _, ok, err := session.ReadSandboxRecord(f.town, sessionName); err != nil || !ok {
+					t.Errorf("record after the seat end: present=%v err=%v, want left for the patrol", ok, err)
+				}
+			}
+			if !dirExists(t, dirs.PolecatDir) {
+				t.Error("the seat directory was removed, want it kept")
+			}
+			if want := "kept: " + sandboxNotGoneReason; !strings.Contains(logs.String(), want) {
+				t.Errorf("log %q does not name the reason %q", logs.String(), want)
+			}
+		})
+	}
+}
+
+// A sandbox the landing deleted whose record cannot be dropped keeps the seat:
+// the record is the patrol's only handle on the sandbox, so the seat stays kept
+// until the patrol removes it (gt-0vb2fy).
+func TestSeatEndAtLandingKeepsTheSeatWhenItsRecordCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+		Session: f.host.sessionName(endRig, endPolecat), Rig: endRig, Polecat: endPolecat, Gateway: "k8s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+	f.host.sandboxEndedMarker = func(string, string) (bool, error) { return true, nil }
+	f.host.removeSandboxRecord = func(string, string) error { return errors.New("registry is read-only") }
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end removed a seat whose record it could not drop")
+	}
+	if len(f.deleted) != 1 {
+		t.Errorf("record deleter called %d times, want once", len(f.deleted))
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed, want it kept")
+	}
+	if want := "kept: its sandbox is deleted but its record could not be removed: registry is read-only"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log %q does not name %q", logs.String(), want)
 	}
 }
 

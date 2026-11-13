@@ -469,11 +469,19 @@ func TestPatrolScanCompletesTheEndOfADeletedKeptSeat(t *testing.T) {
 	p.seatDirs()
 	p.sandboxUp = true
 	p.registryRecord(t)
+	// The agent's session is still ending: its ended marker is not set yet, so
+	// the landing has no sandbox it may delete (gt-0vb2fy).
+	markerSet := false
+	p.host.sandboxEndedMarker = func(string, string) (bool, error) { return markerSet, nil }
 
-	// The landing's own pass keeps the seat: the sandbox is still up.
+	// The landing's own pass keeps the seat: the sandbox is still up and its
+	// marker is not set.
 	if p.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding()) {
 		t.Fatal("a seat whose sandbox is still up was removed")
 	}
+	// The session has ended, so the marker is set and the patrol deletes the
+	// sandbox the landing left.
+	markerSet = true
 	// Half an hour on, the queue would raise the false item.
 	p.clk.Advance(32 * time.Minute)
 	if got := keptSeatAttentionSeats(t, p.host.d, p.clk.Now()); got != 1 {
