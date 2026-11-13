@@ -225,6 +225,9 @@ func TestReviewPreviewReplyFromRefusesWithoutWorkingDirectory(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no working directory") {
 		t.Fatalf("runReviewPreviewReplyFrom() = %v, want a refusal naming the working directory", err)
 	}
+	if !strings.Contains(err.Error(), "no cwd") {
+		t.Errorf("runReviewPreviewReplyFrom() = %v, want the resolver's own error carried", err)
+	}
 }
 
 func TestReviewPreviewReplyAtRefusals(t *testing.T) {

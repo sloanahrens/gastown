@@ -86,7 +86,7 @@ func reviewPreviewReplyFlags(cmd *cobra.Command) (fixed, disputed bool, text str
 func runReviewPreviewReplyFrom(resolve func() (string, error), finding, kind, text string) error {
 	cwd, err := resolve()
 	if err != nil {
-		return errors.New("no working directory")
+		return fmt.Errorf("no working directory: %w", err)
 	}
 	return runReviewPreviewReplyAt(git.NewGit(cwd), beads.New(cwd), finding, kind, text)
 }
