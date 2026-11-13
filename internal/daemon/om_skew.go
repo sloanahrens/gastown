@@ -423,8 +423,7 @@ func (d *Daemon) omSkewChangedPaths(townRoot, installed, remote string) ([]strin
 	}
 	// Both revisions reach git's argv, so each is held to a commit id: a value
 	// that looks like an option would otherwise be read as one, and the diff
-	// deciding the alert would be a diff of something else. The "--" marks the
-	// same boundary from git's side (gt-8n9hj).
+	// deciding the alert would be a diff of something else (gt-8n9hj).
 	if err := omSkewCommitRevs(installed, remote); err != nil {
 		return nil, err
 	}
@@ -574,7 +573,6 @@ func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("git --git-dir=%s remote get-url origin: no url", bare)
 	}
-	// The "--" keeps a url that begins with "-" from being read as an option.
 	out, err := d.omSkewGit("ls-remote", "--", url, omSkewRemoteRef)
 	if err != nil {
 		return "", err
@@ -590,6 +588,11 @@ func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 // and returns its trimmed stdout with the command's own error: the status
 // omSkewGitNoMatch reads is read where exec produces it, not off a wrapped
 // error another function builds (gt-8n9hj).
+//
+// Each caller builds its own argv and keeps a value that could be read as an
+// option out of that position: a revision is held to a commit id by
+// omSkewCommitRevs before the call, a url is passed after "--", and a path is
+// carried inside one --git-dir=<path> argument.
 func (d *Daemon) omSkewGitRun(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), omSkewRemoteTimeout)
 	defer cancel()

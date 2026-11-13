@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -887,5 +890,86 @@ func TestPatrolScanSeatEndFailureDoesNotStopThePass(t *testing.T) {
 	}
 	if want := "sandbox seat end gastown/agate: its seat end did not complete"; !strings.Contains(logs.String(), want) {
 		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// TestSandboxSeatEndCompletionsAskOutsideTheTickBudget drives the production
+// seat end the pass completes a kept seat with, over a fake gateway at its
+// exec boundary: each record the walk checks costs the walk one gateway
+// question, and each completed seat end asks a question of its own. The walk
+// still checks exactly its budget in records, and the completion's question is
+// counted beside the walk's rather than against it.
+func TestSandboxSeatEndCompletionsAskOutsideTheTickBudget(t *testing.T) {
+	t.Parallel()
+	const budget = 3
+	town := t.TempDir()
+	writeTownFile(t, town, "settings/config.json", endSettings)
+	clk := newFixedClock()
+	agentDB := beadsfake.New()
+	names := []string{"p00", "p01", "p02", "p03"}
+	landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	for _, n := range names {
+		// The record's session name is the one the seat's end asks about, the
+		// name the launch writes, not the polecat name its kept record is keyed by.
+		if err := session.WriteSandboxRecord(town, session.SandboxRecord{
+			Session: "gt-" + n, Rig: endRig, Polecat: n, Gateway: "gw1", CreatedAt: clk.Now().Add(-time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeKeptSandboxSeat(town, endRig, n, keptSandboxSeatRecord{
+			Bead: endBead, Reason: sandboxNotGoneReason, Since: clk.Now().Add(-time.Hour), Landing: &landing,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		id := beads.AgentBeadIDFor(constants.RolePolecat, endRig, n, town)
+		fields := beads.AgentFields{
+			RoleType: "polecat", Rig: endRig, Agent: endSandboxIn,
+			Branch: endBranch, CleanupStatus: string(polecat.CleanupClean),
+		}
+		if _, err := agentDB.Create(beads.CreateOptions{
+			ID: id, Title: id, Labels: []string{"gt:agent"}, Priority: -1,
+			Description: beads.FormatAgentDescription(id, &fields),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var walkAsks, gatewayAsks int
+	asked := map[string]int{}
+	d := &Daemon{
+		config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0),
+		tmux: newFakeTmux(clk), clock: clk,
+		openRecoveryBeads: func([]string) beads.Client { return agentDB },
+	}
+	// The gateway is the seat end's own seam, and it has no sandbox of any
+	// name: the existence question is the one the end asks.
+	d.sandboxExists = func(gateway, name string) (bool, error) {
+		gatewayAsks++
+		asked[name]++
+		return false, nil
+	}
+	h := &patrolScanHost{
+		d: d,
+		sandboxExists: func(gateway, name string) (bool, error) {
+			walkAsks++
+			return d.sandboxExists(gateway, name)
+		},
+		sandboxRecordBudget: budget,
+	}
+
+	h.patrolScanSandboxRecords()
+
+	if walkAsks != budget {
+		t.Errorf("the walk asked %d records, want its budget of %d", walkAsks, budget)
+	}
+	if len(asked) != budget {
+		t.Errorf("the tick asked about %d seats, want the budget of %d it checked: %v", len(asked), budget, asked)
+	}
+	for name, n := range asked {
+		if n != 2 {
+			t.Errorf("seat %s was asked about %d times, want the walk's question and its end's: %v", name, n, asked)
+		}
+	}
+	if want := 2 * walkAsks; gatewayAsks != want {
+		t.Errorf("the tick asked the gateway %d questions, want %d: the walk's and the seat ends the walk completed", gatewayAsks, want)
 	}
 }

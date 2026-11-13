@@ -584,6 +584,11 @@ type Daemon struct {
 	// (see rebuild_gt.go); nil is buildsrc.Ensure, which clones and fetches.
 	// Tests point it at a checkout they built.
 	rebuildGTEnsureFn func(ctx context.Context, townRoot, rig, rev string) (string, error)
+	// buildCheckoutEnsureFn resolves the build checkout the pod's start check
+	// runs (see build_checkout_start.go); nil is buildsrc.Ensure. Separate from
+	// rebuildGTEnsureFn, which the rebuild_gt job reads, so a test of one seam
+	// never steers the other. Tests point it at a checkout they built.
+	buildCheckoutEnsureFn func(ctx context.Context, townRoot, rig, rev string) (string, error)
 	// slotGate is the container gate the quiet check reads its report through;
 	// nil is slot.NewGate(), which lists the host's docker. A test supplies a
 	// gate over a fake runtime, so the quiet check's container classification
@@ -2734,8 +2739,8 @@ const OwnerKindManual = "manual"
 
 // DetectSelf names the owner of a daemon started from this process: the
 // container (ContainerNameEnv), the systemd unit (SystemdInvocationEnv), or
-// manual ("hostname:pid"). Every environment
-// read goes through env so a test sets the fixture.
+// manual ("hostname:pid"). Every environment read goes through env so a test
+// sets the fixture.
 //
 // hostname is read only for the manual owner: the other kinds name themselves
 // without the host, so an unreadable host name must not refuse them. Container

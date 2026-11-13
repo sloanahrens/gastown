@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -31,7 +33,7 @@ func buildCheckoutTestDaemon(t *testing.T, townRoot, sha string, shaErr error, r
 	d, _ := newTestDaemon(townRoot)
 	d.containerMode = true
 	d.fullBuildCommitFn = func() (string, error) { return sha, shaErr }
-	d.rebuildGTEnsureFn = func(_ context.Context, townRoot, rig, rev string) (string, error) {
+	d.buildCheckoutEnsureFn = func(_ context.Context, townRoot, rig, rev string) (string, error) {
 		rec.calls++
 		rec.townRoot, rec.rig, rec.rev = townRoot, rig, rev
 		return rec.checkout, rec.returnErr
@@ -56,6 +58,78 @@ func writeBuildCheckoutSettings(t *testing.T, townRoot, raw string) {
 	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// buildCheckoutTree lists every file under roots with its content, so a test
+// can say a step changed nothing.
+func buildCheckoutTree(t *testing.T, roots ...string) map[string]string {
+	t.Helper()
+	tree := make(map[string]string)
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			tree[path] = string(data)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("listing %s: %v", root, err)
+		}
+	}
+	return tree
+}
+
+// TestBuildCheckoutStartDryRun pins what the start check itself does when its
+// resolver reports a checkout without moving it: the pod check runs, writes
+// nothing into the town or the checkout, and its own log line says which
+// checkout it holds at which commit. A host daemon skips the check and says so,
+// and the resolver is never asked.
+func TestBuildCheckoutStartDryRun(t *testing.T) {
+	t.Parallel()
+	t.Run("a pod runs the check and says what it ensured", func(t *testing.T) {
+		t.Parallel()
+		townRoot, checkout := buildCheckoutTown(t)
+		if err := os.WriteFile(filepath.Join(checkout, "checkout-marker"), []byte("where the checkout was\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rec := &buildCheckoutEnsureRecord{checkout: checkout}
+		d := buildCheckoutTestDaemon(t, townRoot, buildCheckoutTestSHA, nil, rec)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		before := buildCheckoutTree(t, townRoot, checkout)
+
+		if err := d.startBuildCheckout(context.Background()); err != nil {
+			t.Fatalf("startBuildCheckout: %v", err)
+		}
+		if after := buildCheckoutTree(t, townRoot, checkout); !reflect.DeepEqual(after, before) {
+			t.Fatalf("the start check changed the town or the checkout:\nbefore: %v\nafter: %v", before, after)
+		}
+		if want := "the gt source checkout is " + checkout + " at " + buildCheckoutTestSHA; !strings.Contains(logs.String(), want) {
+			t.Errorf("the start log does not say %q: %q", want, logs.String())
+		}
+	})
+
+	t.Run("a host daemon skips the check and says so", func(t *testing.T) {
+		t.Parallel()
+		townRoot, checkout := buildCheckoutTown(t)
+		rec := &buildCheckoutEnsureRecord{checkout: checkout}
+		d := buildCheckoutTestDaemon(t, townRoot, buildCheckoutTestSHA, nil, rec)
+		d.containerMode = false
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+
+		if err := d.startBuildCheckout(context.Background()); err != nil {
+			t.Fatalf("startBuildCheckout on a host: %v", err)
+		}
+		if want := "the gt source checkout is not ensured: a host daemon keeps the checkout it has"; !strings.Contains(logs.String(), want) {
+			t.Errorf("a host start check does not say %q: %q", want, logs.String())
+		}
+	})
 }
 
 func TestBuildCheckoutStartEnsuresTheOwnFullSHA(t *testing.T) {

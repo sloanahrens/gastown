@@ -24,9 +24,8 @@ import (
 // worktree is a snapshot the seat's commits never reach, and once the sandbox
 // is gone and the work has landed the only host reader left is the rules
 // battery, which asks about the session by reading its transcript. The step
-// below removes the worktree, so finished seats stop leaving a polecat
-// directory apiece behind, and waits for that last ask (gt-sefzt, gt-381oj). A
-// tmux seat keeps its worktree and is never touched here.
+// below removes the worktree once that last ask has happened, and a tmux seat
+// keeps its worktree and is never touched here (gt-sefzt).
 
 // sandboxSeatLanding is the landing that finished a sandbox seat: the bead, the
 // branch its work was on, when the seat submitted it, and whether the rig's
@@ -300,6 +299,9 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		log("kept: %v", err)
 		return false
 	case partial != "":
+		// A seat whose directories were partly removed and then failed to
+		// finish has nothing left to wait for, so its kept record goes with it
+		// (gt-sefzt).
 		h.clearKeptSeat(rig, name)
 		log("its host directories were partly removed, then the removal failed: %s (the seat is finished: landed %s)", partial, landing.BeadID)
 		return false
@@ -358,8 +360,9 @@ func (h *patrolScanHost) clearPendingSeatEnd(rig, name string) {
 // end again once it has deleted the sandbox that kept it (gt-cz5tdz). A keep
 // whose reason is unchanged keeps the since its first pass stamped, so the
 // record ages from the start of the keep; a changed reason starts a new since.
-// A record it cannot read is logged, and the since starts from now. A write that
-// fails is logged, and the keep stands (gt-464nw6).
+// A record it cannot read, and a record whose since is zero, are logged and
+// dated from now: a keep with no start would never age into an attention item.
+// A write that fails is logged, and the keep stands (gt-464nw6).
 func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLanding, reason string) {
 	path, err := keptSandboxSeatPath(h.town(), rig, name)
 	if err != nil {
@@ -373,8 +376,10 @@ func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLan
 		// The first pass of this keep.
 	case err != nil:
 		h.d.logger.Printf("sandbox seat end %s/%s: its kept record is unreadable, so the keep is dated from now: %v", rig, name, err)
-	case prev.Reason == reason:
+	case prev.Reason == reason && !prev.Since.IsZero():
 		since = prev.Since
+	case prev.Reason == reason:
+		h.d.logger.Printf("sandbox seat end %s/%s: its kept record carries no since, so the keep is dated from now", rig, name)
 	}
 	rec := keptSandboxSeatRecord{Bead: landing.BeadID, Reason: reason, Since: since, Landing: &landing}
 	if err := writeKeptSandboxSeat(h.town(), rig, name, rec); err != nil {
