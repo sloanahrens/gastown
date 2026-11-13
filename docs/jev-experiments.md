@@ -59,7 +59,7 @@ Mango (the HyperCube pattern finder, `mango` rig) can mine the Jev logs for patt
 
 - Location: the town runtime's `jev-dataset` directory, files `<battery>.<question>.csv` and `<battery>.<question>.dict.md`.
 - Row: one logged, answered item that has a label.
-- Columns: `row_id` (opaque hash; mango ignores it), `day`, `hour`, `dow`, `model`, `answer`, `answer_band`, `confidence`, `label` (the words true or false, the mango target), `label_rule`, `label_source`, then `ref_<name>` for allow-listed refs (rig, agent, attempt, target) and `ans_<question>` for every other answer on the same item.
+- Columns: `row_id` (opaque hash; mango ignores it), `day`, `hour`, `dow`, `model`, `answer`, `answer_band`, `confidence`, `label` (the words true or false, the mango target), `label_rule`, `label_source`, then for the dispatch battery only `ran_over_twenty` (the latest landing's polecat time was over 20 minutes) and `needed_second_round` (the bead had an om verdict from attempt 2 or later), each true, false, or empty when it cannot be read, then `ref_<name>` for allow-listed refs (rig, agent, attempt, target) and `ans_<question>` for every other answer on the same item.
 - Rules: ids and features only. No prompt, passage, title, transcript or log sample. A deny-list is a test. A categorical column with more than 15 distinct values is dropped and named in the dict. Rows are written in a deterministic shuffled order because mango infers column types from the first 100 rows. Empty cell is missing.
 - Mango side: merlin runs mango on the files in a scratch database and reports patterns with the sample-size caveat. Mango never writes to the town.
 
