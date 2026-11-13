@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -55,9 +57,12 @@ const (
 // names the time of the last try, and nothing else is recorded for it.
 //
 // At most the budget (sandboxRecordsPerTick) of records is checked per tick,
-// live ones included, so the walk makes at most that many tmux probes and
-// gateway questions, and records the gateway still has cannot starve the ones
-// behind them. The walk over the name-sorted records starts after the name the
+// live ones included. A checked record costs one tmux probe, and unless a live
+// session answers, the existence question to the gateway, then the phase
+// question when the sandbox exists: at most two gateway questions. So the walk
+// makes at most the budget in tmux probes and twice the budget in gateway
+// questions, and records the gateway still has cannot starve the ones behind
+// them. The walk over the name-sorted records starts after the name the
 // last tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks judge
 // consecutive names and every record is judged within ceil(n/budget) ticks,
 // whatever the tick's clock phase. A failed removal is logged and the pass goes
@@ -119,6 +124,8 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 				h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask gateway %q for its phase: %v", name, rec.Gateway, err)
 				continue
 			}
+			// Both questions were answered, so the gateway is no longer silent.
+			h.d.clearGatewayTally(rec.Rig, rec.Polecat)
 			end := h.endHeldSandbox
 			if isStoppedPhase(phase) {
 				end = h.endStoppedSandbox
@@ -136,7 +143,9 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			continue
 		}
 		// A nil deleter drops the record and the routed client and leaves the
-		// sandbox alone: there is none.
+		// sandbox alone: there is none. The gateway answered that it has no
+		// sandbox, so it is no longer silent.
+		h.d.clearGatewayTally(rec.Rig, rec.Polecat)
 		if err := h.removeRecord(name); err != nil {
 			h.d.logger.Printf("patrol_scan: sandbox record %s: removing it failed: %v", name, err)
 			continue
@@ -264,11 +273,12 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 // endStoppedSandbox ends a held sandbox the gateway reports Stopped, with no
 // ended-marker read: a Stopped sandbox cannot answer that question, so the
 // marker never decides it. The sandbox is deleted through the record deleter
-// only when the seat's end is recorded with landing facts and the landing
-// record proves the work landed. The transcripts may not be copied out of a
-// stopped sandbox, so the delete is warned, naming the seat, and goes on. A seat
-// whose work is not proven landed stays, kept with stoppedUnlandedReason. It
-// returns the reason the sandbox is kept, or "" when it was deleted (gt-7h38pd).
+// only when the seat's end is recorded with landing facts, the landing record
+// proves the work landed, and the seat still holds that landed bead and branch
+// (staleStoppedKeep). The transcripts may not be copied out of a stopped
+// sandbox, so the delete is warned, naming the seat, and goes on. A seat whose
+// work is not proven landed stays, kept with stoppedUnlandedReason. It returns
+// the reason the sandbox is kept, or "" when it was deleted (gt-7h38pd).
 func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.SandboxRecord) string {
 	if rec.Rig == "" || rec.Polecat == "" {
 		return "its record names no seat, so its seat's end cannot be read"
@@ -286,6 +296,9 @@ func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.Sand
 		h.recordKeptSeat(rec.Rig, rec.Polecat, *kept.Landing, stoppedUnlandedReason)
 		return stoppedUnlandedReason
 	}
+	if stale := h.staleStoppedKeep(rec.Rig, rec.Polecat, *kept.Landing); stale != "" {
+		return stale
+	}
 	deleter := h.recordDeleter()
 	if deleter == nil {
 		return "no sandbox deleter is linked, so its stopped sandbox cannot be deleted"
@@ -296,6 +309,39 @@ func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.Sand
 	}
 	h.d.logger.Printf("%s: sandbox record %s deleted: it is Stopped and its seat's work landed (%s)", caller, name, seat)
 	return ""
+}
+
+// staleStoppedKeep checks that a seat's landing facts still describe the seat
+// before a Stopped sandbox is deleted on them. The landing proved the bead and
+// branch it names, and a seat slung again since then holds another bead or
+// branch: its hook names a different bead, or its branch is not the landed one.
+// A seat whose hook is clear and whose branch is the landed one passes, which is
+// what gt done leaves after a landing. A mismatch keeps the sandbox, records the
+// keep with sandboxKeptRecordStaleReason, and returns it. A seat whose agent bead
+// cannot be read is kept with the read's error and nothing recorded. It returns
+// "" when the facts describe the seat (gt-7h38pd).
+//
+// A same-bead sling with the same branch name is not told apart here: the agent
+// bead carries no sling time, and the sling helper the landing path uses
+// (land.SlungAtIn) answers per bead, not per seat.
+func (h *patrolScanHost) staleStoppedKeep(rig, name string, landing sandboxSeatLanding) string {
+	fields, err := h.seatAgentFields(rig, name)
+	switch {
+	case err != nil:
+		return "cannot read its agent bead: " + err.Error()
+	case fields == nil:
+		return "its agent bead is gone"
+	}
+	hook := strings.TrimSpace(fields.HookBead)
+	branch := strings.TrimSpace(fields.Branch)
+	landedBranch := strings.TrimSpace(landing.Branch)
+	if (hook == "" || hook == landing.BeadID) && landedBranch != "" && branch == landedBranch {
+		return ""
+	}
+	reason := fmt.Sprintf(sandboxKeptRecordStaleReason,
+		orMissingText(landing.BeadID), orMissingText(landedBranch), orMissingText(hook), orMissingText(branch))
+	h.recordKeptSeat(rig, name, landing, reason)
+	return reason
 }
 
 // recordDeleter is the record deleter a held sandbox is deleted through: the

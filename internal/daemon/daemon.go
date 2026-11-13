@@ -99,6 +99,12 @@ type Daemon struct {
 	// defaultSandboxGatewayRetryTicks (gt-7h38pd).
 	sandboxGatewayRetryLimit int
 
+	// gatewayTallies counts, per kept sandbox seat, the patrol ticks its gateway
+	// has stayed silent, in memory so the alarm does not depend on the kept
+	// record being written (sandbox_gateway_retry.go, gt-7h38pd).
+	gatewayTalliesMu sync.Mutex
+	gatewayTallies   map[string]gatewayTally
+
 	// hb is the heartbeat in flight: its step and the lock between an
 	// abandoned heartbeat and shutdown (heartbeat_signal.go, gt-lbqgz).
 	// hbGrace overrides heartbeatSignalGrace in tests.

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -548,4 +549,202 @@ func TestGatewayKeepLeavesAnUnusableKeptRecordAlone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A Stopped sandbox whose seat was slung again after its landing is kept: the
+// landed facts no longer describe the seat, whose hook names another bead or
+// whose branch is not the landed one. The kept record names both pairs, the
+// sandbox and its record stay, and the seat's item is raised once the window
+// passes (gt-7h38pd).
+func TestPatrolKeepsAStoppedSandboxOfAReusedSeat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		reslung    func(p *keptSeatPatrol)
+		holdBead   string
+		holdBranch string
+	}{
+		{
+			name: "the seat's hook names another bead",
+			reslung: func(p *keptSeatPatrol) {
+				p.seatFields.HookBead = "gt-slung2"
+				p.seatFields.Branch = "polecat/agate/gt-slung2+x2"
+			},
+			holdBead:   "gt-slung2",
+			holdBranch: "polecat/agate/gt-slung2+x2",
+		},
+		{
+			name: "the seat works another branch of the same bead",
+			reslung: func(p *keptSeatPatrol) {
+				p.seatFields.Branch = "polecat/agate/gt-n4xq8+x2"
+			},
+			holdBead:   "<missing>",
+			holdBranch: "polecat/agate/gt-n4xq8+x2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newStoppedSeatPatrol(t, true)
+			tt.reslung(p)
+			p.setAgent()
+			var logs strings.Builder
+			p.host.d.logger = log.New(&logs, "", 0)
+
+			p.host.patrolScanSandboxRecords()
+
+			want := fmt.Sprintf(sandboxKeptRecordStaleReason, endBead, endBranch, tt.holdBead, tt.holdBranch)
+			if len(p.deleted) != 0 {
+				t.Fatalf("sandboxes deleted = %v, want the reused seat's sandbox kept", p.deleted)
+			}
+			if !p.sandboxUp {
+				t.Error("the sandbox is gone, want the reused seat's sandbox still up")
+			}
+			if !p.recorded() {
+				t.Error("the registry record was removed for a sandbox that stays")
+			}
+			if got := p.keptSeatOf(t).Reason; got != want {
+				t.Errorf("kept reason = %q, want %q", got, want)
+			}
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("log %q does not carry the stale reason %q", logs.String(), want)
+			}
+			p.clk.Advance(keptSeatAttentionAfter + time.Minute)
+			items := keptSeatItems(t, p.host.d, p.clk.Now())
+			if len(items) != 1 || !strings.Contains(items[0], want) {
+				t.Errorf("kept-seat items = %v, want one carrying %q", items, want)
+			}
+		})
+	}
+}
+
+// A gateway that answers the existence question but not the phase question is
+// silent for the tick too: the record is kept and counts the try, the error is
+// logged, and the seat's item is raised at the retry limit (gt-7h38pd).
+func TestGatewayPhaseQuestionThatErrorsIsRetriedLikeTheExistenceQuestion(t *testing.T) {
+	t.Parallel()
+	p := newStoppedSeatPatrol(t, true)
+	p.host.sandboxStatus = func(string, string) (sandbox.Status, error) {
+		return sandbox.Status{}, errors.New("signal: killed")
+	}
+	var logs strings.Builder
+	p.host.d.logger = log.New(&logs, "", 0)
+
+	for tick := 1; tick <= 5; tick++ {
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+		if len(p.deleted) != 0 {
+			t.Fatalf("tick %d: sandboxes deleted = %v, want none while the phase is unknown", tick, p.deleted)
+		}
+		if !p.sandboxUp {
+			t.Fatalf("tick %d: the sandbox is gone, want it kept while the phase is unknown", tick)
+		}
+		if got := p.keptSeatOf(t).Tries; got != tick {
+			t.Errorf("tick %d: tries = %d, want %d", tick, got, tick)
+		}
+	}
+	if items := keptSeatItems(t, p.host.d, p.clk.Now()); len(items) != 0 {
+		t.Fatalf("kept-seat items after five silent ticks = %v, want none", items)
+	}
+	p.clk.Advance(time.Minute)
+	p.host.patrolScanSandboxRecords()
+
+	items := keptSeatItems(t, p.host.d, p.clk.Now())
+	if len(items) != 1 {
+		t.Fatalf("kept-seat items after six silent ticks = %v, want one", items)
+	}
+	if want := gatewayNoAnswerKeepReason(p.clk.Now()); !strings.Contains(items[0], want) {
+		t.Errorf("kept-seat item %q does not name the last try %q", items[0], want)
+	}
+	if got := logs.String(); !strings.Contains(got, "cannot ask gateway") || !strings.Contains(got, "for its phase") {
+		t.Errorf("log %q does not name the phase question that failed", got)
+	}
+}
+
+// corruptKeptSeat overwrites the test seat's kept record with bytes that do not
+// decode.
+func corruptKeptSeat(t *testing.T, p *keptSeatPatrol) {
+	t.Helper()
+	path, err := keptSandboxSeatPath(p.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A silent gateway whose tick count cannot be kept in the seat's record raises
+// the seat's item at once, naming why the count cannot be kept, without waiting
+// for the retry limit. An unreadable record is no collect failure once its seat
+// is raised, and the alarm clears when the gateway answers (gt-7h38pd).
+func TestGatewayTickCounterThatCannotBeKeptRaisesTheAlarm(t *testing.T) {
+	t.Parallel()
+	silentGateway := func(p *keptSeatPatrol) {
+		p.host.sandboxExists = func(string, string) (bool, error) {
+			return false, errors.New("signal: killed")
+		}
+	}
+	t.Run("an unreadable kept record raises the counter reason on the first silent tick", func(t *testing.T) {
+		t.Parallel()
+		p := newStoppedSeatPatrol(t, true)
+		corruptKeptSeat(t, p)
+		silentGateway(p)
+
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+
+		items := keptSeatItems(t, p.host.d, p.clk.Now())
+		want := "cannot count gateway tries for " + endRig + "/" + endPolecat + ":"
+		if len(items) != 1 || !strings.Contains(items[0], want) {
+			t.Fatalf("kept-seat items = %v, want one carrying %q", items, want)
+		}
+		if len(p.deleted) != 0 {
+			t.Errorf("sandboxes deleted = %v, want none while the gateway is silent", p.deleted)
+		}
+	})
+
+	t.Run("a write that fails raises the write's error and keeps counting in memory", func(t *testing.T) {
+		t.Parallel()
+		p := newStoppedSeatPatrol(t, true)
+		p.host.keptSeatWrite = func(string, string, string, keptSandboxSeatRecord) error {
+			return errors.New("disk full")
+		}
+		silent := true
+		p.host.sandboxExists = func(string, string) (bool, error) {
+			if silent {
+				return false, errors.New("signal: killed")
+			}
+			return p.sandboxUp, nil
+		}
+
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+		items := keptSeatItems(t, p.host.d, p.clk.Now())
+		if len(items) != 1 || !strings.Contains(items[0], "disk full") {
+			t.Fatalf("kept-seat items after the first silent tick = %v, want one naming the write error", items)
+		}
+		for tick := 2; tick <= 6; tick++ {
+			p.clk.Advance(time.Minute)
+			p.host.patrolScanSandboxRecords()
+		}
+		key := gatewayTallyKey(endRig, endPolecat)
+		if got := p.host.d.gatewayTallySnapshot()[key].tries; got != 6 {
+			t.Errorf("tries held in memory after six silent ticks = %d, want 6", got)
+		}
+		if n := len(keptSeatItems(t, p.host.d, p.clk.Now())); n != 1 {
+			t.Errorf("kept-seat items after six silent ticks = %d, want the same one", n)
+		}
+
+		silent = false
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+
+		if want := []string{session.PolecatSessionName(session.DefaultPrefix, endPolecat)}; !reflect.DeepEqual(p.deleted, want) {
+			t.Fatalf("sandboxes deleted after the answer = %v, want %v", p.deleted, want)
+		}
+		if items := keptSeatItems(t, p.host.d, p.clk.Now()); len(items) != 0 {
+			t.Errorf("kept-seat items after the answer = %v, want none", items)
+		}
+	})
 }

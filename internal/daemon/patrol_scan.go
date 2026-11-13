@@ -416,6 +416,10 @@ type patrolScanHost struct {
 	// (gt-381oj). A seam for the write that fails, which a town's filesystem
 	// need not produce.
 	writePendingSeatEnd func(townRoot, rig, name string, landing sandboxSeatLanding) error
+	// keptSeatWrite is writeKeptSandboxSeat when nil: it records the gateway keep
+	// of a seat, so the tally's alarm is raised when the write fails (gt-7h38pd).
+	// A seam for the write that fails, which a town's filesystem need not produce.
+	keptSeatWrite func(townRoot, rig, name string, rec keptSandboxSeatRecord) error
 	// seatUsage is the seam of the work usage record a sandbox seat's end
 	// writes (sandbox_seat_usage.go). Its zero value reads no transcripts: the
 	// production seat end wires the lister (sandboxSeatEnder).

@@ -385,6 +385,7 @@ func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLan
 // clearKeptSeat forgets the kept record of a seat the end has decided is no
 // longer kept. A removal that fails is logged, and the decision stands.
 func (h *patrolScanHost) clearKeptSeat(rig, name string) {
+	h.d.clearGatewayTally(rig, name)
 	if err := removeKeptSandboxSeat(h.town(), rig, name); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its kept record: %v", rig, name, err)
 	}
@@ -454,6 +455,8 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 			}
 			end.SandboxErrored = failed
 		}
+		// Both questions were answered, so the gateway is no longer silent.
+		h.d.clearGatewayTally(rig, name)
 	}
 	rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
 	if err != nil {

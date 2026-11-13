@@ -105,6 +105,21 @@ func readKeptSandboxSeatRecord(path string) (keptSandboxSeatRecord, error) {
 	return rec, nil
 }
 
+// badKeptSeatKey names the seat whose record path KeptSandboxSeats returned as
+// bad, in gatewayTallyKey form, or "" when the path is not one seat's record.
+func badKeptSeatKey(townRoot, path string) string {
+	rel, err := filepath.Rel(keptSandboxSeatsDir(townRoot), path)
+	if err != nil {
+		return ""
+	}
+	rig, file, ok := strings.Cut(rel, string(filepath.Separator))
+	name, isJSON := strings.CutSuffix(file, ".json")
+	if !ok || !isJSON || strings.ContainsRune(name, filepath.Separator) {
+		return ""
+	}
+	return gatewayTallyKey(rig, name)
+}
+
 // KeptSandboxSeats is the seats the daemon keeps for a reason other than the
 // jev_rules ask under town, read from their records. A record that cannot be
 // read or decoded is returned in bad, by path, never skipped, and so is a rig

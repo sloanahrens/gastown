@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,40 +23,80 @@ const keptSeatAttentionAfter = 30 * time.Minute
 // it. The key is the seat, so a seat raises one item however many ticks it stays
 // kept, and the item clears when the record is gone.
 //
+// A seat whose gateway count cannot be kept in its record (the tally's alarm) is
+// raised at once, naming the alarm, whatever the record says: a record that
+// cannot be read is then no collect failure, since the alarm already raised its
+// seat (gt-7h38pd). A seat whose tally is the only trace of it (its record cannot
+// be read or written) is raised the same way.
+//
 // The record is the only input. A record that cannot be read or decoded, or a
 // store that cannot be listed, fails the collection rather than passing as an
 // empty queue, so the previous tick's items are kept (collectAttention).
 func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attention.Item, error) {
-	seats, bad, err := KeptSandboxSeats(s.d.config.TownRoot)
+	town := s.d.config.TownRoot
+	seats, bad, err := KeptSandboxSeats(town)
 	if err != nil {
 		return nil, err
 	}
-	if len(bad) > 0 {
-		return nil, fmt.Errorf("unreadable kept sandbox seat records: %s", strings.Join(bad, ", "))
-	}
-	var out []attention.Item
-	for _, seat := range seats {
-		kept := s.now.Sub(seat.Since)
-		// A seat whose gateway has stayed silent for the retry limit's ticks is
-		// raised whatever its age (gt-7h38pd).
-		if kept <= keptSeatAttentionAfter && seat.Tries < s.d.gatewayRetryLimit() {
+	tallies := s.d.gatewayTallySnapshot()
+	var unalarmed []string
+	for _, path := range bad {
+		if t, ok := tallies[badKeptSeatKey(town, path)]; ok && t.alarm != "" {
 			continue
 		}
-		bead := seat.Bead
-		if bead == "" {
-			bead = "no recorded bead"
+		unalarmed = append(unalarmed, path)
+	}
+	if len(unalarmed) > 0 {
+		return nil, fmt.Errorf("unreadable kept sandbox seat records: %s", strings.Join(unalarmed, ", "))
+	}
+	limit := s.d.gatewayRetryLimit()
+	var out []attention.Item
+	seen := make(map[string]bool, len(seats))
+	for _, seat := range seats {
+		key := gatewayTallyKey(seat.Rig, seat.Name)
+		seen[key] = true
+		tally := tallies[key]
+		kept := s.now.Sub(seat.Since)
+		// A seat whose gateway has stayed silent for the retry limit's ticks is
+		// raised whatever its age (gt-7h38pd). The tally counts the same ticks
+		// when the record cannot hold the count.
+		if tally.alarm == "" && kept <= keptSeatAttentionAfter && max(seat.Tries, tally.tries) < limit {
+			continue
 		}
-		out = append(out, attention.Item{
-			Key:      "sandbox-seat-kept:" + seat.Rig + "/" + seat.Name,
-			Kind:     attention.KindSandboxSeatKept,
-			Severity: attention.SeverityHigh,
-			Rig:      seat.Rig,
-			Bead:     seat.Bead,
-			Summary: fmt.Sprintf("%s/%s kept %s on %s: %s",
-				seat.Rig, seat.Name, parkedAge(kept), bead, seat.Reason),
-		})
+		reason := seat.Reason
+		if tally.alarm != "" {
+			reason = tally.alarm
+		}
+		out = append(out, keptSeatItem(seat.Rig, seat.Name, seat.Bead, parkedAge(kept), reason))
+	}
+	alarmOnly := make([]string, 0, len(tallies))
+	for key, tally := range tallies {
+		if !seen[key] && tally.alarm != "" {
+			alarmOnly = append(alarmOnly, key)
+		}
+	}
+	sort.Strings(alarmOnly)
+	for _, key := range alarmOnly {
+		rig, name, _ := strings.Cut(key, "/")
+		out = append(out, keptSeatItem(rig, name, "", "with no readable record", tallies[key].alarm))
 	}
 	return out, nil
+}
+
+// keptSeatItem is the kept-seat item of one seat, carrying reason verbatim.
+func keptSeatItem(rig, name, bead, age, reason string) attention.Item {
+	shown := bead
+	if shown == "" {
+		shown = "no recorded bead"
+	}
+	return attention.Item{
+		Key:      "sandbox-seat-kept:" + rig + "/" + name,
+		Kind:     attention.KindSandboxSeatKept,
+		Severity: attention.SeverityHigh,
+		Rig:      rig,
+		Bead:     bead,
+		Summary:  fmt.Sprintf("%s/%s kept %s on %s: %s", rig, name, age, shown, reason),
+	}
 }
 
 // keptSandboxSeatItem picks the kept-seat items out of the kind's previous
