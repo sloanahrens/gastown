@@ -100,7 +100,10 @@ esac
 			if len(gated) != 1 || gated[0] != tc.wantBead {
 				t.Fatalf("gate checked %q, want exactly %s: the submit must check the bead it submits", gated, tc.wantBead)
 			}
-			log, _ := os.ReadFile(logPath)
+			log, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("reading the bd log: %v: without it the no-write check passes vacuously", err)
+			}
 			if strings.Contains(string(log), "ready-to-land") || strings.Contains(string(log), "update "+tc.wantBead) {
 				t.Errorf("a refused submit wrote the work bead; bd calls:\n%s", log)
 			}
