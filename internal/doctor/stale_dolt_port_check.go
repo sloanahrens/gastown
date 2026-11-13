@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,13 +121,16 @@ func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
+	// Every file is tried: one unparseable metadata.json is reported but does
+	// not stop the key coming out of the others (gt-49f3pn).
+	var errs []error
 	for _, metaFile := range c.findMetadataFiles(ctx.TownRoot) {
 		if err := c.removeDeprecatedPort(metaFile); err != nil {
-			return fmt.Errorf("could not fix metadata.json %s: %w", metaFile, err)
+			errs = append(errs, fmt.Errorf("could not fix metadata.json %s: %w", metaFile, err))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // getCorrectPort returns the town's Dolt port from the config resolver

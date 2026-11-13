@@ -139,6 +139,41 @@ func TestStaleDoltPortCheck_FixReportsAnUnreadableMetadata(t *testing.T) {
 	}
 }
 
+// TestStaleDoltPortCheck_FixContinuesPastAnUnreadableMetadata verifies that an
+// unparseable metadata.json elsewhere in the town is reported but does not stop
+// Fix from removing the deprecated key from the other files (gt-49f3pn).
+func TestStaleDoltPortCheck_FixContinuesPastAnUnreadableMetadata(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  port: 3307\n")
+	// The town's own metadata.json is visited first, so it is the file that
+	// used to stop the loop before the rig's file was reached.
+	const broken = `{"dolt_server_port":`
+	brokenFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", broken)
+	carrying := writeDoctorTownFile(t, tmpDir, "zzz/.beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3306,"dolt_database":"rig"}`)
+	writeDoctorTownFile(t, tmpDir, "mayor/rigs.json", `{"version":1,"rigs":{"zzz":{"git_url":"https://example.com/zzz","beads":{"prefix":"zz"}}}}`)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	err := check.Fix(ctx)
+	if err == nil || !strings.Contains(err.Error(), brokenFile) {
+		t.Fatalf("Fix() error = %v, want an error naming %s", err, brokenFile)
+	}
+
+	data, readErr := os.ReadFile(carrying)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "dolt_server_port") {
+		t.Errorf("Fix stopped at the unreadable file: the key survived in %s: %s", carrying, data)
+	}
+	if !strings.Contains(string(data), `"dolt_database": "rig"`) {
+		t.Errorf("Fix dropped other fields: %s", data)
+	}
+}
+
 // TestStaleDoltPortCheck_FixRemovesTheKeyAndStalePort verifies that Fix() removes
 // a stale port file and the deprecated key, and that the town is then consistent.
 func TestStaleDoltPortCheck_FixRemovesTheKeyAndStalePort(t *testing.T) {
