@@ -66,6 +66,9 @@ func TestOpenShellPrepareGivesUpOnAnUnschedulablePodAtTheBound(t *testing.T) {
 	if !strings.Contains(err.Error(), "Insufficient memory") {
 		t.Errorf("err = %v, want the scheduler's message in it", err)
 	}
+	if !errors.Is(err, ErrSandboxUnplaceable) {
+		t.Errorf("err = %v, want it to match ErrSandboxUnplaceable so the dispatcher defers the bead", err)
+	}
 	if got := clock.now.Sub(base); got != unschedulableGiveUp {
 		t.Errorf("the wait ended %s after the condition turned, want %s", got, unschedulableGiveUp)
 	}

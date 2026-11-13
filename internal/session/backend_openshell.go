@@ -669,6 +669,13 @@ func (e *imageDriftError) Is(target error) bool { return target == ErrImageDrift
 // work instead of failing it.
 var ErrCacheVolume = errors.New("sandbox cache volume is missing and cannot be created")
 
+// ErrSandboxUnplaceable identifies a sandbox whose pod the scheduler held
+// Unschedulable past unschedulableGiveUp. Like ErrCacheVolume it is a
+// precondition of the sandbox seat, not a fault of the work being started: the
+// placement is released, and an automatic dispatcher defers the bead to the
+// next tick instead of failing it.
+var ErrSandboxUnplaceable = errors.New("sandbox pod cannot be placed: the scheduler has no node with room for it")
+
 // gtLabelSource is where the host's docker read the image's commit.
 const gtLabelSource = "records no gt commit (label " + gtCommitLabel + ")"
 
@@ -1108,6 +1115,8 @@ type sandboxUnschedulableError struct {
 func (e *sandboxUnschedulableError) Error() string {
 	return fmt.Sprintf("sandbox %s unschedulable for %s, giving up its placement: %s", e.Sandbox, e.Waited.Round(time.Second), e.Message)
 }
+
+func (e *sandboxUnschedulableError) Is(target error) bool { return target == ErrSandboxUnplaceable }
 
 // awaitReady polls the sandbox until its Ready condition is True. The pause
 // between polls goes through b.wait, so a test records it instead of sleeping.

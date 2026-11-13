@@ -2723,6 +2723,14 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			entry.Line = fmt.Sprintf("%s: sling deferred, the sandbox cache volume cannot be created: %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
+		// A sandbox pod the scheduler could not place is the seat's precondition
+		// too. The sling's rollback released the placement, so the bead goes back
+		// to the queue for the next tick, and the label this path would add would
+		// hold it out until an operator cleared it (gt-nq3ngd).
+		if errors.Is(err, session.ErrSandboxUnplaceable) {
+			entry.Line = fmt.Sprintf("%s: sling deferred, the sandbox pod could not be placed: %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
 		if isSpecSlingRefusal(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true})
