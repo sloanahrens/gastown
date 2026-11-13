@@ -52,21 +52,7 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 
 // imageBinaryNames is the binaries the image copies from the root of its build
 // context.
-var imageBinaryNames = []string{"gt", "bd", "bdshim", "om", "trackerd", "trackerbackup", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
-
-// imageBinaryDest is the path in the image each of imageBinaryNames is copied
-// to. Every binary lands at /usr/local/bin under its own name but the two halves
-// of bd: the shim is the bd on PATH and the real bd sits beside it as bd.real,
-// which is where the shim looks for it (gt-q68hh2).
-func imageBinaryDest(name string) string {
-	switch name {
-	case "bd":
-		return "/usr/local/bin/bd.real"
-	case "bdshim":
-		return "/usr/local/bin/bd"
-	}
-	return "/usr/local/bin/" + name
-}
+var imageBinaryNames = []string{"gt", "bd", "om", "trackerd", "trackerbackup", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
 
 // imageBinaries is the list of the image's binaries, plugin binaries and mango
 // files in b.Out, in the order the Dockerfile copies them from its context.
@@ -234,10 +220,10 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 			}
 		}, want: "is not a file in"},
 		{name: "a binary missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
-			*bins = (*bins)[:3]
+			*bins = (*bins)[:2]
 		}, want: "no om binary"},
 		{name: "the claude CLI missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
-			*bins = (*bins)[:6]
+			*bins = (*bins)[:5]
 		}, want: "no claude binary"},
 		{name: "the mango files missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
 			*bins = (*bins)[:len(*bins)-len(mangoNames)]
@@ -299,41 +285,6 @@ func TestBuildImageRefusesAMissingTrackerdBinary(t *testing.T) {
 	}
 }
 
-// TestBuildImageRefusesAMissingBdshim: the image's bd on PATH is the shim, so a
-// build context without one is refused before docker runs rather than shipped
-// with a bd that cannot route a tracker rig (gt-q68hh2).
-func TestBuildImageRefusesAMissingBdshim(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		breakIt func(t *testing.T, b Builder, bins []string) []string
-		want    string
-	}{
-		{name: "not on disk", breakIt: func(t *testing.T, b Builder, bins []string) []string {
-			if err := os.Remove(filepath.Join(b.Out, "bdshim")); err != nil {
-				t.Fatalf("removing the bdshim binary: %v", err)
-			}
-			return bins
-		}, want: "is not a file in"},
-		{name: "missing from the list", breakIt: func(_ *testing.T, _ Builder, bins []string) []string {
-			return slices.DeleteFunc(bins, func(p string) bool { return filepath.Base(p) == "bdshim" })
-		}, want: "no bdshim binary"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			b, run := imageBuilder(t)
-			bins := tc.breakIt(t, b, imageBinaries(b))
-			tag, err := b.BuildImage(context.Background(), testRev, bins)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("BuildImage = %q, %v; want an error naming %q", tag, err, tc.want)
-			}
-			if len(run.calls) != 0 {
-				t.Errorf("a refused image ran %d docker calls, want none", len(run.calls))
-			}
-		})
-	}
-}
-
 // TestDaemonDockerfileCopiesTrackerdBinaries: the image ships trackerd and
 // trackerbackup at /usr/local/bin by one COPY of mode 0755 each from the build
 // context, beside the gt COPY.
@@ -355,43 +306,6 @@ func TestDaemonDockerfileCopiesTrackerdBinaries(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("%s copies trackerd and trackerbackup as %q, want %q", DockerfilePath, got, want)
-	}
-}
-
-// TestDockerfileInstallsShimAsBdAndRealAsBdReal: the image's bd on PATH is the
-// shim, copied to /usr/local/bin/bd, and the real bd is copied beside it to
-// /usr/local/bin/bd.real, which is where the shim looks for it. No other
-// instruction names either path, so nothing shadows the shim (gt-q68hh2).
-func TestDockerfileInstallsShimAsBdAndRealAsBdReal(t *testing.T) {
-	t.Parallel()
-	var got []string
-	writers := map[string]int{}
-	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
-		for _, arg := range in.args {
-			if arg == "/usr/local/bin/bd" || arg == "/usr/local/bin/bd.real" {
-				writers[arg]++
-			}
-		}
-		if in.cmd != "COPY" {
-			continue
-		}
-		_, src, _ := copyOperands(in.args)
-		if src == "bdshim" || src == "bd" {
-			got = append(got, in.cmd+" "+strings.Join(in.args, " "))
-		}
-	}
-	want := []string{
-		"COPY --chmod=0755 bd /usr/local/bin/bd.real",
-		"COPY --chmod=0755 bdshim /usr/local/bin/bd",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("%s copies the real bd and the shim as %q, want %q", DockerfilePath, got, want)
-	}
-	if n := writers["/usr/local/bin/bd"]; n != 1 {
-		t.Errorf("%s names /usr/local/bin/bd in %d words, want the one COPY of the shim", DockerfilePath, n)
-	}
-	if n := writers["/usr/local/bin/bd.real"]; n != 1 {
-		t.Errorf("%s names /usr/local/bin/bd.real in %d words, want the one COPY of the real bd", DockerfilePath, n)
 	}
 }
 
@@ -590,13 +504,12 @@ func gitConfigGlobal(in dockerfileInstruction) (key, value string, ok bool) {
 
 // TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of three
 // kinds. The Dolt client is copied from the dolt stage, and nothing else is.
-// Each of the image binaries (imageBinaryNames) is copied from the build
-// context by its bare name to the path imageBinaryDest names, once each; each
-// plugin binary is copied from its plugin directory to the image's plugin
-// directory, once each; and each of mangoNames is copied from mango/ to
-// /usr/local/lib/gt/mango, once each. A COPY from any other source, or a second
-// copy of a name, fails, so the image cannot ship a binary the deployer did not
-// build or fetch, or miss one it did.
+// Each of the image binaries (imageBinaryNames) is copied from the build context
+// by its bare name to /usr/local/bin, once each; each plugin binary is copied
+// from its plugin directory to the image's plugin directory, once each; and each
+// of mangoNames is copied from mango/ to /usr/local/lib/gt/mango, once each. A
+// COPY from any other source, or a second copy of a name, fails, so the image
+// cannot ship a binary the deployer did not build or fetch, or miss one it did.
 func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	t.Parallel()
 	wantOther := map[string]string{}
@@ -625,8 +538,8 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 				t.Errorf("%s COPY %q reads %q from the build context; want one of the image's binaries by its bare name to /usr/local/bin, a plugin's binary to the image's plugin directory, or a mango file to /usr/local/lib/gt/mango", DockerfilePath, in.args, src)
 				continue
 			}
-			if want := imageBinaryDest(src); dst != want {
-				t.Errorf("%s COPY %q reads %s to %q; want it to %s", DockerfilePath, in.args, src, dst, want)
+			if dst != "/usr/local/bin/"+src {
+				t.Errorf("%s COPY %q reads %s to %q; want it to /usr/local/bin/%s", DockerfilePath, in.args, src, dst, src)
 				continue
 			}
 			contextCopies[src]++

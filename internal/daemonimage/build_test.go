@@ -188,7 +188,7 @@ func builderFor(t *testing.T) (Builder, *fakeRunner) {
 	return validBuilder(run, t.TempDir()), run
 }
 
-func TestBuildBinariesReturnsTheSixPathsUnderOut(t *testing.T) {
+func TestBuildBinariesReturnsTheFivePathsUnderOut(t *testing.T) {
 	t.Parallel()
 	b, _ := builderFor(t)
 	paths, err := b.BuildBinaries(context.Background(), testRev)
@@ -198,7 +198,6 @@ func TestBuildBinariesReturnsTheSixPathsUnderOut(t *testing.T) {
 	want := []string{
 		filepath.Join(b.Out, "gt"),
 		filepath.Join(b.Out, "bd"),
-		filepath.Join(b.Out, "bdshim"),
 		filepath.Join(b.Out, "om"),
 		filepath.Join(b.Out, "trackerd"),
 		filepath.Join(b.Out, "trackerbackup"),
@@ -216,7 +215,7 @@ func TestBuildBinariesReturnsTheSixPathsUnderOut(t *testing.T) {
 		t.Fatalf("reading the output directory: %v", err)
 	}
 	if got := len(entries); got != len(want) {
-		t.Errorf("the output directory holds %d entries after a build, want the six binaries only", got)
+		t.Errorf("the output directory holds %d entries after a build, want the five binaries only", got)
 	}
 }
 
@@ -226,8 +225,8 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	names := []string{"gt", "bd", "bdshim", "om", "trackerd", "trackerbackup"}
-	pkgs := []string{GTPackage, BDPackage, BdshimPackage, OMPackage, TrackerdPackage, TrackerbackupPackage}
+	names := []string{"gt", "bd", "om", "trackerd", "trackerbackup"}
+	pkgs := []string{GTPackage, BDPackage, OMPackage, TrackerdPackage, TrackerbackupPackage}
 	if len(run.calls) != len(names) {
 		t.Fatalf("recorded %d builds, want %d", len(run.calls), len(names))
 	}
@@ -256,7 +255,6 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 	want := []worktreeAdd{
 		{src: b.GTSrc, commit: testRev},
 		{src: b.BDSrc, commit: testBDCommit},
-		{src: b.GTSrc, commit: testRev},
 		{src: b.OMSrc, commit: testOMCommit},
 		{src: b.GTSrc, commit: testRev},
 		{src: b.GTSrc, commit: testRev},
@@ -519,97 +517,8 @@ func TestBuildBinariesBdAndOmStampsUnchanged(t *testing.T) {
 	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
 		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
 	}
-	if got := ldflagsOf(run.calls[3].argv); len(got) != 0 {
+	if got := ldflagsOf(run.calls[2].argv); len(got) != 0 {
 		t.Errorf("om build ldflags = %q, want none", got)
-	}
-}
-
-// TestBuildShipsTheBdShimAsBd: the build compiles cmd/bdshim from the gt
-// checkout at the gt commit as a linux/arm64 binary, stamps it with the same
-// build id as the real bd, and stages it in the build context beside bd under a
-// name of its own, so the Dockerfile can install the shim as bd and the real bd
-// as bd.real (gt-q68hh2). The plan names the shim build with the argv the build
-// runs.
-func TestBuildShipsTheBdShimAsBd(t *testing.T) {
-	t.Parallel()
-	b, run := builderFor(t)
-	paths, err := b.BuildBinaries(context.Background(), testRev)
-	if err != nil {
-		t.Fatalf("BuildBinaries: %v", err)
-	}
-
-	// The shim and the real bd land under two names in the build context.
-	real, shim := filepath.Join(b.Out, "bd"), filepath.Join(b.Out, "bdshim")
-	for _, p := range []string{real, shim} {
-		if info, statErr := os.Stat(p); statErr != nil || !info.Mode().IsRegular() {
-			t.Fatalf("the build context holds no %s binary: %v", filepath.Base(p), statErr)
-		}
-	}
-	if paths[1] != real || paths[2] != shim {
-		t.Errorf("BuildBinaries paths = %q, want the real bd at %s and the shim at %s", paths, real, shim)
-	}
-
-	// The shim is a compile of ./cmd/bdshim in a worktree of the gt checkout at
-	// the gt commit, cross-compiled like every other binary.
-	call := run.calls[2]
-	if got := call.argv[len(call.argv)-1]; got != BdshimPackage {
-		t.Errorf("the shim build compiles %q, want %s", got, BdshimPackage)
-	}
-	if add := run.adds[2]; add.src != b.GTSrc || add.commit != testRev {
-		t.Errorf("the shim worktree = checkout %s at %s, want the gt checkout %s at %s", add.src, add.commit, b.GTSrc, testRev)
-	}
-	for _, want := range []string{"GOOS=linux", "GOARCH=arm64"} {
-		if !contains(call.env, want) {
-			t.Errorf("the shim build env = %q, want %s among them", call.env, want)
-		}
-	}
-
-	// The shim carries bd's build id, both halves, not one of its own.
-	wantFlags := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit}
-	if got := ldflagsOf(call.argv); !reflect.DeepEqual(got, wantFlags) {
-		t.Errorf("the shim build ldflags = %q, want bd's %q", got, wantFlags)
-	}
-	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, wantFlags) {
-		t.Errorf("the real bd's ldflags = %q, want %q", got, wantFlags)
-	}
-
-	// git was asked for the build id once, in bd's worktree: the shim reuses it
-	// rather than reading a second one its own worktree cannot answer.
-	if len(run.shortDirs) != 1 || run.shortDirs[0] != run.adds[1].dir {
-		t.Errorf("git was asked for the build id in %q, want once in bd's worktree %q", run.shortDirs, run.adds[1].dir)
-	}
-
-	// The plan names the shim build with the argv the build runs.
-	pb := planBuilder(t)
-	lines, err := pb.Plan(testRev)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	want := "build bdshim: go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(pb.Out, "bdshim") + " " + BdshimPackage
-	for _, line := range lines {
-		if strings.HasPrefix(line, "build bdshim: ") {
-			if !strings.HasPrefix(line, want) {
-				t.Errorf("plan line = %q, want it to start %q", line, want)
-			}
-			return
-		}
-	}
-	t.Fatalf("plan has no build bdshim: line:\n%s", strings.Join(lines, "\n"))
-}
-
-// TestBuildRefusesAStampWithNoBuildIDToTake: a build stamped with another
-// build's id is refused when no earlier build of the call recorded one, rather
-// than compiled with an empty main.Build that names no commit (gt-q68hh2).
-func TestBuildRefusesAStampWithNoBuildIDToTake(t *testing.T) {
-	t.Parallel()
-	b, run := builderFor(t)
-	shim := binary{name: "bdshim", src: b.GTSrc, commit: testRev, pkg: BdshimPackage, buildIDFrom: "bd"}
-	_, err := b.build(context.Background(), shim, t.TempDir(), bdbuild.Env(b.Environ), nil)
-	if err == nil || !strings.Contains(err.Error(), "no build id from the bd build") {
-		t.Fatalf("build = %v, want an error naming the missing bd build id", err)
-	}
-	if len(run.calls) != 0 {
-		t.Errorf("a refused stamp ran %d builds, want none", len(run.calls))
 	}
 }
 
@@ -699,7 +608,6 @@ func TestBuildBinariesFailsWithoutLeavingPartialOutput(t *testing.T) {
 	for _, tc := range []struct{ name, pkg string }{
 		{"gt", GTPackage},
 		{"bd", BDPackage},
-		{"bdshim", BdshimPackage},
 		{"om", OMPackage},
 		{"trackerd", TrackerdPackage},
 		{"trackerbackup", TrackerbackupPackage},
