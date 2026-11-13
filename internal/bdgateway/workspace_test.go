@@ -99,6 +99,7 @@ func siblingNames(t *testing.T, root string) []string {
 // TestWorkspaceValidation drives every refusal a push makes and checks that a
 // refused document leaves the live tree and its manifest exactly as they were.
 func TestWorkspaceValidation(t *testing.T) {
+	t.Parallel()
 	base := testWorkspaceFiles("one")
 	cases := []struct {
 		name     string
@@ -270,6 +271,7 @@ func TestWorkspaceValidation(t *testing.T) {
 // TestWorkspaceAtomicSwap checks that a push replaces the whole tree and that a
 // failure part-way leaves the previous tree readable and served.
 func TestWorkspaceAtomicSwap(t *testing.T) {
+	t.Parallel()
 	first := testWorkspaceFiles("one")
 
 	t.Run("a push replaces the whole tree", func(t *testing.T) {
@@ -472,6 +474,7 @@ const suffixOld = ".old"
 // TestWorkspaceManifestHeader checks the manifest hash's two jobs: it follows
 // the content exactly, and every answer names the live tree's hash.
 func TestWorkspaceManifestHeader(t *testing.T) {
+	t.Parallel()
 	s, root := openTestStore(t)
 	first := testWorkspaceFiles("one")
 	want := WorkspaceManifest(first)
@@ -545,6 +548,7 @@ func TestWorkspaceManifestHeader(t *testing.T) {
 // header on success and on every refusal, the statuses a bad request gets, and
 // that a store failure is never reported as a successful push.
 func TestWorkspaceHandler(t *testing.T) {
+	t.Parallel()
 	body := func(t *testing.T, files map[string]string) string {
 		t.Helper()
 		encoded, err := json.Marshal(files)
@@ -657,6 +661,7 @@ func TestWorkspaceHandler(t *testing.T) {
 // missing root is empty, and a tree it would not have written is refused rather
 // than hashed and served.
 func TestOpenWorkspaceStore(t *testing.T) {
+	t.Parallel()
 	t.Run("a missing root is an empty workspace", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
 		s, err := OpenWorkspaceStore(root)
