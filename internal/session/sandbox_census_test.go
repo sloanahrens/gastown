@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -49,19 +50,22 @@ func seatNames(n int) []string {
 	return names
 }
 
-// listingOf is the `sandbox list` table of rows: sandbox name to phase.
+// listingOf is the `sandbox list -o json` reply of rows: sandbox name to phase.
 func listingOf(rows map[string]string) string {
 	names := make([]string, 0, len(rows))
 	for name := range rows {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var b strings.Builder
-	b.WriteString("NAME            CREATED              PHASE\n")
+	sandboxes := make([]map[string]string, 0, len(names))
 	for _, name := range names {
-		fmt.Fprintf(&b, "%-15s 2026-11-13 09:00:00  %s\n", name, rows[name])
+		sandboxes = append(sandboxes, map[string]string{"name": name, "phase": rows[name]})
 	}
-	return b.String()
+	b, err := json.Marshal(map[string]any{"sandboxes": sandboxes})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 // seatProbes counts the probes a test makes per verb.

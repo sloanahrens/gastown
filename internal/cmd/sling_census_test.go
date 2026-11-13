@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,7 +74,7 @@ func TestSlingCensusIsSharedBySeatDecisionAndAdmission(t *testing.T) {
 	const seats = 4
 	env := map[string]map[string]string{}
 	created := map[string]time.Time{}
-	rows := []string{}
+	sandboxes := []map[string]string{}
 	for i := 0; i < seats; i++ {
 		name := fmt.Sprintf("gt-gastown-p%d", i)
 		if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: name, Rig: "gastown", Polecat: fmt.Sprintf("p%d", i), Gateway: "gw"}); err != nil {
@@ -81,10 +82,13 @@ func TestSlingCensusIsSharedBySeatDecisionAndAdmission(t *testing.T) {
 		}
 		env[name] = map[string]string{"GT_ROLE": fmt.Sprintf("gastown/polecats/p%d", i)}
 		created[name] = poolTestNow.Add(-time.Hour)
-		rows = append(rows, fmt.Sprintf("%-18s 2026-11-13 09:00:00  Ready", name))
+		sandboxes = append(sandboxes, map[string]string{"name": name, "phase": "Ready"})
 	}
-	listing := "NAME               CREATED              PHASE\n" + strings.Join(rows, "\n") + "\n"
-	gateway := &sandbox.Fake{Reply: map[string]string{"list": listing}}
+	listing, err := json.Marshal(map[string]any{"sandboxes": sandboxes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &sandbox.Fake{Reply: map[string]string{"list": string(listing)}}
 	t.Cleanup(session.BeginSandboxCensus(gateway.Runner()))
 
 	lister := &countingSeatLister{fakeLister: fakeLister{sessions: env, created: created}}

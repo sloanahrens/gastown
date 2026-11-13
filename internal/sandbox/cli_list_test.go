@@ -4,33 +4,47 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-// listTable is a `sandbox list` page in the shape the NAME header and the
-// PHASE column give it. The CREATED cell holds spaces, so PHASE is only found
-// by its column.
-const listTable = `NAME          CREATED              PHASE
-gt-r-alpha    2026-11-12 09:14:02  Ready
-gt-r-beta     2026-11-12 09:20:44  Provisioning
-`
+// wireSandbox and wireList are the `sandbox list -o json` reply, written the
+// way the gateway writes it.
+type wireSandbox struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+}
+
+type wireList struct {
+	NextPageToken string        `json:"next_page_token,omitempty"`
+	Sandboxes     []wireSandbox `json:"sandboxes"`
+}
+
+// listReply is one page of rows and the token that follows it, "" on the last.
+func listReply(token string, rows ...wireSandbox) string {
+	if rows == nil {
+		rows = []wireSandbox{}
+	}
+	b, err := json.Marshal(wireList{NextPageToken: token, Sandboxes: rows})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
 
 // fullPage is a listPageSize page of Ready rows named by index, followed by the
 // continuation token.
 func fullPage(from int, token string) string {
-	var b strings.Builder
-	b.WriteString("NAME          CREATED              PHASE\n")
+	rows := make([]wireSandbox, 0, listPageSize)
 	for i := 0; i < listPageSize; i++ {
-		fmt.Fprintf(&b, "gt-r-%03d     2026-11-12 09:14:02  Ready\n", from+i)
+		rows = append(rows, wireSandbox{Name: fmt.Sprintf("gt-r-%03d", from+i), Phase: "Ready"})
 	}
-	if token != "" {
-		b.WriteString(listTokenPrefix + " " + token + "\n")
-	}
-	return b.String()
+	return listReply(token, rows...)
 }
 
 // pagedRunner answers each `sandbox list` call from pages, keyed by the
@@ -56,16 +70,34 @@ func pagedRunner(pages map[string]string, seen *[]string) Runner {
 func TestCLIList(t *testing.T) {
 	t.Parallel()
 
-	t.Run("parses names and phases from a captured table", func(t *testing.T) {
+	t.Run("parses names and phases from a captured two-page listing", func(t *testing.T) {
 		t.Parallel()
-		cli := &CLI{Gateway: "openshell", Run: pagedRunner(map[string]string{"": listTable}, new([]string))}
-		got, err := cli.List(context.Background())
+		// The two pages are what `openshell -g k8s sandbox list --page-size 2
+		// -o json` printed against the live gateway: page one carries a token,
+		// page two does not.
+		page1, err := os.ReadFile("testdata/sandbox_list_page1.json")
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []Entry{{Name: "gt-r-alpha", Phase: "Ready"}, {Name: "gt-r-beta", Phase: "Provisioning"}}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("List = %v, want %v", got, want)
+		page2, err := os.ReadFile("testdata/sandbox_list_page2.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got1, token1, err := parseListPage(page1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want1 := []Entry{{Name: "gt-dementus", Phase: "Ready"}, {Name: "gt-furiosa", Phase: "Ready"}}
+		if !reflect.DeepEqual(got1, want1) || token1 != "CAESDUxpc3RTYW5kYm94ZXMaIF3A" {
+			t.Errorf("page one = %v, token %q; want %v, token %q", got1, token1, want1, "CAESDUxpc3RTYW5kYm94ZXMaIF3A")
+		}
+		got2, token2, err := parseListPage(page2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want2 := []Entry{{Name: "gt-slit", Phase: "Ready"}}
+		if !reflect.DeepEqual(got2, want2) || token2 != "" {
+			t.Errorf("page two = %v, token %q; want %v and no token", got2, token2, want2)
 		}
 	})
 
@@ -74,7 +106,7 @@ func TestCLIList(t *testing.T) {
 		var seen []string
 		pages := map[string]string{
 			"":      fullPage(0, "tok-2"),
-			"tok-2": listTable,
+			"tok-2": listReply("", wireSandbox{Name: "gt-r-alpha", Phase: "Ready"}, wireSandbox{Name: "gt-r-beta", Phase: "Provisioning"}),
 		}
 		cli := &CLI{Gateway: "openshell", Run: pagedRunner(pages, &seen)}
 		got, err := cli.List(context.Background())
@@ -87,19 +119,22 @@ func TestCLIList(t *testing.T) {
 		if got[0].Name != "gt-r-000" || got[listPageSize].Name != "gt-r-alpha" {
 			t.Errorf("entries out of order across the page boundary: first %v, first of page two %v", got[0], got[listPageSize])
 		}
+		if got[listPageSize+1] != (Entry{Name: "gt-r-beta", Phase: "Provisioning"}) {
+			t.Errorf("last entry = %v, want gt-r-beta in Provisioning", got[listPageSize+1])
+		}
 		if want := []string{"", "tok-2"}; !reflect.DeepEqual(seen, want) {
 			t.Errorf("page tokens asked = %q, want %q", seen, want)
 		}
 	})
 
-	t.Run("sends the page size with every call", func(t *testing.T) {
+	t.Run("sends the page size and the json output with every call", func(t *testing.T) {
 		t.Parallel()
 		cli, f := newFakeCLI()
-		f.Reply = map[string]string{"list": listTable}
+		f.Reply = map[string]string{"list": listReply("")}
 		if _, err := cli.List(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "list", "--page-size", "100")
+		wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "list", "--page-size", "100", "--output", "json")
 	})
 
 	t.Run("a failed command is an error, not an empty list", func(t *testing.T) {
@@ -121,7 +156,7 @@ func TestCLIList(t *testing.T) {
 
 	t.Run("no sandboxes is an empty list", func(t *testing.T) {
 		t.Parallel()
-		cli := &CLI{Gateway: "openshell", Run: (&Fake{Reply: map[string]string{"list": "No sandboxes found.\n"}}).Runner()}
+		cli := &CLI{Gateway: "openshell", Run: (&Fake{Reply: map[string]string{"list": listReply("")}}).Runner()}
 		got, err := cli.List(context.Background())
 		if err != nil || len(got) != 0 {
 			t.Fatalf("List = %v, %v; want no rows and no error", got, err)
@@ -135,10 +170,12 @@ func TestCLIList(t *testing.T) {
 		msg string
 	}{
 		{"full page with no continuation token", fullPage(0, ""), "no continuation token"},
-		{"output with no NAME header", "gt-r-alpha  2026-11-12  Ready\n", ""},
-		{"header with no PHASE column", "NAME  CREATED\ngt-r-alpha  2026-11-12\n", ""},
-		{"row with no phase cell", "NAME          CREATED              PHASE\ngt-r-alpha    2026-11-12 09:14:02\n", ""},
+		{"output that is the table form, not JSON", "NAME          CREATED              PHASE\ngt-r-alpha    2026-11-12 09:14:02  Ready\n", ""},
 		{"empty output", "", ""},
+		{"page with no sandboxes field", `{"next_page_token":""}`, "no sandboxes field"},
+		{"page with null sandboxes", `{"sandboxes":null}`, "no sandboxes field"},
+		{"row with no phase", `{"sandboxes":[{"name":"gt-r-alpha"}]}`, "no name or phase"},
+		{"row with no name", `{"sandboxes":[{"phase":"Ready"}]}`, "no name or phase"},
 	}
 	for _, tc := range refusals {
 		t.Run("refuses "+tc.name, func(t *testing.T) {
