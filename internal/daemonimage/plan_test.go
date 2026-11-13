@@ -106,6 +106,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
 		{"build trackerd: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
+		{"build trackerbackup: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerbackup") + " " + TrackerbackupPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build town-metrics: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build hm: ", "go build -trimpath -o " + filepath.Join(b.Out, "hm") + " " + HMPackage + "   (clean worktree of /src/hm at " + testHMCommit + ")"},
@@ -158,9 +159,10 @@ func TestPlanShowsTheShortCommitStamp(t *testing.T) {
 	t.Fatalf("plan has no build gt: line:\n%s", strings.Join(lines, "\n"))
 }
 
-// TestPlanNamesTheTrackerdBuild: the plan names the trackerd build after the om
-// build and before the plugin builds, in the order the builds run.
-func TestPlanNamesTheTrackerdBuild(t *testing.T) {
+// TestPlanNamesTheTrackerdBuilds: the plan names the trackerd and trackerbackup
+// builds after the om build and before the plugin builds, in the order the
+// builds run.
+func TestPlanNamesTheTrackerdBuilds(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
 	lines, err := b.Plan(testRev)
@@ -183,8 +185,15 @@ func TestPlanNamesTheTrackerdBuild(t *testing.T) {
 	if trackerd <= om {
 		t.Errorf("the build trackerd: line is at %d, want it after build om: at %d", trackerd, om)
 	}
-	if app := at("build app-promote: "); app <= trackerd {
-		t.Errorf("the build app-promote: line is at %d, want it after the build trackerd: line at %d", app, trackerd)
+	backup := at("build trackerbackup: ")
+	if backup < 0 {
+		t.Fatalf("plan has no build trackerbackup: line:\n%s", strings.Join(lines, "\n"))
+	}
+	if backup <= trackerd {
+		t.Errorf("the build trackerbackup: line is at %d, want it after build trackerd: at %d", backup, trackerd)
+	}
+	if app := at("build app-promote: "); app <= backup {
+		t.Errorf("the build app-promote: line is at %d, want it after the build trackerbackup: line at %d", app, backup)
 	}
 }
 
