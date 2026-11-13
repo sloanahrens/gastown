@@ -1,6 +1,7 @@
 package land
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -46,6 +47,54 @@ func TestLocalRoundBoundTwoPerDay(t *testing.T) {
 	}
 	if _, err := b.Allow("gt-aaa"); !errors.Is(err, ErrLocalRoundBound) {
 		t.Fatalf("next-day third Allow(gt-aaa) err = %v, want ErrLocalRoundBound", err)
+	}
+}
+
+// TestLocalRoundBoundClockSetBackKeepsTheCount: a clock set back to an earlier
+// day does not clear the count. The file keeps its later day and its count, the
+// third call on the earlier day is refused, and alternating between the two days
+// never grants a fourth round.
+func TestLocalRoundBoundClockSetBackKeepsTheCount(t *testing.T) {
+	t.Parallel()
+	dayZero := time.Date(2026, 11, 13, 9, 0, 0, 0, time.Local)
+	dayOne := time.Date(2026, 11, 14, 9, 0, 0, 0, time.Local)
+	clock := &fakeDayClock{at: dayOne}
+	dir := t.TempDir()
+	b := Bound{Dir: dir, Now: clock.now}
+	path := filepath.Join(dir, "gt-aaa.json")
+
+	for want := 1; want <= 2; want++ {
+		n, err := b.Allow("gt-aaa")
+		if err != nil || n != want {
+			t.Fatalf("day-one Allow(gt-aaa) call %d = (%d, %v), want (%d, nil)", want, n, err, want)
+		}
+	}
+
+	clock.at = dayZero
+	if n, err := b.Allow("gt-aaa"); !errors.Is(err, ErrLocalRoundBound) {
+		t.Fatalf("set-back Allow(gt-aaa) = (%d, %v), want ErrLocalRoundBound", n, err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st localRoundState
+	if err := json.Unmarshal(body, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Day != "2026-11-14" || st.Count != 2 {
+		t.Fatalf("state after set-back = %+v, want day 2026-11-14 count 2", st)
+	}
+
+	for i := range 4 {
+		clock.at = dayZero
+		if _, err := b.Allow("gt-aaa"); !errors.Is(err, ErrLocalRoundBound) {
+			t.Fatalf("alternation %d on day zero granted a round: err = %v", i, err)
+		}
+		clock.at = dayOne
+		if _, err := b.Allow("gt-aaa"); !errors.Is(err, ErrLocalRoundBound) {
+			t.Fatalf("alternation %d on day one granted a round: err = %v", i, err)
+		}
 	}
 }
 

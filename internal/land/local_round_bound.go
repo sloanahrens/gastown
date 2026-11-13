@@ -70,7 +70,9 @@ func (b Bound) Allow(bead string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if st.Day != day {
+	// Only a later day restarts the count. A stored day after today means the
+	// clock was set back: the file's own day and count stand, so the bound holds.
+	if st.Day < day {
 		st = localRoundState{Bead: bead, Day: day}
 	}
 	if st.Count >= localRoundsPerDay {
