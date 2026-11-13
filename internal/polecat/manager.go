@@ -190,6 +190,9 @@ type Manager struct {
 	// typed-nil *tmux.Tmux here, so the nil checks below stay meaningful.
 	tmux     sessionProbe
 	townRoot string // Computed once at construction; used by agentBeadID for deterministic IDs
+	// agentMemo is the agent beads one sling's reuse step has read, open only
+	// between ShareAgentBeadReads and its end func; nil reads bd every time.
+	agentMemo *agentBeadMemo
 	// spawnGraceWindow is the window a dispatched-but-not-yet-live polecat is
 	// read as spawning rather than stalled (see SpawnGrace). Resolved once at
 	// construction from the town's witness thresholds.
@@ -2416,6 +2419,9 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		return nil, err
 	}
 	defer func() { _ = fl.Unlock() }()
+	// The reuse writes this seat's agent bead (createAgentBeadWithRetry below),
+	// so no read of it later in the sling may come from the memo.
+	defer m.forgetAgentBead(m.agentBeadID(name))
 
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
@@ -3385,7 +3391,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	agentID := m.agentBeadID(name)
 	activeMR := ""
 	sourceHint := ""
-	_, fields, err := beads.GetAgentBead(m.agentBeads(), agentID)
+	_, fields, err := m.readAgentBead(agentID)
 	if err != nil {
 		facts.GitCheckFailed = true
 	}
@@ -4037,7 +4043,7 @@ func (m *Manager) lookupAgentBead(agentID string, batch *beadsBatch) (*beads.Iss
 		fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 		return issue, fields, nil
 	}
-	return beads.GetAgentBead(m.agentBeads(), agentID)
+	return m.readAgentBead(agentID)
 }
 
 // lookupAssignedIssue returns GetAssignedIssue's result for assignee,
