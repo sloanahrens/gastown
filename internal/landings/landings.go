@@ -48,6 +48,10 @@ type Record struct {
 	// from the bead when it landed; a record written before the field existed
 	// leaves it nil (gt-tnml1k).
 	Priority *int `json:"priority,omitempty"`
+	// SPEstimate is the landed bead's sp: estimate, as the landing worker read
+	// it from the bead when it landed; a record written before the field
+	// existed, or a bead with no estimate, leaves it nil (gt-cdhagm).
+	SPEstimate *int `json:"sp_estimate,omitempty"`
 	// PolecatSecs, PolecatAttempts and the two bound flags are the time the
 	// bead's polecat seats spent hooked on it, as the landing worker read them
 	// from the spans log; a crew landing, and a record written before the

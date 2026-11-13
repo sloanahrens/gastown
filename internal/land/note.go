@@ -588,6 +588,10 @@ type LandingRecord struct {
 	// worker. It is written to the landings file only: a landing whose bead
 	// read failed leaves it nil, and the landing stands (gt-tnml1k).
 	Priority *int `json:"priority,omitempty"`
+	// SPEstimate is the landed bead's sp: estimate, read from the bead by the
+	// landing worker. It is written to the landings file only: a bead with no
+	// estimate, or a read that failed, leaves it nil (gt-cdhagm).
+	SPEstimate *int `json:"sp_estimate,omitempty"`
 	// PolecatSecs, PolecatAttempts and the two bound flags are the time the
 	// bead's polecat seats spent hooked on it, read from the spans log when
 	// the record is written (Append). A crew landing has no seat and a bead

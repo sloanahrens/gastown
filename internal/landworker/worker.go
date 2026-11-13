@@ -676,7 +676,9 @@ func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {
 	// The record being finished already names the agent its landing ran on,
 	// so the repair writes it back rather than asking the agent bead again,
 	// which a seat reset since may answer differently (gt-mukgk.6).
-	work := land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Agent: rec.Agent}
+	// The repair rewrites the record from this work, so the estimate the record
+	// holds is carried too, or the repair would drop it (gt-cdhagm).
+	work := land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Agent: rec.Agent, SPEstimate: rec.SPEstimate}
 	if ready, ok := land.ParseReadyNote(issue.Notes); ok {
 		work.Worker = ready.Worker
 	} else {
@@ -794,6 +796,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	work.Head = tip
 	work.Agent = w.seatAgent(work.Worker)
 	work.Priority = w.beadPriority(issue.ID)
+	work.SPEstimate = w.beadSPEstimate(issue.ID)
 	w.landOne(ctx, work, rep)
 }
 
@@ -918,6 +921,26 @@ func (w *Worker) beadPriority(id string) *int {
 	}
 	p := issue.Priority
 	return &p
+}
+
+// beadSPEstimate is the landed bead's sp: estimate, read from the bead the way
+// beadPriority reads it. A failed read is logged and leaves the estimate nil:
+// the record carries none, and the landing stands. A bead with no estimate, or
+// with two that conflict, has none and is no failure (gt-cdhagm).
+func (w *Worker) beadSPEstimate(id string) *int {
+	issue, err := w.Beads.Show(id)
+	if err != nil {
+		w.logf("%s: reading the bead's sp: estimate: %v; the landing records no estimate", id, err)
+		return nil
+	}
+	if issue == nil {
+		return nil
+	}
+	points, ok := storypoints.EstimateOf(issue.Labels)
+	if !ok {
+		return nil
+	}
+	return &points
 }
 
 // polecatFromAssignee is the polecat name in "<rig>/polecats/<name>".

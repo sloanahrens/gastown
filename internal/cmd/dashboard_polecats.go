@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -281,6 +282,10 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			p.Priority = &pr
 			labels = s.Issue.Labels
 			p.Labels = dashBadgeLabels(labels)
+			// The badge labels drop the estimate, so the seat carries it on its own.
+			if n, ok := storypoints.EstimateOf(labels); ok {
+				p.SPEstimate = &n
+			}
 			// The seat's record of the hook dates the bead for the pane when
 			// the feed has no dispatch line for it (gt-jwmxo).
 			if !s.HookedAt.IsZero() {

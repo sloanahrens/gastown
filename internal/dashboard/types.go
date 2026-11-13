@@ -105,6 +105,10 @@ type Polecat struct {
 
 	Priority *int     `json:"priority,omitempty"`
 	Labels   []string `json:"labels,omitempty"`
+	// SPEstimate is the seat's bead's sp: estimate. The badge labels drop it
+	// from Labels, so it rides its own field; absent when the bead has none
+	// or two that conflict (gt-cdhagm).
+	SPEstimate *int `json:"sp_estimate,omitempty"`
 
 	// Slung is when the seat's bead was dispatched (Hooked, when the dispatch
 	// record dates it) and ElapsedSec is that time read against the hub's
@@ -541,6 +545,16 @@ type LandingRow struct {
 	// landing record. It is nil on a row with no record, or one written before
 	// the landing worker recorded it (gt-tnml1k).
 	Priority *int `json:"priority,omitempty"`
+	// SPEstimate is the landed bead's sp: estimate, from the landing record. It
+	// is nil on a row with no record, or one written before the landing worker
+	// recorded it, or a bead with no estimate (gt-cdhagm).
+	SPEstimate *int `json:"sp_estimate,omitempty"`
+	// SPActual is the points the landing's polecat time earns, by the same
+	// measure as the velocity series (storypoints.Actual). It is nil unless the
+	// time is exact: a lower-bound, an upper-bound or an absent time has none.
+	// It needs no sp: label, so a landing of an unestimated bead has one too
+	// (gt-cdhagm).
+	SPActual *int `json:"sp_actual,omitempty"`
 	// Crew marks a row built on a crew session's branch, landed or still
 	// running: no polecat built it, so the Polecat cell says there is no
 	// polecat time rather than drawing a dash, which would look like missing
