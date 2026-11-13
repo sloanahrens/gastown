@@ -48,6 +48,13 @@ func (s *postLandRunnerSet) set(rig string, r *landworker.PostLandRunner) {
 	s.runners[rig] = r
 }
 
+// get returns the rig's post-land runner, nil when the rig has none.
+func (s *postLandRunnerSet) get(rig string) *landworker.PostLandRunner {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runners[rig]
+}
+
 // sorted returns the rigs' names and runners in name order, so the queue is the
 // same list every tick.
 func (s *postLandRunnerSet) sorted() ([]string, []*landworker.PostLandRunner) {

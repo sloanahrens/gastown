@@ -183,7 +183,7 @@ func (s *Store) Mutate(fn func(*State)) (State, error) {
 // Read returns state.json as it stands on disk, for a process other than the
 // run.
 func (s *Store) Read() (State, error) {
-	path := s.path()
+	path := s.Path()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return State{}, fmt.Errorf("%s: %w", path, ErrNoState)
@@ -229,7 +229,7 @@ func (s *Store) publish(st State) error {
 	if rename == nil {
 		rename = os.Rename
 	}
-	if err := rename(staging, s.path()); err != nil {
+	if err := rename(staging, s.Path()); err != nil {
 		return discardStaging(staging, fmt.Errorf("publish update state: %w", err))
 	}
 	// Adopt only what reached the disk, so a failed publish leaves the
@@ -240,7 +240,9 @@ func (s *Store) publish(st State) error {
 }
 
 // path is state.json inside Dir.
-func (s *Store) path() string {
+// Path is the state file the store reads and writes, so a test corrupts the file
+// through the store and not by its name.
+func (s *Store) Path() string {
 	return filepath.Join(s.Dir, stateFileName)
 }
 

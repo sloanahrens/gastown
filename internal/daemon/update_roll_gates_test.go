@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -39,13 +41,22 @@ func TestUpdateRollHoldsAreLoggedAndCreateNoJob(t *testing.T) {
 	running.Outcome = update.OutcomeRunning
 	running.HeartbeatAt = now.Add(-time.Minute)
 
+	// tipPending is main's tip with a pending verdict that started since: the
+	// roll's gate reads its age on the daemon clock.
+	tipPending := func(r *updateJobRig, since time.Duration) {
+		r.main.st = landworker.MainState{PostLandPending: []landworker.PendingPostLand{
+			{Land: landworker.PostLand{Commit: r.commits[2]}, Context: "ci", Since: now.Add(-since)},
+		}}
+	}
+
 	tests := []struct {
 		name       string
 		state      *update.State
 		active     []string
 		listErr    error
-		red        int
-		redErr     error
+		main       func(r *updateJobRig)
+		noRunner   bool
+		tipExit    int
 		wantCreate bool
 		wantReason string
 	}{
@@ -70,14 +81,50 @@ func TestUpdateRollHoldsAreLoggedAndCreateNoJob(t *testing.T) {
 			wantReason: "inside min_interval",
 		},
 		{
-			name:       "an open red-main bead holds the roll",
-			red:        1,
-			wantReason: "main is red on gastown: 1 open red-main bead(s)",
+			name: "a red tip holds the roll, though no red-main bead names it",
+			main: func(r *updateJobRig) {
+				r.main.st = landworker.MainState{LastRun: r.commits[2], LastGreen: r.commits[1]}
+			},
+			wantReason: "main is red at {tip}; not starting a roll onto it",
 		},
 		{
-			name:       "an unreadable red-main state holds the roll",
-			redErr:     errors.New("bd list failed"),
-			wantReason: "main's red state for gastown cannot be read",
+			name:       "a pending verdict inside the bound passes",
+			main:       func(r *updateJobRig) { tipPending(r, 10*time.Minute) },
+			wantCreate: true,
+			wantReason: "created Job gt-update-",
+		},
+		{
+			name:       "a pending verdict older than the bound holds the roll",
+			main:       func(r *updateJobRig) { tipPending(r, 3*time.Hour) },
+			wantReason: "main's verdict is still pending after 3h0m0s; not starting a roll",
+		},
+		{
+			name: "a shortened pending bound holds a verdict the constant would pass",
+			main: func(r *updateJobRig) {
+				r.d.updateTrigger.pendingVerdictBound = 5 * time.Minute
+				tipPending(r, 10*time.Minute)
+			},
+			wantReason: "main's verdict is still pending after 10m0s",
+		},
+		{
+			name:       "no verdict recorded for the tip holds the roll",
+			main:       func(r *updateJobRig) { r.main.st = landworker.MainState{} },
+			wantReason: "no post-land verdict is recorded for main's tip",
+		},
+		{
+			name:       "an unreadable verdict store holds the roll",
+			main:       func(r *updateJobRig) { r.main.err = errors.New("disk gone") },
+			wantReason: "main's verdict for gastown cannot be read: reading the main state: disk gone",
+		},
+		{
+			name:       "a rig with no post-land runner holds the roll",
+			noRunner:   true,
+			wantReason: "main's verdict for gastown cannot be read: no post-land runner is wired for gastown",
+		},
+		{
+			name:       "a tip origin cannot report holds the roll",
+			tipExit:    128,
+			wantReason: "main's tip for gastown cannot be resolved",
 		},
 		{
 			name:       "every hold clear starts the roll",
@@ -93,7 +140,13 @@ func TestUpdateRollHoldsAreLoggedAndCreateNoJob(t *testing.T) {
 			r.pairFor(t, green, true, true)
 			r.cluster.active = tt.active
 			r.cluster.listErr = tt.listErr
-			r.d.updateTrigger.redMain = func(string) (int, error) { return tt.red, tt.redErr }
+			if tt.main != nil {
+				tt.main(r)
+			}
+			if tt.noRunner {
+				r.d.postLandRunners.set("gastown", nil)
+			}
+			r.remote.exit = tt.tipExit
 			if tt.state != nil {
 				store := update.Store{Dir: update.Dir(r.town)}
 				require.NoError(t, store.Write(*tt.state))
@@ -106,23 +159,8 @@ func TestUpdateRollHoldsAreLoggedAndCreateNoJob(t *testing.T) {
 			} else {
 				assert.Empty(t, r.cluster.calls, "a held roll created a Job")
 			}
-			assert.Contains(t, r.logs.String(), tt.wantReason)
+			// {tip} stands for main's tip, a sha the rig makes at run time.
+			assert.Contains(t, r.logs.String(), strings.ReplaceAll(tt.wantReason, "{tip}", green[:12]))
 		})
 	}
-}
-
-// TestUpdateRollRefusesAnUnwiredRedMainRead holds the red-main read to the
-// refusal the daemon must make when nothing is wired: an unseen main is never
-// read as green.
-func TestUpdateRollRefusesAnUnwiredRedMainRead(t *testing.T) {
-	t.Parallel()
-	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
-	green := r.commits[2]
-	r.pairFor(t, green, true, true)
-	r.d.updateTrigger.redMain = nil
-
-	r.d.triggerUpdate()
-
-	assert.Empty(t, r.cluster.calls, "a roll started with no red-main read wired")
-	assert.Contains(t, r.logs.String(), "no red-main read is wired")
 }

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,9 +93,9 @@ func TestUpdateRolledBackRaisesNothingWhenNoRollbackIsRecorded(t *testing.T) {
 func TestUpdateRolledBackFailsOnAnUnreadableState(t *testing.T) {
 	t.Parallel()
 	d, _, _, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{Enabled: true})
-	dir := update.Dir(d.config.TownRoot)
-	require.NoError(t, os.MkdirAll(dir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0o600))
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	require.NoError(t, os.MkdirAll(store.Dir, 0o700))
+	require.NoError(t, os.WriteFile(store.Path(), []byte("{not json"), 0o600))
 
 	items, err := (&attentionSources{d: d}).collectUpdateRolledBack(context.Background())
 	assert.Error(t, err, "an unreadable state must fail the collection")

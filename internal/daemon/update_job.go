@@ -14,8 +14,8 @@ import (
 
 	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/update"
@@ -111,10 +111,31 @@ func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest [
 	return fmt.Errorf("kubectl create for %s exited %d", name, exit)
 }
 
-// ActiveJobs lists the update's Jobs in the update namespace and names those with
-// neither a succeeded nor a failed pod. A Job with no pod yet has finished neither,
-// so it is active: a hold that reads it as finished would start a second roll over
-// it. kubectl's answer is read by its shape only; its output is not echoed.
+// updateJobCondition is one entry of a Job's status.conditions.
+type updateJobCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+// updateJobFinished reports whether a Job's conditions say it has finished: a
+// Complete or a Failed condition with status True. Pod counts do not say it. A Job
+// with a failed pod keeps starting pods while its backoffLimit allows, so a
+// failed count alone is a roll still in progress.
+func updateJobFinished(conds []updateJobCondition) bool {
+	for _, c := range conds {
+		if (c.Type == "Complete" || c.Type == "Failed") && c.Status == "True" {
+			return true
+		}
+	}
+	return false
+}
+
+// ActiveJobs lists the update's Jobs in the update namespace and names those whose
+// conditions do not yet say they finished (updateJobFinished). A Job with no
+// status, one that is suspended, one with a pod still running and one between
+// retries are all active: a hold that read them as finished would start a second
+// roll over a roll still in progress. kubectl's answer is read by its shape only;
+// its output is not echoed.
 func (k kubectlUpdateJob) ActiveJobs(ctx context.Context) ([]string, error) {
 	out, exit, err := k.run(ctx, "", nil, "kubectl", "get", "jobs",
 		"-n", updatejob.DefaultNamespace, "-l", "app.kubernetes.io/name="+updatejob.Name, "-o", "json")
@@ -130,8 +151,7 @@ func (k kubectlUpdateJob) ActiveJobs(ctx context.Context) ([]string, error) {
 				Name string `json:"name"`
 			} `json:"metadata"`
 			Status struct {
-				Succeeded int `json:"succeeded"`
-				Failed    int `json:"failed"`
+				Conditions []updateJobCondition `json:"conditions"`
 			} `json:"status"`
 		} `json:"items"`
 	}
@@ -143,7 +163,7 @@ func (k kubectlUpdateJob) ActiveJobs(ctx context.Context) ([]string, error) {
 		if !strings.HasPrefix(j.Metadata.Name, updateJobNamePrefix) {
 			continue
 		}
-		if j.Status.Succeeded > 0 || j.Status.Failed > 0 {
+		if updateJobFinished(j.Status.Conditions) {
 			continue
 		}
 		active = append(active, j.Metadata.Name)
@@ -376,7 +396,7 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 //   - an unfinished roll: a run is in progress (its heartbeat is fresh, or it
 //     launched inside the suppression window), or a gt-update-* Job is still active;
 //   - min_interval: the last run ended less than settings.MinInterval ago;
-//   - main red: an open red-main bead on the rig the commit is in.
+//   - main's verdict: the post-land verdict of main's tip (mainVerdictHold).
 //
 // The failed-run hold on main's target is updateDue's, which runs before this.
 func (d *Daemon) updateRollHold(now time.Time, settings config.UpdateSettings, facts UpdateFacts, rig string) string {
@@ -395,16 +415,86 @@ func (d *Daemon) updateRollHold(now time.Time, settings config.UpdateSettings, f
 			formatUpdateAge(now.Sub(facts.LastEnded)), settings.MinInterval)
 	}
 	if rig == "" {
-		return "no rig names the pair-ready commit, so main's red state cannot be read; not starting a roll"
+		return "no rig names the pair-ready commit, so main's verdict cannot be read; not starting a roll"
 	}
-	red, err := d.redMainCount(rig)
+	return d.mainVerdictHold(now, rig)
+}
+
+// updatePendingVerdictBound is how long main's tip may stay pending before a roll
+// holds on it. The post-land runner alarms a pending verdict once its
+// post_land_timeout passes (landworker.PostLandStatusDefaultTimeout unless the rig
+// sets merge_queue.post_land_timeout) and keeps the entry readable for its alarm
+// window after that. This bound sits above that default, so a verdict the runner
+// still allows passes and one it has alarmed holds. A rig whose timeout is longer
+// than this bound holds on verdicts the runner is still waiting for: raise the
+// bound with the timeout.
+const updatePendingVerdictBound = 90 * time.Minute
+
+// updatePendingBound is updatePendingVerdictBound, unless a test set
+// pendingVerdictBound to shorten it.
+func (d *Daemon) updatePendingBound() time.Duration {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	if d.updateTrigger.pendingVerdictBound > 0 {
+		return d.updateTrigger.pendingVerdictBound
+	}
+	return updatePendingVerdictBound
+}
+
+// mainVerdictHold names why a roll onto rig must wait for main's verdict, or ""
+// when main's tip is green or a young pending verdict. Main's tip is read from
+// origin, and its verdict from the rig's post-land runner. The rules:
+//   - red: hold, named with the tip;
+//   - pending: pass while young; a verdict pending past updatePendingBound holds,
+//     since a sweep that stalled is not a green;
+//   - unknown (no verdict recorded for the tip): hold;
+//   - a tip that cannot be resolved, a store that cannot be read, or no runner for
+//     the rig: hold, each with its own reason.
+func (d *Daemon) mainVerdictHold(now time.Time, rig string) string {
+	tip, err := d.rigMainTip(rig)
 	if err != nil {
-		return fmt.Sprintf("main's red state for %s cannot be read: %v; not starting a roll", rig, err)
+		return fmt.Sprintf("main's tip for %s cannot be resolved: %v; not starting a roll", rig, err)
 	}
-	if red > 0 {
-		return fmt.Sprintf("main is red on %s: %d open red-main bead(s); not starting a roll onto it", rig, red)
+	v, err := d.rigVerdictOf(rig, tip)
+	if err != nil {
+		return fmt.Sprintf("main's verdict for %s cannot be read: %v; not starting a roll", rig, err)
 	}
-	return ""
+	switch v.State {
+	case landworker.CommitVerdictGreen:
+		return ""
+	case landworker.CommitVerdictRed:
+		return fmt.Sprintf("main is red at %s; not starting a roll onto it", greenRefShortSHA(tip))
+	case landworker.CommitVerdictPending:
+		age := now.Sub(v.Since)
+		if age > d.updatePendingBound() {
+			return fmt.Sprintf("main's verdict is still pending after %s; not starting a roll", formatUpdateAge(age))
+		}
+		return ""
+	}
+	return fmt.Sprintf("no post-land verdict is recorded for main's tip %s; not starting a roll", greenRefShortSHA(tip))
+}
+
+// rigMainTip is the tip of rig's main as origin reports it, read through the
+// rig's bare repository under a bound. It never fetches. A failed read is an
+// error, so a tip the daemon cannot read is never taken as green.
+func (d *Daemon) rigMainTip(rig string) (string, error) {
+	run := d.updateRemoteRun
+	if run == nil {
+		run = update.ExecRun
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateRemoteTimeout)
+	defer cancel()
+	return update.RemoteMainSHA(ctx, run, constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig)))
+}
+
+// rigVerdictOf is the post-land verdict of commit on rig, read from the rig's
+// post-land runner. A rig with no runner has no verdict to read.
+func (d *Daemon) rigVerdictOf(rig, commit string) (landworker.CommitVerdict, error) {
+	runner := d.postLandRunners.get(rig)
+	if runner == nil {
+		return landworker.CommitVerdict{}, fmt.Errorf("no post-land runner is wired for %s", rig)
+	}
+	return runner.VerdictOf(commit)
 }
 
 // activeUpdateJobs names the update Jobs the cluster still runs, under the same
@@ -416,31 +506,6 @@ func (d *Daemon) activeUpdateJobs() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), d.updateJobBound())
 	defer cancel()
 	return d.updateJob.ActiveJobs(ctx)
-}
-
-// redMainCount is how many red-main beads are open on rig. An unwired read is an
-// error, so a daemon that cannot see main's state never starts a roll.
-func (d *Daemon) redMainCount(rig string) (int, error) {
-	d.updateTrigger.mu.Lock()
-	read := d.updateTrigger.redMain
-	d.updateTrigger.mu.Unlock()
-	if read == nil {
-		return 0, errors.New("no red-main read is wired into this daemon")
-	}
-	return read(rig)
-}
-
-// listOpenRedMain counts the open red-main beads of rig: the beads the red-main
-// owner files for a package that stays red on main and closes once main is green
-// again. It is the source the red-main attention rule reads.
-func (d *Daemon) listOpenRedMain(rig string) (int, error) {
-	issues, err := d.rigWorkBeads(rig).List(beads.ListOptions{
-		Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,
-	})
-	if err != nil {
-		return 0, err
-	}
-	return len(issues), nil
 }
 
 // pairReadyRigFor is the rig of the pair-ready item for sha, or "" when none names
