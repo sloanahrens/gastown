@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 )
 
 // gt-jhz3t0: the pool's occupancy does not count a seat whose submitted work is
@@ -69,7 +69,14 @@ func TestPoolOccupancyIgnoresALandedSeat(t *testing.T) {
 			town := t.TempDir()
 			writeSubmittedLandingSeat(t, town, "ruby", "gt-ruby", submittedAt)
 			writeSubmittedLandingSeat(t, town, "opal", "gt-opal", submittedAt)
-			writeLandingLogForPool(t, town, "gt-ruby", c.unreadableLog, c.landedAt)
+			switch {
+			case c.unreadableLog:
+				landtest.MakeLandingLogUnreadable(t, town, "gastown")
+			case c.landedAt != nil:
+				landtest.WriteLandingLog(t, town, "gastown", land.LandingRecord{
+					BeadID: "gt-ruby", Rig: "gastown", Head: "abc123", LandedAt: *c.landedAt,
+				})
+			}
 
 			sessions := map[string]map[string]string{}
 			if c.live {
@@ -110,34 +117,6 @@ func writeSubmittedLandingSeat(t *testing.T, townRoot, polecatName, bead string,
 		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: bead, SubmittedAt: submittedAt})
 }
 
-// writeLandingLogForPool writes the gastown rig's landing log with one record
-// for bead landed at landedAt, or an empty log when landedAt is nil. With
-// unreadable set the log path is a directory, so reading it fails.
-func writeLandingLogForPool(t *testing.T, townRoot, bead string, unreadable bool, landedAt *time.Time) {
-	t.Helper()
-	dir := filepath.Join(constants.TownRuntimePath(townRoot), "landings")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "gastown.jsonl")
-	if unreadable {
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if landedAt == nil {
-		return
-	}
-	line, err := json.Marshal(land.LandingRecord{BeadID: bead, Rig: "gastown", Head: "abc123", LandedAt: *landedAt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestPoolOccupancyFailsWhenALiveSeatsLandingLogIsUnreadable: a live seat whose
 // submission is recorded but whose landing log cannot be read fails the picture,
 // rather than being counted as free or held on a read that failed. Ruby is the
@@ -147,7 +126,7 @@ func TestPoolOccupancyFailsWhenALiveSeatsLandingLogIsUnreadable(t *testing.T) {
 	town := t.TempDir()
 	submittedAt := time.Date(2026, time.November, 12, 10, 0, 0, 0, time.UTC)
 	writeSubmittedLandingSeat(t, town, "ruby", "gt-ruby", submittedAt)
-	writeLandingLogForPool(t, town, "gt-ruby", true, nil)
+	landtest.MakeLandingLogUnreadable(t, town, "gastown")
 
 	sessions := map[string]map[string]string{
 		"gt-ruby": {"GT_ROLE": "gastown/polecats/ruby", "GT_AGENT": "deepseek-flash"},

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 )
 
@@ -71,7 +71,14 @@ func TestSeatCapCensusIgnoresALandedSeat(t *testing.T) {
 			if err := intent.MarkSubmitted(town, ruby, "gt-ruby", "test", submittedAt); err != nil {
 				t.Fatal(err)
 			}
-			writeLandingLogForCensus(t, town, tc.unreadableLog, tc.landedAt)
+			switch {
+			case tc.unreadableLog:
+				landtest.MakeLandingLogUnreadable(t, town, "gastown")
+			case tc.landedAt != nil:
+				landtest.WriteLandingLog(t, town, "gastown", land.LandingRecord{
+					BeadID: "gt-ruby", Rig: "gastown", Head: "abc123", LandedAt: *tc.landedAt,
+				})
+			}
 
 			h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: town}, tmux: tm, clock: clk}, agentRecord: noAgentRecord}
 			got, err := h.seatCap("gastown", "nova")
@@ -88,34 +95,6 @@ func TestSeatCapCensusIgnoresALandedSeat(t *testing.T) {
 				t.Fatalf("seatCap = %+v, want %+v", got, tc.want)
 			}
 		})
-	}
-}
-
-// writeLandingLogForCensus writes the gastown rig's landing log: one record for
-// gt-ruby landed at landedAt, or an empty log when landedAt is nil. With
-// unreadable set the log path is a directory, so reading it fails.
-func writeLandingLogForCensus(t *testing.T, town string, unreadable bool, landedAt *time.Time) {
-	t.Helper()
-	dir := filepath.Join(constants.TownRuntimePath(town), "landings")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "gastown.jsonl")
-	if unreadable {
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if landedAt == nil {
-		return
-	}
-	line, err := json.Marshal(land.LandingRecord{BeadID: "gt-ruby", Rig: "gastown", Head: "abc123", LandedAt: *landedAt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
 
