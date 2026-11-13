@@ -706,6 +706,8 @@ func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation
 			Title:       is.Title,
 			RelatedBead: fields.RelatedBead,
 			Open:        !beads.IssueStatus(is.Status).IsTerminal(),
+			CreatedAt:   beads.ParseIssueTime(is.CreatedAt),
+			ClosedAt:    beads.ParseIssueTime(is.ClosedAt),
 		})
 	}
 	return out, nil

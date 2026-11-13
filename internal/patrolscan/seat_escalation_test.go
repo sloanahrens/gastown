@@ -3,6 +3,7 @@ package patrolscan
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // The escalation tie is read in three places (the stuck-seat tick, the daemon's
@@ -160,5 +161,69 @@ func TestSeatEscalationHoldReadFailureIsReturned(t *testing.T) {
 	}
 	if got.Verdict != "" {
 		t.Errorf("verdict = %q on a failed read, want none", got.Verdict)
+	}
+}
+
+// The answer to an ESCALATED stop (SeatAnsweredAt) is the close of the seat's
+// escalation for the bead when it was raised before the stop and closed after
+// it. Each row without an answer is one way the clock must not restart.
+func TestSeatAnsweredAtAnswers(t *testing.T) {
+	t.Parallel()
+	const seat = "gastown/polecats/ruby"
+	exit := time.Date(2026, 11, 12, 22, 46, 13, 0, time.UTC)
+	before := exit.Add(-2 * time.Minute)
+	answered := exit.Add(2 * time.Minute)
+	later := exit.Add(10 * time.Minute)
+	cases := []struct {
+		name   string
+		raised []Escalation
+		want   time.Time
+	}{
+		{"no escalations at all", nil, time.Time{}},
+		{"closed after the stop, raised before it",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before, ClosedAt: answered}},
+			answered},
+		{"still open: the seat is pending",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before, Open: true}},
+			time.Time{}},
+		{"closed before the stop",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before.Add(-time.Hour), ClosedAt: before}},
+			time.Time{}},
+		{"raised after the stop by a seat that kept working",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: later, ClosedAt: later.Add(time.Minute)}},
+			time.Time{}},
+		{"raise time unknown",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, ClosedAt: answered}},
+			time.Time{}},
+		{"close time unknown",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before}},
+			time.Time{}},
+		{"raised by another seat",
+			[]Escalation{{ID: "hq-1", EscalatedBy: "gastown/polecats/dag", RelatedBead: tieBead, CreatedAt: before, ClosedAt: answered}},
+			time.Time{}},
+		{"names another bead",
+			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: "gt-other", CreatedAt: before, ClosedAt: answered}},
+			time.Time{}},
+		{"two answered: the latest close",
+			[]Escalation{
+				{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before, ClosedAt: answered},
+				{ID: "hq-2", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before, ClosedAt: later},
+			},
+			later},
+		{"one answered beside one still open: open holds the seat",
+			[]Escalation{
+				{ID: "hq-1", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before, ClosedAt: answered},
+				{ID: "hq-2", EscalatedBy: seat, RelatedBead: tieBead, CreatedAt: before, Open: true},
+			},
+			time.Time{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := SeatAnsweredAt(tieRig, tieName, tieBead, exit, tc.raised)
+			if !got.Equal(tc.want) {
+				t.Errorf("SeatAnsweredAt = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

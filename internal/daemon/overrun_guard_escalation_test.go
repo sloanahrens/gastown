@@ -331,3 +331,216 @@ func TestOverrunGuardEscalationIsPerSlingAndCapped(t *testing.T) {
 		t.Errorf("escalation accounting moved the gate's: GateSpent = %v", st.GateSpent)
 	}
 }
+
+// The .31 timeline of gt-bdlg6o, on the bead's own clock: the seat filed its
+// escalation at 16:44, exited ESCALATED at 16:46:13, the overseer closed the
+// escalation at 16:48:00, and a guard cycle at 17:16 stopped the seat anyway
+// (logged at 17:16:37), 28 minutes after the answer, because its clock still
+// ran from the exit.
+var (
+	overrunRaisedAt   = time.Date(2026, 11, 12, 16, 44, 0, 0, time.UTC)
+	overrunExitedAt   = time.Date(2026, 11, 12, 16, 46, 13, 0, time.UTC)
+	overrunAnsweredAt = time.Date(2026, 11, 12, 16, 48, 0, 0, time.UTC)
+)
+
+const overrunTimelineBead = "gt-3lvcjz.31"
+
+// timelineEscalation is hq-wisp-hw1eu as the seat raised it: escalated_by is the
+// seat's address and related_bead the bead. closed answers it at overrunAnsweredAt.
+func timelineEscalation(closed bool) beads.Issue {
+	title := overrunTimelineBead + ": a decision"
+	is := beads.Issue{ID: "hq-wisp-hw1eu", Status: "open", Title: title, Labels: []string{"gt:escalation"},
+		CreatedAt: overrunRaisedAt.Format(time.RFC3339),
+		Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
+			Severity: "high", EscalatedBy: "gastown/polecats/dag", RelatedBead: overrunTimelineBead}),
+	}
+	if closed {
+		is.Status = "closed"
+		is.ClosedAt = overrunAnsweredAt.Format(time.RFC3339)
+	}
+	return is
+}
+
+// newTimelineGuard returns a daemon and fake for the seat dag on the .31 bead,
+// stopped at 30 minutes, whose run ended at overrunExitedAt. escalation, when
+// not nil, is seeded beside the seat's ESCALATED agent record. tick runs one
+// guard cycle at at, reading the escalations as that cycle would.
+func newTimelineGuard(t *testing.T, escalation *beads.Issue) (tick func(at time.Time), f *overrunFake, bd *workBD) {
+	t.Helper()
+	bd = newWorkBD(t)
+	townRoot := t.TempDir()
+	seedOverrunAgent(bd, townRoot, "dag", "stuck", done.ExitEscalated)
+	if escalation != nil {
+		bd.db.Seed(*escalation)
+	}
+	d, _ := newOverrunDaemon(t, false)
+	d.config.TownRoot = townRoot
+	d.openWorkBeads = bd.open
+	d.patrolConfig.Patrols.OverrunGuard.StopAfter = "30m"
+	seat := overrunSeat{Rig: "gastown", Polecat: "dag", Bead: overrunTimelineBead, EscalatedEnd: overrunExitedAt}
+	f = newOverrunFake(0, seat)
+	f.slung[overrunTimelineBead] = overrunExitedAt
+	tick = func(at time.Time) {
+		f.now = at
+		r := newOverrunEscalationReader(d)
+		f.escalationWaiting = r.waiting
+		f.escalationAnsweredAt = r.answeredAt
+		d.runOverrunGuard(f.seams())
+	}
+	return tick, f, bd
+}
+
+// tickEveryMinute runs a guard cycle every minute from one time through to
+// another, inclusive.
+func tickEveryMinute(tick func(time.Time), from, to time.Time) {
+	for at := from; !at.After(to); at = at.Add(time.Minute) {
+		tick(at)
+	}
+}
+
+// The clock of an ESCALATED seat that was answered starts at the answer. Built
+// from the .31 timeline: the escalation is open at the first cycle after the
+// exit, so the seat waits; it is answered at 16:48:00; the cycle at 17:16:30
+// is 28.5 minutes after the answer and must not stop the seat or add
+// needs-split; the cycle at 17:18:00 is the 30 minutes after the answer and does.
+func TestRunOverrunGuard_AnsweredEscalationStartsTheClockAtTheAnswer(t *testing.T) {
+	t.Parallel()
+	open := timelineEscalation(false)
+	tick, f, bd := newTimelineGuard(t, &open)
+
+	tick(overrunExitedAt.Add(time.Minute))
+	if len(f.stops) != 0 || len(f.handedBack) != 0 {
+		t.Fatalf("seat stopped while its escalation was open: stops %v, handed back %v", f.stops, f.handedBack)
+	}
+
+	closed := timelineEscalation(true)
+	bd.db.Seed(closed)
+	tickEveryMinute(tick, overrunExitedAt.Add(2*time.Minute), overrunAnsweredAt.Add(28*time.Minute+30*time.Second))
+	tick(time.Date(2026, 11, 12, 17, 16, 30, 0, time.UTC))
+	if len(f.stops) != 0 || len(f.handedBack) != 0 {
+		t.Fatalf("seat stopped 28.5 minutes after its answer: stops %v, handed back %v (needs-split)", f.stops, f.handedBack)
+	}
+
+	tick(time.Date(2026, 11, 12, 17, 17, 0, 0, time.UTC))
+	if len(f.stops) != 0 {
+		t.Fatalf("seat stopped 29 minutes after its answer: stops %v", f.stops)
+	}
+	tick(time.Date(2026, 11, 12, 17, 18, 0, 0, time.UTC))
+	if len(f.stops) != 1 {
+		t.Fatalf("seat not stopped 30 minutes after its answer: stops %v", f.stops)
+	}
+}
+
+// Re-slung after the answer, the clock starts at the re-sling, not at the answer:
+// the seat's run is the new dispatch, so the answer does not date it.
+func TestRunOverrunGuard_ReslungAfterTheAnswerStartsAtTheReSling(t *testing.T) {
+	t.Parallel()
+	closed := timelineEscalation(true)
+	tick, f, _ := newTimelineGuard(t, &closed)
+	resling := overrunAnsweredAt.Add(10 * time.Minute)
+	f.slung[overrunTimelineBead] = resling
+
+	tickEveryMinute(tick, overrunAnsweredAt.Add(time.Minute), resling.Add(29*time.Minute))
+	if len(f.stops) != 0 {
+		t.Fatalf("seat stopped 29 minutes after its re-sling: stops %v", f.stops)
+	}
+	tick(resling.Add(30 * time.Minute))
+	if len(f.stops) != 1 {
+		t.Fatalf("seat not stopped 30 minutes after its re-sling: stops %v", f.stops)
+	}
+}
+
+// A seat with no escalation answered after its ESCALATED exit keeps the clock
+// from the exit: 30 minutes after the exit it is stopped at the threshold.
+func TestRunOverrunGuard_UnansweredExitStillStopsAtTheThreshold(t *testing.T) {
+	t.Parallel()
+	tick, f, _ := newTimelineGuard(t, nil)
+
+	tickEveryMinute(tick, overrunExitedAt.Add(time.Minute), overrunExitedAt.Add(29*time.Minute))
+	if len(f.stops) != 0 {
+		t.Fatalf("seat stopped 29 minutes after its ESCALATED exit: stops %v", f.stops)
+	}
+	tick(overrunExitedAt.Add(30 * time.Minute))
+	if len(f.stops) != 1 {
+		t.Fatalf("seat not stopped 30 minutes after its ESCALATED exit: stops %v", f.stops)
+	}
+}
+
+// The reader's answer is read through the same tie the exemption uses: the
+// escalation the seat raised for its bead, answered after the exit. A seat
+// that never exited ESCALATED has no answer, whatever escalations it raised.
+func TestOverrunGuardEscalationAnsweredAt(t *testing.T) {
+	t.Parallel()
+	closed := timelineEscalation(true)
+	open := timelineEscalation(false)
+	seat := overrunSeat{Rig: "gastown", Polecat: "dag", Bead: overrunTimelineBead, EscalatedEnd: overrunExitedAt}
+	tests := []struct {
+		name      string
+		escalated beads.Issue
+		seat      overrunSeat
+		want      time.Time
+	}{
+		{"answered after the exit", closed, seat, overrunAnsweredAt},
+		{"still open", open, seat, time.Time{}},
+		{"no ESCALATED exit on the seat", closed, overrunSeat{Rig: "gastown", Polecat: "dag", Bead: overrunTimelineBead}, time.Time{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := newWorkBD(t)
+			bd.db.Seed(tt.escalated)
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
+			got, err := newOverrunEscalationReader(d).answeredAt(tt.seat)
+			if err != nil || !got.Equal(tt.want) {
+				t.Errorf("answeredAt = %v, %v; want %v, nil", got, err, tt.want)
+			}
+		})
+	}
+
+	// A failed read is an error, which the guard turns into keeping the clock
+	// where the stop left it.
+	failing := newWorkBD(t)
+	failing.listErr = errors.New("bd list: connection refused")
+	dFailing := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: failing.open}
+	if got, err := newOverrunEscalationReader(dFailing).answeredAt(seat); err == nil || !got.IsZero() {
+		t.Errorf("answeredAt after a failed read = %v, %v; want zero and an error", got, err)
+	}
+}
+
+// The clock is the answer only when the answer is later than the run's clock.
+func TestOverrunAnsweredFloor(t *testing.T) {
+	t.Parallel()
+	slung := overrunExitedAt
+	tests := []struct {
+		name     string
+		answered time.Time
+		want     time.Time
+	}{
+		{"no answer read", time.Time{}, slung},
+		{"answered after the clock", overrunAnsweredAt, overrunAnsweredAt},
+		{"answered before the clock", overrunExitedAt.Add(-time.Minute), slung},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := overrunAnsweredFloor(slung, tt.answered); !got.Equal(tt.want) {
+				t.Errorf("overrunAnsweredFloor = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The seat waits on its open escalation for the whole of the 30 minutes after
+// its ESCALATED exit: the cycle at 30 minutes finds it unanswered and does not
+// stop it or hand the bead back as needs-split (gt-bdlg6o, .31 timeline).
+func TestRunOverrunGuard_OpenEscalationAtThirtyMinutesDoesNotStop(t *testing.T) {
+	t.Parallel()
+	open := timelineEscalation(false)
+	tick, f, _ := newTimelineGuard(t, &open)
+
+	tickEveryMinute(tick, overrunExitedAt.Add(time.Minute), overrunExitedAt.Add(30*time.Minute))
+	if len(f.stops) != 0 || len(f.handedBack) != 0 {
+		t.Fatalf("seat stopped 30 minutes after its ESCALATED exit with its escalation open: stops %v, handed back %v",
+			f.stops, f.handedBack)
+	}
+}

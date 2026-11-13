@@ -159,6 +159,13 @@ type overrunSeams struct {
 	// guard then counts all of the seat's time. nil means no exemption.
 	escalationWaiting func(seat overrunSeat) (bool, error)
 
+	// escalationAnsweredAt is when the escalation a seat's ESCALATED stop was
+	// for was answered, zero when it was not (overrunEscalationReader.answeredAt).
+	// The clock restarts there (overrunAnsweredFloor). An error means the
+	// escalation state could not be read, and the guard then keeps the clock
+	// where the stop left it. nil means no answer is read.
+	escalationAnsweredAt func(seat overrunSeat) (time.Time, error)
+
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
 	// removeSandbox pushes and removes the sandbox a sandboxed seat ran in
@@ -385,6 +392,11 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if escalationWaiting == nil {
 		escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
 	}
+	// An unset answer seam leaves the clock where the stop left it.
+	escalationAnsweredAt := s.escalationAnsweredAt
+	if escalationAnsweredAt == nil {
+		escalationAnsweredAt = func(overrunSeat) (time.Time, error) { return time.Time{}, nil }
+	}
 	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(pc))
 	maxGateTotal := overrunMaxGateTotal(stopAfter)
 	maxEscalationTotal := overrunMaxEscalationTotal(stopAfter)
@@ -417,6 +429,18 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		slung = slungFloor(slung, seat.SessionStart, seat.RestartedAt)
+		// A seat whose ESCALATED stop was answered could not resume before the
+		// answer, so its clock starts there (gt-bdlg6o). An answer that cannot be
+		// read leaves the clock where the stop left it: the direction that stops.
+		answered, err := escalationAnsweredAt(seat)
+		if err != nil {
+			if !escalationReadFailed {
+				escalationReadFailed = true
+				d.logger.Printf("overrun_guard: %s: cannot read the escalation answer for %s, not restarting its clock: %v", who, seat.Bead, err)
+			}
+			answered = time.Time{}
+		}
+		slung = overrunAnsweredFloor(slung, answered)
 		state, err := readOverrunState(d.config.TownRoot, seat.Bead)
 		if err != nil {
 			// An unreadable record could hide a nudge already sent; act on
@@ -576,12 +600,13 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 	gate := newOverrunGateReader(d)
 	escalation := newOverrunEscalationReader(d)
 	return d.overrunStopSeams(overrunSeams{
-		now:               time.Now,
-		workingSeats:      d.overrunWorkingSeats,
-		slungAt:           sl.slungAt,
-		gateRunning:       gate.running,
-		escalationWaiting: escalation.waiting,
-		nudged:            d.enqueueJevProgress,
+		now:                  time.Now,
+		workingSeats:         d.overrunWorkingSeats,
+		slungAt:              sl.slungAt,
+		gateRunning:          gate.running,
+		escalationWaiting:    escalation.waiting,
+		escalationAnsweredAt: escalation.answeredAt,
+		nudged:               d.enqueueJevProgress,
 		nudge: func(seat overrunSeat, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()
