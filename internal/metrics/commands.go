@@ -54,8 +54,8 @@ type Commands struct {
 	// Today is the day the run reports, as YYYY-MM-DD; it names the extract's
 	// output directory and the digest.
 	Today string
-	// Town is the town root; empty is TOWN_METRICS_TOWN, else the home
-	// directory's gt.
+	// Town is the town root; empty is TOWN_METRICS_TOWN, else the workspace the
+	// process runs in, else the home directory's gt.
 	Town string
 	// Wire builds the day's town; nil wires the host's real env.
 	Wire func(ctx context.Context) (RealTown, error)

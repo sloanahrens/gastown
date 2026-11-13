@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // sameStat reports whether two diff stats match, their floats within 1e-9.
@@ -819,22 +820,97 @@ func TestRealEnvRefusesACacheItCannotRead(t *testing.T) {
 	}
 }
 
-func TestRealEnvTownDefaults(t *testing.T) {
+// TestTownRootResolutionOrder is the order gt-kjm3g8 names: opts.Town, then
+// TOWN_METRICS_TOWN, then the workspace the process runs in, then Home/gt. A
+// workspace made of a working directory or GT_TOWN_ROOT is the same level here:
+// the finder is the one that walks. The finder is injected, so no case starts a
+// process or reads the host's directory.
+func TestTownRootResolutionOrder(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name, town, fromEnv, home, want string
+		name, town, fromEnv, home, workspace, want string
+		finderErr                                  error
 	}{
-		{"the argument wins", "/t", "/e", "/h", "/t"},
-		{"the environment next", "", "/e", "/h", "/e"},
-		{"the home's gt last", "", "", "/h", "/h/gt"},
+		{name: "the argument wins", town: "/t", fromEnv: "/e", home: "/h", workspace: "/w", want: "/t"},
+		{name: "the environment next", fromEnv: "/e", home: "/h", workspace: "/w", want: "/e"},
+		{name: "the workspace next", home: "/h", workspace: "/w", want: "/w"},
+		{name: "a workspace that was never found takes the home's gt", home: "/h", finderErr: workspace.ErrNotFound, want: "/h/gt"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := townRoot(tc.town, tc.fromEnv, tc.home); got != tc.want {
-				t.Errorf("townRoot(%q, %q, %q) = %q, want %q", tc.town, tc.fromEnv, tc.home, got, tc.want)
+			find := func() (string, error) {
+				if tc.finderErr != nil {
+					return "", tc.finderErr
+				}
+				return tc.workspace, nil
+			}
+			got, err := townRoot(tc.town, tc.fromEnv, tc.home, find)
+			if err != nil {
+				t.Fatalf("townRoot: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("townRoot(town=%q, env=%q, home=%q, workspace=%q) = %q, want %q",
+					tc.town, tc.fromEnv, tc.home, tc.workspace, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTownRootRefusesAFinderThatFailed: a finder failing for any reason but a
+// workspace that is not there is a lookup that could not run, and it must stop
+// the wiring rather than hand back Home/gt as if the town were absent.
+func TestTownRootRefusesAFinderThatFailed(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("getwd: permission denied")
+	_, err := townRoot("", "", "/h", func() (string, error) { return "", boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("townRoot error = %v, want the finder's failure", err)
+	}
+}
+
+// TestTownRootRefusesAFinderWithNoRoot: a finder returning an empty root and no
+// error is a broken answer, and taking Home/gt for it would hide that.
+func TestTownRootRefusesAFinderWithNoRoot(t *testing.T) {
+	t.Parallel()
+	_, err := townRoot("", "", "/h", func() (string, error) { return "", nil })
+	if err == nil || !strings.Contains(err.Error(), "no root") {
+		t.Fatalf("townRoot error = %v, want an empty root refused", err)
+	}
+}
+
+// TestRealEnvRefusesAWorkspaceFinderThatFailed: the wiring passes the finder's
+// failure up instead of substituting Home/gt for a lookup that could not run.
+func TestRealEnvRefusesAWorkspaceFinderThatFailed(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("getwd: permission denied")
+	runner := &realRunner{answer: realGit("/t")}
+	_, err := RealEnv(context.Background(), RealEnvOptions{
+		Today: "smoke", Home: "/home", Getenv: noEnv, Files: seamFiles{}.seam(), Run: runner.run,
+		WorkspaceRoot: func() (string, error) { return "", boom },
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("RealEnv error = %v, want the finder's failure", err)
+	}
+}
+
+// TestTownRootPrefersWorkspaceOverHome drives the wiring, not the helper: the
+// town the wiring builds is the workspace's, never the home directory's gt. The
+// pod's HOME is /root and its town is elsewhere, so Home/gt names no town there
+// (gt-kjm3g8).
+func TestTownRootPrefersWorkspaceOverHome(t *testing.T) {
+	t.Parallel()
+	town, home := realFixture(t)
+	runner := &realRunner{answer: realGit(town)}
+	real, err := RealEnv(context.Background(), RealEnvOptions{
+		Today: "smoke", Home: home, Getenv: noEnv, Files: seamFiles{}.seam(), Run: runner.run,
+		WorkspaceRoot: func() (string, error) { return town, nil },
+	})
+	if err != nil {
+		t.Fatalf("RealEnv: %v", err)
+	}
+	if real.Town != town {
+		t.Errorf("Town = %q, want the workspace %s (home/gt is %s)", real.Town, town, filepath.Join(home, "gt"))
 	}
 }
 
