@@ -182,6 +182,10 @@ kubectl apply -f "$sandbox_manifest"
 # before the rollout below is awaited.
 kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type merge \
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
+# The controller is a control-plane pod, so it runs Guaranteed: requests equal
+# limits (gt-cjm8fu). The first container of the deployment is the controller.
+kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"100m","memory":"128Mi"}}}]'
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 
 # helm_release_deployed answers whether openshell is a deployed release. helm
@@ -211,6 +215,10 @@ else
 fi
 kubectl apply -f "$HERE/gateway-nodeport.yaml"
 kubectl apply -f "$HERE/../values/kind/control-plane-services.yaml"
+# The gateway is a control-plane pod, so it runs Guaranteed: requests equal limits
+# (gt-cjm8fu). The first container of the statefulset is the gateway.
+kubectl -n openshell patch statefulset openshell --type json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"250m","memory":"768Mi"},"limits":{"cpu":"250m","memory":"768Mi"}}}]'
 kubectl -n openshell rollout status statefulset/openshell --timeout=300s
 
 # Client certificates for the CLI. The key is never printed; the CLI wants

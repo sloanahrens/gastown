@@ -345,6 +345,13 @@ check "the metrics-server rollout follows the flag patch" before "patch deployme
 patch_args='-n agent-sandbox-system patch deployment agent-sandbox-controller --type merge -p {"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 check "the agent-sandbox controller deployment is patched once with exactly the core nodeSelector" test "$(grep -cF -e "$patch_args" "$S/calls.log" || true)" -eq 1
 check "the controller is pinned before its rollout is awaited" before "patch deployment agent-sandbox-controller" "rollout status deployment/agent-sandbox-controller"
+gateway_patch='-n openshell patch statefulset openshell --type json -p [{"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"250m","memory":"768Mi"},"limits":{"cpu":"250m","memory":"768Mi"}}}]'
+check "the gateway is patched once to requests equal to limits (250m, 768Mi)" test "$(grep -cF -e "$gateway_patch" "$S/calls.log" || true)" -eq 1
+check "the gateway is patched after the chart install" before "helm upgrade --install" "patch statefulset openshell"
+check "the gateway is patched before its rollout is awaited" before "patch statefulset openshell" "rollout status statefulset/openshell"
+controller_patch='-n agent-sandbox-system patch deployment agent-sandbox-controller --type json -p [{"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"100m","memory":"128Mi"}}}]'
+check "the controller is patched once to requests equal to limits (100m, 128Mi)" test "$(grep -cF -e "$controller_patch" "$S/calls.log" || true)" -eq 1
+check "the controller resources are patched before its rollout is awaited" before "patch deployment agent-sandbox-controller --type json" "rollout status deployment/agent-sandbox-controller"
 check "the pool layout is checked with an exact label query" contains "get nodes -l gt.dev/pool" "$CALLS_LOG"
 check "the control-plane Services are applied" contains "values/kind/control-plane-services.yaml" "$CALLS_LOG"
 check "the control-plane Services follow the NodePort service" before "gateway-nodeport.yaml" "values/kind/control-plane-services.yaml"
