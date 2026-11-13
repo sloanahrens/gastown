@@ -23,6 +23,11 @@ type Process interface {
 	// Kill terminates the process group, so a bd that started a child leaves no
 	// orphan when the call ends early.
 	Kill() error
+	// CloseOutputs closes the ends this side reads bd's output from. A process
+	// that outlived bd's group can still hold the pipes open, so a read would
+	// otherwise block past the call's deadline; the executor closes its ends
+	// when it stops waiting.
+	CloseOutputs()
 }
 
 // processRunner starts one process. It is the seam the executor's tests put a
@@ -133,4 +138,13 @@ func (p *realProcess) Kill() error {
 		return os.ErrProcessDone
 	}
 	return util.KillProcessGroup(p.cmd)
+}
+
+// CloseOutputs closes the pipes bd's stdout and stderr are read from. Closing
+// a descriptor that is already gone is not a failure: Wait closes both ends as
+// well, and the call is ending either way, so there is nothing for the caller
+// to act on.
+func (p *realProcess) CloseOutputs() {
+	_ = p.stdout.Close()
+	_ = p.stderr.Close()
 }

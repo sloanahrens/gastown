@@ -4,23 +4,26 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"syscall"
 	"testing"
 )
 
 // TestExecutorRealProcess is the one test in this package that starts a
-// process. It builds testdata/bd into t.TempDir and points the executor's
-// injected binary at it, so the real runner's exit status, its two streams and
-// the timeout kill are shown on a process rather than on a fake. Every other
-// test in the package drives fakeRunner.
+// process. The bd it runs is this test binary re-run as TestBDStandIn, which
+// is how the real runner's exit status, its two streams and the timeout kill
+// are shown on a process without another program being built. Every other test
+// in the package drives fakeRunner.
 func TestExecutorRealProcess(t *testing.T) {
 	t.Parallel()
-	helper := buildBDStandIn(t)
+	self := testBinary(t)
 	e, err := New(Options{
-		Binary:        helper,
+		Binary:        self,
 		WorkspaceRoot: testWorkspace(t),
 		Home:          t.TempDir(),
 		Path:          "/usr/local/bin:/usr/bin:/bin",
@@ -33,7 +36,7 @@ func TestExecutorRealProcess(t *testing.T) {
 
 	t.Run("exit status and streams", func(t *testing.T) {
 		var out bytes.Buffer
-		if err := e.Exec(context.Background(), Request{Argv: []string{"3"}, Rig: "gastown"}, nil, &out); err != nil {
+		if err := e.Exec(context.Background(), Request{Argv: bdArgv("3"), Rig: "gastown"}, nil, &out); err != nil {
 			t.Fatalf("Exec: %v", err)
 		}
 		frames := readFrames(t, out.Bytes())
@@ -53,7 +56,7 @@ func TestExecutorRealProcess(t *testing.T) {
 
 	t.Run("timeout kills the process", func(t *testing.T) {
 		var out bytes.Buffer
-		err := e.Exec(context.Background(), Request{Argv: []string{"hold"}, Rig: "gastown", TimeoutMS: 100}, nil, &out)
+		err := e.Exec(context.Background(), Request{Argv: bdArgv("hold"), Rig: "gastown", TimeoutMS: 100}, nil, &out)
 		if !errors.Is(err, ErrTimeout) {
 			t.Fatalf("Exec = %v, want ErrTimeout", err)
 		}
@@ -81,7 +84,7 @@ func TestExecutorRealProcess(t *testing.T) {
 			return os.Pipe()
 		}}
 		// The second pair failing makes the start close the first pair.
-		if _, err := r.Start(helper, nil, []string{"PATH=/usr/bin:/bin"}, t.TempDir()); !errors.Is(err, boom) {
+		if _, err := r.Start(self, nil, []string{"PATH=/usr/bin:/bin"}, t.TempDir()); !errors.Is(err, boom) {
 			t.Fatalf("Start = %v, want %v", err, boom)
 		}
 	})
@@ -94,7 +97,7 @@ func TestExecutorRealProcess(t *testing.T) {
 	})
 
 	t.Run("a wait that fails and a kill after it", func(t *testing.T) {
-		p, err := (realRunner{}).Start(helper, []string{"0"}, nil, t.TempDir())
+		p, err := (realRunner{}).Start(self, bdArgv("0"), nil, t.TempDir())
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
@@ -112,22 +115,58 @@ func TestExecutorRealProcess(t *testing.T) {
 	})
 }
 
-// buildBDStandIn builds testdata/bd with the go tool found under GOROOT. The
-// tool is run by absolute path, so the unit tier's refused-tool tripwire on
-// PATH is never consulted; -buildvcs=false keeps the build from running git.
-func buildBDStandIn(t *testing.T) string {
+// TestBDStandIn is the bd stand-in TestExecutorRealProcess runs. It does
+// nothing in an ordinary run, and when the executor starts this binary with
+// bdArgv it acts as bd. The exit is syscall.Exit rather than os.Exit: a test
+// binary built with coverage writes its GOCOVERDIR warning to stderr from an
+// exit hook, and stderr here is bd's stream and an assertion.
+//
+//testpolicy:allow parallel — a child-process helper, inert unless its argv names a mode
+func TestBDStandIn(t *testing.T) {
+	if flag.NArg() == 0 {
+		return
+	}
+	if flag.Arg(0) == "hold" {
+		holdUntilKilled()
+	}
+	status, err := strconv.Atoi(flag.Arg(0))
+	if err != nil {
+		return // not a mode this helper acts on
+	}
+	fmt.Fprintln(os.Stdout, "out")
+	fmt.Fprintln(os.Stderr, "err")
+	syscall.Exit(status)
+}
+
+// holdUntilKilled blocks until the executor's kill reaches the process. A pipe
+// whose write end stays open blocks the read without a timer over it, so the
+// hold has no built-in deadline and the runtime has no deadlock to report.
+func holdUntilKilled() {
+	r, w, err := os.Pipe()
+	if err != nil {
+		syscall.Exit(2)
+	}
+	buf := make([]byte, 1)
+	_, _ = r.Read(buf)
+	// Without this, the finalizer on the unused write end closes it, the read
+	// ends, and the process exits before the kill this mode exists to wait for.
+	runtime.KeepAlive(w)
+	syscall.Exit(0)
+}
+
+// bdArgv is the argv that runs the stand-in in mode: the mode follows the test
+// flag, so the testing package parses the flag and leaves the mode as a
+// positional argument.
+func bdArgv(mode string) []string {
+	return []string{"-test.run=^TestBDStandIn$", mode}
+}
+
+// testBinary is this test's own binary, which the real runner starts as bd.
+func testBinary(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("no source path for the bd stand-in")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("the test binary's path: %v", err)
 	}
-	bin := filepath.Join(t.TempDir(), "bd-stand-in")
-	//testpolicy:allow no-subprocess — the compiled stand-in is what the bead names: the go tool is run by absolute path to build it, and no other tool is started
-	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildvcs=false", "-o", bin, "./testdata/bd")
-	cmd.Dir = filepath.Dir(file)
-	cmd.Env = os.Environ()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the bd stand-in: %v\n%s", err, out)
-	}
-	return bin
+	return self
 }

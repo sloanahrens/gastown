@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -164,6 +165,8 @@ func New(opts Options) (*Executor, error) {
 // on frames, and kills the whole process group when the call times out or the
 // client goes away. A refusal before the process starts returns a named error
 // and writes no frames; the HTTP layer answers those before the stream begins.
+// A start that fails is the one exception: the stream has begun by then, so it
+// writes the error frame and the exit frame the design pairs with it.
 func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
 	if e == nil || e.slots == nil || frames == nil {
 		return ErrUnconfigured
@@ -184,6 +187,12 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	if err != nil {
 		return err
 	}
+	// A request the client has already ended starts no process: the kill below
+	// would be its only effect, and the caller learns the same refusal without
+	// the spawn.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %v", ErrClientGone, err)
+	}
 	select {
 	case e.slots <- struct{}{}:
 		defer func() { <-e.slots }()
@@ -203,16 +212,29 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	// The watcher kills the group at the deadline or when the client goes
 	// away. A group that ignores SIGTERM costs KillProcessGroup's grace past
 	// the deadline (gt-6t43); the HTTP layer's own bound must allow for it.
-	// A kill that fails is carried into the returned error, so a call that
-	// could not stop bd does not read as one that did.
+	// killed records that the kill reached bd, so a status that is a signal is
+	// read as the gateway's doing and not as bd's own answer. A kill that
+	// fails is carried into the returned error, so a call that could not stop
+	// bd does not read as one that did.
 	stopWatch := make(chan struct{})
 	watchDone := make(chan struct{})
-	var killErr error
+	var (
+		killed  bool
+		killErr error
+	)
 	go func() {
 		defer close(watchDone)
 		select {
 		case <-runCtx.Done():
-			if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			err := proc.Kill()
+			switch {
+			case err == nil:
+				killed = true
+			case errors.Is(err, os.ErrProcessDone):
+				// bd had already ended on its own, so the deadline did not end
+				// it and its status is its own answer.
+			default:
+				killed = true
 				killErr = err
 			}
 		case <-stopWatch:
@@ -240,8 +262,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	// A pump that cannot write is the client gone; cancel so the watcher kills
 	// bd and the other pump's read ends rather than the call hanging.
 	var writeErr, readErr error
-	for i := 0; i < 2; i++ {
-		err := <-pumpErrs
+	record := func(err error) {
 		switch {
 		case err == nil:
 		case errors.Is(err, errFrameWrite):
@@ -256,32 +277,68 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 			}
 		}
 	}
-	<-stdinDone
+	// The pumps are waited for, but not past the call's own end: a process that
+	// outlived bd's group still holding bd's pipes would keep a read blocked
+	// after the kill, so the ends this side owns are closed and the reads end.
+	// The errors those closes cause are the close's, not bd's, so they are not
+	// read as bd failing.
+	for pending := 2; pending > 0; {
+		select {
+		case err := <-pumpErrs:
+			pending--
+			record(err)
+		case <-runCtx.Done():
+			_ = proc.Stdin().Close()
+			proc.CloseOutputs()
+			for ; pending > 0; pending-- {
+				if err := <-pumpErrs; !errors.Is(err, os.ErrClosed) {
+					record(err)
+				}
+			}
+		}
+	}
+	// The stdin write is bounded the same way: closing our end ends it even
+	// when the child's reader is a process the group kill missed.
+	select {
+	case <-stdinDone:
+	case <-runCtx.Done():
+		_ = proc.Stdin().Close()
+		<-stdinDone
+	}
 	status, waitErr := proc.Wait()
 	close(stopWatch)
 	<-watchDone
 
+	cleanupErr := killErr
 	switch {
 	case ctx.Err() != nil:
 		writeEnding(frames, CodeCanceled, 124, "the request ended before bd did")
-		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, ctx.Err()), killErr)
+		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, ctx.Err()), cleanupErr)
 	case writeErr != nil:
-		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, writeErr), killErr)
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		writeEnding(frames, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
-		return withKillErr(fmt.Errorf("%w: %s", ErrTimeout, limit), killErr)
+		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, writeErr), cleanupErr)
 	case readErr != nil:
 		writeEnding(frames, CodeWaitFailed, 125, readErr.Error())
-		return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), killErr)
+		return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), cleanupErr)
 	case waitErr != nil:
 		writeEnding(frames, CodeWaitFailed, 125, waitErr.Error())
-		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), killErr)
+		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), cleanupErr)
+	case killed && status < 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		writeEnding(frames, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
+		return withKillErr(fmt.Errorf("%w: %s", ErrTimeout, limit), cleanupErr)
 	case status < 0:
 		writeEnding(frames, CodeSignaled, 125, "bd was killed by a signal")
-		return withKillErr(ErrSignaled, killErr)
+		return withKillErr(ErrSignaled, cleanupErr)
 	}
+	// bd exited with a status of its own, which is the answer even when the
+	// deadline passed while the last of its output was being read: a bd that
+	// finished is not a timeout.
 	if err := fw.exit(status); err != nil {
-		return fmt.Errorf("%w: writing the exit frame: %v", ErrClientGone, err)
+		return withKillErr(fmt.Errorf("%w: writing the exit frame: %v", ErrClientGone, err), cleanupErr)
+	}
+	if cleanupErr != nil {
+		// bd answered, but a group the gateway tried to kill could not be
+		// stopped; the caller learns it here, since the frames say success.
+		return fmt.Errorf("bdgateway: bd exited with status %d, but ending its group failed: %w", status, cleanupErr)
 	}
 	return nil
 }
@@ -321,6 +378,12 @@ func (e *Executor) timeout(ms int) (time.Duration, error) {
 // empty cwd is the root. Anything that is not a local relative path is refused
 // before it reaches a filesystem call.
 //
+// The lexical checks are not enough on their own: a symbolic link inside the
+// tree would carry bd, or the metadata it reads, out of the workspace even
+// though every element is local. The gateway writes the workspace itself, so a
+// link below its root is never its own, and each existing element below the
+// root is refused if it is one.
+//
 // The workspace tree holds only the five files the design pushes, so the
 // caller's directory is created on first use: bd starts in the directory the
 // caller named, not in the root. A read-only workspace volume therefore
@@ -337,11 +400,22 @@ func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) 
 	dir = root
 	if cwd != "" {
 		// IsLocal refuses an absolute path and any ".." that leaves the
-		// subtree, so the joined directory stays inside the workspace.
+		// subtree, so the joined path stays inside the workspace.
 		if !filepath.IsLocal(cwd) {
 			return "", "", fmt.Errorf("%w: %q", ErrCwdOutsideWorkspace, cwd)
 		}
 		dir = filepath.Join(root, cwd)
+	}
+	if err := noSymlinkBelow(root, beadsDir); err != nil {
+		return "", "", fmt.Errorf("%w: %v", ErrNoWorkspace, err)
+	}
+	if err := noSymlinkBelow(root, dir); err != nil {
+		// A link is the caller's path leaving the workspace; any other failure
+		// is the workspace not holding the directory the caller named.
+		if errors.Is(err, errSymlinkElement) {
+			return "", "", fmt.Errorf("%w: %v", ErrCwdOutsideWorkspace, err)
+		}
+		return "", "", fmt.Errorf("%w: %v", ErrNoWorkspace, err)
 	}
 	fi, err := os.Stat(beadsDir)
 	if err != nil {
@@ -354,6 +428,40 @@ func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) 
 		return "", "", fmt.Errorf("%w: creating the caller's directory %s: %v", ErrNoWorkspace, dir, err)
 	}
 	return dir, beadsDir, nil
+}
+
+// errSymlinkElement marks a path refused because an element below the
+// workspace root is a symbolic link.
+var errSymlinkElement = errors.New("bdgateway: a symbolic link below the workspace root")
+
+// noSymlinkBelow refuses path when an element of it below root is a symbolic
+// link. Elements past the first that does not exist are not checked: only
+// MkdirAll creates them, and it makes real directories.
+func noSymlinkBelow(root, path string) error {
+	at := root
+	for _, el := range strings.Split(strings.TrimPrefix(path, root), string(filepath.Separator)) {
+		if el == "" || el == "." {
+			continue
+		}
+		at = filepath.Join(at, el)
+		fi, err := os.Lstat(at)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s", errSymlinkElement, at)
+		}
+		if !fi.IsDir() {
+			// A file where the path must pass through a directory: nothing
+			// below it exists to be a link, and the caller's stat or mkdir
+			// names the failure.
+			return nil
+		}
+	}
+	return nil
 }
 
 // buildEnv is bd's environment: the computed values first, then the caller's
@@ -426,7 +534,9 @@ func (f *frameWriter) copy(r io.Reader, kind FrameKind) error {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("%w: %v", errRead, err)
+			// Both are wrapped so a caller can tell a read this package's own
+			// close ended (os.ErrClosed) from one bd's output caused.
+			return fmt.Errorf("%w: %w", errRead, err)
 		}
 	}
 }

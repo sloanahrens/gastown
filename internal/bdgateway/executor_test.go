@@ -105,6 +105,61 @@ func TestExecutorPathMapping(t *testing.T) {
 		}
 	})
 
+	t.Run("a cwd behind a symbolic link", func(t *testing.T) {
+		// A local path can still leave the tree through a link, so a link below
+		// the root is refused before it reaches bd's directory.
+		root := testWorkspace(t)
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, "escape")); err != nil {
+			t.Fatal(err)
+		}
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, root, runner)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", Cwd: "escape"}, nil, io.Discard)
+		if !errors.Is(err, ErrCwdOutsideWorkspace) {
+			t.Fatalf("Exec = %v, want ErrCwdOutsideWorkspace", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+	})
+
+	t.Run("a beads path behind a symbolic link", func(t *testing.T) {
+		root := t.TempDir()
+		outside := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(outside, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, "gastown"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, ".beads"), filepath.Join(root, "gastown", ".beads")); err != nil {
+			t.Fatal(err)
+		}
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, root, runner)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, io.Discard)
+		if !errors.Is(err, ErrNoWorkspace) {
+			t.Fatalf("Exec = %v, want ErrNoWorkspace", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+	})
+
+	t.Run("a cwd that is not a path", func(t *testing.T) {
+		// A NUL byte cannot name anything, so the walk itself refuses it
+		// instead of handing it to bd.
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, testWorkspace(t), runner)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", Cwd: "a\x00b"}, nil, io.Discard)
+		if !errors.Is(err, ErrNoWorkspace) {
+			t.Fatalf("Exec = %v, want ErrNoWorkspace", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+	})
+
 	t.Run("a cwd the workspace cannot hold", func(t *testing.T) {
 		// A regular file where the caller's directory would be created makes
 		// MkdirAll fail the way a read-only workspace volume would.
@@ -224,6 +279,72 @@ func TestExecutorTimeoutKillFails(t *testing.T) {
 	}
 }
 
+// TestExecutorStdinHeld: a body bd never reads is bounded by the call's own
+// end the same way its output is, so a write nobody will take cannot hold the
+// call past its timeout.
+func TestExecutorStdinHeld(t *testing.T) {
+	t.Parallel()
+	proc := newBlockingFake("")
+	proc.heldStdin = newHeldStdin()
+	e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}})
+	err := e.Exec(context.Background(), Request{
+		Argv:      []string{"create", "-"},
+		Rig:       "gastown",
+		TimeoutMS: 20,
+	}, bytes.NewReader(bytes.Repeat([]byte("x"), 1024)), io.Discard)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Exec = %v, want ErrTimeout", err)
+	}
+	if !proc.wasKilled() {
+		t.Error("the process group was not killed")
+	}
+}
+
+// TestExecutorHeldOpen: bd has ended with a status of its own, but a process it
+// left behind still holds its stdout open. The call ends at that status instead
+// of waiting past its deadline for a pipe nobody will close, and a bd that
+// finished is not reported as a timeout. A kill that failed while doing so is
+// carried in the error, since the frames report success.
+func TestExecutorHeldOpen(t *testing.T) {
+	t.Parallel()
+	proc := func(killErr error) *fakeProcess {
+		p := newFakeProcess(0, "", "", nil)
+		p.stdout = newHeldReader()
+		p.killErr = killErr
+		return p
+	}
+	t.Run("bd ended before the kill", func(t *testing.T) {
+		e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc(os.ErrProcessDone)}})
+		var out bytes.Buffer
+		if err := e.Exec(context.Background(), Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown", TimeoutMS: 20}, nil, &out); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+		frames := readFrames(t, out.Bytes())
+		if len(frames) != 1 || frames[0].Kind != FrameExit {
+			t.Fatalf("frames = %+v, want the exit frame alone", frames)
+		}
+		if got, err := frames[0].ExitStatus(); err != nil || got != 0 {
+			t.Errorf("exit status = %d (%v), want 0", got, err)
+		}
+	})
+	t.Run("the kill that failed", func(t *testing.T) {
+		boom := errors.New("the group would not die")
+		e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc(boom)}})
+		var out bytes.Buffer
+		err := e.Exec(context.Background(), Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown", TimeoutMS: 20}, nil, &out)
+		if !errors.Is(err, boom) {
+			t.Fatalf("Exec = %v, want the failed kill in the error", err)
+		}
+		frames := readFrames(t, out.Bytes())
+		if len(frames) != 1 || frames[0].Kind != FrameExit {
+			t.Fatalf("frames = %+v, want the exit frame alone", frames)
+		}
+		if got, err := frames[0].ExitStatus(); err != nil || got != 0 {
+			t.Errorf("exit status = %d (%v), want 0", got, err)
+		}
+	})
+}
+
 // TestExecutorDisconnect: a client that cancels the request, or one whose
 // stream breaks mid-call, still gets bd's process group killed, and the
 // executor names the client as the reason.
@@ -231,11 +352,15 @@ func TestExecutorDisconnect(t *testing.T) {
 	t.Parallel()
 	t.Run("canceled context", func(t *testing.T) {
 		proc := newBlockingFake("")
-		e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}})
+		runner := &fakeRunner{queue: []Process{proc}, started: make(chan struct{})}
+		e := newTestExecutor(t, testWorkspace(t), runner)
 		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
 		var out bytes.Buffer
-		err := e.Exec(ctx, Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &out)
+		done := make(chan error, 1)
+		go func() { done <- e.Exec(ctx, Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &out) }()
+		<-runner.started
+		cancel()
+		err := <-done
 		if !errors.Is(err, ErrClientGone) {
 			t.Fatalf("Exec = %v, want ErrClientGone", err)
 		}
@@ -252,6 +377,25 @@ func TestExecutorDisconnect(t *testing.T) {
 		}
 		if status, err := frames[1].ExitStatus(); err != nil || status != 124 {
 			t.Errorf("exit status = %d (%v), want 124", status, err)
+		}
+	})
+	t.Run("canceled before the call", func(t *testing.T) {
+		// The client ended the request before it arrived: no process starts and
+		// no frames are written, since there is no bd for the kill to reach.
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, testWorkspace(t), runner)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var out bytes.Buffer
+		err := e.Exec(ctx, Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &out)
+		if !errors.Is(err, ErrClientGone) {
+			t.Fatalf("Exec = %v, want ErrClientGone", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+		if out.Len() != 0 {
+			t.Errorf("a refusal before the process wrote frames: %q", out.Bytes())
 		}
 	})
 	t.Run("broken stream", func(t *testing.T) {
@@ -636,15 +780,16 @@ func TestExecutorNew(t *testing.T) {
 
 // fakeProcess is a Process a test drives; nothing is started.
 type fakeProcess struct {
-	stdout  io.Reader
-	stderr  io.Reader
-	stdin   *recordingStdin
-	exited  chan struct{}
-	killed  chan struct{}
-	once    sync.Once
-	status  int
-	waitErr error
-	killErr error
+	stdout    io.Reader
+	stderr    io.Reader
+	stdin     *recordingStdin
+	heldStdin *heldStdin
+	exited    chan struct{}
+	killed    chan struct{}
+	once      sync.Once
+	status    int
+	waitErr   error
+	killErr   error
 }
 
 func newExitedFake(status int, stdout, stderr string) *fakeProcess {
@@ -658,10 +803,9 @@ func newFakeProcess(status int, stdout, stderr string, waitErr error) *fakeProce
 		stdin:   &recordingStdin{},
 		exited:  make(chan struct{}),
 		killed:  make(chan struct{}),
-		status:  status,
 		waitErr: waitErr,
 	}
-	close(p.exited)
+	p.finish(status)
 	return p
 }
 
@@ -690,9 +834,43 @@ func newUnreadableFake(err error) *fakeProcess {
 	}
 }
 
-func (p *fakeProcess) Stdin() io.WriteCloser { return p.stdin }
-func (p *fakeProcess) Stdout() io.Reader     { return p.stdout }
-func (p *fakeProcess) Stderr() io.Reader     { return p.stderr }
+func (p *fakeProcess) Stdin() io.WriteCloser {
+	if p.heldStdin != nil {
+		return p.heldStdin
+	}
+	return p.stdin
+}
+func (p *fakeProcess) Stdout() io.Reader { return p.stdout }
+func (p *fakeProcess) Stderr() io.Reader { return p.stderr }
+
+// heldStdin blocks a write until it is closed, standing in for bd not reading
+// the body while a process outside its group still holds the read end.
+type heldStdin struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newHeldStdin() *heldStdin { return &heldStdin{closed: make(chan struct{})} }
+
+func (s *heldStdin) Write([]byte) (int, error) {
+	<-s.closed
+	return 0, os.ErrClosed
+}
+
+func (s *heldStdin) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+
+// CloseOutputs closes the streams the fake can close; a strings.Reader cannot,
+// and one that can (a held pipe) is what a test uses to block a pump.
+func (p *fakeProcess) CloseOutputs() {
+	for _, r := range []io.Reader{p.stdout, p.stderr} {
+		if c, ok := r.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}
+}
 
 func (p *fakeProcess) Wait() (int, error) {
 	<-p.exited
@@ -760,6 +938,25 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("the clie
 type errorReader struct{ err error }
 
 func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+// heldReader blocks in Read until it is closed, standing in for a pipe that a
+// process which outlived bd's group still holds open.
+type heldReader struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newHeldReader() *heldReader { return &heldReader{closed: make(chan struct{})} }
+
+func (r *heldReader) Read([]byte) (int, error) {
+	<-r.closed
+	return 0, os.ErrClosed
+}
+
+func (r *heldReader) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
+}
 
 // startRecord is one call the fake runner was handed.
 type startRecord struct {
