@@ -1,0 +1,38 @@
+config
+config agent
+config agent get
+config agent list
+config agent remove
+config agent set
+config agent-email-domain
+config cost-tier
+config daemon
+config daemon diff
+config daemon get
+config daemon set
+config daemon unset
+config default-agent
+config default-agent list
+config get
+config migrate
+config secrets
+config secrets migrate
+config set
+config validate
+tap
+tap guard
+tap guard bd-close-invariant
+tap guard bd-create-store
+tap guard bd-init
+tap guard container-suite
+tap guard dangerous-command
+tap guard mol-patrol
+tap guard permission-request
+tap guard polecat-paths
+tap guard pr-workflow
+tap guard question-tool
+tap guard sandbox-secrets
+tap guard script-files
+tap list
+tap nudge-drain
+tap polecat-stop-check

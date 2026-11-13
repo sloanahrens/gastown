@@ -1,0 +1,39 @@
+bead
+bead claim
+bead close
+bead comment
+bead create
+bead dep
+bead dep add
+bead dep remove
+bead note
+bead reopen
+bead reset
+bead review
+bead search
+bead tick
+bead update
+land verdict
+rig
+rig add
+rig config
+rig config set
+rig config show
+rig config unset
+rig dock
+rig hold
+rig list
+rig park
+rig release
+rig remove
+rig reset
+rig settings
+rig settings set
+rig settings show
+rig settings unset
+rig shutdown
+rig status
+rig stop
+rig undock
+rig unpark
+spec lint

@@ -1,0 +1,40 @@
+mail
+mail announces
+mail archive
+mail channel
+mail channel create
+mail channel delete
+mail channel list
+mail channel show
+mail channel subscribe
+mail channel subscribers
+mail channel unsubscribe
+mail check
+mail claim
+mail clear
+mail delete
+mail directory
+mail drain
+mail group
+mail group add
+mail group create
+mail group delete
+mail group list
+mail group remove
+mail group show
+mail hook
+mail inbox
+mail mark-read
+mail mark-unread
+mail peek
+mail queue
+mail queue create
+mail queue delete
+mail queue list
+mail queue show
+mail read
+mail release
+mail reply
+mail search
+mail send
+mail thread

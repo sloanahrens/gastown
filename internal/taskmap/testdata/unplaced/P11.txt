@@ -1,0 +1,38 @@
+crew
+crew add
+crew at
+crew fresh
+crew list
+crew pristine
+crew refresh
+crew remove
+crew rename
+crew restart
+crew stale
+crew start
+crew status
+crew stop
+crew worktree
+dolt
+dolt archive-now
+dolt cleanup
+dolt compare
+dolt container
+dolt container plan
+dolt dump
+dolt fix-metadata
+dolt init
+dolt init-rig
+dolt kill-imposters
+dolt latency
+dolt list
+dolt logs
+dolt migrate
+dolt pause
+dolt restart
+dolt sql
+dolt start
+dolt status
+dolt stop
+dolt top
+dolt unpause

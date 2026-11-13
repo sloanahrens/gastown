@@ -1,0 +1,30 @@
+polecat
+polecat add
+polecat check-recovery
+polecat check-recovery-batch
+polecat gc
+polecat git-state
+polecat identity
+polecat identity add
+polecat identity list
+polecat identity reconcile
+polecat identity remove
+polecat identity rename
+polecat identity show
+polecat list
+polecat nuke
+polecat pool-init
+polecat prune
+polecat remove
+polecat stale
+polecat status
+polecat surviving-work
+session
+session at
+session capture
+session inject
+session list
+session restart
+session start
+session status
+session stop
