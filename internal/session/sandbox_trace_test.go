@@ -159,6 +159,11 @@ func TestSandboxTraceNoteIsANoOpWithoutAPhaseOrText(t *testing.T) {
 		t.Fatalf("Summary() after a whitespace-only note = %q, want %q", got, want)
 	}
 
+	trace.Note("\x00\x1b[31m\x7f")
+	if got, want := trace.Summary(), "ready 1s, total 1s"; got != want {
+		t.Fatalf("Summary() after a control-bytes-only note = %q, want %q", got, want)
+	}
+
 	var nilTrace *SandboxTrace
 	nilTrace.Note("ignored")
 }
@@ -178,17 +183,56 @@ func TestSandboxTraceNoteStaysOnOneLineInTheSummary(t *testing.T) {
 	}
 }
 
+// Gateway text can carry terminal escape sequences and control bytes; the
+// summary is one log line for a terminal, so none of them survive into it.
+func TestSandboxTraceNoteDropsControlBytes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, note, want string
+	}{
+		{"an ANSI colour sequence", "\x1b[31mDependenciesNotReady\x1b[0m: Pod is pending", "DependenciesNotReady: Pod is pending"},
+		{"a carriage return", "Pod is pending\r0/3 nodes are available", "Pod is pending 0/3 nodes are available"},
+		{"a NUL", "Pod\x00is pending", "Pod is pending"},
+		{"a tab inside a note", "Pod\tis pending", "Pod is pending"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newTraceClock()
+			trace := NewSandboxTrace(clock.Now)
+			trace.Phase("ready", func() error { clock.Advance(time.Second); return nil })
+			trace.Note(tc.note)
+
+			want := "ready 1s (" + tc.want + "), total 1s"
+			if got := trace.Summary(); got != want {
+				t.Fatalf("Summary() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // A gateway message has no length bound the town can rely on; a note longer
 // than the summary's budget is cut rather than written whole into the log.
 func TestSandboxTraceNoteIsCutToTheLogLineBudget(t *testing.T) {
 	t.Parallel()
-	clock := newTraceClock()
-	trace := NewSandboxTrace(clock.Now)
-	trace.Phase("ready", func() error { clock.Advance(time.Second); return nil })
-	trace.Note(strings.Repeat("x", traceNoteMax+50))
+	cases := []struct {
+		name, note, want string
+	}{
+		{"exactly the budget", strings.Repeat("x", traceNoteMax), strings.Repeat("x", traceNoteMax)},
+		{"over the budget", strings.Repeat("x", traceNoteMax+50), strings.Repeat("x", traceNoteMax) + " …"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newTraceClock()
+			trace := NewSandboxTrace(clock.Now)
+			trace.Phase("ready", func() error { clock.Advance(time.Second); return nil })
+			trace.Note(tc.note)
 
-	want := strings.Repeat("x", traceNoteMax) + " …"
-	if got := trace.Summary(); !strings.Contains(got, want) {
-		t.Fatalf("Summary() = %q, want the note cut to %d runes and an ellipsis", got, traceNoteMax)
+			want := "ready 1s (" + tc.want + "), total 1s"
+			if got := trace.Summary(); got != want {
+				t.Fatalf("Summary() = %q, want %q", got, want)
+			}
+		})
 	}
 }

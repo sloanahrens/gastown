@@ -2,8 +2,10 @@ package session
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // SandboxTrace times the phases of one sling, so the spec dispatcher's tick log
@@ -83,10 +85,23 @@ func (t *SandboxTrace) Note(note string) {
 	t.phases[len(t.phases)-1].note = note
 }
 
-// noteLine is note as the summary can carry it: on one line, its whitespace
-// runs collapsed to a single space, cut to traceNoteMax runes and marked with
-// an ellipsis when longer.
+// ansiCSI matches a terminal control sequence: the escape byte, its parameter
+// and intermediate bytes, then its final byte. Gateway text can carry color,
+// and the summary's reader is a terminal that would act on it.
+var ansiCSI = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]`)
+
+// noteLine is note as the summary can carry it: one line, its escape sequences
+// removed whole and its whitespace runs and other control characters collapsed
+// to a single space, cut to traceNoteMax runes and marked with an ellipsis when
+// longer.
 func noteLine(note string) string {
+	note = ansiCSI.ReplaceAllString(note, "")
+	note = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, note)
 	note = strings.Join(strings.Fields(note), " ")
 	if r := []rune(note); len(r) > traceNoteMax {
 		return string(r[:traceNoteMax]) + " …"
