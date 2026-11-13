@@ -283,7 +283,6 @@ func TestCallLogOptionsRefused(t *testing.T) {
 // TestCallLogArgvParse pins what argv contributes and what it must never
 // contribute: flag values (inline or separate) and non-id operands.
 func TestCallLogArgvParse(t *testing.T) {
-	l := &CallLog{prefixes: map[string]bool{"gt": true, "hq": true}}
 	tests := []struct {
 		name  string
 		argv  []string
@@ -350,10 +349,30 @@ func TestCallLogArgvParse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := l.parseArgv(tt.argv)
-			if got.verb != tt.verb || !reflect.DeepEqual(got.flags, tt.flags) || !reflect.DeepEqual(got.beads, tt.beads) {
-				t.Errorf("parseArgv(%q) = %+v, want verb %q flags %v beads %v", tt.argv, got, tt.verb, tt.flags, tt.beads)
+			opts := testOptions(t)
+			l, err := NewCallLog(opts)
+			if err != nil {
+				t.Fatalf("NewCallLog: %v", err)
+			}
+			l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: tt.argv})
+			if err := l.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got := decodeLine(t, readLines(t, filepath.Join(opts.Dir, DefaultCallLogName))[0])
+			if got["verb"] != tt.verb || !reflect.DeepEqual(got["flags"], asAny(tt.flags)) ||
+				!reflect.DeepEqual(got["beads"], asAny(tt.beads)) {
+				t.Errorf("argv %q logged verb %v flags %v beads %v, want %q %v %v",
+					tt.argv, got["verb"], got["flags"], got["beads"], tt.verb, tt.flags, tt.beads)
 			}
 		})
 	}
+}
+
+// asAny is a string slice as encoding/json decodes it.
+func asAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
 }

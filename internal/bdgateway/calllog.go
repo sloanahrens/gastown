@@ -90,18 +90,11 @@ type entry struct {
 	DurationMS int64    `json:"duration_ms"`
 }
 
-// item is what the writer goroutine takes from the queue: a line to write, or a
-// flush barrier that closes done once every line before it is written.
-type item struct {
-	line  []byte
-	flush chan struct{}
-}
-
 // CallLog writes one JSONL line per bd call behind a buffered channel, rotates
 // the file by size, and counts calls for GET /v1/stats.
 type CallLog struct {
-	// sendMu is held read while a line or barrier is queued and write while the
-	// channel is closed, so a queued line can never follow a close.
+	// sendMu is held read while a line is queued and write while the channel is
+	// closed, so a queued line can never follow a close.
 	sendMu sync.RWMutex
 	// mu guards the counters, err and closed; the writer takes it only to record
 	// a write error.
@@ -113,7 +106,7 @@ type CallLog struct {
 	dropped uint64
 	verbs   map[string]uint64
 
-	ch   chan item
+	ch   chan []byte
 	done chan struct{}
 
 	now      func() time.Time
@@ -159,7 +152,7 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 		}
 	}
 	l := &CallLog{
-		ch:       make(chan item, opts.Buffer),
+		ch:       make(chan []byte, opts.Buffer),
 		done:     make(chan struct{}),
 		now:      now,
 		prefixes: prefixes,
@@ -238,7 +231,7 @@ func (l *CallLog) Log(rec CallRecord) {
 	}
 	l.mu.Unlock()
 	select {
-	case l.ch <- item{line: append(line, '\n')}:
+	case l.ch <- append(line, '\n'):
 	default:
 		l.mu.Lock()
 		l.dropped++
@@ -256,29 +249,6 @@ func (l *CallLog) Stats() Stats {
 		verbs[verb] = n
 	}
 	return Stats{Calls: l.calls, Errors: l.errors, Dropped: l.dropped, Verbs: verbs}
-}
-
-// Flush waits until every line queued before it is written and returns the first
-// write error seen.
-func (l *CallLog) Flush() error {
-	done := make(chan struct{})
-	l.sendMu.RLock()
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		l.sendMu.RUnlock()
-		<-l.done
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		return l.err
-	}
-	l.mu.Unlock()
-	l.ch <- item{flush: done}
-	l.sendMu.RUnlock()
-	<-done
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.err
 }
 
 // Close stops the writer after the lines already queued, and returns the first
@@ -312,12 +282,8 @@ func (l *CallLog) run(w *logWriter) {
 			l.setErr(err)
 		}
 	}()
-	for it := range l.ch {
-		if it.flush != nil {
-			close(it.flush)
-			continue
-		}
-		if err := w.write(it.line); err != nil {
+	for line := range l.ch {
+		if err := w.write(line); err != nil {
 			l.setErr(err)
 		}
 	}
