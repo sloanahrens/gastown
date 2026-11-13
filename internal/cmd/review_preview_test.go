@@ -527,9 +527,9 @@ func TestReviewPreviewWiresBranchHeadAndBead(t *testing.T) {
 	}
 }
 
-// TestReviewPreviewBuildsForTheResolvedDirectory drives the success path of
-// runReviewPreviewFrom: the resolved directory is the one the dependencies are
-// built for, and the round on them is reported.
+// TestReviewPreviewBuildsForTheResolvedDirectory drives the success path
+// runReviewPreviewFrom delegates to: the resolved directory is the one the
+// dependencies are built for, and the round on them is reported.
 func TestReviewPreviewBuildsForTheResolvedDirectory(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -599,9 +599,10 @@ func TestReviewPreviewProductionBuildBindsItsDirectory(t *testing.T) {
 	}
 
 	elsewhere := t.TempDir()
-	other, ok := reviewPreviewProductionBuild(elsewhere, &stdout, &stderr).store.(*beads.Beads)
+	otherDeps := reviewPreviewProductionBuild(elsewhere, &stdout, &stderr)
+	other, ok := otherDeps.store.(*beads.Beads)
 	if !ok {
-		t.Fatalf("store = %T, want the bd store", other)
+		t.Fatalf("store = %T, want the bd store", otherDeps.store)
 	}
 	if other.IsBeadsRepo() {
 		t.Errorf("the bd store built for %s reads a directory with beads, want its own empty one", elsewhere)
