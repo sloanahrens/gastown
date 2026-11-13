@@ -174,13 +174,14 @@ func Kinds() []Kind {
 }
 
 // Severity is how loud an item is. The values match the alerts.jsonl schema
-// gt tail's watch source reads: low or high.
+// gt tail's watch source reads: low, medium or high.
 type Severity string
 
 // Severities, lowest first.
 const (
-	SeverityLow  Severity = "low"
-	SeverityHigh Severity = "high"
+	SeverityLow    Severity = "low"
+	SeverityMedium Severity = "medium"
+	SeverityHigh   Severity = "high"
 )
 
 // Item is one condition that holds now. Key is the item's stable identity:

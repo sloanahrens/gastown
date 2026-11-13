@@ -105,8 +105,8 @@ func TestHoldStaleOneDayWithDependenciesClosed(t *testing.T) {
 			}
 			it := items[0]
 			if it.Key != "hold-stale:gt-abc12" || it.Kind != attention.KindHoldStale ||
-				it.Severity != attention.SeverityLow || it.Rig != attentionRig || it.Bead != "gt-abc12" {
-				t.Errorf("item = %+v, want a low hold-stale item on gt-abc12", it)
+				it.Severity != attention.SeverityMedium || it.Rig != attentionRig || it.Bead != "gt-abc12" {
+				t.Errorf("item = %+v, want a medium hold-stale item on gt-abc12", it)
 			}
 			for _, want := range []string{"gt-abc12", "overseer-only", "25h0m", "over one day, every dependency closed"} {
 				if !strings.Contains(it.Summary, want) {
@@ -253,9 +253,16 @@ func TestHoldStaleFailedReadKeepsThePreviousItem(t *testing.T) {
 	f.src.holdBeads = func(context.Context, string, string) ([]*beads.Issue, error) {
 		return nil, errors.New("bd list timed out")
 	}
+	f.logs.Reset()
 	after := f.tick(t, holdStaleNow.Add(5*time.Minute))
 	if n := countHoldStale(after); n != 1 {
 		t.Errorf("after a failed list, %d hold-stale items remain, want the previous one kept", n)
+	}
+	logged := f.logs.String()
+	for _, want := range []string{"collector hold-stale:", "listing overseer-only holds", "bd list timed out"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("tick log %q does not name %q", logged, want)
+		}
 	}
 
 	c := collectorFor(t, f.src, attention.KindHoldStale)
@@ -265,53 +272,74 @@ func TestHoldStaleFailedReadKeepsThePreviousItem(t *testing.T) {
 	}
 }
 
-// A failed dependency read, a created time that does not parse, and an unshowable
-// bead each fail the collection: none passes as a clean queue.
-func TestHoldStaleRefusesUnreadableInputs(t *testing.T) {
+// A bead that cannot be judged is skipped with one log line naming it, and the
+// other held beads' items are still raised. Each case is one way a bead cannot
+// be judged: a dependency read that fails, a created time that does not parse,
+// and a show that returns nothing.
+func TestHoldStaleSkipsAnUnjudgeableBead(t *testing.T) {
 	t.Parallel()
+	const bad, good = "gt-bad01", "gt-good1"
 	cases := []struct {
 		name  string
-		setup func(f *attentionFixture)
+		setup func(f *attentionFixture, badBead *beads.Issue)
+		// logWant is the reason the log line must carry.
+		logWant string
 	}{
 		{
 			name: "dependency read fails",
-			setup: func(f *attentionFixture) {
-				holdStaleStore(f, heldBead("gt-abc12", 25*time.Hour, []string{"overseer-only"}))
-				f.src.holdBead = func(context.Context, string, string) (*beads.Issue, error) {
-					return nil, errors.New("bd show timed out")
+			setup: func(f *attentionFixture, badBead *beads.Issue) {
+				holdStaleStore(f, badBead, heldBead(good, 25*time.Hour, []string{"needs-overseer"}))
+				shown := f.src.holdBead
+				f.src.holdBead = func(ctx context.Context, rig, id string) (*beads.Issue, error) {
+					if id == bad {
+						return nil, errors.New("bd show timed out")
+					}
+					return shown(ctx, rig, id)
 				}
 			},
+			logWant: "bd show timed out",
 		},
 		{
 			name: "created time does not parse",
-			setup: func(f *attentionFixture) {
-				bead := heldBead("gt-abc12", 25*time.Hour, []string{"overseer-only"})
-				bead.CreatedAt = "yesterday"
-				holdStaleStore(f, bead)
+			setup: func(f *attentionFixture, badBead *beads.Issue) {
+				badBead.CreatedAt = "yesterday"
+				holdStaleStore(f, badBead, heldBead(good, 25*time.Hour, []string{"needs-overseer"}))
 			},
+			logWant: "not RFC 3339",
 		},
 		{
 			name: "bead listed but not shown",
-			setup: func(f *attentionFixture) {
-				holdStaleStore(f, heldBead("gt-abc12", 25*time.Hour, []string{"overseer-only"}))
-				f.src.holdBead = func(context.Context, string, string) (*beads.Issue, error) {
-					return nil, nil
+			setup: func(f *attentionFixture, badBead *beads.Issue) {
+				holdStaleStore(f, badBead, heldBead(good, 25*time.Hour, []string{"needs-overseer"}))
+				shown := f.src.holdBead
+				f.src.holdBead = func(ctx context.Context, rig, id string) (*beads.Issue, error) {
+					if id == bad {
+						return nil, nil
+					}
+					return shown(ctx, rig, id)
 				}
 			},
+			logWant: "not shown",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newAttentionFixture(t, holdStaleNow)
-			tc.setup(f)
+			tc.setup(f, heldBead(bad, 25*time.Hour, []string{"overseer-only"}, openBlocker))
 			c := collectorFor(t, f.src, attention.KindHoldStale)
 			items, err := c.collect(context.Background())
-			if err == nil {
-				t.Fatalf("collector read the input as clean: items = %+v", items)
+			if err != nil {
+				t.Fatalf("collector failed on one bead: %v", err)
 			}
-			if items != nil {
-				t.Errorf("items = %+v beside an unreadable input, want none", items)
+			if len(items) != 1 || items[0].Bead != good || items[0].Severity != attention.SeverityMedium {
+				t.Errorf("items = %+v, want one medium item on %s", items, good)
+			}
+			logged := f.logs.String()
+			for _, want := range []string{"collector hold-stale: skipped " + bad, tc.logWant} {
+				if !strings.Contains(logged, want) {
+					t.Errorf("log %q does not name %q", logged, want)
+				}
 			}
 		})
 	}

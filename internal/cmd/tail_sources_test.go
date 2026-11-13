@@ -350,6 +350,7 @@ func TestWatchLine_DrawsBySeverityAndAlwaysShows(t *testing.T) {
 		class    tailClass
 	}{
 		{"low", tailClassWarning},
+		{"medium", tailClassWarning},
 		{"high", tailClassFailure},
 	} {
 		class, ok := tailWatchSeverityClass(tc.severity)

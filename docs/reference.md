@@ -1513,12 +1513,12 @@ One JSON object per line:
 |-------|---------|
 | `ts` | RFC3339, when the condition was seen |
 | `class` | what kind of condition it is, e.g. `polecat-stall` |
-| `severity` | `low` or `high` |
+| `severity` | `low`, `medium` or `high` |
 | `text` | the one-line description |
 
 A writer appends and rotates at 1 MB — the attention log renames to
 `events.jsonl.1` — and leaves a file it does not own alone. A line that is not
-an object with a `ts` and a `low`/`high` severity is skipped, with one note in
+an object with a `ts` and a `low`/`medium`/`high` severity is skipped, with one note in
 the feed naming the file and the line's size, so a writer emitting one sees it.
 
 ### Hourly Report

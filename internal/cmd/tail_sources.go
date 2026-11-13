@@ -816,11 +816,11 @@ type tailWatchAlert struct {
 }
 
 // tailWatchSeverityClass is the class a watch line is drawn in: the schema's
-// low is yellow, high is red. false is a severity the schema does not name,
-// which makes the line unreadable rather than drawable.
+// low and medium are yellow, high is red. false is a severity the schema does
+// not name, which makes the line unreadable rather than drawable.
 func tailWatchSeverityClass(severity string) (tailClass, bool) {
 	switch strings.TrimSpace(severity) {
-	case string(attention.SeverityLow):
+	case string(attention.SeverityLow), string(attention.SeverityMedium):
 		return tailClassWarning, true
 	case string(attention.SeverityHigh):
 		return tailClassFailure, true
