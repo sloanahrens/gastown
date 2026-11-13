@@ -115,8 +115,10 @@ echo '[{"id":"tr-rig-testrig","status":"open","labels":[]}]'`
 // through the real showRigBead default: the first show answers the way a bd
 // whose database did not answer does, the second answers the identity bead, and
 // the retry is what makes the rig operational. The unit table covers the branch
-// against the in-process fake; this pins the path the daemon runs against the
-// real subprocess, which the unit tier cannot spawn.
+// against the in-process fake, and
+// TestIsRigOperational_RetryThroughRealBeadsWrapper covers it through the real
+// beads wrapper in the gate; this pins the spawned subprocess, which the unit
+// tier may not start.
 func TestIntegrationIsRigOperational_RetriedBDReadRecovers(t *testing.T) {
 	f := newRigStatusFixture(t, rigStatusStubStoreDownOnce)
 

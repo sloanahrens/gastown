@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -662,6 +663,95 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 	operational, reason := d.isRigOperational(rigName)
 	if operational || reason != "rig is docked (global)" {
 		t.Errorf("isRigOperational(docked rig) = %v, %q; want false, \"rig is docked (global)\"", operational, reason)
+	}
+}
+
+// TestIsRigOperational_RetryThroughRealBeadsWrapper drives the retry through
+// showRigBead's default branch: the real beads wrapper builds the bd argv,
+// parses the machine-mode answer and classifies the exit-25 failure, and
+// rigBeadRunner replaces only the process, which a unit test may not start
+// (internal/testutil/unittier). The spawned bd itself is pinned by
+// TestIntegrationIsRigOperational_RetriedBDReadRecovers.
+func TestIsRigOperational_RetryThroughRealBeadsWrapper(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"tr"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registerTestRigs(t, townRoot, map[string]string{rigName: "tr"})
+
+	var mu sync.Mutex
+	shows := 0
+	var sleeps []time.Duration
+	logBuf := &bytes.Buffer{}
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(logBuf, "", 0),
+		clock:  newFixedClock(),
+		rigBeadRunner: func(_ context.Context, args []string) ([]byte, []byte, error) {
+			if slices.Contains(args, "version") {
+				return []byte("bd 9.9.9\n"), nil, nil // the --allow-stale probe
+			}
+			if !slices.Contains(args, "show") || !slices.Contains(args, "tr-rig-testrig") {
+				t.Errorf("bd call = %v, want the identity-bead show", args)
+				return nil, nil, fmt.Errorf("unexpected bd call %v", args)
+			}
+			mu.Lock()
+			shows++
+			n := shows
+			mu.Unlock()
+			if n == 1 {
+				return nil, []byte("Error: database not available"), exitStatusError(25)
+			}
+			return []byte(`[{"id":"tr-rig-testrig","status":"open","labels":[]}]`), nil, nil
+		},
+		rigStatusSleep: func(wait time.Duration) {
+			mu.Lock()
+			defer mu.Unlock()
+			sleeps = append(sleeps, wait)
+		},
+	}
+	alerts := &rigStatusAlerts{}
+	d.rigStatusAlert = alerts.alert
+	d.rigStatusClear = alerts.clear
+
+	operational, reason := d.isRigOperational(rigName)
+	if !operational {
+		t.Fatalf("a read that answers on retry must be operational, got %q", reason)
+	}
+
+	mu.Lock()
+	gotShows, gotSleeps := shows, append([]time.Duration(nil), sleeps...)
+	mu.Unlock()
+	if gotShows != 2 {
+		t.Errorf("bd show calls = %d, want 2 (the failed read and its retry)", gotShows)
+	}
+	if len(gotSleeps) != 1 || gotSleeps[0] != rigStatusRetryDelay {
+		t.Errorf("retry pauses = %v, want one %v", gotSleeps, rigStatusRetryDelay)
+	}
+	if logged := logBuf.String(); strings.Contains(logged, "failed to check rig bead") {
+		t.Errorf("a read that answered on retry must log no failure, got:\n%s", logged)
+	}
+
+	// The answered read is memoized: a second evaluation re-reads nothing.
+	if operational, reason := d.isRigOperational(rigName); !operational {
+		t.Fatalf("second evaluation = %v, %q, want the memoized answer", operational, reason)
+	}
+	mu.Lock()
+	gotShows = shows
+	mu.Unlock()
+	if gotShows != 2 {
+		t.Errorf("bd show calls after a second evaluation = %d, want still 2", gotShows)
+	}
+
+	drainRigEscalations(d, rigName)
+	if raised, _, cleared := alerts.snapshot(); len(raised) != 0 || len(cleared) != 0 {
+		t.Errorf("escalations raised=%v cleared=%v, want none for a read that recovered", raised, cleared)
 	}
 }
 
