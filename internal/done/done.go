@@ -1668,12 +1668,6 @@ func acquirePresubmitSlot(ctx context.Context, r *doneRun) (func(), error) {
 	return func() { _ = h.Release() }, nil
 }
 
-// pushBranchForLanding pushes head to remote/<branch> under a lease on the
-// tip the remote had, then asserts the remote holds exactly head (gt-2wqt). A
-// rebased or squashed branch replaces an earlier attempt's tip; a concurrent
-// push to the branch makes the lease fail instead of being clobbered. One retry
-// absorbs a push that errored while the remote took the objects (gt-0opm).
-//
 // alreadyLandedAt reports the commit the bead's notes record as its landing: the
 // LANDING RECORD block the landing worker writes (gt-ijimsb). A READY TO LAND
 // block after that record means the bead was reopened with new work, which
