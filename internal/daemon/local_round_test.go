@@ -526,9 +526,11 @@ func TestLocalRoundPriorFindingsCarryRejectionAndLocalRound(t *testing.T) {
 type fakeLocalRoundGit struct {
 	rev, base                          string
 	revErr, updateErr, addErr, baseErr error
-	removeErr                          error
+	removeErr, deleteRefErr            error
 	refs                               map[string]string
-	removed                            []string
+	removed, deleted                   []string
+	// order records the cleanup calls in the order they were made.
+	order []string
 	// calls counts every git call, so a test can assert none was made.
 	calls int
 }
@@ -547,6 +549,17 @@ func (f *fakeLocalRoundGit) UpdateRef(ref, commit string) error {
 	return nil
 }
 
+func (f *fakeLocalRoundGit) DeleteRef(ref string) error {
+	f.calls++
+	f.deleted = append(f.deleted, ref)
+	f.order = append(f.order, "ref delete")
+	if f.deleteRefErr != nil {
+		return f.deleteRefErr
+	}
+	delete(f.refs, ref)
+	return nil
+}
+
 func (f *fakeLocalRoundGit) WorktreeAddDetached(string, string) error {
 	f.calls++
 	return f.addErr
@@ -555,6 +568,7 @@ func (f *fakeLocalRoundGit) WorktreeAddDetached(string, string) error {
 func (f *fakeLocalRoundGit) WorktreeRemove(path string, _ bool) error {
 	f.calls++
 	f.removed = append(f.removed, path)
+	f.order = append(f.order, "worktree remove")
 	return f.removeErr
 }
 
@@ -622,6 +636,9 @@ func TestLocalRoundFetchFailuresRefuseTheRound(t *testing.T) {
 			if got := len(tc.g.removed) == 1; got != tc.wantCleanup {
 				t.Fatalf("worktree cleanup ran %d times; want it run: %v", len(tc.g.removed), tc.wantCleanup)
 			}
+			if _, ok := tc.g.refs["refs/local-round/gt-ryp1ff"]; ok {
+				t.Fatal("the refused round left refs/local-round/gt-ryp1ff behind")
+			}
 		})
 	}
 }
@@ -645,6 +662,72 @@ func TestLocalRoundFetchCleanupLogsWithoutGitOutput(t *testing.T) {
 		if strings.Contains(line, "SECRET-OUTPUT") {
 			t.Fatalf("cleanup logs git's output: %q", line)
 		}
+	}
+}
+
+func TestLocalRoundFetcherCleanupDeletesTheBeadRef(t *testing.T) {
+	t.Parallel()
+	g := &fakeLocalRoundGit{rev: "abcdef1", base: "base1", refs: map[string]string{}}
+	fetch := localRoundFetcher(g, nil, t.TempDir(), "origin", "main", func(string, ...any) {})
+
+	tree, err := fetch("gt-ryp1ff", "abcdef1")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if _, ok := g.refs["refs/local-round/gt-ryp1ff"]; !ok {
+		t.Fatal("fetch wrote no private ref; the head is not pinned")
+	}
+	tree.Cleanup()
+	if _, ok := g.refs["refs/local-round/gt-ryp1ff"]; ok {
+		t.Fatal("refs/local-round/gt-ryp1ff survived cleanup; the bare repository keeps the head forever")
+	}
+	removeAt, deleteAt := -1, -1
+	for i, step := range g.order {
+		switch step {
+		case "worktree remove":
+			removeAt = i
+		case "ref delete":
+			deleteAt = i
+		}
+	}
+	if removeAt < 0 || deleteAt < 0 || removeAt >= deleteAt {
+		t.Fatalf("cleanup ran %v; want the worktree removed before the ref is deleted", g.order)
+	}
+}
+
+func TestLocalRoundFetcherRefDeleteFailureIsLoggedByStep(t *testing.T) {
+	t.Parallel()
+	g := &fakeLocalRoundGit{rev: "abcdef1", base: "base1", refs: map[string]string{}, deleteRefErr: gitOutput}
+	var logged []string
+	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	fetch := localRoundFetcher(g, nil, t.TempDir(), "origin", "main", logf)
+
+	tree, err := fetch("gt-ryp1ff", "abcdef1")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	tree.Cleanup()
+	if len(logged) != 1 {
+		t.Fatalf("cleanup logged %d lines; want one for the failed ref delete: %v", len(logged), logged)
+	}
+	if line := logged[0]; !strings.Contains(line, "gt-ryp1ff") || !strings.Contains(line, "ref delete") {
+		t.Fatalf("log line %q; want the step and the bead named", line)
+	}
+	if strings.Contains(logged[0], "SECRET-OUTPUT") {
+		t.Fatalf("cleanup logs git's output: %q", logged[0])
+	}
+}
+
+func TestLocalRoundFetcherFailureBeforeUpdateRefDeletesNothing(t *testing.T) {
+	t.Parallel()
+	g := &fakeLocalRoundGit{revErr: gitOutput, refs: map[string]string{}}
+	fetch := localRoundFetcher(g, nil, t.TempDir(), "origin", "main", func(string, ...any) {})
+
+	if _, err := fetch("gt-ryp1ff", "abcdef1"); err == nil {
+		t.Fatal("fetch returned no error for a head that is not a commit")
+	}
+	if len(g.deleted) != 0 {
+		t.Fatalf("a refused round deleted %v; want no ref delete", g.deleted)
 	}
 }
 
@@ -681,10 +764,11 @@ func TestLocalRoundFetchAcceptsTheBeadIdShapes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("fetch: %v", err)
 			}
-			tree.Cleanup()
+			// The ref is read before Cleanup, which deletes it.
 			if got := g.refs["refs/local-round/"+bead]; got != "abcdef1" {
 				t.Fatalf("private ref = %q; want the head", got)
 			}
+			tree.Cleanup()
 		})
 	}
 }

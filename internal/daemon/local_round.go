@@ -476,6 +476,7 @@ func (d *Daemon) localRoundPaused() string {
 type localRoundGit interface {
 	Rev(ref string) (string, error)
 	UpdateRef(ref, commit string) error
+	DeleteRef(ref string) error
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
 	MergeBase(a, b string) (string, error)
@@ -507,17 +508,27 @@ func localRoundFetcher(g localRoundGit, repo land.Repo, workRoot, remote, target
 		if _, err := g.Rev(head + "^{commit}"); err != nil {
 			return localRoundTree{}, fmt.Errorf("head %s is not a commit in the rig repository; push the branch first", head)
 		}
-		if err := g.UpdateRef("refs/local-round/"+bead, head); err != nil {
+		ref := "refs/local-round/" + bead
+		if err := g.UpdateRef(ref, head); err != nil {
 			return localRoundTree{}, fmt.Errorf("update-ref of refs/local-round/%s failed", bead)
+		}
+		// Cleanup logs the step that failed, not its error text, which can
+		// carry a command's output.
+		deleteRef := func() {
+			if err := g.DeleteRef(ref); err != nil {
+				logf("local_round: %s: ref delete of %s failed", bead, ref)
+			}
 		}
 		dir, err := os.MkdirTemp(workRoot, "local-round-")
 		if err != nil {
+			// The ref was written for a review that will not run, so it is
+			// this round's to delete too.
+			deleteRef()
 			return localRoundTree{}, fmt.Errorf("creating the local round worktree dir under %s failed", workRoot)
 		}
-		// Cleanup removes only the worktree this round made. A repository-wide
-		// prune is not this round's to run: it touches every worktree of the rig.
-		// Cleanup logs the step that failed, not its error text, which can carry
-		// a command's output.
+		// Cleanup removes the worktree this round made and the ref that pinned
+		// its head. A repository-wide prune is not this round's to run: it
+		// touches every worktree of the rig.
 		cleanup := func() {
 			if err := g.WorktreeRemove(dir, true); err != nil {
 				logf("local_round: %s: worktree remove of %s failed", bead, dir)
@@ -525,6 +536,7 @@ func localRoundFetcher(g localRoundGit, repo land.Repo, workRoot, remote, target
 			if err := os.RemoveAll(dir); err != nil {
 				logf("local_round: %s: removing %s failed", bead, dir)
 			}
+			deleteRef()
 		}
 		if err := g.WorktreeAddDetached(dir, head); err != nil {
 			cleanup()

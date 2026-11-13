@@ -3067,6 +3067,13 @@ func (g *Git) UpdateRef(ref, commit string) error {
 	return err
 }
 
+// DeleteRef removes ref, a full ref name, and an absent ref is not an error
+// (gt-d5ojod).
+func (g *Git) DeleteRef(ref string) error {
+	_, err := g.run("update-ref", "-d", ref)
+	return err
+}
+
 // IsEmpty returns true if the repository has no refs (an empty/unborn repo).
 // This is the case for newly-created repos with no commits.
 func (g *Git) IsEmpty() (bool, error) {
