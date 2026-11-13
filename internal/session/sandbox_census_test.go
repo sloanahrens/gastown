@@ -9,13 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
-
-// censusGuard bounds each wait a census test makes on a goroutine it started.
-// A test that passes returns long before it; the guard only turns a hang into a
-// failure that names the step.
-const censusGuard = 5 * time.Second
 
 // censusGateway is the openshell a census test drives. It answers `sandbox
 // list` from listing, fails the first listErrs list calls, and counts the list
@@ -286,28 +280,31 @@ func TestSlingCensus(t *testing.T) {
 				errs <- readSeat(name, &p)
 			}(n)
 		}
-		select {
-		case <-gw.entered:
-		case <-time.After(censusGuard):
-			t.Fatalf("no list call reached the gateway within %s", censusGuard)
-		}
-		// The first read is inside the list call. A census lock held across
-		// that call would block this lookup until the gate opens.
-		lookup := make(chan bool, 1)
+		// allRead closes once every read has returned, so a regression that
+		// makes no list call fails here instead of waiting for one.
+		allRead := make(chan struct{})
 		go func() {
-			_, ok := installedCensus().cached(known)
-			lookup <- ok
+			wg.Wait()
+			close(allRead)
 		}()
 		select {
-		case ok := <-lookup:
-			if !ok {
-				t.Error("cache lookup during the in-flight list found no kept answer for the known seat")
-			}
-		case <-time.After(censusGuard):
-			t.Fatalf("the census lock was held across the list call: a cache lookup did not return within %s", censusGuard)
+		case <-gw.entered:
+		case <-allRead:
+			t.Fatal("every read returned without a list call reaching the gateway")
+		}
+		// The first read is inside the list call, which holds no census lock.
+		// A census lock held across that call makes TryLock fail, at once and
+		// without a timer.
+		c := installedCensus()
+		if !c.mu.TryLock() {
+			t.Fatal("the census lock is held while a list call is in flight: a second reader would wait on the gateway")
+		}
+		c.mu.Unlock()
+		if _, ok := c.cached(known); !ok {
+			t.Error("cache lookup during the in-flight list found no kept answer for the known seat")
 		}
 		openGate()
-		wg.Wait()
+		<-allRead
 		close(errs)
 		for err := range errs {
 			if err != nil {
