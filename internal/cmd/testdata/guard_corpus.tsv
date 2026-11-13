@@ -582,3 +582,6 @@ test_scope	polecat	"bd close gt-x && go test ./..."	refuse	polecat 'go test' of 
 dangerous	crew	"grep -rn TODO {town}/gastown/mayor"	refuse	a rig's worktree dir	gt-3lvcjz.30	25525f031f423304e4beab561ac41d7fd14ab181c83c76ba884e86cec8e048e3
 container_suite	polecat	"grep -rn TODO {town}/gastown/mayor"	allow		gt-3lvcjz.30	25525f031f423304e4beab561ac41d7fd14ab181c83c76ba884e86cec8e048e3
 test_scope	polecat	"grep -rn TODO {town}/gastown/mayor"	allow		gt-3lvcjz.30	25525f031f423304e4beab561ac41d7fd14ab181c83c76ba884e86cec8e048e3
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads && echo ok"	refuse	targets testcontainers-backed package(s)	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
+test_scope	polecat	"echo ok && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
+dangerous	polecat	"echo ok && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
