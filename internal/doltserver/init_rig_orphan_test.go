@@ -20,9 +20,9 @@ func captureStderr(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stderr = w
+	os.Stderr = w //testpolicy:allow no-global-swap — os.Stderr is where the warnings are written; the test asserts them
 	func() {
-		defer func() { os.Stderr = old }()
+		defer func() { os.Stderr = old }() //testpolicy:allow no-global-swap — restores the os.Stderr swapped above
 		fn()
 	}()
 	if err := w.Close(); err != nil {
@@ -114,6 +114,8 @@ func TestInitRig_OwnedOrphanThatStopsGoesOffline(t *testing.T) {
 // not treated as stopped: InitRig keeps it and registers the rig over SQL, and
 // makes no offline directory next to a server that is still running. The
 // warning says why the server was kept (gt-8oc5pa).
+//
+//testpolicy:allow parallel — captures the process-wide os.Stderr the warning is written to
 func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 	const port = 4562
 	f := withDoltIdentity(newFakeHost().townPort(port)).on("dolt *", fakeReply{}).on("dolt init", fakeReply{})
@@ -155,6 +157,8 @@ func TestInitRig_OwnedOrphanThatStaysUpKeepsServerRunning(t *testing.T) {
 // dolt: Stop refuses it and the forced kill is skipped, so the process and its
 // pid file are left alone and the rig is registered on the live server
 // (gt-8oc5pa).
+//
+//testpolicy:allow parallel — captures the process-wide os.Stderr the warning is written to
 func TestInitRig_UnverifiableOrphanKillIsRefused(t *testing.T) {
 	const port = 4565
 	f := withDoltIdentity(newFakeHost().townPort(port)).on("dolt *", fakeReply{}).on("dolt init", fakeReply{})
