@@ -308,9 +308,10 @@ func (e refreshExitStatus) Error() string { return "exit status " + strconv.Itoa
 func (e refreshExitStatus) ExitCode() int { return int(e) }
 
 // TestDaemonImagePinsWriteFailuresNameTheFile fails each write in turn: a failed
-// image write leaves the seed file unwritten and says neither file changed, and a
-// failed seed write after the image write names the seed file and says the image
-// was written, so the operator knows which file disagrees.
+// image write leaves the seed file unwritten and says so, since the image file may
+// be partly written; a failed seed write after the image write names the seed file
+// and says the image was written, so the operator knows which file disagrees; and
+// a failed seed write with no image write claims nothing about the image file.
 func TestDaemonImagePinsWriteFailuresNameTheFile(t *testing.T) {
 	t.Parallel()
 	t.Run("the image write fails", func(t *testing.T) {
@@ -327,7 +328,7 @@ func TestDaemonImagePinsWriteFailuresNameTheFile(t *testing.T) {
 		if err == nil {
 			t.Fatal("refresh --apply returned no error")
 		}
-		for _, w := range []string{r.flags.pins, "neither file was changed"} {
+		for _, w := range []string{r.flags.pins, "--seed-pins was not written", "may be partly written"} {
 			if !strings.Contains(err.Error(), w) {
 				t.Errorf("error %q does not contain %q", err, w)
 			}
@@ -358,6 +359,63 @@ func TestDaemonImagePinsWriteFailuresNameTheFile(t *testing.T) {
 			t.Errorf("image-pins does not carry the refreshed bd pin after its write:\n%s", got)
 		}
 	})
+	t.Run("the seed write fails with no image write", func(t *testing.T) {
+		t.Parallel()
+		r := newPinsRefreshRig(t)
+		// The image pins stay put, so the image file is not written, while the seed
+		// file's beads line trails the image's bd commit and must be rewritten.
+		r.setSource("bd", pinsRefreshTip["bd"], 5)
+		r.setSource("devops", pinsRefreshTip["devops"], 5)
+		writePinsRefreshFile(t, r.flags.seedPins, "beads "+pinsRefreshTip["bd"]+"\ndevops "+imageTestDevCommit+"\n")
+		imageBefore := readPinsRefreshFile(t, r.flags.pins)
+		r.write = func(path string, data []byte) error {
+			if path == r.flags.seedPins {
+				return errors.New("disk full")
+			}
+			return os.WriteFile(path, data, 0o644)
+		}
+		err := r.run(true)
+		if err == nil {
+			t.Fatal("refresh --apply returned no error")
+		}
+		for _, w := range []string{r.flags.seedPins, "may be partly written", "--pins was not changed"} {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("error %q does not contain %q", err, w)
+			}
+		}
+		if got := readPinsRefreshFile(t, r.flags.pins); got != imageBefore {
+			t.Errorf("image-pins changed though only the seed write was attempted:\n%s", got)
+		}
+	})
+}
+
+// TestDaemonImagePinsApplyWithNothingToRefreshWritesNothing runs --apply when no
+// pin trails its tip by PinRefreshBehind commits and the seed file already agrees:
+// the command says there is nothing to refresh and never reaches the write seam.
+func TestDaemonImagePinsApplyWithNothingToRefreshWritesNothing(t *testing.T) {
+	t.Parallel()
+	r := newPinsRefreshRig(t)
+	r.setSource("bd", pinsRefreshTip["bd"], 5)
+	r.setSource("devops", pinsRefreshTip["devops"], 5)
+	imageBefore := readPinsRefreshFile(t, r.flags.pins)
+	seedBefore := readPinsRefreshFile(t, r.flags.seedPins)
+	r.write = func(path string, data []byte) error {
+		t.Errorf("--apply with nothing to refresh wrote %s", path)
+		return nil
+	}
+
+	if err := r.run(true); err != nil {
+		t.Fatalf("apply with nothing to refresh: %v\n%s", err, r.out)
+	}
+	if !strings.Contains(r.out.String(), "nothing to refresh") {
+		t.Errorf("output does not say there is nothing to refresh:\n%s", r.out)
+	}
+	if got := readPinsRefreshFile(t, r.flags.pins); got != imageBefore {
+		t.Errorf("image-pins changed:\n%s", got)
+	}
+	if got := readPinsRefreshFile(t, r.flags.seedPins); got != seedBefore {
+		t.Errorf("seed-pins changed:\n%s", got)
+	}
 }
 
 // TestDaemonImagePinsFlagsAreWired parses the pins subcommand's flags and checks

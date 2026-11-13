@@ -148,12 +148,15 @@ func runDaemonImagePins(f daemonImagePinsFlags, d daemonImagePinsDeps) error {
 	}
 	if imageChanged {
 		if err := d.write(f.pins, newImage); err != nil {
-			return fmt.Errorf("--pins %q cannot be written, so neither file was changed: %w", f.pins, err)
+			return fmt.Errorf("--pins %q cannot be written, so --seed-pins was not written (--pins may be partly written: check it): %w", f.pins, err)
 		}
 	}
 	if seedChanged {
 		if err := d.write(f.seedPins, newSeed); err != nil {
-			return fmt.Errorf("--pins %q was written but --seed-pins %q cannot be, so the two files disagree until it is fixed: %w", f.pins, f.seedPins, err)
+			if imageChanged {
+				return fmt.Errorf("--pins %q was written but --seed-pins %q cannot be, so the two files disagree until it is fixed: %w", f.pins, f.seedPins, err)
+			}
+			return fmt.Errorf("--seed-pins %q cannot be written (it may be partly written: check it), and --pins was not changed: %w", f.seedPins, err)
 		}
 	}
 	fmt.Fprintf(d.out, "wrote %s and %s\n", f.pins, f.seedPins)

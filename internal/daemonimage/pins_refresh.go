@@ -16,7 +16,7 @@ import (
 const PinRefreshBehind = MaxPinBehind / 2
 
 // seedRigOf names the seed-pins rig that is the same repository as each
-// image-pins source the seed file also pins: the seed names beads where the
+// image pins source the seed file also pins: the seed names beads where the
 // image names bd.
 var seedRigOf = map[string]string{
 	"bd":     "beads",
@@ -129,7 +129,7 @@ func RewritePinCommits(data []byte, commits map[string]string, path string) ([]b
 	return []byte(strings.Join(lines, "")), nil
 }
 
-// RefreshPinFiles returns the image-pins file and the seed-pins file with the
+// RefreshPinFiles returns the image pins file and the seed-pins file with the
 // moved pins' commits and the seed's shared-source commits written in. Both are
 // computed before either is returned, so a refusal for one file leaves the
 // caller with neither to write.
