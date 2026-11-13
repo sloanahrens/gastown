@@ -46,6 +46,12 @@ takes the same commands at the path its rig gives it. To list each town file the
 claim lacks, run `gt doctor --check mac-town-state --pod-town <listing>`;
 `gt doctor --help` gives the listing's format.
 
+After creating a clone, run `gt doctor --check mac-crew-hooks` on a native gt on
+the Mac. Git skips a clone's hooks silently when its `core.hooksPath` points at
+a missing directory, so a pre-push guard can be off with nothing else reporting
+it; the check finds that clone and names the repair. A pod run warns instead of
+passing, because the pod sees no crew clones.
+
 ## L1: the scratch town
 
 L1 proves four things, and only these four are the result:
