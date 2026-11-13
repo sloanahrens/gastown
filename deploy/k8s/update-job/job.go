@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -232,9 +233,30 @@ func mounts() []VolumeMount {
 }
 
 // containerEnv points XDG_CONFIG_HOME at the directory the viewer token is mounted
-// under, as the daemon's containers do.
+// under, as the daemon's containers do, and gives git the credential helper line
+// its main-tip read needs.
 func containerEnv() []EnvVar {
-	return []EnvVar{{Name: k8sdaemon.ConfigHomeEnv, Value: manifestdata.LiveOpenShellConfigHome}}
+	env := []EnvVar{{Name: k8sdaemon.ConfigHomeEnv, Value: manifestdata.LiveOpenShellConfigHome}}
+	return append(env, gitCredentialEnv()...)
+}
+
+// forgeHost is the Forgejo Service host:port the pod's git asks for credentials:
+// the Service the daemon manifests name, composed from its name and port.
+func forgeHost() string {
+	return k8sdaemon.ForgejoName + ":" + strconv.Itoa(k8sdaemon.ForgejoPort)
+}
+
+// gitCredentialEnv puts the daemon's git credential helper in git's config through
+// its own environment config (git-config(1)), so `gt update`'s ls-remote answers
+// Forgejo's login prompt from the viewer token the pod mounts. The helper reads
+// the token file when git asks, and the value names the file's path, never a token.
+func gitCredentialEnv() []EnvVar {
+	host := forgeHost()
+	return []EnvVar{
+		{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		{Name: "GIT_CONFIG_KEY_0", Value: "credential.http://" + host + ".helper"},
+		{Name: "GIT_CONFIG_VALUE_0", Value: "!gt git-credential-forgejo --host " + host + " --token-file " + ViewerTokenPath},
+	}
 }
 
 // labels are the labels on the Job, the CronJob and their pods. They name the update,

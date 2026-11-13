@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,51 @@ func TestInitRecordsTheImagesAndTheContainerRollsThem(t *testing.T) {
 	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != "images" {
 		t.Errorf("init containers = %+v, want the one images container, so the roll waits for the record", pod.InitContainers)
 	}
+}
+
+// TestJobGitCredentialEnv holds git's credential helper to the viewer token and the
+// Forgejo Service: both the init container and the main container carry the three
+// GIT_CONFIG variables, and the helper line names the mounted token file and the
+// host the daemon's constants compose.
+func TestJobGitCredentialEnv(t *testing.T) {
+	t.Parallel()
+	host := k8sdaemon.ForgejoName + ":" + strconv.Itoa(k8sdaemon.ForgejoPort)
+	// The goldens carry this host too: a change to the daemon's Service name or
+	// port is a deliberate change to the Job's helper line, and this check names
+	// the change instead of letting the two drift.
+	const wantHost = "forgejo:3000"
+	if host != wantHost {
+		t.Fatalf("the daemon's Forgejo name and port compose %q, want %q", host, wantHost)
+	}
+	pod := podOf(mustBuild(t, goldenValues()))
+	want := []EnvVar{
+		{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		{Name: "GIT_CONFIG_KEY_0", Value: "credential.http://" + host + ".helper"},
+		{Name: "GIT_CONFIG_VALUE_0", Value: "!gt git-credential-forgejo --host " + host + " --token-file " + ViewerTokenPath},
+	}
+	for _, name := range []string{InitContainerName, ContainerName} {
+		c := containerNamed(t, pod, name)
+		for _, w := range want {
+			got, ok := envNamed(c.Env, w.Name)
+			if !ok {
+				t.Errorf("%s carries no %s, so git has no credential helper and the main-tip read asks for a login it cannot answer", c.Name, w.Name)
+				continue
+			}
+			if got.Value != w.Value {
+				t.Errorf("%s %s = %q, want %q", c.Name, w.Name, got.Value, w.Value)
+			}
+		}
+	}
+}
+
+// envNamed returns the environment variable named name.
+func envNamed(env []EnvVar, name string) (EnvVar, bool) {
+	for _, e := range env {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return EnvVar{}, false
 }
 
 // TestOnlyTheTownStateAndTheViewerTokenAreMounted holds the pod's volumes to the two
