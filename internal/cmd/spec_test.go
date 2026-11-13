@@ -1711,6 +1711,31 @@ func TestSpecDispatchCacheVolumeIsADeferralNotAFailure(t *testing.T) {
 	}
 }
 
+// A sandbox pod the scheduler could not place defers the bead the way a missing
+// cache volume does: no failed label, no note, and the next tick slings it once
+// the cluster has room (gt-nq3ngd).
+func TestSpecDispatchUnplaceablePodIsADeferralNotAFailure(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.slingErrs["gt-a"] = []error{fmt.Errorf("starting polecat session: %w", fmt.Errorf("starting session: %w", session.ErrSandboxUnplaceable))}
+	r := runSpecDispatchCycle(f.env())
+	if len(r.Failed) != 0 || len(r.Deferred) != 1 || len(f.slung) != 0 {
+		t.Fatalf("failed %+v deferred %+v slung %v; want 0 failed and 1 deferred", r.Failed, r.Deferred, f.slung)
+	}
+	if n := len(f.labels["gt-a"]); n != 0 {
+		t.Errorf("labels = %v, want no spec-dispatch-failed label", f.labels["gt-a"])
+	}
+	if n := len(f.notes["gt-a"]); n != 0 {
+		t.Errorf("annotated %d times, want none", n)
+	}
+	if line := r.Deferred[0].Line; !strings.Contains(line, "pod could not be placed") {
+		t.Errorf("deferral line = %q, want it to name the placement", line)
+	}
+	if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+		t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+	}
+}
+
 // A bond that could not take the town bond lock within its wait never reached
 // bd, so it is not Dolt contention, but it defers the bead the way contention
 // does: the queue that outlasted the bound is the town's load, not the bead's,
