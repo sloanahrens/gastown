@@ -82,6 +82,23 @@ func (f *fakeKube) AttachStreams(argv []string, env []string, stdin io.Reader, _
 	return f.Attach(argv, env)
 }
 
+// promptShell is a Shell whose AttachStreams writes the tool's unterminated prompt
+// through the stdout writer it was given, then calls after, so a test can see what
+// the wrapper's own output held at the moment the tool waited for input.
+type promptShell struct {
+	*fakeKube
+	prompt string
+	after  func()
+}
+
+func (s promptShell) AttachStreams(argv []string, env []string, stdin io.Reader, stdout, _ io.Writer) (int, error) {
+	if _, err := stdout.Write([]byte(s.prompt)); err != nil {
+		return 1, err
+	}
+	s.after()
+	return s.fakeKube.Attach(argv, env)
+}
+
 // Capture answers by the probe's kind. Each kind is a different kubectl verb line, so
 // matching on the joined argv is exact enough to tell them apart.
 func (f *fakeKube) Capture(_ context.Context, argv []string) (string, int, error) {
@@ -266,6 +283,53 @@ func TestKubectlRefusesARewriteWithoutWriters(t *testing.T) {
 	}
 	if len(f.captured) != 0 || len(f.attached) != 0 {
 		t.Fatalf("a refused call probed %q and attached %q", f.captured, f.attached)
+	}
+}
+
+// TestPodShowsAPromptBeforeTheToolWaits: with a terminal attached and the roots
+// differing, a prompt the tool prints without a newline reaches the wrapper's output
+// before the tool waits for input. Without a terminal the line waits for its
+// newline, since the stream may be binary.
+func TestPodShowsAPromptBeforeTheToolWaits(t *testing.T) {
+	t.Parallel()
+	const prompt = "continue? "
+	cases := []struct {
+		name string
+		tty  bool
+		// wantWhileWaiting is what the wrapper's output holds when the tool writes
+		// the prompt and waits.
+		wantWhileWaiting string
+	}{
+		{name: "a terminal", tty: true, wantWhileWaiting: prompt},
+		{name: "no terminal", tty: false, wantWhileWaiting: ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			var seenWhileWaiting string
+			shell := promptShell{
+				fakeKube: healthyKube(),
+				prompt:   prompt,
+				after:    func() { seenWhileWaiting = out.String() },
+			}
+			var note bytes.Buffer
+			k := testKubectl(shell, &note)
+			// The roots differ, so the tool's output is rewritten through the
+			// wrapper's streams.
+			k.PodRoot = "/town"
+			k.Stdout, k.Stderr = &out, io.Discard
+			if exit, err := k.Launch(kubeCall(t, kubeTown, tt.tty)); exit != 0 || err != nil {
+				t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+			}
+			if seenWhileWaiting != tt.wantWhileWaiting {
+				t.Fatalf("the wrapper's output while the tool waited = %q, want %q", seenWhileWaiting, tt.wantWhileWaiting)
+			}
+			// The line is written when the call ends either way.
+			if got, want := out.String(), prompt; got != want {
+				t.Fatalf("the output after the call = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

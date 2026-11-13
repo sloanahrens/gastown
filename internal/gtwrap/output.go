@@ -8,46 +8,61 @@ import (
 // outputRewriter rewrites the pod town root of a tool's output to the Mac's town
 // root, so a path the tool prints in the pod can be pasted on the Mac. It is
 // line-oriented: a complete line is rewritten and written at once, so a stream such
-// as `gt attention -f` keeps flowing, and only the bytes of an unterminated line are
-// held back. The rewrite is one substitution of the root as a whole path segment, so
-// a path that merely starts with the same characters (the pod root /town and the
-// directory /township) is left alone.
+// as `gt attention -f` keeps flowing. The rewrite is one substitution of the root as
+// a whole path segment, so a path that merely starts with the same characters (the
+// pod root /town and the directory /township) is left alone.
+//
+// In prompt mode an unterminated line is written as far as a later byte cannot
+// change it, so a prompt the tool prints without a newline reaches the terminal
+// before the tool waits for input. Only the end of the line that could begin or
+// complete the pod root is held back. Prompt mode is for a terminal, which carries
+// no binary stream: bytes it has already written cannot be withdrawn if a NUL byte
+// arrives later, which is why the default holds a line until it ends.
 //
 // A stream that carries a NUL byte is binary: the pending line is written unchanged
 // and everything after it passes through untouched, so an archive or an image is
-// never rewritten. Bytes that hold no root pass through as they arrive.
+// never rewritten.
 type outputRewriter struct {
 	// dst receives the rewritten stream.
 	dst io.Writer
 	// from is the pod's town root, and to is the Mac's.
 	from, to []byte
-	// line holds the bytes of the current line after its last newline, which are
-	// the only bytes not yet written.
+	// line holds the bytes of the current line after its last written byte, which
+	// are the only bytes not yet written.
 	line []byte
+	// prompt writes an unterminated line as far as a later byte cannot change it.
+	prompt bool
+	// prev is the last byte written, and hasPrev says there is one: together they
+	// are the left context of the pending line when prompt mode writes part of it.
+	prev    byte
+	hasPrev bool
 	// binary says a NUL byte was seen, so the rest of the stream is passed through.
 	binary bool
 }
 
 // newOutputRewriter returns a rewriter that copies a tool's output to dst,
-// substituting the pod town root with the Mac town root. The caller passes two
-// roots that differ; equal roots need no rewriter, and a caller that builds one
-// anyway gets a pass-through, since the substitution would replace a string with
-// itself.
-func newOutputRewriter(dst io.Writer, podRoot, town string) *outputRewriter {
-	return &outputRewriter{dst: dst, from: []byte(podRoot), to: []byte(town)}
+// substituting the pod town root with the Mac town root. prompt writes an
+// unterminated line as far as a later byte cannot change it, so an interactive
+// prompt shows before the tool waits; it is for a stream that is a terminal. The
+// caller passes two roots that differ; equal roots need no rewriter, and a caller
+// that builds one anyway gets a pass-through, since the substitution would replace
+// a string with itself.
+func newOutputRewriter(dst io.Writer, podRoot, town string, prompt bool) *outputRewriter {
+	return &outputRewriter{dst: dst, from: []byte(podRoot), to: []byte(town), prompt: prompt}
 }
 
 // Write takes the next bytes of the tool's output, writes every line it completes,
-// and returns the number of bytes it took. A byte it buffers counts as taken: the
-// rewriter owns it until the line ends or Flush writes it.
+// and in prompt mode writes the part of an unterminated line a later byte cannot
+// change. It returns the number of bytes it took: a byte it holds counts as taken,
+// since the rewriter owns it until it is written.
 func (r *outputRewriter) Write(p []byte) (int, error) {
 	if r.binary {
 		return r.dst.Write(p)
 	}
 	if bytes.IndexByte(p, 0) >= 0 {
 		// The stream is binary, so nothing in it may be rewritten. What is pending
-		// was never rewritten, since a line is rewritten only when it ends, so it is
-		// written as it came.
+		// was never rewritten, since a byte is rewritten only once it is written, so
+		// it is written as it came.
 		if err := r.writePending(); err != nil {
 			return 0, err
 		}
@@ -58,14 +73,97 @@ func (r *outputRewriter) Write(p []byte) (int, error) {
 	for {
 		end := bytes.IndexByte(r.line, '\n')
 		if end < 0 {
-			return len(p), nil
+			break
 		}
 		line := r.line[:end+1]
+		if err := r.writeLine(line); err != nil {
+			return 0, err
+		}
 		r.line = r.line[end+1:]
-		if _, err := r.dst.Write(r.rewrite(line)); err != nil {
+	}
+	if r.prompt {
+		if err := r.writePartial(); err != nil {
 			return 0, err
 		}
 	}
+	return len(p), nil
+}
+
+// writeLine writes one complete line, rewritten.
+func (r *outputRewriter) writeLine(line []byte) error {
+	out, _ := r.rewrite(line, r.left(), 0, false, true)
+	return r.emit(out, line[len(line)-1])
+}
+
+// writePartial writes the pending line up to the point a later byte could still
+// change what is written, and keeps the rest. Only the end of the line that could
+// begin or complete the pod root is held, so a prompt reaches the terminal while the
+// tool waits for input.
+func (r *outputRewriter) writePartial() error {
+	if len(r.line) == 0 {
+		return nil
+	}
+	limit := r.partialLimit(r.line)
+	next, hasNext := byte(0), limit < len(r.line)
+	if hasNext {
+		next = r.line[limit]
+	}
+	out, held := r.rewrite(r.line[:limit], r.left(), next, hasNext, false)
+	if held == 0 {
+		return nil
+	}
+	if err := r.emit(out, r.line[held-1]); err != nil {
+		return err
+	}
+	r.line = r.line[held:]
+	return nil
+}
+
+// partialLimit returns the index where the part of line a later write cannot change
+// ends: the start of a suffix that could still grow into the pod root, or of an
+// occurrence that begins before it and ends after it, so the occurrence is held from
+// its own start. The bytes before it can be written now.
+func (r *outputRewriter) partialLimit(line []byte) int {
+	limit := r.partialStart(line)
+	// A root that repeats its own prefix can begin before the held suffix and end
+	// inside it. A match is at most len(from) long, so every occurrence that
+	// overlaps limit starts within the last len(from) bytes before it.
+	for i := limit - 1; i >= 0 && i > limit-len(r.from); i-- {
+		if i+len(r.from) <= len(line) && bytes.Equal(line[i:i+len(r.from)], r.from) && r.leftOK(line, i, r.left()) {
+			limit = i
+		}
+	}
+	return limit
+}
+
+// partialStart returns the index where a suffix of line that could still grow into
+// the pod root begins, or len(line) when no suffix could.
+func (r *outputRewriter) partialStart(line []byte) int {
+	longest := min(len(r.from)-1, len(line))
+	for n := longest; n > 0; n-- {
+		if bytes.Equal(line[len(line)-n:], r.from[:n]) {
+			return len(line) - n
+		}
+	}
+	return len(line)
+}
+
+// left reports whether the byte before the pending line ends a path segment: the
+// start of the stream or of a line, or a byte that is not part of a path.
+func (r *outputRewriter) left() bool {
+	return !r.hasPrev || !pathByte(r.prev)
+}
+
+// emit writes out and records the last input byte it covers, which is the left
+// context of the bytes still pending.
+func (r *outputRewriter) emit(out []byte, last byte) error {
+	if len(out) > 0 {
+		if _, err := r.dst.Write(out); err != nil {
+			return err
+		}
+	}
+	r.prev, r.hasPrev = last, true
+	return nil
 }
 
 // Flush writes the line the stream ended on when it has no newline of its own. A
@@ -79,8 +177,8 @@ func (r *outputRewriter) Flush() error {
 	}
 	line := r.line
 	r.line = nil
-	_, err := r.dst.Write(r.rewrite(line))
-	return err
+	out, _ := r.rewrite(line, r.left(), 0, false, true)
+	return r.emit(out, line[len(line)-1])
 }
 
 // writePending writes the buffered line unchanged and empties the buffer.
@@ -95,11 +193,16 @@ func (r *outputRewriter) writePending() error {
 }
 
 // rewrite returns line with each occurrence of the pod town root that names the
-// root as a whole path segment replaced by the Mac town root. The result is line
-// itself when nothing matches.
-func (r *outputRewriter) rewrite(line []byte) []byte {
+// root as a whole path segment replaced by the Mac town root, and the number of
+// bytes it could decide. The result is line itself when nothing matches.
+//
+// left says whether the byte before line ends a path segment. The byte after line
+// is next when hasNext, the end of the line when end, and unknown otherwise: an
+// occurrence that ends the line before its next byte is known may still turn out to
+// be the root, so it and the bytes after it are left for the next write.
+func (r *outputRewriter) rewrite(line []byte, left bool, next byte, hasNext, end bool) ([]byte, int) {
 	if len(r.from) == 0 {
-		return line
+		return line, len(line)
 	}
 	var out []byte
 	last := 0
@@ -109,38 +212,61 @@ func (r *outputRewriter) rewrite(line []byte) []byte {
 			break
 		}
 		at := i + k
-		if r.rootAt(line, at) {
-			if out == nil {
-				out = make([]byte, 0, len(line)+len(r.to))
-			}
-			out = append(out, line[last:at]...)
-			out = append(out, r.to...)
-			last = at + len(r.from)
-			i = last
+		if !r.leftOK(line, at, left) {
+			i = at + 1
 			continue
 		}
-		i = at + 1
+		e := at + len(r.from)
+		// The byte that decides whether the root ends here has not arrived, so the
+		// occurrence may still be the root: it is held for the next write.
+		if e == len(line) && !end && !hasNext {
+			if out == nil {
+				return line[:at], at
+			}
+			return append(out, line[last:at]...), at
+		}
+		if !r.rightOK(line, e, next, hasNext, end) {
+			i = at + 1
+			continue
+		}
+		if out == nil {
+			out = make([]byte, 0, len(line)+len(r.to))
+		}
+		out = append(out, line[last:at]...)
+		out = append(out, r.to...)
+		last = e
+		i = e
 	}
 	if out == nil {
-		return line
+		return line, len(line)
 	}
-	return append(out, line[last:]...)
+	return append(out, line[last:]...), len(line)
 }
 
-// rootAt reports whether the pod town root at at in line names the root as a whole
-// path segment: the byte before it does not continue a path (so /srv/town is not
-// the root /town), and the byte after it is a path separator, the end of the line,
-// or a byte that ends the token (so /town/rig and a bare /town do match, and
-// /township does not).
-func (r *outputRewriter) rootAt(line []byte, at int) bool {
-	if at > 0 && pathByte(line[at-1]) {
-		return false
+// leftOK reports whether the pod town root at at in line names the root as a whole
+// path segment at its left: the byte before it does not continue a path (so
+// /srv/town is not the root /town). left is the context when at is the first byte.
+func (r *outputRewriter) leftOK(line []byte, at int, left bool) bool {
+	if at == 0 {
+		return left
 	}
-	end := at + len(r.from)
-	if end == len(line) {
-		return true
+	return !pathByte(line[at-1])
+}
+
+// rightOK reports whether the pod town root ending at e in line names the root as a
+// whole path segment at its right: the byte after it is a path separator or a byte
+// that ends the token (so /town/rig and a bare /town do match, and /township does
+// not). The byte after line is next when hasNext, and the end of the line is a
+// token boundary when end.
+func (r *outputRewriter) rightOK(line []byte, e int, next byte, hasNext, end bool) bool {
+	switch {
+	case e < len(line):
+		return line[e] == '/' || !pathByte(line[e])
+	case hasNext:
+		return next == '/' || !pathByte(next)
+	default:
+		return end
 	}
-	return line[end] == '/' || !pathByte(line[end])
 }
 
 // pathByte reports whether b can be part of a path segment: the letters and digits
