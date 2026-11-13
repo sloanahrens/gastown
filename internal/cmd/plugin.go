@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -659,6 +661,29 @@ type pluginSyncRun struct {
 	out, errOut          io.Writer
 }
 
+// existingBuildCheckout is the build-checkout resolver a dry run uses. It names
+// the rig's checkout under the town's build-checkout base when one is there. It
+// never clones, fetches or checks out, so a dry run creates nothing and moves
+// nothing (gt-i3rotl). A missing checkout is an error that says what a real
+// sync would do.
+func existingBuildCheckout(_ context.Context, townRoot, rig, rev string) (string, error) {
+	if rev != "" {
+		return "", fmt.Errorf("a dry run reads the existing checkout only, not rev %s", rev)
+	}
+	dir := filepath.Join(townRoot, buildsrc.BaseDirRel(), rig)
+	info, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", errors.New("no build checkout; a real sync would create it")
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading build checkout %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("build checkout %s is not a directory", dir)
+	}
+	return dir, nil
+}
+
 func (r pluginSyncRun) run() error {
 	townRoot := r.townRoot
 
@@ -666,7 +691,13 @@ func (r pluginSyncRun) run() error {
 	sourceDir := r.source
 	sourceRule := "explicit --source"
 	if sourceDir == "" {
-		src, err := plugin.FindGastownSource(r.ctx, townRoot, r.build)
+		// A dry run only reads: it names the checkout that exists and never
+		// asks buildsrc.Ensure to clone or move one (gt-i3rotl).
+		build := r.build
+		if r.dryRun {
+			build = existingBuildCheckout
+		}
+		src, err := plugin.FindGastownSource(r.ctx, townRoot, build)
 		if err != nil {
 			return err
 		}
