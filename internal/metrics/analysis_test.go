@@ -480,6 +480,20 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	if published.Holdout == nil || *published.Holdout != (PanelSpan{From: "2026-09-28", To: "2026-10-12"}) {
 		t.Errorf("panel.json holdout = %+v, want 2026-09-28..2026-10-12", published.Holdout)
 	}
+	// Every fixture landing is before the sandbox move, so each side's era counts
+	// name that one era, and the two sides together count every landing.
+	counted := 0
+	for side, eras := range map[string]map[string]int{"train": published.TrainEras, "holdout": published.HoldoutEras} {
+		for era, n := range eras {
+			if era != eraPreSandbox {
+				t.Errorf("panel.json %s eras = %v, want only %s", side, eras, eraPreSandbox)
+			}
+			counted += n
+		}
+	}
+	if counted != analyseRows {
+		t.Errorf("panel.json era counts total %d, want every one of the %d landings", counted, analyseRows)
+	}
 	stamp, err := os.ReadFile(filepath.Join(dir, stampName))
 	if err != nil {
 		t.Fatalf("stamp: %v", err)

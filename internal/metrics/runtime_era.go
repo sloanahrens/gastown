@@ -19,8 +19,8 @@ const (
 )
 
 // eraHoldoutMinLandings is the fewest landings the last era must hold before the
-// holdout is that whole era. Under it, the holdout is a date split inside the
-// era, so a short era is not left with too few landings to check a box on.
+// holdout is that whole era. Under it, the holdout is the later 30% of the last
+// era instead.
 const eraHoldoutMinLandings = 300
 
 // eraOrder is the order the era counts are written in, earliest era first.
@@ -44,8 +44,8 @@ func runtimeEra(landedAt string) string {
 
 // SplitByEra cuts rows into train and holdout so the holdout is always inside one
 // runtime era, and a change of regime between the eras is not read as a failed
-// pattern. The last era is the era of the latest landing. When that era holds at least
-// eraHoldoutMinLandings landings and earlier landings exist, train is every
+// pattern. The last era is the era of the latest landing. When that era holds at
+// least eraHoldoutMinLandings landings and earlier landings exist, train is every
 // earlier landing and holdout is the whole last era. Otherwise train is every
 // earlier landing plus the earliest defaultTrainFraction of the last era, and the
 // holdout is the rest of that era, so the cut stays inside one era either way.

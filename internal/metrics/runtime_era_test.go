@@ -192,8 +192,8 @@ func TestPrepareSplitsByRuntimeEra(t *testing.T) {
 	}
 }
 
-// TestEraCountsTextWritesEachEraInOrder: the digest and pane words put each
-// era's count in era order and name an empty side as none.
+// TestEraCountsTextWritesEachEraInOrder: the digest's words put each era's count
+// in era order and name an empty side as none.
 func TestEraCountsTextWritesEachEraInOrder(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
