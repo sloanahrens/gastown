@@ -65,7 +65,9 @@
 //
 // Values.Tracker renders trackerd beside the daemon and the dashboard: on
 // loopback, with the DSN Secret's key in TRACKER_DSN, and published on TrackerPort
-// by a socat sidecar (gt-p85pw.133).
+// by a socat sidecar (gt-p85pw.133). Values.TrackerBackup adds the tracker's nightly
+// dump beside it: a CronJob whose pod runs trackerbackup in TrackerBackupImage and
+// writes the dumps to the tracker-backup claim (gt-a6dyl2).
 //
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
@@ -296,6 +298,55 @@ const (
 	// environment variable, and the key of Values.TrackerDSNSecret it reads.
 	TrackerDSNEnv = "TRACKER_DSN"
 	TrackerDSNKey = "dsn"
+)
+
+// The tracker's nightly dump is a CronJob beside the tracker (gt-a6dyl2). Its pod
+// has an init container that copies trackerbackup out of the daemon image into an
+// emptyDir, and a main container from the postgres image, whose pg_dump is the one
+// the caller's image names. The dumps land on TrackerBackupClaim.
+const (
+	// TrackerBackupName names the CronJob and labels its pods.
+	TrackerBackupName = "tracker-backup"
+	// TrackerBackupClaim is the claim the dumps land on, and the volume name the
+	// main container mounts it by.
+	TrackerBackupClaim = "tracker-backup"
+	// TrackerBackupPath is where the main container mounts the claim: the -dir
+	// trackerbackup writes its dumps to.
+	TrackerBackupPath = "/backups"
+	// TrackerBackupBinVolume is the emptyDir the init container fills and the main
+	// container reads, mounted at TrackerBackupBinPath.
+	TrackerBackupBinVolume = "trackerbackup-bin"
+	TrackerBackupBinPath   = "/opt/trackerbackup"
+	// trackerBackupSource is the binary's path in the daemon image, and
+	// trackerBackupBinary its path in the emptyDir.
+	trackerBackupSource = "/usr/local/bin/trackerbackup"
+	trackerBackupBinary = TrackerBackupBinPath + "/trackerbackup"
+	// TrackerBackupCopyContainer and TrackerBackupDumpContainer name the init
+	// container that copies the binary and the main container that runs it.
+	TrackerBackupCopyContainer = "trackerbackup-copy"
+	TrackerBackupDumpContainer = "trackerbackup"
+	// TrackerBackupKeep is how many dumps trackerbackup keeps, tonight's included.
+	TrackerBackupKeep = 7
+	// TrackerBackupPgBin is the postgres image's pg_dump directory. The image's
+	// major version is the caller's TrackerBackupImage, which must match the 17.x
+	// server in deploy/tracker/docker-compose.yml.
+	TrackerBackupPgBin = "/usr/lib/postgresql/17/bin"
+	// DefaultTrackerBackupStorage is the dump claim's size when Values names none.
+	DefaultTrackerBackupStorage = "5Gi"
+	// DefaultTrackerBackupSchedule runs the dump daily at 03:30 in the controller
+	// manager's time zone, which a CronJob with no timeZone takes.
+	DefaultTrackerBackupSchedule = "30 3 * * *"
+	// trackerBackupConcurrency forbids a run while the last one is still going: a
+	// second run's stale-partial sweep would delete the partial the first writes.
+	trackerBackupConcurrency = "Forbid"
+	// trackerBackupSuccessfulHistory and trackerBackupFailedHistory are the finished
+	// Jobs the cluster keeps.
+	trackerBackupSuccessfulHistory = 1
+	trackerBackupFailedHistory     = 3
+	// trackerBackupBackoffLimit is how many times a failed pod is retried, and
+	// trackerBackupDeadlineSeconds bounds one run, so a hung pg_dump ends.
+	trackerBackupBackoffLimit    = 1
+	trackerBackupDeadlineSeconds = 1800
 )
 
 var (
@@ -698,17 +749,35 @@ type Values struct {
 	// itself never reaches the render. Set without Tracker it is refused, since
 	// nothing would read it.
 	TrackerDSNSecret string
+	// TrackerBackup renders the nightly dump beside the tracker: a CronJob that runs
+	// trackerbackup in TrackerBackupImage against the DSN Secret trackerd reads, and
+	// the claim the dumps land on. It needs Tracker, since it reads the DSN the
+	// tracker reads; a rehearsal refuses Tracker, so it cannot carry this either.
+	TrackerBackup bool
+	// TrackerBackupImage is the postgres image the dump runs in, named by the
+	// caller. Its pg_dump must match the server's major version. There is no
+	// default, and the render does not check its form.
+	TrackerBackupImage string
+	// TrackerBackupStorage is the dump claim's requested size;
+	// DefaultTrackerBackupStorage when empty.
+	TrackerBackupStorage string
+	// TrackerBackupSchedule is the CronJob's cron expression;
+	// DefaultTrackerBackupSchedule when empty. The render does not check it: the
+	// API server refuses a malformed one at apply.
+	TrackerBackupSchedule string
 }
 
-// Manifests is what Build returns, in the order Render writes it. The dashboard
-// and tracker objects are zero unless Values.Dashboard or Values.Tracker is set.
-// The dolt-backup claim is nil when Values.DoltBackupHostPath replaces it.
+// Manifests is what Build returns, in the order Render writes it. The dashboard,
+// tracker and tracker-backup objects are zero unless Values.Dashboard,
+// Values.Tracker or Values.TrackerBackup is set. The dolt-backup claim is nil when
+// Values.DoltBackupHostPath replaces it.
 type Manifests struct {
 	Namespace            Namespace
 	ServiceAccount       ServiceAccount
 	TownStateClaim       PersistentVolumeClaim
 	LandingWorkClaim     PersistentVolumeClaim
 	DoltBackupClaim      *PersistentVolumeClaim
+	TrackerBackupClaim   PersistentVolumeClaim
 	ForgejoService       Service
 	DashboardService     Service
 	TrackerService       Service
@@ -716,6 +785,7 @@ type Manifests struct {
 	Deployment           Deployment
 	DashboardDeployment  Deployment
 	TrackerDeployment    Deployment
+	TrackerBackupCronJob CronJob
 	SweepRoleBinding     RoleBinding
 	CacheTrimRoleBinding RoleBinding
 	SweepReaderBinding   ClusterRoleBinding
@@ -785,6 +855,10 @@ func Build(v Values) (Manifests, error) {
 	if v.Tracker {
 		m.TrackerService = trackerService(namespace)
 		m.TrackerDeployment = tracker
+	}
+	if v.TrackerBackup {
+		m.TrackerBackupClaim = claim(TrackerBackupClaim, namespace, v.TrackerBackupStorage, v.StorageClass)
+		m.TrackerBackupCronJob = trackerBackupCronJob(v, namespace)
 	}
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
 	// the pod mounts the directory the backups are written to (gt-cbsx3k).
@@ -1509,6 +1583,95 @@ func trackerLabels() map[string]string {
 	}
 }
 
+// trackerBackupCronJob is the nightly dump: a CronJob whose pod copies trackerbackup
+// out of the daemon image and runs it in the postgres image, writing the dumps to
+// the tracker-backup claim. The pod takes no ServiceAccount token, and no volume of
+// the Mac or the town. Its run is bounded by the Job's deadline, and a run that
+// starts while one is still going is forbidden, so two dumps never overlap.
+//
+// The postgres image runs as root and reads the claim as root, so the pod sets no
+// runAsNonRoot. The DSN reaches trackerbackup only through the Secret's dsn key, in
+// an environment variable, never in an argument.
+func trackerBackupCronJob(v Values, namespace string) CronJob {
+	automount := false
+	return CronJob{
+		TypeMeta: TypeMeta{APIVersion: "batch/v1", Kind: "CronJob"},
+		Metadata: ObjectMeta{Name: TrackerBackupName, Namespace: namespace, Labels: trackerBackupLabels()},
+		Spec: CronJobSpec{
+			Schedule:                   v.TrackerBackupSchedule,
+			ConcurrencyPolicy:          trackerBackupConcurrency,
+			SuccessfulJobsHistoryLimit: trackerBackupSuccessfulHistory,
+			FailedJobsHistoryLimit:     trackerBackupFailedHistory,
+			JobTemplate: JobTemplate{Spec: JobSpec{
+				BackoffLimit:          trackerBackupBackoffLimit,
+				ActiveDeadlineSeconds: trackerBackupDeadlineSeconds,
+				Template: PodTemplate{
+					Metadata: PodTemplateMeta{Labels: trackerBackupLabels()},
+					Spec: PodSpec{
+						AutomountServiceAccountToken: &automount,
+						RestartPolicy:                "Never",
+						InitContainers:               []Container{trackerBackupCopy(v)},
+						Containers:                   []Container{trackerBackupDump(v)},
+						Volumes: []Volume{
+							{Name: TrackerBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: TrackerBackupClaim}},
+							{Name: TrackerBackupBinVolume, EmptyDir: &EmptyDirVolumeSource{}},
+						},
+					},
+				},
+			}},
+		},
+	}
+}
+
+// trackerBackupCopy is the init container that copies trackerbackup from the daemon
+// image into the emptyDir. cp -p keeps the binary's 0755 mode, so the main container
+// can run it whatever the image's umask.
+func trackerBackupCopy(v Values) Container {
+	return Container{
+		Name:         TrackerBackupCopyContainer,
+		Image:        v.Image,
+		Command:      []string{"cp", "-p", trackerBackupSource, trackerBackupBinary},
+		VolumeMounts: []VolumeMount{{Name: TrackerBackupBinVolume, MountPath: TrackerBackupBinPath}},
+	}
+}
+
+// trackerBackupDump is the main container: trackerbackup in the postgres image, so
+// it runs that image's pg_dump. Command replaces the postgres entrypoint, so the
+// image's database is never initialized. The binary is read from the emptyDir, which
+// this container mounts read-only.
+func trackerBackupDump(v Values) Container {
+	return Container{
+		Name:    TrackerBackupDumpContainer,
+		Image:   v.TrackerBackupImage,
+		Command: []string{trackerBackupBinary},
+		Args: []string{
+			"-dir", TrackerBackupPath,
+			"-keep", strconv.Itoa(TrackerBackupKeep),
+			"-pg-bin", TrackerBackupPgBin,
+		},
+		Env: []EnvVar{{
+			Name: TrackerDSNEnv,
+			ValueFrom: &EnvVarSource{SecretKeyRef: &SecretKeySelector{
+				Name: v.TrackerDSNSecret,
+				Key:  TrackerDSNKey,
+			}},
+		}},
+		VolumeMounts: []VolumeMount{
+			{Name: TrackerBackupClaim, MountPath: TrackerBackupPath},
+			{Name: TrackerBackupBinVolume, MountPath: TrackerBackupBinPath, ReadOnly: true},
+		},
+	}
+}
+
+// trackerBackupLabels are the labels on the dump CronJob and its pods. They name the
+// dump, not the daemon, so the daemon's selector never matches them.
+func trackerBackupLabels() map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       TrackerBackupName,
+		"app.kubernetes.io/managed-by": "gt",
+	}
+}
+
 // volumes are the claims at the container's paths, the scratch emptyDir, and
 // one volume per rendered Secret. A Secret volume is named after its file with
 // the dots of a file name replaced, since a volume name is a DNS-1123 label.
@@ -1771,6 +1934,12 @@ func (v Values) withDefaults() Values {
 	if v.DoltBackupStorage == "" {
 		v.DoltBackupStorage = DefaultDoltBackupStorage
 	}
+	if v.TrackerBackupStorage == "" {
+		v.TrackerBackupStorage = DefaultTrackerBackupStorage
+	}
+	if v.TrackerBackupSchedule == "" {
+		v.TrackerBackupSchedule = DefaultTrackerBackupSchedule
+	}
 	if v.StorageClass == "" {
 		v.StorageClass = DefaultStorageClass
 	}
@@ -1833,6 +2002,9 @@ func (v Values) validate() error {
 		return err
 	}
 	if err := v.validateTracker(); err != nil {
+		return err
+	}
+	if err := v.validateTrackerBackup(); err != nil {
 		return err
 	}
 	if err := v.validateDaemonClaudeDir(); err != nil {
@@ -1899,6 +2071,26 @@ func (v Values) validateTracker() error {
 	}
 	if v.ProxyImage == "" {
 		return errors.New("Values.Tracker is set but Values.ProxyImage is empty: the tracker-relay sidecar that publishes trackerd on TrackerPort runs that image, and an empty one has nothing to run")
+	}
+	return nil
+}
+
+// validateTrackerBackup refuses the backup values its CronJob cannot render: a
+// backup with no tracker, since the dump reads the DSN trackerd reads, an empty
+// postgres image, which has nothing to run, and a claim size outside the grammar
+// the other claims take. A missing DSN Secret is validateTracker's refusal: the
+// backup needs Tracker, so that check runs first.
+func (v Values) validateTrackerBackup() error {
+	if !v.TrackerBackup {
+		return nil
+	}
+	switch {
+	case !v.Tracker:
+		return errors.New("Values.TrackerBackup is set but Values.Tracker is not: the dump reads the DSN the trackerd Deployment reads, so set Tracker or drop TrackerBackup")
+	case v.TrackerBackupImage == "":
+		return errors.New("Values.TrackerBackupImage is empty: name the postgres image the dump runs in, whose pg_dump must match the server's major version")
+	case !storageRE.MatchString(v.TrackerBackupStorage):
+		return fmt.Errorf("Values.TrackerBackupStorage %q: want a non-zero whole number and one of Ki, Mi, Gi or Ti, such as 5Gi", v.TrackerBackupStorage)
 	}
 	return nil
 }
@@ -2307,6 +2499,10 @@ func Render(w io.Writer, m Manifests) error {
 	if m.DoltBackupClaim != nil {
 		docs = append(docs, *m.DoltBackupClaim)
 	}
+	// Build leaves the tracker-backup claim zero unless Values.TrackerBackup is set.
+	if m.TrackerBackupClaim.Kind != "" {
+		docs = append(docs, m.TrackerBackupClaim)
+	}
 	docs = append(docs, m.ForgejoService)
 	// Build leaves the dashboard objects zero unless Values.Dashboard is set, so a
 	// zero object is one that was not rendered and is not written.
@@ -2327,6 +2523,10 @@ func Render(w io.Writer, m Manifests) error {
 	// Build leaves the tracker Deployment zero unless Values.Tracker is set.
 	if m.TrackerDeployment.Kind != "" {
 		docs = append(docs, m.TrackerDeployment)
+	}
+	// Build leaves the tracker-backup CronJob zero unless Values.TrackerBackup is set.
+	if m.TrackerBackupCronJob.Kind != "" {
+		docs = append(docs, m.TrackerBackupCronJob)
 	}
 	// Build leaves a binding zero in a rehearsal, so a zero binding is one that
 	// was not rendered and is not written.
@@ -2560,6 +2760,9 @@ type PodSpec struct {
 	InitContainers []Container `yaml:"initContainers,omitempty"`
 	Containers     []Container `yaml:"containers"`
 	Volumes        []Volume    `yaml:"volumes,omitempty"`
+	// RestartPolicy is Never on a Job's pod, so a failed container fails the pod and
+	// the Job's backoffLimit counts it. Empty takes the API's default.
+	RestartPolicy string `yaml:"restartPolicy,omitempty"`
 }
 
 // PodSecurityContext is the identity a pod runs as when the builder pins it. The
@@ -2578,6 +2781,37 @@ type PodSecurityContext struct {
 type HostAlias struct {
 	IP        string   `yaml:"ip"`
 	Hostnames []string `yaml:"hostnames"`
+}
+
+// CronJob is the subset of batch/v1's CronJob the builder renders.
+type CronJob struct {
+	TypeMeta `yaml:",inline"`
+	Metadata ObjectMeta  `yaml:"metadata"`
+	Spec     CronJobSpec `yaml:"spec"`
+}
+
+// CronJobSpec is the subset of a CronJob's spec the builder sets: when a run starts,
+// what a run does while the last one is still going, and how many finished Jobs the
+// cluster keeps.
+type CronJobSpec struct {
+	Schedule                   string      `yaml:"schedule"`
+	ConcurrencyPolicy          string      `yaml:"concurrencyPolicy"`
+	SuccessfulJobsHistoryLimit int32       `yaml:"successfulJobsHistoryLimit"`
+	FailedJobsHistoryLimit     int32       `yaml:"failedJobsHistoryLimit"`
+	JobTemplate                JobTemplate `yaml:"jobTemplate"`
+}
+
+// JobTemplate is the Job a run creates.
+type JobTemplate struct {
+	Spec JobSpec `yaml:"spec"`
+}
+
+// JobSpec is the subset of a Job's spec the builder sets: how many times a failed
+// pod is retried, and the deadline after which a hung run is ended.
+type JobSpec struct {
+	BackoffLimit          int32       `yaml:"backoffLimit"`
+	ActiveDeadlineSeconds int64       `yaml:"activeDeadlineSeconds"`
+	Template              PodTemplate `yaml:"template"`
 }
 
 // Container is the subset of one container the builder sets. Command replaces
