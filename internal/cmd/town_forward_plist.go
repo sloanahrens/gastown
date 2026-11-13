@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,6 +21,10 @@ const forwardLoopbackBind = "127.0.0.1"
 // forwardPATH is the PATH the job runs under. launchd gives a job only the system
 // directories, which do not hold a Homebrew kubectl.
 const forwardPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+// forwardKubectl is the client the job runs. launchd does not search PATH for a
+// job's program, so the plist names the absolute path the lookup resolves it to.
+const forwardKubectl = "kubectl"
 
 // forwardDNSLabel is an RFC 1123 label. The Service and namespace names reach an
 // argv element and a launchd label, so they are checked against it first.
@@ -90,13 +95,14 @@ type forwardPlistView struct {
 }
 
 func init() {
-	townForwardCmd.AddCommand(newForwardPlistCmd(os.UserHomeDir))
+	townForwardCmd.AddCommand(newForwardPlistCmd(os.UserHomeDir, exec.LookPath))
 	townCmd.AddCommand(townForwardCmd)
 }
 
 // newForwardPlistCmd builds `plist`, which prints the launchd job and loads
-// nothing. home supplies the directory the job's logs go under; a test passes its own.
-func newForwardPlistCmd(home func() (string, error)) *cobra.Command {
+// nothing. home supplies the directory the job's logs go under and lookPath finds
+// the client the job runs; a test passes its own for both.
+func newForwardPlistCmd(home func() (string, error), lookPath func(string) (string, error)) *cobra.Command {
 	var f forwardPlistFlags
 	c := &cobra.Command{
 		Use:   "plist",
@@ -104,6 +110,9 @@ func newForwardPlistCmd(home func() (string, error)) *cobra.Command {
 		Long: `Print a launchd property list for a job that runs kubectl port-forward of
 --service to 127.0.0.1:--port, restarting it if it exits. The job logs under
 ~/gt/daemon.
+
+The job runs the kubectl found on PATH, named in the plist by its absolute path:
+launchd does not search PATH for a job's program.
 
 The command only prints. The plist and the dashboard URL go to stdout and stderr;
 nothing is loaded into launchd and no cluster is contacted.`,
@@ -116,7 +125,14 @@ nothing is loaded into launchd and no cluster is contacted.`,
 			if err != nil {
 				return fmt.Errorf("HOME cannot be found, so the job's log paths cannot be set: %w", err)
 			}
-			if err = writeForwardPlist(cmd.OutOrStdout(), dir, f); err != nil {
+			kubectl, err := lookPath(forwardKubectl)
+			if err != nil {
+				return fmt.Errorf("%s cannot be found, so its absolute path is unknown and the plist cannot be written without it: %w", forwardKubectl, err)
+			}
+			if !filepath.IsAbs(kubectl) {
+				return fmt.Errorf("%s resolved to %q, which is not an absolute path, so launchd cannot run the job", forwardKubectl, kubectl)
+			}
+			if err = writeForwardPlist(cmd.OutOrStdout(), dir, kubectl, f); err != nil {
 				return err
 			}
 			if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "dashboard URL: http://%s:%d/\n", f.bind, f.port); err != nil {
@@ -158,13 +174,14 @@ func (f forwardPlistFlags) validate() error {
 }
 
 // writeForwardPlist writes the property list for f to w, with its logs under home.
+// kubectl is the client's absolute path, which launchd needs to run the job.
 // The template writes straight to w, so a failed write surfaces here.
-func writeForwardPlist(w io.Writer, home string, f forwardPlistFlags) error {
+func writeForwardPlist(w io.Writer, home, kubectl string, f forwardPlistFlags) error {
 	logBase := filepath.Join(home, "gt", "daemon", "forward-"+f.service)
 	view := forwardPlistView{
 		Label: "com.gastown.forward-" + f.service,
 		Args: []string{
-			"kubectl",
+			kubectl,
 			"--context=" + f.context,
 			"--namespace=" + f.namespace,
 			"port-forward",

@@ -6,7 +6,7 @@
 	<string>com.gastown.forward-dashboard</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>kubectl</string>
+		<string>/opt/homebrew/bin/kubectl</string>
 		<string>--context=colima-gt-control</string>
 		<string>--namespace=gt</string>
 		<string>port-forward</string>

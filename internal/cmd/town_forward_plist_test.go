@@ -18,6 +18,10 @@ const forwardPlistGoldenPath = "town_forward_plist.golden"
 // no host path.
 const forwardPlistHome = "/Users/operator"
 
+// forwardPlistKubectl is the client path the default fake lookup returns, so the
+// tests need no kubectl on the host.
+const forwardPlistKubectl = "/opt/homebrew/bin/kubectl"
+
 // forwardPlistArgs are the flags of a valid `plist` run.
 func forwardPlistArgs() []string {
 	return []string{
@@ -53,21 +57,35 @@ func forwardPlistArgsWith(name, value string) []string {
 // runForwardPlist runs the production command with args, writing stdout to out,
 // and returns what it wrote to stderr and its error.
 func runForwardPlist(home func() (string, error), out io.Writer, args []string) (string, error) {
+	return runForwardPlistWithLookup(home, fixedForwardPlistLookup, out, args)
+}
+
+// runForwardPlistWithLookup is runForwardPlist with the client lookup supplied.
+func runForwardPlistWithLookup(home func() (string, error), lookPath func(string) (string, error), out io.Writer, args []string) (string, error) {
 	var errBuf bytes.Buffer
-	err := execForwardPlist(home, out, &errBuf, args)
+	err := execForwardPlistWithLookup(home, lookPath, out, &errBuf, args)
 	return errBuf.String(), err
 }
 
 // execForwardPlist runs the production command with args, writing stdout to out
 // and stderr to errOut.
 func execForwardPlist(home func() (string, error), out, errOut io.Writer, args []string) error {
-	c := newForwardPlistCmd(home)
+	return execForwardPlistWithLookup(home, fixedForwardPlistLookup, out, errOut, args)
+}
+
+// execForwardPlistWithLookup is execForwardPlist with the client lookup supplied.
+func execForwardPlistWithLookup(home func() (string, error), lookPath func(string) (string, error), out, errOut io.Writer, args []string) error {
+	c := newForwardPlistCmd(home, lookPath)
 	c.SetOut(out)
 	c.SetErr(errOut)
 	c.SetArgs(args)
 	c.SilenceUsage = true
 	return c.Execute()
 }
+
+// fixedForwardPlistLookup stands in for exec.LookPath, which would make the test
+// depend on the host's PATH.
+func fixedForwardPlistLookup(string) (string, error) { return forwardPlistKubectl, nil }
 
 func fixedForwardPlistHome() (string, error) { return forwardPlistHome, nil }
 
@@ -138,7 +156,7 @@ func TestTownForwardPlistGolden(t *testing.T) {
 	}
 
 	wantArgs := []string{
-		"kubectl",
+		forwardPlistKubectl,
 		"--context=colima-gt-control",
 		"--namespace=gt",
 		"port-forward",
@@ -152,6 +170,30 @@ func TestTownForwardPlistGolden(t *testing.T) {
 	const wantStderr = "dashboard URL: http://127.0.0.1:8787/\n"
 	if stderr != wantStderr {
 		t.Errorf("stderr = %q, want %q", stderr, wantStderr)
+	}
+}
+
+// TestTownForwardPlistPrintsTheAbsoluteKubectl checks that the job's program is
+// the path the lookup returned, since launchd does not search PATH for it.
+func TestTownForwardPlistPrintsTheAbsoluteKubectl(t *testing.T) {
+	t.Parallel()
+	const kubectl = "/opt/homebrew/opt/kubernetes-cli/bin/kubectl"
+	lookup := func(name string) (string, error) {
+		if name != "kubectl" {
+			return "", errors.New("unexpected lookup of " + name)
+		}
+		return kubectl, nil
+	}
+	var out bytes.Buffer
+	if _, err := runForwardPlistWithLookup(fixedForwardPlistHome, lookup, &out, forwardPlistArgs()); err != nil {
+		t.Fatalf("plist with a resolved kubectl: %v", err)
+	}
+	args := plistProgramArguments(t, out.String())
+	if len(args) == 0 {
+		t.Fatalf("the plist has no ProgramArguments: %s", out.String())
+	}
+	if args[0] != kubectl {
+		t.Errorf("first program argument = %q, want the lookup's path %q", args[0], kubectl)
 	}
 }
 
@@ -222,6 +264,38 @@ func TestTownForwardPlistRefusals(t *testing.T) {
 		err := execForwardPlist(fixedForwardPlistHome, &out, forwardPlistFailingWriter{}, forwardPlistArgs())
 		if err == nil {
 			t.Fatal("a failed write of the URL exited zero")
+		}
+	})
+
+	t.Run("kubectl cannot be found", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		noKubectl := func(string) (string, error) { return "", errors.New("executable file not found in $PATH") }
+		_, err := runForwardPlistWithLookup(fixedForwardPlistHome, noKubectl, &out, forwardPlistArgs())
+		if err == nil {
+			t.Fatal("a run without kubectl exited zero")
+		}
+		if !strings.Contains(err.Error(), "kubectl") {
+			t.Errorf("error %q does not name kubectl", err)
+		}
+		if !strings.Contains(err.Error(), "executable file not found") {
+			t.Errorf("error %q loses the lookup's cause", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("a run without kubectl wrote %d bytes of plist", out.Len())
+		}
+	})
+
+	t.Run("kubectl resolved to a relative path", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		relative := func(string) (string, error) { return "bin/kubectl", nil }
+		_, err := runForwardPlistWithLookup(fixedForwardPlistHome, relative, &out, forwardPlistArgs())
+		if err == nil || !strings.Contains(err.Error(), "kubectl") {
+			t.Fatalf("run with a relative kubectl: err = %v, want one naming kubectl", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("a run with a relative kubectl wrote %d bytes of plist", out.Len())
 		}
 	})
 
