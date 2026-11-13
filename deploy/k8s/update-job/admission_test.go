@@ -119,9 +119,45 @@ func admissionNoElevationExpr() string {
 		"size(c.securityContext.capabilities.add) == 0)))"
 }
 
+// admissionNoExecExpr refuses the fields that run a command of their own: a
+// lifecycle hook and the three probes. Pinning command and args alone would leave
+// these, and a probe runs in the container as the pod's ServiceAccount.
+func admissionNoExecExpr() string {
+	return "!has(c.lifecycle) && !has(c.livenessProbe) && " +
+		"!has(c.readinessProbe) && !has(c.startupProbe)"
+}
+
+// admissionMountsExpr pins every mount to the renderer's: a mount path the
+// renderer does not set could put a file from the claim over a binary the pinned
+// command runs.
+func admissionMountsExpr(t *testing.T, mounts []VolumeMount) string {
+	t.Helper()
+	parts := []string{fmt.Sprintf("size(c.volumeMounts) == %d", len(mounts))}
+	for _, m := range mounts {
+		clauses := []string{
+			"m.name == " + celString(t, m.Name),
+			"m.mountPath == " + celString(t, m.MountPath),
+		}
+		clauses = append(clauses, "!has(m.subPathExpr)")
+		if m.SubPath == "" {
+			clauses = append(clauses, "!has(m.subPath)")
+		} else {
+			clauses = append(clauses, "m.subPath == "+celString(t, m.SubPath))
+		}
+		if m.ReadOnly {
+			clauses = append(clauses, "has(m.readOnly) && m.readOnly")
+		} else {
+			clauses = append(clauses, "(!has(m.readOnly) || !m.readOnly)")
+		}
+		parts = append(parts, "c.volumeMounts.exists(m, "+strings.Join(clauses, " && ")+")")
+	}
+	return strings.Join(parts, " && ")
+}
+
 // admissionContainerExpr is the bound on one container bound to c: the renderer's
 // name, the admitted image, the renderer's command and arguments, the pinned
-// environment, no envFrom and no elevation.
+// environment, no envFrom, no elevation, no hook or probe, and the renderer's
+// mounts.
 func admissionContainerExpr(t *testing.T, c Container) string {
 	t.Helper()
 	return strings.Join([]string{
@@ -132,6 +168,8 @@ func admissionContainerExpr(t *testing.T, c Container) string {
 		admissionEnvExpr(t),
 		"!has(c.envFrom)",
 		admissionNoElevationExpr(),
+		admissionNoExecExpr(),
+		admissionMountsExpr(t, c.VolumeMounts),
 	}, " && ")
 }
 
@@ -308,9 +346,9 @@ func admissionExprProblems(i int, got, want string) []string {
 
 // updateAdmissionProblems names every way the manifest departs from the policy the
 // daemon's Job creation is bounded by: two v1 documents of the expected kinds and
-// names, a policy of Fail on Job CREATE in batch/v1, the validations of
-// admissionValidations, and a binding that denies, for the daemon's ServiceAccount,
-// the Jobs in namespace gt.
+// names, a policy of Fail on Job CREATE in batch/v1 that skips every other account,
+// the validations of admissionValidations, and a binding that denies in namespace
+// gt.
 func updateAdmissionProblems(t *testing.T, docs []admissionDoc) []string {
 	t.Helper()
 	var problems []string
@@ -366,6 +404,15 @@ func admissionPolicyProblems(t *testing.T, policy admissionDoc) []string {
 			}
 		}
 	}
+	// matchConditions belong to the policy (admissionregistration.k8s.io/v1 has no
+	// such field on the binding), and a condition that skips rather than refuses is
+	// what keeps the operator's own Job creation out of these validations.
+	conditions := policy.Spec.MatchConditions
+	if len(conditions) != 1 {
+		problems = append(problems, fmt.Sprintf("the policy holds %d matchConditions, want only the daemon's ServiceAccount", len(conditions)))
+	} else if want := fmt.Sprintf("request.userInfo.username == '%s'", updateAdmissionUser); admissionText(conditions[0].Expression) != want {
+		problems = append(problems, fmt.Sprintf("matchConditions expression is %q, want %q", admissionText(conditions[0].Expression), want))
+	}
 	want := admissionValidations(t)
 	if len(policy.Spec.Validations) != len(want) {
 		problems = append(problems, fmt.Sprintf("the policy holds %d validations, want %d", len(policy.Spec.Validations), len(want)))
@@ -381,8 +428,9 @@ func admissionPolicyProblems(t *testing.T, policy admissionDoc) []string {
 	return problems
 }
 
-// admissionBindingProblems names every way the binding fails to hold the policy to
-// the daemon's Job creation in gt.
+// admissionBindingProblems names every way the binding fails to hold the policy's
+// validations to Job creation in gt: another policy, an action that only warns, a
+// wider namespace, or a matchConditions the binding has no field for.
 func admissionBindingProblems(binding admissionDoc, policyName string) []string {
 	var problems []string
 	if binding.Spec.PolicyName != policyName {
@@ -397,11 +445,8 @@ func admissionBindingProblems(binding admissionDoc, policyName string) []string 
 	} else if got := selector.MatchLabels["kubernetes.io/metadata.name"]; got != k8sdaemon.DefaultNamespace {
 		problems = append(problems, fmt.Sprintf("matchResources namespaceSelector selects namespace %q, want %q", got, k8sdaemon.DefaultNamespace))
 	}
-	conditions := binding.Spec.MatchConditions
-	if len(conditions) != 1 {
-		problems = append(problems, fmt.Sprintf("the binding holds %d matchConditions, want only the daemon's ServiceAccount", len(conditions)))
-	} else if want := fmt.Sprintf("request.userInfo.username == '%s'", updateAdmissionUser); admissionText(conditions[0].Expression) != want {
-		problems = append(problems, fmt.Sprintf("matchConditions expression is %q, want %q", admissionText(conditions[0].Expression), want))
+	if len(binding.Spec.MatchConditions) != 0 {
+		problems = append(problems, "the binding sets matchConditions, which admissionregistration.k8s.io/v1 has no field for: the policy's matchConditions must carry them")
 	}
 	return problems
 }
@@ -423,6 +468,22 @@ func admissionJobContainerProblems(got, want Container) []string {
 	}
 	problems = append(problems, admissionJobArgsProblems(got, want)...)
 	problems = append(problems, admissionJobEnvProblems(got, want)...)
+	return append(problems, admissionJobMountProblems(got, want)...)
+}
+
+// admissionJobMountProblems holds the Job's mounts to the renderer's names, paths,
+// subpaths and read-only flags, since the policy pins each of them.
+func admissionJobMountProblems(got, want Container) []string {
+	var problems []string
+	if len(got.VolumeMounts) != len(want.VolumeMounts) {
+		return []string{fmt.Sprintf("container %q mounts %d volumes, want the renderer's %d", got.Name, len(got.VolumeMounts), len(want.VolumeMounts))}
+	}
+	for i, w := range want.VolumeMounts {
+		g := got.VolumeMounts[i]
+		if g != w {
+			problems = append(problems, fmt.Sprintf("container %q mount %d is %+v, want %+v", got.Name, i, g, w))
+		}
+	}
 	return problems
 }
 
@@ -479,9 +540,10 @@ func admissionMapField(m map[string]any, key string) (map[string]any, bool) {
 
 // admissionEncodedProblems names every pod field the policy refuses that the
 // renderer's types do not model, read from the encoded Job: the host namespaces, a
-// container securityContext or envFrom, and an env valueFrom. A renderer change
-// that added one of them would otherwise pass the typed checks and reach the
-// cluster, where the policy would refuse the daemon's own Job.
+// container securityContext, envFrom, lifecycle hook or probe, and an env
+// valueFrom. A renderer change that added one of them would otherwise pass the
+// typed checks and reach the cluster, where the policy would refuse the daemon's
+// own Job.
 func admissionEncodedProblems(raw []byte) []string {
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
@@ -517,7 +579,7 @@ func admissionEncodedProblems(raw []byte) []string {
 				problems = append(problems, fmt.Sprintf("a %s entry is not a container", field))
 				continue
 			}
-			for _, key := range []string{"securityContext", "envFrom"} {
+			for _, key := range []string{"securityContext", "envFrom", "lifecycle", "livenessProbe", "readinessProbe", "startupProbe"} {
 				if _, found := c[key]; found {
 					problems = append(problems, fmt.Sprintf("container %v sets %s, which the policy refuses", c["name"], key))
 				}
@@ -796,6 +858,33 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 		want: "validation 4",
 	},
 	{
+		name: "a lifecycle hook admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"!has(c.lifecycle)", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "a probe admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[4].Expression = strings.Replace(docs[0].Spec.Validations[4].Expression,
+				"!has(c.readinessProbe)", "true", 1)
+			return docs
+		},
+		want: "validation 5",
+	},
+	{
+		name: "a mount path unpinned",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"m.mountPath == '/Users/sloan/gt'", "true", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
 		name: "an added capability",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
 			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
@@ -874,7 +963,7 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 	{
 		name: "no matchConditions",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			docs[1].Spec.MatchConditions = nil
+			docs[0].Spec.MatchConditions = nil
 			return docs
 		},
 		want: "matchConditions",
@@ -882,7 +971,7 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 	{
 		name: "a second matchCondition",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			docs[1].Spec.MatchConditions = append(docs[1].Spec.MatchConditions, docs[1].Spec.MatchConditions[0])
+			docs[0].Spec.MatchConditions = append(docs[0].Spec.MatchConditions, docs[0].Spec.MatchConditions[0])
 			return docs
 		},
 		want: "matchConditions",
@@ -890,10 +979,18 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 	{
 		name: "the operator's account too",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			docs[1].Spec.MatchConditions[0].Expression = "request.userInfo.username == 'kubernetes-admin'"
+			docs[0].Spec.MatchConditions[0].Expression = "request.userInfo.username == 'kubernetes-admin'"
 			return docs
 		},
 		want: "matchConditions expression",
+	},
+	{
+		name: "matchConditions on the binding",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[1].Spec.MatchConditions = docs[0].Spec.MatchConditions
+			return docs
+		},
+		want: "the binding sets matchConditions",
 	},
 }
 
@@ -978,6 +1075,21 @@ func TestUpdateAdmissionJobRefusesAnotherJob(t *testing.T) {
 				j.Spec.Template.Spec.Containers[0].Env = append(j.Spec.Template.Spec.Containers[0].Env, EnvVar{Name: "EXTRA", Value: "x"})
 			},
 			want: "environment",
+		},
+		{
+			name: "another mount path",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath = "/usr/local/bin"
+			},
+			want: "mount",
+		},
+		{
+			name: "an added mount",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].VolumeMounts = append(j.Spec.Template.Spec.Containers[0].VolumeMounts,
+					VolumeMount{Name: TownStateVolume, MountPath: "/tmp"})
+			},
+			want: "mounts",
 		},
 		{
 			name: "another ServiceAccount",
@@ -1107,6 +1219,24 @@ func TestUpdateAdmissionEncodedJobRefusesAPodField(t *testing.T) {
 				admissionTestContainer(t, pod, "containers", 0)["envFrom"] = []any{map[string]any{"secretRef": map[string]any{"name": "other"}}}
 			},
 			want: "envFrom",
+		},
+		{
+			name: "a container lifecycle",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "containers", 0)["lifecycle"] = map[string]any{
+					"postStart": map[string]any{"exec": map[string]any{"command": []any{"kubectl"}}},
+				}
+			},
+			want: "lifecycle",
+		},
+		{
+			name: "a startup probe",
+			edit: func(t *testing.T, pod map[string]any) {
+				admissionTestContainer(t, pod, "initContainers", 0)["startupProbe"] = map[string]any{
+					"exec": map[string]any{"command": []any{"kubectl"}},
+				}
+			},
+			want: "startupProbe",
 		},
 		{
 			name: "an env valueFrom",

@@ -5,30 +5,31 @@
 # ServiceAccount's own Role. This policy bounds the fields that carry that reach, so
 # that only the Job deploy/k8s/update-job renders gets through: a name starting
 # gt-update-, the pod running as the gt-update ServiceAccount, exactly one container
-# and one init container with the image, command, arguments and environment the
-# renderer sets, exactly two volumes (the town-state claim and the viewer-token
-# Secret the template names), no hostPath, no host network, PID or IPC namespace, and
-# no privileged container or added Linux capability.
+# and one init container with the image, command, arguments, environment and mounts
+# the renderer sets, exactly two volumes (the town-state claim and the viewer-token
+# Secret the template names), no hostPath, no host network, PID or IPC namespace, no
+# lifecycle hook or probe, and no privileged container or added Linux capability.
 #
 # The command and the environment are bounded for the same reason as the volumes:
 # the daemon image carries kubectl and git, and the renderer sets GIT_CONFIG_VALUE_0
-# to a shell command, so a Job free to choose its own command, add a container or
-# set one more environment variable could run kubectl as gt-update and exec into the
-# daemon pod, which mounts every Secret in gt.
+# to a shell command, so a Job free to choose its own command, run a hook or probe,
+# add a container or set one more environment variable could run kubectl as
+# gt-update and exec into the daemon pod, which mounts every Secret in gt. The mounts
+# are pinned because a mount of the claim over a directory the command reads would
+# run a file from the town instead of the image.
 #
-# The binding holds the policy to the daemon: its matchConditions name the daemon's
-# ServiceAccount, so the operator's own apply (which runs as the operator) and a
-# hand-run Job the overseer creates are unaffected, and a request from any other
-# account never reaches these validations. matchConstraints names Job creation only:
-# the daemon's Role has no update verb on Jobs, and a Job's pod template is immutable
-# after creation, so an update could not widen what this admits anyway.
+# The policy's matchConditions name the daemon's ServiceAccount, and matchConditions
+# are how a policy skips a request rather than refusing it: the operator's own apply
+# and a hand-run Job the overseer creates are unaffected, and a request from any
+# other account never reaches these validations. matchConstraints names Job creation
+# only: the daemon's Role has no update verb on Jobs, and a Job's pod template is
+# immutable after creation, so an update could not widen what this admits anyway.
 #
 # This file is not applied by the daemon. The operator applies it with the Job's
 # manifests. The cluster must serve admissionregistration.k8s.io/v1
 # ValidatingAdmissionPolicy, which Kubernetes serves from 1.30 (v1beta1 from 1.28).
 # Before relying on the policy, the operator checks it on the cluster, impersonating
-# the daemon because the binding's matchConditions otherwise leave the request
-# unvalidated:
+# the daemon because the matchConditions otherwise leave the request unvalidated:
 #
 #   kubectl version
 #   kubectl api-resources --api-group=admissionregistration.k8s.io
@@ -54,6 +55,13 @@ metadata:
   name: gt-update-jobs
 spec:
   failurePolicy: Fail
+  # A request that does not match a condition is not validated, so the operator and
+  # the overseer's hand run pass through and only the daemon's Jobs are held to the
+  # validations below.
+  matchConditions:
+    - name: daemon-service-account
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:gt:daemon'
   matchConstraints:
     resourceRules:
       - apiGroups: ["batch"]
@@ -84,11 +92,11 @@ spec:
       message: >-
         the Job's pod must not join the node's network, PID or IPC namespace
     # The one container jobSpec renders (updatejob.updateContainer): its name,
-    # image, command, arguments and environment, and no elevation. The image regex
-    # is what holds the image to forgejo:3000/bot-registry/gastown-daemon, since the
-    # renderer accepts any repo@sha256 reference. The environment is pinned to the
-    # variables containerEnv sets, and envFrom is refused, so no Secret can
-    # enter through the environment.
+    # image, command, arguments, environment and mounts, with no hook, probe or
+    # elevation. The image regex is what holds the image to
+    # forgejo:3000/bot-registry/gastown-daemon, since the renderer accepts any
+    # repo@sha256 reference. The environment is pinned to the variables containerEnv
+    # sets, and envFrom is refused, so no Secret can enter through the environment.
     - expression: >-
         size(object.spec.template.spec.containers) == 1 &&
         object.spec.template.spec.containers.all(c,
@@ -112,10 +120,23 @@ spec:
         (!has(c.securityContext) ||
         ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
         (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
-        size(c.securityContext.capabilities.add) == 0))))
+        size(c.securityContext.capabilities.add) == 0))) &&
+        !has(c.lifecycle) &&
+        !has(c.livenessProbe) &&
+        !has(c.readinessProbe) &&
+        !has(c.startupProbe) &&
+        size(c.volumeMounts) == 2 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly))
       message: >-
         the Job may run only the update container the renderer sets, with its image,
-        command, arguments and environment, and no added capability
+        command, arguments, environment and mounts, no hook or probe, and no added
+        capability
     # The one init container jobSpec renders (updatejob.imagesContainer). Its one
     # caller-chosen argument is the green commit, which must be a full lowercase sha.
     - expression: >-
@@ -142,11 +163,23 @@ spec:
         (!has(c.securityContext) ||
         ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
         (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
-        size(c.securityContext.capabilities.add) == 0))))
+        size(c.securityContext.capabilities.add) == 0))) &&
+        !has(c.lifecycle) &&
+        !has(c.livenessProbe) &&
+        !has(c.readinessProbe) &&
+        !has(c.startupProbe) &&
+        size(c.volumeMounts) == 2 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly))
       message: >-
         the Job may run only the images init container the renderer sets, with its
-        image, command, arguments (the green commit a full lowercase sha) and
-        environment, and no added capability
+        image, command, arguments (the green commit a full lowercase sha),
+        environment and mounts, no hook or probe, and no added capability
     # The two volumes the renderer names: the town-state claim and the viewer-token
     # Secret. Size two plus one branch per volume leaves no room for a third volume,
     # for a hostPath, or for another volume source, and the Secret name pins which
@@ -176,9 +209,3 @@ spec:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: gt
-  # Only the daemon's own requests are validated. The overseer's hand run and the
-  # operator's apply run as other accounts, so this policy never refuses them.
-  matchConditions:
-    - name: daemon-service-account
-      expression: >-
-        request.userInfo.username == 'system:serviceaccount:gt:daemon'
