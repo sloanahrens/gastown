@@ -63,14 +63,17 @@ func (c releaseFailClient) Update(id string, opts beads.UpdateOptions) error {
 
 // TestDeferredExitReleasesTheBeadItPaused: a DEFERRED exit returns the bead
 // the seat held to open and unassigned, with the DEFERRED note on it. Every
-// bead it may not touch is left as it was: a closed bead stays closed, a bead
-// in landing keeps its label and assignee, a rig identity bead and a bead
-// another actor claimed are not reopened, and an ESCALATED or COMPLETED exit
-// releases nothing. A handoff's DEFERRED is not an exit at all.
+// bead it may not touch is left as it was: a closed bead stays closed, a
+// parked bead (deferred or pinned) keeps the person's status and its assignee,
+// a bead in landing keeps its label and assignee, a rig identity bead and a
+// bead another actor claimed are not reopened, and an ESCALATED or COMPLETED
+// exit releases nothing. A handoff's DEFERRED is not an exit at all.
 func TestDeferredExitReleasesTheBeadItPaused(t *testing.T) {
 	t.Parallel()
 	inProgress := string(beads.StatusInProgress)
 	closed := string(beads.StatusClosed)
+	deferred := string(beads.StatusDeferred)
+	pinned := string(beads.IssueStatusPinned)
 	handoff := map[string]string{EnvFromHandoff: "1"}
 	cases := []struct {
 		name         string
@@ -95,6 +98,27 @@ func TestDeferredExitReleasesTheBeadItPaused(t *testing.T) {
 			exit:         ExitDeferred,
 			seed:         releaseBead(closed, releaseSeat),
 			wantStatus:   closed,
+			wantAssignee: releaseSeat,
+		},
+		{
+			name:         "deferred leaves a parked bead with the seat as assignee alone",
+			exit:         ExitDeferred,
+			seed:         releaseBead(deferred, releaseSeat),
+			wantStatus:   deferred,
+			wantAssignee: releaseSeat,
+		},
+		{
+			name:         "deferred leaves a parked bead with no assignee alone",
+			exit:         ExitDeferred,
+			seed:         releaseBead(deferred, ""),
+			wantStatus:   deferred,
+			wantAssignee: "",
+		},
+		{
+			name:         "deferred leaves a pinned bead with the seat as assignee alone",
+			exit:         ExitDeferred,
+			seed:         releaseBead(pinned, releaseSeat),
+			wantStatus:   pinned,
 			wantAssignee: releaseSeat,
 		},
 		{
