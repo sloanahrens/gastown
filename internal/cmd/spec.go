@@ -1701,8 +1701,8 @@ type specDispatchEnv struct {
 	RecordLockTimeout func(beadID string, attempts int) error
 	ClearLockTimeout  func(beadID string) error
 	// LockTimeoutRecorded reports whether a bead's comments record an
-	// assignee-lock timeout run still in progress (specdispatch
-	// .LockTimeoutRecorded), asked when the planned count is missing: a run the
+	// assignee-lock timeout run still in progress (specdispatch's
+	// LockTimeoutRecorded), asked when the planned count is missing: a run the
 	// stored count lost still reads as the retries spent, never as a fresh
 	// start (gt-a4cdcd). Nil cannot answer, and the timeout labels the bead
 	// rather than deferring it on a history nothing read.

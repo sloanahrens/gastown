@@ -2078,6 +2078,53 @@ func withLockTimeouts(s specdispatch.Spec, n int) specdispatch.Spec {
 	return s
 }
 
+// lockTimeoutCommentsUnreadable is a store whose comments read is refused, the
+// failure a lock-timeout history read must report rather than answer as a bead
+// with no run (gt-a4cdcd).
+type lockTimeoutCommentsUnreadable struct{ *beadsfake.Fake }
+
+func (lockTimeoutCommentsUnreadable) Comments(string) ([]beads.Comment, error) {
+	return nil, errors.New("bd comments refused")
+}
+
+// The lock-timeout history read answers what the bead's comments say: a bead
+// with no deferral comment has no run, and one that carries the dispatcher's
+// deferral line does (gt-a4cdcd).
+func TestSpecLockTimeoutRecordedReadsTheBeadsComments(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-a", Status: "open"})
+	read := specLockTimeoutRecorded(func(string) beads.Client { return db })
+
+	if recorded, err := read("gt-a"); err != nil || recorded {
+		t.Fatalf("a bead with no comments = %v, %v; want no run and no error", recorded, err)
+	}
+	deferred := fmt.Sprintf("%sgt-a: sling deferred, sbx-flash's %s for its whole wait (1 of 3): timed out",
+		specDispatchNotePrefix, specdispatch.LockTimeoutPhrase)
+	if err := db.AddComment("gt-a", deferred); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := read("gt-a"); err != nil || !recorded {
+		t.Fatalf("a bead with a deferral comment = %v, %v; want the run in progress", recorded, err)
+	}
+}
+
+// A refused comments read is an error, not "no run": answering a run the read
+// never saw would defer the bead on a history nobody read (gt-a4cdcd).
+func TestSpecLockTimeoutRecordedReportsAnUnreadableHistory(t *testing.T) {
+	t.Parallel()
+	read := specLockTimeoutRecorded(func(string) beads.Client {
+		return lockTimeoutCommentsUnreadable{beadsfake.New()}
+	})
+	recorded, err := read("gt-a")
+	if err == nil || !strings.Contains(err.Error(), "reading comments") {
+		t.Fatalf("err = %v, want the refused comments read", err)
+	}
+	if recorded {
+		t.Error("recorded = true for a read that failed: an unread history is not a run")
+	}
+}
+
 func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
