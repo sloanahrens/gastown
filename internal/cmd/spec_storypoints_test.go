@@ -45,9 +45,9 @@ func TestSpecDispatchStoryPointShadowOffNeverEstimates(t *testing.T) {
 	env.PerTick = 2
 	estimates := 0
 	env.StoryPointShadow = false
-	env.StoryPointEstimate = func(context.Context, string) error {
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
 		estimates++
-		return nil
+		return specEstimateOutcome{}, nil
 	}
 	r := runSpecDispatchCycle(env)
 
@@ -79,9 +79,9 @@ func TestSpecDispatchStoryPointShadowEstimatesEachBeadBeforeItsSling(t *testing.
 		events = append(events, e)
 	}
 	env.StoryPointShadow = true
-	env.StoryPointEstimate = func(_ context.Context, id string) error {
+	env.StoryPointEstimate = func(_ context.Context, id string) (specEstimateOutcome, error) {
 		record("estimate:" + id)
-		return nil
+		return specEstimateOutcome{Action: "estimated", Rung: "all", Minutes: 5, Points: 3}, nil
 	}
 	sling := env.Sling
 	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
@@ -120,8 +120,8 @@ func TestSpecDispatchStoryPointShadowErrorLogsOneLineAndSlings(t *testing.T) {
 	env := f.env()
 	env.StoryPointShadow = true
 	env.After = neverTimer
-	env.StoryPointEstimate = func(context.Context, string) error {
-		return errors.New("embedder refused")
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		return specEstimateOutcome{}, errors.New("embedder refused")
 	}
 	r := runSpecDispatchCycle(env)
 
@@ -150,10 +150,10 @@ func TestSpecDispatchStoryPointShadowTimeoutLogsOneLineAndSlings(t *testing.T) {
 	// The tick cancels before it returns, so the context is done by the time
 	// the cycle is over, and nothing waits on a clock.
 	handed := make(chan context.Context, 1)
-	env.StoryPointEstimate = func(ctx context.Context, _ string) error {
+	env.StoryPointEstimate = func(ctx context.Context, _ string) (specEstimateOutcome, error) {
 		handed <- ctx
 		<-ctx.Done()
-		return ctx.Err()
+		return specEstimateOutcome{}, ctx.Err()
 	}
 	r := runSpecDispatchCycle(env)
 
@@ -173,19 +173,24 @@ func TestSpecDispatchStoryPointShadowTimeoutLogsOneLineAndSlings(t *testing.T) {
 }
 
 // TestSpecDispatchWireStoryPointShadowReadsTheDaemonConfig: the tick takes both
-// shadow fields from the daemon config's story_points block, through the tick's
-// own read of that file (gt-cgsivu).
+// shadow fields and the split route's trigger from the daemon config's
+// story_points block, through the tick's own read of that file (gt-cgsivu,
+// gt-5d9k2f.18).
 func TestSpecDispatchWireStoryPointShadowReadsTheDaemonConfig(t *testing.T) {
 	t.Parallel()
 	const shadowOn = `{"type":"daemon-patrol-config","version":1,` +
 		`"patrols":{"spec_dispatch":{"enabled":true,"interval":"60s","story_points":{"shadow":true}}}}`
+	const splitOn = `{"type":"daemon-patrol-config","version":1,` +
+		`"patrols":{"spec_dispatch":{"enabled":true,"interval":"60s","story_points":{"shadow":true,"split_over_minutes":15}}}}`
 	for _, tc := range []struct {
-		name   string
-		daemon string
-		want   bool
+		name      string
+		daemon    string
+		want      bool
+		wantSplit float64
 	}{
-		{"shadow on", shadowOn, true},
-		{"shadow off", specTickDaemon, false},
+		{"shadow on", shadowOn, true, 0},
+		{"shadow off", specTickDaemon, false, 0},
+		{"split on", splitOn, true, 15},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -195,9 +200,12 @@ func TestSpecDispatchWireStoryPointShadowReadsTheDaemonConfig(t *testing.T) {
 				t.Fatalf("specTickTown: %v", err)
 			}
 			var env specDispatchEnv
-			specWireStoryPointShadow(&env, sd, root)
+			specWireStoryPoints(&env, sd, root)
 			if env.StoryPointShadow != tc.want {
 				t.Errorf("StoryPointShadow = %v, want %v", env.StoryPointShadow, tc.want)
+			}
+			if env.StoryPointSplitOver != tc.wantSplit {
+				t.Errorf("StoryPointSplitOver = %v, want %v", env.StoryPointSplitOver, tc.wantSplit)
 			}
 			if env.StoryPointEstimate == nil {
 				t.Error("StoryPointEstimate = nil, want the production estimate")
@@ -263,8 +271,8 @@ func TestSpecDispatchStoryPointShadowWritesTheEstimate(t *testing.T) {
 				func(string) specEstimateStore { return db },
 				func(string) specEstimateRunner { return run })
 
-			err := shadow(context.Background(), "gt-est")
-			if tc.wantErr == "" {
+			outcome, err := shadow(context.Background(), "gt-est")
+			if err := specShadowErr(outcome, err); tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("shadow estimate: %v", err)
 				}

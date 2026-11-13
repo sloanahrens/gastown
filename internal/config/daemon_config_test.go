@@ -1784,6 +1784,39 @@ func TestSpecDispatchStoryPointsShadowDecodes(t *testing.T) {
 	}
 }
 
+// story_points.split_over_minutes decodes to the accessor the tick reads; a
+// zero or negative value is off, so the route ships disabled (gt-5d9k2f.18).
+func TestSpecDispatchStoryPointsSplitOverDecodes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want float64
+	}{
+		{"set", `{"patrols":{"spec_dispatch":{"story_points":{"split_over_minutes":15}}}}`, 15},
+		{"fractional", `{"patrols":{"spec_dispatch":{"story_points":{"split_over_minutes":11.5}}}}`, 11.5},
+		{"zero", `{"patrols":{"spec_dispatch":{"story_points":{"split_over_minutes":0}}}}`, 0},
+		{"negative", `{"patrols":{"spec_dispatch":{"story_points":{"split_over_minutes":-3}}}}`, 0},
+		{"absent", `{"patrols":{"spec_dispatch":{"story_points":{"shadow":true}}}}`, 0},
+		{"no block", `{"patrols":{"spec_dispatch":{"enabled":true}}}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tc.body), &cfg); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := cfg.Patrols.SpecDispatch.StoryPointsSplitOver(); got != tc.want {
+				t.Errorf("StoryPointsSplitOver() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	var nilBlock *SpecDispatchConfig
+	if got := nilBlock.StoryPointsSplitOver(); got != 0 {
+		t.Errorf("nil spec_dispatch block reads a trigger of %v, want 0", got)
+	}
+}
+
 // The jev_scorecard patrol's block decodes its four keys, and a value the
 // patrol cannot act on is refused at decode rather than read as a default.
 func TestJevScorecardConfigDecodes(t *testing.T) {

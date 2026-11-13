@@ -2709,6 +2709,12 @@ type StoryPointsConfig struct {
 	// the estimate says, and an estimate that fails or runs past its timeout is
 	// one logged line (gt-5d9k2f.14). Off by default.
 	Shadow bool `json:"shadow,omitempty"`
+
+	// SplitOverMinutes is the split route's trigger: a bead whose blended
+	// estimate is at least this many minutes and whose rung names at least two
+	// inputs is labeled for splitting instead of slung (gt-5d9k2f.18). Zero or
+	// negative is off, the default. The operator sets the value.
+	SplitOverMinutes float64 `json:"split_over_minutes,omitempty"`
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
@@ -2729,6 +2735,16 @@ func (c *SpecDispatchConfig) InFlightCap() int {
 // (story_points.shadow). A nil block, or one that leaves shadow unset, is off.
 func (c *SpecDispatchConfig) StoryPointsShadow() bool {
 	return c != nil && c.StoryPoints != nil && c.StoryPoints.Shadow
+}
+
+// StoryPointsSplitOver is the split route's trigger in minutes
+// (story_points.split_over_minutes). A nil block, or a zero or negative value,
+// is 0, which leaves the route off.
+func (c *SpecDispatchConfig) StoryPointsSplitOver() float64 {
+	if c == nil || c.StoryPoints == nil || c.StoryPoints.SplitOverMinutes <= 0 {
+		return 0
+	}
+	return c.StoryPoints.SplitOverMinutes
 }
 
 // ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a

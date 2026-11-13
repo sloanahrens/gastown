@@ -355,6 +355,10 @@ var notDispatchableReasons = []string{
 	specdispatch.SkipNoSeat,
 	specdispatch.SkipRigHold,
 	specdispatch.SkipPerTickLimit,
+	// A bead the split route held waits on a person or bird to cut it into
+	// smaller beads; the split label excludes it from later ticks
+	// (gt-5d9k2f.18).
+	specdispatch.SkipSplitOver,
 	// A candidate an unresolved blocker holds waits on that blocker's
 	// resolution, which a free seat does not change; reading it as the
 	// dispatcher's standoff would raise the rule over every bead a deferred
