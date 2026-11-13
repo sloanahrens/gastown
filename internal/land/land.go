@@ -21,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/land/policy"
 )
 
 // Beads is the part of beads.Client Land writes the work bead through
@@ -1531,11 +1530,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		op := l.operatorConfig(w.BeadID)
 		accepted, used := l.acceptedRisks(w.BeadID, op)
 		comments = l.beadComments(issue)
-		in := ReviewInput{Dir: dir, Base: base, Head: merged, Repo: g, BeadID: w.BeadID,
-			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
-			AcceptedRisksText: accepted,
-			BriefText:         BeadBrief(issue.Description, comments, op), PolicyText: policy.PolicyBlock(),
-			Round: reviewAttempt(issue.Notes), RoundsText: l.roundsText(w.BeadID)}
+		in := BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, dir, g)
 		// The usage window opens with the review it measures (gt-6qc3nw.13); it
 		// is read from the landing's clock, so a test can fix it.
 		usageStart := l.now()
