@@ -150,7 +150,7 @@ The Deployment runs exactly one replica with the `Recreate` strategy, because tw
 
 ### The town-state claim
 
-The *town-state claim* is a persistent volume that holds the town's files: settings, runtime state, the rigs' bare repositories, locks, the dispatch hold. The daemon owns this copy and runs against it; the dashboard mounts the same state to read it. The Mac still holds a second copy of the town until the `gt-wrap` cutover described under [Future work](#future-work), so a town edit is made in both until then.
+The *town-state claim* is a persistent volume that holds the town's files: settings, runtime state, the rigs' bare repositories, locks, the dispatch hold. It is the one town copy. The daemon owns it and runs against it; the dashboard mounts the same state to read it. The Mac is not a town: its `gt`, `bd`, `om` and `hm` are one thin wrapper (`gt-wrap`, in `cmd/gt-wrap`) that runs the command in the daemon pod with `kubectl exec`, and the Mac keeps `~/.claude` and plain git clones. The pod mounts the claim at the same `~/gt` path the Mac used, so the two are easy to confuse: a town edit is made in the pod, and a file under the Mac's `~/gt` is not one the pod reads.
 
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 
@@ -447,7 +447,6 @@ flowchart TB
 
 These are stated plans and open questions, not running systems.
 
-- **The `gt-wrap` cutover.** The operator decided on 2026-11-11 that the daemon pod's town-state claim becomes the single town copy. On the Mac, `gt`, `bd`, `om` and `hm` become one thin wrapper (`gt-wrap`, in `cmd/gt-wrap`) that runs the command inside the daemon pod with `kubectl exec`. The Mac keeps `~/.claude` and plain git clones and stops being a second town. It is not cut over today, and until it is, every town edit is made in both copies. The cutover waits on four landings (the wrapper's Kubernetes target, the crew-clone rule with a doctor check, a copy-list fix, and a config-backup patrol), then a dry run of every Mac caller and the operator's word. `gt-wrap rollback` undoes it.
 - **The cloud check moves into the daemon pod.** The cloud-check patrol that the gt-cloud user runs today is moving into the daemon pod, with the read-only cloud auditor key held in a Secret in the `gt` namespace (gastown bead `gt-c57pax`).
 - **What the gt-cloud deployer becomes.** The deployer is still a Colima profile on the Mac with its own macOS account and launchd jobs, while the rest of the town now runs in the control cluster. What it becomes is undecided: its own Kubernetes cluster, an isolated namespace in the control cluster with its credentials kept apart, or a cloud-side runner. The answer decides where the release bot and the per-app deploy runners live. It is tracked as devops bead `dv-8qse`.
 - **Retiring `<rig>/mayor/rig`.** Each rig used to keep a working clone under `mayor/rig` that held its beads directory, directives and plugin source. These are moving to the bare repository, `<rig>/.beads`, `<town>/directives` and a build checkout under `.runtime/`. Until the work is complete a rig may still hold the old directory.
@@ -462,8 +461,8 @@ Facts that change are read, not written down.
 |---|---|
 | Which rigs exist and their sessions | `gt rig list` |
 | How many polecats may run, and of which kind | `polecat_pool` in `settings/config.json` |
-| Is dispatch held or stopped | `~/gt/seat-refill.hold`, `~/gt/ESTOP`, `~/gt/ESTOP.<rig>` (presence is the signal) |
-| Are new landing passes paused | `~/gt/landing.hold` (presence is the signal) |
+| Is dispatch held or stopped | `seat-refill.hold`, `ESTOP` and `ESTOP.<rig>` in the pod's town root, which is the town-state claim (presence is the signal): the dashboard's header chip shows the dispatch hold, and `gt estop status` reports an ESTOP. A copy in the Mac town directory has no effect on the pod |
+| Are new landing passes paused | `landing.hold` in the pod's town root, which is the town-state claim (presence is the signal): the health line and the Landings pane show `landings paused` and the file's first line. A copy in the Mac town directory has no effect on the pod |
 | What the daemon runs in the cluster | `kubectl --context colima-gt-control -n gt get deploy,pvc,secret` |
 | The sandboxes in use | `kubectl --kubeconfig <town>/.runtime/sbx-k8s/kubeconfig -n openshell get pods` |
 | What needs a human | the dashboard's Attention pane, or `gt attention` |
