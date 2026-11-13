@@ -616,7 +616,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// When metadata.json exists but the Dolt server database doesn't (fresh clone
 		// to a new workspace), we still need to run bd init to create the server-side
 		// database and set issue_prefix. Always ensure issue_prefix is set afterward.
-		sourceBdEnv := bdSubprocessEnv(m.environ(), sourceBeadsDir, opts.Name)
+		sourceBdEnv := bdSubprocessEnv(config.NormalizeConfiguredDoltEnv(m.environ(), m.townRoot), sourceBeadsDir, opts.Name)
 		if !bdDatabaseExists(sourceBeadsDir) {
 			// --server with the town's port: bd connects to gt's central Dolt
 			// server instead of auto-starting its own on a random port, which

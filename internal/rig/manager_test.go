@@ -2760,3 +2760,45 @@ func TestInitBeadsEveryBDCallTakesTheTownEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// AddRig's source-database init (a tracked repo with no database of its own)
+// runs bd with the town's named Dolt endpoint, in place of the harness poison
+// the process inherits, as every other bd call of rig setup does (gt-xnv94x).
+// The call is told apart from the later rig-level init by its options: only the
+// source init is given SkipAgents and the rig's name as its database, so the
+// test cannot pass on the later init alone.
+func TestAddRigSourceInitTakesTheTownEndpoint(t *testing.T) {
+	t.Parallel()
+	for _, tc := range endpointTowns() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root, rigsConfig := setupTestTown(t)
+			writeTownJSON(t, root, tc.dolt)
+			manager, f, bd := testManager(root, rigsConfig)
+			manager.env = poisonedEnv()
+			// A tracked repo with a config.yaml and no metadata.json has no
+			// database yet, so AddRig runs bd init for it.
+			gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "srcinit"), map[string]string{
+				".beads/config.yaml": "prefix: tk\n\n",
+			})
+			if _, err := manager.AddRig(AddRigOptions{
+				Name:          "srcinit",
+				GitURL:        gitURL,
+				BeadsPrefix:   "tk",
+				SkipDoltCheck: true,
+			}); err != nil {
+				t.Fatalf("AddRig: %v", err)
+			}
+			var source []bdCall
+			for _, c := range bd.withVerb("init") {
+				if c.Init.SkipAgents && c.Init.Database == "srcinit" {
+					source = append(source, c)
+				}
+			}
+			if len(source) == 0 {
+				t.Fatalf("AddRig made no source-database bd init; the init calls were %+v", bd.withVerb("init"))
+			}
+			requireEndpointPort(t, source, tc.wantPort)
+		})
+	}
+}
