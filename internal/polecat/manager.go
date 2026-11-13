@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -196,7 +197,7 @@ type Manager struct {
 	// sessionReader answers the has-session reads of the seat listing and the
 	// reuse, open only between ShareSessionProbes and its end func; nil asks
 	// tmux every time.
-	sessionReader SessionReader
+	sessionReader atomic.Pointer[sessionReaderSlot]
 	// spawnGraceWindow is the window a dispatched-but-not-yet-live polecat is
 	// read as spawning rather than stalled (see SpawnGrace). Resolved once at
 	// construction from the town's witness thresholds.

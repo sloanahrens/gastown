@@ -939,6 +939,9 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, sessionWorkDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
+	// The census may hold this seat's answer from before the session existed;
+	// drop it so the next has-session read asks tmux (gt-9qh6wp).
+	session.ForgetSandboxCensus(sessionID)
 
 	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
 	// Declared pane identity replaces process-tree inference in IsRuntimeRunning

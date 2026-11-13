@@ -181,6 +181,16 @@ func (c *SandboxCensus) Forget(session string) {
 	}
 }
 
+// ForgetSandboxCensus drops what the installed census holds for session, and
+// does nothing when no census is installed. A process calls it where it creates
+// session, so the next read of that seat asks tmux again rather than reading the
+// answer it held before the session existed.
+func ForgetSandboxCensus(session string) {
+	if c := installedCensus(); c != nil {
+		c.Forget(session)
+	}
+}
+
 // censusRead answers the tmux read verb(args) on session through c. A session
 // with no sandbox record, or a census that cannot read its listing, takes the
 // per-seat probe as it always did. A Ready sandbox takes the probe once, and a

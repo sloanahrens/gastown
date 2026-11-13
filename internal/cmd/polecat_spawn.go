@@ -1040,9 +1040,10 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// The memo lets the seat listing and the reuse of the seat it picks share
 	// one bd read of each agent bead; it is dropped when the reuse step ends.
 	// The has-session reads of the same listing and reuse go through the sling's
-	// census too (gt-9qh6wp): a Ready seat's answer is kept for the sling, a seat
-	// whose listing or record cannot be read takes its probe as before, and a
-	// seat the gateway does not list is answered not live with no probe.
+	// census too (gt-9qh6wp): a Ready seat's answer is kept for the sling. A seat
+	// the census answers ErrSeatNotLive for (a good listing that does not name it,
+	// or names it Stopped, Error or Failed) is not live with no probe; a listing
+	// or record that cannot be read, or a probe that fails, takes the probe.
 	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
 	var sessionProbes polecat.SessionReader
 	if t != nil {
