@@ -53,16 +53,17 @@ const sizeLargePoints = 34
 // an empty cell rather than false.
 const (
 	// OutcomeRanOverTwenty is true when the latest landing's polecat time was
-	// over twenty minutes (overTwentySecs).
+	// over OverTwentySecs.
 	OutcomeRanOverTwenty Outcome = "ran_over_twenty"
 	// OutcomeNeededSecondRound is true when the bead had an om verdict from
 	// attempt 2 or later.
 	OutcomeNeededSecondRound Outcome = "needed_second_round"
 )
 
-// overTwentySecs is twenty minutes of polecat time, the threshold
-// OutcomeRanOverTwenty reads.
-const overTwentySecs = 20 * 60
+// OverTwentySecs is the polecat time OutcomeRanOverTwenty reads as over, in the
+// seconds a landing record carries it. Exported so the dataset's dict names the
+// same threshold instead of a second copy of the number.
+const OverTwentySecs = 20 * 60
 
 // Verdicts om writes to reviews.jsonl that judged a tree.
 const (
@@ -248,7 +249,7 @@ func (a *dispatchAdapter) outcomes(bead string) map[Outcome]bool {
 	out := map[Outcome]bool{}
 	if rec, ok := a.latest[bead]; ok && rec.Agent != "" {
 		if _, weighted := storypoints.Actual(rec.PolecatSecs, rec.PolecatLowerBound, rec.PolecatUpperBound); weighted {
-			out[OutcomeRanOverTwenty] = rec.PolecatSecs > overTwentySecs
+			out[OutcomeRanOverTwenty] = rec.PolecatSecs > OverTwentySecs
 		}
 	}
 	if a.verdicted[bead] {

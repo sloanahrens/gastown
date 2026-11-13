@@ -35,6 +35,14 @@ const (
 	colLabelSource = "label_source"
 )
 
+// fixedColumns are the fixed column names in written order, the names an
+// outcome column may not take: cells are keyed by column name, so an outcome
+// named for one would replace that column's value and write its header twice.
+var fixedColumns = []string{
+	colRowID, colDay, colHour, colDow, colModel, colAnswer, colAnswerBand,
+	colConfidence, colLabel, colLabelRule, colLabelSource,
+}
+
 // refAllow lists the ref names an export may write, in column order: the
 // adapter's own refs name the beads, sections and commits the labels were read
 // from, and only these few are features.
@@ -180,9 +188,9 @@ func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error)
 		rows = append(rows, row{key: shuffleKey(cells[colRowID]), cells: cells})
 	}
 
-	columns := []string{colRowID, colDay, colHour, colDow, colModel, colAnswer, colAnswerBand, colConfidence, colLabel, colLabelRule, colLabelSource}
+	columns := slices.Clone(fixedColumns)
 	for _, o := range read.Outcomes {
-		if err := refuseName(string(o)); err != nil {
+		if err := refuseOutcome(string(o)); err != nil {
 			return Table{}, err
 		}
 		columns = append(columns, string(o))
@@ -248,6 +256,21 @@ func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error)
 func refuseName(name string) error {
 	if denyNames[strings.ToLower(name)] {
 		return fmt.Errorf("refusing question %q: it would be an ans_ column for text, and the dataset holds ids and features only", name)
+	}
+	return nil
+}
+
+// refuseOutcome refuses an outcome whose name the dataset reserves: a fixed
+// column name, or one under the ref_ and ans_ prefixes the export uses for the
+// item's refs and its other answers. Cells are keyed by column name, so an
+// outcome named for one would replace that column's value and write its header
+// twice.
+func refuseOutcome(name string) error {
+	if err := refuseName(name); err != nil {
+		return err
+	}
+	if slices.Contains(fixedColumns, name) || strings.HasPrefix(name, "ref_") || strings.HasPrefix(name, "ans_") {
+		return fmt.Errorf("refusing outcome %q: it takes a column name the dataset reserves", name)
 	}
 	return nil
 }
@@ -581,7 +604,10 @@ func meaning(column string, question scorecard.QuestionID) string {
 	case colLabelSource:
 		return "where the label came from, such as the overseer's review, empty when the adapter names none"
 	case string(scorecard.OutcomeRanOverTwenty):
-		return "true when the latest landing's polecat time was over 20 minutes (1200 seconds), from the landing record; false at 20 minutes or under; empty when the bead has no landing record, a crew landing, or a time that is a bound or cannot be measured"
+		// The threshold is named from the scorecard's own value, so a change to
+		// it changes the dict rather than leaving it stating an old number.
+		secs := scorecard.OverTwentySecs
+		return fmt.Sprintf("true when the latest landing's polecat time was over %d minutes (%d seconds), from the landing record; false at that threshold or under; empty when the bead has no landing record, a crew landing, or a time that is a bound or cannot be measured", secs/60, secs)
 	case string(scorecard.OutcomeNeededSecondRound):
 		return "true when the bead had an om verdict from attempt 2 or later, so it needed a second round; false when its only verdict was the first attempt; empty when the bead has no verdict"
 	}
