@@ -72,13 +72,6 @@ var (
 	// ticks with, since the tick that planned the sling is the one that filled
 	// the cache (gt-nebs9).
 	specSlingDetailCacheOwner string
-	// specSlingCensusRunner is the openshell runner this job's sandbox census
-	// uses; nil runs the openshell binary, as a sling's census does. A test
-	// replaces it so the census answers without a gateway (gt-4pg3uu).
-	specSlingCensusRunner sandbox.Runner
-	// specSlingEnvFor builds the env one job runs with. A test replaces it to
-	// watch a job from inside its sling step without a town (gt-4pg3uu).
-	specSlingEnvFor = specSlingEnv
 )
 
 var specSlingCmd = &cobra.Command{
@@ -271,17 +264,25 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 // The census source is a parameter so a test hands rows without a bd subprocess
 // (gt-3y319).
 func runSpecSlingInTown(cmd *cobra.Command, townRoot, jobJSON, censusPath string, census func() []beads.CensusRow) error {
+	return runSpecSlingJobInTown(cmd, townRoot, jobJSON, censusPath, census, nil, specSlingEnv)
+}
+
+// runSpecSlingJobInTown is the job run itself. runner is the openshell runner
+// this job's sandbox census uses — nil runs the openshell binary, as a sling's
+// census does — and envFor builds the env the job runs with. Both are
+// parameters so a test substitutes its own without a gateway or a town
+// (gt-4pg3uu).
+func runSpecSlingJobInTown(cmd *cobra.Command, townRoot, jobJSON, censusPath string, census func() []beads.CensusRow, runner sandbox.Runner, envFor func(townRoot, cacheOwner string, traces *specSlingTraces) specDispatchEnv) error {
 	// One census of the sandbox seats for this job: the sling's seat decision
 	// and its admission read the seats through the router, and share one
 	// listing and one probe per seat (gt-4pg3uu). It ends with the job, so
-	// nothing of it carries into the next sling the daemon runs. The runner is
-	// nil in production, which runs the openshell binary.
-	defer session.BeginSandboxCensus(specSlingCensusRunner)()
+	// nothing of it carries into the next sling the daemon runs.
+	defer session.BeginSandboxCensus(runner)()
 	job, err := parseSpecSlingJob(jobJSON)
 	if err != nil {
 		return err
 	}
-	report := specSlingReport(townRoot, job)
+	report := specSlingReport(townRoot, job, envFor)
 	// The census is written whatever the sling decided, held or made, since the
 	// bd calls it made are real either way. A write that fails costs the census
 	// and never the sling: the report carries it once (gt-3y319).
@@ -293,7 +294,7 @@ func runSpecSlingInTown(cmd *cobra.Command, townRoot, jobJSON, censusPath string
 
 // specSlingReport makes the sling a job describes and returns its report. A
 // hold that covers the rig stops it before the sling, as it stops the tick.
-func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
+func specSlingReport(townRoot string, job specSlingJob, envFor func(townRoot, cacheOwner string, traces *specSlingTraces) specDispatchEnv) specDispatchReport {
 	if held := specSlingHold(townRoot, job.Rig); held != nil {
 		return *held
 	}
@@ -301,7 +302,7 @@ func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
 		slingActor = specDispatchActor
 	}
 	traces := &specSlingTraces{}
-	env := specSlingEnvFor(townRoot, specSlingDetailCacheOwner, traces)
+	env := envFor(townRoot, specSlingDetailCacheOwner, traces)
 	report := runSpecSlingJob(env, job)
 	report.Notices = append(report.Notices, traces.notices()...)
 	return report
