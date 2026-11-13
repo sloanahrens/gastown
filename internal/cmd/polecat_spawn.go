@@ -345,11 +345,13 @@ type idleReuseEnv struct {
 	releaseReused func(rigName, polecatName, hookBead string)
 	// seatLive answers the directory cap's question about one polecat
 	// directory: does it hold a live seat? Nil counts every directory, which is
-	// the answer a host that cannot classify its seats gives (gt-xlazq).
+	// the answer a host that cannot classify its seats gives (gt-xlazq). Its
+	// agent-bead reads go through the sling's memo, so a seat the listing
+	// already read is not read from bd again (gt-atlmw2).
 	seatLive liveSeatCounter
 }
 
-func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string)) idleReuseEnv {
+func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string), polecatMgr *polecat.Manager) idleReuseEnv {
 	sessionName := polecat.NewSessionManager(t, r, townRegistry()).SessionName
 	return idleReuseEnv{
 		integrationBranch: func(hookBead string) string {
@@ -357,7 +359,7 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step f
 		},
 		verifyWorktree: verifyWorktreeExists,
 		sessionName:    sessionName,
-		seatLive: newLiveSeatCounter(beads.New(r.Path), func(name string) string {
+		seatLive: newLiveSeatCounter(polecatMgr, func(name string) string {
 			return polecatBeadIDForRig(r, rigName, name)
 		}, sessionName, sandboxSeatProbeFor(townRoot, nil)),
 		defaultBranch: r.DefaultBranch,
@@ -1048,7 +1050,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// one bd read of each agent bead; it is dropped when the reuse step ends.
 	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
-		realIdleReuseEnv(t, r, townRoot, rigName, opts.step), townRoot, rigName,
+		realIdleReuseEnv(t, r, townRoot, rigName, opts.step, polecatMgr), townRoot, rigName,
 		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
 	endAgentBeadReads()
 	if err != nil {

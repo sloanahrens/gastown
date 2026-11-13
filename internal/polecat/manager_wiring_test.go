@@ -80,3 +80,18 @@ func TestNewManagerNamesSessionsFromTheCallersPrefixes(t *testing.T) {
 		t.Fatalf("NewManager(nil).sessionName = %q, want the default prefix", got)
 	}
 }
+
+// TestNewManagerAgentBeadsAreDualScoped is the wiring guard for the sling's
+// seat-liveness read (gt-atlmw2). NewManager must hand the manager the
+// dual-scope agent-bead client that openPolecatBeads builds with
+// beads.ForAgentBead, not the work-bead client itself: every unit test builds
+// its manager with NewManagerWithStore, which uses one client for both, so
+// this is what pins the production construction. NewManager runs no bd.
+func TestNewManagerAgentBeadsAreDualScoped(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "rig", Path: t.TempDir()}
+	m := NewManager(r, nil, nil, nil)
+	if any(m.agentBeads()) == any(m.beads) {
+		t.Fatal("NewManager's agent-bead client is the work-bead client; the seat read would lose the dual-scope resolution beads.ForAgentBead adds")
+	}
+}

@@ -3,7 +3,6 @@ package cmd
 import (
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -11,8 +10,12 @@ import (
 // does it hold a live seat? True counts the directory against the cap.
 type liveSeatCounter func(polecatName string) bool
 
-// newLiveSeatCounter builds the cap's seat question for one rig. agentBeadID
-// names the directory's agent bead, sessionName its session (which is also its
+// newLiveSeatCounter builds the cap's seat question for one rig. mgr is the
+// polecat manager the sling already opened; it is never nil on the sling path
+// (openSlingRig fails instead). The agent-bead read goes through it, so the
+// sling's open memo answers a bead the seat listing already read (gt-atlmw2),
+// and with no memo open it reads bd as before. agentBeadID names
+// the directory's agent bead, sessionName its session (which is also its
 // sandbox's name), and probe tells a sandbox seat from a host seat and asks the
 // gateway whether that sandbox still exists.
 //
@@ -22,13 +25,13 @@ type liveSeatCounter func(polecatName string) bool
 // affirmative "gone" (polecat.SandboxSeatGitState's live source) does not: a
 // sandbox seat's directory is a seed worktree the sandbox never writes to, so
 // nothing live is left behind it (gt-xlazq).
-func newLiveSeatCounter(bd beads.Client, agentBeadID func(polecatName string) string,
+func newLiveSeatCounter(mgr *polecat.Manager, agentBeadID func(polecatName string) string,
 	sessionName func(polecatName string) string, probe sandboxSeatProbe) liveSeatCounter {
 	return func(name string) bool {
-		if bd == nil || probe == nil {
+		if probe == nil {
 			return true
 		}
-		_, fields, err := beads.GetAgentBead(bd, agentBeadID(name))
+		_, fields, err := mgr.ReadAgentBead(agentBeadID(name))
 		if err != nil || fields == nil {
 			return true
 		}
