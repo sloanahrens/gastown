@@ -11,11 +11,11 @@ import (
 )
 
 // forgeOwnerDataFiles are the data files that name the Forgejo owner once, as
-// ForgeOwnerPlaceholder, relative to this package (gt-ucigk3).
+// ForgeOwnerPlaceholder, relative to the repository root (gt-ucigk3).
 var forgeOwnerDataFiles = []string{
-	"../../deploy/daemon/image-pins",
-	"../../deploy/polecat/seed-urls",
-	"../../plugins/app-promote/rigs.conf",
+	"deploy/daemon/image-pins",
+	"deploy/polecat/seed-urls",
+	"plugins/app-promote/rigs.conf",
 }
 
 // literalForgeOwner matches DefaultForgeOwner as a whole name: a URL path
@@ -28,34 +28,59 @@ var literalForgeOwner = regexp.MustCompile(`(^|[^A-Za-z0-9._-])` + regexp.QuoteM
 // one allowed literal is the setting's default, DefaultForgeOwner (gt-ucigk3).
 func TestNoLiteralForgeOwnerOutsideTheSetting(t *testing.T) {
 	t.Parallel()
-	var hits []string
-	for _, file := range forgeOwnerDataFiles {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("reading %s: %v", file, err)
-		}
-		hits = append(hits, literalOwnerHits(file, string(data))...)
-	}
-	err := filepath.WalkDir("../../cmd", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		hits = append(hits, literalOwnerHits(filepath.FromSlash(path), string(data))...)
-		return nil
-	})
+	hits, err := forgeOwnerLiteralHits("../..", forgeOwnerDataFiles)
 	if err != nil {
-		t.Fatalf("walking cmd: %v", err)
+		t.Fatalf("scanning the tree: %v", err)
 	}
 	if len(hits) != 0 {
 		t.Errorf("these name the forge owner literally; write %s and let the reader expand it:\n%s",
 			ForgeOwnerPlaceholder, strings.Join(hits, "\n"))
+	}
+}
+
+// TestForgeOwnerGuardWalkReportsAPlantedLiteral drives the scan on a temp tree,
+// so the real-tree run above cannot pass for the wrong reason: a literal in a
+// non-test Go file under cmd/ and in a data file is reported, named by its path
+// relative to the root, while the same literal in a _test.go file and in a
+// Markdown file is ignored (gt-ucigk3).
+func TestForgeOwnerGuardWalkReportsAPlantedLiteral(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	literal := "bd http://forgejo:3000/" + DefaultForgeOwner + "/beads.git 0123456789abcdef0123456789abcdef01234567\n"
+	files := map[string]string{
+		"cmd/x/main.go":                 "package main\n\nconst owner = \"" + DefaultForgeOwner + "\"\n",
+		"cmd/x/main_test.go":            "package main\n\nconst owner = \"" + DefaultForgeOwner + "\"\n",
+		"cmd/x/README.md":               "The owner is " + DefaultForgeOwner + ".\n",
+		"deploy/daemon/image-pins":      literal,
+		"deploy/polecat/seed-urls":      "devops http://forgejo:3000/{owner}/devops.git\n",
+		"plugins/app-promote/rigs.conf": "fractals {owner}/fractals-nextjs\n",
+	}
+	for rel, body := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hits, err := forgeOwnerLiteralHits(root, forgeOwnerDataFiles)
+	if err != nil {
+		t.Fatalf("forgeOwnerLiteralHits: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d, want 2 (cmd/x/main.go and the pins file): %v", len(hits), hits)
+	}
+	for _, want := range []string{"cmd/x/main.go:3:", "deploy/daemon/image-pins:1:"} {
+		if !containsPrefixed(hits, want) {
+			t.Errorf("no hit names %s: %v", want, hits)
+		}
+	}
+	for _, hit := range hits {
+		if strings.Contains(hit, root) {
+			t.Errorf("hit %q names the absolute path, want it relative to the root", hit)
+		}
 	}
 }
 
@@ -87,6 +112,52 @@ func TestLiteralOwnerHitsReadsEachForm(t *testing.T) {
 			}
 		})
 	}
+}
+
+// forgeOwnerLiteralHits returns one line per owner literal in the data files
+// (relative to root) and in the non-test Go files under root/cmd. Each hit names
+// its file relative to root, so the operator can find it.
+func forgeOwnerLiteralHits(root string, dataFiles []string) ([]string, error) {
+	var hits []string
+	for _, rel := range dataFiles {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", rel, err)
+		}
+		hits = append(hits, literalOwnerHits(rel, string(data))...)
+	}
+	err := filepath.WalkDir(filepath.Join(root, "cmd"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		hits = append(hits, literalOwnerHits(filepath.ToSlash(rel), string(data))...)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walking cmd: %w", err)
+	}
+	return hits, nil
+}
+
+// containsPrefixed reports whether some line of lines starts with prefix.
+func containsPrefixed(lines []string, prefix string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // literalOwnerHits returns one line per owner literal in data, naming the file

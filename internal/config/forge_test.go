@@ -18,7 +18,7 @@ func TestForgeOwnerDefaultsToTheCurrentOwner(t *testing.T) {
 		wantErr   string
 	}{
 		{"no town root", "", true, DefaultForgeOwner, ""},
-		{"a town with no town.json", "", false, DefaultForgeOwner, ""},
+		{"a named town with no town.json", "", false, "", "--town-root"},
 		{"a town with no forge section", testTownJSON + `}`, false, DefaultForgeOwner, ""},
 		{"an empty forge section", testTownJSON + `,"forge":{}}`, false, DefaultForgeOwner, ""},
 		{"the setting overrides the default", testTownJSON + `,"forge":{"owner":"gastown"}}`, false, "gastown", ""},
@@ -47,6 +47,45 @@ func TestForgeOwnerDefaultsToTheCurrentOwner(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ResolveForgeOwner = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveForgeOwnerForPrecedence: an explicit owner wins over the town, the
+// town wins over the default, and an explicit owner that is not a usable name is
+// refused without reading the town (gt-ucigk3).
+func TestResolveForgeOwnerForPrecedence(t *testing.T) {
+	t.Parallel()
+	gastownTown := writeDoltTown(t, testTownJSON+`,"forge":{"owner":"gastown"}}`, "")
+	tests := []struct {
+		name     string
+		explicit string
+		townRoot string
+		want     string
+		wantErr  string
+	}{
+		{"explicit owner wins over the town", "acme", gastownTown, "acme", ""},
+		{"explicit owner needs no town", "acme", writeDoltTown(t, "", ""), "acme", ""},
+		{"no explicit owner reads the town", "", gastownTown, "gastown", ""},
+		{"neither gives the default", "", "", DefaultForgeOwner, ""},
+		{"an explicit owner with a slash is refused", "org/team", gastownTown, "", "forge owner"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveForgeOwnerFor(tt.explicit, tt.townRoot)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ResolveForgeOwnerFor error = %v, want it to name %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveForgeOwnerFor: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveForgeOwnerFor = %q, want %q", got, tt.want)
 			}
 		})
 	}

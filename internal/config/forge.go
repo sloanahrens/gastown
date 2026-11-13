@@ -43,15 +43,16 @@ func ValidForgeOwner(owner string) error {
 // ResolveForgeOwner is the one reader of the town's Forgejo owner: the
 // mayor/town.json forge.owner setting, or DefaultForgeOwner when the caller
 // names no town root and when the town's town.json has no forge section or no
-// owner. A town.json that does not load is an error, never the default: its
-// loader refuses a forge.owner that is not a usable name.
+// owner. A named town root whose town.json is missing or does not load is an
+// error, never the default: the caller may be writing to that owner's account,
+// and the loader refuses a forge.owner that is not a usable name.
 func ResolveForgeOwner(townRoot string) (string, error) {
 	if townRoot == "" {
 		return DefaultForgeOwner, nil
 	}
 	town, err := LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json"))
 	if errors.Is(err, ErrNotFound) {
-		return DefaultForgeOwner, nil
+		return "", fmt.Errorf("forge owner: %s has no town.json (is --town-root right?)", townRoot)
 	}
 	if err != nil {
 		return "", err
@@ -62,9 +63,24 @@ func ResolveForgeOwner(townRoot string) (string, error) {
 	return *town.Forge.Owner, nil
 }
 
+// ResolveForgeOwnerFor is ResolveForgeOwner with a command's explicit owner in
+// front of it: a non-empty explicit owner (--forge-owner) wins and is refused
+// unless it is a usable owner name, and an empty one reads the town as
+// ResolveForgeOwner does.
+func ResolveForgeOwnerFor(explicit, townRoot string) (string, error) {
+	if explicit == "" {
+		return ResolveForgeOwner(townRoot)
+	}
+	if err := ValidForgeOwner(explicit); err != nil {
+		return "", fmt.Errorf("forge owner: %w", err)
+	}
+	return explicit, nil
+}
+
 // ExpandForgeOwnerFromTown expands text's owner placeholder with the town's
 // resolved forge.owner, for a reader that has a town root to read the setting
-// from. A town.json that does not load is an error, never the default expansion.
+// from. A town.json that is missing or does not load is an error, never the
+// default expansion.
 func ExpandForgeOwnerFromTown(townRoot string, text []byte) (string, error) {
 	owner, err := ResolveForgeOwner(townRoot)
 	if err != nil {

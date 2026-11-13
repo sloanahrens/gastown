@@ -574,12 +574,12 @@ func TestDaemonImageFlagsAreWired(t *testing.T) {
 		return nil
 	})
 	var _ *cobra.Command = c
-	c.SetArgs([]string{"--rev", "abc1234", "--out", "/o", "--gt-src", "/g", "--bd-src", "/b", "--om-src", "/m", "--hm-src", "/h", "--devops-src", "/d", "--mango-src", "/mg", "--mango-commit", "aabbccdd", "--pins", "/p"})
+	c.SetArgs([]string{"--rev", "abc1234", "--out", "/o", "--gt-src", "/g", "--bd-src", "/b", "--om-src", "/m", "--hm-src", "/h", "--devops-src", "/d", "--mango-src", "/mg", "--mango-commit", "aabbccdd", "--pins", "/p", "--forge-owner", "acme", "--town-root", "/t"})
 	c.SilenceUsage, c.SilenceErrors = true, true
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	want := daemonImageFlags{rev: "abc1234", out: "/o", gtSrc: "/g", bdSrc: "/b", omSrc: "/m", hmSrc: "/h", devopsSrc: "/d", mangoSrc: "/mg", mangoCommit: "aabbccdd", pins: "/p"}
+	want := daemonImageFlags{rev: "abc1234", out: "/o", gtSrc: "/g", bdSrc: "/b", omSrc: "/m", hmSrc: "/h", devopsSrc: "/d", mangoSrc: "/mg", mangoCommit: "aabbccdd", pins: "/p", forgeOwner: "acme", townRoot: "/t"}
 	if got != want {
 		t.Errorf("flags = %+v, want %+v (apply off by default)", got, want)
 	}
@@ -719,6 +719,71 @@ func TestDaemonImagePlanNamesThePins(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Errorf("--out holds %d entries after a dry run (err %v), want none", len(entries), err)
 	}
+}
+
+// TestDaemonImageOwnerIsFlagThenTownThenDefault: the pins' {owner} expands to
+// --forge-owner when it is set, else to --town-root's forge.owner, else to the
+// setting's default; a named town with no town.json refuses before anything runs
+// (gt-ucigk3).
+func TestDaemonImageOwnerIsFlagThenTownThenDefault(t *testing.T) {
+	t.Parallel()
+	gastownTown := imageTestTown(t, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","forge":{"owner":"gastown"}}`)
+	tests := []struct {
+		name       string
+		forgeOwner string
+		townRoot   string
+		want       string
+		wantErr    string
+	}{
+		{"the flag wins over the town", "acme", gastownTown, "acme", ""},
+		{"the town wins over the default", "", gastownTown, "gastown", ""},
+		{"neither gives the default", "", "", config.DefaultForgeOwner, ""},
+		{"a named town with no town.json is refused", "", imageTestTown(t, ""), "", "forge owner"},
+		{"a flag that is not an owner name is refused", "org/team", "", "", "forge owner"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			placeholder := strings.ReplaceAll(imagePinsText(), "/"+imageTestOwner+"/", "/"+config.ForgeOwnerPlaceholder+"/")
+			if err := os.WriteFile(r.flags.pins, []byte(placeholder), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r.flags.forgeOwner, r.flags.townRoot = tt.forgeOwner, tt.townRoot
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("runDaemonImage = %v, want a refusal naming %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runDaemonImage: %v", err)
+			}
+			if want := "pin bd: http://forgejo:3000/" + tt.want + "/beads.git at "; !strings.Contains(r.out.String(), want) {
+				t.Errorf("output lacks %q:\n%s", want, r.out.String())
+			}
+		})
+	}
+}
+
+// imageTestTown is a town root whose mayor/town.json holds townJSON; an empty
+// townJSON writes no town.json at all.
+func imageTestTown(t *testing.T, townJSON string) string {
+	t.Helper()
+	root := t.TempDir()
+	if townJSON == "" {
+		return root
+	}
+	path := filepath.Join(root, "mayor", "town.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(townJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 // TestOwnerPlaceholderExpandsInEachGoReader: readImagePins expands the pins

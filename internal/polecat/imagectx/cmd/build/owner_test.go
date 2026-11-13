@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,5 +68,34 @@ func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
 	}
 	if _, err := readFile(pinsPath, "", daemonimage.ParsePins); err == nil {
 		t.Error("readFile accepted an empty owner")
+	}
+}
+
+// TestBuildRefusesAnOwnerItCannotResolve: -forge-owner and -town-root reach the
+// owner resolution before any file is read or any source is built, so a value
+// that is not an owner name, and a named town with no town.json, each stop the
+// build with a message naming the cause (gt-ucigk3).
+func TestBuildRefusesAnOwnerItCannotResolve(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"a flag that is not an owner name", []string{"-forge-owner", "org/team"}, "forge owner"},
+		{"a named town with no town.json", []string{"-town-root", t.TempDir()}, "has no town.json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string{"-rev", buildTestSHA, "-out", t.TempDir()}, tt.args...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 1 {
+				t.Fatalf("run = %d, want 1; stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Errorf("stderr = %q, want it to name %q", stderr.String(), tt.wantErr)
+			}
+		})
 	}
 }

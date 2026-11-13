@@ -40,6 +40,8 @@ type daemonImageFlags struct {
 	mangoSrc    string
 	mangoCommit string
 	pins        string // the absolute image-pins file naming the bd, om, hm and devops commits
+	forgeOwner  string // the Forgejo owner the pins' {owner} expands to; empty reads townRoot
+	townRoot    string // the town whose forge.owner names the owner when forgeOwner is empty
 	apply       bool
 	contextOnly bool // stop after the staged build context, before any engine step
 }
@@ -178,6 +180,8 @@ from. Without --apply, --context-only prints that build's plan and runs nothing.
 	fl.StringVar(&f.mangoSrc, "mango-src", "", "absolute mango checkout the image's mango is built from")
 	fl.StringVar(&f.mangoCommit, "mango-commit", "", "mango commit to build the image's mango at (7+ hex characters)")
 	fl.StringVar(&f.pins, "pins", "", "absolute image-pins file naming the bd, om, hm and devops commits")
+	fl.StringVar(&f.forgeOwner, "forge-owner", "", "Forgejo owner the pins' URLs name; empty takes --town-root's forge.owner, else the setting's default")
+	fl.StringVar(&f.townRoot, "town-root", "", "town whose forge.owner names the owner when --forge-owner is empty; empty reads no town")
 	fl.BoolVar(&f.apply, "apply", false, "run the build; without it only print the plan")
 	fl.BoolVar(&f.contextOnly, "context-only", false, "with --apply, stage the build context and stop before any container-engine step, printing its directory")
 	return cmd
@@ -201,7 +205,11 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
 	}
-	pins, err := readImagePins(f.pins, config.DefaultForgeOwner)
+	owner, err := config.ResolveForgeOwnerFor(f.forgeOwner, f.townRoot)
+	if err != nil {
+		return err
+	}
+	pins, err := readImagePins(f.pins, owner)
 	if err != nil {
 		return err
 	}
@@ -311,8 +319,7 @@ func runContextOnly(ctx context.Context, build imageBuilder, rev, ctxDir string,
 // readImagePins reads and parses the pins file at path, expanding its {owner}
 // placeholder with owner first. A file that cannot be read and one the parser
 // refuses are both errors naming the path, so the operator knows which file to
-// fix. The caller passes the setting's default: a build reads no live town, so
-// the expansion is the same on every host and from any checkout.
+// fix. The caller passes the owner config.ResolveForgeOwnerFor resolved.
 func readImagePins(path, owner string) ([]daemonimage.Pin, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {

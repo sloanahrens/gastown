@@ -1,8 +1,7 @@
 # <name> <url> <commit>: the four external sources `gt daemon image` builds from.
 # Each commit is the commit `gt daemon image` builds that source at. Each URL is
-# the rig's Forgejo remote, without a credential. {owner} is expanded from
-# forge.owner; see config.ForgeOwnerPlaceholder. The pin-drift guard refuses a
-# pin that is not an ancestor of the source's origin/main, more than 40 commits
+# the rig's Forgejo remote, without a credential. {owner} is expanded from forge.owner; see config.ForgeOwnerPlaceholder.
+# The pin-drift guard refuses a pin that is not an ancestor of the source's origin/main, more than 40 commits
 # behind it, or more than 7 days older than its tip.
 bd http://forgejo:3000/{owner}/beads.git b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f
 om http://forgejo:3000/{owner}/organic-mechanic.git 50bb8fb1964dda98a22697a6396a75a1fd7b000f

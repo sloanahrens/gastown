@@ -91,6 +91,7 @@ func newHarness(t *testing.T) *harness {
 		"FORGEJO_API_URL": apiRoot,
 	}
 	h.mkdir(h.in("town", ".runtime", "red-main"))
+	h.write(h.in("town", "mayor", "town.json"), `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"}`)
 	h.write(h.in("plugin", "rigs.conf"), rigName+" "+repo+"\n")
 	h.write(h.in("config", "gt", "forgejo-viewer.env"), "FORGEJO_TOKEN="+tokenText+"\n")
 
@@ -2018,6 +2019,26 @@ func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
 				t.Errorf("an unexpanded repository made the reads %v, want none", bad.requests)
 			}
 		})
+	}
+}
+
+// TestRigListRefusesATownWithNoTownJSON: a town root with no mayor/town.json
+// refuses the run before any read, rather than expanding the rig list with the
+// default owner (gt-ucigk3).
+func TestRigListRefusesATownWithNoTownJSON(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	if err := os.Remove(h.in("town", "mayor", "town.json")); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run(); code != 1 {
+		t.Fatalf("exit %d, want 1; output:\n%s", code, h.output())
+	}
+	if !strings.Contains(h.output(), "has no town.json") {
+		t.Errorf("the failure does not name the missing town.json:\n%s", h.output())
+	}
+	if len(h.requests) != 0 {
+		t.Errorf("a town with no town.json made the reads %v, want none", h.requests)
 	}
 }
 

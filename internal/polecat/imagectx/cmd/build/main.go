@@ -3,7 +3,7 @@
 // `make polecat-image` runs it from the gt checkout, then does the engine build
 // and the push from the context it prints.
 //
-//	build -pins <image-pins> -seed-pins <seed-pins> -seed-urls <seed-urls> -rev <sha> -out <dir>
+//	build -pins <image-pins> -seed-pins <seed-pins> -seed-urls <seed-urls> -rev <sha> -out <dir> [-forge-owner <owner>] [-town-root <dir>]
 //
 // It runs in the gt checkout, whose tree must be clean and at -rev. It prints
 // the pin-drift guard's notes, then "context: <dir>" and the labels the image
@@ -36,6 +36,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	seedURLs := fs.String("seed-urls", "deploy/polecat/seed-urls", "the file naming each seeded rig other than gastown by URL")
 	rev := fs.String("rev", "", "the full sha of the gt commit the image is built at; the checkout must be clean and at it")
 	out := fs.String("out", "", "the absolute, empty directory the context is staged in")
+	forgeOwner := fs.String("forge-owner", "", "the Forgejo owner the {owner} placeholder in the pins and seed files expands to; empty takes -town-root's forge.owner, else the setting's default")
+	townRoot := fs.String("town-root", "", "the town whose forge.owner names the owner when -forge-owner is empty; empty reads no town")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -48,9 +50,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "polecat-image: cannot read the working directory: %v\n", err)
 		return 1
 	}
-	// The owner is the setting's default: the build runs from a checkout and
-	// reads no live town, so every host expands the files the same way.
-	owner, err := config.ResolveForgeOwner("")
+	// CI passes neither flag, so it expands the files with the setting's default.
+	owner, err := config.ResolveForgeOwnerFor(*forgeOwner, *townRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1

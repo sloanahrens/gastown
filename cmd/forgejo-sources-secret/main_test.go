@@ -1399,6 +1399,24 @@ func TestSecretOwnerComesFromTheSetting(t *testing.T) {
 	}
 }
 
+// TestSecretRefusesANamedTownWithNoTownJSON: a --town-root with no town.json is
+// refused before any request or store, so the secret never lands on the default
+// owner's account for a town that names no owner (gt-ucigk3).
+func TestSecretRefusesANamedTownWithNoTownJSON(t *testing.T) {
+	t.Parallel()
+	f := newSourcesFake(t, "")
+	res := runCommand(t, f, nil, "--town-root", t.TempDir())
+	if res.code != forgejoprov.ExitUsage {
+		t.Fatalf("exit %d, want the usage code %d; stderr: %s", res.code, forgejoprov.ExitUsage, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "has no town.json") {
+		t.Errorf("stderr does not name the missing town.json: %s", res.stderr)
+	}
+	if calls := f.CallLog(); len(calls) != 0 {
+		t.Errorf("a named town with no town.json made %d call(s), want none", len(calls))
+	}
+}
+
 // TestSecretOwnerRefusesABadSetting: an empty owner and one holding a slash each
 // refuse the run before it sends a request, and the refusal names forge.owner.
 func TestSecretOwnerRefusesABadSetting(t *testing.T) {

@@ -1,3 +1,4 @@
-# <rig> <url>: the repository each seeded rig other than gastown is fetched from, where {owner} is the Forgejo owner, which the reader expands from forge.owner (the setting's default for a build, which reads no town). gastown is seeded from the commit the image is built at, so it has no line here (gt-gg9hv.33).
+# <rig> <url>: the repository each seeded rig other than gastown is fetched from. {owner} is expanded from forge.owner; see config.ForgeOwnerPlaceholder.
+# gastown is seeded from the commit the image is built at, so it has no line here (gt-gg9hv.33).
 devops http://forgejo:3000/{owner}/devops.git
 beads http://forgejo:3000/{owner}/beads.git
