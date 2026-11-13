@@ -678,9 +678,9 @@ func TestPoolSeatSessionsCountsALiveSeatWithNoRecordUnderUnknown(t *testing.T) {
 	}
 }
 
-// The unreadable-record reader warns once per reader, naming the seat and the
-// class it counted it under. A reader serves one occupancy read, so a record
-// that stays unreadable between two listing calls warns on the first read only.
+// The unreadable-record reader warns once per reader, naming the seat. A reader
+// serves one occupancy read, so a record that stays unreadable between two
+// listing calls warns on the first read only.
 func TestPoolSeatAgentWarnsOnceOnAnUnreadableRecord(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -700,9 +700,9 @@ func TestPoolSeatAgentWarnsOnceOnAnUnreadableRecord(t *testing.T) {
 			t.Fatalf("read = %q, nil; want the unreadable-record error", agent)
 		}
 	}
-	want := fmt.Sprintf("warning: gastown/flint's seat record cannot be read, counting the seat under %s", config.UnknownSeatAgent)
+	want := "warning: gastown/flint's seat record cannot be read, holding its seat"
 	if got := out.String(); strings.Count(got, want) != 1 {
-		t.Fatalf("warning wrote %q; want exactly one line naming gastown/flint and %s", got, config.UnknownSeatAgent)
+		t.Fatalf("warning wrote %q; want exactly one line naming gastown/flint and the held seat", got)
 	}
 }
 
