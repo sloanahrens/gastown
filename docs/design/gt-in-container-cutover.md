@@ -72,14 +72,16 @@ and set `native.bd.path` to that path with `"subcommands": ["hooks"]`. Only
 `bd hooks run` then runs on the Mac, since the beads git hooks need the Mac's
 files; the other bd commands reach the pod as before. Keep the old gt the same
 way, `--keep-old gt=/Users/operator/go/bin/gt-native`, and set `native.gt.path`
-to that path with `"subcommands": ["town forward plist", "maint plan", "maint apply"]`:
-those calls print the launchd job's Mac log paths and read the Mac's Docker
-contexts, which the pod lacks (gt-aea89k). Every other gt command reaches the pod
-as before. A native path that is a tool's own installed path would run the
-wrapper itself, and the wrapper refuses it. Install refuses a second name that
-is any tool's path, dated name or aside name, or is asked for twice, before it
-changes anything. Delete the second name and the dated files together after the
-quiet week.
+to that path with `"subcommands"` set to the host command set,
+`["town forward plist", "maint plan", "maint apply"]`. Before changing that set,
+read [Native calls](gt-in-container.md#native-calls) in the parent design: it
+holds the set and why each call runs on the Mac, and `GTHostCommand` in
+`internal/gtwrap/native.go` is its source of truth. Every other gt command
+reaches the pod as before. A native path that is a tool's own installed path
+would run the wrapper itself, and the wrapper refuses it. Install refuses a
+second name that is any tool's path, dated name or aside name, or is asked for
+twice, before it changes anything. Delete the second name and the dated files
+together after the quiet week.
 
 To replace the installed wrappers with a newer build, run `gt-wrap install` again
 from the new gt-wrap with a new stamp and the same `--target` paths, and no
