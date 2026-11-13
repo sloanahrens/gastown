@@ -518,13 +518,13 @@ func TestBudgetPictureNamesDeadHookedSeats(t *testing.T) {
 	b := baseBudget()
 	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
 	b.SetDeadHooked(map[string]int{"deepseek-flash": 1})
-	if got, want := b.Picture(), "deepseek-flash 2/2 (1 dead-hooked), claude-sonnet 1/2"; got != want {
+	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 dead-hooked), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
 
 	// The refusal a full town prints carries the same note.
 	b.Seats[1].Live, b.Seats[1].Cap = 2, 2
-	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Reason != "seats full: deepseek-flash 2/2 (1 dead-hooked), claude-sonnet 2/2" {
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Reason != "seats full: deepseek-flash 2/2 (1 live + 1 dead-hooked), claude-sonnet 2/2" {
 		t.Fatalf("ChooseSeat = %+v, want the dead-hooked seat named", got)
 	}
 
@@ -532,6 +532,35 @@ func TestBudgetPictureNamesDeadHookedSeats(t *testing.T) {
 	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 2})
 	if got, want := b.Picture(), "deepseek-flash 2/2, claude-sonnet 2/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+}
+
+// TestSplitLiveDeadNamesTheDeadHookedPartApart is the one formatter every seat
+// count reads through: the tick line, `gt pool show` and the sling refusal. A
+// seat with no dead-hooked occupant prints nothing extra, and a seat with one
+// prints its live sessions and its dead-hooked seats as two parts of the count.
+func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		total, dead  int
+		wantSplit    string
+		wantDeadWord string
+	}{
+		{"no dead-hooked seat adds nothing", 3, 0, "", ""},
+		{"one of two is dead-hooked", 2, 1, "(1 live + 1 dead-hooked)", "1 dead-hooked"},
+		{"the overshoot names its live part", 10, 2, "(8 live + 2 dead-hooked)", "2 dead-hooked"},
+		{"every session is dead-hooked", 3, 3, "(0 live + 3 dead-hooked)", "3 dead-hooked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SplitLiveDead(tc.total, tc.dead); got != tc.wantSplit {
+				t.Errorf("SplitLiveDead(%d, %d) = %q, want %q", tc.total, tc.dead, got, tc.wantSplit)
+			}
+			if got := DeadHookedCount(tc.dead); got != tc.wantDeadWord {
+				t.Errorf("DeadHookedCount(%d) = %q, want %q", tc.dead, got, tc.wantDeadWord)
+			}
+		})
 	}
 }
 

@@ -460,7 +460,7 @@ func poolCountSources(agent string, sessions []poolSession) string {
 		parts = append(parts, count(live, "session", "sessions"))
 	}
 	if dead > 0 {
-		parts = append(parts, deadHookedCount(dead))
+		parts = append(parts, specdispatch.DeadHookedCount(dead))
 	}
 	if landing > 0 {
 		parts = append(parts, fmt.Sprintf("%d mid-landing", landing))
@@ -469,18 +469,6 @@ func poolCountSources(agent string, sessions []poolSession) string {
 		parts = append(parts, count(claims, "claim", "claims"))
 	}
 	return ": " + strings.Join(parts, ", ")
-}
-
-// deadHookedCount names the seats inside a count that no tmux session holds:
-// their polecat crashed with work still in hand and is waiting for its
-// supervised restart. Empty when none is inside it. One wording for every count
-// an operator reads — the sling refusal, and `gt pool show`'s live column — so
-// the same number reads the same wherever it is met.
-func deadHookedCount(n int) string {
-	if n == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d dead-hooked", n)
 }
 
 // parkedStaleCount names the seats a count no longer holds because their

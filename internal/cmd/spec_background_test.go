@@ -108,6 +108,44 @@ func TestBackgroundTickRosterCountsTheRunningSling(t *testing.T) {
 	}
 }
 
+// TestSpecTickCountsSlingsRunningFromEarlierTicks pins behaviour that already
+// exists. It is not a before-and-after test: it passes on the code it was
+// written against. A sling still running from an earlier tick is in the in-flight
+// set the tick is handed, and specLiveWithInFlight counts it on its seat before
+// ChooseSeat runs, so the next tick admits no more slings than the seat has
+// room for. The release side, a failed sling leaving the set, is pinned by
+// TestAFailedBackgroundSlingIsLoggedLikeAForegroundFailure in
+// internal/daemon/spec_slings_test.go.
+func TestSpecTickCountsSlingsRunningFromEarlierTicks(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		running int // slings still running from earlier ticks, all on the seat
+		want    int // slings this tick hands back
+	}{
+		{"an empty seat takes both", 0, 2},
+		{"one running sling leaves one place", 1, 1},
+		{"a seat full of running slings takes none", 2, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(
+				cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"),
+				cleanSpec("gt-b", 2, "2026-09-29T10:01:00Z"),
+			)
+			f.seats = []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2}}
+			env := backgroundEnv(f)
+			for i := range tc.running {
+				env.InFlight = append(env.InFlight, specInFlight{Bead: "gt-run" + string(rune('a'+i)), Rig: "gastown", Agent: "deepseek-flash"})
+			}
+			r := runSpecDispatchCycle(env)
+			if len(r.Pending) != tc.want {
+				t.Fatalf("handed back %d slings, want %d; roster %q", len(r.Pending), tc.want, r.Roster)
+			}
+		})
+	}
+}
+
 // A sling in its first minute has no session, so the roster shows no spawn. The
 // stagger must still hold the next sling until the running one's start is a gap
 // old (gt-vames).
