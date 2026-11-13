@@ -2269,6 +2269,59 @@ func TestEnsureMetadataNoPortNoPortFile(t *testing.T) {
 	}
 }
 
+// TestEnsureMetadataRemovesThePortFileWhenTheTownStopsNamingItsEndpoint
+// verifies that dolt-server.port does not outlive the endpoint it named: a town
+// that names 3307 gets the file, and a run in which the town names no endpoint
+// removes it rather than leaving bd a stale port to dial (gt-22vrye).
+func TestEnsureMetadataRemovesThePortFileWhenTheTownStopsNamingItsEndpoint(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().townNamesPort(3307)
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	portPath := filepath.Join(beadsDir, "dolt-server.port")
+
+	if err := f.host().EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata for a town naming 3307 failed: %v", err)
+	}
+	if data, err := os.ReadFile(portPath); err != nil || string(data) != "3307" {
+		t.Fatalf("dolt-server.port = %q (err %v), want %q before the endpoint is removed", data, err, "3307")
+	}
+
+	// The same town now names no endpoint on disk.
+	f.mu.Lock()
+	f.namesEndpoint = false
+	f.endpointPort = 0
+	f.mu.Unlock()
+	if err := f.host().EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata for a town naming no endpoint failed: %v", err)
+	}
+	if _, err := os.Stat(portPath); !os.IsNotExist(err) {
+		t.Errorf("dolt-server.port survived the endpoint removal (stat err: %v)", err)
+	}
+}
+
+// TestEnsureMetadataPortFileRemovalFailureIsReturned verifies that a
+// dolt-server.port that cannot be removed is reported, not passed over: a
+// non-empty directory at that path makes os.Remove fail (gt-22vrye).
+func TestEnsureMetadataPortFileRemovalFailureIsReturned(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
+	townRoot := t.TempDir()
+
+	blocked := filepath.Join(townRoot, ".beads", "dolt-server.port")
+	if err := os.MkdirAll(filepath.Join(blocked, "keep"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err == nil {
+		t.Fatal("EnsureMetadata succeeded with dolt-server.port blocked by a non-empty directory, want an error")
+	}
+}
+
 // TestEnsureMetadataNoPortKeepsTheKey verifies that a town without an endpoint
 // does not drop an existing dolt_server_port key: it writes no port file, so the
 // key would be the only port source left (gt-49f3pn).
