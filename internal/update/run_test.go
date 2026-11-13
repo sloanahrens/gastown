@@ -465,6 +465,21 @@ func TestRunDryRunNamesTheSkippedHostInstall(t *testing.T) {
 			t.Errorf("skipped install reason = %q, want no skip note", install.Reason)
 		}
 	})
+
+	// The planner always gives a running install step a reason, so an empty one
+	// is reached only by calling the note directly: the plan line must then carry
+	// the note with no separator in front of it.
+	t.Run("an install step with no prior reason has no leading separator", func(t *testing.T) {
+		t.Parallel()
+		steps := []StepRecord{{Name: StepInstall, WillRun: true}}
+		noteHostInstallSkipped(steps, "pod target")
+
+		var line bytes.Buffer
+		writePlan(&line, steps)
+		if want := "install: run: " + want + "\n"; line.String() != want {
+			t.Errorf("plan line = %q, want %q", line.String(), want)
+		}
+	})
 }
 
 func TestRunInstallPathRecordsEveryStep(t *testing.T) {

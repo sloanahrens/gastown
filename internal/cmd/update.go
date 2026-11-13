@@ -367,6 +367,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	stopHeartbeat := startUpdateHeartbeat(ctx, deps.Store, ticker.C, deps.Clock, updateHeartbeatError(errOut))
 
 	opts := updateOptions(req, skip, only)
+	// Only the digest install skips the host install under a pod target. A run
+	// without --images still installs the Mac binary, which needs the host
+	// installer even when the daemon runs in the pod.
 	if pod != nil && req.Images != "" {
 		opts.HostInstallSkipped = podHostInstallReason
 	}

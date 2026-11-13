@@ -162,7 +162,10 @@ func writePlan(w io.Writer, steps []StepRecord) {
 func noteHostInstallSkipped(steps []StepRecord, reason string) {
 	for i := range steps {
 		if steps[i].Name == StepInstall && steps[i].WillRun {
-			steps[i].Reason += "; " + HostInstallSkipNote(reason)
+			if steps[i].Reason != "" {
+				steps[i].Reason += "; "
+			}
+			steps[i].Reason += HostInstallSkipNote(reason)
 		}
 	}
 }
