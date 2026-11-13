@@ -57,14 +57,10 @@ func (n Native) Check(stat func(string) (fs.FileInfo, error)) error {
 	return nil
 }
 
-// CheckNotSelf refuses a Path that is the wrapper running now: the wrapper would
-// run itself, read the same config, select the native run again and never stop.
-// That is the state after the cutover replaces om with the wrapper while the
-// config still names it (gt-qq5kv4 cutover 7). Two paths are the same file when
-// os.SameFile says so, which covers the same path, a symlink to the wrapper and a
-// hard link of it. A wrapper that cannot be found or read refuses too: an
-// unknown file is not a different one. Check has already passed, so Path is an
-// absolute, readable file.
+// CheckNotSelf refuses a Path that is the wrapper running now, which would run
+// itself and never stop, or a wrapper it cannot find or read to compare
+// (gt-qq5kv4 cutover 7); Check has already passed, so Path is an absolute,
+// readable file.
 func (n Native) CheckNotSelf(stat func(string) (fs.FileInfo, error), executable func() (string, error)) error {
 	key := fmt.Sprintf("native.%s.path", n.Tool)
 	if executable == nil {

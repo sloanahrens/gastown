@@ -18,7 +18,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
-	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 const (
@@ -840,22 +839,54 @@ func TestKubectlRefusesAnUnwiredOrIncompleteTarget(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesARootPodRoot: a pod root of "/" is refused before any probe,
+// with an error that names the value, since the pod walk-up would search the whole
+// pod; a normal absolute pod root still runs the call.
+func TestValidateRefusesARootPodRoot(t *testing.T) {
+	t.Parallel()
+	f := healthyKube()
+	var note bytes.Buffer
+	k := testKubectl(f, &note)
+	k.PodRoot = "/"
+	exit, err := k.Launch(kubeCall(t, kubeTown, false))
+	if exit != 1 || err == nil || !strings.Contains(err.Error(), `pod root is "/"`) {
+		t.Fatalf("Launch with pod root \"/\" = %d, %v; want 1 with an error naming the value", exit, err)
+	}
+	if len(f.captured) != 0 || len(f.attached) != 0 {
+		t.Fatalf("a refused target reached the cluster: probes %q, attached %q", f.captured, f.attached)
+	}
+
+	normal := healthyKube()
+	var normalNote bytes.Buffer
+	ok := testKubectl(normal, &normalNote)
+	ok.PodRoot = "/town"
+	// The root differs from the Mac town, so the call rewrites the tool's output
+	// and needs the wrapper's streams wired.
+	ok.Stdout, ok.Stderr = io.Discard, io.Discard
+	if exit, err := ok.Launch(kubeCall(t, kubeTown, false)); exit != 0 || err != nil {
+		t.Fatalf("Launch with pod root %q = %d, %v; want 0, nil", "/town", exit, err)
+	}
+}
+
 // TestPodTownRootIsTheSharedConstant: the compiled-in root the wrapper maps onto and
-// the TownRootPath the Deployment is rendered with both read manifestdata.PodTownRoot,
-// so a call with no pod_town_root maps onto the path the pod mounts the claim at.
+// the TownRootPath the Deployment is rendered with are both the literal the pod
+// mounts the town-state claim at, so a call with no pod_town_root maps onto that
+// path. The literal is written out here rather than read from the constant, so a
+// change to the constant fails this test.
 func TestPodTownRootIsTheSharedConstant(t *testing.T) {
 	t.Parallel()
+	const wantPodTownRoot = "/Users/sloan/gt"
 	f := healthyKube()
 	var note bytes.Buffer
 	if exit, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig", false)); err != nil || exit != 0 {
 		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
 	}
 	argv := f.attached[0]
-	if root := argv[len(argv)-5]; root != manifestdata.PodTownRoot {
-		t.Fatalf("the wrapper's root argument is %q, want manifestdata.PodTownRoot %q", root, manifestdata.PodTownRoot)
+	if root := argv[len(argv)-5]; root != wantPodTownRoot {
+		t.Fatalf("the wrapper's root argument is %q, want the literal pod town root %q", root, wantPodTownRoot)
 	}
-	if k8sdaemon.TownRootPath != manifestdata.PodTownRoot {
-		t.Fatalf("the rendered TownRootPath is %q, want manifestdata.PodTownRoot %q", k8sdaemon.TownRootPath, manifestdata.PodTownRoot)
+	if k8sdaemon.TownRootPath != wantPodTownRoot {
+		t.Fatalf("the rendered TownRootPath is %q, want the literal pod town root %q", k8sdaemon.TownRootPath, wantPodTownRoot)
 	}
 }
 

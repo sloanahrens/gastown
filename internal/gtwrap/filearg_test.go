@@ -77,6 +77,23 @@ func TestScanFileArgsRewritesToStdin(t *testing.T) {
 	}
 }
 
+// TestShortDescriptionFlagValueIsNotAFileFlag: -d takes free text, so a value that
+// starts with -f is the description and not the file flag; -f itself still names a
+// file the pod reads on stdin.
+func TestShortDescriptionFlagValueIsNotAFileFlag(t *testing.T) {
+	t.Parallel()
+	args := []string{"create", "a title", "-d", "-fx"}
+	got, file, err := ScanFileArgs("bd", args)
+	if err != nil || file != nil || !slices.Equal(got, args) {
+		t.Fatalf("ScanFileArgs(%q) = %q, %v, %v; want the arguments unchanged with no file", args, got, file, err)
+	}
+	got, file, err = ScanFileArgs("bd", []string{"note", "gt-x", "-f", "notes.txt"})
+	want := []string{"note", "gt-x", "-f", "-"}
+	if err != nil || file == nil || *file != (FileArg{"-f", "notes.txt"}) || !slices.Equal(got, want) {
+		t.Fatalf("ScanFileArgs note -f = %q, %v, %v; want %q with -f read as the file flag", got, file, err, want)
+	}
+}
+
 // TestScanFileArgsRefusals: a file the tool opens as a path, two files, and a
 // file beside a stdin already in use are each refused with the cause named.
 func TestScanFileArgsRefusals(t *testing.T) {
