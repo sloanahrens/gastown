@@ -39,8 +39,7 @@ Each rig generates settings in shared parent directories (not per-worktree):
 | Crew (shared) | `<rig>/crew/.claude/settings.json` | `<rig>/crew` |
 | Polecats (shared) | `<rig>/polecats/.claude/settings.json` | `<rig>/polecats` |
 
-Town-level target:
-- `mayor/.claude/settings.json` (key: `mayor`)
+The table is complete: crew and polecat roles only.
 
 The `polecats` override adds the polecat-paths guard (`gt tap guard
 polecat-paths`, gt-hmaf) on the `Bash|Monitor` and
