@@ -1616,6 +1616,16 @@ func dropRigOrphanDBs(dolt doltDatabases, prefix, rigName string, protected map[
 	return nil
 }
 
+// bdRefused reports whether err is a bd call that bd itself answered with a
+// non-zero exit status. A call that never ran (bd missing, the fork failed) or
+// one a signal killed has no exit status, so its answer is unknown and the
+// caller must not read the store's state as its refusal (gt-adxi4m).
+func bdRefused(err error) bool {
+	var cliErr *beads.CLIError
+	var coded interface{ ExitCode() int }
+	return errors.As(err, &cliErr) && errors.As(err, &coded) && coded.ExitCode() > 0
+}
+
 // InitBeads initializes the beads database at rig level.
 // The project's .beads/config.yaml determines sync-branch settings.
 // Use `bd doctor --fix` in the project to configure sync-branch if needed.
@@ -1680,8 +1690,14 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		// with rename-prefix --config-only, the one verb that writes it (SetIssuePrefix). The
 		// refusal's wording differs by bd build and its stdout carries a JSON envelope, so
 		// match the stored value rather than the text: a refusal over a prefix that already
-		// reads back as ours is already-set, and any other refusal is a failure.
+		// reads back as ours is already-set, and any other refusal is a failure. Only a
+		// refusal bd answered can be read that way: a call the deadline killed, a bd that
+		// never started or a failed fork gave no answer, so the stored value cannot excuse
+		// it and the error is surfaced (gt-adxi4m).
 		if prefixErr := bd.SetIssuePrefix(prefix); prefixErr != nil {
+			if !bdRefused(prefixErr) {
+				return fmt.Errorf("bd rename-prefix --config-only failed: %w", beads.Summarize(prefixErr))
+			}
 			current, getErr := bd.ConfigGet("issue_prefix")
 			if getErr != nil {
 				// The read-back failed, so the refusal cannot be shown to be
