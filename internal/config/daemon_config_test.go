@@ -1714,6 +1714,46 @@ func TestSpecDispatchInFlightCapDefaults(t *testing.T) {
 	}
 }
 
+// The story_points block under spec_dispatch decodes its embedder settings,
+// survives a rewrite, and an absent block reads as nil so the estimate runs
+// without an embedder (gt-5d9k2f.13). A misspelt key is refused, since the
+// block decodes strictly.
+func TestSpecDispatchStoryPointsBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"spec_dispatch":{"enabled":true,` +
+		`"story_points":{"embedder_url":"http://host.docker.internal:11434","embedder_model":"qwen3-embedding:4b-q8_0"}}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sp := cfg.Patrols.SpecDispatch.StoryPoints
+	if sp == nil || sp.EmbedderURL != "http://host.docker.internal:11434" || sp.EmbedderModel != "qwen3-embedding:4b-q8_0" {
+		t.Fatalf("story_points decoded as %+v", sp)
+	}
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `"story_points":{"embedder_url":"http://host.docker.internal:11434","embedder_model":"qwen3-embedding:4b-q8_0"}`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("rewrite dropped the story_points block: %s", out)
+	}
+
+	var bare DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"spec_dispatch":{"enabled":true}}}`), &bare); err != nil {
+		t.Fatalf("decode without story_points: %v", err)
+	}
+	if bare.Patrols.SpecDispatch.StoryPoints != nil {
+		t.Errorf("absent story_points read as %+v, want nil", bare.Patrols.SpecDispatch.StoryPoints)
+	}
+
+	var typo DaemonPatrolConfig
+	typoBody := `{"patrols":{"spec_dispatch":{"story_points":{"embedder_ulr":"http://x"}}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(typoBody), &typo); err == nil {
+		t.Error("a misspelt story_points key decoded without an error")
+	}
+}
+
 // The jev_scorecard patrol's block decodes its four keys, and a value the
 // patrol cannot act on is refused at decode rather than read as a default.
 func TestJevScorecardConfigDecodes(t *testing.T) {
