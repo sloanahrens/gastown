@@ -43,6 +43,42 @@ func SandboxSeatGitState(branch string, exists bool, existsErr error, sandboxNam
 	return LiveGitState{Branch: branch, Source: GitStateSourceLive}
 }
 
+// SandboxSeatPhaseGitState is the git state of a seat whose gateway lists its
+// sandbox, judged by the phase the gateway reports for it (gt-dtel4n). Only
+// Running or Ready keeps the running answer; a gateway that cannot give the
+// phase is unknown, never running.
+func SandboxSeatPhaseGitState(branch, sandboxName, phase string, phaseErr error) LiveGitState {
+	if phaseErr != nil {
+		return LiveGitState{
+			Branch:       branch,
+			Source:       GitStateSourceUnknown,
+			FailedReason: fmt.Sprintf("cannot ask the gateway for the sandbox's phase: %v", phaseErr),
+		}
+	}
+	phase = strings.TrimSpace(phase)
+	var reason string
+	switch {
+	case strings.EqualFold(phase, "Running"), strings.EqualFold(phase, "Ready"):
+		st := SandboxSeatGitState(branch, true, nil, sandboxName)
+		st.SandboxPhase = phase
+		return st
+	case strings.EqualFold(phase, "Stopped"):
+		reason = fmt.Sprintf("git state lives in the stopped sandbox %s; it cannot be read until the sandbox starts, and the patrol deletes it once the seat's work has landed", sandboxName)
+	default:
+		shown := phase
+		if shown == "" {
+			shown = "unreported"
+		}
+		reason = fmt.Sprintf("git state of sandbox %s is unknown: the gateway reports it in phase %s", sandboxName, shown)
+	}
+	return LiveGitState{
+		Branch:       branch,
+		Source:       GitStateSourceUnknown,
+		FailedReason: reason,
+		SandboxPhase: phase,
+	}
+}
+
 // SandboxSeatGitRepo is the repository surface SandboxSeatHostGitState reads,
 // so a caller can measure a seat through a repository model instead of a real
 // clone.

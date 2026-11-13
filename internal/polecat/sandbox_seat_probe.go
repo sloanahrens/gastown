@@ -38,6 +38,16 @@ type SandboxSeatProbe func(agent, sessionName string) (state LiveGitState, ok bo
 // exactly one seat. The sandbox is named for the seat's session, as the
 // daemon's GitState and the reaper name it.
 func NewSandboxSeatProbe(townRoot string, exists func(gateway, name string) (bool, error)) SandboxSeatProbe {
+	return NewSandboxSeatProbeWithPhase(townRoot, exists, nil)
+}
+
+// NewSandboxSeatProbeWithPhase is NewSandboxSeatProbe that also asks the
+// gateway for the phase of a sandbox it lists, through phase (gt-dtel4n). A
+// listed sandbox is then answered by SandboxSeatPhaseGitState, so a stopped one
+// names its stop and a phase the gateway cannot give is unknown. A nil phase
+// keeps NewSandboxSeatProbe's answer, the running sandbox's, which the list and
+// safety paths read without a second gateway question.
+func NewSandboxSeatProbeWithPhase(townRoot string, exists func(gateway, name string) (bool, error), phase func(gateway, name string) (sandbox.Status, error)) SandboxSeatProbe {
 	if exists == nil {
 		exists = func(gateway, name string) (bool, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), sandboxSeatTimeout)
@@ -81,6 +91,10 @@ func NewSandboxSeatProbe(townRoot string, exists func(gateway, name string) (boo
 			}
 			gateway := ts.Sandboxes[seat.Sandbox].WithDefaults().Gateway
 			found, existsErr := exists(gateway, sessionName)
+			if phase != nil && found && existsErr == nil {
+				st, phaseErr := phase(gateway, sessionName)
+				return SandboxSeatPhaseGitState("", sessionName, st.Phase, phaseErr), true
+			}
 			return SandboxSeatGitState("", found, existsErr, sessionName), true
 		}
 		return LiveGitState{}, false
