@@ -122,6 +122,7 @@ func readSeat(name string, p *seatProbes) error {
 	return err
 }
 
+//testpolicy:allow parallel — the census is one process-wide answer that BeginSandboxCensus installs, so these tests run one at a time
 func TestSlingCensus(t *testing.T) {
 	// The routing is process-wide, so these tests do not run in parallel.
 	t.Run("ten seats over three reads: one listing and one probe per seat per verb", func(t *testing.T) {
@@ -298,6 +299,8 @@ func TestSlingCensus(t *testing.T) {
 // cannot see on its own: a sandbox this sling creates after the listing was
 // taken is not in that listing, so it must not read as absent. The create path
 // forgets the seat, which reads the listing again.
+//
+//testpolicy:allow parallel — the census is one process-wide answer that BeginSandboxCensus installs, so these tests run one at a time
 func TestSlingCensusSandboxCreatedAfterTheListing(t *testing.T) {
 	gw := &censusGateway{listing: listingOf(map[string]string{"gt-rig-old": "Ready"})}
 	censusTown(t, gw, []string{"gt-rig-old", "gt-rig-new"})
