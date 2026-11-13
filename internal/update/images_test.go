@@ -248,6 +248,29 @@ func TestPodInstallRefusesWhenTheRunningPairIsUnreadable(t *testing.T) {
 	}
 }
 
+// TestInstallRefusesWithoutAReadOfTheRunningPair: an install with no seam that
+// reads the pair the daemon runs could record nothing to restore, so it refuses
+// before the host install, the swap or any write.
+func TestInstallRefusesWithoutAReadOfTheRunningPair(t *testing.T) {
+	t.Parallel()
+	f := newImageFixture(t, ImageRecord{Current: oldPair})
+	f.inst.Images.Running = nil
+
+	res, err := f.inst.Install(context.Background(), newPair.Commit)
+	if err == nil || !strings.Contains(err.Error(), "no read of the pair the daemon runs is wired") {
+		t.Fatalf("Install = %+v, %v; want the missing running pair read refused", res, err)
+	}
+	if f.host.calls != 0 {
+		t.Errorf("the host install ran %d times, want none", f.host.calls)
+	}
+	if len(f.swap.applied) != 0 {
+		t.Errorf("the daemon was swapped to %+v, want no swap", f.swap.applied)
+	}
+	if want := (ImageRecord{Current: oldPair}); f.ledger.rec != want || len(f.ledger.writes) != 0 {
+		t.Errorf("record = %+v after %d writes, want %+v and none", f.ledger.rec, len(f.ledger.writes), want)
+	}
+}
+
 // TestInstallAcceptsARecordedClusterPair: a record left by a restored pod install
 // holds the images the Deployment ran and no commit. The next install accepts it
 // rather than refusing it as damaged, and reads the same pair from the daemon.
