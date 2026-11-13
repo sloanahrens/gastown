@@ -44,6 +44,7 @@ const (
 	analysisDirName = "latest"
 	panelName       = "panel.json"
 	joinedName      = "landings.joined.csv"
+	beadChangesName = "bead-changes.csv"
 	stampName       = "stamp"
 	docsName        = "docs"
 	mangoShaName    = "mango.sha"
@@ -127,6 +128,10 @@ type AnalysisOptions struct {
 	// panel's trend or events it could not draw. Nil writes them to the process
 	// log.
 	Reportf func(format string, args ...any)
+	// ArchiveDir returns the history archive's directory, the one the daemon
+	// writes its dated events files into, for the bead-change table. Empty means
+	// the archive is off. A nil resolver is a wiring error the table reports.
+	ArchiveDir func() (string, error)
 	// BeforeRun, when set, is called once the run is known to be due, before its
 	// first step, with the name of the period the run covers (DuePeriod), so a
 	// caller can do its once-a-period work on the same due decision the analysis
@@ -177,6 +182,10 @@ type AnalysisResult struct {
 	// PeaksSkipped names the peak files the join could not read, so the receipt
 	// names the loss rather than leaving it to the report log.
 	PeaksSkipped []string
+	// BeadChangesDropped is every archive row the bead-change table refused or
+	// did not count again because its event id was already counted. The run
+	// reports the number on its log line; the items are kept here.
+	BeadChangesDropped []DroppedItem
 }
 
 // RunAnalysis runs the daily analysis when its stamp is older than Every, and
@@ -286,6 +295,15 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err := PublishAtomic(dir, joinedName, joinedCSV.Bytes()); err != nil {
 		return res, err
 	}
+	// The bead-change table is not a step: a failure is one line on report, so
+	// the panel, the landings and the stamp still publish.
+	dropped, err := publishBeadChanges(dir, o.ArchiveDir)
+	res.BeadChangesDropped = dropped
+	if err != nil {
+		o.Reportf("analyse: %s not published, the other outputs are: %v", beadChangesName, err)
+	} else if len(dropped) > 0 {
+		o.Reportf("analyse: %s: %d archive row(s) refused or already counted", beadChangesName, len(dropped))
+	}
 	// The stamp goes last: everything the run publishes is in place by the time
 	// it says the analysis is current.
 	if err := PublishAtomic(dir, stampName, []byte(now.Format(time.RFC3339)+"\n")); err != nil {
@@ -294,6 +312,49 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	res.Ran, res.Landings, res.Panel, res.SnapshotsSkipped = true, len(joined), panel, cov.Skipped
 	res.PeaksSkipped = peaksSkipped
 	return res, nil
+}
+
+// publishBeadChanges writes bead-changes.csv into dir from the history archive
+// archiveDir names. When the table cannot be written, the file a previous run
+// left is removed, so a reader finds no table rather than last run's, and the
+// error says why. It returns the archive rows the load refused or counted once.
+func publishBeadChanges(dir string, archiveDir func() (string, error)) ([]DroppedItem, error) {
+	dropped, err := writeBeadChanges(dir, archiveDir)
+	if err == nil {
+		return dropped, nil
+	}
+	if rmErr := os.Remove(filepath.Join(dir, beadChangesName)); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		return dropped, fmt.Errorf("%w; the old file could not be removed: %v", err, rmErr)
+	}
+	return dropped, err
+}
+
+// writeBeadChanges reads the archive's dated events files and publishes the
+// bead-change table. An archive that is off is an error, not an empty table.
+func writeBeadChanges(dir string, archiveDir func() (string, error)) ([]DroppedItem, error) {
+	if archiveDir == nil {
+		return nil, errors.New("AnalysisOptions.ArchiveDir is unset")
+	}
+	root, err := archiveDir()
+	if err != nil {
+		return nil, err
+	}
+	if root == "" {
+		return nil, errors.New("the history archive is off, its archive_dir is unset")
+	}
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(os.DirFS(root), ".", &dropped)
+	if err != nil {
+		return dropped.Items, err
+	}
+	var csv bytes.Buffer
+	if err := WriteBeadChangesCSV(&csv, rows, &dropped); err != nil {
+		return dropped.Items, err
+	}
+	if err := PublishAtomic(dir, beadChangesName, csv.Bytes()); err != nil {
+		return dropped.Items, err
+	}
+	return dropped.Items, nil
 }
 
 // readStamp reads when the last analysis published. A missing or unparseable

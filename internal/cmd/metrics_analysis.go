@@ -38,12 +38,14 @@ place.`,
 	},
 }
 
-// analysisOptions is the town's own mango repository and the binary built from
-// it for this platform, for the two callers that wire the real environment.
+// analysisOptions is the town's own mango repository, the binary built from it
+// for this platform, and the history archive the bead-change table reads, for
+// the two callers that wire the real environment.
 func analysisOptions(town string) metrics.AnalysisOptions {
 	return metrics.AnalysisOptions{
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    metrics.PlatformMangoBin(town),
+		ArchiveDir:  func() (string, error) { return archiveDirForStatus(town) },
 	}
 }
 

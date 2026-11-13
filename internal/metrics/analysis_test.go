@@ -4,9 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -875,6 +877,142 @@ func TestAnalysePublishesThePanelWhenTheTrendCannotBeBuilt(t *testing.T) {
 }
 
 // callWith is the first recorded call whose argv[0] is name.
+// archiveDirWith writes files into a fresh history archive directory and returns
+// its path.
+func archiveDirWith(t *testing.T, files map[string][]byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// archiveResolver is the ArchiveDir seam over one directory; "" is an archive
+// that is off.
+func archiveResolver(dir string) func() (string, error) {
+	return func() (string, error) { return dir, nil }
+}
+
+// The daily run publishes the bead-change table from the dated archive files
+// beside the landings. The event in both day files is counted once.
+func TestAnalysePublishesTheBeadChangesTable(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	opts.ArchiveDir = archiveResolver(archiveDirWith(t, map[string][]byte{
+		"events-gastown-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "", "2026-10-02T00:00:00Z"),
+		}),
+		"events-gastown-20261103.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "", "2026-10-02T00:00:00Z"),
+		}),
+	}))
+	env, _ := analysisEnv(t, town, dayDir, nil)
+
+	res, err := RunAnalysis(context.Background(), env, opts)
+	if err != nil || !res.Ran {
+		t.Fatalf("RunAnalysis = %+v, %v; want a run", res, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(res.Dir, beadChangesName))
+	if err != nil {
+		t.Fatalf("bead-changes.csv: %v", err)
+	}
+	records, err := csv.NewReader(bytes.NewReader(raw)).ReadAll()
+	if err != nil {
+		t.Fatalf("bead-changes.csv does not parse: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %v, want the header and one row for gt-1", records)
+	}
+	cell := func(name string) string {
+		for i, h := range records[0] {
+			if h == name {
+				return records[1][i]
+			}
+		}
+		t.Fatalf("header %v has no %s column", records[0], name)
+		return ""
+	}
+	if got := cell("issue_id"); got != "gt-1" {
+		t.Errorf("issue_id = %q, want gt-1", got)
+	}
+	if got := cell("label_added_count"); got != "1" {
+		t.Errorf("label_added_count = %q, want 1: event 2 is in both day files", got)
+	}
+}
+
+// A failed bead-change table costs that file and nothing else: the panel, the
+// landings and the stamp still publish, a stale table is removed, and the run
+// reports one line that names the failure.
+func TestAnalyseLoaderFailureKeepsTheOtherOutputs(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		archive func(t *testing.T) func() (string, error)
+		want    string
+	}{
+		{
+			name: "unreadable config",
+			archive: func(*testing.T) func() (string, error) {
+				return func() (string, error) { return "", errors.New("daemon config unreadable") }
+			},
+			want: "daemon config unreadable",
+		},
+		{
+			name: "archive off",
+			archive: func(*testing.T) func() (string, error) {
+				return archiveResolver("")
+			},
+			want: "history archive is off",
+		},
+		{
+			name: "unreadable archive file",
+			archive: func(t *testing.T) func() (string, error) {
+				return archiveResolver(archiveDirWith(t, map[string][]byte{
+					"events-gastown-20261102.csv.gz": []byte("not gzip"),
+				}))
+			},
+			want: "not read in full",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, dayDir := analysisTown(t)
+			opts := analysisOptions(town)
+			opts.ArchiveDir = tc.archive(t)
+			var reported []string
+			opts.Reportf = func(format string, args ...any) {
+				reported = append(reported, fmt.Sprintf(format, args...))
+			}
+			dir := filepath.Join(town, ".runtime", "metrics", analysisDirName)
+			writeTownFile(t, filepath.Join(dir, beadChangesName), "stale\n")
+			env, _ := analysisEnv(t, town, dayDir, nil)
+
+			res, err := RunAnalysis(context.Background(), env, opts)
+			if err != nil || !res.Ran {
+				t.Fatalf("RunAnalysis = %+v, %v; want the run to publish", res, err)
+			}
+			for _, name := range []string{panelName, joinedName, stampName} {
+				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+					t.Errorf("%s: %v; a bead-change failure must not cost it", name, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(dir, beadChangesName)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("bead-changes.csv: %v, want the stale table removed", err)
+			}
+			report := strings.Join(reported, "\n")
+			if !strings.Contains(report, "bead-changes.csv not published") || !strings.Contains(report, tc.want) {
+				t.Errorf("report = %q, want one line naming the bead-change failure %q", report, tc.want)
+			}
+		})
+	}
+}
+
 func callWith(calls []recordedCall, name string) *recordedCall {
 	for i, call := range calls {
 		if call.argv[0] == name {
