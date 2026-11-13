@@ -360,29 +360,6 @@ func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
 	}
 }
 
-// The systemd unit renders nothing from the binary's own constants, so a
-// binary upgrade leaves nothing in it to repair.
-func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	unit, ok, err := SupervisorFileContent("systemd", town)
-	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
-	}
-	path := filepath.Join(t.TempDir(), "gastown-daemon.service")
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	content, repair, err := SupervisorFileRepair(path, "systemd", town)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if repair || content != "" {
-		t.Errorf("SupervisorFileRepair() = (%q, %v) for a systemd unit, want (\"\", false)", content, repair)
-	}
-}
-
 // SupervisorFileContent renders nothing for a kind this build does not write
 // (the retired launchd name included), nor the empty kind a host with no
 // supported supervisor reports — rather than erroring on it, since that is an

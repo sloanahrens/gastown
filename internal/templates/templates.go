@@ -261,19 +261,6 @@ func SupervisorFileContent(kind, townRoot string) (content string, ok bool, err 
 	return content, true, nil
 }
 
-// SupervisorFileRepair reports whether the supervisor file at path needs a
-// repair, and what it should say (gt-x872).
-//
-// No repair exists any longer. The launchd plist was the only supervisor file
-// with a value compiled into the binary that wrote it, and gt no longer writes
-// it; the systemd unit renders nothing from the binary's own constants. So for
-// every kind and path the answer is ("", false, nil), the same answer the
-// launchd and unknown kinds always got. The signature stays so that callers
-// asking about a repair keep one answer; it is not a reason to rewrite a file.
-func SupervisorFileRepair(path, kind, townRoot string) (content string, repair bool, err error) {
-	return "", false, nil
-}
-
 // renderSystemdUnit renders the systemd user unit template for the given data.
 func renderSystemdUnit(data SupervisorData) (string, error) {
 	templateContent, err := supervisorFS.ReadFile("systemd/gastown-daemon.service")
