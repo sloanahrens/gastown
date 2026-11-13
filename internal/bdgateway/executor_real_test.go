@@ -69,6 +69,47 @@ func TestExecutorRealProcess(t *testing.T) {
 			t.Errorf("exit status = %d (%v), want 124", status, err)
 		}
 	})
+
+	t.Run("a pipe pair that fails", func(t *testing.T) {
+		boom := errors.New("out of file descriptors")
+		calls := 0
+		r := realRunner{pipe: func() (*os.File, *os.File, error) {
+			calls++
+			if calls == 2 {
+				return nil, nil, boom
+			}
+			return os.Pipe()
+		}}
+		// The second pair failing makes the start close the first pair.
+		if _, err := r.Start(helper, nil, []string{"PATH=/usr/bin:/bin"}, t.TempDir()); !errors.Is(err, boom) {
+			t.Fatalf("Start = %v, want %v", err, boom)
+		}
+	})
+
+	t.Run("a program that is not there", func(t *testing.T) {
+		absent := filepath.Join(t.TempDir(), "no-such-bd")
+		if _, err := (realRunner{}).Start(absent, nil, nil, t.TempDir()); err == nil {
+			t.Fatal("Start of a missing program = nil error, want the start's failure")
+		}
+	})
+
+	t.Run("a wait that fails and a kill after it", func(t *testing.T) {
+		p, err := (realRunner{}).Start(helper, []string{"0"}, nil, t.TempDir())
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if status, err := p.Wait(); err != nil || status != 0 {
+			t.Fatalf("Wait = %d (%v), want 0", status, err)
+		}
+		// A second Wait is the non-ExitError failure a real command reports:
+		// the status is unknown, so the executor must not read it as bd's.
+		if status, err := p.Wait(); err == nil || status != -1 {
+			t.Errorf("second Wait = %d (%v), want -1 and an error", status, err)
+		}
+		if err := p.Kill(); !errors.Is(err, os.ErrProcessDone) {
+			t.Errorf("Kill after Wait = %v, want os.ErrProcessDone", err)
+		}
+	})
 }
 
 // buildBDStandIn builds testdata/bd with the go tool found under GOROOT. The

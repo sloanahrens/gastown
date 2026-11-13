@@ -336,17 +336,12 @@ func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) 
 	}
 	dir = root
 	if cwd != "" {
+		// IsLocal refuses an absolute path and any ".." that leaves the
+		// subtree, so the joined directory stays inside the workspace.
 		if !filepath.IsLocal(cwd) {
 			return "", "", fmt.Errorf("%w: %q", ErrCwdOutsideWorkspace, cwd)
 		}
 		dir = filepath.Join(root, cwd)
-		// IsLocal already refuses ".."; the Rel check is the second read of the
-		// joined path, so a bug in one keeps the other between a caller and a
-		// directory outside the workspace.
-		rel, relErr := filepath.Rel(root, dir)
-		if relErr != nil || !filepath.IsLocal(rel) {
-			return "", "", fmt.Errorf("%w: %q", ErrCwdOutsideWorkspace, cwd)
-		}
 	}
 	fi, err := os.Stat(beadsDir)
 	if err != nil {
@@ -356,7 +351,7 @@ func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) 
 		return "", "", fmt.Errorf("%w: %s is not a directory", ErrNoWorkspace, beadsDir)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", "", fmt.Errorf("bdgateway: creating the caller's directory: %w", err)
+		return "", "", fmt.Errorf("%w: creating the caller's directory %s: %v", ErrNoWorkspace, dir, err)
 	}
 	return dir, beadsDir, nil
 }

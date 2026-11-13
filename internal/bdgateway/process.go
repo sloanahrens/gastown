@@ -32,29 +32,36 @@ type processRunner interface {
 }
 
 // realRunner runs bd with an argv vector, never a shell, in its own process
-// group.
-type realRunner struct{}
+// group. pipe makes one pipe pair; nil means os.Pipe, and a test replaces it to
+// drive the start's failure path without exhausting the process's files.
+type realRunner struct {
+	pipe func() (*os.File, *os.File, error)
+}
 
 // Start starts binary with pipes the executor owns. The parent's copies of the
 // child's ends are closed once the child holds them, so a pump's read ends at
 // bd's exit (and at the group's death when the executor kills it) without the
 // executor having to close anything to signal EOF.
-func (realRunner) Start(binary string, argv, env []string, dir string) (Process, error) {
-	stdinR, stdinW, err := os.Pipe()
-	if err != nil {
-		return nil, err
+func (r realRunner) Start(binary string, argv, env []string, dir string) (Process, error) {
+	pipe := r.pipe
+	if pipe == nil {
+		pipe = os.Pipe
 	}
-	stdoutR, stdoutW, err := os.Pipe()
-	if err != nil {
-		closePipe(stdinR, stdinW)
-		return nil, err
+	// One pair for each of bd's standard streams; the loop gives the three
+	// creations one failure path, which a test drives through the pipe seam.
+	var ends [6]*os.File
+	for i := 0; i < 3; i++ {
+		cr, cw, err := pipe()
+		if err != nil {
+			closePipeEnds(ends[:])
+			return nil, err
+		}
+		ends[2*i], ends[2*i+1] = cr, cw
 	}
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		closePipe(stdinR, stdinW)
-		closePipe(stdoutR, stdoutW)
-		return nil, err
-	}
+	stdinR, stdinW := ends[0], ends[1]
+	stdoutR, stdoutW := ends[2], ends[3]
+	stderrR, stderrW := ends[4], ends[5]
+
 	cmd := exec.Command(binary, argv...)
 	// The executor owns cancellation: it kills the group itself and classifies
 	// the answer, so the command needs the group but no context hook.
@@ -65,9 +72,7 @@ func (realRunner) Start(binary string, argv, env []string, dir string) (Process,
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stderrW
 	if err := cmd.Start(); err != nil {
-		closePipe(stdinR, stdinW)
-		closePipe(stdoutR, stdoutW)
-		closePipe(stderrR, stderrW)
+		closePipeEnds(ends[:])
 		return nil, err
 	}
 	// The child holds a duplicate of each end; the parent's copies would keep a
@@ -78,9 +83,14 @@ func (realRunner) Start(binary string, argv, env []string, dir string) (Process,
 	return &realProcess{cmd: cmd, stdin: stdinW, stdout: stdoutR, stderr: stderrR}, nil
 }
 
-func closePipe(r, w *os.File) {
-	_ = r.Close()
-	_ = w.Close()
+// closePipeEnds closes every end a failed start opened, ignoring the close
+// errors: the start's own error is what the caller acts on.
+func closePipeEnds(ends []*os.File) {
+	for _, f := range ends {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
 }
 
 // realProcess is a started command. done and mu keep a Kill that races a

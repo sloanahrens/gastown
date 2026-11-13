@@ -85,6 +85,43 @@ func TestExecutorPathMapping(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a beads path that is not a directory", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "gastown"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "gastown", ".beads"), []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, root, runner)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, io.Discard)
+		if !errors.Is(err, ErrNoWorkspace) {
+			t.Fatalf("Exec = %v, want ErrNoWorkspace", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+	})
+
+	t.Run("a cwd the workspace cannot hold", func(t *testing.T) {
+		// A regular file where the caller's directory would be created makes
+		// MkdirAll fail the way a read-only workspace volume would.
+		root := testWorkspace(t)
+		if err := os.WriteFile(filepath.Join(root, "gastown", "crew"), []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, root, runner)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", Cwd: "gastown/crew/dipper"}, nil, io.Discard)
+		if !errors.Is(err, ErrNoWorkspace) {
+			t.Fatalf("Exec = %v, want ErrNoWorkspace", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+	})
 }
 
 // TestExecutorExit: bd's stdout and stderr come back as their frames, in order
@@ -169,6 +206,24 @@ func TestExecutorTimeout(t *testing.T) {
 	}
 }
 
+// TestExecutorTimeoutKillFails: a kill that fails is carried in the returned
+// error beside the timeout, so a call that could not stop bd does not read as
+// one that did.
+func TestExecutorTimeoutKillFails(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("the group would not die")
+	proc := newBlockingFake("")
+	proc.killErr = boom
+	e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}})
+	err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 20}, nil, io.Discard)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Exec = %v, want ErrTimeout", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("Exec = %v, want the failed kill in the error", err)
+	}
+}
+
 // TestExecutorDisconnect: a client that cancels the request, or one whose
 // stream breaks mid-call, still gets bd's process group killed, and the
 // executor names the client as the reason.
@@ -210,6 +265,15 @@ func TestExecutorDisconnect(t *testing.T) {
 			t.Error("the process group was not killed")
 		}
 	})
+	t.Run("the exit frame cannot be written", func(t *testing.T) {
+		// A process that writes nothing, so the exit frame is the first and
+		// only write the client's broken stream refuses.
+		e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{newExitedFake(0, "", "")}})
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, failingWriter{})
+		if !errors.Is(err, ErrClientGone) {
+			t.Fatalf("Exec = %v, want ErrClientGone", err)
+		}
+	})
 }
 
 // TestExecutorEndings: a start that fails, a wait that fails and a process
@@ -241,6 +305,14 @@ func TestExecutorEndings(t *testing.T) {
 			runner:   &fakeRunner{queue: []Process{newFakeProcess(-1, "", "", nil)}},
 			wantCode: CodeSignaled,
 			wantErr:  ErrSignaled,
+		},
+		{
+			// bd's output cannot be read back, which is the gateway's failure
+			// rather than bd's, so it names the read and kills the group.
+			name:     "the output cannot be read",
+			runner:   &fakeRunner{queue: []Process{newUnreadableFake(boom)}},
+			wantCode: CodeWaitFailed,
+			wantErr:  errRead,
 		},
 	}
 	for _, tc := range cases {
@@ -572,6 +644,7 @@ type fakeProcess struct {
 	once    sync.Once
 	status  int
 	waitErr error
+	killErr error
 }
 
 func newExitedFake(status int, stdout, stderr string) *fakeProcess {
@@ -605,6 +678,18 @@ func newBlockingFake(stdout string) *fakeProcess {
 	}
 }
 
+// newUnreadableFake is a process whose stdout fails to read; the executor must
+// kill it and report the failed read rather than the kill.
+func newUnreadableFake(err error) *fakeProcess {
+	return &fakeProcess{
+		stdout: errorReader{err: err},
+		stderr: strings.NewReader(""),
+		stdin:  &recordingStdin{},
+		exited: make(chan struct{}),
+		killed: make(chan struct{}),
+	}
+}
+
 func (p *fakeProcess) Stdin() io.WriteCloser { return p.stdin }
 func (p *fakeProcess) Stdout() io.Reader     { return p.stdout }
 func (p *fakeProcess) Stderr() io.Reader     { return p.stderr }
@@ -621,7 +706,7 @@ func (p *fakeProcess) Kill() error {
 		close(p.killed)
 	}
 	p.finish(-1)
-	return nil
+	return p.killErr
 }
 
 func (p *fakeProcess) finish(status int) {
