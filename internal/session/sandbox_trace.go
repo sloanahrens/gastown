@@ -2,8 +2,10 @@ package session
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // SandboxTrace times the phases of one sling, so the spec dispatcher's tick log
@@ -62,15 +64,50 @@ func (t *SandboxTrace) Steps() func(name string) {
 	return t.Mark
 }
 
+// traceNoteMax is the most of a note the summary keeps. A note is text from
+// outside the trace, such as a gateway's condition message, and the summary is
+// one log line: a long message is cut rather than allowed to flood the tick log.
+const traceNoteMax = 200
+
 // Note attaches text to the phase recorded last, which the summary shows in
-// parentheses after that phase's duration. It is a no-op for a nil trace, an
-// empty note, or a trace with no phase yet, so a wait with nothing to say adds
-// nothing to the log.
+// parentheses after that phase's duration. The text is localized to one line
+// first, because the summary is one log line and the text can come from a
+// gateway. It is a no-op for a nil trace, a note with no visible text, or a
+// trace with no phase yet, so a wait with nothing to say adds nothing to the log.
 func (t *SandboxTrace) Note(note string) {
-	if t == nil || note == "" || len(t.phases) == 0 {
+	if t == nil || len(t.phases) == 0 {
+		return
+	}
+	note = noteLine(note)
+	if note == "" {
 		return
 	}
 	t.phases[len(t.phases)-1].note = note
+}
+
+// ansiCSI matches a terminal control sequence: the escape byte, its parameter
+// and intermediate bytes, then its final byte. Gateway text can carry color,
+// and the summary's reader is a terminal that would act on it.
+var ansiCSI = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]`)
+
+// noteLine is note as the summary can carry it: one line, its CSI escape
+// sequences (ansiCSI) removed whole and its whitespace runs and other control
+// characters, which include the lead byte of any other escape sequence,
+// collapsed to a single space, cut to traceNoteMax runes and marked with an
+// ellipsis when longer.
+func noteLine(note string) string {
+	note = ansiCSI.ReplaceAllString(note, "")
+	note = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, note)
+	note = strings.Join(strings.Fields(note), " ")
+	if r := []rune(note); len(r) > traceNoteMax {
+		return string(r[:traceNoteMax]) + " …"
+	}
+	return note
 }
 
 func (t *SandboxTrace) record(name string, from time.Time) {
