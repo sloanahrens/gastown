@@ -1319,3 +1319,22 @@ func TestHostHMConfigPath(t *testing.T) {
 		})
 	}
 }
+
+func TestPathWithin(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path, root string
+		want       bool
+	}{
+		{"/a/b/c", "/a/b", true},
+		{"/a/b", "/a/b", true},
+		{"/a/bc", "/a/b", false},
+		{"/a", "/a/b", false},
+		{"/x/y", "/a/b", false},
+		{"/a/b/../c", "/a/b", false},
+	} {
+		if got := pathWithin(tc.path, tc.root); got != tc.want {
+			t.Errorf("pathWithin(%q, %q) = %v, want %v", tc.path, tc.root, got, tc.want)
+		}
+	}
+}

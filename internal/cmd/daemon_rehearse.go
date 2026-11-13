@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,6 +275,27 @@ func runDaemonRehearse(ctx context.Context, f rehearseFlags, d rehearseDeps) (er
 // rehearseMarker is the file that makes a directory this run's: cleanup deletes
 // the run directory only when the marker in it names this run.
 const rehearseMarker = ".gt-rehearsal-run"
+
+// resolveThroughExisting resolves path's symbolic links when the file need not
+// exist yet: the nearest existing ancestor is resolved and the rest appended.
+func resolveThroughExisting(path string, eval func(string) (string, error)) (string, error) {
+	var rest []string
+	for p := filepath.Clean(path); ; {
+		resolved, err := eval(p)
+		if err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, rest[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(p)
+		if !errors.Is(err, fs.ErrNotExist) || parent == p {
+			return "", err
+		}
+		rest = append(rest, filepath.Base(p))
+		p = parent
+	}
+}
 
 // chooseRunDir picks this run's unique directory under the live town's
 // .runtime/rehearsal, on resolved paths: a link that leads the directory out of
