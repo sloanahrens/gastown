@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -78,22 +79,41 @@ func FormatLocalRound(n int, head string, findings []Finding, at time.Time) stri
 	return b.String()
 }
 
+// The two reasons reading the notes can find no round. They are distinct so a
+// caller can tell notes that hold no block from a block it cannot read.
+var (
+	// ErrNoLocalRound reports notes that hold no LOCAL ROUND block.
+	ErrNoLocalRound = errors.New("land: notes hold no LOCAL ROUND block")
+	// ErrLocalRoundMalformed reports a last LOCAL ROUND block that does not parse.
+	ErrLocalRoundMalformed = errors.New("land: last LOCAL ROUND block does not parse")
+)
+
 // FormatLocalRoundReply renders one reply to a finding of the round it follows:
 // "LOCAL ROUND REPLY: id:<id> <kind> - <text>". The kind's whitespace is
-// collapsed, but its words are not checked. ParseLocalRoundReplies reads only
-// LocalRoundFixed and LocalRoundDisputed, so any other kind is not a reply and
-// its finding stays unanswered.
+// collapsed, and a kind that is not LocalRoundFixed or LocalRoundDisputed
+// panics, so every line it writes parses back as a reply to that finding.
 func FormatLocalRoundReply(findingID, kind, text string) string {
+	kind = NoteField(kind)
+	if kind != LocalRoundFixed && kind != LocalRoundDisputed {
+		panic("land: FormatLocalRoundReply needs a kind of fixed or disputed")
+	}
 	return fmt.Sprintf("%sid:%s %s - %s", localRoundReplyLeader, localRoundToken(findingID),
-		NoteField(kind), defuseLocalRoundText(text))
+		kind, defuseLocalRoundText(text))
 }
 
-// ParseLastLocalRound reads the last LOCAL ROUND block in notes. ok is false
-// when notes holds no block, and also when the last block does not parse: its
-// header or one of its finding lines is malformed. An earlier block is never
-// read in place of a malformed later one, and no finding of a block that is
-// read is dropped.
+// ParseLastLocalRound reads the last LOCAL ROUND block in notes and flattens
+// both ways of finding none to ok=false; a caller that must tell them apart
+// reads ParseLastLocalRoundOrError instead.
 func ParseLastLocalRound(notes string) (LocalRound, bool) {
+	r, err := ParseLastLocalRoundOrError(notes)
+	return r, err == nil
+}
+
+// ParseLastLocalRoundOrError reads the last LOCAL ROUND block in notes and
+// returns ErrNoLocalRound when notes holds none and ErrLocalRoundMalformed when
+// the last one does not parse; an earlier block is never read in place of a
+// malformed later one, and no finding of a block that is read is dropped.
+func ParseLastLocalRoundOrError(notes string) (LocalRound, error) {
 	lines := strings.Split(notes, "\n")
 	last := -1
 	for i, line := range lines {
@@ -102,11 +122,11 @@ func ParseLastLocalRound(notes string) (LocalRound, bool) {
 		}
 	}
 	if last < 0 {
-		return LocalRound{}, false
+		return LocalRound{}, ErrNoLocalRound
 	}
 	r, ok := parseLocalRoundHeader(lines[last])
 	if !ok {
-		return LocalRound{}, false
+		return LocalRound{}, ErrLocalRoundMalformed
 	}
 	for _, line := range lines[last+1:] {
 		if !strings.HasPrefix(line, localRoundFindingLeader) {
@@ -114,11 +134,11 @@ func ParseLastLocalRound(notes string) (LocalRound, bool) {
 		}
 		f, ok := parseLocalRoundFinding(line)
 		if !ok {
-			return LocalRound{}, false
+			return LocalRound{}, ErrLocalRoundMalformed
 		}
 		r.Findings = append(r.Findings, f)
 	}
-	return r, true
+	return r, nil
 }
 
 // ParseLocalRoundReplies returns the replies to the findings of round afterRound,

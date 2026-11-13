@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -158,6 +159,53 @@ func TestLocalRoundParseRefusesMalformedBlock(t *testing.T) {
 	for _, tc := range cases {
 		if got, ok := ParseLastLocalRound(tc.notes); ok {
 			t.Errorf("%s: ParseLastLocalRound = %+v, true; want refused", tc.name, got)
+		}
+	}
+}
+
+// TestLocalRoundParseTellsAbsentFromMalformed: notes with no block report
+// ErrNoLocalRound and a last block that does not parse reports
+// ErrLocalRoundMalformed, while ParseLastLocalRound keeps flattening both to
+// ok=false.
+func TestLocalRoundParseTellsAbsentFromMalformed(t *testing.T) {
+	t.Parallel()
+	good := FormatLocalRound(1, "sha", []Finding{{ID: "f", Severity: "minor", Path: "a.go", Line: 1, Title: "t"}}, localRoundTime())
+	cases := []struct {
+		name, notes string
+		want        error
+	}{
+		{"no block", "some notes\nwithout a block", ErrNoLocalRound},
+		{"no notes", "", ErrNoLocalRound},
+		{"well-formed", good, nil},
+		{"round zero", "LOCAL ROUND (0): head=sha at=2026-11-13T02:30:00Z", ErrLocalRoundMalformed},
+		{"no head field", "LOCAL ROUND (1): sha at=2026-11-13T02:30:00Z", ErrLocalRoundMalformed},
+		{"finding line without a title separator", good + "\nLOCAL ROUND FINDING id:f sev:minor a.go:1", ErrLocalRoundMalformed},
+		{"malformed last block after a good one", good + "\nLOCAL ROUND (2): head=sha", ErrLocalRoundMalformed},
+	}
+	for _, tc := range cases {
+		_, err := ParseLastLocalRoundOrError(tc.notes)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: ParseLastLocalRoundOrError error = %v, want %v", tc.name, err, tc.want)
+		}
+		if _, ok := ParseLastLocalRound(tc.notes); ok != (err == nil) {
+			t.Errorf("%s: ParseLastLocalRound ok = %v, ParseLastLocalRoundOrError err = %v; the two disagree", tc.name, ok, err)
+		}
+	}
+}
+
+// TestFormatLocalRoundReplyRefusesAnUnknownKind: a kind that is not exactly
+// fixed or disputed panics rather than writing a line that reads back as
+// another kind, including a multi-word kind and one holding the separator.
+func TestFormatLocalRoundReplyRefusesAnUnknownKind(t *testing.T) {
+	t.Parallel()
+	panics := func(f func()) (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		f()
+		return
+	}
+	for _, kind := range []string{"fixed because", "not fixed", "fixed - done", "disputed fixed", "Fixed", ""} {
+		if !panics(func() { FormatLocalRoundReply("f-1", kind, "text") }) {
+			t.Errorf("kind %q: FormatLocalRoundReply did not panic, want a refusal", kind)
 		}
 	}
 }
