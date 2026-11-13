@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
@@ -909,7 +908,7 @@ func (f *failFirstEscalates) Escalate(ctx context.Context, e notify.Escalation) 
 // (gt-ryp1ff).
 func TestLocalRoundStartAlertSendFailureIsRetriedNextTick(t *testing.T) {
 	t.Parallel()
-	clk := &diskMaintNoSleepClock{FakeClock: clockwork.NewFakeClock()}
+	clk := &diskMaintNoSleepClock{FakeClock: newFixedClock()}
 	rec := notifyfake.New()
 	// One tick's send makes maxEscalationRetries attempts: refuse all of them.
 	notifier := &failFirstEscalates{Recorder: rec, fail: maxEscalationRetries}
