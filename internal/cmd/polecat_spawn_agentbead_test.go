@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -51,6 +52,7 @@ func TestPaneAfterStartDeathReleasesTheAgentBead(t *testing.T) {
 
 	_, err := paneAfterStart("gt-capable",
 		func(string) (string, error) { return "", errors.New("can't find pane") },
+		func(time.Duration) {},
 		func() { killed = true },
 		s.startupDeathRollback(deleter, c, town))
 

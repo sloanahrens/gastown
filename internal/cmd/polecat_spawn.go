@@ -1394,7 +1394,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	// Get pane — if this fails, the session may have died during startup.
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
-	pane, err := paneAfterStart(s.SessionName, getSessionPane,
+	pane, err := paneAfterStart(s.SessionName, getSessionPane, time.Sleep,
 		func() { s.killStartupDeath(sup, actor) },
 		s.startupDeathRollback(session.SandboxDeleter, beads.New(townRoot), townRoot))
 	if err != nil {
@@ -1423,18 +1423,44 @@ func startSessionWithTrace(opts polecat.SessionStartOptions, backend session.Bac
 	return err
 }
 
+// paneLookupTries is how many times paneAfterStart looks up the pane when the
+// lookup fails with a tmux transport error, and paneLookupRetryPause is the
+// pause before each retry. A transport error says nothing about the session,
+// so it is not read as a dead seat until the retries are spent (gt-mpztwi).
+const (
+	paneLookupTries      = 3
+	paneLookupRetryPause = 2 * time.Second
+)
+
 // paneAfterStart returns the session's pane. When the pane cannot be found the
 // session died during startup: killSession ends what is left of it so a
 // re-sling does not hit "session already running" (gt-jn40ft), and dropSandbox
 // removes the sandbox and record it ran in (gt-2awr8). The supervisor's kill
-// alone leaves the sandbox Ready and its record on disk.
-func paneAfterStart(sessionName string, getPane func(string) (string, error), killSession func(), dropSandbox func(cause error) error) (string, error) {
+// alone leaves the sandbox Ready and its record on disk. A transport error is
+// retried through pause, up to paneLookupTries in all, before the session is
+// declared dead.
+func paneAfterStart(sessionName string, getPane func(string) (string, error), pause func(time.Duration), killSession func(), dropSandbox func(cause error) error) (string, error) {
 	pane, err := getPane(sessionName)
+	tries := 1
+	for err != nil && isTransportError(err) && tries < paneLookupTries {
+		pause(paneLookupRetryPause)
+		tries++
+		pane, err = getPane(sessionName)
+	}
 	if err != nil {
 		killSession()
+		if isTransportError(err) {
+			return "", dropSandbox(fmt.Errorf("getting pane for %s after %d tries (session likely died during startup): %w", sessionName, tries, err))
+		}
 		return "", dropSandbox(fmt.Errorf("getting pane for %s (session likely died during startup): %w", sessionName, err))
 	}
 	return pane, nil
+}
+
+// isTransportError reports whether a pane lookup failed on the tmux transport
+// rather than on the session itself.
+func isTransportError(err error) bool {
+	return strings.Contains(err.Error(), "transport error")
 }
 
 // startupSeatCleaner is the supervisor surface a failed startup's kill needs.
