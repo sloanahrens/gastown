@@ -11,20 +11,32 @@ Gas Town `gt` commands route beads work based on issue ID prefix. For direct
 directory matches the database you intend to touch.
 
 ```bash
-bd -C ~/gt/greenplace/mayor/rig show gp-xyz  # Greenplace rig beads
-bd -C ~/gt show hq-abc                       # Town-level beads
-bd -C ~/gt/wyvern/mayor/rig show wyv-123     # Wyvern rig beads
+bd -C ~/gt/greenplace show gp-xyz  # Greenplace rig beads
+bd -C ~/gt show hq-abc             # Town-level beads
+bd -C ~/gt/wyvern show wyv-123     # Wyvern rig beads
 ```
 
 **How it works**: Routes are defined in `~/gt/.beads/routes.jsonl`. Each rig's
-prefix maps to its beads location (the rig's canonical clone at
-`<rig>/mayor/rig` — a path kept from the retired mayor role, not a live agent).
+prefix routes to the rig root, and the rig's beads live in `<rig>/.beads`.
+A rig's beads directory is chosen by `constants.RigBeadsPath`: `<rig>/.beads`
+once it holds `metadata.json` and no `redirect` file. A rig that has not moved
+keeps its beads in the legacy `<rig>/mayor/rig/.beads`, which is a retired
+path kept only for that fallback; its route then names `<rig>/mayor/rig`
+(`determineRigBeadsPath` in `internal/doctor/routes_check.go`). A rig whose
+`<rig>/.beads` is a `redirect` to that legacy directory is still reached by
+`bd -C <rig>`.
 
 | Prefix | Routes To | Purpose |
 |--------|-----------|---------|
 | `hq-*` | `~/gt/.beads/` | Cross-rig coordination, agent identity |
-| `gp-*` | `~/gt/greenplace/mayor/rig/.beads/` | Greenplace project issues |
-| `wyv-*` | `~/gt/wyvern/mayor/rig/.beads/` | Wyvern project issues |
+| `gp-*` | `~/gt/greenplace/.beads/` | Greenplace project issues |
+| `wyv-*` | `~/gt/wyvern/.beads/` | Wyvern project issues |
+
+A crew or polecat worktree gets a `.beads/redirect` to its rig's beads, the
+target `beads.ComputeRedirectTarget` returns in `internal/beads/beads_redirect.go`.
+For a rig with its own database, from `<rig>/crew/<name>` it names
+`../../.beads`, so `bd` run in the worktree reads the rig's database. The
+function returns an error for a worktree inside the retired `mayor/rig`.
 
 Debug routing: `BD_DEBUG_ROUTING=1 bd -C <owning-root> show <id>`
 
@@ -107,8 +119,8 @@ Theme resolution:
 - `custom`: use exact `{bg, fg}` colors
 - `role_themes`: override role-specific sessions within the rig
 
-Town-level role defaults live in `mayor/config.json` (like `mayor/rig`, a kept
-path named for the retired mayor role) under:
+Town-level role defaults live in `mayor/config.json` in the town root's
+`mayor/` config directory (not a rig's retired `<rig>/mayor/rig`) under:
 
 ```json
 {
@@ -898,24 +910,30 @@ Understanding this hierarchy is essential for proper configuration.
 | **Crew** | `~/gt/<rig>/crew/<name>/` | Persistent human workspace clone |
 | **Polecat** | `~/gt/<rig>/polecats/<name>/<rig>/` | Polecat worktree (ephemeral sandbox) |
 
-Note: The per-rig `<rig>/mayor/rig/` directory is NOT a working directory—it's
-a git clone that holds the canonical `.beads/` database for that rig, and a
-rig's directive layer is read from its `.gastown/directives`.
+Note: No agent works in the rig root. A rig's beads live in `<rig>/.beads`
+(see [Beads Routing](#beads-routing)), its shared git repository is
+`<rig>/.repo.git`, and its directive overlay is read from `<rig>/.gastown/directives`.
+The retired `<rig>/mayor/rig/` directory is not a working directory; a rig that
+still keeps its beads there is the legacy fallback named in Beads Routing.
 
-The writers that fetch in a canonical checkout (`<town>/<rig>/mayor/rig`):
+The writers that fetch, and the checkout each one fetches in:
 
-- The install and the staleness read of the installed binary fetch in
-  `gastown`'s checkout, the tree the binary is built from
-  ([INSTALLING.md](INSTALLING.md)).
-- The daemon's `rebuild_gt` cycle fetches in `gastown`'s checkout and moves no
-  other rig's checkout.
-- Every other fetch runs in a working directory of its own: the crew clone
-  `gt crew` and `gt crew fresh` work in, the caller's current directory for the
-  divergence warning in `gt mol status`, and the bare clone under
-  `.runtime/jev/repos/` for the submission and drift batteries. Checked
-  2026-11-01 for the fetch callers in `internal/daemon`, `internal/version`,
-  `internal/crewfresh`, `internal/jev` and the crew and mol status commands of
-  `internal/cmd`; a new fetch caller belongs in this list.
+- `gt update` fetches in the town's gt source checkout, which it builds in
+  (`installer.SourceCheckout`): `<town>/gastown` when the repository is checked
+  out there, else the legacy `<town>/gastown/mayor/rig`.
+- The daemon's `rebuild_gt` cycle fetches in the job-owned build checkout
+  `<town>/.runtime/build-src/<rig>`, which `buildsrc.Ensure` clones from the
+  gastown rig's `.repo.git` (gt-3lvcjz.21). It moves no rig's checkout.
+- The staleness read of the installed binary (`internal/version`) reads the
+  job-owned build checkout, its normal source, and refreshes that checkout's
+  remote-tracking `origin/main` only when the verdict depends on it.
+- `gt crew` and `gt crew fresh` fetch `origin main` in the crew clone they work
+  in, and `gt mol status` fetches for its divergence warning in the caller's
+  current directory.
+- The bare clone under `.runtime/jev/repos/` serves the submission and drift
+  batteries.
+
+A new fetch caller belongs in this list.
 
 
 ### Settings File Locations
@@ -951,7 +969,7 @@ the `gt done` lifecycle contract (`CLAUDE.local.md` when the repo already tracks
 
 Gas Town no longer uses git sparse checkout to hide customer repo files. Customer
 repositories can have their own `.claude/` directory and `CLAUDE.md` — these are
-preserved in all worktrees (crew, polecats, mayor/rig).
+preserved in all worktrees (crew, polecats, and the refinery clone).
 
 Gas Town's context comes from the town-root `CLAUDE.md` identity anchor
 (picked up by all agents via Claude Code's upward directory traversal),
@@ -1107,13 +1125,13 @@ consumers:
 |-------------|--------|--------|
 | `name`      | string | rig name |
 | `status`    | string | operational / stopped / … |
-| `repo_path` | string | The first of the rig root and `<rig>/refinery/rig` that is a git worktree root (`Rig.RepoPath()`); else the rig's shared `<rig>/.repo.git` (`Rig.BareRepoPath()`) when it has one; else `""` |
+| `repo_path` | string | `Rig.RepoPath()`: the first of the rig root and `<rig>/refinery/rig` that is the root of a git working tree; when neither is, `Rig.BareRepoPath()`, the rig's `<rig>/.repo.git` if it has one (the fallback is in `gt rig list --json`, `internal/cmd/rig.go`); else `""` |
 
 `repo_path` is the field a script that runs git in each rig's repository
 consumes. When it is empty or missing, such a script must fail loudly rather
-than no-op (gt-chqi, gt-xxwx). A rig whose only working clone is at
-`<rig>/mayor/rig` reports `""`, because `mayor/rig` is no longer a candidate:
-move that clone under `<rig>/refinery/rig` or add a bare `.repo.git`
+than no-op (gt-chqi, gt-xxwx). A rig whose only working clone is a retired
+`<rig>/mayor/rig` reports `""`, because `mayor/rig` is not a candidate: move
+that clone under `<rig>/refinery/rig` or give the rig a bare `.repo.git`
 (gt-3lvcjz.30). The daemon's git_hygiene patrol resolves its repository through
 `gitHygieneRepoPath` in `internal/daemon/git_hygiene.go`, which prefers the
 rig's shared bare repo (`.repo.git/`) to what this field reports. A rig it
@@ -1684,7 +1702,7 @@ or a waiting bead with no record, reads its commits and stat from a bare clone
 the pass owns at `.runtime/jev/repos/gastown.git`. The pass creates the clone
 from the rig registry's `git_url` the first time it needs one and fetches
 `refs/heads/*` into it before each such read. The pass never runs git in the
-rig's `mayor/rig` checkout or any town worktree. A fetch that fails stops the
+rig's own checkout or any town worktree. A fetch that fails stops the
 pass and leaves the cursor unmoved.
 
 The first pass sets the cursor to its own time and asks nothing. A submission
@@ -1734,7 +1752,7 @@ The pass reads the diff with `git diff --numstat` and a zero-context `git diff`
 over `base..head`, leaving out Markdown and `_test.go` files. It reads the docs
 at the landing's target branch, `refs/heads/<target>`, from the bare clone the
 submission battery owns at `.runtime/jev/repos/gastown.git`. It never reads
-`mayor/rig` or a town worktree. The pass syncs that clone once, before its first
+a rig's own checkout or a town worktree. The pass syncs that clone once, before its first
 landing, and a failed sync stops the pass with the cursor unmoved.
 
 Sections are chosen in one of two ways. When `hm` is on the PATH, the pass runs
