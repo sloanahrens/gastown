@@ -62,15 +62,36 @@ func (t *SandboxTrace) Steps() func(name string) {
 	return t.Mark
 }
 
+// traceNoteMax is the most of a note the summary keeps. A note is text from
+// outside the trace, such as a gateway's condition message, and the summary is
+// one log line: a long message is cut rather than allowed to flood the tick log.
+const traceNoteMax = 200
+
 // Note attaches text to the phase recorded last, which the summary shows in
-// parentheses after that phase's duration. It is a no-op for a nil trace, an
-// empty note, or a trace with no phase yet, so a wait with nothing to say adds
-// nothing to the log.
+// parentheses after that phase's duration. The text is localized to one line
+// first, because the summary is one log line and the text can come from a
+// gateway. It is a no-op for a nil trace, a note with no visible text, or a
+// trace with no phase yet, so a wait with nothing to say adds nothing to the log.
 func (t *SandboxTrace) Note(note string) {
-	if t == nil || note == "" || len(t.phases) == 0 {
+	if t == nil || len(t.phases) == 0 {
+		return
+	}
+	note = noteLine(note)
+	if note == "" {
 		return
 	}
 	t.phases[len(t.phases)-1].note = note
+}
+
+// noteLine is note as the summary can carry it: on one line, its whitespace
+// runs collapsed to a single space, cut to traceNoteMax runes and marked with
+// an ellipsis when longer.
+func noteLine(note string) string {
+	note = strings.Join(strings.Fields(note), " ")
+	if r := []rune(note); len(r) > traceNoteMax {
+		return string(r[:traceNoteMax]) + " …"
+	}
+	return note
 }
 
 func (t *SandboxTrace) record(name string, from time.Time) {

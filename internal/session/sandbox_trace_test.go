@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,6 +154,41 @@ func TestSandboxTraceNoteIsANoOpWithoutAPhaseOrText(t *testing.T) {
 		t.Fatalf("Summary() after an empty note = %q, want %q", got, want)
 	}
 
+	trace.Note(" \n\t ")
+	if got, want := trace.Summary(), "ready 1s, total 1s"; got != want {
+		t.Fatalf("Summary() after a whitespace-only note = %q, want %q", got, want)
+	}
+
 	var nilTrace *SandboxTrace
 	nilTrace.Note("ignored")
+}
+
+// A gateway's condition message can carry newlines and tabs; the summary is one
+// log line, so the note reaches it collapsed rather than verbatim.
+func TestSandboxTraceNoteStaysOnOneLineInTheSummary(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("ready", func() error { clock.Advance(time.Second); return nil })
+	trace.Note("DependenciesNotReady: Pod is pending\n0/3 nodes are available,\tInsufficient memory")
+
+	want := "ready 1s (DependenciesNotReady: Pod is pending 0/3 nodes are available, Insufficient memory), total 1s"
+	if got := trace.Summary(); got != want {
+		t.Fatalf("Summary() = %q, want %q: a multi-line message must not break the log line", got, want)
+	}
+}
+
+// A gateway message has no length bound the town can rely on; a note longer
+// than the summary's budget is cut rather than written whole into the log.
+func TestSandboxTraceNoteIsCutToTheLogLineBudget(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("ready", func() error { clock.Advance(time.Second); return nil })
+	trace.Note(strings.Repeat("x", traceNoteMax+50))
+
+	want := strings.Repeat("x", traceNoteMax) + " …"
+	if got := trace.Summary(); !strings.Contains(got, want) {
+		t.Fatalf("Summary() = %q, want the note cut to %d runes and an ellipsis", got, traceNoteMax)
+	}
 }
