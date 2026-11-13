@@ -375,17 +375,50 @@ type Budget struct {
 	charges map[string]int
 }
 
-// Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat with
-// a dead-hooked occupant names it, so a full seat has a stated reason even when
-// it shows fewer live sessions than its number (gt-tldj4). A town with a total
-// cap names it too, so the picture a full town is reported with holds the cap
-// that held it rather than only the seats under it.
+// DeadHookedCount names the seats inside a count that no tmux session holds:
+// "2 dead-hooked". It is empty for none. The tick line, `gt pool show` and the
+// sling refusal all print through it, so one count reads the same everywhere.
+func DeadHookedCount(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d dead-hooked", n)
+}
+
+// SplitLiveDead names a seat's dead-hooked part apart from its live sessions:
+// a seat of 10 with 2 dead-hooked reads "(8 live + 2 dead-hooked)". total is the
+// whole count, dead the part of it no session holds. It is empty when dead is 0,
+// so a seat with no dead-hooked occupant keeps the short wording.
+func SplitLiveDead(total, dead int) string {
+	if dead == 0 {
+		return ""
+	}
+	return fmt.Sprintf("(%d live + %s)", total-dead, DeadHookedCount(dead))
+}
+
+// Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat's
+// count is split into its live sessions and its dead-hooked seats, so a full seat
+// that shows fewer live sessions than its number says why: "10/8 (8 live + 2
+// dead-hooked)" (gt-tldj4). A town with a total cap names it too, so the picture
+// a full town is reported with holds the cap that held it rather than only the
+// seats under it.
+//
+// The live part can count a sling twice. The caller adds each sling still running
+// to its agent's count, and the roster shows the same polecat once it spawns, so
+// until that sling returns the seat counts it twice. The error is toward fewer
+// slings, never more, and the picture does not separate the two terms.
+//
+// Budget keeps no reservation across ticks, and none is needed. A sling
+// dispatched in an earlier tick is in the daemon's in-flight set from enqueue
+// until end, and the tick adds every entry to Live (specLiveWithInFlight) before
+// ChooseSeat runs. Bump and Release cover only the slings planned in this tick.
+// A reservation here would count the same sling a second time.
 func (b Budget) Picture() string {
 	parts := make([]string, 0, len(b.Seats))
 	for _, s := range b.Seats {
 		p := fmt.Sprintf("%s %d/%d", s.Agent, s.Live, s.Cap)
-		if s.DeadHooked > 0 {
-			p += fmt.Sprintf(" (%d dead-hooked)", s.DeadHooked)
+		if n := SplitLiveDead(s.Live, s.DeadHooked); n != "" {
+			p += " " + n
 		}
 		if s.closed(b.Now) {
 			p += " (" + s.closedUntil(b.Now) + ")"

@@ -3916,7 +3916,7 @@ func TestSpecRosterFrom_ParkedStaleSeatIsListedNotCounted(t *testing.T) {
 	}
 	live := poolShowLive{live: r.Live, dead: r.DeadHooked, parked: r.ParkedStale, parkedTotal: 1, total: 2, ok: true}
 	text := live.seatCount("deepseek-flash", 3)
-	for _, want := range []string{"2/3", "(1 dead-hooked)", "(1 parked-stale)"} {
+	for _, want := range []string{"2/3", "(1 live + 1 dead-hooked)", "(1 parked-stale)"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("seat count %q does not contain %q", text, want)
 		}

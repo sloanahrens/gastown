@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -217,8 +218,8 @@ func (l poolShowLive) seatCount(agent string, cap int) string {
 		return fmt.Sprintf("cap %d", cap)
 	}
 	count := fmt.Sprintf("%d/%d", l.live[agent], cap)
-	if n := deadHookedCount(l.dead[agent]); n != "" {
-		count += " (" + n + ")"
+	if n := specdispatch.SplitLiveDead(l.live[agent], l.dead[agent]); n != "" {
+		count += " " + n
 	}
 	if n := parkedStaleCount(l.parked[agent]); n != "" {
 		count += " (" + n + ")"

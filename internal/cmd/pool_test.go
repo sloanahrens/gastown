@@ -752,7 +752,7 @@ func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	for first, want := range map[string]string{
-		"deepseek-flash": "deepseek-flash 1/3 (1 dead-hooked) open",
+		"deepseek-flash": "deepseek-flash 1/3 (0 live + 1 dead-hooked) open",
 		"total":          "total 1/4",
 	} {
 		if got := poolTestShowLine(out.String(), first); got != want {
@@ -810,7 +810,7 @@ func TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat(t *testing.T) {
 
 	// The crash is on the seat it was slung on, in both readings, and the other
 	// seat is empty because nothing live sits on it.
-	for _, want := range []string{"claude-sonnet 0/2", "deepseek-flash 1/2 (1 dead-hooked)"} {
+	for _, want := range []string{"claude-sonnet 0/2", "deepseek-flash 1/2 (0 live + 1 dead-hooked)"} {
 		if !strings.Contains(budget.Picture(), want) {
 			t.Errorf("the tick line reads %q, want it to name %q", budget.Picture(), want)
 		}
