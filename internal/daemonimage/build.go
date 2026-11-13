@@ -1,8 +1,8 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
-// host: the linux/arm64 gt, bd, om, trackerd and trackerbackup binaries the
-// image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned
-// claude CLI om's reviewer runs (gt-qpeei.35), and the image built from them
-// (gt-qpeei.16).
+// host: the linux/arm64 gt, bd, bdshim, om, trackerd and trackerbackup binaries
+// the image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the
+// pinned claude CLI om's reviewer runs (gt-qpeei.35), and the image built from
+// them (gt-qpeei.16).
 // Every command it runs and every download it makes is one injected call, so the
 // gate proves what a build runs without Docker, a running daemon, a cluster or
 // the network.
@@ -41,11 +41,15 @@ const DockerContext = "desktop-linux"
 // The package each binary is built from, inside its source tree. gt and bd are
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
 // to the package polecat-image builds, and BDPackage to bdbuild.Package.
+// BdshimPackage is the bd shim, a main package of the gt checkout: the image
+// installs it as the bd on PATH, so a tracker rig answers through it and every
+// Dolt rig passes through to the real bd beside it (gt-q68hh2).
 // TrackerdPackage and TrackerbackupPackage are main packages in the tracker
 // module, built in TrackerdModuleDir rather than at the checkout root.
 const (
 	GTPackage            = "./cmd/gt"
 	BDPackage            = "./cmd/bd"
+	BdshimPackage        = "./cmd/bdshim"
 	OMPackage            = "./cmd/om"
 	TrackerdPackage      = "./cmd/trackerd"
 	TrackerbackupPackage = "./cmd/trackerbackup"
@@ -210,6 +214,10 @@ type binary struct {
 	// with git's abbreviation of the commit in its worktree, which only exists
 	// once the build has made it.
 	stampsBuildID bool
+	// buildIDFrom names another build of the same call whose build id this one
+	// is stamped with, rather than one of its own: the bd shim stands in for the
+	// real bd, so it names that bd's id (gt-q68hh2).
+	buildIDFrom string
 }
 
 // plugin is one plugin the image carries: its directory name in the town's
@@ -226,9 +234,9 @@ var imagePlugins = []plugin{
 	{name: "town-metrics", pkg: "./plugins/town-metrics"},
 }
 
-// BuildBinaries writes gt, bd, om, trackerd and trackerbackup to b.Out and
-// returns their paths in that order. Every refusal comes before the first build
-// runs, so a refused call writes nothing. Each binary is built in a clean
+// BuildBinaries writes gt, bd, bdshim, om, trackerd and trackerbackup to b.Out
+// and returns their paths in that order. Every refusal comes before the first
+// build runs, so a refused call writes nothing. Each binary is built in a clean
 // worktree of its commit and is staged under b.Out until every binary has built,
 // so a build that fails returns its error and no paths, and leaves nothing in
 // b.Out. A bd or om checkout that is not named is fetched from its pin into
@@ -273,6 +281,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
+		{name: "bdshim", src: b.GTSrc, commit: gtCommit, pkg: BdshimPackage, ldflags: bdCommitFlag + bdCommit, buildIDFrom: "bd"},
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
 		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage, moduleDir: TrackerdModuleDir},
 		{name: "trackerbackup", src: b.GTSrc, commit: gtCommit, pkg: TrackerbackupPackage, moduleDir: TrackerdModuleDir},
@@ -283,9 +292,14 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	}
 	defer os.RemoveAll(stage)
 	env := bdbuild.Env(b.Environ)
+	ids := make(map[string]string, 1)
 	for _, build := range builds {
-		if err := b.build(ctx, build, stage, env); err != nil {
+		id, err := b.build(ctx, build, stage, env, ids)
+		if err != nil {
 			return nil, err
+		}
+		if id != "" {
+			ids[build.name] = id
 		}
 	}
 	paths := make([]string, 0, len(builds))
@@ -463,7 +477,7 @@ func (b Builder) BuildPlugins(ctx context.Context, rev string) ([]string, error)
 		builds = append(builds, binary{name: p.name, src: b.GTSrc, commit: gtCommit, pkg: p.pkg})
 	}
 	for _, build := range builds {
-		if err := b.build(ctx, build, stage, env); err != nil {
+		if _, err := b.build(ctx, build, stage, env, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -607,28 +621,38 @@ func refuseCanonicalClone(what, dir string) error {
 	return nil
 }
 
-// build compiles one binary to stage/<name> at build.commit. The clean worktree
-// keeps uncommitted changes out of the binary, and it is removed whether or not
-// the compile succeeds.
-func (b Builder) build(ctx context.Context, build binary, stage string, env []string) error {
+// build compiles one binary to stage/<name> at build.commit and returns the
+// build id it stamped as main.Build, empty when it stamps none. The clean
+// worktree keeps uncommitted changes out of the binary, and it is removed
+// whether or not the compile succeeds. ids holds the build id each earlier build
+// of the same call recorded, which a build with buildIDFrom is stamped with.
+func (b Builder) build(ctx context.Context, build binary, stage string, env []string, ids map[string]string) (string, error) {
 	dir := filepath.Join(stage, build.name+"-src")
 	if _, err := b.Git(build.src, "worktree", "add", "--detach", dir, build.commit); err != nil {
-		return fmt.Errorf("daemonimage: cannot check commit %s out of %s: %w", build.commit, build.src, err)
+		return "", fmt.Errorf("daemonimage: cannot check commit %s out of %s: %w", build.commit, build.src, err)
 	}
 	defer func() { _, _ = b.Git(build.src, "worktree", "remove", "--force", dir) }()
 	ldflags := build.ldflags
-	if build.stampsBuildID {
+	var id string
+	switch {
+	case build.stampsBuildID:
 		short, err := bdBuildID(b.Git, dir, build.commit)
 		if err != nil {
-			return err
+			return "", err
 		}
-		ldflags = bdBuildFlag + short + " " + ldflags
+		id, ldflags = short, bdBuildFlag+short+" "+ldflags
+	case build.buildIDFrom != "":
+		short, ok := ids[build.buildIDFrom]
+		if !ok {
+			return "", fmt.Errorf("daemonimage: no build id from the %s build to stamp %s with", build.buildIDFrom, build.name)
+		}
+		id, ldflags = short, bdBuildFlag+short+" "+ldflags
 	}
 	argv := goBuildArgv(filepath.Join(stage, build.name), build.pkg, ldflags)
 	if err := b.Run(ctx, filepath.Join(dir, build.moduleDir), env, argv); err != nil {
-		return fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
+		return "", fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
 	}
-	return nil
+	return id, nil
 }
 
 // goBuildArgv is the compile of one binary to out: the same argv a build runs and
@@ -770,6 +794,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	)
 	lines = append(lines, bd.fetch...)
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
+	lines = append(lines, fmt.Sprintf("build bdshim: %s   (clean worktree of %s at %s, stamped with bd's build id)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bdshim"), BdshimPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.GTSrc, rev))
 	lines = append(lines, om.fetch...)
 	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
 	lines = append(lines, fmt.Sprintf("build trackerd: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
@@ -1093,17 +1118,17 @@ func (b Builder) stageKnownHosts() error {
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: each of the image's binaries (gt, bd, om, trackerd, trackerbackup,
-// claude, the toolNames and ClientToolNames), each of imagePlugins and each of
-// mangoNames once, at the path under b.Out its COPY reads. Docker would report a
-// missing or misplaced one only after the package install ran, so it is caught
-// here first, against what the caller passed.
+// not read: each of the image's binaries (gt, bd, bdshim, om, trackerd,
+// trackerbackup, claude, the toolNames and ClientToolNames), each of
+// imagePlugins and each of mangoNames once, at the path under b.Out its COPY
+// reads. Docker would report a missing or misplaced one only after the package
+// install ran, so it is caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
 	// rels is each binary's COPY source relative to the build context; want holds
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append(append([]string{"gt", "bd", "om", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
+	for _, name := range append(append([]string{"gt", "bd", "bdshim", "om", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
 		rels[name] = name
 		want = append(want, name)
 	}
