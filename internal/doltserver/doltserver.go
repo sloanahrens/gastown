@@ -63,7 +63,9 @@ import (
 
 // EnsureDoltIdentity configures dolt global identity (user.name, user.email)
 // if not already set. Copies values from git config as a sensible default.
-// This must run before InitRig and Start, since dolt init requires identity.
+// dolt init requires an identity. InitRig calls this itself before it makes
+// the rig directory, so a rig add does not depend on gt install having run it.
+// gt install's preflight also calls it, and it must run before Start.
 func (h *host) EnsureDoltIdentity() error {
 	// Check each field independently to avoid creating duplicates with --add.
 	// Distinguish "key not found" (exit code 1, empty output) from dolt crashes.
@@ -3435,6 +3437,13 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 	} else {
 		// Server not running: create directory and init manually.
 		// The database will be picked up when the server starts.
+		// dolt init refuses to run without a dolt identity, and only gt install's
+		// preflight sets one. A rig add outside install (AddRig called directly)
+		// has none, so set it here before the directory exists: a refusal leaves
+		// no partial rig directory behind. A no-op when dolt already has one (gt-kb8qnt).
+		if err := h.EnsureDoltIdentity(); err != nil {
+			return InitRigResult{}, fmt.Errorf("setting dolt identity before dolt init: %w", err)
+		}
 		if err := os.MkdirAll(rigDir, 0755); err != nil {
 			return InitRigResult{}, fmt.Errorf("creating rig directory: %w", err)
 		}

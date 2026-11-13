@@ -2777,6 +2777,13 @@ func TestEnsureMetadata_CreatesBeadsDir(t *testing.T) {
 // InitRig validation tests
 // =============================================================================
 
+// withDoltIdentity scripts a host whose dolt global identity is already set,
+// the state gt install leaves behind, so InitRig's identity step is a no-op.
+func withDoltIdentity(f *fakeHost) *fakeHost {
+	return f.on("dolt config --global --get user.name", fakeReply{stdout: "Test User\n"}).
+		on("dolt config --global --get user.email", fakeReply{stdout: "test@example.com\n"})
+}
+
 func TestInitRig_EmptyName(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost().host()
@@ -2940,7 +2947,7 @@ func TestInitRig_DoltAndAbsentRouteStillCreate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeHost().townPort(port).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+			f := withDoltIdentity(newFakeHost().townPort(port)).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
 			f.onStart = func(pid int, _ *exec.Cmd) { f.listenOn(pid, port) } // the server comes up on its port
 			h := f.host()
 			h.readIssuePrefix = func(string, string) (string, error) { return "", nil }
@@ -2975,6 +2982,74 @@ func blockBeadsDir(t *testing.T, townRoot, rigName string) {
 	}
 }
 
+// dolt init refuses without a dolt identity, and only gt install sets one, so a
+// rig add that runs without install must set it from git's global identity
+// before dolt init (gt-kb8qnt).
+func TestInitRig_SetsDoltIdentityBeforeDoltInit(t *testing.T) {
+	t.Parallel()
+	const port = 4550
+	f := newFakeHost().townPort(port).
+		on("dolt config --global --get user.name", fakeReply{code: 1}).
+		on("dolt config --global --get user.email", fakeReply{code: 1}).
+		on("git config --global user.name", fakeReply{stdout: "Test User\n"}).
+		on("git config --global user.email", fakeReply{stdout: "test@example.com\n"}).
+		on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+	f.onStart = func(pid int, _ *exec.Cmd) { f.listenOn(pid, port) } // the server comes up on its port
+	h := f.host()
+	h.readIssuePrefix = func(string, string) (string, error) { return "", nil }
+	h.writeIssuePrefix = func(_, _, _, _ string) error { return nil }
+
+	if _, err := h.InitRig(testTown(t), "agrig"); err != nil {
+		t.Fatalf("InitRig: %v", err)
+	}
+	initAt := -1
+	for i, argv := range f.calls {
+		if strings.Join(argv, " ") == "dolt init" {
+			initAt = i
+		}
+	}
+	if initAt < 0 {
+		t.Fatal("dolt init never ran")
+	}
+	for _, set := range []string{
+		"dolt config --global --add user.name Test User",
+		"dolt config --global --add user.email test@example.com",
+	} {
+		at := -1
+		for i, argv := range f.calls {
+			if strings.Join(argv, " ") == set {
+				at = i
+			}
+		}
+		if at < 0 || at > initAt {
+			t.Errorf("%q ran at call %d, want before dolt init at call %d", set, at, initAt)
+		}
+	}
+}
+
+// Without a dolt identity or a git identity to copy, InitRig refuses before dolt
+// init and before it makes the rig directory, so no partial rig is left behind
+// (gt-kb8qnt).
+func TestInitRig_RefusesWithoutAnyDoltIdentity(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().
+		on("dolt config --global --get user.name", fakeReply{code: 1}).
+		on("git config --global user.name", fakeReply{code: 1}).
+		on("dolt *", fakeReply{})
+	h := f.host()
+	townRoot := testTown(t)
+
+	if _, err := h.InitRig(townRoot, "agrig"); err == nil || !strings.Contains(err.Error(), "setting dolt identity before dolt init") {
+		t.Fatalf("InitRig error = %v, want the identity step named", err)
+	}
+	if got := f.ranMatching("dolt init"); len(got) != 0 {
+		t.Errorf("dolt init ran without an identity: %q", got)
+	}
+	if _, err := os.Stat(RigDatabaseDir(townRoot, "agrig")); !os.IsNotExist(err) {
+		t.Errorf("rig database directory exists after the refusal: stat error %v", err)
+	}
+}
+
 // Each failure path of InitRig names the step that failed, so a caller's warning
 // says where preparing the rig's database stopped (gt-p85pw.102).
 func TestInitRig_NamesTheStepThatFailed(t *testing.T) {
@@ -2982,7 +3057,7 @@ func TestInitRig_NamesTheStepThatFailed(t *testing.T) {
 
 	t.Run("creating rig directory", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeHost().on("dolt *", fakeReply{})
+		f := withDoltIdentity(newFakeHost()).on("dolt *", fakeReply{})
 		h := f.host()
 		townRoot := testTown(t)
 		// .dolt-data as a regular file: the rig's directory cannot be made under it.
@@ -2996,7 +3071,7 @@ func TestInitRig_NamesTheStepThatFailed(t *testing.T) {
 
 	t.Run("initializing Dolt database", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeHost().on("dolt init", fakeReply{stderr: "boom", code: 1}).on("dolt *", fakeReply{})
+		f := withDoltIdentity(newFakeHost()).on("dolt init", fakeReply{stderr: "boom", code: 1}).on("dolt *", fakeReply{})
 		h := f.host()
 		if _, err := h.InitRig(testTown(t), "agrig"); err == nil || !strings.Contains(err.Error(), "initializing Dolt database") {
 			t.Fatalf("InitRig error = %v, want the dolt init step named", err)
@@ -3005,7 +3080,7 @@ func TestInitRig_NamesTheStepThatFailed(t *testing.T) {
 
 	t.Run("ensuring issue_prefix for a new database", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeHost().on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+		f := withDoltIdentity(newFakeHost()).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
 		h := f.host()
 		townRoot := testTown(t)
 		blockBeadsDir(t, townRoot, "agrig")
@@ -3110,7 +3185,7 @@ func TestIssuePrefixForRigInit_FallsBackToRigName(t *testing.T) {
 // a temporary server to seed issue_prefix through, and stops it again.
 func TestInitRigSeedsIssuePrefixEmbedded(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost().townPort(4550).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+	f := withDoltIdentity(newFakeHost().townPort(4550)).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
 	f.onStart = func(pid int, _ *exec.Cmd) { f.listenOn(pid, 4550) } // the server comes up on its port
 	h := f.host()
 	var writes []string
