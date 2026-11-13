@@ -76,10 +76,12 @@ function __walk(e, fn) {
   for (var i = 0; i < (e._kids || []).length; i++) { fn(e._kids[i]); __walk(e._kids[i], fn); }
 }
 // __rowCount is how many table rows sit under an element: the height a scroll
-// range is measured from, since the stub draws nothing.
+// range is measured from, since the stub draws nothing. A row is a TR, or a
+// div row of the page's grid tables (.ltrow), which draw their rows without a
+// table element.
 function __rowCount(e) {
   var n = 0;
-  __walk(e, function (c) { if (c.tagName === "TR") n++; });
+  __walk(e, function (c) { if (c.tagName === "TR" || __cls(c, "ltrow")) n++; });
   return n;
 }
 // __find answers the two selectors the page's fold asks of an element: a direct

@@ -112,7 +112,7 @@ button.vsel.on{color:var(--text);border-color:var(--dim)}
 .tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--line);margin-right:4px}
 .o-approved{color:var(--green)}.o-skipped{color:var(--dim)}.o-error{color:var(--amber)}.o-rejected{color:var(--red)}
 .tag.live{color:var(--green);border-color:var(--green)}
-tr.live{background:#101a13}
+tr.live,.ltrow.live{background:#101a13}
 .badge{padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid currentColor;white-space:nowrap}
 .st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
 .st-needs-human,.st-needs-overseer,.st-needs-operator{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown,.st-kept{color:var(--dim)}
@@ -129,7 +129,12 @@ tr.live{background:#101a13}
    at wide widths every track may shrink to nothing, so a long bead title cannot
    carry a row past its panel. Below 640 px the four tracks other than the bead
    hold their content instead (see the rule below). */
-.wtable{display:grid;grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline}
+/* The Polecat and Model tracks take their width from one set of custom
+   properties the seat table and the landings table below it declare together,
+   so the two tables read as one format and a width changed here changes both
+   (gt-ultode). */
+.wtable,.ltable{--polecat-w:max-content;--model-w:max-content}
+.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline}
 /* Below 640 px the four tracks other than the bead hold the width their text
    needs, so their text is not clipped by its own track at 470 px. The floor
    is minmax(max-content,max-content), not a bare max-content: a track's minimum
@@ -217,34 +222,38 @@ section>h2 .r:not([hidden])+.foldsum{margin-left:0}
 .fev .a{color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fev .s{overflow-wrap:anywhere}
 .fev .rp{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The landings table sizes its columns from their content, so the title's floor
-   and the When cell's nowrap widen the table into the scroll box; a fixed
-   layout would size the columns from the table width and ignore both. */
-.ltable{table-layout:auto}
-.ltable td{vertical-align:top}
-.ltable td.n,.ltable th.n{padding-left:14px}
-/* A landing's title keeps a floor, so a narrow panel scrolls the table rather
-   than squeezing the title into a column of one-word fragments. */
-.ltable td.main{min-width:200px;overflow-wrap:break-word}
+/* The landings table draws its rows on the seat table's grid, so both read as
+   one format: the Polecat and Model tracks take the width the two tables declare
+   together (--polecat-w, --model-w above), the bead takes what is left, and
+   every row is a subgrid of the table so a header cell and the cells under it
+   cannot start at different places (gt-ultode). */
+.ltable{display:grid;grid-template-columns:[when] minmax(0,max-content) [polecat] minmax(0,var(--polecat-w)) [model] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [ptime] minmax(0,max-content) [score] minmax(0,max-content) [gate] minmax(0,max-content) [om] minmax(0,max-content) [ship] minmax(0,max-content);gap:2px 8px;align-items:baseline}
+.ltrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
+.ltrow.hrow{color:var(--dim);font-size:11px;border-top:0}
+.ltrow>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ltrow .n{text-align:right}
+/* A landing's bead cell keeps a floor, so a narrow panel scrolls the table
+   rather than squeezing the title into a column of one-word fragments. */
+.ltrow .lbead{min-width:200px}
 /* The When cell is one reading, never a sentence split over two lines: "merging
    47s" reads as one value (gt-u7xe9). */
-.ltable td.when{white-space:nowrap}
+.ltrow .when{white-space:nowrap}
 .lrows{max-height:70vh;overflow-y:auto}
-/* Below 640 px the eight columns cannot sit side by side, so each row stacks: the
-   title first on a full line (two lines at most, the rest on its hover), then the
-   other cells in a wrapping line, each led by its column's name because the
-   header row is hidden. Nothing is cut and the page does not scroll sideways
+/* Below 640 px the ten columns cannot sit side by side, so each row stacks: the
+   bead first on a full line (its title two lines at most, the rest on its hover),
+   then the other cells in a wrapping line, each led by its column's name because
+   the header row is hidden. Nothing is cut and the page does not scroll sideways
    (gt-bqxpz). */
 @media (max-width:640px){
   .ltable{display:block}
-  .ltable tr{display:flex;flex-wrap:wrap;gap:2px 12px;padding:6px 0;border-top:1px solid var(--line)}
-  .ltable tr:first-child{display:none}
-  .ltable td,.ltable td.n{display:block;border-top:0;padding:0;text-align:left}
-  .ltable td.main{order:-1;flex:1 0 100%}
-  .ltable td[data-label]::before{content:attr(data-label) " ";color:var(--dim);font-size:11px}
-  .ltable td.main .title{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .ltrow{display:flex;flex-wrap:wrap;gap:2px 12px;padding:6px 0;border-top:1px solid var(--line)}
+  .ltrow:first-child{display:none}
+  .ltrow>*{display:block;overflow:visible;text-align:left;white-space:normal}
+  .ltrow .lbead{order:-1;flex:1 0 100%}
+  .ltrow [data-label]::before{content:attr(data-label) " ";color:var(--dim);font-size:11px}
+  .ltrow .lbead .ltitle{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 }
-.lrows th{position:sticky;top:0;background:var(--panel)}
+.lrows .hrow{position:sticky;top:0;background:var(--panel);z-index:1}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
 /* A wide table in a narrow panel scrolls sideways, and the fade at the cut edge
    is the cue: a dim gradient under a panel-coloured cover that scrolls with the
@@ -1979,22 +1988,55 @@ function differenceBars(name, key, unit, what, hours, hhmm) {
   return row;
 }
 
-// holderCell is the Landings table's By column for one row: the holder's short
-// name, its rig only where two rigs in view use that name, and the dash a row
-// with no holder draws. fallback stands in for a dash on the one row that names
-// its rig there instead (gt-duuq1).
+// holderCell is the Landings table's Polecat column for one row: the holder's
+// short name, its rig only where two rigs in view use that name, and the dash a
+// row with no holder draws. fallback stands in for a dash on the one row that
+// names its rig there instead (gt-duuq1).
 function holderCell(names, rig, who, fallback) {
-  const by = el("td", "title");
+  const by = el("span", "lwho");
   if (who) { by.textContent = names.label(rig, who); by.title = rig ? rig + "/" + who : who; }
   else by.textContent = fallback || "–";
   return by;
 }
 
-// polecatTimeCell is the Landings table's Polecat column, for every kind of row:
-// the dev time the row carries, by polecatDur's one computation, and on hover
-// each seat's share of it, "2 attempts: 14m + 9m". An attempt whose span never
-// closed adds no time to the record and reads "open", and an attempt that is
-// itself a floor keeps its +, which is why the total may be a lower bound
+// landingAgentCell is the Landings table's Model column, the seat table's Agent
+// column read beside it: the agent the landing's polecat seat ran, shortened as
+// shortAgent shortens it, with the whole name on hover. A row the record gives
+// no agent draws a dash, never an empty cell that reads as missing data: a
+// queued bead (the queue reading names no agent), a running landing (the record
+// is written when the landing ends) and a landing written before the field
+// existed (gt-tnml1k).
+function landingAgentCell(row, queued) {
+  const c = el("span", "lmodel");
+  if (row && row.agent) { c.textContent = shortAgent(row.agent); c.title = row.agent + " — the model the landing's polecat seat ran"; }
+  else {
+    c.textContent = "–";
+    c.title = queued ? "the queue reading names no agent: the landing worker has not taken the bead" : "this landing's record names no agent";
+  }
+  return c;
+}
+
+// landingStateCell is the Landings table's State column: the pill a landing
+// wears — queued, running, rejected and why, failing at which stage, no review
+// or an om error — and on its hover the detail the row used to print on a second
+// line (gt-ultode). A landed landing whose review approved it draws no pill, as
+// it drew none beside its id. A queued row's pill is drawn by the caller, which
+// knows the bead came from the Queue reader rather than from a landing record.
+function landingStateCell(r) {
+  const c = el("span", "lstate");
+  if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; c.append(g); }
+  else if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); g.title = r.detail || ""; c.append(g); }
+  else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed · " + backoffDetail(r); c.append(g); }
+  else if (r.verdict === "skipped") c.append(el("span", "tag", "no review"));
+  else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; c.append(g); }
+  return c;
+}
+
+// polecatTimeCell is the Landings table's Polecat time column, for every kind of
+// row: the dev time the row carries, by polecatDur's one computation, and on
+// hover each seat's share of it, "2 attempts: 14m + 9m". An attempt whose span
+// never closed adds no time to the record and reads "open", and an attempt that
+// is itself a floor keeps its +, which is why the total may be a lower bound
 // (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell
 // names the branch's agent ("crew/<agent>/...") or, when the branch names none,
 // says bird — never a dash, which would look like missing data (gt-kmp7c); the
@@ -2003,7 +2045,7 @@ function holderCell(names, rig, who, fallback) {
 // polecat time — reads the dash, never a figure guessed from its wait
 // (gt-duuq1).
 function polecatTimeCell(row) {
-  const pc = el("td", "n", row.crew ? (row.crew_agent || "bird") : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
+  const pc = el("span", "n", row.crew ? (row.crew_agent || "bird") : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
   const attempts = row.polecat_attempts || [];
   if (row.crew) pc.title = row.crew_agent ? "crew branch: no polecat time exists" : "bird or crew branch: no polecat time exists";
   else if (attempts.length) pc.title = attempts.length + (attempts.length === 1 ? " attempt: " : " attempts: ") + attempts.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
@@ -2011,82 +2053,97 @@ function polecatTimeCell(row) {
 }
 
 // labelCells names each cell of a landings row for the stacked layout: a narrow
-// page (see the max-width rule on .ltable) puts the title on a line of its own
-// and hides the header row, so every other cell carries its column's heading.
-function labelCells(tr, cols) {
-  Array.from(tr.children).forEach((td, i) => { if (i !== 1) td.setAttribute("data-label", cols[i][0]); });
+// page (see the max-width rule on .ltable) puts the bead on a line of its own and
+// hides the header row, so every other cell carries its column's heading.
+function labelCells(tr, cols, skip) {
+  Array.from(tr.children).forEach((td, i) => { if (i !== skip) td.setAttribute("data-label", cols[i][0]); });
+}
+
+// LT_COLS is the Landings table's columns, left to right, the one list the
+// header and every row draw from, so a cell cannot be added to a row and not to
+// the header. The third field marks a reading the table sets right. The Polecat
+// and Model tracks take the width `.wtable,.ltable` declares together, the same
+// properties the seat table above sizes its Polecat and Model columns with
+// (gt-ultode); LT_BEAD is the cell that takes what width is left.
+const LT_COLS = [
+  ["When", "when the landing was taken, or how long a queued bead has waited"],
+  ["Polecat", "who built it: the polecat, or the crew member whose branch it was"],
+  ["Model", "the model the landing's polecat seat ran; hover for the whole agent name"],
+  ["Bead", "the bead, its priority and its title; hover for the whole title, the commit and the stage times"],
+  ["State", "what the landing is doing: queued, running, rejected and why, failing at which stage, or om's verdict; hover for the detail"],
+  ["Polecat time", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, + marks a reading that may understate the time, and ≤ one read from the bead's dispatch, which may overstate it"],
+  ["Score", "om's score", 1],
+  ["Gate", "wall time of the gate stage", 1],
+  ["om", "wall time of the om review", 1],
+  ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1],
+];
+const LT_BEAD = 3;
+
+// beadIdCell writes a row's bead id into its Bead cell, then its priority pill
+// or, where the feed carries no priority, the dash that says so — a running
+// landing, one written before the landing record kept it, and a queue reading
+// with none (gt-tnml1k). Queued rows read the priority off QueueBead.
+function beadIdCell(c, id, priority) {
+  c.append(el("span", "bead", id), document.createTextNode(" "));
+  c.append(priority != null ? el("span", "tag p" + Math.min(priority, 4), "P" + priority) : el("span", "pnone", "–"));
+  return c;
 }
 
 // The Landings table: waiting-to-land beads first, then the rows the worker
 // holds, then the day's finished ones. Null when there is nothing to draw.
-// Every cell goes through el(), which writes textContent, so a bead's own text
-// is never markup.
+// Every row is one line on the seat table's grid: the bead's id, priority and
+// title sit in the Bead cell, and the readings a row used to print under them
+// (its title, the commit, the stage times, the refusal and backoff detail) are
+// that cell's and the State pill's hover (gt-ultode). Every cell goes through
+// el(), which writes textContent, so a bead's own text is never markup.
 function landingTable(s, names, rows, waiting) {
   const shown = waiting.slice(0, QUEUED_LANDING_MAX);
   const more = waiting.length - shown.length;
   if (!shown.length && !rows.length) return null;
   const wrap = el("div");
   const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
-  const tbl = el("table", "ltable");
-  const hr = el("tr");
-  const cols = [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Polecat", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, + marks a reading that may understate the time, and ≤ one read from the bead's dispatch, which may overstate it", 1], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]];
-  cols.forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  const tbl = el("div", "ltable");
+  const hr = el("div", "ltrow hrow");
+  LT_COLS.forEach(([h, tip, num]) => { const c = el("span", num ? "n" : "", h); if (tip) c.title = tip; hr.append(c); });
   tbl.append(hr);
   const today = new Date().toDateString();
   // A queued bead reads in the same grid as a running one (gt-duuq1): the holder
-  // is the bead's assignee, so it belongs in the By column rather than riding on
-  // the Landing cell's first line, and the title and every reading then sit in
-  // the column the running and finished rows put them. The title no longer spans
-  // the empty cells (gt-uvpo1): it sits in the Landing column, whose min-width
-  // and break-word rule (.ltable td.main) keep it readable as a finished row's
-  // title is, and TestLandingsTitleCellKeepsAReadableWidth pins that rule. The
-  // wait is aged from the bead's last update — the label write gt done makes is
-  // normally its last write. No stage has run, so Score, Gate, om and Ship hold
-  // the empty-column dash a running row draws. The queue reading carries no
-  // polecat time, so the Polecat cell has no reading to draw and reads the dash
+  // is the bead's assignee, so it belongs in the Polecat column, and the title
+  // and every reading then sit in the column the running and finished rows put
+  // them. The wait is aged from the bead's last update — the label write gt done
+  // makes is normally its last write. No stage has run, so Score, Gate, om and
+  // Ship hold the empty-column dash a running row draws. The queue reading
+  // carries no polecat time, so the Polecat time cell reads the dash
   // polecatTimeCell draws for a row with none, never a time guessed from the
   // wait. The worker's order is not known to this page, so a row says waiting
   // and nothing about position.
   for (const b of shown) {
-    const tr = el("tr");
-    const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
+    const tr = el("div", "ltrow");
+    const when = el("span", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
     when.title = "submitted and waiting for the landing worker to take it; waiting since the bead's last update, which gt done moves";
     tr.append(when);
-    const main = el("td", "main");
-    main.append(el("span", "bead", b.id));
+    const h = queueHolder(b);
+    tr.append(holderCell(names, h.rig, h.name, ""));
+    tr.append(landingAgentCell(null, true));
+    const bd = beadIdCell(el("span", "lbead"), b.id, b.priority);
+    const title = (b.rig ? b.rig + " · " : "") + (b.title || "");
+    if (b.title) bd.append(document.createTextNode(" "), el("span", "ltitle", title));
+    bd.title = title || b.id;
+    tr.append(bd);
+    const st = el("span", "lstate");
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
-    main.append(document.createTextNode(" "), tag);
-    if (b.title) main.append(document.createElement("br"), el("span", "title", (b.rig ? b.rig + " · " : "") + b.title));
-    tr.append(main);
-    const h = queueHolder(b);
-    tr.append(holderCell(names, h.rig, h.name, ""), polecatTimeCell(b), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"));
-    labelCells(tr, cols);
+    st.append(tag);
+    tr.append(st, polecatTimeCell(b), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"));
+    labelCells(tr, LT_COLS, LT_BEAD);
     tbl.append(tr);
   }
   for (const r of rows) {
-    const tr = el("tr");
+    const tr = el("div", "ltrow");
     const when = new Date(r.at);
-    if (r.outcome === "running") tr.className = "live";
-    tr.append(el("td", "when title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
-    const main = el("td", "main");
-    const beadEl = el("span", "bead", r.bead);
-    main.append(beadEl);
-    if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; main.append(document.createTextNode(" "), g); }
-    else if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); main.append(document.createTextNode(" "), g); }
-    else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed"; main.append(document.createTextNode(" "), g); }
-    else if (r.verdict === "skipped") main.append(document.createTextNode(" "), el("span", "tag", "no review"));
-    else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; main.append(document.createTextNode(" "), g); }
-    if (r.risk) { const g = el("span", "warnc", " ⚑"); g.title = "touched risk paths"; main.append(g); }
-    if (r.title) main.append(document.createElement("br"), el("span", "title", r.title));
-    if (r.outcome === "rejected" && r.detail) main.append(document.createElement("br"), el("span", "badc", r.detail));
-    if (r.outcome === "backoff") main.append(document.createElement("br"), el("span", "badc", backoffDetail(r)));
-    const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
-    // The row's detail rides the bead id, not the whole row: a native tip opens
-    // under the pointer wherever it rests, and over a row it covers that row.
-    beadEl.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
-    tr.append(main);
-    // By names the holder the way the Work panel's seat rows do: the short name, and
+    if (r.outcome === "running") tr.className = "ltrow live";
+    tr.append(el("span", "when title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
+    // Polecat names the holder the way the Work panel's seat rows do: the short name, and
     // its rig only where two rigs in view use that name. The row's own rig
     // is the holder's for a live run; for a finished one it is read back from
     // the polecat roster, so a shared short name still gets its rig. A crew
@@ -2094,25 +2151,40 @@ function landingTable(s, names, rows, waiting) {
     // slingable for, not the crew member who built it (gt-830fd).
     const who = (r.crew && r.crew_agent) || r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
     const rig = r.rig || names.rigOf(who);
-    tr.append(holderCell(names, rig, who, r.outcome === "running" ? r.rig : ""), polecatTimeCell(r));
-    tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
-    tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
-    tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
-    const ship = el("td", "n" + (r.ship_pending ? " warnc" : ""));
+    tr.append(holderCell(names, rig, who, r.outcome === "running" ? r.rig : ""));
+    tr.append(landingAgentCell(r, false));
+    const bd = beadIdCell(el("span", "lbead"), r.bead, r.priority);
+    if (r.risk) { const g = el("span", "warnc", " ⚑"); g.title = "touched risk paths"; bd.append(g); }
+    if (r.title) bd.append(document.createTextNode(" "), el("span", "ltitle", r.title));
+    const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
+    // The whole title, the commit and the stage times ride the bead cell's
+    // hover: one line leaves room for none of them, and nothing is dropped.
+    bd.title = [r.title, r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
+    tr.append(bd);
+    tr.append(landingStateCell(r));
+    tr.append(polecatTimeCell(r));
+    tr.append(el("span", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
+    tr.append(el("span", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
+    tr.append(el("span", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
+    const ship = el("span", "n" + (r.ship_pending ? " warnc" : ""));
     const appRig = r.ship_via === "staging";
     if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = appRig ? "dispatched to staging deployed" : "dispatched to deployed"; }
     else if (r.ship_failed) { ship.textContent = "staging failed"; ship.title = "the staging run that covers this landing failed: " + (r.ship_run_state || "failed"); }
     else if (r.ship_pending) { ship.textContent = "pending"; ship.title = appRig ? "landed; waiting for the staging deploy" : "landed; waiting for the restart that installs it"; }
     else ship.textContent = "–";
     tr.append(ship);
-    labelCells(tr, cols);
+    // A rejected or failing row's detail rides the row as well as its State
+    // pill, so a reader who hovers the row reads why without hunting the pill.
+    if (r.outcome === "rejected" && r.detail) tr.title = r.detail;
+    else if (r.outcome === "backoff") tr.title = backoffDetail(r);
+    labelCells(tr, LT_COLS, LT_BEAD);
     tbl.append(tr);
   }
   // Every finished landing of the window is a row; the rows scroll inside a fixed
   // height, the header row stays put, as the Work panel's beads table does (gt-1kttu).
   const lrows = el("div", "lrows");
   lrows.append(tbl);
-  wrap.append(el("div", "k title", "landings: waiting to land first, then the ones running now and the ones failing in backoff, then every finished landing in the last 24 hours (newest first; hover a row for the commit and stage times)"), lrows);
+  wrap.append(el("div", "k title", "landings: waiting to land first, then the ones running now and the ones failing in backoff, then every finished landing in the last 24 hours (newest first; hover a bead for its title, commit and stage times)"), lrows);
   if (more) wrap.append(el("div", "empty", "and " + more + " more waiting to land — see the Queue pane's “Waiting to land” tab"));
   return wrap;
 }
