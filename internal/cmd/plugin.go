@@ -124,13 +124,19 @@ Examples:
 	RunE: runPluginRun,
 }
 
+// defaultGastownPluginSource is the default plugin source directory as the
+// command help names it: the gastown rig's build checkout under the town root.
+// The base directory comes from buildsrc, which owns that layout, so a change
+// there reaches the help instead of leaving it stale.
+var defaultGastownPluginSource = "<town>/" + filepath.ToSlash(filepath.Join(buildsrc.BaseDirRel(), "gastown", "plugins"))
+
 var pluginSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Sync plugins from source repo to runtime directories",
 	Long: `Copy plugins from the gastown source repository to runtime plugin directories.
 
 By default the source is the plugins directory of the gastown build checkout,
-<town>/.runtime/build-src/gastown/plugins, which is kept at the gastown rig's
+` + defaultGastownPluginSource + `, which is kept at the gastown rig's
 main. The working directory is never consulted — a checkout you happen to
 be standing in is not the town's source of truth (gt-nc7q). Pass --source to
 read a directory of your choosing.
@@ -620,7 +626,16 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return newPluginSyncRun(cmd.Context(), townRoot).run()
+}
+
+// newPluginSyncRun assembles one gt plugin sync from the caller's context, the
+// town root, the parsed flags and the production build-checkout resolver
+// (buildsrc.Ensure). It is a function so a test can read the resolver off the
+// production assembly without running git.
+func newPluginSyncRun(ctx context.Context, townRoot string) pluginSyncRun {
 	return pluginSyncRun{
+		ctx:      ctx,
 		townRoot: townRoot,
 		source:   pluginSyncSource,
 		clean:    pluginSyncClean,
@@ -629,13 +644,14 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 		build:    buildsrc.Ensure,
 		out:      os.Stdout,
 		errOut:   os.Stderr,
-	}.run()
+	}
 }
 
-// pluginSyncRun is one gt plugin sync: the town, the --source, --clean,
-// --dry-run and --force flags, the build-checkout resolver the source comes
-// from when --source is not given, and where output goes.
+// pluginSyncRun is one gt plugin sync: the caller's context, the town, the
+// --source, --clean, --dry-run and --force flags, the build-checkout resolver
+// the source comes from when --source is not given, and where output goes.
 type pluginSyncRun struct {
+	ctx                  context.Context // the command's context, carried so a cancel reaches the build checkout
 	townRoot             string
 	source               string
 	clean, dryRun, force bool
@@ -650,7 +666,7 @@ func (r pluginSyncRun) run() error {
 	sourceDir := r.source
 	sourceRule := "explicit --source"
 	if sourceDir == "" {
-		src, err := plugin.FindGastownSource(context.Background(), townRoot, r.build)
+		src, err := plugin.FindGastownSource(r.ctx, townRoot, r.build)
 		if err != nil {
 			return err
 		}
