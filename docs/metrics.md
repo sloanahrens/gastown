@@ -16,6 +16,8 @@ Done when the next snapshot row shows the new place and has no `errors` entry na
 
 Append one entry to the JSON array in `regime-events.json`. Its default location is `~/.claude/docs/metrics/`; `TOWN_METRICS_DOCS` overrides the directory. The operator writes this file at runtime, outside the repo.
 
+With `TOWN_METRICS_DOCS` unset the metrics steps read `$HOME/.claude/docs/metrics` even when the town is resolved from the working directory or `GT_TOWN_ROOT`: the directory is the operator's, not the town's. In the daemon pod `HOME` is `/root`, so an on-demand `gt metrics report` or `gt metrics backtest` there sets `TOWN_METRICS_DOCS` to this directory. The scheduled `gt metrics run` neither reads nor writes it; its analysis publishes under `<town>/.runtime/metrics/`.
+
 ```json
 {"date": "<YYYY-MM-DD>", "what": "<component> moved from <old place> to <new place>", "source": "<where the move is recorded>", "confirmed": false}
 ```

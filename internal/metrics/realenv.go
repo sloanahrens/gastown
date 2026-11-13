@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // This file is the real-environment wiring. It wires the town the extract reads:
@@ -107,8 +108,17 @@ func hostDir(dir string) ([]DirEntry, error) {
 type RealEnvOptions struct {
 	// Today names the extract's output directory under the town's runtime.
 	Today string
-	// Town is the town root; empty is TOWN_METRICS_TOWN, else Home/gt.
+	// Town is the town root; empty is TOWN_METRICS_TOWN, else the workspace
+	// root, else Home/gt.
 	Town string
+	// WorkspaceRoot finds the town the process runs in, the level between
+	// TOWN_METRICS_TOWN and Home/gt: the walk up from the working directory,
+	// then GT_TOWN_ROOT. A metrics step in the daemon pod runs with a HOME of
+	// /root while the town is elsewhere, so Home/gt names no town there
+	// (gt-kjm3g8). nil is workspace.FindFromCwdOrError when Getenv is nil;
+	// when Getenv is injected the process's own working directory is not
+	// consulted, and a caller that wants the workspace level names it here.
+	WorkspaceRoot func() (string, error)
 	// DocsDir is where the digest and regime-events.json live; empty is
 	// TOWN_METRICS_DOCS, else Home/.claude/docs/metrics.
 	DocsDir string
@@ -163,7 +173,14 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		return real, fmt.Errorf("real env: %w", err)
 	}
 	files := opts.Files.withHostDefaults()
-	town := townRoot(opts.Town, getenv(envTown), home)
+	workspaceRoot := opts.WorkspaceRoot
+	if workspaceRoot == nil && opts.Getenv == nil {
+		workspaceRoot = workspace.FindFromCwdOrError
+	}
+	town, err := townRoot(opts.Town, getenv(envTown), home, workspaceRoot)
+	if err != nil {
+		return real, fmt.Errorf("real env: %w", err)
+	}
 	real.Town = town
 	real.DocsDir = docsDir(opts.DocsDir, getenv(envDocs), home)
 	runtime := filepath.Join(town, ".runtime")
@@ -392,19 +409,48 @@ func run(ctx context.Context, r RunnerDir, dir string, argv []string, timeout ti
 	return r(ctx, dir, append([]string{"nice", "-n", "15"}, argv...))
 }
 
-// townRoot is _town: the town named, else the environment's, else home/gt.
-func townRoot(town, fromEnv, home string) string {
+// townRoot is _town: the town named, else the environment's, else the workspace
+// root, else home/gt. It keeps the named town and TOWN_METRICS_TOWN as the two
+// first overrides and Home/gt as the last, and consults the workspace between
+// them so a step run from inside a town, or in the pod whose session sets
+// GT_TOWN_ROOT, reads that town instead of the home directory's (gt-kjm3g8).
+// A finder that fails for any reason other than workspace.ErrNotFound stops the
+// wiring: a lookup that could not run is not a town that was never found. A
+// finder that returns no root and no error is refused too, so a broken finder
+// never quietly takes the Home/gt fallback.
+func townRoot(town, fromEnv, home string, findWorkspace func() (string, error)) (string, error) {
 	if town != "" {
-		return town
+		return town, nil
 	}
 	if fromEnv != "" {
-		return fromEnv
+		return fromEnv, nil
 	}
-	return filepath.Join(home, "gt")
+	if findWorkspace != nil {
+		root, err := findWorkspace()
+		if err != nil && !errors.Is(err, workspace.ErrNotFound) {
+			return "", fmt.Errorf("workspace root: %w", err)
+		}
+		if err == nil {
+			if root == "" {
+				return "", errors.New("workspace root: the finder returned no root and no error")
+			}
+			return root, nil
+		}
+	}
+	return filepath.Join(home, "gt"), nil
 }
 
 // docsDir is _docs_dir: the directory named, else the environment's, else
 // home/.claude/docs/metrics.
+//
+// It is deliberately not moved under a town resolved from the workspace
+// (gt-kjm3g8): docs/metrics.md names ~/.claude/docs/metrics as where the
+// operator writes regime-events.json, which report and backtest read, and that
+// is not <town>/.claude/docs/metrics. So an on-demand report or backtest in the
+// daemon pod reads /root/.claude/docs/metrics unless TOWN_METRICS_DOCS names
+// the operator's directory; the scheduled hour runs `gt metrics run` (snapshot
+// and analysis), which writes under <town>/.runtime/metrics and never reads
+// this directory.
 func docsDir(docs, fromEnv, home string) string {
 	if docs != "" {
 		return docs
