@@ -315,18 +315,91 @@ func (w writer) MarkIncomplete(usageDir string, f Facts, reason string) error {
 	return w.writeFileAtomic(path, append(out, '\n'))
 }
 
-func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
-	if err := checkRecord(rec); err != nil {
-		return err
-	}
-	var ids []string
+// distinctIDs is the session ids of one run, each once, in order. An empty id is refused.
+func distinctIDs(bead string, sessionIDs []string) ([]string, error) {
+	ids := []string{}
 	for _, id := range sessionIDs {
 		if id == "" {
-			return fmt.Errorf("usageattrib: %s: a session has no id", rec.Bead)
+			return nil, fmt.Errorf("usageattrib: %s: a session has no id", bead)
 		}
 		if !slices.Contains(ids, id) {
 			ids = append(ids, id)
 		}
+	}
+	return ids, nil
+}
+
+// Replace writes rec as its bead's work record with sessionIDs as the sessions it counts, in
+// place of whatever the file held. The scan rebuilds a bead's record from every one of its
+// sessions, so a merge would count the earlier ones twice. A non-empty reason makes the record
+// incomplete and is stored as its error.
+func Replace(usageDir string, rec dashboard.UsageRecord, sessionIDs []string, reason string) error {
+	return writer{create: os.CreateTemp}.Replace(usageDir, rec, sessionIDs, reason)
+}
+
+func (w writer) Replace(usageDir string, rec dashboard.UsageRecord, sessionIDs []string, reason string) error {
+	if err := checkRecord(rec); err != nil {
+		return err
+	}
+	ids, err := distinctIDs(rec.Bead, sessionIDs)
+	if err != nil {
+		return err
+	}
+	stored := storedRecord{UsageRecord: rec, Sessions: ids}
+	if len(ids) > 0 {
+		stored.Batches = []countedBatch{{Sessions: ids, Accounting: accountingOf(rec)}}
+	}
+	if reason != "" {
+		stored.Complete = false
+		stored.Error = reason
+	}
+
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	path := recordPath(usageDir, rec.Bead, rec.Kind)
+	out, err := json.MarshalIndent(stored, "", " ")
+	if err != nil {
+		return fmt.Errorf("usageattrib: encoding the record for %s: %w", rec.Bead, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("usageattrib: creating the beads directory: %w", err)
+	}
+	return w.writeFileAtomic(path, append(out, '\n'))
+}
+
+// Stored is a bead's work record as its file holds it.
+type Stored struct {
+	Record   dashboard.UsageRecord
+	Sessions []string
+	Error    string
+}
+
+// ReadWork reads the work record of bead under usageDir. A missing file is an error wrapping
+// fs.ErrNotExist; a file this package did not write is an error too.
+func ReadWork(usageDir, bead string) (Stored, error) {
+	if !validBead(bead) {
+		return Stored{}, fmt.Errorf("usageattrib: %q is not a bead id", bead)
+	}
+	path := WorkRecordPath(usageDir, bead)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Stored{}, fmt.Errorf("usageattrib: reading %s: %w", path, err)
+	}
+	var s storedRecord
+	if err := json.Unmarshal(data, &s); err != nil {
+		return Stored{}, fmt.Errorf("usageattrib: %s is not a record this package wrote: %w", path, err)
+	}
+	return Stored{Record: s.UsageRecord, Sessions: s.Sessions, Error: s.Error}, nil
+}
+
+func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+	if err := checkRecord(rec); err != nil {
+		return err
+	}
+	ids, err := distinctIDs(rec.Bead, sessionIDs)
+	if err != nil {
+		return err
 	}
 	if len(ids) == 0 {
 		if rec.Totals.Calls != 0 {
@@ -548,6 +621,11 @@ func WorkspaceOf(townRoot, bead string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("usageattrib: workspace of %s: %w", bead, err)
 	}
+	return workspaceIn(m, bead)
+}
+
+// workspaceIn is WorkspaceOf over a map already read, so a scan reads the file once.
+func workspaceIn(m *workspaceid.Map, bead string) (string, error) {
 	prefix, _, _ := strings.Cut(bead, "-")
 	ws, err := m.For(prefix)
 	if err != nil {
