@@ -2668,37 +2668,44 @@ func TestAddRig_KeepsRegistryChangesLandedDuringClone(t *testing.T) {
 	}
 }
 
-// The hermetic harness poisons BEADS_DOLT_PORT with port 1 for the whole test
-// process. A rig's own dolt-server.port must win over that inherited poison in
-// every bd call rig setup makes, or bd dials port 1 (gt-xnv94x).
-func TestInitBeadsRigPortWinsOverHarnessPoison(t *testing.T) {
+// A rig added outside its town's tree still gets the town's named Dolt
+// endpoint in every bd call, in place of the harness poison the test process
+// inherits. A town that names no endpoint leaves the inherited environment as
+// it is (gt-xnv94x).
+func TestInitBeadsEveryBDCallTakesTheTownEndpoint(t *testing.T) {
 	t.Parallel()
-	rigPath := t.TempDir()
-	beadsDir := filepath.Join(rigPath, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	named := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(named, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("4407"), 0644); err != nil {
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
+		`"dolt":{"host":"127.0.0.1","port":4407}}`
+	if err := os.WriteFile(filepath.Join(named, "mayor", "town.json"), []byte(town), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	manager, _, bd := testManager("", nil)
-	manager.env = []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
-	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
-		t.Fatalf("InitBeads: %v", err)
-	}
-	calls := bd.recorded()
-	if len(calls) == 0 {
-		t.Fatal("InitBeads made no bd calls")
-	}
-	for _, c := range calls {
-		for _, entry := range c.Env {
-			if entry == "BEADS_DOLT_PORT=1" || entry == "BEADS_DOLT_SERVER_PORT=1" {
-				t.Errorf("bd %s carries the harness poison %q in %v", c.argv(), entry, c.Env)
+	for _, tc := range []struct {
+		name, townRoot, wantPort string
+	}{
+		{"named endpoint beats the poison", named, "4407"},
+		{"town with no endpoint keeps the inherited port", t.TempDir(), "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			manager, _, bd := testManager(tc.townRoot, nil)
+			manager.env = []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
+			rigPath := t.TempDir() // outside the town tree, as a new rig's dir is
+			if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+				t.Fatalf("InitBeads: %v", err)
 			}
-		}
-		if got := rigEnvMap(c.Env)["BEADS_DOLT_PORT"]; got != "4407" {
-			t.Errorf("bd %s BEADS_DOLT_PORT = %q, want the rig's port 4407", c.argv(), got)
-		}
+			calls := bd.recorded()
+			if len(calls) == 0 {
+				t.Fatal("InitBeads made no bd calls")
+			}
+			for _, c := range calls {
+				if got := rigEnvMap(c.Env)["BEADS_DOLT_PORT"]; got != tc.wantPort {
+					t.Errorf("bd %s BEADS_DOLT_PORT = %q, want %q", c.argv(), got, tc.wantPort)
+				}
+			}
+		})
 	}
 }

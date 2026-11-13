@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -167,14 +168,39 @@ func (e *CLIError) Error() string {
 	return fmt.Sprintf("bd %s: %v", strings.Join(e.Args, " "), e.Err)
 }
 
-// lastNonWarningLine is the last line of out that is not a "Warning:" line.
-// bd prints a permissions warning on every run, so a failure whose only other
-// text is that warning would otherwise name nothing (gt-xnv94x).
+// lastNonWarningLine names why bd failed: the "message" of a JSON error object
+// when out carries one, else the last line that is not a "Warning:" line and
+// not only JSON punctuation. bd prints a permissions warning on every run, so a
+// failure whose only other text is that warning would otherwise name nothing
+// (gt-xnv94x).
 func lastNonWarningLine(out []byte) string {
+	if msg := jsonErrorMessage(out); msg != "" {
+		return msg
+	}
 	lines := strings.Split(string(out), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" && !strings.HasPrefix(line, "Warning:") {
-			return line
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "Warning:") || strings.Trim(line, "{}[],") == "" {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// jsonErrorMessage is the "message" of the first JSON object in out that
+// decodes and has one, or "" when out holds none.
+func jsonErrorMessage(out []byte) string {
+	lines := strings.Split(string(out), "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "{") {
+			continue
+		}
+		var obj struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(strings.Join(lines[i:], "\n")), &obj); err == nil && obj.Message != "" {
+			return obj.Message
 		}
 	}
 	return ""

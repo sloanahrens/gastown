@@ -358,19 +358,6 @@ func envKeyHasPrefix(keyName, prefix string) bool {
 // bdEndpointEnvKeys are the variables bd reads to find its Dolt server.
 var bdEndpointEnvKeys = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
 
-// harnessPoisonDoltPort is the port internal/testutil poisons BEADS_DOLT_PORT
-// with for the whole test process. Nothing listens on it (testutil keeps stray
-// connections off the production server on 3307).
-const harnessPoisonDoltPort = "1"
-
-// envHasKey reports whether env sets key.
-func envHasKey(env []string, key string) bool {
-	return slices.ContainsFunc(env, func(entry string) bool {
-		keyName, _, ok := strings.Cut(entry, "=")
-		return ok && envKeyMatches(keyName, key)
-	})
-}
-
 // addResolvedDoltConnectionEnv sets bd's endpoint variables in env. When
 // beadsDir is in a town that names a Dolt endpoint, that endpoint wins
 // (gt-y3pgh.3), and it is agentconfig.ResolveDoltEndpoint's answer, so the bd a
@@ -391,17 +378,9 @@ func addResolvedDoltConnectionEnv(env, base []string, beadsDir string) []string 
 		if !ok || value == "" {
 			continue
 		}
-		i := slices.IndexFunc(bdEndpointEnvKeys, func(want string) bool { return envKeyMatches(key, want) })
-		if i < 0 {
-			continue
+		if i := slices.IndexFunc(bdEndpointEnvKeys, func(want string) bool { return envKeyMatches(key, want) }); i >= 0 {
+			inherited[bdEndpointEnvKeys[i]] = value
 		}
-		// The test harness's poison port never listens, so an inherited copy of
-		// it must not override the port this beads dir names. With no port of
-		// its own the poison passes through and bd fails fast (gt-xnv94x).
-		if value == harnessPoisonDoltPort && envHasKey(env, bdEndpointEnvKeys[i]) {
-			continue
-		}
-		inherited[bdEndpointEnvKeys[i]] = value
 	}
 	if len(inherited) == 0 {
 		return env

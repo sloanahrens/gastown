@@ -150,6 +150,9 @@ func TestCLIErrorNamesLastNonWarningLine(t *testing.T) {
 		{"error between warnings", "Warning: a\nError: store unavailable\nWarning: b\n", "bd rename-prefix: Error: store unavailable"},
 		{"warning only falls back to the exit error", permissions, "bd rename-prefix: " + codedExit(1).Error()},
 		{"no output falls back to the exit error", "", "bd rename-prefix: " + codedExit(1).Error()},
+		{"JSON error names its message", permissions + "{\n  \"kind\": \"store_unavailable\",\n  \"message\": \"failed to open database \\\"forkrig\\\"\"\n}\n", "bd rename-prefix: failed to open database \"forkrig\""},
+		{"JSON without a message names its kind, not a brace", permissions + "{\n  \"kind\": \"store_unavailable\"\n}\n", "bd rename-prefix: \"kind\": \"store_unavailable\""},
+		{"closing brace after plain text is skipped", "Error: store unavailable\n}\n", "bd rename-prefix: Error: store unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(tc.stderr), Err: codedExit(1)}

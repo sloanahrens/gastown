@@ -137,6 +137,16 @@ func (h *host) bdEnviron() []string {
 	return h.environ()
 }
 
+// bdEnvironFor is bdEnviron for a bd call about the town at townRoot. A town
+// that names its Dolt endpoint makes that endpoint win over the endpoint
+// variables the inherited environment holds. A rig's beads dir can sit outside
+// the town tree, where bd cannot find the town to apply the endpoint itself,
+// so an inherited port would otherwise decide where bd dials (gt-xnv94x). A
+// town that names none keeps bdEnviron unchanged.
+func (h *host) bdEnvironFor(townRoot string) []string {
+	return configpkg.NormalizeConfiguredDoltEnv(h.bdEnviron(), townRoot)
+}
+
 // withEnv is a copy of h that reads env over its own environment: lookups
 // find env first, and a child inherits h's environment with env appended,
 // so env's values win.

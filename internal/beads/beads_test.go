@@ -5900,37 +5900,3 @@ func TestRoleConfigRoundTripKeepsHealthFields(t *testing.T) {
 		t.Errorf("env_var lines = %q, want %q", envLines, wantLines)
 	}
 }
-
-// The harness poisons BEADS_DOLT_PORT with port 1. A beads dir that names its
-// own port keeps it; a beads dir with none keeps the poison, so bd fails fast
-// instead of reaching the production server (gt-xnv94x).
-func TestBuildPinnedBDEnvHarnessPoisonYieldsToRigPort(t *testing.T) {
-	t.Parallel()
-	poisoned := []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
-	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1"}`)
-	withPort := filepath.Join(t.TempDir(), ".beads")
-	withoutPort := filepath.Join(t.TempDir(), ".beads")
-	for _, dir := range []string{withPort, withoutPort} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metadata, 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writePortFileFixture(t, withPort, "4407")
-
-	for _, tc := range []struct {
-		name, beadsDir, wantPort string
-	}{
-		{"rig port beats the poison", withPort, "4407"},
-		{"poison stays when the rig names no port", withoutPort, "1"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := envMap(BuildPinnedBDEnv(poisoned, tc.beadsDir))
-			if got["BEADS_DOLT_PORT"] != tc.wantPort {
-				t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got["BEADS_DOLT_PORT"], tc.wantPort)
-			}
-		})
-	}
-}
