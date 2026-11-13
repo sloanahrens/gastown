@@ -9,7 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
+
+// censusTestGuard bounds every wait of the census tests. It is a failure guard,
+// not a delay: a passing test never waits on it, and a regression that stops a
+// read from returning fails with a named step instead of hanging the package.
+const censusTestGuard = 10 * time.Second
 
 // censusGateway is the openshell a census test drives. It answers `sandbox
 // list` from listing, fails the first listErrs list calls, and counts the list
@@ -291,6 +297,8 @@ func TestSlingCensus(t *testing.T) {
 		case <-gw.entered:
 		case <-allRead:
 			t.Fatal("every read returned without a list call reaching the gateway")
+		case <-time.After(censusTestGuard): //testpolicy:allow no-sleep — a failure guard, not a delay: the receive normally completes at once, and the bound only turns a deadlocked census into a named failure instead of a hung package
+			t.Fatal("no read reached the gateway's list call within the guard")
 		}
 		// The first read is inside the list call, which holds no census lock.
 		// A census lock held across that call makes TryLock fail, at once and
@@ -304,7 +312,11 @@ func TestSlingCensus(t *testing.T) {
 			t.Error("cache lookup during the in-flight list found no kept answer for the known seat")
 		}
 		openGate()
-		<-allRead
+		select {
+		case <-allRead:
+		case <-time.After(censusTestGuard): //testpolicy:allow no-sleep — a failure guard, not a delay: the receive normally completes at once, and the bound only turns a deadlocked census into a named failure instead of a hung package
+			t.Fatal("the reads did not all return within the guard after the list call was released")
+		}
 		close(errs)
 		for err := range errs {
 			if err != nil {
