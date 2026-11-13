@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"syscall"
 )
 
@@ -35,6 +36,19 @@ var handlers = map[string]Handler{
 	"config":   configHandler,
 	"events":   eventsHandler,
 	"stats":    statsHandler,
+}
+
+// HandlerVerbs returns the tracker verbs the registry answers, sorted. The
+// gateway policy's test (internal/bdgateway) reads it to prove every verb the
+// shim serves is allowlisted, so a handler added here without a policy entry
+// fails that gate instead of failing a call behind the gateway.
+func HandlerVerbs() []string {
+	verbs := make([]string, 0, len(handlers))
+	for verb := range handlers {
+		verbs = append(verbs, verb)
+	}
+	slices.Sort(verbs)
+	return verbs
 }
 
 // OsMain is the production entry: this process's argv, environment and working
