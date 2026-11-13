@@ -1,6 +1,7 @@
 package dataset
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -37,15 +38,22 @@ func TestDispatchDatasetCarriesTheTwoOutcomeColumns(t *testing.T) {
 		t.Errorf("CSV = %q, want %q", got, want)
 	}
 	dict := string(table.Dict("dispatch", "needs"))
+	// The threshold is the scorecard's own value, so a second copy of the
+	// number in the dict would fail here once OverTwentySecs changed.
+	threshold := fmt.Sprintf("over %d minutes (%d seconds)", scorecard.OverTwentySecs/60, scorecard.OverTwentySecs)
 	for _, want := range []string{
 		"| ran_over_twenty | boolean |",
 		"| needed_second_round | boolean |",
-		"over 20 minutes (1200 seconds)",
+		threshold,
 		"attempt 2 or later",
 	} {
 		if !strings.Contains(dict, want) {
 			t.Errorf("dict does not hold %q:\n%s", want, dict)
 		}
+	}
+	// The dict states the threshold once, not again in the same sentence.
+	if got := strings.Count(dict, "minutes"); got != 1 {
+		t.Errorf("dict states a minutes threshold %d times, want once:\n%s", got, dict)
 	}
 }
 
@@ -98,6 +106,30 @@ func cellOf(t *testing.T, table Table, rowID, column string) string {
 		t.Fatalf("no row %s", rowID)
 	}
 	return table.Rows[ri][ci]
+}
+
+// An outcome column may not take a name the export already writes: every cell is
+// keyed by column name, so it would replace that column's value and write its
+// header twice.
+func TestBuildRefusesOutcomeNamedForReservedColumn(t *testing.T) {
+	t.Parallel()
+	for _, name := range []scorecard.Outcome{
+		"row_id", "label", "model", "label_source",
+		"ref_rig", "ref_head", "ans_route",
+	} {
+		t.Run(string(name), func(t *testing.T) {
+			t.Parallel()
+			read := outcomeReading()
+			read.Outcomes = []scorecard.Outcome{name}
+			_, err := Build(read, "needs")
+			if err == nil {
+				t.Fatalf("Build accepted outcome column %q, want a refusal", name)
+			}
+			if !strings.Contains(err.Error(), string(name)) {
+				t.Errorf("error %q does not name the outcome", err)
+			}
+		})
+	}
 }
 
 // An outcome column is a name the dataset writes, so the deny-list refuses a
