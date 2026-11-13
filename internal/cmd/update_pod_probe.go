@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -32,7 +33,10 @@ func podDaemonCommit(ctx context.Context, run update.RunFunc, kubeContext, names
 	if err := podArgument("deployment", deployment); err != nil {
 		return "", err
 	}
-	argv := append(podKubectlPrefix(kubeContext, namespace, inCluster), "exec", "deployment/"+deployment, "--", "gt", "version")
+	// The container is named: with two or more containers in the pod kubectl prints a
+	// "Defaulted container ..." line first, and the runner joins stderr to the output, so the
+	// first-line rule below read that notice instead of gt version (the roll 32 Job proof).
+	argv := append(podKubectlPrefix(kubeContext, namespace, inCluster), "exec", "deployment/"+deployment, "-c", k8sdaemon.Name, "--", "gt", "version")
 	out, exit, err := run(ctx, "", nil, "kubectl", argv...)
 	if err != nil {
 		return "", fmt.Errorf("pod daemon commit: running kubectl exec in deployment %s: %w", deployment, err)
