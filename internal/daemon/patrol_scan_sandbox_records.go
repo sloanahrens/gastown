@@ -49,10 +49,10 @@ const (
 // whatever the tick's clock phase. A failed removal is logged and the pass goes
 // on.
 //
-// A record whose seat the end kept is completed here once the sandbox is gone:
-// the keep's reason "the gateway has not confirmed the sandbox gone" is the
-// fact this pass has just settled, and nothing else would offer that seat's end
-// again (gt-cz5tdz). See completeKeptSeatEnd.
+// A seat the end kept is only released once its sandbox is gone, and a pass
+// that removes the record has just made that true; nothing else offers that
+// seat's end again, so the pass completes it (gt-cz5tdz). See
+// completeKeptSeatEnd.
 func (h *patrolScanHost) patrolScanSandboxRecords() {
 	names := session.ListSandboxSessions(h.town())
 	if len(names) == 0 {
