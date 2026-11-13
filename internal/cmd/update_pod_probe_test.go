@@ -36,7 +36,7 @@ func TestPodDaemonCommitReadsTheVersionLine(t *testing.T) {
 	if commit != "abc1234" {
 		t.Errorf("commit = %q, want abc1234", commit)
 	}
-	want := []string{"kubectl", "--context", "town-ctx", "-n", "gastown", "exec", "deployment/daemon", "--", "gt", "version"}
+	want := []string{"kubectl", "--context", "town-ctx", "-n", "gastown", "exec", "deployment/daemon", "-c", "daemon", "--", "gt", "version"}
 	if len(run.calls) != 1 {
 		t.Fatalf("commands run = %d, want 1: %v", len(run.calls), run.calls)
 	}
@@ -55,7 +55,7 @@ func TestPodDaemonCommitRunsTheTrimmedArguments(t *testing.T) {
 	if _, err := podDaemonCommit(context.Background(), run.run, " town-ctx ", "\tgastown ", " daemon", false); err != nil {
 		t.Fatalf("podDaemonCommit: %v", err)
 	}
-	want := []string{"kubectl", "--context", "town-ctx", "-n", "gastown", "exec", "deployment/daemon", "--", "gt", "version"}
+	want := []string{"kubectl", "--context", "town-ctx", "-n", "gastown", "exec", "deployment/daemon", "-c", "daemon", "--", "gt", "version"}
 	if len(run.calls) != 1 {
 		t.Fatalf("commands run = %d, want 1: %v", len(run.calls), run.calls)
 	}
@@ -151,7 +151,7 @@ func TestPodDaemonCommitInClusterOmitsContext(t *testing.T) {
 		if commit != "abc1234" {
 			t.Errorf("commit = %q, want abc1234", commit)
 		}
-		want := []string{"kubectl", "-n", "gastown", "exec", "deployment/daemon", "--", "gt", "version"}
+		want := []string{"kubectl", "-n", "gastown", "exec", "deployment/daemon", "-c", "daemon", "--", "gt", "version"}
 		if len(run.calls) != 1 || !slices.Equal(run.calls[0], want) {
 			t.Errorf("commands = %v, want exactly %v", run.calls, want)
 		}
