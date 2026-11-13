@@ -16,13 +16,17 @@ import (
 
 // The pod daemon's kubectl calls are written down in deploy/k8s/update-rbac.yaml
 // and held to testdata/pod-update-reads.golden, which lists one line per distinct
-// call as `verb resource` in the gt namespace. The Role must grant every golden
-// line and nothing else (gt-360i18).
+// call as `verb resource` in the gt namespace. The gt-update Role must grant every
+// golden line and nothing else, and its Deployment rule is bound to the two
+// Deployments the roll moves (gt-360i18). The gt-update-launch Role grants the
+// daemon's Job verbs and nothing else (gt-1qnr01).
 const (
-	podRBACManifest = "../../deploy/k8s/update-rbac.yaml"
-	podReadsGolden  = "testdata/pod-update-reads.golden"
-	podRBACNS       = "gt"
-	podRBACName     = "gt-update"
+	podRBACManifest   = "../../deploy/k8s/update-rbac.yaml"
+	podReadsGolden    = "testdata/pod-update-reads.golden"
+	podRBACNS         = "gt"
+	podRBACName       = "gt-update"
+	podRBACLaunchName = "gt-update-launch"
+	podRBACDaemonSA   = "daemon"
 )
 
 // podRBACGroup is the API group each resource the pod daemon's kubectl calls touch
@@ -34,8 +38,42 @@ var podRBACGroup = map[string]string{
 	"pods/exec":   "",
 }
 
+// podRBACBoundNames are the resources a rule may bind by resourceNames, and the names
+// the gt-update Role binds each to: the two Deployments the roll moves. A rule on a
+// bound resource must name exactly these, and a rule on any other resource names none.
+var podRBACBoundNames = map[string][]string{
+	"deployments": {"daemon", "dashboard"},
+}
+
+// podRBACLaunchGrants is every grant the gt-update-launch Role needs: the Job verbs
+// the daemon uses to start the roll, and a read and a delete of the Jobs it made.
+var podRBACLaunchGrants = []podRBACGrant{
+	{group: "batch", resource: "jobs", verb: "create"},
+	{group: "batch", resource: "jobs", verb: "get"},
+	{group: "batch", resource: "jobs", verb: "list"},
+	{group: "batch", resource: "jobs", verb: "watch"},
+	{group: "batch", resource: "jobs", verb: "delete"},
+}
+
 // podRBACKinds are the only documents the manifest may hold.
 var podRBACKinds = []string{"ServiceAccount", "Role", "RoleBinding"}
+
+// podRBACWant is the one document of each kind and name the manifest holds: the
+// gt-update ServiceAccount, its Role and RoleBinding, and the launch Role and the
+// RoleBinding that binds it to the daemon's ServiceAccount.
+var podRBACWant = []struct{ kind, name string }{
+	{"ServiceAccount", podRBACName},
+	{"Role", podRBACName},
+	{"RoleBinding", podRBACName},
+	{"Role", podRBACLaunchName},
+	{"RoleBinding", podRBACLaunchName},
+}
+
+// podRBACSubjects is the one subject each RoleBinding must name, by the binding's name.
+var podRBACSubjects = map[string]podRBACSubject{
+	podRBACName:       {Kind: "ServiceAccount", Name: podRBACName, Namespace: podRBACNS},
+	podRBACLaunchName: {Kind: "ServiceAccount", Name: podRBACDaemonSA, Namespace: podRBACNS},
+}
 
 type podRBACMeta struct {
 	Name      string `yaml:"name"`
@@ -159,15 +197,16 @@ func podRBACRuleGrants(rule podRBACRule, g podRBACGrant) bool {
 		slices.Contains(rule.Verbs, g.verb)
 }
 
-// podRBACShapeProblems holds the manifest to its shape: exactly one ServiceAccount,
-// Role and RoleBinding, each named gt-update in gt; the binding's roleRef is the
-// Role and its only subject is the ServiceAccount. Any other document, such as a
-// ClusterRole, is refused by its kind, and a document with no kind is refused too.
+// podRBACShapeProblems holds the manifest to its shape: one ServiceAccount, one Role
+// and one RoleBinding named gt-update, and one Role and one RoleBinding named
+// gt-update-launch, all in gt. Each binding's roleRef is the Role of its own name and
+// its only subject is the ServiceAccount podRBACSubjects names. Any other document,
+// such as a ClusterRole, is refused by its kind, and a document with no kind is
+// refused too.
 func podRBACShapeProblems(docs []podRBACDoc) []string {
 	var problems []string
 	counts := map[string]int{}
 	for _, doc := range docs {
-		counts[doc.Kind]++
 		if doc.Kind == "" {
 			problems = append(problems, "the manifest holds a document with no kind")
 			continue
@@ -176,22 +215,97 @@ func podRBACShapeProblems(docs []podRBACDoc) []string {
 			problems = append(problems, fmt.Sprintf("the manifest holds a %s, and only %s are allowed", doc.Kind, strings.Join(podRBACKinds, ", ")))
 			continue
 		}
-		if doc.Metadata.Name != podRBACName || doc.Metadata.Namespace != podRBACNS {
-			problems = append(problems, fmt.Sprintf("the %s is %s/%s, not %s/%s", doc.Kind, doc.Metadata.Namespace, doc.Metadata.Name, podRBACNS, podRBACName))
+		counts[doc.Kind]++
+		if !podRBACWanted(doc.Kind, doc.Metadata.Name) || doc.Metadata.Namespace != podRBACNS {
+			problems = append(problems, fmt.Sprintf("the %s is %s/%s, not %s", doc.Kind, doc.Metadata.Namespace, doc.Metadata.Name, podRBACNames(doc.Kind)))
 		}
 	}
 	for _, kind := range podRBACKinds {
-		if counts[kind] != 1 {
-			problems = append(problems, fmt.Sprintf("the manifest holds %d %s documents, want 1", counts[kind], kind))
+		want := 0
+		for _, w := range podRBACWant {
+			if w.kind == kind {
+				want++
+			}
+		}
+		if counts[kind] != want {
+			problems = append(problems, fmt.Sprintf("the manifest holds %d %s documents, want %d", counts[kind], kind, want))
 		}
 	}
-	if binding := podRBACKindOf(docs, "RoleBinding"); binding != nil {
-		if binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != podRBACName {
-			problems = append(problems, fmt.Sprintf("the RoleBinding's roleRef is %s %s, not Role %s", binding.RoleRef.Kind, binding.RoleRef.Name, podRBACName))
+	for _, w := range podRBACWant {
+		if n := len(podRBACNamed(docs, w.kind, w.name)); n != 1 {
+			problems = append(problems, fmt.Sprintf("the manifest holds %d %s %s documents, want 1", n, w.kind, w.name))
 		}
-		want := podRBACSubject{Kind: "ServiceAccount", Name: podRBACName, Namespace: podRBACNS}
-		if len(binding.Subjects) != 1 || binding.Subjects[0] != want {
-			problems = append(problems, "the RoleBinding's subjects are not the one ServiceAccount gt-update in gt")
+	}
+	for _, binding := range podRBACNamedKind(docs, "RoleBinding") {
+		if binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != binding.Metadata.Name {
+			problems = append(problems, fmt.Sprintf("the RoleBinding %s's roleRef is %s %s, not Role %s", binding.Metadata.Name, binding.RoleRef.Kind, binding.RoleRef.Name, binding.Metadata.Name))
+		}
+		if want := podRBACSubjects[binding.Metadata.Name]; len(binding.Subjects) != 1 || binding.Subjects[0] != want {
+			problems = append(problems, fmt.Sprintf("the RoleBinding %s's subjects are not the one ServiceAccount %s/%s", binding.Metadata.Name, want.Namespace, want.Name))
+		}
+	}
+	return problems
+}
+
+// podRBACWanted reports whether the manifest may hold a document of kind named name:
+// the ServiceAccount is gt-update alone, and each Role and RoleBinding is one of the
+// two names.
+func podRBACWanted(kind, name string) bool {
+	for _, w := range podRBACWant {
+		if w.kind == kind && w.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// podRBACNames is the namespaced name each kind of document may carry, for a problem.
+func podRBACNames(kind string) string {
+	if kind == "ServiceAccount" {
+		return podRBACNS + "/" + podRBACName
+	}
+	return podRBACNS + "/" + podRBACName + " or " + podRBACNS + "/" + podRBACLaunchName
+}
+
+// podRBACNamedKind returns every document of kind, in manifest order.
+func podRBACNamedKind(docs []podRBACDoc, kind string) []podRBACDoc {
+	var out []podRBACDoc
+	for _, doc := range docs {
+		if doc.Kind == kind {
+			out = append(out, doc)
+		}
+	}
+	return out
+}
+
+// podRBACNamed returns every document of kind named name.
+func podRBACNamed(docs []podRBACDoc, kind, name string) []podRBACDoc {
+	var out []podRBACDoc
+	for _, doc := range podRBACNamedKind(docs, kind) {
+		if doc.Metadata.Name == name {
+			out = append(out, doc)
+		}
+	}
+	return out
+}
+
+// podRBACRoleNamed returns the Role named name, pointing into docs so an edit to it
+// reaches the fixture, or nil when the manifest holds none.
+func podRBACRoleNamed(docs []podRBACDoc, name string) *podRBACDoc {
+	for i := range docs {
+		if docs[i].Kind == "Role" && docs[i].Metadata.Name == name {
+			return &docs[i]
+		}
+	}
+	return nil
+}
+
+// podRBACGrantCoverage names each grant in needed that no rule of role grants.
+func podRBACGrantCoverage(role *podRBACDoc, needed []podRBACGrant) []string {
+	var problems []string
+	for _, g := range needed {
+		if !slices.ContainsFunc(role.Rules, func(r podRBACRule) bool { return podRBACRuleGrants(r, g) }) {
+			problems = append(problems, fmt.Sprintf("grant %q is not granted by any rule of the Role", g))
 		}
 	}
 	return problems
@@ -203,29 +317,50 @@ func podRBACCoverageProblems(role *podRBACDoc, golden []string) []string {
 		return []string{"the manifest holds no Role"}
 	}
 	grants, problems := podRBACGrantsOf(golden)
-	for _, g := range grants {
-		if !slices.ContainsFunc(role.Rules, func(r podRBACRule) bool { return podRBACRuleGrants(r, g) }) {
-			problems = append(problems, fmt.Sprintf("golden line %q is not granted by any rule of the Role", g))
-		}
-	}
-	return problems
+	return append(problems, podRBACGrantCoverage(role, grants)...)
 }
 
-// podRBACGrantProblems names each grant the Role makes that no golden line needs:
-// a wildcard, a resourceNames or nonResourceURLs restriction the check does not
-// model, and any group, resource or verb outside the golden, Secrets included.
+// podRBACGrantProblems names each grant the Role makes that no golden line needs,
+// and each golden line the Role does not grant.
 func podRBACGrantProblems(role *podRBACDoc, golden []string) []string {
 	if role == nil {
 		return []string{"the manifest holds no Role"}
 	}
 	needed, problems := podRBACGrantsOf(golden)
+	return append(problems, podRBACRuleProblems(role, needed)...)
+}
+
+// podRBACLaunchProblems holds the gt-update-launch Role to its grants: each one is
+// granted, and the Role grants nothing else.
+func podRBACLaunchProblems(role *podRBACDoc) []string {
+	if role == nil {
+		return []string{"the manifest holds no Role " + podRBACLaunchName}
+	}
+	return append(podRBACGrantCoverage(role, podRBACLaunchGrants), podRBACRuleProblems(role, podRBACLaunchGrants)...)
+}
+
+// podRBACRuleProblems names each grant the Role makes that needed does not list: a
+// wildcard, any group, resource or verb outside needed, Secrets included, and a
+// resourceNames restriction the check does not model except on a bound resource,
+// which must name exactly podRBACBoundNames.
+func podRBACRuleProblems(role *podRBACDoc, needed []podRBACGrant) []string {
+	var problems []string
 	allowed := make(map[podRBACGrant]bool, len(needed))
 	for _, g := range needed {
 		allowed[g] = true
 	}
 	for i, rule := range role.Rules {
-		if len(rule.ResourceNames) > 0 || len(rule.NonResourceURLs) > 0 {
-			problems = append(problems, fmt.Sprintf("rule %d restricts resourceNames or nonResourceURLs, which this check does not model", i))
+		if len(rule.NonResourceURLs) > 0 {
+			problems = append(problems, fmt.Sprintf("rule %d restricts nonResourceURLs, which this check does not model", i))
+		}
+		for _, resource := range rule.Resources {
+			bound, isBound := podRBACBoundNames[resource]
+			switch {
+			case isBound && !podRBACSameSet(rule.ResourceNames, bound):
+				problems = append(problems, fmt.Sprintf("rule %d grants %s, which is not bound to resourceNames %v", i, resource, bound))
+			case !isBound && len(rule.ResourceNames) > 0:
+				problems = append(problems, fmt.Sprintf("rule %d restricts resourceNames on %s, which this check does not model", i, resource))
+			}
 		}
 		for _, group := range rule.APIGroups {
 			for _, resource := range rule.Resources {
@@ -235,13 +370,21 @@ func podRBACGrantProblems(role *podRBACDoc, golden []string) []string {
 					case group == "*" || resource == "*" || verb == "*":
 						problems = append(problems, fmt.Sprintf("rule %d grants a wildcard: group %q, resource %q, verb %q", i, group, resource, verb))
 					case !allowed[g]:
-						problems = append(problems, fmt.Sprintf("rule %d grants group %q, resource %q, verb %q, which no golden line needs", i, group, resource, verb))
+						problems = append(problems, fmt.Sprintf("rule %d grants group %q, resource %q, verb %q, which no expected grant needs", i, group, resource, verb))
 					}
 				}
 			}
 		}
 	}
 	return problems
+}
+
+// podRBACSameSet reports whether a and b hold the same names, in any order.
+func podRBACSameSet(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }
 
 // loadPodRBAC parses the real manifest, failing the test when it is not valid YAML.
@@ -279,11 +422,22 @@ func podRBACDocOrFail(t *testing.T, docs []podRBACDoc, kind string) *podRBACDoc 
 	return doc
 }
 
-// podRBACRuleNamed returns the first rule of a fixture's Role that names resource,
-// failing the test when none does.
+// podRBACRoleOrFail returns the gt-update Role of a fixture, failing the test when the
+// fixture holds none, so an edit never runs against nothing.
+func podRBACRoleOrFail(t *testing.T, docs []podRBACDoc) *podRBACDoc {
+	t.Helper()
+	role := podRBACRoleNamed(docs, podRBACName)
+	if role == nil {
+		t.Fatalf("fixture holds no Role %s", podRBACName)
+	}
+	return role
+}
+
+// podRBACRuleNamed returns the first rule of a fixture's gt-update Role that names
+// resource, failing the test when none does.
 func podRBACRuleNamed(t *testing.T, docs []podRBACDoc, resource string) *podRBACRule {
 	t.Helper()
-	role := podRBACDocOrFail(t, docs, "Role")
+	role := podRBACRoleOrFail(t, docs)
 	for i := range role.Rules {
 		if slices.Contains(role.Rules[i].Resources, resource) {
 			return &role.Rules[i]
@@ -320,7 +474,7 @@ var podRBACShapeRefusals = []podRBACRefusal{
 	{
 		name: "a Role outside gt",
 		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
-			podRBACDocOrFail(t, docs, "Role").Metadata.Namespace = "default"
+			podRBACRoleOrFail(t, docs).Metadata.Namespace = "default"
 			return docs
 		},
 		want: "not gt/gt-update",
@@ -372,6 +526,29 @@ var podRBACShapeRefusals = []podRBACRefusal{
 		},
 		want: "subjects",
 	},
+	{
+		name: "the launch binding to another ServiceAccount",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACBindingOrFail(t, docs, podRBACLaunchName).Subjects[0].Name = "gt-update"
+			return docs
+		},
+		want: "subjects",
+	},
+	{
+		name: "the launch binding to the gt-update Role",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACBindingOrFail(t, docs, podRBACLaunchName).RoleRef.Name = podRBACName
+			return docs
+		},
+		want: "roleRef",
+	},
+	{
+		name: "no launch Role",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			return slices.DeleteFunc(docs, func(d podRBACDoc) bool { return d.Kind == "Role" && d.Metadata.Name == podRBACLaunchName })
+		},
+		want: "Role gt-update-launch documents",
+	},
 }
 
 // podRBACGrantWidenings are Role edits the grant check must refuse. The ClusterRole
@@ -405,7 +582,7 @@ var podRBACGrantWidenings = []podRBACRefusal{
 	{
 		name: "a Secrets rule",
 		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
-			role := podRBACDocOrFail(t, docs, "Role")
+			role := podRBACRoleOrFail(t, docs)
 			role.Rules = append(role.Rules, podRBACRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}})
 			return docs
 		},
@@ -427,6 +604,30 @@ var podRBACGrantWidenings = []podRBACRefusal{
 			return docs
 		},
 		want: "resourceNames",
+	},
+	{
+		name: "a deployments rule with no resourceNames",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").ResourceNames = nil
+			return docs
+		},
+		want: "not bound to resourceNames",
+	},
+	{
+		name: "a deployments rule bound to one Deployment of the two",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").ResourceNames = []string{"daemon"}
+			return docs
+		},
+		want: "not bound to resourceNames",
+	},
+	{
+		name: "a deployments rule bound to another Deployment",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").ResourceNames = []string{"daemon", "gt-other"}
+			return docs
+		},
+		want: "not bound to resourceNames",
 	},
 	{
 		name: "a ClusterRole",
@@ -473,7 +674,7 @@ func TestPodUpdateRBACManifestRefusesKindlessDocument(t *testing.T) {
 // manifest with no Role, a golden line that is not `verb resource`, and a rule that
 // grants no golden line are problems too: each is named, never skipped.
 func podRBACRemovalProblems(docs []podRBACDoc, golden []string) []string {
-	role := podRBACKindOf(docs, "Role")
+	role := podRBACRoleNamed(docs, podRBACName)
 	if role == nil {
 		return []string{"the manifest holds no Role"}
 	}
@@ -508,7 +709,7 @@ func TestPodUpdateRBACCoversEveryRead(t *testing.T) {
 	t.Parallel()
 	golden := loadPodReadsGolden(t)
 	docs := loadPodRBAC(t)
-	if problems := podRBACCoverageProblems(podRBACKindOf(docs, "Role"), golden); len(problems) > 0 {
+	if problems := podRBACCoverageProblems(podRBACRoleNamed(docs, podRBACName), golden); len(problems) > 0 {
 		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
 	}
 	if problems := podRBACRemovalProblems(docs, golden); len(problems) > 0 {
@@ -533,7 +734,7 @@ func TestPodUpdateRBACRemovalCheckRefusesBadRole(t *testing.T) {
 		{
 			name: "a rule granting no golden line",
 			edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
-				role := podRBACDocOrFail(t, docs, "Role")
+				role := podRBACRoleOrFail(t, docs)
 				role.Rules = append(role.Rules, podRBACRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}})
 				return docs
 			},
@@ -555,25 +756,126 @@ func TestPodUpdateRBACCoversEveryReadRefusesBadGolden(t *testing.T) {
 		{name: "a line with no resource", line: "get", want: "is not `verb resource`"},
 		{name: "a resource with no API group", line: "get secrets", want: "no API group"},
 	} {
-		problems := podRBACCoverageProblems(podRBACKindOf(loadPodRBAC(t), "Role"), []string{r.line})
+		problems := podRBACCoverageProblems(podRBACRoleNamed(loadPodRBAC(t), podRBACName), []string{r.line})
 		podRBACRefused(t, r.name, problems, r.want)
 	}
 }
 
-// TestPodUpdateRBACGrantsNothingElse holds the manifest to the golden: the real
-// file grants nothing outside it, and each widening in podRBACGrantWidenings is
-// refused by name.
+// podRBACAllProblems holds the whole manifest: its shape, the gt-update Role to the
+// golden, and the gt-update-launch Role to its grants.
+func podRBACAllProblems(docs []podRBACDoc, golden []string) []string {
+	problems := podRBACShapeProblems(docs)
+	problems = append(problems, podRBACGrantProblems(podRBACRoleNamed(docs, podRBACName), golden)...)
+	return append(problems, podRBACLaunchProblems(podRBACRoleNamed(docs, podRBACLaunchName))...)
+}
+
+// TestPodUpdateRBACGrantsNothingElse holds the manifest to the golden and to the
+// launch grants: the real file grants nothing outside them, and each widening in
+// podRBACGrantWidenings is refused by name.
 func TestPodUpdateRBACGrantsNothingElse(t *testing.T) {
 	t.Parallel()
 	golden := loadPodReadsGolden(t)
-	docs := loadPodRBAC(t)
-	problems := append(podRBACShapeProblems(docs), podRBACGrantProblems(podRBACKindOf(docs, "Role"), golden)...)
-	if len(problems) > 0 {
+	if problems := podRBACAllProblems(loadPodRBAC(t), golden); len(problems) > 0 {
 		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
 	}
 	for _, r := range podRBACGrantWidenings {
 		docs := r.edit(t, loadPodRBAC(t))
-		problems := append(podRBACShapeProblems(docs), podRBACGrantProblems(podRBACKindOf(docs, "Role"), golden)...)
-		podRBACRefused(t, r.name, problems, r.want)
+		podRBACRefused(t, r.name, podRBACAllProblems(docs, golden), r.want)
 	}
+}
+
+// podRBACLaunchWidenings are edits to the gt-update-launch Role that its grant check
+// must refuse: a verb or resource outside the Job grants, a wildcard, or a
+// resourceNames restriction on jobs.
+var podRBACLaunchWidenings = []podRBACRefusal{
+	{
+		name: "an update verb on jobs",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			rule := &podRBACLaunchOrFail(t, docs).Rules[0]
+			rule.Verbs = append(rule.Verbs, "update")
+			return docs
+		},
+		want: `"update"`,
+	},
+	{
+		name: "a patch verb on jobs",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			rule := &podRBACLaunchOrFail(t, docs).Rules[0]
+			rule.Verbs = append(rule.Verbs, "patch")
+			return docs
+		},
+		want: `"patch"`,
+	},
+	{
+		name: "a pods rule",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			role := podRBACLaunchOrFail(t, docs)
+			role.Rules = append(role.Rules, podRBACRule{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}})
+			return docs
+		},
+		want: `"pods"`,
+	},
+	{
+		name: "a Secrets rule",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			role := podRBACLaunchOrFail(t, docs)
+			role.Rules = append(role.Rules, podRBACRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}})
+			return docs
+		},
+		want: `"secrets"`,
+	},
+	{
+		name: "a wildcard verb on jobs",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACLaunchOrFail(t, docs).Rules[0].Verbs = []string{"*"}
+			return docs
+		},
+		want: "wildcard",
+	},
+	{
+		name: "a jobs rule bound to one Job",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACLaunchOrFail(t, docs).Rules[0].ResourceNames = []string{"gt-update-manual"}
+			return docs
+		},
+		want: "resourceNames",
+	},
+}
+
+// TestPodUpdateLaunchRBAC holds the gt-update-launch Role to the Job grants the daemon
+// needs: the real file grants exactly those, and each widening in
+// podRBACLaunchWidenings is refused by name.
+func TestPodUpdateLaunchRBAC(t *testing.T) {
+	t.Parallel()
+	if problems := podRBACLaunchProblems(podRBACRoleNamed(loadPodRBAC(t), podRBACLaunchName)); len(problems) > 0 {
+		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
+	}
+	for _, r := range podRBACLaunchWidenings {
+		docs := r.edit(t, loadPodRBAC(t))
+		podRBACRefused(t, r.name, podRBACLaunchProblems(podRBACRoleNamed(docs, podRBACLaunchName)), r.want)
+	}
+}
+
+// podRBACBindingOrFail returns the RoleBinding named name in a fixture, failing the
+// test when the fixture holds none, so an edit never runs against nothing.
+func podRBACBindingOrFail(t *testing.T, docs []podRBACDoc, name string) *podRBACDoc {
+	t.Helper()
+	for i := range docs {
+		if docs[i].Kind == "RoleBinding" && docs[i].Metadata.Name == name {
+			return &docs[i]
+		}
+	}
+	t.Fatalf("fixture holds no RoleBinding %s", name)
+	return nil
+}
+
+// podRBACLaunchOrFail returns the gt-update-launch Role of a fixture, failing the test
+// when the fixture holds none.
+func podRBACLaunchOrFail(t *testing.T, docs []podRBACDoc) *podRBACDoc {
+	t.Helper()
+	role := podRBACRoleNamed(docs, podRBACLaunchName)
+	if role == nil {
+		t.Fatalf("fixture holds no Role %s", podRBACLaunchName)
+	}
+	return role
 }

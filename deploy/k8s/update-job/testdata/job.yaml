@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gt-update
+  namespace: gt
+  labels:
+    app.kubernetes.io/name: gt-update
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gt-update
+    spec:
+      serviceAccountName: gt-update
+      automountServiceAccountToken: true
+      priorityClassName: gt-control-plane
+      restartPolicy: Never
+      initContainers:
+        - name: images
+          image: registry.example.test/gastown/daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          command:
+            - gt
+          args:
+            - update
+            - images
+            - --sha
+            - abababababababababababababababababababab
+            - --out
+            - /Users/sloan/gt/.runtime/update/images.yaml
+          workingDir: /Users/sloan/gt
+          env:
+            - name: XDG_CONFIG_HOME
+              value: /run/gt/xdg
+          volumeMounts:
+            - name: town-state
+              mountPath: /Users/sloan/gt
+            - name: viewer-token
+              mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+              subPath: forgejo-viewer.env
+              readOnly: true
+      containers:
+        - name: update
+          image: registry.example.test/gastown/daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          command:
+            - gt
+          args:
+            - update
+            - --images
+            - /Users/sloan/gt/.runtime/update/images.yaml
+            - --pod-in-cluster
+            - --pod-namespace
+            - gt
+          workingDir: /Users/sloan/gt
+          env:
+            - name: XDG_CONFIG_HOME
+              value: /run/gt/xdg
+          volumeMounts:
+            - name: town-state
+              mountPath: /Users/sloan/gt
+            - name: viewer-token
+              mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+              subPath: forgejo-viewer.env
+              readOnly: true
+      volumes:
+        - name: town-state
+          persistentVolumeClaim:
+            claimName: town-state
+        - name: viewer-token
+          secret:
+            secretName: daemon-forgejo-viewer.env
+            defaultMode: 256
