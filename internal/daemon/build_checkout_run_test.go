@@ -38,7 +38,7 @@ func buildCheckoutPodRun(t *testing.T, town string, fullSHA func() (string, erro
 		ownerProbe:        podProbe(t, podEngine, unreadJob(t)),
 		containerMode:     true,
 		fullBuildCommitFn: fullSHA,
-		rebuildGTEnsureFn: func(_ context.Context, townRoot, rig, rev string) (string, error) {
+		buildCheckoutEnsureFn: func(_ context.Context, townRoot, rig, rev string) (string, error) {
 			rec.calls++
 			rec.townRoot, rec.rig, rec.rev = townRoot, rig, rev
 			return rec.checkout, rec.returnErr
@@ -56,6 +56,24 @@ func buildCheckoutPodRun(t *testing.T, town string, fullSHA func() (string, erro
 	d.cancel()
 	err := d.Run()
 	return logs.String(), err
+}
+
+// A pod whose full build commit and checkout resolve runs the start check and
+// goes on: Run does not refuse, and Ensure is asked once for the daemon's own
+// full sha.
+func TestBuildCheckoutStartPassesAtTheRun(t *testing.T) {
+	t.Parallel()
+	town, checkout := buildCheckoutTown(t)
+	rec := &buildCheckoutEnsureRecord{checkout: checkout}
+	_, err := buildCheckoutPodRun(t, town, func() (string, error) {
+		return buildCheckoutTestSHA, nil
+	}, rec)
+	if err != nil {
+		t.Fatalf("Run = %v, want a pod that started", err)
+	}
+	if rec.calls != 1 || rec.rev != buildCheckoutTestSHA {
+		t.Fatalf("Ensure called %d times at rev %q, want once at %q", rec.calls, rec.rev, buildCheckoutTestSHA)
+	}
 }
 
 // A pod whose build commit is not known in full does not start: Run refuses at

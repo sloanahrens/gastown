@@ -62,7 +62,13 @@ const (
 // question when the sandbox exists: at most two gateway questions. So the walk
 // makes at most the budget in tmux probes and twice the budget in gateway
 // questions, and records the gateway still has cannot starve the ones behind
-// them. The walk over the name-sorted records starts after the name the
+// them. A completion (completeKeptSeatEnd) asks the gateway its own two
+// questions, and those are exempt from the walk's budget: a completion follows
+// a record the pass has just checked, so it takes no other record's place, and
+// it cannot wait for a later tick because nothing else offers that kept seat's
+// end again. One tick therefore asks at most four times the budget in gateway
+// questions and still checks at most the budget in records. The walk over the
+// name-sorted records starts after the name the
 // last tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks judge
 // consecutive names and every record is judged within ceil(n/budget) ticks,
 // whatever the tick's clock phase. A failed removal is logged and the pass goes
@@ -165,7 +171,8 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 //
 // A record without landing facts, one that cannot be read, and an end that does
 // not complete are each logged with the seat's name, and the keep stands: the
-// pass goes on to the next record.
+// pass goes on to the next record. The two gateway questions the end asks are
+// outside the walk's record budget (see patrolScanSandboxRecords).
 func (h *patrolScanHost) completeKeptSeatEnd(rec session.SandboxRecord) {
 	if rec.Rig == "" || rec.Polecat == "" {
 		return // a record that names no seat has no kept record to complete

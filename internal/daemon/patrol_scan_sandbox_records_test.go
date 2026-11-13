@@ -889,3 +889,65 @@ func TestPatrolScanSeatEndFailureDoesNotStopThePass(t *testing.T) {
 		t.Errorf("log lacks %q:\n%s", want, logs.String())
 	}
 }
+
+// One tick asks the gateway at most four times its record budget: twice for
+// each record the walk checks, and twice more for each kept seat's end the pass
+// completes. The completion's questions are exempt from the walk's budget
+// because they follow a record the pass has just checked and cannot wait for a
+// later tick, so the walk still checks exactly its budget in records and no
+// record is starved.
+func TestCompleteKeptSeatEndChargesTheTickBudget(t *testing.T) {
+	t.Parallel()
+	const budget = 3
+	town := t.TempDir()
+	clk := newFixedClock()
+	names := []string{"gt-p00", "gt-p01", "gt-p02", "gt-p03"}
+	landing := sandboxSeatLanding{BeadID: endBead, Branch: "polecat/valkyrie/gt-7urwpf", Landed: true}
+	for _, n := range names {
+		if err := session.WriteSandboxRecord(town, session.SandboxRecord{
+			Session: n, Rig: endRig, Polecat: n, Gateway: "gw1", CreatedAt: clk.Now().Add(-time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeKeptSandboxSeat(town, endRig, n, keptSandboxSeatRecord{
+			Bead: endBead, Reason: sandboxNotGoneReason, Since: clk.Now().Add(-time.Hour), Landing: &landing,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var walkAsks, endCalls, gatewayAsks int
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: newFakeTmux(clk), clock: clk}
+	askGateway := func(string, string) (bool, error) {
+		gatewayAsks++
+		return false, nil
+	}
+	d.sandboxExists = askGateway
+	d.endSandboxSeat = func(_, name string, _ sandboxSeatLanding) bool {
+		endCalls++
+		// The seat's end asks the gateway whether its sandbox is gone and then
+		// for its phase: two questions, through the daemon's own seam.
+		askGateway("gw1", name)
+		askGateway("gw1", name)
+		return true
+	}
+	h := &patrolScanHost{
+		d: d,
+		sandboxExists: func(gateway, name string) (bool, error) {
+			walkAsks++
+			return askGateway(gateway, name)
+		},
+		sandboxRecordBudget: budget,
+	}
+
+	h.patrolScanSandboxRecords()
+
+	if walkAsks != budget {
+		t.Errorf("the walk asked %d records, want its budget of %d", walkAsks, budget)
+	}
+	if endCalls != walkAsks {
+		t.Errorf("completed %d kept seat ends, want one per record the walk dropped (%d)", endCalls, walkAsks)
+	}
+	if want := 4 * budget; gatewayAsks > want {
+		t.Errorf("the tick asked the gateway %d questions, want at most %d (twice the budget for the walk, twice more per completion)", gatewayAsks, want)
+	}
+}

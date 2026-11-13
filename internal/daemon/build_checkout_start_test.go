@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -31,7 +33,7 @@ func buildCheckoutTestDaemon(t *testing.T, townRoot, sha string, shaErr error, r
 	d, _ := newTestDaemon(townRoot)
 	d.containerMode = true
 	d.fullBuildCommitFn = func() (string, error) { return sha, shaErr }
-	d.rebuildGTEnsureFn = func(_ context.Context, townRoot, rig, rev string) (string, error) {
+	d.buildCheckoutEnsureFn = func(_ context.Context, townRoot, rig, rev string) (string, error) {
 		rec.calls++
 		rec.townRoot, rec.rig, rec.rev = townRoot, rig, rev
 		return rec.checkout, rec.returnErr
@@ -55,6 +57,62 @@ func writeBuildCheckoutSettings(t *testing.T, townRoot, raw string) {
 	}
 	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// buildCheckoutTree lists every file under roots with its content, so a test
+// can say a step changed nothing.
+func buildCheckoutTree(t *testing.T, roots ...string) map[string]string {
+	t.Helper()
+	tree := make(map[string]string)
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			tree[path] = string(data)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("listing %s: %v", root, err)
+		}
+	}
+	return tree
+}
+
+// TestBuildCheckoutStartDryRun: the start check changes nothing itself. A
+// resolver that reports the checkout without moving it leaves the town and the
+// checkout exactly as it found them, and the log names the checkout and the
+// commit the daemon is built from.
+func TestBuildCheckoutStartDryRun(t *testing.T) {
+	t.Parallel()
+	townRoot, checkout := buildCheckoutTown(t)
+	if err := os.WriteFile(filepath.Join(checkout, "checkout-marker"), []byte("where the checkout was\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := &buildCheckoutEnsureRecord{checkout: checkout}
+	d := buildCheckoutTestDaemon(t, townRoot, buildCheckoutTestSHA, nil, rec)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	before := buildCheckoutTree(t, townRoot, checkout)
+
+	if err := d.startBuildCheckout(context.Background()); err != nil {
+		t.Fatalf("startBuildCheckout: %v", err)
+	}
+	if after := buildCheckoutTree(t, townRoot, checkout); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the start check changed the town or the checkout:\nbefore: %v\nafter: %v", before, after)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("Ensure called %d times, want once", rec.calls)
+	}
+	for _, want := range []string{checkout, buildCheckoutTestSHA} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the start log does not name %q: %q", want, logs.String())
+		}
 	}
 }
 

@@ -30,7 +30,7 @@ func (d *Daemon) startBuildCheckout(ctx context.Context) error {
 		return fmt.Errorf("refusing to start: the daemon's build commit is not a full sha: %w", err)
 	}
 
-	ensure := d.rebuildGTEnsureFn
+	ensure := d.buildCheckoutEnsureFn
 	if ensure == nil {
 		ensure = buildsrc.Ensure
 	}
@@ -38,6 +38,7 @@ func (d *Daemon) startBuildCheckout(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("refusing to start: the gt source checkout at %s: %w", sha, err)
 	}
+	d.logger.Printf("the gt source checkout is %s at %s", checkout, sha)
 
 	ts, err := agentconfig.LoadTownSettings(agentconfig.TownSettingsPath(d.config.TownRoot))
 	if err != nil {

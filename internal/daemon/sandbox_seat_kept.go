@@ -17,18 +17,16 @@ import (
 
 // A sandbox seat the daemon keeps for any reason but the jev_rules ask leaves a
 // durable record of the keep: the seat, its bead, the reason the end gave, when
-// that reason began (gt-464nw6), and the landing facts the end decided with, so
-// the patrol can offer the seat's end again once it has deleted the sandbox
-// that kept it (gt-cz5tdz). Until now the keep was a log line only, so
-// nothing could age it or name it in an attention item. One file per seat under
-// the town's runtime directory. The record is removed when the end decides the
-// seat is no longer kept. The jev_rules keep has its own record
-// (sandbox_seat_end_pending.go) and is not written here.
+// that reason began, and the landing facts the end decided with, so the patrol
+// can offer the seat's end again once it has deleted the sandbox that kept it.
+// One file per seat under the town's runtime directory. The record is removed
+// when the end decides the seat is no longer kept. The jev_rules keep has its
+// own record (sandbox_seat_end_pending.go) and is not written here (gt-464nw6).
 
-// KeptSandboxSeat is one seat the daemon keeps for a reason other than the
+// keptSandboxSeat is one seat the daemon keeps for a reason other than the
 // jev_rules ask: its rig and polecat name, the bead it finished, the keep reason
 // the end gave, and when that reason began.
-type KeptSandboxSeat struct {
+type keptSandboxSeat struct {
 	Rig    string
 	Name   string
 	Bead   string
@@ -125,7 +123,7 @@ func badKeptSeatKey(townRoot, path string) string {
 // read or decoded is returned in bad, by path, never skipped, and so is a rig
 // directory that cannot be listed. The store's own directory that cannot be
 // listed is the error. A town with no records is an empty result, not an error.
-func KeptSandboxSeats(townRoot string) (seats []KeptSandboxSeat, bad []string, err error) {
+func KeptSandboxSeats(townRoot string) (seats []keptSandboxSeat, bad []string, err error) {
 	dir := keptSandboxSeatsDir(townRoot)
 	rigs, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -160,7 +158,7 @@ func KeptSandboxSeats(townRoot string) (seats []KeptSandboxSeat, bad []string, e
 				bad = append(bad, path)
 				continue
 			}
-			seats = append(seats, KeptSandboxSeat{Rig: rigEntry.Name(), Name: name, Bead: rec.Bead, Reason: rec.Reason, Since: rec.Since, Tries: rec.Tries})
+			seats = append(seats, keptSandboxSeat{Rig: rigEntry.Name(), Name: name, Bead: rec.Bead, Reason: rec.Reason, Since: rec.Since, Tries: rec.Tries})
 		}
 	}
 	sort.Slice(seats, func(i, j int) bool {

@@ -375,3 +375,58 @@ func TestKeptSeatRecordRefusesAnUnsafeSeatName(t *testing.T) {
 		t.Error("the kept store was created for an unsafe seat name")
 	}
 }
+
+// TestSeatEndPartialRemovalKeptRecord pins the two kept-record answers a partial
+// removal and an undated record get: a removal that deleted part of a seat and
+// then failed leaves nothing to wait for, so the kept record goes with the seat
+// (gt-sefzt); a kept record with a zero since is dated from the pass that
+// rewrites it, so the keep can still age into an attention item.
+func TestSeatEndPartialRemovalKeptRecord(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC)
+
+	t.Run("a partial removal clears the kept record", func(t *testing.T) {
+		t.Parallel()
+		f, _ := keptSeatScenario(t, now)
+		f.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding())
+		if seats, _, _ := KeptSandboxSeats(f.town); len(seats) != 1 {
+			t.Fatalf("the first pass kept %+v, want the seat recorded", seats)
+		}
+
+		f.seatFields.PushFailed = false
+		f.setAgent()
+		f.removeErr = errors.New("removing the seat's clone: permission denied")
+		f.removeDeleted = true
+		if f.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding()) {
+			t.Fatal("a seat whose removal failed halfway was reported removed")
+		}
+
+		seats, bad, err := KeptSandboxSeats(f.town)
+		if err != nil || len(bad) != 0 {
+			t.Fatalf("reading the kept seats: bad %v, %v", bad, err)
+		}
+		if len(seats) != 0 {
+			t.Errorf("kept seats after a partial removal = %+v, want none: nothing is left to wait for", seats)
+		}
+	})
+
+	t.Run("a kept record with a zero since is dated from now", func(t *testing.T) {
+		t.Parallel()
+		f, _ := keptSeatScenario(t, now)
+		if err := writeKeptSandboxSeat(f.town, endRig, endPolecat, keptSandboxSeatRecord{
+			Bead: endBead, Reason: keptSeatReason, Landing: &sandboxSeatLanding{BeadID: endBead, Landed: true},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		f.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding())
+
+		seats, _, err := KeptSandboxSeats(f.town)
+		if err != nil || len(seats) != 1 {
+			t.Fatalf("kept seats = %+v, %v; want the rewritten record", seats, err)
+		}
+		if !seats[0].Since.Equal(now) {
+			t.Errorf("since = %v, want the pass that found no since, %v", seats[0].Since, now)
+		}
+	})
+}

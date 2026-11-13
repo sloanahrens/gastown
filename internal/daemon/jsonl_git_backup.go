@@ -316,8 +316,8 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if remote {
 		// The remote alert covers both the client directory and the list, so a
 		// tick that reaches here closes it: the directory was made, and the list,
-		// when it ran, succeeded. A tick with a configured database list never
-		// runs the list, and used to leave the alert open forever (gt-4ko5ko).
+		// when it ran, succeeded. A configured database list means no list runs,
+		// and the directory alone answers the alert (gt-4ko5ko).
 		d.clearAlerts("the remote server backup has its client directory and database list", alertKeyJSONLRemote)
 	}
 	if len(databases) == 0 {
