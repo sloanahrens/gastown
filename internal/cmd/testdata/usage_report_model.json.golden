@@ -1,0 +1,24 @@
+{
+  "by": "model",
+  "from": "2026-11-12T12:00:00Z",
+  "to": "2026-11-13T12:00:00Z",
+  "rows": [
+    {
+      "key": "claude-sonnet-5-5",
+      "calls": 7,
+      "claude_uncached": 250,
+      "deepseek_est_usd": 0,
+      "sub_share": null
+    },
+    {
+      "key": "deepseek-flash",
+      "calls": 3,
+      "claude_uncached": 0,
+      "deepseek_est_usd": 0.0123,
+      "sub_share": null
+    }
+  ],
+  "unmatched": 2,
+  "incomplete": 1,
+  "skipped": 1
+}

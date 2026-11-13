@@ -1,0 +1,8 @@
+usage by bead, 2026-11-12T12:00:00Z to 2026-11-13T12:00:00Z
+BEAD  CALLS  CLAUDE_UNCACHED  DEEPSEEK_EST_USD  SUB_SHARE
+gt-a  6      225              0.0000            0.0444
+gt-b  3      0                0.0123            0.2000
+gt-d  1      25               0.0000            0.0000
+unmatched sessions: 2
+incomplete records: 1
+records with no end time: 1
