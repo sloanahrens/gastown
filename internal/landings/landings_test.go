@@ -89,6 +89,41 @@ func TestRecord_ReadsTheWritersPolecatTime(t *testing.T) {
 	}
 }
 
+// TestRecord_ReadsTheWritersPriority: the priority the landing worker writes
+// reads back unchanged, zero included, and a rewrite keeps its key, so a P0
+// landing is not read as one with no priority (gt-tnml1k).
+func TestRecord_ReadsTheWritersPriority(t *testing.T) {
+	t.Parallel()
+	p0 := 0
+	writer := land.LandingRecord{
+		BeadID: "gt-abc", Rig: "gastown", Branch: "polecat/opal/gt-abc", Head: "1111111111111111111111111111111111111111",
+		Target: "main", Base: "2222222222222222222222222222222222222222",
+		LandedCommit: "3333333333333333333333333333333333333333",
+		PatchID:      "4444444444444444444444444444444444444444",
+		GateResult:   "pass", OMVerdict: "approve", OMScore: 0.92, Route: "daemon",
+		LandedAt: time.Date(2026, 9, 30, 14, 5, 6, 0, time.UTC),
+		Priority: &p0,
+	}
+	line, err := json.Marshal(writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec Record
+	if err := json.Unmarshal(line, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Priority == nil || *rec.Priority != 0 {
+		t.Fatalf("priority = %v, want 0 (P0)", rec.Priority)
+	}
+	out, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys(t, out) != keys(t, line) {
+		t.Fatalf("key set drifted from the writer's:\n got %s\nwant %s", keys(t, out), keys(t, line))
+	}
+}
+
 // retiredCILine is a landing record as the worker wrote it while the rig also
 // recorded a candidate gate's verdict: the ci_* keys beside the declared ones.
 const retiredCILine = `{"bead":"gt-abc","rig":"gastown","branch":"polecat/opal/gt-abc","head":"1111111111111111111111111111111111111111","target":"main","base":"2222222222222222222222222222222222222222","landed_commit":"3333333333333333333333333333333333333333","patch_id":"4444444444444444444444444444444444444444","gate_result":"pass (test exit 0 1m2s)","om_verdict":"approve","om_score":0.92,"route":"daemon","landed_at":"2026-09-30T14:05:06Z","ci_verdict":"failed","ci_context":"ci / gate (push)","ci_candidate":"3333333333333333333333333333333333333333","ci_branch":"land/gt-abc","ci_run_status":"failure"}`

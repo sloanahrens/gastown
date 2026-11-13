@@ -417,6 +417,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: landingBuilder(rec.Branch, rec.Rig, rec.Bead, names.submitter),
 			Outcome: "landed", Verdict: omOutcome(rec.OMVerdict), Commit: shortSHA(rec.LandedCommit),
 			Route: rec.Route, Risk: len(rec.RiskPaths) > 0, Crew: isCrewLandingBranch(rec.Branch),
+			Agent: rec.Agent, Priority: rec.Priority,
 		}
 		if row.Crew {
 			// Polecat already names a crew branch's agent segment; carry it

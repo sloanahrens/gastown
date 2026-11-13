@@ -584,6 +584,10 @@ type LandingRecord struct {
 	// crew landing has no seat and records none, so the field is left out of
 	// the JSON and the note rather than written empty (gt-mukgk.6).
 	Agent string `json:"agent,omitempty"`
+	// Priority is the landed bead's priority, read from the bead by the landing
+	// worker. It is written to the landings file only: a landing whose bead
+	// read failed leaves it nil, and the landing stands (gt-tnml1k).
+	Priority *int `json:"priority,omitempty"`
 	// PolecatSecs, PolecatAttempts and the two bound flags are the time the
 	// bead's polecat seats spent hooked on it, read from the spans log when
 	// the record is written (Append). A crew landing has no seat and a bead
