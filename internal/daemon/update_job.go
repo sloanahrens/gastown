@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,11 @@ var errUpdateJobExists = errors.New("the update Job already exists")
 type updateJobClient interface {
 	CreateJob(ctx context.Context, name string, manifest []byte) error
 }
+
+// updateJobEncoder writes a rendered object as YAML. Production is
+// updatejob.YAML; a test injects one that fails, since no rendered Job can fail
+// to encode.
+type updateJobEncoder func(w io.Writer, v any) error
 
 // kubectlUpdateJob creates the Job with kubectl. It names no context, so in a pod
 // kubectl uses the pod's service account. The manifest is written under dir first,
@@ -113,8 +119,12 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 	}
 	name := updateJobName(sha)
 	m.Job.Metadata.Name = name
+	encode := d.updateJobEncode
+	if encode == nil {
+		encode = updatejob.YAML
+	}
 	var buf bytes.Buffer
-	if err := updatejob.YAML(&buf, m.Job); err != nil {
+	if err := encode(&buf, m.Job); err != nil {
 		return fmt.Errorf("encode the update Job: %w", err)
 	}
 	return d.updateJob.CreateJob(ctx, name, buf.Bytes())

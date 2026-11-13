@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -442,6 +444,128 @@ func TestKubectlUpdateJobMapsTheAnswer(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantMsg)
 			assert.NotContains(t, err.Error(), "secret-token", "kubectl's output reached the error")
+		})
+	}
+}
+
+// TestLaunchUpdateJobRefusesWhatItCannotLaunch: each refusal names what the
+// launch could not read, render or send, and creates no Job.
+func TestLaunchUpdateJobRefusesWhatItCannotLaunch(t *testing.T) {
+	t.Parallel()
+	valuesPath := func(r *updateJobRig) string {
+		return imagevalues.PathIn(filepath.Join(r.town, "gastown"))
+	}
+	tests := []struct {
+		name     string
+		canceled bool
+		settings config.UpdateSettings
+		setup    func(t *testing.T, r *updateJobRig)
+		wantMsg  string
+	}{
+		{
+			name:     "canceled context",
+			canceled: true,
+			settings: config.UpdateSettings{MaxRuntime: time.Hour},
+			wantMsg:  context.Canceled.Error(),
+		},
+		{
+			name:     "no cluster client",
+			settings: config.UpdateSettings{MaxRuntime: time.Hour},
+			setup:    func(_ *testing.T, r *updateJobRig) { r.d.updateJob = nil },
+			wantMsg:  "no cluster client is wired",
+		},
+		{
+			name:     "values file unreadable",
+			settings: config.UpdateSettings{MaxRuntime: time.Hour},
+			setup: func(t *testing.T, r *updateJobRig) {
+				require.NoError(t, os.WriteFile(valuesPath(r), []byte("daemon: [\n"), 0o600))
+			},
+			wantMsg: "read the running images",
+		},
+		{
+			name:     "no values file",
+			settings: config.UpdateSettings{MaxRuntime: time.Hour},
+			setup: func(t *testing.T, r *updateJobRig) {
+				require.NoError(t, os.Remove(valuesPath(r)))
+			},
+			wantMsg: "no values file names the running daemon image",
+		},
+		{
+			name:     "job cannot be rendered",
+			settings: config.UpdateSettings{MaxRuntime: 1500 * time.Millisecond},
+			wantMsg:  "render the update Job",
+		},
+		{
+			name:     "job cannot be encoded",
+			settings: config.UpdateSettings{MaxRuntime: time.Hour},
+			setup: func(_ *testing.T, r *updateJobRig) {
+				r.d.updateJobEncode = func(io.Writer, any) error { return errors.New("encode refused") }
+			},
+			wantMsg: "encode the update Job: encode refused",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			if tt.setup != nil {
+				tt.setup(t, r)
+			}
+			ctx := context.Background()
+			if tt.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			err := r.d.launchUpdateJob(ctx, tt.settings, r.commits[2])
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMsg)
+			assert.Empty(t, r.cluster.calls, "a refused launch reached the cluster")
+		})
+	}
+}
+
+// TestKubectlUpdateJobRefusesAnUnwritableDirectory: a manifest the daemon cannot
+// write is refused before kubectl runs, so kubectl never reads a partial file.
+func TestKubectlUpdateJobRefusesAnUnwritableDirectory(t *testing.T) {
+	t.Parallel()
+	const name = "gt-update-abcdef012345"
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, dir string) string
+		wantMsg string
+	}{
+		{
+			name: "update directory is a file",
+			prepare: func(t *testing.T, dir string) string {
+				file := filepath.Join(dir, "not-a-dir")
+				require.NoError(t, os.WriteFile(file, []byte("x"), 0o600))
+				return file
+			},
+			wantMsg: "create the update directory",
+		},
+		{
+			name: "manifest path is a directory",
+			prepare: func(t *testing.T, dir string) string {
+				require.NoError(t, os.Mkdir(filepath.Join(dir, name+".yaml"), 0o700))
+				return dir
+			},
+			wantMsg: "write the manifest of " + name,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := tt.prepare(t, t.TempDir())
+			run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+				t.Error("kubectl ran for a manifest that was not written")
+				return "", 0, nil
+			}
+			err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, []byte("kind: Job\n"))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMsg)
 		})
 	}
 }

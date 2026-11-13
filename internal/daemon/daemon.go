@@ -166,6 +166,9 @@ type Daemon struct {
 	// updateJob creates the roll's Job in the cluster when the daemon runs as a
 	// pod (update_job.go). New wires the kubectl client; nil refuses a launch.
 	updateJob updateJobClient
+	// updateJobEncode writes the rendered Job; nil is updatejob.YAML. A test
+	// injects a failing encoder to drive the encode refusal.
+	updateJobEncode updateJobEncoder
 	// updateAlerts is the update job's alert latch (update_alerts.go): the
 	// keys this daemon run has raised and not yet cleared.
 	updateAlerts updateAlertLatch
