@@ -138,10 +138,6 @@ func (p *LocalRoundPatrol) serve(ctx context.Context, issue *beads.Issue, head s
 		unavailable("the landing worker's om is paused: " + reason)
 		return
 	}
-	if _, err := p.Bound.Allow(issue.ID); err != nil {
-		unavailable(err.Error())
-		return
-	}
 	// The fetch, comment and operator errors are not written: they can carry a
 	// command's output, so the answer names the step that failed instead. A
 	// bead id that cannot name a ref is the one fetch error named, since the id
@@ -156,6 +152,15 @@ func (p *LocalRoundPatrol) serve(ctx context.Context, issue *beads.Issue, head s
 		return
 	}
 	defer tree.Cleanup()
+	// A round counts only once its tree is in hand: a request whose head cannot
+	// be fetched never reaches the reviewer, so it spends none of the day's
+	// rounds. This call stands above the reviewer on purpose: a request that
+	// does reach the reviewer and then fails (the om review errors or is cut off
+	// by the timeout) has already spent one of the day's rounds.
+	if _, err := p.Bound.Allow(issue.ID); err != nil {
+		unavailable(err.Error())
+		return
+	}
 	comments, err := p.Comments(issue.ID)
 	if err != nil {
 		unavailable("could not read the bead's comments")
