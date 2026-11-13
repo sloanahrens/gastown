@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/buildsrc"
 )
 
 // gitInTest runs git in dir with a fixed identity and no signing.
@@ -50,5 +52,79 @@ func TestIntegrationRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "seat-refill (would be removed)") {
 		t.Errorf("--clean dry run did not name what it would remove; output:\n%s", out.String())
+	}
+}
+
+// gitOutputInTest runs git in dir and returns its trimmed stdout.
+func gitOutputInTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gt-i3rotl: a dry run over an existing build checkout reads it and leaves it
+// where it is. The bare repo's main has moved past the checkout, which is the
+// commit buildsrc.Ensure would move it to, so a dry run that reached Ensure
+// would change HEAD and the refs. Built with real git on a temporary town.
+func TestIntegrationRunPluginSync_DryRunLeavesExistingCheckoutAlone(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+
+	// The rig's source repo: plugins at commit A, then commit B on main.
+	src := t.TempDir()
+	gitInTest(t, src, "init", "-b", "main")
+	writeTestPlugin(t, filepath.Join(src, "plugins"), "current-plugin", "A")
+	gitInTest(t, src, "add", "-A")
+	gitInTest(t, src, "commit", "-m", "A")
+	commitA := gitOutputInTest(t, src, "rev-parse", "HEAD")
+
+	// The bare repo the build checkout clones from, holding A as origin/main.
+	bare := filepath.Join(townRoot, "gastown", ".repo.git")
+	if err := os.MkdirAll(filepath.Dir(bare), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitInTest(t, townRoot, "clone", "--bare", src, bare)
+	gitInTest(t, bare, "update-ref", "refs/remotes/origin/main", commitA)
+
+	checkout := buildCheckoutDir(townRoot)
+	if err := os.MkdirAll(filepath.Dir(checkout), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitInTest(t, townRoot, "clone", bare, checkout)
+
+	writeTestPlugin(t, filepath.Join(src, "plugins"), "current-plugin", "B")
+	gitInTest(t, src, "add", "-A")
+	gitInTest(t, src, "commit", "-m", "B")
+	commitB := gitOutputInTest(t, src, "rev-parse", "HEAD")
+	gitInTest(t, src, "push", bare, "main")
+	gitInTest(t, bare, "update-ref", "refs/remotes/origin/main", commitB)
+
+	headBefore := gitOutputInTest(t, checkout, "rev-parse", "HEAD")
+	refsBefore := gitOutputInTest(t, checkout, "for-each-ref", "--format=%(refname) %(objectname)")
+	if headBefore != commitA {
+		t.Fatalf("checkout HEAD = %s before the dry run, want commit A %s", headBefore, commitA)
+	}
+
+	var out bytes.Buffer
+	dry := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: buildsrc.Ensure, dryRun: true, out: &out, errOut: io.Discard}
+	if err := dry.run(); err != nil {
+		t.Fatalf("dry run error = %v; output:\n%s", err, out.String())
+	}
+
+	if got := gitOutputInTest(t, checkout, "rev-parse", "HEAD"); got != headBefore {
+		t.Errorf("dry run moved the checkout's HEAD from %s to %s", headBefore, got)
+	}
+	if got := gitOutputInTest(t, checkout, "for-each-ref", "--format=%(refname) %(objectname)"); got != refsBefore {
+		t.Errorf("dry run changed the checkout's refs:\nbefore:\n%s\nafter:\n%s", refsBefore, got)
+	}
+	if want := "  Source: " + filepath.Join(checkout, "plugins") + " (gastown build checkout)"; !strings.Contains(out.String(), want) {
+		t.Errorf("dry run did not read the existing checkout; want line %q, output:\n%s", want, out.String())
 	}
 }

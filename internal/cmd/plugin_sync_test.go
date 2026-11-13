@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -313,5 +314,122 @@ func TestPluginSyncDryRunReportsProtected(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "edited-plugin (content differs)") {
 		t.Errorf("--force dry run output:\n%s", out.String())
+	}
+}
+
+// failIfCalled is a build-checkout resolver that fails the test when it runs.
+// A dry run must not reach the injected resolver, which is buildsrc.Ensure in
+// production.
+func failIfCalled(t *testing.T) plugin.BuildCheckoutFunc {
+	t.Helper()
+	return func(_ context.Context, _, rig, rev string) (string, error) {
+		t.Errorf("dry run called the injected build resolver (rig %q, rev %q)", rig, rev)
+		return "", errors.New("the injected resolver must not run in a dry run")
+	}
+}
+
+// gt-i3rotl: a dry run with no build checkout names what a real sync would
+// do and leaves .runtime/build-src absent.
+func TestPluginSyncDryRunNoBuildCheckoutCreatesNothing(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+
+	var out bytes.Buffer
+	dry := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: failIfCalled(t), dryRun: true, out: &out, errOut: io.Discard}
+	err := dry.run()
+	if err == nil || !strings.Contains(err.Error(), "a real sync would create it") {
+		t.Fatalf("dry run error = %v, want it to say a real sync would create the build checkout; output:\n%s", err, out.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(townRoot, ".runtime", "build-src")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf(".runtime/build-src after a dry run: stat error = %v, want it absent", statErr)
+	}
+}
+
+// gt-i3rotl: a dry run over an existing checkout reads it in place and never
+// calls the injected resolver, so the resolver cannot move the checkout.
+func TestPluginSyncDryRunReadsExistingCheckoutWithoutInjectedResolver(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	writeTestPlugin(t, filepath.Join(buildCheckoutDir(townRoot), "plugins"), "current-plugin", "current")
+
+	var out bytes.Buffer
+	dry := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: failIfCalled(t), dryRun: true, out: &out, errOut: io.Discard}
+	if err := dry.run(); err != nil {
+		t.Fatalf("dry run error = %v; output:\n%s", err, out.String())
+	}
+	want := "  Source: " + filepath.Join(buildCheckoutDir(townRoot), "plugins") + " (gastown build checkout)"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("dry run did not name the existing checkout as its source; want line %q, output:\n%s", want, out.String())
+	}
+}
+
+// gt-i3rotl: the read-only resolver names only a checkout that is a directory.
+// Every other state is an error, and an error returns no path.
+func TestPluginSyncDryRunBuildCheckoutResolver(t *testing.T) {
+	t.Parallel()
+
+	existingTown := func(t *testing.T) string {
+		t.Helper()
+		townRoot := t.TempDir()
+		if err := os.MkdirAll(buildCheckoutDir(townRoot), 0755); err != nil {
+			t.Fatal(err)
+		}
+		return townRoot
+	}
+	fileAtCheckout := func(t *testing.T) string {
+		t.Helper()
+		townRoot := t.TempDir()
+		if err := os.MkdirAll(filepath.Dir(buildCheckoutDir(townRoot)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, buildCheckoutDir(townRoot), "not a checkout")
+		return townRoot
+	}
+	townIsFile := func(t *testing.T) string {
+		t.Helper()
+		file := filepath.Join(t.TempDir(), "town")
+		writeFile(t, file, "not a directory")
+		return file
+	}
+
+	tests := []struct {
+		name     string
+		townRoot func(t *testing.T) string
+		rev      string
+		wantDir  bool   // the resolver returns the checkout directory
+		wantErr  string // substring of the error when wantDir is false
+	}{
+		{name: "existing directory is returned", townRoot: existingTown, wantDir: true},
+		{name: "absent checkout says a real sync would create it", townRoot: func(t *testing.T) string { return t.TempDir() }, wantErr: "a real sync would create it"},
+		{name: "a file where the checkout belongs is refused", townRoot: fileAtCheckout, wantErr: "is not a directory"},
+		{name: "an unreadable town is an error, not an absent checkout", townRoot: townIsFile, wantErr: "reading build checkout"},
+		{name: "a commit rev is refused", townRoot: existingTown, rev: "0123456789abcdef0123456789abcdef01234567", wantErr: "reads the existing checkout only"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			townRoot := tt.townRoot(t)
+			dir, err := existingBuildCheckout(context.Background(), townRoot, "gastown", tt.rev)
+			if tt.wantDir {
+				if err != nil {
+					t.Fatalf("existingBuildCheckout() error = %v", err)
+				}
+				if want := buildCheckoutDir(townRoot); dir != want {
+					t.Errorf("existingBuildCheckout() = %q, want %q", dir, want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("existingBuildCheckout() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if dir != "" {
+				t.Errorf("existingBuildCheckout() = %q alongside an error, want no path", dir)
+			}
+		})
 	}
 }
