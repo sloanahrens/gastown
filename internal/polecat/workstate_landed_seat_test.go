@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 )
 
 // TestLandedSeatDoesNotCountTowardCapacityAtTheManager drives the Manager's own
@@ -44,7 +45,9 @@ func TestLandedSeatDoesNotCountTowardCapacityAtTheManager(t *testing.T) {
 				t.Fatal(err)
 			}
 			if c.landedAt != nil {
-				writeLandingLogForTest(t, mgr.townRoot, "rig", "gt-jhz3t0", *c.landedAt)
+				landtest.WriteLandingLog(t, mgr.townRoot, "rig", land.LandingRecord{
+					BeadID: "gt-jhz3t0", Rig: "rig", Head: "abc123", LandedAt: *c.landedAt,
+				})
 			}
 
 			d := mgr.WorkstateDispositionForPolecat("toast", StateSubmitted, "")

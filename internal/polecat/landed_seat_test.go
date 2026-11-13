@@ -1,41 +1,16 @@
 package polecat
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 )
 
 // landedSeatTestRig is the rig every fixture here lands in.
 const landedSeatTestRig = "gastown"
-
-// writeLandingLogForTest writes the rig's landing log under townRoot with one
-// record per landed time, each for bead. The log is read by the production
-// reader, so the fixture is the file shape the landing worker appends.
-func writeLandingLogForTest(t *testing.T, townRoot, rig, bead string, landedAt ...time.Time) {
-	t.Helper()
-	dir := filepath.Join(constants.TownRuntimePath(townRoot), "landings")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var body []byte
-	for _, at := range landedAt {
-		line, err := json.Marshal(land.LandingRecord{BeadID: bead, Rig: rig, Head: "abc123", LandedAt: at})
-		if err != nil {
-			t.Fatal(err)
-		}
-		body = append(append(body, line...), '\n')
-	}
-	if err := os.WriteFile(filepath.Join(dir, rig+".jsonl"), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // TestSubmissionLandedReadsTheLandingRecord pins the one predicate the pool,
 // the patrol's seat cap and the classifier share. A landing counts only when
@@ -112,11 +87,13 @@ func TestSubmissionLandedReadsTheLandingRecord(t *testing.T) {
 			switch {
 			case c.wantErr:
 				// The rig's landing log path is a directory, so the read fails.
-				if err := os.MkdirAll(filepath.Join(constants.TownRuntimePath(town), "landings", landedSeatTestRig+".jsonl"), 0o700); err != nil {
-					t.Fatal(err)
-				}
+				landtest.MakeLandingLogUnreadable(t, town, landedSeatTestRig)
 			case !c.noLog:
-				writeLandingLogForTest(t, town, landedSeatTestRig, c.rec.WorkBead, c.landed...)
+				recs := make([]land.LandingRecord, 0, len(c.landed))
+				for _, at := range c.landed {
+					recs = append(recs, land.LandingRecord{BeadID: c.rec.WorkBead, Rig: landedSeatTestRig, Head: "abc123", LandedAt: at})
+				}
+				landtest.WriteLandingLog(t, town, landedSeatTestRig, recs...)
 			}
 			got, err := SubmissionLanded(town, landedSeatTestRig, c.rec)
 			if c.wantErr {
