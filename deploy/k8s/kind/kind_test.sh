@@ -97,7 +97,28 @@ METRICS_DEFAULT_ARGS='--cert-dir=/tmp --secure-port=10250 --kubelet-preferred-ad
 # The args the deployment carries: the manifest's, plus each patch applied since.
 # They persist across applies, so a rerun exercises the script's flag guard.
 metrics_args() { cat "$STATE/metrics-args" 2>/dev/null || printf '%s' "$METRICS_DEFAULT_ARGS"; }
+# The container names a pod template reports, for the jsonpath the script asked
+# for: the containers, or the init containers when the query names them.
+pod_names() { # pod_names QUERY CONTAINERS INIT_CONTAINERS
+  case "$1" in *initContainers*) printf '%s' "$3" ;; *) printf '%s' "$2" ;; esac
+}
+# The -p body of a patch call, so the test reads the ops the script applied.
+patch_body() {
+  local prev="" a
+  for a in "$@"; do
+    [ "$prev" = -p ] && printf '%s' "$a"
+    prev=$a
+  done
+}
 case "$*" in
+  *"get statefulset/openshell"*)
+    # STUB_GATEWAY_READ_FAILS: the read itself fails, which must not read as an empty pod.
+    if [ -n "${STUB_GATEWAY_READ_FAILS-}" ]; then exit 1; fi
+    pod_names "$*" "${STUB_GATEWAY_CONTAINERS-openshell}" "${STUB_GATEWAY_INIT-}" ;;
+  *"get deployment/agent-sandbox-controller"*)
+    pod_names "$*" "${STUB_CONTROLLER_CONTAINERS-agent-sandbox-controller}" "${STUB_CONTROLLER_INIT-}" ;;
+  *"patch statefulset/openshell"*) patch_body "$@" >"$STATE/patch-gateway" ;;
+  *"patch deployment/agent-sandbox-controller"*) patch_body "$@" >"$STATE/patch-controller" ;;
   *"get nodes -l gt.dev/pool"*)
     if [ -f "$STATE/kubectl-down" ]; then echo "The connection to the server 127.0.0.1:1 was refused" >&2; exit 1; fi
     [ -f "$STATE/no-layout" ] || printf 'node/core-node\nnode/sandbox-node\n' ;;
@@ -345,13 +366,28 @@ check "the metrics-server rollout follows the flag patch" before "patch deployme
 patch_args='-n agent-sandbox-system patch deployment agent-sandbox-controller --type merge -p {"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 check "the agent-sandbox controller deployment is patched once with exactly the core nodeSelector" test "$(grep -cF -e "$patch_args" "$S/calls.log" || true)" -eq 1
 check "the controller is pinned before its rollout is awaited" before "patch deployment agent-sandbox-controller" "rollout status deployment/agent-sandbox-controller"
-gateway_patch='-n openshell patch statefulset openshell --type json -p [{"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"250m","memory":"768Mi"},"limits":{"cpu":"250m","memory":"768Mi"}}}]'
-check "the gateway is patched once to requests equal to limits (250m, 768Mi)" test "$(grep -cF -e "$gateway_patch" "$S/calls.log" || true)" -eq 1
-check "the gateway is patched after the chart install" before "helm upgrade --install" "patch statefulset openshell"
-check "the gateway is patched before its rollout is awaited" before "patch statefulset openshell" "rollout status statefulset/openshell"
-controller_patch='-n agent-sandbox-system patch deployment agent-sandbox-controller --type json -p [{"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"100m","memory":"128Mi"}}}]'
-check "the controller is patched once to requests equal to limits (100m, 128Mi)" test "$(grep -cF -e "$controller_patch" "$S/calls.log" || true)" -eq 1
-check "the controller resources are patched before its rollout is awaited" before "patch deployment agent-sandbox-controller --type json" "rollout status deployment/agent-sandbox-controller"
+# guaranteed FILE KIND INDEX CPU MEMORY: the recorded patch sets requests and
+# limits of KIND[INDEX] to CPU and MEMORY. Requests and limits are read from the
+# op for that index, so a container with no requests, or with a different limit,
+# fails. The ops are split onto their own lines first.
+guaranteed() {
+  local op
+  op="$(sed 's/},{"op"/}\n{"op"/g' "$1" | grep -F "\"path\":\"/spec/template/spec/$2/$3/resources\"" || true)"
+  contains "\"requests\":{\"cpu\":\"$4\",\"memory\":\"$5\"}" "$op" && contains "\"limits\":{\"cpu\":\"$4\",\"memory\":\"$5\"}" "$op"
+}
+# ops_on FILE: how many resources ops the patch carries, one per container or init container.
+ops_on() { occurrences '/resources"' "$(cat "$1")"; }
+gateway_ops="$S/state/patch-gateway"
+check "the gateway statefulset is patched once" test "$(count 'patch statefulset/openshell' "$CALLS_LOG")" -eq 1
+check "the gateway is patched after the chart install" before "helm upgrade --install" "patch statefulset/openshell"
+check "the gateway is patched before its rollout is awaited" before "patch statefulset/openshell" "rollout status statefulset/openshell"
+check "the gateway's container has requests equal to limits (250m, 768Mi)" guaranteed "$gateway_ops" containers 0 250m 768Mi
+check "the gateway patch covers its one container" test "$(ops_on "$gateway_ops")" -eq 1
+controller_ops="$S/state/patch-controller"
+check "the controller deployment is patched once with the pair" test "$(count 'patch deployment/agent-sandbox-controller' "$CALLS_LOG")" -eq 1
+check "the controller resources are patched before its rollout is awaited" before "patch deployment/agent-sandbox-controller" "rollout status deployment/agent-sandbox-controller"
+check "the controller's container has requests equal to limits (100m, 128Mi)" guaranteed "$controller_ops" containers 0 100m 128Mi
+check "the controller patch covers its one container" test "$(ops_on "$controller_ops")" -eq 1
 check "the pool layout is checked with an exact label query" contains "get nodes -l gt.dev/pool" "$CALLS_LOG"
 check "the control-plane Services are applied" contains "values/kind/control-plane-services.yaml" "$CALLS_LOG"
 check "the control-plane Services follow the NodePort service" before "gateway-nodeport.yaml" "values/kind/control-plane-services.yaml"
@@ -875,6 +911,37 @@ check "the run fails" test "$RC" -ne 0
 check "the warning names the gateway the CLI selected" contains "selected docker" "$OUT_TEXT"
 check "nothing is selected back" lacks "gateway select" "$(grep "XDG=$S/home/.config " "$S/calls.log" || true)"
 check "the teardown still runs" contains "kind delete cluster" "$CALLS_LOG"
+
+echo "every container and init container of a control-plane pod gets requests equal to limits"
+scenario guaranteed_sidecar
+run "$UP" STUB_GATEWAY_CONTAINERS="openshell gateway-proxy" STUB_GATEWAY_INIT=migrate --
+check "a pod with a sidecar and an init container still comes up" test "$RC" -eq 0
+check "the gateway container has the pair" guaranteed "$S/state/patch-gateway" containers 0 250m 768Mi
+check "the sidecar container has the pair" guaranteed "$S/state/patch-gateway" containers 1 250m 768Mi
+check "the init container has the pair" guaranteed "$S/state/patch-gateway" initContainers 0 250m 768Mi
+check "the patch covers every container and init container" test "$(ops_on "$S/state/patch-gateway")" -eq 3
+
+echo "a controller pod without the named container stops the run"
+scenario controller_missing
+run "$UP" STUB_CONTROLLER_CONTAINERS=other-container --
+check "the run stops" test "$RC" -ne 0
+check "the failure names the container it looked for" contains "no container named agent-sandbox-controller" "$OUT_TEXT"
+check "the failure lists the containers present" contains "it has: other-container" "$OUT_TEXT"
+check "the controller is not patched" test ! -e "$S/state/patch-controller"
+check "the gateway is not patched after the stop" lacks "patch statefulset/openshell" "$CALLS_LOG"
+
+echo "a pod whose containers cannot be read is not reported as sized"
+scenario gateway_unreadable
+run "$UP" STUB_GATEWAY_READ_FAILS=1 --
+check "the run stops when the read fails" test "$RC" -ne 0
+check "the failure is reported as an error naming the read" contains "error: cannot read the containers of statefulset/openshell" "$OUT_TEXT"
+check "a failed read is not reported as an empty pod" lacks "has no containers to size" "$OUT_TEXT"
+check "no gateway patch is applied after a failed read" test ! -e "$S/state/patch-gateway"
+scenario gateway_empty
+run "$UP" STUB_GATEWAY_CONTAINERS= --
+check "the run stops on an empty container list" test "$RC" -ne 0
+check "the failure says the pod has no containers to size" contains "has no containers to size" "$OUT_TEXT"
+check "no gateway patch is applied to an empty list" test ! -e "$S/state/patch-gateway"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "kind_test.sh: all $PASS cases passed"
