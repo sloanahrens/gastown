@@ -1852,6 +1852,10 @@ func (d *Daemon) Run() (err error) {
 	// Landing workers (gt-v4ssj.2): opt-in, one goroutine per rig.
 	d.startLandingWorkers()
 
+	// Local round patrols (gt-ryp1ff): one per rig, serving the polecats' LOCAL
+	// ROUND REQUEST notes; the daemon.local_round switch gates each request.
+	d.startLocalRoundPatrols()
+
 	// The boot gate's poller (gt-niooz0): its own goroutine asks the probes
 	// until they all answer, and ends with the daemon's context. The landing
 	// workers and Dolt supervision do not read its answer.
