@@ -252,12 +252,12 @@ func TestEligibleHonorsTheConfiguredCeiling(t *testing.T) {
 	}
 }
 
-// A type or priority refusal is reported as a skip line even on a bead that
-// wears no board-carried label, because the operator filed it expecting the
-// dispatcher to take it and the dry run has to say why it did not (gt-jr5elm).
-// The kind, status and hold refusals stay silent: they are the bead's own state
-// or kind, and would print one line per agent bead per tick.
-func TestReportableRefusalNamesTypeAndPriorityOnly(t *testing.T) {
+// A type refusal is reported as a skip line even on a bead that wears no
+// board-carried label, because the operator filed it expecting the dispatcher
+// to take it and the dry run has to say why it did not (gt-jr5elm). The
+// priority, kind, status and hold refusals stay silent: a backlog bead past the
+// ceiling, or a bead's own state or kind, would print one line per bead per tick.
+func TestReportableRefusalNamesTypeOnly(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -266,8 +266,8 @@ func TestReportableRefusalNamesTypeAndPriorityOnly(t *testing.T) {
 	}{
 		{"chore type", func(s *Spec) { s.Type = "chore" }, true},
 		{"docs type", func(s *Spec) { s.Type = "docs" }, true},
-		{"priority past the ceiling", func(s *Spec) { s.Priority = 5 }, true},
-		{"unscored priority", func(s *Spec) { s.Priority = -1 }, true},
+		{"priority past the ceiling", func(s *Spec) { s.Priority = 5 }, false},
+		{"unscored priority", func(s *Spec) { s.Priority = -1 }, false},
 		{"epic kind", func(s *Spec) { s.Type = "epic" }, false},
 		{"wisp kind", func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, false},
 		{"agent label kind", func(s *Spec) { s.Labels = []string{"gt:agent"} }, false},

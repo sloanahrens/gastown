@@ -932,11 +932,12 @@ func TestSpecCandidateBlockedContainerIsHeldOnceItsBlockerCloses(t *testing.T) {
 	}
 }
 
-// A ready chore and a ready P5 task are refused by the dispatcher's type and
-// priority rules, and each is reported as one not-eligible skip line naming its
-// refusal, so the tick log says why neither took a seat. The P2 task beside them
-// is the candidate (gt-jr5elm).
-func TestSpecCandidatesReportTypeAndPriorityRefusals(t *testing.T) {
+// A ready chore is refused by the dispatcher's type rule and is reported as one
+// not-eligible skip line naming its refusal, so the tick log says why it took no
+// seat. A ready P5 task is refused by the priority ceiling too, but it is backlog
+// and prints no line, or every backlog bead would print one on every tick
+// (gt-jr5elm). The P2 task beside them is the candidate.
+func TestSpecCandidatesReportTypeRefusalAndSkipBacklog(t *testing.T) {
 	t.Parallel()
 	board := []*beads.Issue{
 		{ID: "gt-chore", Type: "chore", Status: "open", Priority: 2},
@@ -952,7 +953,6 @@ func TestSpecCandidatesReportTypeAndPriorityRefusals(t *testing.T) {
 	}
 	want := map[string]string{
 		"gt-chore": "type chore",
-		"gt-p5":    "priority P5 outside the ceiling P2",
 	}
 	if len(got.Skipped) != len(want) {
 		t.Fatalf("skipped = %+v, want one line per refusal", got.Skipped)
@@ -992,10 +992,10 @@ func TestSpecCandidatesStaySilentOnKindAndStateRefusals(t *testing.T) {
 	}
 }
 
-// The dry run prints the same two refusals in its skipped section: the report
-// is built from the production candidate read, and the printed report names
-// each refusal, while no bead is slung (gt-jr5elm).
-func TestSpecDispatchDryRunReportsTypeAndPriorityRefusals(t *testing.T) {
+// The dry run prints the type refusal in its skipped section and no line for the
+// backlog bead: the report is built from the production candidate read, and no
+// bead is slung (gt-jr5elm).
+func TestSpecDispatchDryRunReportsTypeRefusalNotBacklog(t *testing.T) {
 	t.Parallel()
 	townRoot := specTown(t)
 	board := []*beads.Issue{
@@ -1016,9 +1016,31 @@ func TestSpecDispatchDryRunReportsTypeAndPriorityRefusals(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 	printSpecDispatchReport(cmd, r)
-	for _, want := range []string{"gt-chore: not eligible (type chore)", "gt-p5: not eligible (priority P5 outside the ceiling P2)"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("dry-run output %q does not carry %q; skipped = %+v", out.String(), want, r.Skipped)
-		}
+	if want := "gt-chore: not eligible (type chore)"; !strings.Contains(out.String(), want) {
+		t.Errorf("dry-run output %q does not carry %q; skipped = %+v", out.String(), want, r.Skipped)
+	}
+	if strings.Contains(out.String(), "gt-p5") {
+		t.Errorf("dry-run output %q names the backlog bead gt-p5; skipped = %+v", out.String(), r.Skipped)
+	}
+}
+
+// A backlog bead past the priority ceiling is refused every tick and prints no
+// skip line: the board read reports nothing for it, so a busy backlog stays out
+// of the tick log (gt-jr5elm).
+func TestSpecCandidatesStaySilentOnBacklogPriority(t *testing.T) {
+	t.Parallel()
+	board := []*beads.Issue{
+		{ID: "gt-p5", Type: "task", Status: "open", Priority: 5},
+		{ID: "gt-p4", Type: "task", Status: "open", Priority: 4},
+	}
+	got := specCandidates(specTown(t), 2, func(string) ([]*beads.Issue, error) { return board, nil })
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	if len(got.Candidates) != 0 {
+		t.Errorf("candidates = %+v, want none", got.Candidates)
+	}
+	if len(got.Skipped) != 0 {
+		t.Errorf("skipped = %+v, want no line for backlog priority", got.Skipped)
 	}
 }
