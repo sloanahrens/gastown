@@ -8,7 +8,9 @@
 #
 # get deployments, list deployments, watch deployments: podDaemonSwap.Apply's
 #   rollout waits on both Deployments (kubectl rollout status deployment/<name>).
-#   The get also serves the Deployment read in the exec below.
+#   The get also serves the dashboard's existence read in Apply
+#   (kubectl get deployment/dashboard -o name --ignore-not-found) and the Deployment
+#   read in the exec below.
 #
 # get pods, list pods, create pods/exec: podDaemonCommit in
 #   internal/cmd/update_pod_probe.go (kubectl exec deployment/<name> -- gt version).

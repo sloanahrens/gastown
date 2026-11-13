@@ -341,7 +341,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 		return fmt.Errorf("preparing the pod daemon: %w", err)
 	}
 	if req.Images != "" {
-		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod)
+		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod, out)
 		if err != nil {
 			return fmt.Errorf("preparing the daemon image install: %w", err)
 		}
@@ -666,12 +666,12 @@ const podHostInstallReason = "pod target"
 // at path: the host install the cycle runs first, then the daemon moved to the
 // pair the file names. A run with a pod target skips the host install. The file
 // is read here as well, so a file that does not parse stops the run before any
-// polecat is drained.
-func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string, pod *podDaemonTarget) (update.Installer, error) {
+// polecat is drained. out receives the swap's progress lines.
+func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string, pod *podDaemonTarget, out io.Writer) (update.Installer, error) {
 	if _, err := imagevalues.Load(path); err != nil {
 		return nil, fmt.Errorf("the --images values file: %w", err)
 	}
-	images, err := imageDeps(seams, townRoot, deps, pod)
+	images, err := imageDeps(seams, townRoot, deps, pod, out)
 	if err != nil {
 		return nil, err
 	}
@@ -703,12 +703,12 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 // bound, and the escalation sink. Both callers build it here, so the two cannot
 // wire the same swap differently. A seam that is not wired is refused. deps
 // carries the probe the run wired, so the pod's probe is set on deps before this
-// is called.
-func imageDeps(seams updateSeams, townRoot string, deps update.Deps, pod *podDaemonTarget) (update.ImageDeps, error) {
+// is called. out receives the pod swap's progress lines.
+func imageDeps(seams updateSeams, townRoot string, deps update.Deps, pod *podDaemonTarget, out io.Writer) (update.ImageDeps, error) {
 	if (pod == nil && seams.ImageSwap == nil) || seams.Notifier == nil {
 		return update.ImageDeps{}, errors.New("no daemon image swap or escalation sink is wired")
 	}
-	swap, err := daemonImageSwap(seams, townRoot, pod)
+	swap, err := daemonImageSwap(seams, townRoot, pod, out)
 	if err != nil {
 		return update.ImageDeps{}, err
 	}
@@ -727,8 +727,9 @@ func imageDeps(seams updateSeams, townRoot string, deps update.Deps, pod *podDae
 // daemonImageSwap is the swap a digest install and a rollback put a pair in
 // force through: the pod's Deployment when the run names one, else the container
 // daemon the town's seam builds. A run with a pod target has already had its
-// kubectl runner checked by podDaemonDeps.
-func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget) (update.ImageSwap, error) {
+// kubectl runner checked by podDaemonDeps. out receives the pod swap's progress
+// lines, such as the dashboard's skip.
+func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget, out io.Writer) (update.ImageSwap, error) {
 	if pod == nil {
 		return seams.ImageSwap(townRoot)
 	}
@@ -739,6 +740,7 @@ func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget) (
 		Deployment:     pod.Deployment,
 		Run:            seams.PodRun,
 		RolloutTimeout: updateRestartWait,
+		Out:            out,
 	}, nil
 }
 

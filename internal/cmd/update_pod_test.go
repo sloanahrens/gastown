@@ -48,6 +48,9 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 				k.running = commit
 			}
 		}
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
+		// The dashboard's existence read: the town this fake stands in for has one.
+		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
 	case containsArg(args, "get"):
 		return podListJSON(k.pods...), 0, nil
 	case containsArg(args, "exec"):

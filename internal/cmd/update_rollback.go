@@ -79,7 +79,7 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNam
 	}
 	defer release()
 
-	images, err := imageDeps(seams, townRoot, deps, pod)
+	images, err := imageDeps(seams, townRoot, deps, pod, cmd.OutOrStdout())
 	if err != nil {
 		return fmt.Errorf("gt update rollback: %w", err)
 	}

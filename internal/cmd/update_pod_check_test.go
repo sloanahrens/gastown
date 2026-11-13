@@ -147,6 +147,9 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 				k.running = commit
 			}
 		}
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
+		// The dashboard's existence read the swap makes: the town has a dashboard.
+		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
 	case containsArg(args, "get"):
 		if k.getExit != 0 {
 			return podSwapOutput, k.getExit, nil
@@ -566,7 +569,7 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 		PodRun:   kube.run,
 	}
 	target := podPairTarget()
-	installer, err := digestInstaller(seams, townRoot, deps, path, &target)
+	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
 	}

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,16 +27,30 @@ type podSwapCall struct {
 // podSwapFake records the commands a swap runs. The verb field names the
 // kubectl subcommand that fails; exit and err are what it returns. A deployment
 // set narrows the failure to commands that name that Deployment.
+//
+// The dashboard's existence read (a get) answers present by default. absent makes
+// it answer that the Deployment is not there. readExit and readErr fail the read,
+// and readOut, when set, is the read's whole answer.
 type podSwapFake struct {
 	calls      []podSwapCall
 	verb       string
 	deployment string
 	exit       int
 	err        error
+	absent     bool
+	readExit   int
+	readErr    error
+	readOut    string
 }
 
 func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 	f.calls = append(f.calls, podSwapCall{name: name, args: args})
+	if containsArg(args, "get") {
+		if f.readErr != nil || f.readExit != 0 {
+			return podSwapOutput, f.readExit, f.readErr
+		}
+		return f.readAnswer(), 0, nil
+	}
 	if f.deployment != "" && !containsArg(args, "deployment/"+f.deployment) {
 		return podSwapOutput, 0, nil
 	}
@@ -43,6 +58,19 @@ func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, 
 		return podSwapOutput, f.exit, f.err
 	}
 	return podSwapOutput, 0, nil
+}
+
+// readAnswer is what the existence read prints: the dashboard's name when it
+// exists, nothing when it does not, and readOut when a test sets one.
+func (f *podSwapFake) readAnswer() string {
+	switch {
+	case f.readOut != "":
+		return f.readOut
+	case f.absent:
+		return ""
+	default:
+		return "deployment.apps/" + k8sdaemon.DashboardName + "\n"
+	}
 }
 
 const (
@@ -88,10 +116,11 @@ type podSwapPatchBody struct {
 	} `json:"spec"`
 }
 
-// TestUpdatePodSwapMovesBothDeploymentsInOrder holds the swap's four commands: the
-// daemon's patch, the dashboard's patch, then the wait on each rollout. The daemon's
-// patch carries the polecat annotation; the dashboard's carries only the daemon
-// image, and no annotation, so the annotations it already has stay.
+// TestUpdatePodSwapMovesBothDeploymentsInOrder holds the swap's five commands: the
+// dashboard's existence read, the daemon's patch, the dashboard's patch, then the
+// wait on each rollout. The daemon's patch carries the polecat annotation; the
+// dashboard's carries only the daemon image, and no annotation, so the annotations
+// it already has stay.
 func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 	t.Parallel()
 	fake := &podSwapFake{}
@@ -100,10 +129,13 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	if len(fake.calls) != 4 {
-		t.Fatalf("commands = %+v, want the daemon's patch, the dashboard's patch, then both rollout waits", fake.calls)
+	if len(fake.calls) != 5 {
+		t.Fatalf("commands = %+v, want the dashboard's existence read, the daemon's patch, the dashboard's patch, then both rollout waits", fake.calls)
 	}
 	prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
+	if want := append(slices.Clone(prefix), "get", "deployment/"+k8sdaemon.DashboardName, "-o", "name", "--ignore-not-found"); !slices.Equal(fake.calls[0].args, want) {
+		t.Errorf("first command = %q, want the existence read %q", fake.calls[0].args, want)
+	}
 	patchArgs := func(deployment string) []string {
 		return append(slices.Clone(prefix), "patch", "deployment/"+deployment, "--type=strategic", "-p")
 	}
@@ -123,7 +155,7 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		return body
 	}
 
-	daemon := checkPatch(t, fake.calls[0].args, k8sdaemon.Name)
+	daemon := checkPatch(t, fake.calls[1].args, k8sdaemon.Name)
 	if got := daemon.Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; got != podSwapPolecatRef {
 		t.Errorf("polecat annotation = %q, want the pair's polecat digest", got)
 	}
@@ -131,7 +163,7 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		t.Errorf("daemon containers = %+v, want %s on the pair's daemon digest alone", c, k8sdaemon.Name)
 	}
 
-	dashboard := checkPatch(t, fake.calls[1].args, k8sdaemon.DashboardName)
+	dashboard := checkPatch(t, fake.calls[2].args, k8sdaemon.DashboardName)
 	if c := dashboard.Spec.Template.Spec.Containers; len(c) != 1 || c[0].Name != k8sdaemon.DashboardName || c[0].Image != podSwapDigestRef {
 		t.Errorf("dashboard containers = %+v, want %s on the pair's daemon digest alone", c, k8sdaemon.DashboardName)
 	}
@@ -139,11 +171,105 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		t.Errorf("dashboard annotations = %v, want none, so the pod template's own annotations are kept", got)
 	}
 
-	if !slices.Equal(fake.calls[2].args, rolloutArgs(k8sdaemon.Name)) {
-		t.Errorf("third command = %q, want the daemon's rollout wait %q", fake.calls[2].args, rolloutArgs(k8sdaemon.Name))
+	if !slices.Equal(fake.calls[3].args, rolloutArgs(k8sdaemon.Name)) {
+		t.Errorf("fourth command = %q, want the daemon's rollout wait %q", fake.calls[3].args, rolloutArgs(k8sdaemon.Name))
 	}
-	if !slices.Equal(fake.calls[3].args, rolloutArgs(k8sdaemon.DashboardName)) {
-		t.Errorf("fourth command = %q, want the dashboard's rollout wait %q", fake.calls[3].args, rolloutArgs(k8sdaemon.DashboardName))
+	if !slices.Equal(fake.calls[4].args, rolloutArgs(k8sdaemon.DashboardName)) {
+		t.Errorf("fifth command = %q, want the dashboard's rollout wait %q", fake.calls[4].args, rolloutArgs(k8sdaemon.DashboardName))
+	}
+}
+
+// TestPodDaemonSwapSkipsAnAbsentDashboard holds the town with no dashboard: after
+// the existence read, only the daemon's patch and rollout wait run, no command names
+// the dashboard, and one line says the dashboard was not moved.
+func TestPodDaemonSwapSkipsAnAbsentDashboard(t *testing.T) {
+	t.Parallel()
+	fake := &podSwapFake{absent: true}
+	var out bytes.Buffer
+	swap := podSwapFor(fake)
+	swap.Out = &out
+
+	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(fake.calls) != 3 {
+		t.Fatalf("commands = %+v, want the existence read, then the daemon's patch and rollout wait only", fake.calls)
+	}
+	if !containsArg(fake.calls[1].args, "patch") || !containsArg(fake.calls[1].args, "deployment/"+k8sdaemon.Name) {
+		t.Errorf("second command = %q, want the daemon's patch", fake.calls[1].args)
+	}
+	if !slices.Equal(fake.calls[2].args, append(slices.Clone(fake.calls[1].args[:4]), "rollout", "status", "deployment/"+k8sdaemon.Name, "--timeout=5m0s")) {
+		t.Errorf("third command = %q, want the daemon's rollout wait", fake.calls[2].args)
+	}
+	for _, c := range fake.calls[1:] {
+		if containsArg(c.args, "deployment/"+k8sdaemon.DashboardName) {
+			t.Errorf("command %q names the dashboard, want none once the dashboard is absent", c.args)
+		}
+	}
+	if got, want := out.String(), dashboardAbsentLine+"\n"; got != want {
+		t.Errorf("output = %q, want exactly %q", got, want)
+	}
+}
+
+// TestPodDaemonSwapPrintsNothingWhenTheDashboardIsMoved holds the line to the
+// absent town: a present dashboard is moved and says nothing about it.
+func TestPodDaemonSwapPrintsNothingWhenTheDashboardIsMoved(t *testing.T) {
+	t.Parallel()
+	fake := &podSwapFake{}
+	var out bytes.Buffer
+	swap := podSwapFor(fake)
+	swap.Out = &out
+
+	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("output = %q, want none when the dashboard is moved", got)
+	}
+}
+
+// TestPodDaemonSwapRefusesAnUnreadableDashboardRead holds the existence read to its
+// refusals: a read that exits nonzero, one the runner cannot run, and one whose
+// answer is not the dashboard's name each fail the step before any patch runs, so
+// an unreadable cluster never passes as a dashboard that is not there.
+func TestPodDaemonSwapRefusesAnUnreadableDashboardRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fake podSwapFake
+		want string
+	}{
+		{
+			name: "a read that exits nonzero fails the step",
+			fake: podSwapFake{readExit: 1},
+			want: "the dashboard's existence read exited 1",
+		},
+		{
+			name: "a read the runner cannot run fails the step",
+			fake: podSwapFake{readErr: errors.New("kubectl not found")},
+			want: "running kubectl for the dashboard's existence read",
+		},
+		{
+			name: "a read that answers with something other than the dashboard fails, without echoing it",
+			fake: podSwapFake{readOut: podSwapOutput + "\n"},
+			want: "the dashboard's existence read printed a name other than the dashboard's",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := tt.fake
+			err := podSwapFor(&fake).Apply(context.Background(), podSwapPair)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Apply error = %v, want one containing %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), podSwapOutput) {
+				t.Errorf("Apply error carries the command's output: %v", err)
+			}
+			if len(fake.calls) != 1 {
+				t.Errorf("commands = %+v, want only the existence read: no patch may run on either Deployment", fake.calls)
+			}
+		})
 	}
 }
 
@@ -167,8 +293,8 @@ func TestPodDaemonSwapAcceptsANameAtTheDNSLabelLimit(t *testing.T) {
 	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(fake.calls) != 4 {
-		t.Errorf("commands = %d, want 4 at the limit", len(fake.calls))
+	if len(fake.calls) != 5 {
+		t.Errorf("commands = %d, want 5 at the limit", len(fake.calls))
 	}
 }
 
@@ -183,12 +309,12 @@ func TestPodDaemonSwapUsesTheNamedDeployment(t *testing.T) {
 	}
 	// The daemon's patch and rollout wait name the configured Deployment; the
 	// dashboard's patch and wait name the dashboard's, whatever the daemon is.
-	for _, i := range []int{0, 2} {
+	for _, i := range []int{1, 3} {
 		if !containsArg(fake.calls[i].args, "deployment/daemon-canary") {
 			t.Errorf("command %v does not name the configured Deployment", fake.calls[i].args)
 		}
 	}
-	for _, i := range []int{1, 3} {
+	for _, i := range []int{2, 4} {
 		if !containsArg(fake.calls[i].args, "deployment/"+k8sdaemon.DashboardName) {
 			t.Errorf("command %v does not name the dashboard Deployment", fake.calls[i].args)
 		}
@@ -355,43 +481,43 @@ func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 			name:      "a failing daemon patch stops before the dashboard is patched",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.Name, exit: 1},
 			wantStep:  "the daemon's patch exited 1",
-			wantCalls: 1,
+			wantCalls: 2,
 		},
 		{
 			name:      "a failing dashboard patch stops before the rollout waits",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.DashboardName, exit: 1},
 			wantStep:  "the dashboard's patch exited 1",
-			wantCalls: 2,
+			wantCalls: 3,
 		},
 		{
 			name:      "a failing daemon rollout stops before the dashboard's wait",
 			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.Name, exit: 1},
 			wantStep:  "the daemon's rollout status exited 1",
-			wantCalls: 3,
+			wantCalls: 4,
 		},
 		{
 			name:      "a failing dashboard rollout is named as the dashboard's rollout",
 			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.DashboardName, exit: 1},
 			wantStep:  "the dashboard's rollout status exited 1",
-			wantCalls: 4,
+			wantCalls: 5,
 		},
 		{
 			name:      "a daemon patch command that cannot start is named as the daemon's patch",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.Name, err: errors.New("kubectl not found")},
 			wantStep:  "the daemon's patch",
-			wantCalls: 1,
+			wantCalls: 2,
 		},
 		{
 			name:      "a dashboard patch command that cannot start is named as the dashboard's patch",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.DashboardName, err: errors.New("kubectl not found")},
 			wantStep:  "the dashboard's patch",
-			wantCalls: 2,
+			wantCalls: 3,
 		},
 		{
 			name:      "a rollout command that cannot start is named as the rollout",
 			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.Name, err: errors.New("kubectl not found")},
 			wantStep:  "the daemon's rollout status",
-			wantCalls: 3,
+			wantCalls: 4,
 		},
 	}
 	for _, tt := range tests {
@@ -428,8 +554,8 @@ func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
 		if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
-		if len(fake.calls) != 4 {
-			t.Fatalf("commands = %+v, want both patches then both rollout waits", fake.calls)
+		if len(fake.calls) != 5 {
+			t.Fatalf("commands = %+v, want the existence read, both patches, then both rollout waits", fake.calls)
 		}
 		for _, c := range fake.calls {
 			if containsArg(c.args, "--context") {
@@ -439,11 +565,11 @@ func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
 				t.Errorf("command %v does not start with the namespace", c.args)
 			}
 		}
-		if !containsArg(fake.calls[0].args, "patch") || !containsArg(fake.calls[1].args, "patch") {
-			t.Errorf("first two commands %v are not the patches", fake.calls[:2])
+		if !containsArg(fake.calls[1].args, "patch") || !containsArg(fake.calls[2].args, "patch") {
+			t.Errorf("second and third commands %v are not the patches", fake.calls[1:3])
 		}
-		if !containsArg(fake.calls[2].args, "rollout") || !containsArg(fake.calls[3].args, "rollout") {
-			t.Errorf("last two commands %v are not the rollout waits", fake.calls[2:])
+		if !containsArg(fake.calls[3].args, "rollout") || !containsArg(fake.calls[4].args, "rollout") {
+			t.Errorf("last two commands %v are not the rollout waits", fake.calls[3:])
 		}
 	})
 
