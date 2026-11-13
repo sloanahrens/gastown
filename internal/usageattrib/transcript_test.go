@@ -516,19 +516,46 @@ func TestParseTSIsAnInstant(t *testing.T) {
 	}
 }
 
-// TestParseTSRefusesUnknownForms: a timestamp with a suffix or offset it cannot read is an error.
-func TestParseTSRefusesUnknownForms(t *testing.T) {
+// TestParseTSReadsReferenceFormsAsWallClock: a suffix the reader cannot apply does not make the
+// timestamp an error. The reference strptime read the first 19 bytes and dropped the rest, and so
+// does this: such a timestamp names its wall clock, not an instant its suffix names.
+func TestParseTSReadsReferenceFormsAsWallClock(t *testing.T) {
+	t.Parallel()
+	want := time.Date(2026, 10, 12, 18, 53, 57, 0, time.UTC)
+	for _, ts := range []string{
+		"2026-10-12T18:53:57+0000",
+		"2026-10-12T18:53:57+0200",
+		"2026-10-12T18:53:57-0500",
+		"2026-10-12T18:53:57+02",
+		"2026-10-12T18:53:57z",
+		"2026-10-12T18:53:57Zjunk",
+		"2026-10-12T18:53:57.123+0200",
+		"2026-10-12T18:53:57.",
+		"2026-10-12T18:53:57 +02:00",
+		"2026-10-12T18:53:57+24:00",
+		"2026-10-12T18:53:57+02:60",
+	} {
+		got, err := ParseTS(ts)
+		if err != nil {
+			t.Errorf("ParseTS(%q): %v, want the reference's wall clock", ts, err)
+			continue
+		}
+		if !got.Equal(want) {
+			t.Errorf("ParseTS(%q) = %v, want %v", ts, got, want)
+		}
+	}
+}
+
+// TestParseTSRefusesNonTimestamps: a string the reference also refused — not a timestamp, or with
+// fields out of range — is an error.
+func TestParseTSRefusesNonTimestamps(t *testing.T) {
 	t.Parallel()
 	for _, ts := range []string{
 		"",
 		"not a time",
-		"2026-10-12T18:53:57Zjunk",
-		"2026-10-12T18:53:57+0200",
-		"2026-10-12T18:53:57+24:00",
-		"2026-10-12T18:53:57+02:60",
-		"2026-10-12T18:53:57 +02:00",
 		"2026-13-12T18:53:57Z",
 		"2026-10-12T25:00:00Z",
+		"2026-10-12T10:00:60Z",
 	} {
 		if got, err := ParseTS(ts); err == nil {
 			t.Errorf("ParseTS(%q) = %v, want an error", ts, got)

@@ -149,15 +149,17 @@ const tsLayout = "2006-1-2T15:4:5"
 // empty for Z or no zone.
 var tsPattern = regexp.MustCompile(`^(\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{1,2}:\d{1,2})(?:\.\d+)?(?:Z|([+-])([01]\d|2[0-3]):([0-5]\d))?$`)
 
-// ParseTS parses a transcript timestamp as the UTC instant it names. "2026-10-12T18:53:57Z" and
-// "2026-10-12T20:53:57+02:00" are the same instant, and a timestamp with no zone is read as UTC.
-// This is where the port differs from the Python, which drops the zone and reads the wall clock:
-// an offset is applied here, so comparisons and the CDT hour are on the instant. A timestamp in any
-// other form, or with an offset out of range, is an error.
+// ParseTS parses a transcript timestamp as the UTC instant it names. A well-formed numeric offset
+// is applied where the Python reference drops it, so comparisons and the CDT hour are on the
+// instant; a timestamp with no zone is UTC. A suffix the reader cannot apply (a basic-format or
+// out-of-range offset, trailing text) is dropped and the first 19 bytes read as the wall clock, as
+// the reference does, so this stricter parse still reads every timestamp the reference accepted
+// rather than marking its whole record incomplete. Only a string whose first 19 bytes are not a
+// transcript timestamp is an error.
 func ParseTS(ts string) (time.Time, error) {
 	m := tsPattern.FindStringSubmatch(ts)
 	if m == nil {
-		return time.Time{}, fmt.Errorf("timestamp %q is not a transcript timestamp", ts)
+		return parseTSReference(ts)
 	}
 	t, err := time.ParseInLocation(tsLayout, m[1], time.UTC)
 	if err != nil {
@@ -171,6 +173,19 @@ func ParseTS(ts string) (time.Time, error) {
 		return t.Add(-off), nil
 	}
 	return t.Add(off), nil
+}
+
+// parseTSReference reads ts as the Python strptime does: the first 19 bytes, suffix dropped.
+func parseTSReference(ts string) (time.Time, error) {
+	prefix := ts
+	if len(prefix) > 19 {
+		prefix = prefix[:19]
+	}
+	t, err := time.ParseInLocation(tsLayout, prefix, time.UTC)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("timestamp %q is not a transcript timestamp", ts)
+	}
+	return t, nil
 }
 
 // twoDigits is the value of the two ASCII digits tsPattern admits in an offset group.
