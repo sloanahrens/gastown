@@ -116,7 +116,7 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if err != nil {
 		return exitDown, err
 	}
-	// The head holds only strings, a slice and a map, so marshalling it cannot
+	// The head holds only strings, a slice and a map, so marshaling it cannot
 	// fail; a branch for an error that cannot happen would be dead.
 	head, _ := json.Marshal(bdgateway.Request{
 		Argv:      call.Argv[1:],
