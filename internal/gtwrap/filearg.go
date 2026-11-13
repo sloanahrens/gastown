@@ -93,8 +93,9 @@ var valueFlags = map[string]bool{
 // text whatever it starts with: pflag takes the next argument as the value of a
 // string flag even when it begins with a dash. The scanner skips it instead of
 // reading it as a flag. The list is the text flags a bead is filed or edited
-// with; it only ever makes the scanner skip more, never refuse.
+// with, long and short; it only ever makes the scanner skip more, never refuse.
 var textFlags = map[string]bool{
+	"-d":      true,
 	"--title": true, "--description": true, "--acceptance": true, "--design": true,
 	"--notes": true, "--append-notes": true, "--reason": true, "--message": true,
 	"--comment": true, "--assignee": true, "--labels": true, "--label": true,

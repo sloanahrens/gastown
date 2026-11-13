@@ -35,7 +35,8 @@ type Kubectl struct {
 	// maps onto the pod root; any other directory maps to the pod root itself.
 	Town string
 	// PodRoot is the town root inside the pod. Empty means podTownRoot. It must be
-	// an absolute, clean path, since the pod walk-up script joins under it.
+	// an absolute, clean path other than "/", since the pod walk-up script joins
+	// under it and would otherwise search the whole pod.
 	PodRoot string
 	// Context names the kubectl context every command runs in.
 	Context string
@@ -368,8 +369,8 @@ func (k Kubectl) validate() error {
 			return fmt.Errorf("gtwrap: the kubernetes target's %s is %q; it must name a value that does not start with a dash", f.name, f.value)
 		}
 	}
-	if k.PodRoot != "" && (!path.IsAbs(k.PodRoot) || path.Clean(k.PodRoot) != k.PodRoot) {
-		return fmt.Errorf("gtwrap: the kubernetes target's pod root is %q; it must be an absolute, clean path", k.PodRoot)
+	if k.PodRoot != "" && (!path.IsAbs(k.PodRoot) || path.Clean(k.PodRoot) != k.PodRoot || k.PodRoot == "/") {
+		return fmt.Errorf("gtwrap: the kubernetes target's pod root is %q; it must be an absolute, clean path other than \"/\"", k.PodRoot)
 	}
 	switch {
 	case k.Town == "":
