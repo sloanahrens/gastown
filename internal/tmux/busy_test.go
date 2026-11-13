@@ -250,3 +250,37 @@ func TestIsBusy_CaptureErrorFailsSafeBusy(t *testing.T) {
 		t.Fatal("IsBusy on missing target = false, want true (fail safe)")
 	}
 }
+
+// TestIsIdleErr_ReportsCaptureError: a pane that cannot be captured is an error
+// to IsIdleErr, not a busy pane. IsIdle keeps its false for the same pane.
+func TestIsIdleErr_ReportsCaptureError(t *testing.T) {
+	t.Parallel()
+	_, _, tm, _ := busyServer(t, "")
+	idle, err := tm.IsIdleErr("missing-session-for-idle-check")
+	if err == nil {
+		t.Fatal("IsIdleErr on missing target: nil error, want the capture error")
+	}
+	if idle {
+		t.Fatal("IsIdleErr on missing target reported idle")
+	}
+	if tm.IsIdle("missing-session-for-idle-check") {
+		t.Fatal("IsIdle on missing target = true, want false")
+	}
+}
+
+// TestIsIdleErr_AnswersLikeIsIdle: on a readable pane IsIdleErr has no error
+// and gives IsIdle's answer, busy or at the prompt.
+func TestIsIdleErr_AnswersLikeIsIdle(t *testing.T) {
+	t.Parallel()
+	f, p, tm, _ := busyServer(t, "")
+	setScreen(f, p, "filler", currentSpinner)
+	idle, err := tm.IsIdleErr("gt-x")
+	if err != nil || idle {
+		t.Fatalf("IsIdleErr on busy pane = %v, %v; want false, nil", idle, err)
+	}
+	setScreen(f, p, "user@host:~$ ")
+	idle, err = tm.IsIdleErr("gt-x")
+	if err != nil || idle != tm.IsIdle("gt-x") {
+		t.Fatalf("IsIdleErr on readable pane = %v, %v; IsIdle = %v", idle, err, tm.IsIdle("gt-x"))
+	}
+}

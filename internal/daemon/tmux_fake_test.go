@@ -28,6 +28,7 @@ type fakeTmux struct {
 	hasErr      error
 	listErr     error                           // ListSessions fails with this
 	aliveErr    map[string]error                // per session: IsAgentAliveChecked fails with this
+	idleErr     map[string]error                // per session: IsIdleErr fails with this
 	stalls      map[string][]tmux.ComposerStall // per session, consumed in order; the last repeats
 	stallErr    map[string]error
 	clocks      []*tmux.PendingInputClock // the pending clock each stall probe was handed
@@ -43,6 +44,7 @@ func newFakeTmux(clk clockwork.Clock) *fakeTmux {
 		stalls:   map[string][]tmux.ComposerStall{},
 		stallErr: map[string]error{},
 		aliveErr: map[string]error{},
+		idleErr:  map[string]error{},
 	}
 }
 
@@ -107,6 +109,26 @@ func (f *fakeTmux) IsAgentAliveChecked(session string) (bool, error) {
 func (f *fakeTmux) setAliveErr(session string, err error) {
 	f.mu.Lock()
 	f.aliveErr[session] = err
+	f.mu.Unlock()
+}
+
+// IsIdleErr answers from the idle state the test set with SetIdle (promoted
+// from tmuxfake), or with the error the test set for session: a pane that
+// could not be captured.
+func (f *fakeTmux) IsIdleErr(session string) (bool, error) {
+	f.mu.Lock()
+	err := f.idleErr[session]
+	f.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	return f.Server.IsIdle(session), nil
+}
+
+// setIdleErr makes IsIdleErr fail for session.
+func (f *fakeTmux) setIdleErr(session string, err error) {
+	f.mu.Lock()
+	f.idleErr[session] = err
 	f.mu.Unlock()
 }
 

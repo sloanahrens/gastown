@@ -4296,11 +4296,24 @@ func (t *Tmux) IsAtPrompt(session string, rc *config.RuntimeConfig) bool {
 // hasBusyIndicator). When the agent is actively working, one of those markers
 // is present. When idle, none is.
 func (t *Tmux) IsIdle(session string) bool {
+	idle, err := t.IsIdleErr(session)
+	return err == nil && idle
+}
+
+// IsIdleErr is IsIdle for a caller that must tell a busy pane from one it could
+// not read: a failed pane capture is returned as the error, not folded into
+// false. The idle answer is the same as IsIdle's.
+func (t *Tmux) IsIdleErr(session string) (bool, error) {
 	lines, err := t.capturePaneVisibleTail(session)
 	if err != nil {
-		return false
+		return false, err
 	}
+	return t.idleFromPaneLines(session, lines), nil
+}
 
+// idleFromPaneLines is the IsIdle decision over the trailing pane lines of
+// session.
+func (t *Tmux) idleFromPaneLines(session string, lines []string) bool {
 	for _, line := range lines {
 		if hasBusyIndicator(line) {
 			return false
