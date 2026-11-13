@@ -1523,6 +1523,10 @@ type RecoveryStatus struct {
 	CleanupStatusSource string `json:"cleanup_status_source,omitempty"`
 	GitStateSource      string `json:"git_state_source,omitempty"`
 	GitStateReason      string `json:"git_state_reason,omitempty"`
+	// SandboxPhase is the phase the gateway reported for a sandbox seat whose
+	// sandbox it still lists (Running, Stopped, Error...), empty when the seat
+	// has no such sandbox or the gateway did not say (gt-dtel4n).
+	SandboxPhase string `json:"sandbox_phase,omitempty"`
 }
 
 func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
@@ -1722,7 +1726,7 @@ func idleRecoveryStatus(rig, name string, p *polecat.Polecat, fields *beads.Agen
 // many times they call it and whether a bulk agent-bead list arms the
 // per-polecat lookup first.
 func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
-	return checkRecoveryForPolecatWith(sandboxSeatEnv{probe: sandboxSeatProbeFor(filepath.Dir(r.Path), nil)}, bd, preloadedAgentBeads, r, rigName, polecatName, p, reconcileCleanup)
+	return checkRecoveryForPolecatWith(sandboxSeatEnv{probe: sandboxSeatProbeWithPhase(filepath.Dir(r.Path), nil, session.GatewaySandboxPhase)}, bd, preloadedAgentBeads, r, rigName, polecatName, p, reconcileCleanup)
 }
 
 // checkRecoveryForPolecatWith is checkRecoveryForPolecat with the sandbox probe
@@ -1752,10 +1756,11 @@ func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, pr
 	}
 
 	status := RecoveryStatus{
-		Rig:     rigName,
-		Polecat: polecatName,
-		Branch:  p.Branch,
-		Issue:   p.Issue,
+		Rig:          rigName,
+		Polecat:      polecatName,
+		Branch:       p.Branch,
+		Issue:        p.Issue,
+		SandboxPhase: sandboxLive.SandboxPhase,
 	}
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 	// targetRefs is resolved once below, inside whichever branch actually

@@ -43,6 +43,9 @@ type LiveGitState struct {
 	Source string
 	// FailedReason explains an unknown Source.
 	FailedReason string
+	// SandboxPhase is the phase the gateway reported for a sandbox seat whose
+	// sandbox it still lists; empty when the gateway did not say.
+	SandboxPhase string
 }
 
 // ProbeLiveGitState measures one worktree path. It never returns an error:

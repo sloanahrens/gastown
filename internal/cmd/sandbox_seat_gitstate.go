@@ -31,6 +31,17 @@ type sandboxExistsFunc func(gateway, name string) (bool, error)
 // sandbox seat whose record is gone. exists is the gateway question (nil means
 // the sandbox CLI); production passes nil and a test passes a stub.
 func sandboxSeatProbeFor(townRoot string, exists sandboxExistsFunc) sandboxSeatProbe { //nolint:unparam // exists is the seam tests use; production asks the CLI
+	return sandboxSeatProbeWithPhase(townRoot, exists, nil)
+}
+
+// sandboxPhaseFunc asks a gateway for the phase of the sandbox called name.
+type sandboxPhaseFunc func(gateway, name string) (sandbox.Status, error)
+
+// sandboxSeatProbeWithPhase is sandboxSeatProbeFor that also asks the gateway
+// for the phase of a sandbox it lists, so check-recovery can name a stopped
+// sandbox as stopped (gt-dtel4n). A nil phase is the list path's answer, the
+// running sandbox, read without a second gateway question.
+func sandboxSeatProbeWithPhase(townRoot string, exists sandboxExistsFunc, phase sandboxPhaseFunc) sandboxSeatProbe { //nolint:unparam // exists is the seam tests use; production asks the CLI
 	if exists == nil {
 		exists = func(gateway, name string) (bool, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), sandboxSeatTimeout)
@@ -38,12 +49,12 @@ func sandboxSeatProbeFor(townRoot string, exists sandboxExistsFunc) sandboxSeatP
 			return (&sandbox.CLI{Gateway: gateway}).Exists(ctx, name)
 		}
 	}
-	return sandboxSeatProbe(polecat.NewSandboxSeatProbe(townRoot, func(gateway, name string) (bool, error) {
+	return sandboxSeatProbe(polecat.NewSandboxSeatProbeWithPhase(townRoot, func(gateway, name string) (bool, error) {
 		if recorded, err := session.IsSandboxed(townRoot, name); err == nil && recorded {
 			return true, nil
 		}
 		return exists(gateway, name)
-	}))
+	}, phase))
 }
 
 // polecatSessionNameIn is the session (and sandbox) name of a rig's polecat.
