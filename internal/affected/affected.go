@@ -76,10 +76,13 @@ func Select(run Runner, wd, base, head string) (Selection, error) {
 // package are not returned: the caller tests the direct importers of the
 // packages it changed, not their whole reverse closure (gt-cwkzxk).
 //
-// dirs are repo-relative directories ("internal/rig"). A dir the graph does not
-// hold, or an importer with no directory of its own, is an error, as is a graph
-// that cannot be read: the caller must not fall back to the changed packages
-// alone. The graph is read only when dirs is non-empty.
+// dirs are repo-relative directories ("internal/rig"). A dir whose Go files a
+// build constraint all excludes holds no package, so no package imports it and
+// it contributes no importer; it is skipped rather than read as an unknown dir
+// (gt-zjwe5w). Any other dir the graph does not hold, or an importer with no
+// directory of its own, is an error, as is a graph that cannot be read: the
+// caller must not fall back to the changed packages alone. The graph is read
+// only when dirs is non-empty.
 func DirectImporters(run Runner, wd, head string, dirs []string) ([]string, error) {
 	if len(dirs) == 0 {
 		return nil, nil
@@ -88,7 +91,7 @@ func DirectImporters(run Runner, wd, head string, dirs []string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-	return graph.directImporters(dirs)
+	return graph.directImporters(run, dirs)
 }
 
 // loadGraph reads the import graph of the module at wd and checks it is the
@@ -179,15 +182,21 @@ type pkgGraph struct {
 	imports map[string][]string
 }
 
-// listPackage is the part of one `go list -json` record the selector reads.
+// listPackage is the part of one `go list -json` record the selector reads,
+// from the graph and from the probe that asks whether a changed directory holds
+// a package.
 type listPackage struct {
-	ImportPath string
-	Dir        string
-	Deps       []string
-	Imports    []string
-	ForTest    string
-	Module     *listModule
-	Error      *listError
+	ImportPath     string
+	Dir            string
+	Deps           []string
+	Imports        []string
+	ForTest        string
+	GoFiles        []string
+	CgoFiles       []string
+	TestGoFiles    []string
+	IgnoredGoFiles []string
+	Module         *listModule
+	Error          *listError
 }
 
 type listModule struct {
@@ -339,13 +348,22 @@ func (g *pkgGraph) selectFiles(files []string) (Selection, error) {
 }
 
 // directImporters names the directory of each package that imports one of dirs
-// directly, sorted, leaving out dirs themselves. A dir the graph does not hold
-// is an error: an unknown package has no importers the caller could test.
-func (g *pkgGraph) directImporters(dirs []string) ([]string, error) {
+// directly, sorted, leaving out dirs themselves. A dir whose Go files a build
+// constraint all excludes is skipped: it holds no package, so it has no
+// importers (gt-zjwe5w). Any other dir the graph does not hold is an error: an
+// unknown package has no importers the caller could test.
+func (g *pkgGraph) directImporters(run Runner, dirs []string) ([]string, error) {
 	targets := map[string]bool{}
 	for _, dir := range dirs {
 		importPath, ok := g.byDir[dir]
 		if !ok {
+			excluded, err := allGoFilesExcluded(run, dir)
+			if err != nil {
+				return nil, err
+			}
+			if excluded {
+				continue
+			}
 			return nil, fmt.Errorf("no package in the import graph is in %s", dir)
 		}
 		targets[importPath] = true
@@ -381,6 +399,32 @@ func importsAny(imports []string, set map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// allGoFilesExcluded reports whether dir holds Go files that a build constraint
+// all excludes and none it builds, so the directory holds no package: `go list
+// ./...` never names it, and `go test` of it fails with "build constraints
+// exclude all Go files" (gt-zjwe5w). The directory is read by one go list with
+// -e, since a pattern go list matches is an error without it. A record naming a
+// package, one naming no directory, and one listing a file that builds are not
+// an excluded directory: the answer is false and the caller reports the dir it
+// could not place. Output that cannot be read is an error.
+//
+// The pattern is "./" plus the dir and follows "--", so no part of the dir can
+// be read as a flag.
+func allGoFilesExcluded(run Runner, dir string) (bool, error) {
+	out, err := run([]string{"go", "list", "-e", "-json", "--", "./" + dir})
+	if err != nil {
+		return false, fmt.Errorf("go list ./%s: %w", dir, err)
+	}
+	var rec listPackage
+	if err := json.NewDecoder(bytes.NewReader(out)).Decode(&rec); err != nil {
+		return false, fmt.Errorf("go list ./%s: %w", dir, err)
+	}
+	if rec.Error == nil || rec.Dir == "" || len(rec.IgnoredGoFiles) == 0 {
+		return false, nil
+	}
+	return len(rec.GoFiles) == 0 && len(rec.CgoFiles) == 0 && len(rec.TestGoFiles) == 0, nil
 }
 
 // packagesOfFiles names the import path of the package that owns each file, and

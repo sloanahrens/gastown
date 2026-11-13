@@ -2,6 +2,7 @@ package land
 
 import (
 	"errors"
+	"go/build"
 	"os"
 	"path"
 	"path/filepath"
@@ -229,20 +230,33 @@ func isFixtureDir(dir string) bool {
 	return false
 }
 
-// PackageDirHasGo reports whether repoRoot/dir holds a .go file directly and
-// belongs to the root module. A directory inside a nested module (a go.mod in
-// it or above it, below repoRoot) is not one: `go test` from the root cannot
-// build it, and the Makefile tests those modules in their own directory.
+// PackageDirHasGo reports whether repoRoot/dir holds a .go file a build
+// constraint does not exclude and belongs to the root module. A directory
+// inside a nested module (a go.mod in it or above it, below repoRoot) is not
+// one: `go test` from the root cannot build it, and the Makefile tests those
+// modules in their own directory. A directory whose only Go files the build
+// excludes is not one either: it holds no package, and `go test` of it fails
+// with "build constraints exclude all Go files" (gt-zjwe5w).
 func PackageDirHasGo(repoRoot, dir string) bool {
 	if inNestedModule(repoRoot, dir) {
 		return false
 	}
-	entries, err := os.ReadDir(filepath.Join(repoRoot, filepath.FromSlash(dir)))
+	full := filepath.Join(repoRoot, filepath.FromSlash(dir))
+	entries, err := os.ReadDir(full)
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		match, err := build.Default.MatchFile(full, e.Name())
+		if err != nil {
+			// A file the build cannot judge is kept: `go test` of the directory
+			// reports it, and dropping the directory would hide the failure.
+			return true
+		}
+		if match {
 			return true
 		}
 	}

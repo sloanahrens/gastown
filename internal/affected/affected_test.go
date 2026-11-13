@@ -15,16 +15,28 @@ import (
 // are told apart by the range: the first names base...head, the second the head
 // the working tree is compared against.
 type fakeRunner struct {
-	diff      []byte // git diff base...head
-	treeDiff  []byte // git diff head, the working tree against head
-	untracked []byte // git ls-files --others
-	list      []byte // go list
+	diff      []byte            // git diff base...head
+	treeDiff  []byte            // git diff head, the working tree against head
+	untracked []byte            // git ls-files --others
+	list      []byte            // go list -deps -test -json ./...
+	probe     map[string][]byte // go list -e -json -- ./dir, by dir
 	calls     [][]string
 
 	diffErr      error
 	treeDiffErr  error
 	untrackedErr error
 	listErr      error
+	probeErr     error
+}
+
+// probeArgv reports the dir one go list probe asks about, and whether argv is
+// one.
+func probeArgv(argv []string) (string, bool) {
+	if len(argv) == 6 && argv[0] == "go" && argv[1] == "list" && argv[2] == "-e" &&
+		argv[3] == "-json" && argv[4] == "--" && strings.HasPrefix(argv[5], "./") {
+		return strings.TrimPrefix(argv[5], "./"), true
+	}
+	return "", false
 }
 
 func (f *fakeRunner) run(argv []string) ([]byte, error) {
@@ -33,6 +45,13 @@ func (f *fakeRunner) run(argv []string) ([]byte, error) {
 		return nil, errors.New("fake runner: empty argv")
 	}
 	if argv[0] == "go" {
+		if dir, ok := probeArgv(argv); ok {
+			out, ok := f.probe[dir]
+			if !ok {
+				return nil, fmt.Errorf("fake runner: no probe output for %q", dir)
+			}
+			return out, f.probeErr
+		}
 		return f.list, f.listErr
 	}
 	if argv[0] != "git" || len(argv) < 2 {
@@ -59,6 +78,15 @@ func names(files ...string) []byte {
 	}
 	return out
 }
+
+// notADirectoryRecord is one `go list -e -json` record for a pattern that names
+// no directory: go list reports the failure without a Dir.
+var notADirectoryRecord = []byte(`{"ImportPath": "./internal/nope", "Error": {"Err": "directory not found"}}`)
+
+// excludedDirRecord is one `go list -e -json` record for a directory whose Go
+// files a build constraint all excludes: a Dir, an ignored file, no file that
+// builds, and the error go list reports for the pattern.
+var excludedDirRecord = []byte(`{"ImportPath": "./internal/ignored", "Dir": "/fixture/internal/ignored", "Incomplete": true, "IgnoredGoFiles": ["gen.go"], "Error": {"Err": "build constraints exclude all Go files in /fixture/internal/ignored"}}`)
 
 // fixtureRoot is the module directory the captured graph names: its Dir fields
 // were rewritten to it, so the fixture travels with the repository.
@@ -353,7 +381,12 @@ func TestDirectImportersFailsWithTheReason(t *testing.T) {
 		r    fakeRunner
 		wd   string
 	}{
-		{name: "changed dir is not in the graph", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t)}},
+		{name: "changed dir is not in the graph", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t), probe: map[string][]byte{"internal/nope": notADirectoryRecord}}},
+		{name: "the probe command fails", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t), probe: map[string][]byte{"internal/nope": excludedDirRecord}, probeErr: errors.New("go list failed")}},
+		{name: "the probe output is not JSON", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t), probe: map[string][]byte{"internal/nope": []byte("not json")}}},
+		{name: "the probe names a package the graph lacks", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t), probe: map[string][]byte{"internal/nope": []byte(`{"ImportPath": "example.com/m/internal/nope", "Dir": "/fixture/internal/nope"}`)}}},
+		{name: "ignored files beside a buildable one", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t), probe: map[string][]byte{"internal/nope": []byte(`{"Dir": "/fixture/internal/nope", "GoFiles": ["a.go"], "IgnoredGoFiles": ["b.go"], "Error": {"Err": "build constraints exclude all Go files"}}`)}}},
+		{name: "ignored files beside a test file", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t), probe: map[string][]byte{"internal/nope": []byte(`{"Dir": "/fixture/internal/nope", "TestGoFiles": ["a_test.go"], "IgnoredGoFiles": ["b.go"], "Error": {"Err": "build constraints exclude all Go files"}}`)}}},
 		{name: "go list fails", dirs: []string{"internal/a"}, r: fakeRunner{listErr: errors.New("go list failed")}},
 		{name: "go list reports a package error", dirs: []string{"internal/a"}, r: fakeRunner{list: []byte(`{"ImportPath": "example.com/m/internal/a", "Error": {"Err": "build constraints exclude all Go files"}}`)}},
 		{name: "working tree differs from head", dirs: []string{"internal/a"}, r: fakeRunner{list: listGraph(t), treeDiff: names("internal/a/a.go")}},
@@ -382,6 +415,45 @@ func TestDirectImportersFailsWithTheReason(t *testing.T) {
 			}
 			if got != nil {
 				t.Errorf("DirectImporters = %v with an error, want nil", got)
+			}
+		})
+	}
+}
+
+// TestDirectImportersSkipsADirectoryWithOnlyExcludedGoFiles: a changed dir whose
+// Go files a build constraint all excludes holds no package, so nothing imports
+// it: the selection skips it instead of failing on a dir the graph cannot hold
+// (gt-zjwe5w).
+func TestDirectImportersSkipsADirectoryWithOnlyExcludedGoFiles(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		dirs  []string
+		probe map[string][]byte
+		want  []string
+	}{
+		{
+			name:  "the excluded dir alone",
+			dirs:  []string{"internal/ignored"},
+			probe: map[string][]byte{"internal/ignored": excludedDirRecord},
+		},
+		{
+			name:  "the excluded dir beside a package",
+			dirs:  []string{"internal/ignored", "internal/a"},
+			probe: map[string][]byte{"internal/ignored": excludedDirRecord},
+			want:  []string{"internal/b", "internal/c", "internal/f"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &fakeRunner{list: listGraph(t), probe: tc.probe}
+			got, err := DirectImporters(r.run, fixtureRoot, "HEAD", tc.dirs)
+			if err != nil {
+				t.Fatalf("DirectImporters: %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("DirectImporters(%v) = %v, want %v", tc.dirs, got, tc.want)
 			}
 		})
 	}
