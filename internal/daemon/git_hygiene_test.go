@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -697,6 +698,251 @@ func TestRunGitHygiene_EmptyBareRepoDirectoryIsAFailedCycle(t *testing.T) {
 	if !strings.Contains(reason, "no rig has a repository") {
 		t.Errorf("reason = %q, want the no-repository failure", reason)
 	}
+}
+
+// withGit makes every repository the daemon opens go through wrap.
+func withGit(d *Daemon, wrap func(daemonGit) daemonGit) {
+	open := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return wrap(open(dir)) }
+}
+
+// A crew/ branch lands by patch: crew/landed carries main's "landed" change
+// under its own SHA, so its one commit reads "-" in cherry and the branch is
+// deleted; crew/open's commit is on no base, so it reads "+" and is kept.
+func TestRunGitHygiene_DeletesLandedCrewBranchAndKeepsUnlandedOne(t *testing.T) {
+	t.Parallel()
+	d, feed, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/landed", base)
+	f.Commit(t, origin, "crew/landed", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	f.SetRef(t, origin, "refs/heads/crew/open", base)
+	open := f.Commit(t, origin, "crew/open", "open work", map[string]string{"o.txt": "o\n"})
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/landed"); got != "" {
+		t.Errorf("origin crew/landed = %q, want the landed branch deleted", got)
+	}
+	if got := f.Ref(origin, "refs/heads/crew/open"); got != open {
+		t.Errorf("origin crew/open = %q, want the unlanded branch kept at %s", got, open)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/open: it holds commits that are not on origin/main") {
+		t.Errorf("log does not say why crew/open was kept:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "1 repo(s): 0 merged, 0 orphan, 0 remote branch(es) deleted, 1 crew branch(es) deleted") {
+		t.Errorf("log lacks the crew count in the summary:\n%s", logs.String())
+	}
+	if len(feed.payloads) != 0 {
+		t.Errorf("feed = %v, want no failed cycle", feed.payloads)
+	}
+}
+
+// An empty crew/ branch has no commit beyond the default branch. It counts as
+// landed only once its tip is older than the patrol interval, read through the
+// daemon's clock: a branch cut a moment ago is not reaped.
+func TestRunGitHygiene_EmptyCrewBranchIsDeletedOnlyOnceOlderThanTheInterval(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	old := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/old", old)
+	fresh := f.Commit(t, origin, "main", "later", map[string]string{"b.txt": "b\n"})
+	f.SetRef(t, origin, "refs/heads/crew/fresh", fresh)
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	oldAt, err := d.gitAt(origin).CommitTime(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshAt, err := d.gitAt(origin).CommitTime(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !freshAt.After(oldAt) {
+		t.Fatalf("fixture: fresh tip %v is not after old tip %v", freshAt, oldAt)
+	}
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{GitHygiene: &PatrolConfig{Interval: "1h"}}}
+	// The clock sits one second past the old tip's hour, so the old tip is
+	// older than the interval and the fresh tip is inside it.
+	d.clock = clockwork.NewFakeClockAt(oldAt.Add(time.Hour + time.Second))
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/old"); got != "" {
+		t.Errorf("origin crew/old = %q, want the empty branch older than the interval deleted", got)
+	}
+	if got := f.Ref(origin, "refs/heads/crew/fresh"); got != fresh {
+		t.Errorf("origin crew/fresh = %q, want the empty branch inside the interval kept at %s", got, fresh)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/fresh: it has no commit beyond origin/main") {
+		t.Errorf("log does not say why crew/fresh was kept:\n%s", logs.String())
+	}
+}
+
+// A crew branch whose cherry check errors is kept with the reason in the log,
+// and so is the integration branch, which the sweep never deletes (gt-t9vl4).
+func TestRunGitHygiene_KeepsCrewBranchWhoseCherryFailsAndLogsTheIntegrationBranch(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/integration/epic", base)
+	epic := f.Commit(t, origin, "integration/epic", "epic work", map[string]string{"e.txt": "e\n"})
+	f.SetRef(t, origin, "refs/heads/crew/broken", base)
+	broken := f.Commit(t, origin, "crew/broken", "work", map[string]string{"w.txt": "w\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+	withGit(d, func(g daemonGit) daemonGit { return cherryFails{g} })
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/broken"); got != broken {
+		t.Errorf("origin crew/broken = %q, want the branch kept at %s when cherry fails", got, broken)
+	}
+	if got := f.Ref(origin, "refs/heads/integration/epic"); got != epic {
+		t.Errorf("origin integration/epic = %q, want the integration branch kept at %s", got, epic)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/broken: cannot tell whether it has landed: cherry: boom") {
+		t.Errorf("log does not report the failed cherry check:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "keep origin/integration/epic: integration branches are never deleted") {
+		t.Errorf("log does not say why integration/epic was kept:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "0 merged, 0 orphan, 0 remote, 0 crew") {
+		t.Errorf("log lacks the zero crew count:\n%s", logs.String())
+	}
+}
+
+// An empty crew branch whose tip time cannot be read is kept: the interval
+// check needs that time, and without it the branch is not known to be old.
+func TestRunGitHygiene_KeepsEmptyCrewBranchWhoseTipTimeFails(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/empty", base)
+	f.Commit(t, origin, "main", "later", map[string]string{"b.txt": "b\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+	withGit(d, func(g daemonGit) daemonGit { return commitTimeFails{g} })
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/empty"); got != base {
+		t.Errorf("origin crew/empty = %q, want the branch kept at %s", got, base)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/empty: cannot tell whether it has landed: commit time: boom") {
+		t.Errorf("log does not report the unreadable tip time:\n%s", logs.String())
+	}
+}
+
+// A crew branch is kept when the default base cannot be settled: the sweep
+// judges it against origin's default branch, and an integration base that
+// cannot be fetched leaves that answer unknown.
+func TestRunGitHygiene_KeepsCrewBranchWhenTheBaseCannotBeSettled(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/landed", base)
+	landed := f.Commit(t, origin, "crew/landed", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+	// Made after the clone, so the repository has no remote-tracking ref for it
+	// and the settle has to fetch it.
+	f.SetRef(t, origin, "refs/heads/integration/epic", base)
+	f.Commit(t, origin, "integration/epic", "epic work", map[string]string{"e.txt": "e\n"})
+	withGit(d, func(g daemonGit) daemonGit { return baseUnsettled{g} })
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/landed"); got != landed {
+		t.Errorf("origin crew/landed = %q, want the branch kept at %s while its base is unsettled", got, landed)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/landed: cannot tell whether it has landed") {
+		t.Errorf("log does not report the unsettled base:\n%s", logs.String())
+	}
+}
+
+// A landed crew branch whose guarded delete is refused stays on origin and is
+// logged, and the summary does not count it.
+func TestRunGitHygiene_KeepsLandedCrewBranchWhenTheDeleteIsRefused(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/landed", base)
+	landed := f.Commit(t, origin, "crew/landed", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+	withGit(d, func(g daemonGit) daemonGit { return deleteRemoteRefused{g} })
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/landed"); got != landed {
+		t.Errorf("origin crew/landed = %q, want the branch kept at %s when the delete is refused", got, landed)
+	}
+	if !strings.Contains(logs.String(), "delete origin/crew/landed: push: boom") {
+		t.Errorf("log does not report the refused delete:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "0 merged, 0 orphan, 0 remote, 0 crew") {
+		t.Errorf("log counts a refused delete as deleted:\n%s", logs.String())
+	}
+}
+
+// commitTimeFails is a daemonGit whose CommitTime always errors.
+type commitTimeFails struct{ daemonGit }
+
+func (commitTimeFails) CommitTime(rev string) (time.Time, error) {
+	return time.Time{}, errors.New("commit time: boom")
+}
+
+// baseUnsettled is a daemonGit whose fetches always fail, so an integration
+// base the repository lacks cannot be settled.
+type baseUnsettled struct{ daemonGit }
+
+func (baseUnsettled) FetchPrune(remote string) error { return errors.New("fetch: boom") }
+
+func (baseUnsettled) FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error {
+	return errors.New("fetch: boom")
+}
+
+// deleteRemoteRefused is a daemonGit whose guarded remote delete is refused.
+type deleteRemoteRefused struct{ daemonGit }
+
+func (deleteRemoteRefused) DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error {
+	return errors.New("push: boom")
 }
 
 func TestGitHygieneConfig(t *testing.T) {
