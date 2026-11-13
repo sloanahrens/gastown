@@ -69,6 +69,28 @@ func (p *fakeProbes) ImagePublished(_ context.Context, sha string) (bool, error)
 	return p.published, nil
 }
 
+// countedProbes is fakeProbes that counts the maintenance probe calls, so a
+// test can tell a plan that asked them from one that did not.
+type countedProbes struct {
+	*fakeProbes
+	archive, backup, gc int
+}
+
+func (p *countedProbes) ArchiveBehind(ctx context.Context) (int, int, error) {
+	p.archive++
+	return p.fakeProbes.ArchiveBehind(ctx)
+}
+
+func (p *countedProbes) BackupToday(ctx context.Context) (bool, error) {
+	p.backup++
+	return p.fakeProbes.BackupToday(ctx)
+}
+
+func (p *countedProbes) GCDue(ctx context.Context) (bool, string, error) {
+	p.gc++
+	return p.fakeProbes.GCDue(ctx)
+}
+
 // planFor builds a plan and fails the test on an error.
 func planFor(t *testing.T, p Probes, o PlanOptions) []StepRecord {
 	t.Helper()
@@ -507,6 +529,118 @@ func TestPlanSameCommitShortInstalledMatchesFullMain(t *testing.T) {
 	if install.Reason != "installed build equals main" {
 		t.Errorf("install reason = %q, want %q", install.Reason, "installed build equals main")
 	}
+}
+
+func TestPlanPodTarget(t *testing.T) {
+	t.Parallel()
+	const installed = "1111111111111111111111111111111111111111"
+	const mainSHA = "2222222222222222222222222222222222222222"
+
+	t.Run("none of the Dolt probes is called and maintenance is not run", func(t *testing.T) {
+		t.Parallel()
+		// Each probe fails if it is called at all, so a plan that still asked
+		// them could not return: that is what the Job pod did, where the Dolt
+		// data directory does not exist.
+		cause := errors.New("the Dolt data directory does not exist")
+		p := &countedProbes{fakeProbes: &fakeProbes{
+			installed: installed, main: mainSHA, published: true,
+			errArchive: cause, errBackup: cause, errGC: cause,
+		}}
+
+		steps, _, err := BuildPlan(context.Background(), p, PlanOptions{PodTarget: true})
+		if err != nil {
+			t.Fatalf("BuildPlan: %v", err)
+		}
+		if p.archive != 0 || p.backup != 0 || p.gc != 0 {
+			t.Errorf("maintenance probes called %d/%d/%d times, want none for a pod target", p.archive, p.backup, p.gc)
+		}
+		maintenance := stepNamed(t, steps, StepMaintenance)
+		if maintenance.WillRun {
+			t.Errorf("maintenance WillRun = true, want false for a pod target (reason %q)", maintenance.Reason)
+		}
+		if maintenance.Reason != podMaintenanceReason {
+			t.Errorf("maintenance reason = %q, want %q", maintenance.Reason, podMaintenanceReason)
+		}
+	})
+
+	t.Run("the install steps are planned as before", func(t *testing.T) {
+		t.Parallel()
+		p := &countedProbes{fakeProbes: &fakeProbes{
+			installed: installed, main: mainSHA, published: true, backup: true,
+		}}
+
+		steps := planFor(t, p, PlanOptions{PodTarget: true})
+		for _, name := range []StepName{StepDrain, StepInstall, StepRestart, StepVerify, StepLift} {
+			if s := stepNamed(t, steps, name); !s.WillRun {
+				t.Errorf("%s WillRun = false, want true for a pod target (reason %q)", name, s.Reason)
+			}
+		}
+		reason := stepNamed(t, steps, StepInstall).Reason
+		for _, sha := range []string{"11111111", "22222222"} {
+			if !strings.Contains(reason, sha) {
+				t.Errorf("install reason %q does not contain %q", reason, sha)
+			}
+		}
+		if !strings.Contains(reason, "differs from main") {
+			t.Errorf("install reason = %q, want it to say the builds differ", reason)
+		}
+	})
+
+	t.Run("a sha probe still fails the plan", func(t *testing.T) {
+		t.Parallel()
+		cause := errors.New("probe unavailable")
+		p := &countedProbes{fakeProbes: &fakeProbes{installed: installed, main: mainSHA, published: true, errMain: cause}}
+
+		_, _, err := BuildPlan(context.Background(), p, PlanOptions{PodTarget: true})
+		if err == nil {
+			t.Fatal("BuildPlan error = nil, want the MainSHA failure")
+		}
+		if !strings.Contains(err.Error(), "MainSHA") {
+			t.Errorf("error = %q, want it to name MainSHA", err)
+		}
+		if !errors.Is(err, cause) {
+			t.Errorf("error does not wrap the probe cause: %v", err)
+		}
+	})
+}
+
+func TestPlanHostTarget(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the three probes are called once each", func(t *testing.T) {
+		t.Parallel()
+		p := &countedProbes{fakeProbes: &fakeProbes{
+			installed: "abc1234", main: "abc1234", published: true, backup: true,
+		}}
+
+		steps := planFor(t, p, PlanOptions{})
+		if p.archive != 1 || p.backup != 1 || p.gc != 1 {
+			t.Errorf("maintenance probes called %d/%d/%d times, want once each", p.archive, p.backup, p.gc)
+		}
+		maintenance := stepNamed(t, steps, StepMaintenance)
+		if maintenance.WillRun {
+			t.Errorf("maintenance WillRun = true, want false: nothing is due (reason %q)", maintenance.Reason)
+		}
+		if maintenance.Reason != "nothing is due" {
+			t.Errorf("maintenance reason = %q, want %q", maintenance.Reason, "nothing is due")
+		}
+	})
+
+	t.Run("maintenance is planned from the probes' answers", func(t *testing.T) {
+		t.Parallel()
+		p := &countedProbes{fakeProbes: &fakeProbes{
+			installed: "abc1234", main: "abc1234", published: true, backup: true,
+			gcDue: true, gcReason: "the watermark is a day old",
+		}}
+
+		maintenance := stepNamed(t, planFor(t, p, PlanOptions{}), StepMaintenance)
+		if !maintenance.WillRun {
+			t.Fatalf("maintenance WillRun = false, want true: a gc is due (reason %q)", maintenance.Reason)
+		}
+		if !strings.Contains(maintenance.Reason, "a gc is due: the watermark is a day old") {
+			t.Errorf("maintenance reason = %q, want it to name the gc trigger", maintenance.Reason)
+		}
+	})
 }
 
 func TestPlanSameCommitDifferentCommitsStillInstall(t *testing.T) {

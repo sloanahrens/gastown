@@ -208,6 +208,9 @@ func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
 		if got.opts.HostInstallSkipped != podHostInstallReason {
 			t.Errorf("HostInstallSkipped = %q, want %q", got.opts.HostInstallSkipped, podHostInstallReason)
 		}
+		if !got.opts.PodTarget {
+			t.Error("PodTarget = false, want true: the run's daemon runs as a pod, so the plan must not read the host's Dolt directories")
+		}
 		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
 		if err != nil {
 			t.Fatalf("Install: %v", err)
@@ -223,6 +226,9 @@ func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
 		if got.opts.HostInstallSkipped != "" {
 			t.Errorf("HostInstallSkipped = %q, want none without a pod target", got.opts.HostInstallSkipped)
 		}
+		if got.opts.PodTarget {
+			t.Error("PodTarget = true, want false: the run names no pod daemon")
+		}
 		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
 		if err != nil {
 			t.Fatalf("Install: %v", err)
@@ -235,6 +241,40 @@ func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
 		}
 	})
 
+}
+
+// TestUpdatePodTargetWithoutImagesStillMarksThePlan: --skip install is the one
+// pod-target run allowed without --images, so it carries no host-install skip
+// note. The run must still tell the plan its daemon is a pod, or the plan asks
+// the host's Dolt probes and the Job fails on a data directory the pod does not
+// have.
+func TestUpdatePodTargetWithoutImagesStillMarksThePlan(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	var got update.Options
+	seams := updateSeams{
+		FindTownRoot: func() (string, error) { return townRoot, nil },
+		DepsFactory: func(string) (update.Deps, error) {
+			return update.Deps{Store: &update.Store{Dir: update.Dir(townRoot)}, Clock: updateClock{}}, nil
+		},
+		Run: func(_ context.Context, _ update.Deps, opts update.Options) (update.State, error) {
+			got = opts
+			return update.State{Outcome: update.OutcomeOK}, nil
+		},
+		PodRun: func(context.Context, string, []string, string, ...string) (string, int, error) {
+			return "", 0, nil
+		},
+	}
+
+	if _, err := runPodCommand(t, seams, "--skip", "install", "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace); err != nil {
+		t.Fatalf("gt update --skip install with the pod flags: %v", err)
+	}
+	if got.HostInstallSkipped != "" {
+		t.Errorf("HostInstallSkipped = %q, want none without --images", got.HostInstallSkipped)
+	}
+	if !got.PodTarget {
+		t.Error("PodTarget = false, want true: the run's daemon runs as a pod, so the plan must not read the host's Dolt directories")
+	}
 }
 
 // podRunCounts counts the seams a gt update run reaches: the town lookup, the deps

@@ -482,6 +482,37 @@ func TestRunDryRunNamesTheSkippedHostInstall(t *testing.T) {
 	})
 }
 
+// TestRunPodTargetPlansNoMaintenance: Run hands the pod target to the plan, so a
+// run whose maintenance probes would fail on the host's Dolt paths still plans
+// that step as not run and finishes.
+func TestRunPodTargetPlansNoMaintenance(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	cause := errors.New("the Dolt data directory does not exist")
+	f.probes.errArchive = cause
+	f.probes.errBackup = cause
+	f.probes.errGC = cause
+	f.opts.PodTarget = true
+
+	st, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	maintenance := step(t, st, StepMaintenance)
+	if maintenance.WillRun {
+		t.Errorf("maintenance WillRun = true, want false for a pod target (reason %q)", maintenance.Reason)
+	}
+	if maintenance.Result != ResultSkipped {
+		t.Errorf("maintenance result = %q, want %q", maintenance.Result, ResultSkipped)
+	}
+	if maintenance.Reason != podMaintenanceReason {
+		t.Errorf("maintenance reason = %q, want %q", maintenance.Reason, podMaintenanceReason)
+	}
+	if st.Outcome != OutcomeOK {
+		t.Errorf("outcome = %q, want %q", st.Outcome, OutcomeOK)
+	}
+}
+
 func TestRunInstallPathRecordsEveryStep(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)
