@@ -348,6 +348,67 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 		}
 	})
 
+	t.Run("a temp tree that cannot be created is refused", func(t *testing.T) {
+		s, root := openTestStore(t)
+		pushWorkspace(t, s, first)
+		beforeTree := readWorkspace(t, root)
+		s.fs.mkdirTemp = func(string, string) (string, error) { return "", errors.New("no space left") }
+
+		if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("two")), Files: testWorkspaceFiles("two")}); !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after a temp-tree failure = %v, want %v", got, beforeTree)
+		}
+	})
+
+	t.Run("a tree directory that cannot be created is refused", func(t *testing.T) {
+		s, root := openTestStore(t)
+		pushWorkspace(t, s, first)
+		beforeTree := readWorkspace(t, root)
+		s.fs.mkdirAll = func(string, os.FileMode) error { return errors.New("permission denied") }
+
+		if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("two")), Files: testWorkspaceFiles("two")}); !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after a directory failure = %v, want %v", got, beforeTree)
+		}
+	})
+
+	t.Run("a failed cleanup is reported", func(t *testing.T) {
+		s, _ := openTestStore(t)
+		pushWorkspace(t, s, first)
+		s.fs.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+		s.fs.removeAll = func(string) error { return errors.New("permission denied") }
+
+		_, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("two")), Files: testWorkspaceFiles("two")})
+		if !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if !strings.Contains(err.Error(), "removing the temp tree") {
+			t.Errorf("error does not say the cleanup failed: %v", err)
+		}
+	})
+
+	t.Run("a first push that cannot publish is refused", func(t *testing.T) {
+		s, root := openTestStore(t)
+		s.fs.rename = func(string, string) error { return errors.New("rename refused") }
+
+		if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(first), Files: first}); !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("a failed first push left a tree at the root: %v", err)
+		}
+		if got, want := s.Manifest(), WorkspaceManifest(map[string]string{}); got != want {
+			t.Errorf("manifest after a failed first push = %s, want the empty workspace's %s", got, want)
+		}
+		if siblings := siblingNames(t, root); len(siblings) != 0 {
+			t.Errorf("an abandoned temp tree survived the failure: %v", siblings)
+		}
+	})
+
 	t.Run("a live tree that cannot be read is refused", func(t *testing.T) {
 		s, root := openTestStore(t)
 		before := pushWorkspace(t, s, first)
@@ -753,6 +814,32 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		writeFileIn(t, root, "gt/.beads/redirect", "x")
 		fsys := osWorkspaceFS()
 		fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+
+	t.Run("a tree directory that cannot be read", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, "gt/.beads/redirect", "x")
+		fsys := osWorkspaceFS()
+		fsys.readDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("permission denied") }
+		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+
+	t.Run("a nested tree directory that cannot be read", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, "gt/.beads/redirect", "x")
+		fsys := osWorkspaceFS()
+		readDir := fsys.readDir
+		fsys.readDir = func(dir string) ([]os.DirEntry, error) {
+			if dir != root {
+				return nil, errors.New("permission denied")
+			}
+			return readDir(dir)
+		}
 		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
 		}

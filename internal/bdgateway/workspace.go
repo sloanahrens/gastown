@@ -276,42 +276,49 @@ func (s *WorkspaceStore) readTree() (map[string]string, error) {
 	}
 	files := map[string]string{}
 	total := 0
-	err = filepath.WalkDir(s.root, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	if err := s.readTreeDir(s.root, "", files, &total); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrWorkspaceRoot, err)
+	}
+	return files, nil
+}
+
+// readTreeDir adds every file under dir to files, keyed by its path from the
+// root, and checks it against the push rules. prefix is that path so far, in
+// slash form. Directories are walked through the filesystem seam rather than
+// filepath.WalkDir, so every read failure is one a test can drive.
+func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string, total *int) error {
+	entries, err := s.fs.readDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := path.Join(prefix, entry.Name())
+		if entry.IsDir() {
+			if err := s.readTreeDir(filepath.Join(dir, entry.Name()), name, files, total); err != nil {
+				return err
+			}
+			continue
 		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(s.root, p)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(rel)
 		if err := validateWorkspacePath(name); err != nil {
 			return err
 		}
-		if !d.Type().IsRegular() {
+		if !entry.Type().IsRegular() {
 			return fmt.Errorf("%w: %q is not a regular file", ErrWorkspacePath, name)
 		}
-		content, err := s.fs.readFile(p)
+		content, err := s.fs.readFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			return err
 		}
 		if len(content) > MaxWorkspaceFileBytes {
 			return fmt.Errorf("%w: %q is %d bytes, cap %d", ErrWorkspaceFileTooLarge, name, len(content), MaxWorkspaceFileBytes)
 		}
-		total += len(content)
-		if total > MaxWorkspaceTotalBytes {
+		*total += len(content)
+		if *total > MaxWorkspaceTotalBytes {
 			return fmt.Errorf("%w: over %d bytes at %q", ErrWorkspaceTooLarge, MaxWorkspaceTotalBytes, name)
 		}
 		files[name] = string(content)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrWorkspaceRoot, err)
 	}
-	return files, nil
+	return nil
 }
 
 // Put validates a document, builds its tree beside the live one, and publishes
