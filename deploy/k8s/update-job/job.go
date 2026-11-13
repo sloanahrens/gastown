@@ -35,6 +35,11 @@ import (
 const (
 	// Name names the Job and the CronJob, and labels their pods.
 	Name = "gt-update"
+	// JobNamePrefix starts the name the daemon gives each Job it creates from the
+	// template: Name, a hyphen, and the green commit's short sha. The admission
+	// policy in deploy/k8s/update-admission.yaml admits only this prefix, so the
+	// name the daemon computes and the name the policy requires cannot drift.
+	JobNamePrefix = Name + "-"
 	// ServiceAccountName is the ServiceAccount the pod runs as; its Role and
 	// RoleBinding are in deploy/k8s/update-rbac.yaml.
 	ServiceAccountName = "gt-update"

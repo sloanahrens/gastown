@@ -23,8 +23,9 @@ import (
 
 // updateJobNamePrefix names the Job a pod roll creates: gt-update-<sha12> for
 // the green commit it rolls to. The same commit names the same Job, so a second
-// launch of one commit finds the first.
-const updateJobNamePrefix = "gt-update-"
+// launch of one commit finds the first. It is updatejob's constant, which the
+// admission policy in deploy/k8s/update-admission.yaml is held to.
+const updateJobNamePrefix = updatejob.JobNamePrefix
 
 const (
 	// updateJobCreateTimeout bounds one create of the roll's Job, on the daemon's
