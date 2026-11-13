@@ -52,7 +52,9 @@ func imagePairOf(v imagevalues.Values) ImagePair {
 // ImageRecord is the digest install's ledger. Current is the pair the daemon
 // runs, or the pair it is being moved to; Previous is the pair a rollback puts
 // back. Both are written before the service changes, so a swap that stops
-// partway leaves the pair to restore on record.
+// partway leaves the pair to restore on record. For a daemon that runs as a
+// pod, Previous is the pair its Deployment ran, read from the cluster, and names
+// no commit: a Deployment carries the two images and no build.
 type ImageRecord struct {
 	V        int       `json:"v"`
 	Current  ImagePair `json:"current"`
@@ -171,10 +173,35 @@ type ImageSwap interface {
 	Apply(ctx context.Context, pair ImagePair) error
 }
 
+// ImageRunningPair reads the pair a daemon runs now, so an install can put it
+// back when the pair it applies fails. The pair may name no commit: a value
+// read from a Deployment, rather than from a values file, names none.
+type ImageRunningPair interface {
+	RunningPair(ctx context.Context) (ImagePair, error)
+}
+
+// RecordedRunningPair is the pair a daemon with no Deployment to ask runs: the
+// current pair its record holds. An empty record names nothing recorded.
+type RecordedRunningPair struct {
+	Ledger ImageLedger
+}
+
+// RunningPair is the current pair the record holds.
+func (r RecordedRunningPair) RunningPair(context.Context) (ImagePair, error) {
+	rec, err := r.Ledger.Read()
+	if err != nil {
+		return ImagePair{}, fmt.Errorf("reading the daemon image record: %w", err)
+	}
+	return rec.Current, nil
+}
+
 // ImageDeps are the effects a digest install and a rollback reach.
 type ImageDeps struct {
 	// Ledger holds the recorded pairs.
 	Ledger ImageLedger
+	// Running reads the pair the daemon runs now: the pod's Deployment when the
+	// daemon runs as a pod, else RecordedRunningPair.
+	Running ImageRunningPair
 	// Swap puts a pair in force.
 	Swap ImageSwap
 	// Verify asks the daemon which build it runs; the wait for a swap reads it.
@@ -208,10 +235,16 @@ func (d ImageDeps) wired() error {
 }
 
 // swapTo puts pair in force and reports whether the daemon came back on
-// pair.Commit within the bound. A canceled context is an error.
+// pair.Commit within the bound. A pair read from a Deployment names no commit,
+// so there is no build to wait for: the swap's own wait for the rollout, which
+// the pod swap makes for both Deployments, is that pair's confirmation. A
+// canceled context is an error.
 func (d ImageDeps) swapTo(ctx context.Context, pair ImagePair) (bool, error) {
 	if err := d.Swap.Apply(ctx, pair); err != nil {
 		return false, err
+	}
+	if pair.Commit == "" {
+		return true, nil
 	}
 	return WaitForRestart(ctx, d.Clock, d.Sleep, d.Verify, pair.Commit, d.Wait, d.Poll)
 }
@@ -256,8 +289,10 @@ func (d ImageDeps) escalateRestore(ctx context.Context, reason string) error {
 // DigestInstaller is the install step of a run given --images. It runs the
 // host install the cycle always runs, then moves the daemon to the image pair
 // the values file names, and waits for the daemon to report the build. The
-// pair the daemon ran before is recorded before the swap, so a daemon that does
-// not come up on the new pair is restored to it.
+// pair the daemon runs now is read from the daemon itself and recorded before
+// the swap, so a daemon that does not come up on the new pair is restored to
+// it: the values file cannot say what ran before, since the update Job's init
+// container rewrites it with the new pair (gt-q8e9dv).
 type DigestInstaller struct {
 	// Inner is the host install the cycle runs with or without --images.
 	Inner Installer
@@ -272,12 +307,31 @@ type DigestInstaller struct {
 }
 
 // validRecordedPair checks a pair the ledger holds. The zero pair is nothing
-// recorded and passes; any other pair must be one a values file could hold.
+// recorded and passes; any other pair must name both images by digest, and its
+// commit, when given, must be a full commit. A pair read from a Deployment names
+// no commit, and is recorded that way.
 func validRecordedPair(p ImagePair) error {
 	if p == (ImagePair{}) {
 		return nil
 	}
-	return imagevalues.ValidPair(imagevalues.Values{Daemon: p.Daemon, Polecat: p.Polecat, Commit: p.Commit})
+	for _, field := range []struct{ name, value string }{
+		{"daemon", p.Daemon},
+		{"polecat", p.Polecat},
+	} {
+		if !imagevalues.ValidRef(field.value) {
+			return fmt.Errorf("the %s image %q is not repo@sha256:<64 lowercase hex>", field.name, field.value)
+		}
+	}
+	if p.Commit != "" && !imagevalues.ValidCommit(p.Commit) {
+		return fmt.Errorf("the commit %q is not a full 40-character lowercase commit", p.Commit)
+	}
+	return nil
+}
+
+// sameImages reports whether two pairs name the same daemon and polecat images.
+// The commit is not compared: a pair read from a Deployment names none.
+func sameImages(a, b ImagePair) bool {
+	return a.Daemon == b.Daemon && a.Polecat == b.Polecat
 }
 
 // pairHolds reports whether the pair check, when one is wired, holds pair. An
@@ -286,11 +340,14 @@ func (d *DigestInstaller) pairHolds(ctx context.Context, pair ImagePair) bool {
 	return d.PairCheck == nil || d.PairCheck(ctx, pair) == nil
 }
 
-// Install validates the values file and its commit before anything changes, runs
-// the host install, and moves the daemon to the pair.
+// Install validates the values file and its commit, reads the pair the daemon
+// runs now, runs the host install, and moves the daemon to the pair.
 func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResult, error) {
 	if err := d.Images.wired(); err != nil {
 		return InstallResult{}, err
+	}
+	if d.Images.Running == nil {
+		return InstallResult{}, errors.New("no read of the pair the daemon runs is wired")
 	}
 	values, err := imagevalues.Load(d.Path)
 	if err != nil {
@@ -311,18 +368,24 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 			return InstallResult{}, fmt.Errorf("the daemon image record names a damaged pair; nothing changed: %w", err)
 		}
 	}
+	// The pair the daemon runs now is read from the daemon itself, before
+	// anything changes: the update Job's init container rewrites the values file
+	// with the new pair, so the file cannot say what ran before it.
+	running, err := d.Images.Running.RunningPair(ctx)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("reading the pair the daemon runs now, so a failed install could not be put back; nothing changed: %w", err)
+	}
 
 	res, err := d.Inner.Install(ctx, sha)
 	if err != nil || ClassifyInstall(res) != ResultOK {
 		return res, err
 	}
-	previous := rec.Current
-	if rec.Current == target {
-		// The record already names the pair as current. The daemon is left alone
-		// when it reports the commit and the pair check, when wired, holds the
-		// pair; otherwise a run that stopped between the record and the swap left
-		// the service behind, and the swap runs again with the previous pair that
-		// record kept.
+	previous := running
+	if sameImages(running, target) {
+		// The daemon already runs the pair. It is left alone when it reports the
+		// commit and the pair check, when wired, holds the pair; otherwise a run
+		// that stopped between the record and the swap left the service behind,
+		// and the swap runs again with the previous pair that record kept.
 		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) && d.pairHolds(ctx, target) {
 			return res, nil
 		}

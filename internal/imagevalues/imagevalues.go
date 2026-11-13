@@ -189,6 +189,12 @@ func Write(path string, v Values) error {
 	return nil
 }
 
+// ValidRef reports whether ref is an image reference a consumer could pull: a
+// repository name and @sha256:<64 lowercase hex>.
+func ValidRef(ref string) bool {
+	return refPattern.MatchString(ref)
+}
+
 // ValidPair reports whether v is a pair a values file could hold: each ref is
 // repo@sha256:<64 lowercase hex> and the commit is a full commit. A pair read
 // back from a ledger is checked with it before any write uses its values.
@@ -212,7 +218,7 @@ func (v Values) validate() error {
 		{"daemon", v.Daemon},
 		{"polecat", v.Polecat},
 	} {
-		if !refPattern.MatchString(field.value) {
+		if !ValidRef(field.value) {
 			return fmt.Errorf("imagevalues: the values file's %s %q is not repo@sha256:<64 lowercase hex>", field.name, field.value)
 		}
 	}

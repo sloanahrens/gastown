@@ -769,40 +769,49 @@ func imageDeps(seams updateSeams, townRoot string, deps update.Deps, pod *podDae
 	if (pod == nil && seams.ImageSwap == nil) || seams.Notifier == nil {
 		return update.ImageDeps{}, errors.New("no daemon image swap or escalation sink is wired")
 	}
-	swap, err := daemonImageSwap(seams, townRoot, pod, out)
+	swap, running, err := daemonImageSwap(seams, townRoot, pod, out)
 	if err != nil {
 		return update.ImageDeps{}, err
 	}
 	return update.ImageDeps{
-		Ledger: update.FileImageLedger{Dir: update.Dir(townRoot)},
-		Swap:   swap,
-		Verify: deps.Verify,
-		Clock:  deps.Clock,
-		Sleep:  deps.Sleep,
-		Wait:   updateRestartWait,
-		Poll:   updateRestartPoll,
-		Notify: seams.Notifier(townRoot),
+		Ledger:  update.FileImageLedger{Dir: update.Dir(townRoot)},
+		Running: running,
+		Swap:    swap,
+		Verify:  deps.Verify,
+		Clock:   deps.Clock,
+		Sleep:   deps.Sleep,
+		Wait:    updateRestartWait,
+		Poll:    updateRestartPoll,
+		Notify:  seams.Notifier(townRoot),
 	}, nil
 }
 
 // daemonImageSwap is the swap a digest install and a rollback put a pair in
-// force through: the pod's Deployment when the run names one, else the container
-// daemon the town's seam builds. A run with a pod target has already had its
-// kubectl runner checked by podDaemonDeps. out receives the pod swap's progress
-// lines, such as the dashboard's skip.
-func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget, out io.Writer) (update.ImageSwap, error) {
-	if pod == nil {
-		return seams.ImageSwap(townRoot)
+// force through, and the read of the pair the daemon runs now: the pod's
+// Deployment when the run names one, else the container daemon the town's seam
+// builds and its record. A run with a pod target has already had its kubectl
+// runner checked by podDaemonDeps. out receives the pod swap's progress lines,
+// such as the dashboard's skip.
+func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget, out io.Writer) (update.ImageSwap, update.ImageRunningPair, error) {
+	if pod != nil {
+		swap := podDaemonSwap{
+			Context:        pod.Context,
+			Namespace:      pod.Namespace,
+			InCluster:      pod.InCluster,
+			Deployment:     pod.Deployment,
+			Run:            seams.PodRun,
+			RolloutTimeout: updateRestartWait,
+			Out:            out,
+		}
+		return swap, swap, nil
 	}
-	return podDaemonSwap{
-		Context:        pod.Context,
-		Namespace:      pod.Namespace,
-		InCluster:      pod.InCluster,
-		Deployment:     pod.Deployment,
-		Run:            seams.PodRun,
-		RolloutTimeout: updateRestartWait,
-		Out:            out,
-	}, nil
+	swap, err := seams.ImageSwap(townRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The container daemon has no Deployment to ask, so its record is the pair it
+	// runs.
+	return swap, update.RecordedRunningPair{Ledger: update.FileImageLedger{Dir: update.Dir(townRoot)}}, nil
 }
 
 // loadUpdatePatrolConfig reads the daemon settings the installer's image-trim

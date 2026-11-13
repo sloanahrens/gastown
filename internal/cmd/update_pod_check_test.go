@@ -121,14 +121,17 @@ func podListJSON(pods ...podPairPod) string {
 // every command as the runner would; failWord makes the command carrying that
 // word exit 1. Every call is recorded.
 type podPairKubectl struct {
-	calls    []podPairCall
-	commits  map[string]string
-	running  string
-	pods     []podPairPod
-	raw      string
-	getExit  int
-	runErr   error
-	failWord string
+	calls   []podPairCall
+	commits map[string]string
+	running string
+	// image and polecat are the pair the daemon Deployment's pod template runs;
+	// a patch of the daemon Deployment sets them to the pair it carries.
+	image, polecat string
+	pods           []podPairPod
+	raw            string
+	getExit        int
+	runErr         error
+	failWord       string
 }
 
 func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
@@ -141,12 +144,25 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 	}
 	switch {
 	case containsArg(args, "patch"):
-		joined := strings.Join(args, " ")
-		for ref, commit := range k.commits {
-			if strings.Contains(joined, ref) {
-				k.running = commit
+		var patch podSwapPatchBody
+		if err := json.Unmarshal([]byte(args[len(args)-1]), &patch); err != nil {
+			return "", 0, nil
+		}
+		for _, c := range patch.Spec.Template.Spec.Containers {
+			if c.Name == k8sdaemon.Name {
+				k.image = c.Image
 			}
 		}
+		if polecat, ok := patch.Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; ok {
+			k.polecat = polecat
+		}
+		if commit, ok := k.commits[k.image]; ok {
+			k.running = commit
+		}
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.Name):
+		// The running pair read: the Deployment's daemon image and polecat
+		// annotation.
+		return k.image + "\n" + k.polecat, 0, nil
 	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
 		// The dashboard's existence read the swap makes: the town has a dashboard.
 		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
@@ -555,6 +571,10 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 	kube := &podPairKubectl{
 		commits: map[string]string{podSwapDigestRef: podPairCommit, podPairPrevDaemon: podPairPrevCommit},
 		running: podPairPrevCommit,
+		// The Deployment runs the previous pair before the install, so the running
+		// pair read names the pair the restore must put back.
+		image:   podPairPrevDaemon,
+		polecat: podPairPrevPolecat,
 		pods:    []podPairPod{runningPod("gastown-daemon-old", podPairPrevDaemon)},
 	}
 	clock := &rollbackTestClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
@@ -613,7 +633,9 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 	if err != nil {
 		t.Fatalf("read the record: %v", err)
 	}
-	if want := (update.ImageRecord{V: 1, Current: podPairPrev, Previous: podPairPrev}); rec != want {
+	// The pair restored is the one read from the Deployment, which names no commit.
+	restored := update.ImagePair{Daemon: podPairPrevDaemon, Polecat: podPairPrevPolecat}
+	if want := (update.ImageRecord{V: 1, Current: restored, Previous: restored}); rec != want {
 		t.Errorf("record after the restore = %+v, want %+v", rec, want)
 	}
 }

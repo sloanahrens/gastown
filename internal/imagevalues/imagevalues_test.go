@@ -405,4 +405,15 @@ func TestImageValuesValidators(t *testing.T) {
 			t.Errorf("ValidDigest(%q) = %v, want %v", value, got, want)
 		}
 	}
+	refRows := map[string]bool{
+		"registry.internal:5000/town/gastown-daemon@" + testDigest: true,
+		"gastown-daemon:latest":                                    false,
+		"gastown-daemon@" + strings.Repeat("a", 64):                false,
+		"registry.internal:5000/town/Gastown-daemon@" + testDigest: false,
+	}
+	for value, want := range refRows {
+		if got := imagevalues.ValidRef(value); got != want {
+			t.Errorf("ValidRef(%q) = %v, want %v", value, got, want)
+		}
+	}
 }
