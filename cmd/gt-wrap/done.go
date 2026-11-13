@@ -9,7 +9,8 @@ import (
 )
 
 const (
-	// gtTool is the tool whose done subcommand takes the worktree facts.
+	// gtTool is the tool named gt: its done call takes the worktree facts, and
+	// its host command set runs on the Mac.
 	gtTool = "gt"
 	// doneSubcommand is the first argument that selects gt done.
 	doneSubcommand = "done"

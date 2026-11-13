@@ -44,6 +44,50 @@ func TestNativeCoversOnlyItsSubcommands(t *testing.T) {
 	}
 }
 
+func TestNativeCoversGtHostCommands(t *testing.T) {
+	t.Parallel()
+	n := Native{Tool: "gt", Path: "/usr/local/bin/gt", Subcommands: gtHostCommands}
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "town forward plist", args: []string{"town", "forward", "plist"}, want: true},
+		{name: "town forward plist with flags", args: []string{"town", "forward", "plist", "--service", "dashboard", "--port", "8080"}, want: true},
+		{name: "the town forward group alone", args: []string{"town", "forward"}, want: false},
+		{name: "town state", args: []string{"town", "state"}, want: false},
+		{name: "pool show", args: []string{"pool", "show"}, want: false},
+		{name: "status", args: []string{"status"}, want: false},
+		{name: "maint plan", args: []string{"maint", "plan"}, want: true},
+		{name: "maint apply", args: []string{"maint", "apply", "baks"}, want: true},
+		{name: "maint plan nodes", args: []string{"maint", "plan", "nodes"}, want: true},
+		{name: "maint plan colima", args: []string{"maint", "plan", "colima"}, want: true},
+		{name: "maint plan registry", args: []string{"maint", "plan", "registry"}, want: true},
+		{name: "maint plan sizes", args: []string{"maint", "plan", "sizes"}, want: true},
+		{name: "maint apply worktree", args: []string{"maint", "apply", "worktree"}, want: true},
+		{name: "maint plan baks", args: []string{"maint", "plan", "baks"}, want: true},
+		{name: "the maint group alone", args: []string{"maint"}, want: false},
+		{name: "an unknown maint leaf", args: []string{"maint", "report"}, want: false},
+		{name: "no arguments", args: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := n.Covers(tt.args); got != tt.want {
+				t.Fatalf("Covers(%q) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNativeGtEntryCannotNameAPathOutsideTheHostSet(t *testing.T) {
+	t.Parallel()
+	n := Native{Tool: "gt", Path: "/usr/local/bin/gt", Subcommands: []string{"status"}}
+	if n.Covers([]string{"status"}) {
+		t.Fatal("Covers(status) = true, want false for a gt entry outside the host command set")
+	}
+}
+
 func TestNativeCoversBdHooksRunOnly(t *testing.T) {
 	t.Parallel()
 	n := Native{Tool: "bd", Path: "/usr/local/bin/bd", Subcommands: []string{"hooks"}}
