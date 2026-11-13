@@ -3,7 +3,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -367,15 +369,122 @@ func TestPluginSyncDryRunReadsExistingCheckoutWithoutInjectedResolver(t *testing
 	}
 }
 
-// gt-i3rotl: the read-only resolver names only a checkout that is a directory.
-// Every other state is an error, and an error returns no path.
+// treeSnapshot records every path under dir with its content hash and mode, so
+// a test can assert a run left the tree exactly as it found it.
+func treeSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			fmt.Fprintf(&b, "%s dir %o\n", rel, info.Mode().Perm())
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s file %o %x\n", rel, info.Mode().Perm(), sha256.Sum256(data))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshotting %s: %v", dir, err)
+	}
+	return b.String()
+}
+
+// gt-i3rotl: a dry run through the production assembly leaves an existing
+// checkout exactly as it found it. The integration test pins the same behavior
+// against real git; this one runs in the unit tier, where the gate sees it.
+// The town has no bare repo, so a dry run that reached buildsrc.Ensure would
+// fail, and the snapshot catches any write it made.
+func TestPluginSyncDryRunProductionAssemblyLeavesCheckoutInPlace(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	checkout := buildCheckoutDir(townRoot)
+	writeTestPlugin(t, filepath.Join(checkout, "plugins"), "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
+	before := treeSnapshot(t, checkout)
+
+	var out bytes.Buffer
+	r := newPluginSyncRun(context.Background(), townRoot)
+	r.dryRun = true
+	r.out, r.errOut = &out, io.Discard
+	if err := r.run(); err != nil {
+		t.Fatalf("dry run error = %v; output:\n%s", err, out.String())
+	}
+	if got := treeSnapshot(t, checkout); got != before {
+		t.Errorf("dry run changed the build checkout:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	want := "  Source: " + filepath.Join(checkout, "plugins") + " (gastown build checkout)"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("dry run did not read the existing checkout; want line %q, output:\n%s", want, out.String())
+	}
+}
+
+// gt-i3rotl: a dry run that finds only a bare directory under the build-src
+// base refuses it instead of reading it as the gastown checkout.
+func TestPluginSyncDryRunRefusesDirectoryWithoutPluginSource(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(buildCheckoutDir(townRoot), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	r := newPluginSyncRun(context.Background(), townRoot)
+	r.dryRun = true
+	r.out, r.errOut = &out, io.Discard
+	err := r.run()
+	if err == nil || !strings.Contains(err.Error(), "holds no plugin source") {
+		t.Fatalf("dry run error = %v, want it to refuse a directory with no plugin source; output:\n%s", err, out.String())
+	}
+}
+
+// gt-i3rotl: the read-only resolver names only a build checkout: a directory
+// under the base that holds the plugin source. Every other state is an error,
+// and an error returns no path.
 func TestPluginSyncDryRunBuildCheckoutResolver(t *testing.T) {
 	t.Parallel()
 
-	existingTown := func(t *testing.T) string {
+	// existingTown builds the checkout directory, with or without the plugin
+	// source inside it, so a row can vary only what it names.
+	existingTown := func(t *testing.T, withSource bool) string {
 		t.Helper()
 		townRoot := t.TempDir()
-		if err := os.MkdirAll(buildCheckoutDir(townRoot), 0755); err != nil {
+		checkout := buildCheckoutDir(townRoot)
+		if err := os.MkdirAll(checkout, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if withSource {
+			writeTestPlugin(t, filepath.Join(checkout, "plugins"), "current-plugin", "current")
+		}
+		return townRoot
+	}
+	sourceIsFile := func(t *testing.T) string {
+		t.Helper()
+		townRoot := existingTown(t, false)
+		writeFile(t, filepath.Join(buildCheckoutDir(townRoot), "plugins"), "not a directory")
+		return townRoot
+	}
+	sourceUnreadable := func(t *testing.T) string {
+		t.Helper()
+		townRoot := existingTown(t, false)
+		// A symlink loop makes the stat fail with ELOOP, not ENOENT: an
+		// unreadable plugin source is not an absent one.
+		if err := os.Symlink("plugins", filepath.Join(buildCheckoutDir(townRoot), "plugins")); err != nil {
 			t.Fatal(err)
 		}
 		return townRoot
@@ -403,11 +512,14 @@ func TestPluginSyncDryRunBuildCheckoutResolver(t *testing.T) {
 		wantDir  bool   // the resolver returns the checkout directory
 		wantErr  string // substring of the error when wantDir is false
 	}{
-		{name: "existing directory is returned", townRoot: existingTown, wantDir: true},
+		{name: "checkout holding the plugin source is returned", townRoot: func(t *testing.T) string { return existingTown(t, true) }, wantDir: true},
 		{name: "absent checkout says a real sync would create it", townRoot: func(t *testing.T) string { return t.TempDir() }, wantErr: "a real sync would create it"},
+		{name: "a directory holding no plugin source is refused", townRoot: func(t *testing.T) string { return existingTown(t, false) }, wantErr: "holds no plugin source"},
 		{name: "a file where the checkout belongs is refused", townRoot: fileAtCheckout, wantErr: "is not a directory"},
+		{name: "a plugins file where the plugin source belongs is refused", townRoot: sourceIsFile, wantErr: "plugin source in build checkout"},
+		{name: "an unreadable plugin source is an error, not an absent checkout", townRoot: sourceUnreadable, wantErr: "reading plugin source"},
 		{name: "an unreadable town is an error, not an absent checkout", townRoot: townIsFile, wantErr: "reading build checkout"},
-		{name: "a commit rev is refused", townRoot: existingTown, rev: "0123456789abcdef0123456789abcdef01234567", wantErr: "reads the existing checkout only"},
+		{name: "a commit rev is refused", townRoot: func(t *testing.T) string { return existingTown(t, true) }, rev: "0123456789abcdef0123456789abcdef01234567", wantErr: "reads the existing checkout only"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -662,10 +662,11 @@ type pluginSyncRun struct {
 }
 
 // existingBuildCheckout is the build-checkout resolver a dry run uses. It names
-// the rig's checkout under the town's build-checkout base when one is there. It
-// never clones, fetches or checks out, so a dry run creates nothing and moves
-// nothing (gt-i3rotl). A missing checkout is an error that says what a real
-// sync would do.
+// the rig's checkout under the town's build-checkout base when one holds the
+// plugin source. It never clones, fetches or checks out, so a dry run creates
+// nothing and moves nothing (gt-i3rotl). A missing checkout is an error that
+// says what a real sync would do, and so is a directory there that holds no
+// plugin source: a leftover is not a checkout.
 func existingBuildCheckout(_ context.Context, townRoot, rig, rev string) (string, error) {
 	if rev != "" {
 		return "", fmt.Errorf("a dry run reads the existing checkout only, not rev %s", rev)
@@ -680,6 +681,17 @@ func existingBuildCheckout(_ context.Context, townRoot, rig, rev string) (string
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("build checkout %s is not a directory", dir)
+	}
+	plugins := filepath.Join(dir, "plugins")
+	src, err := os.Stat(plugins)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("build checkout %s holds no plugin source; a real sync would create it", dir)
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading plugin source in build checkout %s: %w", dir, err)
+	}
+	if !src.IsDir() {
+		return "", fmt.Errorf("plugin source in build checkout %s is not a directory", dir)
 	}
 	return dir, nil
 }
