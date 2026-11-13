@@ -11,10 +11,11 @@ import (
 )
 
 // podRootLiteral matches the pod town root spelled as a path: followed by the end
-// of the path, a quote, a backtick, a space, or a slash that starts a child path.
-// The sibling paths (/Users/sloan/gt-landing.noindex and the rest) continue with a
-// letter or a dash, so they do not match.
-var podRootLiteral = regexp.MustCompile("/Users/sloan/gt(?:[/\"` \\t]|$)")
+// of the line, or by a character that cannot continue the name `gt`. A letter,
+// digit, underscore or dash continues it, so the sibling paths
+// (/Users/sloan/gt-landing.noindex and the rest) do not match; punctuation after
+// the name ends it.
+var podRootLiteral = regexp.MustCompile("/Users/sloan/gt(?:[^A-Za-z0-9_-]|$)")
 
 // podRootSpellings returns the 1-based lines of src that spell the pod town root
 // literally.
@@ -41,10 +42,18 @@ func TestPodRootLiteralScanner(t *testing.T) {
 		{name: "a path under the root", src: `dir := "/Users/sloan/gt/rig/polecats"`, want: true},
 		{name: "a literal in help text", src: "  gt town state seed --town /Users/sloan/gt --namespace rehearsal", want: true},
 		{name: "a literal at the end of a line", src: "root = /Users/sloan/gt", want: true},
+		{name: "a literal before a comma", src: `// the root defaults to /Users/sloan/gt, then the rename moves it`, want: true},
+		{name: "a literal before a sentence period", src: `// the claim mounts at /Users/sloan/gt.`, want: true},
+		{name: "a literal before a close paren", src: `x := f(/Users/sloan/gt)`, want: true},
+		{name: "a literal before a semicolon", src: `root=/Users/sloan/gt; export GT_TOWN_ROOT`, want: true},
+		{name: "a literal before a colon", src: `root: /Users/sloan/gt`, want: true},
+		{name: "a literal in single quotes", src: `run('/Users/sloan/gt')`, want: true},
 		{name: "the landing sibling", src: `LandingWorkPath = "/Users/sloan/gt-landing.noindex"`, want: false},
 		{name: "the backup sibling", src: `DoltBackupPath = "/Users/sloan/gt-backups/dolt"`, want: false},
 		{name: "the beads sibling", src: `ClaudeBeadsRoot = "/Users/sloan/.claude/.beads"`, want: false},
 		{name: "a longer name under the account", src: `x := "/Users/sloan/gtx"`, want: false},
+		{name: "a digit continues the name", src: `x := "/Users/sloan/gt9"`, want: false},
+		{name: "an underscore continues the name", src: `x := "/Users/sloan/gt_old"`, want: false},
 		{name: "the constant by name", src: `TownRootPath = manifestdata.PodTownRoot`, want: false},
 	}
 	for _, tt := range tests {
