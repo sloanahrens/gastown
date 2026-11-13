@@ -1789,3 +1789,91 @@ func TestJevScorecardConfigRefusesBadValues(t *testing.T) {
 		}
 	}
 }
+
+// daemon.local_round (gt-mwbdzb) is off until the overseer turns it on, and an
+// absent block leaves the wall bound at its default. Read together with
+// LocalRoundTimeout, the pair is the one switch and the one bound.
+func TestDaemonLocalRoundDefaults(t *testing.T) {
+	t.Parallel()
+
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{}`), &cfg); err != nil {
+		t.Fatalf("decode without local_round: %v", err)
+	}
+	if cfg.LocalRoundEnabled() {
+		t.Error("LocalRoundEnabled() with no block = true, want false")
+	}
+	if got, err := cfg.LocalRoundTimeout(); err != nil || got != 300*time.Second {
+		t.Errorf("LocalRoundTimeout() with no block = %v, %v; want 300s", got, err)
+	}
+
+	var nilCfg *DaemonPatrolConfig
+	if nilCfg.LocalRoundEnabled() {
+		t.Error("LocalRoundEnabled() on a nil config = true, want false")
+	}
+	if got, err := nilCfg.LocalRoundTimeout(); err != nil || got != DefaultLocalRoundTimeout {
+		t.Errorf("LocalRoundTimeout() on a nil config = %v, %v; want the 300s default", got, err)
+	}
+
+	var enabled DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"local_round":{"enabled":true}}`), &enabled); err != nil {
+		t.Fatalf("decode local_round: %v", err)
+	}
+	if !enabled.LocalRoundEnabled() {
+		t.Error("LocalRoundEnabled() with enabled true = false, want true")
+	}
+	if got, err := enabled.LocalRoundTimeout(); err != nil || got != DefaultLocalRoundTimeout {
+		t.Errorf("LocalRoundTimeout() with no timeout_seconds = %v, %v; want the 300s default", got, err)
+	}
+
+	var zero DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"local_round":{"enabled":true,"timeout_seconds":0}}`), &zero); err != nil {
+		t.Fatalf("decode local_round with timeout_seconds 0: %v", err)
+	}
+	if got, err := zero.LocalRoundTimeout(); err != nil || got != DefaultLocalRoundTimeout {
+		t.Errorf("LocalRoundTimeout() with timeout_seconds 0 = %v, %v; want the 300s default", got, err)
+	}
+}
+
+// daemon.local_round.timeout_seconds is refused outside (0, 900] with an error
+// naming the field: a mistyped bound must not read as the default, or a round
+// would serve for longer than the overseer allowed.
+func TestDaemonLocalRoundValidates(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		seconds string
+		want    time.Duration
+		wantErr string
+	}{
+		{name: "at the wall", seconds: "900", want: 900 * time.Second},
+		{name: "below the default", seconds: "15", want: 15 * time.Second},
+		{name: "above the wall", seconds: "901", wantErr: "daemon.local_round.timeout_seconds"},
+		{name: "negative", seconds: "-1", wantErr: "daemon.local_round.timeout_seconds"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"local_round":{"enabled":true,"timeout_seconds":` + tt.seconds + `}}`
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+				t.Fatalf("decode %s = %v", body, err)
+			}
+			got, err := cfg.LocalRoundTimeout()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("LocalRoundTimeout() = %v, want %v", err, tt.want)
+				}
+				if got != tt.want {
+					t.Fatalf("LocalRoundTimeout() = %v, want %v", got, tt.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("LocalRoundTimeout() = %v, want an error naming %s", got, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not name %s", err, tt.wantErr)
+			}
+		})
+	}
+}
