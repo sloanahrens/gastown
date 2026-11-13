@@ -674,8 +674,8 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 }
 
 // refuseForeignComposeFile refuses to replace a compose file gt did not write,
-// for every command that writes one: `daemon compose write` and `daemon scratch
-// up` both call it, through their own read seam, before either writes. The
+// for every command that writes one: `daemon compose write` calls it, through
+// its own read seam, before it writes. The
 // generated-file header at the first line is the mark: a file without it belongs
 // to the operator, and an unreadable file cannot be told apart from theirs, so
 // both need --force. A missing file is written as before.
