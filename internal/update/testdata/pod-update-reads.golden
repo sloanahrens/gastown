@@ -3,11 +3,14 @@
 # which command each line serves, read from the code:
 #
 # patch deployments: podDaemonSwap.Apply in internal/cmd/update_pod_swap.go, the
-#   strategic patch of the daemon's Deployment (kubectl patch deployment/<name>).
+#   strategic patches of the daemon's Deployment and the dashboard's
+#   (kubectl patch deployment/<name>).
 #
 # get deployments, list deployments, watch deployments: podDaemonSwap.Apply's
-#   rollout wait (kubectl rollout status deployment/<name>). The get also serves the
-#   Deployment read in the exec below.
+#   rollout waits on both Deployments (kubectl rollout status deployment/<name>).
+#   The get also serves the dashboard's existence read in Apply
+#   (kubectl get deployment/dashboard -o name --ignore-not-found) and the Deployment
+#   read in the exec below.
 #
 # get pods, list pods, create pods/exec: podDaemonCommit in
 #   internal/cmd/update_pod_probe.go (kubectl exec deployment/<name> -- gt version).

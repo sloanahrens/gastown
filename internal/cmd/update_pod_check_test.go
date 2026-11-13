@@ -147,6 +147,9 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 				k.running = commit
 			}
 		}
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
+		// The dashboard's existence read the swap makes: the town has a dashboard.
+		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
 	case containsArg(args, "get"):
 		if k.getExit != 0 {
 			return podSwapOutput, k.getExit, nil
@@ -566,7 +569,7 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 		PodRun:   kube.run,
 	}
 	target := podPairTarget()
-	installer, err := digestInstaller(seams, townRoot, deps, path, &target)
+	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
 	if err != nil {
 		t.Fatalf("digestInstaller: %v", err)
 	}
@@ -585,9 +588,23 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 	if !strings.Contains(res.Reason, "the daemon did not run the pair") || !strings.Contains(res.Reason, "restored "+podPairPrevDaemon) {
 		t.Errorf("reason = %q, want the failed check and the restore named", res.Reason)
 	}
-	patches := kube.patches()
-	if len(patches) != 2 || !strings.Contains(strings.Join(patches[0], " "), podSwapDigestRef) || !strings.Contains(strings.Join(patches[1], " "), podPairPrevDaemon) {
-		t.Errorf("patches = %q, want the new pair then the restore of the previous pair", patches)
+	// Each Deployment is patched to the new pair, then restored to the previous one.
+	var daemonPatches, dashboardPatches [][]string
+	for _, p := range kube.patches() {
+		switch {
+		case slices.Contains(p, "deployment/"+k8sdaemon.Name):
+			daemonPatches = append(daemonPatches, p)
+		case slices.Contains(p, "deployment/"+k8sdaemon.DashboardName):
+			dashboardPatches = append(dashboardPatches, p)
+		}
+	}
+	for _, set := range []struct {
+		name    string
+		patches [][]string
+	}{{"daemon", daemonPatches}, {"dashboard", dashboardPatches}} {
+		if len(set.patches) != 2 || !strings.Contains(strings.Join(set.patches[0], " "), podSwapDigestRef) || !strings.Contains(strings.Join(set.patches[1], " "), podPairPrevDaemon) {
+			t.Errorf("%s patches = %q, want the new pair then the restore of the previous pair", set.name, set.patches)
+		}
 	}
 	if kube.wroteToPod() {
 		t.Errorf("a failed check wrote the values file into the pod: calls = %+v", kube.calls)
