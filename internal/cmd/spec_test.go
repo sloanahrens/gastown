@@ -1913,6 +1913,26 @@ func TestSpecDispatchLockTimeoutIsTransient(t *testing.T) {
 			t.Errorf("errors = %v, want the failed write reported", r.Errors)
 		}
 	})
+
+	// An env with no counter at all cannot bound the retries either: the
+	// timeout it cannot record labels the bead rather than deferring it on a
+	// count nothing remembers (gt-a4cdcd).
+	t.Run("an unwired counter labels the bead", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		f.seats = []specdispatch.Seat{{Agent: seat, Cap: 1}}
+		f.slingErrs["gt-a"] = []error{lockTimeout}
+		env := f.env()
+		env.RecordLockTimeout = nil
+		r := runSpecDispatchCycle(env)
+
+		if !slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel) {
+			t.Fatalf("labels = %v, want %s when no count can be recorded", f.labels["gt-a"], specdispatch.DispatchFailedLabel)
+		}
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "no lock timeout counter is wired") {
+			t.Errorf("errors = %v, want the unwired counter reported", r.Errors)
+		}
+	})
 }
 
 // withLockTimeouts is a spec whose bead metadata records n consecutive
