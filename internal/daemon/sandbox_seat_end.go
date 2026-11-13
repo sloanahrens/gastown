@@ -318,11 +318,13 @@ func (h *patrolScanHost) clearPendingSeatEnd(rig, name string) {
 	}
 }
 
-// recordKeptSeat leaves the record of a keep: the bead, and the reason the end
-// gave. A keep whose reason is unchanged keeps the since its first pass stamped,
-// so the record ages from the start of the keep; a changed reason starts a new
-// since. A record it cannot read is logged, and the since starts from now. A
-// write that fails is logged, and the keep stands (gt-464nw6).
+// recordKeptSeat leaves the record of a keep: the bead, the reason the end gave,
+// and the landing facts the end decided with, so the patrol can offer the seat's
+// end again once it has deleted the sandbox that kept it (gt-cz5tdz). A keep
+// whose reason is unchanged keeps the since its first pass stamped, so the
+// record ages from the start of the keep; a changed reason starts a new since.
+// A record it cannot read is logged, and the since starts from now. A write that
+// fails is logged, and the keep stands (gt-464nw6).
 func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLanding, reason string) {
 	path, err := keptSandboxSeatPath(h.town(), rig, name)
 	if err != nil {
@@ -339,7 +341,7 @@ func (h *patrolScanHost) recordKeptSeat(rig, name string, landing sandboxSeatLan
 	case prev.Reason == reason:
 		since = prev.Since
 	}
-	rec := keptSandboxSeatRecord{Bead: landing.BeadID, Reason: reason, Since: since}
+	rec := keptSandboxSeatRecord{Bead: landing.BeadID, Reason: reason, Since: since, Landing: &landing}
 	if err := writeKeptSandboxSeat(h.town(), rig, name, rec); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the keep: %v; the seat is kept all the same", rig, name, err)
 	}

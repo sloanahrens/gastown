@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"os"
 	"sort"
 	"time"
 
@@ -39,13 +41,18 @@ const (
 // record too, so by then there is no record for this path to find.
 //
 // At most the budget (sandboxRecordsPerTick) of records is checked per tick,
-// live ones included, so a tick makes at most that many tmux probes and gateway
-// questions, and records the gateway still has cannot starve the ones behind
-// them. The walk over the name-sorted records starts after the name the last
-// tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks judge
+// live ones included, so the walk makes at most that many tmux probes and
+// gateway questions, and records the gateway still has cannot starve the ones
+// behind them. The walk over the name-sorted records starts after the name the
+// last tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks judge
 // consecutive names and every record is judged within ceil(n/budget) ticks,
 // whatever the tick's clock phase. A failed removal is logged and the pass goes
 // on.
+//
+// A seat the end kept is only released once its sandbox is gone, and a pass
+// that removes the record has just made that true; nothing else offers that
+// seat's end again, so the pass completes it (gt-cz5tdz). See
+// completeKeptSeatEnd.
 func (h *patrolScanHost) patrolScanSandboxRecords() {
 	names := session.ListSandboxSessions(h.town())
 	if len(names) == 0 {
@@ -94,6 +101,43 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		if !exists {
 			h.d.logger.Printf("patrol_scan: sandbox record %s removed: the gateway has no such sandbox (%s/%s)", name, rec.Rig, rec.Polecat)
 		}
+		h.completeKeptSeatEnd(rec)
+	}
+}
+
+// completeKeptSeatEnd offers the end of a seat the end kept once the patrol has
+// deleted the sandbox that kept it and removed its record (gt-cz5tdz). The end
+// runs again through Daemon.sandboxSeatEnder with the landing facts the kept
+// record holds, so it measures the sandbox gone and every other guard afresh:
+// a seat whose work is unlanded or unpushed stays kept, with that reason
+// rewritten into its record, and only a seat every guard lets go is released.
+// The patrol never clears the record or releases the seat itself.
+//
+// A record without landing facts, one that cannot be read, and an end that does
+// not complete are each logged with the seat's name, and the keep stands: the
+// pass goes on to the next record.
+func (h *patrolScanHost) completeKeptSeatEnd(rec session.SandboxRecord) {
+	if rec.Rig == "" || rec.Polecat == "" {
+		return // a record that names no seat has no kept record to complete
+	}
+	path, err := keptSandboxSeatPath(h.town(), rec.Rig, rec.Polecat)
+	if err != nil {
+		h.d.logger.Printf("patrol_scan: sandbox record %s: no kept record of %s/%s can be read: %v", rec.Session, rec.Rig, rec.Polecat, err)
+		return
+	}
+	kept, err := readKeptSandboxSeatRecord(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return // the seat was not kept
+	case err != nil:
+		h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its kept record is unreadable, so its seat end is not completed; the keep stands: %v", rec.Rig, rec.Polecat, err)
+		return
+	case kept.Landing == nil:
+		h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its kept record names no landing facts, so its seat end cannot be completed; the keep stands (%s)", rec.Rig, rec.Polecat, kept.Reason)
+		return
+	}
+	if !h.d.sandboxSeatEnder()(rec.Rig, rec.Polecat, *kept.Landing) {
+		h.d.logger.Printf("patrol_scan: sandbox seat end %s/%s: its seat end did not complete after its sandbox was deleted; the keep stands (%s)", rec.Rig, rec.Polecat, kept.Reason)
 	}
 }
 

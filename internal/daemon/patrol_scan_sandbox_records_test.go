@@ -1,16 +1,20 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -371,5 +375,349 @@ func TestPatrolScanSandboxRecordsFailureBranches(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// keptSeatPatrol is one finished sandbox seat whose keep the end recorded and
+// whose sandbox registry record the patrol finds: the record pass over the
+// seat-end fake, with the record pass's own gateway and deleter seams, so the
+// patrol's completion of the seat's end is the real end.
+type keptSeatPatrol struct {
+	*seatEndFake
+	clk *clockwork.FakeClock
+	// sandboxUp is the gateway's answer for the seat's sandbox: true until the
+	// record deleter has deleted it.
+	sandboxUp bool
+}
+
+func newKeptSeatPatrol(t *testing.T, now time.Time) *keptSeatPatrol {
+	t.Helper()
+	f := newSeatEndFake(t)
+	clk := clockwork.NewFakeClockAt(now)
+	f.host.d.clock = clk
+	f.host.d.tmux = newFakeTmux(clk)
+	p := &keptSeatPatrol{seatEndFake: f, clk: clk}
+	f.host.sandboxExists = func(string, string) (bool, error) { return p.sandboxUp, nil }
+	f.host.sandboxEndedMarker = func(string, string) (bool, error) { return true, nil }
+	f.host.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+		f.deleted = append(f.deleted, rec.Session)
+		p.sandboxUp = false
+		return nil
+	}
+	f.host.d.endSandboxSeat = f.host.endFinishedSandboxSeat
+	return p
+}
+
+// registryRecord writes the seat's sandbox registry record, as the sling does
+// when it launches the seat, old enough for the record pass to judge.
+func (p *keptSeatPatrol) registryRecord(t *testing.T) {
+	t.Helper()
+	rec := session.SandboxRecord{
+		Session:   session.PolecatSessionName(session.DefaultPrefix, endPolecat),
+		Rig:       endRig,
+		Polecat:   endPolecat,
+		Gateway:   "gw1",
+		CreatedAt: p.clk.Now().Add(-time.Hour),
+	}
+	if err := session.WriteSandboxRecord(p.town, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recorded reports whether the seat's sandbox registry record is still there.
+func (p *keptSeatPatrol) recorded() bool {
+	p.t.Helper()
+	ok, err := session.IsSandboxed(p.town, session.PolecatSessionName(session.DefaultPrefix, endPolecat))
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	return ok
+}
+
+// keptSeatAttentionSeats is the attention collector's view of the town's kept
+// records at now.
+func keptSeatAttentionSeats(t *testing.T, d *Daemon, now time.Time) int {
+	t.Helper()
+	src := &attentionSources{d: d, now: now}
+	items, err := src.collectKeptSandboxSeats(context.Background())
+	if err != nil {
+		t.Fatalf("collecting the kept-seat attention items: %v", err)
+	}
+	return len(items)
+}
+
+// The patrol that deletes a held sandbox completes the kept seat's end in the
+// same pass: the end runs again with the landing facts the kept record holds,
+// every guard agrees, the host directories and the record go, and the queue
+// raises no false sandbox-seat-kept item (gt-cz5tdz).
+func TestPatrolScanCompletesTheEndOfADeletedKeptSeat(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC)
+	p := newKeptSeatPatrol(t, now)
+	p.seedAgent()
+	p.retire(intent.DesiredStop)
+	p.seatDirs()
+	p.sandboxUp = true
+	p.registryRecord(t)
+
+	// The landing's own pass keeps the seat: the sandbox is still up.
+	if p.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding()) {
+		t.Fatal("a seat whose sandbox is still up was removed")
+	}
+	// Half an hour on, the queue would raise the false item.
+	p.clk.Advance(32 * time.Minute)
+	if got := keptSeatAttentionSeats(t, p.host.d, p.clk.Now()); got != 1 {
+		t.Fatalf("attention items before the patrol = %d, want the false kept item", got)
+	}
+
+	p.host.patrolScanSandboxRecords()
+
+	if want := []string{session.PolecatSessionName(session.DefaultPrefix, endPolecat)}; !reflect.DeepEqual(p.deleted, want) {
+		t.Fatalf("sandboxes deleted = %v, want %v", p.deleted, want)
+	}
+	if p.recorded() {
+		t.Error("the registry record survived the deleted sandbox")
+	}
+	if seats, bad, err := KeptSandboxSeats(p.town); err != nil || len(bad) != 0 || len(seats) != 0 {
+		t.Errorf("kept seats after the patrol = %+v, bad %v, %v; want none", seats, bad, err)
+	}
+	if dirExists(t, filepath.Join(p.town, endRig, "polecats", endPolecat)) {
+		t.Error("the released seat kept its host directories")
+	}
+	if got := keptSeatAttentionSeats(t, p.host.d, p.clk.Now()); got != 0 {
+		t.Errorf("attention items after the patrol = %d, want none", got)
+	}
+}
+
+// A seat kept for a reason that stays true is still kept after the patrol
+// deletes its sandbox, and its record names that reason: the completed end
+// measured the sandbox gone and the next guard kept the seat (gt-cz5tdz).
+func TestPatrolScanLeavesASeatKeptForAnotherReasonKept(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC)
+	p := newKeptSeatPatrol(t, now)
+	p.seatFields.PushFailed = true
+	p.seedAgent()
+	p.retire(intent.DesiredStop)
+	p.seatDirs()
+	p.sandboxUp = true
+	p.registryRecord(t)
+
+	if p.host.endFinishedSandboxSeat(endRig, endPolecat, keptSeatLanding()) {
+		t.Fatal("a seat whose sandbox is still up was removed")
+	}
+
+	p.host.patrolScanSandboxRecords()
+
+	if len(p.deleted) != 1 {
+		t.Fatalf("sandboxes deleted = %v, want the held one", p.deleted)
+	}
+	seats, bad, err := KeptSandboxSeats(p.town)
+	if err != nil || len(bad) != 0 {
+		t.Fatalf("reading the kept seats: bad %v, %v", bad, err)
+	}
+	if len(seats) != 1 {
+		t.Fatalf("kept seats after the patrol = %+v, want the still-kept seat", seats)
+	}
+	if seats[0].Reason != keptSeatReason {
+		t.Errorf("keep reason = %q, want %q: the completed end names the fact that still keeps it", seats[0].Reason, keptSeatReason)
+	}
+	if !dirExists(t, filepath.Join(p.town, endRig, "polecats", endPolecat)) {
+		t.Error("a seat kept for unpushed work lost its host directories")
+	}
+}
+
+// A kept record written before it held landing facts is left as it is and the
+// patrol logs why: with no facts to offer the end, the keep stands as today
+// (gt-cz5tdz).
+func TestPatrolScanLeavesAKeptRecordWithoutLandingFactsAlone(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true})
+	var logs strings.Builder
+	r.host.d.logger = log.New(&logs, "", 0)
+	since := time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC)
+	old := keptSandboxSeatRecord{Bead: endBead, Reason: keptSeatReason, Since: since}
+	if err := writeKeptSandboxSeat(r.town, "gastown", "capable", old); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	r.host.d.endSandboxSeat = func(rig, name string, _ sandboxSeatLanding) bool {
+		calls = append(calls, rig+"/"+name)
+		return true
+	}
+
+	r.host.patrolScanSandboxRecords()
+
+	if len(r.deleterCalls) != 1 {
+		t.Fatalf("the held sandbox was not deleted: %v", r.deleterCalls)
+	}
+	if r.recorded() {
+		t.Error("the registry record survived the deleted sandbox")
+	}
+	if len(calls) != 0 {
+		t.Errorf("the seat end was offered for a record with no landing facts: %v", calls)
+	}
+	seats, bad, err := KeptSandboxSeats(r.town)
+	if err != nil || len(bad) != 0 || len(seats) != 1 {
+		t.Fatalf("kept seats = %+v, bad %v, %v; want the untouched record", seats, bad, err)
+	}
+	if seats[0].Reason != old.Reason || !seats[0].Since.Equal(since) || seats[0].Bead != old.Bead {
+		t.Errorf("kept record = %+v, want it left as it was", seats[0])
+	}
+	if want := "sandbox seat end gastown/capable: its kept record names no landing facts"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+}
+
+// The patrol offers a seat's end only once it has removed the sandbox's record
+// and can read the landing facts from the kept record: a removal that fails and
+// a kept record that cannot be read each leave the keep as it is (gt-cz5tdz).
+func TestPatrolScanOffersNoSeatEndItCannotReadTheFactsFor(t *testing.T) {
+	t.Parallel()
+	landing := keptSeatLanding()
+	tests := []struct {
+		name string
+		// noSeat is a registry record that names no rig or polecat: no kept
+		// record can exist for it, so nothing is offered and nothing is logged.
+		noSeat    bool
+		removeErr error
+		corrupt   bool
+		wantLog   string
+	}{
+		{
+			name:      "a removal that fails",
+			removeErr: errors.New("disk full"),
+			wantLog:   "sandbox record gt-agate: removing it failed: disk full",
+		},
+		{
+			name:    "a kept record that cannot be read",
+			corrupt: true,
+			wantLog: "sandbox seat end gastown/agate: its kept record is unreadable, so its seat end is not completed",
+		},
+		{
+			name:   "a record that names no seat",
+			noSeat: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			clk := newFixedClock()
+			reg := session.SandboxRecord{
+				Session: "gt-agate", Rig: endRig, Polecat: "agate", Gateway: "gw1",
+				CreatedAt: clk.Now().Add(-time.Hour),
+			}
+			if tt.noSeat {
+				reg.Rig, reg.Polecat = "", ""
+			}
+			if err := session.WriteSandboxRecord(town, reg); err != nil {
+				t.Fatal(err)
+			}
+			if !tt.noSeat {
+				path, err := keptSandboxSeatPath(town, endRig, "agate")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tt.corrupt {
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := writeKeptSandboxSeat(town, endRig, "agate", keptSandboxSeatRecord{
+					Bead: endBead, Reason: "the gateway has not confirmed the sandbox gone", Since: clk.Now(), Landing: &landing,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var logs strings.Builder
+			var calls []string
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), tmux: newFakeTmux(clk), clock: clk}
+			d.endSandboxSeat = func(rig, name string, _ sandboxSeatLanding) bool {
+				calls = append(calls, rig+"/"+name)
+				return true
+			}
+			h := &patrolScanHost{
+				d:             d,
+				sandboxExists: func(string, string) (bool, error) { return false, nil },
+			}
+			if tt.removeErr != nil {
+				h.removeSandboxRecord = func(string, string) error { return tt.removeErr }
+			}
+
+			h.patrolScanSandboxRecords()
+
+			if len(calls) != 0 {
+				t.Errorf("seat ends offered = %v, want none", calls)
+			}
+			if tt.removeErr == nil {
+				if left := session.ListSandboxSessions(town); len(left) != 0 {
+					t.Errorf("registry records left = %v, want none", left)
+				}
+			}
+			if tt.wantLog == "" {
+				if strings.Contains(logs.String(), "sandbox seat end") {
+					t.Errorf("log names a seat end for a record that names no seat:\n%s", logs.String())
+				}
+			} else if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log lacks %q:\n%s", tt.wantLog, logs.String())
+			}
+		})
+	}
+}
+
+// A seat end that does not complete is logged and does not stop the pass: every
+// other record is still removed and its seat's end offered, with the landing
+// facts its kept record holds (gt-cz5tdz).
+func TestPatrolScanSeatEndFailureDoesNotStopThePass(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	seats := []struct{ session, polecat string }{
+		{"gt-agate", "agate"},
+		{"gt-bismuth", "bismuth"},
+	}
+	landing := keptSeatLanding()
+	for _, s := range seats {
+		if err := session.WriteSandboxRecord(town, session.SandboxRecord{
+			Session: s.session, Rig: endRig, Polecat: s.polecat, Gateway: "gw1",
+			CreatedAt: clk.Now().Add(-time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeKeptSandboxSeat(town, endRig, s.polecat, keptSandboxSeatRecord{
+			Bead: endBead, Reason: "the gateway has not confirmed the sandbox gone", Since: clk.Now(), Landing: &landing,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logs strings.Builder
+	var ended []string
+	var landed []sandboxSeatLanding
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), tmux: newFakeTmux(clk), clock: clk}
+	d.endSandboxSeat = func(rig, name string, l sandboxSeatLanding) bool {
+		ended = append(ended, rig+"/"+name)
+		landed = append(landed, l)
+		return name != "agate" // the first seat's end fails here
+	}
+	h := &patrolScanHost{d: d, sandboxExists: func(string, string) (bool, error) { return false, nil }}
+
+	h.patrolScanSandboxRecords()
+
+	if want := []string{endRig + "/agate", endRig + "/bismuth"}; !reflect.DeepEqual(ended, want) {
+		t.Errorf("seat ends offered = %v, want %v (the failed one does not stop the pass)", ended, want)
+	}
+	for _, got := range landed {
+		if got != landing {
+			t.Errorf("landing offered = %+v, want the recorded %+v", got, landing)
+		}
+	}
+	if left := session.ListSandboxSessions(town); len(left) != 0 {
+		t.Errorf("registry records left = %v, want none", left)
+	}
+	if want := "sandbox seat end gastown/agate: its seat end did not complete"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
 	}
 }
