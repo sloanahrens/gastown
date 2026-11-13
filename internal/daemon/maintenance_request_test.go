@@ -183,6 +183,33 @@ func TestMaintenanceRequestRunsOutsideTheWindow(t *testing.T) {
 	})
 }
 
+// A request over an external server — the pod, where the roll's maintenance
+// step asks for the night — runs the cycle: the list comes from the server and
+// the week alone decides (gt-lc16x3).
+func TestMaintenanceRequestRunsAgainstAnExternalServer(t *testing.T) {
+	t.Parallel()
+	d, f := requestDaemon(t, gcTestNow)
+	f.serverDBs = []string{"hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	// Weekly-only is the rule here, so the database must be a week stale: the
+	// two-hour-old seed is not due.
+	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
+	path := writeRequestFile(t, d, "run-pod", gcTestNow)
+
+	requestTickAndCycle(t, d)
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Fatalf("gc calls = %q, want hq over SQL for the request", got)
+	}
+	res := readRequestResult(t, d)
+	if res.RunID != "run-pod" || res.Outcome != "completed" {
+		t.Errorf("result = %+v, want run-pod completed", res)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("request file still there after a completed cycle: %v", err)
+	}
+}
+
 // Under either standby the tick starts no cycle and answers the request
 // deferred, naming the standby, instead of leaving the job to time out.
 func TestMaintenanceRequestUnderStandbyAnswersDeferred(t *testing.T) {
@@ -711,10 +738,11 @@ func TestMaintenanceRequestUnanswerablePathsWriteFailed(t *testing.T) {
 		}
 	})
 
-	t.Run("no local server", func(t *testing.T) {
+	t.Run("server cannot list its databases", func(t *testing.T) {
 		t.Parallel()
 		d, f := requestDaemon(t, outsideRequestNow)
 		d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+		f.serverErr = errors.New("dolt is not answering")
 		// A failed request is not the scheduled window: it must not consume the
 		// gap a later cycle would have to wait out.
 		lastRun := outsideRequestNow.Add(-48 * time.Hour)
@@ -724,11 +752,11 @@ func TestMaintenanceRequestUnanswerablePathsWriteFailed(t *testing.T) {
 		d.runScheduledMaintenance()
 
 		if len(f.gcCalls) != 0 {
-			t.Errorf("gc calls = %v against a remote server", f.gcCalls)
+			t.Errorf("gc calls = %v with no database list", f.gcCalls)
 		}
 		res := readRequestResult(t, d)
-		if res.RunID != "run-remote" || res.Outcome != "failed" || !strings.Contains(res.Detail, "local server") {
-			t.Errorf("result = %+v, want run-remote failed naming the local-server requirement", res)
+		if res.RunID != "run-remote" || res.Outcome != "failed" || !strings.Contains(res.Detail, "dolt is not answering") {
+			t.Errorf("result = %+v, want run-remote failed naming the list failure", res)
 		}
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("request still there: %v", err)
