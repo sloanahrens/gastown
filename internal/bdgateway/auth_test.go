@@ -791,11 +791,12 @@ func (e fakeDirEntry) Info() (fs.FileInfo, error) { return nil, errors.New("unus
 // fakeTokenFile is one open token file for the injected-failure tests: Stat and
 // Read report the failures a real file cannot be made to produce on demand.
 type fakeTokenFile struct {
-	info    os.FileInfo
-	statErr error
-	data    []byte
-	readErr error
-	off     int
+	info     os.FileInfo
+	statErr  error
+	data     []byte
+	readErr  error
+	closeErr error
+	off      int
 }
 
 func (f *fakeTokenFile) Stat() (os.FileInfo, error) {
@@ -817,7 +818,7 @@ func (f *fakeTokenFile) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (f *fakeTokenFile) Close() error { return nil }
+func (f *fakeTokenFile) Close() error { return f.closeErr }
 
 // TestAuthLoaderIOFailures drives the loader's I/O refusal branches through an
 // injected filesystem: a temp directory cannot be made to fail a stat, a
@@ -886,6 +887,17 @@ func TestAuthLoaderIOFailures(t *testing.T) {
 				readDir: oneEntry,
 				open: func(string) (tokenFile, error) {
 					return &fakeTokenFile{info: tokenInfo, readErr: errors.New("read failed")}, nil
+				},
+			},
+			wantErr: ErrTokenFile,
+		},
+		{
+			name: "closing a token file fails",
+			fs: tokenFS{
+				lstat:   dirOnly,
+				readDir: oneEntry,
+				open: func(string) (tokenFile, error) {
+					return &fakeTokenFile{info: tokenInfo, data: []byte("a-token\n"), closeErr: errors.New("close failed")}, nil
 				},
 			},
 			wantErr: ErrTokenFile,

@@ -218,13 +218,16 @@ func validCaller(caller string) bool {
 // it. The mode must be 0600 exactly: a token readable by anyone else is refused
 // with the mode named and the token left unread. Surrounding whitespace is
 // trimmed, so a file written with a trailing newline works.
-func readTokenDigest(fs tokenFS, path string) ([sha256.Size]byte, error) {
-	var digest [sha256.Size]byte
+func readTokenDigest(fs tokenFS, path string) (digest [sha256.Size]byte, err error) {
 	f, err := fs.open(path)
 	if err != nil {
 		return digest, fmt.Errorf("%w: %s: %v", ErrTokenFile, path, err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("%w: close %s: %v", ErrTokenFile, path, cerr)
+		}
+	}()
 	info, err := f.Stat()
 	switch {
 	case err != nil:
@@ -246,9 +249,9 @@ func readTokenDigest(fs tokenFS, path string) ([sha256.Size]byte, error) {
 }
 
 // Lookup returns the identity token authenticates to, and false for a token no
-// entry holds. Every entry is compared, and each comparison runs
-// constantTimeDigestCompare over two SHA-256 digests, so a request's duration
-// says neither how much of a token matched nor which entry did.
+// entry holds. Every entry is compared, and each comparison runs the table's
+// compare seam over two SHA-256 digests, so a request's duration says neither
+// how much of a token matched nor which entry did.
 func (t *TokenTable) Lookup(token string) (Identity, bool) {
 	digest := sha256.Sum256([]byte(token))
 	var match Identity
