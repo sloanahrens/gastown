@@ -58,7 +58,7 @@ func TestCensusHasSessionAnswersAnUnlistedSeatOnlyFromAGoodListing(t *testing.T)
 			t.Cleanup(session.BeginSandboxCensus(gateway.Runner()))
 
 			lister := &countingSeatLister{fakeLister: fakeLister{}}
-			running, err := censusHasSession{tmux: lister}.HasSession(seat)
+			running, err := session.CensusSessionReader{Tmux: lister}.HasSession(seat)
 			if tt.wantNotLive {
 				if !errors.Is(err, session.ErrSeatNotLive) {
 					t.Errorf("HasSession(%s) error = %v, want ErrSeatNotLive", seat, err)

@@ -253,3 +253,23 @@ func BeginSandboxCensus(run sandbox.Runner) (end func()) {
 func SandboxCensusRead[T any](session, verb string, args []string, probe func() (T, error)) (T, error) {
 	return censusRead(installedCensus(), session, verb, args, probe)
 }
+
+// HasSessionProbe is the tmux read the census answers for a seat.
+type HasSessionProbe interface {
+	HasSession(name string) (bool, error)
+}
+
+// CensusSessionReader answers a seat's has-session read through the census
+// installed for this process, and through Tmux when no census is installed.
+// A sling installs it on the polecat manager it reads its rig through, so the
+// manager's seat-listing and reuse probes cost no extra openshell process.
+type CensusSessionReader struct {
+	Tmux HasSessionProbe
+}
+
+// HasSession answers the seat's has-session read from the census.
+func (r CensusSessionReader) HasSession(name string) (bool, error) {
+	return SandboxCensusRead(name, "has-session", nil, func() (bool, error) {
+		return r.Tmux.HasSession(name)
+	})
+}

@@ -61,7 +61,7 @@ func (r *seamReader) hasCount() int {
 
 // TestManagerSessionProbesUseTheSeam: while a reader is installed, the Manager's
 // has-session reads of the seat listing and the reuse go through it and never to
-// its own tmux client; with none installed, or once it ends, they go to tmux.
+// its own tmux client; with none installed, or once nil is set, they go to tmux.
 func TestManagerSessionProbesUseTheSeam(t *testing.T) {
 	t.Parallel()
 
@@ -71,8 +71,7 @@ func TestManagerSessionProbesUseTheSeam(t *testing.T) {
 		tm := &probeTmux{}
 		mgr.tmux = tm
 		reader := &seamReader{running: true}
-		end := mgr.ShareSessionProbes(reader)
-		defer end()
+		mgr.SetSessionProbes(reader)
 
 		running, _ := mgr.polecatSessionState("p1")
 		if !running {
@@ -92,8 +91,7 @@ func TestManagerSessionProbesUseTheSeam(t *testing.T) {
 		tm := &probeTmux{}
 		mgr.tmux = tm
 		reader := &seamReader{running: false}
-		end := mgr.ShareSessionProbes(reader)
-		defer end()
+		mgr.SetSessionProbes(reader)
 
 		if err := mgr.killExistingPolecatSession("p1", "reuse"); err != nil {
 			t.Fatalf("killExistingPolecatSession: %v", err)
@@ -103,6 +101,59 @@ func TestManagerSessionProbesUseTheSeam(t *testing.T) {
 		}
 		if got := tm.hasCount(); got != 0 {
 			t.Errorf("tmux answered %d has-session reads while the reader was installed, want 0", got)
+		}
+	})
+
+	t.Run("the stale-seat check reads through the reader, not tmux", func(t *testing.T) {
+		t.Parallel()
+		mgr, _, _, _, _ := canonicalWithPolecats(t, true, "p1")
+		tm := &probeTmux{}
+		mgr.tmux = tm
+		reader := &seamReader{running: true}
+		mgr.SetSessionProbes(reader)
+
+		stale, err := mgr.DetectStalePolecats(1)
+		if err != nil {
+			t.Fatalf("DetectStalePolecats: %v", err)
+		}
+		if len(stale) != 1 || !stale[0].HasActiveSession {
+			t.Fatalf("stale = %+v, want p1 with an active session from the reader", stale)
+		}
+		// The listing and the stale check each ask the seat; both went to the
+		// reader.
+		if got := reader.hasCount(); got != 2 {
+			t.Errorf("reader answered %d has-session reads, want 2 (the listing and the stale check)", got)
+		}
+		if got := tm.hasCount(); got != 0 {
+			t.Errorf("tmux answered %d has-session reads while the reader was installed, want 0", got)
+		}
+	})
+
+	t.Run("a reader alone answers, with no client to judge the process", func(t *testing.T) {
+		t.Parallel()
+		mgr, _, _, _, _ := canonicalWithPolecats(t, true, "p1")
+		mgr.tmux = nil
+		reader := &seamReader{running: true}
+		mgr.SetSessionProbes(reader)
+
+		running, stale := mgr.polecatSessionState("p1")
+		if !running || stale {
+			t.Errorf("polecatSessionState = running %v, stale %v; want the reader's running answer, not stale", running, stale)
+		}
+		if got := reader.hasCount(); got != 1 {
+			t.Errorf("reader answered %d has-session reads, want 1", got)
+		}
+	})
+
+	t.Run("a failing reader with no client is not running", func(t *testing.T) {
+		t.Parallel()
+		mgr, _, _, _, _ := canonicalWithPolecats(t, true, "p1")
+		mgr.tmux = nil
+		reader := &failingSeamReader{err: errors.New("sandbox listing failed")}
+		mgr.SetSessionProbes(reader)
+
+		if running, _ := mgr.polecatSessionState("p1"); running {
+			t.Error("polecatSessionState reported running with a failed reader and no client")
 		}
 	})
 
@@ -118,21 +169,46 @@ func TestManagerSessionProbesUseTheSeam(t *testing.T) {
 		}
 	})
 
-	t.Run("once the end func runs the read goes back to tmux", func(t *testing.T) {
+	t.Run("nil puts the read back on tmux", func(t *testing.T) {
 		t.Parallel()
 		mgr, _, _, _, _ := canonicalWithPolecats(t, true, "p1")
 		tm := &probeTmux{}
 		mgr.tmux = tm
 		reader := &seamReader{running: true}
-		end := mgr.ShareSessionProbes(reader)
-		end()
+		mgr.SetSessionProbes(reader)
+		mgr.SetSessionProbes(nil)
 
 		mgr.polecatSessionState("p1")
 		if got := reader.hasCount(); got != 0 {
-			t.Errorf("reader answered %d reads after its end func ran, want 0", got)
+			t.Errorf("reader answered %d reads after nil was set, want 0", got)
 		}
 		if got := tm.hasCount(); got != 1 {
-			t.Errorf("tmux answered %d has-session reads after the end func, want 1", got)
+			t.Errorf("tmux answered %d has-session reads after nil was set, want 1", got)
+		}
+	})
+
+	t.Run("a later set replaces the earlier reader", func(t *testing.T) {
+		t.Parallel()
+		mgr, _, _, _, _ := canonicalWithPolecats(t, true, "p1")
+		tm := &probeTmux{}
+		mgr.tmux = tm
+		first := &seamReader{running: true}
+		second := &seamReader{running: false}
+		mgr.SetSessionProbes(first)
+		mgr.SetSessionProbes(second)
+
+		running, _ := mgr.polecatSessionState("p1")
+		if running {
+			t.Error("polecatSessionState reported running, want the second reader's not-running answer")
+		}
+		if got := first.hasCount(); got != 0 {
+			t.Errorf("the replaced reader answered %d reads, want 0", got)
+		}
+		if got := second.hasCount(); got != 1 {
+			t.Errorf("the current reader answered %d reads, want 1", got)
+		}
+		if got := tm.hasCount(); got != 0 {
+			t.Errorf("tmux answered %d reads while a reader was installed, want 0", got)
 		}
 	})
 }

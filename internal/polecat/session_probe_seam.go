@@ -8,32 +8,30 @@ import (
 
 // SessionReader answers the has-session question a Manager asks while it lists
 // its seats and reuses one. A sling installs a reader that answers through its
-// sandbox census (ShareSessionProbes); with none installed the Manager asks its
+// sandbox census (SetSessionProbes); with none installed the Manager asks its
 // own tmux client, as it always has.
 type SessionReader interface {
 	HasSession(name string) (bool, error)
 }
 
-// sessionReaderSlot is one installed reader. The Manager holds a pointer to it,
-// so an install and its end func swap whole slots, and a read never sees a
-// reader torn in half.
+// sessionReaderSlot holds one installed reader. The Manager stores it whole
+// through an atomic pointer, so a concurrent read never sees a torn value.
 type sessionReaderSlot struct {
 	reader SessionReader
 }
 
-// ShareSessionProbes makes this Manager answer its has-session reads through
-// reader until the returned end func is called. The sling's reuse step opens it
-// around its seat listing and reuse. A nil reader installs nothing. The end func
-// restores the reader that was installed before this call, so nested installs
-// unwind in order; with none before, every read goes to the Manager's own tmux
-// client again.
-func (m *Manager) ShareSessionProbes(reader SessionReader) (end func()) {
-	var next *sessionReaderSlot
-	if reader != nil {
-		next = &sessionReaderSlot{reader: reader}
+// SetSessionProbes makes this Manager answer its has-session reads through
+// reader until a later call replaces it, and through its own tmux client again
+// when reader is nil. The sling calls it once, on the manager openSlingRig
+// builds for the command, and nowhere else: that manager, the command and the
+// census its reader consults all end together, so the seam needs no end of its
+// own.
+func (m *Manager) SetSessionProbes(reader SessionReader) {
+	if reader == nil {
+		m.sessionReader.Store(nil)
+		return
 	}
-	prev := m.sessionReader.Swap(next)
-	return func() { m.sessionReader.Store(prev) }
+	m.sessionReader.Store(&sessionReaderSlot{reader: reader})
 }
 
 // hasSession is the has-session read through the installed reader, if any, and
@@ -41,8 +39,8 @@ func (m *Manager) ShareSessionProbes(reader SessionReader) (end func()) {
 // session.ErrSeatNotLive is a seat with no server to ask, so the read is false
 // with no tmux read. Any other reader error means the reader could not answer
 // (a listing or probe failed), and the read takes the Manager's own tmux client
-// as it does with no reader. Callers keep their own nil check on m.tmux, which
-// the reader does not replace.
+// as it does with no reader. A Manager with no client either answers not
+// running.
 func (m *Manager) hasSession(name string) (bool, error) {
 	if slot := m.sessionReader.Load(); slot != nil {
 		running, err := slot.reader.HasSession(name)
@@ -52,6 +50,9 @@ func (m *Manager) hasSession(name string) (bool, error) {
 		case errors.Is(err, session.ErrSeatNotLive):
 			return false, nil
 		}
+	}
+	if m.tmux == nil {
+		return false, nil
 	}
 	return m.tmux.HasSession(name)
 }

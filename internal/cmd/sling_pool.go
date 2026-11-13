@@ -513,26 +513,6 @@ func (l censusLister) GetSessionCreatedTime(name string) (time.Time, error) {
 	})
 }
 
-// hasSessionProbe is the tmux read censusHasSession answers through the census.
-type hasSessionProbe interface {
-	HasSession(name string) (bool, error)
-}
-
-// censusHasSession is the has-session reader a sling's reuse step installs on
-// its polecat manager (polecat.ShareSessionProbes): a seat's has-session read
-// goes through the sling's census, so the seat listing and the reuse of the
-// seat it picks ask each sandboxed seat once.
-type censusHasSession struct {
-	tmux hasSessionProbe
-}
-
-// HasSession answers the seat's has-session read from the census.
-func (c censusHasSession) HasSession(name string) (bool, error) {
-	return session.SandboxCensusRead(name, "has-session", nil, func() (bool, error) {
-		return c.tmux.HasSession(name)
-	})
-}
-
 // polecatDispositionFunc reads one polecat's own bead state for the pool. A nil
 // func is a pool that cannot read any polecat's state.
 type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, error)

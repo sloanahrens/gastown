@@ -15,11 +15,15 @@ import (
 )
 
 // TestSlingCensusIsSharedByReuse runs one sling through its seat decision, its
-// admission and the reuse step's has-session reads over ten sandboxed seats.
-// The sling makes one gateway listing, and each seat's has-session is probed
-// once however many readers ask: the seat listing and the reuse of the seat it
-// picks share the answer. A probe that failed is not kept, so the reader after
-// it asks again. A seat killed in the run is probed afresh afterwards.
+// admission and the has-session reads the reuse step reads through its own
+// reader (session.CensusSessionReader, the reader a sling installs on its
+// polecat manager in openSlingRig) over ten sandboxed seats. The sling makes
+// one gateway listing, and each seat's has-session is probed once however many
+// readers ask: the seat listing and the reuse of the seat it picks share the
+// answer. A probe that failed is not kept, so the reader after it asks again. A
+// seat killed in the run is probed afresh afterwards. The manager's own use of
+// this reader is pinned by TestSlingCensusIsSharedByManagerReuse, in
+// internal/polecat, where a Manager can be built without a live tmux.
 //
 //testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestSlingCensusIsSharedByReuse(t *testing.T) {
@@ -77,7 +81,7 @@ func TestSlingCensusIsSharedByReuse(t *testing.T) {
 	// The reuse step: the seat listing asks every seat's has-session, and a
 	// failed read is asked again by the next reader; then the reuse asks the
 	// seat it picks, which the census already holds.
-	reuse := censusHasSession{tmux: lister}
+	reuse := session.CensusSessionReader{Tmux: lister}
 	for i := 0; i < seats; i++ {
 		name := fmt.Sprintf("gt-gastown-p%d", i)
 		if _, err := reuse.HasSession(name); err != nil {

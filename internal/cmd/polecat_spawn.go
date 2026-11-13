@@ -969,10 +969,17 @@ func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Mana
 		return nil, nil, nil, fmt.Errorf("rig '%s' not found", rigName)
 	}
 
-	// The polecat manager carries tmux for session-aware allocation.
+	// The polecat manager carries tmux for session-aware allocation. Its
+	// has-session reads go through the sling's census (gt-9qh6wp): the seat
+	// listing, the reuse of the seat it picks and the fresh path's create
+	// probes ask each sandboxed seat once. A seat the census answers
+	// ErrSeatNotLive for is not live with no probe; a listing or record that
+	// cannot be read, or a probe that fails, takes the manager's own probe.
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	return r, t, supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling")), nil
+	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"))
+	mgr.SetSessionProbes(session.CensusSessionReader{Tmux: t})
+	return r, t, mgr, nil
 }
 
 func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, stores slingStores) (*SpawnedPolecatInfo, error) {
@@ -1039,21 +1046,10 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// paying for a new worktree.
 	// The memo lets the seat listing and the reuse of the seat it picks share
 	// one bd read of each agent bead; it is dropped when the reuse step ends.
-	// The has-session reads of the same listing and reuse go through the sling's
-	// census too (gt-9qh6wp): a Ready seat's answer is kept for the sling. A seat
-	// the census answers ErrSeatNotLive for (a good listing that does not name it,
-	// or names it Stopped, Error or Failed) is not live with no probe; a listing
-	// or record that cannot be read, or a probe that fails, takes the probe.
 	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
-	var sessionProbes polecat.SessionReader
-	if t != nil {
-		sessionProbes = censusHasSession{tmux: t}
-	}
-	endSessionProbes := polecatMgr.ShareSessionProbes(sessionProbes)
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
 		realIdleReuseEnv(t, r, townRoot, rigName, opts.step), townRoot, rigName,
 		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
-	endSessionProbes()
 	endAgentBeadReads()
 	if err != nil {
 		return nil, err

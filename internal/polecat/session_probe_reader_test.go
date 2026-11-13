@@ -42,8 +42,7 @@ func TestManagerSessionProbesTakeNotLiveFromTheReader(t *testing.T) {
 	tm := &probeTmux{}
 	mgr.tmux = tm
 	reader := &failingSeamReader{err: session.ErrSeatNotLive}
-	end := mgr.ShareSessionProbes(reader)
-	defer end()
+	mgr.SetSessionProbes(reader)
 
 	running, _ := mgr.polecatSessionState("p1")
 	if running {
@@ -66,8 +65,7 @@ func TestManagerSessionProbesFallBackToTmuxOnAReaderError(t *testing.T) {
 	tm := &probeTmux{}
 	mgr.tmux = tm
 	reader := &failingSeamReader{err: errors.New("sandbox listing failed")}
-	end := mgr.ShareSessionProbes(reader)
-	defer end()
+	mgr.SetSessionProbes(reader)
 
 	running, _ := mgr.polecatSessionState("p1")
 	if !running {
@@ -79,40 +77,6 @@ func TestManagerSessionProbesFallBackToTmuxOnAReaderError(t *testing.T) {
 	if got := tm.hasCount(); got != 1 {
 		t.Errorf("tmux answered %d has-session reads after the reader's error, want 1", got)
 	}
-}
-
-// TestShareSessionProbesNestedInstallsUnwindInOrder: an inner install takes
-// the reader over, its end func gives the outer reader back, and the outer end
-// func leaves the Manager on its own tmux client. A second end func is harmless.
-func TestShareSessionProbesNestedInstallsUnwindInOrder(t *testing.T) {
-	t.Parallel()
-	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "p1")
-	tm := &probeTmux{}
-	mgr.tmux = tm
-	outer := &seamReader{running: true}
-	inner := &seamReader{running: false}
-
-	endOuter := mgr.ShareSessionProbes(outer)
-	endInner := mgr.ShareSessionProbes(inner)
-	endInner()
-
-	running, _ := mgr.polecatSessionState("p1")
-	if !running {
-		t.Errorf("after the inner end, polecatSessionState reported not running; want the outer reader's running answer")
-	}
-	if got := outer.hasCount(); got != 1 {
-		t.Errorf("outer reader answered %d reads after the inner end, want 1", got)
-	}
-	if got := inner.hasCount(); got != 0 {
-		t.Errorf("inner reader answered %d reads after its end func, want 0", got)
-	}
-
-	endOuter()
-	mgr.polecatSessionState("p1")
-	if got := tm.hasCount(); got != 1 {
-		t.Errorf("tmux answered %d has-session reads after the outer end, want 1", got)
-	}
-	endOuter()
 }
 
 // promptAtCreateTmux is a fake tmux whose new session shows the agent's ready
@@ -190,6 +154,9 @@ func TestLaunchDropsTheCensusAnswerForTheSessionItCreates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
+	// The launch's startup-nudge check runs in the background; wait for it so
+	// nothing of this test outlives it.
+	m.nudgeWG.Wait()
 
 	running, err := read()
 	if err != nil || !running {
