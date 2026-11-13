@@ -970,6 +970,13 @@ func TestAnalyseLoaderFailureKeepsTheOtherOutputs(t *testing.T) {
 			want: "history archive is off",
 		},
 		{
+			name: "unwired resolver",
+			archive: func(*testing.T) func() (string, error) {
+				return nil
+			},
+			want: "ArchiveDir is unset",
+		},
+		{
 			name: "unreadable archive file",
 			archive: func(t *testing.T) func() (string, error) {
 				return archiveResolver(archiveDirWith(t, map[string][]byte{
@@ -1010,6 +1017,21 @@ func TestAnalyseLoaderFailureKeepsTheOtherOutputs(t *testing.T) {
 				t.Errorf("report = %q, want one line naming the bead-change failure %q", report, tc.want)
 			}
 		})
+	}
+}
+
+// A stale table that cannot be removed is named in the error with the reason the
+// table was not written, so neither failure hides the other. A non-empty
+// directory in the table's place cannot be removed.
+func TestPublishBeadChangesNamesAStaleTableItCannotRemove(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, beadChangesName, "held"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := publishBeadChanges(dir, archiveResolver(""))
+	if err == nil || !strings.Contains(err.Error(), "history archive is off") || !strings.Contains(err.Error(), "could not be removed") {
+		t.Fatalf("err = %v, want the archive-off reason and the removal failure", err)
 	}
 }
 
