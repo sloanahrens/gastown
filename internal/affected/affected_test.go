@@ -309,6 +309,98 @@ func TestAffectedUnreadableDiffIsAll(t *testing.T) {
 	}
 }
 
+// TestDirectImportersSelectsOnlyPackagesThatImportTheChangeDirectly holds the
+// fixture graph to the direct edges: e imports b, which imports a, so e is an
+// importer of b and not of a. c and f reach a only through their tests, and
+// those tests are direct importers too.
+func TestDirectImportersSelectsOnlyPackagesThatImportTheChangeDirectly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		dirs []string
+		want []string
+	}{
+		{"leaf", []string{"internal/a"}, []string{"internal/b", "internal/c", "internal/f"}},
+		{"import of a leaf", []string{"internal/b"}, []string{"internal/e"}},
+		{"nothing imports the package", []string{"internal/d"}, nil},
+		{"a test-only import is an importer", []string{"internal/h"}, []string{"internal/g"}},
+		{"the package a test imports", []string{"internal/g"}, []string{"internal/h"}},
+		{"changed packages are not importers of each other", []string{"internal/a", "internal/b"}, []string{"internal/c", "internal/e", "internal/f"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &fakeRunner{list: listGraph(t)}
+			got, err := DirectImporters(r.run, fixtureRoot, "HEAD", tc.dirs)
+			if err != nil {
+				t.Fatalf("DirectImporters: %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("DirectImporters(%v) = %v, want %v", tc.dirs, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDirectImportersFailsWithTheReason covers each read that cannot be
+// trusted: a selection over a graph that is not the head's, or one that does
+// not hold the changed package, must fail rather than name fewer importers.
+func TestDirectImportersFailsWithTheReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		dirs []string
+		r    fakeRunner
+		wd   string
+	}{
+		{name: "changed dir is not in the graph", dirs: []string{"internal/nope"}, r: fakeRunner{list: listGraph(t)}},
+		{name: "go list fails", dirs: []string{"internal/a"}, r: fakeRunner{listErr: errors.New("go list failed")}},
+		{name: "go list reports a package error", dirs: []string{"internal/a"}, r: fakeRunner{list: []byte(`{"ImportPath": "example.com/m/internal/a", "Error": {"Err": "build constraints exclude all Go files"}}`)}},
+		{name: "working tree differs from head", dirs: []string{"internal/a"}, r: fakeRunner{list: listGraph(t), treeDiff: names("internal/a/a.go")}},
+		{name: "untracked go file", dirs: []string{"internal/a"}, r: fakeRunner{list: listGraph(t), untracked: names("internal/a/extra.go")}},
+		{name: "not at the module root", dirs: []string{"internal/a"}, r: fakeRunner{list: listGraph(t)}, wd: "/fixture/internal"},
+		{
+			// A package outside the module that imports one inside it has no
+			// directory the selection can name, so its edge cannot be placed.
+			name: "an importer with no directory in the module",
+			dirs: []string{"internal/a"},
+			r: fakeRunner{list: append(listGraph(t),
+				[]byte(`{"ImportPath": "example.com/other", "Dir": "/cache/other", "Imports": ["example.com/m/internal/a"]}`+"\n")...)},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wd := fixtureRoot
+			if tc.wd != "" {
+				wd = tc.wd
+			}
+			r := tc.r
+			got, err := DirectImporters(r.run, wd, "HEAD", tc.dirs)
+			if err == nil {
+				t.Fatalf("DirectImporters = %v, want an error naming the cause", got)
+			}
+			if got != nil {
+				t.Errorf("DirectImporters = %v with an error, want nil", got)
+			}
+		})
+	}
+}
+
+// TestDirectImportersReadsNoGraphForNoChange: an empty set of changed
+// packages has no importers, and must not need the graph to say so.
+func TestDirectImportersReadsNoGraphForNoChange(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{listErr: errors.New("go list failed"), treeDiffErr: errors.New("git diff failed")}
+	got, err := DirectImporters(r.run, fixtureRoot, "HEAD", nil)
+	if err != nil {
+		t.Fatalf("DirectImporters: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("DirectImporters = %v, want none", got)
+	}
+}
+
 func TestAffectedUnplacedFileIsSelected(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

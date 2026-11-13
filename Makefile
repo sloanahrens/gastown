@@ -574,8 +574,10 @@ tier-check:
 # presubmit is gt done's pre-submit check (gt-ssyxd): the landing worker gates
 # every branch on the merged tree with `make gate`, so a polecat running the
 # whole gate first only doubles the host load. This target lints, builds, and
-# tests just the packages the branch changed (internal/land/cmd/changedpkgs,
-# unit-tested in internal/land/changed_test.go). It skips the budget runner, the
+# tests the packages the branch changed and their direct importers
+# (internal/land/cmd/changedpkgs, unit-tested in internal/land/changed_test.go
+# and internal/land/importers_test.go; the heavy importers are left out and
+# named, gt-cwkzxk). It skips the budget runner, the
 # drift guard and the shell tests. Judged by exit code alone, like the gate. A
 # package the branch deleted is not tested: there is nothing to run.
 #
