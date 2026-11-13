@@ -2668,31 +2668,86 @@ func TestAddRig_KeepsRegistryChangesLandedDuringClone(t *testing.T) {
 	}
 }
 
-// A rig added outside its town's tree still gets the town's named Dolt
-// endpoint in every bd call, in place of the harness poison the test process
-// inherits. A town that names no endpoint leaves the inherited environment as
-// it is (gt-xnv94x).
-func TestInitBeadsEveryBDCallTakesTheTownEndpoint(t *testing.T) {
+// The bd calls rig setup makes take the town's named Dolt endpoint, in place of
+// the harness poison the test process inherits. A rig's dir sits outside the
+// town tree, where bd cannot find the town to apply the endpoint itself. A town
+// that names no endpoint leaves the inherited environment as it is (gt-xnv94x).
+
+// endpointTown is a town that names a Dolt endpoint or none, and the port its
+// rig's bd calls must dial.
+type endpointTown struct {
+	name, dolt, wantPort string
+}
+
+func endpointTowns() []endpointTown {
+	return []endpointTown{
+		{"named endpoint beats the poison", `,"dolt":{"host":"127.0.0.1","port":4407}`, "4407"},
+		{"town with no endpoint keeps the inherited port", "", "1"},
+	}
+}
+
+// poisonedEnv is the environment the test process inherits: the harness's port
+// poison, which no rig bd call may dial.
+func poisonedEnv() []string {
+	return []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
+}
+
+// writeTownJSON writes mayor/town.json under root, with extra appended to the
+// town object.
+func writeTownJSON(t *testing.T, root, extra string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"` + extra + `}`
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(town), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireEndpointPort fails t for each recorded call whose bd environment does
+// not dial wantPort.
+func requireEndpointPort(t *testing.T, calls []bdCall, wantPort string) {
+	t.Helper()
+	for _, c := range calls {
+		if got := rigEnvMap(c.Env)["BEADS_DOLT_PORT"]; got != wantPort {
+			t.Errorf("bd %s BEADS_DOLT_PORT = %q, want %q", c.argv(), got, wantPort)
+		}
+	}
+}
+
+func TestVerifyBeadsRoundTripTakesTheTownEndpoint(t *testing.T) {
 	t.Parallel()
-	named := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(named, "mayor"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
-		`"dolt":{"host":"127.0.0.1","port":4407}}`
-	if err := os.WriteFile(filepath.Join(named, "mayor", "town.json"), []byte(town), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name, townRoot, wantPort string
-	}{
-		{"named endpoint beats the poison", named, "4407"},
-		{"town with no endpoint keeps the inherited port", t.TempDir(), "1"},
-	} {
+	for _, tc := range endpointTowns() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			manager, _, bd := testManager(tc.townRoot, nil)
-			manager.env = []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
+			root := t.TempDir()
+			writeTownJSON(t, root, tc.dolt)
+			manager, _, bd := testManager(root, nil)
+			manager.env = poisonedEnv()
+			bd.config = map[string]string{"issue_prefix": "tk"}
+			rigPath := t.TempDir() // outside the town tree, as a new rig's dir is
+			if err := manager.verifyBeadsRoundTrip(rigPath, filepath.Join(rigPath, ".beads"), "rig", "tk"); err != nil {
+				t.Fatalf("verifyBeadsRoundTrip: %v", err)
+			}
+			reads := bd.withVerb("config get")
+			if len(reads) == 0 {
+				t.Fatal("verifyBeadsRoundTrip made no bd config get call")
+			}
+			requireEndpointPort(t, reads, tc.wantPort)
+		})
+	}
+}
+
+func TestInitBeadsEveryBDCallTakesTheTownEndpoint(t *testing.T) {
+	t.Parallel()
+	for _, tc := range endpointTowns() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeTownJSON(t, root, tc.dolt)
+			manager, _, bd := testManager(root, nil)
+			manager.env = poisonedEnv()
 			rigPath := t.TempDir() // outside the town tree, as a new rig's dir is
 			if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
 				t.Fatalf("InitBeads: %v", err)
@@ -2701,11 +2756,7 @@ func TestInitBeadsEveryBDCallTakesTheTownEndpoint(t *testing.T) {
 			if len(calls) == 0 {
 				t.Fatal("InitBeads made no bd calls")
 			}
-			for _, c := range calls {
-				if got := rigEnvMap(c.Env)["BEADS_DOLT_PORT"]; got != tc.wantPort {
-					t.Errorf("bd %s BEADS_DOLT_PORT = %q, want %q", c.argv(), got, tc.wantPort)
-				}
-			}
+			requireEndpointPort(t, calls, tc.wantPort)
 		})
 	}
 }

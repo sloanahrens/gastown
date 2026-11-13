@@ -138,21 +138,19 @@ func TestIsStoreUnavailableReadsTheStoreExit(t *testing.T) {
 	}
 }
 
-// bd prints a permissions warning on every run, so a failure whose only other
-// text is that warning must still say why it failed.
-func TestCLIErrorNamesLastNonWarningLine(t *testing.T) {
+// bd prints a permissions warning on every run. Error keeps bd's whole output,
+// and Summary names the reason, so a failure whose only other text is that
+// warning still says why it failed (gt-xnv94x).
+const bdPermissionsWarning = "Warning: .beads has permissions 0755 (recommended: 0700)\n"
+
+func TestCLIErrorKeepsBDsOutput(t *testing.T) {
 	t.Parallel()
-	const permissions = "Warning: .beads has permissions 0755 (recommended: 0700)\n"
 	for _, tc := range []struct {
 		name, stderr, want string
 	}{
-		{"error after the warning", permissions + "Error: database \"forkrig\" not found\n", "bd rename-prefix: Error: database \"forkrig\" not found"},
-		{"error between warnings", "Warning: a\nError: store unavailable\nWarning: b\n", "bd rename-prefix: Error: store unavailable"},
-		{"warning only falls back to the exit error", permissions, "bd rename-prefix: " + codedExit(1).Error()},
+		{"multi-line output is kept whole", bdPermissionsWarning + "Error: store unavailable\n", "bd rename-prefix: Warning: .beads has permissions 0755 (recommended: 0700)\nError: store unavailable"},
+		{"warning only is kept as bd printed it", bdPermissionsWarning, "bd rename-prefix: Warning: .beads has permissions 0755 (recommended: 0700)"},
 		{"no output falls back to the exit error", "", "bd rename-prefix: " + codedExit(1).Error()},
-		{"JSON error names its message", permissions + "{\n  \"kind\": \"store_unavailable\",\n  \"message\": \"failed to open database \\\"forkrig\\\"\"\n}\n", "bd rename-prefix: failed to open database \"forkrig\""},
-		{"JSON without a message names its kind, not a brace", permissions + "{\n  \"kind\": \"store_unavailable\"\n}\n", "bd rename-prefix: \"kind\": \"store_unavailable\""},
-		{"closing brace after plain text is skipped", "Error: store unavailable\n}\n", "bd rename-prefix: Error: store unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(tc.stderr), Err: codedExit(1)}
@@ -160,5 +158,55 @@ func TestCLIErrorNamesLastNonWarningLine(t *testing.T) {
 				t.Fatalf("Error() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCLIErrorSummaryNamesTheReason(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, stderr, want string
+	}{
+		{"error after the warning", bdPermissionsWarning + "Error: database \"forkrig\" not found\n", "Error: database \"forkrig\" not found"},
+		{"error between warnings", "Warning: a\nError: store unavailable\nWarning: b\n", "Error: store unavailable"},
+		{"warning only falls back to the exit error", bdPermissionsWarning, codedExit(1).Error()},
+		{"no output falls back to the exit error", "", codedExit(1).Error()},
+		{"JSON error names its message", bdPermissionsWarning + "{\n  \"kind\": \"store_unavailable\",\n  \"message\": \"failed to open database \\\"forkrig\\\"\"\n}\n", "failed to open database \"forkrig\""},
+		{"JSON without a message names its kind, not a brace", bdPermissionsWarning + "{\n  \"kind\": \"store_unavailable\"\n}\n", "\"kind\": \"store_unavailable\""},
+		{"closing brace after plain text is skipped", "Error: store unavailable\n}\n", "Error: store unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(tc.stderr), Err: codedExit(1)}
+			if got := err.Summary(); got != tc.want {
+				t.Fatalf("Summary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeKeepsTheErrorChain(t *testing.T) {
+	t.Parallel()
+	cliErr := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(bdPermissionsWarning + "Error: store unavailable\n"), Err: codedExit(1)}
+	summarized := Summarize(cliErr)
+	if got, want := summarized.Error(), "Error: store unavailable"; got != want {
+		t.Fatalf("Summarize(...).Error() = %q, want %q", got, want)
+	}
+	wrapped := fmt.Errorf("setting issue_prefix: %w", summarized)
+	if got, want := wrapped.Error(), "setting issue_prefix: Error: store unavailable"; got != want {
+		t.Fatalf("wrapped message = %q, want %q", got, want)
+	}
+	var got *CLIError
+	if !errors.As(wrapped, &got) || got != cliErr {
+		t.Fatalf("errors.As lost the CLIError: got %v", got)
+	}
+	if !errors.Is(wrapped, cliErr) {
+		t.Fatalf("errors.Is lost the CLIError")
+	}
+}
+
+func TestSummarizeLeavesOtherErrorsAlone(t *testing.T) {
+	t.Parallel()
+	plain := errors.New("exec: bd not found")
+	if got := Summarize(plain); got != plain {
+		t.Fatalf("Summarize(plain) = %v, want the same error", got)
 	}
 }

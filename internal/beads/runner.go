@@ -162,17 +162,46 @@ type CLIError struct {
 }
 
 func (e *CLIError) Error() string {
-	if msg := lastNonWarningLine(e.Stderr); msg != "" {
+	if msg := strings.TrimSpace(string(e.Stderr)); msg != "" {
 		return fmt.Sprintf("bd %s: %s", strings.Join(e.Args, " "), msg)
 	}
 	return fmt.Sprintf("bd %s: %v", strings.Join(e.Args, " "), e.Err)
 }
 
-// lastNonWarningLine names why bd failed: the "message" of a JSON error object
-// when out carries one, else the last line that is not a "Warning:" line and
-// not only JSON punctuation. bd prints a permissions warning on every run, so a
-// failure whose only other text is that warning would otherwise name nothing
-// (gt-xnv94x).
+// Summary is why bd failed, in one line: the reason from lastNonWarningLine,
+// or the exit error when bd's output names none.
+func (e *CLIError) Summary() string {
+	if msg := lastNonWarningLine(e.Stderr); msg != "" {
+		return msg
+	}
+	return fmt.Sprint(e.Err)
+}
+
+// summarizedError is a failed bd call worded as its Summary. It unwraps to the
+// call's error, so errors.Is and errors.As reach the same chain.
+type summarizedError struct {
+	summary string
+	err     error
+}
+
+func (e summarizedError) Error() string { return e.summary }
+
+func (e summarizedError) Unwrap() error { return e.err }
+
+// Summarize returns err worded as its CLIError's Summary when err holds one, so
+// a message built from it names the reason. Any other error is returned as is.
+func Summarize(err error) error {
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) {
+		return summarizedError{summary: cliErr.Summary(), err: err}
+	}
+	return err
+}
+
+// lastNonWarningLine is the reason bd gave for a failure: the "message" of a
+// JSON error object in out, else the last line that is not a "Warning:" line
+// or bare punctuation. bd prints a permissions warning on every run, so a
+// failure whose only other text is that warning would name nothing (gt-xnv94x).
 func lastNonWarningLine(out []byte) string {
 	if msg := jsonErrorMessage(out); msg != "" {
 		return msg

@@ -3726,7 +3726,7 @@ func (h *host) readRigIssuePrefix(townRoot, beadsDir string) (string, error) {
 	if h.readIssuePrefix != nil {
 		return h.readIssuePrefix(townRoot, beadsDir)
 	}
-	return beads.NewWithBeadsDir(townRoot, beadsDir, beads.WithEnv(h.bdEnvironFor(townRoot))).ConfigGet("issue_prefix")
+	return h.bdFor(townRoot, beadsDir).ConfigGet("issue_prefix")
 }
 
 // writeRigIssuePrefix sets issue_prefix through bd (bd rename-prefix
@@ -3740,8 +3740,8 @@ func (h *host) writeRigIssuePrefix(townRoot, beadsDir, database, prefix string) 
 	if h.writeIssuePrefix != nil {
 		return h.writeIssuePrefix(townRoot, beadsDir, database, prefix)
 	}
-	if err := beads.NewWithBeadsDir(townRoot, beadsDir, beads.WithEnv(h.bdEnvironFor(townRoot))).SetIssuePrefix(prefix); err != nil {
-		return fmt.Errorf("setting issue_prefix for %s: %w", database, err)
+	if err := h.bdFor(townRoot, beadsDir).SetIssuePrefix(prefix); err != nil {
+		return fmt.Errorf("setting issue_prefix for %s: %w", database, beads.Summarize(err))
 	}
 	return nil
 }

@@ -18,14 +18,6 @@ func (m *Manager) environ() []string {
 	return os.Environ()
 }
 
-// bdEnviron is the environment the manager's bd calls start from: environ,
-// with the town's named Dolt endpoint in place of any inherited endpoint
-// variables. A rig's beads dir can sit outside the town tree, where bd cannot
-// find the town to apply the endpoint itself (gt-xnv94x).
-func (m *Manager) bdEnviron() []string {
-	return config.NormalizeConfiguredDoltEnv(m.environ(), m.townRoot)
-}
-
 // rigBD is the bd surface rig setup runs: init, config and the
 // repository-fingerprint migration. A *beads.Beads from beads.NewPlain
 // provides it, sending exactly the argv, directory and environment given.

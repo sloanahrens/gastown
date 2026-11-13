@@ -1193,6 +1193,20 @@ func WithDirRunner(run func(ctx context.Context, dir string, args []string) (std
 	}
 }
 
+// WithEnvRunner is WithDirRunner that also receives the environment bd would be
+// started with, after the pinning and Dolt endpoint variables are applied. A
+// test that asserts which endpoint a bd call dials reads it here.
+func WithEnvRunner(run func(ctx context.Context, dir string, env, args []string) (stdout, stderr []byte, err error)) Option {
+	return func(f *beadsFields) {
+		if run == nil {
+			return
+		}
+		f.exec = func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+			return run(ctx, c.dir, c.env, c.args)
+		}
+	}
+}
+
 // ActingAs returns a copy of b whose bd calls run as actor (WithActor),
 // including the wrappers derived from it. An empty actor returns b.
 func (b *Beads) ActingAs(actor string) *Beads {
