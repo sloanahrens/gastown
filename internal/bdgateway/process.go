@@ -23,6 +23,8 @@ type Process interface {
 	// Kill terminates the process group, so a bd that started a child leaves no
 	// orphan when the call ends early.
 	Kill() error
+	// Pid is the process's own id, named when the kill could not end it.
+	Pid() int
 	// CloseOutputs closes the ends this side reads bd's output from. A process
 	// that outlived bd's group can still hold the pipes open, so a read would
 	// otherwise block past the call's deadline; the executor closes its ends
@@ -31,7 +33,8 @@ type Process interface {
 }
 
 // processRunner starts one process. It is the seam the executor's tests put a
-// fake behind; executor_real_test.go points the real one at a helper binary.
+// fake behind; executor_real_test.go replaces it with the real one that runs
+// this package's test binary as bd.
 type processRunner interface {
 	Start(binary string, argv, env []string, dir string) (Process, error)
 }
@@ -112,6 +115,7 @@ type realProcess struct {
 func (p *realProcess) Stdin() io.WriteCloser { return p.stdin }
 func (p *realProcess) Stdout() io.Reader     { return p.stdout }
 func (p *realProcess) Stderr() io.Reader     { return p.stderr }
+func (p *realProcess) Pid() int              { return p.cmd.Process.Pid }
 
 func (p *realProcess) Wait() (int, error) {
 	err := p.cmd.Wait()

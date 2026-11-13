@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestExecutorRealProcess is the one test in this package that starts a
@@ -36,7 +37,9 @@ func TestExecutorRealProcess(t *testing.T) {
 
 	t.Run("exit status and streams", func(t *testing.T) {
 		var out bytes.Buffer
-		if err := e.Exec(context.Background(), Request{Argv: bdArgv("3"), Rig: "gastown"}, nil, &out); err != nil {
+		if err := runBounded(t, func() error {
+			return e.Exec(context.Background(), Request{Argv: bdArgv("3"), Rig: "gastown"}, nil, &out)
+		}); err != nil {
 			t.Fatalf("Exec: %v", err)
 		}
 		frames := readFrames(t, out.Bytes())
@@ -56,7 +59,9 @@ func TestExecutorRealProcess(t *testing.T) {
 
 	t.Run("timeout kills the process", func(t *testing.T) {
 		var out bytes.Buffer
-		err := e.Exec(context.Background(), Request{Argv: bdArgv("hold"), Rig: "gastown", TimeoutMS: 100}, nil, &out)
+		err := runBounded(t, func() error {
+			return e.Exec(context.Background(), Request{Argv: bdArgv("hold"), Rig: "gastown", TimeoutMS: 100}, nil, &out)
+		})
 		if !errors.Is(err, ErrTimeout) {
 			t.Fatalf("Exec = %v, want ErrTimeout", err)
 		}
@@ -101,6 +106,9 @@ func TestExecutorRealProcess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
+		if pid := p.Pid(); pid <= 0 {
+			t.Errorf("Pid = %d, want the started process's pid", pid)
+		}
 		if status, err := p.Wait(); err != nil || status != 0 {
 			t.Fatalf("Wait = %d (%v), want 0", status, err)
 		}
@@ -139,19 +147,46 @@ func TestBDStandIn(t *testing.T) {
 }
 
 // holdUntilKilled blocks until the executor's kill reaches the process. A pipe
-// whose write end stays open blocks the read without a timer over it, so the
-// hold has no built-in deadline and the runtime has no deadlock to report.
+// whose write end stays open blocks the read, so the wait is the kill and not a
+// timer. The bound ends the child if the kill never comes, so a broken test
+// fails on the wrong exit status instead of leaving a detached process behind.
 func holdUntilKilled() {
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	r, w, err := os.Pipe()
 	if err != nil {
 		syscall.Exit(2)
 	}
-	buf := make([]byte, 1)
-	_, _ = r.Read(buf)
+	read := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1)
+		_, _ = r.Read(buf)
+		close(read)
+	}()
+	select {
+	case <-read:
+	case <-bound.Done():
+		syscall.Exit(2)
+	}
 	// Without this, the finalizer on the unused write end closes it, the read
 	// ends, and the process exits before the kill this mode exists to wait for.
 	runtime.KeepAlive(w)
 	syscall.Exit(0)
+}
+
+// runBounded runs one Exec and fails the test if it does not return within the
+// test's bound, so a regression that blocks fails rather than hangs the tier.
+func runBounded(t *testing.T, exec func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- exec() }()
+	select {
+	case err := <-done:
+		return err
+	case <-waitCtx(t).Done():
+		t.Fatal("Exec did not return within the test's bound")
+		return nil
+	}
 }
 
 // bdArgv is the argv that runs the stand-in in mode: the mode follows the test

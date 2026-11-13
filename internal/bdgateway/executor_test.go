@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -285,7 +286,7 @@ func TestExecutorTimeoutKillFails(t *testing.T) {
 func TestExecutorStdinHeld(t *testing.T) {
 	t.Parallel()
 	proc := newBlockingFake("")
-	proc.heldStdin = newHeldStdin()
+	proc.heldStdin = newHeldStdin(waitCtx(t))
 	e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}})
 	err := e.Exec(context.Background(), Request{
 		Argv:      []string{"create", "-"},
@@ -300,47 +301,181 @@ func TestExecutorStdinHeld(t *testing.T) {
 	}
 }
 
-// TestExecutorHeldOpen: bd has ended with a status of its own, but a process it
-// left behind still holds its stdout open. The call ends at that status instead
-// of waiting past its deadline for a pipe nobody will close, and a bd that
-// finished is not reported as a timeout. A kill that failed while doing so is
-// carried in the error, since the frames report success.
+// TestExecutorHeldOpen: bd has ended, but a process it left behind still holds
+// its stdout open. The call ends at its deadline instead of waiting for a pipe
+// nobody will close, and bd's own status does not turn that ending into a
+// success. A kill that failed is carried in the error beside the timeout.
 func TestExecutorHeldOpen(t *testing.T) {
 	t.Parallel()
-	proc := func(killErr error) *fakeProcess {
+	proc := func(t *testing.T, killErr error) *fakeProcess {
 		p := newFakeProcess(0, "", "", nil)
-		p.stdout = newHeldReader()
+		p.stdout = newHeldReader(waitCtx(t))
 		p.killErr = killErr
 		return p
 	}
-	t.Run("bd ended before the kill", func(t *testing.T) {
-		e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc(os.ErrProcessDone)}})
+	boom := errors.New("the group would not die")
+	for _, tc := range []struct {
+		name      string
+		killErr   error
+		wantInErr error
+	}{
+		{name: "bd ended before the kill", killErr: os.ErrProcessDone},
+		{name: "the kill that failed", killErr: boom, wantInErr: boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc(t, tc.killErr)}})
+			var out bytes.Buffer
+			err := e.Exec(context.Background(), Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown", TimeoutMS: 20}, nil, &out)
+			if !errors.Is(err, ErrTimeout) {
+				t.Fatalf("Exec = %v, want ErrTimeout", err)
+			}
+			if tc.wantInErr != nil && !errors.Is(err, tc.wantInErr) {
+				t.Errorf("Exec = %v, want the failed kill in the error", err)
+			}
+			frames := readFrames(t, out.Bytes())
+			if len(frames) != 2 {
+				t.Fatalf("frames = %+v, want the error frame and the exit frame", frames)
+			}
+			if refusal, err := frames[0].GatewayError(); err != nil || refusal.Code != CodeTimeout {
+				t.Errorf("error frame = %+v (%v), want code %q", refusal, err, CodeTimeout)
+			}
+			if status, err := frames[1].ExitStatus(); err != nil || status != 124 {
+				t.Errorf("exit status = %d (%v), want 124", status, err)
+			}
+		})
+	}
+}
+
+// TestExecutorDeadlineWinsStatus: bd exits with a status of its own at the
+// deadline the gateway killed it at. The call is the timeout, not the status:
+// the ending is recorded before the kill so it cannot be replaced by bd's
+// answer afterwards.
+func TestExecutorDeadlineWinsStatus(t *testing.T) {
+	t.Parallel()
+	zero := 0
+	proc := newBlockingFake("")
+	proc.killStatus = &zero
+	e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}})
+	var out bytes.Buffer
+	err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 20}, nil, &out)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Exec = %v, want ErrTimeout rather than bd's zero status", err)
+	}
+	frames := readFrames(t, out.Bytes())
+	if len(frames) != 2 {
+		t.Fatalf("frames = %+v, want the error frame and the exit frame", frames)
+	}
+	if refusal, err := frames[0].GatewayError(); err != nil || refusal.Code != CodeTimeout {
+		t.Errorf("error frame = %+v (%v), want code %q", refusal, err, CodeTimeout)
+	}
+	if status, err := frames[1].ExitStatus(); err != nil || status != 124 {
+		t.Errorf("exit status = %d (%v), want 124", status, err)
+	}
+}
+
+// TestExecutorKillFailed: a bd that survives the kill's grace ends the call at
+// once with ErrKillFailed beside the call's own ending, named with bd's pid,
+// rather than holding Exec past the deadline.
+func TestExecutorKillFailed(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("the group would not die")
+	proc := func(t *testing.T, killErr error) *fakeProcess {
+		p := newBlockingFake("")
+		p.stubborn = true
+		p.killErr = killErr
+		return p
+	}
+	newExecutor := func(t *testing.T, runner *fakeRunner) *Executor {
+		runner.bound = waitCtx(t)
+		e, err := New(Options{
+			Binary:        "/opt/bd/bd",
+			WorkspaceRoot: testWorkspace(t),
+			Home:          "/home/bdgw",
+			Path:          "/usr/local/bin:/usr/bin:/bin",
+			DoltHost:      "gt-dolt",
+			DoltPort:      "3307",
+			KillGrace:     20 * time.Millisecond,
+			runner:        runner,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return e
+	}
+
+	t.Run("the deadline and a kill that failed", func(t *testing.T) {
+		e := newExecutor(t, &fakeRunner{queue: []Process{proc(t, boom)}})
 		var out bytes.Buffer
-		if err := e.Exec(context.Background(), Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown", TimeoutMS: 20}, nil, &out); err != nil {
-			t.Fatalf("Exec: %v", err)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 20}, nil, &out)
+		if !errors.Is(err, ErrKillFailed) {
+			t.Fatalf("Exec = %v, want ErrKillFailed", err)
+		}
+		if !errors.Is(err, ErrTimeout) {
+			t.Errorf("Exec = %v, want the timeout ending in the error", err)
+		}
+		if !errors.Is(err, boom) {
+			t.Errorf("Exec = %v, want the failed kill in the error", err)
+		}
+		if !strings.Contains(err.Error(), "4242") {
+			t.Errorf("Exec = %v, want bd's pid", err)
 		}
 		frames := readFrames(t, out.Bytes())
-		if len(frames) != 1 || frames[0].Kind != FrameExit {
-			t.Fatalf("frames = %+v, want the exit frame alone", frames)
+		if len(frames) != 2 {
+			t.Fatalf("frames = %+v, want the error frame and the exit frame", frames)
 		}
-		if got, err := frames[0].ExitStatus(); err != nil || got != 0 {
-			t.Errorf("exit status = %d (%v), want 0", got, err)
+		if refusal, err := frames[0].GatewayError(); err != nil || refusal.Code != CodeTimeout {
+			t.Errorf("error frame = %+v (%v), want code %q", refusal, err, CodeTimeout)
+		}
+		if status, err := frames[1].ExitStatus(); err != nil || status != 124 {
+			t.Errorf("exit status = %d (%v), want 124", status, err)
 		}
 	})
-	t.Run("the kill that failed", func(t *testing.T) {
-		boom := errors.New("the group would not die")
-		e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc(boom)}})
+
+	t.Run("the client's cancel", func(t *testing.T) {
+		runner := &fakeRunner{queue: []Process{proc(t, nil)}, started: make(chan struct{})}
+		e := newExecutor(t, runner)
+		ctx, cancel := context.WithCancel(context.Background())
 		var out bytes.Buffer
-		err := e.Exec(context.Background(), Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown", TimeoutMS: 20}, nil, &out)
-		if !errors.Is(err, boom) {
-			t.Fatalf("Exec = %v, want the failed kill in the error", err)
+		done := make(chan error, 1)
+		go func() { done <- e.Exec(ctx, Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &out) }()
+		select {
+		case <-runner.started:
+		case <-waitCtx(t).Done():
+			t.Fatal("bd was not started within the test's bound")
+		}
+		cancel()
+		var err error
+		select {
+		case err = <-done:
+		case <-waitCtx(t).Done():
+			t.Fatal("Exec did not return within the test's bound")
+		}
+		if !errors.Is(err, ErrKillFailed) {
+			t.Fatalf("Exec = %v, want ErrKillFailed", err)
+		}
+		if !errors.Is(err, ErrClientGone) {
+			t.Errorf("Exec = %v, want the client's ending in the error", err)
 		}
 		frames := readFrames(t, out.Bytes())
-		if len(frames) != 1 || frames[0].Kind != FrameExit {
-			t.Fatalf("frames = %+v, want the exit frame alone", frames)
+		if len(frames) != 2 {
+			t.Fatalf("frames = %+v, want the error frame and the exit frame", frames)
 		}
-		if got, err := frames[0].ExitStatus(); err != nil || got != 0 {
-			t.Errorf("exit status = %d (%v), want 0", got, err)
+		if refusal, err := frames[0].GatewayError(); err != nil || refusal.Code != CodeCanceled {
+			t.Errorf("error frame = %+v (%v), want code %q", refusal, err, CodeCanceled)
+		}
+		if status, err := frames[1].ExitStatus(); err != nil || status != 124 {
+			t.Errorf("exit status = %d (%v), want 124", status, err)
+		}
+	})
+
+	t.Run("a kill that never reached bd", func(t *testing.T) {
+		e := newExecutor(t, &fakeRunner{queue: []Process{proc(t, os.ErrProcessDone)}})
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 20}, nil, io.Discard)
+		if !errors.Is(err, ErrKillFailed) {
+			t.Fatalf("Exec = %v, want ErrKillFailed", err)
+		}
+		if !strings.Contains(err.Error(), "did not reach") {
+			t.Errorf("Exec = %v, want the kill that did not reach bd named", err)
 		}
 	})
 }
@@ -358,9 +493,18 @@ func TestExecutorDisconnect(t *testing.T) {
 		var out bytes.Buffer
 		done := make(chan error, 1)
 		go func() { done <- e.Exec(ctx, Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &out) }()
-		<-runner.started
+		select {
+		case <-runner.started:
+		case <-waitCtx(t).Done():
+			t.Fatal("bd was not started within the test's bound")
+		}
 		cancel()
-		err := <-done
+		var err error
+		select {
+		case err = <-done:
+		case <-waitCtx(t).Done():
+			t.Fatal("Exec did not return within the test's bound")
+		}
 		if !errors.Is(err, ErrClientGone) {
 			t.Fatalf("Exec = %v, want ErrClientGone", err)
 		}
@@ -487,7 +631,7 @@ func TestExecutorEndings(t *testing.T) {
 func TestExecutorCap(t *testing.T) {
 	t.Parallel()
 	proc := newBlockingFake("")
-	runner := &fakeRunner{queue: []Process{proc}, started: make(chan struct{})}
+	runner := &fakeRunner{queue: []Process{proc}, started: make(chan struct{}), bound: waitCtx(t)}
 	e, err := New(Options{
 		Binary:        "/opt/bd/bd",
 		WorkspaceRoot: testWorkspace(t),
@@ -507,7 +651,11 @@ func TestExecutorCap(t *testing.T) {
 	go func() {
 		firstDone <- e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &first)
 	}()
-	<-runner.started
+	select {
+	case <-runner.started:
+	case <-waitCtx(t).Done():
+		t.Fatal("bd was not started within the test's bound")
+	}
 
 	var second bytes.Buffer
 	err = e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &second)
@@ -522,8 +670,13 @@ func TestExecutorCap(t *testing.T) {
 	}
 
 	proc.finish(0)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("the call holding the slot: %v", err)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("the call holding the slot: %v", err)
+		}
+	case <-waitCtx(t).Done():
+		t.Fatal("the call holding the slot did not return within the test's bound")
 	}
 }
 
@@ -669,7 +822,7 @@ func TestExecutorTimeoutValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			runner := &fakeRunner{queue: []Process{newBlockingFake("")}}
+			runner := &fakeRunner{queue: []Process{newBlockingFake("")}, bound: waitCtx(t)}
 			e, err := New(Options{
 				Binary:         "/opt/bd/bd",
 				WorkspaceRoot:  root,
@@ -741,6 +894,7 @@ func TestExecutorNew(t *testing.T) {
 		"no Dolt port":         func(o *Options) { o.DoltPort = "" },
 		"negative concurrency": func(o *Options) { o.MaxConcurrent = -1 },
 		"negative timeout":     func(o *Options) { o.DefaultTimeout = -time.Second },
+		"negative kill grace":  func(o *Options) { o.KillGrace = -time.Second },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -778,7 +932,9 @@ func TestExecutorNew(t *testing.T) {
 	}
 }
 
-// fakeProcess is a Process a test drives; nothing is started.
+// fakeProcess is a Process a test drives; nothing is started. bound is the
+// test's wait bound, set by fakeRunner when it hands the process out: Wait
+// reports a failure at the bound instead of blocking the unit tier.
 type fakeProcess struct {
 	stdout    io.Reader
 	stderr    io.Reader
@@ -790,6 +946,12 @@ type fakeProcess struct {
 	status    int
 	waitErr   error
 	killErr   error
+	// killStatus is the status a kill ends the process with; nil is -1.
+	killStatus *int
+	// stubborn keeps a kill from ending the process, standing in for a bd the
+	// kill did not reach.
+	stubborn bool
+	bound    context.Context
 }
 
 func newExitedFake(status int, stdout, stderr string) *fakeProcess {
@@ -847,14 +1009,21 @@ func (p *fakeProcess) Stderr() io.Reader { return p.stderr }
 // the body while a process outside its group still holds the read end.
 type heldStdin struct {
 	closed chan struct{}
+	bound  context.Context
 	once   sync.Once
 }
 
-func newHeldStdin() *heldStdin { return &heldStdin{closed: make(chan struct{})} }
+func newHeldStdin(bound context.Context) *heldStdin {
+	return &heldStdin{closed: make(chan struct{}), bound: bound}
+}
 
 func (s *heldStdin) Write([]byte) (int, error) {
-	<-s.closed
-	return 0, os.ErrClosed
+	select {
+	case <-s.closed:
+		return 0, os.ErrClosed
+	case <-s.bound.Done():
+		return 0, fmt.Errorf("heldStdin.Write: no close within the test's bound: %w", s.bound.Err())
+	}
 }
 
 func (s *heldStdin) Close() error {
@@ -873,8 +1042,15 @@ func (p *fakeProcess) CloseOutputs() {
 }
 
 func (p *fakeProcess) Wait() (int, error) {
-	<-p.exited
-	return p.status, p.waitErr
+	if p.bound == nil {
+		return -1, errors.New("fakeProcess.Wait: no test bound was attached")
+	}
+	select {
+	case <-p.exited:
+		return p.status, p.waitErr
+	case <-p.bound.Done():
+		return -1, fmt.Errorf("fakeProcess.Wait: no end within the test's bound: %w", p.bound.Err())
+	}
 }
 
 func (p *fakeProcess) Kill() error {
@@ -883,9 +1059,17 @@ func (p *fakeProcess) Kill() error {
 	default:
 		close(p.killed)
 	}
-	p.finish(-1)
+	if !p.stubborn {
+		status := -1
+		if p.killStatus != nil {
+			status = *p.killStatus
+		}
+		p.finish(status)
+	}
 	return p.killErr
 }
+
+func (p *fakeProcess) Pid() int { return 4242 }
 
 func (p *fakeProcess) finish(status int) {
 	p.once.Do(func() {
@@ -943,14 +1127,21 @@ func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
 // process which outlived bd's group still holds open.
 type heldReader struct {
 	closed chan struct{}
+	bound  context.Context
 	once   sync.Once
 }
 
-func newHeldReader() *heldReader { return &heldReader{closed: make(chan struct{})} }
+func newHeldReader(bound context.Context) *heldReader {
+	return &heldReader{closed: make(chan struct{}), bound: bound}
+}
 
 func (r *heldReader) Read([]byte) (int, error) {
-	<-r.closed
-	return 0, os.ErrClosed
+	select {
+	case <-r.closed:
+		return 0, os.ErrClosed
+	case <-r.bound.Done():
+		return 0, fmt.Errorf("heldReader.Read: no close within the test's bound: %w", r.bound.Err())
+	}
 }
 
 func (r *heldReader) Close() error {
@@ -976,6 +1167,9 @@ type fakeRunner struct {
 	once    sync.Once
 	// err makes Start fail, as a missing or unexecutable binary would.
 	err error
+	// bound is the test's wait bound, attached to every fake Process this
+	// runner starts so no fake wait is unbounded.
+	bound context.Context
 }
 
 func (r *fakeRunner) Start(binary string, argv, env []string, dir string) (Process, error) {
@@ -984,6 +1178,9 @@ func (r *fakeRunner) Start(binary string, argv, env []string, dir string) (Proce
 	var proc Process = newExitedFake(0, "", "")
 	if len(r.queue) > 0 {
 		proc, r.queue = r.queue[0], r.queue[1:]
+	}
+	if p, ok := proc.(*fakeProcess); ok {
+		p.bound = r.bound
 	}
 	err := r.err
 	r.mu.Unlock()
@@ -1026,6 +1223,9 @@ func testWorkspace(t *testing.T) string {
 
 func newTestExecutor(t *testing.T, root string, runner processRunner) *Executor {
 	t.Helper()
+	if r, ok := runner.(*fakeRunner); ok && r.bound == nil {
+		r.bound = waitCtx(t)
+	}
 	e, err := New(Options{
 		Binary:           "/opt/bd/bd",
 		WorkspaceRoot:    root,

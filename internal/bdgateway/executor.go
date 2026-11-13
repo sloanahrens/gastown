@@ -30,6 +30,12 @@ const (
 	// shortest of them, so a head that leaves timeout_ms out still cannot run
 	// without a bound.
 	DefaultTimeout = 30 * time.Second
+
+	// DefaultKillGrace bounds how long Exec waits for bd's process to end after
+	// the deadline's kill. A process still running past it is reported as
+	// ErrKillFailed and reaped by a goroutine, so a bd that ignores the kill
+	// cannot hold Exec and its concurrency slot past the deadline.
+	DefaultKillGrace = 2 * time.Second
 )
 
 // The executor's named refusals. A caller matches these rather than message
@@ -44,6 +50,7 @@ var (
 	ErrTooManyCalls        = errors.New("bdgateway: the concurrency cap is full")
 	ErrBadTimeout          = errors.New("bdgateway: timeout_ms is not a duration the gateway can run")
 	ErrTimeout             = errors.New("bdgateway: bd did not finish before the timeout")
+	ErrKillFailed          = errors.New("bdgateway: bd was still running after the kill")
 	ErrSignaled            = errors.New("bdgateway: bd was killed by a signal")
 	ErrClientGone          = errors.New("bdgateway: the client is gone")
 )
@@ -84,6 +91,9 @@ type Options struct {
 	// DefaultTimeout applies when the head's timeout_ms is 0; 0 means
 	// DefaultTimeout.
 	DefaultTimeout time.Duration
+	// KillGrace bounds the wait for bd's process after the deadline's kill; 0
+	// means DefaultKillGrace.
+	KillGrace time.Duration
 	// runner starts one process. Unexported so only this package's tests can
 	// put a fake behind it.
 	runner processRunner
@@ -102,6 +112,7 @@ type Executor struct {
 	trackerURL     string
 	trackerToken   string
 	defaultTimeout time.Duration
+	killGrace      time.Duration
 	slots          chan struct{}
 	runner         processRunner
 }
@@ -133,6 +144,9 @@ func New(opts Options) (*Executor, error) {
 	if opts.DefaultTimeout < 0 {
 		return nil, fmt.Errorf("%w: DefaultTimeout %s is negative", ErrUnconfigured, opts.DefaultTimeout)
 	}
+	if opts.KillGrace < 0 {
+		return nil, fmt.Errorf("%w: KillGrace %s is negative", ErrUnconfigured, opts.KillGrace)
+	}
 	max := opts.MaxConcurrent
 	if max == 0 {
 		max = DefaultMaxConcurrent
@@ -140,6 +154,10 @@ func New(opts Options) (*Executor, error) {
 	limit := opts.DefaultTimeout
 	if limit == 0 {
 		limit = DefaultTimeout
+	}
+	grace := opts.KillGrace
+	if grace == 0 {
+		grace = DefaultKillGrace
 	}
 	runner := opts.runner
 	if runner == nil {
@@ -155,6 +173,7 @@ func New(opts Options) (*Executor, error) {
 		trackerURL:     opts.TrackerURL,
 		trackerToken:   opts.TrackerTokenFile,
 		defaultTimeout: limit,
+		killGrace:      grace,
 		slots:          make(chan struct{}, max),
 		runner:         runner,
 	}, nil
@@ -167,6 +186,10 @@ func New(opts Options) (*Executor, error) {
 // and writes no frames; the HTTP layer answers those before the stream begins.
 // A start that fails is the one exception: the stream has begun by then, so it
 // writes the error frame and the exit frame the design pairs with it.
+//
+// Once the deadline or a client departure fires, that ending is the call's
+// answer whatever status bd later reports, and a bd still running after the
+// kill's grace is ErrKillFailed rather than a wait with no bound.
 func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
 	if e == nil || e.slots == nil || frames == nil {
 		return ErrUnconfigured
@@ -209,35 +232,32 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		return fmt.Errorf("bdgateway: starting bd: %w", err)
 	}
 
-	// The watcher kills the group at the deadline or when the client goes
-	// away. A group that ignores SIGTERM costs KillProcessGroup's grace past
-	// the deadline (gt-6t43); the HTTP layer's own bound must allow for it.
-	// killed records that the kill reached bd, so a status that is a signal is
-	// read as the gateway's doing and not as bd's own answer. A kill that
-	// fails is carried into the returned error, so a call that could not stop
-	// bd does not read as one that did.
+	// out is the one record of how this call ends. The watcher writes the
+	// ending before it kills, so a status bd reports afterwards can never be
+	// read as its own answer: the call the gateway ended is that ending.
+	out := &callOutcome{}
 	stopWatch := make(chan struct{})
 	watchDone := make(chan struct{})
-	var (
-		killed  bool
-		killErr error
-	)
 	go func() {
 		defer close(watchDone)
 		select {
 		case <-runCtx.Done():
-			err := proc.Kill()
-			switch {
-			case err == nil:
-				killed = true
-			case errors.Is(err, os.ErrProcessDone):
-				// bd had already ended on its own, so the deadline did not end
-				// it and its status is its own answer.
-			default:
-				killed = true
-				killErr = err
-			}
 		case <-stopWatch:
+			// The wait finished first, but the deadline or a cancel may already
+			// have fired while it ran; the record says so before Exec reads it.
+			if runCtx.Err() == nil {
+				return
+			}
+		}
+		out.setEnding(callEndingOf(runCtx))
+		err := proc.Kill()
+		switch {
+		case err == nil:
+			out.killedBy(nil)
+		case errors.Is(err, os.ErrProcessDone):
+			// bd had already ended on its own, so no signal of ours reached it.
+		default:
+			out.killedBy(err)
 		}
 	}()
 
@@ -305,42 +325,160 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		_ = proc.Stdin().Close()
 		<-stdinDone
 	}
-	status, waitErr := proc.Wait()
+
+	// bd's own end is waited for, but not past the deadline's kill grace: a
+	// process that survived the kill would otherwise hold Exec, and the slot it
+	// took, for as long as it ran.
+	waitCh := make(chan waitResult, 1)
+	go func() {
+		status, err := proc.Wait()
+		waitCh <- waitResult{status: status, err: err}
+	}()
+	select {
+	case w := <-waitCh:
+		out.waitedAs(w.status, w.err)
+	case <-runCtx.Done():
+		// The call's end fired while the wait was running. Both pumps have
+		// ended by here, so what is left to bound is bd's own end.
+		grace := time.NewTimer(e.killGrace)
+		defer grace.Stop()
+		select {
+		case w := <-waitCh:
+			out.waitedAs(w.status, w.err)
+		case <-grace.C:
+			// bd is still running: the wait goroutine reaps it when it ends.
+		}
+	}
 	close(stopWatch)
 	<-watchDone
 
-	cleanupErr := killErr
+	end, killErr, killed, waited, status, waitErr := out.state()
+	if !waited {
+		return e.killFailed(frames, proc, end, killErr, killed, limit)
+	}
+	switch end {
+	case deadlineEnding:
+		// The deadline ended this call, so its status is not bd's answer: a
+		// call killed at its deadline is never a success.
+		writeEnding(frames, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
+		return withKillErr(fmt.Errorf("%w: %s", ErrTimeout, limit), killErr)
+	case canceledEnding:
+		switch {
+		case readErr != nil:
+			// A read the gateway could not make is its failure, even though the
+			// cancel it caused is what ended the wait.
+			writeEnding(frames, CodeWaitFailed, 125, readErr.Error())
+			return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), killErr)
+		case ctx.Err() != nil:
+			writeEnding(frames, CodeCanceled, 124, "the request ended before bd did")
+			return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, ctx.Err()), killErr)
+		}
+		// The gateway stopped the call because the client's stream could not be
+		// written.
+		writeEnding(frames, CodeCanceled, 124, "the client's stream could not be written")
+		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, writeErr), killErr)
+	}
 	switch {
-	case ctx.Err() != nil:
-		writeEnding(frames, CodeCanceled, 124, "the request ended before bd did")
-		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, ctx.Err()), cleanupErr)
-	case writeErr != nil:
-		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, writeErr), cleanupErr)
-	case readErr != nil:
-		writeEnding(frames, CodeWaitFailed, 125, readErr.Error())
-		return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), cleanupErr)
 	case waitErr != nil:
 		writeEnding(frames, CodeWaitFailed, 125, waitErr.Error())
-		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), cleanupErr)
-	case killed && status < 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		writeEnding(frames, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
-		return withKillErr(fmt.Errorf("%w: %s", ErrTimeout, limit), cleanupErr)
+		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), killErr)
 	case status < 0:
 		writeEnding(frames, CodeSignaled, 125, "bd was killed by a signal")
-		return withKillErr(ErrSignaled, cleanupErr)
+		return withKillErr(ErrSignaled, killErr)
 	}
-	// bd exited with a status of its own, which is the answer even when the
-	// deadline passed while the last of its output was being read: a bd that
-	// finished is not a timeout.
+	// bd exited with a status of its own, which is the answer when no ending
+	// fired: the gateway did not stop this call.
 	if err := fw.exit(status); err != nil {
-		return withKillErr(fmt.Errorf("%w: writing the exit frame: %v", ErrClientGone, err), cleanupErr)
-	}
-	if cleanupErr != nil {
-		// bd answered, but a group the gateway tried to kill could not be
-		// stopped; the caller learns it here, since the frames say success.
-		return fmt.Errorf("bdgateway: bd exited with status %d, but ending its group failed: %w", status, cleanupErr)
+		return fmt.Errorf("%w: writing the exit frame: %v", ErrClientGone, err)
 	}
 	return nil
+}
+
+// waitResult is what one Wait reported, handed from its goroutine to Exec.
+type waitResult struct {
+	status int
+	err    error
+}
+
+// callEnding is how the gateway ended a call before bd did.
+type callEnding int
+
+const (
+	noEnding callEnding = iota
+	deadlineEnding
+	canceledEnding
+)
+
+// callEndingOf names the ending a fired runCtx stands for. The deadline is the
+// timeout; any other end of the context is a cancel, from the client or from a
+// pump that could not write.
+func callEndingOf(ctx context.Context) callEnding {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return deadlineEnding
+	}
+	return canceledEnding
+}
+
+// callOutcome is one call's single record of how it ended. The ending is
+// written before the kill, so the status bd reports afterwards cannot replace
+// it, and Exec decides its error and frames from this record in one place.
+type callOutcome struct {
+	mu      sync.Mutex
+	end     callEnding
+	killed  bool
+	killErr error
+	waited  bool
+	status  int
+	waitErr error
+}
+
+func (o *callOutcome) setEnding(end callEnding) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.end = end
+}
+
+func (o *callOutcome) killedBy(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.killed = true
+	o.killErr = err
+}
+
+func (o *callOutcome) waitedAs(status int, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.waited, o.status, o.waitErr = true, status, err
+}
+
+func (o *callOutcome) state() (end callEnding, killErr error, killed, waited bool, status int, waitErr error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.end, o.killErr, o.killed, o.waited, o.status, o.waitErr
+}
+
+// killFailed ends a call whose bd outlived the kill grace. The call returns at
+// once with its named ending and ErrKillFailed, and the wait goroutine reaps bd
+// when it ends, so a process that ignores the kill holds neither Exec nor the
+// slot it took.
+func (e *Executor) killFailed(frames io.Writer, proc Process, end callEnding, killErr error, killed bool, limit time.Duration) error {
+	named := fmt.Errorf("%w: %s", ErrTimeout, limit)
+	code := CodeTimeout
+	message := fmt.Sprintf("bd did not finish within %s and did not end after the kill", limit)
+	if end == canceledEnding {
+		named = fmt.Errorf("%w: the request ended before bd did", ErrClientGone)
+		code = CodeCanceled
+		message = "the request ended before bd did, and bd did not end after the kill"
+	}
+	failed := fmt.Errorf("%w: process %d did not end within %s of the kill", ErrKillFailed, proc.Pid(), e.killGrace)
+	if !killed {
+		failed = fmt.Errorf("%w: process %d never reported its end and the kill did not reach it", ErrKillFailed, proc.Pid())
+	}
+	if killErr != nil {
+		failed = errors.Join(failed, fmt.Errorf("bdgateway: killing bd's process group: %w", killErr))
+	}
+	writeEnding(frames, code, 124, message)
+	return errors.Join(named, failed)
 }
 
 // readStdin buffers the request body, one byte over the cap so a body past the
