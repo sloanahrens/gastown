@@ -27,6 +27,11 @@ var holdStaleLabels = []string{
 	holdStaleHeldLabel,
 }
 
+// holdStaleReleaseLogLabel marks an append-only release log, which keeps its
+// hold label by design (dv-2d7z, dv-f6pe); the alert would otherwise raise it
+// every day. It is not a hold label: a bead wearing it is skipped, not judged.
+const holdStaleReleaseLogLabel = "release-log"
+
 const (
 	// holdStaleDepsClosedAfter is the age past which a hold whose dependencies
 	// are all closed is raised at medium severity. Age is the bead's created
@@ -50,7 +55,8 @@ const (
 // list fails the collection, so the previous tick's items are kept
 // (collectAttention). A bead that cannot be judged (an unparseable created
 // time, a failed show, or a show that returns nothing) is skipped with one
-// log line naming it, and the other beads' items are still raised.
+// log line naming it, and the other beads' items are still raised. A bead
+// labeled release-log is skipped before its age or dependencies are read.
 func (s *attentionSources) collectHoldStale(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	seen := map[string]bool{}
@@ -65,6 +71,9 @@ func (s *attentionSources) collectHoldStale(ctx context.Context) ([]attention.It
 					continue
 				}
 				seen[is.ID] = true
+				if holdStaleExempt(is.Labels) {
+					continue
+				}
 				it, ok, err := s.judgeHold(ctx, rig, is)
 				if err != nil {
 					s.d.logger.Printf("attention: collector %s: skipped %s: %v", attention.KindHoldStale, is.ID, err)
@@ -118,6 +127,17 @@ func (s *attentionSources) judgeHold(ctx context.Context, rig string, is *beads.
 		Summary: fmt.Sprintf("%s held %s by created time (labels %s); raised: %s",
 			is.ID, parkedAge(age), strings.Join(holdStaleLabelsOn(is.Labels), ", "), raised),
 	}, true, nil
+}
+
+// holdStaleExempt reports whether a bead is an append-only release log, held
+// on purpose, so the alert leaves it alone.
+func holdStaleExempt(labels []string) bool {
+	for _, label := range labels {
+		if label == holdStaleReleaseLogLabel {
+			return true
+		}
+	}
+	return false
 }
 
 // holdStaleLabelsOn is the hold labels a bead carries, in holdStaleLabels order.
