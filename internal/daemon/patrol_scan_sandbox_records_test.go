@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -504,6 +505,107 @@ func TestPatrolScanCompletesTheEndOfADeletedKeptSeat(t *testing.T) {
 	}
 	if got := keptSeatAttentionSeats(t, p.host.d, p.clk.Now()); got != 0 {
 		t.Errorf("attention items after the patrol = %d, want none", got)
+	}
+}
+
+// The record pass deletes a held sandbox under the seat lock the landing's own
+// end takes, and re-reads the record under it. A landing that removed the record
+// between the pass's read and its delete leaves the patrol nothing to do: it
+// makes no deleter call and does not fail the pass. Every other answer keeps the
+// record with that condition's own reason (gt-0vb2fy).
+func TestPatrolScanKeepsAHeldSandboxItCannotDeleteUnderTheSeatLock(t *testing.T) {
+	t.Parallel()
+	name := session.PolecatSessionName(session.DefaultPrefix, endPolecat)
+	tests := []struct {
+		name string
+		// between runs in the gateway seam, after the pass read the record and
+		// before it takes the seat lock.
+		between     func(t *testing.T, p *keptSeatPatrol)
+		lock        func(rigPath, name string, fn func() error) error
+		removeErr   error
+		rig         string
+		wantDeleted int
+		wantReason  string // "" for a quiet skip
+	}{
+		{
+			name: "a landing removed the record first",
+			between: func(t *testing.T, p *keptSeatPatrol) {
+				if err := session.RemoveSandboxRecord(p.town, name); err != nil {
+					t.Fatalf("removing the record as the landing would: %v", err)
+				}
+			},
+		},
+		{
+			name: "an unreadable record keeps it",
+			between: func(t *testing.T, p *keptSeatPatrol) {
+				path := filepath.Join(session.SandboxRegistryDir(p.town), name+".json")
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantReason: "kept: cannot re-read its sandbox record under its seat lock:",
+		},
+		{
+			name: "a busy seat lock keeps it",
+			lock: func(string, string, func() error) error {
+				return polecat.ErrSandboxSeatLockBusy
+			},
+			wantReason: "kept: its seat lock could not be taken: polecat directory lock is busy",
+		},
+		{
+			name:        "a record that cannot be removed keeps the seat end",
+			removeErr:   errors.New("registry is read-only"),
+			wantDeleted: 1,
+			wantReason:  "kept: its sandbox is deleted but its record could not be removed: registry is read-only",
+		},
+		{
+			name:       "an unsafe rig keeps it",
+			rig:        "../gastown",
+			wantReason: "kept: sandbox seat directories: rig \"../gastown\" is not a single path segment",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 11, 12, 16, 57, 28, 0, time.UTC)
+			p := newKeptSeatPatrol(t, now)
+			p.seedAgent()
+			p.retire(intent.DesiredStop)
+			p.seatDirs()
+			p.sandboxUp = true
+			if tt.rig != "" {
+				if err := session.WriteSandboxRecord(p.town, session.SandboxRecord{
+					Session: name, Rig: tt.rig, Polecat: endPolecat, Gateway: "gw1",
+					CreatedAt: p.clk.Now().Add(-time.Hour),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				p.registryRecord(t)
+			}
+			var logs strings.Builder
+			p.host.d.logger = log.New(&logs, "", 0)
+			p.host.sandboxExists = func(string, string) (bool, error) {
+				if tt.between != nil {
+					tt.between(t, p)
+				}
+				return true, nil
+			}
+			p.host.sandboxSeatLock = tt.lock
+			p.host.removeSandboxRecord = func(string, string) error { return tt.removeErr }
+
+			p.host.patrolScanSandboxRecords()
+
+			if len(p.deleted) != tt.wantDeleted {
+				t.Errorf("record deleter calls = %v, want %d", p.deleted, tt.wantDeleted)
+			}
+			if tt.wantReason == "" {
+				return
+			}
+			if !strings.Contains(logs.String(), tt.wantReason) {
+				t.Errorf("log %q does not name the reason %q", logs.String(), tt.wantReason)
+			}
+		})
 	}
 }
 

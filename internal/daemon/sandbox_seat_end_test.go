@@ -80,7 +80,7 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 		},
 	}
 	f.agentBead = beads.AgentBeadIDFor(constants.RolePolecat, endRig, endPolecat, town)
-	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: newFakeTmux(newFixedClock())}
 	d.rulesCursorAt = func(string) (time.Time, bool, error) {
 		if f.cursorErr != nil {
 			return time.Time{}, false, f.cursorErr
@@ -446,8 +446,7 @@ func TestSeatEndAtLandingDeletesTheSandboxWhenTheMarkerIsSet(t *testing.T) {
 
 // Every answer short of a set marker, and every failure on the way, leaves the
 // held sandbox and its record in place for the patrol. The seat is kept with the
-// reason it had before the landing ended held sandboxes, and the landing is not
-// failed (gt-0vb2fy).
+// reason that condition produced, and the landing is not failed (gt-0vb2fy).
 func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 	t.Parallel()
 	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
@@ -459,32 +458,46 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 		deleteErr   error
 		noRecord    bool
 		corruptRec  bool
+		liveSession bool
 		wantAsked   bool
 		wantDeleted bool
+		wantReason  string
 	}{
 		{
 			name: "a marker that is not set keeps the sandbox", landing: landed,
-			wantAsked: true,
+			wantAsked: true, wantReason: "its ended marker is not set",
 		},
 		{
 			name: "a marker that cannot be read keeps the sandbox", landing: landed,
 			markerErr: errors.New("exec failed"), wantAsked: true,
+			wantReason: "cannot ask its sandbox for its ended marker: exec failed",
 		},
 		{
+			name: "a live session keeps the sandbox", landing: landed, marker: true, liveSession: true,
+			wantReason: sandboxSessionLiveReason,
+		},
+		{
+			// keepReason asks the sandbox first, so unlanded work behind a held
+			// sandbox keeps the seat for the sandbox, and the landing asks its
+			// marker nothing.
 			name: "unlanded work keeps the sandbox", marker: true,
-			landing: sandboxSeatLanding{BeadID: endBead, Branch: endBranch},
+			landing:    sandboxSeatLanding{BeadID: endBead, Branch: endBranch},
+			wantReason: sandboxNotGoneReason,
 		},
 		{
 			name: "a deleter that fails keeps the sandbox", landing: landed, marker: true,
 			deleteErr: errors.New("gateway unreachable"), wantAsked: true, wantDeleted: true,
+			wantReason: "its ended sandbox could not be deleted: gateway unreachable",
 		},
 		{
 			name: "a sandbox with no record is left for the patrol", landing: landed, marker: true,
-			noRecord: true,
+			noRecord:   true,
+			wantReason: "its sandbox record is absent, so no deleter names its sandbox",
 		},
 		{
 			name: "an unreadable record keeps the sandbox", landing: landed, marker: true,
 			corruptRec: true,
+			wantReason: "its sandbox record cannot be read, so the sandbox is left for the patrol:",
 		},
 	}
 	for _, tt := range tests {
@@ -495,6 +508,9 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 			f.retire(intent.DesiredStop)
 			dirs := f.seatDirs()
 			sessionName := f.host.sessionName(endRig, endPolecat)
+			if tt.liveSession {
+				f.host.d.tmux.(*fakeTmux).addSession(sessionName, "claude", testEpoch)
+			}
 			switch {
 			case tt.corruptRec:
 				path := filepath.Join(session.SandboxRegistryDir(f.town), sessionName+".json")
@@ -541,7 +557,7 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 			if !dirExists(t, dirs.PolecatDir) {
 				t.Error("the seat directory was removed, want it kept")
 			}
-			if want := "kept: " + sandboxNotGoneReason; !strings.Contains(logs.String(), want) {
+			if want := "kept: " + tt.wantReason; !strings.Contains(logs.String(), want) {
 				t.Errorf("log %q does not name the reason %q", logs.String(), want)
 			}
 		})

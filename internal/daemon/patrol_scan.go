@@ -405,6 +405,12 @@ type patrolScanHost struct {
 	// when nil: session.SandboxEndedMarkerPresent. A seam for the unit tier,
 	// which has no gateway to exec in (gt-yck7hz).
 	sandboxEndedMarker func(gateway, name string) (bool, error)
+	// sandboxSeatLock takes a polecat's seat lock when nil:
+	// polecat.WithSandboxSeatLock. The record pass holds it around a held
+	// sandbox's delete, so it cannot race the landing's own end on one record
+	// (gt-0vb2fy). A seam for a lock that is busy, which the unit tier cannot
+	// wait out.
+	sandboxSeatLock func(rigPath, name string, fn func() error) error
 	// writePendingSeatEnd is writePendingSandboxSeatEnd when nil: it records a
 	// seat kept for the jev_rules ask so a later pass offers its end again
 	// (gt-381oj). A seam for the write that fails, which a town's filesystem
