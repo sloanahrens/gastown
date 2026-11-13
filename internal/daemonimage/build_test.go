@@ -281,12 +281,15 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 			t.Errorf("build %d ran in %q, want %q", i, run.calls[i].dir, wantDir)
 		}
 	}
-	removed := make([]string, 0, len(want))
-	for _, add := range run.adds {
-		removed = append(removed, add.dir)
+	// Each build removes the worktree it made when it returns, in build order,
+	// so the removals are one per expected build and none is left behind.
+	if len(run.removed) != len(want) {
+		t.Fatalf("removed %d worktrees, want one for each of the %d builds", len(run.removed), len(want))
 	}
-	if !reflect.DeepEqual(run.removed, removed) {
-		t.Errorf("removed worktrees %q, want every worktree the builds added", run.removed)
+	for i := range want {
+		if run.removed[i] != run.adds[i].dir {
+			t.Errorf("worktree %d was removed at %q, want the directory it was made in, %q", i, run.removed[i], run.adds[i].dir)
+		}
 	}
 }
 
