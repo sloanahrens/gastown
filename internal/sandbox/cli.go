@@ -60,6 +60,9 @@ type Status struct {
 	Name, Phase string
 	Ready       bool // the Ready condition is True
 	ReadyKnown  bool // the status carried a Ready condition at all
+	// ReadyReason and ReadyMessage are the Ready condition's reason and message,
+	// which say why a sandbox is not Ready yet. Empty when the gateway gives none.
+	ReadyReason, ReadyMessage string
 	// NotReadySince is when the Ready condition last turned False, which for
 	// a terminal phase is when the failure began. Zero when the gateway does
 	// not say (gt-j18af).
@@ -212,6 +215,7 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 		switch cond.Type {
 		case "Ready":
 			st.ReadyKnown = true
+			st.ReadyReason, st.ReadyMessage = cond.Reason, cond.Message
 			if strings.EqualFold(cond.Status, "True") {
 				st.Ready = true
 				continue

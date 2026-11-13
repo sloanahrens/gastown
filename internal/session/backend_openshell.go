@@ -1043,7 +1043,14 @@ type stagedArchives struct {
 // Ready, extract the skeleton, clone, extract the runtime files, write the
 // redirect, and record the sandbox so the tmux router sends its commands here.
 func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir, redirect, workspaceID string, files stagedArchives) error {
-	if err := spec.Trace.Phase("ready", func() error { return b.awaitReady(ctx, spec.Session) }); err != nil {
+	var cond string
+	err := spec.Trace.Phase("ready", func() error {
+		var err error
+		cond, err = b.awaitReady(ctx, spec.Session)
+		return err
+	})
+	spec.Trace.Note(cond)
+	if err != nil {
 		return err
 	}
 	// The sandbox's own gt is the one that will run; Prepare's label check only
@@ -1122,30 +1129,57 @@ func (e *sandboxUnschedulableError) Is(target error) bool { return target == Err
 // between polls goes through b.wait, so a test records it instead of sleeping.
 // A pod the scheduler has held Unschedulable for unschedulableGiveUp ends the
 // wait early with a sandboxUnschedulableError; a pod that is scheduled but not
-// yet Ready keeps the readyPolls bound.
-func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
+// yet Ready keeps the readyPolls bound. It returns the Ready condition's reason
+// and message from the last poll that was not Ready, as readyCondition words
+// them: empty when the first poll was Ready, so only a wait that polled again
+// carries one.
+func (b *openshellBackend) awaitReady(ctx context.Context, name string) (string, error) {
 	var unsched unschedulableWait
+	var cond string
 	for polls := 1; ; polls++ {
 		st, err := b.cli.Get(ctx, name)
 		if err != nil {
-			return fmt.Errorf("waiting for sandbox %s: %w", name, err)
+			return cond, fmt.Errorf("waiting for sandbox %s: %w", name, err)
 		}
 		if st.Ready {
-			return nil
+			return cond, nil
 		}
+		cond = readyCondition(st)
 		if waited, stuck := b.unschedulableFor(name, st, &unsched); stuck {
-			return &sandboxUnschedulableError{Sandbox: name, Message: st.UnschedulableMsg, Waited: waited}
+			return cond, &sandboxUnschedulableError{Sandbox: name, Message: st.UnschedulableMsg, Waited: waited}
 		}
 		if polls == readyPolls {
 			if !st.ReadyKnown {
-				return fmt.Errorf("sandbox %s reported no Ready condition after %d polls (phase %q)", name, readyPolls, st.Phase)
+				return cond, fmt.Errorf("sandbox %s reported no Ready condition after %d polls (phase %q)%s", name, readyPolls, st.Phase, withCondition(cond))
 			}
-			return fmt.Errorf("sandbox %s not Ready after %d polls (phase %q)", name, readyPolls, st.Phase)
+			return cond, fmt.Errorf("sandbox %s not Ready after %d polls (phase %q)%s", name, readyPolls, st.Phase, withCondition(cond))
 		}
 		if err := b.wait(ctx, readyInterval); err != nil {
-			return err
+			return cond, err
 		}
 	}
+}
+
+// readyCondition is the Ready condition's reason and message as one phrase for
+// the wait's errors and the sling trace, "" when the gateway gave neither.
+func readyCondition(st sandbox.Status) string {
+	switch {
+	case st.ReadyReason != "" && st.ReadyMessage != "":
+		return st.ReadyReason + ": " + st.ReadyMessage
+	case st.ReadyReason != "":
+		return st.ReadyReason
+	default:
+		return st.ReadyMessage
+	}
+}
+
+// withCondition appends a readyCondition phrase to an error, and adds nothing
+// when there is none, so an error with no condition keeps its text.
+func withCondition(cond string) string {
+	if cond == "" {
+		return ""
+	}
+	return ", Ready condition: " + cond
 }
 
 // unschedulableWait is what one readiness wait carries from poll to poll.

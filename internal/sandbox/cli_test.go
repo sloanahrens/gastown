@@ -154,6 +154,42 @@ func TestGetArgvAndDecode(t *testing.T) {
 	}
 }
 
+func TestGetReadsTheReadyReasonAndMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		reply string
+		want  Status
+	}{
+		{"a not-Ready condition names its reason and message",
+			`{"name":"x","phase":"Provisioning","conditions":[{"type":"Ready","status":"False","reason":"DependenciesNotReady","message":"Pod is pending: 0/3 nodes are available: Insufficient memory."}]}`,
+			Status{Name: "x", Phase: "Provisioning", ReadyKnown: true, ReadyReason: "DependenciesNotReady", ReadyMessage: "Pod is pending: 0/3 nodes are available: Insufficient memory."}},
+		{"a reason without a message",
+			`{"name":"x","phase":"Provisioning","conditions":[{"type":"Ready","status":"False","reason":"Starting"}]}`,
+			Status{Name: "x", Phase: "Provisioning", ReadyKnown: true, ReadyReason: "Starting"}},
+		{"a condition without a reason or message leaves both empty",
+			`{"name":"x","phase":"Provisioning","conditions":[{"type":"Ready","status":"False"}]}`,
+			Status{Name: "x", Phase: "Provisioning", ReadyKnown: true}},
+		{"the scheduler's condition is not the Ready condition",
+			`{"name":"x","phase":"Provisioning","conditions":[{"type":"Ready","status":"False"},{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"Insufficient memory."}]}`,
+			Status{Name: "x", Phase: "Provisioning", ReadyKnown: true, Unschedulable: true, UnschedulableMsg: "Insufficient memory."}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cli, f := newFakeCLI()
+			f.Reply = map[string]string{"get": tt.reply}
+			got, err := cli.Get(context.Background(), "x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("status = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConditionTime(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)

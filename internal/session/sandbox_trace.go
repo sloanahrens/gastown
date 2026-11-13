@@ -21,6 +21,7 @@ type SandboxTrace struct {
 type tracePhase struct {
 	name string
 	took time.Duration
+	note string
 }
 
 // NewSandboxTrace starts a trace whose total runs from now, read through now.
@@ -59,6 +60,17 @@ func (t *SandboxTrace) Steps() func(name string) {
 		return nil
 	}
 	return t.Mark
+}
+
+// Note attaches text to the phase recorded last, which the summary shows in
+// parentheses after that phase's duration. It is a no-op for a nil trace, an
+// empty note, or a trace with no phase yet, so a wait with nothing to say adds
+// nothing to the log.
+func (t *SandboxTrace) Note(note string) {
+	if t == nil || note == "" || len(t.phases) == 0 {
+		return
+	}
+	t.phases[len(t.phases)-1].note = note
 }
 
 func (t *SandboxTrace) record(name string, from time.Time) {
@@ -129,7 +141,11 @@ func (t *SandboxTrace) Summary() string {
 	var timed time.Duration
 	for _, p := range t.phases {
 		timed += p.took
-		parts = append(parts, fmt.Sprintf("%s %s", p.name, p.took.Round(time.Millisecond)))
+		part := fmt.Sprintf("%s %s", p.name, p.took.Round(time.Millisecond))
+		if p.note != "" {
+			part += " (" + p.note + ")"
+		}
+		parts = append(parts, part)
 	}
 	total := t.now().Sub(t.began)
 	if rest := total - timed; rest > 0 {
