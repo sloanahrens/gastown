@@ -43,12 +43,12 @@ type specSlingJob struct {
 	// OverrunNote is the overrun-stop flag the sling writes on its bead once it
 	// has dispatched it (gt-b9j3o.4): the tick that planned the sling decided
 	// the box, and the job carries the answer to the process that runs it.
-	OverrunNote string `json:"overrun_note,omitempty"`
+	OverrunNote string                  `json:"overrun_note,omitempty"`
+	Run         specdispatch.FormulaRun `json:"run"`
 	// LockTimeouts is the consecutive assignee-lock-timeout count the tick read
 	// on the bead, so the sling that runs later adds to the same run rather
 	// than starting from a count it did not read (gt-a4cdcd).
-	LockTimeouts int                     `json:"lock_timeouts,omitempty"`
-	Run          specdispatch.FormulaRun `json:"run"`
+	LockTimeouts int `json:"lock_timeouts,omitempty"`
 }
 
 // specInFlight is a running sling as the daemon hands it to the tick: the
@@ -326,9 +326,13 @@ func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDisp
 		Annotate: func(id, key, text string) error {
 			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
 		},
-		AddLabel:          func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
+		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
+
 		RecordLockTimeout: recordLockTimeout,
 		ClearLockTimeout:  clearLockTimeout,
+		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
+			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
+		}),
 		Sling: func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
 			trace := session.NewSandboxTrace(time.Now)
 			name, err := slingSpec(townRoot, c, resume, seat, nil, trace, newRigDockedMemo(nil))

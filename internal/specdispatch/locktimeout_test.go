@@ -29,3 +29,33 @@ func TestLockTimeoutAttemptsReadsOnlyItsOwnMetadataKey(t *testing.T) {
 		})
 	}
 }
+
+// A bead's comments record the timeout run when its count is gone: a deferral
+// comment is a run still in progress, the bound's own comment ends the run so a
+// person's label clear gets fresh retries, and the newest such comment decides
+// (gt-a4cdcd).
+func TestLockTimeoutRecordedReadsTheNewestRunComment(t *testing.T) {
+	t.Parallel()
+	deferred := "spec-dispatch: gt-a: sling deferred, sbx-flash's hook write lock stayed held for its whole wait (1 of 3): timed out"
+	stuck := "spec-dispatch: gt-a: dispatch failed, sbx-flash's hook write lock stayed held on 3 ticks in a row, so it is stuck: timed out"
+	cases := []struct {
+		name     string
+		comments []string
+		want     bool
+	}{
+		{"no comments", nil, false},
+		{"a comment about something else", []string{"spec-dispatch: gt-a: shaped once"}, false},
+		{"a deferral", []string{deferred}, true},
+		{"the bound's comment", []string{stuck}, false},
+		{"a run that ended after one that did not", []string{deferred, stuck}, false},
+		{"a fresh run after an ended one", []string{stuck, deferred}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := LockTimeoutRecorded(c.comments); got != c.want {
+				t.Errorf("LockTimeoutRecorded(%v) = %v, want %v", c.comments, got, c.want)
+			}
+		})
+	}
+}

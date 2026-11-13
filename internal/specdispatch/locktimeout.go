@@ -3,6 +3,7 @@ package specdispatch
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // Two slings that pick the same seat can race for the same polecat name: the
@@ -17,10 +18,28 @@ import (
 // The count lives in bead metadata, as the bound-kill count does: notes are
 // prose for people, and anything that reads them for state is a convention
 // every other writer to the bead can break.
+//
+// The bound fails safe, because a count that cannot be read must not restart
+// the run. A count whose write fails is no bound at all, so the caller labels
+// the bead at once instead of deferring it on a count nothing remembers. A
+// count that is gone while the bead's comments still record a timeout run in
+// progress reads as the retries spent, never as zero (LockTimeoutRecorded): a
+// bead whose record was lost, and a lock that really is stuck, both surface.
 
 // LockTimeoutAttemptsKey is the metadata key holding a bead's consecutive
 // assignee-lock-timeout count.
 const LockTimeoutAttemptsKey = "spec_dispatch_lock_timeout_attempts"
+
+// LockTimeoutPhrase is the phrase every dispatcher line about an
+// assignee-lock timeout carries: the bead's comments are where the run is
+// recorded when its count is gone.
+const LockTimeoutPhrase = "hook write lock stayed held"
+
+// LockTimeoutDeferralPhrase is the phrase a comment recording a timeout the
+// dispatcher deferred carries. The failed line that labels the bead does not
+// carry it: that line ends the run, and a person who clears the label gets a
+// fresh one.
+const LockTimeoutDeferralPhrase = "sling deferred"
 
 // LockTimeoutRetries bounds the consecutive assignee-lock timeouts a bead is
 // deferred for: the timeout that reaches this count labels the bead, and the
@@ -29,10 +48,11 @@ const LockTimeoutRetries = 3
 
 // LockTimeoutAttempts reads the consecutive timeout count a bead's metadata
 // records. Metadata that holds no count (none at all, or another writer's keys)
-// reads as 0: the bead has not timed out since its last success. A count that
-// is present but unreadable (metadata that is not JSON, a value that is not a
-// number) reads as the retries spent: a bead whose record cannot be trusted is
-// held for a person rather than deferred without end.
+// reads as 0, which is the count only because the caller asks the bead's
+// comments next (LockTimeoutRecorded): a run the record lost is still in them.
+// A count that is present but unreadable (metadata that is not JSON, a value
+// that is not a number) reads as the retries spent: a bead whose record cannot
+// be trusted is held for a person rather than deferred without end.
 func LockTimeoutAttempts(metadata []byte) int {
 	if len(metadata) == 0 {
 		return 0
@@ -54,4 +74,26 @@ func LockTimeoutAttempts(metadata []byte) int {
 		}
 	}
 	return LockTimeoutRetries
+}
+
+// LockTimeoutRecorded reports whether comments, newest last as bd returns them,
+// record an assignee-lock-timeout run still in progress. The newest comment
+// carrying LockTimeoutPhrase decides: one that also carries
+// LockTimeoutDeferralPhrase records a run that has not reached the bound, and
+// the failed line that ends the run (it labels the bead) does not. No such
+// comment is no run.
+//
+// A deferral from an earlier dispatch of the same bead reads as a run in
+// progress too, since nothing tells the two runs apart once the count is gone.
+// That labels a bead which timed out once long ago and again now, which is the
+// safe direction: the label is a person's to clear, and clearing it starts a
+// fresh run.
+func LockTimeoutRecorded(comments []string) bool {
+	for i := len(comments) - 1; i >= 0; i-- {
+		if !strings.Contains(comments[i], LockTimeoutPhrase) {
+			continue
+		}
+		return strings.Contains(comments[i], LockTimeoutDeferralPhrase)
+	}
+	return false
 }

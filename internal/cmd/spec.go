@@ -1700,6 +1700,13 @@ type specDispatchEnv struct {
 	// bead instead of deferring it again.
 	RecordLockTimeout func(beadID string, attempts int) error
 	ClearLockTimeout  func(beadID string) error
+	// LockTimeoutRecorded reports whether a bead's comments record an
+	// assignee-lock timeout run still in progress (specdispatch
+	// .LockTimeoutRecorded), asked when the planned count is missing: a run the
+	// stored count lost still reads as the retries spent, never as a fresh
+	// start (gt-a4cdcd). Nil cannot answer, and the timeout labels the bead
+	// rather than deferring it on a history nothing read.
+	LockTimeoutRecorded func(beadID string) (bool, error)
 	// BranchOnOrigin reports whether a bead's recorded resume branch still
 	// exists on the rig's origin. An error means the answer is unknown, and
 	// the candidate is left for the next tick (gt-gzhin.3).
@@ -1841,6 +1848,33 @@ func (e specDispatchEnv) clearLockTimeout(beadID string) error {
 		return nil
 	}
 	return e.ClearLockTimeout(beadID)
+}
+
+// lockTimeoutHistory answers whether a bead's comments record an
+// assignee-lock-timeout run still in progress. An env with no reader answers an
+// error: the timeout then labels the bead, because deferring it on a history
+// nobody read is the unbounded retry the bound exists to stop (gt-a4cdcd).
+func (e specDispatchEnv) lockTimeoutHistory(beadID string) (bool, error) {
+	if e.LockTimeoutRecorded == nil {
+		return false, errors.New("no lock timeout history is wired")
+	}
+	return e.LockTimeoutRecorded(beadID)
+}
+
+// specLockTimeoutRecorded reads a bead's comments and answers whether they
+// record an assignee-lock-timeout run still in progress (gt-a4cdcd).
+func specLockTimeoutRecorded(storeFor func(beadID string) beads.Client) func(beadID string) (bool, error) {
+	return func(beadID string) (bool, error) {
+		comments, err := storeFor(beadID).Comments(beadID)
+		if err != nil {
+			return false, fmt.Errorf("reading comments: %w", err)
+		}
+		texts := make([]string, 0, len(comments))
+		for _, c := range comments {
+			texts = append(texts, c.Text)
+		}
+		return specdispatch.LockTimeoutRecorded(texts), nil
+	}
 }
 
 // inFlightCap is the number of slings the tick runs at once. An env that sets
@@ -2873,14 +2907,36 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		// and it labels the bead (gt-a4cdcd).
 		if errors.Is(err, ErrAssigneeLockTimeout) {
 			lockAttempts := p.lockTimeouts + 1
+			why := fmt.Sprintf("%s's hook write lock stayed held on %d ticks in a row, so it is stuck",
+				seat.Agent, lockAttempts)
+			// A planned count of zero is a bead whose record holds none: it has
+			// not timed out since its last success, or the count was lost. Its
+			// comments decide, so a lost count cannot restart the run (gt-a4cdcd).
+			if p.lockTimeouts == 0 {
+				recorded, historyErr := env.lockTimeoutHistory(id)
+				switch {
+				case historyErr != nil:
+					lockAttempts = specdispatch.LockTimeoutRetries
+					why = fmt.Sprintf("%s's hook write lock stayed held, and its timeout history could not be read (%v), so the run cannot be deferred again",
+						seat.Agent, historyErr)
+				case recorded:
+					lockAttempts = specdispatch.LockTimeoutRetries
+					why = fmt.Sprintf("%s's hook write lock stayed held once more while its stored count was gone, so the run cannot be deferred again",
+						seat.Agent)
+				}
+			}
 			if lockAttempts < specdispatch.LockTimeoutRetries {
 				entry.Line = fmt.Sprintf("%s: sling deferred, %s's hook write lock stayed held for its whole wait (%d of %d): %s",
 					id, seat.Agent, lockAttempts, specdispatch.LockTimeoutRetries, firstErrLine(err))
-				return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, recordLockTimeout: lockAttempts})
+				// The comment is the record the count cannot be when the write
+				// is lost: it lands once per run and reads as a run in progress
+				// (specdispatch.LockTimeoutRecorded).
+				marker := fmt.Sprintf("%s%s: sling deferred, %s's hook write lock stayed held", specDispatchNotePrefix, id, seat.Agent)
+				return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, recordLockTimeout: lockAttempts,
+					notes: [][2]string{{marker, specDispatchNotePrefix + entry.Line}}})
 			}
 			excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
-			failLine := fmt.Sprintf("%s: dispatch failed, %s's hook write lock stayed held on %d ticks in a row, so it is stuck: %s; %s",
-				id, seat.Agent, lockAttempts, firstErrLine(err), excluded)
+			failLine := fmt.Sprintf("%s: dispatch failed, %s: %s; %s", id, why, firstErrLine(err), excluded)
 			entry.Line = failLine
 			note := specDispatchNotePrefix + failLine
 			// recordLockTimeout stays 0, so done() clears the count: a person
@@ -3486,6 +3542,10 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		},
 		RecordLockTimeout: recordLockTimeout,
 		ClearLockTimeout:  clearLockTimeout,
+		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
+			reads.call()
+			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
+		}),
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
 		},

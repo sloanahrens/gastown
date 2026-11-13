@@ -217,24 +217,24 @@ func sectionHint(name string) string {
 
 // Spec is the slice of a bead the lint reads.
 type Spec struct {
-	ID        string
-	Title     string
-	Type      string
-	Status    string
-	Assignee  string
-	Priority  int
-	CreatedAt string
-	CreatedBy string
-	Labels    []string
-	// Metadata is the bead's metadata JSON as bd returned it, filled by the
-	// caller from a full read (a show). The dispatcher reads the consecutive
-	// assignee-lock-timeout count from it (LockTimeoutAttempts, gt-a4cdcd); a
-	// read that does not carry metadata leaves it empty.
-	Metadata    []byte
+	ID          string
+	Title       string
+	Type        string
+	Status      string
+	Assignee    string
+	Priority    int
+	CreatedAt   string
+	CreatedBy   string
+	Labels      []string
 	Description string
 	Design      string
 	Notes       string
 	Acceptance  string
+	// Metadata is the bead's metadata JSON as bd returned it, filled by the
+	// caller from a full read (a show). The dispatcher reads the consecutive
+	// assignee-lock-timeout count from it (LockTimeoutAttempts, gt-a4cdcd); a
+	// read that does not carry metadata leaves it empty.
+	Metadata []byte
 	// CommentCount is the comment_count of the row the spec was read from: the
 	// ready board carries it, so a tick can tell a bead's comments have not
 	// changed without reading them.
