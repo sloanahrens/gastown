@@ -31,11 +31,17 @@ type pendingSandboxFixture struct {
 	d        *Daemon
 	cli      *fakeCLI
 	src      *attentionSources
+	clock    *clockwork.FakeClock
 	reply    cliReply
 	byVerb   map[string]cliReply
 	runErr   error
 	profiles map[string]agentconfig.SandboxProfile
 	logs     bytes.Buffer
+	// hanging, when set, holds a pod read until held is closed: a cluster that
+	// never answers. hangEntered is told each time a read reaches the cluster.
+	hanging     bool
+	held        chan struct{}
+	hangEntered chan struct{}
 }
 
 func newPendingSandboxFixture(t *testing.T) *pendingSandboxFixture {
@@ -51,6 +57,12 @@ func newPendingSandboxFixture(t *testing.T) *pendingSandboxFixture {
 			return cliReply{code: 1, stderr: f.runErr.Error()}
 		}
 		verb := cacheTrimVerb(c.args)
+		if f.hanging && strings.HasPrefix(verb, "get pods ") {
+			held := f.held
+			f.hangEntered <- struct{}{}
+			<-held
+			return cliReply{}
+		}
 		if reply, ok := f.byVerb[verb]; ok {
 			return reply
 		}
@@ -59,10 +71,11 @@ func newPendingSandboxFixture(t *testing.T) *pendingSandboxFixture {
 		}
 		return cliReply{}
 	})
+	f.clock = clockwork.NewFakeClockAt(pendingSandboxNow)
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(&f.logs, "", 0),
-		clock:  clockwork.NewFakeClockAt(pendingSandboxNow),
+		clock:  f.clock,
 	}
 	d.execCmd = f.cli.run
 	d.diskMaint.getenv = func(string) string { return "" }
@@ -155,7 +168,7 @@ func TestPendingSandboxReadNamesTheSandboxNamespace(t *testing.T) {
 	}
 	var found bool
 	for _, call := range f.cli.recorded() {
-		if verb := cacheTrimVerb(call.args); verb == "get pods -n "+pendingSandboxNamespace+" -o json" {
+		if verb := cacheTrimVerb(call.args); verb == "get pods -n "+pendingSandboxNamespace+" -o json --request-timeout=10s" {
 			found = true
 		}
 	}
@@ -178,10 +191,10 @@ func TestPendingSandboxReadsEachProfileNamespaceOnce(t *testing.T) {
 		"docker-seat":   {Driver: agentconfig.SandboxDriverDocker},
 	}
 	f.byVerb = map[string]cliReply{
-		"get pods -n openshell -o json": {stdout: sandboxPodListJSON(
+		"get pods -n openshell -o json --request-timeout=10s": {stdout: sandboxPodListJSON(
 			sandboxPodJSON("default--gt-nux", "openshell", "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient cpu.", pendingSandboxNow.Add(-3*time.Minute)),
 		)},
-		"get pods -n sandboxes-b -o json": {stdout: sandboxPodListJSON(
+		"get pods -n sandboxes-b -o json --request-timeout=10s": {stdout: sandboxPodListJSON(
 			sandboxPodJSON("default--gt-b", "sandboxes-b", "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient memory.", pendingSandboxNow.Add(-4*time.Minute)),
 		)},
 	}
@@ -204,7 +217,7 @@ func TestPendingSandboxReadsEachProfileNamespaceOnce(t *testing.T) {
 			reads[verb]++
 		}
 	}
-	for _, verb := range []string{"get pods -n openshell -o json", "get pods -n sandboxes-b -o json"} {
+	for _, verb := range []string{"get pods -n openshell -o json --request-timeout=10s", "get pods -n sandboxes-b -o json --request-timeout=10s"} {
 		if reads[verb] != 1 {
 			t.Errorf("%q read %d times, want once; calls = %+v", verb, reads[verb], f.cli.recorded())
 		}
@@ -562,5 +575,238 @@ func TestPendingSandboxProfilesReadFailureIsAnError(t *testing.T) {
 	}
 	if items != nil {
 		t.Errorf("items = %+v beside the refusal, want none", items)
+	}
+}
+
+// releaseHang lets a held pod read return, the way kubectl does once its own
+// request timeout ends the call, and ends the hang for the reads after it. Safe
+// to call more than once.
+func (f *pendingSandboxFixture) releaseHang() {
+	f.hanging = false
+	if f.held != nil {
+		close(f.held)
+		f.held = nil
+	}
+}
+
+// finishHungRead releases the held pod read and waits, bounded, until the daemon
+// has seen the runner return, so the namespace's read is no longer outstanding.
+func (f *pendingSandboxFixture) finishHungRead(t *testing.T, namespace string) {
+	t.Helper()
+	returned := f.d.sandboxPendingReads[namespace]
+	f.releaseHang()
+	blockUntil(t, "the held pod read to return", returned)
+}
+
+// podReads counts the pod-list calls the fake cluster has seen.
+func (f *pendingSandboxFixture) podReads() int {
+	var n int
+	for _, c := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
+			n++
+		}
+	}
+	return n
+}
+
+// hangPendingSandboxRead runs collectAttention over collectors under the tick's
+// deadline, as writeAttentionWith does, while the cluster never answers the pod
+// list, then moves the daemon's clock past the read deadline. It returns the
+// items the tick observed. The bounded wait ends the test if the collection does
+// not return once the deadline passes. The held read stays outstanding until
+// finishHungRead or the test's cleanup releases it.
+func hangPendingSandboxRead(t *testing.T, f *pendingSandboxFixture, prev attention.State, collectors ...attentionCollector) []attention.Item {
+	t.Helper()
+	t.Cleanup(f.releaseHang)
+	tick, cancelTick := context.WithTimeout(context.Background(), attentionTimeout)
+	t.Cleanup(cancelTick)
+	f.hanging = true
+	f.held = make(chan struct{})
+	f.hangEntered = make(chan struct{}, 1)
+	observed := make(chan []attention.Item, 1)
+	go func() {
+		observed <- collectAttention(tick, prev, collectors, f.d.logger.Printf)
+	}()
+	blockUntil(t, "the pod read to reach the cluster", f.hangEntered)
+	f.clock.Advance(sandboxPendingReadTimeout)
+	wait, cancel := context.WithTimeout(context.Background(), signalWait)
+	defer cancel()
+	select {
+	case items := <-observed:
+		return items
+	case <-wait.Done():
+		t.Fatalf("the collection did not return after its %s read deadline", sandboxPendingReadTimeout)
+		return nil
+	}
+}
+
+// TestPendingSandboxReadRefusesAnExpiredTick covers gt-hlo2ac: a pod read that
+// starts after the tick's deadline never reaches the cluster, and the collector
+// returns the context's error with no items.
+func TestPendingSandboxReadRefusesAnExpiredTick(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	items, err := collectorFor(t, f.src, attention.KindSandboxPending).collect(ctx)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if items != nil {
+		t.Errorf("items = %+v beside the refusal, want none", items)
+	}
+	// A read spawned anyway would be recorded as outstanding; wait for it to
+	// return, bounded, so the count below cannot miss a read still in flight.
+	if returned := f.d.sandboxPendingReads[pendingSandboxNamespace]; returned != nil {
+		blockUntil(t, "the spawned pod read to return", returned)
+	}
+	if n := f.podReads(); n != 0 {
+		t.Errorf("pod reads = %d, want none after the tick's deadline", n)
+	}
+}
+
+// TestPendingSandboxCollectorGivesUpOnAHungCluster covers gt-hlo2ac: a sandbox
+// cluster that never answers its pod list is cut off at the read deadline. The
+// tick keeps the previous items and the first-seen map, logs the timeout, and
+// the pod read carries kubectl's own request timeout.
+func TestPendingSandboxCollectorGivesUpOnAHungCluster(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	const untimed = "openshell/default--gt-untimed"
+	firstSeen := pendingSandboxNow.Add(-30 * time.Second)
+	f.d.sandboxPendingFirstSeen = map[string]time.Time{untimed: firstSeen}
+	previous := attention.Item{
+		Key:      sandboxPendingKeyPrefix + "openshell/default--gt-nux",
+		Kind:     attention.KindSandboxPending,
+		Severity: attention.SeverityHigh,
+		Summary:  "sandbox pod openshell/default--gt-nux pending 3m, unschedulable: earlier",
+	}
+
+	items := hangPendingSandboxRead(t, f, attention.State{Items: []attention.Item{previous}}, collectorFor(t, f.src, attention.KindSandboxPending))
+
+	if len(items) != 1 || items[0].Key != previous.Key || items[0].Summary != previous.Summary {
+		t.Errorf("items = %+v, want the previous tick's item kept", items)
+	}
+	if got := f.d.sandboxPendingFirstSeen; len(got) != 1 || !got[untimed].Equal(firstSeen) {
+		t.Errorf("first-seen map = %v, want the previous map kept", got)
+	}
+	if got := f.logs.String(); !strings.Contains(got, "no answer within 15s") {
+		t.Errorf("log = %q, want the read's timeout named", got)
+	}
+	var pods []cliCall
+	for _, c := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
+			pods = append(pods, c)
+		}
+	}
+	if len(pods) != 1 {
+		t.Fatalf("pod reads = %d, want one", len(pods))
+	}
+	if !strings.Contains(cacheTrimVerb(pods[0].args), "--request-timeout=10s") {
+		t.Errorf("pod read args = %q, want --request-timeout=10s for this read", cacheTrimVerb(pods[0].args))
+	}
+}
+
+// TestPendingSandboxCollectorRecoversAfterATimeout covers gt-hlo2ac: after a
+// read that timed out, the next collection with a working cluster raises the
+// item for a pod Unschedulable past the window.
+func TestPendingSandboxCollectorRecoversAfterATimeout(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	const message = "0/3 nodes are available: 3 Insufficient cpu."
+	f.reply = cliReply{stdout: sandboxPodListJSON(
+		sandboxPodJSON("default--gt-nux", pendingSandboxNamespace, "Pending", "False", "Unschedulable", message, pendingSandboxNow.Add(-3*time.Minute)),
+	)}
+
+	if items := hangPendingSandboxRead(t, f, attention.State{}, collectorFor(t, f.src, attention.KindSandboxPending)); len(items) != 0 {
+		t.Fatalf("the timed-out tick observed %+v, want nothing from an empty previous state", items)
+	}
+
+	// The held kubectl call returns on its own request timeout; the next tick
+	// reads a working cluster.
+	f.finishHungRead(t, pendingSandboxNamespace)
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "sandbox-pending:openshell/default--gt-nux" {
+		t.Fatalf("items = %+v, want the unschedulable pod raised after the timeout", items)
+	}
+	want := "sandbox pod openshell/default--gt-nux pending 3m, unschedulable: " + message
+	if items[0].Summary != want {
+		t.Errorf("summary = %q, want %q", items[0].Summary, want)
+	}
+}
+
+// TestPendingSandboxHungReadDoesNotStallLaterCollectors covers gt-hlo2ac: the
+// pending-sandbox read sits first in the tick, its cluster never answers, and a
+// collector after it still runs in the same tick and its items are observed.
+func TestPendingSandboxHungReadDoesNotStallLaterCollectors(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	later := attention.Item{
+		Key:      "red-main:later-collector",
+		Kind:     attention.KindRedMain,
+		Severity: attention.SeverityHigh,
+		Summary:  "a collector after the hung read",
+	}
+	laterCollector := attentionCollector{
+		kind: attention.KindRedMain,
+		collect: func(context.Context) ([]attention.Item, error) {
+			return []attention.Item{later}, nil
+		},
+	}
+
+	items := hangPendingSandboxRead(t, f, attention.State{}, collectorFor(t, f.src, attention.KindSandboxPending), laterCollector)
+
+	if len(items) != 1 || items[0].Key != later.Key {
+		t.Errorf("items = %+v, want the later collector's item in the same tick", items)
+	}
+}
+
+// TestPendingSandboxReadWaitsForAnOutstandingRead covers gt-hlo2ac: while a
+// timed-out read is still held by the cluster, the next tick starts no second
+// read of that namespace. It refuses with an error and keeps the previous items,
+// and once the held read returns the following tick reads again and raises.
+func TestPendingSandboxReadWaitsForAnOutstandingRead(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	const message = "0/3 nodes are available: 3 Insufficient cpu."
+	f.reply = cliReply{stdout: sandboxPodListJSON(
+		sandboxPodJSON("default--gt-nux", pendingSandboxNamespace, "Pending", "False", "Unschedulable", message, pendingSandboxNow.Add(-3*time.Minute)),
+	)}
+	collector := collectorFor(t, f.src, attention.KindSandboxPending)
+
+	if items := hangPendingSandboxRead(t, f, attention.State{}, collector); len(items) != 0 {
+		t.Fatalf("the timed-out tick observed %+v, want nothing", items)
+	}
+
+	// The cluster answers again, but the held read has not returned: the tick
+	// must not start a second read of the namespace.
+	f.hanging = false
+	items, err := f.collect(t)
+	if err == nil || !strings.Contains(err.Error(), "still outstanding") {
+		t.Fatalf("collection under an outstanding read: items = %+v, err = %v; want the outstanding refusal", items, err)
+	}
+	if items != nil {
+		t.Errorf("items = %+v beside the refusal, want none", items)
+	}
+	if n := f.podReads(); n != 1 {
+		t.Fatalf("pod reads = %d, want the one held read only", n)
+	}
+
+	// The held read returns; the next tick reads and raises the pod.
+	f.finishHungRead(t, pendingSandboxNamespace)
+	items, err = f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "sandbox-pending:openshell/default--gt-nux" {
+		t.Errorf("items after the held read returns = %+v, want the pod's item", items)
+	}
+	if n := f.podReads(); n != 2 {
+		t.Errorf("pod reads = %d, want the held read and one fresh read", n)
 	}
 }

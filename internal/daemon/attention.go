@@ -577,10 +577,19 @@ func attentionWord(s attention.EventState) string {
 // collector that fails contributes no items of its own, and the previous
 // tick's items it owns instead: an unanswered query must not clear a real
 // alarm (townhealth's UNKNOWN rule, gt-s3rec.1). The failure is logged once,
-// in the collector's name.
+// in the collector's name. Once the tick's context is done no further collector
+// starts: each one not started keeps its previous items the same way, and one
+// line names the collector the deadline stopped before (gt-hlo2ac).
 func collectAttention(ctx context.Context, prev attention.State, collectors []attentionCollector, logf func(string, ...any)) []attention.Item {
 	var observed []attention.Item
-	for _, c := range collectors {
+	for i, c := range collectors {
+		if ctx.Err() != nil {
+			logf("attention: tick deadline expired before collector %s; skipped %d", c.kind, len(collectors)-i)
+			for _, skipped := range collectors[i:] {
+				observed = append(observed, skipped.kept(prev)...)
+			}
+			break
+		}
 		items, err := c.collect(ctx)
 		if err != nil {
 			logf("attention: collector %s: %v", c.kind, err)

@@ -805,6 +805,12 @@ type Daemon struct {
 	// or stops being unschedulable drops out (gt-1gtq5g).
 	sandboxPendingFirstSeen map[string]time.Time
 
+	// sandboxPendingReads holds, per namespace, the pod read the tick last
+	// started. Its channel closes when the kubectl runner returns, so a read
+	// the deadline abandoned keeps the namespace busy until it really ends
+	// (gt-hlo2ac). Only the attention tick touches it.
+	sandboxPendingReads map[string]chan struct{}
+
 	// scheduledSlingsHold and queuedWorkHold remember the operator dispatch
 	// hold each dispatcher last saw, so a hold is logged once when it appears,
 	// changes, or lifts rather than on every tick (gt-ifijm).

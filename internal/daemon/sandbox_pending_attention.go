@@ -30,6 +30,16 @@ const (
 	// name follow it, so one pod has one item however many ticks it stays
 	// unschedulable.
 	sandboxPendingKeyPrefix = "sandbox-pending:"
+
+	// sandboxPendingReadTimeout bounds one namespace's pod read. A sandbox
+	// cluster that does not answer (a VM restart, gt-hlo2ac) costs this read
+	// and not the collectors behind it in the attention tick.
+	sandboxPendingReadTimeout = 15 * time.Second
+
+	// sandboxPendingRequestTimeout is kubectl's own bound on the same read, so
+	// the API server gives up before the daemon does. It is passed for this
+	// read only.
+	sandboxPendingRequestTimeout = 10 * time.Second
 )
 
 // collectPendingSandboxPods raises one high item per sandbox pod that has been
@@ -130,6 +140,61 @@ func pendingSandboxUnplaced(pod pendingSandboxPod) (string, bool) {
 	return "", false
 }
 
+// errSandboxPendingNoAnswer is the cause a read carries when its deadline ends
+// it before the cluster answers.
+var errSandboxPendingNoAnswer = fmt.Errorf("no answer within %s", sandboxPendingReadTimeout)
+
+// pendingSandboxRead reads namespace's pod list under sandboxPendingReadTimeout.
+// The deadline runs on the daemon's clock and cancels the read's context, and
+// the read is abandoned at that point whether or not the runner honors its
+// context, so one hung cluster costs one read (gt-hlo2ac). A read that outlives
+// its deadline returns an error, and the caller keeps the previous items.
+//
+// An abandoned runner goroutine stays alive until the runner returns; that is
+// the one bound on the leak. Until then the namespace's read is outstanding, and
+// a later tick does not start a second read of it: it returns an error and keeps
+// the previous items, so a hung cluster holds at most one goroutine per namespace.
+func (d *Daemon) pendingSandboxRead(ctx context.Context, kubeconfig, namespace string) ([]byte, error) {
+	// A read that starts after the tick's deadline never reaches the cluster, so
+	// no runner goroutine is spawned for it (gt-hlo2ac).
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("reading the pod list for namespace %s: %w", namespace, err)
+	}
+	if outstanding, ok := d.sandboxPendingReads[namespace]; ok {
+		select {
+		case <-outstanding:
+		default:
+			return nil, fmt.Errorf("the pod list for namespace %s is still outstanding from an earlier tick", namespace)
+		}
+	}
+	if d.sandboxPendingReads == nil {
+		d.sandboxPendingReads = make(map[string]chan struct{})
+	}
+	returned := make(chan struct{})
+	d.sandboxPendingReads[namespace] = returned
+
+	readCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	deadline := d.clk().AfterFunc(sandboxPendingReadTimeout, func() { cancel(errSandboxPendingNoAnswer) })
+	defer deadline.Stop()
+	type reply struct {
+		out []byte
+		err error
+	}
+	done := make(chan reply, 1)
+	go func() {
+		defer close(returned)
+		out, err := d.cacheTrimKubectl(readCtx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json", fmt.Sprintf("--request-timeout=%s", sandboxPendingRequestTimeout))
+		done <- reply{out, err}
+	}()
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-readCtx.Done():
+		return nil, fmt.Errorf("reading the pod list for namespace %s: %w", namespace, context.Cause(readCtx))
+	}
+}
+
 // pendingSandboxPods reads namespace's pod list and returns one item per pod
 // that has stayed Pending and unschedulable past sandboxPendingAfter.
 //
@@ -142,7 +207,7 @@ func pendingSandboxUnplaced(pod pendingSandboxPod) (string, bool) {
 // its missing time is logged once per daemon run rather than skipped without a
 // word.
 func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace string, now time.Time, prevFirstSeen, nextFirstSeen map[string]time.Time) ([]attention.Item, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json")
+	out, err := d.pendingSandboxRead(ctx, kubeconfig, namespace)
 	if err != nil {
 		return nil, err
 	}
