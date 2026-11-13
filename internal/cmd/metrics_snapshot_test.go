@@ -91,6 +91,48 @@ func TestMetricsSnapshotReceiptSaysWhetherAPlacementIsKnown(t *testing.T) {
 	}
 }
 
+// A placement source that ran and failed prints "unreadable", not "none known",
+// and the receipt counts its error; with no placement source at all the receipt
+// still says none is known.
+func TestMetricsSnapshotReceiptPlacementUnreadable(t *testing.T) {
+	t.Parallel()
+	env := func() metrics.Env {
+		return metrics.Env{Town: t.TempDir(), Now: func() time.Time { return time.Date(2026, 10, 24, 20, 0, 0, 0, time.UTC) }}
+	}
+	tests := []struct {
+		name    string
+		sources []metrics.Source
+		want    string
+	}{
+		{
+			name: "the placement source failed",
+			sources: []metrics.Source{
+				fakeSource{group: "alpha", cols: map[string]any{"n": 1}},
+				fakeSource{group: metrics.PlacementGroup, err: errors.New("placement is unreadable")},
+			},
+			want: "(1 groups, 1 errors); placement: unreadable\n",
+		},
+		{
+			name: "no source supplied a placement",
+			sources: []metrics.Source{
+				fakeSource{group: "alpha", cols: map[string]any{"n": 1}},
+			},
+			want: "(1 groups, 0 errors); placement: none known\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := runMetricsSnapshotWith(context.Background(), &out, env(), tt.sources); err != nil {
+				t.Fatalf("runMetricsSnapshotWith: %v", err)
+			}
+			if !strings.Contains(out.String(), tt.want) || strings.Count(out.String(), "\n") != 1 {
+				t.Fatalf("receipt = %q, want one line holding %q", out.String(), tt.want)
+			}
+		})
+	}
+}
+
 // The daily step's receipt names the day and the file, and a second run the
 // same day says the rig was already recorded.
 func TestRunBdDailyPrintsItsReceipt(t *testing.T) {

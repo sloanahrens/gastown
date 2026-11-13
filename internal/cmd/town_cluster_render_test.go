@@ -1501,9 +1501,10 @@ func requireErrorNames(t *testing.T, err error, want ...string) {
 	}
 }
 
-// TestTownClusterRenderTrackerFlag holds --tracker: trackerd's Service and
-// Deployment follow the daemon's in apply order, each refusal names the flag it
-// is about before anything is written, and the DSN Secret is named, never read.
+// TestTownClusterRenderTrackerFlag holds --tracker: trackerd's Service sorts
+// after the daemon's Service and its Deployment after the daemon's Deployment in
+// apply order, and each refusal names the flag it is about before anything is
+// written.
 func TestTownClusterRenderTrackerFlag(t *testing.T) {
 	t.Parallel()
 
@@ -1517,7 +1518,7 @@ func TestTownClusterRenderTrackerFlag(t *testing.T) {
 		return f
 	}
 
-	t.Run("the pair is written after the daemon objects in apply order", func(t *testing.T) {
+	t.Run("the pair follows the daemon's Service and Deployment in apply order", func(t *testing.T) {
 		f := trackerFixture(t)
 		var out bytes.Buffer
 		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
@@ -1586,35 +1587,62 @@ func TestTownClusterRenderTrackerFlag(t *testing.T) {
 		}
 	})
 
-	t.Run("the DSN Secret is named and its value is never printed or written", func(t *testing.T) {
-		f := trackerFixture(t)
-		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
-			t.Fatalf("render: %v", err)
+}
+
+// TestTownClusterRenderTrackerDoesNotReadTheDSN: the render names the Secret
+// trackerd reads its DSN from and never opens the DSN. The render's secret-file
+// reads go through readFile, so the fake below records every path the render
+// opens and fails when one is not the secrets manifest; grepping the output for
+// a DSN-shaped string cannot see a read that is not printed.
+func TestTownClusterRenderTrackerDoesNotReadTheDSN(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.tracker = true
+	f.trackerDSNSecret = "gt-trackerd-dsn"
+	f.proxyImage = clusterRenderDaemonDigest
+	f.hostGateway = "192.168.64.1"
+	// A DSN file named for the Secret sits in the config directory, so a render
+	// that opens one reads a real value and the fake records the read.
+	f.configDir = t.TempDir()
+	dsnPath := filepath.Join(f.configDir, f.trackerDSNSecret)
+	if err := os.WriteFile(dsnPath, []byte("postgres://trackerd:sentinel@example.test:5432/tracker"), 0o600); err != nil {
+		t.Fatalf("writing the DSN file: %v", err)
+	}
+	var out bytes.Buffer
+	deps := clusterRenderTestDeps(t, &out)
+	var reads []string
+	deps.readFile = func(path string) ([]byte, error) {
+		reads = append(reads, path)
+		return os.ReadFile(path)
+	}
+	if err := runClusterRender(deps, f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if want := []string{filepath.Join(f.dir, secretsManifestRelPath)}; !slices.Equal(reads, want) {
+		t.Fatalf("the render read %v, want only the secrets manifest %v", reads, want)
+	}
+	if !strings.Contains(out.String(), "reads its DSN from Secret gt-trackerd-dsn under key dsn") {
+		t.Fatalf("the output does not name the DSN Secret and its key:\n%s", out.String())
+	}
+	// The DSN Secret is read as an environment variable, so no create line
+	// names it: a create line would need a value the render does not have.
+	for _, l := range createLines(out.String()) {
+		if strings.Contains(l, "gt-trackerd-dsn") {
+			t.Errorf("a create line names the DSN Secret: %s", l)
 		}
-		if !strings.Contains(out.String(), "reads its DSN from Secret gt-trackerd-dsn under key dsn") {
-			t.Fatalf("the output does not name the DSN Secret and its key:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "postgres://") {
+		t.Errorf("the output holds a DSN-shaped string:\n%s", out.String())
+	}
+	for _, name := range dirNames(t, f.out) {
+		data, err := os.ReadFile(filepath.Join(f.out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
 		}
-		// The DSN Secret is read as an environment variable, so no create line
-		// names it: a create line would need a value the render does not have.
-		for _, l := range createLines(out.String()) {
-			if strings.Contains(l, "gt-trackerd-dsn") {
-				t.Errorf("a create line names the DSN Secret: %s", l)
-			}
+		if strings.Contains(string(data), "postgres://") {
+			t.Errorf("%s holds a DSN-shaped string", name)
 		}
-		if strings.Contains(out.String(), "postgres://") {
-			t.Errorf("the output holds a DSN-shaped string:\n%s", out.String())
-		}
-		for _, name := range dirNames(t, f.out) {
-			data, err := os.ReadFile(filepath.Join(f.out, name))
-			if err != nil {
-				t.Fatalf("reading %s: %v", name, err)
-			}
-			if strings.Contains(string(data), "postgres://") {
-				t.Errorf("%s holds a DSN-shaped string", name)
-			}
-		}
-	})
+	}
 }
 
 // TestTownClusterRenderTrackerBackupFlag holds --tracker-backup: the dump's claim
