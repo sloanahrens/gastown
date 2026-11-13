@@ -454,7 +454,20 @@ func TestSectionHash(t *testing.T) {
 	withNotes := *base
 	withNotes.Notes = "SP ESTIMATE v1 sp:8 rung:all hash:whatever"
 	if SectionHash(&withNotes) != hash {
-		t.Fatal("a comment in the notes changed the hash; only the sections count")
+		t.Fatal("a note changed the hash; only the sections count")
+	}
+
+	// A comment carries the estimate note itself; reading it back would make
+	// the next rerun hash its own output.
+	withComment := *base
+	withComment.Comments = []beads.Comment{{
+		ID:      "c-1",
+		IssueID: base.ID,
+		Author:  "overseer",
+		Text:    "SP ESTIMATE v1 sp:8 rung:all hash:whatever",
+	}}
+	if SectionHash(&withComment) != hash {
+		t.Fatal("a comment changed the hash; only the sections count")
 	}
 
 	changed := map[string]func(*beads.Issue){
