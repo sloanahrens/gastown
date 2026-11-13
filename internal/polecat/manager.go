@@ -212,6 +212,9 @@ type Manager struct {
 	// now is the clock buildBranchName stamps branch names with; nil means
 	// time.Now. A test sets it to fix the millisecond.
 	now func() time.Time
+	// stamps is the sequence branch-name stamps come from; nil means the
+	// process-wide sequence. A test sets its own so it never moves the shared one.
+	stamps *branchStampClock
 	// clock paces the Dolt retry backoff; nil is the real clock.
 	clock clockwork.Clock
 	// recoverReadOnly restarts a read-only Dolt server; nil means
@@ -857,10 +860,14 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	if clock == nil {
 		clock = time.Now
 	}
+	stamps := m.stamps
+	if stamps == nil {
+		stamps = processBranchStamps
+	}
 
 	// No template configured - use default behavior for backward compatibility
 	if template == "" {
-		return FormatGeneratedBranchName(name, issue, processBranchStamps.next(clock))
+		return FormatGeneratedBranchName(name, issue, stamps.next(clock))
 	}
 
 	// Build template variables
@@ -882,7 +889,7 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	vars["{name}"] = name
 
 	// {timestamp}
-	vars["{timestamp}"] = processBranchStamps.next(clock)
+	vars["{timestamp}"] = stamps.next(clock)
 
 	// {issue} - issue ID without prefix
 	if issue != "" {

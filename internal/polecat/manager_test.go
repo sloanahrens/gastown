@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1321,11 +1322,19 @@ func TestBuildBranchName_SameMillisecondNamesDiffer(t *testing.T) {
 			m := newTestManager(r, w, nil, newNoDatabaseDB())
 			fixed := time.UnixMilli(1_800_000_000_000)
 			m.now = func() time.Time { return fixed }
+			// A stamp sequence of its own, so this test never moves the
+			// process-wide one.
+			m.stamps = &branchStampClock{}
 
 			first := m.buildBranchName("alpha", "gt-123")
 			second := m.buildBranchName("alpha", "gt-123")
-			if first == second {
-				t.Fatalf("two names built in one millisecond are both %q, want different names", first)
+			wantFirst := strconv.FormatInt(fixed.UnixMilli(), 36)
+			wantSecond := strconv.FormatInt(fixed.UnixMilli()+1, 36)
+			if !strings.HasSuffix(first, wantFirst) {
+				t.Fatalf("first name %q does not carry stamp %q", first, wantFirst)
+			}
+			if !strings.HasSuffix(second, wantSecond) {
+				t.Fatalf("second name %q does not carry stamp %q (the first plus one millisecond)", second, wantSecond)
 			}
 		})
 	}

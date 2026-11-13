@@ -26,9 +26,11 @@ type BranchNameMeta struct {
 // encoded (base36 UnixMilli). ok=false covers both a non-generated branch and
 // a suffix that isn't a generated timestamp at all — e.g. the "backup-<sha>"
 // form preserve-then-nuke writes, which contains a "-" and so is never a
-// valid base36 numeral. Callers must treat ok=false as "age unknown", never
-// as "old enough": this is the only source of age for the gt-527j remote
-// prune guard, which fails closed when it cannot establish a branch's age.
+// valid base36 numeral. A generated timestamp can run up to
+// branchStampMaxLead ahead of the real creation time. Callers must treat
+// ok=false as "age unknown", never as "old enough": this is the only source
+// of age for the gt-527j remote prune guard, which fails closed when it
+// cannot establish a branch's age.
 func (m BranchNameMeta) GeneratedAt() (time.Time, bool) {
 	if !m.Generated || m.Suffix == "" {
 		return time.Time{}, false
@@ -40,10 +42,17 @@ func (m BranchNameMeta) GeneratedAt() (time.Time, bool) {
 	return time.UnixMilli(ms), true
 }
 
+// branchStampMaxLead bounds how far a bumped stamp may run ahead of the clock.
+// A bump covers the few milliseconds of a same-millisecond collision or a
+// small backward step; a larger backward step means the clock was reset, and
+// the stamp follows the clock again instead of running ahead for minutes.
+const branchStampMaxLead = 2 * time.Second
+
 // branchStampClock hands out the base-36 UnixMilli stamp that generated branch
-// names carry. Each stamp is max(now, last+1), so two names built in one
-// millisecond never share a stamp: a repair that follows an add inside the
-// same millisecond would otherwise collide on an existing branch.
+// names carry. Two names built in one millisecond share no stamp (unless the
+// clock has just stepped back past branchStampMaxLead): a repair that follows
+// an add inside the same millisecond would otherwise collide on an existing
+// branch.
 type branchStampClock struct {
 	mu   sync.Mutex
 	last int64 // last stamp handed out, in UnixMilli
@@ -53,14 +62,17 @@ type branchStampClock struct {
 // from, so Managers built separately still never repeat a stamp.
 var processBranchStamps = &branchStampClock{}
 
-// next returns the stamp for the time now reports, bumped past the last one
-// handed out. A bumped stamp runs ahead of the clock until the clock catches
-// up, so GeneratedAt can report a time later than the real one.
+// next returns the stamp for the time now reports. When the clock has not
+// moved past the last stamp, next hands out last+1 instead, as long as that is
+// within branchStampMaxLead of the clock. A stamp that has been bumped runs
+// ahead of the clock until the clock catches up. If the clock stepped back
+// further than that, next returns the clock reading, so a duplicate is possible
+// only for two names in one millisecond right after such a step.
 func (c *branchStampClock) next(now func() time.Time) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ms := now().UnixMilli()
-	if ms <= c.last {
+	if ms <= c.last && c.last+1-ms <= branchStampMaxLead.Milliseconds() {
 		ms = c.last + 1
 	}
 	c.last = ms
