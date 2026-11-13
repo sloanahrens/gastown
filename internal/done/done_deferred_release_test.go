@@ -39,12 +39,13 @@ func deferredReleaseRun(t *testing.T, seen *seenDoneEvent, bd beads.Client, env 
 	return r
 }
 
-// releaseFailClient fails the read or the write of the work bead, so a test
-// can drive the release's refusal branches.
+// releaseFailClient fails the read of the work bead, its guarded release, or
+// its DEFERRED note, so a test can drive the release's refusal branches.
 type releaseFailClient struct {
 	beads.Client
-	showErr   error
-	updateErr error
+	showErr     error
+	transferErr error
+	noteErr     error
 }
 
 func (c releaseFailClient) Show(id string) (*beads.Issue, error) {
@@ -54,11 +55,37 @@ func (c releaseFailClient) Show(id string) (*beads.Issue, error) {
 	return c.Client.Show(id)
 }
 
-func (c releaseFailClient) Update(id string, opts beads.UpdateOptions) error {
-	if c.updateErr != nil {
-		return c.updateErr
+func (c releaseFailClient) TransferIfAssignee(id, expected, status, assignee string) (bool, error) {
+	if c.transferErr != nil {
+		return false, c.transferErr
 	}
+	return c.Client.TransferIfAssignee(id, expected, status, assignee)
+}
+
+func (c releaseFailClient) AppendNotes(id, note string) error {
+	if c.noteErr != nil {
+		return c.noteErr
+	}
+	return c.Client.AppendNotes(id, note)
+}
+
+// releaseRaceClient lets another actor claim the bead just before the release
+// writes it, the read-then-write window the guard has to close. onWrite runs
+// for the release's guarded transfer (and for any plain update, so the test
+// also goes red against a forced write after the stale read).
+type releaseRaceClient struct {
+	beads.Client
+	onWrite func()
+}
+
+func (c releaseRaceClient) Update(id string, opts beads.UpdateOptions) error {
+	c.onWrite()
 	return c.Client.Update(id, opts)
+}
+
+func (c releaseRaceClient) TransferIfAssignee(id, expected, status, assignee string) (bool, error) {
+	c.onWrite()
+	return c.Client.TransferIfAssignee(id, expected, status, assignee)
 }
 
 // TestDeferredExitReleasesTheBeadItPaused: a DEFERRED exit returns the bead
@@ -231,7 +258,7 @@ func TestDeferredExitLeavesAWorkflowStepAlone(t *testing.T) {
 }
 
 // TestDeferredExitRefusesAReleaseItCannotMake: a bead the release cannot read
-// or write fails the exit, and the bead keeps the seat's claim with no DEFERRED
+// or free fails the exit, and the bead keeps the seat's claim with no DEFERRED
 // note. The exit is never reported clean over a bead the release did not free.
 func TestDeferredExitRefusesAReleaseItCannotMake(t *testing.T) {
 	t.Parallel()
@@ -246,9 +273,9 @@ func TestDeferredExitRefusesAReleaseItCannotMake(t *testing.T) {
 			},
 		},
 		{
-			name: "a write that fails",
+			name: "a guarded release that fails",
 			wrap: func(c beads.Client) beads.Client {
-				return releaseFailClient{Client: c, updateErr: errors.New("bd update: store locked")}
+				return releaseFailClient{Client: c, transferErr: errors.New("bd update: store locked")}
 			},
 		},
 	}
@@ -273,5 +300,117 @@ func TestDeferredExitRefusesAReleaseItCannotMake(t *testing.T) {
 				t.Errorf("notes = %q, want no DEFERRED note from a failed release", got.Notes)
 			}
 		})
+	}
+}
+
+// TestDeferredExitNoteCarriesTheReasonTheSeatPassed: the DEFERRED note names
+// the reason the seat passed (its --finding texts), and says only that the work
+// paused when the seat passed none.
+func TestDeferredExitNoteCarriesTheReasonTheSeatPassed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		findings []string
+		want     []string
+	}{
+		{
+			name:     "one reason",
+			findings: []string{"blocked on the upstream schema"},
+			want:     []string{"DEFERRED by " + releaseSeat + ": blocked on the upstream schema; the bead is open and unassigned"},
+		},
+		{
+			name:     "every reason",
+			findings: []string{"blocked on the upstream schema", "needs an operator decision"},
+			want:     []string{"blocked on the upstream schema; needs an operator decision"},
+		},
+		{
+			name: "no reason passed",
+			want: []string{"DEFERRED by " + releaseSeat + ": work paused; the bead is open and unassigned"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New(beadsfake.WithPrefix("gt"))
+			db.Seed(releaseBead(string(beads.StatusInProgress), releaseSeat))
+			var seen seenDoneEvent
+			r := deferredReleaseRun(t, &seen, db, nil)
+			r.findings = tc.findings
+			if err := reportDone(r, ExitDeferred); err != nil {
+				t.Fatalf("reportDone(DEFERRED): %v", err)
+			}
+			got, err := db.Show(releaseBeadID)
+			if err != nil {
+				t.Fatalf("show %s: %v", releaseBeadID, err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got.Notes, want) {
+					t.Errorf("notes = %q, want them to contain %q", got.Notes, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDeferredExitLeavesABeadAnotherActorTakesMidRelease: a claim another actor
+// makes between the release's read and its write is not cleared, and the exit
+// is not an error: the bead is no longer this seat's to release.
+func TestDeferredExitLeavesABeadAnotherActorTakesMidRelease(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(releaseBead(string(beads.StatusInProgress), releaseSeat))
+	inProgress := string(beads.StatusInProgress)
+	racer := releaseOther
+	claim := func() {
+		if err := db.Update(releaseBeadID, beads.UpdateOptions{
+			Status:   &inProgress,
+			Assignee: &racer,
+			Force:    true,
+		}); err != nil {
+			t.Fatalf("seeding the racing claim: %v", err)
+		}
+	}
+	var seen seenDoneEvent
+	r := deferredReleaseRun(t, &seen, releaseRaceClient{Client: db, onWrite: claim}, nil)
+	if err := reportDone(r, ExitDeferred); err != nil {
+		t.Fatalf("reportDone(DEFERRED) over a bead another actor took: %v, want nil", err)
+	}
+	got, err := db.Show(releaseBeadID)
+	if err != nil {
+		t.Fatalf("show %s: %v", releaseBeadID, err)
+	}
+	if got.Status != inProgress || got.Assignee != releaseOther {
+		t.Errorf("bead = status %q assignee %q, want the racing claim kept", got.Status, got.Assignee)
+	}
+	if strings.Contains(got.Notes, "DEFERRED by") {
+		t.Errorf("notes = %q, want no DEFERRED note on a bead the release did not free", got.Notes)
+	}
+}
+
+// TestDeferredExitReportsANoteItCannotWrite: a note the release cannot append
+// fails the exit after the bead was freed, so the release is not reported clean
+// without its reason. A re-run appends the note, since the freed bead is
+// releasable again.
+func TestDeferredExitReportsANoteItCannotWrite(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(releaseBead(string(beads.StatusInProgress), releaseSeat))
+	var seen seenDoneEvent
+	r := deferredReleaseRun(t, &seen, releaseFailClient{
+		Client:  db,
+		noteErr: errors.New("bd update: store locked"),
+	}, nil)
+	if err := reportDone(r, ExitDeferred); err == nil {
+		t.Fatal("reportDone(DEFERRED) = nil, want the failed note returned")
+	}
+	got, err := db.Show(releaseBeadID)
+	if err != nil {
+		t.Fatalf("show %s: %v", releaseBeadID, err)
+	}
+	if got.Status != string(beads.StatusOpen) || got.Assignee != "" {
+		t.Errorf("bead = status %q assignee %q, want it released despite the failed note", got.Status, got.Assignee)
+	}
+	if strings.Contains(got.Notes, "DEFERRED by") {
+		t.Errorf("notes = %q, want no DEFERRED note from a failed write", got.Notes)
 	}
 }
