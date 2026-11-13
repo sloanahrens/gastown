@@ -810,3 +810,20 @@ func TestPendingSandboxReadWaitsForAnOutstandingRead(t *testing.T) {
 		t.Errorf("pod reads = %d, want the held read and one fresh read", n)
 	}
 }
+
+// TestCollectPendingSandboxPodsNeverReportsItsOwnPreviousReadOutstanding: a read
+// whose runner has returned is not outstanding. The runner goroutine closes the
+// namespace's returned channel before it sends the reply, so the next tick's read,
+// which can start the moment the caller has the reply, never finds the finished
+// read still outstanding (the gate failed on it under load, gt-wot51s).
+func TestCollectPendingSandboxPodsNeverReportsItsOwnPreviousReadOutstanding(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	f.reply = cliReply{stdout: `{"items":[]}`}
+	for i := 0; i < 3000; i++ {
+		f.src.now = pendingSandboxNow.Add(time.Duration(i) * time.Second)
+		if _, err := f.collect(t); err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+	}
+}

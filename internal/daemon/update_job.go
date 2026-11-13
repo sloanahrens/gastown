@@ -262,8 +262,13 @@ func (d *Daemon) launchUpdateJobBounded(settings config.UpdateSettings, sha stri
 
 	done := make(chan error, 1)
 	go func() {
-		defer close(returned)
-		done <- d.launchUpdateJob(ctx, settings, sha)
+		err := d.launchUpdateJob(ctx, settings, sha)
+		// The create has returned, so it is no longer outstanding. This comes before
+		// the send: the caller can take the answer and attempt the next launch at
+		// once, and a close that waited for the goroutine to finish would let that
+		// attempt find this create still outstanding.
+		close(returned)
+		done <- err
 	}()
 	select {
 	case err := <-done:
