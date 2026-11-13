@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/update"
@@ -100,10 +101,12 @@ func (p *updateProbes) InstalledSHA(context.Context) (string, error) {
 	return sha, nil
 }
 
-// MainSHA is the tip of origin's main, read with ls-remote. It never fetches:
-// nothing in the town's checkouts fetches except the installer.
+// MainSHA is the tip of origin's main, read with ls-remote through the rig's
+// bare repository under the town root. It never fetches: nothing in the town's
+// checkouts fetches except the installer. The source checkout is not read, so
+// a checkout that lags or is not a repository cannot change the answer.
 func (p *updateProbes) MainSHA(ctx context.Context) (string, error) {
-	return update.RemoteMainSHA(ctx, p.env.Run, p.env.RepoRoot)
+	return update.RemoteMainSHA(ctx, p.env.Run, constants.RigBareRepoPath(filepath.Join(p.env.TownRoot, "gastown")))
 }
 
 // ArchiveBehind is the archive gap B10b2 supplies: how many commits and events

@@ -7,12 +7,14 @@ import (
 	"testing"
 )
 
-// TestRemoteMainSHA: the tip is the first field of the first ls-remote line;
-// a failed run, a nonzero exit or an empty answer is an error, never a blank.
+// TestRemoteMainSHA: the tip is the first field of the first ls-remote line,
+// read through the bare repository's --git-dir; a failed run, a nonzero exit
+// or an empty answer is an error that names the bare repository, never a blank.
 func TestRemoteMainSHA(t *testing.T) {
 	t.Parallel()
 
 	const tip = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	const bare = "/town/gastown/.repo.git"
 	tests := []struct {
 		name    string
 		output  string
@@ -37,20 +39,23 @@ func TestRemoteMainSHA(t *testing.T) {
 			run := func(_ context.Context, dir string, _ []string, name string, args ...string) (string, int, error) {
 				gotName, gotArgs = name, args
 				if dir != "" {
-					t.Errorf("ran in dir %q, want the repo root passed as -C", dir)
+					t.Errorf("ran in dir %q, want the bare repository passed as --git-dir", dir)
 				}
 				return tt.output, tt.exit, tt.err
 			}
 
-			sha, err := RemoteMainSHA(context.Background(), run, "/town/repo")
+			sha, err := RemoteMainSHA(context.Background(), run, bare)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("RemoteMainSHA() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if sha != tt.want {
 				t.Errorf("RemoteMainSHA() sha = %q, want %q", sha, tt.want)
 			}
-			if gotName != "git" || strings.Join(gotArgs, " ") != "-C /town/repo ls-remote origin refs/heads/main" {
-				t.Errorf("ran %s %v, want git -C /town/repo ls-remote origin refs/heads/main", gotName, gotArgs)
+			if err != nil && !strings.Contains(err.Error(), bare) {
+				t.Errorf("RemoteMainSHA() error = %q, want it to name the bare repository %s", err, bare)
+			}
+			if gotName != "git" || strings.Join(gotArgs, " ") != "--git-dir "+bare+" ls-remote origin refs/heads/main" {
+				t.Errorf("ran %s %v, want git --git-dir %s ls-remote origin refs/heads/main", gotName, gotArgs, bare)
 			}
 		})
 	}
