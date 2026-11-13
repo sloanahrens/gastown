@@ -89,6 +89,27 @@ type ExecInstaller struct {
 	ExtraEnv []string
 }
 
+// HostInstallSkipNote is what a plan line or a step's detail says when the host
+// install is skipped for reason.
+func HostInstallSkipNote(reason string) string {
+	return "host install skipped: " + reason
+}
+
+// SkippedInstaller stands in for the host install when the daemon runs as a
+// pod: there is no Mac build to make here, so it installs nothing and reports
+// a successful verdict whose reason names the skip. The digest swap that
+// follows is the install.
+type SkippedInstaller struct {
+	// Reason says why the host install is skipped.
+	Reason string
+}
+
+// Install builds and runs nothing. The verdict is a noop, which ClassifyInstall
+// reads as a success, and it names no commit because nothing was installed here.
+func (s SkippedInstaller) Install(_ context.Context, _ string) (InstallResult, error) {
+	return InstallResult{Event: "noop", Reason: HostInstallSkipNote(s.Reason)}, nil
+}
+
 // ExecRun is the production RunFunc: it runs name with args in dir and reports
 // the combined output and exit status. A non-nil env is the complete
 // environment; a nil env inherits the process environment.

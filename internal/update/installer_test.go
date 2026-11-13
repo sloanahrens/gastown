@@ -244,6 +244,23 @@ func TestExecInstallerRunsMakeThenTheInstaller(t *testing.T) {
 	}
 }
 
+// TestSkippedInstallerSucceedsAndNamesTheSkip holds the stand-in for a host
+// install a pod target skips: it reports success, so the digest swap that
+// follows runs, and the verdict's reason is the skip the step prints.
+func TestSkippedInstallerSucceedsAndNamesTheSkip(t *testing.T) {
+	t.Parallel()
+	res, err := SkippedInstaller{Reason: "pod target"}.Install(context.Background(), "abc1234")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := ClassifyInstall(res); got != ResultOK {
+		t.Errorf("ClassifyInstall = %q, want %q", got, ResultOK)
+	}
+	if want := "host install skipped: pod target"; res.Reason != want {
+		t.Errorf("Reason = %q, want %q", res.Reason, want)
+	}
+}
+
 func TestExecInstallerErrors(t *testing.T) {
 	t.Parallel()
 	t.Run("a failed make is an error with the output tail and the installer is not run", func(t *testing.T) {

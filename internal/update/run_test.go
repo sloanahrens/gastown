@@ -417,6 +417,71 @@ func TestRunDryRunPrintsThePlanAndWritesNothing(t *testing.T) {
 	})
 }
 
+// TestRunDryRunNamesTheSkippedHostInstall holds the plan line of a run whose host
+// install is skipped: the install step still runs and its line names the skip,
+// and a selection that drops the step leaves no skip to name.
+func TestRunDryRunNamesTheSkippedHostInstall(t *testing.T) {
+	t.Parallel()
+	want := HostInstallSkipNote("pod target")
+
+	t.Run("a running install step names the skip", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.opts.DryRun = true
+		f.opts.HostInstallSkipped = "pod target"
+
+		st, err := f.run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		install := step(t, st, StepInstall)
+		if !install.WillRun {
+			t.Fatalf("install step does not run in this fixture: %+v", install)
+		}
+		if !strings.Contains(install.Reason, want) {
+			t.Errorf("install reason = %q, want it to name %q", install.Reason, want)
+		}
+		if !strings.Contains(f.log.String(), want) {
+			t.Errorf("plan log is missing %q:\n%s", want, f.log.String())
+		}
+	})
+
+	t.Run("a skipped install step names nothing", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.opts.DryRun = true
+		f.opts.HostInstallSkipped = "pod target"
+		f.opts.Skip = map[StepName]bool{StepInstall: true}
+
+		st, err := f.run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		install := step(t, st, StepInstall)
+		if install.WillRun {
+			t.Fatalf("install step runs under --skip install: %+v", install)
+		}
+		if strings.Contains(install.Reason, want) {
+			t.Errorf("skipped install reason = %q, want no skip note", install.Reason)
+		}
+	})
+
+	// The planner always gives a running install step a reason, so an empty one
+	// is reached only by calling the note directly: the plan line must then carry
+	// the note with no separator in front of it.
+	t.Run("an install step with no prior reason has no leading separator", func(t *testing.T) {
+		t.Parallel()
+		steps := []StepRecord{{Name: StepInstall, WillRun: true}}
+		noteHostInstallSkipped(steps, "pod target")
+
+		var line bytes.Buffer
+		writePlan(&line, steps)
+		if want := "install: run: " + want + "\n"; line.String() != want {
+			t.Errorf("plan line = %q, want %q", line.String(), want)
+		}
+	})
+}
+
 func TestRunInstallPathRecordsEveryStep(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)
