@@ -101,6 +101,108 @@ func TestParseBranchName(t *testing.T) {
 	}
 }
 
+// stampMillis decodes a stamp branchStampClock.next returned.
+func stampMillis(t *testing.T, stamp string) int64 {
+	t.Helper()
+	ms, err := strconv.ParseInt(stamp, 36, 64)
+	if err != nil {
+		t.Fatalf("stamp %q is not a base-36 integer: %v", stamp, err)
+	}
+	return ms
+}
+
+func TestBranchStampClock_NextIsStrictlyIncreasing(t *testing.T) {
+	t.Parallel()
+	base := time.UnixMilli(1_800_000_000_000)
+	tests := []struct {
+		name     string
+		readings []time.Duration // clock reading for each call, after base
+		want     []int64         // stamp for each call, in ms after base
+	}{
+		{
+			name:     "same millisecond bumps by one",
+			readings: []time.Duration{0, 0},
+			want:     []int64{0, 1},
+		},
+		{
+			name:     "three calls in one millisecond bump by one each",
+			readings: []time.Duration{0, 0, 0},
+			want:     []int64{0, 1, 2},
+		},
+		{
+			name:     "small backward skew bumps by one",
+			readings: []time.Duration{0, -5 * time.Millisecond},
+			want:     []int64{0, 1},
+		},
+		{
+			name:     "backward step beyond the lead follows the clock",
+			readings: []time.Duration{0, -10 * time.Minute},
+			want:     []int64{0, -600_000},
+		},
+		{
+			name:     "clock advanced keeps its own reading",
+			readings: []time.Duration{0, 10 * time.Millisecond},
+			want:     []int64{0, 10},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// A local clock, so no other test moves its last stamp.
+			c := &branchStampClock{}
+			for i, reading := range tt.readings {
+				at := base.Add(reading)
+				got := stampMillis(t, c.next(func() time.Time { return at }))
+				if want := base.UnixMilli() + tt.want[i]; got != want {
+					t.Fatalf("call %d stamp = %d, want %d", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBranchStampClock_BumpIsBoundedByLead(t *testing.T) {
+	t.Parallel()
+	base := time.UnixMilli(1_800_000_000_000)
+	c := &branchStampClock{}
+	c.next(func() time.Time { return base })
+	// A step back that keeps the bump within the lead is still bumped.
+	edge := base.Add(-branchStampMaxLead + time.Millisecond)
+	got := stampMillis(t, c.next(func() time.Time { return edge }))
+	if want := base.UnixMilli() + 1; got != want {
+		t.Fatalf("stamp inside the lead = %d, want the bumped %d", got, want)
+	}
+	// The last stamp is now base+1, so reaching past would need a bump beyond
+	// the lead: the stamp follows the clock instead of running ahead.
+	past := base.Add(-branchStampMaxLead)
+	got = stampMillis(t, c.next(func() time.Time { return past }))
+	if want := past.UnixMilli(); got != want {
+		t.Fatalf("stamp past the lead = %d, want the clock reading %d", got, want)
+	}
+}
+
+func TestBranchStampClock_StampParsesAsGeneratedAt(t *testing.T) {
+	t.Parallel()
+	base := time.UnixMilli(1_800_000_000_000)
+	c := &branchStampClock{}
+	now := func() time.Time { return base }
+	c.next(now)
+	// The second call at the same millisecond is bumped one millisecond past the clock.
+	stamp := c.next(now)
+
+	meta, ok := ParseGeneratedBranchName(FormatGeneratedBranchName("alpha", "gt-abc", stamp))
+	if !ok {
+		t.Fatalf("ParseGeneratedBranchName did not parse a branch built from stamp %q", stamp)
+	}
+	got, ok := meta.GeneratedAt()
+	if !ok {
+		t.Fatalf("GeneratedAt() ok = false for stamp %q, want true", stamp)
+	}
+	if want := base.Add(time.Millisecond); !got.Equal(want) {
+		t.Fatalf("GeneratedAt() = %v, want %v", got, want)
+	}
+}
+
 func TestBranchNameMetaGeneratedAt(t *testing.T) {
 	t.Parallel()
 	now := time.Now().Truncate(time.Millisecond)

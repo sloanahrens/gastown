@@ -209,6 +209,12 @@ type Manager struct {
 	// the worktree; nil means os.Getwd. A test sets it instead of moving the
 	// whole process with a chdir.
 	getwd func() (string, error)
+	// now is the clock buildBranchName stamps branch names with; nil means
+	// time.Now. A test sets it to fix the millisecond.
+	now func() time.Time
+	// stamps is the sequence branch-name stamps come from; nil means the
+	// process-wide sequence. A test sets its own so it never moves the shared one.
+	stamps *branchStampClock
 	// clock paces the Dolt retry backoff; nil is the real clock.
 	clock clockwork.Clock
 	// recoverReadOnly restarts a read-only Dolt server; nil means
@@ -850,11 +856,18 @@ type AddOptions struct {
 // - polecat/{name}-{timestamp} otherwise
 func (m *Manager) buildBranchName(name, issue string) string {
 	template := m.rig.GetStringConfig("polecat_branch_template")
+	clock := m.now
+	if clock == nil {
+		clock = time.Now
+	}
+	stamps := m.stamps
+	if stamps == nil {
+		stamps = processBranchStamps
+	}
 
 	// No template configured - use default behavior for backward compatibility
 	if template == "" {
-		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 36)
-		return FormatGeneratedBranchName(name, issue, timestamp)
+		return FormatGeneratedBranchName(name, issue, stamps.next(clock))
 	}
 
 	// Build template variables
@@ -868,7 +881,7 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	}
 
 	// {year} and {month}
-	now := time.Now()
+	now := clock()
 	vars["{year}"] = now.Format("06")  // YY format
 	vars["{month}"] = now.Format("01") // MM format
 
@@ -876,7 +889,7 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	vars["{name}"] = name
 
 	// {timestamp}
-	vars["{timestamp}"] = strconv.FormatInt(now.UnixMilli(), 36)
+	vars["{timestamp}"] = stamps.next(clock)
 
 	// {issue} - issue ID without prefix
 	if issue != "" {
