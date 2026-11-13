@@ -110,6 +110,56 @@ func TestDeferredDoneLeavesReadyToLandBeadUntouched(t *testing.T) {
 	}
 }
 
+// TestDeferredDoneClearsTheHookInTheSameStateWrite: a DEFERRED exit clears the
+// agent bead's hook_bead in the one write that also carries the completion
+// metadata (cleanup_status). The seat reads stuck, not done: patrol_scan
+// restarts a stuck seat from its DEFERRED exit (gt-ks62m).
+func TestDeferredDoneClearsTheHookInTheSameStateWrite(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID:       "gt-base-123",
+		Title:    "the work",
+		Type:     "task",
+		Status:   string(beads.StatusInProgress),
+		Assignee: "gastown/polecats/nux",
+	})
+
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge:  func(string, string) {},
+	}
+	clean := "clean"
+	pending := beads.AgentFieldUpdates{CleanupStatus: &clean}
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitDeferred, "gt-base-123", pending); err != nil {
+		t.Fatalf("deferred gt done: %v", err)
+	}
+
+	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
+	if fields.HookBead != "" {
+		t.Errorf("hook_bead = %q, want it cleared by the DEFERRED exit", fields.HookBead)
+	}
+	if fields.CleanupStatus != clean {
+		t.Errorf("cleanup_status = %q, want %q: the completion metadata rides in the same write as the hook clear", fields.CleanupStatus, clean)
+	}
+	if fields.AgentState != string(beads.AgentStateStuck) {
+		t.Errorf("agent_state = %q, want stuck: patrol_scan recovers a seat from its DEFERRED exit", fields.AgentState)
+	}
+}
+
 // TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint: a completed gt done
 // on a rework bead still sitting on the head its rejection names skips the
 // close (the close-time invariant, gt-6hmz) and leaves the bead open — but the

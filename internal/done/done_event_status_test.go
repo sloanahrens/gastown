@@ -3,12 +3,16 @@ package done
 import (
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/role"
 )
 
 // recordDoneTestRun is a run with just what reportDone reads before it writes
-// the agent bead: the event write is what the tests here read.
+// the agent bead: the event write is what the tests here read. A DEFERRED exit
+// also reads the work bead, so the run's store is an empty fake, where the bead
+// is absent and nothing is released, and no bd process starts.
 func recordDoneTestRun(seen *seenDoneEvent) *doneRun {
 	return &doneRun{
 		issueID: "gt-work",
@@ -20,6 +24,7 @@ func recordDoneTestRun(seen *seenDoneEvent) *doneRun {
 			seen.eventType, seen.actor, seen.payload = eventType, actor, payload
 			return nil
 		},
+		openSource: func(string, string) beads.Client { return beadsfake.New() },
 	}
 }
 
