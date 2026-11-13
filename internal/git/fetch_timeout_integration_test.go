@@ -127,6 +127,29 @@ func TestIntegrationFetchRefspecWithTimeoutBoundsAStallingHTTPRemote(t *testing.
 	assertBoundedAndHelperGone(t, err, time.Since(start), stallingRemoteBound, conns())
 }
 
+// FetchBranch takes no timeout argument: the bound it runs under is the
+// package's remoteQueryTimeout, so this drives the crew submit path's fetch
+// against a real stalled socket at the bound it ships with. It is the slowest
+// of these three by design; the stall waits out the production bound.
+func TestIntegrationFetchBranchBoundsAStallingHTTPRemote(t *testing.T) {
+	url, conns := stallingHTTPRemote(t)
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	g := NewGitWithDir(dir, "")
+	start := time.Now()
+	err := g.FetchBranch(url, "main")
+	assertBoundedAndHelperGone(t, err, time.Since(start), remoteQueryTimeout, conns())
+	// FetchBranch wraps the timeout with the remote and the branch, so the
+	// caller's message says which fetch stalled.
+	for _, want := range []string{url, "main"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("FetchBranch error %q does not name %q", err, want)
+		}
+	}
+}
+
 // ls-remote against the same stalling http remote is bounded the same way.
 func TestIntegrationListRemoteRefsWithHashesTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
 	url, conns := stallingHTTPRemote(t)
