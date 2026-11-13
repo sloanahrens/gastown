@@ -444,13 +444,16 @@ func TestDigestInstallEscalatesWhenTheSwapCannotBePutBack(t *testing.T) {
 		Path:  values,
 		Images: update.ImageDeps{
 			Ledger: ledger,
-			Swap:   swap,
-			Verify: &rollbackTestSwap{},
-			Clock:  clock,
-			Sleep:  clock.sleep,
-			Wait:   updateRestartWait,
-			Poll:   updateRestartPoll,
-			Notify: notes,
+			// The container daemon has no Deployment to ask, so its record is the
+			// pair it runs.
+			Running: update.RecordedRunningPair{Ledger: ledger},
+			Swap:    swap,
+			Verify:  &rollbackTestSwap{},
+			Clock:   clock,
+			Sleep:   clock.sleep,
+			Wait:    updateRestartWait,
+			Poll:    updateRestartPoll,
+			Notify:  notes,
 		},
 	}
 	res, err := inst.Install(context.Background(), newPair.Commit)
