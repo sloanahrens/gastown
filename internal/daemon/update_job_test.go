@@ -863,3 +863,22 @@ func TestKubectlUpdateJobRefusesNoRequestTimeout(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(dir, name+".yaml"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "the manifest was written for a create that was refused")
 }
+
+// TestLaunchUpdateJobBoundedNeverFindsItsOwnFinishedCreateOutstanding: a create
+// whose client has returned is not outstanding. The goroutine closes the
+// outstanding channel before it sends the answer, so the next attempt, which
+// can start the moment the caller has the answer, never gets errUpdateJobOutstanding
+// for a create that is over. The gate failed on the ordering under load
+// (TestUpdateJobRefusalsBackOff, gt-wot51s).
+func TestLaunchUpdateJobBoundedNeverFindsItsOwnFinishedCreateOutstanding(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.cluster.refuse = errors.New("cluster unreachable")
+	settings := config.UpdateSettings{MaxRuntime: time.Hour}
+	for i := 0; i < 3000; i++ {
+		err := r.d.launchUpdateJobBounded(settings, r.commits[2])
+		if errors.Is(err, errUpdateJobOutstanding) {
+			t.Fatalf("attempt %d found the earlier, finished create outstanding", i)
+		}
+	}
+}
