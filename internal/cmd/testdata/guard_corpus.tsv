@@ -585,3 +585,6 @@ test_scope	polecat	"grep -rn TODO {town}/gastown/mayor"	allow		gt-3lvcjz.30	2552
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads && echo ok"	refuse	targets testcontainers-backed package(s)	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
 test_scope	polecat	"echo ok && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
 dangerous	polecat	"echo ok && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
+dangerous	polecat	"seq 1 300 | xargs -I{} bash -c 'gt done'"	refuse	Never poll the slot or script a gt done retry	gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
+container_suite	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
+test_scope	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
