@@ -95,7 +95,7 @@ func TestSupervisorFileIsFor(t *testing.T) {
 	// fileOf writes content to a supervisor file under a temporary directory.
 	fileOf := func(t *testing.T, content string) string {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), launchdPlistName)
+		path := filepath.Join(t.TempDir(), "daemon.plist")
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatalf("writing the supervisor file: %v", err)
 		}

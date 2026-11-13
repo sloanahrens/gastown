@@ -28,7 +28,7 @@ var guardSelf = Owner{Kind: OwnerKindManual, ID: "fixture-host:4242"}
 
 // guardLaunchd is the owner a launchd job an older build recorded. No current
 // build writes a launchd owner, so the guard reads it as unknown.
-var guardLaunchd = Owner{Kind: "launchd", ID: templates.LaunchdLabel}
+var guardLaunchd = Owner{Kind: "launchd", ID: "com.gastown.daemon"}
 
 // guardTown makes a town root with the daemon directory a start expects.
 func guardTown(t *testing.T) string {

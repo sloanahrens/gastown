@@ -15,18 +15,11 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// LaunchdLabel is the launchd job label the rendered plist carries.
-const LaunchdLabel = "com.gastown.daemon"
-
-// launchdPlistName is the file that label is installed as, under
-// ~/Library/LaunchAgents.
-const launchdPlistName = LaunchdLabel + ".plist"
-
 // SystemdUnit is the unit name the rendered systemd unit file carries.
 const SystemdUnit = "gastown-daemon.service"
 
 // SupervisorReader reads the live state of the supervisor job of the given
-// kind ("launchd" / "systemd"); SupervisorJobState in production.
+// kind ("systemd"); SupervisorJobState in production.
 type SupervisorReader func(kind string) SupervisorState
 
 // SupervisorState is what the service manager is doing with the supervisor
@@ -36,7 +29,7 @@ type SupervisorReader func(kind string) SupervisorState
 // daemon, losing the flock and exiting non-zero every ThrottleInterval
 // (gt-sq9e).
 type SupervisorState struct {
-	Kind     string // "launchd", "systemd", "container", or "" where no supervisor exists
+	Kind     string // "systemd", "container", or "" where no supervisor exists
 	Loaded   bool   // the service manager knows the job, or docker knows the container
 	PID      int    // the process the job runs; 0 when it has none, and always 0 for a container
 	Runs     int    // how many times the service manager has spawned it
@@ -70,18 +63,14 @@ type supervisorHost struct {
 var realHost = supervisorHost{goos: runtime.GOOS, getenv: os.Getenv, homeDir: os.UserHomeDir, probe: runSupervisorProbe}
 
 // SupervisorFilePath returns the path of the supervisor file this host would
-// use and the kind it belongs to ("launchd" / "systemd"), or ("", "") on a
-// host with no supported supervisor. The file need not exist.
+// use and the kind it belongs to ("systemd"), or ("", "") on a host with no
+// supported supervisor. The file need not exist.
 func SupervisorFilePath() (path, kind string) {
 	return realHost.filePath()
 }
 
 func (h supervisorHost) filePath() (path, kind string) {
 	switch h.goos {
-	case "darwin":
-		if homeDir, err := h.homeDir(); err == nil {
-			return filepath.Join(homeDir, "Library", "LaunchAgents", launchdPlistName), "launchd"
-		}
 	case "linux":
 		if p, err := h.systemdUnitPath(); err == nil {
 			return p, "systemd"
@@ -101,9 +90,6 @@ func SupervisorJobState(kind string) SupervisorState {
 
 func (h supervisorHost) jobState(kind string) SupervisorState {
 	switch kind {
-	case "launchd":
-		argv := []string{"launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), LaunchdLabel)}
-		return probeSupervisorJob(h.probe, kind, argv, parseLaunchdPrint, launchdJobIsMissing)
 	case "systemd":
 		argv := []string{"systemctl", "--user", "show",
 			"-p", "LoadState", "-p", "MainPID", "-p", "NRestarts", "-p", "ExecMainStatus", "-p", "InvocationID", SystemdUnit}
@@ -276,37 +262,6 @@ func runSupervisorProbe(argv []string) (string, error) {
 	return string(out), err
 }
 
-// parseLaunchdPrint reads 'launchctl print' output, which reports the live
-// fields as "pid = N", "runs = N" and "last exit code = N" among many others.
-// A job that is loaded but not running prints no pid: pid 0 with Loaded is
-// that state, not a failure to read it.
-func parseLaunchdPrint(out string) (loaded bool, pid, runs, lastExit int) {
-	loaded = true // launchctl only prints a job it knows
-	lastExit = -1
-	for _, line := range strings.Split(out, "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), " = ")
-		if !ok {
-			continue
-		}
-		switch key {
-		case "pid":
-			pid = atoiOr(value, 0)
-		case "runs":
-			runs = atoiOr(value, 0)
-		case "last exit code":
-			lastExit = atoiOr(value, -1)
-		}
-	}
-	return loaded, pid, runs, lastExit
-}
-
-// launchdJobIsMissing reports whether launchctl failed because the job is not
-// loaded in the user's gui domain ("Could not find service ... in domain for
-// user gui: 501", exit 113) rather than from a fault of its own.
-func launchdJobIsMissing(out string, err error) bool {
-	return strings.Contains(out, "Could not find service") || strings.Contains(err.Error(), "Could not find service")
-}
-
 // parseSystemctlShow reads 'systemctl show' output ("Key=Value" lines): a unit
 // the manager does not know reports LoadState=not-found, and a loaded one that
 // is not running reports MainPID=0.
@@ -383,8 +338,8 @@ func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 	recorded, xmlText := supervisorWorkingDirectory(string(data))
 	if recorded == "" {
 		// Present but not in the shape the templates render (hand-edited,
-		// older format): still a provisioned supervisor as far as launchd or
-		// systemd is concerned, so refusing beats treating it as absent.
+		// older format): still a provisioned supervisor as far as systemd is
+		// concerned, so refusing beats treating it as absent.
 		return false, fmt.Errorf("supervisor file %s has no WorkingDirectory; cannot tell which town it serves — fix or remove it", path)
 	}
 	// The spelling as written first: every file that has matched a town on it

@@ -2,6 +2,7 @@ package templates
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -13,7 +14,10 @@ func TestProvisionSupervisor_DarwinWritesNothing(t *testing.T) {
 	t.Parallel()
 	h := fakeHost(t, "darwin")
 	town := t.TempDir()
-	plistPath, _ := h.filePath()
+	home, err := h.homeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := h.provisionSupervisor(town)
 	if err != nil {
@@ -23,7 +27,7 @@ func TestProvisionSupervisor_DarwinWritesNothing(t *testing.T) {
 	if got != want {
 		t.Errorf("provision message = %q, want %q", got, want)
 	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Errorf("darwin provision left a file at %s (stat err = %v), want none", plistPath, err)
+	if _, err := os.Stat(filepath.Join(home, "Library")); !os.IsNotExist(err) {
+		t.Errorf("darwin provision wrote under HOME (stat err = %v), want nothing", err)
 	}
 }
