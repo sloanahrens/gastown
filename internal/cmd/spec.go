@@ -314,6 +314,7 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		CreatedAt:    issue.CreatedAt,
 		CreatedBy:    issue.CreatedBy,
 		Labels:       issue.Labels,
+		Metadata:     issue.Metadata,
 		Description:  issue.Description,
 		Design:       issue.Design,
 		Notes:        issue.Notes,
@@ -1692,6 +1693,13 @@ type specDispatchEnv struct {
 	// so the dispatcher does not sling that bead again on a kill's retries
 	// (gt-vaivp). Nil drops nothing.
 	DropTimeoutRetry func(beadID string) error
+	// RecordLockTimeout writes the consecutive assignee-lock-timeout count a
+	// deferred sling leaves on its bead, and ClearLockTimeout drops it when the
+	// bead's next outcome is not another timeout (gt-a4cdcd). A Record that
+	// fails or is unwired cannot bound the retries, so the sling labels the
+	// bead instead of deferring it again.
+	RecordLockTimeout func(beadID string, attempts int) error
+	ClearLockTimeout  func(beadID string) error
 	// BranchOnOrigin reports whether a bead's recorded resume branch still
 	// exists on the rig's origin. An error means the answer is unknown, and
 	// the candidate is left for the next tick (gt-gzhin.3).
@@ -1793,6 +1801,46 @@ type specDispatchEnv struct {
 type specLedgerFile struct {
 	Load func(path string) (*specdispatch.Ledger, error)
 	Save func(path string, ledger *specdispatch.Ledger) error
+}
+
+// specLockTimeoutCounter is the pair of writes a bead's consecutive
+// assignee-lock-timeout count lives behind, in the bead's metadata, for both
+// the tick and the background sling processes that carry the count across
+// ticks (gt-a4cdcd).
+func specLockTimeoutCounter(townRoot string) (record func(beadID string, attempts int) error, clear func(beadID string) error) {
+	store := func(id string) beads.Client {
+		return beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id))
+	}
+	record = func(id string, attempts int) error {
+		return store(id).Update(id, beads.UpdateOptions{
+			SetMetadata: []string{fmt.Sprintf("%s=%d", specdispatch.LockTimeoutAttemptsKey, attempts)},
+		})
+	}
+	clear = func(id string) error {
+		return store(id).Update(id, beads.UpdateOptions{
+			UnsetMetadata: []string{specdispatch.LockTimeoutAttemptsKey},
+		})
+	}
+	return record, clear
+}
+
+// recordLockTimeout writes a bead's consecutive assignee-lock-timeout count
+// through the env's writer. An env with no writer cannot bound the deferrals,
+// and the caller labels the bead instead (gt-a4cdcd).
+func (e specDispatchEnv) recordLockTimeout(beadID string, attempts int) error {
+	if e.RecordLockTimeout == nil {
+		return errors.New("no lock timeout counter is wired")
+	}
+	return e.RecordLockTimeout(beadID, attempts)
+}
+
+// clearLockTimeout drops a bead's consecutive assignee-lock-timeout count. An
+// env with no writer never recorded one, so there is nothing to clear.
+func (e specDispatchEnv) clearLockTimeout(beadID string) error {
+	if e.ClearLockTimeout == nil {
+		return nil
+	}
+	return e.ClearLockTimeout(beadID)
 }
 
 // inFlightCap is the number of slings the tick runs at once. An env that sets
@@ -2340,7 +2388,8 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// run together instead of one after another (the sling, not the
 		// reads, was the tick: 45-70 s each in series, 2026-10-21).
 		c.order = len(pending)
-		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, overrunNote: overrunNote, entry: entry})
+		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, overrunNote: overrunNote,
+			lockTimeouts: specdispatch.LockTimeoutAttempts(latest.Metadata), entry: entry})
 		slated[id] = true
 		budget.Bump(seat.Agent, budget.Now)
 	}
@@ -2527,7 +2576,12 @@ type specPendingSling struct {
 	// overrunNote is the overrun-stop flag the sling writes on its bead once it
 	// has dispatched it; empty for a bead outside the box (gt-b9j3o.4).
 	overrunNote string
-	entry       specDispatchEntry
+	// lockTimeouts is the consecutive assignee-lock-timeout count the bead
+	// carried when this sling was planned (the tick's last-moment re-read, or
+	// the job for a background sling): a timeout this sling hits is one more,
+	// and any other outcome clears it (gt-a4cdcd).
+	lockTimeouts int
+	entry        specDispatchEntry
 }
 
 // specSlingOutcome is what one sling produced, applied to the report in
@@ -2540,6 +2594,12 @@ type specSlingOutcome struct {
 	entry specDispatchEntry
 	label string      // a label to add to the bead, when set
 	notes [][2]string // Annotate key, text pairs
+	// recordLockTimeout is the consecutive assignee-lock-timeout count to
+	// write on the bead, 0 when this outcome owes none (gt-a4cdcd).
+	recordLockTimeout int
+	// clearLockTimeout drops the count a bead carries: the bead succeeded on
+	// this sling, or this failure or deferral broke the consecutive run.
+	clearLockTimeout bool
 	// refused is set when the sling was refused before it spawned, or after it
 	// rolled its spawn back: its charged seat is handed back. Any other sling
 	// that did not succeed keeps the charge for the tick (gt-pto2f).
@@ -2634,6 +2694,24 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 	case specSlingFailed:
 		report.Failed = append(report.Failed, o.entry)
 	}
+	if o.recordLockTimeout > 0 {
+		// A count that cannot be written is no bound at all: the next tick
+		// would read 0 and defer the bead forever, so the bead is labeled for
+		// a person instead of deferred on a retry nothing remembers (gt-a4cdcd).
+		if err := env.recordLockTimeout(o.entry.Bead, o.recordLockTimeout); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: recording the lock timeout count: %v", o.entry.Bead, err))
+			if o.label == "" {
+				o.label = specdispatch.DispatchFailedLabel
+			}
+		}
+	} else if o.clearLockTimeout {
+		// A clear that fails costs the next run its fresh count, never the
+		// sling's own outcome: the count that stays can only make a later
+		// timeout label the bead earlier.
+		if err := env.clearLockTimeout(o.entry.Bead); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: clearing the lock timeout count: %v", o.entry.Bead, err))
+		}
+	}
 	if o.label != "" {
 		if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
@@ -2711,6 +2789,12 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		if driftNote != "" {
 			o.entry.Line += " (" + driftNote + ")"
 		}
+		// Any outcome that is not this tick's assignee-lock timeout ends the
+		// bead's consecutive run: it either dispatched the bead or failed, held
+		// or deferred it for a reason of another kind (gt-a4cdcd).
+		if p.lockTimeouts > 0 && o.recordLockTimeout == 0 {
+			o.clearLockTimeout = true
+		}
 		return o
 	}
 	// A refusal for the lagging image stands for HoldFor: the slings behind it
@@ -2778,6 +2862,30 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		if errors.Is(err, ErrBondLockTimeout) {
 			entry.Line = fmt.Sprintf("%s: sling deferred, the town bond lock did not free: %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
+		// An assignee lock that never freed is the seat's contention, not the
+		// bead's defect: two slings admitted to one seat can pick the same free
+		// polecat name, and only one of them holds that polecat's hook write.
+		// The label this path would write next holds the bead out of the queue
+		// until a person clears it, so a lone timeout defers the bead and the
+		// next tick slings it again; the timeout that reaches
+		// LockTimeoutRetries consecutive runs is a lock that really is stuck,
+		// and it labels the bead (gt-a4cdcd).
+		if errors.Is(err, ErrAssigneeLockTimeout) {
+			lockAttempts := p.lockTimeouts + 1
+			if lockAttempts < specdispatch.LockTimeoutRetries {
+				entry.Line = fmt.Sprintf("%s: sling deferred, %s's hook write lock stayed held for its whole wait (%d of %d): %s",
+					id, seat.Agent, lockAttempts, specdispatch.LockTimeoutRetries, firstErrLine(err))
+				return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, recordLockTimeout: lockAttempts})
+			}
+			excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
+			failLine := fmt.Sprintf("%s: dispatch failed, %s's hook write lock stayed held on %d ticks in a row, so it is stuck: %s; %s",
+				id, seat.Agent, lockAttempts, firstErrLine(err), excluded)
+			entry.Line = failLine
+			note := specDispatchNotePrefix + failLine
+			// recordLockTimeout stays 0, so done() clears the count: a person
+			// who clears this label gives the bead a fresh set of retries.
+			return done(specSlingOutcome{kind: specSlingFailed, entry: entry, label: specdispatch.DispatchFailedLabel, notes: [][2]string{{note, note}}})
 		}
 		// A failed sling is not known to have spawned nothing: a hook or a
 		// session start can fail after it took effect, and the rollback is
@@ -3263,6 +3371,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	}
 	// The tick's bd reads, kept for the tick alone (gt-u8rbh).
 	reads := newSpecTickReads()
+	// The consecutive assignee-lock-timeout count, read on the bead's fresh
+	// read and written back when a timeout defers it (gt-a4cdcd).
+	recordLockTimeout, clearLockTimeout := specLockTimeoutCounter(townRoot)
 	// The revert beads the tick read, kept for the tick alone so a rig with an
 	// open revert costs it one bd read (gt-kuax8).
 	reverts := newSpecRevertBeads()
@@ -3373,6 +3484,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 				UnsetMetadata: []string{specdispatch.TimeoutAttemptsKey},
 			})
 		},
+		RecordLockTimeout: recordLockTimeout,
+		ClearLockTimeout:  clearLockTimeout,
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
 		},

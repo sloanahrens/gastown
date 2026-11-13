@@ -123,7 +123,11 @@ type fakeSpecTown struct {
 	notes          map[string][]string
 	labels         map[string][]string
 	sleeps         int
-	slingRecords   []specSlingRecord
+	// lockTimeoutWriteErr fails the consecutive assignee-lock-timeout count's
+	// write for the bead it names, so a test drives the path where the count
+	// cannot be recorded and the bead has to be labeled instead (gt-a4cdcd).
+	lockTimeoutWriteErr map[string]error
+	slingRecords        []specSlingRecord
 	// mu guards the fields the tick's concurrent slings touch (the show
 	// sequence, the sling record, sleeps); the rest run on the tick goroutine.
 	mu sync.Mutex
@@ -309,6 +313,28 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			f.labels[id] = append(f.labels[id], label)
 			s := f.specs[id]
 			s.Labels = append(s.Labels, label)
+			f.specs[id] = s
+			return nil
+		},
+		// The bead's metadata is the fake's own record: the count a deferred
+		// sling writes is read back by the next tick's fresh read, as bd's
+		// metadata is (gt-a4cdcd).
+		RecordLockTimeout: func(id string, attempts int) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if err := f.lockTimeoutWriteErr[id]; err != nil {
+				return err
+			}
+			s := f.specs[id]
+			s.Metadata = fmt.Appendf(nil, `{%q:%d}`, specdispatch.LockTimeoutAttemptsKey, attempts)
+			f.specs[id] = s
+			return nil
+		},
+		ClearLockTimeout: func(id string) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			s := f.specs[id]
+			s.Metadata = nil
 			f.specs[id] = s
 			return nil
 		},
@@ -1785,6 +1811,115 @@ func TestSpecDispatchBondLockTimeoutIsADeferral(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A sling whose hook write loses the assignee-lock race is the seat's
+// contention, not the bead's defect: one timeout defers the bead with no
+// failed label and the next tick slings it again, the third consecutive
+// timeout labels it because the lock really is stuck, and any other failure
+// labels at once as it always has (gt-a4cdcd).
+func TestSpecDispatchLockTimeoutIsTransient(t *testing.T) {
+	t.Parallel()
+	const seat = "sbx-flash"
+	// Wrapped the way the engine returns it (internal/sling: "serializing hook
+	// write for %s: %w").
+	lockTimeout := fmt.Errorf("serializing hook write for gastown/polecats/sbx-flash-1: %w", ErrAssigneeLockTimeout)
+
+	t.Run("one timeout defers and requeues", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		f.seats = []specdispatch.Seat{{Agent: seat, Cap: 1}}
+		f.slingErrs["gt-a"] = []error{lockTimeout}
+		r := runSpecDispatchCycle(f.env())
+
+		if len(r.Failed) != 0 || len(r.Deferred) != 1 {
+			t.Fatalf("failed %+v deferred %+v, want one deferral and no failure", r.Failed, r.Deferred)
+		}
+		if got := f.labels["gt-a"]; len(got) != 0 {
+			t.Fatalf("labels = %v, want none: the bead keeps its place in the queue", got)
+		}
+		if line := r.Deferred[0].Line; !strings.Contains(line, seat) || !strings.Contains(line, "(1 of 3)") {
+			t.Errorf("deferral line = %q, want the seat named and the count 1 of 3", line)
+		}
+		if got := specdispatch.LockTimeoutAttempts(f.specs["gt-a"].Metadata); got != 1 {
+			t.Errorf("recorded count = %d, want 1", got)
+		}
+		// Still a candidate: the next tick slings it, and that success clears
+		// the count.
+		if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+			t.Fatalf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+		}
+		if got := specdispatch.LockTimeoutAttempts(f.specs["gt-a"].Metadata); got != 0 {
+			t.Errorf("count after the successful sling = %d, want 0", got)
+		}
+	})
+
+	t.Run("third consecutive timeout labels", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(withLockTimeouts(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"), 2))
+		f.seats = []specdispatch.Seat{{Agent: seat, Cap: 1}}
+		f.slingErrs["gt-a"] = []error{lockTimeout}
+		r := runSpecDispatchCycle(f.env())
+
+		if len(r.Failed) != 1 || len(r.Deferred) != 0 {
+			t.Fatalf("failed %+v deferred %+v, want the third timeout to fail the sling", r.Failed, r.Deferred)
+		}
+		if !slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel) {
+			t.Fatalf("labels = %v, want %s: a stuck lock has to surface", f.labels["gt-a"], specdispatch.DispatchFailedLabel)
+		}
+		if line := r.Failed[0].Line; !strings.Contains(line, "3 ticks in a row") {
+			t.Errorf("failure line = %q, want it to say why the label was added", line)
+		}
+		// The count is cleared so a person who clears the label gives the bead
+		// a fresh set of retries.
+		if got := specdispatch.LockTimeoutAttempts(f.specs["gt-a"].Metadata); got != 0 {
+			t.Errorf("count after the label = %d, want 0", got)
+		}
+	})
+
+	t.Run("another failure labels at once", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(withLockTimeouts(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"), 1))
+		f.seats = []specdispatch.Seat{{Agent: seat, Cap: 1}}
+		f.slingErrs["gt-a"] = []error{errors.New("starting polecat session: tmux: boom")}
+		r := runSpecDispatchCycle(f.env())
+
+		if len(r.Failed) != 1 || len(r.Deferred) != 0 {
+			t.Fatalf("failed %+v deferred %+v, want the failure to label the bead", r.Failed, r.Deferred)
+		}
+		if !slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel) {
+			t.Fatalf("labels = %v, want %s", f.labels["gt-a"], specdispatch.DispatchFailedLabel)
+		}
+		// A different failure breaks the run, so no stale count survives it.
+		if got := specdispatch.LockTimeoutAttempts(f.specs["gt-a"].Metadata); got != 0 {
+			t.Errorf("count after another failure = %d, want 0", got)
+		}
+	})
+
+	// A count that cannot be written is no bound: without it the next tick
+	// would read 0 and defer the bead forever, so the bead is labeled instead.
+	t.Run("an unwritable count labels the bead", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		f.seats = []specdispatch.Seat{{Agent: seat, Cap: 1}}
+		f.slingErrs["gt-a"] = []error{lockTimeout}
+		f.lockTimeoutWriteErr = map[string]error{"gt-a": errors.New("bd update: store busy")}
+		r := runSpecDispatchCycle(f.env())
+
+		if !slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel) {
+			t.Fatalf("labels = %v, want %s when the count cannot be recorded", f.labels["gt-a"], specdispatch.DispatchFailedLabel)
+		}
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "recording the lock timeout count") {
+			t.Errorf("errors = %v, want the failed write reported", r.Errors)
+		}
+	})
+}
+
+// withLockTimeouts is a spec whose bead metadata records n consecutive
+// assignee-lock timeouts, as the dispatcher's own write leaves them.
+func withLockTimeouts(s specdispatch.Spec, n int) specdispatch.Spec {
+	s.Metadata = fmt.Appendf(nil, `{%q:%d}`, specdispatch.LockTimeoutAttemptsKey, n)
+	return s
 }
 
 func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
