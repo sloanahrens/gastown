@@ -1,0 +1,378 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/hmhints"
+	"github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/storypoints"
+	"github.com/steveyegge/gastown/internal/storypoints/estimate"
+	"github.com/steveyegge/gastown/internal/workspace"
+)
+
+// gt spec estimate (gt-5d9k2f.13) writes one bead's story-point estimate: the
+// labels sp:N, sp-rung:<rung> and sp-minutes:<n>, and the estimate's note as a
+// comment. A bead whose sections match the hash in its latest note is left
+// alone unless --force. An estimate that cannot be made writes sp-rung:none and
+// a comment saying why, and exits 0, so a bead the shape cannot judge is never
+// read as a small one.
+
+// specEstimateNotePrefix begins every comment the estimate writes, and the
+// comment the command reads its hash from.
+const specEstimateNotePrefix = "SP ESTIMATE v1"
+
+const (
+	// specEstimateTimeout bounds one estimate, Jev and the embedder included.
+	specEstimateTimeout = 2 * time.Minute
+	// specEstimateEmbedTimeout bounds one embedder request.
+	specEstimateEmbedTimeout = 30 * time.Second
+)
+
+var (
+	specEstimateForce  bool
+	specEstimateDryRun bool
+	specEstimateJSON   bool
+)
+
+var specEstimateCmd = &cobra.Command{
+	Use:   "estimate <bead-id>",
+	Short: "Write a bead's story-point estimate (sp:N labels and a note)",
+	Long: `Estimate one work bead before dispatch and write the result to it.
+
+The estimate blends the shape of the bead's text, an embedding of its
+Constraints and Acceptance (when patrols.spec_dispatch.story_points names an
+embedder), and Jev's fits_twenty_minutes answer (when the battery in
+patrols.jev_dispatch opens). An input that cannot be built is left out and
+named in the note, and the rung label says which inputs were used.
+
+On success the bead gets sp:N, sp-rung:<rung> and sp-minutes:<n> (the blended
+minutes, one decimal), replacing any earlier sp:, sp-rung: and sp-minutes:
+labels, and the note as a comment. The note's first line is
+"SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>"; the hash covers the bead's
+Goal, Constraints, Acceptance and Size sections, so a bead rerun without a
+change is skipped.
+
+When no estimate can be made, the bead gets sp-rung:none, loses its old
+sp:, sp-rung: and sp-minutes: labels, and a comment says why. The command
+exits 0.
+
+--dry-run prints the labels and the note it would write and writes nothing.
+--force estimates again even when the hash matches.`,
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runSpecEstimate,
+}
+
+func init() {
+	specEstimateCmd.Flags().BoolVar(&specEstimateForce, "force", false, "Estimate again even when the bead's sections match the hash in its latest estimate note")
+	specEstimateCmd.Flags().BoolVar(&specEstimateDryRun, "dry-run", false, "Print the labels and the note that would be written; write nothing")
+	specEstimateCmd.Flags().BoolVar(&specEstimateJSON, "json", false, "Print the outcome as JSON")
+	specCmd.AddCommand(specEstimateCmd)
+}
+
+// specEstimateStore is the bead access the command needs. Every write goes
+// through the bd wrapper beads.Client, as the other spec commands do.
+type specEstimateStore interface {
+	Show(id string) (*beads.Issue, error)
+	Comments(id string) ([]beads.Comment, error)
+	Update(id string, opts beads.UpdateOptions) error
+	AddComment(id, text string) error
+}
+
+// specEstimateRunner is what a run needs from outside the bead. Production
+// wires estimate.Estimate and specEstimateDeps; a test wires stubs, so no hm,
+// Jev or embedder is reached from a unit test.
+type specEstimateRunner struct {
+	Estimate func(ctx context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error)
+	Deps     func() (estimate.Deps, error)
+}
+
+// specEstimateOpts are the command's flags.
+type specEstimateOpts struct {
+	Force  bool
+	DryRun bool
+	JSON   bool
+}
+
+// specEstimateOutcome is what one run did, or would do, to one bead.
+type specEstimateOutcome struct {
+	ID string `json:"id"`
+	// Action is estimated, unchanged (the sections match the hash in the latest
+	// note, so nothing was estimated) or none (no usable estimate).
+	Action string `json:"action"`
+	// DryRun is set when nothing was written and the changes are only shown.
+	DryRun  bool    `json:"dry_run"`
+	Points  int     `json:"sp,omitempty"`
+	Rung    string  `json:"rung,omitempty"`
+	Minutes float64 `json:"minutes,omitempty"`
+	Hash    string  `json:"hash"`
+	// Reason says why there is no estimate; empty otherwise.
+	Reason       string   `json:"reason,omitempty"`
+	AddLabels    []string `json:"add_labels,omitempty"`
+	RemoveLabels []string `json:"remove_labels,omitempty"`
+	Comment      string   `json:"comment,omitempty"`
+}
+
+func runSpecEstimate(cmd *cobra.Command, args []string) error {
+	return runSpecEstimateFrom(cmd, args, workspace.FindFromCwdOrError)
+}
+
+// runSpecEstimateFrom is runSpecEstimate with the town-root lookup given, so a
+// test drives its refusal without depending on the working directory.
+func runSpecEstimateFrom(cmd *cobra.Command, args []string, findTown func() (string, error)) error {
+	townRoot, err := findTown()
+	if err != nil {
+		return fmt.Errorf("finding the town root: %w", err)
+	}
+	beadID := args[0]
+	run := specEstimateRunner{
+		Estimate: estimate.Estimate,
+		Deps: func() (estimate.Deps, error) {
+			return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), cmd.ErrOrStderr())
+		},
+	}
+	opts := specEstimateOpts{Force: specEstimateForce, DryRun: specEstimateDryRun, JSON: specEstimateJSON}
+	return runSpecEstimateOn(cmd.OutOrStdout(), beadID, beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)), opts, run)
+}
+
+// runSpecEstimateOn is runSpecEstimate with the store and the runner given, so
+// a test drives every branch through fakes.
+func runSpecEstimateOn(out io.Writer, beadID string, store specEstimateStore, opts specEstimateOpts, run specEstimateRunner) error {
+	issue, err := store.Show(beadID)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", beadID, err)
+	}
+	comments, err := store.Comments(beadID)
+	if err != nil {
+		return fmt.Errorf("reading the comments on %s: %w", beadID, err)
+	}
+	hash := estimate.SectionHash(issue)
+	if !opts.Force && latestEstimateHash(comments) == hash {
+		return writeSpecEstimate(out, specEstimateOutcome{ID: beadID, Action: "unchanged", Hash: hash}, opts.JSON)
+	}
+
+	deps, err := run.Deps()
+	if err != nil {
+		return fmt.Errorf("estimating %s: %w", beadID, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), specEstimateTimeout)
+	defer cancel()
+	result, estErr := run.Estimate(ctx, deps, issue)
+
+	outcome := planSpecEstimate(beadID, hash, issue.Labels, result, estErr)
+	outcome.DryRun = opts.DryRun
+	if opts.DryRun {
+		return writeSpecEstimate(out, outcome, opts.JSON)
+	}
+	// The labels go first. A failed label write leaves the bead with no note
+	// for this hash, so the next run estimates it again. A note written before
+	// the labels would make the bead look estimated when its labels are not.
+	if err := store.Update(beadID, beads.UpdateOptions{AddLabels: outcome.AddLabels, RemoveLabels: outcome.RemoveLabels}); err != nil {
+		return fmt.Errorf("labeling %s: %w", beadID, err)
+	}
+	if err := store.AddComment(beadID, outcome.Comment); err != nil {
+		return fmt.Errorf("commenting on %s: %w", beadID, err)
+	}
+	return writeSpecEstimate(out, outcome, opts.JSON)
+}
+
+// planSpecEstimate decides what one run writes: the labels to add and remove,
+// and the comment. An estimate error, or a result that no label can carry,
+// becomes the none outcome.
+func planSpecEstimate(beadID, hash string, existing []string, r estimate.Result, estErr error) specEstimateOutcome {
+	if estErr == nil {
+		estErr = specEstimateLabelable(r)
+	}
+	if estErr != nil {
+		add := []string{storypoints.RungLabel("none")}
+		return specEstimateOutcome{
+			ID:           beadID,
+			Action:       "none",
+			Hash:         hash,
+			Reason:       estErr.Error(),
+			AddLabels:    add,
+			RemoveLabels: staleEstimateLabels(existing, add),
+			Comment:      specEstimateNoneNote(hash, estErr),
+		}
+	}
+	minutes := specEstimateMinutes(r.Minutes)
+	add := []string{storypoints.SPLabel(r.Points), storypoints.RungLabel(r.Rung), storypoints.MinutesLabel(minutes)}
+	return specEstimateOutcome{
+		ID:           beadID,
+		Action:       "estimated",
+		Hash:         hash,
+		Points:       r.Points,
+		Rung:         r.Rung,
+		Minutes:      minutes,
+		AddLabels:    add,
+		RemoveLabels: staleEstimateLabels(existing, add),
+		Comment:      estimate.Note(r),
+	}
+}
+
+// specEstimateLabelable refuses a result whose labels would not parse back:
+// points off the scale, or minutes that round to zero, infinite or NaN.
+func specEstimateLabelable(r estimate.Result) error {
+	if !storypoints.Valid(r.Points) {
+		return fmt.Errorf("the estimate's %d points are not on the scale", r.Points)
+	}
+	if m := specEstimateMinutes(r.Minutes); !(m > 0) || math.IsInf(m, 0) {
+		return fmt.Errorf("the estimate's %v minutes do not round to a labelable value", r.Minutes)
+	}
+	return nil
+}
+
+// specEstimateMinutes rounds minutes to one decimal, the value sp-minutes
+// carries. MinutesLabel writes the shortest form of that value, which is what
+// ParseLabel reads back.
+func specEstimateMinutes(m float64) float64 {
+	return math.Round(m*10) / 10
+}
+
+// staleEstimateLabels lists the sp:, sp-rung: and sp-minutes: labels a bead
+// carries that the run is about to replace. A label the run adds again is not
+// removed. sp-actual: is the landing worker's and is never touched here.
+func staleEstimateLabels(existing, add []string) []string {
+	var stale []string
+	for _, l := range existing {
+		if !strings.HasPrefix(l, "sp:") && !strings.HasPrefix(l, "sp-rung:") && !strings.HasPrefix(l, "sp-minutes:") {
+			continue
+		}
+		if slices.Contains(add, l) {
+			continue
+		}
+		stale = append(stale, l)
+	}
+	return stale
+}
+
+// latestEstimateHash is the hash in the note of the latest comment that begins
+// SP ESTIMATE v1, or "" when there is no such comment or it names no hash.
+// Comments are oldest first.
+func latestEstimateHash(comments []beads.Comment) string {
+	for i := len(comments) - 1; i >= 0; i-- {
+		text := strings.TrimSpace(comments[i].Text)
+		if !strings.HasPrefix(text, specEstimateNotePrefix) {
+			continue
+		}
+		first, _, _ := strings.Cut(text, "\n")
+		for _, field := range strings.Fields(first) {
+			if h, ok := strings.CutPrefix(field, "hash:"); ok {
+				return h
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// specEstimateNoneNote is the comment for an estimate that could not be made.
+// It carries the hash, so an unchanged bead is not estimated again, and it
+// names the reason on one line.
+func specEstimateNoneNote(hash string, cause error) string {
+	reason := strings.Join(strings.Fields(cause.Error()), " ")
+	return fmt.Sprintf("%s sp:none rung:none hash:%s\nno estimate: %s", specEstimateNotePrefix, hash, reason)
+}
+
+// specEstimateDeps reads the estimate's inputs from the town's settings. A
+// settings block that does not parse refuses the run, as the dispatcher's tick
+// does. A Jev or embedder that cannot be set up is not a refusal: it becomes a
+// skipped input, named in the note.
+func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, error) {
+	sd, err := readSpecDispatchConfig(townRoot)
+	if err != nil {
+		return estimate.Deps{}, fmt.Errorf("reading patrols.spec_dispatch: %w", err)
+	}
+	embedder, err := specEstimateEmbedder(sd)
+	if err != nil {
+		return estimate.Deps{}, err
+	}
+	return estimate.Deps{
+		Embedder: embedder,
+		JevAsk:   specEstimateJev(townRoot, errw),
+		HMRunner: hmhints.ExecRunner,
+		Rig:      rig,
+	}, nil
+}
+
+// specEstimateEmbedder builds the embedder from story_points, or returns a nil
+// embedder when none is configured. A URL with no model is refused, since the
+// embedder would send a request that names no model.
+func specEstimateEmbedder(sd *config.SpecDispatchConfig) (storypoints.Embedder, error) {
+	if sd == nil || sd.StoryPoints == nil || sd.StoryPoints.EmbedderURL == "" {
+		return nil, nil
+	}
+	sp := sd.StoryPoints
+	if sp.EmbedderModel == "" {
+		return nil, errors.New("patrols.spec_dispatch.story_points.embedder_url is set without embedder_model")
+	}
+	return storypoints.OllamaEmbedder{
+		URL:     sp.EmbedderURL,
+		Model:   sp.EmbedderModel,
+		Dim:     storypoints.Default().EmbeddingDimension(),
+		Timeout: specEstimateEmbedTimeout,
+		HTTP:    &http.Client{},
+	}, nil
+}
+
+// specEstimateJev is the Jev input. When the battery cannot be opened, the
+// returned asker reports why on every call, so the note names the skip.
+func specEstimateJev(townRoot string, errw io.Writer) estimate.JevAsker {
+	pass, err := openSpecEstimateJev(townRoot, errw)
+	if err != nil {
+		return func(context.Context, *beads.Issue) (dispatch.Answers, error) {
+			return dispatch.Answers{}, err
+		}
+	}
+	return pass.Ask
+}
+
+// openSpecEstimateJev opens the battery from patrols.jev_dispatch, the settings
+// the dispatch pass reads.
+func openSpecEstimateJev(townRoot string, errw io.Writer) (*dispatch.Pass, error) {
+	settings, err := jevDispatchSettings(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return dispatch.Open(townRoot, settings, errw)
+}
+
+// writeSpecEstimate prints the outcome: one line for a person, the whole record
+// for --json.
+func writeSpecEstimate(out io.Writer, o specEstimateOutcome, asJSON bool) error {
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(o)
+	}
+	switch o.Action {
+	case "unchanged":
+		fmt.Fprintf(out, "%s: unchanged since its last estimate; nothing written (--force estimates again)\n", o.ID)
+	case "none":
+		fmt.Fprintf(out, "%s: no estimate (%s); sp-rung:none\n", o.ID, o.Reason)
+	default:
+		fmt.Fprintf(out, "%s: sp:%d rung:%s minutes:%s\n", o.ID, o.Points, o.Rung, strconv.FormatFloat(o.Minutes, 'f', -1, 64))
+	}
+	if o.DryRun {
+		fmt.Fprintf(out, "dry run: nothing written\n")
+		fmt.Fprintf(out, "add: %s\n", strings.Join(o.AddLabels, ", "))
+		if len(o.RemoveLabels) > 0 {
+			fmt.Fprintf(out, "remove: %s\n", strings.Join(o.RemoveLabels, ", "))
+		}
+		fmt.Fprintf(out, "comment:\n%s\n", o.Comment)
+	}
+	return nil
+}
