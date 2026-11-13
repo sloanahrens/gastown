@@ -330,6 +330,129 @@ func TestInstallByDigestRollsBackAnUnhealthyDaemon(t *testing.T) {
 	})
 }
 
+// TestInstallByDigestRunsThePairCheckAfterTheSwap holds the pair check to the
+// forward swap: a check that refuses the pair restores the recorded previous one,
+// a check that holds keeps the new pair, and a canceled context is reported as
+// the cancel, not as a failed step.
+func TestInstallByDigestRunsThePairCheckAfterTheSwap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a check that refuses the pair restores the recorded previous pair", func(t *testing.T) {
+		t.Parallel()
+		f := newImageFixture(t, ImageRecord{Current: oldPair})
+		var checked []ImagePair
+		f.inst.PairCheck = func(_ context.Context, pair ImagePair) error {
+			checked = append(checked, pair)
+			return errors.New("the pod runs another image")
+		}
+		res, err := f.inst.Install(context.Background(), newPair.Commit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if ClassifyInstall(res) != ResultFailed {
+			t.Fatalf("result = %+v, want a failed install", res)
+		}
+		if !strings.Contains(res.Reason, "the daemon did not run the pair: the pod runs another image") || !strings.Contains(res.Reason, "restored "+oldPair.Daemon) {
+			t.Errorf("reason = %q, want the check and the restore named", res.Reason)
+		}
+		if len(checked) != 1 || checked[0] != newPair {
+			t.Errorf("checked = %+v, want the check run once on the new pair", checked)
+		}
+		if got := f.swap.applied; len(got) != 2 || got[0] != newPair || got[1] != oldPair {
+			t.Errorf("applied = %+v, want the new pair then the restore of the previous pair", got)
+		}
+		if want := (ImageRecord{Current: oldPair, Previous: oldPair}); f.ledger.rec != want {
+			t.Errorf("record after restore = %+v, want %+v", f.ledger.rec, want)
+		}
+	})
+
+	t.Run("a check that holds keeps the new pair in force", func(t *testing.T) {
+		t.Parallel()
+		f := newImageFixture(t, ImageRecord{Current: oldPair})
+		f.inst.PairCheck = func(context.Context, ImagePair) error { return nil }
+		res, err := f.inst.Install(context.Background(), newPair.Commit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if ClassifyInstall(res) != ResultOK {
+			t.Fatalf("result = %+v, want an installed pair", res)
+		}
+		if got := f.swap.applied; len(got) != 1 || got[0] != newPair {
+			t.Errorf("applied = %+v, want the new pair alone: a check that holds restores nothing", got)
+		}
+		if want := (ImageRecord{Current: newPair, Previous: oldPair}); f.ledger.rec != want {
+			t.Errorf("record = %+v, want %+v", f.ledger.rec, want)
+		}
+	})
+
+	t.Run("a canceled context after the check is the cancel, not a failed step", func(t *testing.T) {
+		t.Parallel()
+		f := newImageFixture(t, ImageRecord{Current: oldPair})
+		ctx, cancel := context.WithCancel(context.Background())
+		f.inst.PairCheck = func(context.Context, ImagePair) error {
+			cancel()
+			return errors.New("the pod runs another image")
+		}
+		_, err := f.inst.Install(ctx, newPair.Commit)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Install error = %v, want the context cancel", err)
+		}
+		if got := f.swap.applied; len(got) != 1 {
+			t.Errorf("applied = %+v, want no restore after a cancel", got)
+		}
+	})
+}
+
+// TestInstallByDigestChecksARecordedPairTheDaemonAlreadyRuns holds a rerun to the
+// pair check: a pair already on record and reported by the daemon is left alone
+// only when the check holds it. A check that refuses it is applied again and
+// restored to the recorded previous pair, so a pair the pod does not hold is never kept.
+func TestInstallByDigestChecksARecordedPairTheDaemonAlreadyRuns(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a check that holds leaves the daemon alone with no swap", func(t *testing.T) {
+		t.Parallel()
+		f := newImageFixture(t, ImageRecord{Current: newPair, Previous: oldPair})
+		var checked []ImagePair
+		f.inst.PairCheck = func(_ context.Context, pair ImagePair) error {
+			checked = append(checked, pair)
+			return nil
+		}
+		res, err := f.inst.Install(context.Background(), newPair.Commit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if ClassifyInstall(res) != ResultOK {
+			t.Fatalf("result = %+v, want an installed pair", res)
+		}
+		if len(checked) != 1 || checked[0] != newPair {
+			t.Errorf("checked = %+v, want the check run once on the recorded pair", checked)
+		}
+		if len(f.swap.applied) != 0 {
+			t.Errorf("applied = %+v, want no swap when the pair holds", f.swap.applied)
+		}
+	})
+
+	t.Run("a check that refuses the recorded pair applies it again and restores the previous", func(t *testing.T) {
+		t.Parallel()
+		f := newImageFixture(t, ImageRecord{Current: newPair, Previous: oldPair})
+		f.inst.PairCheck = func(context.Context, ImagePair) error { return errors.New("the pod runs another image") }
+		res, err := f.inst.Install(context.Background(), newPair.Commit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if ClassifyInstall(res) != ResultFailed {
+			t.Fatalf("result = %+v, want a failed install", res)
+		}
+		if got := f.swap.applied; len(got) != 2 || got[0] != newPair || got[1] != oldPair {
+			t.Errorf("applied = %+v, want the recorded pair applied again, then the previous pair restored", got)
+		}
+		if want := (ImageRecord{Current: oldPair, Previous: oldPair}); f.ledger.rec != want {
+			t.Errorf("record after restore = %+v, want %+v", f.ledger.rec, want)
+		}
+	})
+}
+
 // TestInstallByDigestRefusesADamagedRecord holds the restore's input: a
 // images.json that holds a pair no values file could hold stops the install
 // before the host install, the swap, or any write, and the file is left as it was.

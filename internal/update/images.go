@@ -223,6 +223,10 @@ type DigestInstaller struct {
 	Path string
 	// Images are the effects the swap, the wait and a restore reach.
 	Images ImageDeps
+	// PairCheck, when set, runs once the daemon reports the new pair. An error
+	// fails the install and restores the previous pair, as an unhealthy daemon
+	// does. Nil checks nothing.
+	PairCheck func(ctx context.Context, pair ImagePair) error
 }
 
 // validRecordedPair checks a pair the ledger holds. The zero pair is nothing
@@ -232,6 +236,12 @@ func validRecordedPair(p ImagePair) error {
 		return nil
 	}
 	return imagevalues.ValidPair(imagevalues.Values{Daemon: p.Daemon, Polecat: p.Polecat, Commit: p.Commit})
+}
+
+// pairHolds reports whether the pair check, when one is wired, holds pair. An
+// unwired check holds nothing back.
+func (d *DigestInstaller) pairHolds(ctx context.Context, pair ImagePair) bool {
+	return d.PairCheck == nil || d.PairCheck(ctx, pair) == nil
 }
 
 // Install validates the values file and its commit before anything changes, runs
@@ -267,10 +277,11 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 	previous := rec.Current
 	if rec.Current == target {
 		// The record already names the pair as current. The daemon is left alone
-		// when it reports the commit; otherwise a run that stopped between the
-		// record and the swap left the service behind, and the swap runs again
-		// with the previous pair that record kept.
-		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) {
+		// when it reports the commit and the pair check, when wired, holds the
+		// pair; otherwise a run that stopped between the record and the swap left
+		// the service behind, and the swap runs again with the previous pair that
+		// record kept.
+		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) && d.pairHolds(ctx, target) {
 			return res, nil
 		}
 		previous = rec.Previous
@@ -284,13 +295,22 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 	if ctx.Err() != nil {
 		return InstallResult{}, ctx.Err()
 	}
-	if err == nil && healthy {
-		return res, nil
-	}
-
 	reason := fmt.Sprintf("the daemon did not report %s within the restart bound", shortSHA(sha))
-	if err != nil {
+	switch {
+	case err != nil:
 		reason = "the daemon image swap failed: " + err.Error()
+	case healthy:
+		if d.PairCheck == nil {
+			return res, nil
+		}
+		checkErr := d.PairCheck(ctx, target)
+		if ctx.Err() != nil {
+			return InstallResult{}, ctx.Err()
+		}
+		if checkErr == nil {
+			return res, nil
+		}
+		reason = "the daemon did not run the pair: " + checkErr.Error()
 	}
 	res.Event = "failed"
 	res.Exit = 1
