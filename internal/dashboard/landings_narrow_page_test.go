@@ -34,14 +34,15 @@ type landingsBodyRow struct {
 	} `json:"cells"`
 }
 
-// landingsRows reads back the body rows the Landings table drew, in order.
+// landingsRows reads back the body rows the Landings table drew, in order: each
+// is a div row of the table's grid, the header row left out.
 func landingsRows(t *testing.T, p *pageDOM) []landingsBodyRow {
 	t.Helper()
 
 	v, err := p.vm.RunString(`JSON.stringify((function () {
   var rows = [];
   __walk(document.getElementById("trend"), function (c) {
-    if (c.tagName !== "TR" || !c.children.length || c.children[0].tagName === "TH") return;
+    if (!__cls(c, "ltrow") || __cls(c, "hrow") || !c.children.length) return;
     rows.push({class: c.className || "", cells: c.children.__arr.map(function (td) {
       return {class: td.className || "", text: td.textContent, title: td.title || "", span: td.colSpan || 1};
     })});
@@ -158,23 +159,26 @@ func TestLandingsWhenCellNeverWraps(t *testing.T) {
 	}
 }
 
-// A landing's title keeps a floor: the Landing cell is at least 200 px wide and
-// only breaks a word when nothing else fits, so a narrow column does not shred
-// it into one- and two-letter lines. A long unbroken token is the case the
-// break-word value is chosen for: it breaks rather than overflowing the cell.
+// A landing's bead cell keeps a floor: the cell is at least 200 px wide and its
+// id, priority and title clip with an ellipsis past it, so a narrow column does
+// not shred the title into one- and two-letter lines, and the whole of it stays
+// readable on the cell's hover (gt-ultode).
 func TestLandingsTitleCellKeepsAReadableWidth(t *testing.T) {
 	t.Parallel()
 
-	decls := cssDecls(t, "main")
+	decls := cssDecls(t, "lbead")
 	min, ok := decls["min-width"]
 	if !ok {
-		t.Fatal("the Landing cell rule sets no min-width, so a narrow column squeezes the title to nothing")
+		t.Fatal("the bead cell rule sets no min-width, so a narrow column squeezes the title to nothing")
 	}
 	if px := cssPxValue(t, min); px < 150 {
-		t.Errorf("the Landing cell rule has min-width %q, want at least 150px for a readable title", min)
+		t.Errorf("the bead cell rule has min-width %q, want at least 150px for a readable title", min)
 	}
-	if got := decls["overflow-wrap"]; got != "break-word" {
-		t.Errorf("the Landing cell rule has overflow-wrap %q, want break-word: a long word breaks only as a last resort, never anywhere", got)
+	cells := cssRule(t, ".ltrow>*")
+	for _, want := range []string{"min-width:0", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap"} {
+		if !strings.Contains(cells, want) {
+			t.Errorf("the row's cells carry no %q, so a long title widens a column instead of being ellipsed", want)
+		}
 	}
 
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
@@ -186,24 +190,56 @@ func TestLandingsTitleCellKeepsAReadableWidth(t *testing.T) {
 		t.Fatalf("the table drew %d rows, want the queued bead, the running landing and the finished one", len(rows))
 	}
 	for _, row := range rows {
-		if len(row.Cells) < 2 {
-			t.Fatal("a landings row drew fewer than two cells")
+		if len(row.Cells) < 4 {
+			t.Fatal("a landings row drew fewer than four cells")
 		}
-		if !hasClassToken(row.Cells[1].Class, "main") {
-			t.Errorf("the Landing cell of row %q carries class %q, want the main class the title rule names", row.Cells[0].Text, row.Cells[1].Class)
+		if !hasClassToken(row.Cells[3].Class, "lbead") {
+			t.Errorf("the bead cell of row %q carries class %q, want the lbead class the title rule names", row.Cells[0].Text, row.Cells[3].Class)
 		}
 	}
 }
 
-// The table sizes its columns from their content. That is what turns the
-// title's floor and the When cell's nowrap into width: a fixed layout would
-// size the columns from the table width and ignore both, squeezing the title
-// and clipping the When reading however the cells declare themselves.
-func TestLandingsTableSizesColumnsFromContent(t *testing.T) {
+// The table lays out the ten columns in the order its header and rows draw
+// them, and only the bead takes what is left of the width: a row states no
+// columns of its own, so a header cell and the cells under it cannot start at
+// different places (gt-ultode).
+func TestTheLandingsTableLaysOutItsColumns(t *testing.T) {
 	t.Parallel()
 
-	if got := cssDecls(t, "ltable")["table-layout"]; got != "auto" {
-		t.Errorf("the .ltable rule has table-layout %q, want auto so the title floor and the When cell's nowrap size the columns", got)
+	var tracks, names []string
+	for _, tok := range strings.Fields(declOf(t, topRule(t, ".ltable"), "grid-template-columns")) {
+		if n, ok := strings.CutPrefix(tok, "["); ok {
+			names = append(names, strings.TrimSuffix(n, "]"))
+			continue
+		}
+		tracks = append(tracks, tok)
+	}
+	if got, want := strings.Join(names, " "), "when polecat model bead state ptime score gate om ship"; got != want {
+		t.Errorf("the landings table names its columns %q, want %q in the order the header draws them", got, want)
+	}
+	if len(tracks) != 10 {
+		t.Fatalf("the landings table lays out %d columns (%q), want ten", len(tracks), tracks)
+	}
+	flex := 0
+	for i, track := range tracks {
+		if !strings.HasPrefix(track, "minmax(0,") {
+			t.Errorf("the column %q can be widened by its own content; a track must shrink to nothing instead", track)
+		}
+		if strings.HasSuffix(track, "1fr)") {
+			flex++
+			if names[i] != "bead" {
+				t.Errorf("the %s column, not the bead, takes what is left of the width", names[i])
+			}
+		}
+	}
+	if flex != 1 {
+		t.Errorf("the table gives %d columns what is left of the width, want exactly one (the bead and its title)", flex)
+	}
+	if got := cssRule(t, ".ltrow"); !strings.Contains(got, "grid-template-columns:subgrid") {
+		t.Errorf("a landings row lays out its own columns instead of the table's: %s", got)
+	}
+	if got := cssDecls(t, "hrow")["position"]; got != "sticky" {
+		t.Errorf("the header row's position is %q, want sticky so the columns stay readable while the rows scroll", got)
 	}
 }
 
@@ -303,9 +339,9 @@ func TestLandingsLayoutRulesHoldAtEveryWidth(t *testing.T) {
 		t.Error("no max-width rule stacks the .grid to one track, so the narrow column the landings table is drawn in has no declaration")
 	}
 
-	props := []string{"table-layout", "min-width", "overflow-wrap", "white-space", "overflow-x"}
+	props := []string{"min-width", "overflow-wrap", "white-space", "overflow-x"}
 	for _, rule := range landingsConditionalRules(t) {
-		for _, class := range []string{"ltable", "lrows", "main", "when"} {
+		for _, class := range []string{"ltable", "lrows", "lbead", "when"} {
 			if !selectsClass(rule.Sel, class) {
 				continue
 			}
@@ -334,11 +370,12 @@ func landingsHeaderCells(t *testing.T, p *pageDOM) int {
 }
 
 // A queued row draws the same cells in the same columns as a running one: When,
-// Landing, By, Polecat, Score, Gate, om and Ship, every cell one column wide.
-// The holder sits in By, so the Landing cell carries no "by <name>" text, and
-// the columns with no queued reading hold the dash a running row uses for a
-// column it has no value for (gt-duuq1). Mutation: drop the queued row's By cell
-// or one of its dashes and the row no longer covers the header's columns.
+// Polecat, Model, Bead, State, Polecat time, Score, Gate, om and Ship, every cell
+// one column wide. The holder sits in the Polecat column, so the Bead cell
+// carries no "by <name>" text, and the columns with no queued reading hold the
+// dash a running row uses for a column it has no value for (gt-duuq1,
+// gt-ultode). Mutation: drop the queued row's Model cell or one of its dashes and
+// the row no longer covers the header's columns.
 func TestAQueuedRowDrawsTheRunningRowsCells(t *testing.T) {
 	t.Parallel()
 
@@ -347,8 +384,8 @@ func TestAQueuedRowDrawsTheRunningRowsCells(t *testing.T) {
 	p.call(t, "renderTrend", landingsQueuedRunningAndLanded(now))
 
 	head := landingsHeaderCells(t, p)
-	if head != 8 {
-		t.Fatalf("the table heads %d columns, want the eight the Landings table draws", head)
+	if head != 10 {
+		t.Fatalf("the table heads %d columns, want the ten the Landings table draws", head)
 	}
 	rows := landingsRows(t, p)
 	if len(rows) != 3 {
@@ -366,38 +403,41 @@ func TestAQueuedRowDrawsTheRunningRowsCells(t *testing.T) {
 			t.Errorf("the queued row's cell %d carries class %q, want the running row's %q in that column", i, c.Class, running.Cells[i].Class)
 		}
 	}
-	if got := queued.Cells[1].Text; strings.Contains(got, "by ") {
-		t.Errorf("the queued row's Landing cell reads %q, want no by reading: the holder sits in the By column", got)
+	if got := queued.Cells[3].Text; strings.Contains(got, "by ") {
+		t.Errorf("the queued row's Bead cell reads %q, want no by reading: the holder sits in the Polecat column", got)
 	}
-	for i := 2; i < head; i++ {
+	// Model has no queue reading, and the four stage readings have not run: each
+	// draws the dash. The Bead cell and the State pill carry the row's own text.
+	for _, i := range []int{2, 5, 6, 7, 8, 9} {
 		if got := queued.Cells[i].Text; got != "–" {
 			t.Errorf("the queued row's cell %d reads %q, want a dash for a stat the queue reading has not got", i, got)
 		}
 	}
 }
 
-// queuedRowParts is what one queued row reads back: its When and By cells, and
-// the parts of the Landing cell the row draws inside.
+// queuedRowParts is what one queued row reads back: its When, Polecat and State
+// cells, and the parts of its Bead cell the row draws inside.
 type queuedRowParts struct {
 	When    drawn `json:"when"`
-	Landing drawn `json:"landing"`
-	By      drawn `json:"by"`
 	Bead    drawn `json:"bead"`
-	Tag     drawn `json:"tag"`
+	Polecat drawn `json:"polecat"`
+	State   drawn `json:"state"`
+	ID      drawn `json:"id"`
+	Pill    drawn `json:"pill"`
 	Title   drawn `json:"title"`
 }
 
-// queuedRow reads back the first queued row's cells and the parts of its
-// Landing cell.
+// queuedRow reads back the first queued row's cells and the parts of its Bead
+// cell.
 func queuedRow(t *testing.T, p *pageDOM) queuedRowParts {
 	t.Helper()
 
 	v, err := p.vm.RunString(`JSON.stringify((function () {
   var tbl = __find(document.getElementById("trend"), ".ltable");
-  var tr = tbl.children[1], main = tr.children[1];
+  var tr = tbl.children[1], bead = tr.children[3];
   function part(e) { return e ? {text: e.textContent, class: e.className || "", title: e.title || ""} : null; }
-  return {when: part(tr.children[0]), landing: part(main), by: part(tr.children[2]),
-          bead: part(__find(main, ".bead")), tag: part(__find(main, ".tag")), title: part(__find(main, ".title"))};
+  return {when: part(tr.children[0]), polecat: part(tr.children[1]), bead: part(bead), state: part(__find(tr.children[4], ".tag")),
+          id: part(__find(bead, ".bead")), pill: part(__find(bead, ".tag")), title: part(__find(bead, ".ltitle"))};
 })())`)
 	if err != nil {
 		t.Fatalf("reading the queued row: %v", err)
@@ -410,9 +450,9 @@ func queuedRow(t *testing.T, p *pageDOM) queuedRowParts {
 }
 
 // The layout costs the row no field: the When cell ages the wait from the bead's
-// last update, the Landing cell keeps the bead id, the queued tag and why it
-// says that, and the rig and title of the bead, and the By cell names the holder
-// with the store it names (gt-duuq1).
+// last update, the Bead cell keeps the bead id, its priority pill, the rig and
+// title of the bead, the State cell the queued tag and why it says that, and the
+// Polecat cell names the holder with the store it names (gt-duuq1, gt-ultode).
 func TestAQueuedRowKeepsEveryField(t *testing.T) {
 	t.Parallel()
 
@@ -422,7 +462,7 @@ func TestAQueuedRowKeepsEveryField(t *testing.T) {
 	p.call(t, "renderTrend", map[string]any{
 		"queue": map[string]any{"landing": []any{map[string]any{
 			"id": "gt-loqew", "title": "the queue that never drains",
-			"rig": "gastown", "assignee": "gastown/polecats/dag",
+			"rig": "gastown", "assignee": "gastown/polecats/dag", "priority": 2,
 			"updated_at": time.Now().Add(-12 * time.Minute).Format(time.RFC3339),
 		}}},
 	})
@@ -434,25 +474,28 @@ func TestAQueuedRowKeepsEveryField(t *testing.T) {
 	if !strings.Contains(got.When.Title, "submitted and waiting for the landing worker to take it") || !strings.Contains(got.When.Title, "waiting since the bead's last update") {
 		t.Errorf("the When cell's hover reads %q, want it to say what the wait is aged from", got.When.Title)
 	}
-	if got.Bead.Text != "gt-loqew" {
-		t.Errorf("the Landing cell's bead reads %q, want the queued bead's id", got.Bead.Text)
+	if got.ID.Text != "gt-loqew" {
+		t.Errorf("the Bead cell's bead reads %q, want the queued bead's id", got.ID.Text)
 	}
-	if got.Tag.Text != "queued" || !strings.Contains(got.Tag.Title, "the landing worker has not taken it") {
-		t.Errorf("the Landing cell's tag reads %q (%q), want the queued tag and why it says that", got.Tag.Text, got.Tag.Title)
+	if got.Pill.Text != "P2" {
+		t.Errorf("the Bead cell's priority reads %q, want the P2 pill the queue reading carries", got.Pill.Text)
+	}
+	if got.State.Text != "queued" || !strings.Contains(got.State.Title, "the landing worker has not taken it") {
+		t.Errorf("the State cell reads %q (%q), want the queued tag and why it says that", got.State.Text, got.State.Title)
 	}
 	if got.Title.Text != "gastown · the queue that never drains" {
-		t.Errorf("the Landing cell's title reads %q, want the bead's rig and title", got.Title.Text)
+		t.Errorf("the Bead cell's title reads %q, want the bead's rig and title", got.Title.Text)
 	}
-	if strings.Contains(got.Landing.Text, "by ") {
-		t.Errorf("the Landing cell reads %q, want no holder reading", got.Landing.Text)
+	if strings.Contains(got.Bead.Text, "by ") {
+		t.Errorf("the Bead cell reads %q, want no holder reading", got.Bead.Text)
 	}
-	if got.By.Text != "dag" || got.By.Title != "gastown/dag" {
-		t.Errorf("the By cell reads %q (%q), want the bare name and the store it names", got.By.Text, got.By.Title)
+	if got.Polecat.Text != "dag" || got.Polecat.Title != "gastown/dag" {
+		t.Errorf("the Polecat cell reads %q (%q), want the bare name and the store it names", got.Polecat.Text, got.Polecat.Title)
 	}
 }
 
 // A bead nobody holds draws the dash every other row draws for a holder, never
-// a placeholder name, and the Landing cell carries no "by" reading (gt-duuq1).
+// a placeholder name, and the Bead cell carries no "by" reading (gt-duuq1).
 func TestAQueuedRowWithNoHolderDrawsTheDash(t *testing.T) {
 	t.Parallel()
 
@@ -465,14 +508,14 @@ func TestAQueuedRowWithNoHolderDrawsTheDash(t *testing.T) {
 	})
 
 	got := queuedRow(t, p)
-	if got.By.Text != "–" {
-		t.Errorf("the By cell reads %q, want the dash a row with no holder draws", got.By.Text)
+	if got.Polecat.Text != "–" {
+		t.Errorf("the Polecat cell reads %q, want the dash a row with no holder draws", got.Polecat.Text)
 	}
-	if got.By.Title != "" {
-		t.Errorf("the By cell carries the hover %q, want none for a bead nobody holds", got.By.Title)
+	if got.Polecat.Title != "" {
+		t.Errorf("the Polecat cell carries the hover %q, want none for a bead nobody holds", got.Polecat.Title)
 	}
-	if strings.Contains(got.Landing.Text, "by ") {
-		t.Errorf("the Landing cell reads %q, want no holder reading for a bead nobody holds", got.Landing.Text)
+	if strings.Contains(got.Bead.Text, "by ") {
+		t.Errorf("the Bead cell reads %q, want no holder reading for a bead nobody holds", got.Bead.Text)
 	}
 }
 
@@ -500,10 +543,10 @@ func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
 	})
 
 	cells := landingsRows(t, p)[0].Cells
-	if got := cells[3].Text; got != "13m+" {
+	if got := cells[5].Text; got != "13m+" {
 		t.Errorf("the running row's Polecat cell reads %q, want 13m+ as polecatDur reads a floor of 780s", got)
 	}
-	if title := cells[3].Title; !strings.Contains(title, "1 attempt: 13m+") {
+	if title := cells[5].Title; !strings.Contains(title, "1 attempt: 13m+") {
 		t.Errorf("the Polecat cell's hover reads %q, want the attempt polecatDur draws for a running row", title)
 	}
 }
@@ -531,16 +574,16 @@ func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
 	})
 
 	cells := landingsRows(t, p)[0].Cells
-	if got := cells[3].Text; got != "–" {
+	if got := cells[5].Text; got != "–" {
 		t.Errorf("the queued row's Polecat cell reads %q, want a dash when the queue reading carries no dev time", got)
 	}
-	if got := cells[3].Title; got != "" {
+	if got := cells[5].Title; got != "" {
 		t.Errorf("the queued row's Polecat cell carries the hover %q, want none for a row with no reading", got)
 	}
 }
 
-// A finished landing and one the worker is running draw all eight cells, with
-// the readings the server sent and dashes where a stage has not run.
+// A finished landing and one the worker is running draw all ten cells, with the
+// readings the server sent and dashes where a stage has not run.
 func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
 	t.Parallel()
 
@@ -565,7 +608,7 @@ func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
 		t.Fatalf("the table drew %d rows, want the queued bead, the running landing and the finished one", len(rows))
 	}
 	for _, row := range rows {
-		bead := row.Cells[1].Text
+		bead := row.Cells[3].Text
 		if len(row.Cells) != head {
 			t.Fatalf("the %q row drew %d cells, want the %d columns the table heads", bead, len(row.Cells), head)
 		}
@@ -576,10 +619,10 @@ func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
 		}
 	}
 	running, finished := rows[1], rows[2]
-	if got := running.Cells[6].Text; got != "–" {
+	if got := running.Cells[8].Text; got != "–" {
 		t.Errorf("the running row's om cell reads %q, want a dash for a review that has not finished", got)
 	}
-	for i, want := range map[int]string{4: "0.86", 5: "42s", 6: "61s", 7: "3m"} {
+	for i, want := range map[int]string{6: "0.86", 7: "42s", 8: "61s", 9: "3m"} {
 		if got := finished.Cells[i].Text; got != want {
 			t.Errorf("the finished row's cell %d reads %q, want %q", i, got, want)
 		}
@@ -639,29 +682,29 @@ func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
 	}
 }
 
-// At 470 px the eight columns cannot sit side by side. Below 640 px each row
-// stacks: the title on a full line of its own, clamped to two lines, and every
-// other cell named by its column because the header row is hidden. Nothing is
-// cut and the page does not scroll sideways. The harness has no layout engine,
-// so the test reads the declarations and the cells' labels; the rendered
-// 470 px check is the overseer's, live (gt-bqxpz).
+// At 470 px the ten columns cannot sit side by side. Below 640 px each row
+// stacks: the bead on a full line of its own, its title clamped to two lines,
+// and every other cell named by its column because the header row is hidden.
+// Nothing is cut and the page does not scroll sideways. The harness has no
+// layout engine, so the test reads the declarations and the cells' labels; the
+// rendered 470 px check is the overseer's, live (gt-bqxpz, gt-ultode).
 func TestLandingsFitsANarrowViewport(t *testing.T) {
 	t.Parallel()
 
 	want := map[string]map[string]string{
-		".ltable":                {"display": "block"},
-		".ltable tr":             {"display": "flex", "flex-wrap": "wrap"},
-		".ltable tr:first-child": {"display": "none"},
-		".ltable td":             {"display": "block"},
-		".ltable td.main":        {"order": "-1", "flex": "1 0 100%"},
-		".ltable td.main .title": {"-webkit-line-clamp": "2", "overflow": "hidden"},
+		".ltable":               {"display": "block"},
+		".ltrow":                {"display": "flex", "flex-wrap": "wrap"},
+		".ltrow:first-child":    {"display": "none"},
+		".ltrow>*":              {"display": "block"},
+		".ltrow .lbead":         {"order": "-1", "flex": "1 0 100%"},
+		".ltrow .lbead .ltitle": {"-webkit-line-clamp": "2", "overflow": "hidden"},
 	}
 	found := map[string]bool{}
 	for _, rule := range landingsConditionalRules(t) {
 		if !strings.Contains(rule.At, "max-width:640px") {
 			continue
 		}
-		// A selector list is read by its first selector: ".ltable td,.ltable td.n".
+		// A selector list is read by its first selector: ".ltrow td,.ltrow td.n".
 		first, _, _ := strings.Cut(rule.Sel, ",")
 		for sel, decls := range want {
 			if strings.TrimSpace(first) != sel {
@@ -677,18 +720,18 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 	}
 	for sel := range want {
 		if !found[sel] {
-			t.Errorf("no max-width:640px rule styles %s, so the narrow table keeps its eight columns side by side", sel)
+			t.Errorf("no max-width:640px rule styles %s, so the narrow table keeps its ten columns side by side", sel)
 		}
 	}
 
-	// A finished row's cells, except the title, are named for the stacked layout.
+	// A finished row's cells, except the bead, are named for the stacked layout.
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
 	p := newPageDOM(t)
 	p.call(t, "renderTrend", landingsQueuedRunningAndLanded(now))
 	v, err := p.vm.RunString(`JSON.stringify((function () {
   var out = [];
   __walk(document.getElementById("trend"), function (c) {
-    if (c.tagName !== "TR" || !c.children.length || c.children[0].tagName === "TH") return;
+    if (!__cls(c, "ltrow") || __cls(c, "hrow") || !c.children.length) return;
     out.push({title: c.title || "", labels: c.children.__arr.map(function (td) { return td["attr_data-label"] || ""; })});
   });
   return out;
@@ -706,13 +749,17 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the table drew %d rows, want 3", len(rows))
 	}
-	wantLabels := []string{"When", "", "By", "Polecat", "Score", "Gate", "om", "Ship"}
+	wantLabels := []string{"When", "Polecat", "Model", "", "State", "Polecat time", "Score", "Gate", "om", "Ship"}
 	for _, row := range rows {
 		if strings.Join(row.Labels, "|") != strings.Join(wantLabels, "|") {
 			t.Errorf("a landings row's cells are labelled %q, want %q", row.Labels, wantLabels)
 		}
+		// A row with nothing to explain keeps its hover on the bead cell, so no
+		// tip opens over the row. A rejected or failing row names its detail on
+		// the row as well; TestRejectedAndFailingRowsKeepTheirDetailOnHover
+		// pins that.
 		if row.Title != "" {
-			t.Errorf("a landings row carries the hover %q on the whole row, want it on the bead id so the tip does not open over the row", row.Title)
+			t.Errorf("a landings row carries the hover %q on the whole row, want it on the bead cell so the tip does not open over the row", row.Title)
 		}
 	}
 }

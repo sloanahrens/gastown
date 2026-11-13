@@ -49,8 +49,8 @@ func TestLandingsPaneDrawsEveryLandingInAScrollBox(t *testing.T) {
       var cls = c.attr_class || c.className || "";
       var here = inScroll || cls === "lrows";
       if (cls === "lrows") out.scroll++;
-      if (here && c.tagName === "TR" && c.children && c.children.length && c.children[0].tagName === "TH") out.headers++;
-      if (here && c.tagName === "TR" && c.children && c.children.length && c.children[0].tagName !== "TH") out.rows++;
+      if (here && __cls(c, "ltrow") && __cls(c, "hrow")) out.headers++;
+      if (here && __cls(c, "ltrow") && !__cls(c, "hrow")) out.rows++;
       walk(c, here);
     }
   }

@@ -61,7 +61,7 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 
 	tbl := pageFunc(t, "landingTable")
 	for _, want := range []string{
-		`el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting")`,
+		`el("span", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting")`,
 		`when.title = "submitted and waiting for the landing worker to take it; waiting since the bead's last update, which gt done moves";`,
 	} {
 		if !strings.Contains(tbl, want) {
@@ -97,7 +97,8 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	})
 
 	// The table is found by its class: the caption above it is not part of the
-	// row count. The By cell is the third, after When and the Landing cell.
+	// row count. The Polecat cell is the second, after When and before the Model
+	// cell and the Bead cell.
 	var rows []struct {
 		Main  string `json:"main"`
 		By    string `json:"by"`
@@ -106,7 +107,7 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	got, err := dom.vm.RunString(`JSON.stringify((function () {
   var tbl = __find(document.getElementById("trend"), ".ltable");
   return tbl.children.__arr.slice(1).map(function (tr) {
-    return {main: tr.children[1].textContent, by: tr.children[2].textContent, title: tr.children[2].title};
+    return {main: tr.children[3].textContent, by: tr.children[1].textContent, title: tr.children[1].title};
   });
 })())`)
 	if err != nil {
@@ -135,10 +136,10 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	}
 }
 
-// The holder left the Landing cell when the queued row took the By column: a
-// queued row whose bead has an assignee reads its id, tag and title there and
-// no "by <name>" text (gt-duuq1).
-func TestAQueuedRowsLandingCellCarriesNoHolder(t *testing.T) {
+// The holder left the Bead cell when the queued row took the Polecat column: a
+// queued row whose bead has an assignee reads its id, its title and the queued
+// tag (in the State column) and no "by <name>" text (gt-duuq1, gt-ultode).
+func TestAQueuedRowsBeadCellCarriesNoHolder(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
@@ -148,28 +149,38 @@ func TestAQueuedRowsLandingCellCarriesNoHolder(t *testing.T) {
 		}},
 	})
 
-	v, err := dom.vm.RunString(`(function () {
-  var tbl = __find(document.getElementById("trend"), ".ltable");
-  return tbl.children[1].children[1].textContent;
-})()`)
+	v, err := dom.vm.RunString(`JSON.stringify((function () {
+  var tbl = __find(document.getElementById("trend"), ".ltable"), tr = tbl.children[1];
+  return {bead: tr.children[3].textContent, state: tr.children[4].textContent};
+})())`)
 	if err != nil {
-		t.Fatalf("reading the queued row's Landing cell: %v", err)
+		t.Fatalf("reading the queued row's cells: %v", err)
 	}
-	main := v.String()
-	if strings.Contains(main, "by ") {
-		t.Errorf("the Landing cell reads %q, want no by reading: the holder belongs in the By column", main)
+	var got struct {
+		Bead  string `json:"bead"`
+		State string `json:"state"`
 	}
-	for _, want := range []string{"gt-held", "queued", "the queue that never drains"} {
-		if !strings.Contains(main, want) {
-			t.Errorf("the Landing cell reads %q, want it to keep %q", main, want)
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the queued row's cells: %v", err)
+	}
+	if strings.Contains(got.Bead, "by ") {
+		t.Errorf("the Bead cell reads %q, want no by reading: the holder belongs in the Polecat column", got.Bead)
+	}
+	for _, want := range []string{"gt-held", "the queue that never drains"} {
+		if !strings.Contains(got.Bead, want) {
+			t.Errorf("the Bead cell reads %q, want it to keep %q", got.Bead, want)
 		}
+	}
+	if got.State != "queued" {
+		t.Errorf("the State cell reads %q, want the queued tag", got.State)
 	}
 }
 
-// The By column is still the column that says who built a landing, heading and
-// hover alike, so the name a rejected or failing row now carries reads as that
-// landing's submitter rather than as a new kind of column (gt-gclus).
-func TestTheLandingsByColumnStillSaysWhoBuiltIt(t *testing.T) {
+// The Polecat column is today's By column, the one that says who built a
+// landing, heading and hover alike, so the name a rejected or failing row
+// carries reads as that landing's submitter rather than as a new kind of column
+// (gt-gclus, gt-ultode).
+func TestTheLandingsPolecatColumnStillSaysWhoBuiltIt(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.Local)
@@ -193,7 +204,7 @@ func TestTheLandingsByColumnStillSaysWhoBuiltIt(t *testing.T) {
     for (const c of (n.children || [])) walk(c);
   })(document.getElementById("trend"));
   if (!tbl) return null;
-  const head = tbl.children[0].children[2], cell = tbl.children[1].children[2];
+  const head = tbl.children[0].children[1], cell = tbl.children[1].children[1];
   return {head: head.textContent, tip: head.title, cell: cell.textContent};
 })())`)
 	if err != nil {
@@ -207,11 +218,11 @@ func TestTheLandingsByColumnStillSaysWhoBuiltIt(t *testing.T) {
 	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
 		t.Fatalf("decoding the drawn table: %v", err)
 	}
-	if got.Head != "By" || !strings.Contains(got.Tip, "who built it") {
-		t.Errorf("the By heading reads %q (%q), want the column that says who built it", got.Head, got.Tip)
+	if got.Head != "Polecat" || !strings.Contains(got.Tip, "who built it") {
+		t.Errorf("the Polecat heading reads %q (%q), want the column that says who built it", got.Head, got.Tip)
 	}
 	if got.Cell != "agate" {
-		t.Errorf("the rejected row's By cell reads %q, want the submitter the server named", got.Cell)
+		t.Errorf("the rejected row's Polecat cell reads %q, want the submitter the server named", got.Cell)
 	}
 }
 
@@ -233,16 +244,16 @@ func TestQueuedLandingsAreCappedWithAPointerToTheQueuePane(t *testing.T) {
 	}
 }
 
-// A bead's own text stays text: the id, the title and the store all go through
-// el(), which writes textContent, so a title holding markup shows as that
-// markup's text and never as markup (gt-zc45r).
+// A bead's own text stays text: the id, the priority and the title all go
+// through el(), which writes textContent, so a title holding markup shows as
+// that markup's text and never as markup (gt-zc45r).
 func TestQueuedLandingsDrawEveryCellAsText(t *testing.T) {
 	t.Parallel()
 
 	tbl := pageFunc(t, "landingTable")
 	for _, want := range []string{
-		`main.append(el("span", "bead", b.id));`,
-		`if (b.title) main.append(document.createElement("br"), el("span", "title", (b.rig ? b.rig + " · " : "") + b.title));`,
+		`const bd = beadIdCell(el("span", "lbead"), b.id, b.priority);`,
+		`if (b.title) bd.append(document.createTextNode(" "), el("span", "ltitle", title));`,
 	} {
 		if !strings.Contains(tbl, want) {
 			t.Errorf("a queued row does not draw %q as text", want)
@@ -383,10 +394,10 @@ func drawnPolecatColumn(t *testing.T, dom *pageDOM) []polecatCell {
   })(document.getElementById("trend"));
   if (!tbl) return [];
   const col = name => tbl.children[0].children.__arr.findIndex(th => th.textContent === name);
-  const beadCol = col("Landing"), polecatCol = col("Polecat");
-  if (beadCol < 0 || polecatCol < 0) throw new Error("the table has no Landing and Polecat headings");
+  const beadCol = col("Bead"), polecatCol = col("Polecat time");
+  if (beadCol < 0 || polecatCol < 0) throw new Error("the table has no Bead and Polecat time headings");
   return tbl.children.__arr.slice(1).map(tr => ({
-    bead: tr.children[beadCol].textContent,
+    bead: __find(tr.children[beadCol], ".bead").textContent,
     text: tr.children[polecatCol].textContent,
     title: tr.children[polecatCol].title,
   }));
@@ -584,13 +595,13 @@ func drawnByColumn(t *testing.T, dom *pageDOM) map[string]string {
   const heads = tbl.children[0].children;
   let beadCol = -1, byCol = -1;
   for (let i = 0; i < heads.length; i++) {
-    if (heads[i].textContent === "Landing") beadCol = i;
-    if (heads[i].textContent === "By") byCol = i;
+    if (heads[i].textContent === "Bead") beadCol = i;
+    if (heads[i].textContent === "Polecat") byCol = i;
   }
-  if (beadCol < 0 || byCol < 0) throw new Error("the table has no Landing and By headings");
+  if (beadCol < 0 || byCol < 0) throw new Error("the table has no Bead and Polecat headings");
   const rows = [];
   for (let i = 1; i < tbl.children.length; i++) {
-    rows.push([tbl.children[i].children[beadCol].textContent, tbl.children[i].children[byCol].textContent]);
+    rows.push([__find(tbl.children[i].children[beadCol], ".bead").textContent, tbl.children[i].children[byCol].textContent]);
   }
   return rows;
 })())`)
