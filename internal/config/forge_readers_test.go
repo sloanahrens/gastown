@@ -28,6 +28,7 @@ var knownOwnerDataFileNamers = map[string]string{
 	"cmd/forgejo-sources-secret/main.go":          "comment: the URL names the two files hold",
 	"internal/ci/preflight/preflight.go":          "comment: the pins' host",
 	"internal/cmd/daemon_image.go":                "reader: readImagePins expands image-pins",
+	"internal/cmd/daemon_image_pins.go":           "reader: readImagePinsFile expands image-pins, and the refresh writes back the unexpanded text",
 	"internal/daemonimage/build.go":               "comment: the pins file Plan names",
 	"internal/daemonimage/pins.go":                "reader: ParsePins, and PinsPath",
 	"internal/polecat/imagectx/imagectx.go":       "reader: ParseSeedURLs expands and refuses the placeholder",

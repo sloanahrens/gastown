@@ -327,25 +327,34 @@ func runContextOnly(ctx context.Context, build imageBuilder, rev, ctxDir string,
 // cannot be read and one the parser refuses are both errors naming the path, so
 // the operator knows which file to fix.
 func readImagePins(path string, ownerOf func() (string, error)) ([]daemonimage.Pin, error) {
+	_, pins, err := readImagePinsFile(path, ownerOf)
+	return pins, err
+}
+
+// readImagePinsFile is readImagePins that also returns the file's text as it is
+// on disk, with the {owner} placeholder unexpanded, so a caller that writes the
+// file back keeps the placeholder.
+func readImagePinsFile(path string, ownerOf func() (string, error)) (string, []daemonimage.Pin, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("--pins %q cannot be read: %w", path, err)
+		return "", nil, fmt.Errorf("--pins %q cannot be read: %w", path, err)
 	}
 	text := string(body)
+	expanded := text
 	if strings.Contains(text, config.ForgeOwnerPlaceholder) {
 		owner, err := ownerOf()
 		if err != nil {
-			return nil, fmt.Errorf("--pins %q: %w", path, err)
+			return "", nil, fmt.Errorf("--pins %q: %w", path, err)
 		}
-		if text, err = config.ExpandForgeOwner(text, owner); err != nil {
-			return nil, fmt.Errorf("--pins %q: %w", path, err)
+		if expanded, err = config.ExpandForgeOwner(text, owner); err != nil {
+			return "", nil, fmt.Errorf("--pins %q: %w", path, err)
 		}
 	}
-	pins, err := daemonimage.ParsePins([]byte(text))
+	pins, err := daemonimage.ParsePins([]byte(expanded))
 	if err != nil {
-		return nil, fmt.Errorf("--pins %q: %w", path, err)
+		return "", nil, fmt.Errorf("--pins %q: %w", path, err)
 	}
-	return pins, nil
+	return text, pins, nil
 }
 
 // pinCheckout is the --<name>-src checkout named for pin name, or "" when the
