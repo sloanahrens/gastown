@@ -23,10 +23,10 @@ import (
 // when the end decides the seat is no longer kept. The jev_rules keep has its
 // own record (sandbox_seat_end_pending.go) and is not written here (gt-464nw6).
 
-// keptSandboxSeat is one seat the daemon keeps for a reason other than the
+// KeptSandboxSeat is one seat the daemon keeps for a reason other than the
 // jev_rules ask: its rig and polecat name, the bead it finished, the keep reason
 // the end gave, and when that reason began.
-type keptSandboxSeat struct {
+type KeptSandboxSeat struct {
 	Rig    string
 	Name   string
 	Bead   string
@@ -123,7 +123,7 @@ func badKeptSeatKey(townRoot, path string) string {
 // read or decoded is returned in bad, by path, never skipped, and so is a rig
 // directory that cannot be listed. The store's own directory that cannot be
 // listed is the error. A town with no records is an empty result, not an error.
-func KeptSandboxSeats(townRoot string) (seats []keptSandboxSeat, bad []string, err error) {
+func KeptSandboxSeats(townRoot string) (seats []KeptSandboxSeat, bad []string, err error) {
 	dir := keptSandboxSeatsDir(townRoot)
 	rigs, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -158,7 +158,7 @@ func KeptSandboxSeats(townRoot string) (seats []keptSandboxSeat, bad []string, e
 				bad = append(bad, path)
 				continue
 			}
-			seats = append(seats, keptSandboxSeat{Rig: rigEntry.Name(), Name: name, Bead: rec.Bead, Reason: rec.Reason, Since: rec.Since, Tries: rec.Tries})
+			seats = append(seats, KeptSandboxSeat{Rig: rigEntry.Name(), Name: name, Bead: rec.Bead, Reason: rec.Reason, Since: rec.Since, Tries: rec.Tries})
 		}
 	}
 	sort.Slice(seats, func(i, j int) bool {

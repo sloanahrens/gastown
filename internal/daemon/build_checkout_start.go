@@ -20,6 +20,7 @@ import (
 // fallback.
 func (d *Daemon) startBuildCheckout(ctx context.Context) error {
 	if !d.containerMode {
+		d.logger.Printf("the gt source checkout is not ensured: a host daemon keeps the checkout it has")
 		return nil
 	}
 	sha, err := d.fullBuildCommit()

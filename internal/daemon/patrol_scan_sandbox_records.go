@@ -62,22 +62,21 @@ const (
 // question when the sandbox exists: at most two gateway questions. So the walk
 // makes at most the budget in tmux probes and twice the budget in gateway
 // questions, and records the gateway still has cannot starve the ones behind
-// them. A completion (completeKeptSeatEnd) asks the gateway its own two
-// questions, and those are exempt from the walk's budget: a completion follows
-// a record the pass has just checked, so it takes no other record's place, and
-// it cannot wait for a later tick because nothing else offers that kept seat's
-// end again. One tick therefore asks at most four times the budget in gateway
-// questions and still checks at most the budget in records. The walk over the
-// name-sorted records starts after the name the
-// last tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks judge
-// consecutive names and every record is judged within ceil(n/budget) ticks,
-// whatever the tick's clock phase. A failed removal is logged and the pass goes
-// on.
+// them. A completion (completeKeptSeatEnd) asks the gateway its own questions
+// for the seat end it re-runs, and those are outside the walk's budget: the
+// completion follows a record the walk has already charged, so it takes no
+// other record's place, and it cannot move to a later tick because the pass has
+// just removed the record that named the seat, so no later walk offers that
+// seat again. The walk still checks exactly its budget in records, whatever the
+// completions ask. The walk over the name-sorted records starts after the name
+// the last tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks
+// judge consecutive names and every record is judged within ceil(n/budget)
+// ticks, whatever the tick's clock phase. A failed removal is logged and the
+// pass goes on.
 //
 // A seat the end kept is only released once its sandbox is gone, and a pass
-// that removes the record has just made that true; nothing else offers that
-// seat's end again, so the pass completes it (gt-cz5tdz). See
-// completeKeptSeatEnd.
+// that removes the record has just made that true; no later pass sees the seat
+// again, so this one completes it (gt-cz5tdz). See completeKeptSeatEnd.
 func (h *patrolScanHost) patrolScanSandboxRecords() {
 	names := session.ListSandboxSessions(h.town())
 	if len(names) == 0 {
@@ -171,7 +170,7 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 //
 // A record without landing facts, one that cannot be read, and an end that does
 // not complete are each logged with the seat's name, and the keep stands: the
-// pass goes on to the next record. The two gateway questions the end asks are
+// pass goes on to the next record. The gateway questions the end asks are
 // outside the walk's record budget (see patrolScanSandboxRecords).
 func (h *patrolScanHost) completeKeptSeatEnd(rec session.SandboxRecord) {
 	if rec.Rig == "" || rec.Polecat == "" {

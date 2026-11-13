@@ -587,9 +587,12 @@ func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 // omSkewGitRun runs one read-only git call, bounded by omSkewRemoteTimeout,
 // and returns its trimmed stdout with the command's own error: the status
 // omSkewGitNoMatch reads is read where exec produces it, not off a wrapped
-// error another function builds (gt-8n9hj). A call that hands git a revision, a
-// path or a url passes it after "--", so a value that begins with "-" is not
-// read as an option.
+// error another function builds (gt-8n9hj).
+//
+// Each caller builds its own argv and keeps a value that could be read as an
+// option out of that position: a revision is held to a commit id by
+// omSkewCommitRevs before the call, a url is passed after "--", and a path is
+// carried inside one --git-dir=<path> argument.
 func (d *Daemon) omSkewGitRun(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), omSkewRemoteTimeout)
 	defer cancel()
