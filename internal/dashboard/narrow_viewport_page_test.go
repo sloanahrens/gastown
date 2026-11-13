@@ -30,7 +30,7 @@ func TestHealthLineWrapsAtANarrowWidth(t *testing.T) {
 	}
 }
 
-// At 470 px the Polecats table keeps its five columns in the same order, every
+// At 470 px the Polecats table keeps its six columns in the same order, every
 // column but the bead holds the width its text needs, and only the bead shrinks
 // (gt-ec79s). The test reads the narrow template's declarations, as
 // TestLandingsFitsANarrowViewport does.
@@ -58,11 +58,11 @@ func TestPolecatsTableFitsANarrowViewport(t *testing.T) {
 		}
 		tracks = append(tracks, tok)
 	}
-	if got, want := strings.Join(names, " "), "polecat agent bead state age"; got != want {
+	if got, want := strings.Join(names, " "), "polecat agent bead state age points"; got != want {
 		t.Errorf("the narrow seat table names its columns %q, want %q in the order the header draws them", got, want)
 	}
-	if len(tracks) != 5 {
-		t.Fatalf("the narrow seat table lays out %d columns (%q), want five", len(tracks), cols)
+	if len(tracks) != 6 {
+		t.Fatalf("the narrow seat table lays out %d columns (%q), want six", len(tracks), cols)
 	}
 	for i, name := range names {
 		track := tracks[i]

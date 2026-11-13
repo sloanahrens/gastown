@@ -76,7 +76,7 @@ func landingsSeatsState(t *testing.T) map[string]any {
 // TestPolecatsIsInLandingsBetweenItsFiguresAndRows draws the Landings body over a
 // reading with figures, seats and landings, then reads the body's order and the
 // seat rows: the figures first, the Polecats section, then the landing rows, and
-// the seats drawn in the table's five columns with the seat's header summary.
+// the seats drawn in the table's six columns with the seat's header summary.
 func TestPolecatsIsInLandingsBetweenItsFiguresAndRows(t *testing.T) {
 	t.Parallel()
 
@@ -96,7 +96,7 @@ func TestPolecatsIsInLandingsBetweenItsFiguresAndRows(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the Polecats section drew %d rows (%v), want a header and two seats", len(rows), rows)
 	}
-	if got := strings.Join(rows[0], " "); got != "Polecat Model Bead State Age" {
+	if got := strings.Join(rows[0], " "); got != "Polecat Model Bead State Age Points" {
 		t.Errorf("the seat header reads %q, want the same columns as before", got)
 	}
 	if rows[1][0] != "dementus" || rows[1][3] != "working" {

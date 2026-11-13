@@ -134,7 +134,7 @@ tr.live,.ltrow.live{background:#101a13}
    so the two tables read as one format and a width changed here changes both
    (gt-ultode). */
 .wtable,.ltable{--polecat-w:max-content;--model-w:max-content}
-.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline}
+.wtable{display:grid;grid-template-columns:[polecat] minmax(0,var(--polecat-w)) [agent] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch) [points] minmax(0,max-content);gap:2px 8px;align-items:baseline}
 /* Below 640 px the four tracks other than the bead hold the width their text
    needs, so their text is not clipped by its own track at 470 px. The floor
    is minmax(max-content,max-content), not a bare max-content: a track's minimum
@@ -142,7 +142,7 @@ tr.live,.ltrow.live{background:#101a13}
    max-content lets the track shrink. Only the bead shrinks to make room (gt-ec79s);
    if the four fixed tracks together exceed the panel, the grid overflows rather
    than shrinking them. */
-@media (max-width:640px){.wtable{grid-template-columns:[polecat] minmax(max-content,max-content) [agent] minmax(max-content,max-content) [bead] minmax(0,1fr) [state] minmax(max-content,max-content) [age] minmax(max-content,max-content)}}
+@media (max-width:640px){.wtable{grid-template-columns:[polecat] minmax(max-content,max-content) [agent] minmax(max-content,max-content) [bead] minmax(0,1fr) [state] minmax(max-content,max-content) [age] minmax(max-content,max-content) [points] minmax(max-content,max-content)}}
 .workrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
 /* A fold's summary spans the table, and its rows are a subgrid of it, so a
    collapsed group hides rows that would still line up with the live ones. */
@@ -152,7 +152,7 @@ tr.live,.ltrow.live{background:#101a13}
 .workrow>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
-.workrow .wnum{text-align:right;color:var(--dim)}
+.workrow .wnum,.workrow .wpts{text-align:right;color:var(--dim)}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
@@ -227,7 +227,7 @@ section>h2 .r:not([hidden])+.foldsum{margin-left:0}
    together (--polecat-w, --model-w above), the bead takes what is left, and
    every row is a subgrid of the table so a header cell and the cells under it
    cannot start at different places (gt-ultode). */
-.ltable{display:grid;grid-template-columns:[when] minmax(0,max-content) [polecat] minmax(0,var(--polecat-w)) [model] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [ptime] minmax(0,max-content) [score] minmax(0,max-content) [gate] minmax(0,max-content) [om] minmax(0,max-content) [ship] minmax(0,max-content);gap:2px 8px;align-items:baseline}
+.ltable{display:grid;grid-template-columns:[when] minmax(0,max-content) [polecat] minmax(0,var(--polecat-w)) [model] minmax(0,var(--model-w)) [bead] minmax(0,1fr) [state] minmax(0,max-content) [ptime] minmax(0,max-content) [points] minmax(0,max-content) [score] minmax(0,max-content) [gate] minmax(0,max-content) [om] minmax(0,max-content) [ship] minmax(0,max-content);gap:2px 8px;align-items:baseline}
 .ltrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
 .ltrow.hrow{color:var(--dim);font-size:11px;border-top:0}
 .ltrow>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -239,7 +239,7 @@ section>h2 .r:not([hidden])+.foldsum{margin-left:0}
    47s" reads as one value (gt-u7xe9). */
 .ltrow .when{white-space:nowrap}
 .lrows{max-height:70vh;overflow-y:auto}
-/* Below 640 px the ten columns cannot sit side by side, so each row stacks: the
+/* Below 640 px the eleven columns cannot sit side by side, so each row stacks: the
    bead first on a full line (its title two lines at most, the rest on its hover),
    then the other cells in a wrapping line, each led by its column's name because
    the header row is hidden. Nothing is cut and the page does not scroll sideways
@@ -1223,13 +1223,14 @@ function worseRead(a, b) {
   return (a.ageSec || 0) >= (b.ageSec || 0) ? a : b;
 }
 
-// workHead is a row of the seat table's grid, spanning the same five columns as
+// workHead is a row of the seat table's grid, spanning the same six columns as
 // a seat row, so a heading cannot drift from the cells under it (gt-n7yb8).
 function workHead() {
   const tr = el("div", "workrow whead");
   [["Polecat", "the polecat, with its rig and last-24-hour landings on hover"], ["Model", "the model the seat's session was started with"],
    ["Bead", "the bead on the seat's hook, with its title"], ["State", "the state the town's inventory reads the seat into"],
-   ["Age", "how long the bead has waited: a queued bead since its submit, any other since the bead was dispatched; the hover repeats the dispatch time and adds how long its session has been silent"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
+   ["Age", "how long the bead has waited: a queued bead since its submit, any other since the bead was dispatched; the hover repeats the dispatch time and adds how long its session has been silent"],
+   ["Points", "the bead's story-point estimate, then how long the bead has been dispatched; the elapsed time is a duration, not points"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
   return tr;
 }
 
@@ -1264,6 +1265,13 @@ function paintAges(r, now) {
   r.age.className = "wnum" + (p.bead && (stuck || since > 5400 || (quiet != null && quiet >= 600)) ? " warnc" : "");
   r.age.textContent = aged ? (since == null ? "–" : fmtDur(since)) : "";
   r.age.title = aged ? (stuck || stateTip) + dispatched + silent : "";
+  // The Points cell reads the bead's estimate, then the elapsed time since
+  // dispatch, which moves with the clock like the age does. A seat holding no
+  // bead leaves it empty.
+  const est = p.sp_estimate == null ? "–" : String(p.sp_estimate);
+  const elapsed = dispatchedSec == null ? "–" : fmtDur(dispatchedSec);
+  r.pts.textContent = p.bead ? est + " · " + elapsed : "";
+  r.pts.title = p.bead ? "the bead's story-point estimate, then how long the bead has been dispatched; the elapsed time is a duration, not points" : "";
 }
 
 // seatShortNames is the one table of the sandbox seats' short names, read by
@@ -1338,7 +1346,7 @@ function workRow(names, p, now) {
   }
   const badge = el("span", "badge st-" + p.state, p.state);
   cell("wstate", "").append(badge);
-  const r = {p: p, badge: badge, age: cell("wnum", "")};
+  const r = {p: p, badge: badge, age: cell("wnum", ""), pts: cell("wpts", "")};
   paintAges(r, now);
   workSeatRows.push(r);
   if ((p.hints || []).length) {
@@ -2072,12 +2080,28 @@ const LT_COLS = [
   ["Bead", "the bead, its priority and its title; hover for the whole title, the commit and the stage times"],
   ["State", "what the landing is doing: queued, running, rejected and why, failing at which stage, or om's verdict; hover for the detail"],
   ["Polecat time", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, + marks a reading that may understate the time, and ≤ one read from the bead's dispatch, which may overstate it"],
+  ["Points", "estimate → actual: the estimate is the bead's sp: label; the actual is points, the polecat minutes rounded to the nearest Fibonacci number (none for a lower-bound, upper-bound or unmeasured time); a dash is a side with no figure", 1],
   ["Score", "om's score", 1],
   ["Gate", "wall time of the gate stage", 1],
   ["om", "wall time of the om review", 1],
   ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1],
 ];
 const LT_BEAD = 3;
+
+// spPointsText is a landing's Points reading: the estimate, an arrow, then the
+// actual. A side with no figure reads a dash, and a row with neither reads one
+// dash, so a queued row reads est → – and a landed row of an unestimated bead
+// reads – → actual.
+function spPointsText(est, actual) {
+  if (est == null && actual == null) return "–";
+  return (est == null ? "–" : String(est)) + " → " + (actual == null ? "–" : String(actual));
+}
+
+// landingPointsCell draws a row's Points reading. A zero is a figure; only a
+// missing side reads a dash.
+function landingPointsCell(est, actual) {
+  return el("span", "n", spPointsText(est, actual));
+}
 
 // beadIdCell writes a row's bead id into its Bead cell, then its priority pill
 // or, where the feed carries no priority, the dash that says so — a running
@@ -2134,7 +2158,7 @@ function landingTable(s, names, rows, waiting) {
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
     st.append(tag);
-    tr.append(st, polecatTimeCell(b), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"));
+    tr.append(st, polecatTimeCell(b), landingPointsCell(b.sp_estimate, null), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"));
     labelCells(tr, LT_COLS, LT_BEAD);
     tbl.append(tr);
   }
@@ -2163,6 +2187,7 @@ function landingTable(s, names, rows, waiting) {
     tr.append(bd);
     tr.append(landingStateCell(r));
     tr.append(polecatTimeCell(r));
+    tr.append(landingPointsCell(r.sp_estimate, r.sp_actual));
     tr.append(el("span", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("span", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
     tr.append(el("span", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));

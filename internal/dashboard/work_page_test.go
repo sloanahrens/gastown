@@ -35,7 +35,7 @@ func workState(polecats []any, queue map[string]any) map[string]any {
 
 // workRows reads every seat row the panel drew, folded or not, as the text of
 // its cells. Every cell is a span — the hints a row carries are buttons in a
-// div of their own — so a row reads as its five columns however much it
+// div of their own — so a row reads as its six columns however much it
 // carries.
 func workRows(t *testing.T, dom *pageDOM) [][]string {
 	t.Helper()
@@ -144,12 +144,12 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the panel drew %d rows (%v), want a header and two seats", len(rows), rows)
 	}
-	if got := rows[0]; strings.Join(got, " ") != "Polecat Model Bead State Age" {
+	if got := rows[0]; strings.Join(got, " ") != "Polecat Model Bead State Age Points" {
 		t.Errorf("the header row reads %v", got)
 	}
 	busy := rows[1]
-	if len(busy) != 5 {
-		t.Fatalf("a seat's row has %d cells (%v), want five", len(busy), busy)
+	if len(busy) != 6 {
+		t.Fatalf("a seat's row has %d cells (%v), want six", len(busy), busy)
 	}
 	if busy[0] != "dementus" {
 		t.Errorf("the row does not lead with the polecat: %v", busy)
@@ -170,7 +170,7 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	// hold something rather than left out. It holds no bead, so it names no
 	// agent and names its rig in the Bead column instead (gt-hnztc).
 	idle := rows[2]
-	if len(idle) != 5 || idle[0] != "furiosa" || idle[1] != "" || idle[2] != "gastown" || idle[3] != "idle" || idle[4] != "" {
+	if len(idle) != 6 || idle[0] != "furiosa" || idle[1] != "" || idle[2] != "gastown" || idle[3] != "idle" || idle[4] != "" || idle[5] != "" {
 		t.Errorf("the idle seat's row reads %v", idle)
 	}
 	if !strings.Contains(workText(t, dom), "1 idle (free to take work; the model is chosen when work is dispatched)") {
@@ -841,11 +841,11 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 		}
 		tracks = append(tracks, tok)
 	}
-	if got, want := strings.Join(names, " "), "polecat agent bead state age"; got != want {
+	if got, want := strings.Join(names, " "), "polecat agent bead state age points"; got != want {
 		t.Errorf("the seat table names its columns %q, want %q in the order the header draws them", got, want)
 	}
-	if len(tracks) != 5 {
-		t.Errorf("the seat table lays out %d columns (%q), want five: polecat, agent, bead, state, age", len(tracks), cols)
+	if len(tracks) != 6 {
+		t.Errorf("the seat table lays out %d columns (%q), want six: polecat, agent, bead, state, age, points", len(tracks), cols)
 	}
 	flex := 0
 	for _, track := range tracks {
@@ -1648,8 +1648,8 @@ func TestTheWorkPanelShowsTheBeadsDescriptionOnHover(t *testing.T) {
 		t.Errorf("a bead with no description must hover as its title alone, got %q", tips)
 	}
 	for _, row := range workRows(t, dom)[1:] {
-		if len(row) != 5 {
-			t.Errorf("a seat's row has %d cells (%v), want the same five as before", len(row), row)
+		if len(row) != 6 {
+			t.Errorf("a seat's row has %d cells (%v), want six: the five as before and Points", len(row), row)
 		}
 		if strings.Contains(strings.Join(row, " "), "After this lands") {
 			t.Errorf("the description must stay in the hover, not the row's text: %v", row)

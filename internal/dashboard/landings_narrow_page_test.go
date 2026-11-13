@@ -199,7 +199,7 @@ func TestLandingsTitleCellKeepsAReadableWidth(t *testing.T) {
 	}
 }
 
-// The table lays out the ten columns in the order its header and rows draw
+// The table lays out the eleven columns in the order its header and rows draw
 // them, and only the bead takes what is left of the width: a row states no
 // columns of its own, so a header cell and the cells under it cannot start at
 // different places (gt-ultode).
@@ -214,11 +214,11 @@ func TestTheLandingsTableLaysOutItsColumns(t *testing.T) {
 		}
 		tracks = append(tracks, tok)
 	}
-	if got, want := strings.Join(names, " "), "when polecat model bead state ptime score gate om ship"; got != want {
+	if got, want := strings.Join(names, " "), "when polecat model bead state ptime points score gate om ship"; got != want {
 		t.Errorf("the landings table names its columns %q, want %q in the order the header draws them", got, want)
 	}
-	if len(tracks) != 10 {
-		t.Fatalf("the landings table lays out %d columns (%q), want ten", len(tracks), tracks)
+	if len(tracks) != 11 {
+		t.Fatalf("the landings table lays out %d columns (%q), want eleven", len(tracks), tracks)
 	}
 	flex := 0
 	for i, track := range tracks {
@@ -384,8 +384,8 @@ func TestAQueuedRowDrawsTheRunningRowsCells(t *testing.T) {
 	p.call(t, "renderTrend", landingsQueuedRunningAndLanded(now))
 
 	head := landingsHeaderCells(t, p)
-	if head != 10 {
-		t.Fatalf("the table heads %d columns, want the ten the Landings table draws", head)
+	if head != 11 {
+		t.Fatalf("the table heads %d columns, want the eleven the Landings table draws", head)
 	}
 	rows := landingsRows(t, p)
 	if len(rows) != 3 {
@@ -408,7 +408,7 @@ func TestAQueuedRowDrawsTheRunningRowsCells(t *testing.T) {
 	}
 	// Model has no queue reading, and the four stage readings have not run: each
 	// draws the dash. The Bead cell and the State pill carry the row's own text.
-	for _, i := range []int{2, 5, 6, 7, 8, 9} {
+	for _, i := range []int{2, 5, 6, 7, 8, 9, 10} {
 		if got := queued.Cells[i].Text; got != "–" {
 			t.Errorf("the queued row's cell %d reads %q, want a dash for a stat the queue reading has not got", i, got)
 		}
@@ -619,10 +619,10 @@ func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
 		}
 	}
 	running, finished := rows[1], rows[2]
-	if got := running.Cells[8].Text; got != "–" {
+	if got := running.Cells[9].Text; got != "–" {
 		t.Errorf("the running row's om cell reads %q, want a dash for a review that has not finished", got)
 	}
-	for i, want := range map[int]string{6: "0.86", 7: "42s", 8: "61s", 9: "3m"} {
+	for i, want := range map[int]string{7: "0.86", 8: "42s", 9: "61s", 10: "3m"} {
 		if got := finished.Cells[i].Text; got != want {
 			t.Errorf("the finished row's cell %d reads %q, want %q", i, got, want)
 		}
@@ -682,7 +682,7 @@ func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
 	}
 }
 
-// At 470 px the ten columns cannot sit side by side. Below 640 px each row
+// At 470 px the eleven columns cannot sit side by side. Below 640 px each row
 // stacks: the bead on a full line of its own, its title clamped to two lines,
 // and every other cell named by its column because the header row is hidden.
 // Nothing is cut and the page does not scroll sideways. The harness has no
@@ -720,7 +720,7 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 	}
 	for sel := range want {
 		if !found[sel] {
-			t.Errorf("no max-width:640px rule styles %s, so the narrow table keeps its ten columns side by side", sel)
+			t.Errorf("no max-width:640px rule styles %s, so the narrow table keeps its eleven columns side by side", sel)
 		}
 	}
 
@@ -749,7 +749,7 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the table drew %d rows, want 3", len(rows))
 	}
-	wantLabels := []string{"When", "Polecat", "Model", "", "State", "Polecat time", "Score", "Gate", "om", "Ship"}
+	wantLabels := []string{"When", "Polecat", "Model", "", "State", "Polecat time", "Points", "Score", "Gate", "om", "Ship"}
 	for _, row := range rows {
 		if strings.Join(row.Labels, "|") != strings.Join(wantLabels, "|") {
 			t.Errorf("a landings row's cells are labelled %q, want %q", row.Labels, wantLabels)
