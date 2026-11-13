@@ -45,6 +45,10 @@ type specSlingJob struct {
 	// the box, and the job carries the answer to the process that runs it.
 	OverrunNote string                  `json:"overrun_note,omitempty"`
 	Run         specdispatch.FormulaRun `json:"run"`
+	// LockTimeouts is the consecutive assignee-lock-timeout count the tick read
+	// on the bead, so the sling that runs later adds to the same run rather
+	// than starting from a count it did not read (gt-a4cdcd).
+	LockTimeouts int `json:"lock_timeouts,omitempty"`
 }
 
 // specInFlight is a running sling as the daemon hands it to the tick: the
@@ -181,7 +185,8 @@ func specHandOffPendingSlings(env specDispatchEnv, pending []specPendingSling, r
 		report.Dispatched = append(report.Dispatched, entry)
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
-			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, OverrunNote: p.overrunNote, Run: p.c.Run,
+			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, OverrunNote: p.overrunNote,
+			LockTimeouts: p.lockTimeouts, Run: p.c.Run,
 		})
 	}
 }
@@ -190,14 +195,15 @@ func specHandOffPendingSlings(env specDispatchEnv, pending []specPendingSling, r
 func (j specSlingJob) pending() specPendingSling {
 	spec := specdispatch.Spec{ID: j.Bead}
 	return specPendingSling{
-		c:           specCandidate{Spec: spec, Rig: j.Rig, Run: j.Run},
-		id:          j.Bead,
-		seat:        specdispatch.SeatChoice{Agent: j.Agent, Reason: j.Reason},
-		resume:      j.Resume,
-		gone:        j.Gone,
-		shapeNote:   j.ShapeNote,
-		overrunNote: j.OverrunNote,
-		entry:       specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
+		c:            specCandidate{Spec: spec, Rig: j.Rig, Run: j.Run},
+		id:           j.Bead,
+		seat:         specdispatch.SeatChoice{Agent: j.Agent, Reason: j.Reason},
+		resume:       j.Resume,
+		gone:         j.Gone,
+		shapeNote:    j.ShapeNote,
+		overrunNote:  j.OverrunNote,
+		lockTimeouts: j.LockTimeouts,
+		entry:        specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
 	}
 }
 
@@ -315,11 +321,18 @@ func specSlingReport(townRoot string, job specSlingJob, envFor func(townRoot, ca
 // daemon started, which reads no cache.
 func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDispatchEnv {
 	specDetailCache.Store(specSlingDetailCacheFor(townRoot, cacheOwner))
+	recordLockTimeout, clearLockTimeout := specLockTimeoutCounter(townRoot)
 	return specDispatchEnv{
 		Annotate: func(id, key, text string) error {
 			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
 		},
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
+
+		RecordLockTimeout: recordLockTimeout,
+		ClearLockTimeout:  clearLockTimeout,
+		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
+			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
+		}),
 		Sling: func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
 			trace := session.NewSandboxTrace(time.Now)
 			name, err := slingSpec(townRoot, c, resume, seat, nil, trace, newRigDockedMemo(nil))

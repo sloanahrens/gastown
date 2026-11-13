@@ -1700,6 +1700,30 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 	return tryAcquireSlingAssigneeLockWith(townRoot, targetAgent, time.Sleep)
 }
 
+// ErrAssigneeLockTimeout is the sentinel every give-up on the assignee sling
+// lock matches: the lock stayed held for the whole bounded wait. It is a
+// sentinel rather than the message text because a caller that answers the
+// timeout differently — the spec dispatcher defers the bead instead of holding
+// it out of the queue — has to match it through the "serializing hook write"
+// wrap (internal/sling) without reading English (gt-a4cdcd).
+var ErrAssigneeLockTimeout = errors.New("assignee sling lock timed out")
+
+// assigneeLockTimeout is the give-up on a lock that never freed, with the
+// message a person reads and Is so errors.Is reaches ErrAssigneeLockTimeout.
+// The message is unchanged from the one the timeout has always printed.
+type assigneeLockTimeout struct {
+	agent   string
+	seconds int
+}
+
+func (e assigneeLockTimeout) Error() string {
+	return fmt.Sprintf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", e.agent, e.seconds)
+}
+
+// Is reports the sentinel this timeout matches: errors.Is(err,
+// ErrAssigneeLockTimeout) answers true for it however it is wrapped.
+func (assigneeLockTimeout) Is(target error) bool { return target == ErrAssigneeLockTimeout }
+
 // tryAcquireSlingAssigneeLockWith is tryAcquireSlingAssigneeLock with the
 // wait between attempts explicit.
 func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(time.Duration)) (func(), error) {
@@ -1730,7 +1754,7 @@ func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(ti
 		}
 	}
 
-	return nil, fmt.Errorf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", targetAgent, maxAttempts*retryInterval/1000)
+	return nil, assigneeLockTimeout{agent: targetAgent, seconds: maxAttempts * retryInterval / 1000}
 }
 
 // resolvePRBranch resolves a GitHub PR number to its head branch name via `gh pr view`.

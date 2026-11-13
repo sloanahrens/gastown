@@ -5,6 +5,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +113,35 @@ func TestTryAcquireSlingAssigneeLock_TimesOutOnAStuckHolder(t *testing.T) {
 	}
 	if sleeps != 19 {
 		t.Errorf("slept %d times, want 19 (a wait between each of 20 attempts)", sleeps)
+	}
+}
+
+// A give-up on the assignee lock is a typed error: the spec dispatcher answers
+// the timeout differently from every other sling failure, and it matches the
+// sentinel through the engine's "serializing hook write" wrap without reading
+// the message (gt-a4cdcd).
+func TestAssigneeLockTimeoutIsTyped(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	agent := "gastown/polecats/sbx-flash-1"
+	holder, err := tryAcquireSlingAssigneeLock(townRoot, agent)
+	if err != nil {
+		t.Fatalf("holder lock acquire failed: %v", err)
+	}
+	defer holder()
+
+	_, err = tryAcquireSlingAssigneeLockWith(townRoot, agent, func(time.Duration) {})
+	if err == nil {
+		t.Fatal("a lock held throughout must not be acquired")
+	}
+	if !errors.Is(err, ErrAssigneeLockTimeout) {
+		t.Errorf("errors.Is(%v, ErrAssigneeLockTimeout) = false, want the timeout to be typed", err)
+	}
+	// internal/sling wraps the lock error before it reaches the dispatcher.
+	wrapped := fmt.Errorf("serializing hook write for %s: %w", agent, err)
+	if !errors.Is(wrapped, ErrAssigneeLockTimeout) {
+		t.Errorf("errors.Is(%v, ErrAssigneeLockTimeout) = false, want the sentinel to survive the engine's wrap", wrapped)
 	}
 }
 

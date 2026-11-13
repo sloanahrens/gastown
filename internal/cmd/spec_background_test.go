@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -412,6 +413,39 @@ func TestSpecSlingJobsDoNotShareACensus(t *testing.T) {
 	}
 	if listCalls := len(gateway.Calls()); listCalls != 2 {
 		t.Errorf("gateway listings = %d, want one per job: the first job's listing must not be seen by the second", listCalls)
+	}
+}
+
+// A background sling continues the assignee-lock-timeout run the tick read: the
+// count rides the job through the wire, so a bead whose timeouts arrive through
+// `gt spec sling --job` labels on the third one as a foreground sling's does
+// (gt-a4cdcd).
+func TestBackgroundSlingCarriesTheLockTimeoutCount(t *testing.T) {
+	t.Parallel()
+	lockTimeout := fmt.Errorf("serializing hook write for gastown/polecats/sbx-flash-1: %w", ErrAssigneeLockTimeout)
+	f := newFakeSpecTown(withLockTimeouts(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"), 2))
+	f.seats = []specdispatch.Seat{{Agent: "sbx-flash", Cap: 1}}
+	f.slingErrs["gt-a"] = []error{lockTimeout}
+
+	planned := runSpecDispatchCycle(backgroundEnv(f))
+	if len(planned.Pending) != 1 || planned.Pending[0].LockTimeouts != 2 {
+		t.Fatalf("pending = %+v, want one job carrying the count 2", planned.Pending)
+	}
+	raw, err := json.Marshal(planned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct{ Pending []specSlingJob }
+	if err := json.Unmarshal(raw, &wire); err != nil || len(wire.Pending) != 1 {
+		t.Fatalf("report did not carry the job: %v %s", err, raw)
+	}
+
+	report := runSpecSlingJob(f.env(), wire.Pending[0])
+	if len(report.Failed) != 1 {
+		t.Fatalf("sling report = %+v, want the third timeout to fail the sling", report)
+	}
+	if !slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel) {
+		t.Fatalf("labels = %v, want %s: the count the tick read reached the sling", f.labels["gt-a"], specdispatch.DispatchFailedLabel)
 	}
 }
 

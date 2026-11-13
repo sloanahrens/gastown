@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -34,6 +35,23 @@ func TestSpecFromBoardRowCarriesTheSpec(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("spec from board row = %+v, want %+v", got, want)
+	}
+}
+
+// The last-moment re-read before a sling is a full show, so the bead's metadata
+// reaches the sling: the consecutive assignee-lock-timeout count is read from
+// there, and a read that dropped it would defer a stuck lock forever
+// (gt-a4cdcd).
+func TestShowSpecCarriesTheBeadsMetadata(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-m1", Metadata: json.RawMessage(`{"spec_dispatch_lock_timeout_attempts":2}`)})
+	got, err := showSpecWith(nil, "gt-m1", func(id string) (*beads.Issue, error) { return db.Show(id) })
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if n := specdispatch.LockTimeoutAttempts(got.Metadata); n != 2 {
+		t.Errorf("count on the shown spec = %d, want the bead's metadata read (2)", n)
 	}
 }
 
