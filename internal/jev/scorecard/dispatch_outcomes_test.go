@@ -125,3 +125,19 @@ func TestDispatchNeededSecondRoundOutcome(t *testing.T) {
 		})
 	}
 }
+
+// dispatchOutcomes reads the records it is given, not adapter state, so its
+// answer for a placement depends only on those records.
+func TestDispatchOutcomesReadsTheRecordsItIsGiven(t *testing.T) {
+	t.Parallel()
+	latest := map[string]landings.Record{
+		"gt-o": {Bead: "gt-o", Agent: "sbx-haiku", PolecatSecs: 21 * 60},
+	}
+	got := dispatchOutcomes("gt-o", latest, map[string]bool{"gt-o": true}, map[string]bool{"gt-o": true})
+	if v, ok := got[OutcomeRanOverTwenty]; !ok || !v {
+		t.Errorf("ran_over_twenty = %v (set %v), want true", v, ok)
+	}
+	if v, ok := got[OutcomeNeededSecondRound]; !ok || !v {
+		t.Errorf("needed_second_round = %v (set %v), want true", v, ok)
+	}
+}
