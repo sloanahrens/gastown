@@ -205,11 +205,16 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
 	}
-	owner, err := config.ResolveForgeOwnerFor(f.forgeOwner, f.townRoot)
-	if err != nil {
-		return err
+	// A bad --forge-owner is refused even when the pins hold no placeholder to
+	// expand, so the flag never reads as accepted while it is ignored.
+	if f.forgeOwner != "" {
+		if err := config.ValidForgeOwner(f.forgeOwner); err != nil {
+			return fmt.Errorf("forge owner from --forge-owner: %w", err)
+		}
 	}
-	pins, err := readImagePins(f.pins, owner)
+	pins, err := readImagePins(f.pins, func() (string, error) {
+		return config.ResolveForgeOwnerFor(f.forgeOwner, f.townRoot)
+	})
 	if err != nil {
 		return err
 	}
@@ -316,18 +321,25 @@ func runContextOnly(ctx context.Context, build imageBuilder, rev, ctxDir string,
 	return nil
 }
 
-// readImagePins reads and parses the pins file at path, expanding its {owner}
-// placeholder with owner first. A file that cannot be read and one the parser
-// refuses are both errors naming the path, so the operator knows which file to
-// fix. The caller passes the owner config.ResolveForgeOwnerFor resolved.
-func readImagePins(path, owner string) ([]daemonimage.Pin, error) {
+// readImagePins reads and parses the pins file at path. When the file holds the
+// {owner} placeholder, ownerOf names the owner it expands to; a file with no
+// placeholder never calls ownerOf, so the town is not read for it. A file that
+// cannot be read and one the parser refuses are both errors naming the path, so
+// the operator knows which file to fix.
+func readImagePins(path string, ownerOf func() (string, error)) ([]daemonimage.Pin, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("--pins %q cannot be read: %w", path, err)
 	}
-	text, err := config.ExpandForgeOwner(string(body), owner)
-	if err != nil {
-		return nil, fmt.Errorf("--pins %q: %w", path, err)
+	text := string(body)
+	if strings.Contains(text, config.ForgeOwnerPlaceholder) {
+		owner, err := ownerOf()
+		if err != nil {
+			return nil, fmt.Errorf("--pins %q: %w", path, err)
+		}
+		if text, err = config.ExpandForgeOwner(text, owner); err != nil {
+			return nil, fmt.Errorf("--pins %q: %w", path, err)
+		}
 	}
 	pins, err := daemonimage.ParsePins([]byte(text))
 	if err != nil {

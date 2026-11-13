@@ -46,7 +46,9 @@ var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // ParsePins parses an image-pins file: one "<name> <url> <commit>" per line,
 // with blank lines and "#" comments ignored. It refuses a file that does not
 // name each of PinNames exactly once, with a full commit and a credential-free
-// http(s) repository URL, and every refusal names its line. {owner} is expanded from forge.owner; see config.ForgeOwnerPlaceholder.
+// http(s) repository URL, and every refusal names its line. The caller expands
+// {owner} first (see config.ForgeOwnerPlaceholder); ParsePins refuses a
+// placeholder that reaches it.
 func ParsePins(data []byte) ([]Pin, error) {
 	var pins []Pin
 	seen := make(map[string]bool, len(PinNames))

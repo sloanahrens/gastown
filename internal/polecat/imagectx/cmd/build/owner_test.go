@@ -71,30 +71,95 @@ func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
 	}
 }
 
-// TestBuildRefusesAnOwnerItCannotResolve: -forge-owner and -town-root reach the
-// owner resolution before any file is read or any source is built, so a value
-// that is not an owner name, and a named town with no town.json, each stop the
-// build with a message naming the cause (gt-ucigk3).
-func TestBuildRefusesAnOwnerItCannotResolve(t *testing.T) {
+// TestImageBuildForgeOwnerFlag: the same fixture files, with their {owner}
+// placeholders, expand to the setting's default when -forge-owner is unset and to
+// the flag's owner when it is given, for image-pins and seed-urls alike. The
+// flag's value is validated before any file is read (gt-ucigk3).
+func TestImageBuildForgeOwnerFlag(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	pinsBody := "bd http://forgejo:3000/{owner}/beads.git " + buildTestSHA + "\n" +
+		"om http://forgejo:3000/{owner}/organic-mechanic.git " + buildTestSHA + "\n" +
+		"hm http://forgejo:3000/{owner}/history-man.git " + buildTestSHA + "\n" +
+		"devops http://forgejo:3000/{owner}/devops.git " + buildTestSHA + "\n"
+	pinsPath := filepath.Join(dir, "image-pins")
+	seedPinsPath := filepath.Join(dir, "seed-pins")
+	urlsPath := filepath.Join(dir, "seed-urls")
+	files := map[string]string{
+		pinsPath:     pinsBody,
+		seedPinsPath: "devops " + buildTestSHA + "\n",
+		urlsPath:     "devops http://forgejo:3000/{owner}/devops.git\nbeads http://forgejo:3000/{owner}/beads.git\n",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	defaultOwner, err := buildForgeOwner("", false)
+	if err != nil {
+		t.Fatalf("buildForgeOwner without the flag: %v", err)
+	}
+	flagOwner, err := buildForgeOwner("acme", true)
+	if err != nil {
+		t.Fatalf("buildForgeOwner with -forge-owner acme: %v", err)
+	}
+	if defaultOwner != config.DefaultForgeOwner || flagOwner != "acme" {
+		t.Fatalf("owners = %q and %q, want %q and acme", defaultOwner, flagOwner, config.DefaultForgeOwner)
+	}
+
+	fromDefault, err := readBuildInputs(pinsPath, seedPinsPath, urlsPath, defaultOwner)
+	if err != nil {
+		t.Fatalf("readBuildInputs with the default: %v", err)
+	}
+	fromFlag, err := readBuildInputs(pinsPath, seedPinsPath, urlsPath, flagOwner)
+	if err != nil {
+		t.Fatalf("readBuildInputs with -forge-owner: %v", err)
+	}
+	if want := "http://forgejo:3000/" + config.DefaultForgeOwner + "/beads.git"; fromDefault.bd.URL != want {
+		t.Errorf("default bd URL = %q, want %q", fromDefault.bd.URL, want)
+	}
+	if want := "http://forgejo:3000/acme/beads.git"; fromFlag.bd.URL != want {
+		t.Errorf("flag bd URL = %q, want %q", fromFlag.bd.URL, want)
+	}
+	if want := "http://forgejo:3000/" + config.DefaultForgeOwner + "/beads.git"; fromDefault.urls["beads"] != want {
+		t.Errorf("default seed URL of beads = %q, want %q", fromDefault.urls["beads"], want)
+	}
+	if want := "http://forgejo:3000/acme/beads.git"; fromFlag.urls["beads"] != want {
+		t.Errorf("flag seed URL of beads = %q, want %q", fromFlag.urls["beads"], want)
+	}
+}
+
+// TestBuildRefusesABadForgeOwnerBeforeAnyRead: a -forge-owner that is not an
+// owner name, or is given empty, stops the build before it reads the pins files
+// (which here do not exist, so a read first would fail as "cannot read"), with a
+// message naming the flag (gt-ucigk3).
+func TestBuildRefusesABadForgeOwnerBeforeAnyRead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name string
+		flag []string
 	}{
-		{"a flag that is not an owner name", []string{"-forge-owner", "org/team"}, "forge owner"},
-		{"a named town with no town.json", []string{"-town-root", t.TempDir()}, "has no town.json"},
+		{"a flag that is not an owner name", []string{"-forge-owner", "org/team"}},
+		{"an empty flag", []string{"-forge-owner", ""}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			args := append([]string{"-rev", buildTestSHA, "-out", t.TempDir()}, tt.args...)
+			absent := filepath.Join(t.TempDir(), "absent")
+			args := append([]string{
+				"-rev", buildTestSHA, "-out", t.TempDir(),
+				"-pins", absent, "-seed-pins", absent, "-seed-urls", absent,
+			}, tt.flag...)
 			var stdout, stderr bytes.Buffer
 			if code := run(args, &stdout, &stderr); code != 1 {
 				t.Fatalf("run = %d, want 1; stderr: %s", code, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), tt.wantErr) {
-				t.Errorf("stderr = %q, want it to name %q", stderr.String(), tt.wantErr)
+			if !strings.Contains(stderr.String(), "forge owner from -forge-owner") {
+				t.Errorf("stderr = %q, want it to name -forge-owner", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "cannot read") {
+				t.Errorf("stderr = %q: the build read a file before refusing the owner", stderr.String())
 			}
 		})
 	}

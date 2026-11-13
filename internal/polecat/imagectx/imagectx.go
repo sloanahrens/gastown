@@ -125,8 +125,9 @@ var goVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
 var rigName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // ParseSeedURLs parses a seed-urls file: one "<rig> <url>" per line, with blank
-// lines and "#" comments ignored. A rig named twice is refused. {owner} is expanded from forge.owner; see config.ForgeOwnerPlaceholder.
-// The URL is otherwise not checked here: FetchSource refuses a URL that carries
+// lines and "#" comments ignored. A rig named twice is refused. The caller
+// expands {owner} first (see config.ForgeOwnerPlaceholder); ParseSeedURLs refuses
+// a placeholder that reaches it. The URL is otherwise not checked here: FetchSource refuses a URL that carries
 // a credential or is not http(s), before any command runs.
 func ParseSeedURLs(data []byte) (map[string]string, error) {
 	urls := map[string]string{}

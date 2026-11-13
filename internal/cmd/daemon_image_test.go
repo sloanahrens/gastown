@@ -532,7 +532,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		return nil
 	}
 	r.deps.environ = []string{"PATH=/usr/bin", "DOCKER_CONTEXT=other", "DOCKER_HOST=tcp://elsewhere:2375", "HOME=/home/x"}
-	pins, err := readImagePins(r.flags.pins, config.DefaultForgeOwner)
+	pins, err := readImagePins(r.flags.pins, ownerIs(config.DefaultForgeOwner))
 	if err != nil {
 		t.Fatalf("readImagePins: %v", err)
 	}
@@ -786,6 +786,61 @@ func imageTestTown(t *testing.T, townJSON string) string {
 	return root
 }
 
+// TestDaemonImageReadsTheTownOnlyForAPlaceholder: the town's forge.owner is read
+// only when the pins file holds {owner} and --forge-owner does not name it. The
+// town root here names no town.json, so a read of it refuses: a row that
+// succeeds did not read the town (gt-ucigk3).
+func TestDaemonImageReadsTheTownOnlyForAPlaceholder(t *testing.T) {
+	t.Parallel()
+	missingTown := imageTestTown(t, "")
+	tests := []struct {
+		name        string
+		placeholder bool
+		forgeOwner  string
+		want        string // the owner the pin URLs must name, when no error is wanted
+		wantErr     string
+	}{
+		{"no placeholder reads no town", false, "", imageTestOwner, ""},
+		{"a placeholder with the flag reads no town", true, "acme", "acme", ""},
+		{"a placeholder with no flag reads the town", true, "", "", "forge owner"},
+		{"a bad flag is refused even with no placeholder", false, "org/team", "", "forge owner"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			body := imagePinsText()
+			if tt.placeholder {
+				body = strings.ReplaceAll(body, "/"+imageTestOwner+"/", "/"+config.ForgeOwnerPlaceholder+"/")
+			}
+			if err := os.WriteFile(r.flags.pins, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r.flags.forgeOwner, r.flags.townRoot = tt.forgeOwner, missingTown
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("runDaemonImage = %v, want a refusal naming %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runDaemonImage: %v", err)
+			}
+			if want := "pin bd: http://forgejo:3000/" + tt.want + "/beads.git at "; !strings.Contains(r.out.String(), want) {
+				t.Errorf("output lacks %q:\n%s", want, r.out.String())
+			}
+		})
+	}
+}
+
+// ownerIs is the owner resolver a test hands readImagePins: it names owner and
+// reads no town.
+func ownerIs(owner string) func() (string, error) {
+	return func() (string, error) { return owner, nil }
+}
+
 // TestOwnerPlaceholderExpandsInEachGoReader: readImagePins expands the pins
 // file's {owner} with the setting's default, so the URLs are the ones the file
 // named before the placeholder; the parser refuses a placeholder nothing
@@ -800,7 +855,7 @@ func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pins, err := readImagePins(path, config.DefaultForgeOwner)
+	pins, err := readImagePins(path, ownerIs(config.DefaultForgeOwner))
 	if err != nil {
 		t.Fatalf("readImagePins: %v", err)
 	}
@@ -812,7 +867,7 @@ func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
 	if _, err := daemonimage.ParsePins([]byte(body)); err == nil {
 		t.Error("ParsePins accepted a URL holding the unexpanded placeholder")
 	}
-	if _, err := readImagePins(path, ""); err == nil {
+	if _, err := readImagePins(path, ownerIs("")); err == nil {
 		t.Error("readImagePins accepted an empty owner")
 	}
 }
@@ -822,7 +877,7 @@ func TestOwnerPlaceholderExpandsInEachGoReader(t *testing.T) {
 func TestReadImagePinsRefusesAnUnreadableFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "absent")
-	if _, err := readImagePins(path, config.DefaultForgeOwner); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+	if _, err := readImagePins(path, ownerIs(config.DefaultForgeOwner)); err == nil || !strings.Contains(err.Error(), "cannot be read") {
 		t.Fatalf("readImagePins = %v, want an error naming the unreadable file", err)
 	}
 }
