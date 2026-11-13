@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/plugin"
 )
 
@@ -51,7 +53,7 @@ func fixedBuild(dir string) plugin.BuildCheckoutFunc {
 func runPluginSyncFor(t *testing.T, townRoot, source string) string {
 	t.Helper()
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), source: source, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), source: source, out: &out, errOut: io.Discard}
 	if err := r.run(); err != nil {
 		t.Errorf("runPluginSync() error = %v", err)
 	}
@@ -128,7 +130,7 @@ func TestRunPluginSync_DryRunNamesExtraWithoutClean(t *testing.T) {
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
 
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, out: &out, errOut: io.Discard}
 	if err := r.run(); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
@@ -155,7 +157,7 @@ func TestRunPluginSync_ReportsExtraItLeaves(t *testing.T) {
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
 
 	var out, errOut bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), out: &out, errOut: &errOut}
+	r := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), out: &out, errOut: &errOut}
 	if err := r.run(); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
@@ -182,7 +184,7 @@ func TestRunPluginSync_DryRunCleanProtectsUnshippedExtra(t *testing.T) {
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
 
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, clean: true, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, clean: true, out: &out, errOut: io.Discard}
 	if err := r.run(); err == nil {
 		t.Fatalf("run() = nil, want the protected-plugin error; output:\n%s", out.String())
 	}
@@ -210,7 +212,7 @@ func TestRunPluginSync_BuildCheckoutErrorFailsWithoutFallback(t *testing.T) {
 	errBuild := errors.New("bare repo missing")
 	failing := func(_ context.Context, _, _, _ string) (string, error) { return "", errBuild }
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, build: failing, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: failing, out: &out, errOut: io.Discard}
 	if err := r.run(); !errors.Is(err, errBuild) {
 		t.Fatalf("run() error = %v, want it to wrap %v; output:\n%s", err, errBuild, out.String())
 	}
@@ -219,7 +221,50 @@ func TestRunPluginSync_BuildCheckoutErrorFailsWithoutFallback(t *testing.T) {
 	}
 }
 
-// The help names the build checkout the default source is read from.
+// The production assembly must wire the real build-checkout resolver. Every
+// other test injects fixedBuild, so without this a refactor could leave
+// `gt plugin sync` resolving no checkout at all while the suite stayed green.
+func TestPluginSyncRunWiresProductionBuildResolver(t *testing.T) {
+	t.Parallel()
+
+	r := newPluginSyncRun(context.Background(), t.TempDir())
+	if r.build == nil {
+		t.Fatal("newPluginSyncRun has no build-checkout resolver; gt plugin sync would fail in production")
+	}
+	if got, want := reflect.ValueOf(r.build).Pointer(), reflect.ValueOf(buildsrc.Ensure).Pointer(); got != want {
+		t.Error("newPluginSyncRun does not wire buildsrc.Ensure, the resolver that keeps the checkout at the rig's main")
+	}
+}
+
+// A cancellation on the command's context must reach the build-checkout
+// resolver: run() used a background context, so a canceled `gt plugin sync`
+// still started the checkout work.
+func TestRunPluginSyncHonorsCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var sawCtxErr error
+	build := func(c context.Context, _, _, _ string) (string, error) {
+		sawCtxErr = c.Err()
+		if sawCtxErr != nil {
+			return "", sawCtxErr
+		}
+		return "", errors.New("the resolver ran with a live context")
+	}
+	r := pluginSyncRun{ctx: ctx, townRoot: t.TempDir(), build: build, out: io.Discard, errOut: io.Discard}
+	if err := r.run(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run() error = %v, want it to wrap context.Canceled", err)
+	}
+	if sawCtxErr != context.Canceled {
+		t.Errorf("the resolver saw ctx error %v, want context.Canceled: the command's cancellation was dropped", sawCtxErr)
+	}
+}
+
+// The help names the build checkout the default source is read from. The
+// expected path is pinned here, not derived, so a change to buildsrc's layout
+// that the help follows is caught and reviewed rather than drifting silently.
 func TestPluginSyncHelpNamesBuildCheckout(t *testing.T) {
 	t.Parallel()
 
@@ -240,7 +285,7 @@ func TestPluginSyncDryRunReportsProtected(t *testing.T) {
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "edited-plugin", "hand edit")
 
 	var out, errOut bytes.Buffer
-	dry := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, out: &out, errOut: &errOut}
+	dry := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, out: &out, errOut: &errOut}
 	dryErr := dry.run()
 	if dryErr == nil {
 		t.Fatalf("dry run returned nil for a plugin holding runtime edits; output:\n%s", out.String())
@@ -255,14 +300,14 @@ func TestPluginSyncDryRunReportsProtected(t *testing.T) {
 		t.Errorf("stderr = %q, want the edited file named", errOut.String())
 	}
 
-	realErr := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), out: io.Discard, errOut: io.Discard}.run()
+	realErr := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), out: io.Discard, errOut: io.Discard}.run()
 	if realErr == nil || realErr.Error() != dryErr.Error() {
 		t.Errorf("dry run error = %v, real run error = %v; want the same", dryErr, realErr)
 	}
 
 	// --force discards the edits, so the preview is a plain diff again.
 	out.Reset()
-	forced := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, force: true, out: &out, errOut: io.Discard}
+	forced := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, force: true, out: &out, errOut: io.Discard}
 	if err := forced.run(); err != nil {
 		t.Fatalf("--force dry run error = %v", err)
 	}

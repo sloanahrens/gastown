@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -43,7 +44,7 @@ func TestIntegrationRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	r := pluginSyncRun{townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, clean: true, out: &out, errOut: io.Discard}
+	r := pluginSyncRun{ctx: context.Background(), townRoot: townRoot, build: fixedBuild(buildCheckoutDir(townRoot)), dryRun: true, clean: true, out: &out, errOut: io.Discard}
 	if err := r.run(); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
