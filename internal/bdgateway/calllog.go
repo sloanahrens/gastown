@@ -141,15 +141,17 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 	if now == nil {
 		now = time.Now
 	}
-	w := &logWriter{maxBytes: opts.MaxBytes, maxFiles: opts.MaxFiles, hook: hook}
+	var w *logWriter
 	if hook == nil {
-		w.path = filepath.Join(opts.Dir, DefaultCallLogName)
+		w = newLogWriter(filepath.Join(opts.Dir, DefaultCallLogName), opts.MaxBytes, opts.MaxFiles)
 		if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
 			return nil, fmt.Errorf("bdgateway: create call log directory: %w", err)
 		}
 		if err := w.open(); err != nil {
 			return nil, err
 		}
+	} else {
+		w = &logWriter{hook: hook}
 	}
 	l := &CallLog{
 		ch:       make(chan []byte, opts.Buffer),
@@ -357,19 +359,42 @@ func isFlagToken(arg string) bool {
 	return len(arg) > 1 && arg[0] == '-'
 }
 
+// logFile is the part of *os.File the writer uses; a test substitutes one whose
+// methods fail to drive each error path.
+type logFile interface {
+	Write([]byte) (int, error)
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
 // logWriter owns the live file and its rotation. Only the writer goroutine
 // touches it after construction.
 type logWriter struct {
 	path     string
 	maxBytes int64
 	maxFiles int
-	file     *os.File
+	file     logFile
 	size     int64
 	hook     func([]byte) error
+
+	openFile func(string) (logFile, error)
+	rename   func(oldpath, newpath string) error
+	remove   func(name string) error
+}
+
+func newLogWriter(path string, maxBytes int64, maxFiles int) *logWriter {
+	return &logWriter{
+		path: path, maxBytes: maxBytes, maxFiles: maxFiles,
+		openFile: func(name string) (logFile, error) {
+			return os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		},
+		rename: os.Rename,
+		remove: os.Remove,
+	}
 }
 
 func (w *logWriter) open() error {
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := w.openFile(w.path)
 	if err != nil {
 		return fmt.Errorf("bdgateway: open call log: %w", err)
 	}
@@ -425,17 +450,17 @@ func (w *logWriter) rotate() error {
 		}
 	}
 	if w.maxFiles <= 1 {
-		return removeIfExists(w.path)
+		return w.removeIfExists(w.path)
 	}
-	if err := removeIfExists(backupPath(w.path, w.maxFiles-1)); err != nil {
+	if err := w.removeIfExists(backupPath(w.path, w.maxFiles-1)); err != nil {
 		return err
 	}
 	for i := w.maxFiles - 2; i >= 1; i-- {
-		if err := renameIfExists(backupPath(w.path, i), backupPath(w.path, i+1)); err != nil {
+		if err := w.renameIfExists(backupPath(w.path, i), backupPath(w.path, i+1)); err != nil {
 			return err
 		}
 	}
-	return renameIfExists(w.path, backupPath(w.path, 1))
+	return w.renameIfExists(w.path, backupPath(w.path, 1))
 }
 
 func (w *logWriter) close() error {
@@ -454,16 +479,16 @@ func backupPath(path string, n int) string {
 	return path + "." + strconv.Itoa(n)
 }
 
-func removeIfExists(path string) error {
-	err := os.Remove(path)
+func (w *logWriter) removeIfExists(path string) error {
+	err := w.remove(path)
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return fmt.Errorf("bdgateway: remove call log %s: %w", path, err)
 }
 
-func renameIfExists(from, to string) error {
-	err := os.Rename(from, to)
+func (w *logWriter) renameIfExists(from, to string) error {
+	err := w.rename(from, to)
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}

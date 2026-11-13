@@ -264,6 +264,194 @@ func TestCallLogWriteError(t *testing.T) {
 	if err := l.Close(); !errors.Is(err, diskFull) {
 		t.Fatalf("Close = %v, want %v", err, diskFull)
 	}
+	// Closing again reports the same failure rather than a clean second close.
+	if err := l.Close(); !errors.Is(err, diskFull) {
+		t.Fatalf("second Close = %v, want %v", err, diskFull)
+	}
+}
+
+// TestCallLogFilesystemRefused drives the two ways the live file cannot be
+// opened: a directory path that is a file, and a name already taken by a
+// directory.
+func TestCallLogFilesystemRefused(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "logs")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if l, err := NewCallLog(CallLogOptions{Dir: notDir, BeadPrefixes: []string{"gt"}}); err == nil {
+		l.Close()
+		t.Fatal("NewCallLog over a file succeeded, want an error")
+	}
+
+	logDir := filepath.Join(dir, "calllog")
+	if err := os.MkdirAll(filepath.Join(logDir, DefaultCallLogName), 0o755); err != nil {
+		t.Fatalf("make directory: %v", err)
+	}
+	if l, err := NewCallLog(CallLogOptions{Dir: logDir, BeadPrefixes: []string{"gt"}}); err == nil {
+		l.Close()
+		t.Fatal("NewCallLog over a directory named call.log succeeded, want an error")
+	}
+}
+
+// TestLogWriterKeepOneFile covers the one-file setting: rotation removes the
+// live file rather than renaming it to a backup.
+func TestLogWriterKeepOneFile(t *testing.T) {
+	t.Parallel()
+	w := newLogWriter("call.log", 10, 1)
+	w.file = &fakeFile{size: 9}
+	w.size = 9
+	removed := ""
+	w.remove = func(name string) error { removed = name; return nil }
+	w.openFile = func(string) (logFile, error) { return &fakeFile{}, nil }
+	if err := w.write([]byte("0123456789\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if removed != "call.log" {
+		t.Errorf("removed %q, want the live file", removed)
+	}
+}
+
+// fakeFile is a logFile whose calls fail when a test says so.
+type fakeFile struct {
+	size     int64
+	writeErr error
+	statErr  error
+	closeErr error
+}
+
+func (f *fakeFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	f.size += int64(len(p))
+	return len(p), nil
+}
+
+func (f *fakeFile) Stat() (os.FileInfo, error) {
+	if f.statErr != nil {
+		return nil, f.statErr
+	}
+	return fakeInfo{size: f.size}, nil
+}
+
+func (f *fakeFile) Close() error { return f.closeErr }
+
+type fakeInfo struct{ size int64 }
+
+func (f fakeInfo) Name() string       { return "fake" }
+func (f fakeInfo) Size() int64        { return f.size }
+func (f fakeInfo) Mode() os.FileMode  { return 0 }
+func (f fakeInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeInfo) IsDir() bool        { return false }
+func (f fakeInfo) Sys() any           { return nil }
+
+// TestLogWriterFailurePaths drives every write, rotate, rename, remove and
+// close failure the writer can meet, so none is read as a clean log.
+func TestLogWriterFailurePaths(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	line := []byte("{\"x\":1}\n")
+	tests := []struct {
+		name string
+		run  func(t *testing.T) error
+	}{
+		{
+			name: "open",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.openFile = func(string) (logFile, error) { return nil, boom }
+				return w.write(line)
+			},
+		},
+		{
+			name: "stat",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.openFile = func(string) (logFile, error) { return &fakeFile{statErr: boom}, nil }
+				return w.open()
+			},
+		},
+		{
+			name: "write",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.file = &fakeFile{writeErr: boom}
+				return w.write(line)
+			},
+		},
+		{
+			name: "rotate close",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.file = &fakeFile{size: 95, closeErr: boom}
+				w.size = 95
+				return w.write(line)
+			},
+		},
+		{
+			name: "reopen after rotate",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.file = &fakeFile{size: 95}
+				w.size = 95
+				w.openFile = func(string) (logFile, error) { return nil, boom }
+				w.remove = func(string) error { return nil }
+				w.rename = func(string, string) error { return nil }
+				return w.write(line)
+			},
+		},
+		{
+			name: "rotate remove",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.remove = func(string) error { return boom }
+				return w.rotate()
+			},
+		},
+		{
+			name: "rotate shift rename",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.file = &fakeFile{}
+				w.remove = func(string) error { return nil }
+				w.rename = func(string, string) error { return boom }
+				return w.rotate()
+			},
+		},
+		{
+			name: "rotate live rename",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.file = &fakeFile{}
+				w.remove = func(string) error { return nil }
+				w.rename = func(from, _ string) error {
+					if from == w.path {
+						return boom
+					}
+					return nil
+				}
+				return w.rotate()
+			},
+		},
+		{
+			name: "close",
+			run: func(t *testing.T) error {
+				w := newLogWriter("call.log", 100, 3)
+				w.file = &fakeFile{closeErr: boom}
+				return w.close()
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tt.run(t); !errors.Is(err, boom) {
+				t.Fatalf("%s = %v, want %v", tt.name, err, boom)
+			}
+		})
+	}
 }
 
 func TestCallLogOptionsRefused(t *testing.T) {
