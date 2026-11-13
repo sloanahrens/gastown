@@ -193,7 +193,8 @@ type Manager struct {
 	townRoot string // Computed once at construction; used by agentBeadID for deterministic IDs
 	// agentMemo is the agent beads one sling's reuse step has read, open only
 	// between ShareAgentBeadReads and its end func; nil reads bd every time.
-	agentMemo *agentBeadMemo
+	// It is set, read and cleared without a shared lock, so it is atomic.
+	agentMemo atomic.Pointer[agentBeadMemo]
 	// sessionReader answers the manager's has-session reads once a sling sets
 	// it (SetSessionProbes); nil asks this manager's own tmux client.
 	sessionReader atomic.Pointer[sessionReaderSlot]
@@ -1922,7 +1923,7 @@ func sameBeadsDir(a, b string) bool {
 	return ea == nil && eb == nil && ra == rb
 }
 
-// warnf reports a cleanup that could not finish; nil warn is style.PrintWarning.
+// warnf reports a failure the caller carries on past; nil warn is style.PrintWarning.
 func (m *Manager) warnf(format string, args ...any) {
 	if m.warn != nil {
 		m.warn(format, args...)
@@ -2498,13 +2499,18 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// that repository's object store and remote-tracking refs, so a second fetch
 	// in the worktree brings nothing new. Non-fatal: may be offline. Only a
 	// missing bare repository falls back to the worktree, its own only handle.
+	// Name the repository this fetch really uses: when the bare repo is
+	// missing, the fallback below is the worktree, and a warning that said
+	// "bare repo" would point at the wrong one.
 	fetchRepo, err := m.repoBase()
+	fetchRepoName := "the bare repo"
 	if err != nil {
 		fetchRepo = polecatGit
+		fetchRepoName = "the worktree"
 	}
 	fetchErr := fetchRepo.Fetch("origin")
 	if fetchErr != nil {
-		style.PrintWarning("could not fetch origin for polecat %s: %v", name, fetchErr)
+		m.warnf("could not fetch origin for polecat %s: %v", name, fetchErr)
 	}
 
 	// Determine the start point for the new branch.
@@ -2520,7 +2526,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		present, refErr := fetchRepo.RefExists("origin/" + opts.ResumeBranch)
 		if fetchErr != nil || refErr != nil || !present {
 			if err := fetchRepo.FetchBranch("origin", opts.ResumeBranch); err != nil {
-				style.PrintWarning("could not fetch resume branch %s on bare repo: %v", opts.ResumeBranch, err)
+				m.warnf("could not fetch resume branch %s on %s: %v", opts.ResumeBranch, fetchRepoName, err)
 			}
 		}
 		startPoint = "origin/" + opts.ResumeBranch
