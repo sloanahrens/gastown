@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -222,6 +223,10 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if cmd != nil {
 		ctx = cmd.Context()
 	}
+	// One census of the sandbox seats for this sling: the seat decision and the
+	// admission both read the seats through the router, and share one listing
+	// and one probe per seat (gt-l1odqt).
+	defer session.BeginSandboxCensus(nil)()
 	// Per-step timing on stderr so a slow dispatch can be attributed (gt-llg8).
 	slingSteps = sling.NewTimer(os.Stderr)
 	return newSlingRun(slingOptionsFromFlags()).run(ctx, cmd, args)

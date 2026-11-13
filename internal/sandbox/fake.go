@@ -59,7 +59,7 @@ func copyRows(in [][]string) [][]string {
 
 // verbs are the openshell subcommands the Fake keys on.
 var verbs = map[string]bool{
-	"create": true, "get": true, "exec": true, "upload": true,
+	"create": true, "get": true, "list": true, "exec": true, "upload": true,
 	"stop": true, "start": true, "delete": true, "logs": true, "download": true,
 }
 

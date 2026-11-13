@@ -965,6 +965,9 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	if err := spec.Trace.Phase("create", func() error { return b.createOrReplaceEndedSeat(ctx, create) }); err != nil {
 		return nil, fmt.Errorf("creating sandbox %s: %w", spec.Session, err)
 	}
+	// The sandbox is new: a listing or an answer the sling read before it
+	// existed must not say it is absent or stale.
+	routing.forget(spec.Session)
 
 	workDir := path.Join(sandboxTownRoot, rel)
 	if err := b.populate(ctx, spec, workDir, redirectTarget(rel), workspaceID, staged); err != nil {

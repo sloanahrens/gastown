@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -262,6 +263,117 @@ func parseConditionTime(raw json.RawMessage) (time.Time, bool) {
 		return time.Unix(ts.Seconds, int64(ts.Nanos)).UTC(), true
 	}
 	return time.Time{}, false
+}
+
+// Entry is one row of `sandbox list`: the sandbox's name and its phase
+// (Ready, Provisioning, ...).
+type Entry struct {
+	Name, Phase string
+}
+
+// listPageSize is the rows one `sandbox list` call asks for. A page that comes
+// back full may have more behind it, so List follows the continuation token.
+const listPageSize = 100
+
+// listMaxPages bounds the paging loop, so a gateway that keeps returning a
+// token cannot hold a sling in the loop.
+const listMaxPages = 1000
+
+// listTokenPrefix starts the line that carries the continuation token after a
+// full page. It is not verified against openshell's output: the openshell
+// binary and its help text are not in this repository, so the form is the one
+// parseListPage reads and a different one fails the listing closed (see List).
+const listTokenPrefix = "Next page token:"
+
+// List reads every sandbox the gateway lists, following the continuation
+// token until a page comes back short. A failed call is an error, and so is a
+// listing that cannot be read whole: a table with no NAME and PHASE columns, a
+// row with no phase, or a full page with no readable token. An unknown listing
+// must never read as an empty one.
+func (c *CLI) List(ctx context.Context) ([]Entry, error) {
+	var out []Entry
+	token := ""
+	for page := 0; page < listMaxPages; page++ {
+		a := c.argv("sandbox", "list", "--page-size", strconv.Itoa(listPageSize))
+		if token != "" {
+			a = append(a, "--page-token", token)
+		}
+		stdout, _, err := c.run(ctx, callTimeout, "sandbox list", a, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		rows, next, err := parseListPage(stdout)
+		if err != nil {
+			return nil, fmt.Errorf("openshell sandbox list: %w", err)
+		}
+		out = append(out, rows...)
+		if len(rows) < listPageSize {
+			return out, nil
+		}
+		if next == "" {
+			return nil, fmt.Errorf("openshell sandbox list: a full page of %d has no continuation token", listPageSize)
+		}
+		if next == token {
+			return nil, fmt.Errorf("openshell sandbox list: the continuation token repeated (%q)", next)
+		}
+		token = next
+	}
+	return nil, fmt.Errorf("openshell sandbox list: more than %d pages", listMaxPages)
+}
+
+// noSandboxesReply is the whole output of `sandbox list` when the gateway has
+// none.
+const noSandboxesReply = "No sandboxes found."
+
+// parseListPage reads one page of `sandbox list`: the rows under the NAME
+// header, with the name and the PHASE cell of each, and the continuation token
+// if the page names one. PHASE is read at the column its header starts at, since
+// the CREATED cell holds spaces of its own.
+func parseListPage(stdout []byte) ([]Entry, string, error) {
+	text := strings.TrimSpace(string(stdout))
+	if text == noSandboxesReply {
+		return nil, "", nil
+	}
+	var (
+		entries  []Entry
+		next     string
+		phaseCol = -1
+		headered bool
+	)
+	for _, line := range strings.Split(string(stdout), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			continue
+		case strings.HasPrefix(trimmed, listTokenPrefix):
+			next = strings.TrimSpace(strings.TrimPrefix(trimmed, listTokenPrefix))
+			continue
+		case !headered:
+			fields := strings.Fields(line)
+			if len(fields) == 0 || fields[0] != "NAME" {
+				return nil, "", fmt.Errorf("no NAME header in the listing")
+			}
+			phaseCol = strings.Index(line, "PHASE")
+			if phaseCol < 0 {
+				return nil, "", fmt.Errorf("no PHASE column in the listing header")
+			}
+			headered = true
+			continue
+		}
+		if phaseCol >= len(line) {
+			return nil, "", fmt.Errorf("row %q has no phase cell", trimmed)
+		}
+		phase := strings.Fields(line[phaseCol:])
+		name := strings.Fields(line)[0]
+		if len(phase) == 0 {
+			return nil, "", fmt.Errorf("row %q has no phase cell", trimmed)
+		}
+		entries = append(entries, Entry{Name: name, Phase: phase[0]})
+	}
+	if !headered {
+		return nil, "", fmt.Errorf("no NAME header in the listing")
+	}
+	return entries, next, nil
 }
 
 // Exists reports whether the gateway has a sandbox of that name. Only the
