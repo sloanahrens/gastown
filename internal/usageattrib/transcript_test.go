@@ -483,8 +483,9 @@ func TestReaderRepeatedIDTakesMaxOfEachField(t *testing.T) {
 	}
 }
 
-// TestParseTSIsAnInstant: a timestamp names one UTC instant. A Z suffix, a numeric offset and no suffix
-// are read as the instant they name; a suffix the reader does not know is refused, not read as UTC.
+// TestParseTSIsAnInstant: a timestamp names one UTC instant. Z, lowercase z, a numeric offset in
+// every form (extended "+02:00", basic "+0200", hour-only "+02") and no suffix are read as the
+// instant they name; no offset is dropped and read as the wall clock.
 func TestParseTSIsAnInstant(t *testing.T) {
 	t.Parallel()
 	utc := func(h, m, s int) time.Time { return time.Date(2026, 10, 12, h, m, s, 0, time.UTC) }
@@ -494,11 +495,17 @@ func TestParseTSIsAnInstant(t *testing.T) {
 		want time.Time
 	}{
 		{"Z suffix", "2026-10-12T18:53:57Z", utc(18, 53, 57)},
+		{"lowercase z suffix", "2026-10-12T18:53:57z", utc(18, 53, 57)},
 		{"no suffix is UTC", "2026-10-12T18:53:57", utc(18, 53, 57)},
 		{"fraction and Z", "2026-10-12T18:53:57.123456Z", utc(18, 53, 57)},
 		{"positive offset", "2026-10-12T20:53:57+02:00", utc(18, 53, 57)},
 		{"negative offset", "2026-10-12T13:53:57-05:00", utc(18, 53, 57)},
 		{"fraction and offset", "2026-10-12T20:53:57.5+02:00", utc(18, 53, 57)},
+		{"basic positive offset", "2026-10-12T20:53:57+0200", utc(18, 53, 57)},
+		{"basic negative offset", "2026-10-12T13:53:57-0500", utc(18, 53, 57)},
+		{"basic zero offset", "2026-10-12T18:53:57+0000", utc(18, 53, 57)},
+		{"hour-only offset", "2026-10-12T20:53:57+02", utc(18, 53, 57)},
+		{"fraction and basic offset", "2026-10-12T20:53:57.123+0200", utc(18, 53, 57)},
 		{"one-digit fields", "2026-10-2T1:00:00", time.Date(2026, 10, 2, 1, 0, 0, 0, time.UTC)},
 		{"one-digit fields and offset", "2026-10-2T3:00:00+02:00", time.Date(2026, 10, 2, 1, 0, 0, 0, time.UTC)},
 	}
@@ -516,19 +523,57 @@ func TestParseTSIsAnInstant(t *testing.T) {
 	}
 }
 
-// TestParseTSRefusesUnknownForms: a timestamp with a suffix or offset it cannot read is an error.
-func TestParseTSRefusesUnknownForms(t *testing.T) {
+// TestParseTSReadsUnreadableSuffixAsWallClock: a suffix that names no zone makes the timestamp
+// neither an error nor a zone. The reference strptime read the first 19 bytes and dropped the rest,
+// and so does this; the record stays complete instead of losing its usage. A numeric offset the
+// reader can apply is never dropped (see TestParseTSIsAnInstant), and one it cannot apply is an
+// error (see TestParseTSRefusesAnOffsetItCannotApply).
+func TestParseTSReadsUnreadableSuffixAsWallClock(t *testing.T) {
+	t.Parallel()
+	want := time.Date(2026, 10, 12, 18, 53, 57, 0, time.UTC)
+	for _, ts := range []string{
+		"2026-10-12T18:53:57Zjunk", // trailing text
+		"2026-10-12T18:53:57.",     // a dot with no fraction
+	} {
+		got, err := ParseTS(ts)
+		if err != nil {
+			t.Errorf("ParseTS(%q): %v, want the reference's wall clock", ts, err)
+			continue
+		}
+		if !got.Equal(want) {
+			t.Errorf("ParseTS(%q) = %v, want %v", ts, got, want)
+		}
+	}
+}
+
+// TestParseTSRefusesAnOffsetItCannotApply: a suffix shaped like an offset that tsPattern cannot
+// apply is an error, never the wall clock. Reading "+02:60" as 18:53:57 UTC would be off by the
+// offset with the record left complete, and the CDT price hour wrong with no signal (gt-gkzfab).
+func TestParseTSRefusesAnOffsetItCannotApply(t *testing.T) {
+	t.Parallel()
+	for _, ts := range []string{
+		"2026-10-12T18:53:57 +02:00", // a space before the zone
+		"2026-10-12T18:53:57+24:00",  // offset hours out of range
+		"2026-10-12T18:53:57+02:60",  // offset minutes out of range
+		"2026-10-12T18:53:57-0260",   // basic form, minutes out of range
+		"2026-10-12T18:53:57.5 -02",  // a fraction, a blank before the zone
+	} {
+		if got, err := ParseTS(ts); err == nil {
+			t.Errorf("ParseTS(%q) = %v, want an error: the offset cannot be applied", ts, got)
+		}
+	}
+}
+
+// TestParseTSRefusesNonTimestamps: a string the reference also refused — not a timestamp, or with
+// fields out of range — is an error.
+func TestParseTSRefusesNonTimestamps(t *testing.T) {
 	t.Parallel()
 	for _, ts := range []string{
 		"",
 		"not a time",
-		"2026-10-12T18:53:57Zjunk",
-		"2026-10-12T18:53:57+0200",
-		"2026-10-12T18:53:57+24:00",
-		"2026-10-12T18:53:57+02:60",
-		"2026-10-12T18:53:57 +02:00",
 		"2026-13-12T18:53:57Z",
 		"2026-10-12T25:00:00Z",
+		"2026-10-12T10:00:60Z",
 	} {
 		if got, err := ParseTS(ts); err == nil {
 			t.Errorf("ParseTS(%q) = %v, want an error", ts, got)
@@ -538,11 +583,14 @@ func TestParseTSRefusesUnknownForms(t *testing.T) {
 
 // TestCostOffsetTimestampIsPricedAtItsInstant: 10:00+09:00 is 01:00Z, which is 20:00 CDT, a peak hour that
 // doubles the price. Read as the wall clock, 10:00 UTC is 05:00 CDT, off-peak. 15:00Z is 10:00 CDT, off-peak.
+// The basic form "+0900" names the same instant as the extended "+09:00".
 func TestCostOffsetTimestampIsPricedAtItsInstant(t *testing.T) {
 	t.Parallel()
 	const in = 1_000_000
 	peak, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T10:00:00+09:00")
 	assertCost(t, peak, ok, err, 0.30)
+	basic, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T10:00:00+0900")
+	assertCost(t, basic, ok, err, 0.30)
 	zulu, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T01:00:00Z")
 	assertCost(t, zulu, ok, err, 0.30)
 	off, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T15:00:00Z")
