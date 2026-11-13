@@ -182,6 +182,41 @@ kubectl apply -f "$sandbox_manifest"
 # before the rollout below is awaited.
 kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type merge \
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
+# guaranteed_pod NAMESPACE KIND/NAME CPU MEMORY [CONTAINER] gives every container
+# and init container of the pod template requests equal to limits, so the pod
+# runs Guaranteed (gt-cjm8fu). Every container gets the same pair: the sizes are
+# set for the main container, and Guaranteed needs the pair on all of them.
+# CONTAINER, when given, must be one of the containers; a missing name stops the
+# run and lists the names present. Each index in the patch is the container's
+# place in the live object, read in the same call, not a position assumed here.
+guaranteed_pod() {
+  local ns=$1 target=$2 cpu=$3 mem=$4 must=${5:-} names inits i ops="" res
+  names="$(kubectl -n "$ns" get "$target" -o 'jsonpath={.spec.template.spec.containers[*].name}')" ||
+    die "cannot read the containers of $target in $ns"
+  inits="$(kubectl -n "$ns" get "$target" -o 'jsonpath={.spec.template.spec.initContainers[*].name}')" ||
+    die "cannot read the init containers of $target in $ns"
+  # An empty list would patch nothing and report success, so it stops the run.
+  [ -n "$names" ] || die "$target in $ns has no containers to size"
+  if [ -n "$must" ]; then
+    case " $names " in
+      *" $must "*) ;;
+      *) die "$target in $ns has no container named $must (it has: $names)" ;;
+    esac
+  fi
+  res="{\"requests\":{\"cpu\":\"$cpu\",\"memory\":\"$mem\"},\"limits\":{\"cpu\":\"$cpu\",\"memory\":\"$mem\"}}"
+  i=0
+  for _ in $names; do
+    ops="$ops,{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/$i/resources\",\"value\":$res}"
+    i=$((i + 1))
+  done
+  i=0
+  for _ in $inits; do
+    ops="$ops,{\"op\":\"add\",\"path\":\"/spec/template/spec/initContainers/$i/resources\",\"value\":$res}"
+    i=$((i + 1))
+  done
+  kubectl -n "$ns" patch "$target" --type json -p "[${ops#,}]"
+}
+guaranteed_pod agent-sandbox-system deployment/agent-sandbox-controller 100m 128Mi agent-sandbox-controller
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 
 # helm_release_deployed answers whether openshell is a deployed release. helm
@@ -211,6 +246,9 @@ else
 fi
 kubectl apply -f "$HERE/gateway-nodeport.yaml"
 kubectl apply -f "$HERE/../values/kind/control-plane-services.yaml"
+# The gateway is a control-plane pod, so it runs Guaranteed (gt-cjm8fu). The
+# chart's container names are not fixed here, so every container gets the pair.
+guaranteed_pod openshell statefulset/openshell 250m 768Mi
 kubectl -n openshell rollout status statefulset/openshell --timeout=300s
 
 # Client certificates for the CLI. The key is never printed; the CLI wants
