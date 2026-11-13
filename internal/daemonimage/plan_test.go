@@ -75,8 +75,7 @@ func planBuilder(t *testing.T) Builder {
 // commit, the cut the build stamps. The bd line prints planBuildID for
 // main.Build, the argv value only the worktree a build makes can answer: Plan
 // makes none, and the Git seam above fails the test if it reads one from
-// anywhere. The bdshim line stamps the same bd build id: the shim names the bd
-// it stands in for. The om line names its pin, never HEAD.
+// anywhere. The om line names its pin, never HEAD.
 func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
@@ -105,7 +104,6 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"pin devops: ", testPinURL("devops") + " at " + testDevopsCommit},
 		{"build gt: ", "go build -trimpath -ldflags " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
-		{"build bdshim: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bdshim") + " " + BdshimPackage + "   (clean worktree of /src/gt at " + testRev + ", stamped with bd's build id)"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
 		{"build trackerd: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
 		{"build trackerbackup: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerbackup") + " " + TrackerbackupPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
