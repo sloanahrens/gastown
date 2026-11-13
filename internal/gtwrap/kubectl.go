@@ -14,12 +14,13 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
-// podTownRoot is the town root inside the daemon pod: the path the Deployment
-// sets as GT_TOWN_ROOT and mounts the town-state claim at. It is
-// deploy/k8s/daemon's TownRootPath, and a test pins the two.
-const podTownRoot = "/Users/sloan/gt"
+// podTownRoot is the compiled-in town root inside the daemon pod, the one
+// deploy/k8s/daemon renders as TownRootPath. A Kubectl whose PodRoot is empty maps
+// onto it; the config key pod_town_root replaces it.
+const podTownRoot = manifestdata.PodTownRoot
 
 // podNameRE matches a pod name as kubectl prints it. A name read from the cluster
 // goes into argv, so it is checked before any command uses it.
@@ -31,8 +32,11 @@ var podNameRE = regexp.MustCompile(`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`)
 type Kubectl struct {
 	// Town is the town root on the Mac: the caller passes $HOME/gt, which needs no
 	// town marker, since the Mac is no longer a town. A working directory under it
-	// maps onto podTownRoot; any other directory maps to podTownRoot itself.
+	// maps onto the pod root; any other directory maps to the pod root itself.
 	Town string
+	// PodRoot is the town root inside the pod. Empty means podTownRoot. It must be
+	// an absolute, clean path, since the pod walk-up script joins under it.
+	PodRoot string
 	// Context names the kubectl context every command runs in.
 	Context string
 	// Namespace is the namespace of the Deployment.
@@ -65,8 +69,8 @@ type kubeLadder struct {
 
 // Launch runs call by exec into the pod the ladder finds, and refuses with the
 // doctor's reason when no rung holds. A working directory the pod cannot see is
-// mapped onto podTownRoot with a note on Note. A mapped directory the pod lacks
-// runs in the nearest existing ancestor under podTownRoot, and the tool is told
+// mapped onto the pod root with a note on Note. A mapped directory the pod lacks
+// runs in the nearest existing ancestor under the pod root, and the tool is told
 // the caller's directory in GT_CALLER_CWD. A credential in the environment is
 // dropped with a note, since the environment travels in the kubectl argv.
 func (k Kubectl) Launch(call Call) (int, error) {
@@ -84,9 +88,9 @@ func (k Kubectl) Launch(call Call) (int, error) {
 	if err != nil {
 		return exitDown, err
 	}
-	dir, under := podDir(k.Town, call.Dir)
+	dir, under := podDir(k.Town, k.podRoot(), call.Dir)
 	if !under {
-		fmt.Fprintf(k.Note, "gt-wrap: %s is outside the town %s, which the pod cannot see, so the tool runs in %s\n", call.Dir, k.Town, podTownRoot)
+		fmt.Fprintf(k.Note, "gt-wrap: %s is outside the town %s, which the pod cannot see, so the tool runs in %s\n", call.Dir, k.Town, k.podRoot())
 	}
 	if len(dropped) > 0 {
 		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
@@ -221,7 +225,7 @@ func (k Kubectl) checkTool(pod string) error {
 }
 
 // podWalkUpScript runs the tool in the nearest directory the pod has at or above
-// the caller's mapped directory, and never above podTownRoot. A target outside the
+// the caller's mapped directory, and never above the pod root. A target outside the
 // root, a target with a .. step, an absent root, a walk that finds no directory,
 // and a directory the shell cannot enter each refuse in one line and exit 125, so
 // the tool did not start; otherwise the tool's own exit status passes through. A
@@ -273,7 +277,7 @@ func (k Kubectl) execArgv(pod string, call Call, dir string) []string {
 		argv = append(argv, entry)
 	}
 	argv = append(argv, doltHostVar+"="+doltHostGateway)
-	argv = append(argv, "sh", "-c", podWalkUpScript, "sh", dir, podTownRoot, call.Dir)
+	argv = append(argv, "sh", "-c", podWalkUpScript, "sh", dir, k.podRoot(), call.Dir)
 	return append(argv, call.Argv...)
 }
 
@@ -282,15 +286,23 @@ func (k Kubectl) deploymentRef() string {
 	return fmt.Sprintf("deployment/%s in namespace %s at context %s", k.Deployment, k.Namespace, k.Context)
 }
 
+// podRoot is the town root inside the pod: PodRoot when set, else podTownRoot.
+func (k Kubectl) podRoot() string {
+	if k.PodRoot == "" {
+		return podTownRoot
+	}
+	return k.PodRoot
+}
+
 // podDir maps the caller's directory onto the pod's town root. A directory under
 // the Mac's town keeps its path relative to the town; any other directory maps to
-// the town root, and the second result is false so the caller can note it.
-func podDir(town, dir string) (string, bool) {
+// the pod root, and the second result is false so the caller can note it.
+func podDir(town, root, dir string) (string, bool) {
 	rel, err := filepath.Rel(town, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return podTownRoot, false
+		return root, false
 	}
-	return path.Join(podTownRoot, filepath.ToSlash(rel)), true
+	return path.Join(root, filepath.ToSlash(rel)), true
 }
 
 // probe runs one kubectl command that only reads state, with the context flag set
@@ -324,6 +336,9 @@ func (k Kubectl) validate() error {
 		if f.value == "" || strings.HasPrefix(f.value, "-") {
 			return fmt.Errorf("gtwrap: the kubernetes target's %s is %q; it must name a value that does not start with a dash", f.name, f.value)
 		}
+	}
+	if k.PodRoot != "" && (!path.IsAbs(k.PodRoot) || path.Clean(k.PodRoot) != k.PodRoot) {
+		return fmt.Errorf("gtwrap: the kubernetes target's pod root is %q; it must be an absolute, clean path", k.PodRoot)
 	}
 	switch {
 	case k.Town == "":

@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
 
@@ -106,7 +107,7 @@ A failure after the stream starts exits non-zero and says the claim is partial
 and not to be used.
 
 Examples:
-  gt town state seed --town /Users/sloan/gt --namespace rehearsal --pod seed-helper \
+  gt town state seed --town ` + manifestdata.PodTownRoot + ` --namespace rehearsal --pod seed-helper \
     --context colima-gt-control --secrets-manifest deploy/daemon/secrets.yaml --rehearsal`,
 	Args: cobra.NoArgs,
 	RunE: runTownStateSeed,

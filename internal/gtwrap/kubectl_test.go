@@ -18,6 +18,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 const (
@@ -483,11 +484,77 @@ func TestPodDirMapsTheTownOntoThePodTownRoot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, mapped := podDir(kubeTown, tt.dir)
+			got, mapped := podDir(kubeTown, podTownRoot, tt.dir)
 			if got != tt.want || mapped != tt.mapped {
 				t.Fatalf("podDir(%q, %q) = %q, %v; want %q, %v", kubeTown, tt.dir, got, mapped, tt.want, tt.mapped)
 			}
 		})
+	}
+}
+
+// TestPodDirMapsOntoAConfiguredRoot: a pod root other than the compiled-in one is
+// the root a mapped directory lands under, and the Mac town is still the one the
+// directory is measured against, so the same directories map as before.
+func TestPodDirMapsOntoAConfiguredRoot(t *testing.T) {
+	t.Parallel()
+	const root = "/town"
+	tests := []struct {
+		name   string
+		dir    string
+		want   string
+		mapped bool
+	}{
+		{name: "the town itself", dir: kubeTown, want: root, mapped: true},
+		{name: "a directory under the town", dir: kubeTown + "/rig/polecats/cheedo", want: root + "/rig/polecats/cheedo", mapped: true},
+		{name: "a sibling sharing the town's prefix", dir: kubeTown + "-old/rig", want: root, mapped: false},
+		{name: "a directory elsewhere", dir: "/tmp/work", want: root, mapped: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, mapped := podDir(kubeTown, root, tt.dir)
+			if got != tt.want || mapped != tt.mapped {
+				t.Fatalf("podDir(%q, %q, %q) = %q, %v; want %q, %v", kubeTown, root, tt.dir, got, mapped, tt.want, tt.mapped)
+			}
+		})
+	}
+}
+
+// TestPodLaunchMapsOntoAConfiguredPodRoot: with PodRoot set, the directory under the
+// Mac town maps onto that root, the walk-up script is given that root, and a walk to
+// an ancestor tells the tool the caller's Mac directory.
+func TestPodLaunchMapsOntoAConfiguredPodRoot(t *testing.T) {
+	t.Parallel()
+	const root = "/town"
+	caller := kubeTown + "/rig/polecats/x"
+	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{root: true, root + "/rig": true}}
+	var note bytes.Buffer
+	k := testKubectl(pod, &note)
+	k.PodRoot = root
+	exit, err := k.Launch(kubeCall(t, caller, false))
+	if err != nil || exit != 0 {
+		t.Fatalf("Launch = %d, %v; want 0, nil; stderr: %q", exit, err, pod.stderr.String())
+	}
+	if len(pod.runs) != 1 {
+		t.Fatalf("the tool ran %d times, want once; stderr: %q", len(pod.runs), pod.stderr.String())
+	}
+	if got, want := pod.runs[0].dir, root+"/rig"; got != want {
+		t.Fatalf("the tool ran in %q, want the nearest ancestor %q under the configured root", got, want)
+	}
+	if got := pod.runs[0].env["GT_CALLER_CWD"]; got != caller {
+		t.Fatalf("GT_CALLER_CWD = %q, want the caller's Mac directory %q", got, caller)
+	}
+	argv := pod.attached[0]
+	// The walk-up's parameters are the mapped directory, the root and the caller's
+	// directory, followed by the tool and its arguments.
+	if got := argv[len(argv)-6]; got != root+"/rig/polecats/x" {
+		t.Fatalf("the mapped directory argument is %q, want %q", got, root+"/rig/polecats/x")
+	}
+	if got := argv[len(argv)-5]; got != root {
+		t.Fatalf("the root argument is %q, want the configured root %q", got, root)
+	}
+	if got := argv[len(argv)-4]; got != caller {
+		t.Fatalf("the caller's directory argument is %q, want %q", got, caller)
 	}
 }
 
@@ -705,6 +772,8 @@ func TestKubectlRefusesAnUnwiredOrIncompleteTarget(t *testing.T) {
 		{name: "no kubectl check", change: func(k *Kubectl) { k.LookPath = nil }, want: "kubectl check"},
 		{name: "no note writer", change: func(k *Kubectl) { k.Note = nil }, want: "note writer"},
 		{name: "no shell", change: func(k *Kubectl) { k.Shell = nil }, want: "shell"},
+		{name: "a pod root that is relative", change: func(k *Kubectl) { k.PodRoot = "town" }, want: "pod root"},
+		{name: "a pod root with a trailing slash", change: func(k *Kubectl) { k.PodRoot = "/town/" }, want: "pod root"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -727,12 +796,22 @@ func TestKubectlRefusesAnUnwiredOrIncompleteTarget(t *testing.T) {
 	}
 }
 
-// TestPodTownRootMatchesTheRenderedDeployment pins podTownRoot to the town path
-// the daemon Deployment is rendered with, so the two cannot drift apart.
-func TestPodTownRootMatchesTheRenderedDeployment(t *testing.T) {
+// TestPodTownRootIsTheSharedConstant: the compiled-in root the wrapper maps onto and
+// the TownRootPath the Deployment is rendered with both read manifestdata.PodTownRoot,
+// so a call with no pod_town_root maps onto the path the pod mounts the claim at.
+func TestPodTownRootIsTheSharedConstant(t *testing.T) {
 	t.Parallel()
-	if podTownRoot != k8sdaemon.TownRootPath {
-		t.Fatalf("podTownRoot = %q, want the rendered TownRootPath %q", podTownRoot, k8sdaemon.TownRootPath)
+	f := healthyKube()
+	var note bytes.Buffer
+	if exit, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig", false)); err != nil || exit != 0 {
+		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+	}
+	argv := f.attached[0]
+	if root := argv[len(argv)-5]; root != manifestdata.PodTownRoot {
+		t.Fatalf("the wrapper's root argument is %q, want manifestdata.PodTownRoot %q", root, manifestdata.PodTownRoot)
+	}
+	if k8sdaemon.TownRootPath != manifestdata.PodTownRoot {
+		t.Fatalf("the rendered TownRootPath is %q, want manifestdata.PodTownRoot %q", k8sdaemon.TownRootPath, manifestdata.PodTownRoot)
 	}
 }
 

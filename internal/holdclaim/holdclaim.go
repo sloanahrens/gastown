@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // ContextEnv and NamespaceEnv are the daemon.env names of the pod setting.
@@ -32,13 +33,12 @@ const (
 	NamespaceEnv = "GT_DAEMON_POD_NAMESPACE"
 )
 
-// deployName and podMount are the daemon Deployment's name and the path its
-// town-state claim is mounted at, as deploy/k8s/daemon sets them. They are kept
-// here, not imported, so the writer does not link the manifest package; the
-// holdclaim tests fail if they drift from it.
+// deployName is the daemon Deployment's name. podMount is the path its town-state
+// claim is mounted at, read from the shared pod paths that deploy/k8s/daemon also
+// reads, so the writer and the rendered Deployment cannot drift apart.
 const (
 	deployName = "daemon"
-	podMount   = "/Users/sloan/gt"
+	podMount   = manifestdata.PodTownRoot
 )
 
 // kubectlTimeout bounds one kubectl call, so a pod that stops answering fails
