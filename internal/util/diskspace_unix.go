@@ -15,7 +15,13 @@ func GetDiskSpace(path string) (*DiskSpaceInfo, error) {
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return nil, fmt.Errorf("statfs %s: %w", path, err)
 	}
+	return diskSpaceFromStatfs(stat), nil
+}
 
+// diskSpaceFromStatfs is the arithmetic of GetDiskSpace over one statfs result,
+// apart from the call, so a test checks it on a value it builds instead of on a
+// disk whose free space moves between two reads (gt-dgvuvb).
+func diskSpaceFromStatfs(stat syscall.Statfs_t) *DiskSpaceInfo {
 	bsize := uint64(stat.Bsize)
 	total := stat.Blocks * bsize
 	free := uint64(stat.Bavail) * bsize //nolint:unconvert // Bavail is int64 on freebsd, uint64 on linux
@@ -31,5 +37,5 @@ func GetDiskSpace(path string) (*DiskSpaceInfo, error) {
 		TotalBytes:     total,
 		UsedBytes:      used,
 		UsedPercent:    usedPct,
-	}, nil
+	}
 }
