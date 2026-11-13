@@ -229,7 +229,8 @@ func (a *dispatchAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	if len(labels) == 0 {
 		return Labeling{}, nil
 	}
-	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+"), Outcomes: a.outcomes(item.ID)}, nil
+	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+"),
+		Outcomes: dispatchOutcomes(item.ID, a.latest, a.verdicted, a.reworked)}, nil
 }
 
 // Outcomes names the outcome columns the dispatch dataset writes, after its
@@ -238,22 +239,20 @@ func (a *dispatchAdapter) Outcomes() []Outcome {
 	return []Outcome{OutcomeRanOverTwenty, OutcomeNeededSecondRound}
 }
 
-// outcomes reads the two outcome values for one placement. ran_over_twenty is
-// left out unless the bead's latest landing carries a weighted polecat time, so
-// a bead with no landing, a crew landing and a bound time all read as unknown.
+// dispatchOutcomes reads the two outcome values for one placement from the
+// latest landing records and verdict sets it is given. ran_over_twenty is left
+// out unless the bead's latest landing carries a weighted polecat time, so a
+// bead with no landing, a crew landing and a bound time all read as unknown.
 // needed_second_round is left out unless the bead has an om verdict at all.
-// It reads the landings and verdicts Label has already loaded: sizeLabel loads
-// the landings and fails the label when they cannot be read, and loadReviews
-// runs before it, so no read here can fail.
-func (a *dispatchAdapter) outcomes(bead string) map[Outcome]bool {
+func dispatchOutcomes(bead string, latest map[string]landings.Record, verdicted, reworked map[string]bool) map[Outcome]bool {
 	out := map[Outcome]bool{}
-	if rec, ok := a.latest[bead]; ok && rec.Agent != "" {
+	if rec, ok := latest[bead]; ok && rec.Agent != "" {
 		if _, weighted := storypoints.Actual(rec.PolecatSecs, rec.PolecatLowerBound, rec.PolecatUpperBound); weighted {
 			out[OutcomeRanOverTwenty] = rec.PolecatSecs > OverTwentySecs
 		}
 	}
-	if a.verdicted[bead] {
-		out[OutcomeNeededSecondRound] = a.reworked[bead]
+	if verdicted[bead] {
+		out[OutcomeNeededSecondRound] = reworked[bead]
 	}
 	return out
 }
