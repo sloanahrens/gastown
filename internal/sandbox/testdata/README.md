@@ -11,6 +11,6 @@ the live gateway on 2026-11-13 at about 04:30 UTC.
   in these files.
 - The token text is the prefix seagull recorded, not the full token. The
   parser treats it as opaque, and the test passes it back verbatim.
-- The production call adds `--all-workspaces` and `--page-size 100`. The
-  captured pages were taken without `--all-workspaces` and at page size 2, so
-  that the listing spans two pages.
+- The production call adds `--page-size 100` and no workspace flag, so it lists
+  the default workspace the rest of the CLI acts in. The captured pages were
+  taken at page size 2 so that the listing spans two pages.

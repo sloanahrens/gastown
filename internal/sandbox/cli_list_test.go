@@ -127,6 +127,31 @@ func TestCLIList(t *testing.T) {
 		}
 	})
 
+	t.Run("a token of realistic length is passed back byte for byte", func(t *testing.T) {
+		t.Parallel()
+		// SYNTHETIC token, not captured from the gateway: 150 characters of the
+		// base64 alphabet, including '+', '/' and the '=' padding, the length and
+		// alphabet of a real token. pagedRunner answers only this exact token, so
+		// a List that alters it on the way back fails here.
+		synthetic := strings.Repeat("Ab+/", 37) + "=="
+		var seen []string
+		pages := map[string]string{
+			"":        listReply(synthetic, wireSandbox{Name: "gt-r-alpha", Phase: "Ready"}),
+			synthetic: listReply("", wireSandbox{Name: "gt-r-beta", Phase: "Ready"}),
+		}
+		cli := &CLI{Gateway: "openshell", Run: pagedRunner(pages, &seen)}
+		got, err := cli.List(context.Background())
+		if err != nil {
+			t.Fatalf("List: %v (the synthetic token was not passed back unchanged)", err)
+		}
+		if len(got) != 2 {
+			t.Errorf("List returned %d rows, want 2", len(got))
+		}
+		if want := []string{"", synthetic}; !reflect.DeepEqual(seen, want) {
+			t.Errorf("page tokens asked = %q, want %q", seen, want)
+		}
+	})
+
 	t.Run("a short page with a token continues to the next page", func(t *testing.T) {
 		t.Parallel()
 		var seen []string
@@ -176,14 +201,14 @@ func TestCLIList(t *testing.T) {
 		}
 	})
 
-	t.Run("sends the page size and the json output with every call", func(t *testing.T) {
+	t.Run("asks the default workspace in json at the page size, with no workspace flag", func(t *testing.T) {
 		t.Parallel()
 		cli, f := newFakeCLI()
 		f.Reply = map[string]string{"list": listReply("")}
 		if _, err := cli.List(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "list", "--all-workspaces", "--page-size", "100", "--output", "json")
+		wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "list", "--page-size", "100", "--output", "json")
 	})
 
 	t.Run("a failed command is an error, not an empty list", func(t *testing.T) {

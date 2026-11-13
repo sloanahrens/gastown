@@ -280,13 +280,9 @@ const listPageSize = 100
 // token cannot hold a sling in the loop.
 const listMaxPages = 1000
 
-// listAllWorkspaces makes `sandbox list` return every workspace's sandboxes.
-// Rig sandboxes are created in per-rig workspaces, and the listing may be
-// scoped to one workspace by default: without the flag, a seat in another
-// workspace reads as absent.
-const listAllWorkspaces = "--all-workspaces"
-
-// List reads every sandbox the gateway lists. The only end of a listing is a
+// List reads every sandbox the gateway lists, in the default workspace the rest
+// of this file acts in: a listing across workspaces would count sandboxes that
+// Create, Get, Exec and Delete cannot reach. The only end of a listing is a
 // page with no continuation token: a short page that carries a token is
 // followed, because a gateway may return fewer rows than asked and still have
 // more behind it. It reads `-o json`: the table form prints the token on
@@ -300,7 +296,7 @@ func (c *CLI) List(ctx context.Context) ([]Entry, error) {
 	token := ""
 	seen := map[string]bool{}
 	for page := 0; page < listMaxPages; page++ {
-		a := c.argv("sandbox", "list", listAllWorkspaces, "--page-size", strconv.Itoa(listPageSize), "--output", "json")
+		a := c.argv("sandbox", "list", "--page-size", strconv.Itoa(listPageSize), "--output", "json")
 		if token != "" {
 			a = append(a, "--page-token", token)
 		}
