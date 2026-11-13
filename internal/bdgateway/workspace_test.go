@@ -346,6 +346,62 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 		}
 	})
 
+	t.Run("a live tree that cannot be read is refused", func(t *testing.T) {
+		s, root := openTestStore(t)
+		before := pushWorkspace(t, s, first)
+		beforeTree := readWorkspace(t, root)
+		s.fs.lstat = func(string) (os.FileInfo, error) { return nil, errors.New("permission denied") }
+
+		if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("two")), Files: testWorkspaceFiles("two")}); !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after an unreadable root = %v, want %v", got, beforeTree)
+		}
+		if s.Manifest() != before {
+			t.Errorf("manifest after an unreadable root = %s, want %s", s.Manifest(), before)
+		}
+		if siblings := siblingNames(t, root); len(siblings) != 0 {
+			t.Errorf("an abandoned temp tree survived the failure: %v", siblings)
+		}
+	})
+
+	t.Run("a sweep failure refuses the push", func(t *testing.T) {
+		s, root := openTestStore(t)
+		pushWorkspace(t, s, first)
+		second := testWorkspaceFiles("two")
+		before := pushWorkspace(t, s, second)
+		beforeTree := readWorkspace(t, root)
+		s.fs.removeAll = func(string) error { return errors.New("permission denied") }
+
+		if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("three")), Files: testWorkspaceFiles("three")}); !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after a sweep failure = %v, want %v", got, beforeTree)
+		}
+		if s.Manifest() != before {
+			t.Errorf("manifest after a sweep failure = %s, want %s", s.Manifest(), before)
+		}
+	})
+
+	t.Run("a store directory that cannot be read is refused", func(t *testing.T) {
+		s, root := openTestStore(t)
+		before := pushWorkspace(t, s, first)
+		beforeTree := readWorkspace(t, root)
+		s.fs.readDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("permission denied") }
+
+		if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("two")), Files: testWorkspaceFiles("two")}); !errors.Is(err, ErrWorkspaceSwap) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after an unreadable store directory = %v, want %v", got, beforeTree)
+		}
+		if s.Manifest() != before {
+			t.Errorf("manifest after an unreadable store directory = %s, want %s", s.Manifest(), before)
+		}
+	})
+
 	t.Run("a restore failure is reported and the old tree stays readable", func(t *testing.T) {
 		s, root := openTestStore(t)
 		pushWorkspace(t, s, first)
@@ -678,6 +734,24 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a root that cannot be read", func(t *testing.T) {
+		fsys := osWorkspaceFS()
+		fsys.lstat = func(string) (os.FileInfo, error) { return nil, errors.New("permission denied") }
+		if _, err := openWorkspaceStore(filepath.Join(t.TempDir(), "ws"), fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+
+	t.Run("a tree file that cannot be read", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, "gt/.beads/redirect", "x")
+		fsys := osWorkspaceFS()
+		fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
 }
 
 // writeFileIn creates path under root and writes content to it.

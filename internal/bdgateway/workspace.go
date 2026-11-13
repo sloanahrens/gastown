@@ -191,6 +191,9 @@ func shown(text string) string {
 // workspaceFS is the store's filesystem seam. The real one is osWorkspaceFS;
 // tests replace one call to drive an error branch that a healthy disk cannot.
 type workspaceFS struct {
+	lstat     func(path string) (os.FileInfo, error)
+	readFile  func(path string) ([]byte, error)
+	readDir   func(path string) ([]os.DirEntry, error)
 	mkdirTemp func(dir, pattern string) (string, error)
 	mkdirAll  func(path string, perm os.FileMode) error
 	removeAll func(path string) error
@@ -201,6 +204,9 @@ type workspaceFS struct {
 // osWorkspaceFS is the seam's production value.
 func osWorkspaceFS() workspaceFS {
 	return workspaceFS{
+		lstat:     os.Lstat,
+		readFile:  os.ReadFile,
+		readDir:   os.ReadDir,
 		mkdirTemp: os.MkdirTemp,
 		mkdirAll:  os.MkdirAll,
 		removeAll: os.RemoveAll,
@@ -229,10 +235,16 @@ type WorkspaceStore struct {
 // volume: a mount point cannot be renamed, and a push against one fails with the
 // old tree still live.
 func OpenWorkspaceStore(root string) (*WorkspaceStore, error) {
+	return openWorkspaceStore(root, osWorkspaceFS())
+}
+
+// openWorkspaceStore is OpenWorkspaceStore with the filesystem seam exposed, so
+// tests can drive the read failures a healthy disk does not produce.
+func openWorkspaceStore(root string, fsys workspaceFS) (*WorkspaceStore, error) {
 	if root == "" {
 		return nil, fmt.Errorf("%w: empty path", ErrWorkspaceRoot)
 	}
-	s := &WorkspaceStore{root: root, fs: osWorkspaceFS()}
+	s := &WorkspaceStore{root: root, fs: fsys}
 	files, err := s.readTree()
 	if err != nil {
 		return nil, err
@@ -252,7 +264,7 @@ func (s *WorkspaceStore) Manifest() string {
 // readTree loads and checks the live tree. The checks are the push rules, so a
 // tree the store would not accept from a pusher is not one it serves either.
 func (s *WorkspaceStore) readTree() (map[string]string, error) {
-	info, err := os.Lstat(s.root)
+	info, err := s.fs.lstat(s.root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	}
@@ -282,7 +294,7 @@ func (s *WorkspaceStore) readTree() (map[string]string, error) {
 		if !d.Type().IsRegular() {
 			return fmt.Errorf("%w: %q is not a regular file", ErrWorkspacePath, name)
 		}
-		content, err := os.ReadFile(p)
+		content, err := s.fs.readFile(p)
 		if err != nil {
 			return err
 		}
@@ -356,7 +368,7 @@ func (s *WorkspaceStore) writeTree(root string, files map[string]string) error {
 // (the root is a mount point, say) fails before the live tree moves.
 func (s *WorkspaceStore) swap(tmp string) error {
 	old := s.oldPath()
-	_, err := os.Lstat(s.root)
+	_, err := s.fs.lstat(s.root)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if err := s.fs.rename(tmp, s.root); err != nil {
@@ -386,7 +398,7 @@ func (s *WorkspaceStore) swap(tmp string) error {
 // from a crash must not keep the gateway from booting. A failed removal after a
 // successful publish is the same leftover, cleaned by the next push.
 func (s *WorkspaceStore) sweep() error {
-	entries, err := os.ReadDir(s.parent())
+	entries, err := s.fs.readDir(s.parent())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
