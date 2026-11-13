@@ -109,7 +109,21 @@ func runMetricsSnapshotWith(ctx context.Context, out io.Writer, env metrics.Env,
 		note = "; no data collected"
 	}
 	if rec.Placement == nil {
-		note += "; placement: none known"
+		// A placement source that ran and failed is in Errors under the
+		// placement group: the receipt says unreadable, so an operator does not
+		// read a failed source as one that was never wired.
+		unreadable := false
+		for _, e := range rec.Errors {
+			if e.Group == metrics.PlacementGroup {
+				unreadable = true
+				break
+			}
+		}
+		if unreadable {
+			note += "; placement: unreadable"
+		} else {
+			note += "; placement: none known"
+		}
 	}
 	_, err = fmt.Fprintf(out, "snapshot %s appended to %s (%d groups, %d errors)%s\n", rec.TS, path, groups, len(rec.Errors), note)
 	return err
