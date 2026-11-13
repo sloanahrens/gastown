@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1284,6 +1285,56 @@ func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 			}
 			if !validator.MatchString(got) {
 				t.Fatalf("buildBranchName(%q, %q) = %q rejected by claude-code-action head-ref validator", c.polecat, c.issue, got)
+			}
+		})
+	}
+}
+
+// TestBuildBranchName_SameMillisecondNamesDiffer covers gt-srpy8g: a forced
+// repair that builds its branch name in the same millisecond as the add that
+// created the polecat must not reproduce that name.
+func TestBuildBranchName_SameMillisecondNamesDiffer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		template string
+	}{
+		{name: "default_format", template: ""},
+		{name: "timestamp_template", template: "feature/{name}-{timestamp}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			w := newWorld()
+			w.InitRepo(t, tmpDir)
+
+			r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+			wispCfg := wisp.NewConfig(filepath.Dir(r.Path), r.Name)
+			if tt.template != "" {
+				if err := wispCfg.Set("polecat_branch_template", tt.template); err != nil {
+					t.Fatalf("set wisp template: %v", err)
+				}
+			} else if err := wispCfg.Unset("polecat_branch_template"); err != nil {
+				t.Fatalf("unset wisp template: %v", err)
+			}
+
+			m := newTestManager(r, w, nil, newNoDatabaseDB())
+			fixed := time.UnixMilli(1_800_000_000_000)
+			m.now = func() time.Time { return fixed }
+			// A stamp sequence of its own, so this test never moves the
+			// process-wide one.
+			m.stamps = &branchStampClock{}
+
+			first := m.buildBranchName("alpha", "gt-123")
+			second := m.buildBranchName("alpha", "gt-123")
+			wantFirst := strconv.FormatInt(fixed.UnixMilli(), 36)
+			wantSecond := strconv.FormatInt(fixed.UnixMilli()+1, 36)
+			if !strings.HasSuffix(first, wantFirst) {
+				t.Fatalf("first name %q does not carry stamp %q", first, wantFirst)
+			}
+			if !strings.HasSuffix(second, wantSecond) {
+				t.Fatalf("second name %q does not carry stamp %q (the first plus one millisecond)", second, wantSecond)
 			}
 		})
 	}

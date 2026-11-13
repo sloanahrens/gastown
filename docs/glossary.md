@@ -69,6 +69,9 @@ Ephemeral Beads destroyed after runs. Wisps are lightweight work items used for 
 ### Hook
 A special pinned Bead for each agent. The Hook is an agent's primary work queue - when work appears on your Hook, GUPP dictates you must run it.
 
+### Story point
+A Fibonacci size of a bead's polecat time. `sp:N` is the estimate label. The [Story points](reference.md#story-points) section says who writes each story-point label and when.
+
 ## Workflow Commands
 
 ### Slinging
