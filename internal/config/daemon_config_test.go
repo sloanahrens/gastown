@@ -1905,6 +1905,31 @@ func TestDaemonLocalRoundDefaults(t *testing.T) {
 	}
 }
 
+// TestLocalRoundExplicitDisabled: an explicit enabled:false leaves the round
+// off, and a present block with no enabled key keeps the default, which is
+// also off (gt-uc0ot0).
+func TestLocalRoundExplicitDisabled(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"explicit false", `{"local_round":{"enabled":false}}`},
+		{"absent key", `{"local_round":{}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tt.body), &cfg); err != nil {
+				t.Fatalf("decode %s: %v", tt.body, err)
+			}
+			if cfg.LocalRoundEnabled() {
+				t.Errorf("LocalRoundEnabled() with %s = true, want false", tt.body)
+			}
+		})
+	}
+}
+
 // daemon.local_round.timeout_seconds is refused outside (0, 900] with an error
 // naming the field: a mistyped bound must not read as the default, or a round
 // would serve for longer than the overseer allowed.

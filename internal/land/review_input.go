@@ -8,8 +8,8 @@ import (
 
 // BuildReviewInput assembles every input one review of a bead's diff gets
 // (gt-8af9s7): the single place a review's inputs are assembled, called by the
-// landing worker and, next, by the polecat's local round, so the two cannot
-// drift into judging the same bead against different material.
+// landing worker. The polecat's local round is meant to call it too, so the two
+// cannot drift into judging the same bead against different material.
 //
 // issue is the work bead (the caller has read it) and comments are its
 // comments; both are read by the caller, which also reads the accepted-risk

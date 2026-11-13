@@ -833,6 +833,41 @@ func landsAndRecords(t *testing.T, f *landFixture) {
 	}
 }
 
+// recordCarriesPriorityAndEstimate lands f's work with a priority and an
+// sp: estimate set, then reads the landings file back: the record it writes
+// carries both, the fields the landing worker hands the lander (gt-nxn93f).
+// The integration tier runs it over real git.
+func recordCarriesPriorityAndEstimate(t *testing.T, f *landFixture) {
+	t.Helper()
+	priority, estimate := 2, 5
+	f.work.Priority = &priority
+	f.work.SPEstimate = &estimate
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	lines := f.landingLines()
+	if len(lines) != 1 {
+		t.Fatalf("landings lines = %q", lines)
+	}
+	var rec LandingRecord
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Priority == nil || *rec.Priority != priority {
+		t.Errorf("record priority = %v, want %d", rec.Priority, priority)
+	}
+	if rec.SPEstimate == nil || *rec.SPEstimate != estimate {
+		t.Errorf("record sp estimate = %v, want %d", rec.SPEstimate, estimate)
+	}
+}
+
+// TestRecordCarriesPriorityAndLandingRecord: the priority and estimate the
+// landing request carries reach the landing record (gt-nxn93f).
+func TestRecordCarriesPriorityAndLandingRecord(t *testing.T) {
+	t.Parallel()
+	recordCarriesPriorityAndEstimate(t, newLandFixture(t))
+}
+
 // A rework of a bead that landed before (after a revert) lands a new head,
 // and refs/landed/<bead> moves to it: the ref answers "is this worktree's
 // work landed?" for the newest landing of the bead, not the first (gt-as9v8).
