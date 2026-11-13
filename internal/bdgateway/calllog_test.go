@@ -58,6 +58,7 @@ func keys(m map[string]any) []string {
 // TestCallLogRedaction is acceptance box 1: one JSONL line, exactly the allowed
 // fields, and no flag value from argv in it.
 func TestCallLogRedaction(t *testing.T) {
+	t.Parallel()
 	opts := testOptions(t)
 	opts.Buffer = 4
 	l, err := NewCallLog(opts)
@@ -126,6 +127,7 @@ func TestCallLogRedaction(t *testing.T) {
 // TestCallLogDrop is acceptance box 2's first half: a full buffer drops the line
 // and counts it instead of blocking the caller.
 func TestCallLogDrop(t *testing.T) {
+	t.Parallel()
 	taken := make(chan struct{}, 1)
 	unblock := make(chan struct{})
 	hook := func([]byte) error {
@@ -166,6 +168,7 @@ func TestCallLogDrop(t *testing.T) {
 // TestCallLogRotate is acceptance box 2's second half: rotation keeps the newest
 // file under the size limit and keeps only MaxFiles files.
 func TestCallLogRotate(t *testing.T) {
+	t.Parallel()
 	const (
 		maxBytes = 400
 		calls    = 40
@@ -221,6 +224,7 @@ func TestCallLogRotate(t *testing.T) {
 // TestCallLogStats is acceptance box 3: calls, errors, dropped and per-verb
 // counts come out of Stats.
 func TestCallLogStats(t *testing.T) {
+	t.Parallel()
 	opts := testOptions(t)
 	l, err := NewCallLog(opts)
 	if err != nil {
@@ -248,6 +252,7 @@ func TestCallLogStats(t *testing.T) {
 // TestCallLogWriteError checks a failed write is reported by Close, not read as
 // a clean log.
 func TestCallLogWriteError(t *testing.T) {
+	t.Parallel()
 	diskFull := errors.New("disk full")
 	hook := func([]byte) error { return diskFull }
 	opts := testOptions(t)
@@ -262,6 +267,7 @@ func TestCallLogWriteError(t *testing.T) {
 }
 
 func TestCallLogOptionsRefused(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		opts CallLogOptions
@@ -283,6 +289,7 @@ func TestCallLogOptionsRefused(t *testing.T) {
 // TestCallLogArgvParse pins what argv contributes and what it must never
 // contribute: flag values (inline or separate) and non-id operands.
 func TestCallLogArgvParse(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		argv  []string
