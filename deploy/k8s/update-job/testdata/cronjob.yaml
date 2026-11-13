@@ -38,6 +38,12 @@ spec:
               env:
                 - name: XDG_CONFIG_HOME
                   value: /run/gt/xdg
+                - name: GIT_CONFIG_COUNT
+                  value: "1"
+                - name: GIT_CONFIG_KEY_0
+                  value: credential.http://forgejo:3000.helper
+                - name: GIT_CONFIG_VALUE_0
+                  value: '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env'
               volumeMounts:
                 - name: town-state
                   mountPath: /Users/sloan/gt
@@ -61,6 +67,12 @@ spec:
               env:
                 - name: XDG_CONFIG_HOME
                   value: /run/gt/xdg
+                - name: GIT_CONFIG_COUNT
+                  value: "1"
+                - name: GIT_CONFIG_KEY_0
+                  value: credential.http://forgejo:3000.helper
+                - name: GIT_CONFIG_VALUE_0
+                  value: '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env'
               volumeMounts:
                 - name: town-state
                   mountPath: /Users/sloan/gt
