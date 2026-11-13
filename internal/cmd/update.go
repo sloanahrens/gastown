@@ -149,6 +149,25 @@ func podDaemonInClusterFromFlags(kubeContext, namespace string, inPod bool) (*po
 	return &target, nil
 }
 
+// podImagesRequiredMessage is the refusal for a pod-target run that would select
+// the install step without --images: the host install would build and install the
+// Mac binary, and the pod's build never changes, so the run fails at verify.
+const podImagesRequiredMessage = "a pod target (--pod-context or --pod-in-cluster) needs --images: only an image pair moves a pod's daemon, so a run without it would build and install the Mac binary and then fail at verify because the pod's build never changes; pass --images <values file> (gt update images writes it), or --skip install to run the other steps"
+
+// refusePodInstallWithoutImages refuses a pod-target run that selects the install
+// step and names no image pair. The install step is selected unless --skip names
+// it or --only names other steps, the rule applySelection applies. A --dry-run is
+// refused too, since its plan would show the host install for a pod.
+func refusePodInstallWithoutImages(pod *podDaemonTarget, images string, skip, only map[update.StepName]bool) error {
+	if pod == nil || images != "" {
+		return nil
+	}
+	if skip[update.StepInstall] || (len(only) > 0 && !only[update.StepInstall]) {
+		return nil
+	}
+	return errors.New(podImagesRequiredMessage)
+}
+
 // podProbeBound bounds one kubectl exec the pod probe makes. It is far under the
 // restart wait, so a hung exec is one failed poll inside the wait, not a hang past it.
 const podProbeBound = time.Minute
@@ -327,6 +346,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return err
 	}
+	if err := refusePodInstallWithoutImages(pod, req.Images, skip, only); err != nil {
+		return err
+	}
 
 	townRoot, err := seams.FindTownRoot()
 	if err != nil {
@@ -367,9 +389,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	stopHeartbeat := startUpdateHeartbeat(ctx, deps.Store, ticker.C, deps.Clock, updateHeartbeatError(errOut))
 
 	opts := updateOptions(req, skip, only)
-	// Only the digest install skips the host install under a pod target. A run
-	// without --images still installs the Mac binary, which needs the host
-	// installer even when the daemon runs in the pod.
+	// Only the digest install skips the host install under a pod target. A pod
+	// target with the install step selected and no --images is refused before
+	// this point, by refusePodInstallWithoutImages.
 	if pod != nil && req.Images != "" {
 		opts.HostInstallSkipped = podHostInstallReason
 	}

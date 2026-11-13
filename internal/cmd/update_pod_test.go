@@ -122,13 +122,6 @@ func (h *podHostInstaller) Install(_ context.Context, sha string) (update.Instal
 // deps and reports success, so no step runs.
 func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 	t.Helper()
-	return captureWiredRun(t, true, extra...)
-}
-
-// captureWiredRun is captureWiredInstall with the digest flag optional: a run
-// without --images has no digest install, so its install is the host install.
-func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
-	t.Helper()
 	townRoot := t.TempDir()
 	values := filepath.Join(townRoot, "images.yaml")
 	// The polecat digest is the one the fake registry serves at the dev tag, so the
@@ -168,10 +161,7 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 		PodRun:    got.kube.run,
 		Images:    podPairImages(podPairManifest),
 	}
-	args := extra
-	if digest {
-		args = append([]string{"--images", values}, extra...)
-	}
+	args := append([]string{"--images", values}, extra...)
 	if _, err := runPodCommand(t, seams, args...); err != nil {
 		t.Fatalf("gt update %v: %v", args, err)
 	}
@@ -181,7 +171,8 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 // TestUpdatePodTargetSkipsTheHostInstall holds the digest install under a pod
 // target: the host install is never called, the daemon still moves to the pair,
 // and the run's report names the skip. A run without a pod target still calls
-// the host install first, and a pod-target run without --images keeps it.
+// the host install first. A pod-target run without --images is refused, which
+// TestUpdatePodTargetWithoutImagesIsRefused holds.
 func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
 	t.Parallel()
 
@@ -244,26 +235,173 @@ func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
 		}
 	})
 
-	// A pod-target run without --images installs the Mac binary, which still
-	// needs the host installer: the skip is for the digest install only. The
-	// row pins that on purpose, so the behaviour cannot drift by accident.
-	t.Run("a pod-target run without --images still calls the host install once", func(t *testing.T) {
-		t.Parallel()
-		got := captureWiredRun(t, false, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
-		if got.opts.HostInstallSkipped != "" {
-			t.Errorf("HostInstallSkipped = %q, want none without --images", got.opts.HostInstallSkipped)
+}
+
+// podRunCounts counts the seams a gt update run reaches: the town lookup, the deps
+// factory, the orchestrator, the host installer and the pod's kubectl runner. A
+// refused run reaches none of them.
+type podRunCounts struct {
+	townLookups int
+	depsCalls   int
+	runs        int
+	host        *podHostInstaller
+	kube        *podDaemonKubectl
+}
+
+// runCountedPodCommand runs gt update with args over fakes that count each seam
+// above. withImages adds --images with a values file, so a run gets past the
+// refusal with its digest install wired; the fake orchestrator never calls it.
+func runCountedPodCommand(t *testing.T, withImages bool, args ...string) (podRunCounts, error) {
+	t.Helper()
+	townRoot := t.TempDir()
+	clock := &rollbackTestClock{now: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)}
+	compose := &rollbackTestSwap{}
+	got := podRunCounts{
+		host: &podHostInstaller{},
+		kube: &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, pods: podPairHealthy()},
+	}
+	seams := updateSeams{
+		FindTownRoot: func() (string, error) {
+			got.townLookups++
+			return townRoot, nil
+		},
+		DepsFactory: func(string) (update.Deps, error) {
+			got.depsCalls++
+			return update.Deps{
+				Store:     &update.Store{Dir: update.Dir(townRoot)},
+				Clock:     clock,
+				Sleep:     clock.sleep,
+				Verify:    compose,
+				Installer: got.host,
+			}, nil
+		},
+		Run: func(context.Context, update.Deps, update.Options) (update.State, error) {
+			got.runs++
+			return update.State{Outcome: update.OutcomeOK}, nil
+		},
+		ImageSwap: func(string) (update.ImageSwap, error) { return compose, nil },
+		Notifier:  func(string) notify.Notifier { return notifyfake.New() },
+		PodRun:    got.kube.run,
+		Images:    podPairImages(podPairManifest),
+		InPod:     func() bool { return true },
+	}
+	if withImages {
+		values := filepath.Join(townRoot, "images.yaml")
+		if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Commit: rollbackNewCommit}); err != nil {
+			t.Fatalf("write the values file: %v", err)
 		}
-		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
-		if err != nil {
-			t.Fatalf("Install: %v", err)
-		}
-		if got.host.calls != 1 {
-			t.Errorf("host install called %d times, want it called once", got.host.calls)
-		}
-		if verdict := update.ClassifyInstall(res); verdict != update.ResultOK {
-			t.Errorf("ClassifyInstall = %q, want %q: %+v", verdict, update.ResultOK, res)
-		}
+		args = append([]string{"--images", values}, args...)
+	}
+	_, err := runPodCommand(t, seams, args...)
+	return got, err
+}
+
+// TestUpdatePodTargetWithoutImagesIsRefused holds the refusal: a pod-target run
+// without --images that selects the install step stops with the constant's text
+// and exit status 1, for --pod-context and for --pod-in-cluster. A --dry-run and an
+// explicit --only install are refused too, since both select the install step.
+func TestUpdatePodTargetWithoutImagesIsRefused(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "--pod-context", args: []string{"--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace}},
+		{name: "--pod-in-cluster", args: []string{"--pod-in-cluster", "--pod-namespace", podSwapNamespace}},
+		{name: "--pod-context with --dry-run", args: []string{"--dry-run", "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace}},
+		{name: "--pod-context with --only install", args: []string{"--only", "install", "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := runCountedPodCommand(t, false, tt.args...)
+			if err == nil {
+				t.Fatalf("gt update %v ran, want it refused", tt.args)
+			}
+			if err.Error() != podImagesRequiredMessage {
+				t.Errorf("error = %q, want %q", err.Error(), podImagesRequiredMessage)
+			}
+			if code := exitCodeForError(err); code != 1 {
+				t.Errorf("exit status = %d, want 1", code)
+			}
+		})
+	}
+}
+
+// TestUpdatePodTargetRefusalRunsNothing holds that the refusal comes before any
+// step: the town lookup, the deps factory, the orchestrator, the host installer
+// and the pod's kubectl runner are all unreached.
+func TestUpdatePodTargetRefusalRunsNothing(t *testing.T) {
+	t.Parallel()
+	got, err := runCountedPodCommand(t, false, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+	if err == nil {
+		t.Fatal("gt update with a pod target and no --images ran, want it refused")
+	}
+	if got.townLookups != 0 {
+		t.Errorf("town lookup called %d times, want none", got.townLookups)
+	}
+	if got.depsCalls != 0 {
+		t.Errorf("deps factory called %d times, want none", got.depsCalls)
+	}
+	if got.runs != 0 {
+		t.Errorf("orchestrator called %d times, want none", got.runs)
+	}
+	if got.host.calls != 0 {
+		t.Errorf("host installer called %d times, want none", got.host.calls)
+	}
+	if len(got.kube.calls) != 0 {
+		t.Errorf("pod runner ran %d commands, want none: %v", len(got.kube.calls), got.kube.calls)
+	}
+}
+
+// TestUpdatePodTargetWithoutInstallRefusalRuns holds the runs the refusal leaves
+// alone: a pod target with an image pair, a pod target that skips or does not
+// select the install step, and a run with no pod target. Each reaches the
+// orchestrator.
+func TestUpdatePodTargetWithoutInstallRefusalRuns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		withImages bool
+		args       []string
+	}{
+		{name: "a pod target with --images", withImages: true, args: []string{"--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace}},
+		{name: "--pod-context with --skip install", args: []string{"--skip", "install", "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace}},
+		{name: "--pod-context with --only verify", args: []string{"--only", "verify", "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace}},
+		{name: "--pod-in-cluster with --only verify", args: []string{"--only", "verify", "--pod-in-cluster", "--pod-namespace", podSwapNamespace}},
+		{name: "no pod target", args: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := runCountedPodCommand(t, tt.withImages, tt.args...)
+			if err != nil {
+				t.Fatalf("gt update %v was refused or failed: %v", tt.args, err)
+			}
+			if got.runs != 1 {
+				t.Errorf("orchestrator called %d times, want it called once", got.runs)
+			}
+		})
+	}
+}
+
+// TestUpdateImagesSubcommandIsNotRefused holds gt update images, which writes the
+// values file the refusal names. It is a subcommand, not a run: runUpdate's refusal
+// never sees it, and it takes none of the pod flags.
+func TestUpdateImagesSubcommandIsNotRefused(t *testing.T) {
+	t.Parallel()
+	_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
 	})
+	writes := 0
+	out := filepath.Join(t.TempDir(), "images.yaml")
+	if _, err := runPodCommand(t, updateSeams{Images: testUpdateImagesSeams(t, server, &writes)}, "images", "--sha", testUpdateImagesSHA, "--out", out); err != nil {
+		t.Fatalf("gt update images was refused: %v", err)
+	}
+	if writes != 1 {
+		t.Errorf("the values file was written %d times, want once", writes)
+	}
 }
 
 // TestUpdatePodProbeBoundsTheExec holds the pod probe's bound: the kubectl exec it
@@ -406,7 +544,9 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 				return update.State{}, nil
 			},
 		}
-		_, err := runPodCommand(t, seams, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		// --skip install keeps the install step out of the plan, so the pod-target
+		// refusal does not fire first and the missing runner is what is refused.
+		_, err := runPodCommand(t, seams, "--skip", "install", "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
 		if err == nil || !strings.Contains(err.Error(), "no pod command runner is wired") {
 			t.Fatalf("gt update error = %v, want the missing kubectl runner named", err)
 		}
