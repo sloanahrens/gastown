@@ -609,20 +609,23 @@ func (f *pendingSandboxFixture) podReads() int {
 	return n
 }
 
-// hangPendingSandboxRead runs collectAttention over collectors while the cluster
-// never answers the pod list, then moves the daemon's clock past the read
-// deadline. It returns the items the tick observed. The bounded wait ends the
-// test if the collection does not return once the deadline passes. The held read
-// stays outstanding until finishHungRead or the test's cleanup releases it.
+// hangPendingSandboxRead runs collectAttention over collectors under the tick's
+// deadline, as writeAttentionWith does, while the cluster never answers the pod
+// list, then moves the daemon's clock past the read deadline. It returns the
+// items the tick observed. The bounded wait ends the test if the collection does
+// not return once the deadline passes. The held read stays outstanding until
+// finishHungRead or the test's cleanup releases it.
 func hangPendingSandboxRead(t *testing.T, f *pendingSandboxFixture, prev attention.State, collectors ...attentionCollector) []attention.Item {
 	t.Helper()
 	t.Cleanup(f.releaseHang)
+	tick, cancelTick := context.WithTimeout(context.Background(), attentionTimeout)
+	t.Cleanup(cancelTick)
 	f.hanging = true
 	f.held = make(chan struct{})
 	f.hangEntered = make(chan struct{}, 1)
 	observed := make(chan []attention.Item, 1)
 	go func() {
-		observed <- collectAttention(context.Background(), prev, collectors, f.d.logger.Printf)
+		observed <- collectAttention(tick, prev, collectors, f.d.logger.Printf)
 	}()
 	blockUntil(t, "the pod read to reach the cluster", f.hangEntered)
 	f.clock.Advance(sandboxPendingReadTimeout)
@@ -634,6 +637,33 @@ func hangPendingSandboxRead(t *testing.T, f *pendingSandboxFixture, prev attenti
 	case <-wait.Done():
 		t.Fatalf("the collection did not return after its %s read deadline", sandboxPendingReadTimeout)
 		return nil
+	}
+}
+
+// TestPendingSandboxReadRefusesAnExpiredTick covers gt-hlo2ac: a pod read that
+// starts after the tick's deadline never reaches the cluster, and the collector
+// returns the context's error with no items.
+func TestPendingSandboxReadRefusesAnExpiredTick(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	items, err := collectorFor(t, f.src, attention.KindSandboxPending).collect(ctx)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if items != nil {
+		t.Errorf("items = %+v beside the refusal, want none", items)
+	}
+	// A read spawned anyway would be recorded as outstanding; wait for it to
+	// return, bounded, so the count below cannot miss a read still in flight.
+	if returned := f.d.sandboxPendingReads[pendingSandboxNamespace]; returned != nil {
+		blockUntil(t, "the spawned pod read to return", returned)
+	}
+	if n := f.podReads(); n != 0 {
+		t.Errorf("pod reads = %d, want none after the tick's deadline", n)
 	}
 }
 

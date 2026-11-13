@@ -155,6 +155,11 @@ var errSandboxPendingNoAnswer = fmt.Errorf("no answer within %s", sandboxPending
 // a later tick does not start a second read of it: it returns an error and keeps
 // the previous items, so a hung cluster holds at most one goroutine per namespace.
 func (d *Daemon) pendingSandboxRead(ctx context.Context, kubeconfig, namespace string) ([]byte, error) {
+	// A read that starts after the tick's deadline never reaches the cluster, so
+	// no runner goroutine is spawned for it (gt-hlo2ac).
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("reading the pod list for namespace %s: %w", namespace, err)
+	}
 	if outstanding, ok := d.sandboxPendingReads[namespace]; ok {
 		select {
 		case <-outstanding:

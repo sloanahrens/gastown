@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -2047,6 +2048,99 @@ func TestCollectTierSweepStarvedStopsOnACancelledTick(t *testing.T) {
 	if _, err := f.src.collectTierSweepStarved(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
+}
+
+// gt-hlo2ac: a tick whose deadline has already passed starts no collector. Each
+// collector it does not start keeps its previous items, and one line names the
+// collector the deadline stopped before and how many it skipped.
+func TestCollectAttentionStartsNoCollectorAfterTheDeadline(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prev := attention.State{Items: []attention.Item{
+		{Key: "red-main:prev", Kind: attention.KindRedMain, Severity: attention.SeverityHigh, Summary: "red"},
+		{Key: "escalation:prev", Kind: attention.KindEscalation, Severity: attention.SeverityHigh, Summary: "escalated"},
+	}}
+	var started int
+	counting := func(context.Context) ([]attention.Item, error) {
+		started++
+		return nil, nil
+	}
+	collectors := []attentionCollector{
+		{kind: attention.KindRedMain, collect: counting},
+		{kind: attention.KindEscalation, collect: counting},
+	}
+	var logs []string
+	observed := collectAttention(ctx, prev, collectors, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	if started != 0 {
+		t.Errorf("collectors started = %d, want none after the deadline", started)
+	}
+	if !hasKeys(observed, "red-main:prev", "escalation:prev") {
+		t.Errorf("observed = %+v, want every previous item kept", observed)
+	}
+	want := "attention: tick deadline expired before collector red-main; skipped 2"
+	if len(logs) != 1 || logs[0] != want {
+		t.Errorf("logs = %q, want one line %q", logs, want)
+	}
+}
+
+// gt-hlo2ac: the deadline expires while the first collector runs. Its items come
+// through, and the collectors after it start none and keep their previous items.
+func TestCollectAttentionStopsAtADeadlineThatExpiresMidTick(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := attention.Item{Key: "red-main:first", Kind: attention.KindRedMain, Severity: attention.SeverityHigh, Summary: "first"}
+	prev := attention.State{Items: []attention.Item{
+		{Key: "escalation:prev", Kind: attention.KindEscalation, Severity: attention.SeverityHigh, Summary: "escalated"},
+		{Key: "rejected:prev", Kind: attention.KindRejectedTwice, Severity: attention.SeverityHigh, Summary: "rejected"},
+	}}
+	var started int
+	counting := func(context.Context) ([]attention.Item, error) {
+		started++
+		return nil, nil
+	}
+	collectors := []attentionCollector{
+		{kind: attention.KindRedMain, collect: func(context.Context) ([]attention.Item, error) {
+			cancel()
+			return []attention.Item{first}, nil
+		}},
+		{kind: attention.KindEscalation, collect: counting},
+		{kind: attention.KindRejectedTwice, collect: counting},
+	}
+	var logs []string
+	observed := collectAttention(ctx, prev, collectors, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	if started != 0 {
+		t.Errorf("collectors started after the deadline = %d, want none", started)
+	}
+	if !hasKeys(observed, "red-main:first", "escalation:prev", "rejected:prev") {
+		t.Errorf("observed = %+v, want the first collector's item and the later collectors' previous items", observed)
+	}
+	want := "attention: tick deadline expired before collector escalation; skipped 2"
+	if len(logs) != 1 || logs[0] != want {
+		t.Errorf("logs = %q, want one line %q", logs, want)
+	}
+}
+
+// hasKeys reports whether items hold exactly the keys in want, in any order.
+func hasKeys(items []attention.Item, want ...string) bool {
+	if len(items) != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(items))
+	for _, it := range items {
+		seen[it.Key] = true
+	}
+	for _, k := range want {
+		if !seen[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // gt-pqpq8: one failed bd show skips that bead alone. The landing whose read
