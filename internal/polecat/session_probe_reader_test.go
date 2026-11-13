@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -91,6 +92,9 @@ func (f promptAtCreateTmux) NewSessionWithCommandAndEnv(name, workDir, command s
 	return nil
 }
 
+// launchNudgeGuard bounds the wait for the launch's startup-nudge check.
+const launchNudgeGuard = 10 * time.Second
+
 // TestLaunchDropsTheCensusAnswerForTheSessionItCreates: the census holds a seat
 // its gateway lists Stopped as not live, with no probe. The sandbox comes up
 // and the launch creates the seat's session. The next has-session read must
@@ -155,8 +159,19 @@ func TestLaunchDropsTheCensusAnswerForTheSessionItCreates(t *testing.T) {
 		t.Fatalf("launch: %v", err)
 	}
 	// The launch's startup-nudge check runs in the background; wait for it so
-	// nothing of this test outlives it.
-	m.nudgeWG.Wait()
+	// nothing of this test outlives it. Zero retries above makes it return at
+	// once, so the wait never reaches the guard: the guard only turns a check
+	// that did not return into a named failure instead of a hung package.
+	nudgeDone := make(chan struct{})
+	go func() {
+		m.nudgeWG.Wait()
+		close(nudgeDone)
+	}()
+	select {
+	case <-nudgeDone:
+	case <-time.After(launchNudgeGuard): //testpolicy:allow no-sleep — a failure guard, not a delay: the receive completes at once on a passing run, and the bound only names the startup-nudge check that failed to return
+		t.Fatal("the launch's startup-nudge check did not return within the guard")
+	}
 
 	running, err := read()
 	if err != nil || !running {
