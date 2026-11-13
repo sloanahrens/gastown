@@ -55,6 +55,13 @@ type Kubectl struct {
 	// Note receives the stderr note for a working directory the pod cannot see.
 	// Nil refuses the call, so a mapped directory is never silent.
 	Note io.Writer
+	// Stdout and Stderr receive the tool's output when the pod town root and the
+	// Mac town differ: the tool prints pod paths, and the wrapper rewrites them to
+	// the Mac's. They are the wrapper's own streams. When the roots are equal, the
+	// tool's output goes to the caller's streams through the Shell unchanged, and
+	// these are not read. Nil refuses a rewriting call, so its output is never lost.
+	Stdout io.Writer
+	Stderr io.Writer
 	// ProbeTimeout bounds each probe. Zero means probeTimeout.
 	ProbeTimeout time.Duration
 }
@@ -96,10 +103,34 @@ func (k Kubectl) Launch(call Call) (int, error) {
 		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
 	}
 	call.Env = env
-	if call.Stdin != nil {
-		return k.Shell.AttachStdin(k.execArgv(l.pod, call, dir), nil, call.Stdin)
+	return k.attach(l.pod, call, dir)
+}
+
+// attach runs the call in the pod. When the pod's town root and the Mac's differ, a
+// path the tool prints names the pod's root, which the Mac does not have, so the
+// output is rewritten to the Mac's root line by line. The exit status, the standard
+// input and the walk-up script are the same either way.
+func (k Kubectl) attach(pod string, call Call, dir string) (int, error) {
+	argv := k.execArgv(pod, call, dir)
+	if !k.rewrites() {
+		if call.Stdin != nil {
+			return k.Shell.AttachStdin(argv, nil, call.Stdin)
+		}
+		return k.Shell.Attach(argv, nil)
 	}
-	return k.Shell.Attach(k.execArgv(l.pod, call, dir), nil)
+	out := newOutputRewriter(k.Stdout, k.podRoot(), k.Town)
+	errOut := newOutputRewriter(k.Stderr, k.podRoot(), k.Town)
+	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errOut)
+	// The tool's last line need not end in a newline, so the two streams are
+	// flushed before the call returns. A failure to write the output is reported
+	// with the tool's own status, so the caller keeps it.
+	return exit, errors.Join(err, out.Flush(), errOut.Flush())
+}
+
+// rewrites reports whether the pod's town root and the Mac's differ, and so
+// whether a path the tool prints must be rewritten to work on the Mac.
+func (k Kubectl) rewrites() bool {
+	return k.podRoot() != k.Town
 }
 
 // screenEnv drops the entries of env that carry a credential, and returns the names
@@ -349,6 +380,8 @@ func (k Kubectl) validate() error {
 		return errors.New("gtwrap: no kubectl check is wired for the kubernetes target, so the call is refused")
 	case k.Note == nil:
 		return errors.New("gtwrap: no note writer is wired for the kubernetes target, so a mapped directory would be silent; the call is refused")
+	case k.rewrites() && (k.Stdout == nil || k.Stderr == nil):
+		return errors.New("gtwrap: the pod town root and the Mac town differ, so the tool's output is rewritten, but no output writer is wired for it; the call is refused")
 	}
 	return nil
 }

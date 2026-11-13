@@ -109,6 +109,8 @@ func osSurface() surface {
 				Shell:      gtwrap.OSShell{},
 				LookPath:   exec.LookPath,
 				Note:       os.Stderr,
+				Stdout:     os.Stdout,
+				Stderr:     os.Stderr,
 			}
 		},
 		executable: os.Executable,

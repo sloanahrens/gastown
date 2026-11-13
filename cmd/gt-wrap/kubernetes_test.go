@@ -147,14 +147,30 @@ func TestDoctorExitsOneWhenTheKubernetesLadderIsDown(t *testing.T) {
 // reads the root and directory arguments the walk-up script was given.
 type podRecorder struct {
 	attached [][]string
+	// stdout and stderr are what a stream-carrying exec prints, and exit is what
+	// it returns: the output and status of the pod's tool.
+	stdout, stderr string
+	exit           int
 }
 
 func (p *podRecorder) Attach(argv []string, _ []string) (int, error) {
 	p.attached = append(p.attached, argv)
-	return 0, nil
+	return p.exit, nil
 }
 
 func (p *podRecorder) AttachStdin(argv []string, env []string, _ io.Reader) (int, error) {
+	return p.Attach(argv, env)
+}
+
+// AttachStreams prints the canned output to the writers the wrapper wired and
+// returns the tool's status, as a kubectl exec would.
+func (p *podRecorder) AttachStreams(argv []string, env []string, _ io.Reader, stdout, stderr io.Writer) (int, error) {
+	if _, err := io.WriteString(stdout, p.stdout); err != nil {
+		return 0, err
+	}
+	if _, err := io.WriteString(stderr, p.stderr); err != nil {
+		return 0, err
+	}
 	return p.Attach(argv, env)
 }
 
@@ -192,6 +208,8 @@ func newPodHarness(t *testing.T, config string) (*harness, *podRecorder) {
 			Shell:      pod,
 			LookPath:   func(string) (string, error) { return "/usr/local/bin/kubectl", nil },
 			Note:       h.stderr,
+			Stdout:     h.stdout,
+			Stderr:     h.stderr,
 		}
 	}
 	return h, pod
@@ -273,6 +291,30 @@ func TestConfigPodTownRoot(t *testing.T) {
 				t.Fatal("a target was built or a tool ran for a config with a refused pod_town_root")
 			}
 		})
+	}
+}
+
+// TestRunRewritesPodPathsInOutput: with pod_town_root set to a root the Mac does
+// not have, a path the pod's tool prints is rewritten to the Mac's town path on
+// stdout and on stderr, and the tool's exit status passes through.
+func TestRunRewritesPodPathsInOutput(t *testing.T) {
+	t.Parallel()
+	h, pod := newPodHarness(t, kubernetesConfigWith(`"pod_town_root": "/town"`))
+	pod.stdout = "/town/rig/polecats/coma/gastown/README.md\n"
+	pod.stderr = "no such file: /town/rig/missing\n"
+	pod.exit = 3
+	if exit := h.run("gt", "status", "--line"); exit != 3 {
+		t.Fatalf("run = %d, want the tool's exit status 3; stderr: %s", exit, h.stderr)
+	}
+	macTown := filepath.Join(h.home, "gt")
+	if want := macTown + "/rig/polecats/coma/gastown/README.md\n"; h.stdout.String() != want {
+		t.Fatalf("stdout = %q, want the Mac path %q", h.stdout, want)
+	}
+	if want := "no such file: " + macTown + "/rig/missing"; !strings.Contains(h.stderr.String(), want) {
+		t.Fatalf("stderr %q does not hold the rewritten path %q", h.stderr, want)
+	}
+	if podPath := "no such file: /town/rig/missing"; strings.Contains(h.stderr.String(), podPath) {
+		t.Fatalf("stderr %q still holds the pod's path %q", h.stderr, podPath)
 	}
 }
 

@@ -330,6 +330,10 @@ func (s *cutoverShell) AttachStdin(argv []string, env []string, _ io.Reader) (in
 	return 0, nil
 }
 
+func (s *cutoverShell) AttachStreams(argv []string, env []string, _ io.Reader, _, _ io.Writer) (int, error) {
+	return 0, nil
+}
+
 func (s *cutoverShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	s.captured = append(s.captured, argv)
 	if len(argv) < 2 {

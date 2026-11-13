@@ -75,6 +75,14 @@ func (f *fakeKube) AttachStdin(argv []string, env []string, stdin io.Reader) (in
 	return f.Attach(argv, env)
 }
 
+// AttachStreams records the reader the call carried, then attaches as Attach does.
+// It writes nothing: the tests that read a rewritten stream drive the rewriter
+// itself, and the cmd-level test drives the wiring.
+func (f *fakeKube) AttachStreams(argv []string, env []string, stdin io.Reader, _, _ io.Writer) (int, error) {
+	f.stdins = append(f.stdins, stdin)
+	return f.Attach(argv, env)
+}
+
 // Capture answers by the probe's kind. Each kind is a different kubectl verb line, so
 // matching on the joined argv is exact enough to tell them apart.
 func (f *fakeKube) Capture(_ context.Context, argv []string) (string, int, error) {
@@ -241,6 +249,27 @@ func TestKubectlRefusesAnEnvEntryWithNoValue(t *testing.T) {
 	}
 }
 
+// TestKubectlRefusesARewriteWithoutWriters: when the pod town root and the Mac town
+// differ the tool's output must be rewritten, so a target with no output writer is
+// refused before any probe, rather than running the tool with its output lost.
+func TestKubectlRefusesARewriteWithoutWriters(t *testing.T) {
+	t.Parallel()
+	f := healthyKube()
+	var note bytes.Buffer
+	k := testKubectl(f, &note)
+	k.PodRoot = "/town"
+	exit, err := k.Launch(kubeCall(t, kubeTown, false))
+	if exit != 1 || err == nil {
+		t.Fatalf("Launch = %d, %v; want 1 and an error", exit, err)
+	}
+	if !strings.Contains(err.Error(), "output writer") {
+		t.Fatalf("error %q does not name the missing output writer", err)
+	}
+	if len(f.captured) != 0 || len(f.attached) != 0 {
+		t.Fatalf("a refused call probed %q and attached %q", f.captured, f.attached)
+	}
+}
+
 // podRun is one tool exec the walk-up script started.
 type podRun struct {
 	dir string
@@ -268,6 +297,18 @@ func (p *podShell) AttachStdin(argv []string, env []string, _ io.Reader) (int, e
 }
 
 func (p *podShell) Attach(argv []string, _ []string) (int, error) {
+	return p.run(argv, io.Discard)
+}
+
+// AttachStreams runs the script as Attach does, with the script's standard output
+// going to the given writer. The script's standard error is kept in p.stderr, so a
+// test reads the walk-up's own refusal wherever the target sends its stderr.
+func (p *podShell) AttachStreams(argv []string, _ []string, _ io.Reader, stdout, _ io.Writer) (int, error) {
+	return p.run(argv, stdout)
+}
+
+// run executes the walk-up script and reports the status it exited with.
+func (p *podShell) run(argv []string, stdout io.Writer) (int, error) {
 	p.attached = append(p.attached, argv)
 	script, params, env, err := shellInvocation(argv)
 	if err != nil {
@@ -280,7 +321,7 @@ func (p *podShell) Attach(argv []string, _ []string) (int, error) {
 		interp.StatHandler(p.stat),
 		interp.AccessHandler(func(context.Context, string, interp.AccessMode) error { return nil }),
 		interp.ExecHandler(p.exec),
-		interp.StdIO(nil, io.Discard, &p.stderr),
+		interp.StdIO(nil, stdout, &p.stderr),
 	)
 	if err != nil {
 		return 0, err
@@ -531,6 +572,9 @@ func TestPodLaunchMapsOntoAConfiguredPodRoot(t *testing.T) {
 	var note bytes.Buffer
 	k := testKubectl(pod, &note)
 	k.PodRoot = root
+	// The root differs from the Mac town, so the call rewrites the tool's output
+	// and needs the wrapper's streams wired.
+	k.Stdout, k.Stderr = io.Discard, io.Discard
 	exit, err := k.Launch(kubeCall(t, caller, false))
 	if err != nil || exit != 0 {
 		t.Fatalf("Launch = %d, %v; want 0, nil; stderr: %q", exit, err, pod.stderr.String())
