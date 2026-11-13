@@ -477,6 +477,12 @@ type Daemon struct {
 	// tests; nil runs bd (see showRigBead).
 	rigBeadShowFn func(rigPath, rigBeadID string) (*beads.Issue, error)
 
+	// rigBeadRunner runs every bd call of the rig docked/parked read through
+	// this function instead of a subprocess (beads.WithRunner), so a unit test
+	// exercises the real beads wrapper in process: the argv it builds, its
+	// machine-mode parsing and its failure classification. nil runs bd.
+	rigBeadRunner func(ctx context.Context, args []string) (stdout, stderr []byte, err error)
+
 	// rigStatusSleep waits out rigStatusRetryDelay before the retry of a failed
 	// rig identity-bead read; nil waits on clk(). Tests record the waits.
 	rigStatusSleep func(time.Duration)
@@ -3334,12 +3340,17 @@ func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 }
 
 // showRigBead reads a rig's identity bead with bd show, or through
-// rigBeadShowFn when a test set one.
+// rigBeadShowFn (the whole read) or rigBeadRunner (the process only) when a
+// test set one.
 func (d *Daemon) showRigBead(rigPath, rigBeadID string) (*beads.Issue, error) {
 	if d.rigBeadShowFn != nil {
 		return d.rigBeadShowFn(rigPath, rigBeadID)
 	}
-	return beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath)).Show(rigBeadID)
+	var opts []beads.Option
+	if d.rigBeadRunner != nil {
+		opts = append(opts, beads.WithRunner(d.rigBeadRunner))
+	}
+	return beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath), opts...).Show(rigBeadID)
 }
 
 // autoRestartDisabled reports whether a resolved auto_restart value turns

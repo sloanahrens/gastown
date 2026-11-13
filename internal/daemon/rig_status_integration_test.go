@@ -36,8 +36,11 @@ fi
 if [ "$1" = "show" ] || [ "$2" = "show" ]; then
   echo show >> %s
 fi
+# shows is how many show calls have been served, so a script can answer a later
+# call differently from the first.
+shows=$(wc -l < %s | tr -d ' ')
 %s
-`, countPath, showScript)
+`, countPath, countPath, showScript)
 
 	path := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -97,6 +100,48 @@ func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
 	// The retry's pause is recorded rather than waited out.
 	d.rigStatusSleep = f.recordSleep
 	return f
+}
+
+// rigStatusStubStoreDownOnce answers bd's store_unavailable exit (25) for the
+// first show and the identity bead for the second, so the retry is what
+// produces the verdict. $shows is set by writeRigStatusBDStub.
+const rigStatusStubStoreDownOnce = `if [ "$shows" -le 1 ]; then
+  echo 'Error: database not available' >&2
+  exit 25
+fi
+echo '[{"id":"tr-rig-testrig","status":"open","labels":[]}]'`
+
+// TestIntegrationIsRigOperational_RetriedBDReadRecovers covers the retry
+// through the real showRigBead default: the first show answers the way a bd
+// whose database did not answer does, the second answers the identity bead, and
+// the retry is what makes the rig operational. The unit table covers the branch
+// against the in-process fake, and
+// TestIsRigOperational_RetryThroughRealBeadsWrapper covers it through the real
+// beads wrapper in the gate; this pins the spawned subprocess, which the unit
+// tier may not start.
+func TestIntegrationIsRigOperational_RetriedBDReadRecovers(t *testing.T) {
+	f := newRigStatusFixture(t, rigStatusStubStoreDownOnce)
+
+	operational, reason := f.daemon.isRigOperational(f.rigName)
+	if !operational {
+		t.Fatalf("a read that answers on retry must be operational, got %q", reason)
+	}
+	if got := f.showCount(t); got != 2 {
+		t.Errorf("bd show calls = %d, want 2 (the failed read and its retry)", got)
+	}
+	if got := f.retrySleeps(); len(got) != 1 || got[0] != rigStatusRetryDelay {
+		t.Errorf("retry pauses = %v, want one %v", got, rigStatusRetryDelay)
+	}
+	if entry := f.memoized(t, f.rigName); entry.failed != "" || entry.verdict != rigBeadActive {
+		t.Errorf("memoized entry = {failed: %q, verdict: %v}, want the answered read", entry.failed, entry.verdict)
+	}
+	if logged := f.logBuf.String(); strings.Contains(logged, "failed to check rig bead") {
+		t.Errorf("a read that answered on retry must log no failure, got:\n%s", logged)
+	}
+	waitForRigStatusAlert(t, f, "no escalation for a recovered read", func() bool {
+		raised, _, cleared := f.alerts.snapshot()
+		return len(raised) == 0 && len(cleared) == 0
+	})
 }
 
 // TestIntegrationIsRigOperational_MissingBeadThroughBD is the wiring guard

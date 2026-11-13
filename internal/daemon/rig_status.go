@@ -46,13 +46,10 @@ const rigOperationalCacheTTL = 5 * time.Minute
 // meantime.
 const rigOperationalFailureCacheTTL = 3 * time.Minute
 
-// A bead read that fails is retried once, after this pause, before the failure
+// A bead read that fails is retried once after this pause, before the failure
 // is memoized or escalated: a store that does not answer for one read is often
-// answering again a moment later, and one failed bd call should not hold a rig
-// out of landing for the whole failure window. The pause runs on the heartbeat
-// goroutine, and a failure is memoized for rigOperationalFailureCacheTTL, so the
-// pause is paid at most once per rig per that window. A timed-out read is not
-// retried: it has already spent its subprocess budget (gt-4nu3).
+// answering again a moment later. A read that timed out is not retried, because
+// it has already spent its subprocess budget (gt-4nu3).
 const rigStatusRetryDelay = 2 * time.Second
 
 // rigBeadVerdict is what a rig's identity bead says about the rig's own state.
