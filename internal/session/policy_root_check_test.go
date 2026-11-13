@@ -81,8 +81,7 @@ func TestPolicyRootCheckNamesTheProfileAndPath(t *testing.T) {
 }
 
 // The sling call site with no gt source checkout under the town: createSpec
-// refuses with the checkout's own error and resolves no policy path. The pass
-// case, a checkout that holds the policy, is TestOpenShellProductionPolicyRootIsTheTownCheckout.
+// refuses with the checkout's own error and resolves no policy path.
 func TestPolicyRootCheckAtTheSlingCallSiteWithoutACheckout(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -94,5 +93,24 @@ func TestPolicyRootCheckAtTheSlingCallSiteWithoutACheckout(t *testing.T) {
 	_, err = b.(*openshellBackend).createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err == nil || !strings.Contains(err.Error(), "no gt source checkout") {
 		t.Fatalf("createSpec = %v, want the no-checkout refusal", err)
+	}
+}
+
+// The sling call site over a town whose gt source checkout holds the profile's
+// policy: createSpec resolves that copy's path. The pass case is asserted here,
+// beside the refusal, so the call site's two answers are read together.
+func TestPolicyRootCheckAtTheSlingCallSiteResolvesTheTownCopy(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	b, err := newOpenShellBackend(town, openshellTestProfile)
+	if err != nil {
+		t.Fatalf("newOpenShellBackend: %v", err)
+	}
+	cs, err := b.(*openshellBackend).createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	if want := filepath.Join(openshellTestPolicyRoot(town), "deploy", "polecat", "policy.yaml"); cs.PolicyPath != want {
+		t.Fatalf("PolicyPath = %q, want the town copy %q", cs.PolicyPath, want)
 	}
 }

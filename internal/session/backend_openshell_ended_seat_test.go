@@ -75,11 +75,13 @@ func TestOpenShellPrepareReplacesAnEndedSandboxHoldingTheName(t *testing.T) {
 	if len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
 		t.Fatalf("first calls = %q, want %q (the held sandbox must be saved and deleted before the second create)", got, want)
 	}
-	if got := gw.calls[2]; !slices.Contains(got, endedMarkerScript) {
-		t.Errorf("call 3 = %q, want the ended marker question", got)
-	}
-	if got := gw.calls[3]; !slices.Contains(got, sandboxProjectsDir) {
-		t.Errorf("call 4 = %q, want the transcript listing the copy reads", got)
+	// The two execs are found by what they ask, not by their position, so a
+	// call added before them does not move the assertion.
+	markerAt := slices.IndexFunc(gw.calls, func(call []string) bool { return slices.Contains(call, endedMarkerScript) })
+	listAt := slices.IndexFunc(gw.calls, func(call []string) bool { return slices.Contains(call, sandboxProjectsDir) })
+	deleteAt := slices.IndexFunc(gw.calls, func(call []string) bool { return openshellTestVerb(call) == "delete" })
+	if markerAt < 0 || listAt < 0 || deleteAt < 0 || markerAt > listAt || listAt > deleteAt {
+		t.Errorf("calls = %q, want the ended marker question, then the transcript listing, before the delete", got)
 	}
 
 	rec, ok, err := ReadSandboxRecord(town, openshellTestSession)
