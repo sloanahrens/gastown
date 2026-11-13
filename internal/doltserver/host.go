@@ -71,6 +71,9 @@ type host struct {
 	// through bd (seedRigIssuePrefix).
 	readIssuePrefix  func(townRoot, beadsDir string) (string, error)
 	writeIssuePrefix func(townRoot, beadsDir, database, prefix string) error
+	// bdRunner runs the bd calls bdFor makes in place of a bd process, with the
+	// environment each would start with; nil is the real bd.
+	bdRunner func(ctx context.Context, dir string, env, args []string) (stdout, stderr []byte, err error)
 	// doltEndpoint is the town's Dolt endpoint (config.ResolveDoltEndpoint).
 	doltEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
 	// persistedEndpoint is the endpoint every non-container process uses, the one
@@ -135,6 +138,14 @@ func (h *host) bdEnviron() []string {
 		return h.bdEnvironList()
 	}
 	return h.environ()
+}
+
+// bdFor is the bd client for the rig beads dir beadsDir of the town at townRoot.
+// The town's named endpoint replaces any inherited one, because bd cannot find
+// a beads dir outside the town tree to apply it itself (gt-xnv94x).
+func (h *host) bdFor(townRoot, beadsDir string) *beads.Beads {
+	env := configpkg.NormalizeConfiguredDoltEnv(h.bdEnviron(), townRoot)
+	return beads.NewWithBeadsDir(townRoot, beadsDir, beads.WithEnv(env), beads.WithEnvRunner(h.bdRunner))
 }
 
 // withEnv is a copy of h that reads env over its own environment: lookups

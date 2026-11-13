@@ -2667,3 +2667,138 @@ func TestAddRig_KeepsRegistryChangesLandedDuringClone(t *testing.T) {
 		t.Errorf("rigc, the rig this add registered, is missing: %v", after.Rigs)
 	}
 }
+
+// The bd calls rig setup makes take the town's named Dolt endpoint, in place of
+// the harness poison the test process inherits. A rig's dir sits outside the
+// town tree, where bd cannot find the town to apply the endpoint itself. A town
+// that names no endpoint leaves the inherited environment as it is (gt-xnv94x).
+
+// endpointTown is a town that names a Dolt endpoint or none, and the port its
+// rig's bd calls must dial.
+type endpointTown struct {
+	name, dolt, wantPort string
+}
+
+func endpointTowns() []endpointTown {
+	return []endpointTown{
+		{"named endpoint beats the poison", `,"dolt":{"host":"127.0.0.1","port":4407}`, "4407"},
+		{"town with no endpoint keeps the inherited port", "", "1"},
+	}
+}
+
+// poisonedEnv is the environment the test process inherits: the harness's port
+// poison, which no rig bd call may dial.
+func poisonedEnv() []string {
+	return []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
+}
+
+// writeTownJSON writes mayor/town.json under root, with extra appended to the
+// town object.
+func writeTownJSON(t *testing.T, root, extra string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"` + extra + `}`
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(town), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireEndpointPort fails t for each recorded call whose bd environment does
+// not dial wantPort.
+func requireEndpointPort(t *testing.T, calls []bdCall, wantPort string) {
+	t.Helper()
+	for _, c := range calls {
+		if got := rigEnvMap(c.Env)["BEADS_DOLT_PORT"]; got != wantPort {
+			t.Errorf("bd %s BEADS_DOLT_PORT = %q, want %q", c.argv(), got, wantPort)
+		}
+	}
+}
+
+func TestVerifyBeadsRoundTripTakesTheTownEndpoint(t *testing.T) {
+	t.Parallel()
+	for _, tc := range endpointTowns() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeTownJSON(t, root, tc.dolt)
+			manager, _, bd := testManager(root, nil)
+			manager.env = poisonedEnv()
+			bd.config = map[string]string{"issue_prefix": "tk"}
+			rigPath := t.TempDir() // outside the town tree, as a new rig's dir is
+			if err := manager.verifyBeadsRoundTrip(rigPath, filepath.Join(rigPath, ".beads"), "rig", "tk"); err != nil {
+				t.Fatalf("verifyBeadsRoundTrip: %v", err)
+			}
+			reads := bd.withVerb("config get")
+			if len(reads) == 0 {
+				t.Fatal("verifyBeadsRoundTrip made no bd config get call")
+			}
+			requireEndpointPort(t, reads, tc.wantPort)
+		})
+	}
+}
+
+func TestInitBeadsEveryBDCallTakesTheTownEndpoint(t *testing.T) {
+	t.Parallel()
+	for _, tc := range endpointTowns() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeTownJSON(t, root, tc.dolt)
+			manager, _, bd := testManager(root, nil)
+			manager.env = poisonedEnv()
+			rigPath := t.TempDir() // outside the town tree, as a new rig's dir is
+			if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+				t.Fatalf("InitBeads: %v", err)
+			}
+			calls := bd.recorded()
+			if len(calls) == 0 {
+				t.Fatal("InitBeads made no bd calls")
+			}
+			requireEndpointPort(t, calls, tc.wantPort)
+		})
+	}
+}
+
+// AddRig's source-database init (a tracked repo with no database of its own)
+// runs bd with the town's named Dolt endpoint, in place of the harness poison
+// the process inherits, as every other bd call of rig setup does (gt-xnv94x).
+// The call is told apart from the later rig-level init by its options: only the
+// source init is given SkipAgents and the rig's name as its database, so the
+// test cannot pass on the later init alone.
+func TestAddRigSourceInitTakesTheTownEndpoint(t *testing.T) {
+	t.Parallel()
+	for _, tc := range endpointTowns() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root, rigsConfig := setupTestTown(t)
+			writeTownJSON(t, root, tc.dolt)
+			manager, f, bd := testManager(root, rigsConfig)
+			manager.env = poisonedEnv()
+			// A tracked repo with a config.yaml and no metadata.json has no
+			// database yet, so AddRig runs bd init for it.
+			gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "srcinit"), map[string]string{
+				".beads/config.yaml": "prefix: tk\n\n",
+			})
+			if _, err := manager.AddRig(AddRigOptions{
+				Name:          "srcinit",
+				GitURL:        gitURL,
+				BeadsPrefix:   "tk",
+				SkipDoltCheck: true,
+			}); err != nil {
+				t.Fatalf("AddRig: %v", err)
+			}
+			var source []bdCall
+			for _, c := range bd.withVerb("init") {
+				if c.Init.SkipAgents && c.Init.Database == "srcinit" {
+					source = append(source, c)
+				}
+			}
+			if len(source) == 0 {
+				t.Fatalf("AddRig made no source-database bd init; the init calls were %+v", bd.withVerb("init"))
+			}
+			requireEndpointPort(t, source, tc.wantPort)
+		})
+	}
+}

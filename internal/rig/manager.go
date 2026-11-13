@@ -616,7 +616,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// When metadata.json exists but the Dolt server database doesn't (fresh clone
 		// to a new workspace), we still need to run bd init to create the server-side
 		// database and set issue_prefix. Always ensure issue_prefix is set afterward.
-		sourceBdEnv := bdSubprocessEnv(m.environ(), sourceBeadsDir, opts.Name)
+		sourceBdEnv := bdSubprocessEnv(config.NormalizeConfiguredDoltEnv(m.environ(), m.townRoot), sourceBeadsDir, opts.Name)
 		if !bdDatabaseExists(sourceBeadsDir) {
 			// --server with the town's port: bd connects to gt's central Dolt
 			// server instead of auto-starting its own on a random port, which
@@ -1085,7 +1085,7 @@ func (m *Manager) verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefi
 	if prefix == "" {
 		return nil // No expected prefix to verify against
 	}
-	got, err := m.bdIn(rigPath, bdSubprocessEnv(m.environ(), resolvedBeadsDir, "")).ConfigGet("issue_prefix")
+	got, err := m.bdIn(rigPath, bdSubprocessEnv(config.NormalizeConfiguredDoltEnv(m.environ(), m.townRoot), resolvedBeadsDir, "")).ConfigGet("issue_prefix")
 	if errors.Is(err, exec.ErrNotFound) {
 		return nil // bd not installed — rig add already tolerates this elsewhere
 	}
@@ -1641,7 +1641,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 
 	// Pin bd to the intended .beads directory/database through the shared
 	// hardened env builder so stale shell selectors cannot leak into rig init.
-	filteredEnv := bdSubprocessEnv(m.environ(), beadsDir, rigName)
+	filteredEnv := bdSubprocessEnv(config.NormalizeConfiguredDoltEnv(m.environ(), m.townRoot), beadsDir, rigName)
 
 	// Run bd init if available (Dolt is the only backend since bd v0.51.0).
 	// --server tells bd to set dolt_mode=server in metadata.json so bd
@@ -1685,10 +1685,10 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 			if getErr != nil {
 				// The read-back failed, so the refusal cannot be shown to be
 				// harmless: name both, or the refusal hides why the store was unreadable.
-				return fmt.Errorf("bd config set issue_prefix failed: %s; reading issue_prefix back also failed: %w", bdErrOutput(prefixErr), getErr)
+				return fmt.Errorf("bd config set issue_prefix failed: %s; reading issue_prefix back also failed: %w", beads.Summarize(prefixErr), getErr)
 			}
 			if current != prefix {
-				return fmt.Errorf("bd config set issue_prefix failed: %s", bdErrOutput(prefixErr))
+				return fmt.Errorf("bd config set issue_prefix failed: %s", beads.Summarize(prefixErr))
 			}
 		}
 

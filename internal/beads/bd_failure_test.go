@@ -137,3 +137,101 @@ func TestIsStoreUnavailableReadsTheStoreExit(t *testing.T) {
 		})
 	}
 }
+
+// bd prints a permissions warning on every run. Error keeps bd's whole output,
+// and Summary names the reason, so a failure whose only other text is that
+// warning still says why it failed (gt-xnv94x).
+const bdPermissionsWarning = "Warning: .beads has permissions 0755 (recommended: 0700)\n"
+
+func TestCLIErrorKeepsBDsOutput(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, stderr, want string
+	}{
+		{"multi-line output is kept whole", bdPermissionsWarning + "Error: store unavailable\n", "bd rename-prefix: Warning: .beads has permissions 0755 (recommended: 0700)\nError: store unavailable"},
+		{"warning only is kept as bd printed it", bdPermissionsWarning, "bd rename-prefix: Warning: .beads has permissions 0755 (recommended: 0700)"},
+		{"no output falls back to the exit error", "", "bd rename-prefix: " + codedExit(1).Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(tc.stderr), Err: codedExit(1)}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// envelopeFailed is the machine-mode error envelope bd writes on stdout for a
+// failed call.
+const envelopeFailed = "{\n  \"contract_version\": 1,\n  \"data\": null,\n  \"error\": {\n    \"kind\": \"store_unavailable\",\n    \"message\": \"failed to open database \\\"forkrig\\\"\"\n  }\n}\n"
+
+func TestSummarizeNamesTheReason(t *testing.T) {
+	t.Parallel()
+	const bare = "bd rename-prefix: "
+	for _, tc := range []struct {
+		name, stdout, stderr, want string
+	}{
+		{"error after the warning", "", bdPermissionsWarning + "Error: database \"forkrig\" not found\n", "Error: database \"forkrig\" not found"},
+		{"error between warnings", "", "Warning: a\nError: store unavailable\nWarning: b\n", "Error: store unavailable"},
+		{"envelope on stdout names its message", envelopeFailed, bdPermissionsWarning, "failed to open database \"forkrig\""},
+		{"flat JSON message on stdout names its message", "{\"kind\": \"store_unavailable\", \"message\": \"failed to open database\"}\n", bdPermissionsWarning, "failed to open database"},
+		{"envelope with trailing text still names its message", envelopeFailed + "Warning: trailing\n", "", "failed to open database \"forkrig\""},
+		{"closing brace after plain text is skipped", "", "Error: store unavailable\n}\n", "Error: store unavailable"},
+		// No reason anywhere: the error is returned as it was, not reworded.
+		{"warning only keeps the error as it was", "", bdPermissionsWarning, bare + "Warning: .beads has permissions 0755 (recommended: 0700)"},
+		{"no output keeps the error as it was", "", "", bare + codedExit(1).Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &CLIError{Args: []string{"rename-prefix"}, Stdout: []byte(tc.stdout), Stderr: []byte(tc.stderr), Err: codedExit(1)}
+			if got := Summarize(err).Error(); got != tc.want {
+				t.Fatalf("Summarize(...).Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeReadsAFailedRoutedCall(t *testing.T) {
+	t.Parallel()
+	err := &unavailableError{
+		msg:    "bd rename-prefix: " + bdPermissionsWarning,
+		cause:  codedExit(1),
+		stdout: []byte(envelopeFailed),
+		stderr: []byte(bdPermissionsWarning),
+	}
+	summarized := Summarize(err)
+	if got, want := summarized.Error(), "failed to open database \"forkrig\""; got != want {
+		t.Fatalf("Summarize(...).Error() = %q, want %q", got, want)
+	}
+	wrapped := fmt.Errorf("setting issue_prefix: %w", summarized)
+	if !errors.Is(wrapped, ErrUnavailable) {
+		t.Fatalf("errors.Is lost ErrUnavailable")
+	}
+}
+
+func TestSummarizeKeepsTheErrorChain(t *testing.T) {
+	t.Parallel()
+	cliErr := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(bdPermissionsWarning + "Error: store unavailable\n"), Err: codedExit(1)}
+	summarized := Summarize(cliErr)
+	if got, want := summarized.Error(), "Error: store unavailable"; got != want {
+		t.Fatalf("Summarize(...).Error() = %q, want %q", got, want)
+	}
+	wrapped := fmt.Errorf("setting issue_prefix: %w", summarized)
+	if got, want := wrapped.Error(), "setting issue_prefix: Error: store unavailable"; got != want {
+		t.Fatalf("wrapped message = %q, want %q", got, want)
+	}
+	var got *CLIError
+	if !errors.As(wrapped, &got) || got != cliErr {
+		t.Fatalf("errors.As lost the CLIError: got %v", got)
+	}
+	if !errors.Is(wrapped, cliErr) {
+		t.Fatalf("errors.Is lost the CLIError")
+	}
+}
+
+func TestSummarizeLeavesOtherErrorsAlone(t *testing.T) {
+	t.Parallel()
+	plain := errors.New("exec: bd not found")
+	if got := Summarize(plain); got != plain {
+		t.Fatalf("Summarize(plain) = %v, want the same error", got)
+	}
+}

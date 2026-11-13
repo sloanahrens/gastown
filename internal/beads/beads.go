@@ -1193,6 +1193,20 @@ func WithDirRunner(run func(ctx context.Context, dir string, args []string) (std
 	}
 }
 
+// WithEnvRunner is WithDirRunner that also receives the environment bd would be
+// started with, after the pinning and Dolt endpoint variables are applied. A
+// test that asserts which endpoint a bd call dials reads it here.
+func WithEnvRunner(run func(ctx context.Context, dir string, env, args []string) (stdout, stderr []byte, err error)) Option {
+	return func(f *beadsFields) {
+		if run == nil {
+			return
+		}
+		f.exec = func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+			return run(ctx, c.dir, c.env, c.args)
+		}
+	}
+}
+
 // ActingAs returns a copy of b whose bd calls run as actor (WithActor),
 // including the wrappers derived from it. An empty actor returns b.
 func (b *Beads) ActingAs(actor string) *Beads {
@@ -2322,9 +2336,9 @@ func (b *Beads) wrapError(err error, stdout []byte, stderr string, args []string
 		// beside them. Every other message stays byte-identical, keeping log
 		// and caller expectations stable (gt-824d).
 		if errors.Is(err, context.DeadlineExceeded) {
-			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err, stdout: stdout}
+			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err, stdout: stdout, stderr: []byte(stderr)}
 		}
-		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err, stdout: stdout}
+		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err, stdout: stdout, stderr: []byte(stderr)}
 	}
 	return &unavailableError{msg: fmt.Sprintf("bd %s: %v", strings.Join(args, " "), err), cause: err, stdout: stdout}
 }
