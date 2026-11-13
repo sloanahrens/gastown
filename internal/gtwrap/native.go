@@ -22,9 +22,17 @@ type Native struct {
 	Subcommands []string
 }
 
-// Covers reports whether a call of the tool with args runs natively.
+// Covers reports whether a call of the tool with args runs natively. The beads
+// git hooks call `bd hooks run`, and that call needs the Mac's files, so for bd
+// only hooks run is native; the other hooks leaves and bd commands reach the target.
 func (n Native) Covers(args []string) bool {
-	return len(args) > 0 && slices.Contains(n.Subcommands, args[0])
+	if len(args) == 0 || !slices.Contains(n.Subcommands, args[0]) {
+		return false
+	}
+	if n.Tool == "bd" {
+		return len(args) > 1 && args[1] == "run"
+	}
+	return true
 }
 
 // Check reports why Path cannot run: it is empty, relative, unreadable, or not an

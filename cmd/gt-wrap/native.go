@@ -8,9 +8,16 @@ import (
 	"github.com/steveyegge/gastown/internal/gtwrap"
 )
 
-// omTool is the only tool the config key native accepts: a call of om that
-// reads the caller's worktree runs on the Mac, and no other tool does.
-const omTool = "om"
+// omTool and bdTool are the tools the config key native accepts: a call of om
+// that reads the caller's worktree runs on the Mac, and so does a bd hook, which
+// reads the Mac's commit message file. No other tool does.
+const (
+	omTool = "om"
+	bdTool = "bd"
+	// bdNativeSubcommand is the only bd subcommand a native entry may name. The
+	// internal Covers rule narrows it to hooks run.
+	bdNativeSubcommand = "hooks"
+)
 
 // nativeEntry is one tool under the native key of the config file.
 type nativeEntry struct {
@@ -19,18 +26,26 @@ type nativeEntry struct {
 }
 
 // nativeTools reads the native key of the config file at path. A key that names
-// any tool but om refuses the file: the key is not a way to run another tool on
-// the Mac. An entry with no subcommand refuses too, since it would run nothing.
-// The path is checked at each call, so a call the path cannot serve is refused
-// where it happens, and --doctor reports the same check.
+// any tool but om and bd refuses the file: the key is not a way to run another
+// tool on the Mac. A bd entry may name only hooks, so the file cannot make any
+// other bd command native. An entry with no subcommand refuses too, since it
+// would run nothing. The path is checked at each call, so a call the path cannot
+// serve is refused where it happens, and --doctor reports the same check.
 func nativeTools(entries map[string]nativeEntry, path string) (map[string]gtwrap.Native, error) {
 	out := make(map[string]gtwrap.Native, len(entries))
 	for tool, entry := range entries {
-		if tool != omTool {
-			return nil, fmt.Errorf("gtwrap: the target config file %s names native.%s; only %q runs natively", path, tool, omTool)
+		if tool != omTool && tool != bdTool {
+			return nil, fmt.Errorf("gtwrap: the target config file %s names native.%s; only %q and %q run natively", path, tool, omTool, bdTool)
 		}
 		if len(entry.Subcommands) == 0 {
 			return nil, fmt.Errorf("gtwrap: native.%s.subcommands in the target config file %s names no subcommand; list the subcommand the native run takes, e.g. [\"review\"]", tool, path)
+		}
+		if tool == bdTool {
+			for _, sub := range entry.Subcommands {
+				if sub != bdNativeSubcommand {
+					return nil, fmt.Errorf("gtwrap: native.%s.subcommands in the target config file %s names %q; bd runs natively only for %q, so list %q alone", tool, path, sub, bdNativeSubcommand, bdNativeSubcommand)
+				}
+			}
 		}
 		out[tool] = gtwrap.Native{Tool: tool, Path: entry.Path, Subcommands: entry.Subcommands}
 	}

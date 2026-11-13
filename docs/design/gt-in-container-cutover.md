@@ -67,8 +67,11 @@ renamed to its dated name. Use it for om:
 `--keep-old om=/Users/operator/go/bin/om-native`, and set `native.om.path` to
 that path once. It stays valid after install and after rollback, since it is the
 same file as the dated old om and then the restored om, so the config never names
-a stamp. A native path that is a tool's own installed path would run the wrapper
-itself, and the wrapper refuses it. Install refuses a second name that is any
+a stamp. Keep the old bd the same way: `--keep-old bd=/Users/operator/go/bin/bd-native`,
+and set `native.bd.path` to that path with `"subcommands": ["hooks"]`. Only
+`bd hooks run` then runs on the Mac, since the beads git hooks need the Mac's
+files; the other bd commands reach the pod as before. A native path that is a
+tool's own installed path would run the wrapper itself, and the wrapper refuses it. Install refuses a second name that is any
 tool's path, dated name or aside name, or is asked for twice, before it changes
 anything. Delete the second name and the dated files together after the quiet
 week.
