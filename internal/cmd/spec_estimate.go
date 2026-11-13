@@ -289,8 +289,10 @@ func specEstimateNoneNote(hash string, cause error) string {
 
 // specEstimateDeps reads the estimate's inputs from the town's settings. A
 // settings block that does not parse refuses the run, as the dispatcher's tick
-// does. A Jev or embedder that cannot be set up is not a refusal: it becomes a
-// skipped input, named in the note.
+// does. A Jev battery that cannot be opened, and an embedder that is not
+// configured, are not refusals: each becomes a skipped input, named in the
+// note. An embedder URL set without a model is a configuration error and
+// refuses the run (specEstimateEmbedder).
 func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, error) {
 	sd, err := readSpecDispatchConfig(townRoot)
 	if err != nil {
