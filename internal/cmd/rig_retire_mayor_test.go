@@ -51,6 +51,7 @@ func retireMayorExists(t *testing.T, path string) bool {
 }
 
 func TestRigRetireMayorDryRunChangesNothing(t *testing.T) {
+	t.Parallel()
 	townRoot, from, to := retireMayorTown(t)
 	var out bytes.Buffer
 
@@ -69,6 +70,7 @@ func TestRigRetireMayorDryRunChangesNothing(t *testing.T) {
 }
 
 func TestRigRetireMayorApplyRenamesOnce(t *testing.T) {
+	t.Parallel()
 	townRoot, from, to := retireMayorTown(t)
 	var out bytes.Buffer
 
@@ -84,6 +86,7 @@ func TestRigRetireMayorApplyRenamesOnce(t *testing.T) {
 }
 
 func TestRigRetireMayorRefusalNamesPathAndRenamesNothing(t *testing.T) {
+	t.Parallel()
 	townRoot, from, to := retireMayorTown(t)
 	routes := filepath.Join(townRoot, constants.DirBeads, "routes.jsonl")
 	if err := os.MkdirAll(filepath.Dir(routes), 0o755); err != nil {
@@ -107,6 +110,7 @@ func TestRigRetireMayorRefusalNamesPathAndRenamesNothing(t *testing.T) {
 }
 
 func TestRigRetireMayorAlreadyRetiredIsNotAnError(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	var out bytes.Buffer
 
@@ -119,6 +123,7 @@ func TestRigRetireMayorAlreadyRetiredIsNotAnError(t *testing.T) {
 }
 
 func TestRigRetireMayorIsRegisteredUnderRig(t *testing.T) {
+	t.Parallel()
 	var found bool
 	for _, sub := range rigCmd.Commands() {
 		if sub.Name() != "retire-mayor" {

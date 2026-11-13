@@ -103,6 +103,7 @@ func retireBaseWorld(f *fakeRetireFS) {
 }
 
 func TestRetireMayorPlan(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name               string
 		setup              func(f *fakeRetireFS)
@@ -302,6 +303,7 @@ func TestRetireMayorPlan(t *testing.T) {
 // TestRetireMayorApply checks that only Apply renames, and that it renames to the
 // planned destination exactly once.
 func TestRetireMayorApply(t *testing.T) {
+	t.Parallel()
 	t.Run("apply renames mayor/rig to the dated destination", func(t *testing.T) {
 		f := newFakeRetireFS()
 		retireBaseWorld(f)
@@ -368,6 +370,7 @@ func TestRetireMayorApply(t *testing.T) {
 
 // TestRetireMayorUndo checks that the printed mv reverses the rename.
 func TestRetireMayorUndo(t *testing.T) {
+	t.Parallel()
 	f := newFakeRetireFS()
 	retireBaseWorld(f)
 	plan, err := PlanRetireMayor(f, retireTown, retireRig, retireClock)
