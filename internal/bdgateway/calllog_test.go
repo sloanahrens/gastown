@@ -1,6 +1,7 @@
 package bdgateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,7 +171,7 @@ func TestCallLogDrop(t *testing.T) {
 	l.Log(rec) // the writer takes this one and parks inside the hook
 	select {
 	case <-taken: // the writer holds it, so the queue is empty and the buffer free
-	case <-t.Context().Done():
+	case <-waitCtx(t).Done():
 		t.Fatal("the writer did not take the first line")
 	}
 	l.Log(rec) // fills the one-slot buffer
@@ -314,7 +315,7 @@ func TestCallLogAfterClose(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-t.Context().Done():
+	case <-waitCtx(t).Done():
 		t.Fatal("Log after Close blocked")
 	}
 	if got := l.Stats(); got.Calls != 1 || got.Dropped != 1 {
@@ -695,18 +696,18 @@ func TestCallLogArgvParse(t *testing.T) {
 			// bd's tree records no arity for a command flag, so the scanner
 			// cannot tell --title's value from an operand: an id-shaped token
 			// stays, free text does not.
-			name:  "free text after a command flag stays out, id-shaped token is kept",
+			name:  "an id-shaped value of a command flag is never logged",
 			argv:  []string{"create", "--title", "gt-fake", "refactor-sling"},
 			verb:  "create",
 			flags: []string{"--title"},
-			beads: []string{"gt-fake"},
+			beads: []string{},
 		},
 		{
-			name:  "boolean command flag keeps the bead id after it",
+			name:  "an id after a command flag is not kept: the flag may take it as its value",
 			argv:  []string{"list", "--ready", "gt-abc"},
 			verb:  "list",
 			flags: []string{"--ready"},
-			beads: []string{"gt-abc"},
+			beads: []string{},
 		},
 		{
 			name:  "clustered short token logs its first name only",
@@ -815,4 +816,59 @@ func asAny(in []string) []any {
 		out[i] = s
 	}
 	return out
+}
+
+// waitCtx bounds one wait in a test: a wait that outlives it fails the test by
+// name instead of hanging until the package timeout. The deadline is not a
+// sleep; every wait it bounds returns as soon as its event happens.
+func waitCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// TestCallLogBeadsOnlyBeforeFlags: a bead-shaped token after a command flag may
+// be that flag's value (--parent gt-b), and a value is never logged, so only
+// operands that precede every flag are read as bead ids.
+func TestCallLogBeadsOnlyBeforeFlags(t *testing.T) {
+	t.Parallel()
+	l, err := newCallLog(testOptions(t), func([]byte) error { return nil })
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want []string
+	}{
+		{"id before a command flag with an id-shaped value", []string{"update", "gt-aaaa", "--parent", "gt-bbbb"}, []string{"gt-aaaa"}},
+		{"id after a command flag is not read", []string{"update", "--parent", "gt-bbbb", "gt-aaaa"}, []string{}},
+		{"several ids before any flag", []string{"close", "gt-aaaa", "gt-cccc"}, []string{"gt-aaaa", "gt-cccc"}},
+		{"no flags at all", []string{"show", "gt-aaaa"}, []string{"gt-aaaa"}},
+	} {
+		got := l.parseArgv(tc.argv).beads
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: beads = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCallLogLoggedCountsAreBounded: an argv with hundreds of flags or ids logs
+// at most maxLoggedItems of each.
+func TestCallLogLoggedCountsAreBounded(t *testing.T) {
+	t.Parallel()
+	l, err := newCallLog(testOptions(t), func([]byte) error { return nil })
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	argv := []string{"close"}
+	for i := 0; i < 3*maxLoggedItems; i++ {
+		argv = append(argv, "gt-aaaa")
+	}
+	if got := len(l.parseArgv(argv).beads); got != maxLoggedItems {
+		t.Errorf("beads logged = %d, want %d", got, maxLoggedItems)
+	}
 }

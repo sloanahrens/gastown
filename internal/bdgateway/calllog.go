@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,8 @@ const (
 	// maxFieldBytes bounds the class and caller strings: the caller writes
 	// X-Gt-Caller, so a long one must not grow a line without bound.
 	maxFieldBytes = 64
+	// maxLoggedItems bounds the flags and the bead ids one entry carries.
+	maxLoggedItems = 32
 )
 
 // CallLogOptions configures a CallLog.
@@ -362,9 +365,8 @@ type logParts struct {
 // can never disagree about which token is a flag, a flag's value or an operand.
 // It keeps the first command word as the verb, each flag's name (never a
 // value), and the operands that are bead ids. Operands that are not bead ids —
-// titles, descriptions, comment bodies — are never kept; a command flag's arity
-// is not in bd's tree, so an id-shaped token after one is read as an operand and
-// kept.
+// titles, descriptions, comment bodies — are never kept, and neither is an
+// id-shaped token after a flag, which may be that flag's value.
 //
 // An argv the scanner cannot place yields no flags and no ids and is counted
 // under unparsedVerb, so an unreadable call is visible rather than blank
@@ -385,11 +387,30 @@ func (l *CallLog) parseArgv(argv []string) logParts {
 		if flag.clustered || !bareFlag.MatchString(flag.name) {
 			continue
 		}
+		if len(parts.flags) >= maxLoggedItems {
+			break
+		}
 		parts.flags = append(parts.flags, flag.spelling)
 	}
-	for _, operand := range scan.operands {
-		if isBeadID(operand, l.prefixes) {
-			parts.beads = append(parts.beads, operand)
+	// Only an operand that precedes every flag is positional for certain: after
+	// a command flag it may be that flag's value, and a value is never logged.
+	positional := argv
+	for i, arg := range argv {
+		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+			continue
+		}
+		if kind, known, attached := rootFlag(arg); known && !attached && kind != flagValue {
+			continue // a boolean root flag takes no value, so the next token is not its value
+		}
+		positional = argv[:i]
+		break
+	}
+	for _, token := range positional {
+		if len(parts.beads) >= maxLoggedItems {
+			break
+		}
+		if isBeadID(token, l.prefixes) && slices.Contains(scan.operands, token) {
+			parts.beads = append(parts.beads, token)
 		}
 	}
 	return parts
