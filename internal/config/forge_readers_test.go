@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -71,6 +72,7 @@ func TestOwnerPlaceholderFilesHaveOnlyKnownReaders(t *testing.T) {
 // filesNamingOwnerDataFiles returns, sorted and relative to root, every regular
 // file under root that names a data file in ownerDataFileNames. Tests, Markdown
 // and documentation are skipped: they describe the files, they do not read them.
+// Binaries are skipped too, since a build output embeds strings from its sources.
 func filesNamingOwnerDataFiles(root string) ([]string, error) {
 	var named []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -93,6 +95,10 @@ func filesNamingOwnerDataFiles(root string) ([]string, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)
+		}
+		if bytes.IndexByte(data, 0) >= 0 {
+			// A built binary carries strings from its sources; it reads no data file.
+			return nil
 		}
 		for _, dataName := range ownerDataFileNames {
 			if strings.Contains(string(data), dataName) {
