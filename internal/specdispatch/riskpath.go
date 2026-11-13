@@ -29,7 +29,7 @@ const riskPathsUnreadText = "the risk-path check did not run: %s"
 
 // riskPathWarnings returns the WARN lines s earns: one when its text names
 // riskPathWarnMin or more paths on the target branch's risk list, one when
-// that list could not be read. A bead labelled size-ok is not warned. The
+// that list could not be read. A bead labeled size-ok is not warned. The
 // lines change neither the route nor the exit code; risk paths are advisory
 // because the risk list holds paths a landing should review, not paths it
 // must split.
