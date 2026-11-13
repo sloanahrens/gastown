@@ -85,7 +85,7 @@ func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
 	d.rigStatusAlert = alerts.alert
 	d.rigStatusClear = alerts.clear
 
-	return &rigStatusFixture{
+	f := &rigStatusFixture{
 		daemon:    d,
 		townRoot:  townRoot,
 		rigName:   rigName,
@@ -94,6 +94,9 @@ func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
 		logBuf:    logBuf,
 		alerts:    alerts,
 	}
+	// The retry's pause is recorded rather than waited out.
+	d.rigStatusSleep = f.recordSleep
+	return f
 }
 
 // TestIntegrationIsRigOperational_MissingBeadThroughBD is the wiring guard

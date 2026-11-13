@@ -457,6 +457,7 @@ func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 			}
 			return &beads.Issue{ID: id, Title: "Rig", Type: "task", Status: "open"}, nil
 		},
+		rigStatusSleep: func(time.Duration) {},
 	}
 	return d, &buf, &restarts
 }

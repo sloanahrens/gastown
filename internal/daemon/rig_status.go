@@ -46,6 +46,15 @@ const rigOperationalCacheTTL = 5 * time.Minute
 // meantime.
 const rigOperationalFailureCacheTTL = 3 * time.Minute
 
+// A bead read that fails is retried once, after this pause, before the failure
+// is memoized or escalated: a store that does not answer for one read is often
+// answering again a moment later, and one failed bd call should not hold a rig
+// out of landing for the whole failure window. The pause runs on the heartbeat
+// goroutine, and a failure is memoized for rigOperationalFailureCacheTTL, so the
+// pause is paid at most once per rig per that window. A timed-out read is not
+// retried: it has already spent its subprocess budget (gt-4nu3).
+const rigStatusRetryDelay = 2 * time.Second
+
 // rigBeadVerdict is what a rig's identity bead says about the rig's own state.
 type rigBeadVerdict int
 
@@ -76,6 +85,9 @@ func rigStatusFailureCategory(err error) string {
 		return "lookup timed out"
 	case errors.Is(err, beads.ErrNotFound):
 		return "rig bead missing"
+	case beads.IsStoreUnavailable(err):
+		// bd's store_unavailable exit (25): the database behind bd did not answer.
+		return "store unavailable: the database behind bd did not answer"
 	default:
 		return "lookup failed"
 	}
@@ -253,6 +265,17 @@ func (c *rigOperationalCache) runEscalations(rigName string) {
 		c.mu.Unlock()
 		work()
 	}
+}
+
+// waitRigStatusRetry waits out rigStatusRetryDelay before the retry of a failed
+// identity-bead read: through rigStatusSleep when a test set one, on the daemon's
+// clock otherwise.
+func (d *Daemon) waitRigStatusRetry() {
+	if d.rigStatusSleep != nil {
+		d.rigStatusSleep(rigStatusRetryDelay)
+		return
+	}
+	d.clk().Sleep(rigStatusRetryDelay)
 }
 
 // alertRigStatusUnverified escalates a rig whose docked/parked status cannot be

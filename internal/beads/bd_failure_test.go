@@ -107,3 +107,33 @@ func TestCLIErrorUnwrapUsesClassifier(t *testing.T) {
 		t.Errorf("bd not-found CLIError: Is(NotFound)=%v Is(Unavailable)=%v", errors.Is(err, ErrNotFound), errors.Is(err, ErrUnavailable))
 	}
 }
+
+// TestIsStoreUnavailableReadsTheStoreExit: bd's store_unavailable exit (25) is
+// the store not answering, and is the only exit that says so; not-found (20)
+// and an unrelated failure are not. The production error from wrapError and
+// the CLIError the runner returns both carry the exit through to the check.
+func TestIsStoreUnavailableReadsTheStoreExit(t *testing.T) {
+	t.Parallel()
+	b := New("/test")
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"exit 25 through wrapError", b.wrapError(codedExit(25), nil, "database not found: gastown", []string{"show", "gt-x"}), true},
+		{"exit 25 bare", codedExit(25), true},
+		{"exit 25 in a CLIError", &CLIError{Args: []string{"show"}, Stderr: []byte("database not found: gastown"), Err: codedExit(25)}, true},
+		{"ErrStoreUnavailable", fmt.Errorf("probe: %w", ErrStoreUnavailable), true},
+		{"exit 20 not found", b.wrapError(codedExit(20), nil, "", []string{"show", "gt-x"}), false},
+		{"exit 24 route unreachable", b.wrapError(codedExit(24), nil, "", []string{"show", "gt-x"}), false},
+		{"exit 1 generic failure", b.wrapError(codedExit(1), nil, "boom", []string{"show", "gt-x"}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsStoreUnavailable(tc.err); got != tc.want {
+				t.Fatalf("IsStoreUnavailable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

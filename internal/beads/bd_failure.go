@@ -50,6 +50,15 @@ func bdSaidNotFound(exitCode int, stdout []byte) bool {
 	return json.Unmarshal(trimmed, &env) == nil && env.Error != nil && env.Error.Kind == "not_found"
 }
 
+// IsStoreUnavailable reports whether a failed bd call failed because the
+// database behind bd did not answer: bd's store_unavailable exit (25), or an
+// error already wrapping ErrStoreUnavailable. A read the deadline ended is not
+// reported here by its exit, so a caller that has a timeout category checks
+// context.DeadlineExceeded before this.
+func IsStoreUnavailable(err error) bool {
+	return errors.Is(err, ErrStoreUnavailable) || exitCodeOf(err) == bdStoreUnavailableExit
+}
+
 // markUnavailable returns err carrying ErrUnavailable, so a caller cannot read
 // a failed read as an empty one. An error that already carries ErrUnavailable
 // comes back unchanged.
