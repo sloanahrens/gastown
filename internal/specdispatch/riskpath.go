@@ -81,8 +81,8 @@ func PathTokens(text string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, raw := range strings.FieldsFunc(text, isPathTokenDelim) {
-		tok := pathLineRefRe.ReplaceAllString(raw, "")
-		tok = strings.TrimRight(tok, ".,;:")
+		tok := strings.TrimRight(raw, ".,;:")
+		tok = strings.TrimRight(pathLineRefRe.ReplaceAllString(tok, ""), ".,;:")
 		tok = strings.TrimPrefix(tok, "./")
 		tok = strings.TrimSuffix(tok, "/")
 		if tok == "" || seen[tok] || !pathTokenRe.MatchString(tok) || !pathSegmentsOK(tok) {

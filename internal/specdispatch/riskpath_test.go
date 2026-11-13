@@ -19,6 +19,7 @@ func TestPathTokens(t *testing.T) {
 		{name: "a repo path", text: "internal/land/riskpaths.go", want: []string{"internal/land/riskpaths.go"}},
 		{name: "a package path in backticks and a root file", text: "`internal/daemon` Makefile", want: []string{"internal/daemon", "Makefile"}},
 		{name: "a line reference", text: "./internal/cmd/spec.go:42", want: []string{"internal/cmd/spec.go"}},
+		{name: "a line reference ending a sentence", text: "internal/cmd/spec.go:42.", want: []string{"internal/cmd/spec.go"}},
 		{name: "a glob in prose names its subtree", text: "internal/daemon/**", want: []string{"internal/daemon"}},
 		{name: "a name named twice is read once", text: "internal/land, internal/land", want: []string{"internal/land"}},
 		{name: "an absolute path and a parent segment are dropped", text: "/usr/local/bin ../x/y.go", want: nil},
