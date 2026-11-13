@@ -19,6 +19,15 @@ func TestLockTimeoutAttemptsReadsOnlyItsOwnMetadataKey(t *testing.T) {
 		{"no metadata", nil, 0},
 		{"a count that is not a number", []byte(`{"spec_dispatch_lock_timeout_attempts":"many"}`), LockTimeoutRetries},
 		{"metadata that is not json", []byte("{not json"), LockTimeoutRetries},
+		// A count the dispatcher cannot have written reads as the retries spent: a
+		// negative one would never reach the bound and would defer the bead on
+		// every tick (gt-a4cdcd, review rejection 2).
+		{"a negative number", []byte(`{"spec_dispatch_lock_timeout_attempts":-1}`), LockTimeoutRetries},
+		{"a negative string", []byte(`{"spec_dispatch_lock_timeout_attempts":"-2"}`), LockTimeoutRetries},
+		{"a count past the bound", []byte(`{"spec_dispatch_lock_timeout_attempts":99}`), LockTimeoutRetries},
+		{"a count too large for an int", []byte(`{"spec_dispatch_lock_timeout_attempts":1e30}`), LockTimeoutRetries},
+		{"zero", []byte(`{"spec_dispatch_lock_timeout_attempts":0}`), 0},
+		{"the bound itself", []byte(`{"spec_dispatch_lock_timeout_attempts":3}`), LockTimeoutRetries},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

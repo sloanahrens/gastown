@@ -67,9 +67,15 @@ func LockTimeoutAttempts(metadata []byte) int {
 	}
 	switch v := raw.(type) {
 	case float64:
-		return int(v)
+		// A count outside 0..LockTimeoutRetries cannot be one the dispatcher wrote
+		// (it writes 1 and 2 and clears the key at the bound): a negative one would
+		// defer the bead on every tick, since it never reaches the bound, and a huge
+		// one overflows the int. Both read as the retries spent.
+		if v >= 0 && v <= LockTimeoutRetries {
+			return int(v)
+		}
 	case string:
-		if n, err := strconv.Atoi(v); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= LockTimeoutRetries {
 			return n
 		}
 	}
