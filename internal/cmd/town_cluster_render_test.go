@@ -942,6 +942,38 @@ func TestApplyObjectsRefusesWhatItCannotOrder(t *testing.T) {
 	}
 }
 
+// TestApplyObjectsRanksTheTrackerBackupClaimWithTheCronJob holds the one claim
+// applyObjects lifts out of the claims' place: the tracker-backup claim ranks
+// with the CronJob, so it applies after trackerd's Deployment, and every other
+// claim keeps the claims' rank.
+func TestApplyObjectsRanksTheTrackerBackupClaimWithTheCronJob(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		claim string
+		rank  string
+	}{
+		{name: "the tracker-backup claim ranks with the CronJob", claim: k8sdaemon.TrackerBackupClaim, rank: "CronJob"},
+		{name: "another claim keeps the claims' rank", claim: k8sdaemon.TownStateClaim, rank: "PersistentVolumeClaim"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stream := "kind: PersistentVolumeClaim\nmetadata:\n  name: " + tt.claim + "\n"
+			objects, err := applyObjects([]byte(stream), yaml.Marshal)
+			if err != nil {
+				t.Fatalf("applyObjects: %v", err)
+			}
+			if len(objects) != 1 {
+				t.Fatalf("applyObjects returned %d objects, want the one claim", len(objects))
+			}
+			if got, want := objects[0].rank, applyRank[tt.rank]; got != want {
+				t.Errorf("the %s claim's rank = %d, want the %s rank %d", tt.claim, got, tt.rank, want)
+			}
+		})
+	}
+}
+
 // TestSecretCreateLinesRefusesAVolumeItCannotName holds the create-line printer
 // to a refusal for each mounted Secret it cannot name a source for.
 func TestSecretCreateLinesRefusesAVolumeItCannotName(t *testing.T) {
