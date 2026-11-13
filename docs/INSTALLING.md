@@ -6,7 +6,7 @@ For the shortest path, use `brew install gastown` on macOS or the Docker setup i
 
 ## The live town is not a host install
 
-The live town runs in the control cluster, not on a machine you install onto. Its daemon is the `daemon` Deployment: one replica under the `Recreate` strategy, so two daemons never write the same town at once. Its dashboard is a separate Deployment. A new image reaches them by the roll in [architecture.md](architecture.md), which is done by hand today. On the Mac, `gt`, `bd`, `om` and `hm` are the `gt-wrap` binary, which runs each tool inside the daemon pod, so the steps below do not describe the live town.
+The live town runs in the control cluster, not on a machine you install onto. Its daemon and dashboard are Deployments there. Before you change how the live town runs or deploys, read [architecture.md](architecture.md), which owns the control plane, the daemon's replica and strategy, and the roll that delivers a new image, done by hand today. On the Mac, `gt`, `bd`, `om` and `hm` are the `gt-wrap` binary, which runs each tool inside the daemon pod, so the steps below do not describe the live town.
 
 The steps below are for a person who runs Gas Town on their own machine. Where they say `gt daemon` or `gt up`, they mean a daemon or services on that machine.
 
@@ -165,10 +165,10 @@ cost lands on every landing gate, and the daemon reports it as its `exec-tax`
 field, RED over `operational.health.exec_tax_red`.
 
 A tmux server started from Terminal.app inherits Terminal's exemption. The
-daemon does not: its supervisor starts it (a pod in the control cluster in the
-live town), and it is the parent of every landing gate, so until the grant
+daemon does not, and it is the parent of every landing gate, so until the grant
 exists each gate exec pays the full scan. What exempts it is a Developer Tools
-grant on `~/.local/bin/gt`.
+grant on `~/.local/bin/gt`. This section is for a Mac that runs the daemon
+itself; the live town's daemon is a Linux pod, where no scan happens.
 
 Add the grant once, after the first signed install:
 
