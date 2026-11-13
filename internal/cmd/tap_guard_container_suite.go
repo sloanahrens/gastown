@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -2990,18 +2991,101 @@ func printContainerSuiteBlock(w io.Writer, reason, originalCommand string, match
 //     --role flag documents, so it is printed when present and the placeholder
 //     is kept only as the fallback for a hook that inherited no role.
 func containerSuiteWrap(command, gtRole string) string {
+	return containerSuiteWrapWith(command, gtRole, containerSuiteReadTokens)
+}
+
+// containerSuiteReader reads a command into the argv-like tokens the wrap
+// advice is built from. It is a parameter of containerSuiteWrapWith, so the
+// mutation test can hand the production wrap a reading that loses a separator.
+type containerSuiteReader func(command string) []string
+
+// containerSuiteWrapWith is containerSuiteWrap over the tokens read gives.
+func containerSuiteWrapWith(command, gtRole string, read containerSuiteReader) string {
 	command = strings.TrimSpace(command)
 	role := containerSuiteWrapRole(gtRole)
-	if isCompoundShellCommand(command) {
+	shape := containerSuiteShapeOf(read(command))
+	if shape.compound {
 		return fmt.Sprintf("gt slot run --role %s -- sh -c %s", role, config.ShellQuote(command))
 	}
 	// slot.SplitEnvPrefix is the same rule the runner applies to its own
 	// argv (gt-18nx), so the guard's advice and the runner's reading of it
 	// cannot drift: whatever it peels is exactly what 'env' has to carry.
-	if envAssigns, _ := slot.SplitEnvPrefix(shellTokenize(command)); len(envAssigns) > 0 {
+	if shape.env {
 		return fmt.Sprintf("gt slot run --role %s -- env %s", role, command)
 	}
 	return fmt.Sprintf("gt slot run --role %s -- %s", role, command)
+}
+
+// containerSuiteReadTokens is the production reader: the parsedTokens reading
+// of gt-crn9gu. shellTokenize is the fallback for a command shellparse cannot
+// read, and for a command containerSuiteParsedUnsafe names: parsedTokens drops
+// the separators those commands carry, so the compound test on its tokens would
+// miss a second command that the wrap has to keep under the slot. shellTokenize
+// stays only until gt-crn9gu retires it.
+func containerSuiteReadTokens(command string) []string {
+	tokens, readable := parsedTokens(command)
+	if !readable || containerSuiteParsedUnsafe(command) {
+		return shellTokenize(command)
+	}
+	return tokens
+}
+
+// containerSuiteCompoundMarkers are substrings of a command whose separators or
+// structure parsedTokens does not keep as tokens: a brace or subshell group, a
+// substitution or arithmetic, the double-bracket and bash pipe-and-stderr forms,
+// a backtick, and a heredoc (its operator and body are dropped).
+var containerSuiteCompoundMarkers = []string{"(", "{", "}", "`", "[[", "$[", "|&", "<<"}
+
+// containerSuiteCompoundKeywords are the words that open or close a compound
+// command. parsedTokens turns the separators inside one into structure, so the
+// words are not tokens of the parsed reading.
+var containerSuiteCompoundKeywords = map[string]bool{
+	"for": true, "while": true, "until": true, "if": true, "then": true,
+	"else": true, "elif": true, "fi": true, "do": true, "done": true,
+	"case": true, "esac": true, "select": true, "function": true,
+}
+
+// containerSuiteParsedUnsafe reports whether command has a shape the parsed
+// reading can read as simpler than the shell does, so the fallback reads it.
+// The shapes are the compound markers and keywords above, and a command ending
+// in ";" or "&", a separator parsedTokens drops when no command follows it
+// ("echo ;" reads as "echo"). The rule reads the command text, because the
+// parsed tokens lack the very structure it has to detect. It only ever sends a
+// command to the old reading, which is the reading the guard used before, so a
+// rule that is too broad costs advice quality and never strictness.
+func containerSuiteParsedUnsafe(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if strings.HasSuffix(trimmed, ";") || strings.HasSuffix(trimmed, "&") {
+		return true
+	}
+	for _, marker := range containerSuiteCompoundMarkers {
+		if strings.Contains(trimmed, marker) {
+			return true
+		}
+	}
+	words := strings.FieldsFunc(trimmed, func(r rune) bool {
+		return unicode.IsSpace(r) || r == ';' || r == '&' || r == '|'
+	})
+	for _, w := range words {
+		if containerSuiteCompoundKeywords[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// containerSuiteShape is the pair of decisions the wrap advice turns on: whether
+// the command chains more than one command (so it must go to a shell), and
+// whether it leads with VAR=value assignments (so it must go through env).
+type containerSuiteShape struct {
+	compound bool
+	env      bool
+}
+
+// containerSuiteShapeOf reads the wrap decisions off tokens.
+func containerSuiteShapeOf(tokens []string) containerSuiteShape {
+	envAssigns, _ := slot.SplitEnvPrefix(tokens)
+	return containerSuiteShape{compound: containerSuiteCompound(tokens), env: len(envAssigns) > 0}
 }
 
 // containerSuiteWrapRole is the holder name printed in the remediation's
@@ -3022,10 +3106,10 @@ func containerSuiteWrapRole(gtRole string) string {
 	return role
 }
 
-// isCompoundShellCommand reports whether command chains more than one command
+// containerSuiteCompound reports whether tokens chain more than one command
 // on a line, so the wrapper must be handed a shell rather than prefixed to it.
-func isCompoundShellCommand(command string) bool {
-	for _, tok := range shellTokenize(command) {
+func containerSuiteCompound(tokens []string) bool {
+	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
 			return true
 		}
