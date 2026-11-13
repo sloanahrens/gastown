@@ -201,6 +201,11 @@ func TestSupervisorStatusLine_DarwinHasNoSupervisor(t *testing.T) {
 	}
 	plist := filepath.Join(home, "Library", "LaunchAgents", "com.gastown.daemon.plist")
 	writeFileAt(t, plist, "<plist><dict><key>WorkingDirectory</key>\n<string>"+town+"</string></dict></plist>")
+	// A reader that would report a loaded job for the daemon: if darwin read the
+	// plist, the line would name a supervisor instead of "none".
+	read := func(kind string) SupervisorState {
+		return SupervisorState{Kind: kind, Loaded: true, PID: 64604, Runs: 1, LastExit: 0}
+	}
 
 	if path, kind := h.filePath(); path != "" || kind != "" {
 		t.Errorf("filePath() = (%q, %q), want none on darwin", path, kind)
@@ -208,7 +213,7 @@ func TestSupervisorStatusLine_DarwinHasNoSupervisor(t *testing.T) {
 	if got := h.status(); got != "none" {
 		t.Errorf("status() = %q, want none on darwin", got)
 	}
-	if got := h.statusLine(town, 64604, nil); got != "none" {
+	if got := h.statusLine(town, 64604, read); got != "none" {
 		t.Errorf("statusLine = %q, want none on darwin", got)
 	}
 }

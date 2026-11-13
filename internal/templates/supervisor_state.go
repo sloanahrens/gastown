@@ -64,7 +64,9 @@ var realHost = supervisorHost{goos: runtime.GOOS, getenv: os.Getenv, homeDir: os
 
 // SupervisorFilePath returns the path of the supervisor file this host would
 // use and the kind it belongs to ("systemd"), or ("", "") on a host with no
-// supported supervisor. The file need not exist.
+// supported supervisor. The file need not exist. A macOS host reads as having
+// none: the Mac daemon is retired, and a launchd job still loaded there is not a
+// supervisor this state reports.
 func SupervisorFilePath() (path, kind string) {
 	return realHost.filePath()
 }

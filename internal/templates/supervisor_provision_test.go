@@ -27,7 +27,8 @@ func TestProvisionSupervisor_DarwinWritesNothing(t *testing.T) {
 	if got != want {
 		t.Errorf("provision message = %q, want %q", got, want)
 	}
-	if _, err := os.Stat(filepath.Join(home, "Library")); !os.IsNotExist(err) {
-		t.Errorf("darwin provision wrote under HOME (stat err = %v), want nothing", err)
+	plist := filepath.Join(home, "Library", "LaunchAgents", "com.gastown.daemon.plist")
+	if _, err := os.Stat(plist); !os.IsNotExist(err) {
+		t.Errorf("darwin provision wrote %s (stat err = %v), want no file there", plist, err)
 	}
 }

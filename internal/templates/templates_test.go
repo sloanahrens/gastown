@@ -383,10 +383,10 @@ func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 	}
 }
 
-// SupervisorFileContent renders nothing for a kind this build does not write,
-// the launchd kind included, nor the empty kind a host with no supported
-// supervisor reports — rather than erroring on it, since that is an ordinary
-// host.
+// SupervisorFileContent renders nothing for a kind this build does not write
+// (the retired launchd name included), nor the empty kind a host with no
+// supported supervisor reports — rather than erroring on it, since that is an
+// ordinary host.
 func TestSupervisorFileContent_UnknownKind(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"", "upstart", "launchd", "launchd "} {
