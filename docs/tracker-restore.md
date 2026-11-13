@@ -12,9 +12,9 @@ hope, not a backup.
 ## What is on disk
 
 The nightly dump is written in the control cluster, not on the Mac. The
-`tracker-backup` CronJob in namespace `gt` runs `trackerbackup` at 03:30 each
-day, and the job's pod mounts the `tracker-backup` claim at `/backups`. The job
-keeps the newest seven dumps. The nightly run writes nothing to
+`tracker-backup` CronJob in namespace `gt` runs `trackerbackup` nightly, and the
+job's pod mounts the `tracker-backup` claim at `/backups`. The job keeps the
+newest seven dumps. The nightly run writes nothing to
 `~/gt-backups/tracker`; the copy-out below places the dump you pick there, where
 steps 1 and 2 read it.
 
@@ -28,11 +28,14 @@ A `.dump` file is one PostgreSQL custom-format archive of the whole `tracker`
 database. The runner publishes a night by renaming `<date>.dump.partial` to
 `<date>.dump`, so a name that still ends in `.partial` is never restorable.
 
-The claim is mounted only by the job's pods, and a pod exits when its run ends,
-so nothing is running to copy from. The render writes a reader Pod for that,
+A job's pod mounts the claim for its run and exits when the run ends, so
+between nights nothing is running to copy from. The render writes a reader Pod
+for that,
 `15-pod-tracker-backup-reader.yaml`, beside the CronJob. It mounts the claim
-read-only at `/backups` on the dump image, which is a postgres image and so has
-`sleep` and `cat`, and it is never restarted. The render does not apply it.
+read-only at `/backups` on the image `--tracker-backup-image` names, and it is
+never restarted. The render does not apply it. The reader runs `sleep` and the
+copy below runs `cat`, both inside that image, so the image must carry both; the
+render does not inspect an image's contents.
 Apply it only to copy a dump out, from the `--out` directory of the render:
 
 ```bash
@@ -45,8 +48,9 @@ kubectl --context colima-gt-control -n gt delete -f 15-pod-tracker-backup-reader
 Run the `exec` lines once the Pod is Running. Copy only a name that ends in
 `.dump`: a `.partial` file is never restorable. The copy uses `exec cat`, not
 `kubectl cp`, because `kubectl cp` needs `tar` in the image and `cat` needs
-nothing. The claim is `ReadWriteOnce`, so delete the reader before 03:30; a
-reader that still holds the claim can keep the night's run from starting.
+nothing. The claim is `ReadWriteOnce`, so delete the reader before the next
+nightly run; a reader that still holds the claim can keep that run from
+starting.
 
 ## 1. Pick a dump
 
