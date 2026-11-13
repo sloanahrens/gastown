@@ -223,6 +223,27 @@ func TestRewritePinsCommitsRefusesAMissingLine(t *testing.T) {
 	}
 }
 
+// TestRefreshPinsFilesRefusesAnImageWithNoLine checks the two files are refused
+// together: an image file with no line for a moved pin returns no bytes for
+// either file, and the error names the image file.
+func TestRefreshPinsFilesRefusesAnImageWithNoLine(t *testing.T) {
+	t.Parallel()
+	image := []byte("bd " + testPinURL("beads") + " " + pinBDCommit + "\n")
+	seed := []byte("beads " + pinBDCommit + "\ndevops " + pinDevopsCommit + "\n")
+	const next = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	newImage, newSeed, err := RefreshPinFiles(image, seed, PinsPath, seedPinsPath,
+		map[string]string{"devops": next}, map[string]string{"beads": pinBDCommit, "devops": next})
+	if err == nil {
+		t.Fatalf("RefreshPinFiles = %q, %q, want a refusal", newImage, newSeed)
+	}
+	if !strings.Contains(err.Error(), PinsPath) {
+		t.Errorf("error %q does not name %q", err, PinsPath)
+	}
+	if newImage != nil || newSeed != nil {
+		t.Errorf("a refused refresh returned bytes: %q, %q", newImage, newSeed)
+	}
+}
+
 // TestRefreshSeedPinsKeepsTheFilesAgreeing refreshes the image file's bd and the
 // seed file's beads line, then checks TestCommittedPinsAgree's rule holds on the
 // two refreshed files: each shared source names the same commit in both.

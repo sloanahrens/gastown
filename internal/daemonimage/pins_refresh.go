@@ -129,6 +129,22 @@ func RewritePinCommits(data []byte, commits map[string]string, path string) ([]b
 	return []byte(strings.Join(lines, "")), nil
 }
 
+// RefreshPinFiles returns the image-pins file and the seed-pins file with the
+// moved pins' commits and the seed's shared-source commits written in. Both are
+// computed before either is returned, so a refusal for one file leaves the
+// caller with neither to write.
+func RefreshPinFiles(image, seed []byte, imagePath, seedPath string, moved, seedCommits map[string]string) (newImage, newSeed []byte, err error) {
+	newImage, err = RewritePinCommits(image, moved, imagePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	newSeed, err = RefreshSeedPins(seed, seedCommits, seedPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newImage, newSeed, nil
+}
+
 // RefreshSeedPins validates the seed-pins file at path, whose bytes are data,
 // and returns it with each rig in commits set to its commit. A file that does
 // not parse is an error naming the file, and nothing is returned for it.

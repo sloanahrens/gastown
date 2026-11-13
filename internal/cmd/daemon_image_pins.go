@@ -24,11 +24,13 @@ type daemonImagePinsFlags struct {
 }
 
 // daemonImagePinsDeps is what the refresh takes from the host: git, to read each
-// source checkout's origin/main, how a path resolves, and where output goes. A
-// test supplies a fake git, so no unit test runs git or touches a network.
+// source checkout's origin/main, how a path resolves, how a file is written, and
+// where output goes. A test supplies a fake git and a fake writer, so no unit
+// test runs git, touches a network, or writes outside its temporary directory.
 type daemonImagePinsDeps struct {
 	git          bdbuild.Git
 	evalSymlinks func(path string) (string, error)
+	write        func(path string, data []byte) error
 	out          io.Writer
 }
 
@@ -81,7 +83,10 @@ var daemonImagePinsCmd = newDaemonImagePinsCmd(func(out io.Writer, f daemonImage
 	return runDaemonImagePins(f, daemonImagePinsDeps{
 		git:          bdbuild.ExecGit,
 		evalSymlinks: filepath.EvalSymlinks,
-		out:          out,
+		write: func(path string, data []byte) error {
+			return os.WriteFile(path, data, 0o644)
+		},
+		out: out,
 	})
 })
 
@@ -125,13 +130,8 @@ func runDaemonImagePins(f daemonImagePinsFlags, d daemonImagePinsDeps) error {
 		moved[c.Name] = c.To
 		commits[c.Name] = c.To
 	}
-	newImage := []byte(imageRaw)
-	if len(moved) != 0 {
-		if newImage, err = daemonimage.RewritePinCommits(newImage, moved, f.pins); err != nil {
-			return err
-		}
-	}
-	newSeed, err := daemonimage.RefreshSeedPins(seedRaw, daemonimage.SeedCommits(commits), f.seedPins)
+	newImage, newSeed, err := daemonimage.RefreshPinFiles(
+		[]byte(imageRaw), seedRaw, f.pins, f.seedPins, moved, daemonimage.SeedCommits(commits))
 	if err != nil {
 		return err
 	}
@@ -147,12 +147,12 @@ func runDaemonImagePins(f daemonImagePinsFlags, d daemonImagePinsDeps) error {
 		return nil
 	}
 	if imageChanged {
-		if err := os.WriteFile(f.pins, newImage, 0o644); err != nil {
+		if err := d.write(f.pins, newImage); err != nil {
 			return fmt.Errorf("--pins %q cannot be written, so neither file was changed: %w", f.pins, err)
 		}
 	}
 	if seedChanged {
-		if err := os.WriteFile(f.seedPins, newSeed, 0o644); err != nil {
+		if err := d.write(f.seedPins, newSeed); err != nil {
 			return fmt.Errorf("--pins %q was written but --seed-pins %q cannot be, so the two files disagree until it is fixed: %w", f.pins, f.seedPins, err)
 		}
 	}
@@ -183,8 +183,9 @@ func printPinsRefresh(out io.Writer, pins []daemonimage.Pin, changes []daemonima
 }
 
 // validateDaemonImagePinsFlags refuses, before anything is read, a missing
-// required flag, a relative or missing file, a checkout that is not an existing
-// directory, and a checkout that is or lies inside a canonical clone.
+// required flag, a relative path, a checkout that is not an existing directory,
+// and a checkout that is or lies inside a canonical clone. A pins file that is
+// missing or unreadable is refused by the read that follows, which names it.
 func validateDaemonImagePinsFlags(f daemonImagePinsFlags, evalSymlinks func(string) (string, error)) error {
 	for _, req := range []struct{ flag, value string }{
 		{"--pins", f.pins}, {"--seed-pins", f.seedPins},
@@ -200,9 +201,6 @@ func validateDaemonImagePinsFlags(f daemonImagePinsFlags, evalSymlinks func(stri
 	} {
 		if !filepath.IsAbs(p.value) {
 			return fmt.Errorf("%s %q is not absolute: name the file outright", p.flag, p.value)
-		}
-		if info, err := os.Stat(p.value); err != nil || !info.Mode().IsRegular() {
-			return fmt.Errorf("%s %q is not an existing file", p.flag, p.value)
 		}
 	}
 	for _, p := range []struct{ flag, value string }{

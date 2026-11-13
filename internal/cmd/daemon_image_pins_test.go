@@ -67,6 +67,7 @@ func (g *pinsRefreshGit) run(dir string, args ...string) ([]byte, error) {
 type pinsRefreshRig struct {
 	flags daemonImagePinsFlags
 	git   *pinsRefreshGit
+	write func(path string, data []byte) error
 	out   *bytes.Buffer
 	src   map[string]string
 }
@@ -75,9 +76,10 @@ func newPinsRefreshRig(t *testing.T) *pinsRefreshRig {
 	t.Helper()
 	root := t.TempDir()
 	r := &pinsRefreshRig{
-		git: &pinsRefreshGit{answer: map[string]string{}, errs: map[string]error{}},
-		out: &bytes.Buffer{},
-		src: map[string]string{},
+		git:   &pinsRefreshGit{answer: map[string]string{}, errs: map[string]error{}},
+		write: func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:   &bytes.Buffer{},
+		src:   map[string]string{},
 	}
 	for _, name := range []string{"bd", "om", "hm", "devops"} {
 		dir := filepath.Join(root, "src", name)
@@ -126,6 +128,7 @@ func (r *pinsRefreshRig) deps() daemonImagePinsDeps {
 	return daemonImagePinsDeps{
 		git:          r.git.run,
 		evalSymlinks: func(p string) (string, error) { return p, nil },
+		write:        r.write,
 		out:          r.out,
 	}
 }
@@ -302,6 +305,59 @@ func (e refreshExitStatus) Error() string { return "exit status " + strconv.Itoa
 
 func (e refreshExitStatus) ExitCode() int { return int(e) }
 
+// TestDaemonImagePinsWriteFailuresNameTheFile fails each write in turn: a failed
+// image write leaves the seed file unwritten and says neither file changed, and a
+// failed seed write after the image write names the seed file and says the image
+// was written, so the operator knows which file disagrees.
+func TestDaemonImagePinsWriteFailuresNameTheFile(t *testing.T) {
+	t.Parallel()
+	t.Run("the image write fails", func(t *testing.T) {
+		t.Parallel()
+		r := newPinsRefreshRig(t)
+		seedBefore := readPinsRefreshFile(t, r.flags.seedPins)
+		r.write = func(path string, data []byte) error {
+			if path == r.flags.pins {
+				return errors.New("disk full")
+			}
+			return os.WriteFile(path, data, 0o644)
+		}
+		err := r.run(true)
+		if err == nil {
+			t.Fatal("refresh --apply returned no error")
+		}
+		for _, w := range []string{r.flags.pins, "neither file was changed"} {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("error %q does not contain %q", err, w)
+			}
+		}
+		if got := readPinsRefreshFile(t, r.flags.seedPins); got != seedBefore {
+			t.Errorf("seed-pins changed after the image write failed:\n%s", got)
+		}
+	})
+	t.Run("the seed write fails after the image write", func(t *testing.T) {
+		t.Parallel()
+		r := newPinsRefreshRig(t)
+		r.write = func(path string, data []byte) error {
+			if path == r.flags.seedPins {
+				return errors.New("disk full")
+			}
+			return os.WriteFile(path, data, 0o644)
+		}
+		err := r.run(true)
+		if err == nil {
+			t.Fatal("refresh --apply returned no error")
+		}
+		for _, w := range []string{r.flags.seedPins, "was written"} {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("error %q does not contain %q", err, w)
+			}
+		}
+		if got := readPinsRefreshFile(t, r.flags.pins); !strings.Contains(got, pinsRefreshTip["bd"]) {
+			t.Errorf("image-pins does not carry the refreshed bd pin after its write:\n%s", got)
+		}
+	})
+}
+
 // TestDaemonImagePinsFlagsAreWired parses the pins subcommand's flags and checks
 // each reaches the run function, and that the subcommand sits under image.
 func TestDaemonImagePinsFlagsAreWired(t *testing.T) {
@@ -368,7 +424,21 @@ func TestDaemonImagePinsRefusesBadInputBeforeReading(t *testing.T) {
 			breakIt: func(t *testing.T, r *pinsRefreshRig) {
 				r.flags.seedPins = filepath.Join(t.TempDir(), "absent-seed-pins")
 			},
-			wantErr: "is not an existing file",
+			wantErr: "cannot be read",
+		},
+		{
+			name: "a seed-pins path that is a directory",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.flags.seedPins = t.TempDir()
+			},
+			wantErr: "cannot be read",
+		},
+		{
+			name: "a checkout named by a relative path",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.flags.omSrc = "om"
+			},
+			wantErr: "is not absolute",
 		},
 		{
 			name: "a checkout inside a canonical clone",
