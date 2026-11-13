@@ -32,6 +32,10 @@ type host struct {
 	// environList is the whole environment a child inherits (os.Environ).
 	lookupEnv   func(key string) (string, bool)
 	environList func() []string
+	// bdEnvironList is the environment the bd calls this host makes start
+	// from (bdEnviron); nil is environ(). A test narrows it to the bd calls
+	// alone, leaving the rest of the host's children their environment.
+	bdEnvironList func() []string
 	// goos reports the platform this machine runs (runtime.GOOS).
 	goos func() string
 	// run runs a command to completion and returns what it wrote. A failure
@@ -123,6 +127,14 @@ func (h *host) environ() []string {
 		return h.environList()
 	}
 	return os.Environ()
+}
+
+// bdEnviron is the environment a bd call this host makes starts from.
+func (h *host) bdEnviron() []string {
+	if h.bdEnvironList != nil {
+		return h.bdEnvironList()
+	}
+	return h.environ()
 }
 
 // withEnv is a copy of h that reads env over its own environment: lookups

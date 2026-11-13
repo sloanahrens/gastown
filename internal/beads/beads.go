@@ -1279,8 +1279,9 @@ func NewIsolatedWithPort(workDir string, serverPort int) *Beads {
 
 // NewWithBeadsDir creates a Beads wrapper with an explicit BEADS_DIR.
 // This is needed when running from a polecat worktree but accessing town-level beads.
-func NewWithBeadsDir(workDir, beadsDir string) *Beads {
-	return newBeads(beadsFields{workDir: workDir, beadsDir: beadsDir})
+// opts apply as in New; WithEnv sets the environment bd calls start from.
+func NewWithBeadsDir(workDir, beadsDir string, opts ...Option) *Beads {
+	return newBeads(applyOptions(beadsFields{workDir: workDir, beadsDir: beadsDir}, opts))
 }
 
 // NewRigLocal creates a Beads wrapper pinned to workDir's own database.

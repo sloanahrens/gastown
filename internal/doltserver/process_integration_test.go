@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The unit tier runs the adapter on a fakeHost, whose process table stands in
@@ -255,6 +257,27 @@ func TestIntegrationStartOnFreePortRetriesOnABoundPort(t *testing.T) {
 	}
 }
 
+// bdEnvWithoutPoisonedDoltPorts is the environment a bd call starts from: the
+// process's, with the two Dolt ports the harness poisons removed (not set to
+// empty, which bd would still read). Only the host's bd calls take it.
+func bdEnvWithoutPoisonedDoltPorts() []string {
+	return beads.StripEnvKey(beads.StripEnvKey(os.Environ(), "GT_DOLT_PORT"), "BEADS_DOLT_PORT")
+}
+
+// rigDoltServerPort is the port in the rig's dolt-server.port, the one bd dials.
+func rigDoltServerPort(t *testing.T, townRoot string) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(FindRigBeadsDir(townRoot, "testrig"), "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("reading the rig's dolt-server.port: %v", err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parsing the rig's dolt-server.port %q: %v", raw, err)
+	}
+	return port
+}
+
 // A real dolt sql-server started, found running, and stopped by the adapter,
 // in a temporary town on its own port. InitRig on that stopped server makes
 // the database and seeds issue_prefix through a temporary server.
@@ -269,6 +292,12 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 	}
 	var townRoot string
 	h, err := startOnFreePort(t, freePorts(t), func(h *host) error {
+		// The hermetic harness poisons GT_DOLT_PORT/BEADS_DOLT_PORT to port 1 for
+		// the whole process. When the town names no endpoint, bd takes an
+		// inherited BEADS_DOLT_PORT over the rig's dolt-server.port, so the poison
+		// sent InitRig's issue_prefix write to port 1. Only this host's bd calls
+		// drop the poison; its other children keep it.
+		h.bdEnvironList = bdEnvWithoutPoisonedDoltPorts
 		town := testTownRoot(t)
 		townRoot = town
 		t.Cleanup(func() { _, _ = h.ReapOwnedTestServers(town) })
@@ -302,14 +331,44 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 	if out, err := query.CombinedOutput(); err != nil || !strings.Contains(string(out), "tr") {
 		t.Errorf("issue_prefix after InitRig: %v\n%s", err, out)
 	}
+	if os.Getenv("GT_TEST_EXTERNAL_DOLT") != "1" {
+		for _, key := range []string{"GT_DOLT_PORT", "BEADS_DOLT_PORT"} {
+			if os.Getenv(key) == "" {
+				t.Errorf("%s is unset in the test process after InitRig; only the host's bd calls should drop the harness poison", key)
+			}
+		}
+	}
 
-	h, err = startOnFreePort(t, freePorts(t), func(h *host) error { return h.Start(townRoot) })
+	// bd dials the rig's dolt-server.port, which InitRig wrote and Start does not
+	// rewrite. The second start takes that port first, so the server it starts
+	// is the one bd reaches; a fresh port is taken only after a port race.
+	rigPort := rigDoltServerPort(t, townRoot)
+	takeRigPort := true
+	h, err = startOnFreePort(t, func() int {
+		if takeRigPort {
+			takeRigPort = false
+			return rigPort
+		}
+		return freePort(t)
+	}, func(h *host) error {
+		h.bdEnvironList = bdEnvWithoutPoisonedDoltPorts
+		return h.Start(townRoot)
+	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	running, pid, err := h.IsRunning(townRoot)
 	if err != nil || !running || pid <= 0 {
 		t.Fatalf("IsRunning after Start = %v, %d, %v", running, pid, err)
+	}
+	// bd, through the host's environment, reads issue_prefix from the server
+	// Start left running, and the town's config names the port that server
+	// listens on.
+	if ep, ok := h.resolvePersistedEndpoint(townRoot); !ok || ep.Port != doltPort(t, h) {
+		t.Errorf("the town's persisted endpoint = %+v, %v; want the port the started server listens on, %d", ep, ok, doltPort(t, h))
+	}
+	if got, err := h.readRigIssuePrefix(townRoot, FindRigBeadsDir(townRoot, "testrig")); err != nil || got != "tr" {
+		t.Errorf("issue_prefix read by bd through the host's environment = %q, %v; want tr", got, err)
 	}
 	if err := h.VerifyTownDoltSQLServerPID(townRoot, pid); err != nil {
 		t.Errorf("the started server does not verify as this town's: %v", err)
