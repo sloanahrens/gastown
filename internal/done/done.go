@@ -1671,10 +1671,43 @@ func acquirePresubmitSlot(ctx context.Context, r *doneRun) (func(), error) {
 // push to the branch makes the lease fail instead of being clobbered. One retry
 // absorbs a push that errored while the remote took the objects (gt-0opm).
 //
+// alreadyLandedAt reports the commit the bead's notes record as its landing: the
+// LANDING RECORD block the landing worker writes (gt-ijimsb). A READY TO LAND
+// block after that record means the bead was reopened with new work, which
+// submits normally, so only a record nothing was resubmitted after counts.
+func alreadyLandedAt(issue *beads.Issue) (string, bool) {
+	if issue == nil {
+		return "", false
+	}
+	const key = "\nlanded_commit: "
+	rec := strings.LastIndex(issue.Notes, land.LandingNoteMarker+key)
+	if rec < 0 || strings.LastIndex(issue.Notes, land.ReadyNoteMarker+"\n") > rec {
+		return "", false
+	}
+	rest := issue.Notes[rec+len(land.LandingNoteMarker)+len(key):]
+	line, _, _ := strings.Cut(rest, "\n")
+	sha := strings.TrimSpace(line)
+	return sha, sha != ""
+}
+
+// pushBranchForLanding pushes head to remote/<branch> under a lease on the
+// tip the remote had, then asserts the remote holds exactly head (gt-2wqt). A
+// rebased or squashed branch replaces an earlier attempt's tip; a concurrent
+// push to the branch makes the lease fail instead of being clobbered. One retry
+// absorbs a push that errored while the remote took the objects (gt-0opm).
+//
+// A bead whose notes already record a landing has nothing left to preserve, so
+// nothing is pushed: a lease cannot tell that origin's tip is the landed work
+// and would overwrite it (gt-ijimsb).
+//
 // The remote is the rig's configured landing remote (gt-fn9e6.9), not an
 // assumed origin. Its resolution can fail closed; submitForLanding reaches it
 // first (gt-fn9e6.18).
 func pushBranchForLanding(r *doneRun, sourceBD beads.Client, sourceIssue *beads.Issue, head, baseRef string) error {
+	if sha, landed := alreadyLandedAt(sourceIssue); landed {
+		fmt.Fprintf(r.stdout(), "gt done: %s already landed at %s; nothing pushed\n", r.issueID, sha)
+		return nil
+	}
 	remote, err := r.resolveLandingRemote()
 	if err != nil {
 		return err
