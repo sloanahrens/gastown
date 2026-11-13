@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ const (
 	previewHead      = "0123456789abcdef0123456789abcdef01234567"
 	previewOtherHead = "89abcdef0123456789abcdef0123456789abcdef"
 	previewRequest   = reviewPreviewRequestPrefix + previewHead
+	previewBranch    = "polecat/slit/gt-jx66mp+mweedkx1"
 )
 
 // previewFixture is a reviewPreview over an in-memory work bead. The note
@@ -327,6 +329,41 @@ func TestReviewPreviewEnsureOriginHead(t *testing.T) {
 	}
 }
 
+func TestReviewPreviewReadsTheAnswerForItsHead(t *testing.T) {
+	t.Parallel()
+	mine := land.FormatLocalRound(1, previewHead, []land.Finding{
+		{ID: "f1", Severity: "major", Path: "a.go", Line: 1, Title: "mine"},
+	}, time.Date(2026, 11, 13, 3, 1, 0, 0, time.UTC))
+	other := land.FormatLocalRound(2, previewOtherHead, nil, time.Date(2026, 11, 13, 3, 2, 0, 0, time.UTC))
+
+	cases := []struct {
+		name         string
+		after        string // the notes after this head's request
+		wantAnswered bool
+		wantHead     string
+		wantReason   string
+	}{
+		{name: "a block for this head", after: mine, wantAnswered: true, wantHead: previewHead},
+		{name: "a block for this head, then one for another head", after: mine + "\n" + other, wantAnswered: true, wantHead: previewHead},
+		{name: "only a block for another head", after: other, wantAnswered: false},
+		{name: "an unavailable block after a block for another head", after: other + "\nLOCAL ROUND (3): unavailable - om is paused", wantAnswered: true, wantReason: "om is paused"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ans := readReviewPreviewAnswer(previewRequest+"\n"+c.after, previewHead)
+			if ans.answered != c.wantAnswered {
+				t.Fatalf("answered = %v, want %v", ans.answered, c.wantAnswered)
+			}
+			if ans.round.Head != c.wantHead {
+				t.Errorf("round head = %q, want %q", ans.round.Head, c.wantHead)
+			}
+			if ans.reason != c.wantReason {
+				t.Errorf("reason = %q, want %q", ans.reason, c.wantReason)
+			}
+		})
+	}
+}
+
 func TestReviewPreviewNotesOfShownBead(t *testing.T) {
 	t.Parallel()
 
@@ -372,5 +409,173 @@ func TestReviewPreviewBeadFromBranch(t *testing.T) {
 		if got != c.want || ok != c.ok {
 			t.Errorf("reviewPreviewBeadFromBranch(%q) = %q, %v; want %q, %v", c.branch, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// fakePreviewRepo is the git the wiring reads the branch and head with and
+// pushes through. originTip is what origin reports for the branch.
+type fakePreviewRepo struct {
+	branch, head       string
+	branchErr, headErr error
+	originTip          string
+	pushes             []string
+}
+
+func (r *fakePreviewRepo) CurrentBranch() (string, error) { return r.branch, r.branchErr }
+
+func (r *fakePreviewRepo) Rev(string) (string, error) { return r.head, r.headErr }
+
+func (r *fakePreviewRepo) PushRemoteBranchTip(string, string) (string, error) {
+	return r.originTip, nil
+}
+
+func (r *fakePreviewRepo) Push(remote, branch string, force bool) error {
+	r.pushes = append(r.pushes, fmt.Sprintf("%s %s force=%v", remote, branch, force))
+	return nil
+}
+
+// fakePreviewStore is the bead store the wiring reads notes from and appends
+// the request to. Every call is recorded with the bead id it named.
+type fakePreviewStore struct {
+	issues   map[string]*beads.Issue
+	shown    []string
+	appended []string
+}
+
+func (s *fakePreviewStore) Show(id string) (*beads.Issue, error) {
+	s.shown = append(s.shown, id)
+	return s.issues[id], nil
+}
+
+func (s *fakePreviewStore) AppendNotes(id, note string) error {
+	s.appended = append(s.appended, id+": "+note)
+	iss := s.issues[id]
+	if iss == nil {
+		return errors.New("bead not found")
+	}
+	iss.Notes = previewNotesAppend(iss.Notes, note)
+	return nil
+}
+
+func TestReviewPreviewWiresBranchHeadAndBead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		originTip string
+		wantPush  bool
+	}{
+		{name: "origin lacks the head", originTip: previewOtherHead, wantPush: true},
+		{name: "origin has the head", originTip: previewHead, wantPush: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repo := &fakePreviewRepo{branch: previewBranch, head: previewHead, originTip: c.originTip}
+			store := &fakePreviewStore{issues: map[string]*beads.Issue{"gt-jx66mp": {ID: "gt-jx66mp"}}}
+			clock := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
+			polls := 0
+			var stdout, stderr bytes.Buffer
+
+			err := runReviewPreviewAt(reviewPreviewDeps{
+				out:    &stdout,
+				errOut: &stderr,
+				repo:   repo,
+				store:  store,
+				poll: func(d time.Duration) {
+					polls++
+					clock = clock.Add(d)
+					if polls == 2 {
+						iss := store.issues["gt-jx66mp"]
+						iss.Notes = previewNotesAppend(iss.Notes, previewBlock(previewHead))
+					}
+				},
+				now:      func() time.Time { return clock },
+				wait:     reviewPreviewWait,
+				interval: reviewPreviewPollEvery,
+			})
+			if err != nil {
+				t.Fatalf("runReviewPreviewAt() = %v, want nil", err)
+			}
+
+			wantPushes := 0
+			if c.wantPush {
+				wantPushes = 1
+			}
+			if len(repo.pushes) != wantPushes {
+				t.Fatalf("pushes = %q, want %d push of the branch to origin", repo.pushes, wantPushes)
+			}
+			if c.wantPush && repo.pushes[0] != "origin "+previewBranch+" force=false" {
+				t.Errorf("push = %q, want a plain push of %s to origin", repo.pushes[0], previewBranch)
+			}
+			for _, id := range store.shown {
+				if id != "gt-jx66mp" {
+					t.Errorf("notes read from %q, want the bead the branch names gt-jx66mp", id)
+				}
+			}
+			if want := []string{"gt-jx66mp: " + previewRequest}; strings.Join(store.appended, "|") != strings.Join(want, "|") {
+				t.Fatalf("appended = %q, want %q", store.appended, want)
+			}
+			if !strings.Contains(stdout.String(), "f1 major internal/cmd/review_preview.go:42 poll never ends") {
+				t.Errorf("stdout = %q, want the findings of the block on the bead", stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want none", stderr.String())
+			}
+		})
+	}
+}
+
+func TestReviewPreviewWiringRefusesBeforeAnyWrite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		repo       *fakePreviewRepo
+		wantStderr string
+	}{
+		{
+			name:       "the current branch cannot be read",
+			repo:       &fakePreviewRepo{branchErr: errors.New("git gone"), head: previewHead},
+			wantStderr: "could not read the current branch",
+		},
+		{
+			name:       "the branch names no work bead",
+			repo:       &fakePreviewRepo{branch: "main", head: previewHead},
+			wantStderr: "names no work bead",
+		},
+		{
+			name:       "HEAD cannot be read",
+			repo:       &fakePreviewRepo{branch: previewBranch, headErr: errors.New("git gone")},
+			wantStderr: "could not read HEAD",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &fakePreviewStore{issues: map[string]*beads.Issue{"gt-jx66mp": {ID: "gt-jx66mp"}}}
+			var stdout, stderr bytes.Buffer
+
+			err := runReviewPreviewAt(reviewPreviewDeps{
+				out:    &stdout,
+				errOut: &stderr,
+				repo:   c.repo,
+				store:  store,
+				poll: func(time.Duration) {
+					t.Errorf("poll ran: a refused preview must not wait")
+				},
+				now:      time.Now,
+				wait:     reviewPreviewWait,
+				interval: reviewPreviewPollEvery,
+			})
+			if err != nil {
+				t.Fatalf("runReviewPreviewAt() = %v, want nil: the preview never fails the submit", err)
+			}
+			if !strings.Contains(stderr.String(), c.wantStderr) || !strings.Contains(stderr.String(), reviewPreviewUnavailable) {
+				t.Errorf("stderr = %q, want %q and %q", stderr.String(), c.wantStderr, reviewPreviewUnavailable)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want none", stdout.String())
+			}
+			if len(c.repo.pushes) != 0 || len(store.shown) != 0 || len(store.appended) != 0 {
+				t.Errorf("wrote or read after a refusal: pushes %q, shown %q, appended %q", c.repo.pushes, store.shown, store.appended)
+			}
+		})
 	}
 }

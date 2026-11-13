@@ -3,13 +3,13 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -57,6 +57,10 @@ const (
 	// reviewPreviewUnavailable opens every stderr line the preview prints when
 	// it gives up. The submit goes ahead.
 	reviewPreviewUnavailable = "preview unavailable, submit anyway"
+
+	// reviewPreviewBlockPrefix opens every block header the daemon writes, the
+	// round's and the unavailable one. A reply or finding line does not match it.
+	reviewPreviewBlockPrefix = land.LocalRoundMarker + " ("
 
 	// reviewPreviewWait bounds the wall-clock wait for a round to be written.
 	reviewPreviewWait = 15 * time.Minute
@@ -167,7 +171,13 @@ func (p *reviewPreview) report(round land.LocalRound) error {
 // unavailable prints why the preview gave up. It returns nil: the submit goes
 // ahead whatever the reason.
 func (p *reviewPreview) unavailable(reason string) error {
-	fmt.Fprintf(p.errOut, "%s: %s\n", reviewPreviewUnavailable, reason)
+	return reviewPreviewGiveUp(p.errOut, reason)
+}
+
+// reviewPreviewGiveUp prints why a preview gave up before or during its run. It
+// returns nil for the same reason unavailable does.
+func reviewPreviewGiveUp(errOut io.Writer, reason string) error {
+	fmt.Fprintf(errOut, "%s: %s\n", reviewPreviewUnavailable, reason)
 	return nil
 }
 
@@ -187,20 +197,37 @@ func readReviewPreviewAnswer(notes, head string) reviewPreviewAnswer {
 		return reviewPreviewAnswer{}
 	}
 	ans := reviewPreviewAnswer{requested: true}
-	tail := lines[last+1:]
-	if round, ok := land.ParseLastLocalRound(strings.Join(tail, "\n")); ok && round.Head == head {
-		ans.answered = true
-		ans.round = round
-		return ans
-	}
-	for _, line := range tail {
-		if m := unavailableBlockRE.FindStringSubmatch(line); m != nil {
-			ans.answered = true
-			ans.reason = m[1]
-			return ans
+	// Each block is read on its own, so a block for another head does not hide
+	// this head's answer before it. The last answer for this head wins.
+	for _, block := range splitReviewPreviewBlocks(lines[last+1:]) {
+		if round, ok := land.ParseLastLocalRound(strings.Join(block, "\n")); ok {
+			if round.Head == head {
+				ans = reviewPreviewAnswer{requested: true, answered: true, round: round}
+			}
+			continue
+		}
+		if m := unavailableBlockRE.FindStringSubmatch(block[0]); m != nil {
+			ans = reviewPreviewAnswer{requested: true, answered: true, reason: m[1]}
 		}
 	}
 	return ans
+}
+
+// splitReviewPreviewBlocks cuts lines at each block header, so each block runs
+// from its header to the next one. Lines before the first header belong to no
+// block and are dropped. A finding or reply line is not a header, so it stays
+// with its block.
+func splitReviewPreviewBlocks(lines []string) [][]string {
+	var blocks [][]string
+	for _, line := range lines {
+		if strings.HasPrefix(line, reviewPreviewBlockPrefix) {
+			blocks = append(blocks, nil)
+		}
+		if len(blocks) > 0 {
+			blocks[len(blocks)-1] = append(blocks[len(blocks)-1], line)
+		}
+	}
+	return blocks
 }
 
 // ensureOriginHead puts head on origin under the branch when origin's tip is
@@ -241,41 +268,84 @@ func reviewPreviewBeadFromBranch(branch string) (string, bool) {
 	return meta.Issue, true
 }
 
+// reviewPreviewRepo is the git the preview reads the branch and head with and
+// pushes through. Production passes a *git.Git.
+type reviewPreviewRepo interface {
+	CurrentBranch() (string, error)
+	Rev(ref string) (string, error)
+	PushRemoteBranchTip(remote, branch string) (string, error)
+	Push(remote, branch string, force bool) error
+}
+
+// reviewPreviewStore is the work bead store the notes are read from and the
+// request is appended to. Production passes a *beads.Beads.
+type reviewPreviewStore interface {
+	Show(id string) (*beads.Issue, error)
+	AppendNotes(id, note string) error
+}
+
+// reviewPreviewDeps is everything a preview reads or writes outside itself.
+// runReviewPreview fills it with the real git, bd and clock; the tests fill it
+// with fakes.
+type reviewPreviewDeps struct {
+	out, errOut io.Writer
+	repo        reviewPreviewRepo
+	store       reviewPreviewStore
+	poll        func(time.Duration)
+	now         func() time.Time
+	wait        time.Duration
+	interval    time.Duration
+}
+
 func runReviewPreview(cmd *cobra.Command, _ []string) error {
-	p := &reviewPreview{
+	cwd, err := callercwd.Require()
+	if err != nil {
+		return reviewPreviewGiveUp(cmd.ErrOrStderr(), fmt.Sprintf("no working directory: %v", err))
+	}
+	return runReviewPreviewAt(reviewPreviewDeps{
 		out:      cmd.OutOrStdout(),
 		errOut:   cmd.ErrOrStderr(),
-		now:      time.Now,
+		repo:     git.NewGit(cwd),
+		store:    beads.New(cwd),
 		poll:     time.Sleep,
+		now:      time.Now,
 		wait:     reviewPreviewWait,
 		interval: reviewPreviewPollEvery,
-	}
-	cwd, err := os.Getwd()
+	})
+}
+
+// runReviewPreviewAt wires the branch to its work bead and head, then runs the
+// preview on them. The bead is the one the branch names; the notes are read and
+// the request appended on that bead only.
+func runReviewPreviewAt(d reviewPreviewDeps) error {
+	branch, err := d.repo.CurrentBranch()
 	if err != nil {
-		return p.unavailable(fmt.Sprintf("no working directory: %v", err))
-	}
-	g := git.NewGit(cwd)
-	branch, err := g.CurrentBranch()
-	if err != nil {
-		return p.unavailable("could not read the current branch")
+		return reviewPreviewGiveUp(d.errOut, "could not read the current branch")
 	}
 	bead, ok := reviewPreviewBeadFromBranch(branch)
 	if !ok {
-		return p.unavailable(fmt.Sprintf("branch %s names no work bead", branch))
+		return reviewPreviewGiveUp(d.errOut, fmt.Sprintf("branch %s names no work bead", branch))
 	}
-	head, err := g.Rev("HEAD")
+	head, err := d.repo.Rev("HEAD")
 	if err != nil {
-		return p.unavailable("could not read HEAD")
+		return reviewPreviewGiveUp(d.errOut, "could not read HEAD")
 	}
-	client := beads.New(cwd)
-	p.bead = bead
-	p.head = head
-	p.pushHead = func() error {
-		return ensureOriginHead(head,
-			func() (string, error) { return g.PushRemoteBranchTip("origin", branch) },
-			func() error { return g.Push("origin", branch, false) })
+	p := &reviewPreview{
+		out:    d.out,
+		errOut: d.errOut,
+		bead:   bead,
+		head:   head,
+		pushHead: func() error {
+			return ensureOriginHead(head,
+				func() (string, error) { return d.repo.PushRemoteBranchTip("origin", branch) },
+				func() error { return d.repo.Push("origin", branch, false) })
+		},
+		readNotes:  func() (string, error) { return reviewPreviewNotes(bead, d.store.Show) },
+		appendNote: func(note string) error { return d.store.AppendNotes(bead, note) },
+		poll:       d.poll,
+		now:        d.now,
+		wait:       d.wait,
+		interval:   d.interval,
 	}
-	p.readNotes = func() (string, error) { return reviewPreviewNotes(bead, client.Show) }
-	p.appendNote = func(note string) error { return client.AppendNotes(bead, note) }
 	return p.run()
 }
