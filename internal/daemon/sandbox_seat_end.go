@@ -90,6 +90,17 @@ type sandboxSeatEnd struct {
 // on later passes until it is (gt-381oj).
 const rulesPendingReason = "jev_rules has not yet asked about this submission"
 
+// sandboxNotGoneReason is the keep reason of a seat whose measured sandbox the
+// gateway has not confirmed gone. The landing's own end deletes such a sandbox
+// before this reason is asked (gt-0vb2fy); one it leaves is the patrol's.
+const sandboxNotGoneReason = "the gateway has not confirmed the sandbox gone"
+
+// sandboxSessionLiveReason is the keep reason of a seat whose live session still
+// answers to its name. A set ended marker alone does not prove that session has
+// ended, so the sandbox waits for the patrol, which runs the same check
+// (gt-0vb2fy).
+const sandboxSessionLiveReason = "session still live"
+
 // keepReason names why the seat's host directories must stay, or "" when they
 // may be removed. Every reason is a fact someone else measured; the first one
 // this file can answer decides. A missing fact keeps the seat: the removal
@@ -100,7 +111,7 @@ func (e sandboxSeatEnd) keepReason() string {
 	case !e.SandboxSeat:
 		return "not a sandbox seat: a tmux seat keeps its worktree"
 	case !e.SandboxGone && !e.SandboxErrored:
-		return "the gateway has not confirmed the sandbox gone"
+		return sandboxNotGoneReason
 	case !e.Landed:
 		return "no landing record proves its work landed (unlanded)"
 	case !e.CleanupStatus.IsSafe():
@@ -198,6 +209,27 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			unmeasured = unmeasuredReason
 			return nil
 		}
+		// A sandbox the gateway still holds is ended here, at the landing, once
+		// every other fact releases the seat (gt-0vb2fy). The probe takes that
+		// sandbox as gone, so a seat kept for any other reason keeps it for the
+		// patrol, as before. The start is read before the held sandbox's record
+		// is removed, while the record still holds it (gt-6qc3nw.12).
+		probe := end
+		probe.SandboxGone = true
+		held := !end.SandboxGone && !end.SandboxErrored && probe.keepReason() == ""
+		var (
+			start    time.Time
+			startErr error
+		)
+		if held {
+			start, startErr = h.seatStartedAt(rig, name, landing.Submitted)
+			if why := h.endHeldSandboxAtLanding(rig, name); why != "" {
+				kept = why
+				h.clearPendingSeatEnd(rig, name)
+				return nil
+			}
+			end.SandboxGone = true
+		}
 		if why := end.keepReason(); why != "" {
 			kept = why
 			// The record and the decision that wrote it are one fact, so both
@@ -215,8 +247,11 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// The seat's start is read before the errored sandbox below is deleted,
 		// since its record is the only place the start is kept (gt-6qc3nw.12).
 		// A record the teardown removed earlier leaves its start on the ledger
-		// (gt-kovllv).
-		start, startErr := h.seatStartedAt(rig, name, landing.Submitted)
+		// (gt-kovllv). A held sandbox's start was read above, before its record
+		// went.
+		if !held {
+			start, startErr = h.seatStartedAt(rig, name, landing.Submitted)
+		}
 		// Every guard has let the seat go, so its errored sandbox holds no work
 		// the landing does not already have. It is deleted before the host
 		// directories, so the seat name is free once they are gone (gt-jhoi1).
@@ -568,6 +603,46 @@ func (h *patrolScanHost) removeErroredSeatSandbox(rig, name, gateway string) str
 	if !removed {
 		return "its sandbox is no longer in a failure phase"
 	}
+	return ""
+}
+
+// endHeldSandboxAtLanding ends the sandbox a landed seat's gateway still holds,
+// once every other fact has released the seat (gt-0vb2fy). It is the patrol's
+// own path, endHeldSandbox: the sandbox answers whether its ended marker is set,
+// and when it is the record deleter copies the transcripts and deletes the
+// sandbox. The record is then dropped, as the patrol drops it.
+//
+// It returns the reason the seat is kept, or "" when the sandbox and its record
+// are gone. It asks the same live-session probe the patrol asks before either
+// deletes (sandboxSeatSessionLive), and keeps the sandbox, with the probe's
+// reason, when a session still answers to the seat's name. A probe that errors
+// keeps it too: the landing has no proof the session is not live, so it fails
+// closed. A record that cannot be read or is absent, and every refusal
+// endHeldSandbox makes, keep the seat with that refusal's own reason, so the
+// patrol deletes the sandbox as it does today.
+func (h *patrolScanHost) endHeldSandboxAtLanding(rig, name string) string {
+	sessionName := h.sessionName(rig, name)
+	live, err := h.sandboxSeatSessionLive(sessionName)
+	if err != nil {
+		return "cannot ask tmux whether its session is live, so the sandbox is left for the patrol: " + err.Error()
+	}
+	if live {
+		return sandboxSessionLiveReason
+	}
+	rec, ok, err := session.ReadSandboxRecord(h.town(), sessionName)
+	if err != nil {
+		return "its sandbox record cannot be read, so the sandbox is left for the patrol: " + err.Error()
+	}
+	if !ok {
+		return "its sandbox record is absent, so no deleter names its sandbox"
+	}
+	if why := h.endHeldSandbox("sandbox seat end", sessionName, rec); why != "" {
+		return why
+	}
+	if err := h.removeRecord(sessionName); err != nil {
+		return "its sandbox is deleted but its record could not be removed: " + err.Error()
+	}
+	h.d.logger.Printf("sandbox seat end %s/%s: deleted its held sandbox at the landing, not at the next patrol tick", rig, name)
 	return ""
 }
 
