@@ -7,7 +7,7 @@ The OpenShell gateway is the long-lived service behind the `openshell` session b
 - Sandbox seats run on the k8s gateway: `defaultSandboxGateway` in `internal/config/types.go` is `"k8s"`.
 - The gateway lives in the sandbox cluster, the Colima VM `gt-sbx` in namespace `openshell`, and creates one pod per running polecat. See [the architecture](architecture.md).
 - The daemon pod reaches the gateway through a socat relay, see [the architecture](architecture.md), and holds the gateway's config and mTLS client files in the `daemon-openshell` Secret (`openShellKeys` in `deploy/k8s/daemon/daemon.go`).
-- A seat runs on the k8s gateway when its sandbox profile's `driver` is `kubernetes`. The field takes `docker` or `kubernetes`, and `docker` is the default when it is unset (`internal/config/types.go`), so a seat's profile must name `kubernetes`. See [Sandbox profile driver](#sandbox-profile-driver).
+- A seat runs on the k8s gateway when its sandbox profile's `driver` is `kubernetes`. Before editing a profile, read [Sandbox profile driver](#sandbox-profile-driver).
 
 ## Sandbox profile driver
 
@@ -32,7 +32,11 @@ A sandbox seat runs in a container the gateway creates, not on the Mac. Before y
 - **Commands that print the environment or a secret are refused.** The guard in `internal/cmd/tap_guard_sandbox_secrets.go` blocks them inside a sandbox only.
 - **The agent's tmux is invisible to the host's.** The sandbox runs its own tmux server; gt reaches it through `openshell sandbox exec` (see `internal/session/sandbox_registry.go`).
 
-## Where state lives
+## Mac gateway (retired): only for a Mac that still runs the old agent
+
+Skip this section unless the Mac still runs the `com.gastown.openshell-gateway` launchd agent.
+
+### Where state lives
 
 | Path | Holds |
 |---|---|
@@ -42,10 +46,6 @@ A sandbox seat runs in a container the gateway creates, not on the Mac. Before y
 | `~/gt/.runtime/openshell/gateway.log` | stdout and stderr of the gateway |
 
 A lost `~/.local/state/openshell/` means the providers are gone; re-register them from the two key files.
-
-## Mac gateway (retired): only for a Mac that still runs the old agent
-
-Skip this section unless the Mac still runs the `com.gastown.openshell-gateway` launchd agent.
 
 ### Install
 
