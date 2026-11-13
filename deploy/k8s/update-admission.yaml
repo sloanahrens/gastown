@@ -230,7 +230,7 @@ spec:
         !has(object.spec.template.spec.securityContext.supplementalGroups) &&
         !has(object.spec.template.spec.securityContext.sysctls) &&
         !has(object.spec.template.spec.securityContext.seccompProfile) &&
-        !has(object.spec.template.spec.securityContext.selinuxOptions)) &&
+        !has(object.spec.template.spec.securityContext.selinuxOptions))) &&
         has(object.spec.template.spec.automountServiceAccountToken) &&
         object.spec.template.spec.automountServiceAccountToken == true &&
         object.spec.template.spec.priorityClassName == 'gt-control-plane' &&

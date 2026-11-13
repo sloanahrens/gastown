@@ -202,7 +202,7 @@ func admissionPodExpr(t *testing.T, pod PodSpec) string {
 			"!has(object.spec.template.spec.securityContext.supplementalGroups) && " +
 			"!has(object.spec.template.spec.securityContext.sysctls) && " +
 			"!has(object.spec.template.spec.securityContext.seccompProfile) && " +
-			"!has(object.spec.template.spec.securityContext.selinuxOptions))",
+			"!has(object.spec.template.spec.securityContext.selinuxOptions)))",
 	}
 	if pod.AutomountServiceAccountToken == nil {
 		parts = append(parts, "!has(object.spec.template.spec.automountServiceAccountToken)")
@@ -1636,4 +1636,67 @@ func TestUpdateAdmissionEncodedJobRefusesWhatItCannotRead(t *testing.T) {
 			t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
 		}
 	}
+}
+
+// TestAdmissionExpressionsBalanced is the cheap stand-in for compiling the CEL: the
+// API server refuses a policy whose expression has an unclosed group, and the
+// other checks here compare the YAML to a Go-built copy of the same text, so a
+// parenthesis dropped from both goes unseen. Every expression must open and close
+// its parentheses and brackets in order, outside string literals.
+func TestAdmissionExpressionsBalanced(t *testing.T) {
+	t.Parallel()
+	var exprs []string
+	for _, doc := range loadUpdateAdmission(t) {
+		for _, c := range doc.Spec.MatchConditions {
+			exprs = append(exprs, c.Expression)
+		}
+		for _, v := range doc.Spec.Validations {
+			exprs = append(exprs, v.Expression)
+		}
+	}
+	if len(exprs) == 0 {
+		t.Fatal("the policy holds no expression to check")
+	}
+	for i, e := range exprs {
+		if err := balanced(e); err != nil {
+			t.Errorf("expression %d: %v: %.120s", i, err, e)
+		}
+	}
+	for _, bad := range []string{"(a && (b)", "a)", "(a]", "[(a])"} {
+		if balanced(bad) == nil {
+			t.Errorf("balanced(%q) accepted an unbalanced expression", bad)
+		}
+	}
+	if err := balanced(`has(a.b) && x == "(" && (c || [d])`); err != nil {
+		t.Errorf("balanced refused a balanced expression with a bracket inside a string: %v", err)
+	}
+}
+
+// balanced reports the first unbalanced parenthesis or bracket in a CEL
+// expression, skipping single- and double-quoted string literals.
+func balanced(expr string) error {
+	var stack []rune
+	var quote rune
+	for _, r := range expr {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '(' || r == '[':
+			stack = append(stack, r)
+		case r == ')' || r == ']':
+			want := map[rune]rune{')': '(', ']': '['}[r]
+			if len(stack) == 0 || stack[len(stack)-1] != want {
+				return fmt.Errorf("unexpected %q", r)
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	if len(stack) > 0 {
+		return fmt.Errorf("%d group(s) never closed", len(stack))
+	}
+	return nil
 }
