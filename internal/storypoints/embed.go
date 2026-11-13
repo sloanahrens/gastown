@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -95,7 +96,13 @@ func (e OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, erro
 	body, _ := json.Marshal(embedRequest{Model: e.Model, Input: []string{text}})
 	ctx, cancel := context.WithTimeout(ctx, e.Timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.URL+"/api/embed", bytes.NewReader(body))
+	// JoinPath keeps a trailing slash on the configured URL from doubling the
+	// path separator before /api/embed.
+	endpoint, err := url.JoinPath(e.URL, "api", "embed")
+	if err != nil {
+		return nil, fmt.Errorf("storypoints: build embed endpoint: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("storypoints: build embed request: %w", err)
 	}
@@ -133,7 +140,8 @@ func (w Weights) EmbeddingDimension() int {
 
 // EmbeddingMinutes is the embedding ridge's predicted polecat minutes for vec:
 // exp(intercept + dot(coef, vec)). It refuses a vector whose length is not the
-// weights' embedding dimension, and a result that is not a finite number.
+// weights' embedding dimension, and a result that is not a finite positive
+// number.
 func (w Weights) EmbeddingMinutes(vec []float32) (float64, error) {
 	if len(w.embedCoef) == 0 {
 		return 0, ErrNoWeights
@@ -144,6 +152,11 @@ func (w Weights) EmbeddingMinutes(vec []float32) (float64, error) {
 	m := math.Exp(w.embedLog(vec))
 	if math.IsNaN(m) || math.IsInf(m, 0) {
 		return 0, errors.New("storypoints: embedding minutes are not a finite number")
+	}
+	// exp(x) is above zero for every finite x, so a zero here is an underflow
+	// and not a prediction.
+	if m == 0 {
+		return 0, errors.New("storypoints: embedding minutes underflowed to zero")
 	}
 	return m, nil
 }
