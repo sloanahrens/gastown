@@ -59,122 +59,89 @@ listener:
 	}
 }
 
-// TestStaleDoltPortCheck_InconsistentMetadata verifies the check detects wrong port in metadata.json.
-func TestStaleDoltPortCheck_InconsistentMetadata(t *testing.T) {
+// TestStaleDoltPortCheckIgnoresTheDeprecatedPort verifies the check does not
+// report metadata.json for its deprecated dolt_server_port key, and that Fix
+// removes the key from a file that carries it while keeping every other field
+// and the port file (gt-49f3pn).
+func TestStaleDoltPortCheckIgnoresTheDeprecatedPort(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create .dolt-data/config.yaml with port 3307
-	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
-	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	configYaml := `log_level: warning
-listener:
-  port: 3307
-`
-	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte(configYaml), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create town .beads/metadata.json with WRONG port (3306 instead of 3307)
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	metadata := map[string]interface{}{
-		"dolt_mode":        "server",
-		"dolt_server_host": "127.0.0.1",
-		"dolt_server_port": 3306, // Wrong port!
-		"dolt_database":    "hq",
-	}
-	metadataBytes, _ := json.MarshalIndent(metadata, "", "  ")
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadataBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  port: 3307\n")
+	metaFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":3306,"dolt_database":"hq"}`)
 
 	check := NewStaleDoltPortCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	result := check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Fatalf("expected StatusOK: the key is not a port the check judges, got %v: %s %v", result.Status, result.Message, result.Details)
+	}
 
+	// A stale port file makes the check warn; Fix then cleans the key too.
+	portFile := writeDoctorTownFile(t, tmpDir, ".beads/dolt-server.port", "3306")
+	result = check.Run(ctx)
 	if result.Status != StatusWarning {
-		t.Errorf("expected StatusWarning for inconsistent port, got %v: %s", result.Status, result.Message)
+		t.Fatalf("expected StatusWarning for the stale port file, got %v: %s", result.Status, result.Message)
+	}
+	for _, detail := range result.Details {
+		if strings.Contains(detail, "metadata.json") {
+			t.Errorf("metadata.json reported for its deprecated key: %s", detail)
+		}
 	}
 
-	// Should mention the wrong port in details
-	if len(result.Details) == 0 {
-		t.Error("expected details to contain port mismatch info")
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() failed: %v", err)
 	}
-
-	t.Logf("Result: status=%v, message=%s, details=%v", result.Status, result.Message, result.Details)
+	if _, err := os.Stat(portFile); !os.IsNotExist(err) {
+		t.Errorf("stale port file survived Fix (stat err: %v)", err)
+	}
+	data, err := os.ReadFile(metaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := meta["dolt_server_port"]; ok {
+		t.Errorf("Fix left the deprecated dolt_server_port key: %v", meta["dolt_server_port"])
+	}
+	if meta["dolt_database"] != "hq" || meta["dolt_server_host"] != "127.0.0.1" {
+		t.Errorf("Fix dropped other fields: %v", meta)
+	}
 }
 
-// TestStaleDoltPortCheck_FixUpdatesMetadata verifies that Fix() updates metadata.json with correct port.
-func TestStaleDoltPortCheck_FixUpdatesMetadata(t *testing.T) {
+// TestStaleDoltPortCheck_FixRemovesTheKeyAndStalePort verifies that Fix() removes
+// a stale port file and the deprecated key, and that the town is then consistent.
+func TestStaleDoltPortCheck_FixRemovesTheKeyAndStalePort(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create .dolt-data/config.yaml with port 3307
-	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
-	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	configYaml := `log_level: warning
-listener:
-  port: 3307
-`
-	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte(configYaml), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create town .beads/metadata.json with WRONG port
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	metadata := map[string]interface{}{
-		"dolt_mode":        "server",
-		"dolt_server_host": "127.0.0.1",
-		"dolt_server_port": 3306, // Wrong port!
-		"dolt_database":    "hq",
-	}
-	metadataBytes, _ := json.MarshalIndent(metadata, "", "  ")
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadataBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  port: 3307\n")
+	writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3306,"dolt_database":"hq"}`)
+	writeDoctorTownFile(t, tmpDir, ".beads/dolt-server.port", "3306")
 
 	check := NewStaleDoltPortCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
-	// Run check to detect the issue
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning before fix, got %v", result.Status)
 	}
 
-	// Run fix
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix() failed: %v", err)
 	}
 
-	// Verify metadata.json was updated
-	updatedBytes, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".beads", "metadata.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	var updatedMetadata map[string]interface{}
-	if err := json.Unmarshal(updatedBytes, &updatedMetadata); err != nil {
-		t.Fatal(err)
+	if strings.Contains(string(data), "dolt_server_port") {
+		t.Errorf("metadata.json still has the deprecated key: %s", data)
 	}
 
-	port := int(updatedMetadata["dolt_server_port"].(float64))
-	if port != 3307 {
-		t.Errorf("expected port 3307 after fix, got %d", port)
-	}
-
-	// Run check again - should pass now
 	result = check.Run(ctx)
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK after fix, got %v: %s", result.Status, result.Message)
@@ -209,8 +176,8 @@ func TestStaleDoltPortCheck_TownJSONPortWins(t *testing.T) {
 		t.Errorf("port file must survive Fix: %v", err)
 	}
 	data, err := os.ReadFile(metaFile)
-	if err != nil || !strings.Contains(string(data), "3310") {
-		t.Errorf("metadata.json must keep 3310, got %q (err %v)", data, err)
+	if err != nil || strings.Contains(string(data), "dolt_server_port") {
+		t.Errorf("metadata.json must lose the deprecated key, got %q (err %v)", data, err)
 	}
 }
 
@@ -285,9 +252,10 @@ func TestStaleDoltPortCheck_PortlessTownJSONFallsThroughToConfigYAML(t *testing.
 	}
 }
 
-// TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing verifies that a
-// town naming no Dolt port is reported unknown and Fix touches no file.
-func TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing(t *testing.T) {
+// TestStaleDoltPortCheck_UnknownPortSkipsAndFixKeepsPortFile verifies that a
+// town naming no Dolt port is reported unknown, and Fix keeps the port file
+// (it removes only the deprecated key, which needs no port to judge).
+func TestStaleDoltPortCheck_UnknownPortSkipsAndFixKeepsPortFile(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -309,7 +277,7 @@ func TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing(t *testing.T) {
 		t.Errorf("port file must survive Fix when the port is unknown: %v", err)
 	}
 	data, err := os.ReadFile(metaFile)
-	if err != nil || !strings.Contains(string(data), "3310") {
-		t.Errorf("metadata.json must keep 3310, got %q (err %v)", data, err)
+	if err != nil || strings.Contains(string(data), "dolt_server_port") {
+		t.Errorf("metadata.json must lose the deprecated key, got %q (err %v)", data, err)
 	}
 }

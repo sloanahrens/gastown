@@ -1956,10 +1956,11 @@ func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
 	}
 }
 
-// TestEnsureMetadata_RepairsStalePort tests that EnsureMetadata overwrites
-// a stale dolt_server_port (e.g., 13729 from a previous bd init) with the
-// correct port from DefaultConfig. This is the root cause of "connection
-// refused" errors reported by community users after gt dolt fix-metadata.
+// TestEnsureMetadata_RepairsStalePort tests that EnsureMetadata replaces a
+// stale port (e.g., 13729 from a previous bd init) with the town's port from
+// DefaultConfig, in dolt-server.port, the file bd reads. This is the root cause
+// of "connection refused" errors reported by community users after gt dolt
+// fix-metadata. The deprecated metadata.json key is removed (gt-49f3pn).
 func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost().townPort(DefaultPort)
@@ -1999,14 +2000,110 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		t.Fatalf("parsing metadata: %v", err)
 	}
 
-	// Port should now be the town's (3307), not the stale 13729
-	wantPort := float64(DefaultPort)
-	if meta["dolt_server_port"] != wantPort {
-		t.Errorf("dolt_server_port = %v, want %v", meta["dolt_server_port"], wantPort)
+	if _, ok := meta["dolt_server_port"]; ok {
+		t.Errorf("metadata.json still has the deprecated dolt_server_port key: %v", meta["dolt_server_port"])
 	}
 	if meta["dolt_server_host"] != "127.0.0.1" {
 		t.Errorf("dolt_server_host = %v, want 127.0.0.1", meta["dolt_server_host"])
 	}
+	// Port should now be the town's (3307), not the stale 13729
+	portData, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("reading dolt-server.port: %v", err)
+	}
+	if got := string(portData); got != strconv.Itoa(DefaultPort) {
+		t.Errorf("dolt-server.port = %q, want %d", got, DefaultPort)
+	}
+}
+
+// TestEnsureMetadataDropsTheDeprecatedPort verifies that EnsureMetadata removes
+// the deprecated dolt_server_port key that bd warns on, never writes it, keeps
+// every other field, and changes nothing on a second run (gt-49f3pn).
+func TestEnsureMetadataDropsTheDeprecatedPort(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().townPort(DefaultPort).host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	carrying := map[string]interface{}{
+		"backend":          "dolt",
+		"database":         "dolt",
+		"dolt_mode":        "server",
+		"dolt_database":    "hq",
+		"dolt_server_host": "127.0.0.1",
+		"dolt_server_port": 13729,
+		"project_id":       "keep-me",
+	}
+	data, _ := json.Marshal(carrying)
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata failed: %v", err)
+	}
+	got := readJSONMap(t, metaPath)
+	if _, ok := got["dolt_server_port"]; ok {
+		t.Errorf("dolt_server_port survived EnsureMetadata: %v", got["dolt_server_port"])
+	}
+	for key, want := range map[string]interface{}{
+		"dolt_server_host": "127.0.0.1",
+		"dolt_database":    "hq",
+		"project_id":       "keep-me",
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %v, want %v", key, got[key], want)
+		}
+	}
+
+	settled, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("second EnsureMetadata failed: %v", err)
+	}
+	again, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(settled, again) {
+		t.Errorf("second EnsureMetadata rewrote metadata.json:\nfirst:  %s\nsecond: %s", settled, again)
+	}
+
+	// A file without the key never gains it.
+	rigBeadsDir := filepath.Join(townRoot, "rig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigMeta := filepath.Join(rigBeadsDir, "metadata.json")
+	if err := os.WriteFile(rigMeta, []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"rig"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadataForBeadsDir(townRoot, rigBeadsDir, "rig"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir failed: %v", err)
+	}
+	if _, ok := readJSONMap(t, rigMeta)["dolt_server_port"]; ok {
+		t.Error("EnsureMetadataForBeadsDir added dolt_server_port to a file that had none")
+	}
+}
+
+// readJSONMap decodes the JSON object at path.
+func readJSONMap(t *testing.T, path string) map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	return m
 }
 
 // TestEnsureMetadataWritesThePortFile verifies that EnsureMetadata writes the

@@ -25,11 +25,13 @@ func TestReadBeadsRuntimeConfigServerMetadata(t *testing.T) {
   "backend": "dolt",
   "dolt_mode": "server",
   "dolt_server_host": "192.0.2.10",
-  "dolt_server_port": 4311,
   "dolt_database": "gastown"
 }`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0600); err != nil {
 		t.Fatalf("write metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("4311"), 0600); err != nil {
+		t.Fatalf("write dolt-server.port: %v", err)
 	}
 
 	cfg, ok := doltserver.ReadBeadsRuntimeConfig(beadsDir)

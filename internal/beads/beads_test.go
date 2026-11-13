@@ -385,16 +385,26 @@ func TestCreateOptionsRig(t *testing.T) {
 	}
 }
 
+// writePortFileFixture writes port to dir/dolt-server.port, the port file bd
+// reads the port from (the metadata.json key is deprecated, gt-49f3pn).
+func writePortFileFixture(t *testing.T, dir, port string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "dolt-server.port"), []byte(port), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
 	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1"}`)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePortFileFixture(t, beadsDir, "4407")
 
 	env := BuildPinnedBDEnv([]string{
 		"PATH=/usr/bin",
@@ -478,12 +488,13 @@ func TestBuildPinnedBDEnvFollowsRedirectBeforeMetadata(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigBeadsDir, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rigBeadsDir, "metadata.json"), []byte(`{"dolt_database":"hq","dolt_server_host":"wrong-host","dolt_server_port":9999}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "metadata.json"), []byte(`{"dolt_database":"hq","dolt_server_host":"wrong-host"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(canonicalBeadsDir, "metadata.json"), []byte(`{"dolt_database":"gastown","dolt_server_host":"127.0.0.2","dolt_server_port":4407}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(canonicalBeadsDir, "metadata.json"), []byte(`{"dolt_database":"gastown","dolt_server_host":"127.0.0.2"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePortFileFixture(t, canonicalBeadsDir, "4407")
 
 	env := BuildPinnedBDEnv([]string{
 		"PATH=/usr/bin",
@@ -591,10 +602,11 @@ func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1"}`)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePortFileFixture(t, beadsDir, "4407")
 
 	base := []string{
 		"PATH=/usr/bin",
@@ -733,7 +745,7 @@ func TestBuildPinnedBDEnvEndpointPrecedence(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(townJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
-	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1"}`)
 	inTown := filepath.Join(townRoot, "rig", ".beads")
 	outside := filepath.Join(t.TempDir(), ".beads")
 	for _, dir := range []string{inTown, outside} {
@@ -743,6 +755,7 @@ func TestBuildPinnedBDEnvEndpointPrecedence(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metadata, 0644); err != nil {
 			t.Fatal(err)
 		}
+		writePortFileFixture(t, dir, "4407")
 	}
 	inherited := []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=127.0.0.2", "BEADS_DOLT_PORT=5507", "GT_DOLT_PORT=9999"}
 
@@ -779,10 +792,11 @@ func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T)
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1"}`)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writePortFileFixture(t, beadsDir, "4407")
 
 	env := BuildRoutingBDEnv([]string{
 		"PATH=/usr/bin",

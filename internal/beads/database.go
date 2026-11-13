@@ -305,15 +305,11 @@ func readDoltMetadata(beadsDir string) doltMetadata {
 	}
 	var raw struct {
 		DoltServerHost string `json:"dolt_server_host"`
-		DoltServerPort int    `json:"dolt_server_port"`
 	}
 	if json.Unmarshal(data, &raw) != nil {
 		return meta
 	}
 	meta.Host = strings.TrimSpace(raw.DoltServerHost)
-	if meta.Port == "" && raw.DoltServerPort > 0 {
-		meta.Port = strconv.Itoa(raw.DoltServerPort)
-	}
 	return meta
 }
 
