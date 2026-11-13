@@ -57,7 +57,7 @@ BD_ACTOR falls back to git user.name. Crew sessions are not retired.
 Exit statuses:
   COMPLETED      - Work done, branch submitted for landing (default)
   ESCALATED      - Hit blocker, needs human intervention
-  DEFERRED       - Work paused, issue still open
+  DEFERRED       - Work paused; the bead is released open and unassigned
 
 Process exit codes (the work was not submitted; no completion is recorded
 and the session stays up so you can fix it and re-run gt done):
