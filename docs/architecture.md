@@ -156,6 +156,8 @@ The daemon is granted the right to start the pod update's Job, so the roll outli
 
 The *town-state claim* is a persistent volume that holds the town's files: settings, runtime state, the rigs' bare repositories, locks, the dispatch hold. It is the one town copy. The daemon owns it and runs against it; the dashboard mounts the same state to read it. The Mac is not a town: its `gt`, `bd`, `om` and `hm` are one thin wrapper (`gt-wrap`, in `cmd/gt-wrap`) that runs the command in the daemon pod with `kubectl exec`, and the Mac keeps `~/.claude` and plain git clones. The pod mounts the claim at the same `~/gt` path the Mac used, so the two are easy to confuse: a town edit is made in the pod, and a file under the Mac's `~/gt` is not one the pod reads. The pod's town root may differ from the Mac's; when it does, the wrapper rewrites the pod root to the Mac root in the tool's stdout and stderr so a path the tool prints still works on the Mac. Before editing that rewriter, read `docs/design/gt-in-container.md`, which holds its rules.
 
+A call the wrapper's config covers under its `native` key runs on the Mac with that tool's own binary, not in the pod. Before editing which calls run natively, read [Native calls](design/gt-in-container.md#native-calls), which holds the set and why each call is on it.
+
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 
 ### Secrets
