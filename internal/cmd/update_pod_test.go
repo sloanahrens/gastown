@@ -70,6 +70,8 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
 	case containsArg(args, "get"):
 		return podListJSON(k.pods...), 0, nil
+	case containsArg(args, "polecat-devtag"):
+		return podPairDevTagJSON(true, testDigestOf(podPairManifest)), 0, nil
 	case containsArg(args, "exec"):
 		return "gt version " + k.running + " built on test\n", 0, nil
 	}

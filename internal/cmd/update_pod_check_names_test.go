@@ -5,39 +5,35 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/update"
 )
 
 // TestUpdatePodPairCheckNamesTheCheckThatFailed holds each pair check failure to
 // the check the rollback record names: a daemon pod on another digest is
-// running-digests, a registry dev tag on another digest is registry-tag, and a
-// values file that no longer holds the pair names no check. The message is the
-// same text the check always reported.
+// running-digests, a dev tag on another digest is registry-tag, and a values
+// file that no longer holds the pair names no check.
 func TestUpdatePodPairCheckNamesTheCheckThatFailed(t *testing.T) {
 	t.Parallel()
-	otherDigest := "registry.internal:5000/town/gastown-daemon@" + testDigestOf([]byte("another daemon image"))
+	otherDaemon := "registry.internal:5000/town/gastown-daemon@" + testDigestOf([]byte("another daemon image"))
 	rows := []struct {
 		name      string
 		kube      podPairKubectl
-		images    updateImagesSeams
-		valuesDir func(t *testing.T) string
 		wantCheck string
 		wantMsg   string
 	}{
 		{
 			name:      "a daemon pod runs another digest",
-			kube:      podPairKubectl{pods: []podPairPod{runningPod("gastown-daemon-new", otherDigest)}},
-			images:    podPairImages(podPairManifest),
+			kube:      podPairKubectl{pods: []podPairPod{runningPod("gastown-daemon-new", otherDaemon)}},
 			wantCheck: update.CheckRunningDigests,
 			wantMsg:   "runs daemon digest",
 		},
 		{
-			name:      "the registry's dev tag names another digest",
-			kube:      podPairKubectl{pods: podPairHealthy()},
-			images:    podPairImages([]byte("another polecat image")),
+			name:      "the dev tag names another digest",
+			kube:      podPairKubectl{pods: podPairHealthy(), devTag: podPairDevTagJSON(true, testDigestOf([]byte("another polecat image")))},
 			wantCheck: update.CheckRegistryTag,
-			wantMsg:   "the registry's dev tag for the polecat image is digest",
+			wantMsg:   "names digest",
 		},
 	}
 	for _, row := range rows {
@@ -45,7 +41,8 @@ func TestUpdatePodPairCheckNamesTheCheckThatFailed(t *testing.T) {
 			t.Parallel()
 			path, _ := podPairValuesFile(t)
 			kube := row.kube
-			check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: row.images, TownRoot: t.TempDir(), ValuesPath: path}
+			clock := &rollbackTestClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
+			check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path, Clock: clock, Sleep: clock.sleep}
 			err := check.Check(context.Background(), podPairPair)
 			var pc update.PairCheckError
 			if !errors.As(err, &pc) {
@@ -70,7 +67,7 @@ func TestUpdatePodPairCheckRefusalNamesNoCheck(t *testing.T) {
 	other := podPairPair
 	other.Commit = "3333333333333333333333333333333333333333"
 	kube := podPairKubectl{pods: podPairHealthy()}
-	check := podPairCheck{Run: kube.run, Target: podPairTarget(), Images: podPairImages(podPairManifest), TownRoot: t.TempDir(), ValuesPath: path}
+	check := podPairCheck{Run: kube.run, Target: podPairTarget(), ValuesPath: path}
 	// The file holds podPairPair, so a check of another pair refuses it.
 	err := check.Check(context.Background(), other)
 	var pc update.PairCheckError
