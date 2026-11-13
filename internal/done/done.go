@@ -937,6 +937,9 @@ type doneRun struct {
 	deps        doneSubmitDeps
 	// out is where a submission prints its outcome; nil means os.Stdout.
 	out io.Writer
+	// openSource opens the bead store a DEFERRED exit releases its bead in;
+	// nil is OpenSourceStore.
+	openSource SourceStoreOpener
 }
 
 // stdout is the writer a submission prints its outcome to.
@@ -1881,6 +1884,13 @@ func reportDone(r *doneRun, exitType string) error {
 
 	getenv := r.env
 	fromHandoff := getenv(EnvFromHandoff) == "1"
+	// A DEFERRED exit releases the bead it paused (gt-tq23e9). A handoff's
+	// DEFERRED is not an exit: the successor session resumes the same bead.
+	if exitType == ExitDeferred && !fromHandoff {
+		if err := r.releaseDeferred(); err != nil {
+			return err
+		}
+	}
 	fmt.Println()
 	if r.agent.Role != role.Polecat {
 		fmt.Printf("%s Session exiting\n", style.Bold.Render("→"))
