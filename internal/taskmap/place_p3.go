@@ -34,6 +34,7 @@ func init() {
 		Entry{Path: "metrics shape-outcome", Group: "review", Use: "Use this to see whether a bead's first-filed shape predicts its review rounds and whether it is approved."},
 		Entry{Path: "metrics snapshot", Group: "internal", Use: "Use this to add one town snapshot to the metrics log now."},
 		Entry{Path: "metrics storypoints", Group: "orient", Use: "Use this to read today's story-points shadow report from the landings table."},
+		Entry{Path: "metrics storypoints-train", Group: "internal", Use: "Use this to refit the story-points weights from the landings table, writing a proposed file and a report for a person to adopt."},
 
 		Entry{Path: "nudge", Group: "dispatch", Use: "Use this to send a polecat or crew session a message that it sees in its live session."},
 		Entry{Path: "peek", Group: "seats", Use: "Use this to see what a polecat or crew session is doing now, from its recent terminal output."},
