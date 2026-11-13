@@ -87,7 +87,11 @@ these settings, so a database elsewhere is named by that Secret.
 The DSNs carry no password. libpq takes it from `PGPASSWORD`, which you set to
 the password in `tracker-db.env` beside the compose file, or from a `0600`
 `~/.pgpass` entry for `127.0.0.1:5432`. A block whose first lines find neither
-stops with a message naming both.
+stops with a message naming both. The guard checks only that `PGPASSWORD` is set
+or that `~/.pgpass` is readable, not that the file holds an entry libpq can
+use: with an entry missing, a block still starts and the first `psql`,
+`createdb` or `dropdb` asks for the password, or fails when there is no terminal
+to ask on.
 
 `--exit-on-error` stops at the first error, so a restore that would otherwise
 have ignored one fails here. `--no-owner` gives the restored objects to your
@@ -172,9 +176,9 @@ for a while. Drop it then:
 ```bash
 if [ -z "${PGPASSWORD:-}" ] && [ ! -r "$HOME/.pgpass" ]; then
   echo "set PGPASSWORD from deploy/tracker/tracker-db.env, or add a ~/.pgpass entry for 127.0.0.1:5432" >&2
-else
-  dropdb --maintenance-db "postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable" --force "$ASIDE"
+  exit 1
 fi
+dropdb --maintenance-db "postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable" --force "$ASIDE"
 ```
 
 ## Rehearsal
