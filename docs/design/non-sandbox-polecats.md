@@ -9,12 +9,12 @@ seats); the host seats `claude-haiku`, `claude-sonnet`, `deepseek-flash` and
 
 ## Method
 
-The code read is `origin/main` at `65474d9e` (2026-11-06). Each row's callers
-come from a grep of the non-test tree, given in **Evidence**. No live town was
-read; the live facts below are the overseer's comment on gt-slpty4, restated.
-Line numbers are left out of the paths table because they move; the symbol is
-the reference. The docs table has no symbol to name, so it keeps the lines the
-grep printed at that commit.
+The code read is `origin/main` at `ab8c61d46` (2026-11-13). Each row's symbols
+and callers were re-read against that sha with a grep of the non-test tree,
+given in **Evidence**. No live town was read; the live facts below are the
+overseer's comment on gt-slpty4, restated. Line numbers are left out of the paths
+table because they move; the symbol is the reference. The docs table has no
+symbol to name, so it keeps the lines the grep printed at that sha.
 
 Two senses of a name carry the whole inventory:
 
@@ -27,7 +27,10 @@ Two senses of a name carry the whole inventory:
 A polecat *seat* named `claude-sonnet` and a *sling* that names `claude-sonnet`
 are different debt: the first is a host seat, the second is a host spawn.
 
-## Live-town facts (overseer, 2026-11-06)
+## Live-town facts (overseer, as of 2026-11-06, not re-read)
+
+Town state, not code on `origin/main`. These facts are as of 2026-11-06 and were
+not re-read on 2026-11-13; the numbers are the overseer's, carried over unchanged.
 
 - `gt pool show` lists `sbx-flash` (cap 5) and `sbx-haiku` (cap 0). The four
   retired seats are gone from `polecat_pool.seats`.
@@ -52,16 +55,16 @@ seat.
 |---|---|---|---|---|---|
 | P1 | `internal/config/seats.go` — `Seats`, `SeatConfig.Backend` | Validates `polecat_pool.seats`; `backend: ""` or `tmux` is the host tmux backend, `openshell` requires a sandbox profile | `config.Seats` in `internal/townconfig/townconfig.go`, `internal/polecat/sandbox_seat_probe.go`, `internal/polecat/session_manager.go`, `internal/daemon/daemon.go`, `internal/daemon/crash_stale_sandbox_hook.go`, `internal/daemon/scheduled_slings_spec.go`, `internal/cmd/session_backend.go`, `internal/cmd/spec.go`, `internal/cmd/pool.go`, `internal/cmd/pool_migrate.go`, `internal/cmd/dashboard_polecats.go`, `internal/cmd/dashboard_models.go` | No seat today. `gt pool set claude-haiku=2` passes while the settings declare that agent, and writes a seat with no backend (host) | **Delete now (B1)** |
 | P2 | `internal/cmd/session_backend.go` — `sessionBackendForAgent`, `sessionBackendForAgentWith` | Picks the backend from the agent's seat; an agent with no seat gets host tmux | `internal/cmd/polecat_spawn.go` (spawn), `internal/cmd/pool_seats.go` (`townSeatBackend`, used by `internal/cmd/session.go` and `internal/cmd/up.go`) | Yes: `--agent claude-haiku` still resolves from the settings and, with no seat, falls through to tmux; a hand-edited seat naming a retired agent is accepted by `Seats(ts, nil)` and runs on tmux when it names no backend | **Delete now (B2)** |
-| P3 | `internal/cmd/sling_pool.go` — `choosePoolAgent`, `poolOwnsAgent` | A requested agent with no seat returns no opinion and the request stands; the pool only caps agents it owns | `routeWithNotice` (the sling admission path), which also serves the spec dispatcher's own route | Yes, when a sling or a scheduled entry names a retired agent. The help text at `internal/cmd/sling.go` says a seat is honored or the sling is refused; a name that is no seat takes a third route, the host, which the help does not name | **Delete now (B2)** |
+| P3 | `internal/cmd/sling_pool.go` — `choosePoolAgent`, `poolOwnsAgent` | A requested agent with no seat returns no opinion and the request stands; the pool only caps agents it owns | `poolRouter.route` ← `internal/cmd/polecat_spawn.go` (the spawn route, line 874), through `routeWith` and `routeWithNotice` in `sling_pool.go`; `peekPolecatPoolAgent` has no caller on main | Yes, when a sling or a scheduled entry names a retired agent. The help text at `internal/cmd/sling.go` says a seat is honored or the sling is refused; a name that is no seat takes a third route, the host, which the help does not name | **Delete now (B2)** |
 | P4 | `internal/cmd/pool_seats.go` — `restartPolecatOnSlungAgent`, `townSeatBackend` | Restarts a crashed polecat on the agent its intent record names, resolving that agent's backend | `internal/cmd/session.go` (`gt session start`/`restart`), `internal/cmd/up.go` | Yes for an intent record written before the cutover: the record outlives the seat, and a name with no seat restarts on host tmux | **Delete now (B2)** |
 | P5 | `internal/polecat/session_manager.go` — `Start`, `SessionStartOptions.Backend` | A nil backend is the host tmux session | `internal/cmd/polecat_spawn.go` (passes one), `internal/cmd/pool_seats.go` (passes one when the town is known) | Only a start with no town root (no settings to name a backend) | **Delete now (B3)** |
-| P6 | `internal/config/types.go` — `SandboxProfile.WithDefaults`, `Validate`, `SandboxDriverDocker`; `internal/session/backend_openshell.go` — `usesDockerVolumes`, `ensureCacheVolume`, `cacheDriverConfig` | An unset sandbox driver defaults to `docker`; a docker seat with a named cache volume mounts a per-rig Docker cache volume | `WithDefaults` in `internal/cmd/session_backend.go`, `internal/polecat/sandbox_seat_probe.go`, `internal/polecat/session_manager.go`, `internal/daemon/crash_stale_sandbox_hook.go`, `internal/cmd/sandbox_endpoint.go`, `cmd/polecatcaches/main.go`; the volume path in `internal/session/backend_openshell.go` | The Docker-driver seat the k8s page calls the control is no longer in the pool (it is the two `sbx-*` seats); any profile that omits `driver` still takes this path, and X confirms no live `sbx-*` profile does | **Delete after X** |
-| P7 | `internal/config/cost_tier.go` — `claudeSonnetPreset`, `claudeHaikuPreset`, `CostTierAgents`, `CostTierRoleAgents`, `ApplyCostTier`; `internal/config/loader.go` — `costTierPresetByName` | Builds host Claude CLI presets and maps the budget tier's crew to `claude-sonnet` | `costTierPresetByName` ← `lookupAgentConfigIfExists` ← `AgentResolver`, `ValidateAgentConfig`, `ResolveAgentConfigByName`; `ApplyCostTier` ← `gt config cost-tier` (`internal/cmd/config.go`); the tier tables ← `GetCurrentTier`/`FormatTierRoleTable` | Yes for crew and reviewer roles, not for a polecat seat. A polecat reaches the name only through P1–P5 | **Keep** |
+| P6 | `internal/config/types.go` — `SandboxProfile.WithDefaults`, `Validate`, `SandboxDriverDocker`; `internal/session/backend_openshell.go` — `usesDockerVolumes`, `ensureCacheVolume`, `cacheDriverConfig` | An unset gateway defaults to `k8s` (`defaultSandboxGateway`, `internal/config/types.go:1888`, applied by `WithDefaults` at `types.go:1919`, gt-dze2tw). An unset driver defaults to `docker` (`WithDefaults`, `internal/config/types.go:1925`). A docker seat with a named cache volume mounts a per-rig Docker cache volume | `WithDefaults` in `internal/cmd/session_backend.go`, `internal/config/seats.go`, `internal/polecat/sandbox_seat_probe.go`, `internal/polecat/session_manager.go`, `internal/daemon/crash_stale_sandbox_hook.go`, `internal/cmd/sandbox_endpoint.go`, `internal/cmd/sandbox_set_resources.go`, `cmd/polecatcaches/main.go`; the volume path in `internal/session/backend_openshell.go` | The Docker-driver seat the k8s page calls the control is no longer in the pool (it is the two `sbx-*` seats); any profile that omits `driver` still takes this path, and X confirms no live `sbx-*` profile does; a profile that omits `gateway` now takes the k8s gateway, not openshell | **Delete after X** |
+| P7 | `internal/config/cost_tier.go` — `claudeSonnetPreset`, `claudeHaikuPreset`, `CostTierAgents`, `CostTierRoleAgents`, `ApplyCostTier`; `internal/config/loader.go` — `costTierPresetByName` | Builds host Claude CLI presets and maps the budget tier's crew to `claude-sonnet` | `costTierPresetByName` ← `lookupAgentConfigIfExists` ← `AgentResolver`, `ValidateAgentConfig`, `ResolveAgentConfigByName`, `lookupAgentConfig`; `ApplyCostTier` ← `gt config cost-tier` (`internal/cmd/config.go`); the tier tables ← `GetCurrentTier`/`FormatTierRoleTable` | Yes for crew and reviewer roles, not for a polecat seat. A polecat reaches the name only through P1–P5 | **Keep** |
 | P8 | `internal/cmd/model.go` — `modelBuiltinProfiles` | Ships the `haiku`/`sonnet` profiles `gt model` reads and applies | `readModelView` and the `gt model` commands (`runModelShow`, `runModelSetRole`, `runModelSetDefault`, `runModelApply`) | Live as a host-role setting; the names resolve through P7 | **Keep** |
 | P9 | `internal/cmd/pool_migrate.go` — `poolMigrateDefaultHookedAgent` | The second seat's default when a two-seat config set `max_hooked` and no `hooked_agent`; it was `claude-sonnet` | `takePatrolSeatKeys` ← `planPoolMigrate` ← `runPoolMigrate` (`gt pool migrate`) | Only a config that still holds the two-seat keys; this town's does not. `checkMigrated` needs the name to resolve, which P7 provides | **Keep** |
 | P10 | `internal/cmd/pool.go` — help and `parsePoolSeatCaps` error; `internal/cmd/pool_mix.go` — signpost | `gt pool set` help/error examples use `claude-haiku`/`deepseek-flash`; `gt pool mix` is a retired signpost whose examples use them | Cobra registration; `runPoolMix` from the `pool mix` command | Text only: `gt pool mix` exits 2 for every argument except `-h`/`--help` | **Delete now (B4)** |
-| P11 | `internal/cmd/sling_schedule.go` — `ScheduledSling.Agent`; `internal/daemon/scheduled_slings.go` — `--agent`; `internal/daemon/scheduled_slings_spec.go` — `run_agent` check | A non-spec scheduled entry carries an agent into `gt sling`; a spec entry's `agent` is refused at load and its `run_agent` must name a seat | `scheduleSlingBead` in `internal/cmd/sling_schedule.go`; the scheduler's `sling` construction in `internal/daemon/scheduled_slings.go` | Yes for a non-spec entry that still names a retired agent; the 0-label fact does not cover patrol entries | **Keep** (the field can name `sbx-*`; the refusal is B2) |
-| P12 | `internal/beads/beads_agent.go` — `AgentFields.Agent` | Records the agent a sling spawned the seat on, for the roster and later restarts | Written by `internal/cmd/polecat_spawn.go` (`AddOptions`), read by the agent-bead/roster readers | Generic: holds `sbx-*` for the live seats | **Keep** |
+| P11 | `internal/config/daemon_config.go` — `ScheduledSlingEntry.Agent`; `internal/cmd/sling_schedule.go` — `scheduleSlingBead` (writes the agent into the bead's fields); `internal/daemon/scheduled_slings.go` — `--agent=`; `internal/daemon/scheduled_slings_spec.go` — `run_agent` check | A non-spec scheduled entry carries an agent into `gt sling`; a spec entry's `agent` is refused at load and its `run_agent` must name a seat | `scheduleSlingBead` in `internal/cmd/sling_schedule.go`; the scheduler's `sling` construction in `internal/daemon/scheduled_slings.go` | Yes for a non-spec entry that still names a retired agent; the 0-label fact does not cover patrol entries | **Keep** (the field can name `sbx-*`; the refusal is B2) |
+| P12 | `internal/beads/beads_agent.go` — `AgentFields.Agent` | Records the agent a sling spawned the seat on, for the roster and later restarts | Written by `internal/polecat/manager.go` (`AddOptions`), which `internal/cmd/polecat_spawn.go` fills; read by the agent-bead/roster readers | Generic: holds `sbx-*` for the live seats | **Keep** |
 | P13 | `internal/agentlog/transcript.go` — `claudeProjectDirsFor` and its `~/.claude` fallback | Searches every root that can hold a seat's transcript, including the default root a host agent inherits | `LatestTranscript`/`ProjectDirsFor` ← `internal/liveness`, `internal/jev`, `internal/daemon` | Host roles still log under `~/.claude`; a seat spawned with its own `CLAUDE_CONFIG_DIR` logs there | **Keep** |
 | P14 | `internal/models/backend.go` — `ModelFamily`; `internal/cmd/dashboard_om.go` — `omModelName` | Shortens a model name to its family for display | `internal/cmd/spec.go` (overrun note), `internal/cmd/dashboard_models.go`, `internal/cmd/dashboard_om.go` | Display only; `flash` is still the family of `sbx-flash` | **Keep** |
 | P15 | no code constructor: `deepseek-flash` is an `agents` entry in the live settings | The name resolves through the generic `lookupAgentConfigIfExists` and `ResolveAgentConfigWithOverride`; the code ships no preset for it | The resolver callers in P7; `ModelFamily` for display (P14) | Yes while the settings entry exists; a seat or `--agent deepseek-flash` then reaches P2 | **Keep** (the settings entry is the overseer's to clean; no code to delete) |
@@ -126,17 +129,22 @@ removed.
 
 ## Docs
 
-The exact-name grep at `origin/main` (`65474d9e`,
+The exact-name grep at `origin/main` (`ab8c61d46`,
 `grep -rnE '(^|[^a-zA-Z0-9-])<name>([^a-zA-Z0-9-]|$)' docs/`):
 
 | File | Lines | What the line is |
 |---|---|---|
-| `docs/INSTALLING.md` | 265, 268, 274: `claude-haiku` on each | Install examples: `gt config agent set`, `gt config default-agent`, `gt sling --agent` |
-| `docs/reference.md` | 996, 1009, 1011, 1076: `claude-haiku`; 618: `deepseek-flash` | Agent-config examples, a secrets example, and a sling example |
+| `docs/INSTALLING.md` | none: no `claude-haiku` on main; the install examples read `<agent-alias>` at 271, 274, 280 | Install examples: `gt config agent set`, `gt config default-agent`, `gt sling --agent` |
+| `docs/reference.md` | 1166, 1179, 1181, 1291: `claude-haiku`; 785: `deepseek-flash` | Agent-config examples (785, 1166, 1179, 1181) and a sling example (1291); the secrets example that named `claude-haiku` is gone from main |
 | `docs/concepts/identity.md` | 267: `claude-sonnet` and `claude-haiku`; 279, 280: `claude-sonnet` | The model-comparison section and its `bd count --label=agent:` examples |
 | `docs/examples/town-settings.example.json` | 22, 25: `deepseek-flash` | An agent entry with `--model deepseek-flash` |
 | `docs/design/k8s-sandboxes.md` | 18: `deepseek-flash-sandbox-k8s` | The first k8s seat in a dated decision; the page also still calls the Docker-driver seat the control, which P6 retires |
 | `README.md` (outside `docs/`) | 435: `deepseek-flash`; 462: `claude-sonnet` | Quick-start examples |
+
+The same grep at `ab8c61d46` also matches two plan files added after the first
+read, `docs/plans/2026-11-11-story-points-plan.md` (line 95) and
+`docs/plans/2026-11-11-story-points-retrospective.md` (line 31). They are not in
+the table above, and B7 does not name them.
 
 The `deepseek` provider, the spend metric and the `deepseek` OpenShell provider
 are live; only the *seat* names retired. A grep for `deepseek` in `internal/` is
@@ -169,7 +177,7 @@ The greps, run at `origin/main` over the non-test tree:
 - `grep -rn 'ApplyCostTier\|CostTierAgents\|costTierPresetByName' internal/ cmd/`
 - `grep -rn 'modelBuiltinProfiles' internal/cmd/`
 - `grep -rn 'poolMigrateDefaultHookedAgent' internal/cmd/`
-- `grep -rn 'ScheduledSling.Agent\|--agent=' internal/cmd/ internal/daemon/`
+- `grep -rn 'ScheduledSlingEntry\|--agent=' internal/cmd/ internal/daemon/ internal/config/`
 - `grep -rn 'AgentFields' internal/beads/`
 - `grep -rn 'claudeProjectDirsFor\|LatestTranscript\|ProjectDirsFor' internal/`
 - `grep -rn 'ModelFamily(\|omModelName(' internal/ cmd/`
