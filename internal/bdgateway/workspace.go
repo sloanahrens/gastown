@@ -78,8 +78,8 @@ var (
 	ErrWorkspaceSwap = errors.New("bdgateway: workspace swap failed")
 	// ErrWorkspaceLiveTreeLost is a swap that could neither publish its tree nor
 	// restore the previous one: no tree is live at the root, so the store serves
-	// the empty workspace, and a later Open recovers the tree the swap moved
-	// aside.
+	// the empty workspace, and a later Open or push recovers the tree the swap
+	// moved aside.
 	ErrWorkspaceLiveTreeLost = errors.New("bdgateway: workspace live tree lost")
 )
 
@@ -261,12 +261,14 @@ func openWorkspaceStore(root string, fsys workspaceFS) (*WorkspaceStore, error) 
 		return nil, fmt.Errorf("%w: empty path", ErrWorkspaceRoot)
 	}
 	s := &WorkspaceStore{root: root, fs: fsys}
-	if err := s.recoverSwapped(); err != nil {
-		return nil, err
-	}
-	files, err := s.readTree()
+	files, restored, err := s.recoverSwapped()
 	if err != nil {
 		return nil, err
+	}
+	if !restored {
+		if files, err = s.readTree(); err != nil {
+			return nil, err
+		}
 	}
 	s.manifest = WorkspaceManifest(files)
 	return s, nil
@@ -275,28 +277,36 @@ func openWorkspaceStore(root string, fsys workspaceFS) (*WorkspaceStore, error) 
 // recoverSwapped restores the previous tree when the process stopped between
 // the two renames a replacement makes: the root is absent and the tree moved
 // aside is still there. Recovering here is what keeps a crash from turning a
-// pushed workspace into an empty one, and it runs on Open, before a later push's
-// sweep can remove the only copy of the tree. A root that exists is left alone;
-// the tree beside it is then a leftover the next push sweeps.
-func (s *WorkspaceStore) recoverSwapped() error {
+// pushed workspace into an empty one, and it runs on Open and before a push
+// writes anything, so a later sweep never removes the only copy of the tree. The
+// moved-aside tree is read and checked before it is renamed, so a tree the store
+// cannot serve is refused in place rather than published. A root that exists is
+// left alone; the tree beside it is then a leftover the next push sweeps. The
+// returned files are the restored tree's, and restored reports whether there was
+// one.
+func (s *WorkspaceStore) recoverSwapped() (map[string]string, bool, error) {
 	if _, err := s.fs.lstat(s.root); err == nil {
-		return nil
+		return nil, false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceRoot, err)
+		return nil, false, fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceRoot, err)
 	}
 	info, err := s.fs.lstat(s.oldPath())
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return nil, false, nil
 	} else if err != nil {
-		return fmt.Errorf("%w: reading the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
+		return nil, false, fmt.Errorf("%w: reading the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, s.oldPath())
+		return nil, false, fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, shown(s.oldPath()))
+	}
+	files, err := s.readTreeAt(s.oldPath())
+	if err != nil {
+		return nil, false, err
 	}
 	if err := s.fs.rename(s.oldPath(), s.root); err != nil {
-		return fmt.Errorf("%w: restoring the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
+		return nil, false, fmt.Errorf("%w: restoring the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
 	}
-	return nil
+	return files, true, nil
 }
 
 // Manifest returns the manifest hash of the live tree. Every gateway response
@@ -310,7 +320,13 @@ func (s *WorkspaceStore) Manifest() string {
 // readTree loads and checks the live tree. The checks are the push rules, so a
 // tree the store would not accept from a pusher is not one it serves either.
 func (s *WorkspaceStore) readTree() (map[string]string, error) {
-	info, err := s.fs.lstat(s.root)
+	return s.readTreeAt(s.root)
+}
+
+// readTreeAt loads and checks the tree at root, which is the live tree or one a
+// swap moved aside.
+func (s *WorkspaceStore) readTreeAt(root string) (map[string]string, error) {
+	info, err := s.fs.lstat(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]string{}, nil
 	}
@@ -318,11 +334,11 @@ func (s *WorkspaceStore) readTree() (map[string]string, error) {
 		return nil, fmt.Errorf("%w: %v", ErrWorkspaceRoot, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, s.root)
+		return nil, fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, shown(root))
 	}
 	files := map[string]string{}
 	total := 0
-	if err := s.readTreeDir(s.root, "", files, &total); err != nil {
+	if err := s.readTreeDir(root, "", files, &total); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrWorkspaceRoot, err)
 	}
 	return files, nil
@@ -355,28 +371,29 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 			return err
 		}
 		if !entry.Type().IsRegular() {
-			return fmt.Errorf("%w: %q is not a regular file", ErrWorkspacePath, name)
+			return fmt.Errorf("%w: %q is not a regular file", ErrWorkspacePath, shown(name))
 		}
 		content, err := s.fs.readFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			return err
 		}
 		if len(content) > MaxWorkspaceFileBytes {
-			return fmt.Errorf("%w: %q is %d bytes, cap %d", ErrWorkspaceFileTooLarge, name, len(content), MaxWorkspaceFileBytes)
+			return fmt.Errorf("%w: %q is %d bytes, cap %d", ErrWorkspaceFileTooLarge, shown(name), len(content), MaxWorkspaceFileBytes)
 		}
 		*total += len(content)
 		if *total > MaxWorkspaceTotalBytes {
-			return fmt.Errorf("%w: over %d bytes at %q", ErrWorkspaceTooLarge, MaxWorkspaceTotalBytes, name)
+			return fmt.Errorf("%w: over %d bytes at %q", ErrWorkspaceTooLarge, MaxWorkspaceTotalBytes, shown(name))
 		}
 		files[name] = string(content)
 	}
 	return nil
 }
 
-// Put validates a document, builds its tree beside the live one, and publishes
-// it, returning the manifest hash now served. Every refusal happens before the
-// tree is touched; a failure while building or publishing leaves the previous
-// tree live (see swap).
+// Put validates a document, recovers a previous tree a failed swap left beside
+// the root, builds the document's tree beside the live one, and publishes it,
+// returning the manifest hash now served. A document refusal happens before the
+// store writes anything; a failure while building or publishing leaves the
+// previous tree live (see swap).
 func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 	manifest, err := validatedManifest(doc)
 	if err != nil {
@@ -385,6 +402,17 @@ func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A swap whose restore failed left the previous tree beside the root and no
+	// tree live (ErrWorkspaceLiveTreeLost). Recovering it here, before the sweep,
+	// puts that tree back under the root: the sweep then removes only a leftover
+	// copy, and a build failure below cannot discard the only one.
+	files, restored, err := s.recoverSwapped()
+	if err != nil {
+		return "", err
+	}
+	if restored {
+		s.manifest = WorkspaceManifest(files)
+	}
 	if err := s.sweep(); err != nil {
 		return "", err
 	}
@@ -397,8 +425,8 @@ func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 	}
 	if err := s.swap(tmp); err != nil {
 		// The restore failed too, so no tree is live at the root: the store now
-		// serves the empty workspace, and the header must name that tree, not
-		// the one a later Open recovers from beside the root.
+		// serves the empty workspace, and the header must name that tree, not the
+		// one a later Open or push recovers from beside the root.
 		if errors.Is(err, ErrWorkspaceLiveTreeLost) {
 			s.manifest = WorkspaceManifest(map[string]string{})
 		}
@@ -478,7 +506,7 @@ func (s *WorkspaceStore) sweep() error {
 			continue
 		}
 		if err := s.fs.removeAll(filepath.Join(s.parent(), name)); err != nil {
-			return fmt.Errorf("%w: removing the leftover tree %q: %v", ErrWorkspaceSwap, name, err)
+			return fmt.Errorf("%w: removing the leftover tree %q: %v", ErrWorkspaceSwap, shown(name), err)
 		}
 	}
 	return nil
