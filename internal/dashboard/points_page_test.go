@@ -276,9 +276,51 @@ func TestTheLandingsPointsCellIsLabelledForTheStackedLayout(t *testing.T) {
 	}
 }
 
-// fibonacciRun matches three consecutive Fibonacci numbers in order, the shape a
-// points scale takes when it is written into the page.
-var fibonacciRun = regexp.MustCompile(`\b(1|2|3|5|8|13|21|34|55|89)\b\s*,\s*\b(2|3|5|8|13|21|34|55|89)\b\s*,\s*\b(3|5|8|13|21|34|55|89)\b`)
+// fibonacciScale is the points scale the feed rounds minutes onto, ascending as
+// the design writes it. The page draws the feed's points and must not carry a
+// copy: the scale is what a minutes-to-points conversion would need.
+var fibonacciScale = []string{"1", "2", "3", "5", "8", "13", "21", "34", "55", "89"}
+
+// fibonacciScaleIndex is each scale value's position, for spotting consecutive
+// runs.
+var fibonacciScaleIndex = func() map[string]int {
+	at := make(map[string]int, len(fibonacciScale))
+	for i, n := range fibonacciScale {
+		at[n] = i
+	}
+	return at
+}()
+
+// numberRun matches three or more numbers separated only by punctuation or
+// whitespace: a list once the syntax around it is stripped, whether it is an
+// array, a call's arguments, a sequence of statements, or numbers written as
+// strings. The page's prose and identifiers sit between the numbers of
+// unrelated code, so only a real list forms a run.
+var numberRun = regexp.MustCompile(`\d+(?:[\s,;\[\](){}"']+\d+){2,}`)
+
+// numberRunNumber splits a number run into its numbers.
+var numberRunNumber = regexp.MustCompile(`\d+`)
+
+// fibonacciScaleRun returns the first run in script that lists three
+// consecutive points of the scale in one direction, ascending or descending, or
+// "" when script carries none. A copied scale is caught however it is ordered
+// and delimited: the guard this replaces matched only ascending,
+// comma-separated triples, so a reversed or space-separated scale slipped past
+// it (gt-drlxcn).
+func fibonacciScaleRun(script string) string {
+	for _, run := range numberRun.FindAllString(script, -1) {
+		nums := numberRunNumber.FindAllString(run, -1)
+		for i := 0; i+2 < len(nums); i++ {
+			a, aOK := fibonacciScaleIndex[nums[i]]
+			b, bOK := fibonacciScaleIndex[nums[i+1]]
+			c, cOK := fibonacciScaleIndex[nums[i+2]]
+			if aOK && bOK && cOK && (b == a+1 && c == b+1 || b == a-1 && c == b-1) {
+				return run
+			}
+		}
+	}
+	return ""
+}
 
 // TestThePageCarriesNoPointsScaleOrConversion reads the page's script and fails
 // on a Fibonacci run, the scale the feed's points are rounded onto. The page
@@ -291,7 +333,39 @@ func TestThePageCarriesNoPointsScaleOrConversion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := fibonacciRun.FindString(script); m != "" {
-		t.Errorf("index.html writes the Fibonacci run %q, so the page carries a points scale", m)
+	if run := fibonacciScaleRun(script); run != "" {
+		t.Errorf("index.html writes the Fibonacci run %q, so the page carries a points scale", run)
+	}
+}
+
+// TestTheFibonacciScaleGuardCatchesEveryShape drives the guard over the shapes a
+// copied points scale can take, in both directions and with the delimiters a
+// list of numbers is written with, and checks that unrelated number runs are
+// left alone.
+func TestTheFibonacciScaleGuardCatchesEveryShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		script string
+		want   bool
+	}{
+		{"ascending, comma-separated", `const s = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89];`, true},
+		{"descending, comma-separated", `const s = [89, 55, 34, 21, 13, 8, 5, 3, 2, 1];`, true},
+		{"space-separated", `const s = 1 2 3 5 8 13;`, true},
+		{"semicolon-separated across lines", "const s = 1;\n2;\n3;", true},
+		{"numbers written as strings", `const s = ["1", "2", "3", "5"];`, true},
+		{"three values only", `return [8, 13, 21];`, true},
+		{"powers of two", `const s = [2, 4, 8, 16, 32];`, false},
+		{"a date and its arguments", `const t = Date.UTC(2000, 0, 1);`, false},
+		{"unrelated numbers", `return [600, 48, 3];`, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fibonacciScaleRun(tt.script) != ""; got != tt.want {
+				t.Errorf("fibonacciScaleRun(%q) found a scale = %t, want %t", tt.script, got, tt.want)
+			}
+		})
 	}
 }
