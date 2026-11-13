@@ -213,10 +213,11 @@ func hostRewriteFiles() rewriteFiles {
 // <file>.pre-rewrite and the new bytes replace the file atomically. A file with
 // no old value is not written.
 //
-// Before anything else it refuses, in a dry run as well as an apply, when any
-// file under root named <file>.pre-rewrite exists outside the trees in
-// rewriteKeptSkip: a previous run was neither undone nor cleaned, and that copy
-// is the only original. Nothing is written in either case.
+// After it reads the listed-class files, and before anything is written, it
+// refuses, in a dry run as well as an apply, when any file under root named
+// <file>.pre-rewrite exists outside the trees in rewriteKeptSkip: a previous run
+// was neither undone nor cleaned, and that copy is the only original. Nothing is
+// written in either case.
 func Rewrite(root string, q RewriteQuery, apply bool) (*RewriteReport, error) {
 	return rewriteWith(os.DirFS(root), root, q, apply, hostRewriteFiles())
 }
@@ -228,13 +229,6 @@ func rewriteWith(fsys fs.FS, root string, q RewriteQuery, apply bool, files rewr
 	}
 	if err := checkRewriteTown(root); err != nil {
 		return nil, err
-	}
-	kept, err := keptCopies(fsys)
-	if err != nil {
-		return nil, err
-	}
-	if len(kept) > 0 {
-		return nil, keptCopiesError(kept)
 	}
 	classes, err := rewriteClassesFor(fsys)
 	if err != nil {
@@ -255,6 +249,13 @@ func rewriteWith(fsys fs.FS, root string, q RewriteQuery, apply bool, files rewr
 	})
 	if err != nil {
 		return nil, err
+	}
+	kept, err := keptCopies(fsys)
+	if err != nil {
+		return nil, err
+	}
+	if len(kept) > 0 {
+		return nil, keptCopiesError(kept)
 	}
 	report := &RewriteReport{Classes: classNames(classes)}
 	for _, t := range pending {
@@ -499,9 +500,6 @@ func keptCopies(fsys fs.FS) ([]string, error) {
 	var kept []string
 	err := fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if rel == "." {
-				return fmt.Errorf("rewrite: reading the town root: %w", err)
-			}
 			return fmt.Errorf("rewrite: walking %s: %w", rel, err)
 		}
 		if d.IsDir() {

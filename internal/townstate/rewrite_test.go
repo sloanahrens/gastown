@@ -2,6 +2,7 @@ package townstate
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -435,6 +436,227 @@ func TestRewriteOwnerMatchesOnlyAWholeAccountName(t *testing.T) {
 	}
 }
 
+// TestUndoRefusesWhatItCannotSearch drives the kept-copy search an undo makes:
+// a directory it cannot list is returned, not read as holding no copies.
+func TestUndoRefusesWhatItCannotSearch(t *testing.T) {
+	t.Parallel()
+	logsTown := fstest.MapFS{
+		"settings/config.json": {Data: []byte(`{}`)},
+		"logs/daemon.log":      {Data: []byte("x")},
+	}
+	_, err := undoWith(failingFS{FS: logsTown, readDirErr: map[string]error{"logs": errInjected}}, t.TempDir(), hostRewriteFiles())
+	if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), "walking logs") {
+		t.Fatalf("undoWith = %v, want the injected failure naming logs", err)
+	}
+}
+
+// TestUndoRefusesARecreateThatFails drives each step of recreating a missing
+// rewritten file from its kept copy: the copy is read, the file is written, the
+// copy is removed, and the file is stat'd. Each failure is returned by name.
+func TestUndoRefusesARecreateThatFails(t *testing.T) {
+	t.Parallel()
+	const rel = "settings/config.json"
+	// setup applies a rewrite and then deletes the rewritten file, so the undo
+	// has to recreate it. It returns the town and the file's full path.
+	setup := func(t *testing.T) (string, string) {
+		t.Helper()
+		root := writeRewriteTown(t, []rewriteTownFile{{rel, `{"town_root":"` + rewriteOldRoot + `"}`}})
+		if _, err := Rewrite(root, rewriteQuery(), true); err != nil {
+			t.Fatalf("Rewrite: %v", err)
+		}
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.Remove(full); err != nil {
+			t.Fatalf("removing the rewritten file: %v", err)
+		}
+		return root, full
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (fs.FS, rewriteFiles, string)
+		want  string
+	}{
+		{
+			name: "kept copy cannot be read",
+			setup: func(t *testing.T) (fs.FS, rewriteFiles, string) {
+				root, _ := setup(t)
+				fsys := failingFS{FS: os.DirFS(root), openErr: map[string]error{rel + RewriteBackupSuffix: errInjected}}
+				return fsys, hostRewriteFiles(), root
+			},
+			want: "reading the kept copy of settings/config.json",
+		},
+		{
+			name: "file cannot be created",
+			setup: func(t *testing.T) (fs.FS, rewriteFiles, string) {
+				root, _ := setup(t)
+				files := hostRewriteFiles()
+				files.openFile = func(string, int, fs.FileMode) (io.WriteCloser, error) { return nil, errInjected }
+				return os.DirFS(root), files, root
+			},
+			want: "restoring settings/config.json",
+		},
+		{
+			name: "kept copy cannot be removed after the restore",
+			setup: func(t *testing.T) (fs.FS, rewriteFiles, string) {
+				root, _ := setup(t)
+				files := hostRewriteFiles()
+				files.remove = func(string) error { return errInjected }
+				return os.DirFS(root), files, root
+			},
+			want: "removing the kept copy of settings/config.json after restoring it",
+		},
+		{
+			name: "file cannot be stat'd",
+			setup: func(t *testing.T) (fs.FS, rewriteFiles, string) {
+				root, full := setup(t)
+				files := hostRewriteFiles()
+				files.lstat = func(p string) (fs.FileInfo, error) {
+					if p == full {
+						return nil, errInjected
+					}
+					return os.Lstat(p)
+				}
+				return os.DirFS(root), files, root
+			},
+			want: "checking settings/config.json",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys, files, root := tc.setup(t)
+			_, err := undoWith(fsys, root, files)
+			if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("undoWith = %v, want the injected failure naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestUndoLeavesAKeptCopyOutsideTheClassesAlone plants a kept copy in a directory
+// no class names. The undo restores the class file and leaves the copy where it
+// is, so the refusal it causes is the operator's to clear.
+func TestUndoLeavesAKeptCopyOutsideTheClassesAlone(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteTown(t, []rewriteTownFile{{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`}})
+	if _, err := Rewrite(root, rewriteQuery(), true); err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	const stray = "logs/daemon.log" + RewriteBackupSuffix
+	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o755); err != nil {
+		t.Fatalf("creating logs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(stray)), []byte("kept by hand\n"), 0o644); err != nil {
+		t.Fatalf("writing the stray copy: %v", err)
+	}
+
+	report, err := Undo(root)
+	if err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if want := []RewriteRestored{{Path: "settings/config.json"}}; !slices.Equal(report.Undone, want) {
+		t.Errorf("Undo restored %+v, want %+v", report.Undone, want)
+	}
+	if got := readRewriteFile(t, root, stray); got != "kept by hand\n" {
+		t.Errorf("Undo changed the stray copy: %q", got)
+	}
+}
+
+// TestRewriteNamesTenKeptCopiesAndCountsTheRest plants eleven kept copies. The
+// refusal names the first ten in path order and counts the one it leaves out.
+func TestRewriteNamesTenKeptCopiesAndCountsTheRest(t *testing.T) {
+	t.Parallel()
+	files := []rewriteTownFile{{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`}}
+	for i := range 11 {
+		files = append(files, rewriteTownFile{fmt.Sprintf("logs/k%02d.pre-rewrite", i), "kept\n"})
+	}
+	root := writeRewriteTown(t, files)
+	_, err := Rewrite(root, rewriteQuery(), false)
+	if err == nil || !strings.Contains(err.Error(), "11 kept copies") || !strings.Contains(err.Error(), "logs/k09.pre-rewrite") ||
+		strings.Contains(err.Error(), "logs/k10.pre-rewrite") || !strings.Contains(err.Error(), "and 1 more") {
+		t.Fatalf("Rewrite = %v, want a refusal naming ten copies and the one more", err)
+	}
+}
+
+// TestScanNamesAFileStillHoldingTheOldRoot drives the post-apply scan on its own:
+// a class file that still holds the old root is named, and one that does not is
+// not.
+func TestScanNamesAFileStillHoldingTheOldRoot(t *testing.T) {
+	t.Parallel()
+	root := writeRewriteTown(t, []rewriteTownFile{
+		{"settings/config.json", `{"town_root":"` + rewriteOldRoot + `"}`},
+		{"gastown/config.json", `{"dir":"` + rewriteNewRoot + `"}`},
+	})
+	got, err := Scan(root, rewriteQuery(), nil)
+	if err != nil || !slices.Equal(got, []string{"settings/config.json"}) {
+		t.Fatalf("Scan = %v, %v; want settings/config.json alone", got, err)
+	}
+}
+
+// TestRewriteLeavesTheGitAndDoltTreesAlone plants a class-shaped file inside each
+// tree the rewrite walk skips, and the repository shapes it reads without a
+// pointer: a bare repository with no worktrees, a worktree with no gitdir, a
+// gitdir that is a link, and a .git file that is not a pointer. Only the class
+// file of the town itself is rewritten.
+func TestRewriteLeavesTheGitAndDoltTreesAlone(t *testing.T) {
+	t.Parallel()
+	const old = `{"town_root":"` + rewriteOldRoot + `"}`
+	root := writeRewriteTown(t, []rewriteTownFile{
+		{"settings/config.json", old},
+		{".git/settings/config.json", old},
+		{".dolt-data-x/settings/config.json", old},
+		{"dolt/settings/config.json", old},
+		{"gastown/.git", "not a pointer\n"},
+		{"gastown/.repo.git/HEAD", "ref: refs/heads/main\n"},
+		{"gastown/.repo.git/worktrees/idle/notes.txt", "idle\n"},
+		{"gastown/.repo.git/worktrees/README", "not a worktree\n"},
+		{"other/.repo.git/HEAD", "ref: refs/heads/main\n"},
+	})
+	linked := filepath.Join(root, "gastown", ".repo.git", "worktrees", "linked")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatalf("creating the worktree: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "settings", "config.json"), filepath.Join(linked, "gitdir")); err != nil {
+		t.Fatalf("planting the gitdir link: %v", err)
+	}
+
+	report, err := Rewrite(root, rewriteQuery(), false)
+	if err != nil {
+		t.Fatalf("Rewrite = %v, want the run to proceed", err)
+	}
+	if len(report.Files) != 1 || report.Files[0].Path != "settings/config.json" {
+		t.Errorf("Rewrite named %+v, want settings/config.json alone", report.Files)
+	}
+}
+
+// TestRewriteRootMatchesOnlyAWholePath runs the root replacement over the places
+// a root can sit: at a quote or an equals sign, at the end of the text, and
+// inside a longer path or name, where it is left alone.
+func TestRewriteRootMatchesOnlyAWholePath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+		n    int
+	}{
+		{name: "quoted", in: `"/Users/sloan/gt"`, want: `"/town"`, n: 1},
+		{name: "after an equals sign", in: `dir=/Users/sloan/gt`, want: `dir=/town`, n: 1},
+		{name: "at the end of the text", in: `/Users/sloan/gt`, want: `/town`, n: 1},
+		{name: "with a path under it", in: `/Users/sloan/gt/landing`, want: `/town/landing`, n: 1},
+		{name: "longer name after it", in: `/Users/sloan/gtx`, want: `/Users/sloan/gtx`},
+		{name: "name before it", in: `x/Users/sloan/gt`, want: `x/Users/sloan/gt`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, n := rewriteContent([]byte(tc.in), rewriteQuery())
+			if string(got) != tc.want || n != tc.n {
+				t.Errorf("rewriteContent(%q) = %q, %d; want %q, %d", tc.in, got, n, tc.want, tc.n)
+			}
+		})
+	}
+}
+
 // writeError is a file whose write fails, and closeError is one whose close
 // fails after a good write; both stand in for a disk that stops taking bytes.
 type writeError struct{ closeErr error }
@@ -753,6 +975,7 @@ func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 	boom := errors.New("boom")
 	classTown := fstest.MapFS{"settings/config.json": {Data: []byte(`{"town_root":"` + rewriteOldRoot + `"}`)}}
 	walkTown := fstest.MapFS{"rig/settings/config.json": {Data: []byte(`{}`)}}
+	logsTown := fstest.MapFS{"rig/settings/config.json": {Data: []byte(`{}`)}, "logs/daemon.log": {Data: []byte("x")}}
 	repoTown := fstest.MapFS{"rig/.repo.git/worktrees/w/gitdir": {Data: []byte(rewriteOldRoot + "\n")}}
 
 	cases := []struct {
@@ -787,7 +1010,13 @@ func TestRewriteRefusesWhatItCannotWalk(t *testing.T) {
 			name: "worktree list fails",
 			root: dir,
 			fsys: failingFS{FS: repoTown, readDirErr: map[string]error{"rig/.repo.git/worktrees": boom}},
-			want: "walking rig/.repo.git/worktrees",
+			want: "reading rig/.repo.git/worktrees",
+		},
+		{
+			name: "kept-copy search cannot list a directory the rewrite walk skips",
+			root: dir,
+			fsys: failingFS{FS: logsTown, readDirErr: map[string]error{"logs": boom}},
+			want: "walking logs",
 		},
 		{
 			name: "worktree pointer is visited",
