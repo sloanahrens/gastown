@@ -13,6 +13,13 @@ import (
 // MacCrewHooksCheckName is the name 'gt doctor --check' takes for MacCrewHooksCheck.
 const MacCrewHooksCheckName = "mac-crew-hooks"
 
+// podEnv is the variable the kubelet sets in every pod, the same signal
+// internal/cmd's podEnv and internal/sweeprunner's InClusterHost read.
+const podEnv = "KUBERNETES_SERVICE_HOST"
+
+// macCrewHooksNativeHint sends the reader to the run that sees the Mac clones.
+const macCrewHooksNativeHint = "Run 'gt doctor --check mac-crew-hooks' on a native gt on the Mac, where the crew clones live"
+
 // MacCrewHooksCheck finds a crew clone on the Mac whose core.hooksPath points
 // nowhere. Git then silently skips the hooks, so a guard such as the pre-push
 // hook does not run in that clone and nothing reports it.
@@ -21,8 +28,15 @@ const MacCrewHooksCheckName = "mac-crew-hooks"
 // no git subprocess, so it runs on a native gt on the Mac. A clone whose .git is
 // a file is a linked worktree that shares its main clone's config; it is not
 // scanned on its own. The check never writes: each finding names the repair.
+//
+// A run inside a pod reports a warning rather than a pass when it finds nothing,
+// because the pod sees only the clones mounted there, not the Mac ones
+// (gt-hhkgui).
 type MacCrewHooksCheck struct {
 	BaseCheck
+	// getenv reads the environment; nil reads os.Getenv. A test sets it so its
+	// result does not depend on whether the test process runs inside a pod.
+	getenv func(string) string
 }
 
 // NewMacCrewHooksCheck creates the check.
@@ -94,8 +108,23 @@ func (c *MacCrewHooksCheck) Run(ctx *CheckContext) *CheckResult {
 			fmt.Sprintf("%d crew clone(s) have a core.hooksPath that does not work", len(findings)),
 			findings, "Apply the repair named on each line, then re-run the check")
 	}
+	if c.inPod() {
+		return c.result(StatusWarning,
+			fmt.Sprintf("ran inside a pod: the %d crew clone(s) visible here are not the Mac crew clones, which this run cannot see", len(clones)),
+			nil, macCrewHooksNativeHint)
+	}
 	return c.result(StatusOK,
 		fmt.Sprintf("All %d main crew clone(s) have an unset or existing core.hooksPath", len(clones)), nil, "")
+}
+
+// inPod reports whether the check runs in a pod, whose scan sees only the clones
+// mounted there (gt-hhkgui).
+func (c *MacCrewHooksCheck) inPod() bool {
+	getenv := c.getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return getenv(podEnv) != ""
 }
 
 func (c *MacCrewHooksCheck) result(status CheckStatus, msg string, details []string, hint string) *CheckResult {
