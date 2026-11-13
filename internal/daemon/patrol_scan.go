@@ -395,6 +395,12 @@ type patrolScanHost struct {
 	// sandboxDeleter deletes a sandbox and its record when nil:
 	// session.SandboxDeleter. A seat end removes an errored sandbox through it.
 	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
+	// noSandboxDeleterLinked stands in for a binary that linked no record
+	// deleter, so session.SandboxDeleter is nil. It is false in every binary
+	// that imports session, whose init installs the hook; the unit tier sets it
+	// to drive the record pass's refusal, which nothing else can reach
+	// (gt-vyo6o0).
+	noSandboxDeleterLinked bool
 	// sandboxEndedMarker asks a held sandbox whether its ended marker is set
 	// when nil: session.SandboxEndedMarkerPresent. A seam for the unit tier,
 	// which has no gateway to exec in (gt-yck7hz).

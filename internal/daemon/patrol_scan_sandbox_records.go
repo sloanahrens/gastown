@@ -33,10 +33,11 @@ const (
 // up for the hold, with an ended marker in it (gt-yck7hz). Such a record is
 // ended here only when the sandbox answers that the marker is set, and then
 // through the record deleter, which copies the seat's transcripts before it
-// deletes the sandbox. A marker that is absent, an exec that fails, and a
-// deleter that fails each keep the record, so a seat still starting is never
-// deleted by this path. A finish whose stop deletes the sandbox removes the
-// record too, so by then there is no record for this path to find.
+// deletes the sandbox. A marker that is absent, an exec that fails, a deleter
+// that fails, and a town with no deleter linked each keep the record, so a seat
+// still starting is never deleted by this path. A finish whose stop deletes the
+// sandbox removes the record too, so by then there is no record for this path to
+// find.
 //
 // At most the budget (sandboxRecordsPerTick) of records is checked per tick,
 // live ones included, so a tick makes at most that many tmux probes and gateway
@@ -101,8 +102,9 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 // ended: the sandbox answers whether its ended marker is set, and when it is,
 // the record deleter copies the seat's transcripts and deletes the sandbox and
 // its seat token. It reports whether the record may now be dropped. Every answer
-// short of a set marker, and every failure, keeps the sandbox and its record, so
-// a seat still starting or crashed is never deleted here.
+// short of a set marker, every failure, and a binary with no deleter linked keep
+// the sandbox and its record, so a seat still starting or crashed is never
+// deleted here.
 func (h *patrolScanHost) endHeldSandbox(name string, rec session.SandboxRecord) bool {
 	ended, err := h.sandboxEndedMarkerSet(rec.Gateway, name)
 	if err != nil {
@@ -113,8 +115,14 @@ func (h *patrolScanHost) endHeldSandbox(name string, rec session.SandboxRecord) 
 		return false
 	}
 	deleter := h.sandboxDeleter
-	if deleter == nil {
+	if deleter == nil && !h.noSandboxDeleterLinked {
 		deleter = session.SandboxDeleter
+	}
+	if deleter == nil {
+		// Dropping the record without a deleter would leave the sandbox behind
+		// with nothing left to name it, so it is kept for the operator.
+		h.d.logger.Printf("patrol_scan: sandbox record %s kept: no sandbox deleter is linked, so its ended sandbox cannot be deleted (%s/%s)", name, rec.Rig, rec.Polecat)
+		return false
 	}
 	if err := deleter(h.town(), rec); err != nil {
 		h.d.logger.Printf("patrol_scan: sandbox record %s kept: its ended sandbox could not be deleted: %v", name, err)

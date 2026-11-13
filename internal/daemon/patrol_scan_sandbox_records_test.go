@@ -23,6 +23,7 @@ type recordReap struct {
 	asked        []string // "gateway|sandbox" questions, in order
 	markerAsked  []string // "gateway|sandbox" ended-marker questions, in order
 	deleterCalls []string // sandboxes the record deleter was asked to delete
+	logs         strings.Builder
 }
 
 type recordReapOpts struct {
@@ -34,6 +35,7 @@ type recordReapOpts struct {
 	marker     bool          // the held sandbox answers that its ended marker is set
 	markerErr  error         // the held sandbox cannot be asked for its marker
 	deleterErr error         // the record deleter fails
+	noDeleter  bool          // neither a seam nor a linked deleter exists
 }
 
 const recordReapSession = "gt-capable"
@@ -54,17 +56,20 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	if err := session.WriteSandboxRecord(town, rec); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: tm, clock: clk}
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&r.logs, "", 0), tmux: tm, clock: clk}
 	r.host = &patrolScanHost{d: d, sandboxExists: func(gateway, name string) (bool, error) {
 		r.asked = append(r.asked, gateway+"|"+name)
 		return o.exists, o.existsErr
 	}, sandboxEndedMarker: func(gateway, name string) (bool, error) {
 		r.markerAsked = append(r.markerAsked, gateway+"|"+name)
 		return o.marker, o.markerErr
-	}, sandboxDeleter: func(_ string, rec session.SandboxRecord) error {
-		r.deleterCalls = append(r.deleterCalls, rec.Session)
-		return o.deleterErr
-	}}
+	}, noSandboxDeleterLinked: o.noDeleter}
+	if !o.noDeleter {
+		r.host.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+			r.deleterCalls = append(r.deleterCalls, rec.Session)
+			return o.deleterErr
+		}
+	}
 	return r
 }
 
@@ -82,8 +87,8 @@ func (r *recordReap) recorded() bool {
 // An unreachable gateway keeps the record, as does a young one: a sandbox that
 // deleted itself is told from one still coming up by the gateway's answer and
 // the record's age together. A sandbox the gateway still has is ended only when
-// its ended marker is set, through the record deleter; every other answer keeps
-// the record and the sandbox.
+// its ended marker is set, through the record deleter; every other answer, and a
+// binary with no deleter linked, keeps the record and the sandbox.
 func TestPatrolScanSandboxRecords(t *testing.T) {
 	t.Parallel()
 	old := sandboxRecordGrace + time.Minute
@@ -94,17 +99,19 @@ func TestPatrolScanSandboxRecords(t *testing.T) {
 		wantAsked        bool
 		wantMarkerAsked  bool
 		wantDeleterCalls bool
+		wantLog          string // a fragment the pass logs, "" for no assertion
 	}{
-		{"old_record_gateway_has_no_sandbox", recordReapOpts{age: old, gateway: "gw1"}, true, true, false, false},
-		{"old_record_with_no_gateway_named", recordReapOpts{age: old}, true, true, false, false},
-		{"record_without_a_date_counts_as_old", recordReapOpts{age: -1, gateway: "gw1"}, true, true, false, false},
-		{"young_record_is_kept", recordReapOpts{age: sandboxRecordGrace - time.Second, gateway: "gw1"}, false, false, false, false},
-		{"gateway_unreachable_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", existsErr: errors.New("connection refused")}, false, true, false, false},
-		{"live_session_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", liveTmux: true}, false, false, false, false},
-		{"held_sandbox_with_marker_is_deleted_through_deleter", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true}, true, true, true, true},
-		{"held_sandbox_without_marker_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true}, false, true, true, false},
-		{"held_sandbox_marker_exec_error_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, markerErr: errors.New("gateway unreachable")}, false, true, true, false},
-		{"held_sandbox_deleter_error_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true, deleterErr: errors.New("disk full")}, false, true, true, true},
+		{"old_record_gateway_has_no_sandbox", recordReapOpts{age: old, gateway: "gw1"}, true, true, false, false, ""},
+		{"old_record_with_no_gateway_named", recordReapOpts{age: old}, true, true, false, false, ""},
+		{"record_without_a_date_counts_as_old", recordReapOpts{age: -1, gateway: "gw1"}, true, true, false, false, ""},
+		{"young_record_is_kept", recordReapOpts{age: sandboxRecordGrace - time.Second, gateway: "gw1"}, false, false, false, false, ""},
+		{"gateway_unreachable_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", existsErr: errors.New("connection refused")}, false, true, false, false, ""},
+		{"live_session_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", liveTmux: true}, false, false, false, false, ""},
+		{"held_sandbox_with_marker_is_deleted_through_deleter", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true}, true, true, true, true, ""},
+		{"held_sandbox_without_marker_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true}, false, true, true, false, ""},
+		{"held_sandbox_marker_exec_error_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, markerErr: errors.New("gateway unreachable")}, false, true, true, false, ""},
+		{"held_sandbox_deleter_error_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true, deleterErr: errors.New("disk full")}, false, true, true, true, ""},
+		{"held_sandbox_with_no_deleter_keeps_the_record", recordReapOpts{age: old, gateway: "gw1", exists: true, marker: true, noDeleter: true}, false, true, true, false, "no sandbox deleter is linked"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +132,9 @@ func TestPatrolScanSandboxRecords(t *testing.T) {
 			}
 			if tt.wantAsked && len(r.asked) == 1 && r.asked[0] != tt.opts.gateway+"|"+recordReapSession {
 				t.Errorf("gateway question = %q, want the record's gateway and its sandbox name", r.asked[0])
+			}
+			if tt.wantLog != "" && !strings.Contains(r.logs.String(), tt.wantLog) {
+				t.Errorf("log = %q, want it to contain %q", r.logs.String(), tt.wantLog)
 			}
 		})
 	}
