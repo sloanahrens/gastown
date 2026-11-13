@@ -2,6 +2,7 @@ package gtwrap
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -97,5 +98,45 @@ func TestOutputRewriteLeavesBinaryAlone(t *testing.T) {
 	}
 	if !bytes.Equal(out.Bytes(), stream) {
 		t.Fatalf("output = %q, want the binary stream unchanged %q", out.Bytes(), stream)
+	}
+}
+
+// errorWriter is a destination whose every write fails.
+type errorWriter struct{ err error }
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// TestOutputReportsAWriteFailure: a destination that cannot take the output is
+// reported from every path that writes to it, so a stream lost at the terminal is
+// never taken for a stream delivered.
+func TestOutputReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("the terminal is gone")
+	cases := []struct {
+		name   string
+		writes [][]byte
+	}{
+		{name: "a completed line", writes: [][]byte{[]byte(rewritePodRoot + "/rig\n")}},
+		{name: "a pending line when the stream turns binary", writes: [][]byte{[]byte(rewritePodRoot + "/rig"), []byte("\x00")}},
+		{name: "the last line at the end of the stream", writes: [][]byte{[]byte(rewritePodRoot + "/rig")}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newOutputRewriter(errorWriter{err: boom}, rewritePodRoot, rewriteTown)
+			var got error
+			for _, p := range tt.writes {
+				if _, err := r.Write(p); err != nil {
+					got = err
+					break
+				}
+			}
+			if got == nil {
+				got = r.Flush()
+			}
+			if !errors.Is(got, boom) {
+				t.Fatalf("the failed write = %v, want %v", got, boom)
+			}
+		})
 	}
 }
