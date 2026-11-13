@@ -366,7 +366,11 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	defer ticker.Stop()
 	stopHeartbeat := startUpdateHeartbeat(ctx, deps.Store, ticker.C, deps.Clock, updateHeartbeatError(errOut))
 
-	st, runErr := seams.Run(ctx, deps, updateOptions(req, skip, only))
+	opts := updateOptions(req, skip, only)
+	if pod != nil && req.Images != "" {
+		opts.HostInstallSkipped = podHostInstallReason
+	}
+	st, runErr := seams.Run(ctx, deps, opts)
 	stopHeartbeat()
 	release()
 
@@ -651,10 +655,15 @@ func realUpdateInstaller(townRoot string) (update.Installer, error) {
 	return newExecInstaller(townRoot, realRunFunc(), patrol)
 }
 
+// podHostInstallReason is why a run with a pod target installs nothing on the
+// host: the daemon runs in the pod, so there is no Mac build to make.
+const podHostInstallReason = "pod target"
+
 // digestInstaller makes the install step a digest install over the values file
-// at path: the host install the cycle always runs, then the daemon moved to the
-// pair the file names. The file is read here as well, so a file that does not
-// parse stops the run before any polecat is drained.
+// at path: the host install the cycle runs first, then the daemon moved to the
+// pair the file names. A run with a pod target skips the host install. The file
+// is read here as well, so a file that does not parse stops the run before any
+// polecat is drained.
 func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string, pod *podDaemonTarget) (update.Installer, error) {
 	if _, err := imagevalues.Load(path); err != nil {
 		return nil, fmt.Errorf("the --images values file: %w", err)
@@ -663,8 +672,12 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	if err != nil {
 		return nil, err
 	}
+	inner := deps.Installer
+	if pod != nil {
+		inner = update.SkippedInstaller{Reason: podHostInstallReason}
+	}
 	return &update.DigestInstaller{
-		Inner:  deps.Installer,
+		Inner:  inner,
 		Path:   path,
 		Images: images,
 	}, nil

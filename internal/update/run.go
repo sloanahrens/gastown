@@ -62,6 +62,10 @@ type Options struct {
 	Skip, Only map[StepName]bool
 	// Force plans an install even when the installed build is main.
 	Force bool
+	// HostInstallSkipped names why the run's host install is skipped, when it
+	// is. The install step still runs, since its digest swap is the install, and
+	// its plan line says the host install is skipped.
+	HostInstallSkipped string
 	// Source is the record's provenance: SourceManual (the default) or
 	// SourceDaemon.
 	Source string
@@ -80,6 +84,9 @@ func Run(ctx context.Context, d Deps, o Options) (State, error) {
 	steps, target, err := BuildPlan(ctx, d.Probes, PlanOptions{Skip: o.Skip, Only: o.Only, Force: o.Force})
 	if err != nil {
 		return State{}, err
+	}
+	if o.HostInstallSkipped != "" {
+		noteHostInstallSkipped(steps, o.HostInstallSkipped)
 	}
 	st := newRunState(d, o, steps, target)
 	writePlan(d.Log, st.Steps)
@@ -146,6 +153,17 @@ func writePlan(w io.Writer, steps []StepRecord) {
 			action = "run"
 		}
 		fmt.Fprintf(w, "%s: %s: %s\n", step.Name, action, step.Reason)
+	}
+}
+
+// noteHostInstallSkipped adds the skipped host install to the install step's
+// plan line. A step that does not run has no install to name, so it is left as
+// the selection made it.
+func noteHostInstallSkipped(steps []StepRecord, reason string) {
+	for i := range steps {
+		if steps[i].Name == StepInstall && steps[i].WillRun {
+			steps[i].Reason += "; " + HostInstallSkipNote(reason)
+		}
 	}
 }
 

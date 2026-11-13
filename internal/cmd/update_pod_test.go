@@ -82,9 +82,22 @@ func runPodCommand(t *testing.T, seams updateSeams, args ...string) (string, err
 // asked for: the deps the run was built with.
 type wiredInstall struct {
 	deps    update.Deps
+	opts    update.Options
 	compose *rollbackTestSwap
 	verify  *rollbackTestSwap
 	kube    *podDaemonKubectl
+	host    *podHostInstaller
+}
+
+// podHostInstaller stands in for the run's host install and counts the calls. A
+// run with a pod target must make none, so a test asserts the count is zero.
+type podHostInstaller struct {
+	calls int
+}
+
+func (h *podHostInstaller) Install(_ context.Context, sha string) (update.InstallResult, error) {
+	h.calls++
+	return update.InstallResult{Event: "installed", Commit: sha}, nil
 }
 
 // captureWiredInstall runs gt update --images with extra flags, over seams whose
@@ -103,19 +116,22 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		compose: &rollbackTestSwap{},
 		verify:  &rollbackTestSwap{},
 		kube:    &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}},
+		host:    &podHostInstaller{},
 	}
 	seams := updateSeams{
 		FindTownRoot: func() (string, error) { return townRoot, nil },
 		DepsFactory: func(string) (update.Deps, error) {
 			return update.Deps{
-				Store:  &update.Store{Dir: update.Dir(townRoot)},
-				Clock:  clock,
-				Sleep:  clock.sleep,
-				Verify: got.verify,
+				Store:     &update.Store{Dir: update.Dir(townRoot)},
+				Clock:     clock,
+				Sleep:     clock.sleep,
+				Verify:    got.verify,
+				Installer: got.host,
 			}, nil
 		},
-		Run: func(_ context.Context, deps update.Deps, _ update.Options) (update.State, error) {
+		Run: func(_ context.Context, deps update.Deps, opts update.Options) (update.State, error) {
 			got.deps = deps
+			got.opts = opts
 			return update.State{Outcome: update.OutcomeOK}, nil
 		},
 		ImageSwap: func(string) (update.ImageSwap, error) { return got.compose, nil },
@@ -127,6 +143,71 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		t.Fatalf("gt update %v: %v", args, err)
 	}
 	return got
+}
+
+// TestUpdatePodTargetSkipsTheHostInstall holds the digest install under a pod
+// target: the host install is never called, the daemon still moves to the pair,
+// and the run's report names the skip. A run without a pod target still calls
+// the host install first.
+func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a pod target never calls the host install", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		if _, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit); err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if got.host.calls != 0 {
+			t.Errorf("host install called %d times, want none under a pod target", got.host.calls)
+		}
+	})
+
+	t.Run("a pod target still moves the daemon to the pair", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if verdict := update.ClassifyInstall(res); verdict != update.ResultOK {
+			t.Errorf("ClassifyInstall = %q, want %q: %+v", verdict, update.ResultOK, res)
+		}
+		// patchBody fails the test when no patch was run, so the swap is checked
+		// by the call that reads it.
+		got.kube.patchBody(t)
+	})
+
+	t.Run("the run's report names the skip", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		if got.opts.HostInstallSkipped != podHostInstallReason {
+			t.Errorf("HostInstallSkipped = %q, want %q", got.opts.HostInstallSkipped, podHostInstallReason)
+		}
+		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if want := update.HostInstallSkipNote(podHostInstallReason); res.Reason != want {
+			t.Errorf("install reason = %q, want %q", res.Reason, want)
+		}
+	})
+
+	t.Run("a run without a pod target calls the host install first", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t)
+		if got.opts.HostInstallSkipped != "" {
+			t.Errorf("HostInstallSkipped = %q, want none without a pod target", got.opts.HostInstallSkipped)
+		}
+		// The host install runs before the swap, so a swap error after it is not
+		// this subtest's concern; only the call is.
+		if _, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit); err != nil && got.host.calls == 0 {
+			t.Fatalf("Install never reached the host install: %v", err)
+		}
+		if got.host.calls != 1 {
+			t.Errorf("host install called %d times, want it called first", got.host.calls)
+		}
+	})
 }
 
 // TestUpdatePodProbeBoundsTheExec holds the pod probe's bound: the kubectl exec it
