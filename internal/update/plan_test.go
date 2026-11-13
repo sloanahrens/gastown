@@ -563,14 +563,14 @@ func TestPlanPodTarget(t *testing.T) {
 		}
 	})
 
-	t.Run("the install steps are planned as before", func(t *testing.T) {
+	t.Run("the install and its checks are planned as before", func(t *testing.T) {
 		t.Parallel()
 		p := &countedProbes{fakeProbes: &fakeProbes{
 			installed: installed, main: mainSHA, published: true, backup: true,
 		}}
 
 		steps := planFor(t, p, PlanOptions{PodTarget: true})
-		for _, name := range []StepName{StepDrain, StepInstall, StepRestart, StepVerify, StepLift} {
+		for _, name := range []StepName{StepInstall, StepRestart, StepVerify} {
 			if s := stepNamed(t, steps, name); !s.WillRun {
 				t.Errorf("%s WillRun = false, want true for a pod target (reason %q)", name, s.Reason)
 			}
@@ -600,6 +600,106 @@ func TestPlanPodTarget(t *testing.T) {
 		}
 		if !errors.Is(err, cause) {
 			t.Errorf("error does not wrap the probe cause: %v", err)
+		}
+	})
+}
+
+// TestPlanPodTargetSkipsDrainAndLift holds a pod target's drain and lift: the
+// pod's daemon finishes its landing step and starts nothing new when it is
+// stopped, so neither step runs and no dispatch hold is taken. The Job's run
+// took the hold and stopped the whole town from dispatching while it waited on
+// 8 working seats (gt-quowam).
+func TestPlanPodTargetSkipsDrainAndLift(t *testing.T) {
+	t.Parallel()
+	const installed = "1111111111111111111111111111111111111111"
+	const mainSHA = "2222222222222222222222222222222222222222"
+
+	t.Run("the drain and lift steps are planned not to run", func(t *testing.T) {
+		t.Parallel()
+		p := &fakeProbes{installed: installed, main: mainSHA, published: true, backup: true}
+
+		steps := planFor(t, p, PlanOptions{PodTarget: true})
+		for _, name := range []StepName{StepDrain, StepLift} {
+			s := stepNamed(t, steps, name)
+			if s.WillRun {
+				t.Errorf("%s WillRun = true, want false for a pod target (reason %q)", name, s.Reason)
+			}
+			if s.Reason != podDrainReason {
+				t.Errorf("%s reason = %q, want %q", name, s.Reason, podDrainReason)
+			}
+		}
+		if !stepNamed(t, steps, StepInstall).WillRun {
+			t.Error("install WillRun = false, want true: the fixture's installed build differs from main")
+		}
+	})
+
+	t.Run("the run never reads or takes the dispatch hold", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.opts.PodTarget = true
+		// A Stat of the hold fails, so a run that looks at the hold at all aborts
+		// with the drain step failed: the hold must stay untouched, not merely
+		// released by the end of the run.
+		f.files.statErr[f.hold.Path] = errors.New("the dispatch hold must not be read")
+
+		st, err := f.run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if st.Outcome != OutcomeOK {
+			t.Errorf("Outcome = %q, want %q: the run touched the dispatch hold", st.Outcome, OutcomeOK)
+		}
+		if f.holdExists() {
+			t.Error("the run created the dispatch hold file for a pod target")
+		}
+		if st.Hold != (HoldRecord{}) {
+			t.Errorf("Hold = %+v, want no hold recorded", st.Hold)
+		}
+		for _, name := range []StepName{StepDrain, StepLift} {
+			if got := step(t, st, name).Result; got != ResultSkipped {
+				t.Errorf("%s Result = %q, want %q", name, got, ResultSkipped)
+			}
+		}
+		if f.inst.calls != 1 {
+			t.Errorf("installer called %d times, want 1: the install runs without the hold", f.inst.calls)
+		}
+	})
+}
+
+// TestPlanHostTargetKeepsDrainAndLift holds a non-pod target's plan to today's:
+// an install brings the drain and the lift with it, so the run takes the hold
+// before it installs.
+func TestPlanHostTargetKeepsDrainAndLift(t *testing.T) {
+	t.Parallel()
+	const installed = "1111111111111111111111111111111111111111"
+	const mainSHA = "2222222222222222222222222222222222222222"
+
+	t.Run("an install plans the drain and the lift", func(t *testing.T) {
+		t.Parallel()
+		p := &fakeProbes{installed: installed, main: mainSHA, published: true, backup: true}
+
+		steps := planFor(t, p, PlanOptions{})
+		for _, name := range []StepName{StepDrain, StepLift} {
+			s := stepNamed(t, steps, name)
+			if !s.WillRun {
+				t.Errorf("%s WillRun = false, want true for a host target with an install planned (reason %q)", name, s.Reason)
+			}
+			if s.Reason != "an install is planned" {
+				t.Errorf("%s reason = %q, want %q", name, s.Reason, "an install is planned")
+			}
+		}
+	})
+
+	t.Run("no install leaves both not run", func(t *testing.T) {
+		t.Parallel()
+		p := &fakeProbes{installed: mainSHA, main: mainSHA, published: true, backup: true}
+
+		steps := planFor(t, p, PlanOptions{})
+		for _, name := range []StepName{StepDrain, StepLift} {
+			s := stepNamed(t, steps, name)
+			if s.WillRun {
+				t.Errorf("%s WillRun = true, want false: no install is planned (reason %q)", name, s.Reason)
+			}
 		}
 	})
 }
