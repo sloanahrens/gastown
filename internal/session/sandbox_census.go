@@ -11,8 +11,8 @@ import (
 )
 
 // ErrSeatNotLive is what a census read answers for a sandbox seat whose sandbox
-// the gateway lists as absent or not Ready. No tmux read is made for such a
-// seat: its sandbox has no server to ask.
+// the gateway lists as absent, Stopped, Error or Failed. No tmux read is made
+// for such a seat: its sandbox has no server to ask.
 var ErrSeatNotLive = errors.New("sandbox seat is not live: its sandbox is absent from the gateway or not Ready")
 
 // SandboxCensus is one sling process's read-once view of the sandbox seats. A
@@ -22,21 +22,36 @@ var ErrSeatNotLive = errors.New("sandbox seat is not live: its sandbox is absent
 // a seat's read-only tmux question once per sling, so the later read reads the
 // census.
 //
-// Only a Ready sandbox gets a tmux probe, and a read that succeeded is kept.
-// A failed listing or a failed probe is not kept: the read falls back to the
-// per-seat probe, and the next read asks again. A sling process installs one
-// census (BeginSandboxCensus) and drops it when it ends; nothing carries from
-// one sling into the next.
+// Only a Ready sandbox gets a tmux probe, and a probe that succeeded is kept. A
+// probe that failed is not kept, and the next read asks again. A listing that
+// failed is kept for the rest of the sling as "listing unavailable": every seat
+// of that gateway then takes its per-seat probe, and the gateway is not asked
+// again within the sling. A sling process installs one census
+// (BeginSandboxCensus) and drops it when it ends; nothing carries from one sling
+// into the next.
 type SandboxCensus struct {
 	townRoot string
 	run      sandbox.Runner // nil runs the openshell binary
 
-	mu sync.Mutex
-	// phases holds, per gateway, the phase of each sandbox a listing that read
-	// whole named. Only a whole listing is kept.
-	phases map[string]map[string]string
+	// mu guards the two maps only. It is never held across a gateway call.
+	mu       sync.Mutex
+	listings map[string]*gatewayListing
 	// answers holds the successful tmux reads, keyed by seatKey.
 	answers map[string]any
+}
+
+// gatewayListing is one gateway's sandbox listing for this sling. The read that
+// creates it fetches the listing with no lock held, then sets rows or err and
+// closes done. Every other read of that gateway waits on done and shares the
+// result, so concurrent seats make one gateway call.
+type gatewayListing struct {
+	done chan struct{}
+	// rows maps each sandbox name to its phase. Valid once done is closed and
+	// err is nil.
+	rows map[string]string
+	// err is why the listing cannot answer for any seat: the call failed, or
+	// the reply named no sandboxes at all.
+	err error
 }
 
 // NewSandboxCensus returns an empty census for the town's sandbox registry.
@@ -45,7 +60,7 @@ func NewSandboxCensus(townRoot string, run sandbox.Runner) *SandboxCensus {
 	return &SandboxCensus{
 		townRoot: townRoot,
 		run:      run,
-		phases:   map[string]map[string]string{},
+		listings: map[string]*gatewayListing{},
 		answers:  map[string]any{},
 	}
 }
@@ -56,30 +71,73 @@ func seatKey(session, verb string, args []string) string {
 	return strings.Join(append([]string{session, verb}, args...), "\x00")
 }
 
-// seatPhase reports the gateway's phase for the sandbox name, and whether the
-// listing names it. A listing that cannot be read, or that comes back empty
-// while the registry holds a record for the seat, is an error: an unknown
-// listing must not read as "no sandbox".
-func (c *SandboxCensus) seatPhase(gateway, name string) (phase string, listed bool, err error) {
+// listingOf returns gateway's listing for this sling, reading it if no read has
+// yet. The census lock covers only the lookup and the store; a listing in
+// flight is waited on, not read again.
+func (c *SandboxCensus) listingOf(gateway string) *gatewayListing {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	rows, ok := c.phases[gateway]
-	if !ok {
-		entries, err := (&sandbox.CLI{Gateway: gateway, Run: c.run}).List(context.Background())
-		if err != nil {
-			return "", false, err
-		}
-		if len(entries) == 0 {
-			return "", false, fmt.Errorf("sandbox listing of gateway %q is empty while the registry holds %s", gateway, name)
-		}
-		rows = make(map[string]string, len(entries))
-		for _, e := range entries {
-			rows[e.Name] = e.Phase
-		}
-		c.phases[gateway] = rows
+	if l, ok := c.listings[gateway]; ok {
+		c.mu.Unlock()
+		<-l.done
+		return l
 	}
-	phase, listed = rows[name]
+	l := &gatewayListing{done: make(chan struct{})}
+	c.listings[gateway] = l
+	c.mu.Unlock()
+
+	entries, err := (&sandbox.CLI{Gateway: gateway, Run: c.run}).List(context.Background())
+	switch {
+	case err != nil:
+		l.err = err
+	case len(entries) == 0:
+		// An empty reply is not an answer that no seat exists: the registry
+		// may hold records the gateway has lost track of, and reading absent
+		// would skip their probes.
+		l.err = fmt.Errorf("sandbox listing of gateway %q is empty", gateway)
+	default:
+		l.rows = make(map[string]string, len(entries))
+		for _, e := range entries {
+			l.rows[e.Name] = e.Phase
+		}
+	}
+	close(l.done)
+	return l
+}
+
+// seatPhase reports the gateway's phase for the sandbox name, and whether the
+// listing names it. A listing that could not be read is an error for every seat
+// of that gateway: an unknown listing must not read as "no sandbox".
+func (c *SandboxCensus) seatPhase(gateway, name string) (phase string, listed bool, err error) {
+	l := c.listingOf(gateway)
+	if l.err != nil {
+		return "", false, l.err
+	}
+	phase, listed = l.rows[name]
 	return phase, listed, nil
+}
+
+// seatLiveness is how the census reads one phase the gateway lists.
+type seatLiveness int
+
+const (
+	// seatUnknownPhase is any phase the census has not been taught. It is
+	// neither live nor dead, so the seat is asked directly.
+	seatUnknownPhase seatLiveness = iota
+	// seatLive is Ready: the seat's tmux server can be asked.
+	seatLive
+	// seatNotLive is Stopped, Error or Failed: the seat has no server to ask.
+	seatNotLive
+)
+
+// livenessOf reads phase, compared case-insensitively after trimming.
+func livenessOf(phase string) seatLiveness {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "ready":
+		return seatLive
+	case "stopped", "error", "failed":
+		return seatNotLive
+	}
+	return seatUnknownPhase
 }
 
 // cached returns the answer kept for key, if one was.
@@ -97,10 +155,11 @@ func (c *SandboxCensus) keep(key string, v any) {
 	c.answers[key] = v
 }
 
-// Forget drops the answers held for session and every gateway listing. Called
-// when this process creates or kills the session: a new sandbox is not in the
-// listing taken before it, so the listing is read again rather than read as
-// "absent".
+// Forget drops the answers held for session and every gateway listing that
+// read whole or is still in flight. Called when this process creates or kills
+// the session: a new sandbox is not in a listing taken before it, so the
+// listing is read again rather than read as "absent". A listing that failed is
+// kept, as the sling's answer that the gateway cannot be read.
 func (c *SandboxCensus) Forget(session string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -110,14 +169,24 @@ func (c *SandboxCensus) Forget(session string) {
 			delete(c.answers, k)
 		}
 	}
-	c.phases = map[string]map[string]string{}
+	for gateway, l := range c.listings {
+		select {
+		case <-l.done:
+			if l.err == nil {
+				delete(c.listings, gateway)
+			}
+		default:
+			delete(c.listings, gateway)
+		}
+	}
 }
 
 // censusRead answers the tmux read verb(args) on session through c. A session
 // with no sandbox record, or a census that cannot read its listing, takes the
 // per-seat probe as it always did. A Ready sandbox takes the probe once, and a
-// seat absent from the listing or not Ready is answered ErrSeatNotLive with no
-// probe at all.
+// seat absent from the listing, Stopped, Error or Failed is answered
+// ErrSeatNotLive with no probe at all. A phase the census does not know takes
+// the probe every read and is never kept.
 func censusRead[T any](c *SandboxCensus, session, verb string, args []string, probe func() (T, error)) (T, error) {
 	var zero T
 	if c == nil {
@@ -131,8 +200,14 @@ func censusRead[T any](c *SandboxCensus, session, verb string, args []string, pr
 	if err != nil {
 		return probe()
 	}
-	if !listed || !strings.EqualFold(strings.TrimSpace(phase), "Ready") {
+	if !listed {
 		return zero, ErrSeatNotLive
+	}
+	switch livenessOf(phase) {
+	case seatNotLive:
+		return zero, ErrSeatNotLive
+	case seatUnknownPhase:
+		return probe()
 	}
 	key := seatKey(session, verb, args)
 	if v, ok := c.cached(key); ok {

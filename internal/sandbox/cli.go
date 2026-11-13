@@ -271,26 +271,36 @@ type Entry struct {
 	Name, Phase string
 }
 
-// listPageSize is the rows one `sandbox list` call asks for. A page that comes
-// back full may have more behind it, so List follows the continuation token.
+// listPageSize is the rows one `sandbox list` call asks for. List follows the
+// continuation token whatever a page's length, so the size only sets the
+// number of calls.
 const listPageSize = 100
 
 // listMaxPages bounds the paging loop, so a gateway that keeps returning a
 // token cannot hold a sling in the loop.
 const listMaxPages = 1000
 
-// List reads every sandbox the gateway lists, following the continuation
-// token until a page comes back short. It reads `-o json`: the table form
-// prints the token on stderr, where a stdout parse never sees it. A failed call
-// is an error, and so is a listing that cannot be read whole: output that is
-// not a sandbox page, a page with no sandboxes field, a row with no name or
-// phase, or a full page with no token. An unknown listing must never read as
-// an empty one.
+// listAllWorkspaces makes `sandbox list` return every workspace's sandboxes.
+// Rig sandboxes are created in per-rig workspaces, and the listing may be
+// scoped to one workspace by default: without the flag, a seat in another
+// workspace reads as absent.
+const listAllWorkspaces = "--all-workspaces"
+
+// List reads every sandbox the gateway lists. The only end of a listing is a
+// page with no continuation token: a short page that carries a token is
+// followed, because a gateway may return fewer rows than asked and still have
+// more behind it. It reads `-o json`: the table form prints the token on
+// stderr, where a stdout parse never sees it. A failed call is an error, and so
+// is a listing that cannot be read whole: output that is not a sandbox page, a
+// page with no sandboxes field, a row with no name or phase, a token that
+// repeats, or more than listMaxPages pages. An unknown listing must never read
+// as an empty one.
 func (c *CLI) List(ctx context.Context) ([]Entry, error) {
 	var out []Entry
 	token := ""
+	seen := map[string]bool{}
 	for page := 0; page < listMaxPages; page++ {
-		a := c.argv("sandbox", "list", "--page-size", strconv.Itoa(listPageSize), "--output", "json")
+		a := c.argv("sandbox", "list", listAllWorkspaces, "--page-size", strconv.Itoa(listPageSize), "--output", "json")
 		if token != "" {
 			a = append(a, "--page-token", token)
 		}
@@ -303,15 +313,13 @@ func (c *CLI) List(ctx context.Context) ([]Entry, error) {
 			return nil, fmt.Errorf("openshell sandbox list: %w", err)
 		}
 		out = append(out, rows...)
-		if len(rows) < listPageSize {
+		if next == "" {
 			return out, nil
 		}
-		if next == "" {
-			return nil, fmt.Errorf("openshell sandbox list: a full page of %d has no continuation token", listPageSize)
-		}
-		if next == token {
+		if seen[next] {
 			return nil, fmt.Errorf("openshell sandbox list: the continuation token repeated (%q)", next)
 		}
+		seen[next] = true
 		token = next
 	}
 	return nil, fmt.Errorf("openshell sandbox list: more than %d pages", listMaxPages)

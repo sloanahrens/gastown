@@ -13,22 +13,32 @@ import (
 
 // censusGateway is the openshell a census test drives. It answers `sandbox
 // list` from listing, fails the first listErrs list calls, and counts the list
-// calls it made.
+// calls it made. When gate is set, the first list call announces itself on
+// entered and then blocks until gate is closed.
 type censusGateway struct {
 	mu       sync.Mutex
 	listing  string
 	listErrs int
 	lists    int
+	gate     chan struct{}
+	entered  chan struct{}
 }
 
 func (g *censusGateway) run(_ context.Context, argv []string, _ []byte, _ []string) ([]byte, []byte, error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if !strings.Contains(strings.Join(argv, " "), " list") {
+		g.mu.Unlock()
 		return nil, nil, fmt.Errorf("unexpected argv %v", argv)
 	}
 	g.lists++
-	if g.lists <= g.listErrs {
+	first := g.lists == 1
+	fail := g.lists <= g.listErrs
+	g.mu.Unlock()
+	if first && g.gate != nil {
+		g.entered <- struct{}{}
+		<-g.gate
+	}
+	if fail {
 		return nil, []byte("gateway unreachable"), errors.New("exit status 1")
 	}
 	return []byte(g.listing), nil, nil
@@ -174,7 +184,7 @@ func TestSlingCensus(t *testing.T) {
 		names := []string{"gt-rig-ready", "gt-rig-starting", "gt-rig-gone"}
 		gw := &censusGateway{listing: listingOf(map[string]string{
 			"gt-rig-ready":    "Ready",
-			"gt-rig-starting": "Provisioning",
+			"gt-rig-starting": "Stopped",
 		})}
 		censusTown(t, gw, names)
 		var p seatProbes
@@ -194,28 +204,93 @@ func TestSlingCensus(t *testing.T) {
 		}
 	})
 
-	t.Run("a failed listing is not kept: the next read asks again and falls back to a probe", func(t *testing.T) {
+	t.Run("a failed listing is remembered for the sling: one list call, every read falls back to a probe", func(t *testing.T) {
+		names := seatNames(10)
+		rows := map[string]string{}
+		for _, n := range names {
+			rows[n] = "Ready"
+		}
+		gw := &censusGateway{listing: listingOf(rows), listErrs: 1}
+		censusTown(t, gw, names)
+		var p seatProbes
+		for read := 0; read < 3; read++ {
+			for _, n := range names {
+				if err := readSeat(n, &p); err != nil {
+					t.Fatalf("read %d of %s: %v; a failed listing must fall back to the probe", read, n, err)
+				}
+			}
+		}
+		if got := gw.listCalls(); got != 1 {
+			t.Errorf("list calls = %d, want 1 (a failed listing is not asked again within the sling)", got)
+		}
+		for _, verb := range []string{"show-environment", "session-created"} {
+			if got := p.of(verb); got != 30 {
+				t.Errorf("%s probes = %d, want 30 (the per-seat fallback on every read)", verb, got)
+			}
+		}
+	})
+
+	t.Run("the next sling reads the listing again after a failed one", func(t *testing.T) {
 		names := []string{"gt-rig-s00"}
 		gw := &censusGateway{listing: listingOf(map[string]string{"gt-rig-s00": "Ready"}), listErrs: 1}
 		censusTown(t, gw, names)
 		var p seatProbes
 		if _, err := SandboxCensusRead("gt-rig-s00", "show-environment", nil, p.probe("show-environment")); err != nil {
-			t.Fatalf("first read (listing fails) must fall back to the probe: %v", err)
+			t.Fatalf("first sling, failed listing: %v", err)
 		}
-		if got := p.of("show-environment"); got != 1 {
-			t.Fatalf("after a failed listing, probes = %d, want 1 (the per-seat fallback)", got)
+		// A new sling's census starts clean.
+		t.Cleanup(BeginSandboxCensus(gw.run))
+		if _, err := SandboxCensusRead("gt-rig-s00", "show-environment", nil, p.probe("show-environment")); err != nil {
+			t.Fatal(err)
 		}
 		if _, err := SandboxCensusRead("gt-rig-s00", "show-environment", nil, p.probe("show-environment")); err != nil {
 			t.Fatal(err)
 		}
 		if got := gw.listCalls(); got != 2 {
-			t.Errorf("list calls = %d, want 2 (the failed one is retried)", got)
-		}
-		if _, err := SandboxCensusRead("gt-rig-s00", "show-environment", nil, p.probe("show-environment")); err != nil {
-			t.Fatal(err)
+			t.Errorf("list calls = %d, want 2 (one failed in the first sling, one that answers in the second)", got)
 		}
 		if got := p.of("show-environment"); got != 2 {
-			t.Errorf("probes after a successful listing = %d, want 2 (the third read is answered from the census)", got)
+			t.Errorf("probes = %d, want 2 (the first read's fallback, then the second sling's census answers from cache)", got)
+		}
+	})
+
+	t.Run("seats asking at once share one listing in flight, and the census lock is free during the call", func(t *testing.T) {
+		names := seatNames(10)
+		rows := map[string]string{}
+		for _, n := range names {
+			rows[n] = "Ready"
+		}
+		gw := &censusGateway{listing: listingOf(rows), gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+		censusTown(t, gw, names)
+		var p seatProbes
+		var wg sync.WaitGroup
+		errs := make(chan error, len(names))
+		for _, n := range names {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				errs <- readSeat(name, &p)
+			}(n)
+		}
+		<-gw.entered
+		// The first read is inside the list call. A census lock held across
+		// that call would block this lookup until the gate opens.
+		installedCensus().cached("gt-rig-s00\x00show-environment\x00GT_ROLE")
+		close(gw.gate)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Errorf("concurrent read: %v", err)
+			}
+		}
+		if got := gw.listCalls(); got != 1 {
+			t.Errorf("list calls = %d, want 1 (ten seats in flight share one listing)", got)
+		}
+		for _, verb := range []string{"show-environment", "session-created"} {
+			if got := p.of(verb); got != 10 {
+				t.Errorf("%s probes = %d, want 10 (one per seat)", verb, got)
+			}
 		}
 	})
 
@@ -231,8 +306,8 @@ func TestSlingCensus(t *testing.T) {
 		if got := p.of("show-environment"); got != 2 {
 			t.Errorf("probes = %d, want 2 (not read as absent, not kept)", got)
 		}
-		if got := gw.listCalls(); got != 2 {
-			t.Errorf("list calls = %d, want 2 (an empty listing is not kept)", got)
+		if got := gw.listCalls(); got != 1 {
+			t.Errorf("list calls = %d, want 1 (an empty listing is remembered as unavailable for the sling)", got)
 		}
 	})
 
@@ -318,5 +393,49 @@ func TestSlingCensusSandboxCreatedAfterTheListing(t *testing.T) {
 	}
 	if got := gw.listCalls(); got != 2 {
 		t.Errorf("list calls = %d, want 2 (the forget reads the listing again)", got)
+	}
+}
+
+// TestSlingCensusPhases pins how each listed phase is read: Ready is live and
+// probed once; Stopped, Error and Failed are not live and get no probe; any
+// other phase is neither, so the seat is probed on every read and nothing is
+// kept.
+//
+//testpolicy:allow parallel — the census is one process-wide answer that BeginSandboxCensus installs, so these tests run one at a time
+func TestSlingCensusPhases(t *testing.T) {
+	tests := []struct {
+		phase     string
+		notLive   bool
+		wantProbe int
+	}{
+		{phase: "Ready", wantProbe: 1},
+		{phase: "READY", wantProbe: 1},
+		{phase: " Ready ", wantProbe: 1},
+		{phase: "Stopped", notLive: true},
+		{phase: "Error", notLive: true},
+		{phase: "failed", notLive: true},
+		{phase: "Provisioning", wantProbe: 2},
+		{phase: "Pending", wantProbe: 2},
+		{phase: "Starting", wantProbe: 2},
+		{phase: "Hibernating", wantProbe: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.phase, func(t *testing.T) {
+			gw := &censusGateway{listing: listingOf(map[string]string{"gt-rig-s00": tt.phase})}
+			censusTown(t, gw, []string{"gt-rig-s00"})
+			var p seatProbes
+			for read := 0; read < 2; read++ {
+				_, err := SandboxCensusRead("gt-rig-s00", "show-environment", nil, p.probe("show-environment"))
+				if tt.notLive && !errors.Is(err, ErrSeatNotLive) {
+					t.Fatalf("read %d: err = %v, want ErrSeatNotLive", read, err)
+				}
+				if !tt.notLive && err != nil {
+					t.Fatalf("read %d: err = %v, want nil", read, err)
+				}
+			}
+			if got := p.of("show-environment"); got != tt.wantProbe {
+				t.Errorf("probes = %d, want %d for phase %q", got, tt.wantProbe, tt.phase)
+			}
+		})
 	}
 }

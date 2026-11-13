@@ -127,6 +127,55 @@ func TestCLIList(t *testing.T) {
 		}
 	})
 
+	t.Run("a short page with a token continues to the next page", func(t *testing.T) {
+		t.Parallel()
+		var seen []string
+		pages := map[string]string{
+			"":      listReply("tok-2", wireSandbox{Name: "gt-r-alpha", Phase: "Ready"}),
+			"tok-2": listReply("", wireSandbox{Name: "gt-r-beta", Phase: "Ready"}),
+		}
+		cli := &CLI{Gateway: "openshell", Run: pagedRunner(pages, &seen)}
+		got, err := cli.List(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Entry{{Name: "gt-r-alpha", Phase: "Ready"}, {Name: "gt-r-beta", Phase: "Ready"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("List = %v, want %v (a short page with a token must not end the listing)", got, want)
+		}
+		if want := []string{"", "tok-2"}; !reflect.DeepEqual(seen, want) {
+			t.Errorf("page tokens asked = %q, want %q", seen, want)
+		}
+	})
+
+	t.Run("a short page without a token ends the listing", func(t *testing.T) {
+		t.Parallel()
+		var seen []string
+		pages := map[string]string{"": listReply("", wireSandbox{Name: "gt-r-alpha", Phase: "Ready"})}
+		cli := &CLI{Gateway: "openshell", Run: pagedRunner(pages, &seen)}
+		got, err := cli.List(context.Background())
+		if err != nil || len(got) != 1 {
+			t.Fatalf("List = %v, %v; want one row and no error", got, err)
+		}
+		if len(seen) != 1 {
+			t.Errorf("made %d calls, want 1", len(seen))
+		}
+	})
+
+	t.Run("a full page without a token ends the listing", func(t *testing.T) {
+		t.Parallel()
+		var seen []string
+		pages := map[string]string{"": fullPage(0, "")}
+		cli := &CLI{Gateway: "openshell", Run: pagedRunner(pages, &seen)}
+		got, err := cli.List(context.Background())
+		if err != nil || len(got) != listPageSize {
+			t.Fatalf("List returned %d rows, %v; want %d rows and no error", len(got), err, listPageSize)
+		}
+		if len(seen) != 1 {
+			t.Errorf("made %d calls, want 1 (no token, so no second page)", len(seen))
+		}
+	})
+
 	t.Run("sends the page size and the json output with every call", func(t *testing.T) {
 		t.Parallel()
 		cli, f := newFakeCLI()
@@ -134,7 +183,7 @@ func TestCLIList(t *testing.T) {
 		if _, err := cli.List(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "list", "--page-size", "100", "--output", "json")
+		wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "list", "--all-workspaces", "--page-size", "100", "--output", "json")
 	})
 
 	t.Run("a failed command is an error, not an empty list", func(t *testing.T) {
@@ -169,7 +218,6 @@ func TestCLIList(t *testing.T) {
 		// msg, when set, is the part of the error a refusal must name.
 		msg string
 	}{
-		{"full page with no continuation token", fullPage(0, ""), "no continuation token"},
 		{"output that is the table form, not JSON", "NAME          CREATED              PHASE\ngt-r-alpha    2026-11-12 09:14:02  Ready\n", ""},
 		{"empty output", "", ""},
 		{"page with no sandboxes field", `{"next_page_token":""}`, "no sandboxes field"},
