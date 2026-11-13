@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// head is the doc's example head; tests write it as the bytes a caller would.
+// head is the head bytes a caller writes: the request as JSON, then its newline.
 func head(t *testing.T, req Request) []byte {
 	t.Helper()
 	line, err := json.Marshal(req)
@@ -245,13 +245,26 @@ func TestCodecMalformed(t *testing.T) {
 
 // TestCodecReadError: a connection that fails mid-frame is reported as itself,
 // not as a short frame, so a caller can retry a broken connection and not a
-// protocol violation.
+// protocol violation, and a failure at the first byte of a frame or a head
+// reaches the caller instead of reading as an end of stream.
 func TestCodecReadError(t *testing.T) {
 	t.Parallel()
 	reset := errors.New("connection reset")
+
+	// The kind byte arrives, then the connection fails reading the length.
 	r := io.MultiReader(bytes.NewReader([]byte{1}), errReader{reset})
 	if _, err := ReadFrame(r); !errors.Is(err, reset) || errors.Is(err, ErrShortFrame) {
 		t.Errorf("ReadFrame over a failing connection = %v, want it to wrap %v and not %v", err, reset, ErrShortFrame)
+	}
+
+	// The connection fails before the frame's first byte.
+	if _, err := ReadFrame(errReader{reset}); !errors.Is(err, reset) || errors.Is(err, io.EOF) {
+		t.Errorf("ReadFrame with no byte read = %v, want it to wrap %v and not %v", err, reset, io.EOF)
+	}
+
+	// The connection fails while the head is read.
+	if _, _, err := ReadRequest(errReader{reset}); !errors.Is(err, reset) {
+		t.Errorf("ReadRequest over a failing connection = %v, want it to wrap %v", err, reset)
 	}
 }
 
