@@ -2478,13 +2478,18 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 
 	polecatGit := m.gits.Open(clonePath)
 
-	// Fetch latest from origin (non-fatal: may be offline)
-	repoGit, err := m.repoBase()
-	if err == nil {
-		_ = repoGit.Fetch("origin")
+	// Fetch latest from origin once, on the bare repository. A worktree shares
+	// that repository's object store and remote-tracking refs, so a second fetch
+	// in the worktree brings nothing new. Non-fatal: may be offline. Only a
+	// missing bare repository falls back to the worktree, its own only handle.
+	fetchRepo, err := m.repoBase()
+	if err != nil {
+		fetchRepo = polecatGit
 	}
-	// Also fetch in the worktree itself so it has the latest refs
-	_ = polecatGit.Fetch("origin")
+	fetchErr := fetchRepo.Fetch("origin")
+	if fetchErr != nil {
+		style.PrintWarning("could not fetch origin for polecat %s: %v", name, fetchErr)
+	}
 
 	// Determine the start point for the new branch.
 	// When resuming an existing branch (gh#3602), the start point IS that branch's
@@ -2493,14 +2498,14 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	switch {
 	case opts.ResumeBranch != "":
 		// Fetch the resume branch directly so origin/<branch> is up-to-date even
-		// on shallow / single-branch reference clones.
-		if repoGit != nil {
-			if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
+		// on shallow / single-branch reference clones. Skipped when the full fetch
+		// already left it in place; a failed full fetch proves nothing, so it does
+		// not count as having fetched the branch.
+		present, refErr := fetchRepo.RefExists("origin/" + opts.ResumeBranch)
+		if fetchErr != nil || refErr != nil || !present {
+			if err := fetchRepo.FetchBranch("origin", opts.ResumeBranch); err != nil {
 				style.PrintWarning("could not fetch resume branch %s on bare repo: %v", opts.ResumeBranch, err)
 			}
-		}
-		if err := polecatGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
-			style.PrintWarning("could not fetch resume branch %s in worktree: %v", opts.ResumeBranch, err)
 		}
 		startPoint = "origin/" + opts.ResumeBranch
 	case opts.BaseBranch != "":
