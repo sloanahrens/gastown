@@ -78,6 +78,19 @@ type updateTriggerState struct {
 	// updateRemoteBackoff of it, the hold makes no new read and reads main as
 	// unknown from the remembered failure (gt-jhep9).
 	remoteFailedAt time.Time
+	// offLog logs the pod's off-switch line once per start (see triggerUpdate).
+	offLog logLatch
+	// jobFailedAt is the clock reading of the last pod launch that timed out or was
+	// refused, zero when none is pending. jobFailures counts the consecutive ones;
+	// the backoff after the next failure doubles with it (update_job.go).
+	jobFailedAt time.Time
+	jobFailures int
+	// jobBound overrides updateJobCreateTimeout for a test that shortens the
+	// create's deadline; zero is the constant. Set before the heartbeat runs.
+	jobBound time.Duration
+	// jobOutstanding is closed when the last create the daemon abandoned returns;
+	// nil until one is abandoned.
+	jobOutstanding chan struct{}
 }
 
 // triggerUpdate is the heartbeat's update block: decide whether an update is
@@ -90,6 +103,11 @@ func (d *Daemon) triggerUpdate() {
 	d.checkUpdateAlerts(now)
 	settings, ok := d.updateSettings()
 	if !ok || !settings.Enabled {
+		if ok && d.podMode {
+			// A pod starts no roll until the switch is on, and says so once per
+			// start, so an operator who expects a roll can see why none starts.
+			d.updateTrigger.offLog.logf(d.logger.Printf, "update-off", "update: off in this pod (patrols.update.enabled is false); no update Job is created")
+		}
 		return
 	}
 
@@ -106,6 +124,13 @@ func (d *Daemon) triggerUpdate() {
 		// Name the hold, so an operator can see why updates have stopped
 		// rather than only when one starts.
 		d.noteUpdateNotDue(reason)
+		return
+	}
+	if d.podMode {
+		// A pod's roll is the Job, gated on a pair-ready commit, and never the child.
+		// Pod mode wins over container mode: a child started here is the one the
+		// pod's replacement takes down, so none starts even with container mode set.
+		d.triggerPodUpdate(now, settings, reason)
 		return
 	}
 	d.clearUpdateNotDue()

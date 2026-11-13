@@ -102,3 +102,25 @@ func TestKubeconfigHasContextIgnoresUnreadableFiles(t *testing.T) {
 		t.Error("a context no file names was found")
 	}
 }
+
+// TestInClusterHost: a pod is a process the kubelet gave KUBERNETES_SERVICE_HOST.
+func TestInClusterHost(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "unset", env: map[string]string{}, want: false},
+		{name: "empty", env: map[string]string{"KUBERNETES_SERVICE_HOST": ""}, want: false},
+		{name: "set", env: map[string]string{"KUBERNETES_SERVICE_HOST": "10.0.0.1"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := InClusterHost(func(k string) string { return tt.env[k] }); got != tt.want {
+				t.Errorf("InClusterHost(%v) = %v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}
