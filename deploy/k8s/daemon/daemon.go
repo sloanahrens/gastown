@@ -25,7 +25,9 @@
 // with every name decided for a pod by podEnvDecisions: the pod sets its
 // container-mode pair, its stable owner name and its clock, keeps the Dolt
 // endpoint and the provider settings, and drops the engine, the Mac's
-// kubeconfig, the host wrapper's cloud directories and the takeover switch.
+// kubeconfig, the host wrapper's cloud directories and the takeover switch. It
+// also sets FORGEJO_API_URL from Values.ForgeHost and TRACKER_URL from
+// Values.Tracker.
 // TestPodEnvDecisions holds a decision for every live name,
 // TestPodEnvEqualsTheComposeEnv holds the two services equal but for the names
 // composeOnlyEnv lists, and TestPodCommandEqualsTheComposeCommand holds the
@@ -298,6 +300,11 @@ const (
 	// environment variable, and the key of Values.TrackerDSNSecret it reads.
 	TrackerDSNEnv = "TRACKER_DSN"
 	TrackerDSNKey = "dsn"
+	// TrackerURLEnv is the variable the daemon container carries when
+	// Values.Tracker is set: the tracker Service's URL, so every process the pod
+	// starts (the daemon and the wrapped gt and bd) reaches the tracker without
+	// a per-process file (gt-qtxmg7).
+	TrackerURLEnv = "TRACKER_URL"
 )
 
 // The tracker's nightly dump is a CronJob beside the tracker (gt-a6dyl2). Its pod
@@ -742,7 +749,8 @@ type Values struct {
 	// dashboard: trackerd on loopback from Values.Image, and a socat relay from
 	// Values.ProxyImage that publishes it on TrackerPort. It needs
 	// TrackerDSNSecret and refuses an empty ProxyImage, since the relay has no
-	// image without it; a rehearsal refuses it, as it refuses the dashboard.
+	// image without it; a rehearsal refuses it, as it refuses the dashboard. Set,
+	// the daemon container also carries TRACKER_URL, the Service's URL.
 	Tracker bool
 	// TrackerDSNSecret is the name of the Secret whose dsn key holds the tracker's
 	// connection string; the trackerd container reads it into TRACKER_DSN. The DSN
@@ -1273,6 +1281,9 @@ func containerEnvironment(v Values) []EnvVar {
 	if v.ForgeHost != "" {
 		env = append(env, EnvVar{Name: forgejoAPIURLEnv, Value: "http://" + v.ForgeHost + "/api/v1"})
 	}
+	if v.Tracker {
+		env = append(env, EnvVar{Name: TrackerURLEnv, Value: trackerURL()})
+	}
 	kept := make(map[string]string, len(v.Env)+1)
 	for name, value := range v.Env {
 		kept[name] = value
@@ -1319,6 +1330,13 @@ func dashboardService(namespace string) Service {
 			Ports:    []ServicePort{{Name: "http", Port: DashboardPort, Protocol: "TCP"}},
 		},
 	}
+}
+
+// trackerURL is the trackerd Service as the daemon container reaches it: the
+// bare Service name and TrackerPort, which resolve because trackerService and
+// the daemon Deployment share the render's namespace.
+func trackerURL() string {
+	return "http://" + TrackerName + ":" + strconv.Itoa(TrackerPort)
 }
 
 // trackerService publishes the relay's port inside the cluster, so another pod
@@ -2339,6 +2357,8 @@ func (v Values) validateEnv() error {
 			return fmt.Errorf("Values.Env[%q]: want an environment variable name", name)
 		case name == forgejoAPIURLEnv:
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.ForgeHost when one is given, so a caller's value would be dropped", name)
+		case name == TrackerURLEnv:
+			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.Tracker when the tracker is rendered, so a caller's value would be dropped", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
 		case decision.drop != "":

@@ -581,6 +581,41 @@ func trackerValues(t *testing.T) Values {
 	return v
 }
 
+// TestDaemonDeploymentCarriesTheTrackerURL holds TRACKER_URL to the tracker
+// mode: with Values.Tracker set the daemon container carries exactly one, the
+// trackerd Service in the pod's own namespace; without it, the container
+// carries none.
+func TestDaemonDeploymentCarriesTheTrackerURL(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		values Values
+		want   []string
+	}{
+		{"with the tracker", trackerValues(t), []string{"http://trackerd:7433"}},
+		{"without the tracker", goldenValues(t), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctr := mustBuild(t, tc.values).Deployment.Spec.Template.Spec.Containers[0]
+			if got := envValuesNamed(ctr, TrackerURLEnv); !slices.Equal(got, tc.want) {
+				t.Errorf("the daemon container carries %s = %q, want exactly %q", TrackerURLEnv, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTrackerDaemonGolden holds the daemon Deployment's shape when the tracker
+// is rendered: the pod's environment gains TRACKER_URL and nothing else moves.
+// It is the daemon's golden; the tracker's own objects are walked by
+// TestTrackerDeployment.
+func TestTrackerDaemonGolden(t *testing.T) {
+	t.Parallel()
+	built := mustBuild(t, trackerValues(t))
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-tracker.yaml", document(t, built.Deployment))
+}
+
 // TestTrackerDeployment walks the tracker pod: trackerd on loopback with the DSN
 // Secret's dsn key in TRACKER_DSN, the relay sidecar publishing TrackerPort from
 // TrackerListenPort, and the pod shape that reaches nothing else: no
@@ -934,6 +969,12 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"an env name with no decision", func(v *Values) { v.Env["SOME_UNDECIDED"] = "x" }, `Values.Env["SOME_UNDECIDED"]`, "no decision"},
 		{"the forge API root with a forge host", func(v *Values) { v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "from Values.ForgeHost when one is given"},
 		{"the forge API root with no forge host", func(v *Values) { v.ForgeHost = ""; v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "from Values.ForgeHost when one is given"},
+		{"the tracker URL with the tracker on", func(v *Values) {
+			v.Tracker = true
+			v.TrackerDSNSecret = "town-tracker-dsn"
+			v.Env[TrackerURLEnv] = "http://elsewhere:7433"
+		}, `Values.Env["TRACKER_URL"]`, "from Values.Tracker"},
+		{"the tracker URL with the tracker off", func(v *Values) { v.Env[TrackerURLEnv] = "http://elsewhere:7433" }, `Values.Env["TRACKER_URL"]`, "from Values.Tracker"},
 		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
 		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
 		{"an env value that looks like a secret", func(v *Values) { v.Env[awsRegionEnv] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["AWS_REGION"]`, ""},
