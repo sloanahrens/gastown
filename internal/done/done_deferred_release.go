@@ -30,11 +30,13 @@ func (r *doneRun) releaseDeferred() error {
 // unassigned pool, so the seat's claim does not outlive its session (gt-tq23e9).
 // The attached molecule is left as it is, as for any DEFERRED exit.
 //
-// It acts only on a bead the seat holds, or one with no assignee. A bead that
-// is closed (or tombstoned), a workflow step (its DEFERRED is a completion), in
-// landing (gt:ready-to-land, which the landing worker owns), a rig identity
-// bead, or claimed by another actor is left exactly as it is, and so is a bead
-// that no longer exists. The status, the assignee and the DEFERRED note go in
+// It acts only on a bead the seat holds, or one with no assignee. A bead is
+// left exactly as it is when its status is not actionable (closed, tombstoned,
+// or parked as deferred or pinned, which is a person's hold on it), when it is
+// a workflow step (its DEFERRED is a completion), when it is in landing
+// (gt:ready-to-land, which the landing worker owns), when it is a rig identity
+// bead, or when another actor claimed it; a bead that no longer exists is left
+// as it is too. Otherwise the status, the assignee and the DEFERRED note go in
 // one bd update, so the release is one Dolt commit.
 //
 // A read or write failure is returned, not logged, so gt done exits non-zero.
@@ -49,7 +51,10 @@ func releaseDeferredBead(bd beads.Client, issueID, seat string) error {
 		return fmt.Errorf("reading %s to release it on DEFERRED: %w", issueID, err)
 	}
 	switch {
-	case beads.IssueStatus(issue.Status).IsTerminal():
+	case !beads.IssueStatus(issue.Status).IsActionable():
+		// Not actionable: terminal, or parked as deferred or pinned while the
+		// seat held it. A parked bead is the person's hold on it, which this
+		// seat's exit must not lift (gt-tq23e9).
 		return nil
 	case strings.Contains(issueID, "-wfs-"):
 		// A workflow step's DEFERRED exit is a completion, not a pause (the
