@@ -3,6 +3,7 @@ package rig
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -245,6 +246,51 @@ func TestRetireMayorPlan(t *testing.T) {
 			wantErr: "permission denied",
 		},
 		{
+			name: "unreadable mayor/rig is an error, not a missing one",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.errs[retireFrom] = errors.New("permission denied")
+			},
+			rig:     retireRig,
+			wantErr: "permission denied",
+		},
+		{
+			name: "unreadable destination is an error, not a free one",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.errs[retireTo] = errors.New("permission denied")
+			},
+			rig:     retireRig,
+			wantErr: "permission denied",
+		},
+		{
+			name: "unreadable crew directory is an error, not an empty one",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.errs[filepath.Join(retireRigPath, constants.DirCrew)] = errors.New("permission denied")
+			},
+			rig:     retireRig,
+			wantErr: "permission denied",
+		},
+		{
+			name: "unreadable polecats directory is an error, not an empty one",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.errs[filepath.Join(retireRigPath, constants.DirPolecats)] = errors.New("permission denied")
+			},
+			rig:     retireRig,
+			wantErr: "permission denied",
+		},
+		{
+			name: "routes line with no path is an error naming its line",
+			setup: func(f *fakeRetireFS) {
+				retireBaseWorld(f)
+				f.files[retireRoutes] = "{\"prefix\":\"gt-\"}\n"
+			},
+			rig:     retireRig,
+			wantErr: retireRoutes + ":1",
+		},
+		{
 			name:    "empty rig name is an error",
 			setup:   retireBaseWorld,
 			rig:     "",
@@ -337,6 +383,22 @@ func TestRetireMayorApply(t *testing.T) {
 		}
 	})
 
+	t.Run("apply reports a destination it cannot read and renames nothing", func(t *testing.T) {
+		f := newFakeRetireFS()
+		retireBaseWorld(f)
+		plan, err := PlanRetireMayor(f, retireTown, retireRig, retireClock)
+		if err != nil {
+			t.Fatalf("PlanRetireMayor: %v", err)
+		}
+		f.errs[retireTo] = errors.New("permission denied")
+		if err := plan.Apply(f); err == nil {
+			t.Fatal("Apply = nil, want the unreadable destination")
+		}
+		if len(f.renames) != 0 {
+			t.Errorf("renames = %v, want none", f.renames)
+		}
+	})
+
 	t.Run("apply rechecks the destination taken after the plan", func(t *testing.T) {
 		f := newFakeRetireFS()
 		retireBaseWorld(f)
@@ -369,6 +431,30 @@ func TestRetireMayorApply(t *testing.T) {
 }
 
 // TestRetireMayorUndo checks that the printed mv reverses the rename.
+// A path that runs through a regular file is neither present nor missing: the
+// real filesystem reports an error, and OSRetireFS must pass it up.
+func TestRetireMayorOSFSExistsReportsAnUnreadablePath(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (OSRetireFS{}).Exists(filepath.Join(file, "child")); err == nil {
+		t.Error("Exists under a regular file = nil error, want one")
+	}
+}
+
+func TestRetireMayorOSFSSubDirsReportsAnUnreadableDirectory(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (OSRetireFS{}).SubDirs(file); err == nil {
+		t.Error("SubDirs of a regular file = nil error, want one")
+	}
+}
+
 func TestRetireMayorUndo(t *testing.T) {
 	t.Parallel()
 	f := newFakeRetireFS()

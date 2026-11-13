@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,7 @@ func TestRigRetireMayorDryRunChangesNothing(t *testing.T) {
 	townRoot, from, to := retireMayorTown(t)
 	var out bytes.Buffer
 
-	if err := retireMayorRig(&out, rig.OSRetireFS{}, townRoot, "gastown", false, retireMayorClock); err != nil {
+	if err := retireMayorRig(&out, rig.OSRetireFS{}, inTown(townRoot), "gastown", false, retireMayorClock); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
 	if !retireMayorExists(t, from) || retireMayorExists(t, to) {
@@ -74,7 +75,7 @@ func TestRigRetireMayorApplyRenamesOnce(t *testing.T) {
 	townRoot, from, to := retireMayorTown(t)
 	var out bytes.Buffer
 
-	if err := retireMayorRig(&out, rig.OSRetireFS{}, townRoot, "gastown", true, retireMayorClock); err != nil {
+	if err := retireMayorRig(&out, rig.OSRetireFS{}, inTown(townRoot), "gastown", true, retireMayorClock); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	if retireMayorExists(t, from) || !retireMayorExists(t, to) {
@@ -97,7 +98,7 @@ func TestRigRetireMayorRefusalNamesPathAndRenamesNothing(t *testing.T) {
 	}
 	var out bytes.Buffer
 
-	err := retireMayorRig(&out, rig.OSRetireFS{}, townRoot, "gastown", true, retireMayorClock)
+	err := retireMayorRig(&out, rig.OSRetireFS{}, inTown(townRoot), "gastown", true, retireMayorClock)
 	if err == nil {
 		t.Fatal("apply with a routes refusal = nil, want an error")
 	}
@@ -114,11 +115,62 @@ func TestRigRetireMayorAlreadyRetiredIsNotAnError(t *testing.T) {
 	townRoot := t.TempDir()
 	var out bytes.Buffer
 
-	if err := retireMayorRig(&out, rig.OSRetireFS{}, townRoot, "gastown", true, retireMayorClock); err != nil {
+	if err := retireMayorRig(&out, rig.OSRetireFS{}, inTown(townRoot), "gastown", true, retireMayorClock); err != nil {
 		t.Fatalf("already retired: %v", err)
 	}
 	if !strings.Contains(out.String(), "already retired") {
 		t.Errorf("output %q does not say the rig is already retired", out.String())
+	}
+}
+
+// inTown is the town finder for a town at townRoot.
+func inTown(townRoot string) func() (string, error) {
+	return func() (string, error) { return townRoot, nil }
+}
+
+// renameRefusingFS is a RetireFS whose rename always fails.
+type renameRefusingFS struct{ rig.OSRetireFS }
+
+func (renameRefusingFS) Rename(string, string) error {
+	return errors.New("rename refused")
+}
+
+func TestRigRetireMayorOutsideATownIsAnError(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	outside := func() (string, error) { return "", errors.New("no town here") }
+
+	err := retireMayorRig(&out, rig.OSRetireFS{}, outside, "gastown", false, retireMayorClock)
+	if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Fatalf("error = %v, want the not-in-a-workspace refusal", err)
+	}
+}
+
+func TestRigRetireMayorInvalidRigNameIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot, from, _ := retireMayorTown(t)
+	var out bytes.Buffer
+
+	err := retireMayorRig(&out, rig.OSRetireFS{}, inTown(townRoot), "../gastown", true, retireMayorClock)
+	if err == nil || !strings.Contains(err.Error(), "planning retire-mayor") {
+		t.Fatalf("error = %v, want the planning refusal", err)
+	}
+	if !retireMayorExists(t, from) {
+		t.Error("an invalid rig name renamed a directory")
+	}
+}
+
+func TestRigRetireMayorRenameFailureIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot, from, to := retireMayorTown(t)
+	var out bytes.Buffer
+
+	err := retireMayorRig(&out, renameRefusingFS{}, inTown(townRoot), "gastown", true, retireMayorClock)
+	if err == nil || !strings.Contains(err.Error(), "rename refused") {
+		t.Fatalf("error = %v, want the rename failure", err)
+	}
+	if !retireMayorExists(t, from) || retireMayorExists(t, to) {
+		t.Error("a failed rename moved the directory")
 	}
 }
 

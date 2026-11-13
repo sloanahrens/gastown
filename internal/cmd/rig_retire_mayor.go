@@ -48,16 +48,17 @@ func init() {
 }
 
 func runRigRetireMayor(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return retireMayorRig(os.Stdout, rig.OSRetireFS{}, workspace.FindFromCwdOrError, args[0], rigRetireMayorApply, time.Now)
+}
+
+// retireMayorRig prints the retire-mayor plan for rigName under the town findTown
+// returns. It renames the rig's mayor/rig only when apply is set and the plan has
+// no refusals.
+func retireMayorRig(w io.Writer, fsys rig.RetireFS, findTown func() (string, error), rigName string, apply bool, clock func() time.Time) error {
+	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return retireMayorRig(os.Stdout, rig.OSRetireFS{}, townRoot, args[0], rigRetireMayorApply, time.Now)
-}
-
-// retireMayorRig prints the retire-mayor plan for rigName. It renames the rig's
-// mayor/rig only when apply is set and the plan has no refusals.
-func retireMayorRig(w io.Writer, fsys rig.RetireFS, townRoot, rigName string, apply bool, clock func() time.Time) error {
 	plan, err := rig.PlanRetireMayor(fsys, townRoot, rigName, clock)
 	if err != nil {
 		return fmt.Errorf("planning retire-mayor for rig %s: %w", rigName, err)
