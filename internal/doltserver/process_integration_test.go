@@ -267,6 +267,13 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("dolt is not installed")
 	}
+	// The hermetic harness poisons GT_DOLT_PORT/BEADS_DOLT_PORT to port 1 for
+	// the whole process. When the town names no endpoint, bd takes an
+	// inherited BEADS_DOLT_PORT over the rig's dolt-server.port, so the poison
+	// sent bd to port 1 instead of the server this test starts. Clear it so bd
+	// reads the port InitRig wrote.
+	t.Setenv("GT_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	var townRoot string
 	h, err := startOnFreePort(t, freePorts(t), func(h *host) error {
 		town := testTownRoot(t)
