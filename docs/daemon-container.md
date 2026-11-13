@@ -938,25 +938,26 @@ live town): `touch <scratch-parent>/.l2-end`. The window is the time between
 
 The daemon-state box and the configuration `find` hold on a quiet live town and
 fail when the town's own operation changes it during the window (pool and patrol
-edits, an install that restarts the daemon under launchd). A failure is told
-from an L2 effect with these two commands; run them, keep the output with the
-rest of the evidence, and record which box fired and why:
+edits, an install that restarts the daemon). A failure is told from an L2 effect
+with this command; run it, keep the output with the rest of the evidence, and
+record which box fired and why:
 
 ```
 for b in $(find <live-town>/settings -maxdepth 1 -name 'config.json.bak-*' -newer <scratch-parent>/.l2-start ! -newer <scratch-parent>/.l2-end | sort); do
   diff <(jq -S . "$b") <(jq -S . <live-town>/settings/config.json); done | grep -i -E 'landing_worker|forgejo|token'
-s=$(date -r <scratch-parent>/.l2-start '+%Y/%m/%d %H:%M:%S'); e=$(date -r <scratch-parent>/.l2-end '+%Y/%m/%d %H:%M:%S')
-awk -v s="$s" -v e="$e" '$1" "$2 >= s && $1" "$2 <= e' <live-town>/daemon/daemon.log | grep -a 'Daemon owner' | sed 's/^[^ ]* [^ ]* //' | sort -u
 ```
 
-A pass is: the first command prints nothing (no changed key mentions the landing
-worker, a Forgejo or a token, so the edits are not L2's), and the second prints
-only `Daemon owner: launchd "com.gastown.daemon"` (every start inside the window
-was the live supervisor's, none a container). The same two commands, without the window
-bounds, were run once, read-only, against the live town after the L2 run and
-printed exactly that; the window-scoped form was checked for syntax only. The
-output was observed once, not verified over time. Any other output means the
-live town may have been touched: take the steps below.
+A pass is: the command prints nothing (no changed key mentions the landing
+worker, a Forgejo or a token, so the edits are not L2's). Any other output means
+the live town may have been touched: take the steps below.
+
+A second command once listed here, which read the `Daemon owner:` lines the live
+daemon wrote inside the window and expected `launchd "com.gastown.daemon"`, is
+retired. gt-o17leb removed launchd from `daemon.supervisor`: the live daemon is
+the `daemon` Deployment (deploy/k8s/daemon/daemon.go), and the daemon still logs
+`Daemon owner: %s %q` (internal/daemon/daemon.go) with an owner kind of systemd,
+container or manual, none of them launchd for the live town. No live setup writes
+a launchd owner line, so the check could never pass.
 
 L2 is green when Steps 1 to 9 passed as described and every box above is
 true. Record each step and box on the program bead, with the time.
@@ -1014,8 +1015,8 @@ listeners on 3000, 2222 and 3307, and `~/.config/gt/forgejo-*.env` matched the
 recorded baseline. **Two boxes read different from the baseline: the live
 daemon's state and the configuration `find`.** What was seen: the `find` printed
 backups of `settings/config.json`; the diff of those backups showed the pool and
-patrol settings changed; and the live daemon was restarted twice by launchd, at
-times that match installs. That is consistent with the live town's own
+patrol settings changed; and the live daemon was restarted twice, at times that
+match installs. That is consistent with the live town's own
 operation and not with L2, but it is not proven by these readings. The commands
 under [Checks that the live town was not touched](#checks-that-the-live-town-was-not-touched)
 are the way to prove it. On a quiet town both boxes hold. The run's evidence (landing
