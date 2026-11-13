@@ -1,19 +1,18 @@
 # Daemon in a container: runbooks
 
-The town's daemon can run in a container on Docker Desktop instead of under
-launchd. The design and plan notes are in git history (see CHANGELOG).
-This page is the operator's side: the ladder of live checks, one section per
-rung. Run a rung only after the one before it is recorded green. The list
-below is a summary.
+The live daemon is a pod: the `daemon` Deployment in the control cluster (see
+`docs/architecture.md` and `deploy/k8s/daemon/daemon.go`). No launchd job runs
+it. The design and plan notes are in git history (see CHANGELOG).
+This page is the operator's runbook for a scratch town: the ladder of checks,
+one section per rung, and the procedure for fetching the daemon image, which
+the L1 section gives. Run a rung only after the one before it is recorded
+green. The list below is a summary.
 
 - L1, below: a scratch town's daemon starts in a container and stays healthy for
   30 minutes. Nothing in it touches the live daemon.
 - [L2](#l2-landing-through-a-throwaway-forgejo), below: the scratch town lands a
   bead through a throwaway Forgejo and runner. The dispatch half is not yet
   provable; see that section's first paragraph.
-- [L3](#l3-the-live-cutover-window): the live launchd daemon is replaced by the
-  container in a window the operator chooses, with launchd kept as the
-  rollback.
 - [Restoring the town configuration](#restoring-the-town-configuration), when a
   claim has lost its configuration.
 
@@ -183,7 +182,7 @@ prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src`, `--hm-src`,
 `--devops-src`, `--mango-src` or `--out` at a canonical `mayor/rig` clone: the
 command refuses one.
 
-**Before any L3 window: the container-config rehearsal.** From `~/gt`, run
+**Before any change to the live daemon's config: the container-config rehearsal.** From `~/gt`, run
 `gt daemon rehearse --live-root ~/gt --image gt-daemon:<rev>`; `--help` says what it
 stages and checks, and the table `rehearsalChecks` in `internal/cmd/daemon_rehearse.go`
 is the list. The container's settings carry `daemon.container_off`, the plugins and
@@ -1028,227 +1027,6 @@ container has no `openshell`, so L2 proves the landing half only; Step 9 submits
 the work by hand. Also not observed: a gate that builds anything (the scratch
 gate runs one echo), the landing worker's om review (turned off), and a landing
 under load.
-
-## L3: the live cutover window
-
-L3 replaces the live launchd daemon with the container, in a window the operator
-chooses, and keeps launchd as the rollback. It is the only rung that touches the
-live town, so it runs only after L1 and L2 are recorded and every precondition
-below is ticked. Its outputs, like those of L1 and L2, are derived from the code
-on `main` and not yet observed (see [What L3 has not
-observed](#what-l3-has-not-observed)).
-
-**The launchd job stays installed throughout.** The cutover stops it with
-`launchctl bootout`, which unloads the job and leaves its plist file where it
-is. Nothing in this window removes the plist or the job's definition; that is
-what makes the rollback one command. Do not delete the plist or undo what `gt daemon
-enable-supervisor` set up during L3 or in the days after it.
-
-The operator runs this window with the overseer. Every `gt` command below runs
-with the live town as the working directory, and every Docker command names its
-context as in L1.
-
-### Preconditions
-
-Tick every box, and write the time against each on the program bead, before the
-window. A box that cannot be ticked moves the window; it is never waived on the
-day.
-
-- [ ] **L1 is recorded green** (the L1 runbook, gt-qpeei.31): the container
-      town's daemon stayed healthy for 30 minutes and refused a hand-started
-      daemon.
-- [ ] **L2 is recorded** (this page, gt-qpeei.33), including that its dispatch
-      half is recorded as not proven. The operator has accepted that: a polecat
-      dispatched from the container daemon has not been seen to land.
-- [ ] **The live `state.json` names an owner.** Read it:
-
-      ```
-      cat <live-town>/daemon/state.json
-      ```
-
-      Expected: an `owner` of kind `launchd` and id `com.gastown.daemon`, written
-      by the running live daemon. The cutover starts the container behind the
-      startup guard with no takeover, and the guard refuses a state with no
-      owner (rule 2 of `internal/daemon/takeover.go`), so a live daemon built
-      before the owner field (plan task A5) leaves the cutover refused at step 4
-      with the old daemon already stopped. If there is no `owner`, install a
-      current `gt` and let the live daemon restart on it first, then read the
-      file again.
-- [ ] **The `om` credential is decided and in place.** The subscription token
-      file is written with mode 0600; its `expires_at` sidecar is written
-      readable only by the daemon's user; both are mounted read-only into the
-      container; the token file's path is on the compose command line as
-      `--om-token-file <path>` (the entrypoint reads no `GT_` variable for it);
-      and the sidecar's path is the town setting `daemon.om_token_meta`, which
-      the `om-token-expiry` doctor check reads. That key is read by the strict
-      settings parser at boot, so it is set only in a scratch town's own
-      settings until the installed `gt` knows it, and never in a live
-      `settings/config.json` before then: a live file with a key the installed
-      `gt` does not know stops the daemon at boot. Neither `ANTHROPIC_API_KEY`
-      nor `ANTHROPIC_AUTH_TOKEN` is in the container's environment; the
-      entrypoint refuses to start with one. Do not paste a token or its path's
-      contents anywhere.
-- [ ] **`dolt.container_host` is set** in the live `town.json` and the
-      container reaches the loopback-bound Dolt through it. The connectivity
-      probe (research task R4, an overseer-owned live check) is recorded green.
-- [ ] **The image is built** at the commit being cut over to:
-      `gt daemon image --rev <rev> ... --apply` (L1 Step 2), and
-      `docker --context desktop-linux image inspect gt-daemon:<rev>` prints an
-      id.
-- [ ] **The container can dispatch.** Add `--kubeconfig ~/gt/.runtime/sbx-k8s/kubeconfig
-      --openshell-config-dir ~/.config/openshell` to the compose write. The
-      render derives `.runtime/container/kubeconfig.yaml` (clusters only, on
-      `host.docker.internal` with `tls-server-name: localhost`, since the kind API
-      certificate does not name `host.docker.internal`), lists it before the
-      original in `KUBECONFIG`, mounts the openshell directory read-only and sets
-      `XDG_CONFIG_HOME`. The daemon.env entries that are not host-only reach the
-      container's environment; secrets stay resolved by name. Only paths appear
-      in the compose file.
-- [ ] **The container keeps the host's clock and files.** The render sets `TZ` to
-      the zone `polecat_pool.timezone` names (else the host's zoneinfo link), binds
-      `daemon.om_token_meta` read-only and `patrols.landing_worker.work_root`
-      read-write, each at the same path as on the host. The write refuses rather than default to UTC when the zone cannot be determined (set `polecat_pool.timezone`); `validateClient` and `containerZone` list every refusal.
-- [ ] **The live compose file is written.** `gt daemon compose write --image
-      gt-daemon:<rev>` renders `<live-town>/daemon/container/compose.yml` from
-      the town's settings and starts nothing. To let the container's landing
-      worker push to the live Forgejo, add the forge credential pair:
-      `--forge-host host.docker.internal:3000 --forge-token-file ~/.config/gt/forgejo-landing.env`.
-      `host.docker.internal` is how the container reaches the Mac (the name
-      `dolt.container_host` gives it) and 3000 is the port the live Forgejo
-      publishes; the credential helper is keyed to exactly this host:port, so
-      it has to be the one the container's pushes name. The path is the landing
-      bot's token file that `docs/forgejo-runbook.md`'s provisioning writes.
-      It must exist before the cutover starts the container, not merely before
-      the window's first landing: the compose file bind-mounts it, and Docker
-      resolves that mount at container start, so a token written afterwards is
-      too late. Leave `~` unquoted so the shell makes the path absolute, since
-      a relative one is refused. Without the pair its pushes fail;
-      `gt daemon compose write --help` gives the pair's contract.
-      The cutover starts the container from this file, so the window cannot
-      start before it exists.
-- [ ] **Both container fields are set in the live settings** while
-      `daemon.supervisor` stays `launchd`: `daemon.container_name` and
-      `daemon.compose_project`, never one without the other. The cutover builds
-      the container side from them and refuses a town that sets neither.
-- [ ] **gt-mac-watch publishes for the live town.** The devops launchd job
-      gt-mac-watch is loaded, and `<live-town>/.runtime/host/probes.json` was
-      modified in the last 180 seconds. The container daemon refuses a probe
-      file older than 180 seconds, so that check is the alarm when gt-mac-watch
-      stops. gt does not start or stop the job.
-- [ ] **The dispatch hold is on.** The overseer places it, never an agent:
-      `seat-refill.hold` is in the pod's town root. It is a shared row
-      (`deploy/daemon/town-state.yaml`): the pod reads the file in its own
-      town-state claim each tick, and a copy in the Mac town directory has no
-      effect on the pod. The Docker compose container binds the host town, so
-      there a Mac write is seen directly. The cutover only reads it. The ESTOP
-      files (`ESTOP` and `ESTOP.<rig>`) are shared rows the same way: the pod
-      reads each from its own claim, `gt estop` writes the sentinel into the
-      claim as well as the Mac's tree and reads each write back, and the cutover
-      neither creates, removes nor edits them.
-- [ ] **No install is pending.** `ls <live-town>/daemon/install-pending.json`
-      reports no such file. The marker is written while an install is in flight
-      and removed when the cycle reaches a verdict (`docs/INSTALLING.md`); a
-      marker that stands means an install is running, and the window waits for
-      it.
-- [ ] **The window is after any pending install.** Start it at least 30 minutes
-      after the last install that swapped a binary: a landing's install request
-      waits that long, so a window inside it can have an install begin under the
-      cutover. Check the last install's time before choosing the start.
-- [ ] **No `gt sling` is running and no container-gate job is running.** The
-      cutover waits for both (below), but look first: a window that starts with
-      either busy spends its 30 minutes waiting.
-- [ ] **The live compose starts two containers.** Besides the daemon it starts
-      `sweep-dind`, a privileged Docker-in-Docker engine on the project's
-      internal network that the daemon waits on. The compose names its image by
-      digest (`templates.DindImage`, `data.forgejo.org/oci/docker@sha256:...`);
-      that digest must still be served by the engine the daemon will use
-      (`gt daemon rehearse` pulls it). The design notes that chose the paired
-      engines are in git history (see CHANGELOG).
-- [ ] **A recorded baseline.** Before starting, keep the output of
-      `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
-      (it shows neither container yet),
-      `cat <live-town>/daemon/state.json`, and
-      `launchctl print gui/$(id -u)/com.gastown.daemon`, for the comparison at
-      the end and for the rollback.
-
-### Checks during the first 24 hours
-
-Take checks 1 to 3 at the start of the window (T+0), at each hour from T+1 to
-T+6, and at T+12 and T+24. Take checks 4, 5 and 7 once, at T+0. Take check 6
-when the operator lifts the dispatch hold. Checks 1 to 5 and 7 only read. Check
-6 is the one operator action: the operator lifts the hold, and puts it back on
-at the first sign of trouble.
-
-- [ ] `gt doctor --check daemon --check daemon-liveness` report OK; for a
-      container town they read the container and `state.json`, not a pid.
-- [ ] `cat <live-town>/daemon/state.json` names owner `container` and the live
-      container's name, `"running": true`, and a `heartbeat_count` larger than
-      at the previous check (it counts from 0 in the new process).
-- [ ] `<live-town>/.runtime/host/probes.json` was modified in the last 180
-      seconds, and gt-mac-watch is still loaded.
-- [ ] `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
-      shows the live container and `sweep-dind` up and not restarting, and
-      matches the baseline otherwise.
-- [ ] `gt doctor --check om-token-expiry` reports OK or a warning with a date
-      and the days left; it is skipped only while the setting is unset.
-- [ ] After the dispatch hold is lifted by the operator, one bead is dispatched
-      and lands. This is the first time a container daemon dispatches in the
-      live town and is not proven by L2: watch it end to end, and put the hold
-      back on at the first sign of trouble.
-- [ ] No second daemon: a hand-started `gt daemon run` is refused. Do not try it
-      on the live town during the window; L1 proved it, and a failed refusal
-      here would be the worst case. Instead read that `ps` shows no `gt daemon
-      run` process on the host: `pgrep -fl "gt daemon run"` prints nothing.
-
-If any check fails and the cause is not understood within minutes, stop and escalate to the overseer.
-
-### Rollback
-
-The reverse cutover was removed by gt-a2uug4.15, with the launchd supervisor commands. gt no longer supports a launchd-supervised town, so there is no rollback procedure to run.
-
-### What the L3 cutover on 2026-11-04 showed
-
-Each bullet gives what the cutover showed and the bead that tracks it; the
-program bead holds the output.
-
-- The startup guard asked `launchctl` whether the old launchd owner still ran.
-  A Linux container has no `launchctl`, so the guard read unknown and refused.
-  The host agent now publishes the launchd job state in `probes.json`
-  (schema 2), and the guard falls back to a fresh reading (gt-4r9wf).
-- The container daemon wrote its own Dolt address, `host.docker.internal`, into
-  the beads `metadata.json` files in the shared town directory and broke every
-  host `bd`. `EnsureMetadata` now persists `dolt.host` (gt-fimtw).
-- The landing worker found no bot token: `XDG_CONFIG_HOME` is `/run/gt/xdg` in
-  the container, so `~/.config/gt/...` resolved to an unmounted path.
-  `gt daemon compose write --config-dir` mounts the directory at both paths
-  (gt-gg9hv.3). Add `--secrets-manifest deploy/daemon/secrets.yaml` to mount
-  only the files the manifest lists, each read-only at its own path and at the
-  XDG path, and no directory of the config tree (gt-gg9hv.66); the manifest's
-  header defines its fields and what rotating a listed file costs. The same list
-  becomes the cluster Secrets when the daemon moves into the cluster.
-- Rig git remotes name `forgejo:3000`, which a container cannot resolve;
-  `--extra-host forgejo:host-gateway` fixes it (gt-gg9hv.2).
-- om withholds `CLAUDE_CODE_OAUTH_TOKEN` from its reviewer by design, and the
-  container had no om config; `gt daemon claude-exec` and the derived om config
-  fix it (gt-gg9hv.12, gt-gg9hv.13). The om token file must be a single line;
-  the entrypoint now strips whitespace (gt-gg9hv.8).
-- Every rig's `post_land_command` needs a toolchain (go, make) the image lacks,
-  so post-land exited 127 and the daemon read it as a red main and queued a
-  revert of a good landing. The commands are set to `true` until gt-gg9hv.7.
-- The backup root is `$HOME/gt-backups`, which is `/root` in the container, so
-  backups went to throwaway filesystems; `--backup-dir` sets
-  `GT_DOLT_BACKUP_ROOT` and mounts the shared directory (gt-gg9hv.16,
-  gt-gg9hv.17).
-- The devops reporters read `/Users/Shared/gt-cloud/reports` and
-  `/Users/Shared/gt-cloud/releases`, and hm-sync syncs `~/.claude` with its
-  `.beads`; none of those host paths was mounted in the container, so
-  `gt daemon compose write --bind-ro` mounts a host directory read-only at its
-  own path, repeatable for more (gt-vqexg).
-- The `update` and `rebuild_*` patrols cannot install in a container and are
-  disabled in the town settings (gt-1oz0t).
-- The plugin binaries were macOS builds; the image carries Linux builds
-  installed under `bin/<goos>-<goarch>/` (gt-gg9hv.6, .9, .10, .14). Plugins
-  that wrap Mac-installed tools still fail (gt-gg9hv.15).
 
 ## The backup spike guard's keys
 
