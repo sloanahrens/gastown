@@ -137,6 +137,10 @@ var ruleOwners = map[string]Owner{
 	// A stale hold is the overseer's to release: it reads the hold's reason and
 	// releases the label or closes the bead (gt-j669b4.19).
 	RuleHoldStale: OwnerOverseer,
+	// A sandbox pod the scheduler cannot place is the town's own pool to look
+	// at: the overseer gives the pod what its request needs, or lowers the
+	// request, before a person is woken (gt-1gtq5g).
+	RuleSandboxPending: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

@@ -697,6 +697,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A held bead nobody has released (gt-j669b4.19). The owns predicate
 		// keeps only its own items when a list or show fails.
 		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},
+		// A sandbox pod the scheduler cannot place (gt-1gtq5g). The owns
+		// predicate keeps only its own items when the cluster read fails.
+		{kind: attention.KindSandboxPending, collect: s.collectPendingSandboxPods, owns: pendingSandboxItem},
 	}, s.questionCollectors()...)
 }
 
