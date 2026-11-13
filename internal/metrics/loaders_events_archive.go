@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,10 @@ import (
 
 // The events archive is the Dolt events table exported for analysis: one
 // events-<database>.csv.gz per database under one directory, each with a header
-// and one row per event. LoadBeadChangesArchive rolls the rows up to one
+// and one row per event. The daemon's history archive names each day's file
+// events-<database>-<UTC date>.csv.gz, and a day's export overlaps the one before
+// it (the lookback window), so an event can sit in two files; each event id is
+// counted once. LoadBeadChangesArchive rolls the rows up to one
 // BeadChangeRow per bead, and WriteBeadChangesCSV publishes them for a dataset
 // loader. A bead created before the archive's retention start has no created
 // event; its creation time is then the created_at inside an updated row's
@@ -33,6 +37,10 @@ const (
 	eventsArchivePrefix = "events-"
 	eventsArchiveSuffix = ".csv.gz"
 )
+
+// archiveDatePart is the UTC date the daemon appends to a dated events file's
+// database name: eight digits, as in events-gastown-20261102.csv.gz.
+var archiveDatePart = regexp.MustCompile(`^\d{8}$`)
 
 // archiveEventTypes are the event_type values the rollup accepts; any other
 // names a row it does not understand, which it refuses rather than count as
@@ -54,9 +62,10 @@ var archiveEventTypes = map[string]bool{
 // update: the fields that carry the bead's prose.
 var archiveTextFields = []string{"description", "design", "acceptance_criteria", "notes"}
 
-// archiveRequiredColumns are the events columns the rollup needs. The others
-// (comment, id) are carried by the export and ignored here.
-var archiveRequiredColumns = []string{"issue_id", "event_type", "actor", "old_value", "new_value", "created_at"}
+// archiveRequiredColumns are the events columns the rollup needs. The id is the
+// events row's key, which decides whether a row is already counted from another
+// file. The comment is carried by the export and ignored here.
+var archiveRequiredColumns = []string{"issue_id", "event_type", "actor", "old_value", "new_value", "created_at", "id"}
 
 // BeadChangeColumns is the header WriteBeadChangesCSV writes, in column order.
 var BeadChangeColumns = []string{
@@ -98,13 +107,15 @@ type BeadChangeRow struct {
 	FirstFiledDescription               string
 }
 
-// LoadBeadChangesArchive reads every events-*.csv.gz file directly under dir of
+// LoadBeadChangesArchive reads every events archive file directly under dir of
 // fsys and returns one BeadChangeRow per database and issue id, sorted by
-// database then issue id. A row it cannot parse is recorded in dropped and the
-// other rows still load; a file it cannot read is recorded as failed, and the
-// rows that did load are returned beside an error naming that file. A directory
-// that cannot be listed is an error, since no rows there does not mean no
-// changes were archived.
+// database then issue id. A file is events-<database>.csv.gz or the daemon's
+// dated events-<database>-<UTC date>.csv.gz. An event id already counted from
+// another file is recorded in dropped and not counted again. A row it cannot
+// parse is recorded in dropped and the other rows still load; a file it cannot
+// read is recorded as failed, and the rows that did load are returned beside an
+// error naming that file. A directory that cannot be listed is an error, since
+// no rows there does not mean no changes were archived.
 //
 // Only the files this load failed count against it: a caller may share one
 // Dropped between loaders.
@@ -121,18 +132,19 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 		return nil, fmt.Errorf("events archive: listing %s: %w", dir, err)
 	}
 	aggs := make(map[string]*beadChangeAgg)
+	seen := make(map[string]bool)
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasPrefix(name, eventsArchivePrefix) || !strings.HasSuffix(name, eventsArchiveSuffix) {
 			continue
 		}
 		filePath := path.Join(dir, name)
-		database := strings.TrimSuffix(strings.TrimPrefix(name, eventsArchivePrefix), eventsArchiveSuffix)
-		if database == "" {
+		database, ok := archiveFileDatabase(name)
+		if !ok {
 			dropped.Fail("archive:"+filePath, "file name names no database")
 			continue
 		}
-		readEventsArchiveFile(fsys, filePath, database, aggs, dropped)
+		readEventsArchiveFile(fsys, filePath, database, aggs, seen, dropped)
 	}
 	rows := make([]BeadChangeRow, 0, len(aggs))
 	for _, agg := range aggs {
@@ -149,6 +161,18 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 			len(failed), strings.Join(failed, ", "))
 	}
 	return rows, nil
+}
+
+// archiveFileDatabase returns the database an events archive file belongs to:
+// events-<db>.csv.gz, or events-<db>-<8-digit UTC date>.csv.gz. The date is
+// parsed from the right, so a database name that extends a shorter one is never
+// mistaken for it. It reports false when the name holds no database.
+func archiveFileDatabase(name string) (string, bool) {
+	stem := strings.TrimSuffix(strings.TrimPrefix(name, eventsArchivePrefix), eventsArchiveSuffix)
+	if i := strings.LastIndex(stem, "-"); i > 0 && archiveDatePart.MatchString(stem[i+1:]) {
+		stem = stem[:i]
+	}
+	return stem, stem != ""
 }
 
 // beadChangeAgg is one bead's counts and earliest stamps while its rows are
@@ -208,8 +232,9 @@ func (a *beadChangeAgg) finish() BeadChangeRow {
 	return row
 }
 
-// readEventsArchiveFile reads one gzip CSV and folds its rows into aggs.
-func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*beadChangeAgg, dropped *Dropped) {
+// readEventsArchiveFile reads one gzip CSV and folds its rows into aggs. seen
+// holds the database and id of every row already counted, across files.
+func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*beadChangeAgg, seen map[string]bool, dropped *Dropped) {
 	source := "archive:" + path
 	f, err := fsys.Open(path)
 	if err != nil {
@@ -225,11 +250,14 @@ func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*b
 		return
 	}
 	defer func() { _ = zr.Close() }()
-	readEventsArchiveCSV(csv.NewReader(zr), source, database, aggs, dropped)
+	readEventsArchiveCSV(csv.NewReader(zr), source, database, aggs, seen, dropped)
 }
 
 // readEventsArchiveCSV reads the header and every record of one archive file.
-func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[string]*beadChangeAgg, dropped *Dropped) {
+// A row whose id seen already holds was counted already, in this file or an
+// earlier one: it is recorded in dropped and not folded in again. A row with an
+// empty id has no key to match, so it is folded in as read.
+func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[string]*beadChangeAgg, seen map[string]bool, dropped *Dropped) {
 	header, err := r.Read()
 	if err != nil {
 		dropped.Fail(source, fmt.Sprintf("header: %v", err))
@@ -276,6 +304,14 @@ func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[strin
 			dropped.Add(source, fmt.Sprintf("row %d: %v", n, err))
 			continue
 		}
+		key := database + "\x00" + ev.id
+		if ev.id != "" {
+			if seen[key] {
+				dropped.Add(source, fmt.Sprintf("row %d: event id %s is already counted from another file", n, ev.id))
+				continue
+			}
+			seen[key] = true
+		}
 		agg := aggs[database+"\x00"+ev.issue]
 		if agg == nil {
 			agg = &beadChangeAgg{database: database, issueID: ev.issue, actors: map[string]struct{}{}}
@@ -289,6 +325,7 @@ func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[strin
 // and, for an updated row, the changed fields the new_value object names and
 // the issue the old_value object describes.
 type archiveEvent struct {
+	id      string
 	issue   string
 	kind    string
 	actor   string
@@ -313,6 +350,7 @@ func parseArchiveEvent(rec []string, columns map[string]int) (archiveEvent, erro
 		return rec[i]
 	}
 	ev := archiveEvent{
+		id:     strings.TrimSpace(cell("id")),
 		issue:  strings.TrimSpace(cell("issue_id")),
 		kind:   strings.TrimSpace(cell("event_type")),
 		actor:  strings.TrimSpace(cell("actor")),

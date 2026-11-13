@@ -751,6 +751,101 @@ func TestBeadChangesDoesNotFailOnAnotherLoadersFailure(t *testing.T) {
 	}
 }
 
+// archiveRowWithID is archiveRow with the events row's id set, so a test can
+// place the same event in two files.
+func archiveRowWithID(id, issue, kind, actor, oldValue, newValue, createdAt string) []string {
+	return []string{issue, kind, actor, oldValue, newValue, "", createdAt, id}
+}
+
+// The daemon's day file for a database is events-<db>-<date>.csv.gz, and the
+// export's lookback window re-reads the rows before it. An event in both files
+// is counted once, and the copy is logged.
+func TestBeadChangesCountsAnEventOnceAcrossDatedFiles(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown-20261101.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("7", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			archiveRowWithID("8", "gt-1", "label_added", "alice", "", "", "2026-10-02T00:00:00Z"),
+		}),
+		"events-gastown-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("8", "gt-1", "label_added", "alice", "", "", "2026-10-02T00:00:00Z"),
+			archiveRowWithID("9", "gt-1", "closed", "alice", "", "", "2026-10-03T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	row := findBeadChange(t, rows, "gastown", "gt-1")
+	if row.LabelAddedCount != 1 {
+		t.Errorf("LabelAddedCount = %d, want 1: event 8 is in both files", row.LabelAddedCount)
+	}
+	if row.UpdateCount != 0 || row.ClosedAt != "2026-10-03T00:00:00Z" {
+		t.Errorf("row = %+v, want the closed event counted and no updates", row)
+	}
+	if dropped.Count() != 1 {
+		t.Fatalf("dropped = %+v, want the one repeated event logged", dropped.Items)
+	}
+	if got := dropped.Items[0]; got.Source != "archive:archive/events-gastown-20261102.csv.gz" || !strings.Contains(got.Reason, "event id 8") {
+		t.Errorf("drop = %+v, want event 8 logged against the later file", got)
+	}
+}
+
+// A dated file's database is the name before its eight-digit date; a name whose
+// last part is not a date is the whole database.
+func TestBeadChangesReadsTheDatabaseOfADatedFile(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+		"events-my-db-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+		"events-bar-2026110.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if dropped.Count() != 0 {
+		t.Fatalf("dropped = %+v, want none: the databases differ, so the ids do not repeat", dropped.Items)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v, want one per database", rows)
+	}
+	findBeadChange(t, rows, "gastown", "gt-1")
+	findBeadChange(t, rows, "my-db", "gt-1")
+	findBeadChange(t, rows, "bar-2026110", "gt-1")
+}
+
+// The id is the key that matches a row across files, so a file whose header
+// lacks it is unreadable and fails rather than counting every copy.
+func TestBeadChangesFailsAFileWithoutAnIDColumn(t *testing.T) {
+	t.Parallel()
+	withoutID := []string{"issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at"}
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown-20261102.csv.gz": eventsArchiveWithHeader(t, withoutID, [][]string{
+			{"gt-1", "created", "alice", "", `{"title":"t"}`, "", "2026-10-01T00:00:00Z"},
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err == nil || !strings.Contains(err.Error(), "events-gastown-20261102.csv.gz") {
+		t.Fatalf("load error = %v, want one naming the file whose header lacks id", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %+v, want none from a file without ids", rows)
+	}
+	if len(dropped.Items) == 0 || !strings.Contains(dropped.Items[0].Reason, "columns: id") {
+		t.Errorf("drops = %+v, want the reason to name the missing id column", dropped.Items)
+	}
+}
+
 // A partial archive would publish as a complete dataset, so the writer refuses
 // it and writes nothing.
 func TestWriteBeadChangesCSVRefusesAPartialArchive(t *testing.T) {

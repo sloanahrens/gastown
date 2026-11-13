@@ -213,6 +213,40 @@ func TestAnalysisOptionsWiresThePlatformMangoBin(t *testing.T) {
 	}
 }
 
+// The bead-change table reads the archive the daemon config names, through the
+// resolver gt dolt status also uses. An unset archive_dir is off, not a default
+// directory, so the table reports it rather than reading some other one.
+func TestAnalysisOptionsReadsTheConfiguredArchiveDir(t *testing.T) {
+	t.Parallel()
+	archive := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "configured",
+			body: `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":"` + archive + `"}}}`,
+			want: archive,
+		},
+		{
+			name: "unset",
+			body: `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00"}}}`,
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeDaemonConfig(t, town, tc.body)
+			got, err := analysisOptions(town).ArchiveDir()
+			if err != nil || got != tc.want {
+				t.Fatalf("ArchiveDir() = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 // analyseTown is a town with a metrics day and no gt source checkout: the day
 // the fake extract answers with, and no gastown/cmd/gt/main.go.
 func analyseTown(t *testing.T) string {
