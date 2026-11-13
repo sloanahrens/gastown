@@ -1910,6 +1910,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget := env.Budget
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
 	budget.SetLive(specLiveWithInFlight(roster.Live, env.InFlight))
+	// The in-flight term is named apart from the roster in the picture, so a
+	// count above a cap reads as a double count rather than an admission past
+	// it (gt-la4r78). SetLive has set Live, which the term is part of.
+	budget.SetInFlight(specInFlightByAgent(env.InFlight))
 	budget.SetDeadHooked(roster.DeadHooked)
 	budget.SetDraining(roster.Draining)
 	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)

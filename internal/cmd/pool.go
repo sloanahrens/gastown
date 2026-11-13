@@ -218,7 +218,10 @@ func (l poolShowLive) seatCount(agent string, cap int) string {
 		return fmt.Sprintf("cap %d", cap)
 	}
 	count := fmt.Sprintf("%d/%d", l.live[agent], cap)
-	if n := specdispatch.SplitLiveDead(l.live[agent], l.dead[agent]); n != "" {
+	// This read holds no separate in-flight input, so it passes 0: the count
+	// is the roster's own and the line keeps its wording. The formatter is the
+	// tick line's, so both readers print a seat the same way (gt-la4r78).
+	if n := specdispatch.SplitLiveDead(l.live[agent], 0, l.dead[agent]); n != "" {
 		count += " " + n
 	}
 	if n := parkedStaleCount(l.parked[agent]); n != "" {

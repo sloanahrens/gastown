@@ -268,6 +268,12 @@ type Seat struct {
 	Agent string
 	Cap   int // live polecats allowed on this agent
 	Live  int // live polecats (and in-flight claims) on this agent
+	// InFlight is the part of Live that is slings still running from an earlier
+	// dispatch: the roster may not show them yet, and the tick adds each one to
+	// Live (specLiveWithInFlight) before ChooseSeat compares it to Cap. Named
+	// apart from Live, a seat reading above its cap reads as a double count
+	// rather than an admission past the cap (gt-la4r78).
+	InFlight int
 	// DeadHooked counts how many of Live hold the seat with no tmux session:
 	// their polecat crashed and is waiting for a supervised restart. They count
 	// toward Cap, and naming them explains a full seat that shows fewer live
@@ -385,28 +391,41 @@ func DeadHookedCount(n int) string {
 	return fmt.Sprintf("%d dead-hooked", n)
 }
 
-// SplitLiveDead names a seat's dead-hooked part apart from its live sessions:
-// a seat of 10 with 2 dead-hooked reads "(8 live + 2 dead-hooked)". total is the
-// whole count, dead the part of it no session holds. It is empty when dead is 0,
-// so a seat with no dead-hooked occupant keeps the short wording.
-func SplitLiveDead(total, dead int) string {
-	if dead == 0 {
+// SplitLiveDead names a seat's count as its parts: its live sessions, the
+// slings still running that the roster may not show yet, and the dead-hooked
+// seats no session holds. A seat of 11 with 2 in flight and 1 dead-hooked reads
+// "(8 live + 2 in flight + 1 dead-hooked)". total is the whole count the
+// dispatcher compares to the cap; the parts sum to it. It is empty when no
+// sling is in flight and no seat is dead-hooked, so a seat carrying neither
+// keeps the short wording.
+func SplitLiveDead(total, inFlight, dead int) string {
+	if inFlight == 0 && dead == 0 {
 		return ""
 	}
-	return fmt.Sprintf("(%d live + %s)", total-dead, DeadHookedCount(dead))
+	parts := []string{fmt.Sprintf("%d live", total-inFlight-dead)}
+	if inFlight > 0 {
+		parts = append(parts, fmt.Sprintf("%d in flight", inFlight))
+	}
+	if dead > 0 {
+		parts = append(parts, DeadHookedCount(dead))
+	}
+	return "(" + strings.Join(parts, " + ") + ")"
 }
 
 // Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat's
-// count is split into its live sessions and its dead-hooked seats, so a full seat
-// that shows fewer live sessions than its number says why: "10/8 (8 live + 2
-// dead-hooked)" (gt-tldj4). A town with a total cap names it too, so the picture
-// a full town is reported with holds the cap that held it rather than only the
-// seats under it.
+// count is split into its live sessions, the slings still running and its
+// dead-hooked seats, so a full seat that shows fewer live sessions than its
+// number says why: "11/9 (8 live + 2 in flight + 1 dead-hooked)" (gt-tldj4,
+// gt-la4r78). The parts sum to the number before the cap, which stays the count
+// the dispatcher decides with. A town with a total cap names it too, so the
+// picture a full town is reported with holds the cap that held it rather than
+// only the seats under it.
 //
 // The live part can count a sling twice. The caller adds each sling still running
 // to its agent's count, and the roster shows the same polecat once it spawns, so
 // until that sling returns the seat counts it twice. The error is toward fewer
-// slings, never more, and the picture does not separate the two terms.
+// slings, never more, and the in-flight term is the one that reads the double
+// count.
 //
 // Budget keeps no reservation across ticks, and none is needed. A sling
 // dispatched in an earlier tick is in the daemon's in-flight set from enqueue
@@ -417,7 +436,7 @@ func (b Budget) Picture() string {
 	parts := make([]string, 0, len(b.Seats))
 	for _, s := range b.Seats {
 		p := fmt.Sprintf("%s %d/%d", s.Agent, s.Live, s.Cap)
-		if n := SplitLiveDead(s.Live, s.DeadHooked); n != "" {
+		if n := SplitLiveDead(s.Live, s.InFlight, s.DeadHooked); n != "" {
 			p += " " + n
 		}
 		if s.closed(b.Now) {
@@ -436,18 +455,29 @@ func (b Budget) Picture() string {
 
 // SetLive fills each seat's Live from a count per agent, and LiveTotal from the
 // whole count: a live polecat on an agent the seats do not name is still a live
-// polecat, so a total cap has to see it. It clears DeadHooked, which is a
-// breakdown of Live and is set afterwards by SetDeadHooked.
+// polecat, so a total cap has to see it. It clears InFlight and DeadHooked, the
+// two breakdowns of Live, which are set afterwards by SetInFlight and
+// SetDeadHooked.
 func (b *Budget) SetLive(live map[string]int) {
 	total := 0
 	for i := range b.Seats {
 		b.Seats[i].Live = live[b.Seats[i].Agent]
+		b.Seats[i].InFlight = 0
 		b.Seats[i].DeadHooked = 0
 	}
 	for _, n := range live {
 		total += n
 	}
 	b.LiveTotal = total
+}
+
+// SetInFlight fills each seat's in-flight count from a count per agent, after
+// SetLive has set Live: the in-flight slings are part of Live, and this names
+// the part a reading above the cap can be read against (gt-la4r78).
+func (b *Budget) SetInFlight(inFlight map[string]int) {
+	for i := range b.Seats {
+		b.Seats[i].InFlight = inFlight[b.Seats[i].Agent]
+	}
 }
 
 // SetDeadHooked fills each seat's dead-hooked count from a count per agent,
