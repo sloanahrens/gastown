@@ -2,7 +2,8 @@
 //
 // This file ports the transcript reader and the DeepSeek cost model from usagelib.py:
 // IterAssistantUsage, SumUsage, BaseModel, ParseTS and EstCost. The Python functions are the
-// reference: on the same input these return the same values.
+// reference: on the same input these return the same values, except that ParseTS applies a
+// numeric zone offset where the Python drops it (see ParseTS).
 package usageattrib
 
 import (
@@ -10,8 +11,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -140,14 +143,38 @@ func BaseModel(model string) string {
 // as strptime does.
 const tsLayout = "2006-1-2T15:4:5"
 
-// ParseTS parses a transcript timestamp such as "2026-10-12T18:53:57Z" as UTC. Like the Python,
-// it reads only the first 19 bytes, so fractional seconds and the zone suffix are ignored.
+// tsPattern is a transcript timestamp: the strptime fields, an optional fraction (dropped, as the
+// Python does), and an optional zone, either Z or a numeric offset whose hours are 00 to 23 and
+// minutes 00 to 59. Groups: 1 the fields, 2 the sign of an offset, 3 its hours, 4 its minutes; all
+// empty for Z or no zone.
+var tsPattern = regexp.MustCompile(`^(\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{1,2}:\d{1,2})(?:\.\d+)?(?:Z|([+-])([01]\d|2[0-3]):([0-5]\d))?$`)
+
+// ParseTS parses a transcript timestamp as the UTC instant it names. "2026-10-12T18:53:57Z" and
+// "2026-10-12T20:53:57+02:00" are the same instant, and a timestamp with no zone is read as UTC.
+// This is where the port differs from the Python, which drops the zone and reads the wall clock:
+// an offset is applied here, so comparisons and the CDT hour are on the instant. A timestamp in any
+// other form, or with an offset out of range, is an error.
 func ParseTS(ts string) (time.Time, error) {
-	if len(ts) > 19 {
-		ts = ts[:19]
+	m := tsPattern.FindStringSubmatch(ts)
+	if m == nil {
+		return time.Time{}, fmt.Errorf("timestamp %q is not a transcript timestamp", ts)
 	}
-	return time.ParseInLocation(tsLayout, ts, time.UTC)
+	t, err := time.ParseInLocation(tsLayout, m[1], time.UTC)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if m[2] == "" {
+		return t, nil
+	}
+	off := time.Duration(twoDigits(m[3])*60+twoDigits(m[4])) * time.Minute
+	if m[2] == "+" {
+		return t.Add(-off), nil
+	}
+	return t.Add(off), nil
 }
+
+// twoDigits is the value of the two ASCII digits tsPattern admits in an offset group.
+func twoDigits(s string) int { return int(s[0]-'0')*10 + int(s[1]-'0') }
 
 // price is USD per million tokens: cache miss, cache hit, output.
 type price struct{ miss, hit, output float64 }

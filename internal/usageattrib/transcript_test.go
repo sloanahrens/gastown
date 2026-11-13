@@ -417,6 +417,138 @@ func TestCostParseTSMirrorsStrptime(t *testing.T) {
 	}
 }
 
+// usageLine is one assistant line for message id mid with the given usage fields, timestamp UTC Z.
+func usageLine(t *testing.T, mid string, in, cc, cr, out int64) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"type":      "assistant",
+		"timestamp": "2026-10-12T10:00:00Z",
+		"uuid":      fmt.Sprintf("u-%s-%d-%d-%d-%d", mid, in, cc, cr, out),
+		"message": map[string]any{
+			"id":    mid,
+			"model": "claude-opus-5-5",
+			"usage": map[string]any{
+				"input_tokens":                in,
+				"cache_creation_input_tokens": cc,
+				"cache_read_input_tokens":     cr,
+				"output_tokens":               out,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal fixture line: %v", err)
+	}
+	return string(b)
+}
+
+// TestReaderRepeatedIDTakesMaxOfEachField: a message id written on several lines counts once, and
+// each token field is the maximum over those lines, independently of the others.
+func TestReaderRepeatedIDTakesMaxOfEachField(t *testing.T) {
+	t.Parallel()
+	type fields struct{ in, cc, cr, out int64 }
+	tests := []struct {
+		name  string
+		lines []fields
+		want  fields
+	}{
+		{"single line", []fields{{1, 2, 3, 4}}, fields{1, 2, 3, 4}},
+		{"output grows block by block", []fields{{1, 2, 3, 100}, {1, 2, 3, 300}, {1, 2, 3, 900}}, fields{1, 2, 3, 900}},
+		{"lower later line does not lower the total", []fields{{1, 2, 3, 900}, {1, 2, 3, 300}}, fields{1, 2, 3, 900}},
+		{"input from a later line", []fields{{5, 0, 0, 10}, {7, 0, 0, 10}}, fields{7, 0, 0, 10}},
+		{"each field maxed on its own", []fields{{1, 9, 0, 10}, {4, 2, 8, 5}}, fields{4, 9, 8, 10}},
+		{"cache read from the first line only", []fields{{1, 1, 50, 1}, {1, 1, 0, 1}}, fields{1, 1, 50, 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var lines []string
+			for _, f := range tc.lines {
+				lines = append(lines, usageLine(t, "m1", f.in, f.cc, f.cr, f.out))
+			}
+			msgs, bad, err := IterAssistantUsage(writeTranscript(t, lines))
+			if err != nil {
+				t.Fatalf("IterAssistantUsage: %v", err)
+			}
+			if bad != 0 {
+				t.Errorf("bad = %d, want 0", bad)
+			}
+			if len(msgs) != 1 {
+				t.Fatalf("len(msgs) = %d, want 1 (one id counts once)", len(msgs))
+			}
+			got := fields{msgs[0].Input, msgs[0].CacheCreation, msgs[0].CacheRead, msgs[0].Output}
+			if got != tc.want {
+				t.Errorf("fields = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseTSIsAnInstant: a timestamp names one UTC instant. A Z suffix, a numeric offset and no suffix
+// are read as the instant they name; a suffix the reader does not know is refused, not read as UTC.
+func TestParseTSIsAnInstant(t *testing.T) {
+	t.Parallel()
+	utc := func(h, m, s int) time.Time { return time.Date(2026, 10, 12, h, m, s, 0, time.UTC) }
+	tests := []struct {
+		name string
+		ts   string
+		want time.Time
+	}{
+		{"Z suffix", "2026-10-12T18:53:57Z", utc(18, 53, 57)},
+		{"no suffix is UTC", "2026-10-12T18:53:57", utc(18, 53, 57)},
+		{"fraction and Z", "2026-10-12T18:53:57.123456Z", utc(18, 53, 57)},
+		{"positive offset", "2026-10-12T20:53:57+02:00", utc(18, 53, 57)},
+		{"negative offset", "2026-10-12T13:53:57-05:00", utc(18, 53, 57)},
+		{"fraction and offset", "2026-10-12T20:53:57.5+02:00", utc(18, 53, 57)},
+		{"one-digit fields", "2026-10-2T1:00:00", time.Date(2026, 10, 2, 1, 0, 0, 0, time.UTC)},
+		{"one-digit fields and offset", "2026-10-2T3:00:00+02:00", time.Date(2026, 10, 2, 1, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseTS(tc.ts)
+			if err != nil {
+				t.Fatalf("ParseTS(%q): %v", tc.ts, err)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("ParseTS(%q) = %v, want %v", tc.ts, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseTSRefusesUnknownForms: a timestamp with a suffix or offset it cannot read is an error.
+func TestParseTSRefusesUnknownForms(t *testing.T) {
+	t.Parallel()
+	for _, ts := range []string{
+		"",
+		"not a time",
+		"2026-10-12T18:53:57Zjunk",
+		"2026-10-12T18:53:57+0200",
+		"2026-10-12T18:53:57+24:00",
+		"2026-10-12T18:53:57+02:60",
+		"2026-10-12T18:53:57 +02:00",
+		"2026-13-12T18:53:57Z",
+		"2026-10-12T25:00:00Z",
+	} {
+		if got, err := ParseTS(ts); err == nil {
+			t.Errorf("ParseTS(%q) = %v, want an error", ts, got)
+		}
+	}
+}
+
+// TestCostOffsetTimestampIsPricedAtItsInstant: 10:00+09:00 is 01:00Z, which is 20:00 CDT, a peak hour that
+// doubles the price. Read as the wall clock, 10:00 UTC is 05:00 CDT, off-peak. 15:00Z is 10:00 CDT, off-peak.
+func TestCostOffsetTimestampIsPricedAtItsInstant(t *testing.T) {
+	t.Parallel()
+	const in = 1_000_000
+	peak, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T10:00:00+09:00")
+	assertCost(t, peak, ok, err, 0.30)
+	zulu, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T01:00:00Z")
+	assertCost(t, zulu, ok, err, 0.30)
+	off, ok, err := EstCost("deepseek-flash", in, 0, 0, 0, "2026-10-12T15:00:00Z")
+	assertCost(t, off, ok, err, 0.15)
+}
+
 func TestCostBaseModelDropsBracketSuffix(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{"deepseek-flash[1m]": "deepseek-flash", "deepseek-flash": "deepseek-flash", "": ""} {
