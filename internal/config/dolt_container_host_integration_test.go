@@ -40,7 +40,7 @@ func TestIntegrationDoltContainerHostFromEnvironment(t *testing.T) {
 		wantHost   string
 	}{
 		{"the flag the compose file exports reaches container_host", config.SupervisorContainer, containerHost},
-		{"a launchd daemon keeps dolt.host", config.SupervisorLaunchd, localHost},
+		{"a launchd daemon keeps dolt.host", "launchd", localHost},
 		{"an unset flag keeps dolt.host", "", localHost},
 	}
 	for _, tt := range tests {

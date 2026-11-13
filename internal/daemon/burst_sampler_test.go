@@ -1045,7 +1045,7 @@ func TestContainerModeFromEnv(t *testing.T) {
 		want   bool
 	}{
 		{name: "the compose file's container", getenv: burstContainerGetenv, want: true},
-		{name: "launchd", getenv: func(string) string { return config.SupervisorLaunchd }, want: false},
+		{name: "launchd", getenv: func(string) string { return "launchd" }, want: false},
 		{name: "an empty environment", getenv: func(string) string { return "" }, want: false},
 	}
 	for _, tt := range tests {

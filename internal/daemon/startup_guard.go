@@ -135,10 +135,10 @@ func startupCandidates(townRoot string) ([]Owner, error) {
 // the readers the supervisor status already uses: docker inspect for a
 // container (run, templates.RunDockerInspect in production), the service
 // manager's job for systemd, and a same-host process check for a manual owner
-// (hostname names this host). A launchd owner is unknown, since launchd is not
-// visible from the pod and its job is not read. Whatever it cannot read is
-// unknown, and unknown refuses. read reads a supervisor job; nil reads the
-// service manager for real.
+// (hostname names this host). An owner of any other kind, a launchd owner an
+// older build recorded among them, is unknown: its job is not read. Whatever it
+// cannot read is unknown, and unknown refuses. read reads a supervisor job; nil
+// reads the service manager for real.
 func startupOwnerProbe(run templates.ContainerDocker, hostname func() (string, error), read templates.SupervisorReader) OwnerProbe {
 	if read == nil {
 		read = templates.SupervisorJobState

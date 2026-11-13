@@ -24,8 +24,10 @@ var startGuardNow = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 // heartbeat of it is another owner's.
 var startGuardOther = daemon.Owner{Kind: daemon.OwnerKindManual, ID: "other-host:7"}
 
-// startGuardLaunchd is the recorded owner of a launchd daemon.
-var startGuardLaunchd = daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}
+// startGuardLaunchd is the recorded owner of a launchd daemon an older build
+// started. No current build records a launchd owner, so the guard reads it as
+// an owner it cannot judge.
+var startGuardLaunchd = daemon.Owner{Kind: "launchd", ID: templates.LaunchdLabel}
 
 // guardProbe wraps daemon.GuardStart with the fixed clock and the given probe,
 // the shape of the control's guard seam. Everything else is the real guard. The
@@ -556,7 +558,7 @@ func TestStartDaemonTakeoverByHandCarriesTheVariableToTheChild(t *testing.T) {
 func TestRealStartGuardReadsTheTownsFiles(t *testing.T) {
 	t.Parallel()
 	town := startGuardTown(t)
-	self := daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}
+	self := daemon.Owner{Kind: "launchd", ID: templates.LaunchdLabel}
 	if err := realStartGuard(town, self, false); err != nil {
 		t.Fatalf("realStartGuard on a town with no daemon file: %v", err)
 	}

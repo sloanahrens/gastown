@@ -135,7 +135,6 @@ func (c *DaemonPatrolConfig) ValidatePolecatImageSource() error {
 // The supervisor kinds daemon.supervisor accepts, and the names the container
 // kind runs under when the town sets neither.
 const (
-	SupervisorLaunchd   = "launchd"
 	SupervisorSystemd   = "systemd"
 	SupervisorContainer = "container"
 
@@ -157,7 +156,8 @@ const (
 	TakeoverEnv = "GT_DAEMON_TAKEOVER"
 
 	// LaunchdJobEnv is the variable launchd sets to the job label of the
-	// process it started; the label is the launchd owner's id (gt-qpeei.12).
+	// process it started. The daemon no longer names a launchd owner from it
+	// (gt-o17leb).
 	LaunchdJobEnv = "XPC_SERVICE_NAME"
 
 	// SystemdInvocationEnv is the variable systemd sets to the unit's
@@ -231,17 +231,17 @@ var ForgeHostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:([0-9]{1,
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town
 // sets none and the host's own detection answers, and an error for any value
-// that is not one of the three kinds.
+// that is not one of the two kinds.
 func (c *DaemonPatrolConfig) SupervisorKind() (string, error) {
 	if c == nil || c.Supervisor == "" {
 		return "", nil
 	}
 	switch c.Supervisor {
-	case SupervisorLaunchd, SupervisorSystemd, SupervisorContainer:
+	case SupervisorSystemd, SupervisorContainer:
 		return c.Supervisor, nil
 	}
-	return "", fmt.Errorf("daemon.supervisor %q: accepted values are %q, %q and %q; leave it unset to detect the host's service manager",
-		c.Supervisor, SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
+	return "", fmt.Errorf("daemon.supervisor %q: accepted values are %q and %q; leave it unset to detect the host's service manager",
+		c.Supervisor, SupervisorSystemd, SupervisorContainer)
 }
 
 // OMTokenMeta returns the sidecar path daemon.om_token_meta sets, "" when the

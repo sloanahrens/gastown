@@ -26,8 +26,9 @@ var guardNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 // guardSelf is the owner a hand-run start names in these tests.
 var guardSelf = Owner{Kind: OwnerKindManual, ID: "fixture-host:4242"}
 
-// guardLaunchd is the owner the town's launchd job records.
-var guardLaunchd = Owner{Kind: agentconfig.SupervisorLaunchd, ID: templates.LaunchdLabel}
+// guardLaunchd is the owner a launchd job an older build recorded. No current
+// build writes a launchd owner, so the guard reads it as unknown.
+var guardLaunchd = Owner{Kind: "launchd", ID: templates.LaunchdLabel}
 
 // guardTown makes a town root with the daemon directory a start expects.
 func guardTown(t *testing.T) string {
@@ -448,7 +449,7 @@ func TestStartupOwnerProbe(t *testing.T) {
 			// Another app's XPC label names no job of this town, so it is not
 			// read from the service manager.
 			name:  "a launchd owner under another label is unknown",
-			owner: Owner{Kind: agentconfig.SupervisorLaunchd, ID: "application.x.y"},
+			owner: Owner{Kind: "launchd", ID: "application.x.y"},
 			host:  host,
 		},
 	}

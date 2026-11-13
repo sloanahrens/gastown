@@ -366,7 +366,7 @@ func TestAttentionHostProbesSelectByMode(t *testing.T) {
 	}), noForgejo, noNodeDisk).(fileHostProbes); !ok {
 		t.Errorf("container mode did not select fileHostProbes")
 	}
-	for _, mode := range []string{"", config.SupervisorLaunchd, config.SupervisorSystemd} {
+	for _, mode := range []string{"", "launchd", config.SupervisorSystemd} {
 		if _, ok := attentionHostProbes(townRoot, getenv(map[string]string{
 			config.ContainerModeEnv: mode,
 		}), noForgejo, noNodeDisk).(systemHostProbes); !ok {

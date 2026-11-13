@@ -145,7 +145,7 @@ func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 			Running:        true,
 			LastHeartbeat:  time.Now().Add(-time.Minute),
 			HeartbeatCount: 3,
-			Owner:          &daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel},
+			Owner:          &daemon.Owner{Kind: "launchd", ID: templates.LaunchdLabel},
 		}, job: containerRunning(), want: StatusError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,7 +223,7 @@ func TestJudgeContainerDaemon_UnknownSupervisorSettingFailsClosed(t *testing.T) 
 func TestJudgeContainerDaemon_HostKindIsNotAContainerTown(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	if err := daemon.SavePatrolConfig(townRoot, &config.DaemonPatrolConfig{Supervisor: config.SupervisorLaunchd}); err != nil {
+	if err := daemon.SavePatrolConfig(townRoot, &config.DaemonPatrolConfig{Supervisor: "launchd"}); err != nil {
 		t.Fatalf("SavePatrolConfig: %v", err)
 	}
 

@@ -1415,12 +1415,11 @@ func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
 	if SystemdInvocationEnv != "INVOCATION_ID" {
 		t.Errorf("SystemdInvocationEnv = %q, want INVOCATION_ID", SystemdInvocationEnv)
 	}
-	if SupervisorContainer != "container" || SupervisorLaunchd != "launchd" || SupervisorSystemd != "systemd" {
-		t.Errorf("supervisor kinds = %q, %q, %q", SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
+	if SupervisorContainer != "container" || SupervisorSystemd != "systemd" {
+		t.Errorf("supervisor kinds = %q, %q", SupervisorSystemd, SupervisorContainer)
 	}
 
 	for _, tt := range []struct{ name, value string }{
-		{"launchd", SupervisorLaunchd},
 		{"systemd", SupervisorSystemd},
 		{"container", SupervisorContainer},
 		{"unset", ""},
@@ -1460,23 +1459,31 @@ func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
 	}
 }
 
+// A kind gt does not run is refused, and the error names the two kinds that
+// are accepted. launchd is one such kind: a town still carrying it is refused
+// rather than read as a launchd job (gt-o17leb).
 func TestDaemonPatrolConfig_SupervisorKindRefusesUnknown(t *testing.T) {
 	t.Parallel()
-	var cfg DaemonPatrolConfig
-	if err := DecodeJSONFile("daemon.json", []byte(`{"supervisor":"kube"}`), &cfg); err != nil {
-		t.Fatalf("decode = %v", err)
-	}
-	got, err := cfg.SupervisorKind()
-	if err == nil {
-		t.Fatalf("SupervisorKind() = %q, nil; want an error", got)
-	}
-	if got != "" {
-		t.Errorf("SupervisorKind() kind = %q beside the error, want empty", got)
-	}
-	for _, want := range []string{`"kube"`, SupervisorLaunchd, SupervisorSystemd, SupervisorContainer} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not name %s", err, want)
-		}
+	for _, value := range []string{"kube", "launchd"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(`{"supervisor":"`+value+`"}`), &cfg); err != nil {
+				t.Fatalf("decode = %v", err)
+			}
+			got, err := cfg.SupervisorKind()
+			if err == nil {
+				t.Fatalf("SupervisorKind() = %q, nil; want an error", got)
+			}
+			if got != "" {
+				t.Errorf("SupervisorKind() kind = %q beside the error, want empty", got)
+			}
+			for _, want := range []string{`"` + value + `"`, `accepted values are "systemd" and "container"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %s", err, want)
+				}
+			}
+		})
 	}
 }
 
