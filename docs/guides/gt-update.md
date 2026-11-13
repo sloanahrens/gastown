@@ -206,6 +206,10 @@ finds the first and starts nothing.
   ahead of the running commit. A commit with only one of its two images
   published, or one equal to or older than the running commit, starts nothing.
 - A Job the cluster already holds for the commit counts as already launched.
+- A create the cluster refuses, or does not answer within 30 seconds, starts
+  nothing and is logged with its reason. The next attempt waits one minute, then
+  doubles the wait to five minutes. The Job's name makes the retry safe: a create
+  that the server took after the daemon gave up is found, not made again.
 - A daemon outside a pod keeps the detached `gt update --from-daemon` child.
 
 The Job's pod runs the commit's images through `gt update images` and then

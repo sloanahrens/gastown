@@ -29,14 +29,40 @@ const kubernetesServiceHostEnv = "KUBERNETES_SERVICE_HOST"
 // launch of one commit finds the first.
 const updateJobNamePrefix = "gt-update-"
 
+const (
+	// updateJobCreateTimeout bounds one create of the roll's Job, on the daemon's
+	// clock. The create runs on the heartbeat, so a cluster that does not answer
+	// costs this much and no more (gt-hlo2ac is the same class).
+	updateJobCreateTimeout = 30 * time.Second
+
+	// updateJobRequestSlack is how much shorter kubectl's own --request-timeout is
+	// than updateJobCreateTimeout, so kubectl gives up before the daemon abandons
+	// the call and the two bounds agree.
+	updateJobRequestSlack = 5 * time.Second
+
+	// updateJobBackoffBase is the wait after the first failed launch. Each further
+	// consecutive failure doubles it, up to updateLaunchSuppression.
+	updateJobBackoffBase = time.Minute
+)
+
 // errUpdateJobExists is what a cluster client returns when the Job it was asked
 // to create is already there: the roll for that commit was launched already.
 var errUpdateJobExists = errors.New("the update Job already exists")
 
+// errUpdateJobNoAnswer is the create's outcome when the cluster did not answer
+// within the bound. The create may still land on the server; the next attempt
+// finds it by name.
+var errUpdateJobNoAnswer = errors.New("the cluster did not answer the create within its bound")
+
+// errUpdateJobOutstanding refuses an attempt while an earlier abandoned create
+// has not returned, so a hung cluster holds one goroutine, not one per attempt.
+var errUpdateJobOutstanding = errors.New("an earlier create of the update Job has not returned")
+
 // updateJobClient creates the roll's Job in the cluster from its rendered
-// manifest. Production is kubectlUpdateJob; a test injects a fake.
+// manifest, and bounds the request by requestTimeout. Production is
+// kubectlUpdateJob; a test injects a fake.
 type updateJobClient interface {
-	CreateJob(ctx context.Context, name string, manifest []byte) error
+	CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error
 }
 
 // updateJobEncoder writes a rendered object as YAML. Production is
@@ -57,10 +83,15 @@ func newKubectlUpdateJob(townRoot string) updateJobClient {
 	return kubectlUpdateJob{dir: update.Dir(townRoot), run: update.ExecRun}
 }
 
-// CreateJob applies manifest as the Job name. kubectl's AlreadyExists answer is
+// CreateJob applies manifest as the Job name, with kubectl's own request timeout
+// set to requestTimeout. kubectl reads zero as no bound, so a zero bound is
+// refused before anything is written. kubectl's AlreadyExists answer is
 // errUpdateJobExists; any other refusal names the exit status only, since the
 // output of kubectl is not echoed.
-func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte) error {
+func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
+	if requestTimeout <= 0 {
+		return fmt.Errorf("the create of %s has no request timeout to send", name)
+	}
 	if err := os.MkdirAll(k.dir, 0o700); err != nil {
 		return fmt.Errorf("create the update directory %s: %w", k.dir, err)
 	}
@@ -68,7 +99,7 @@ func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest [
 	if err := os.WriteFile(path, manifest, 0o600); err != nil {
 		return fmt.Errorf("write the manifest of %s: %w", name, err)
 	}
-	out, exit, err := k.run(ctx, "", nil, "kubectl", "create", "-f", path)
+	out, exit, err := k.run(ctx, "", nil, "kubectl", "create", "-f", path, "--request-timeout="+requestTimeout.String())
 	if err != nil {
 		return fmt.Errorf("running kubectl create for %s: %w", name, err)
 	}
@@ -127,7 +158,76 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 	if err := encode(&buf, m.Job); err != nil {
 		return fmt.Errorf("encode the update Job: %w", err)
 	}
-	return d.updateJob.CreateJob(ctx, name, buf.Bytes())
+	return d.updateJob.CreateJob(ctx, name, buf.Bytes(), d.updateJobRequestTimeout())
+}
+
+// updateJobBound is the deadline on one create: updateJobCreateTimeout, unless a
+// test shortened it through updateTriggerState.jobBound.
+func (d *Daemon) updateJobBound() time.Duration {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	if d.updateTrigger.jobBound > 0 {
+		return d.updateTrigger.jobBound
+	}
+	return updateJobCreateTimeout
+}
+
+// updateJobRequestTimeout is kubectl's bound on the create: the deadline less
+// updateJobRequestSlack, so kubectl gives up before the daemon abandons the call.
+func (d *Daemon) updateJobRequestTimeout() time.Duration {
+	return d.updateJobBound() - updateJobRequestSlack
+}
+
+// launchUpdateJobBounded runs launchUpdateJob under updateJobBound on the
+// daemon's clock. The create is abandoned at the deadline whether or not the
+// cluster client honors its context, so one hung cluster costs the heartbeat one
+// bound (gt-hlo2ac). An abandoned create keeps its goroutine until it returns;
+// until then a later attempt returns errUpdateJobOutstanding instead of starting
+// a second create. A create that times out is never recorded as launched: the
+// retry finds the Job by its name if the server took it.
+func (d *Daemon) launchUpdateJobBounded(settings config.UpdateSettings, sha string) error {
+	d.updateTrigger.mu.Lock()
+	outstanding := d.updateTrigger.jobOutstanding
+	d.updateTrigger.mu.Unlock()
+	if outstanding != nil {
+		select {
+		case <-outstanding:
+		default:
+			return errUpdateJobOutstanding
+		}
+	}
+	returned := make(chan struct{})
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.jobOutstanding = returned
+	d.updateTrigger.mu.Unlock()
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	deadline := d.clk().AfterFunc(d.updateJobBound(), func() { cancel(errUpdateJobNoAnswer) })
+	defer deadline.Stop()
+
+	done := make(chan error, 1)
+	go func() {
+		defer close(returned)
+		done <- d.launchUpdateJob(ctx, settings, sha)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return errUpdateJobNoAnswer
+	}
+}
+
+// updateJobBackoff is the wait after the failures-th consecutive failed pod
+// launch: updateJobBackoffBase, doubled for each further failure, capped at
+// updateLaunchSuppression. The cap is the same wait a refused child launch gets.
+func updateJobBackoff(failures int) time.Duration {
+	wait := updateJobBackoffBase
+	for i := 1; i < failures && wait < updateLaunchSuppression; i++ {
+		wait *= 2
+	}
+	return min(wait, updateLaunchSuppression)
 }
 
 // pairReadySHAForRoll is the green commit a pod roll goes to: the pair-ready item
@@ -148,11 +248,11 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 		}
 		git := clone(it.Rig)
 		if git == nil {
-			return "", fmt.Sprintf("the local clone of %s is missing, so pair-ready %s cannot be judged", it.Rig, greenRefShortSHA(it.SHA))
+			return "", fmt.Sprintf("clone missing: the local clone of %s is missing, so pair-ready %s cannot be judged", it.Rig, greenRefShortSHA(it.SHA))
 		}
 		ahead, err := git.IsAncestor(running, it.SHA)
 		if err != nil {
-			return "", fmt.Sprintf("judging pair-ready %s against the running commit in the local clone: %v", greenRefShortSHA(it.SHA), err)
+			return "", fmt.Sprintf("ancestry check failed: judging pair-ready %s against the running commit in the local clone: %v", greenRefShortSHA(it.SHA), err)
 		}
 		if ahead {
 			cands = append(cands, candidate{sha: it.SHA, git: git})
@@ -172,7 +272,7 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 			}
 			below, err := c.git.IsAncestor(o.sha, c.sha)
 			if err != nil {
-				return "", fmt.Sprintf("judging pair-ready %s against %s in the local clone: %v", greenRefShortSHA(o.sha), greenRefShortSHA(c.sha), err)
+				return "", fmt.Sprintf("pair not judgeable: judging pair-ready %s against %s in the local clone: %v", greenRefShortSHA(o.sha), greenRefShortSHA(c.sha), err)
 			}
 			if !below {
 				newest = false
@@ -183,7 +283,7 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 			return c.sha, ""
 		}
 	}
-	return "", "the pair-ready green commits do not form one line; not launching"
+	return "", "commits not linear: the pair-ready green commits do not form one line; not launching"
 }
 
 // triggerPodUpdate is the due decision for a daemon that runs as a pod. The roll
@@ -193,7 +293,7 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string) {
 	running, err := pairReadyRunningCommit(d.config.TownRoot)
 	if err != nil {
-		d.noteUpdateNotDue("cannot read the running commit: " + err.Error())
+		d.noteUpdateNotDue("running commit unreadable: " + err.Error())
 		return
 	}
 	sha, why := pairReadySHAForRoll(d.pairReady.observed(), running, d.pairReadyBareClone)
@@ -202,22 +302,57 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 		return
 	}
 	d.clearUpdateNotDue()
-	if d.updateRefusedRecently(now) {
+	if d.updateJobBackingOff(now) {
 		return
 	}
 	d.logger.Printf("update: due (%s); pair-ready %s; starting the update Job", reason, greenRefShortSHA(sha))
-	err = d.launchUpdateJob(context.Background(), settings, sha)
+	err = d.launchUpdateJobBounded(settings, sha)
 	switch {
 	case errors.Is(err, errUpdateJobExists):
 		// The roll for this commit is in the cluster already: wait out the
 		// suppression as for a launch, rather than create it again.
+		d.noteUpdateJobSuccess()
 		d.noteUpdateLaunch(now)
 		d.logger.Printf("update: Job %s is already launched", updateJobName(sha))
+	case errors.Is(err, errUpdateJobNoAnswer):
+		wait := d.noteUpdateJobFailure(now)
+		d.logger.Printf("update: launch of the update Job timed out after %s; not launched; not retrying for %s", d.updateJobBound(), wait)
 	case err != nil:
-		d.logger.Printf("update: launch of the update Job failed: %v; not retrying for %s", err, updateLaunchSuppression)
-		d.noteUpdateRefusal(now)
+		wait := d.noteUpdateJobFailure(now)
+		d.logger.Printf("update: launch of the update Job failed: %v; not launched; not retrying for %s", err, wait)
 	default:
+		d.noteUpdateJobSuccess()
 		d.noteUpdateLaunch(now)
 		d.logger.Printf("update: created Job %s", updateJobName(sha))
 	}
+}
+
+// updateJobBackingOff reports whether the last failed pod launch is recent
+// enough that this heartbeat waits out its backoff rather than trying again.
+func (d *Daemon) updateJobBackingOff(now time.Time) bool {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	if d.updateTrigger.jobFailedAt.IsZero() {
+		return false
+	}
+	return now.Sub(d.updateTrigger.jobFailedAt) < updateJobBackoff(d.updateTrigger.jobFailures)
+}
+
+// noteUpdateJobFailure records a pod launch that timed out or was refused, so the
+// next attempt waits out the doubled backoff. It returns that wait for the log.
+func (d *Daemon) noteUpdateJobFailure(now time.Time) time.Duration {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	d.updateTrigger.jobFailures++
+	d.updateTrigger.jobFailedAt = now
+	return updateJobBackoff(d.updateTrigger.jobFailures)
+}
+
+// noteUpdateJobSuccess clears the pod launch failures once a Job is created or
+// found, so the next failure starts the backoff again from its first step.
+func (d *Daemon) noteUpdateJobSuccess() {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	d.updateTrigger.jobFailures = 0
+	d.updateTrigger.jobFailedAt = time.Time{}
 }

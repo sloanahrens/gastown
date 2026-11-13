@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,16 +24,39 @@ import (
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
+// testUpdateJobBound is the create deadline the tests shorten to. The daemon's
+// clock is a fake, so no test waits on it: a test moves the clock past it.
+const testUpdateJobBound = time.Minute
+
 // fakeUpdateJob is the cluster: the Jobs it holds by name, and every create the
-// daemon made. refuse, when set, is what every create returns instead.
+// daemon made, with the request timeout each one carried. refuse, when set, is
+// what every create returns instead. hang, when set, makes each create signal
+// entered and then wait: for its context to end, or with ignoreCtx for release,
+// the way a cluster that never answers would.
 type fakeUpdateJob struct {
-	calls  []string
-	made   map[string][]byte
-	refuse error
+	calls    []string
+	timeouts []time.Duration
+	made     map[string][]byte
+	refuse   error
+	hang     bool
+	// ignoreCtx makes a hung create wait for release instead of its context.
+	ignoreCtx bool
+	entered   chan struct{}
+	release   chan struct{}
 }
 
-func (f *fakeUpdateJob) CreateJob(_ context.Context, name string, manifest []byte) error {
+func (f *fakeUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
 	f.calls = append(f.calls, name)
+	f.timeouts = append(f.timeouts, requestTimeout)
+	if f.hang {
+		f.entered <- struct{}{}
+		if f.ignoreCtx {
+			<-f.release
+			return errors.New("released after the bound")
+		}
+		<-ctx.Done()
+		return context.Cause(ctx)
+	}
 	if f.refuse != nil {
 		return f.refuse
 	}
@@ -54,6 +78,7 @@ type updateJobRig struct {
 	bare     string
 	git      pairReadyGit
 	commits  []string
+	clock    *clockwork.FakeClock
 }
 
 // newUpdateJobRig builds the rig with cfg as the update block and the pod switch
@@ -62,6 +87,8 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	t.Helper()
 	d, logs, launches, _ := newUpdateTriggerTestDaemon(t, cfg)
 	setUpdateSource(t, d)
+	clock := clockwork.NewFakeClockAt(updateTriggerTestTime)
+	d.clock = clock
 	town := d.config.TownRoot
 	bare := constants.RigBareRepoPath(filepath.Join(town, "gastown"))
 	require.NoError(t, os.MkdirAll(bare, 0o755))
@@ -73,12 +100,13 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	}
 	d.openGitFn = func(dir string) daemonGit { return world.Open(dir).(daemonGit) }
 	d.podMode = true
-	cluster := &fakeUpdateJob{made: map[string][]byte{}}
+	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
+	t.Cleanup(func() { close(cluster.release) })
 	d.updateJob = cluster
 	writeRunningImages(t, town, commits[1])
 	return &updateJobRig{
 		d: d, logs: logs, cluster: cluster, launches: launches, town: town,
-		bare: bare, git: world.Open(bare).(pairReadyGit), commits: commits,
+		bare: bare, git: world.Open(bare).(pairReadyGit), commits: commits, clock: clock,
 	}
 }
 
@@ -193,7 +221,7 @@ func TestPairReadySHAForRoll(t *testing.T) {
 			items:      []attention.Item{item("other", c2)},
 			running:    c1,
 			git:        rollGitStub{ancestors: anc([2]string{c1, c2})},
-			wantReason: "the local clone of other is missing",
+			wantReason: "clone missing: the local clone of other is missing",
 		},
 		{
 			name:    "a clone that cannot judge the pair refuses the decision",
@@ -202,7 +230,7 @@ func TestPairReadySHAForRoll(t *testing.T) {
 			git: rollGitStub{errs: map[[2]string]error{
 				{c1, c2}: errors.New("git failed"),
 			}},
-			wantReason: "judging pair-ready " + c2[:12] + " against the running commit",
+			wantReason: "ancestry check failed: judging pair-ready " + c2[:12] + " against the running commit",
 		},
 		{
 			name:    "pairs that do not form one line refuse the decision",
@@ -220,7 +248,7 @@ func TestPairReadySHAForRoll(t *testing.T) {
 				ancestors: anc([2]string{c0, c1}, [2]string{c0, c2}),
 				errs:      map[[2]string]error{{c2, c1}: errors.New("git failed")},
 			},
-			wantReason: "judging pair-ready " + c2[:12] + " against " + c1[:12],
+			wantReason: "pair not judgeable: judging pair-ready " + c2[:12] + " against " + c1[:12],
 		},
 	}
 	for _, tt := range tests {
@@ -365,9 +393,9 @@ func TestUpdateJobAlreadyExistsIsAlreadyLaunched(t *testing.T) {
 	assert.Equal(t, []byte("earlier"), r.cluster.made[name], "the existing Job was replaced")
 }
 
-// TestUpdateJobRefusedLaunchWaitsOutTheSuppression: a cluster that refuses the
-// create logs the failure and is not asked again inside the suppression window.
-func TestUpdateJobRefusedLaunchWaitsOutTheSuppression(t *testing.T) {
+// TestUpdateJobRefusedLaunchWaitsOutTheBackoff: a cluster that refuses the create
+// logs the refusal and is not asked again inside the first backoff.
+func TestUpdateJobRefusedLaunchWaitsOutTheBackoff(t *testing.T) {
 	t.Parallel()
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	r.cluster.refuse = errors.New("cluster unreachable")
@@ -376,9 +404,209 @@ func TestUpdateJobRefusedLaunchWaitsOutTheSuppression(t *testing.T) {
 	r.d.triggerUpdate()
 	r.d.triggerUpdate()
 
-	assert.Len(t, r.cluster.calls, 1, "a refused launch was retried inside the suppression window")
+	assert.Len(t, r.cluster.calls, 1, "a refused launch was retried inside its backoff")
 	assert.Contains(t, r.logs.String(), "launch of the update Job failed: cluster unreachable")
 	assert.NotContains(t, r.logs.String(), "created Job")
+}
+
+// TestUpdateJobBlockingCreateTimesOut: a cluster that never answers holds the
+// create until its context ends. The heartbeat returns at the daemon's deadline
+// with no launch recorded, the create carried kubectl's bound less the slack, and
+// the timeout is logged as a timeout.
+func TestUpdateJobBlockingCreateTimesOut(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.cluster.hang = true
+	r.d.updateTrigger.jobBound = testUpdateJobBound
+	r.pairFor(t, r.commits[2], true, true)
+	clock := r.clock
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.d.triggerUpdate()
+	}()
+	<-r.cluster.entered // the create is in flight, and its deadline is already on the clock
+	clock.Advance(testUpdateJobBound)
+	<-done
+
+	name := "gt-update-" + r.commits[2][:12]
+	assert.Equal(t, []string{name}, r.cluster.calls)
+	assert.Equal(t, []time.Duration{testUpdateJobBound - updateJobRequestSlack}, r.cluster.timeouts,
+		"kubectl's request timeout is not the deadline less the slack")
+	assert.True(t, r.d.lastUpdateLaunch().IsZero(), "a timed-out create was recorded as launched")
+	assert.Contains(t, r.logs.String(), "launch of the update Job timed out after "+testUpdateJobBound.String())
+	assert.NotContains(t, r.logs.String(), "created Job")
+}
+
+// TestUpdateJobHungCreateIsNotStacked: a create that ignores its context is
+// abandoned at the deadline, and the next attempt, past its backoff, does not
+// start a second create while the first is still out.
+func TestUpdateJobHungCreateIsNotStacked(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.cluster.hang = true
+	r.cluster.ignoreCtx = true
+	r.d.updateTrigger.jobBound = testUpdateJobBound
+	r.pairFor(t, r.commits[2], true, true)
+	clock := r.clock
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.d.triggerUpdate()
+	}()
+	<-r.cluster.entered
+	clock.Advance(testUpdateJobBound)
+	<-done
+
+	// Past the backoff, the next attempt either refuses at once, or starts a second
+	// create that the test abandons at its deadline. Only the second is a failure.
+	clock.Advance(updateJobBackoff(1))
+	second := make(chan struct{})
+	go func() {
+		defer close(second)
+		r.d.triggerUpdate()
+	}()
+	select {
+	case <-second:
+	case <-r.cluster.entered:
+		clock.Advance(testUpdateJobBound)
+		<-second
+	}
+
+	assert.Len(t, r.cluster.calls, 1, "a second create started while the first was outstanding")
+	assert.Contains(t, r.logs.String(), "an earlier create of the update Job has not returned")
+}
+
+// TestUpdateJobRefusalsBackOff: each consecutive refusal doubles the wait before
+// the next attempt, from one minute to the five-minute cap, and no attempt comes
+// early.
+func TestUpdateJobRefusalsBackOff(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.cluster.refuse = errors.New("cluster unreachable")
+	r.pairFor(t, r.commits[2], true, true)
+	clock := r.clock
+
+	steps := []struct {
+		after       time.Duration
+		wantAttempt bool
+	}{
+		// The first refusal waits 1m, the second 2m, the third 4m; the fourth
+		// would wait 8m and is capped at 5m.
+		{after: 0, wantAttempt: true},
+		{after: 59 * time.Second, wantAttempt: false},
+		{after: time.Second, wantAttempt: true},
+		{after: 119 * time.Second, wantAttempt: false},
+		{after: time.Second, wantAttempt: true},
+		{after: 239 * time.Second, wantAttempt: false},
+		{after: time.Second, wantAttempt: true},
+		{after: 299 * time.Second, wantAttempt: false},
+		{after: time.Second, wantAttempt: true},
+	}
+	for i, st := range steps {
+		clock.Advance(st.after)
+		before := len(r.cluster.calls)
+		r.d.triggerUpdate()
+		attempted := len(r.cluster.calls) > before
+		require.Equal(t, st.wantAttempt, attempted, "step %d", i)
+	}
+	assert.Contains(t, r.logs.String(), "not retrying for 5m0s")
+}
+
+// TestUpdateJobBackoffDoublesAndCaps: the wait after the nth consecutive failure
+// is one minute doubled for each failure after the first, never past the launch
+// suppression.
+func TestUpdateJobBackoffDoublesAndCaps(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{failures: 1, want: time.Minute},
+		{failures: 2, want: 2 * time.Minute},
+		{failures: 3, want: 4 * time.Minute},
+		{failures: 4, want: updateLaunchSuppression},
+		{failures: 9, want: updateLaunchSuppression},
+	}
+	for _, tt := range tests {
+		t.Run(strconv.Itoa(tt.failures), func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, updateJobBackoff(tt.failures))
+		})
+	}
+}
+
+// TestUpdateJobRefusalsLogTheirReason: a clone that is missing, a clone whose
+// ancestry check fails, and a running commit that cannot be read each stop the
+// launch with its own logged reason, so an operator can tell a refusal from a wait.
+func TestUpdateJobRefusalsLogTheirReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, r *updateJobRig)
+		wantReason string
+	}{
+		{
+			name: "clone missing",
+			setup: func(t *testing.T, r *updateJobRig) {
+				require.NoError(t, os.RemoveAll(r.bare))
+			},
+			wantReason: "clone missing: the local clone of gastown is missing",
+		},
+		{
+			name: "ancestry check failed",
+			setup: func(_ *testing.T, r *updateJobRig) {
+				open := r.d.openGitFn
+				r.d.openGitFn = func(dir string) daemonGit { return ancestryErrGit{open(dir)} }
+			},
+			wantReason: "ancestry check failed: judging pair-ready",
+		},
+		{
+			name: "running commit unreadable",
+			setup: func(t *testing.T, r *updateJobRig) {
+				require.NoError(t, os.WriteFile(imagevalues.PathIn(filepath.Join(r.town, "gastown")), []byte("daemon: [\n"), 0o600))
+			},
+			wantReason: "running commit unreadable: ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.pairFor(t, r.commits[2], true, true)
+			tt.setup(t, r)
+
+			r.d.triggerUpdate()
+
+			assert.Contains(t, r.logs.String(), tt.wantReason)
+			assert.Empty(t, r.cluster.calls, "a refused launch reached the cluster")
+		})
+	}
+}
+
+// ancestryErrGit is a clone whose ancestry check fails; everything else is read
+// from the real clone under it.
+type ancestryErrGit struct{ daemonGit }
+
+func (ancestryErrGit) IsAncestor(string, string) (bool, error) {
+	return false, errors.New("ancestry unreadable")
+}
+
+// TestUpdateJobPodAndContainerModeCreatesTheJobOnly: a daemon that is both a pod
+// and in container mode, the likely production shape, creates the Job and starts
+// no detached child, since the child is what the pod's replacement takes down.
+func TestUpdateJobPodAndContainerModeCreatesTheJobOnly(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.d.containerMode = true
+	r.pairFor(t, r.commits[2], true, true)
+
+	r.d.triggerUpdate()
+
+	assert.Len(t, r.cluster.calls, 1, "the pod with container mode did not create its Job")
+	assert.Equal(t, 0, *r.launches, "a pod with container mode started the detached child")
 }
 
 // TestUpdateJobContainerModeKeepsTheDetachedChild: a daemon in the supervisor
@@ -397,9 +625,12 @@ func TestUpdateJobContainerModeKeepsTheDetachedChild(t *testing.T) {
 	assert.Empty(t, cluster.calls, "a container daemon created a Job")
 }
 
+// testRequestTimeout is the kubectl request timeout the kubectl tests pass in.
+const testRequestTimeout = 25 * time.Second
+
 // TestKubectlUpdateJobMapsTheAnswer: kubectl's exit status and its AlreadyExists
-// answer are the outcome, the manifest is written where kubectl reads it, and a
-// refusal names the exit without echoing kubectl's output.
+// answer are the outcome, the manifest is written where kubectl reads it with the
+// request timeout set, and a refusal names the exit without echoing kubectl's output.
 func TestKubectlUpdateJobMapsTheAnswer(t *testing.T) {
 	t.Parallel()
 	const name = "gt-update-abcdef012345"
@@ -426,10 +657,10 @@ func TestKubectlUpdateJobMapsTheAnswer(t *testing.T) {
 				gotArgs = args
 				return tt.out, tt.exit, tt.runErr
 			}
-			err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, manifest)
+			err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, manifest, testRequestTimeout)
 
 			path := filepath.Join(dir, name+".yaml")
-			assert.Equal(t, []string{"create", "-f", path}, gotArgs)
+			assert.Equal(t, []string{"create", "-f", path, "--request-timeout=" + testRequestTimeout.String()}, gotArgs)
 			got, readErr := os.ReadFile(path)
 			require.NoError(t, readErr)
 			assert.Equal(t, manifest, got)
@@ -458,6 +689,8 @@ func TestLaunchUpdateJobRefusesWhatItCannotLaunch(t *testing.T) {
 	tests := []struct {
 		name     string
 		canceled bool
+		// sha is the green commit to launch; empty is the rig's third commit.
+		sha      string
 		settings config.UpdateSettings
 		setup    func(t *testing.T, r *updateJobRig)
 		wantMsg  string
@@ -491,9 +724,10 @@ func TestLaunchUpdateJobRefusesWhatItCannotLaunch(t *testing.T) {
 			wantMsg: "no values file names the running daemon image",
 		},
 		{
-			name:     "job cannot be rendered",
-			settings: config.UpdateSettings{MaxRuntime: 1500 * time.Millisecond},
-			wantMsg:  "render the update Job",
+			name:     "green commit is not a full sha",
+			sha:      "4a01ba03",
+			settings: config.UpdateSettings{MaxRuntime: time.Hour},
+			wantMsg:  "render the update Job: Values.GreenCommit",
 		},
 		{
 			name:     "job cannot be encoded",
@@ -518,7 +752,12 @@ func TestLaunchUpdateJobRefusesWhatItCannotLaunch(t *testing.T) {
 				cancel()
 			}
 
-			err := r.d.launchUpdateJob(ctx, tt.settings, r.commits[2])
+			sha := r.commits[2]
+			if tt.sha != "" {
+				sha = tt.sha
+			}
+
+			err := r.d.launchUpdateJob(ctx, tt.settings, sha)
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantMsg)
@@ -563,11 +802,28 @@ func TestKubectlUpdateJobRefusesAnUnwritableDirectory(t *testing.T) {
 				t.Error("kubectl ran for a manifest that was not written")
 				return "", 0, nil
 			}
-			err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, []byte("kind: Job\n"))
+			err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, []byte("kind: Job\n"), testRequestTimeout)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantMsg)
 		})
 	}
+}
+
+// TestKubectlUpdateJobRefusesNoRequestTimeout: kubectl reads a zero request
+// timeout as no bound, so a create with none is refused before kubectl runs.
+func TestKubectlUpdateJobRefusesNoRequestTimeout(t *testing.T) {
+	t.Parallel()
+	const name = "gt-update-abcdef012345"
+	dir := t.TempDir()
+	run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+		t.Error("kubectl ran with no request timeout")
+		return "", 0, nil
+	}
+	err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, []byte("kind: Job\n"), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no request timeout")
+	_, statErr := os.Stat(filepath.Join(dir, name+".yaml"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "the manifest was written for a create that was refused")
 }
 
 // TestInClusterFromEnv: a pod is a process the kubelet gave KUBERNETES_SERVICE_HOST.
