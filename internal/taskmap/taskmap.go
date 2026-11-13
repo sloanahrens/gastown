@@ -1,9 +1,9 @@
 // Package taskmap gives every gt command a task group and a one-line use, so
 // an agent looking for a tool finds it by the job to be done rather than by
-// rediscovering the command tree. Entries are registered from the per-batch
-// placement files (internal/taskmap/place_pN.go); TestEveryCommandHasATask in
-// internal/cmd fails when a command has neither an entry nor a line in
-// testdata/unplaced.
+// rediscovering the command tree. Entries are added with Register. Commands
+// that have no entry yet are listed, one path per line, in the batch files
+// under testdata/unplaced, and TestEveryCommandHasATask in internal/cmd fails
+// when a runnable, visible command has neither an entry nor a line there.
 package taskmap
 
 import (
@@ -56,9 +56,9 @@ var descriptions = map[Group]string{
 	"internal":  "Use this for gt's own plumbing when no task group fits.",
 }
 
-// defaultRegistry holds the entries the package-level functions expose. Each
-// placement file registers into it from its init.
-var defaultRegistry = newRegistry()
+// defaultRegistry is the map the package-level functions expose and the
+// placement files fill.
+var defaultRegistry = NewRegistry()
 
 // Groups returns every task group, in display order.
 func Groups() []Group {
@@ -71,58 +71,63 @@ func Describe(g Group) string {
 	return descriptions[g]
 }
 
-// registry holds the entries one map knows about.
-type registry struct {
+// Registry holds the entries one task map knows about.
+type Registry struct {
 	entries map[string]Entry
 }
 
-func newRegistry() *registry {
-	return &registry{entries: map[string]Entry{}}
+// NewRegistry returns an empty map.
+func NewRegistry() *Registry {
+	return &Registry{entries: map[string]Entry{}}
 }
 
-// Register adds entries to the default map. Each placement file calls it from
-// its init.
+// Default returns the shared map the package-level functions read and the
+// placement files register into.
+func Default() *Registry {
+	return defaultRegistry
+}
+
+// Register adds es to the default map.
 func Register(es ...Entry) {
-	defaultRegistry.register(es...)
+	defaultRegistry.Register(es...)
 }
 
 // Lookup returns the entry for path.
 func Lookup(path string) (Entry, bool) {
-	return defaultRegistry.lookup(path)
+	return defaultRegistry.Lookup(path)
 }
 
 // ByGroup returns g's entries, sorted by Path.
 func ByGroup(g Group) []Entry {
-	return defaultRegistry.byGroup(g)
+	return defaultRegistry.ByGroup(g)
 }
 
 // Search returns entries whose Path or Use contains word, ignoring case and
 // sorted by Path.
 func Search(word string) []Entry {
-	return defaultRegistry.search(word)
+	return defaultRegistry.Search(word)
 }
 
-// Validate returns the problems that stop the map covering every command:
-// a path with no entry and no unplaced line, an unplaced line that has an
-// entry or names no command, and a registered entry that has an unknown
-// group, an empty or multi-line Use, or names no command. The result is empty
-// when the map is clean.
+// Validate returns the problems Registry.Validate reports for the default map.
 func Validate(paths []string, unplaced []string) []string {
-	return defaultRegistry.validate(paths, unplaced)
+	return defaultRegistry.Validate(paths, unplaced)
 }
 
-func (r *registry) register(es ...Entry) {
+// Register adds es to r, replacing an entry at the same path.
+func (r *Registry) Register(es ...Entry) {
 	for _, e := range es {
 		r.entries[e.Path] = e
 	}
 }
 
-func (r *registry) lookup(path string) (Entry, bool) {
+// Lookup returns the entry r holds for path.
+func (r *Registry) Lookup(path string) (Entry, bool) {
 	e, ok := r.entries[path]
 	return e, ok
 }
 
-func (r *registry) byGroup(g Group) []Entry {
+// ByGroup returns g's entries in r, sorted by Path.
+func (r *Registry) ByGroup(g Group) []Entry {
 	var out []Entry
 	for _, e := range r.entries {
 		if e.Group == g {
@@ -133,7 +138,9 @@ func (r *registry) byGroup(g Group) []Entry {
 	return out
 }
 
-func (r *registry) search(word string) []Entry {
+// Search returns entries in r whose Path or Use contains word, ignoring case
+// and sorted by Path.
+func (r *Registry) Search(word string) []Entry {
 	needle := strings.ToLower(word)
 	var out []Entry
 	for _, e := range r.entries {
@@ -145,7 +152,12 @@ func (r *registry) search(word string) []Entry {
 	return out
 }
 
-func (r *registry) validate(paths []string, unplaced []string) []string {
+// Validate returns the problems that stop r covering every command: a path
+// with no entry and no unplaced line, an unplaced line that has an entry or
+// names no command, and a registered entry that has an unknown group, an
+// empty or multi-line Use, or names no command. The result is empty when the
+// map is clean.
+func (r *Registry) Validate(paths []string, unplaced []string) []string {
 	commands := make(map[string]bool, len(paths))
 	for _, p := range paths {
 		commands[p] = true

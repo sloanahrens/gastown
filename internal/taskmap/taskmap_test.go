@@ -69,55 +69,69 @@ func TestValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			reg := newRegistry()
-			reg.register(tc.entries...)
-			got := reg.validate(tc.paths, tc.unplaced)
+			reg := NewRegistry()
+			reg.Register(tc.entries...)
+			got := reg.Validate(tc.paths, tc.unplaced)
 			if !slices.Equal(got, tc.want) {
-				t.Fatalf("validate(%v, %v) = %q, want %q", tc.paths, tc.unplaced, got, tc.want)
+				t.Fatalf("Validate(%v, %v) = %q, want %q", tc.paths, tc.unplaced, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestPackageFunctions drives the package-level entry points the placement
-// files and the command walk use, so deleting any delegation turns it red.
-//
-//testpolicy:allow parallel — registers into the package-level map, which no other test may read mid-run
-func TestPackageFunctions(t *testing.T) {
-	Register(
-		Entry{Path: "zz-wiring-alpha", Group: "orient", Use: "Use this to prove registration reaches the default map."},
-		Entry{Path: "zz-wiring-beta", Group: "dispatch", Use: "Use this to prove search reads the use line."},
+// TestRegistryQueries drives the registry the placement files fill, on a map
+// this test owns: the default map grows with every placement bead, so an
+// assertion that counts its entries would break as the map fills.
+func TestRegistryQueries(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(
+		Entry{Path: "pool set", Group: "seats", Use: "Use this to move a seat."},
+		Entry{Path: "pool list", Group: "seats", Use: "Use this to see the seats."},
+		Entry{Path: "status", Group: "orient", Use: "Use this to see where the town stands."},
 	)
 
-	if e, ok := Lookup("zz-wiring-alpha"); !ok || e.Group != "orient" {
-		t.Errorf("Lookup(zz-wiring-alpha) = %+v, %v; want the registered entry", e, ok)
+	if e, ok := reg.Lookup("pool set"); !ok || e.Group != "seats" {
+		t.Errorf("Lookup(pool set) = %+v, %v; want the registered entry", e, ok)
 	}
-	if _, ok := Lookup("zz-wiring-missing"); ok {
-		t.Error("Lookup(zz-wiring-missing) found an entry")
+	if _, ok := reg.Lookup("missing"); ok {
+		t.Error("Lookup(missing) found an entry")
 	}
+	if got := reg.ByGroup("seats"); len(got) != 2 || got[0].Path != "pool list" || got[1].Path != "pool set" {
+		t.Errorf("ByGroup(seats) = %+v; want both seats entries sorted by path", got)
+	}
+	if got := reg.Search("POOL"); len(got) != 2 || got[0].Path != "pool list" || got[1].Path != "pool set" {
+		t.Errorf("Search(POOL) = %+v; want both pool entries sorted by path", got)
+	}
+	if got := reg.Search("move a seat"); len(got) != 1 || got[0].Path != "pool set" {
+		t.Errorf("Search(move a seat) = %+v; want only the entry whose Use matches", got)
+	}
+}
 
-	got := Search("WIRING")
-	if len(got) != 2 || got[0].Path != "zz-wiring-alpha" || got[1].Path != "zz-wiring-beta" {
-		t.Errorf("Search(WIRING) = %+v; want both wiring entries sorted by path", got)
-	}
-	if got := Search("prove search"); len(got) != 1 || got[0].Path != "zz-wiring-beta" {
-		t.Errorf("Search(prove search) = %+v; want only the entry whose Use matches", got)
-	}
+// TestPackageFunctions drives the package-level entry points the placement
+// files and callers use, so deleting a delegation turns it red. It asserts
+// membership, never counts: the default map is shared with the placement
+// files' inits, so a count here would break as the map fills.
+//
+//testpolicy:allow parallel — registers into the shared default map, which no other test may read mid-run
+func TestPackageFunctions(t *testing.T) {
+	entry := Entry{Path: "zz-wiring-alpha", Group: "orient", Use: "Use this to prove registration reaches the default map."}
+	Register(entry)
 
-	// A clean map: every registered entry is a command and every command has
-	// an entry.
-	var paths []string
-	for _, g := range Groups() {
-		for _, e := range ByGroup(g) {
-			paths = append(paths, e.Path)
-		}
+	if got, ok := Lookup(entry.Path); !ok || got != entry {
+		t.Errorf("Lookup(%s) = %+v, %v; want the registered entry", entry.Path, got, ok)
 	}
-	paths = append(paths, "zz-wiring-alpha", "zz-wiring-beta")
-	if problems := Validate(paths, nil); len(problems) > 0 {
-		t.Errorf("Validate over the registered entries = %q; want clean", problems)
+	if got := ByGroup(entry.Group); !slices.Contains(got, entry) {
+		t.Errorf("ByGroup(%s) = %+v; want the registered entry", entry.Group, got)
 	}
+	if got := Search(entry.Path); !slices.Contains(got, entry) {
+		t.Errorf("Search(%s) = %+v; want the registered entry", entry.Path, got)
+	}
+	// A registered entry names a command the caller did not pass, so at least
+	// this entry must be reported however many placement beads have landed.
 	if problems := Validate(nil, nil); len(problems) == 0 {
-		t.Error("Validate(nil, nil) reported no problem; want the registered entries to be flagged as naming no command")
+		t.Error("Validate(nil, nil) reported no problem; want the registered entry flagged as naming no command")
 	}
 }
 
