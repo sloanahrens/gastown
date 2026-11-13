@@ -268,6 +268,71 @@ func TestCallLogWriteError(t *testing.T) {
 	if err := l.Close(); !errors.Is(err, diskFull) {
 		t.Fatalf("second Close = %v, want %v", err, diskFull)
 	}
+	// The line the writer could not store is counted, so a failing log never
+	// reads as clean in Stats.
+	if got := l.Stats(); got.Calls != 1 || got.Dropped != 1 {
+		t.Errorf("Stats = calls %d dropped %d, want 1 and 1", got.Calls, got.Dropped)
+	}
+}
+
+// TestCallLogVerbBounded checks argv cannot grow the per-verb map without
+// bound: every verb past maxVerbKeys is counted under otherVerb.
+func TestCallLogVerbBounded(t *testing.T) {
+	t.Parallel()
+	const calls = 1000
+	opts := testOptions(t)
+	opts.Buffer = calls
+	l, err := newCallLog(opts, func([]byte) error { return nil })
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	for i := 0; i < calls; i++ {
+		l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{fmt.Sprintf("v%d", i)}})
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := l.Stats()
+	if got.Calls != calls {
+		t.Errorf("calls = %d, want %d", got.Calls, calls)
+	}
+	if len(got.Verbs) != maxVerbKeys+1 {
+		t.Errorf("kept %d verb keys, want %d", len(got.Verbs), maxVerbKeys+1)
+	}
+	if want := uint64(calls - maxVerbKeys); got.Verbs[otherVerb] != want {
+		t.Errorf("verbs[%s] = %d, want %d", otherVerb, got.Verbs[otherVerb], want)
+	}
+}
+
+// TestCallLogVerbValidation checks an operand that is not a bd command word is
+// neither written as the verb nor counted, so argv cannot key the stats map
+// with arbitrary text.
+func TestCallLogVerbValidation(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"GT-Itjuwu"}})
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{strings.Repeat("a", maxVerbLen+1)}})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	for _, line := range readLines(t, filepath.Join(opts.Dir, DefaultCallLogName)) {
+		if verb := decodeLine(t, line)["verb"]; verb != "" {
+			t.Errorf("verb = %v, want empty", verb)
+		}
+	}
+	got := l.Stats()
+	if got.Calls != 2 {
+		t.Errorf("calls = %d, want 2", got.Calls)
+	}
+	if len(got.Verbs) != 0 {
+		t.Errorf("verbs = %v, want none", got.Verbs)
+	}
 }
 
 // TestCallLogFilesystemRefused drives the two ways the live file cannot be
@@ -481,6 +546,7 @@ func TestCallLogOptionsRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if l, err := NewCallLog(tt.opts); err == nil {
 				l.Close()
 				t.Fatal("NewCallLog succeeded, want an error")
@@ -556,9 +622,45 @@ func TestCallLogArgvParse(t *testing.T) {
 			flags: []string{},
 			beads: []string{"gt-itjuwu"},
 		},
+		{
+			name:  "boolean root flag keeps the bead id after it",
+			argv:  []string{"list", "--json", "gt-abc"},
+			verb:  "list",
+			flags: []string{"--json"},
+			beads: []string{"gt-abc"},
+		},
+		{
+			name:  "attached short root flag value is not logged",
+			argv:  []string{"list", "-Cdir"},
+			verb:  "list",
+			flags: []string{"-C"},
+			beads: []string{},
+		},
+		{
+			name:  "attached long root flag value is not logged",
+			argv:  []string{"list", "--db=beads"},
+			verb:  "list",
+			flags: []string{"--db"},
+			beads: []string{},
+		},
+		{
+			name:  "dash token that names no flag is not logged",
+			argv:  []string{"list", "-5"},
+			verb:  "list",
+			flags: []string{},
+			beads: []string{},
+		},
+		{
+			name:  "operand that is not a command word names no verb",
+			argv:  []string{"GT-Itjuwu", "gt-abc"},
+			verb:  "",
+			flags: []string{},
+			beads: []string{"gt-abc"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			opts := testOptions(t)
 			l, err := NewCallLog(opts)
 			if err != nil {
