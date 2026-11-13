@@ -2294,6 +2294,95 @@ func TestEnsureMetadataNoPortKeepsTheKey(t *testing.T) {
 	}
 }
 
+// injectedEndpointHost is a host that gives every town port through
+// doltEndpoint, with nothing on disk naming it.
+func injectedEndpointHost(port int) *host {
+	return &host{
+		doltEndpoint: func(string) (configpkg.DoltEndpoint, bool) {
+			return configpkg.DoltEndpoint{Port: port}, true
+		},
+	}
+}
+
+// TestEnsureMetadataInjectedPortWritesNoPortFile verifies that a port the host
+// injects is not written to dolt-server.port when the town names no endpoint on
+// disk. bd dials the port that file names, so an injected port would send bd to a
+// server the town does not name (gt-k3kb52).
+func TestEnsureMetadataInjectedPortWritesNoPortFile(t *testing.T) {
+	t.Parallel()
+	h := injectedEndpointHost(43703)
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt-server.port")); !os.IsNotExist(err) {
+		t.Errorf("dolt-server.port written for an injected port the town does not name (stat err: %v)", err)
+	}
+}
+
+// TestEnsureMetadataInjectedPortKeepsTheLegacyKey verifies that an injected port
+// with no endpoint on disk leaves an existing dolt_server_port key alone: no port
+// file is written, so the key stays the only port source (gt-49f3pn, gt-k3kb52).
+func TestEnsureMetadataInjectedPortKeepsTheLegacyKey(t *testing.T) {
+	t.Parallel()
+	h := injectedEndpointHost(43703)
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	if err := os.WriteFile(metaPath, []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"hq","dolt_server_port":4407}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir failed: %v", err)
+	}
+	if got := readJSONMap(t, metaPath)["dolt_server_port"]; got != float64(4407) {
+		t.Errorf("dolt_server_port = %v, want 4407 kept: the injected port was not written to a port file", got)
+	}
+}
+
+// TestEnsureMetadataTownNamedPortWritesPortFile verifies that a town which names
+// its endpoint on disk (mayor/town.json dolt.port) gets that port in
+// dolt-server.port, the file bd reads (gt-2r2och, gt-k3kb52).
+func TestEnsureMetadataTownNamedPortWritesPortFile(t *testing.T) {
+	t.Parallel()
+	h := injectedEndpointHost(43703)
+	townRoot := t.TempDir()
+
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"port":43703}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("dolt-server.port not written for a town that names its endpoint: %v", err)
+	}
+	if got := string(data); got != "43703" {
+		t.Errorf("dolt-server.port = %q, want %q", got, "43703")
+	}
+}
+
 // TestEnsureMetadata_RepairsWrongDoltDatabase verifies that EnsureMetadata
 // corrects a metadata.json where dolt_database points to the wrong database
 // (e.g., "beads_gt" instead of "gastown"). This is the primary fix for the

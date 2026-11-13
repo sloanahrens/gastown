@@ -125,7 +125,10 @@ func (f *fakeHost) host() *host {
 		sleep:        f.sleep,
 		bdArgs:       func(_, args []string) []string { return args },
 		doltEndpoint: f.doltEndpoint,
-		probeTimeout: f.probeTimeout,
+		// townPort is the town's endpoint on disk too, as mayor/town.json is on a
+		// real town, so a fake town with townPort names its endpoint (gt-k3kb52).
+		persistedEndpoint: f.doltEndpoint,
+		probeTimeout:      f.probeTimeout,
 	}
 }
 
