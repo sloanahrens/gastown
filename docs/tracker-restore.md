@@ -2,17 +2,24 @@
 
 > Status: current
 
-`trackerbackup` writes one `pg_dump` of the tracker database into
-`~/gt-backups/tracker/<date>.dump` (gt-p85pw.48). This page restores one of
-those files.
+The nightly `trackerbackup` run writes one `pg_dump` of the tracker database
+into the `tracker-backup` claim in the control cluster (gt-p85pw.48). This page
+copies one of those files out and restores it.
 
 Before the night you need it, run step 2 once: a dump nobody has restored is a
 hope, not a backup.
 
 ## What is on disk
 
+The nightly dump is written in the control cluster, not on the Mac. The
+`tracker-backup` CronJob in namespace `gt` runs `trackerbackup` at 03:30 each
+day, and the job's pod mounts the `tracker-backup` claim at `/backups`. The job
+keeps the newest seven dumps. The nightly run writes nothing to
+`~/gt-backups/tracker`; the copy-out below places the dump you pick there, where
+steps 1 and 2 read it.
+
 ```
-~/gt-backups/tracker/
+/backups/ (the tracker-backup claim)
   2026-10-28.dump           complete: pg_dump exited 0 with a non-empty file
   2026-10-29.dump.partial   a run in progress, or a run that was killed
 ```
@@ -20,6 +27,26 @@ hope, not a backup.
 A `.dump` file is one PostgreSQL custom-format archive of the whole `tracker`
 database. The runner publishes a night by renaming `<date>.dump.partial` to
 `<date>.dump`, so a name that still ends in `.partial` is never restorable.
+
+The claim is mounted only by the job's pods, and a pod exits when its run ends,
+so nothing is running to copy from. The render writes a reader Pod for that,
+`15-pod-tracker-backup-reader.yaml`, beside the CronJob. It mounts the claim
+read-only at `/backups` on the dump image, which is a postgres image and so has
+`sleep` and `cat`, and it is never restarted. The render does not apply it.
+Apply it only to copy a dump out, from the `--out` directory of the render:
+
+```bash
+kubectl --context colima-gt-control -n gt apply -f 15-pod-tracker-backup-reader.yaml
+kubectl --context colima-gt-control -n gt exec tracker-backup-reader -- ls /backups
+kubectl --context colima-gt-control -n gt exec tracker-backup-reader -- cat /backups/2026-10-28.dump > ~/gt-backups/tracker/2026-10-28.dump
+kubectl --context colima-gt-control -n gt delete -f 15-pod-tracker-backup-reader.yaml
+```
+
+Run the `exec` lines once the Pod is Running. Copy only a name that ends in
+`.dump`: a `.partial` file is never restorable. The copy uses `exec cat`, not
+`kubectl cp`, because `kubectl cp` needs `tar` in the image and `cat` needs
+nothing. The claim is `ReadWriteOnce`, so delete the reader before 03:30; a
+reader that still holds the claim can keep the night's run from starting.
 
 ## 1. Pick a dump
 

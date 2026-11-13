@@ -105,19 +105,20 @@ func clusterRenderTestDeps(t *testing.T, out io.Writer) clusterRenderDeps {
 	t.Helper()
 	town := clusterRenderTestTown(t)
 	return clusterRenderDeps{
-		findTown:     func() (string, error) { return town, nil },
-		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
-		readFile:     os.ReadFile,
-		lstat:        os.Lstat,
-		getenv:       func(string) string { return "" },
-		userHome:     func() (string, error) { return "/fake/home", nil },
-		build:        k8sdaemon.Build,
-		render:       k8sdaemon.Render,
-		buildHelper:  k8sdaemon.BuildHelper,
-		encode:       k8sdaemon.YAML,
-		mkdirAll:     func(path string) error { return os.MkdirAll(path, 0o755) },
-		writeFile:    func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
-		out:          out,
+		findTown:                 func() (string, error) { return town, nil },
+		containerEnv:             func(string) (map[string]string, error) { return map[string]string{}, nil },
+		readFile:                 os.ReadFile,
+		lstat:                    os.Lstat,
+		getenv:                   func(string) string { return "" },
+		userHome:                 func() (string, error) { return "/fake/home", nil },
+		build:                    k8sdaemon.Build,
+		render:                   k8sdaemon.Render,
+		buildHelper:              k8sdaemon.BuildHelper,
+		buildTrackerBackupReader: k8sdaemon.BuildTrackerBackupReader,
+		encode:                   k8sdaemon.YAML,
+		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
+		writeFile:                func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:                      out,
 	}
 }
 
@@ -1612,6 +1613,219 @@ func TestTownClusterRenderTrackerFlag(t *testing.T) {
 			if strings.Contains(string(data), "postgres://") {
 				t.Errorf("%s holds a DSN-shaped string", name)
 			}
+		}
+	})
+}
+
+// TestTownClusterRenderTrackerBackupFlag holds --tracker-backup: the dump's claim
+// and CronJob follow trackerd's Deployment in apply order, each refusal names the
+// flag it is about before anything is written, and the render names the image and
+// the DSN Secret the dump runs with, never the DSN.
+func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
+	t.Parallel()
+
+	const backupImage = "registry.example.test/library/postgres@sha256:" +
+		"0000000000000000000000000000000000000000000000000000000000000002"
+
+	backupFixture := func(t *testing.T) clusterRenderFlags {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		f.tracker = true
+		f.trackerDSNSecret = "gt-trackerd-dsn"
+		f.proxyImage = clusterRenderDaemonDigest
+		f.hostGateway = "192.168.64.1"
+		f.trackerBackup = true
+		f.trackerBackupImage = backupImage
+		return f
+	}
+
+	t.Run("the claim and the CronJob follow trackerd's Deployment", func(t *testing.T) {
+		f := backupFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		want := []string{
+			"01-namespace-gt.yaml",
+			"02-persistentvolumeclaim-town-state.yaml",
+			"03-persistentvolumeclaim-landing-work.yaml",
+			"04-persistentvolumeclaim-dolt-backup.yaml",
+			"05-serviceaccount-daemon.yaml",
+			"06-service-forgejo.yaml",
+			"07-service-trackerd.yaml",
+			"08-rolebinding-daemon-sweep-runner.yaml",
+			"09-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"10-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"11-deployment-daemon.yaml",
+			"12-deployment-trackerd.yaml",
+			"13-persistentvolumeclaim-tracker-backup.yaml",
+			"14-cronjob-tracker-backup.yaml",
+			"15-pod-tracker-backup-reader.yaml",
+		}
+		if got := dirNames(t, f.out); !slices.Equal(got, want) {
+			t.Fatalf("file names = %v, want %v", got, want)
+		}
+		cron, err := os.ReadFile(filepath.Join(f.out, "14-cronjob-tracker-backup.yaml"))
+		if err != nil {
+			t.Fatalf("reading the CronJob: %v", err)
+		}
+		if !strings.Contains(string(cron), backupImage) {
+			t.Errorf("the CronJob does not run the named image %s:\n%s", backupImage, cron)
+		}
+	})
+
+	t.Run("each refusal names its flag and writes nothing", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(f *clusterRenderFlags)
+			names  []string
+		}{
+			{
+				name: "without the tracker",
+				mutate: func(f *clusterRenderFlags) {
+					f.tracker = false
+					f.trackerDSNSecret = ""
+					f.proxyImage = ""
+				},
+				names: []string{"--tracker-backup needs --tracker:"},
+			},
+			{
+				name:   "without the image",
+				mutate: func(f *clusterRenderFlags) { f.trackerBackupImage = "  " },
+				names:  []string{"--tracker-backup needs --tracker-backup-image"},
+			},
+			{
+				name: "with a rehearsal",
+				mutate: func(f *clusterRenderFlags) {
+					f.rehearsal = true
+					f.namespace = "gt-rehearsal"
+					f.forgeHost = ""
+				},
+				names: []string{"--tracker is for a live render"},
+			},
+			{
+				name: "the image without the backup",
+				mutate: func(f *clusterRenderFlags) {
+					f.trackerBackup = false
+				},
+				names: []string{"--tracker-backup-image is for the nightly dump", "name --tracker-backup with it"},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				f := backupFixture(t)
+				tt.mutate(&f)
+				var out bytes.Buffer
+				requireErrorNames(t, runClusterRender(clusterRenderTestDeps(t, &out), f), tt.names...)
+				if _, err := os.Stat(f.out); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("--out was created by a refused render: stat = %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("the image and the DSN Secret are named, and the DSN is never printed or written", func(t *testing.T) {
+		f := backupFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if !strings.Contains(out.String(), "runs in image "+backupImage+" and reads its DSN from Secret gt-trackerd-dsn under key dsn") {
+			t.Fatalf("the output does not name the dump's image and DSN Secret:\n%s", out.String())
+		}
+		for _, l := range createLines(out.String()) {
+			if strings.Contains(l, "gt-trackerd-dsn") {
+				t.Errorf("a create line names the DSN Secret: %s", l)
+			}
+		}
+		for _, name := range dirNames(t, f.out) {
+			data, err := os.ReadFile(filepath.Join(f.out, name))
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+			if strings.Contains(string(data), "postgres://") {
+				t.Errorf("%s holds a DSN-shaped string", name)
+			}
+		}
+	})
+
+	t.Run("the reader mounts the claim read-only, never restarts, and is not applied with the rest", func(t *testing.T) {
+		f := backupFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(f.out, "15-pod-tracker-backup-reader.yaml"))
+		if err != nil {
+			t.Fatalf("reading the reader: %v", err)
+		}
+		var pod struct {
+			Spec struct {
+				RestartPolicy string `yaml:"restartPolicy"`
+				Containers    []struct {
+					Image        string `yaml:"image"`
+					VolumeMounts []struct {
+						MountPath string `yaml:"mountPath"`
+						ReadOnly  bool   `yaml:"readOnly"`
+					} `yaml:"volumeMounts"`
+				} `yaml:"containers"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal(data, &pod); err != nil {
+			t.Fatalf("the reader does not parse back: %v", err)
+		}
+		if kind := renderedKind(t, filepath.Join(f.out, "15-pod-tracker-backup-reader.yaml")); kind != "Pod" {
+			t.Errorf("the reader's kind = %q, want Pod", kind)
+		}
+		if pod.Spec.RestartPolicy != "Never" {
+			t.Errorf("the reader's restartPolicy = %q, want Never", pod.Spec.RestartPolicy)
+		}
+		if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != backupImage {
+			t.Fatalf("the reader's containers = %+v, want one on the dump image %s", pod.Spec.Containers, backupImage)
+		}
+		mounts := pod.Spec.Containers[0].VolumeMounts
+		if len(mounts) != 1 || mounts[0].MountPath != "/backups" || !mounts[0].ReadOnly {
+			t.Errorf("the reader's mounts = %+v, want the claim at /backups read-only", mounts)
+		}
+		if !strings.Contains(out.String(), "tracker-backup-reader Pod") || !strings.Contains(out.String(), "is not applied with the rest") {
+			t.Errorf("the output does not say the reader is not applied with the rest:\n%s", out.String())
+		}
+	})
+
+	t.Run("a reader that cannot render or encode refuses and writes nothing", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(d *clusterRenderDeps)
+			cause  string
+		}{
+			{
+				name: "the builder refuses",
+				mutate: func(d *clusterRenderDeps) {
+					d.buildTrackerBackupReader = func(k8sdaemon.Values) (k8sdaemon.TrackerBackupReader, error) {
+						return k8sdaemon.TrackerBackupReader{}, errors.New("refused")
+					}
+				},
+				cause: "cannot render the tracker dump's reader",
+			},
+			{
+				name: "the encoder fails",
+				mutate: func(d *clusterRenderDeps) {
+					d.encode = func(io.Writer, any) error { return errors.New("encode") }
+				},
+				cause: "cannot encode the tracker dump's reader",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				f := backupFixture(t)
+				var out bytes.Buffer
+				d := clusterRenderTestDeps(t, &out)
+				tt.mutate(&d)
+				requireErrorNames(t, runClusterRender(d, f), tt.cause, "no file was written")
+				if got := outState(f.out); got != "absent" {
+					t.Errorf("the refused render left --out %s, want it untouched", got)
+				}
+			})
 		}
 	})
 }
