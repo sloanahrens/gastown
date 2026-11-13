@@ -16,21 +16,14 @@ bd -C ~/gt show hq-abc             # Town-level beads
 bd -C ~/gt/wyvern show wyv-123     # Wyvern rig beads
 ```
 
-**How it works**: Routes are defined in `~/gt/.beads/routes.jsonl`. Each rig's
-prefix routes to the rig root, and the rig's beads live in `<rig>/.beads`.
-A rig's beads directory is chosen by `constants.RigBeadsPath`: `<rig>/.beads`
-once it holds `metadata.json` and no `redirect` file. A rig that has not moved
-keeps its beads in the legacy `<rig>/mayor/rig/.beads`, which is a retired
-path kept only for that fallback; its route then names `<rig>/mayor/rig`
-(`determineRigBeadsPath` in `internal/doctor/routes_check.go`). A rig whose
-`<rig>/.beads` is a `redirect` to that legacy directory is still reached by
-`bd -C <rig>`.
-
-| Prefix | Routes To | Purpose |
-|--------|-----------|---------|
-| `hq-*` | `~/gt/.beads/` | Cross-rig coordination, agent identity |
-| `gp-*` | `~/gt/greenplace/.beads/` | Greenplace project issues |
-| `wyv-*` | `~/gt/wyvern/.beads/` | Wyvern project issues |
+**How it works**: Routes are defined in `~/gt/.beads/routes.jsonl`. The town
+prefix `hq-` routes to `~/gt/.beads` for cross-rig coordination and agent
+identity; each rig's prefix routes to its rig root. A rig's beads directory is
+chosen by `constants.RigBeadsPath`: `<rig>/.beads` once it holds `metadata.json`
+and no `redirect` file, else the retired legacy `<rig>/mayor/rig/.beads` that
+the route names for a rig that has not moved (`determineRigBeadsPath` in
+`internal/doctor/routes_check.go`). A rig whose `<rig>/.beads` is a `redirect`
+to that legacy directory is still reached by `bd -C <rig>`.
 
 A crew or polecat worktree gets a `.beads/redirect` to its rig's beads, the
 target `beads.ComputeRedirectTarget` returns in `internal/beads/beads_redirect.go`.

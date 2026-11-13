@@ -83,9 +83,9 @@ week.
 
 To replace the installed wrappers with a newer build, run `gt-wrap install` again
 from the new gt-wrap with a new stamp and the same `--target` paths, and no
-`--keep-old`: each wrapper is a regular file, so install renames it to
-`<name>.pre-wrap-<new stamp>`, places the new one and runs its `--doctor`. Never
-`cp` over a wrapper: copying over a running signed binary gets it killed. With
+`--keep-old`: each wrapper is a regular file, so install replaces it the way it
+replaces a tool above. Never `cp` over a wrapper: copying over a running signed
+binary gets it killed. With
 two stamps, `gt-wrap rollback --stamp <new stamp>` puts the previous wrapper back,
 and `gt-wrap rollback --stamp <first stamp>` puts the native tools back from either
 state (the wrapper at the path is moved aside as `<name>.wrapper-<first stamp>`).

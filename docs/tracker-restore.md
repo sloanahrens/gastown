@@ -63,6 +63,10 @@ cluster, and the shell's exit trap drops that database whatever happens next.
 
 ```bash
 set -euo pipefail
+if [ -z "${PGPASSWORD:-}" ] && [ ! -r "$HOME/.pgpass" ]; then
+  echo "set PGPASSWORD from deploy/tracker/tracker-db.env, or add a ~/.pgpass entry for 127.0.0.1:5432" >&2
+  false
+fi
 DUMP=~/gt-backups/tracker/2026-10-28.dump
 MAINT="postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable"
 NAME="restorecheck_$(date +%Y%m%d%H%M%S)_$$"
@@ -79,6 +83,15 @@ tracker database: port 5432 and role `tracker`, with the database swapped to
 file needs lives in `tracker-db.env` beside it. trackerd reaches the same
 database through the `TRACKER_DSN` Secret of its Deployment; no plist holds
 these settings, so a database elsewhere is named by that Secret.
+
+The DSNs carry no password. libpq takes it from `PGPASSWORD`, which you set to
+the password in `tracker-db.env` beside the compose file, or from a `0600`
+`~/.pgpass` entry for `127.0.0.1:5432`. A block whose first lines find neither
+stops with a message naming both. The guard checks only that `PGPASSWORD` is set
+or that `~/.pgpass` is readable, not that the file holds an entry libpq can
+use: with an entry missing, a block still starts and the first `psql`,
+`createdb` or `dropdb` asks for the password, or fails when there is no terminal
+to ask on.
 
 `--exit-on-error` stops at the first error, so a restore that would otherwise
 have ignored one fails here. `--no-owner` gives the restored objects to your
@@ -124,6 +137,10 @@ and fails on a file that is not a usable dump.
 
 ```bash
 set -euo pipefail
+if [ -z "${PGPASSWORD:-}" ] && [ ! -r "$HOME/.pgpass" ]; then
+  echo "set PGPASSWORD from deploy/tracker/tracker-db.env, or add a ~/.pgpass entry for 127.0.0.1:5432" >&2
+  false
+fi
 DUMP=~/gt-backups/tracker/2026-10-28.dump
 MAINT="postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable"
 ASIDE="tracker_damaged_$(date +%Y%m%d%H%M%S)"
@@ -157,6 +174,10 @@ The renamed copy stays on the cluster until the restored database has served
 for a while. Drop it then:
 
 ```bash
+if [ -z "${PGPASSWORD:-}" ] && [ ! -r "$HOME/.pgpass" ]; then
+  echo "set PGPASSWORD from deploy/tracker/tracker-db.env, or add a ~/.pgpass entry for 127.0.0.1:5432" >&2
+  exit 1
+fi
 dropdb --maintenance-db "postgres://tracker@127.0.0.1:5432/postgres?sslmode=disable" --force "$ASIDE"
 ```
 
@@ -177,9 +198,8 @@ default list filter had something to leave out. The dump was taken with
   `pg_database` held only `postgres` and `tracker` afterwards.
 - Step 3, the database half: `pg_restore -l` exited 0, the rename to
   `tracker_damaged_...` succeeded, the fresh `tracker` restored and the count
-  read `3` back. The two service lines (2 and 6) did not run: they were
-  `launchctl` lines then, and the rehearsal host had no launchd job for the
-  tracker.
+  read `3` back. The two service lines (2 and 6) did not run: the rehearsal had
+  no tracker service to stop or start.
 - The package check: `go test ./internal/restorecheck/` (unit, the order and
   every refusal) and `go test -tags integration ./internal/restorecheck/`
   (a real `pg_dump` restored into a scratch database, the subset passing, and
