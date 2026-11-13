@@ -36,7 +36,9 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 	var out []attention.Item
 	for _, seat := range seats {
 		kept := s.now.Sub(seat.Since)
-		if kept <= keptSeatAttentionAfter {
+		// A seat whose gateway has stayed silent for the retry limit's ticks is
+		// raised whatever its age (gt-7h38pd).
+		if kept <= keptSeatAttentionAfter && seat.Tries < s.d.gatewayRetryLimit() {
 			continue
 		}
 		bead := seat.Bead

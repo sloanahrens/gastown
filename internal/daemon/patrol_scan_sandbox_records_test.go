@@ -16,6 +16,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -65,6 +66,9 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	r.host = &patrolScanHost{d: d, sandboxExists: func(gateway, name string) (bool, error) {
 		r.asked = append(r.asked, gateway+"|"+name)
 		return o.exists, o.existsErr
+	}, sandboxStatus: func(string, string) (sandbox.Status, error) {
+		// A running sandbox: the phase question never reaches a real gateway.
+		return sandbox.Status{Phase: "Ready"}, nil
 	}, sandboxEndedMarker: func(gateway, name string) (bool, error) {
 		r.markerAsked = append(r.markerAsked, gateway+"|"+name)
 		return o.marker, o.markerErr

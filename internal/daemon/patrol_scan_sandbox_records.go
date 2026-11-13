@@ -46,6 +46,14 @@ const (
 // sandbox removes the record too, so by then there is no record for this path to
 // find.
 //
+// A held sandbox the gateway reports Stopped is ended on its phase, not its
+// marker, and only when its seat's end is recorded with landing facts that prove
+// the work landed. A Stopped sandbox whose work is not proven landed is kept with
+// the reason stoppedUnlandedReason (gt-7h38pd). A gateway that does not answer,
+// for the existence question or the phase question, is a retry on the next tick:
+// a seat whose end is recorded counts the tick in its kept record, whose reason
+// names the time of the last try, and nothing else is recorded for it.
+//
 // At most the budget (sandboxRecordsPerTick) of records is checked per tick,
 // live ones included, so the walk makes at most that many tmux probes and
 // gateway questions, and records the gateway still has cannot starve the ones
@@ -97,12 +105,27 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		}
 		exists, err := h.sandboxStillExists(rec.Gateway, name)
 		if err != nil {
+			h.countGatewayTry(rec)
 			h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask gateway %q: %v", name, rec.Gateway, err)
 			continue
 		}
 		if exists {
-			dropped, why := h.deleteHeldSandbox(name, rec)
+			// A gateway that cannot give the phase is silent for this tick too
+			// (gt-7h38pd). A Stopped sandbox cannot answer the ended-marker
+			// question, so it is ended on its phase and seat, not its marker.
+			phase, err := h.sandboxPhase(rec.Gateway, name)
+			if err != nil {
+				h.countGatewayTry(rec)
+				h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask gateway %q for its phase: %v", name, rec.Gateway, err)
+				continue
+			}
+			end := h.endHeldSandbox
+			if isStoppedPhase(phase) {
+				end = h.endStoppedSandbox
+			}
+			dropped, why := h.deleteHeldSandbox(name, rec, end)
 			if why != "" {
+				h.settleGatewayKeep(rec, why)
 				h.d.logger.Printf("patrol_scan: sandbox record %s kept: %s (%s/%s)", name, why, rec.Rig, rec.Polecat)
 				continue
 			}
@@ -174,8 +197,9 @@ func (h *patrolScanHost) sandboxSeatSessionLive(name string) (bool, error) {
 // re-reads the record under the lock. It reports whether the record is gone
 // (true: the patrol completes the seat's end) and, when the sandbox is kept,
 // why. A record removed between the pass's read and this lock is a quiet skip:
-// not kept, and no deleter is called.
-func (h *patrolScanHost) deleteHeldSandbox(name string, rec session.SandboxRecord) (dropped bool, why string) {
+// not kept, and no deleter is called. end decides whether the sandbox goes:
+// endHeldSandbox for a running sandbox, endStoppedSandbox for a Stopped one.
+func (h *patrolScanHost) deleteHeldSandbox(name string, rec session.SandboxRecord, end func(caller, name string, rec session.SandboxRecord) string) (dropped bool, why string) {
 	if err := polecat.CheckSandboxSeatNames(rec.Rig, rec.Polecat); err != nil {
 		return false, err.Error()
 	}
@@ -192,7 +216,7 @@ func (h *patrolScanHost) deleteHeldSandbox(name string, rec session.SandboxRecor
 		if !ok {
 			return nil // the landing removed it first: nothing to delete here
 		}
-		if why = h.endHeldSandbox("patrol_scan", name, current); why != "" {
+		if why = end("patrol_scan", name, current); why != "" {
 			return nil
 		}
 		if err := h.removeRecord(name); err != nil {
@@ -224,10 +248,7 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 	if !ended {
 		return "its ended marker is not set"
 	}
-	deleter := h.sandboxDeleter
-	if deleter == nil && !h.noSandboxDeleterLinked {
-		deleter = session.SandboxDeleter
-	}
+	deleter := h.recordDeleter()
 	if deleter == nil {
 		// Dropping the record without a deleter would leave the sandbox behind
 		// with nothing left to name it, so it is kept for the operator.
@@ -238,6 +259,71 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 	}
 	h.d.logger.Printf("%s: sandbox record %s deleted: its seat ended and the sandbox's ended marker is set; its transcripts are copied before the delete, and a failed copy is warned (%s/%s)", caller, name, rec.Rig, rec.Polecat)
 	return ""
+}
+
+// endStoppedSandbox ends a held sandbox the gateway reports Stopped, with no
+// ended-marker read: a Stopped sandbox cannot answer that question, so the
+// marker never decides it. The sandbox is deleted through the record deleter
+// only when the seat's end is recorded with landing facts and the landing
+// record proves the work landed. The transcripts may not be copied out of a
+// stopped sandbox, so the delete is warned, naming the seat, and goes on. A seat
+// whose work is not proven landed stays, kept with stoppedUnlandedReason. It
+// returns the reason the sandbox is kept, or "" when it was deleted (gt-7h38pd).
+func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.SandboxRecord) string {
+	if rec.Rig == "" || rec.Polecat == "" {
+		return "its record names no seat, so its seat's end cannot be read"
+	}
+	seat := rec.Rig + "/" + rec.Polecat
+	kept, ok, err := h.readKeptSeatFor(rec.Rig, rec.Polecat)
+	switch {
+	case err != nil:
+		return "its kept record cannot be read: " + err.Error()
+	case !ok:
+		return "its seat's end is not recorded"
+	case kept.Landing == nil:
+		return "its kept record names no landing facts"
+	case !kept.Landing.Landed:
+		h.recordKeptSeat(rec.Rig, rec.Polecat, *kept.Landing, stoppedUnlandedReason)
+		return stoppedUnlandedReason
+	}
+	deleter := h.recordDeleter()
+	if deleter == nil {
+		return "no sandbox deleter is linked, so its stopped sandbox cannot be deleted"
+	}
+	h.d.logger.Printf("%s: warning: sandbox record %s is Stopped, so its transcripts may not be copied out before the delete (%s)", caller, name, seat)
+	if err := deleter(h.town(), rec); err != nil {
+		return "its stopped sandbox could not be deleted: " + err.Error()
+	}
+	h.d.logger.Printf("%s: sandbox record %s deleted: it is Stopped and its seat's work landed (%s)", caller, name, seat)
+	return ""
+}
+
+// recordDeleter is the record deleter a held sandbox is deleted through: the
+// seam when one is set, else session.SandboxDeleter. It is nil when the binary
+// linked no deleter and the unit tier has said so.
+func (h *patrolScanHost) recordDeleter() func(townRoot string, rec session.SandboxRecord) error {
+	if h.sandboxDeleter != nil {
+		return h.sandboxDeleter
+	}
+	if h.noSandboxDeleterLinked {
+		return nil
+	}
+	return session.SandboxDeleter
+}
+
+// sandboxPhase asks the gateway for the phase of the sandbox called name: the
+// sandboxStatus seam when set, else session.GatewaySandboxPhase. A gateway that
+// cannot answer is an error, never a phase.
+func (h *patrolScanHost) sandboxPhase(gateway, name string) (string, error) {
+	status := h.sandboxStatus
+	if status == nil {
+		status = session.GatewaySandboxPhase
+	}
+	st, err := status(gateway, name)
+	if err != nil {
+		return "", err
+	}
+	return st.Phase, nil
 }
 
 // sandboxEndedMarkerSet asks the sandbox called name on gateway whether its

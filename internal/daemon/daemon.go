@@ -94,6 +94,11 @@ type Daemon struct {
 	// survives records coming and going between ticks.
 	sandboxRecordCursor string
 
+	// sandboxGatewayRetryLimit is how many ticks a kept sandbox seat's gateway may
+	// stay silent before the queue raises the seat's item. Zero is
+	// defaultSandboxGatewayRetryTicks (gt-7h38pd).
+	sandboxGatewayRetryLimit int
+
 	// hb is the heartbeat in flight: its step and the lock between an
 	// abandoned heartbeat and shutdown (heartbeat_signal.go, gt-lbqgz).
 	// hbGrace overrides heartbeatSignalGrace in tests.
