@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -197,7 +198,29 @@ func buildCommand(ctx context.Context, dir string, env []string, name string, ar
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	cmd.WaitDelay = commandWaitDelay
+	if stdin := runStdinOf(ctx); stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	return cmd
+}
+
+// runStdinKey is the context key that carries a command's stdin through a
+// RunFunc, which has no stdin parameter of its own.
+type runStdinKey struct{}
+
+// withRunStdin returns ctx carrying data as the stdin of the next command run
+// with it. A nil data is no stdin.
+func withRunStdin(ctx context.Context, data []byte) context.Context {
+	if data == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runStdinKey{}, data)
+}
+
+// runStdinOf is the stdin withRunStdin carries, or nil when ctx carries none.
+func runStdinOf(ctx context.Context) []byte {
+	data, _ := ctx.Value(runStdinKey{}).([]byte)
+	return data
 }
 
 // newRunFunc returns a RunFunc over output. A command that ran is read by what

@@ -679,11 +679,23 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	if pod != nil {
 		inner = update.SkippedInstaller{Reason: podHostInstallReason}
 	}
-	return &update.DigestInstaller{
+	install := &update.DigestInstaller{
 		Inner:  inner,
 		Path:   path,
 		Images: images,
-	}, nil
+	}
+	if pod != nil {
+		// The pod's pair is checked once the swap reports it: its daemon's image
+		// ids, the registry's dev tag, and then the values file goes into the pod.
+		install.PairCheck = podPairCheck{
+			Run:        seams.PodRun,
+			Target:     *pod,
+			Images:     seams.Images,
+			TownRoot:   townRoot,
+			ValuesPath: path,
+		}.Check
+	}
+	return install, nil
 }
 
 // imageDeps is the set of effects a digest install and a rollback both reach:

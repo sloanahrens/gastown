@@ -21,11 +21,14 @@ import (
 // podDaemonKubectl stands in for kubectl against a daemon that runs as a pod. A
 // patch puts the daemon on the build of the daemon digest it names, and an exec
 // reports the build the pod runs, so the rollout wait reads the commit the patch
-// put in force. running is the build the pod runs before any patch.
+// put in force. running is the build the pod runs before any patch. imageIDs is
+// the image id the daemon pod reports for its daemon container, which the pod's
+// pair check reads after the rollout.
 type podDaemonKubectl struct {
-	calls   [][]string
-	commits map[string]string
-	running string
+	calls    [][]string
+	commits  map[string]string
+	running  string
+	imageIDs string
 }
 
 func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
@@ -38,6 +41,8 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 				k.running = commit
 			}
 		}
+	case containsArg(args, "get"):
+		return k.imageIDs, 0, nil
 	case containsArg(args, "exec"):
 		return "gt version " + k.running + " built on test\n", 0, nil
 	}
@@ -115,7 +120,9 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 	t.Helper()
 	townRoot := t.TempDir()
 	values := filepath.Join(townRoot, "images.yaml")
-	if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podSwapPolecatRef, Commit: rollbackNewCommit}); err != nil {
+	// The polecat digest is the one the fake registry serves at the dev tag, so the
+	// pod's pair check passes for a healthy pod.
+	if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Commit: rollbackNewCommit}); err != nil {
 		t.Fatalf("write the values file: %v", err)
 	}
 	clock := &rollbackTestClock{now: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)}
@@ -125,7 +132,7 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 	got := wiredInstall{
 		compose: compose,
 		verify:  compose,
-		kube:    &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}},
+		kube:    &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, imageIDs: podSwapDigestRef},
 		host:    &podHostInstaller{},
 	}
 	seams := updateSeams{
@@ -147,6 +154,7 @@ func captureWiredRun(t *testing.T, digest bool, extra ...string) wiredInstall {
 		ImageSwap: func(string) (update.ImageSwap, error) { return got.compose, nil },
 		Notifier:  func(string) notify.Notifier { return notifyfake.New() },
 		PodRun:    got.kube.run,
+		Images:    podPairImages(podPairManifest),
 	}
 	args := extra
 	if digest {
