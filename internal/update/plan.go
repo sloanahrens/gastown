@@ -24,7 +24,9 @@ type Probes interface {
 // and lift, and skipping drain also drops lift. Force plans an install even
 // when the installed build equals main and that image is published. PodTarget
 // reports that the daemon runs as a pod: its Dolt stays on the host, so the
-// plan reads no host Dolt directory and plans the maintenance step not to run.
+// plan reads no host Dolt directory and plans the maintenance step not to run,
+// and its daemon drains itself when it is stopped, so the plan runs neither the
+// drain nor the lift and the run takes no dispatch hold.
 type PlanOptions struct {
 	Skip      map[StepName]bool
 	Only      map[StepName]bool
@@ -37,13 +39,21 @@ type PlanOptions struct {
 // directories are, and the pod has neither.
 const podMaintenanceReason = "the daemon runs as a pod: its Dolt maintenance runs on the host"
 
+// podDrainReason is the drain and lift steps' reason for a pod target: a pod's
+// daemon finishes its landing step and starts nothing new when it is stopped
+// (gt-99ys4n), so the run takes no dispatch hold and has nothing to drain or
+// lift.
+const podDrainReason = "the daemon runs as a pod: it drains itself on stop"
+
 // BuildPlan decides which update steps have work and returns them in run order
 // with a reason for each, alongside the build the run targets. It does no I/O:
 // every fact comes from p. Both shas are trimmed of surrounding whitespace
 // before they are compared, queried and recorded. A probe that fails, or that
 // reports a blank sha, fails the plan with that probe named. A pod target is
 // asked none of the maintenance probes, since the Dolt data they read is not in
-// the pod: its maintenance step is planned not to run.
+// the pod: its maintenance step is planned not to run. A pod target also plans
+// its drain and lift not to run, since its daemon drains itself on stop and the
+// run takes no dispatch hold.
 func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Target, error) {
 	var target Target
 
@@ -94,13 +104,20 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 		followReason = "an install is planned"
 	}
 
+	drain, drainReason := install, followReason
+	lift, liftReason := install, followReason
+	if o.PodTarget {
+		drain, drainReason = false, podDrainReason
+		lift, liftReason = false, podDrainReason
+	}
+
 	steps := []StepRecord{
-		{Name: StepDrain, WillRun: install, Reason: followReason},
+		{Name: StepDrain, WillRun: drain, Reason: drainReason},
 		{Name: StepMaintenance, WillRun: maintenance, Reason: maintenanceReason},
 		{Name: StepInstall, WillRun: install, Reason: installReason},
 		{Name: StepRestart, WillRun: install, Reason: followReason},
 		{Name: StepVerify, WillRun: install, Reason: followReason},
-		{Name: StepLift, WillRun: install, Reason: followReason},
+		{Name: StepLift, WillRun: lift, Reason: liftReason},
 	}
 	applySelection(steps, o)
 	return steps, target, nil

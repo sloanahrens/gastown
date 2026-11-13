@@ -300,7 +300,9 @@ recorded pair back.
 daemon that runs as a pod: the pair moves that Deployment, and the daemon's
 build is read from its pod rather than the state file. --pod-in-cluster with
 --pod-namespace names the same Deployment with no context, for a job that runs
-in the cluster the pod is in.
+in the cluster the pod is in. A pod run takes no dispatch hold and plans
+neither the drain nor the lift: the pod's daemon finishes its landing step and
+starts nothing new when it is stopped.
 
 Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 5 when another run holds the lock, 130 when interrupted.`,

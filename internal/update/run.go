@@ -40,7 +40,8 @@ type Deps struct {
 	Probes Probes
 	// Seats lists the seats the drain waits for.
 	Seats SeatProbe
-	// Hold is the dispatch hold the run takes before it drains and installs.
+	// Hold is the dispatch hold the run takes before it drains and installs. A
+	// pod target takes none: its daemon drains itself on stop.
 	Hold *Hold
 	// Installer puts the target build in force.
 	Installer Installer
@@ -68,7 +69,9 @@ type Options struct {
 	HostInstallSkipped string
 	// PodTarget reports that the run's daemon runs as a pod. The pod holds no
 	// Dolt data, so the plan leaves the maintenance cycle to the host that does
-	// and reads none of its directories.
+	// and reads none of its directories. The pod's daemon drains itself on stop,
+	// so the plan runs neither the drain nor the lift, and the run takes no
+	// dispatch hold.
 	PodTarget bool
 	// Source is the record's provenance: SourceManual (the default) or
 	// SourceDaemon.
