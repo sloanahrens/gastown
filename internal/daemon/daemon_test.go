@@ -535,6 +535,7 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 			asked = append(asked, id)
 			return nil, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
 		},
+		rigStatusSleep: func(time.Duration) {},
 	}
 
 	// When Dolt is unavailable, isRigOperational should return false
@@ -549,8 +550,10 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 	if !strings.Contains(reason, "Dolt unavailable") && !strings.Contains(reason, "cannot verify") {
 		t.Errorf("reason should mention Dolt unavailable, got: %q", reason)
 	}
-	if len(asked) != 1 || asked[0] != "tr-rig-testrig" {
-		t.Errorf("rig bead reads = %v, want the one read of tr-rig-testrig (prefix from config.json)", asked)
+	// The failed read is retried once (rigStatusRetryDelay); both reads go to the
+	// prefix from config.json.
+	if len(asked) != 2 || asked[0] != "tr-rig-testrig" || asked[1] != "tr-rig-testrig" {
+		t.Errorf("rig bead reads = %v, want the read of tr-rig-testrig and its one retry (prefix from config.json)", asked)
 	}
 }
 
@@ -634,6 +637,7 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
 			return nil, fmt.Errorf("no issue found matching %q", id)
 		},
+		rigStatusSleep: func(time.Duration) {},
 	}
 	if operational, _ := d.isRigOperational(rigName); operational {
 		t.Error("isRigOperational should return false when rig bead is missing")

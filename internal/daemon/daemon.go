@@ -471,6 +471,10 @@ type Daemon struct {
 	// tests; nil runs bd (see showRigBead).
 	rigBeadShowFn func(rigPath, rigBeadID string) (*beads.Issue, error)
 
+	// rigStatusSleep waits out rigStatusRetryDelay before the retry of a failed
+	// rig identity-bead read; nil waits on clk(). Tests record the waits.
+	rigStatusSleep func(time.Duration)
+
 	// checkpointRevertAlert raises the escalation for a checkpoint_dog WIP
 	// commit that would revert content already merged to main (gt-2bp8). New
 	// wires it to the daemon's alert helper; it stays nil on a zero-value
@@ -3243,6 +3247,12 @@ func (d *Daemon) rigBeadVerdict(rigName string) (rigBeadEntry, bool) {
 	}
 
 	rigBeadID, verdict, err := d.queryRigBead(rigName)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		// One retry before the failure is memoized or escalated (see
+		// rigStatusRetryDelay). A timed-out read is not retried.
+		d.waitRigStatusRetry()
+		rigBeadID, verdict, err = d.queryRigBead(rigName)
+	}
 	answeredAt := d.clk().Now()
 	if err != nil {
 		// The category is in the line on purpose: "assuming not operational"

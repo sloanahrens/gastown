@@ -81,10 +81,26 @@ type rigStatusFixture struct {
 
 	// In-process fixtures (newRigStatusFakeFixture) answer the read from show,
 	// on clock, instead of from a bd on PATH.
-	clock *clockwork.FakeClock
-	mu    sync.Mutex
-	show  rigShow
-	shows int
+	clock  *clockwork.FakeClock
+	mu     sync.Mutex
+	show   rigShow
+	shows  int
+	sleeps []time.Duration // the retry pauses the daemon asked for, in order
+}
+
+// recordSleep stands in for the daemon's retry pause: it records the wait and
+// returns at once.
+func (f *rigStatusFixture) recordSleep(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sleeps = append(f.sleeps, d)
+}
+
+// retrySleeps is the retry pauses recorded so far.
+func (f *rigStatusFixture) retrySleeps() []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Duration(nil), f.sleeps...)
 }
 
 // rigShow is how an in-process fixture answers the identity-bead read. It may
@@ -168,6 +184,7 @@ func newRigStatusFakeFixture(t *testing.T, show rigShow) *rigStatusFixture {
 	}
 	f.daemon.rigStatusAlert = f.alerts.alert
 	f.daemon.rigStatusClear = f.alerts.clear
+	f.daemon.rigStatusSleep = f.recordSleep
 	f.daemon.rigBeadShowFn = func(_, id string) (*beads.Issue, error) {
 		f.mu.Lock()
 		f.shows++
@@ -893,5 +910,123 @@ func TestRigDockStamp_DaemonReadsThePathTheCommandWrites(t *testing.T) {
 	}
 	if stamp, err := rig.DockStamp(f.daemon.config.TownRoot, f.rigName); err != nil || stamp.IsZero() {
 		t.Errorf("the daemon cannot read the stamp the dock wrote: %v, %v", stamp, err)
+	}
+}
+
+// rigShowAnswers answers successive identity-bead reads with answers in turn,
+// then keeps answering with the last one.
+func rigShowAnswers(answers ...rigShow) rigShow {
+	n := 0
+	return func(clk *clockwork.FakeClock) (*beads.Issue, error) {
+		answer := answers[len(answers)-1]
+		if n < len(answers) {
+			answer = answers[n]
+		}
+		n++
+		return answer(clk)
+	}
+}
+
+// exitStatusError carries a process exit status the way *exec.ExitError does,
+// which is how bd's store_unavailable exit (25) reaches the daemon through the
+// beads error chain.
+type exitStatusError int
+
+func (e exitStatusError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitStatusError) ExitCode() int { return int(e) }
+
+// TestIsRigOperational_OneRetryBeforeAFailureCounts pins the retry on a rig's
+// identity-bead read: a read that fails once and then answers is the verdict,
+// with no failure stored and no escalation; a read that fails twice is memoized
+// as failed and escalated once; a timed-out read is not retried at all.
+func TestIsRigOperational_OneRetryBeforeAFailureCounts(t *testing.T) {
+	t.Parallel()
+	storeDown := func(*clockwork.FakeClock) (*beads.Issue, error) {
+		return nil, fmt.Errorf("bd show tr-rig-testrig: %w", exitStatusError(25))
+	}
+	const storeCategory = "store unavailable: the database behind bd did not answer"
+	for _, tc := range []struct {
+		name            string
+		answers         []rigShow
+		wantOperational bool
+		wantShows       int
+		wantSleeps      int
+		wantFailed      string // the memoized failure category, empty when answered
+		wantRaised      int
+		wantLogged      string
+	}{
+		{
+			name:            "fails once then answers: the verdict stands, nothing is stored or escalated",
+			answers:         []rigShow{storeDown, rigShowOperational},
+			wantOperational: true,
+			wantShows:       2,
+			wantSleeps:      1,
+		},
+		{
+			name:       "fails twice: the failure is stored and escalated once, and the log names the store",
+			answers:    []rigShow{storeDown, storeDown},
+			wantShows:  2,
+			wantSleeps: 1,
+			wantFailed: storeCategory,
+			wantRaised: 1,
+			wantLogged: storeCategory,
+		},
+		{
+			name:            "a missing bead gets the retry too",
+			answers:         []rigShow{rigShowMissing, rigShowOperational},
+			wantOperational: true,
+			wantShows:       2,
+			wantSleeps:      1,
+		},
+		{
+			name:       "a timed-out read is not retried",
+			answers:    []rigShow{rigShowTimedOut, rigShowOperational},
+			wantShows:  1,
+			wantSleeps: 0,
+			wantFailed: "lookup timed out",
+			wantRaised: 1,
+			wantLogged: "lookup timed out",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRigStatusFakeFixture(t, rigShowAnswers(tc.answers...))
+
+			operational, _ := f.daemon.isRigOperational(f.rigName)
+			if operational != tc.wantOperational {
+				t.Errorf("operational = %v, want %v", operational, tc.wantOperational)
+			}
+			if got := f.showCount(t); got != tc.wantShows {
+				t.Errorf("bd reads = %d, want %d", got, tc.wantShows)
+			}
+			if got := len(f.retrySleeps()); got != tc.wantSleeps {
+				t.Errorf("retry pauses = %d, want %d", got, tc.wantSleeps)
+			}
+			for _, d := range f.retrySleeps() {
+				if d != rigStatusRetryDelay {
+					t.Errorf("retry pause = %v, want %v", d, rigStatusRetryDelay)
+				}
+			}
+			if got := f.memoized(t, f.rigName).failed; got != tc.wantFailed {
+				t.Errorf("memoized failure = %q, want %q", got, tc.wantFailed)
+			}
+
+			logged := f.logBuf.String()
+			if tc.wantFailed == "" && strings.Contains(logged, "failed to check rig bead") {
+				t.Errorf("a read that answered on retry must log no failure, got:\n%s", logged)
+			}
+			if tc.wantLogged != "" && !strings.Contains(logged, tc.wantLogged) {
+				t.Errorf("log = %q, want it to contain %q", logged, tc.wantLogged)
+			}
+
+			drainRigEscalations(f.daemon, f.rigName)
+			raised, _, cleared := f.alerts.snapshot()
+			if len(raised) != tc.wantRaised {
+				t.Errorf("escalations raised = %d, want %d", len(raised), tc.wantRaised)
+			}
+			if len(cleared) != 0 {
+				t.Errorf("escalations cleared = %d, want 0: nothing was open to clear", len(cleared))
+			}
+		})
 	}
 }
