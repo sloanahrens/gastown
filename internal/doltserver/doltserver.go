@@ -4655,9 +4655,11 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		}
 	}
 
-	// Fast path: avoid rewriting metadata.json when already correct.
+	// Fast path: avoid rewriting metadata.json when already correct. The port
+	// file is written on this path too, so a current metadata.json still gets
+	// it (gt-2r2och).
 	if !changed {
-		return nil
+		return writeDoltPortFile(beadsDir, config.Port)
 	}
 
 	data, err := json.MarshalIndent(existing, "", "  ")
@@ -4669,6 +4671,26 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		return fmt.Errorf("writing metadata.json: %w", err)
 	}
 
+	return writeDoltPortFile(beadsDir, config.Port)
+}
+
+// writeDoltPortFile writes the decimal port to beadsDir/dolt-server.port, the
+// source bd reads before the deprecated dolt_server_port key (gt-2r2och). It
+// rewrites the file only when its content differs, so an unchanged port leaves
+// the file's mtime alone. A town without an endpoint (port 0) writes nothing,
+// as it writes no key today (gt-y3pgh.3).
+func writeDoltPortFile(beadsDir string, port int) error {
+	if port <= 0 {
+		return nil
+	}
+	portPath := filepath.Join(beadsDir, "dolt-server.port")
+	want := []byte(strconv.Itoa(port))
+	if data, err := os.ReadFile(portPath); err == nil && bytes.Equal(data, want) {
+		return nil
+	}
+	if err := atomicfile.WriteFile(portPath, want, 0644); err != nil {
+		return fmt.Errorf("writing dolt-server.port: %w", err)
+	}
 	return nil
 }
 

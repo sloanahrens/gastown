@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -2005,6 +2006,134 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 	}
 	if meta["dolt_server_host"] != "127.0.0.1" {
 		t.Errorf("dolt_server_host = %v, want 127.0.0.1", meta["dolt_server_host"])
+	}
+}
+
+// TestEnsureMetadataWritesThePortFile verifies that EnsureMetadata writes the
+// town's port to dolt-server.port, the source bd reads before the deprecated
+// dolt_server_port key (gt-2r2och). An unchanged port leaves the file alone; a
+// changed town port rewrites it.
+func TestEnsureMetadataWritesThePortFile(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().townPort(3307)
+	h := f.host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	portPath := filepath.Join(beadsDir, "dolt-server.port")
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata failed: %v", err)
+	}
+	data, err := os.ReadFile(portPath)
+	if err != nil {
+		t.Fatalf("reading dolt-server.port: %v", err)
+	}
+	if string(data) != "3307" {
+		t.Errorf("dolt-server.port = %q, want %q", data, "3307")
+	}
+
+	// Pin an old mtime so a rewrite is visible whatever the filesystem's
+	// timestamp granularity.
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(portPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("second EnsureMetadata failed: %v", err)
+	}
+	info, err := os.Stat(portPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(old) {
+		t.Errorf("dolt-server.port was rewritten with an unchanged port: mtime = %v, want %v", info.ModTime(), old)
+	}
+
+	f.townPort(3308)
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata after port change failed: %v", err)
+	}
+	data, err = os.ReadFile(portPath)
+	if err != nil {
+		t.Fatalf("reading dolt-server.port after port change: %v", err)
+	}
+	if string(data) != "3308" {
+		t.Errorf("dolt-server.port after port change = %q, want %q", data, "3308")
+	}
+}
+
+// TestEnsureMetadataWritesPortFileWhenMetadataCurrent verifies that the port
+// file is written even when metadata.json already holds every value, so a
+// beads directory that predates the port file gets it on the next run.
+func TestEnsureMetadataWritesPortFileWhenMetadataCurrent(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().townPort(DefaultPort)
+	h := f.host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("first EnsureMetadata failed: %v", err)
+	}
+	if err := os.Remove(filepath.Join(beadsDir, "dolt-server.port")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("second EnsureMetadata failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("dolt-server.port not written on a current metadata.json: %v", err)
+	}
+	if want := strconv.Itoa(DefaultPort); string(data) != want {
+		t.Errorf("dolt-server.port = %q, want %q", data, want)
+	}
+}
+
+// TestEnsureMetadataPortFileWriteFailureIsReturned verifies that a
+// dolt-server.port that cannot be replaced is reported, not passed over: a
+// directory at that path makes the atomic rename fail.
+func TestEnsureMetadataPortFileWriteFailureIsReturned(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().townPort(DefaultPort).host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt-server.port"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err == nil {
+		t.Fatal("EnsureMetadata succeeded with dolt-server.port blocked by a directory, want an error")
+	}
+}
+
+// TestEnsureMetadataNoPortNoPortFile verifies that a town without an endpoint
+// writes no dolt-server.port and does not fail, as it writes no
+// dolt_server_port key (gt-y3pgh.3).
+func TestEnsureMetadataNoPortNoPortFile(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+		t.Fatalf("EnsureMetadata failed for a town without an endpoint: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt-server.port")); !os.IsNotExist(err) {
+		t.Errorf("dolt-server.port exists for a town without an endpoint (stat err: %v)", err)
 	}
 }
 
