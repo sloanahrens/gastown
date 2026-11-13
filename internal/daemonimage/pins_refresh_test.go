@@ -244,6 +244,36 @@ func TestRefreshPinsFilesRefusesAnImageWithNoLine(t *testing.T) {
 	}
 }
 
+// TestRefreshPinsFilesRefusesASeedWithNoLine checks a seed file with no line for
+// a shared source refuses the pair: no bytes come back for either file, and the
+// error names the seed file.
+func TestRefreshPinsFilesRefusesASeedWithNoLine(t *testing.T) {
+	t.Parallel()
+	image := []byte(validImagePins())
+	seed := []byte("beads " + pinBDCommit + "\n")
+	newImage, newSeed, err := RefreshPinFiles(image, seed, PinsPath, seedPinsPath,
+		nil, map[string]string{"beads": pinBDCommit, "devops": pinDevopsCommit})
+	if err == nil {
+		t.Fatalf("RefreshPinFiles = %q, %q, want a refusal", newImage, newSeed)
+	}
+	if !strings.Contains(err.Error(), seedPinsPath) {
+		t.Errorf("error %q does not name %q", err, seedPinsPath)
+	}
+	if newImage != nil || newSeed != nil {
+		t.Errorf("a refused refresh returned bytes: %q, %q", newImage, newSeed)
+	}
+}
+
+// TestRefreshPinsRefusesANilGit checks the planner refuses to run without a git
+// to read origin/main with, rather than planning from no tips.
+func TestRefreshPinsRefusesANilGit(t *testing.T) {
+	t.Parallel()
+	pins := mustParsePins(t, validImagePins())
+	if got, err := PlanPinRefresh(pins, refreshMainOf, nil); err == nil {
+		t.Fatalf("PlanPinRefresh with no git = %+v, want a refusal", got)
+	}
+}
+
 // TestRefreshSeedPinsKeepsTheFilesAgreeing refreshes the image file's bd and the
 // seed file's beads line, then checks TestCommittedPinsAgree's rule holds on the
 // two refreshed files: each shared source names the same commit in both.

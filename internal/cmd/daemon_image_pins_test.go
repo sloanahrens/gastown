@@ -65,21 +65,23 @@ func (g *pinsRefreshGit) run(dir string, args ...string) ([]byte, error) {
 // bd pin 30 behind its tip, an om pin 5 behind, an hm pin at its tip, and a
 // devops pin 25 behind.
 type pinsRefreshRig struct {
-	flags daemonImagePinsFlags
-	git   *pinsRefreshGit
-	write func(path string, data []byte) error
-	out   *bytes.Buffer
-	src   map[string]string
+	flags   daemonImagePinsFlags
+	git     *pinsRefreshGit
+	write   func(path string, data []byte) error
+	resolve func(path string) (string, error)
+	out     *bytes.Buffer
+	src     map[string]string
 }
 
 func newPinsRefreshRig(t *testing.T) *pinsRefreshRig {
 	t.Helper()
 	root := t.TempDir()
 	r := &pinsRefreshRig{
-		git:   &pinsRefreshGit{answer: map[string]string{}, errs: map[string]error{}},
-		write: func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
-		out:   &bytes.Buffer{},
-		src:   map[string]string{},
+		git:     &pinsRefreshGit{answer: map[string]string{}, errs: map[string]error{}},
+		resolve: func(p string) (string, error) { return p, nil },
+		write:   func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:     &bytes.Buffer{},
+		src:     map[string]string{},
 	}
 	for _, name := range []string{"bd", "om", "hm", "devops"} {
 		dir := filepath.Join(root, "src", name)
@@ -127,7 +129,7 @@ func (r *pinsRefreshRig) setSource(name, tip string, behind int) {
 func (r *pinsRefreshRig) deps() daemonImagePinsDeps {
 	return daemonImagePinsDeps{
 		git:          r.git.run,
-		evalSymlinks: func(p string) (string, error) { return p, nil },
+		evalSymlinks: r.resolve,
 		write:        r.write,
 		out:          r.out,
 	}
@@ -432,6 +434,20 @@ func TestDaemonImagePinsRefusesBadInputBeforeReading(t *testing.T) {
 				r.flags.seedPins = t.TempDir()
 			},
 			wantErr: "cannot be read",
+		},
+		{
+			name: "a checkout that does not resolve",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.resolve = func(string) (string, error) { return "", errors.New("too many links") }
+			},
+			wantErr: "cannot be resolved",
+		},
+		{
+			name: "a checkout that is not there",
+			breakIt: func(t *testing.T, r *pinsRefreshRig) {
+				r.flags.omSrc = filepath.Join(t.TempDir(), "absent-om")
+			},
+			wantErr: "is not an existing directory",
 		},
 		{
 			name: "a checkout named by a relative path",
