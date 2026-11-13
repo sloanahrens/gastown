@@ -1,0 +1,41 @@
+bird
+bird bind
+bird list
+bird start
+birds
+birds due
+hooks
+hooks base
+hooks diff
+hooks init
+hooks install
+hooks list
+hooks override
+hooks reconcile
+hooks registry
+hooks scan
+hooks sync
+init
+install
+plugin
+plugin history
+plugin list
+plugin record-run
+plugin run
+plugin show
+plugin sync
+ring
+ring forge
+ring remove
+ring renew
+ring status
+slot
+slot reap
+slot run
+slot status
+theme
+theme apply
+theme cli
+tracker
+tracker replay
+tracker status

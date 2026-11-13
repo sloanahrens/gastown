@@ -1,0 +1,35 @@
+agent
+agent pause
+agent resume
+agents
+agents check
+agents fix
+agents list
+agents menu
+agents resolve
+agents state
+directive
+directive edit
+directive list
+directive show
+handoff
+hook
+hook attach
+hook clear
+hook detach
+hook show
+hook status
+model
+model apply
+model set-default
+model set-role
+model show
+sandbox
+sandbox endpoint
+scheduler
+scheduler clear
+scheduler list
+scheduler pause
+scheduler resume
+scheduler run
+scheduler status

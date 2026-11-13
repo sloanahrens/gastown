@@ -1,0 +1,42 @@
+attention
+attention ack
+cloud-check
+dashboard
+doctor
+doctor fix
+escalate
+escalate ack
+escalate clear
+escalate close
+escalate list
+escalate show
+escalate stale
+gate
+gate model
+heartbeat
+history
+intervention
+intervention record
+log
+log crash
+log prune-worktree
+overseer
+overseer beat
+overseer log
+prime
+questions
+ready
+regime
+regime backfill
+regime check
+regime record
+repoguard
+report
+report publish
+show
+stale
+status
+tail
+usage
+usage sample
+version
