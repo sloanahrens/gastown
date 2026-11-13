@@ -43,7 +43,8 @@ var tmuxReachNames = map[string]bool{
 // tmuxReachWords are the camelCase words that name a pane or
 // working-directory helper. A whole word is matched, not a substring, so
 // panelWidth and companyPanel are not reaches while getSessionPane and
-// GetPaneWorkDir are.
+// GetPaneWorkDir are, and a pair of adjacent words that spells one
+// (sessionWorkDir) is a match too.
 var tmuxReachWords = map[string]bool{
 	"pane":     true,
 	"panes":    true,
@@ -118,9 +119,19 @@ func identWords(name string) []string {
 
 // paneHelperName reports whether name spells a pane or working-directory helper,
 // matched by camelCase word so getSessionPane and GetPaneWorkDir are caught and
-// panelWidth is not.
+// panelWidth is not. Two words that spell one are matched too, so sessionWorkDir
+// is caught: the name spells workdir wherever the capital falls.
 func paneHelperName(name string) bool {
-	return slices.ContainsFunc(identWords(name), func(w string) bool { return tmuxReachWords[w] })
+	words := identWords(name)
+	for i, w := range words {
+		if tmuxReachWords[w] {
+			return true
+		}
+		if i+1 < len(words) && tmuxReachWords[w+words[i+1]] {
+			return true
+		}
+	}
+	return false
 }
 
 // reachName reports whether name on its own is a reach: a pane or
@@ -129,11 +140,13 @@ func reachName(name string) bool {
 	return tmuxReachNames[name] || paneHelperName(name)
 }
 
-// tmuxScan is one scan's state: the package functions a call may lead to, the
-// file each is declared in, and the functions already walked, so a cycle ends.
+// tmuxScan is one scan's state: the package functions and methods a call may
+// lead to, the file each is declared in, and the declarations already walked,
+// so a cycle ends.
 type tmuxScan struct {
 	fset     *token.FileSet
 	funcs    map[string][]*ast.FuncDecl
+	methods  map[string][]*ast.FuncDecl
 	declFile map[*ast.FuncDecl]string
 	visited  map[*ast.FuncDecl]bool
 	reaches  []tmuxReach
@@ -155,12 +168,30 @@ func (s *tmuxScan) follow(name string) {
 	}
 }
 
+// followMethod walks the body of every package method named name. A selector
+// call does not say which type its receiver holds without type information, so
+// every method of that name is followed; a method already walked ends there,
+// and a name that is itself a reach ends it too: the selector rule already
+// reports it, and its body is the tmux call the guard exists to catch.
+func (s *tmuxScan) followMethod(name string) {
+	if paneHelperName(name) {
+		return
+	}
+	for _, fd := range s.methods[name] {
+		if s.visited[fd] {
+			continue
+		}
+		s.visited[fd] = true
+		s.walk(s.declFile[fd], name, fd)
+	}
+}
+
 // walk records every tmux reach under root, which file declares as fn, and
-// follows each package function root calls, so a reach one hop away is
-// reported too. A reach is a call through the tmux package, a reference to a
-// name in tmuxReachNames, or any call or selector whose name spells a pane or
-// working-directory helper. A bare variable that happens to be called pane is
-// none of them.
+// follows each package function or method root calls, so a reach one hop away
+// is reported too. A reach is a call through the tmux package, a reference to
+// a name in tmuxReachNames, a call or selector whose name spells a pane or
+// working-directory helper, or a bare reference to a package function that
+// spells one. A local variable that happens to be called pane is none of them.
 func (s *tmuxScan) walk(file, fn string, root ast.Node) {
 	report := func(name string, pos token.Pos) {
 		s.reaches = append(s.reaches, tmuxReach{file, fn, name, s.fset.Position(pos).Line})
@@ -183,25 +214,31 @@ func (s *tmuxScan) walk(file, fn string, root ast.Node) {
 			ast.Inspect(x.X, visit)
 			return false
 		case *ast.CallExpr:
-			id, ok := x.Fun.(*ast.Ident)
-			if !ok {
-				// A method or package call: the selector rule above covers it.
-				return true
+			switch fun := x.Fun.(type) {
+			case *ast.Ident:
+				if reachName(fun.Name) {
+					// A direct call to a reach name is a reach: following it
+					// would instead report the tmux call inside the helper itself.
+					report(fun.Name, fun.Pos())
+				} else {
+					s.follow(fun.Name)
+				}
+				// The callee is judged here, so walk the arguments only.
+				for _, a := range x.Args {
+					ast.Inspect(a, visit)
+				}
+				return false
+			case *ast.SelectorExpr:
+				// A method call is followed into the methods of that name. The
+				// selector rule still judges the call, so inspecting on reports
+				// a pane method and walks the receiver and arguments.
+				s.followMethod(fun.Sel.Name)
 			}
-			if reachName(id.Name) {
-				// A direct call to a reach name is a reach: following it would
-				// instead report the tmux call inside the helper itself.
-				report(id.Name, id.Pos())
-			} else {
-				s.follow(id.Name)
-			}
-			// The callee is judged here, so walk the arguments only.
-			for _, a := range x.Args {
-				ast.Inspect(a, visit)
-			}
-			return false
 		case *ast.Ident:
-			if tmuxReachNames[x.Name] {
+			// A bare reference to a reach name is a reach only when the name
+			// declares a package function: a local variable called pane and a
+			// WorkDir field key are not references to a helper.
+			if tmuxReachNames[x.Name] || (paneHelperName(x.Name) && len(s.funcs[x.Name]) > 0) {
 				report(x.Name, x.Pos())
 			}
 		}
@@ -218,6 +255,7 @@ func scanTmuxReaches(pkg tmuxPackage, sc tmuxScope) ([]tmuxReach, []string, erro
 	fset := token.NewFileSet()
 	files := make(map[string]*ast.File, len(pkg))
 	funcs := map[string][]*ast.FuncDecl{}
+	methods := map[string][]*ast.FuncDecl{}
 	declFile := map[*ast.FuncDecl]string{}
 	for _, name := range slices.Sorted(maps.Keys(pkg)) {
 		f, err := parser.ParseFile(fset, name, pkg[name], parser.SkipObjectResolution)
@@ -226,9 +264,15 @@ func scanTmuxReaches(pkg tmuxPackage, sc tmuxScope) ([]tmuxReach, []string, erro
 		}
 		files[name] = f
 		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			declFile[fd] = name
+			if fd.Recv == nil {
 				funcs[fd.Name.Name] = append(funcs[fd.Name.Name], fd)
-				declFile[fd] = name
+			} else {
+				methods[fd.Name.Name] = append(methods[fd.Name.Name], fd)
 			}
 		}
 	}
@@ -238,7 +282,7 @@ func scanTmuxReaches(pkg tmuxPackage, sc tmuxScope) ([]tmuxReach, []string, erro
 		return nil, nil, fmt.Errorf("scope names %s, which the package does not hold", sc.file)
 	}
 
-	s := &tmuxScan{fset: fset, funcs: funcs, declFile: declFile, visited: map[*ast.FuncDecl]bool{}}
+	s := &tmuxScan{fset: fset, funcs: funcs, methods: methods, declFile: declFile, visited: map[*ast.FuncDecl]bool{}}
 	var declared []string
 	for _, d := range f.Decls {
 		fd, isFunc := d.(*ast.FuncDecl)
@@ -386,6 +430,45 @@ func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, e
 			sc:   sling,
 			want: []string{"resolveTargetAgentID reaches resolveTargetAgentFn"},
 		},
+		{
+			name: "a helper spelled by two camelCase words is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	return sessionWorkDir("session", target), nil
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches sessionWorkDir"},
+		},
+		{
+			name: "a pane helper referenced as a value is reported",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func getSessionPane(sessionName string) (string, error) { return sessionName, nil }
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	lookup := getSessionPane
+	_, err := lookup(target)
+	return "", err
+}
+`)},
+			sc:   sling,
+			want: []string{"resolveTargetAgentID reaches getSessionPane"},
+		},
+		{
+			name: "a field named WorkDir is not a reach",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	plan := struct{ WorkDir string }{WorkDir: target}
+	_ = plan
+	return "", nil
+}
+`)},
+			sc:   sling,
+			want: nil,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -451,6 +534,43 @@ func helper(target string) string {
 			want: []string{"helper reaches getSessionPane"},
 		},
 		{
+			name: "method call is followed",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+type resolver struct{}
+
+func (r resolver) resolve(target string) (string, error) {
+	_, err := getSessionPane(target)
+	return "", err
+}
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	var r resolver
+	_, err := r.resolve(target)
+	return "", err
+}
+`)},
+			want: []string{"resolve reaches getSessionPane"},
+		},
+		{
+			name: "a method named for a pane helper is reported, not followed",
+			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
+
+type resolver struct{}
+
+func (r resolver) getSessionPane(target string) string {
+	_ = tmux.NewTmux()
+	return target
+}
+
+func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
+	var r resolver
+	return r.getSessionPane(target), nil
+}
+`)},
+			want: []string{"resolveTargetAgentID reaches getSessionPane"},
+		},
+		{
 			name: "call cycle ends",
 			pkg: tmuxPackage{"sling_target.go": []byte(`package cmd
 
@@ -489,7 +609,8 @@ func helperB(target string) string {
 }
 
 // TestTmuxReachWords: a helper is named by a whole camelCase word, not by a
-// substring, so a panel or a company name is not one.
+// substring, so a panel or a company name is not one, and two words that spell
+// one still name it wherever the capital falls.
 func TestTmuxReachWords(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -501,6 +622,7 @@ func TestTmuxReachWords(t *testing.T) {
 		{name: "pane", want: true},
 		{name: "listPanes", want: true},
 		{name: "workdirPath", want: true},
+		{name: "sessionWorkDir", want: true},
 		{name: "panelWidth", want: false},
 		{name: "companyPanel", want: false},
 		{name: "panel", want: false},
