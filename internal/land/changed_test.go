@@ -529,6 +529,8 @@ func TestPackageDirHasGo(t *testing.T) {
 	writeFile(t, root, "pkg/a.go", "package pkg\n")
 	writeFile(t, root, "docs/readme.md", "x\n")
 	writeFile(t, root, "nested/deep/b.go", "package deep\n")
+	writeFile(t, root, "excluded/gen.go", "//go:build ignore\n\npackage gen\n")
+	writeFile(t, root, "withtest/x_test.go", "package withtest\n")
 
 	for dir, want := range map[string]bool{
 		"pkg":      true,
@@ -536,6 +538,11 @@ func TestPackageDirHasGo(t *testing.T) {
 		"nested":   false, // only a subdirectory holds Go
 		"missing":  false,
 		"pkg/a.go": false, // a file, not a directory
+		// Its only Go file a build constraint excludes: no package builds, so
+		// `go test` of it fails rather than passing (gt-zjwe5w).
+		"excluded": false,
+		// A test file builds, so `go test` of the directory runs (gt-zjwe5w).
+		"withtest": true,
 	} {
 		if got := PackageDirHasGo(root, dir); got != want {
 			t.Errorf("PackageDirHasGo(%q) = %v, want %v", dir, got, want)
