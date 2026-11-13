@@ -633,7 +633,7 @@ func dashboardDeploys(townRoot string, rigOf func(bead string) string, cutoff ti
 	deploys.setShipDefinitions(tailRestartRig(townRoot), rigOf, staging)
 	deploys.setHorizon(trendHours * time.Hour)
 	if dispatches != nil {
-		deploys.setSlungClock(dispatches.StartBefore)
+		deploys.setSlungClock(dispatches.StartBefore, why)
 	}
 	return deploys
 }
