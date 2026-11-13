@@ -1963,7 +1963,7 @@ func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
 // fix-metadata. The deprecated metadata.json key is removed (gt-49f3pn).
 func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost().townPort(DefaultPort)
+	f := newFakeHost().townNamesPort(DefaultPort)
 	h := f.host()
 	townRoot := t.TempDir()
 
@@ -2021,7 +2021,7 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 // every other field, and changes nothing on a second run (gt-49f3pn).
 func TestEnsureMetadataDropsTheDeprecatedPort(t *testing.T) {
 	t.Parallel()
-	h := newFakeHost().townPort(DefaultPort).host()
+	h := newFakeHost().townNamesPort(DefaultPort).host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -2115,7 +2115,7 @@ func readJSONMap(t *testing.T, path string) map[string]interface{} {
 // changed town port rewrites it.
 func TestEnsureMetadataWritesThePortFile(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost().townPort(3307)
+	f := newFakeHost().townNamesPort(3307)
 	h := f.host()
 	townRoot := t.TempDir()
 
@@ -2171,7 +2171,7 @@ func TestEnsureMetadataWritesThePortFile(t *testing.T) {
 // beads directory that predates the port file gets it on the next run.
 func TestEnsureMetadataWritesPortFileWhenMetadataCurrent(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost().townPort(DefaultPort)
+	f := newFakeHost().townNamesPort(DefaultPort)
 	h := f.host()
 	townRoot := t.TempDir()
 
@@ -2203,7 +2203,7 @@ func TestEnsureMetadataWritesPortFileWhenMetadataCurrent(t *testing.T) {
 // directory at that path makes the atomic rename fail.
 func TestEnsureMetadataPortFileWriteFailureIsReturned(t *testing.T) {
 	t.Parallel()
-	h := newFakeHost().townPort(DefaultPort).host()
+	h := newFakeHost().townNamesPort(DefaultPort).host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -2223,7 +2223,7 @@ func TestEnsureMetadataPortFileWriteFailureIsReturned(t *testing.T) {
 // the port file is written.
 func TestEnsureMetadataPortFileFailureKeepsTheKey(t *testing.T) {
 	t.Parallel()
-	h := newFakeHost().townPort(3307).host()
+	h := newFakeHost().townNamesPort(3307).host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -2380,6 +2380,40 @@ func TestEnsureMetadataTownNamedPortWritesPortFile(t *testing.T) {
 	}
 	if got := string(data); got != "43703" {
 		t.Errorf("dolt-server.port = %q, want %q", got, "43703")
+	}
+}
+
+// TestEnsureMetadataPortFileHoldsTheNamedPortNotTheInjected verifies that when
+// the host injects a port that differs from the one mayor/town.json names, the
+// file holds the named port: bd dials the town's endpoint, not the injected one
+// (gt-k3kb52).
+func TestEnsureMetadataPortFileHoldsTheNamedPortNotTheInjected(t *testing.T) {
+	t.Parallel()
+	h := injectedEndpointHost(43703)
+	townRoot := t.TempDir()
+
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"port":3307}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("dolt-server.port not written for a town that names its endpoint: %v", err)
+	}
+	if got := string(data); got != "3307" {
+		t.Errorf("dolt-server.port = %q, want the named %q, not the injected 43703", got, "3307")
 	}
 }
 

@@ -4603,10 +4603,11 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 
 	// bd dials the port dolt-server.port names, so the file names only an
 	// endpoint the town writes on disk. A port the host injects, or the default,
-	// is not the town's endpoint (gt-k3kb52).
+	// is not the town's endpoint (gt-k3kb52). One resolver decides both whether
+	// the file is written and which port it holds.
 	filePort := 0
-	if _, named := h.resolvePersistedEndpoint(townRoot); named {
-		filePort = config.Port
+	if persisted, named := h.resolvePersistedEndpoint(townRoot); named {
+		filePort = persisted.Port
 	}
 
 	// Patch dolt server fields. Only write when values actually change so tracked
@@ -4699,7 +4700,9 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 // source bd reads the port from (gt-2r2och). It rewrites the file only when its
 // content differs, so an unchanged port leaves the file's mtime alone. A port of
 // 0 writes nothing (gt-y3pgh.3): the caller passes 0 for a town that names no
-// endpoint on disk (gt-k3kb52).
+// endpoint on disk (gt-k3kb52). A file already there is not removed when a
+// later call passes 0: nothing deletes it, so a town that stops naming its
+// endpoint keeps the last port it named (gt-k3kb52).
 func writeDoltPortFile(beadsDir string, port int) error {
 	if port <= 0 {
 		return nil
