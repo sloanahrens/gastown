@@ -23,12 +23,13 @@ func (r *doneRun) releaseDeferred() error {
 		open = OpenSourceStore
 	}
 	bd, _, _ := RoutedIssueBeadsIn(filepath.Join(r.townRoot, r.rigName), r.issueID, open)
-	return releaseDeferredBead(bd, r.issueID, r.sender)
+	return releaseDeferredBead(bd, r.issueID, r.sender, r.findings)
 }
 
 // releaseDeferredBead returns the bead a seat paused on DEFERRED to the open,
 // unassigned pool, so the seat's claim does not outlive its session (gt-tq23e9).
-// The attached molecule is left as it is, as for any DEFERRED exit.
+// The note names the reason the seat passed (its --finding texts). The attached
+// molecule is left as it is, as for any DEFERRED exit.
 //
 // It acts only on a bead the seat holds, or one with no assignee. A bead is
 // left exactly as it is when its status is not actionable (closed, tombstoned,
@@ -36,13 +37,17 @@ func (r *doneRun) releaseDeferred() error {
 // a workflow step (its DEFERRED is a completion), when it is in landing
 // (gt:ready-to-land, which the landing worker owns), when it is a rig identity
 // bead, or when another actor claimed it; a bead that no longer exists is left
-// as it is too. Otherwise the status, the assignee and the DEFERRED note go in
-// one bd update, so the release is one Dolt commit.
+// as it is too.
+//
+// The release is guarded on the assignee and status just read, so another
+// actor's claim made between the read and the write is never cleared: a guard
+// that no longer holds writes nothing and is not an error. The DEFERRED note
+// follows a release that held.
 //
 // A read or write failure is returned, not logged, so gt done exits non-zero.
 // The agent-bead write ahead of this release has already cleared the hook; the
 // release itself keys on the issue id, not on the hook.
-func releaseDeferredBead(bd beads.Client, issueID, seat string) error {
+func releaseDeferredBead(bd beads.Client, issueID, seat string, findings []string) error {
 	issue, err := bd.Show(issueID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
@@ -68,18 +73,23 @@ func releaseDeferredBead(bd beads.Client, issueID, seat string) error {
 		return nil
 	}
 	open, unassigned := string(beads.StatusOpen), ""
-	note := fmt.Sprintf("DEFERRED by %s: work paused; the bead is open and unassigned for the next sling", seat)
-	// Force is needed because the store fences clearing the assignee of an
-	// in_progress bead. The fence is the seat's own claim, which the check above
-	// has just established, so overriding it releases nothing that is not this
-	// seat's.
-	if err := bd.Update(issueID, beads.UpdateOptions{
-		Status:      &open,
-		Assignee:    &unassigned,
-		AppendNotes: note,
-		Force:       true,
-	}); err != nil {
+	reason := "work paused"
+	if len(findings) > 0 {
+		reason = strings.Join(findings, "; ")
+	}
+	note := fmt.Sprintf("DEFERRED by %s: %s; the bead is open and unassigned for the next sling", seat, reason)
+	// The write is guarded on the assignee and status read above (bd's
+	// --if-assignee/--if-status), so a claim another actor made after the read
+	// is not cleared. A guard that no longer holds writes nothing.
+	released, err := beads.TransferIfHeld(bd, issueID, issue.Assignee, issue.Status, open, unassigned)
+	if err != nil {
 		return fmt.Errorf("releasing %s on DEFERRED: %w", issueID, err)
+	}
+	if !released {
+		return nil
+	}
+	if err := bd.AppendNotes(issueID, note); err != nil {
+		return fmt.Errorf("noting the DEFERRED release of %s: %w", issueID, err)
 	}
 	return nil
 }
