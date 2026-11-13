@@ -3,6 +3,7 @@
 package gtwrap
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -96,5 +97,26 @@ func TestIntegrationCaptureReturnsAHealthyProbeWhileAChildHoldsStdoutBriefly(t *
 	out, exit, err := OSShell{}.Capture(ctx, argv)
 	if err != nil || exit != 0 || out != "ready\n" {
 		t.Fatalf("Capture = %q, exit %d, err %v; want \"ready\\n\", 0, nil", out, exit, err)
+	}
+}
+
+// TestIntegrationOSShellAttachStreamsPipesTheOutput: a real process started by
+// AttachStreams writes to writers that are not the wrapper's own files, so exec
+// copies its output through a pipe, which is the path the kubernetes target's
+// rewriter takes. Both streams arrive as the process wrote them, and its exit
+// status comes back.
+func TestIntegrationOSShellAttachStreamsPipesTheOutput(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	argv := []string{"sh", "-c", `printf 'out %s\n' "$1"; printf 'err %s\n' "$2" >&2; exit 3`, "sh", "one", "two"}
+	exit, err := OSShell{}.AttachStreams(argv, nil, nil, &stdout, &stderr)
+	if err != nil || exit != 3 {
+		t.Fatalf("AttachStreams = %d, %v; want exit 3 and no error", exit, err)
+	}
+	if got, want := stdout.String(), "out one\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if got, want := stderr.String(), "err two\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }

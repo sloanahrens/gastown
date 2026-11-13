@@ -109,8 +109,12 @@ func (k Kubectl) Launch(call Call) (int, error) {
 
 // attach runs the call in the pod. When the pod's town root and the Mac's differ, a
 // path the tool prints names the pod's root, which the Mac does not have, so the
-// output is rewritten to the Mac's root line by line. The exit status, the standard
-// input and the walk-up script are the same either way.
+// output is rewritten to the Mac's root line by line. A terminal can carry an
+// interactive prompt the tool prints with no newline and waits on, so with one
+// attached the rewriter writes an unterminated line as far as a later byte cannot
+// change it; without one the line is held until it ends, since the stream may be
+// binary. The exit status, the standard input and the walk-up script are the same
+// either way.
 func (k Kubectl) attach(pod string, call Call, dir string) (int, error) {
 	argv := k.execArgv(pod, call, dir)
 	if !k.rewrites() {
@@ -119,8 +123,11 @@ func (k Kubectl) attach(pod string, call Call, dir string) (int, error) {
 		}
 		return k.Shell.Attach(argv, nil)
 	}
-	out := newOutputRewriter(k.Stdout, k.podRoot(), k.Town)
-	errOut := newOutputRewriter(k.Stderr, k.podRoot(), k.Town)
+	// The same condition stdioFlags uses for a terminal: -t is passed only when the
+	// tool's stdin is the caller's terminal.
+	prompt := call.TTY && call.Stdin == nil
+	out := newOutputRewriter(k.Stdout, k.podRoot(), k.Town, prompt)
+	errOut := newOutputRewriter(k.Stderr, k.podRoot(), k.Town, prompt)
 	exit, err := k.Shell.AttachStreams(argv, nil, call.Stdin, out, errOut)
 	// The tool's last line need not end in a newline, so the two streams are
 	// flushed before the call returns. A failure to write the output is reported
