@@ -64,6 +64,13 @@ type Status struct {
 	// a terminal phase is when the failure began. Zero when the gateway does
 	// not say (gt-j18af).
 	NotReadySince time.Time
+	// Unschedulable is the pod's PodScheduled condition read False with reason
+	// Unschedulable: no node has room for it. UnschedulableMsg is the
+	// scheduler's message, and UnschedulableSince is when the condition last
+	// turned False, zero when the gateway does not say.
+	Unschedulable      bool
+	UnschedulableMsg   string
+	UnschedulableSince time.Time
 }
 
 func (c *CLI) bin() string {
@@ -184,8 +191,10 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 		Name       string `json:"name"`
 		Phase      string `json:"phase"`
 		Conditions []struct {
-			Type   string `json:"type"`
-			Status string `json:"status"`
+			Type    string `json:"type"`
+			Status  string `json:"status"`
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
 			// The condition time arrives camelCase in the JSON the gateway
 			// prints; the snake_case proto spelling is read too. RawMessage
 			// keeps a future shape from failing the whole decode: losing the
@@ -200,15 +209,22 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 	}
 	st := Status{Name: raw.Name, Phase: raw.Phase}
 	for _, cond := range raw.Conditions {
-		if cond.Type != "Ready" {
-			continue
+		switch cond.Type {
+		case "Ready":
+			st.ReadyKnown = true
+			if strings.EqualFold(cond.Status, "True") {
+				st.Ready = true
+				continue
+			}
+			st.NotReadySince = conditionTime(cond.LastTransitionTime, cond.LastTransitionTimeProto)
+		case "PodScheduled":
+			if !strings.EqualFold(cond.Status, "False") || cond.Reason != "Unschedulable" {
+				continue
+			}
+			st.Unschedulable = true
+			st.UnschedulableMsg = cond.Message
+			st.UnschedulableSince = conditionTime(cond.LastTransitionTime, cond.LastTransitionTimeProto)
 		}
-		st.ReadyKnown = true
-		if strings.EqualFold(cond.Status, "True") {
-			st.Ready = true
-			continue
-		}
-		st.NotReadySince = conditionTime(cond.LastTransitionTime, cond.LastTransitionTimeProto)
 	}
 	return st, nil
 }

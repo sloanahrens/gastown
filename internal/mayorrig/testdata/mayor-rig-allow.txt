@@ -27,6 +27,7 @@ internal/cmd/rig.go	3	pending-retirement	gt rig: the help and status output, and
 internal/cmd/rig_adopt_prefix.go	1	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
 internal/cmd/rig_dock.go	1	pending-retirement	gt rig dock: the mayor/rig checkout as the beads working directory
 internal/cmd/rig_helpers.go	1	pending-retirement	rig helpers: the mayor/rig beads path the rig commands open
+internal/cmd/rig_retire_mayor.go	2	pending-retirement	rename step (retire-mayor): the help text names the rig's mayor/rig and its retired name
 internal/cmd/sling_helpers.go	1	pending-retirement	gt sling: the mayor/rig path used as a rig's work directory
 internal/config/directives.go	3	pending-retirement	directives loader: reads the central and per-rig directives under mayor/rig
 internal/config/loader.go	1	pending-retirement	config loader: the daemon patrol config path under constants.DirMayor
@@ -54,6 +55,7 @@ internal/mail/router.go	1	pending-retirement	mail router: the constants.DirMayor
 internal/metrics/source_config.go	1	pending-retirement	metrics source config: the .om.json path under the rig's mayor/rig checkout
 internal/nudge/deliver/town.go	1	pending-retirement	nudge delivery: the constants.DirMayor target prefix, which is not the clone path
 internal/rig/manager.go	5	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
+internal/rig/retire_mayor.go	3	pending-retirement	rename step (retire-mayor): the RigMayorPath call and the DirMayor/DirRig names that build the directory it renames and the route suffix it matches
 internal/sandbox/skeleton.go	1	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
 internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the constants.DirMayor path to the rigs registry
 internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names in its path table

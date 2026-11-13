@@ -128,6 +128,14 @@ func TestGetArgvAndDecode(t *testing.T) {
 			Status{Name: "x", Phase: "Ready", Ready: true, ReadyKnown: true}},
 		{"an unreadable camelCase time falls back to the proto spelling", `{"name":"x","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":"yesterday","last_transition_time":"2026-10-24T14:07:29Z"}]}`,
 			Status{Name: "x", Phase: "Error", ReadyKnown: true, NotReadySince: time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)}},
+		{"an unschedulable pod names the scheduler message and when it began", `{"name":"x","phase":"Provisioning","conditions":[{"type":"Ready","status":"False"},{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"0/3 nodes are available: Insufficient memory.","lastTransitionTime":"2026-10-24T14:07:29Z"}]}`,
+			Status{Name: "x", Phase: "Provisioning", ReadyKnown: true, Unschedulable: true, UnschedulableMsg: "0/3 nodes are available: Insufficient memory.", UnschedulableSince: time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)}},
+		{"an unschedulable pod with an unreadable time keeps no clock", `{"name":"x","phase":"Provisioning","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"Insufficient memory.","lastTransitionTime":"yesterday"}]}`,
+			Status{Name: "x", Phase: "Provisioning", Unschedulable: true, UnschedulableMsg: "Insufficient memory."}},
+		{"a scheduled pod is not unschedulable", `{"name":"x","phase":"Provisioning","conditions":[{"type":"PodScheduled","status":"True"}]}`,
+			Status{Name: "x", Phase: "Provisioning"}},
+		{"a pod False for another reason is not unschedulable", `{"name":"x","phase":"Provisioning","conditions":[{"type":"PodScheduled","status":"False","reason":"SchedulerError","message":"boom"}]}`,
+			Status{Name: "x", Phase: "Provisioning"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
