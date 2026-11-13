@@ -200,24 +200,26 @@ Before a rig's cutover its gate workflow is on the GitHub `main` — landed
 through the old path first, so Forgejo never falls back to
 `.github/workflows` — and its runner image can run that gate.
 
-The `forgejo-probe-go` broker rule is not installed yet: the operator must first
-install the probe binary and pin its sha256 in the broker policy, a human gesture
-at a sitting.
+There is no standing `forgejo-probe-go` rule. A probe rule is an ordinary
+per-rig rule, added at a sitting only when that rig is about to be cut over and
+removed when the probing is over (dv-vjcd.2, devops repo).
 
-`sudo -u gt-forge gt-approve run forgejo-probe-go -- <rig> --repo OWNER/NAME`
-proves the last of those before anything changes: it clones the rig's GitHub
-`main`, pushes it to the rig's Forgejo copy as `land/probe-<rig>` from a
+To prove the gate before a cutover, ask the overseer for that rig's rule and run
+`sudo -u gt-forge gt-approve run forgejo-probe-go -- <rig> --repo OWNER/NAME`,
+which proves the last of those before anything changes: it clones the rig's
+GitHub `main`, pushes it to the rig's Forgejo copy as `land/probe-<rig>` from a
 throwaway worktree of the rig's own repository — the same push the landing
 worker makes, so the rig's pre-push hook runs and a hook that refuses `land/*`
 fails the probe rather than the first landing — then waits for the real gate
 status and requires green; the branch and the worktree are deleted on every
 path, red, timed out or green.
 `--town-root` says which town holds the rig; where that repository is absent the
-probe pushes from the clone instead and warns that the hooks were not
-exercised. The cutover runs the probe and refuses unless it is green, so a
-cutover that starts is one the real runner has already passed. A green probe
-records itself at `~/.config/gt/probe-<rig>.record`, mode 600: key=value lines
-naming the rig, the repository, the probed commit, the context, the verdict and
+probe pushes from the clone instead, warns that the hooks were not exercised and
+exits 3, which the cutover reads as not green. The cutover runs the probe in
+process and refuses unless it is green, so a cutover that starts is one the real
+runner has already passed. A green probe records itself at
+`~/.config/gt/probe-<rig>.record`, mode 600: key=value lines naming the rig, the
+repository, the probed commit, the context, the verdict and
 the time, with `epoch=` as the Unix time of the run in seconds and each green run
 overwriting the last. A `--dry-run` writes no record, so it prints the probe
 instead of running it.
