@@ -1,6 +1,7 @@
 package usageattrib
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -202,7 +203,7 @@ func TestUsageAttribDedupeAcrossSessions(t *testing.T) {
 		Subagent: []Message{{ID: id("m2"), Output: 12}},
 	}
 	sessions := []SessionUsage{a, b}
-	dedupeAcross(sessions)
+	dedupeAcross(sessions, []string{"/copy/a.jsonl", "/copy/b.jsonl"})
 	if len(sessions[0].Main) != 2 || sessions[0].Main[0].Input != 10 || sessions[0].Main[0].Output != 9 {
 		t.Errorf("first session's m1 = %+v, want the maximum of both sightings", sessions[0].Main)
 	}
@@ -535,5 +536,136 @@ func TestUsageAttribScanSinceDropsEarlierRuns(t *testing.T) {
 	}
 	if strings.Join(res.Written, ",") != "b-2" {
 		t.Errorf("written = %v, want only b-2: b-1 ended before since", res.Written)
+	}
+}
+
+// sharedMessageFixture is two beads run back to back on one seat, each with a session. The second
+// session is a resume that repeats the first session's message m-shared, with its own copy's
+// timestamp and usage, and has one message of its own. replayStartsEarlier gives the second session an
+// earlier message of its own, so its start comes before the first session's.
+func sharedMessageFixture(firstTS, replayTS string, replayStartsEarlier bool) fixture {
+	id := func(s string) *string { return &s }
+	first := SessionUsage{ID: "s-first", Complete: true, Main: []Message{
+		{ID: id("m-shared"), Model: "claude-sonnet-5-5", TS: firstTS, Input: 10, Output: 5},
+	}}
+	var replayMain []Message
+	if replayStartsEarlier {
+		replayMain = append(replayMain, Message{ID: id("m-pre"), Model: "claude-sonnet-5-5", TS: at(0)})
+	}
+	replayMain = append(replayMain,
+		Message{ID: id("m-shared"), Model: "claude-sonnet-5-5", TS: replayTS, Input: 4, Output: 9},
+		Message{ID: id("m-own"), Model: "claude-sonnet-5-5", TS: at(150 * time.Minute), Input: 100, Output: 1},
+	)
+	replay := SessionUsage{ID: "s-replay", Complete: true, Main: replayMain}
+	return fixture{
+		evs: []events.Event{
+			sling(0, "b-1", "gastown/polecats/nux"),
+			done(time.Hour, "b-1", "gastown/polecats/nux"),
+			sling(2*time.Hour, "b-2", "gastown/polecats/nux"),
+			done(3*time.Hour, "b-2", "gastown/polecats/nux"),
+		},
+		seats: map[string][]string{},
+		reads: map[string]fakeRead{
+			"/copy/first.jsonl":  {s: first, mtime: t0.Add(30 * time.Minute)},
+			"/copy/replay.jsonl": {s: replay, mtime: t0.Add(150 * time.Minute)},
+		},
+	}
+}
+
+// TestUsageAttribRepeatedMessageChargedToEarliestCopy scans two beads whose sessions repeat one message
+// id, with the sessions read in both orders. The message is charged to the session whose copy sorts
+// first (copyOrder), so each row gives the same totals in both orders. The want columns are b-1's and
+// b-2's input tokens: b-1 holds 10 from its own copy and b-2 holds 100 from its own message, plus 10 when
+// its session owns the shared message (the maximum of the two copies' input).
+func TestUsageAttribRepeatedMessageChargedToEarliestCopy(t *testing.T) {
+	t.Parallel()
+	const (
+		first  = "/copy/first.jsonl"
+		replay = "/copy/replay.jsonl"
+	)
+	tests := []struct {
+		name                string
+		firstTS, replayTS   string
+		replayStartsEarlier bool
+		wantB1In, wantB2In  int64
+	}{
+		{"equal copy timestamps and starts, the session id decides", at(30 * time.Minute), at(30 * time.Minute), false, 10, 100},
+		{"equal copy timestamps, the session that started first owns it", at(30 * time.Minute), at(30 * time.Minute), true, 0, 110},
+		{"an earlier copy owns it whatever its session id", at(60 * time.Minute), at(30 * time.Minute), false, 0, 110},
+		{"a later copy does not own it", at(30 * time.Minute), at(60 * time.Minute), false, 10, 100},
+		{"a copy with an empty timestamp loses to a good one", "", at(30 * time.Minute), false, 0, 110},
+		{"a copy with an unparseable timestamp loses to a good one", "yesterday", at(30 * time.Minute), false, 0, 110},
+		{"a good copy beats an unparseable one the other way", at(30 * time.Minute), "yesterday", false, 10, 100},
+	}
+	orders := []struct {
+		name  string
+		paths []string
+	}{
+		{"first session read first", []string{first, replay}},
+		{"resumed session read first", []string{replay, first}},
+	}
+	for _, tt := range tests {
+		for _, order := range orders {
+			t.Run(tt.name+", "+order.name, func(t *testing.T) {
+				t.Parallel()
+				town := t.TempDir()
+				f := sharedMessageFixture(tt.firstTS, tt.replayTS, tt.replayStartsEarlier)
+				f.seats["gastown/nux"] = order.paths
+				if _, err := Scan(ScanOptions{Town: town}, f.deps()); err != nil {
+					t.Fatalf("Scan: %v", err)
+				}
+				if b1, b2 := readRecord(t, town, "b-1").Record.Totals.Input, readRecord(t, town, "b-2").Record.Totals.Input; b1 != tt.wantB1In || b2 != tt.wantB2In {
+					t.Errorf("input b-1=%d b-2=%d, want b-1=%d b-2=%d", b1, b2, tt.wantB1In, tt.wantB2In)
+				}
+			})
+		}
+	}
+}
+
+// TestUsageAttribRebuildConvergesAfterMidLoopWriteFailure fails the second record write of a scan
+// through the real writer, with a stale record on disk for the bead that write would have replaced.
+// The failure leaves the first bead written and the second as it was, the error names the file, and a
+// rebuild re-run gives the same records as a scan that was never interrupted.
+func TestUsageAttribRebuildConvergesAfterMidLoopWriteFailure(t *testing.T) {
+	t.Parallel()
+	whole := t.TempDir()
+	if _, err := Scan(ScanOptions{Town: whole}, twoBeads().deps()); err != nil {
+		t.Fatalf("uninterrupted Scan: %v", err)
+	}
+
+	town := t.TempDir()
+	usageDir := filepath.Join(town, ".runtime", "usage")
+	writeFinal(t, town, "b-2", []string{"stale"})
+	writes := 0
+	failing := writer{create: func(dir, pattern string) (*os.File, error) {
+		writes++
+		if writes == 2 {
+			return nil, errors.New("disk full")
+		}
+		return os.CreateTemp(dir, pattern)
+	}}
+	f := twoBeads()
+	f.replace = failing.Replace
+	res, err := Scan(ScanOptions{Town: town, Rebuild: true}, f.deps())
+	if err == nil {
+		t.Fatal("Scan succeeded through a failing write")
+	}
+	if want := WorkRecordPath(usageDir, "b-2"); !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the file that failed, %s", err, want)
+	}
+	if strings.Join(res.Written, ",") != "b-1" {
+		t.Errorf("written before the failure = %v, want only b-1", res.Written)
+	}
+	if st := readRecord(t, town, "b-2"); strings.Join(st.Sessions, ",") != "stale" {
+		t.Errorf("b-2 after the failure has sessions %v, want its stale record left as it was", st.Sessions)
+	}
+
+	if _, err := Scan(ScanOptions{Town: town, Rebuild: true}, twoBeads().deps()); err != nil {
+		t.Fatalf("rebuild re-run: %v", err)
+	}
+	for _, bead := range []string{"b-1", "b-2"} {
+		if got, want := recordBytes(t, town, bead), recordBytes(t, whole, bead); !bytes.Equal(got, want) {
+			t.Errorf("%s after the rebuild re-run differs from the uninterrupted scan:\n got %s\nwant %s", bead, got, want)
+		}
 	}
 }

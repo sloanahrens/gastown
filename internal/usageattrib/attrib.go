@@ -257,7 +257,8 @@ func readLandingFile(path string) ([]Landing, error) {
 type ScanOptions struct {
 	Town    string
 	Rebuild bool
-	// Since is the first instant a run may have ended at; zero keeps every run.
+	// Since is the first instant a run may have ended at; zero keeps every run. A run still open is
+	// kept whatever Since is.
 	Since time.Time
 }
 
@@ -299,9 +300,15 @@ type beadPlan struct {
 	reason string
 }
 
-// Scan rebuilds the work records of the beads that ran in the town. Every read happens before the
-// first write: a workspaces file that does not parse, or an events, landing or seat-copy read that
-// fails, is an error and writes nothing.
+// Scan rebuilds the work records of the beads that ran in the town. Every read, and the plan for every
+// record, happens before the first write: a workspaces file that does not parse, an events or landing
+// read that fails, or a transcript whose modification time cannot be read, is an error and writes
+// nothing. A transcript that is read but fails partway, or has a line that does not parse, is kept and
+// marks its bead's record incomplete. The writes then go one bead at a
+// time, each atomically by rename, and the unmatched and state files last. A write that fails partway
+// leaves the beads before it rewritten and the rest as they were: Scan returns the partial result with
+// the error, which names the file that failed. A re-run with Rebuild gives the same records as a scan
+// that did not fail.
 func Scan(o ScanOptions, d ScanDeps) (ScanResult, error) {
 	now := d.now()
 	m, err := workspaceid.Load(o.Town)
@@ -333,7 +340,8 @@ func Scan(o ScanOptions, d ScanDeps) (ScanResult, error) {
 	seats := seatKeys(runs)
 	cut := map[string]int{}
 	var all []SessionUsage
-	var owners []int
+	var allPaths []string
+	var owners []int // the run each session of all belongs to; -1 when no run claims it
 	var mtimes []time.Time
 	var unmatched []unmatchedLine
 	runSessions := make([]int, len(runs))
@@ -351,8 +359,14 @@ func Scan(o ScanOptions, d ScanDeps) (ScanResult, error) {
 			if mtime.IsZero() {
 				return ScanResult{}, fmt.Errorf("usageattrib: scan: %s cannot be placed in a run: %w", p, rerr)
 			}
+			// Every session read takes part in deciding who owns a repeated message, even one no
+			// run claims: its copy may be the first happening. Only a claimed session is charged.
 			idx, ok := matchRun(runs, k.rig, k.seat, mtime)
+			all = append(all, sess)
+			allPaths = append(allPaths, p)
+			mtimes = append(mtimes, mtime)
 			if !ok {
+				owners = append(owners, -1)
 				if o.Since.IsZero() || !mtime.Before(o.Since) {
 					unmatched = append(unmatched, unmatchedLine{
 						Seat: k.rig + "/" + k.seat, Session: sess.ID, LastWrite: mtime,
@@ -361,16 +375,14 @@ func Scan(o ScanOptions, d ScanDeps) (ScanResult, error) {
 				}
 				continue
 			}
-			all = append(all, sess)
 			owners = append(owners, idx)
-			mtimes = append(mtimes, mtime)
 			runSessions[idx]++
 			if rerr != nil {
 				runFaults[idx] = append(runFaults[idx], rerr.Error())
 			}
 		}
 	}
-	dedupeAcross(all)
+	dedupeAcross(all, allPaths)
 
 	usageDir := filepath.Join(constants.TownRuntimePath(o.Town), "usage")
 	plans, err := planBeads(runs, all, owners, mtimes, runSessions, runFaults, cut, m, usageDir, now, o.Rebuild)
@@ -481,6 +493,9 @@ func planBeads(runs []Run, all []SessionUsage, owners []int, mtimes []time.Time,
 	}
 	sort.Strings(beads)
 	for i, idx := range owners {
+		if idx < 0 {
+			continue
+		}
 		g := groups[runs[idx].Bead]
 		g.sessions = append(g.sessions, all[i])
 		g.mtimes = append(g.mtimes, mtimes[i])

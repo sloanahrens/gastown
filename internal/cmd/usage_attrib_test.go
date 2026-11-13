@@ -197,3 +197,30 @@ func TestUsageAttribScanSinceReadsTheDayInTheTownZone(t *testing.T) {
 		t.Errorf("scan --since 2026-11-14 output %q, want the run dropped", out)
 	}
 }
+
+// TestUsageAttribScanHelpStatesWhatTheCodeDoes checks the scan's help and its --since flag against what
+// the code does: open runs are kept, nothing is written when the read phase fails, and a write that
+// fails partway leaves the beads before it rewritten, named by the error.
+func TestUsageAttribScanHelpStatesWhatTheCodeDoes(t *testing.T) {
+	t.Parallel()
+	scan := newUsageAttribScanCmd(defaultUsageAttribDeps())
+	help := strings.Join(strings.Fields(scan.Long), " ")
+	for _, want := range []string{
+		"and every run still open",
+		"stops the scan before anything is written",
+		"A write that fails partway leaves the beads before it rewritten",
+		"the error names the file",
+		"gives the same records as a scan that did not fail",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("scan help does not say %q", want)
+		}
+	}
+	since := scan.Flags().Lookup("since")
+	if since == nil {
+		t.Fatal("scan has no --since flag")
+	}
+	if usage := strings.Join(strings.Fields(since.Usage), " "); !strings.Contains(usage, "and the runs still open") {
+		t.Errorf("--since help = %q, want it to say open runs are kept", usage)
+	}
+}

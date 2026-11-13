@@ -82,12 +82,20 @@ for a bead with no end event, once its newest transcript is more than 24 hours
 old. A final record is left alone unless its session set changed. --rebuild
 rewrites every record, final or not.
 
---since YYYY-MM-DD keeps the runs that ended on or after that day. The day is
-read in America/Chicago, the town's zone, from midnight.
+--since YYYY-MM-DD keeps the runs that ended on or after that day, and every
+run still open. The day is read in America/Chicago, the town's zone, from
+midnight.
 
 Exit status: 0 when the scan ran, 2 when it could not. A malformed
-settings/workspaces.json, or an events, landing or transcript file that cannot
-be read, stops the scan before any record is written.`,
+settings/workspaces.json, an events or landing file that cannot be read, or a
+transcript whose modification time cannot be read, stops the scan before
+anything is written. A transcript that is read but fails partway, or has a line
+that does not parse, is kept and marks its bead's record incomplete. Records
+are then written one bead at a time, each atomically, and unmatched.jsonl and
+state.json last.
+A write that fails partway leaves the beads before it rewritten and the rest as
+they were, and the error names the file. A re-run with --rebuild then gives the
+same records as a scan that did not fail.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -96,7 +104,7 @@ be read, stops the scan before any record is written.`,
 		},
 	}
 	cmd.Flags().BoolVar(&rebuild, "rebuild", false, "rewrite every record, including final ones")
-	cmd.Flags().StringVar(&since, "since", "", "keep the runs that ended on or after this YYYY-MM-DD day in America/Chicago")
+	cmd.Flags().StringVar(&since, "since", "", "keep the runs that ended on or after this YYYY-MM-DD day in America/Chicago, and the runs still open")
 	return cmd
 }
 
