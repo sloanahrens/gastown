@@ -52,16 +52,9 @@ func TestPassLandsWithNoSPEstimate(t *testing.T) {
 			h.seedLabelled(t, "gt-abc", tc.labels...)
 			logs := h.captureLogs()
 			if tc.store != nil {
-				// The agent-bead hook runs just before the bead reads that land
-				// the estimate, and the lander puts the working store back.
-				h.w.AgentBeadID = func(string) string {
-					h.w.Beads = tc.store(h)
-					return ""
-				}
-				h.lander.fn = func(_ int, _ land.Work) (land.Result, error) {
-					h.w.Beads = h.bd
-					return land.Result{LandedCommit: spLanded, PatchID: "pppppppppp"}, nil
-				}
+				// Injected before the pass, so the test does not depend on where
+				// in the pass a bead read happens (gt-9rfjgs).
+				h.w.Beads = tc.store(h)
 			}
 			rep := h.w.Pass(context.Background())
 			if rep.Landed != 1 || rep.Failed != 0 {
