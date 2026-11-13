@@ -86,6 +86,8 @@ type unavailableError struct {
 	cause error
 	// stdout is bd's stdout, which in machine mode is the error envelope.
 	stdout []byte
+	// stderr is bd's stderr, which msg quotes; Summarize reads the reason here.
+	stderr []byte
 }
 
 func (e *unavailableError) Error() string { return e.msg }

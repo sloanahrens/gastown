@@ -2,9 +2,12 @@ package doltserver
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The bd calls that read and write a rig's issue_prefix take the town's named
@@ -63,6 +66,32 @@ func TestRigIssuePrefixCallsTakeTheTownEndpoint(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A failed rename-prefix names the reason bd wrote in its error envelope, not
+// its permissions warning, and the error still matches beads.ErrUnavailable
+// (gt-xnv94x).
+func TestWriteRigIssuePrefixNamesBDsReason(t *testing.T) {
+	t.Parallel()
+	envelope := "{\"contract_version\":1,\"data\":null,\"error\":{\"kind\":\"store_unavailable\",\"message\":\"failed to open database \\\"forkrig\\\"\"}}\n"
+	h := &host{
+		environList: func() []string { return []string{"PATH=/usr/bin"} },
+		bdRunner: func(_ context.Context, _ string, _, _ []string) ([]byte, []byte, error) {
+			stderr := []byte("Warning: .beads has permissions 0755 (recommended: 0700)\n")
+			return []byte(envelope), stderr, errors.New("exit status 1")
+		},
+	}
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := h.writeRigIssuePrefix(t.TempDir(), beadsDir, "forkrig", "fr")
+	if want := `setting issue_prefix for forkrig: failed to open database "forkrig"`; err == nil || err.Error() != want {
+		t.Fatalf("writeRigIssuePrefix() = %v, want %q", err, want)
+	}
+	if !errors.Is(err, beads.ErrUnavailable) {
+		t.Fatalf("writeRigIssuePrefix() lost ErrUnavailable: %v", err)
 	}
 }
 

@@ -2336,9 +2336,9 @@ func (b *Beads) wrapError(err error, stdout []byte, stderr string, args []string
 		// beside them. Every other message stays byte-identical, keeping log
 		// and caller expectations stable (gt-824d).
 		if errors.Is(err, context.DeadlineExceeded) {
-			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err, stdout: stdout}
+			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err, stdout: stdout, stderr: []byte(stderr)}
 		}
-		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err, stdout: stdout}
+		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err, stdout: stdout, stderr: []byte(stderr)}
 	}
 	return &unavailableError{msg: fmt.Sprintf("bd %s: %v", strings.Join(args, " "), err), cause: err, stdout: stdout}
 }

@@ -168,17 +168,8 @@ func (e *CLIError) Error() string {
 	return fmt.Sprintf("bd %s: %v", strings.Join(e.Args, " "), e.Err)
 }
 
-// Summary is why bd failed, in one line: the reason from lastNonWarningLine,
-// or the exit error when bd's output names none.
-func (e *CLIError) Summary() string {
-	if msg := lastNonWarningLine(e.Stderr); msg != "" {
-		return msg
-	}
-	return fmt.Sprint(e.Err)
-}
-
-// summarizedError is a failed bd call worded as its Summary. It unwraps to the
-// call's error, so errors.Is and errors.As reach the same chain.
+// summarizedError is a failed bd call worded as the reason bd gave. It unwraps
+// to the call's error, so errors.Is and errors.As reach the same chain.
 type summarizedError struct {
 	summary string
 	err     error
@@ -188,38 +179,44 @@ func (e summarizedError) Error() string { return e.summary }
 
 func (e summarizedError) Unwrap() error { return e.err }
 
-// Summarize returns err worded as its CLIError's Summary when err holds one, so
-// a message built from it names the reason. Any other error is returned as is.
+// Summarize returns err worded as the reason bd gave for failing, so a message
+// built from it names that reason rather than bd's permissions warning. An
+// error holding no reason is returned as is, and so is any error that is not a
+// failed bd call.
 func Summarize(err error) error {
 	var cliErr *CLIError
-	if errors.As(err, &cliErr) {
-		return summarizedError{summary: cliErr.Summary(), err: err}
+	var unavailable *unavailableError
+	var reason string
+	switch {
+	case errors.As(err, &cliErr):
+		reason = failureReason(cliErr.Stdout, cliErr.Stderr)
+	case errors.As(err, &unavailable):
+		reason = failureReason(unavailable.stdout, unavailable.stderr)
 	}
-	return err
+	if reason == "" {
+		return err
+	}
+	return summarizedError{summary: reason, err: err}
 }
 
-// lastNonWarningLine is the reason bd gave for a failure: the "message" of a
-// JSON error object in out, else the last line that is not a "Warning:" line
-// or bare punctuation. bd prints a permissions warning on every run, so a
-// failure whose only other text is that warning would name nothing (gt-xnv94x).
-func lastNonWarningLine(out []byte) string {
-	if msg := jsonErrorMessage(out); msg != "" {
+// failureReason is the reason bd gave for a failure: the message of the error
+// envelope on stdout, else the last non-warning line of stderr, else the last
+// non-warning line of stdout. bd prints a permissions warning on every run, so
+// a failure whose only other text is that warning names no reason (gt-xnv94x).
+func failureReason(stdout, stderr []byte) string {
+	if msg := envelopeMessage(stdout); msg != "" {
 		return msg
 	}
-	lines := strings.Split(string(out), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" || strings.HasPrefix(line, "Warning:") || strings.Trim(line, "{}[],") == "" {
-			continue
-		}
-		return line
+	if msg := lastNonWarningLine(stderr); msg != "" {
+		return msg
 	}
-	return ""
+	return lastNonWarningLine(stdout)
 }
 
-// jsonErrorMessage is the "message" of the first JSON object in out that
-// decodes and has one, or "" when out holds none.
-func jsonErrorMessage(out []byte) string {
+// envelopeMessage is the message of the JSON error object in out: the error
+// envelope bd writes in machine mode ({"error": {"message": ...}}), or a flat
+// object's top-level message. It is "" when out holds neither.
+func envelopeMessage(out []byte) string {
 	lines := strings.Split(string(out), "\n")
 	for i, line := range lines {
 		if !strings.HasPrefix(strings.TrimSpace(line), "{") {
@@ -227,10 +224,34 @@ func jsonErrorMessage(out []byte) string {
 		}
 		var obj struct {
 			Message string `json:"message"`
+			Error   *struct {
+				Message string `json:"message"`
+			} `json:"error"`
 		}
-		if err := json.Unmarshal([]byte(strings.Join(lines[i:], "\n")), &obj); err == nil && obj.Message != "" {
+		// Decode reads the first JSON value and ignores any text after it.
+		if err := json.NewDecoder(strings.NewReader(strings.Join(lines[i:], "\n"))).Decode(&obj); err != nil {
+			continue
+		}
+		if obj.Error != nil && obj.Error.Message != "" {
+			return obj.Error.Message
+		}
+		if obj.Message != "" {
 			return obj.Message
 		}
+	}
+	return ""
+}
+
+// lastNonWarningLine is the last line of out that is not a "Warning:" line or
+// bare JSON punctuation, or "" when there is none.
+func lastNonWarningLine(out []byte) string {
+	lines := strings.Split(string(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "Warning:") || strings.Trim(line, "{}[],") == "" {
+			continue
+		}
+		return line
 	}
 	return ""
 }
