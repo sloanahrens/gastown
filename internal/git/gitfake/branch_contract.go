@@ -587,6 +587,9 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		if n, err := g.MergeCommitsAhead("origin/main", "origin/"+fixtureBranch); err != nil || n != 0 {
 			t.Errorf("MergeCommitsAhead of a branch with no merge = %d, %v; want 0", n, err)
 		}
+		if _, err := g.MergeCommitsAhead("origin/main", "no-such-branch"); err == nil {
+			t.Error("MergeCommitsAhead of an unknown branch succeeded")
+		}
 		if err := g.CheckoutNewBranch("mergework", "origin/"+fixtureBranch); err != nil {
 			t.Fatal(err)
 		}
