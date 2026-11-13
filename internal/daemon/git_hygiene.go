@@ -15,7 +15,8 @@ import (
 
 // The git_hygiene patrol cleans each rig's repository (gitHygieneRepoPath):
 // it deletes merged local branches, local agent branches whose remote branch
-// is gone, and merged agent branches on origin, then runs git gc. It was the
+// is gone, merged agent branches on origin, and crew/ branches on origin whose
+// commits have all landed by patch, then runs git gc. It was the
 // git-hygiene run.sh plugin (gt-4k3fj.8.5). Two things the script did are
 // gone: it cleared every stash, which drops whatever uncommitted work someone
 // parked there, and it deleted remote branches through `gh api`; the delete is
@@ -46,10 +47,15 @@ var gitHygieneLocalOrphanPrefixes = []string{"polecat/", "dog/", "fix/", "pr-", 
 // the default branch.
 var gitHygieneRemotePrefixes = []string{"polecat/", "fix/", "pr-", "worktree-agent-"}
 
+// gitHygieneCrewPrefix names the origin branches a crew member pushes. A crew
+// branch lands by patch rather than by SHA, so the ancestor test that clears a
+// polecat branch never calls it merged; crewKeepReason judges it by cherry.
+const gitHygieneCrewPrefix = "crew/"
+
 // gitHygieneResult counts one repository's cleanup.
 type gitHygieneResult struct {
-	merged, orphan, remote int
-	gc                     bool
+	merged, orphan, remote, crew int
+	gc                           bool
 }
 
 func gitHygieneInterval(config *DaemonPatrolConfig) time.Duration {
@@ -140,10 +146,11 @@ func (d *Daemon) runGitHygiene() {
 		total.merged += res.merged
 		total.orphan += res.orphan
 		total.remote += res.remote
-		d.logger.Printf("git_hygiene: %s: %d merged, %d orphan, %d remote, gc=%t", repo, res.merged, res.orphan, res.remote, res.gc)
+		total.crew += res.crew
+		d.logger.Printf("git_hygiene: %s: %d merged, %d orphan, %d remote, %d crew, gc=%t", repo, res.merged, res.orphan, res.remote, res.crew, res.gc)
 	}
-	summary := fmt.Sprintf("%d repo(s): %d merged, %d orphan, %d remote branch(es) deleted, %d rig(s) skipped", len(repos), total.merged, total.orphan, total.remote, skipped)
-	if total.merged+total.orphan+total.remote == 0 {
+	summary := fmt.Sprintf("%d repo(s): %d merged, %d orphan, %d remote branch(es) deleted, %d crew branch(es) deleted, %d rig(s) skipped", len(repos), total.merged, total.orphan, total.remote, total.crew, skipped)
+	if total.merged+total.orphan+total.remote+total.crew == 0 {
 		cycle.skipStep("branches", summary)
 		return
 	}
@@ -248,6 +255,35 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 		res.remote++
 	}
 
+	// The crew sweep runs beside the remote one: a crew/ branch is deleted once
+	// it has landed on origin's default branch by patch (crewKeepReason), with
+	// the same hash-guarded delete. Integration branches are never candidates;
+	// they are logged here so each kept one says why.
+	interval := gitHygieneInterval(d.patrol())
+	for b, hash := range onRemote {
+		if strings.HasPrefix(b, gitHygieneIntegrationPrefix) {
+			logf("keep origin/%s: integration branches are never deleted (gt-t9vl4)", b)
+			continue
+		}
+		if keep(b) || !strings.HasPrefix(b, gitHygieneCrewPrefix) {
+			continue
+		}
+		reason, err := d.crewKeepReason(g, basesErr, def, hash, interval)
+		if err != nil {
+			logf("keep origin/%s: cannot tell whether it has landed: %v", b, err)
+			continue
+		}
+		if reason != "" {
+			logf("keep origin/%s: %s", b, reason)
+			continue
+		}
+		if err := g.DeleteRemoteBranchIfAt("origin", b, hash); err != nil {
+			logf("delete origin/%s: %v", b, err)
+			continue
+		}
+		res.crew++
+	}
+
 	if err := g.GC(); err != nil {
 		logf("gc: %v", err)
 	} else {
@@ -296,6 +332,37 @@ func settleOriginRef(g daemonGit, branch, want string) error {
 		return nil
 	}
 	return g.FetchRefspecWithTimeout("origin", "+refs/heads/"+branch+":"+ref, git.RemoteQueryTimeout)
+}
+
+// crewKeepReason says why origin's crew branch at hash is kept, or returns ""
+// when it has landed: every commit on it has a patch-equivalent on origin's
+// default branch. An error means the answer is unknown, and the caller keeps
+// the branch. A branch with no commit beyond the default counts as landed only
+// once its tip is older than the patrol interval, so a branch cut a moment ago
+// is not reaped.
+func (d *Daemon) crewKeepReason(g daemonGit, basesErr error, def, hash string, interval time.Duration) (string, error) {
+	if basesErr != nil {
+		return "", basesErr
+	}
+	base := "origin/" + def
+	out, err := g.Cherry(base, hash)
+	if err != nil {
+		return "", err
+	}
+	if git.CountCherryUnmergedCommits(out) > 0 {
+		return "it holds commits that are not on " + base, nil
+	}
+	if strings.TrimSpace(out) != "" {
+		return "", nil
+	}
+	tip, err := g.CommitTime(hash)
+	if err != nil {
+		return "", err
+	}
+	if age := d.clk().Now().Sub(tip); age <= interval {
+		return fmt.Sprintf("it has no commit beyond %s and its tip is %s old, within the %s interval", base, age.Round(time.Second), interval), nil
+	}
+	return "", nil
 }
 
 // holdsUnpushedWork reports whether local branch b has a commit whose patch is
