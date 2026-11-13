@@ -161,6 +161,7 @@ func TestRunStartsTheCensusLogOnMinuteTicks(t *testing.T) {
 	}
 	probe := &censusLogProbe{started: make(chan struct{}), stopped: make(chan struct{})}
 	d.seams.censusLog = probe.start
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	t.Cleanup(d.cancel)

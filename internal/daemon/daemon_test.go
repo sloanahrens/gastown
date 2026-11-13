@@ -905,6 +905,7 @@ func startParkedRunWith(t *testing.T, town string, env map[string]string, probe 
 		"spec_dispatch":    true,
 	}
 	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
+	d.seams.startLocalRoundPatrols = func(*Daemon) {}
 
 	parked := make(chan struct{})
 	release := make(chan struct{})
