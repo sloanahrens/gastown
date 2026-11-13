@@ -146,6 +146,7 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 // the rigs after it are not judged this tick, and the observations already made
 // are saved, so an escalation seen open before the stop is not forgotten.
 func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, rigs []string) escalationCloseState {
+	s.seat = readSeatOncePerPass(s.seat, s.logf)
 	cur, saved := st.clone(), st.clone()
 	listed := map[string]bool{}
 	writeFailed := false
@@ -222,7 +223,7 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	}
 	seat, err := s.seat(rig, name)
 	if err != nil {
-		s.logf("escalation_close: %s/%s: cannot read the session for %s, will retry: %v", rig, name, e.ID, err)
+		// readSeatOncePerPass has logged the failed read.
 		return escalationPending
 	}
 	if !seat.Live {
@@ -254,8 +255,9 @@ func escalationCloseMessage(e patrolscan.Escalation) string {
 
 // sanitizeEscalationCloseReason makes a close reason safe to type into a seat's
 // session: each run of whitespace becomes one space, control characters and
-// escape sequences are dropped, and the result is cut to escalationCloseReasonMax
-// runes.
+// escape sequences are dropped, a double quote becomes a single quote and a
+// backslash a space, so the reason cannot end the double-quoted span the
+// message wraps it in. The result is cut to escalationCloseReasonMax runes.
 func sanitizeEscalationCloseReason(reason string) string {
 	runes := []rune(reason)
 	var b strings.Builder
@@ -265,7 +267,7 @@ func sanitizeEscalationCloseReason(reason string) string {
 		switch {
 		case r == '\x1b':
 			i = escapeSequenceEnd(runes, i)
-		case unicode.IsSpace(r):
+		case unicode.IsSpace(r), r == '\\':
 			pendingSpace = true
 		case unicode.IsControl(r):
 		default:
@@ -273,6 +275,9 @@ func sanitizeEscalationCloseReason(reason string) string {
 				b.WriteRune(' ')
 			}
 			pendingSpace = false
+			if r == '"' {
+				r = '\''
+			}
 			b.WriteRune(r)
 		}
 	}
@@ -320,7 +325,8 @@ func escapeSequenceEnd(runes []rune, i int) int {
 }
 
 // escalationSeatState reads a polecat seat's session: live when it exists,
-// and idle when that session sits at its input prompt.
+// and idle when that session sits at its input prompt. A pane that cannot be
+// read is an error, so the seat is not taken for busy without a word.
 func (d *Daemon) escalationSeatState(rig, name string) (escalationSeat, error) {
 	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rig), name)
 	alive, err := d.tmux.HasSession(sessionName)
@@ -330,7 +336,34 @@ func (d *Daemon) escalationSeatState(rig, name string) (escalationSeat, error) {
 	if !alive {
 		return escalationSeat{}, nil
 	}
-	return escalationSeat{Live: true, Idle: d.tmux.IsIdle(sessionName)}, nil
+	idle, err := d.tmux.IsIdleErr(sessionName)
+	if err != nil {
+		return escalationSeat{Live: true}, fmt.Errorf("idle probe: %w", err)
+	}
+	return escalationSeat{Live: true, Idle: idle}, nil
+}
+
+// readSeatOncePerPass wraps the seat read of one pass so each seat is read
+// once, however many of its escalations closed, and a failed read is logged
+// once. The wrapper is made per pass, so the next tick reads the seat again.
+func readSeatOncePerPass(read func(rig, name string) (escalationSeat, error), logf func(format string, args ...any)) func(rig, name string) (escalationSeat, error) {
+	type reading struct {
+		seat escalationSeat
+		err  error
+	}
+	seen := map[string]reading{}
+	return func(rig, name string) (escalationSeat, error) {
+		key := rig + "/" + name
+		r, ok := seen[key]
+		if !ok {
+			r.seat, r.err = read(rig, name)
+			seen[key] = r
+			if r.err != nil {
+				logf("escalation_close: %s: cannot read the session, will retry: %v", key, r.err)
+			}
+		}
+		return r.seat, r.err
+	}
 }
 
 // clone returns a copy that shares no map or slice with st.
