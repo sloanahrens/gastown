@@ -48,6 +48,22 @@ const (
 // one definition (gt-eele9q).
 const sizeLargePoints = 34
 
+// The outcome columns the dispatch dataset writes beside its label. Each is
+// read per placement and left out when it cannot be read, so the dataset writes
+// an empty cell rather than false.
+const (
+	// OutcomeRanOverTwenty is true when the latest landing's polecat time was
+	// over twenty minutes (overTwentySecs).
+	OutcomeRanOverTwenty Outcome = "ran_over_twenty"
+	// OutcomeNeededSecondRound is true when the bead had an om verdict from
+	// attempt 2 or later.
+	OutcomeNeededSecondRound Outcome = "needed_second_round"
+)
+
+// overTwentySecs is twenty minutes of polecat time, the threshold
+// OutcomeRanOverTwenty reads.
+const overTwentySecs = 20 * 60
+
 // Verdicts om writes to reviews.jsonl that judged a tree.
 const (
 	reviewApprove        = "approve"
@@ -92,7 +108,10 @@ type dispatchAdapter struct {
 	reviews map[string]land.ReviewRecord
 	// reworked is a bead with a verdict from a rework attempt (attempt 2 or
 	// later). A bead in it with no first-attempt verdict has an unknown first try.
-	reworked      map[string]bool
+	reworked map[string]bool
+	// verdicted is a bead with an om verdict from any attempt. needed_second_round
+	// is unknown for a bead without one.
+	verdicted     map[string]bool
 	reviewsLoaded bool
 	// shown holds the beads Prefetch read in one batch, by id. showBead reads a
 	// bead missing from it the one-at-a-time way.
@@ -209,7 +228,33 @@ func (a *dispatchAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	if len(labels) == 0 {
 		return Labeling{}, nil
 	}
-	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
+	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+"), Outcomes: a.outcomes(item.ID)}, nil
+}
+
+// Outcomes names the outcome columns the dispatch dataset writes, after its
+// label.
+func (a *dispatchAdapter) Outcomes() []Outcome {
+	return []Outcome{OutcomeRanOverTwenty, OutcomeNeededSecondRound}
+}
+
+// outcomes reads the two outcome values for one placement. ran_over_twenty is
+// left out unless the bead's latest landing carries a weighted polecat time, so
+// a bead with no landing, a crew landing and a bound time all read as unknown.
+// needed_second_round is left out unless the bead has an om verdict at all.
+// It reads the landings and verdicts Label has already loaded: sizeLabel loads
+// the landings and fails the label when they cannot be read, and loadReviews
+// runs before it, so no read here can fail.
+func (a *dispatchAdapter) outcomes(bead string) map[Outcome]bool {
+	out := map[Outcome]bool{}
+	if rec, ok := a.latest[bead]; ok && rec.Agent != "" {
+		if _, weighted := storypoints.Actual(rec.PolecatSecs, rec.PolecatLowerBound, rec.PolecatUpperBound); weighted {
+			out[OutcomeRanOverTwenty] = rec.PolecatSecs > overTwentySecs
+		}
+	}
+	if a.verdicted[bead] {
+		out[OutcomeNeededSecondRound] = a.reworked[bead]
+	}
+	return out
 }
 
 // loadReviews reads the town's om verdicts and keeps each bead's first
@@ -222,7 +267,9 @@ func (a *dispatchAdapter) loadReviews() error {
 	}
 	a.reviews = map[string]land.ReviewRecord{}
 	a.reworked = map[string]bool{}
+	a.verdicted = map[string]bool{}
 	for _, r := range recs {
+		a.verdicted[r.BeadID] = true
 		if r.Attempt > 1 {
 			a.reworked[r.BeadID] = true
 		}

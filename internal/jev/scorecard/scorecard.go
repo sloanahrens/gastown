@@ -84,6 +84,9 @@ type Reading struct {
 	Items []Item
 	// Labelings holds item i's labeling at index i.
 	Labelings []Labeling
+	// Outcomes names the outcome columns the battery writes, when its adapter
+	// declares them as an Outcomer; nil for a battery that declares none.
+	Outcomes []Outcome
 	// LinesSkipped counts the log lines that did not parse.
 	LinesSkipped int
 	// LogMissing is set when the battery has no log yet.
@@ -108,7 +111,11 @@ func Read(ctx context.Context, a Adapter, since time.Time) (Reading, error) {
 		}
 		labelings[i] = lab
 	}
-	return Reading{Items: items, Labelings: labelings, LinesSkipped: skipped, LogMissing: !found}, nil
+	var outcomes []Outcome
+	if o, ok := a.(Outcomer); ok {
+		outcomes = o.Outcomes()
+	}
+	return Reading{Items: items, Labelings: labelings, Outcomes: outcomes, LinesSkipped: skipped, LogMissing: !found}, nil
 }
 
 // Build reads the adapter's log, keeps the items stamped at or after since (a

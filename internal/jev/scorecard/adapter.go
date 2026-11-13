@@ -72,6 +72,25 @@ type Labeling struct {
 	// the overseer's, so the report counts them apart. An adapter with one
 	// source leaves it empty.
 	Source string
+	// Outcomes holds the outcome values the battery declares, which the dataset
+	// writes beside the label. An outcome absent from it could not be read for
+	// this item, so the dataset writes an empty cell, never false.
+	Outcomes map[Outcome]bool
+}
+
+// Outcome names a value an adapter reads for each item beside its label, such
+// as whether a landing ran over twenty minutes. Unlike a question it is not
+// scored; it is a feature the dataset carries so the analysis can mine what
+// predicts it.
+type Outcome string
+
+// Outcomer is an Adapter whose battery writes outcome columns into its dataset.
+// Only a battery that implements it gets them, so every other battery's dataset
+// is unchanged.
+type Outcomer interface {
+	// Outcomes names the outcomes the battery's labelings carry, in the order
+	// the dataset writes them.
+	Outcomes() []Outcome
 }
 
 // Adapter reads one battery's log and labels its items from the ground truth

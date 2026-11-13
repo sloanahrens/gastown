@@ -156,6 +156,9 @@ func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error)
 			colLabelRule:   lab.Rule,
 			colLabelSource: lab.Source,
 		}
+		for _, o := range read.Outcomes {
+			cells[string(o)] = outcomeText(lab.Outcomes, o)
+		}
 		for name, v := range it.Refs {
 			if v == "" || !slices.Contains(refAllow, name) {
 				continue
@@ -178,6 +181,12 @@ func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error)
 	}
 
 	columns := []string{colRowID, colDay, colHour, colDow, colModel, colAnswer, colAnswerBand, colConfidence, colLabel, colLabelRule, colLabelSource}
+	for _, o := range read.Outcomes {
+		if err := refuseName(string(o)); err != nil {
+			return Table{}, err
+		}
+		columns = append(columns, string(o))
+	}
 	for _, name := range refAllow {
 		if refsUsed[name] {
 			columns = append(columns, "ref_"+name)
@@ -310,6 +319,16 @@ func labelText(label bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// outcomeText spells an outcome the way labelText spells a label. An outcome
+// the item does not carry is an empty cell, never false.
+func outcomeText(outcomes map[scorecard.Outcome]bool, o scorecard.Outcome) string {
+	v, ok := outcomes[o]
+	if !ok {
+		return ""
+	}
+	return labelText(v)
 }
 
 // answerText writes Jev's answer: a noul's probability, a score's level or a
@@ -561,6 +580,10 @@ func meaning(column string, question scorecard.QuestionID) string {
 		return "the scorecard rule that set the label"
 	case colLabelSource:
 		return "where the label came from, such as the overseer's review, empty when the adapter names none"
+	case string(scorecard.OutcomeRanOverTwenty):
+		return "true when the latest landing's polecat time was over 20 minutes (1200 seconds), from the landing record; false at 20 minutes or under; empty when the bead has no landing record, a crew landing, or a time that is a bound or cannot be measured"
+	case string(scorecard.OutcomeNeededSecondRound):
+		return "true when the bead had an om verdict from attempt 2 or later, so it needed a second round; false when its only verdict was the first attempt; empty when the bead has no verdict"
 	}
 	if name, ok := strings.CutPrefix(column, "ref_"); ok {
 		return fmt.Sprintf("the %s the item's log line carried", name)
