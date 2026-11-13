@@ -150,7 +150,7 @@ The daemon is one long-running program. It does not think about code. It keeps t
 
 The Deployment runs exactly one replica with the `Recreate` strategy, because two daemons must never write the same town at once. It has no shutdown hook. On `SIGTERM` it gets a grace period long enough to finish the landing it is in.
 
-The daemon is granted the right to start the pod update's Job, so the roll outlives the pod it replaces. Through that Job it reaches the update ServiceAccount's grants and every Secret in `gt`, and it can run any image the nodes pull. The reason it is accepted, and what bounds it, are in the header of `deploy/k8s/update-rbac.yaml`.
+The daemon is granted the right to start the pod update's Job, so the roll outlives the pod it replaces. Through that Job it reaches the update ServiceAccount's grants and every Secret in `gt`, and it can run any image the nodes pull. The reason it is accepted is in the header of `deploy/k8s/update-rbac.yaml`, and what bounds it is in the header of `deploy/k8s/update-admission.yaml`.
 
 ### The town-state claim
 

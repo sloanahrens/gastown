@@ -21,10 +21,11 @@
 # mounts only when the operator's key file is set; (3) run any image the nodes can
 # pull. WHY ACCEPTED: the daemon is the town's own control process, it already mounts
 # most of the Secrets in gt, and the roll must outlive the pod it replaces, so it
-# needs a creator other than that pod. WHAT BOUNDS IT: namespace gt only, and the
-# verbs on jobs only. The rendered Job template (deploy/k8s/update-job) is what the
-# daemon creates, but nothing enforces that. FOLLOW-UP, not in this change: a
-# ValidatingAdmissionPolicy that pins the Job's serviceAccountName, volumes and image.
+# needs a creator other than that pod. WHAT BOUNDS IT: namespace gt only, the verbs
+# on jobs only, and the ValidatingAdmissionPolicy in deploy/k8s/update-admission.yaml,
+# which admits from the daemon's ServiceAccount only the Job deploy/k8s/update-job
+# renders. That file's header holds the bounds; the operator applies it with these
+# manifests.
 #
 # This file is not applied by the daemon. The operator's apply step applies it with
 # the Job's manifests. TestPodUpdateRBACManifestParses, TestPodUpdateRBACCoversEveryRead

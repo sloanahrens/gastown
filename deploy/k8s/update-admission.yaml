@@ -1,0 +1,256 @@
+# The ValidatingAdmissionPolicy that bounds what a Job the daemon starts may be
+# (gt-j571bu). deploy/k8s/update-rbac.yaml grants the daemon ServiceAccount create,
+# get, list, watch and delete on Jobs in gt; a Job's pod spec is chosen by whoever
+# creates it, so that grant alone reaches any Secret in gt and the gt-update
+# ServiceAccount's own Role.
+#
+# It bounds exactly these fields, and no others: the Job's name starts gt-update-;
+# the pod runs as the gt-update ServiceAccount and carries its token; the host
+# network, PID and IPC namespaces are off; nodeName, nodeSelector, tolerations,
+# runtimeClassName, hostAliases, dnsConfig, shareProcessNamespace and hostUsers
+# are unset; the pod securityContext sets no run-as identity,
+# group, sysctl or security profile; the priority class is gt-control-plane and the
+# restart policy Never; the pod has exactly one update container and one images init
+# container, with the image, command, arguments, environment and mounts the renderer
+# sets, and no ports, envFrom, lifecycle hook, probe, privileged flag or added Linux
+# capability; and it has exactly two volumes, the town-state claim and the
+# viewer-token Secret, each of that exact kind, with no hostPath.
+#
+# The command and the environment are bounded for the same reason as the volumes:
+# the daemon image carries kubectl and git, and the renderer sets GIT_CONFIG_VALUE_0
+# to a shell command, so a Job free to choose its own command, run a hook or probe,
+# add a container or set one more environment variable could run kubectl as
+# gt-update and exec into the daemon pod, which mounts every Secret in gt. The mounts
+# are pinned because a mount of the claim over a directory the command reads would
+# run a file from the town instead of the image.
+#
+# The policy's matchConditions name the daemon's ServiceAccount, and matchConditions
+# are how a policy skips a request rather than refusing it: the operator's own apply
+# and a hand-run Job the overseer creates are unaffected, and a request from any
+# other account never reaches these validations. matchConstraints names Job creation
+# only: the daemon's Role has no update verb on Jobs, and a Job's pod template is
+# immutable after creation, so an update could not widen what this admits anyway.
+#
+# This file is not applied by the daemon. The operator applies it with the Job's
+# manifests. The cluster must serve admissionregistration.k8s.io/v1
+# ValidatingAdmissionPolicy, which Kubernetes serves from 1.30 (v1beta1 from 1.28).
+# Before relying on the policy, the operator checks it on the cluster, impersonating
+# the daemon because the matchConditions otherwise leave the request unvalidated:
+#
+#   kubectl version
+#   kubectl api-resources --api-group=admissionregistration.k8s.io
+#   kubectl apply --dry-run=server -f deploy/k8s/update-admission.yaml
+#   kubectl apply -f deploy/k8s/update-admission.yaml
+#   kubectl -n gt create job --from=cronjob/gt-update gt-update-probe \
+#     --dry-run=client -o yaml > scratch/real.yaml
+#   kubectl -n gt create --dry-run=server \
+#     --as=system:serviceaccount:gt:daemon -f scratch/real.yaml      # must be admitted
+#
+# Run the last command again on each mutated Job in the bead's table (an extra
+# Secret volume, a hostPath, another ServiceAccount, a name outside gt-update-,
+# another Secret); each must be refused by the validation named in the bead. If the
+# API server refuses this file at apply, or refuses the real Job, stop and report
+# the message: failurePolicy Fail then denies every Job the daemon creates.
+#
+# TestUpdateAdmissionPolicy holds these expressions to the renderer's own output
+# (its containers, environment and constants) and the rendered Job to the same
+# bounds, without needing a CEL library.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gt-update-jobs
+spec:
+  failurePolicy: Fail
+  # A request that does not match a condition is not validated, so the operator and
+  # the overseer's hand run pass through and only the daemon's Jobs are held to the
+  # validations below.
+  matchConditions:
+    - name: daemon-service-account
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:gt:daemon'
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        resources: ["jobs"]
+        operations: ["CREATE"]
+  validations:
+    # The daemon names each Job it creates gt-update-<green short sha>
+    # (updatejob.JobNamePrefix and internal/daemon's updateJobName).
+    - expression: >-
+        object.metadata.name.startsWith('gt-update-')
+      message: >-
+        the Job's name must start gt-update-, the name the daemon gives the update
+        Job it creates
+    # The deprecated serviceAccount alias is refused unless it names the same
+    # account, so a request cannot name one account in each field.
+    - expression: >-
+        object.spec.template.spec.serviceAccountName == 'gt-update' &&
+        (!has(object.spec.template.spec.serviceAccount) ||
+        object.spec.template.spec.serviceAccount == 'gt-update')
+      message: >-
+        the Job's pod must run as the gt-update ServiceAccount, which is the account
+        the update-rbac Role grants
+    - expression: >-
+        (!has(object.spec.template.spec.hostNetwork) || !object.spec.template.spec.hostNetwork) &&
+        (!has(object.spec.template.spec.hostPID) || !object.spec.template.spec.hostPID) &&
+        (!has(object.spec.template.spec.hostIPC) || !object.spec.template.spec.hostIPC)
+      message: >-
+        the Job's pod must not join the node's network, PID or IPC namespace
+    # The one container jobSpec renders (updatejob.updateContainer): its name,
+    # image, command, arguments, environment and mounts, with no hook, probe or
+    # elevation. The image regex is what holds the image to
+    # forgejo:3000/bot-registry/gastown-daemon, since the renderer accepts any
+    # repo@sha256 reference. The environment is pinned to the variables containerEnv
+    # sets, and envFrom is refused, so no Secret can enter through the environment.
+    - expression: >-
+        size(object.spec.template.spec.containers) == 1 &&
+        object.spec.template.spec.containers.all(c,
+        c.name == 'update' &&
+        c.image.matches('^forgejo:3000/bot-registry/gastown-daemon@sha256:[0-9a-f]{64}$') &&
+        c.command == ['gt'] &&
+        size(c.args) == 6 &&
+        c.args[0] == 'update' &&
+        c.args[1] == '--images' &&
+        c.args[2] == '/Users/sloan/gt/.runtime/update/images.yaml' &&
+        c.args[3] == '--pod-in-cluster' &&
+        c.args[4] == '--pod-namespace' &&
+        c.args[5] == 'gt' &&
+        has(c.env) &&
+        size(c.env) == 4 &&
+        c.env.exists(e, e.name == 'XDG_CONFIG_HOME' && has(e.value) && e.value == '/run/gt/xdg') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
+        !has(c.envFrom) &&
+        !has(c.ports) &&
+        (!has(c.securityContext) ||
+        ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0))) &&
+        !has(c.lifecycle) &&
+        !has(c.livenessProbe) &&
+        !has(c.readinessProbe) &&
+        !has(c.startupProbe) &&
+        size(c.volumeMounts) == 2 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly))
+      message: >-
+        the Job may run only the update container the renderer sets, with its image,
+        command, arguments, environment and mounts, no hook or probe, and no added
+        capability
+    # The one init container jobSpec renders (updatejob.imagesContainer). Its one
+    # caller-chosen argument is the green commit, which must be a full lowercase sha.
+    - expression: >-
+        has(object.spec.template.spec.initContainers) &&
+        size(object.spec.template.spec.initContainers) == 1 &&
+        object.spec.template.spec.initContainers.all(c,
+        c.name == 'images' &&
+        c.image.matches('^forgejo:3000/bot-registry/gastown-daemon@sha256:[0-9a-f]{64}$') &&
+        c.command == ['gt'] &&
+        size(c.args) == 6 &&
+        c.args[0] == 'update' &&
+        c.args[1] == 'images' &&
+        c.args[2] == '--sha' &&
+        c.args[3].matches('^[0-9a-f]{40}$') &&
+        c.args[4] == '--out' &&
+        c.args[5] == '/Users/sloan/gt/.runtime/update/images.yaml' &&
+        has(c.env) &&
+        size(c.env) == 4 &&
+        c.env.exists(e, e.name == 'XDG_CONFIG_HOME' && has(e.value) && e.value == '/run/gt/xdg') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
+        !has(c.envFrom) &&
+        !has(c.ports) &&
+        (!has(c.securityContext) ||
+        ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0))) &&
+        !has(c.lifecycle) &&
+        !has(c.livenessProbe) &&
+        !has(c.readinessProbe) &&
+        !has(c.startupProbe) &&
+        size(c.volumeMounts) == 2 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly))
+      message: >-
+        the Job may run only the images init container the renderer sets, with its
+        image, command, arguments (the green commit a full lowercase sha),
+        environment and mounts, no hook or probe, and no added capability
+    # The two volumes the renderer names: the town-state claim and the viewer-token
+    # Secret. Size two plus one branch per volume leaves no room for a third volume,
+    # for a hostPath, or for another volume source, and the Secret name pins which
+    # Secret is mounted.
+    - expression: >-
+        has(object.spec.template.spec.volumes) &&
+        size(object.spec.template.spec.volumes) == 2 &&
+        object.spec.template.spec.volumes.all(v,
+        (v.name == 'town-state' && has(v.persistentVolumeClaim) &&
+        v.persistentVolumeClaim.claimName == 'town-state' && !has(v.hostPath)) ||
+        (v.name == 'viewer-token' && has(v.secret) &&
+        v.secret.secretName == 'daemon-forgejo-viewer.env' && !has(v.hostPath)))
+      message: >-
+        the Job may mount only the town-state claim and the viewer-token Secret, and
+        no hostPath
+    # The pod fields the renderer leaves unset or sets to one value. nodeName,
+    # nodeSelector, tolerations and runtimeClassName would place the pod on a chosen
+    # node or runtime; hostAliases and dnsConfig would redirect the names the pod
+    # resolves (the Forgejo and daemon hosts among them); shareProcessNamespace and
+    # hostUsers would change what the pod's processes can see and which user they
+    # map to; the pod securityContext would change the user, groups, sysctls
+    # or security profile the pinned command runs under; and the daemon image runs as
+    # its own user, so the renderer sets no run-as identity. The API server may
+    # default the pod securityContext to an empty object, so this checks its fields,
+    # not its presence.
+    - expression: >-
+        !has(object.spec.template.spec.nodeName) &&
+        !has(object.spec.template.spec.nodeSelector) &&
+        !has(object.spec.template.spec.tolerations) &&
+        !has(object.spec.template.spec.runtimeClassName) &&
+        !has(object.spec.template.spec.hostAliases) &&
+        !has(object.spec.template.spec.dnsConfig) &&
+        !has(object.spec.template.spec.shareProcessNamespace) &&
+        !has(object.spec.template.spec.hostUsers) &&
+        (!has(object.spec.template.spec.securityContext) ||
+        (!has(object.spec.template.spec.securityContext.runAsNonRoot) &&
+        !has(object.spec.template.spec.securityContext.runAsUser) &&
+        !has(object.spec.template.spec.securityContext.runAsGroup) &&
+        !has(object.spec.template.spec.securityContext.fsGroup) &&
+        !has(object.spec.template.spec.securityContext.supplementalGroups) &&
+        !has(object.spec.template.spec.securityContext.sysctls) &&
+        !has(object.spec.template.spec.securityContext.seccompProfile) &&
+        !has(object.spec.template.spec.securityContext.selinuxOptions)) &&
+        has(object.spec.template.spec.automountServiceAccountToken) &&
+        object.spec.template.spec.automountServiceAccountToken == true &&
+        object.spec.template.spec.priorityClassName == 'gt-control-plane' &&
+        object.spec.template.spec.restartPolicy == 'Never'
+      message: >-
+        the Job's pod may set only the ServiceAccount token, priority class and
+        restart policy the renderer sets, with no node placement, runtime class,
+        host alias, DNS config, shared process namespace, user namespace setting,
+        run-as identity, group, sysctl or security profile
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gt-update-jobs
+spec:
+  policyName: gt-update-jobs
+  validationActions: [Deny]
+  matchResources:
+    # The namespace the daemon's Role lives in, named by the label every namespace
+    # carries (kubernetes.io/metadata.name).
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: gt

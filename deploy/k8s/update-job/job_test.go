@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
 // updatingGoldens reports whether -update was passed. The flag is registered in
@@ -25,10 +26,13 @@ func updatingGoldens() bool {
 	return f != nil && f.Value.String() == "true"
 }
 
-// goldenValues is the configuration the goldens record.
+// goldenValues is the configuration the goldens record. The image is the town
+// registry and daemon image name the admission policy admits
+// (deploy/k8s/update-admission.yaml), so the golden Job is one the policy lets
+// through and a change to the image's form fails the admission test.
 func goldenValues() Values {
 	return Values{
-		Image:       "registry.example.test/gastown/daemon@sha256:" + strings.Repeat("0123456789abcdef", 4),
+		Image:       "forgejo:3000/bot-registry/" + imagevalues.DaemonImage + "@sha256:" + strings.Repeat("0123456789abcdef", 4),
 		GreenCommit: strings.Repeat("ab", 20),
 		MaxRuntime:  2 * time.Hour,
 	}

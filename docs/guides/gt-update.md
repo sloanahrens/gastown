@@ -221,15 +221,19 @@ finds the first and starts nothing.
 The Job's pod runs the commit's images through `gt update images` and then
 `gt update`, as the `gt-update` ServiceAccount. The RBAC it runs under, and what
 the daemon's grant to create Jobs reaches, are in the header of
-`deploy/k8s/update-rbac.yaml`.
+`deploy/k8s/update-rbac.yaml`; what bounds the grant is in the header of
+`deploy/k8s/update-admission.yaml`.
 
 #### Proof before the switch is turned on
 
 Turn `patrols.update.enabled` on in a pod only after one roll has run by hand
 through the Job, with the overseer watching:
 
-1. Apply the update manifests: `deploy/k8s/update-rbac.yaml`, and the Job and
-   the suspended CronJob `gt-update` rendered from `deploy/k8s/update-job`.
+1. Apply the update manifests: `deploy/k8s/update-rbac.yaml`,
+   `deploy/k8s/update-admission.yaml`, and the Job and the suspended CronJob
+   `gt-update` rendered from `deploy/k8s/update-job`. Before you apply the
+   policy, read the cluster-version requirement in the header of
+   `deploy/k8s/update-admission.yaml`; that header carries the check command.
 2. Start the roll from the suspended CronJob, which copies its template:
 
    ```bash
