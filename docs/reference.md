@@ -434,6 +434,101 @@ dispatcher retries the bead while the count is below three (gt-vaivp).
 `docs/guides/spec-dispatcher.md` is the behavioral guide: candidates, the shape
 gate, the seat table and how to turn the ticker off.
 
+### Story points
+
+A story point is a bead's expected polecat time on a Fibonacci scale. `gt spec
+estimate` writes an estimate before dispatch, and the landing worker writes the
+measure after the bead lands. The scale is in `internal/storypoints/points.go`.
+
+**Scale.** A time in minutes takes the lowest point whose upper edge it does not
+exceed; an edge belongs to the lower point. The edges are 1 up to 1.5 minutes,
+2 up to 2.5, 3 up to 4, 5 up to 6.5, 8 up to 10.5, 13 up to 17, 21 up to 27.5,
+34 up to 44.5, 55 up to 72, and 89 above 72. A time that is zero, negative or
+NaN has no point (`ErrNoMinutes`) and is never read as 1.
+
+**Labels.** Four labels carry a bead's points:
+
+- `sp:N` is the estimate. `gt spec estimate` writes it.
+- `sp-minutes:<n>` is the blended minutes behind `sp:N`, to one decimal place.
+  It is written beside `sp:N`.
+- `sp-rung:<rung>` names the inputs that made the estimate: `all`, `shape-jev`,
+  `shape-embed`, `shape`, or `none` when no estimate could be made.
+- `sp-actual:N` is the measure. The landing worker writes it from the landing
+  record's `polecat_secs`, and only on a bead that carries an `sp:` label. It is
+  not written when the time is a lower bound, an upper bound, absent, or zero. A
+  failed label write is logged and not retried; the landing stands.
+
+**`gt spec estimate <bead-id> [--force] [--dry-run] [--json]`.** It hashes the
+bead's Goal, Constraints, Acceptance and Size sections and its Acceptance field.
+When the latest `SP ESTIMATE v1` comment carries the same hash, it writes
+nothing. `--force` estimates again regardless. Otherwise it removes the bead's
+old `sp:`, `sp-rung:` and `sp-minutes:` labels, adds the new ones, and posts the
+note as a comment. `--dry-run` prints the labels and the note and writes nothing.
+`--json` prints the outcome as JSON. The note's first line is
+`SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>`; the rest names the minutes, the
+inputs used, each skipped input with its reason, and the nearest past beads from
+hm. The nearest beads are named for a reader; they do not change the number.
+
+**Inputs and the fallback ladder.** The inputs that could be built are averaged
+on the log scale with equal weight. The rung is set by which inputs were used:
+
+| Rung | Inputs used |
+|---|---|
+| `all` | shape, embedding, Jev |
+| `shape-jev` | shape, Jev |
+| `shape-embed` | shape, embedding |
+| `shape` | shape only |
+| `none` | no estimate: the bead gets `sp-rung:none`, a comment with the reason, and the command exits 0 |
+
+- **Shape** is twelve features of the bead's text and is always built. The seat
+  is unknown before dispatch, so its term takes the training mean.
+- **Embedding** embeds the Constraints and Acceptance text with an ollama
+  embedder and reads the result through a ridge regression. It needs
+  `embedder_url` and `embedder_model` below.
+- **Jev** is the dispatch battery's `fits_twenty_minutes` answer, asked with no
+  seat. It needs the `patrols.jev_dispatch` battery to open.
+
+An input whose dependency is absent or fails is skipped and named in the note.
+A bead with no text has no estimate, and a canceled run has none either.
+
+**Settings.** In `daemon.json`, under `patrols.spec_dispatch.story_points`:
+
+- `embedder_url` is the ollama server; the embedder posts to `<url>/api/embed`.
+  Unset, the embedding input is skipped.
+- `embedder_model` is required with `embedder_url`. The checked-in weights were
+  fitted on `qwen3-embedding:4b-q8_0`. A URL with no model refuses the run.
+
+**Weights.** The model is `internal/storypoints/weights.json`, embedded in the
+binary. It holds the shape model, the Jev probability-to-minutes table, and the
+embedding ridge. The checked-in file changes only by a commit.
+
+**Shadow report.** Run `gt metrics extract`, then `gt metrics storypoints`. The
+report reads the landings table. Below 60 estimated landings with a measured
+time, it prints the count and stops. At 60 or more, it prints the rank
+correlation of estimate and measure with a bootstrap 95% interval against the
+0.4 bar, per seat class and per rung; the exact and within-one shares; the count
+of estimated beads that landed unmeasured and of rung `none`; and the split
+trigger table, computed from `sp-minutes:`.
+
+**Retrain.** Run `gt metrics extract`, then `gt metrics storypoints-train`. It
+fits the shape and embedding ridges on the landed beads that have a measured
+time and a seat class of haiku or flash, using the earlier 80% of them, and
+scores the latest beads as a holdout. It reads the embeddings from the ollama
+server at `STORYPOINTS_EMBED_URL` (default `http://127.0.0.1:11434`), not from
+`embedder_url`. It writes two files beside the day's tables:
+`storypoints-weights.proposed.json` and `storypoints-train.txt`. A proposed file
+whose holdout rank correlation does not reach 0.4 is written with a `.rejected`
+suffix. The report gives both correlations and a verdict. The fits-to-minutes
+knots are the checked-in model's and are not refit, so recalibrate before
+adopting a proposed file. The command never writes `weights.json`; a proposed
+file is adopted by committing it.
+
+The spec dispatcher does not estimate a bead before it slings it. `gt spec
+estimate` is the only writer of `sp:`, `sp-rung:` and `sp-minutes:` today.
+
+The landings pane's points velocity is a separate reading of polecat time; see
+[Story-point velocity](#story-point-velocity).
+
 ### Disk Maintenance
 
 Registry retention and the `disk_maintenance` patrol are switched by two
