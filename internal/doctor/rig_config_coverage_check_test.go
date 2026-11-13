@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -385,5 +386,135 @@ func TestRigConfigCoverage_CredentialNeverPrinted(t *testing.T) {
 		if strings.Contains(all, secret) {
 			t.Errorf("result prints planted credential %q:\n%s", secret, all)
 		}
+	}
+}
+
+// TestRigConfigCoverage_RealParkState leaves the park read at its default
+// townconfig.ParkState and drives a real town tree: a registry park record
+// keeps an omitted rig out of the findings, and the same rig without one is
+// reported.
+func TestRigConfigCoverage_RealParkState(t *testing.T) {
+	t.Parallel()
+	const parkedEntry = `"hm":{"git_url":"x","parked":{"since":"2026-09-01T00:00:00Z","by":"operator","reason":"test"}}`
+	cases := []struct {
+		name     string
+		hm       string
+		unparked int
+		want     []string
+	}{
+		{name: "registry park record skips the rig", hm: parkedEntry, unparked: 1},
+		{
+			name:     "no park record reports the rig",
+			hm:       `"hm":{"git_url":"x"}`,
+			unparked: 2,
+			want:     []string{"rig hm: not in daemon.patrols.landing_worker.rigs"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			write := func(rel, body string) {
+				t.Helper()
+				path := filepath.Join(town, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("mayor/town.json", `{"type":"town","version":2,"name":"gt"}`)
+			write("mayor/rigs.json", `{"version":1,"rigs":{"gastown":{"git_url":"x"},`+tc.hm+`}}`)
+			write("mayor/daemon.json", `{"type":"daemon-patrol-config","version":1,"patrols":{"landing_worker":{"enabled":true,"rigs":["gastown"]}}}`)
+			const settings = `{"type":"rig-settings","version":1,"merge_queue":{"forgejo":{},"post_land_command":"make test"}}`
+			write("gastown/settings/config.json", settings)
+			write("hm/settings/config.json", settings)
+
+			res := (&RigConfigCoverageCheck{}).Run(&CheckContext{TownRoot: town})
+			wantStatus := StatusOK
+			if len(tc.want) > 0 {
+				wantStatus = StatusError
+			}
+			if res.Status != wantStatus {
+				t.Errorf("status = %s, want %s: %s", res.Status, wantStatus, res.Message)
+			}
+			if !slices.Equal(res.Details, tc.want) {
+				t.Errorf("details = %q, want %q", res.Details, tc.want)
+			}
+			if want := fmt.Sprintf("All %d unparked rig(s)", tc.unparked); wantStatus == StatusOK && !strings.Contains(res.Message, want) {
+				t.Errorf("message = %q, want the count %q", res.Message, want)
+			}
+		})
+	}
+}
+
+// TestRigConfigCoverage_InfoLists covers every other list of rig names the
+// check reports as info: the scheduled slings' rigs, the retired
+// main_branch_test block, and the patrol lists found by their block type.
+func TestRigConfigCoverage_InfoLists(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*config.PatrolsConfig)
+		want   []string
+	}{
+		{
+			name: "scheduled sling entry names its rig",
+			mutate: func(p *config.PatrolsConfig) {
+				p.ScheduledSlings = &config.ScheduledSlingsConfig{Enabled: true, Entries: []config.ScheduledSlingEntry{
+					{Name: "audit", Rig: "gastown", Formula: "mol-audit", IntervalStr: "24h"},
+				}}
+			},
+			want: []string{"info: rig hm: not in daemon.patrols.scheduled_slings.entries[].rig"},
+		},
+		{
+			name: "retired main_branch_test block still names its rigs",
+			mutate: func(p *config.PatrolsConfig) {
+				p.MainBranchTest = json.RawMessage(`{"enabled":true,"rigs":["gastown"]}`)
+			},
+			want: []string{"info: rig hm: not in daemon.patrols.main_branch_test.rigs"},
+		},
+		{
+			name: "main_branch_test block that does not decode names no rig",
+			mutate: func(p *config.PatrolsConfig) {
+				p.MainBranchTest = json.RawMessage(`{"rigs":"gastown"}`)
+			},
+		},
+		{
+			name: "patrol found by its block type",
+			mutate: func(p *config.PatrolsConfig) {
+				p.RebuildGT = &config.PatrolConfig{Enabled: true, Rigs: []string{"gastown"}}
+			},
+			want: []string{"info: rig hm: not in daemon.patrols.rebuild_gt.rigs"},
+		},
+		{
+			name: "patrol block with no rigs names no rig",
+			mutate: func(p *config.PatrolsConfig) {
+				p.ResourceSampler = &config.PatrolConfig{Enabled: true}
+			},
+		},
+		{
+			name: "block that is not a patrol config contributes no list",
+			mutate: func(p *config.PatrolsConfig) {
+				p.DoltServer = &config.DoltServerConfig{Enabled: true}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res := runRigConfigCoverage(t, fakeRigTown{
+				rigs:     []string{"gastown", "hm"},
+				daemon:   daemonWith(tc.mutate),
+				settings: settledRigs("gastown", "hm"),
+			})
+			if res.Status != StatusOK {
+				t.Fatalf("status = %s, want OK (info never fails): %s %q", res.Status, res.Message, res.Details)
+			}
+			if !slices.Equal(res.Details, tc.want) {
+				t.Errorf("details = %q, want %q", res.Details, tc.want)
+			}
+		})
 	}
 }
