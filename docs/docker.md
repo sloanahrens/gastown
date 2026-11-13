@@ -2,7 +2,7 @@
 
 The Compose runtime (`Dockerfile`, `docker-compose.yml` and `docker-entrypoint.sh` at the repository root) hosts a separate, self-contained Gas Town workspace at `/gt`, for trying `gt` in isolation. It is not how the live town runs. The live town runs as the `daemon` and `dashboard` Deployments in the control cluster, described in [architecture.md](architecture.md). This page does not describe that setup.
 
-Gas Town ships two Docker images. The production runtime image hosts a sandboxed Gas Town workspace and is the focus of most of this document. The e2e testing image runs integration tests inside CI and is described in its own section near the end.
+Gas Town ships two Docker images. The production runtime image hosts a sandboxed Gas Town workspace and is the focus of most of this document. The e2e testing image runs the integration tests on demand and is described in its own section near the end.
 
 To try Gas Town on your own machine, you can use the Compose runtime described here or install `gt` directly on your host machine. [INSTALLING.md](INSTALLING.md) covers the native install. Pick one: Docker gives you stronger isolation and bundles every prerequisite, while the native install puts `gt` directly on your host.
 
@@ -15,10 +15,8 @@ The Docker tooling lives at the repository root.
 | `Dockerfile` | Production runtime image. The Dockerfile builds on Anthropic's claude-code sandbox template, installs Git, Go, Dolt, beads, plus utility tooling, and compiles `gt` from source. |
 | `docker-compose.yml` | Service definition for the runtime. The compose file sets capabilities, volumes, and the bind mount you point at a host directory. |
 | `docker-entrypoint.sh` | First-run bootstrap script. The script sets git and dolt identity from environment variables, then runs `gt install /gt --git` against the bind-mounted workspace. |
-| `Dockerfile.e2e` | Image used by CI for integration tests. The e2e image is Alpine-based, more minimal than the production image, and runs `go test` rather than a long-lived service. |
+| `Dockerfile.e2e` | Image that runs the e2e integration tests. The e2e image is Alpine-based, more minimal than the production image, and runs `go test` rather than a long-lived service. |
 | `.dockerignore` | Build-context exclusions. The ignore list keeps `.git`, `.beads`, Compose env files, Dolt state, agent state directories, and build artifacts out of the image. |
-
-CI workflows under `.github/workflows/` use `Dockerfile.e2e` for e2e jobs and pull `dolthub/dolt-sql-server` images for tests that need a Dolt server outside a full Gas Town environment.
 
 ## Quick start
 
@@ -276,9 +274,6 @@ Common use cases for the e2e image:
 
 - A developer reproduces a CI failure locally. The same `Dockerfile.e2e`, build, and run produce the same isolated environment.
 - A developer tests changes to the install or workspace lifecycle without touching the host.
-- CI validates that `gt install --git` works from a clean filesystem.
-
-You typically do not run `Dockerfile.e2e` directly. CI does.
 
 ## CI integration
 
