@@ -14,9 +14,8 @@
 // every read repository is readable; 1 when a step fails, a read fails or a
 // required repository is unreadable; and 2 when the command line is refused,
 // including a --town-root with no town.json or whose forge.owner is not a usable
-// owner name. An
-// unlisted secret is a state a check reports, not a failure, because the check
-// runs before the first real run, when the secret is absent.
+// owner name. An unlisted secret is a state a check reports, not a failure,
+// because the check runs before the first real run, when the secret is absent.
 package main
 
 import (
