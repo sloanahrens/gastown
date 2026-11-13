@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
@@ -883,6 +884,72 @@ func TestLocalRoundStartFailureRaisesAnAlert(t *testing.T) {
 	}
 	if !strings.Contains(beadStore.issues[0].Notes, "LOCAL ROUND (1): head=abcdef1 at=") {
 		t.Fatalf("the rebuilt patrol did not serve the request; notes:\n%s", beadStore.issues[0].Notes)
+	}
+}
+
+// failFirstEscalates refuses its first fail sends and records the rest, as a
+// notifier that is down for a while and then answers does.
+type failFirstEscalates struct {
+	*notifyfake.Recorder
+	fail  int
+	calls int
+}
+
+func (f *failFirstEscalates) Escalate(ctx context.Context, e notify.Escalation) error {
+	f.calls++
+	if f.calls <= f.fail {
+		return errors.New("notifier down")
+	}
+	return f.Recorder.Escalate(ctx, e)
+}
+
+// The alarm's own failure path: a start alert whose send fails is not taken for
+// an open one. The next tick, which is refused again, sends it again; once it has
+// landed no tick sends a second one; and the later build that lands clears it
+// (gt-ryp1ff).
+func TestLocalRoundStartAlertSendFailureIsRetriedNextTick(t *testing.T) {
+	t.Parallel()
+	clk := &diskMaintNoSleepClock{FakeClock: clockwork.NewFakeClock()}
+	rec := notifyfake.New()
+	// One tick's send makes maxEscalationRetries attempts: refuse all of them.
+	notifier := &failFirstEscalates{Recorder: rec, fail: maxEscalationRetries}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: t.TempDir()}, notifier: notifier, clock: clk}
+	refused := errors.New("rig repository /town/a/.repo.git: no such file")
+	repaired := false
+	beadStore := &fakeRoundBeads{}
+	reviewer := &fakeRoundReviewer{findings: []land.Finding{oneFinding}}
+	a := &localRoundRigPatrol{d: d, rig: "a", build: func(string) (*LocalRoundPatrol, error) {
+		if !repaired {
+			return nil, refused
+		}
+		return newRoundPatrol(t, beadStore, reviewer), nil
+	}}
+	ctx := context.Background()
+
+	a.tick(ctx)
+	if got := rec.Escalations(); len(got) != 0 {
+		t.Fatalf("escalations after a refused send = %+v; want none recorded", got)
+	}
+	if a.alertOpen {
+		t.Fatal("the alert is marked open though its send failed: the next tick would never send it")
+	}
+
+	a.tick(ctx)
+	escalations := rec.Escalations()
+	if len(escalations) != 1 || escalations[0].Escalation.Fingerprint != localRoundRigKey("a") {
+		t.Fatalf("escalations after the retry = %+v; want one start alert under rig a's key", escalations)
+	}
+
+	a.tick(ctx)
+	if got := rec.Escalations(); len(got) != 1 {
+		t.Fatalf("escalations after the alert landed = %d; want it sent once, not again each tick", len(got))
+	}
+
+	repaired = true
+	a.tick(ctx)
+	clears := rec.Clears()
+	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{localRoundRigKey("a")}) {
+		t.Fatalf("clears = %+v; want one clear of rig a's start alert once its build landed", clears)
 	}
 }
 

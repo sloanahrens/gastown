@@ -336,19 +336,23 @@ func (r *localRoundRigPatrol) tick(ctx context.Context) {
 	r.patrol.Tick(ctx)
 }
 
-// startFailed raises the rig's start alert once. The mark is set before the
-// send, so a send that fails is still cleared by the later build that lands.
+// startFailed raises the rig's start alert once. The mark is set only when the
+// send lands: a send that fails leaves the alert unraised, so the next tick,
+// which builds again and is refused again, sends it again. An alert that never
+// reached the notifier must not be taken for an open one, or the rig would stay
+// silent for as long as it stays refused.
 func (r *localRoundRigPatrol) startFailed(ctx context.Context, err error) {
 	if r.alertOpen {
 		return
 	}
 	key := localRoundRigKey(r.rig)
-	r.alertOpen = true
 	r.d.logger.Printf("local_round: %s: not starting: %v", r.rig, err)
 	message := fmt.Sprintf("the local_round patrol cannot start for rig %s: %v. Local round requests on its beads get no answer until this is fixed.", r.rig, err)
 	if sendErr := r.d.escalateAlertSeverityCtx(ctx, localRoundAlertSeverity, key, "local_round", message); sendErr != nil {
-		r.d.logger.Printf("local_round: %s: the alert for the patrol that cannot start was not sent: %v", r.rig, sendErr)
+		r.d.logger.Printf("local_round: %s: the alert for the patrol that cannot start was not sent, and is sent again on the next tick: %v", r.rig, sendErr)
+		return
 	}
+	r.alertOpen = true
 }
 
 // clearStartFailure clears the rig's start alert once a build has landed. The
