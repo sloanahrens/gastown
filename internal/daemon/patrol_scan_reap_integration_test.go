@@ -28,7 +28,7 @@ func TestIntegrationReapRecoveryBatchDeadlineKillsARunningGT(t *testing.T) {
 	// The bound is fake time, so it costs the cases nothing; what they spend is
 	// the scripts' own running time.
 	const bound = 300 * time.Millisecond
-	for _, tc := range []struct {
+	cases := []struct {
 		name       string
 		script     string
 		toBound    bool
@@ -39,20 +39,36 @@ func TestIntegrationReapRecoveryBatchDeadlineKillsARunningGT(t *testing.T) {
 		// the wall clock would cut it off here; its own exit status has to be
 		// what ends the run.
 		{"a gt that fails on its own is not", "sleep 1\necho boom >&2\nexit 3", false, false},
-	} {
+	}
+	// Every script is written here, serially, before any subtest starts: the
+	// daemon execs a script as soon as a subtest runs it, and exec of a file
+	// still open for writing fails with "text file busy" when a sibling
+	// subtest's fork holds the write fd across its exec (golang/go#22315).
+	// A write in the parallel subtest races that fork (gt-62scpd).
+	type prepared struct {
+		gtPath string
+		marker string
+	}
+	preparedCases := make([]prepared, len(cases))
+	for i, tc := range cases {
+		dir := t.TempDir()
+		gtPath := filepath.Join(dir, "gt")
+		marker := filepath.Join(dir, "started")
+		script := strings.ReplaceAll(tc.script, "{marker}", marker)
+		if err := os.WriteFile(gtPath, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		preparedCases[i] = prepared{gtPath: gtPath, marker: marker}
+	}
+	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := reapHost(t, enabledCleanup("gastown"), nil, nil)
 			h.d.logger = log.New(io.Discard, "", 0)
 			fc := clockwork.NewFakeClockAt(time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC))
 			h.d.clock = fc
-			dir := t.TempDir()
-			h.d.gtPath = filepath.Join(dir, "gt")
-			marker := filepath.Join(dir, "started")
-			script := strings.ReplaceAll(tc.script, "{marker}", marker)
-			if err := os.WriteFile(h.d.gtPath, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			h.d.gtPath = preparedCases[i].gtPath
+			marker := preparedCases[i].marker
 
 			done := make(chan reapBatch, 1)
 			go func() { done <- h.runRecoveryBatchWithin("gastown", 3, bound) }()
