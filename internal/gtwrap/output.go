@@ -91,8 +91,7 @@ func (r *outputRewriter) Write(p []byte) (int, error) {
 
 // writeLine writes one complete line, rewritten.
 func (r *outputRewriter) writeLine(line []byte) error {
-	out, _ := r.rewrite(line, r.left(), 0, false, true)
-	return r.emit(out, line[len(line)-1])
+	return r.emit(r.rewrite(line, r.left(), 0, false, true), line[len(line)-1])
 }
 
 // writePartial writes the pending line up to the point a later byte could still
@@ -104,27 +103,32 @@ func (r *outputRewriter) writePartial() error {
 		return nil
 	}
 	limit := r.partialLimit(r.line)
+	if limit == 0 {
+		return nil
+	}
 	next, hasNext := byte(0), limit < len(r.line)
 	if hasNext {
 		next = r.line[limit]
 	}
-	out, held := r.rewrite(r.line[:limit], r.left(), next, hasNext, false)
-	if held == 0 {
-		return nil
-	}
-	if err := r.emit(out, r.line[held-1]); err != nil {
+	out := r.rewrite(r.line[:limit], r.left(), next, hasNext, false)
+	if err := r.emit(out, r.line[limit-1]); err != nil {
 		return err
 	}
-	r.line = r.line[held:]
+	r.line = r.line[limit:]
 	return nil
 }
 
 // partialLimit returns the index where the part of line a later write cannot change
 // ends: the start of a suffix that could still grow into the pod root, or of an
-// occurrence that begins before it and ends after it, so the occurrence is held from
-// its own start. The bytes before it can be written now.
+// occurrence whose right boundary the next byte decides, so the occurrence is held
+// from its own start. The bytes before it can be written now.
 func (r *outputRewriter) partialLimit(line []byte) int {
 	limit := r.partialStart(line)
+	// An occurrence that ends the buffer needs the byte after it to decide whether
+	// it ends a token, so it is held from its start.
+	if at := len(line) - len(r.from); at >= 0 && bytes.Equal(line[at:], r.from) && r.leftOK(line, at, r.left()) {
+		limit = min(limit, at)
+	}
 	// A root that repeats its own prefix can begin before the held suffix and end
 	// inside it. A match is at most len(from) long, so every occurrence that
 	// overlaps limit starts within the last len(from) bytes before it.
@@ -177,8 +181,7 @@ func (r *outputRewriter) Flush() error {
 	}
 	line := r.line
 	r.line = nil
-	out, _ := r.rewrite(line, r.left(), 0, false, true)
-	return r.emit(out, line[len(line)-1])
+	return r.emit(r.rewrite(line, r.left(), 0, false, true), line[len(line)-1])
 }
 
 // writePending writes the buffered line unchanged and empties the buffer.
@@ -193,16 +196,15 @@ func (r *outputRewriter) writePending() error {
 }
 
 // rewrite returns line with each occurrence of the pod town root that names the
-// root as a whole path segment replaced by the Mac town root, and the number of
-// bytes it could decide. The result is line itself when nothing matches.
+// root as a whole path segment replaced by the Mac town root. The result is line
+// itself when nothing matches. Every occurrence in line is decided: the caller
+// holds back an occurrence whose right boundary a later byte would decide.
 //
 // left says whether the byte before line ends a path segment. The byte after line
-// is next when hasNext, the end of the line when end, and unknown otherwise: an
-// occurrence that ends the line before its next byte is known may still turn out to
-// be the root, so it and the bytes after it are left for the next write.
-func (r *outputRewriter) rewrite(line []byte, left bool, next byte, hasNext, end bool) ([]byte, int) {
+// is next when hasNext, and the end of the line is a token boundary when end.
+func (r *outputRewriter) rewrite(line []byte, left bool, next byte, hasNext, end bool) []byte {
 	if len(r.from) == 0 {
-		return line, len(line)
+		return line
 	}
 	var out []byte
 	last := 0
@@ -212,20 +214,8 @@ func (r *outputRewriter) rewrite(line []byte, left bool, next byte, hasNext, end
 			break
 		}
 		at := i + k
-		if !r.leftOK(line, at, left) {
-			i = at + 1
-			continue
-		}
 		e := at + len(r.from)
-		// The byte that decides whether the root ends here has not arrived, so the
-		// occurrence may still be the root: it is held for the next write.
-		if e == len(line) && !end && !hasNext {
-			if out == nil {
-				return line[:at], at
-			}
-			return append(out, line[last:at]...), at
-		}
-		if !r.rightOK(line, e, next, hasNext, end) {
+		if !r.leftOK(line, at, left) || !r.rightOK(line, e, next, hasNext, end) {
 			i = at + 1
 			continue
 		}
@@ -238,9 +228,9 @@ func (r *outputRewriter) rewrite(line []byte, left bool, next byte, hasNext, end
 		i = e
 	}
 	if out == nil {
-		return line, len(line)
+		return line
 	}
-	return append(out, line[last:]...), len(line)
+	return append(out, line[last:]...)
 }
 
 // leftOK reports whether the pod town root at at in line names the root as a whole
