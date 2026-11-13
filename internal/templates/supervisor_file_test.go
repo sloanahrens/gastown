@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"encoding/xml"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,14 +101,15 @@ func TestSupervisorFileIsFor(t *testing.T) {
 		}
 		return path
 	}
-	// rendered is the daemon plist an install would leave for townRoot.
+	// rendered is a daemon plist written for townRoot: its WorkingDirectory
+	// holds the town root XML-escaped, the way the plist was written.
 	rendered := func(t *testing.T, townRoot string) string {
 		t.Helper()
-		content, err := renderLaunchdPlist(SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: townRoot})
-		if err != nil {
-			t.Fatalf("rendering the plist: %v", err)
+		var escaped strings.Builder
+		if err := xml.EscapeText(&escaped, []byte(townRoot)); err != nil {
+			t.Fatalf("escaping the town root: %v", err)
 		}
-		return content
+		return "<plist version=\"1.0\">\n<dict>\n    <key>WorkingDirectory</key>\n    <string>" + escaped.String() + "</string>\n</dict>\n</plist>\n"
 	}
 
 	for _, tc := range []struct {

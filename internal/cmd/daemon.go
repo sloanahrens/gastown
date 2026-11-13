@@ -688,7 +688,7 @@ func enableSupervisorOn(c *daemonControl, townRoot string) error {
 // starts the unit, and a launchd job is already loaded from an earlier
 // provision, so a town another owner holds is refused before the file is
 // written.
-func enableSupervisor(townRoot string, provision func(townRoot string, shutdownBudget time.Duration) (string, error), guard func(townRoot string) error) error {
+func enableSupervisor(townRoot string, provision func(townRoot string) (string, error), guard func(townRoot string) error) error {
 	// Refuse while a manual daemon holds the lock. RunAtLoad + Restart=always
 	// means systemd would immediately spawn a second daemon that loses the
 	// flock on daemon.lock and exits non-zero, then gets respawned every ~10s
@@ -704,7 +704,7 @@ func enableSupervisor(townRoot string, provision func(townRoot string, shutdownB
 		return err
 	}
 
-	msg, err := provision(townRoot, daemon.ShutdownBudget)
+	msg, err := provision(townRoot)
 	if err != nil {
 		return fmt.Errorf("configuring supervisor: %w", err)
 	}

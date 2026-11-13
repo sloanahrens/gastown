@@ -1,31 +1,12 @@
 package templates
 
 import (
-	"encoding/xml"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
-	"time"
 )
-
-// assertWellFormedXML fails the test unless s parses as XML from start to end.
-func assertWellFormedXML(t *testing.T, s string) {
-	t.Helper()
-	dec := xml.NewDecoder(strings.NewReader(s))
-	for {
-		if _, err := dec.Token(); err != nil {
-			if errors.Is(err, io.EOF) {
-				return
-			}
-			t.Fatalf("rendered plist is not well-formed XML: %v", err)
-		}
-	}
-}
 
 func TestNew(t *testing.T) {
 	t.Parallel()
@@ -348,144 +329,6 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 	}
 }
 
-// TestRenderLaunchdPlist_EnvironmentVariables verifies that extra env vars
-// (e.g. from settings/daemon.env) are rendered into the plist's
-// EnvironmentVariables dict alongside GT_TOWN_ROOT.
-func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
-	t.Parallel()
-	data := SupervisorData{
-		GTPath:   "/usr/local/bin/gt",
-		TownRoot: "/test/town",
-		Env: map[string]string{
-			"CMUX_CLAUDE_HOOKS_DISABLED": "1",
-			"SDKROOT":                    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
-			"DEVELOPER_DIR":              "/Library/Developer/CommandLineTools",
-		},
-	}
-
-	output, err := renderLaunchdPlist(data)
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-
-	if !strings.Contains(output, "<key>GT_TOWN_ROOT</key>") {
-		t.Error("plist missing GT_TOWN_ROOT key")
-	}
-	for key, value := range data.Env {
-		if !strings.Contains(output, "<key>"+key+"</key>") {
-			t.Errorf("plist missing env key %q:\n%s", key, output)
-		}
-		if !strings.Contains(output, "<string>"+value+"</string>") {
-			t.Errorf("plist missing env value %q for key %q:\n%s", value, key, output)
-		}
-	}
-}
-
-// TestRenderLaunchdPlist_EscapesItsValues covers values holding XML syntax: the
-// plist has to parse, and a value crafted as markup must not add a key nobody
-// wrote.
-func TestRenderLaunchdPlist_EscapesItsValues(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		data SupervisorData
-	}{
-		{
-			name: "town root with ampersand and angle bracket",
-			data: SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: "/towns/a&b<c"},
-		},
-		{
-			name: "gt path with ampersand",
-			data: SupervisorData{GTPath: "/opt/a&b/gt", TownRoot: "/test/town"},
-		},
-		{
-			name: "env key and value with markup",
-			data: SupervisorData{
-				GTPath:   "/usr/local/bin/gt",
-				TownRoot: "/test/town",
-				Env:      map[string]string{"A&B": "x<y"},
-			},
-		},
-		{
-			name: "town root crafted as markup",
-			data: SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: "/towns/</string><key>Injected</key><string>x"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := renderLaunchdPlist(tt.data)
-			if err != nil {
-				t.Fatalf("renderLaunchdPlist() error = %v", err)
-			}
-			assertWellFormedXML(t, got)
-
-			// The same data with a benign town root has the keys the template
-			// writes; the escaped values must not add or move any key.
-			benign := tt.data
-			benign.TownRoot = "/test/town"
-			want, err := renderLaunchdPlist(benign)
-			if err != nil {
-				t.Fatalf("renderLaunchdPlist(benign) error = %v", err)
-			}
-			if gotKeys, wantKeys := plistKeyNames(t, got), plistKeyNames(t, want); !slices.Equal(gotKeys, wantKeys) {
-				t.Errorf("rendered plist keys = %q, want %q (a value added or moved a key):\n%s", gotKeys, wantKeys, got)
-			}
-		})
-	}
-}
-
-// plistKeyNames returns the text of each <key> element in s, in document
-// order, read through the XML parser so markup in a value cannot pass for a key.
-func plistKeyNames(t *testing.T, s string) []string {
-	t.Helper()
-	var keys []string
-	dec := xml.NewDecoder(strings.NewReader(s))
-	inKey := false
-	for {
-		tok, err := dec.Token()
-		if errors.Is(err, io.EOF) {
-			return keys
-		}
-		if err != nil {
-			t.Fatalf("rendered plist is not well-formed XML: %v", err)
-		}
-		switch tok := tok.(type) {
-		case xml.StartElement:
-			inKey = tok.Name.Local == "key"
-		case xml.EndElement:
-			inKey = false
-		case xml.CharData:
-			if inKey {
-				keys = append(keys, string(tok))
-			}
-		}
-	}
-}
-
-// TestRenderLaunchdPlist_WorkingDirectoryReadsBackAsTheTownRoot checks the
-// round trip the supervisor status and repair reads depend on: the escaped
-// WorkingDirectory decodes to the town root that was rendered into it.
-func TestRenderLaunchdPlist_WorkingDirectoryReadsBackAsTheTownRoot(t *testing.T) {
-	t.Parallel()
-	const townRoot = "/towns/a&b<c"
-	got, err := renderLaunchdPlist(SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: townRoot})
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-	written, isXMLText := supervisorWorkingDirectory(got)
-	if !isXMLText {
-		t.Errorf("supervisorWorkingDirectory read a plist as a unit's literal text")
-	}
-	decoded, err := decodeXMLEntities(written)
-	if err != nil {
-		t.Fatalf("decodeXMLEntities read back an error: %v", err)
-	}
-	if decoded != townRoot {
-		t.Errorf("the WorkingDirectory read back is %q, want %q", decoded, townRoot)
-	}
-}
-
 // TestRenderSystemdUnit_EnvironmentVariables verifies that extra env vars
 // are rendered into the systemd unit as Environment= directives alongside
 // GT_TOWN_ROOT.
@@ -517,231 +360,12 @@ func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
 	}
 }
 
-// TestRenderLaunchdPlist_NoExtraEnv verifies the plist still renders cleanly
-// with a nil Env map (the common case before settings/daemon.env exists).
-func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
-	t.Parallel()
-	output, err := renderLaunchdPlist(SupervisorData{
-		GTPath:   "/usr/local/bin/gt",
-		TownRoot: "/test/town",
-	})
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-	if !strings.Contains(output, "<key>GT_TOWN_ROOT</key>") {
-		t.Error("plist missing GT_TOWN_ROOT key")
-	}
-}
-
-// TestRenderLaunchdPlist_StandardProcessType guards gt-2ycne. launchd's
-// ProcessType=Background puts the daemon and every child it spawns (landing
-// gates, post-land gates, plugin runs) in darwinbg: efficiency cores only, CPU
-// and I/O throttled whenever the host is busy. A landing gate that takes ~100s
-// from a shell took 8-15 minutes under the daemon (priority 4, linkers idle at
-// 0% CPU for 30-50s). The daemon does foreground work for the whole town, so
-// it must run as a Standard job.
-func TestRenderLaunchdPlist_StandardProcessType(t *testing.T) {
-	t.Parallel()
-	output, err := renderLaunchdPlist(SupervisorData{
-		GTPath:   "/usr/local/bin/gt",
-		TownRoot: "/test/town",
-	})
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-	if strings.Contains(output, "<string>Background</string>") {
-		t.Errorf("plist runs the daemon as a Background process; its landing gates inherit darwinbg throttling (gt-2ycne):\n%s", output)
-	}
-	if !strings.Contains(output, "<key>ProcessType</key>\n    <string>Standard</string>") {
-		t.Errorf("plist must set ProcessType Standard explicitly (gt-2ycne):\n%s", output)
-	}
-}
-
-// TestRenderLaunchdPlist_ExitTimeOut verifies ExitTimeOutSeconds renders as
-// launchd's ExitTimeOut key, and that a zero value (the default before a
-// caller opts in) omits the key entirely rather than writing <integer>0</integer>,
-// which would make launchd SIGKILL the daemon almost immediately on restart.
-func TestRenderLaunchdPlist_ExitTimeOut(t *testing.T) {
-	t.Parallel()
-	output, err := renderLaunchdPlist(SupervisorData{
-		GTPath:             "/usr/local/bin/gt",
-		TownRoot:           "/test/town",
-		ExitTimeOutSeconds: 85,
-	})
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-	if !strings.Contains(output, "<key>ExitTimeOut</key>") || !strings.Contains(output, "<integer>85</integer>") {
-		t.Errorf("plist missing ExitTimeOut=85:\n%s", output)
-	}
-
-	output, err = renderLaunchdPlist(SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: "/test/town"})
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-	if strings.Contains(output, "<key>ExitTimeOut</key>") {
-		t.Errorf("plist set ExitTimeOut for a zero ExitTimeOutSeconds, leaving launchd's default in effect requires omitting the key:\n%s", output)
-	}
-}
-
-// writeInstalledPlist writes body where the launchd plist for town would be
-// installed and returns its path. SupervisorFileRepair is pointed at the path
-// directly, the way the caller resolves it, so the test does not need HOME.
-func writeInstalledPlist(t *testing.T, town, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// renderedPlist is what this binary renders for town, the shape an install
-// writes. exitTimeout is the budget it is rendered with.
-func renderedPlist(t *testing.T, town string, exitTimeout time.Duration) string {
-	t.Helper()
-	content, ok, err := SupervisorFileContent("launchd", town, exitTimeout)
-	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
-	}
-	return content
-}
-
-// TestSupervisorFileRepair_AddsAMissingExitTimeOut is the bug gt-x872 names: a
-// plist installed before ExitTimeOut existed carries no key, and every restart
-// through launchd then SIGKILLs the daemon at the 20s default, part-way
-// through a graceful shutdown that is allowed longer than that. The file is
-// this binary's rendering of this town in every other respect, so the repair
-// is to rewrite it with the key.
-func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	path := writeInstalledPlist(t, town, renderedPlist(t, town, 0))
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if !repair {
-		t.Fatal("SupervisorFileRepair() did not repair a plist with no ExitTimeOut")
-	}
-	if !strings.Contains(content, "<key>ExitTimeOut</key>") || !strings.Contains(content, "<integer>55</integer>") {
-		t.Errorf("repair does not carry ExitTimeOut=55:\n%s", content)
-	}
-	if content != renderedPlist(t, town, 55*time.Second) {
-		t.Errorf("repair is not the current rendering (changed something other than ExitTimeOut):\n%s", content)
-	}
-}
-
-// A plist that has the key but at an older budget is the same repair: the
-// value is compiled into the binary, so it follows the binary, not the file.
-func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	path := writeInstalledPlist(t, town, renderedPlist(t, town, 20*time.Second))
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if !repair {
-		t.Fatal("SupervisorFileRepair() did not repair an out-of-date ExitTimeOut")
-	}
-	if !strings.Contains(content, "<integer>55</integer>") {
-		t.Errorf("repair does not carry the current ExitTimeOut:\n%s", content)
-	}
-}
-
-// TestSupervisorFileRepair_ReplacesABackgroundProcessType is gt-2ycne: every
-// plist installed before the fix says ProcessType Background, which throttles
-// the daemon and every landing gate it runs. The value comes from the template,
-// so it follows the binary like ExitTimeOut does, and an installed file that
-// differs only there is repaired to Standard.
-func TestSupervisorFileRepair_ReplacesABackgroundProcessType(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	current := renderedPlist(t, town, 55*time.Second)
-	old := strings.Replace(current, "<string>Standard</string>", "<string>Background</string>", 1)
-	if old == current {
-		t.Fatal("test setup: rendered plist has no Standard ProcessType to replace")
-	}
-	path := writeInstalledPlist(t, town, old)
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if !repair {
-		t.Fatal("SupervisorFileRepair() did not repair a plist whose ProcessType is Background")
-	}
-	if content != current {
-		t.Errorf("repair is not the current rendering:\n%s", content)
-	}
-}
-
-// A file this binary would write unchanged needs no repair, and the caller
-// must be able to tell that from a repair it declined to make.
-func TestSupervisorFileRepair_CurrentFileIsNoRepair(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	path := writeInstalledPlist(t, town, renderedPlist(t, town, 55*time.Second))
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if repair || content != "" {
-		t.Errorf("SupervisorFileRepair() = (%q, %v) for a current file, want (\"\", false)", content, repair)
-	}
-}
-
-// The repair is confined to the one value that belongs to the binary. A file
-// that names a different gt is somebody's deliberate configuration — repointing
-// a launchd job at whichever gt happens to be running is a reconfiguration, and
-// not this function's to make.
-func TestSupervisorFileRepair_LeavesAFileThatDiffersInMore(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	other, err := renderLaunchdPlist(SupervisorData{
-		GTPath:             "/opt/other/bin/gt",
-		TownRoot:           town,
-		ExitTimeOutSeconds: 0,
-	})
-	if err != nil {
-		t.Fatalf("renderLaunchdPlist() error = %v", err)
-	}
-	path := writeInstalledPlist(t, town, other)
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if repair || content != "" {
-		t.Errorf("SupervisorFileRepair() = (%q, %v), want (\"\", false): the file names another gt", content, repair)
-	}
-}
-
-// A plist serving another town is not this town's to rewrite.
-func TestSupervisorFileRepair_AnotherTownsFileIsNotTouched(t *testing.T) {
-	t.Parallel()
-	other := t.TempDir()
-	path := writeInstalledPlist(t, other, renderedPlist(t, other, 0))
-
-	content, repair, err := SupervisorFileRepair(path, "launchd", t.TempDir(), 55*time.Second)
-	if err != nil {
-		t.Fatalf("SupervisorFileRepair() error = %v", err)
-	}
-	if repair || content != "" {
-		t.Errorf("SupervisorFileRepair() = (%q, %v), want (\"\", false): the file serves another town", content, repair)
-	}
-}
-
 // The systemd unit renders nothing from the binary's own constants, so a
 // binary upgrade leaves nothing in it to repair.
 func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	unit, ok, err := SupervisorFileContent("systemd", town, 0)
+	unit, ok, err := SupervisorFileContent("systemd", town)
 	if err != nil || !ok {
 		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
 	}
@@ -750,7 +374,7 @@ func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, repair, err := SupervisorFileRepair(path, "systemd", town, 55*time.Second)
+	content, repair, err := SupervisorFileRepair(path, "systemd", town)
 	if err != nil {
 		t.Fatalf("SupervisorFileRepair() error = %v", err)
 	}
@@ -759,13 +383,35 @@ func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 	}
 }
 
+// The launchd kind is retired. A plist an older gt wrote for this town, with a
+// value a repair used to rewrite, is not repaired: this build repairs no
+// supervisor file, and a launchd plist is not one it writes.
+func TestSupervisorFileRepair_LaunchdPlistIsNeverRepaired(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	body := "<plist version=\"1.0\">\n<dict>\n    <key>WorkingDirectory</key>\n    <string>" + town + "</string>\n    <key>ProcessType</key>\n    <string>Background</string>\n</dict>\n</plist>\n"
+	path := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", town)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if repair || content != "" {
+		t.Errorf("SupervisorFileRepair() = (%q, %v) for a launchd plist, want (\"\", false)", content, repair)
+	}
+}
+
 // SupervisorFileContent renders nothing for a kind this build does not write,
-// including the empty kind a host with no supported supervisor reports —
-// rather than erroring on it, since that is an ordinary host.
+// the launchd kind included, nor the empty kind a host with no supported
+// supervisor reports — rather than erroring on it, since that is an ordinary
+// host.
 func TestSupervisorFileContent_UnknownKind(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"", "upstart", "launchd "} {
-		content, ok, err := SupervisorFileContent(kind, t.TempDir(), time.Second)
+	for _, kind := range []string{"", "upstart", "launchd", "launchd "} {
+		content, ok, err := SupervisorFileContent(kind, t.TempDir())
 		if err != nil {
 			t.Errorf("SupervisorFileContent(%q) error = %v", kind, err)
 		}
@@ -1243,7 +889,7 @@ func TestSupervisorData_LeavesDaemonEnvTokensOut(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, "settings", "daemon.env"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	data, err := supervisorData(town, 0)
+	data, err := supervisorData(town)
 	if err != nil {
 		t.Fatal(err)
 	}

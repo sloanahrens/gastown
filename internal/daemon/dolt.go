@@ -46,14 +46,13 @@ const doltServerStopPoll = 100 * time.Millisecond
 //
 // This is the actual value a daemon restart must plan around — not an
 // estimate — because both restart paths bound the OLD daemon's lifetime by a
-// mechanism outside shutdown() itself: `gt daemon restart`'s launchd
-// supervisor (internal/cmd/daemon_supervisor.go) sets the job's ExitTimeOut
-// to this same budget, so a SIGTERM'd daemon that hasn't exited by then is
-// SIGKILLed regardless of which step it is on; the hand path's StopDaemon
-// (daemon.go) waits StopWaitBudget, ShutdownBudget plus a small margin, before
-// it does the same. Either way, ShutdownBudget is the longest the old process
-// can legitimately take, and it is what waitForRestart's poll budget is
-// derived from.
+// mechanism outside shutdown() itself: `gt daemon restart` under a provisioned
+// systemd unit (internal/cmd/daemon_supervisor.go) waits for the old process
+// to exit before it starts the new one; the hand path's StopDaemon (daemon.go)
+// waits StopWaitBudget, ShutdownBudget plus a small margin, and SIGKILLs a
+// daemon that is still running after it. Either way, ShutdownBudget is the
+// longest the old process can legitimately take, and it is what
+// waitForRestart's poll budget is derived from.
 const ShutdownBudget = doltServerStopBudget
 
 // DefaultDoltHealthCheckInterval is how often the dedicated Dolt health check

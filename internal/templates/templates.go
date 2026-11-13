@@ -4,15 +4,12 @@ package templates
 import (
 	"bytes"
 	"embed"
-	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"text/template"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
@@ -27,7 +24,7 @@ var templateFuncs = template.FuncMap{
 //go:embed roles/*.md.tmpl
 var templateFS embed.FS
 
-//go:embed launchd/*.plist systemd/*.service
+//go:embed systemd/*.service
 var supervisorFS embed.FS
 
 //go:embed polecat-CLAUDE.md
@@ -58,17 +55,6 @@ type SupervisorData struct {
 	GTPath   string            // Path to the gt binary
 	TownRoot string            // Path to the Gas Town workspace
 	Env      map[string]string // Extra environment variables from settings/daemon.env
-
-	// ExitTimeOutSeconds is launchd's ExitTimeOut for the daemon job: how long
-	// launchd waits after SIGTERM (sent by `launchctl kickstart -k`, i.e. `gt
-	// daemon restart`) before it SIGKILLs the process. It must be at least as
-	// large as the daemon's own worst-case graceful shutdown (see
-	// daemon.ShutdownBudget) — otherwise launchd force-kills the daemon
-	// mid-shutdown on every restart, which for the Dolt SQL server step in
-	// particular risks corrupting its append-only journal instead of letting
-	// it exit cleanly. 0 omits the key, which leaves launchd's own default
-	// (20s) in effect.
-	ExitTimeOutSeconds int
 }
 
 // New creates a new Templates instance.
@@ -190,35 +176,28 @@ func StaleCommands(workspacePath string) []string {
 }
 
 // ProvisionSupervisor creates and configures supervisor files for the daemon.
-// On macOS: writes a launchd plist, which launchd loads at the next login; gt
-// does not load it.
 // On Linux: creates and enables a systemd user unit.
+// On macOS: writes nothing. gt no longer provisions a launchd job; a macOS town
+// runs its daemon in the container.
 // Returns a message indicating what action was taken (or skipped).
 //
 // Reads settings/daemon.env (if present) and carries its KEY=VALUE pairs into
-// the supervisor's EnvironmentVariables/Environment= so a launchd/systemd-
-// spawned daemon gets the same host-specific env vars a manually-started one
-// inherits from the operator's shell. GT_TOWN_ROOT is always set from
-// townRoot directly and cannot be overridden by the env file.
-//
-// exitTimeout becomes the launchd job's ExitTimeOut (see SupervisorData); the
-// caller passes daemon.ShutdownBudget so the two stay derived from the same
-// real value instead of drifting independently. A zero exitTimeout leaves
-// launchd's own default in effect (only meaningful on darwin).
-func ProvisionSupervisor(townRoot string, exitTimeout time.Duration) (string, error) {
-	return realHost.provisionSupervisor(townRoot, exitTimeout)
+// the supervisor's Environment= so a systemd-spawned daemon gets the same
+// host-specific env vars a manually-started one inherits from the operator's
+// shell. GT_TOWN_ROOT is always set from townRoot directly and cannot be
+// overridden by the env file.
+func ProvisionSupervisor(townRoot string) (string, error) {
+	return realHost.provisionSupervisor(townRoot)
 }
 
 // provisionSupervisor is ProvisionSupervisor for the host h describes.
-func (h supervisorHost) provisionSupervisor(townRoot string, exitTimeout time.Duration) (string, error) {
-	data, err := supervisorData(townRoot, exitTimeout)
+func (h supervisorHost) provisionSupervisor(townRoot string) (string, error) {
+	data, err := supervisorData(townRoot)
 	if err != nil {
 		return "", err
 	}
 
 	switch h.goos {
-	case "darwin":
-		return h.provisionLaunchd(data)
 	case "linux":
 		return provisionSystemd(data)
 	default:
@@ -230,7 +209,7 @@ func (h supervisorHost) provisionSupervisor(townRoot string, exitTimeout time.Du
 // provision paths and SupervisorFileContent go through it, so that a file
 // rewritten from the running binary is byte-for-byte the file a fresh
 // provision would write: "what is current" has to mean one thing.
-func supervisorData(townRoot string, exitTimeout time.Duration) (SupervisorData, error) {
+func supervisorData(townRoot string) (SupervisorData, error) {
 	gtPath, err := os.Executable()
 	if err != nil {
 		return SupervisorData{}, fmt.Errorf("finding gt executable: %w", err)
@@ -250,163 +229,49 @@ func supervisorData(townRoot string, exitTimeout time.Duration) (SupervisorData,
 	}
 
 	return SupervisorData{
-		GTPath:             gtPath,
-		TownRoot:           townRoot,
-		Env:                env,
-		ExitTimeOutSeconds: int(exitTimeout / time.Second),
+		GTPath:   gtPath,
+		TownRoot: townRoot,
+		Env:      env,
 	}, nil
 }
 
 // SupervisorFileContent renders the supervisor file this binary would install
-// for the town at townRoot under the supervisor of the given kind
-// ("launchd"/"systemd"), from the same data ProvisionSupervisor renders with.
-// ok is false for a kind this build does not write — including the empty kind
-// a host with no supported supervisor reports.
+// for the town at townRoot under the supervisor of the given kind ("systemd"),
+// from the same data ProvisionSupervisor renders with. ok is false for a kind
+// this build does not write — the launchd kind, which gt no longer writes, and
+// the empty kind a host with no supported supervisor reports.
 //
-// It answers "what does this binary think the file should say", which
-// SupervisorFileRepair needs to ask, and which a caller can use to see the
-// difference a provision would make without installing anything.
-func SupervisorFileContent(kind, townRoot string, exitTimeout time.Duration) (content string, ok bool, err error) {
-	switch kind {
-	case "launchd", "systemd":
-	default:
+// It answers "what does this binary think the file should say", which a caller
+// can use to see the difference a provision would make without installing
+// anything.
+func SupervisorFileContent(kind, townRoot string) (content string, ok bool, err error) {
+	if kind != "systemd" {
 		return "", false, nil
 	}
 
-	data, err := supervisorData(townRoot, exitTimeout)
+	data, err := supervisorData(townRoot)
 	if err != nil {
 		return "", false, err
 	}
 
-	if kind == "launchd" {
-		content, err = renderLaunchdPlist(data)
-	} else {
-		content, err = renderSystemdUnit(data)
-	}
+	content, err = renderSystemdUnit(data)
 	if err != nil {
 		return "", false, err
 	}
 	return content, true, nil
 }
 
-// SupervisorFileRepair returns the content that should replace the supervisor
-// file at path, and whether there is a repair to make at all (gt-x872).
+// SupervisorFileRepair reports whether the supervisor file at path needs a
+// repair, and what it should say (gt-x872).
 //
-// The file at path describes a job run out of townRoot; the caller has already
-// established that it is this town's. A repair is a rewrite of the values
-// in it that are compiled into the binary that wrote it — launchd's
-// ExitTimeOut, which comes from daemon.ShutdownBudget, and its ProcessType,
-// which comes from the template (gt-2ycne). It goes stale on a
-// binary upgrade and nowhere else, and it is not cosmetic: a job whose
-// ExitTimeOut is shorter than the daemon's own graceful shutdown gets its
-// daemon SIGKILLed mid-shutdown on every restart, which for the Dolt SQL
-// server step in particular risks its journal. That value has to follow the
-// binary, so a file written by an older one has to be repairable without
-// re-provisioning the whole job.
-//
-// Anything else that differs means the file is not this binary's rendering of
-// this town — a different gt path, a different town, a job someone wrote by
-// hand, an env file that changed since it was written — and none of it is
-// repaired here. Repointing a launchd job at whichever gt happens to be
-// running is a reconfiguration, not a repair; `gt daemon enable-supervisor`
-// is the explicit way to re-provision a file from scratch.
-//
-// On Linux this is always ("", false, nil): the systemd unit renders no value
-// from the binary's own constants, so there is nothing for a binary upgrade to
-// leave behind.
-//
-// It only renders. Installing the content and making the running job read it
-// are the caller's, and separate: a service manager caches a job definition
-// when it loads it, so a rewritten file reaches a loaded job only through an
-// unload and a load.
-func SupervisorFileRepair(path, kind, townRoot string, exitTimeout time.Duration) (content string, repair bool, err error) {
-	if kind != "launchd" {
-		return "", false, nil
-	}
-	isFor, err := SupervisorFileIsFor(path, townRoot)
-	if err != nil || !isFor {
-		return "", false, err
-	}
-
-	installed, err := os.ReadFile(path) //nolint:gosec // fixed per-user path from this package
-	if err != nil {
-		return "", false, fmt.Errorf("reading supervisor file %s: %w", path, err)
-	}
-
-	current, ok, err := SupervisorFileContent(kind, townRoot, exitTimeout)
-	if err != nil || !ok {
-		return "", false, err
-	}
-
-	if string(installed) == current {
-		return "", false, nil
-	}
-	if withExitTimeOutStripped(string(installed)) != withExitTimeOutStripped(current) {
-		return "", false, nil
-	}
-	return current, true, nil
-}
-
-// binaryOwnedKeys are the launchd keys whose values come from the binary that
-// renders the plist rather than from the town: ExitTimeOut from
-// daemon.ShutdownBudget (gt-x872) and ProcessType from the template itself
-// (gt-2ycne: ProcessType Background made the daemon and every child it spawns
-// darwinbg — efficiency cores, throttled CPU and I/O — so landing gates ran
-// 5-10x slower than the same gate from a shell; the template now says
-// Standard). A file that differs from the current rendering only in these
-// keys is this binary's file, written by an older build, and is repaired.
-var binaryOwnedKeys = []string{"<key>ExitTimeOut</key>", "<key>ProcessType</key>"}
-
-// withExitTimeOutStripped removes the binary-owned keys (binaryOwnedKeys) and
-// their values from a rendered plist, so that two plists differing only in
-// those values compare equal. Matching is line-based against what
-// renderLaunchdPlist produces — the key on its own line, the value on the
-// next — so a file formatted some other way (the key and value on one line)
-// keeps its difference and is not treated as a repairable one.
-func withExitTimeOutStripped(plist string) string {
-	lines := strings.Split(plist, "\n")
-	kept := make([]string, 0, len(lines))
-	for i := 0; i < len(lines); i++ {
-		if slices.Contains(binaryOwnedKeys, strings.TrimSpace(lines[i])) {
-			i++ // the value line goes with the key
-			continue
-		}
-		kept = append(kept, lines[i])
-	}
-	return strings.Join(kept, "\n")
-}
-
-// renderLaunchdPlist renders the launchd plist template for the given data.
-func renderLaunchdPlist(data SupervisorData) (string, error) {
-	templateContent, err := supervisorFS.ReadFile("launchd/com.gastown.daemon.plist")
-	if err != nil {
-		return "", fmt.Errorf("reading launchd template: %w", err)
-	}
-
-	tmpl, err := template.New("launchd").Funcs(template.FuncMap{"xml": xmlText}).Parse(string(templateContent))
-	if err != nil {
-		return "", fmt.Errorf("parsing launchd template: %w", err)
-	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("rendering launchd template: %w", err)
-	}
-
-	return buf.String(), nil
-}
-
-// xmlText escapes s for XML character data. The template writes paths straight
-// into the plist, and a town whose path holds & or < would otherwise render a
-// file launchd cannot parse — or, with a path crafted as </string><key>...,
-// one that carries keys nobody wrote. Every value the template interpolates
-// goes through this.
-func xmlText(s string) string {
-	var buf strings.Builder
-	// EscapeText only reports its writer's failure, and strings.Builder's
-	// Write never fails, so this escape has no error to carry back.
-	_ = xml.EscapeText(&buf, []byte(s))
-	return buf.String()
+// No repair exists any longer. The launchd plist was the only supervisor file
+// with a value compiled into the binary that wrote it, and gt no longer writes
+// it; the systemd unit renders nothing from the binary's own constants. So for
+// every kind and path the answer is ("", false, nil), the same answer the
+// launchd and unknown kinds always got. The signature stays so that callers
+// asking about a repair keep one answer; it is not a reason to rewrite a file.
+func SupervisorFileRepair(path, kind, townRoot string) (content string, repair bool, err error) {
+	return "", false, nil
 }
 
 // renderSystemdUnit renders the systemd user unit template for the given data.
@@ -427,20 +292,6 @@ func renderSystemdUnit(data SupervisorData) (string, error) {
 	}
 
 	return buf.String(), nil
-}
-
-// LaunchdPlistPath returns the path where the launchd plist is (or would be)
-// installed on macOS.
-func LaunchdPlistPath() (string, error) {
-	return realHost.launchdPlistPath()
-}
-
-func (h supervisorHost) launchdPlistPath() (string, error) {
-	homeDir, err := h.homeDir()
-	if err != nil {
-		return "", fmt.Errorf("finding home directory: %w", err)
-	}
-	return filepath.Join(homeDir, "Library", "LaunchAgents", launchdPlistName), nil
 }
 
 // SystemdUnitPath returns the path where the systemd user unit is (or would
@@ -480,32 +331,6 @@ func (h supervisorHost) status() string {
 		return kind
 	}
 	return "none"
-}
-
-// provisionLaunchd writes the launchd plist on macOS. launchd loads a
-// LaunchAgent from the user's LaunchAgents directory at login; gt writes the
-// file and does not load it.
-func (h supervisorHost) provisionLaunchd(data SupervisorData) (string, error) {
-	plistPath, err := h.launchdPlistPath()
-	if err != nil {
-		return "", err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
-		return "", fmt.Errorf("creating LaunchAgents directory: %w", err)
-	}
-
-	content, err := renderLaunchdPlist(data)
-	if err != nil {
-		return "", err
-	}
-
-	// Write plist file
-	if err := os.WriteFile(plistPath, []byte(content), 0644); err != nil {
-		return "", fmt.Errorf("writing plist file: %w", err)
-	}
-
-	return "Wrote launchd plist " + plistPath + "; launchd loads it at the next login", nil
 }
 
 // provisionSystemd creates and enables a systemd user unit on Linux.

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -46,7 +45,7 @@ func TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld(t *testing.T) {
 	defer func() { _ = lock.Unlock() }()
 
 	provisioned := false
-	provision := func(string, time.Duration) (string, error) { provisioned = true; return "", nil }
+	provision := func(string) (string, error) { provisioned = true; return "", nil }
 	if err := enableSupervisor(townRoot, provision, func(string) error { return nil }); err == nil {
 		t.Fatal("enableSupervisor() error = nil, want error while daemon.lock is held")
 	} else if !strings.Contains(err.Error(), "stop the running daemon first: gt daemon stop") {
