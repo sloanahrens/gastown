@@ -304,7 +304,7 @@ func dangerousGroupMarker(command string) bool {
 }
 
 // dangerousCommandWords splits command at the runes that separate a keyword
-// from its neighbours: blanks, the shell operators, and the group and quoting
+// from its neighbors: blanks, the shell operators, and the group and quoting
 // punctuation a keyword can touch, so "(while" and "done)" are seen as the
 // keywords they are.
 func dangerousCommandWords(command string) []string {
