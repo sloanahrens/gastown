@@ -1754,6 +1754,36 @@ func TestSpecDispatchStoryPointsBlockRoundTrips(t *testing.T) {
 	}
 }
 
+// story_points.shadow decodes to the accessor the tick reads: on when set, and
+// off when the key is absent or the block is nil (gt-5d9k2f.14).
+func TestSpecDispatchStoryPointsShadowDecodes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"set on", `{"patrols":{"spec_dispatch":{"story_points":{"shadow":true}}}}`, true},
+		{"absent", `{"patrols":{"spec_dispatch":{"story_points":{"embedder_url":"http://x"}}}}`, false},
+		{"no block", `{"patrols":{"spec_dispatch":{"enabled":true}}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tc.body), &cfg); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := cfg.Patrols.SpecDispatch.StoryPointsShadow(); got != tc.want {
+				t.Errorf("StoryPointsShadow() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	var nilBlock *SpecDispatchConfig
+	if nilBlock.StoryPointsShadow() {
+		t.Error("nil spec_dispatch block reads shadow on")
+	}
+}
+
 // The jev_scorecard patrol's block decodes its four keys, and a value the
 // patrol cannot act on is refused at decode rather than read as a default.
 func TestJevScorecardConfigDecodes(t *testing.T) {

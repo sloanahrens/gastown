@@ -165,42 +165,54 @@ func runSpecEstimateWired(cmd *cobra.Command, args []string, findTown func() (st
 // runSpecEstimateOn is runSpecEstimate with the store and the runner given, so
 // a test drives every branch through fakes.
 func runSpecEstimateOn(out io.Writer, beadID string, store specEstimateStore, opts specEstimateOpts, run specEstimateRunner) error {
+	outcome, err := specEstimateBead(context.Background(), beadID, store, opts, run)
+	if err != nil {
+		return err
+	}
+	return writeSpecEstimate(out, outcome, opts.JSON)
+}
+
+// specEstimateBead makes one bead's estimate and writes it, as runSpecEstimateOn
+// does, under ctx. The estimate itself runs under specEstimateTimeout inside
+// ctx, so a caller that gives up early (the dispatcher's shadow estimate)
+// cancels it.
+func specEstimateBead(ctx context.Context, beadID string, store specEstimateStore, opts specEstimateOpts, run specEstimateRunner) (specEstimateOutcome, error) {
 	issue, err := store.Show(beadID)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", beadID, err)
+		return specEstimateOutcome{}, fmt.Errorf("reading %s: %w", beadID, err)
 	}
 	comments, err := store.Comments(beadID)
 	if err != nil {
-		return fmt.Errorf("reading the comments on %s: %w", beadID, err)
+		return specEstimateOutcome{}, fmt.Errorf("reading the comments on %s: %w", beadID, err)
 	}
 	hash := estimate.SectionHash(issue)
 	if !opts.Force && latestEstimateHash(comments) == hash {
-		return writeSpecEstimate(out, specEstimateOutcome{ID: beadID, Action: "unchanged", Hash: hash}, opts.JSON)
+		return specEstimateOutcome{ID: beadID, Action: "unchanged", Hash: hash}, nil
 	}
 
 	deps, err := run.Deps()
 	if err != nil {
-		return fmt.Errorf("estimating %s: %w", beadID, err)
+		return specEstimateOutcome{}, fmt.Errorf("estimating %s: %w", beadID, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), specEstimateTimeout)
+	estCtx, cancel := context.WithTimeout(ctx, specEstimateTimeout)
 	defer cancel()
-	result, estErr := run.Estimate(ctx, deps, issue)
+	result, estErr := run.Estimate(estCtx, deps, issue)
 
 	outcome := planSpecEstimate(beadID, hash, issue.Labels, result, estErr)
 	outcome.DryRun = opts.DryRun
 	if opts.DryRun {
-		return writeSpecEstimate(out, outcome, opts.JSON)
+		return outcome, nil
 	}
 	// The labels go first. A failed label write leaves the bead with no note
 	// for this hash, so the next run estimates it again. A note written before
 	// the labels would make the bead look estimated when its labels are not.
 	if err := store.Update(beadID, beads.UpdateOptions{AddLabels: outcome.AddLabels, RemoveLabels: outcome.RemoveLabels}); err != nil {
-		return fmt.Errorf("labeling %s: %w", beadID, err)
+		return specEstimateOutcome{}, fmt.Errorf("labeling %s: %w", beadID, err)
 	}
 	if err := store.AddComment(beadID, outcome.Comment); err != nil {
-		return fmt.Errorf("commenting on %s: %w", beadID, err)
+		return specEstimateOutcome{}, fmt.Errorf("commenting on %s: %w", beadID, err)
 	}
-	return writeSpecEstimate(out, outcome, opts.JSON)
+	return outcome, nil
 }
 
 // planSpecEstimate decides what one run writes: the labels to add and remove,
