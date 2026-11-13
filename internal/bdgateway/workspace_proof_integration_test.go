@@ -4,9 +4,32 @@
 // through a workspace tree laid out the way the gateway's PUT /v1/workspace
 // will push one, with the redirect and the Dolt endpoint rewritten into that
 // tree. It skips unless BD_PROOF_BEAD names a bead and the Dolt endpoint is
-// set, so a sandbox starts no bd and reaches no network; the env-branch and
-// fake-bd tests start child copies of this test binary, and the fake-bd ones
-// exec a symlink to it in place of bd.
+// set, so a sandbox starts no bd and reaches no network; the env and bd-result
+// tests start child copies of this test binary and run it against commands
+// standing in for bd.
+//
+// Running it. The proof needs a real bd and a Dolt endpoint that holds a bead;
+// elsewhere it skips, unless BD_PROOF_REQUIRE says a missing prerequisite must
+// fail instead. The overseer sets:
+//
+//	BD_PROOF_BEAD                a bead id in the endpoint's database, e.g. gt-p02maf
+//	BEADS_DOLT_SERVER_HOST       the Dolt endpoint bd reads
+//	BEADS_DOLT_SERVER_PORT       the endpoint's port
+//	BD_REAL_BIN                  optional: the bd to run; PATH's bd otherwise
+//	BD_PROOF_PROJECT_ID          optional: a uuid written into metadata.json, which
+//	                             exercises bd's project-id check
+//	BD_PROOF_REQUIRE=1           a missing prerequisite fails instead of skipping
+//
+// and runs, from the repository root:
+//
+//	go vet -tags integration ./internal/bdgateway
+//	BD_PROOF_BEAD=gt-p02maf BEADS_DOLT_SERVER_HOST=<host> \
+//	  BEADS_DOLT_SERVER_PORT=<port> BD_PROOF_REQUIRE=1 \
+//	  go test -tags integration ./internal/bdgateway -count=1 -v
+//
+// The integration run takes no -run filter — the build tag selects the tier and
+// that tags every test in this package (docs/testing.md) — so a filter that
+// matches no name cannot turn the proof into a vacuous pass.
 
 package bdgateway
 
@@ -40,78 +63,12 @@ const (
 	proofRequireEnv  = "BD_PROOF_REQUIRE"
 )
 
-// The names the fake bd symlinks carry, one per behaviour. The basename of the
-// symlink the proof execs is what selects the behaviour, because the proof runs
-// bd with bd's argv and no test flag.
-const (
-	fakeBdOK    = "bd-fake-ok"
-	fakeBdWrong = "bd-fake-wrong"
-	fakeBdFail  = "bd-fake-fail"
-)
-
 // The reasons a sandbox run skips instead of failing.
 const (
 	skipNoBead     = proofBeadEnv + " is unset: the proof has no bead to read"
 	skipNoEndpoint = proofDoltHostEnv + " and " + proofDoltPortEnv + " must both name the Dolt endpoint"
 	skipNoBd       = "bd is not on PATH and " + proofBdBinEnv + " is unset"
 )
-
-// TestMain lets the proof run against a fake bd: when this binary was exec'd
-// through a symlink whose basename is one of the fakeBd* names, it prints that
-// behaviour and exits instead of running the tests. The check runs before
-// m.Run parses flags, because the proof execs bd with bd's argv, not test flags.
-func TestMain(m *testing.M) {
-	if mode, ok := fakeBdMode(os.Args[0]); ok {
-		os.Exit(fakeBd(mode))
-	}
-	os.Exit(m.Run())
-}
-
-// fakeBdMode reports whether arg0 is the fake bd symlink and which behaviour
-// its name selects.
-func fakeBdMode(arg0 string) (string, bool) {
-	base := filepath.Base(arg0)
-	if !strings.HasPrefix(base, "bd-fake-") {
-		return "", false
-	}
-	return base, true
-}
-
-// fakeBd is the fake bd process: it answers `bd show <bead>` for each
-// symlink's behaviour.
-func fakeBd(mode string) int {
-	if len(os.Args) < 3 {
-		fmt.Fprint(os.Stderr, "fake bd: want show <bead>\n")
-		return 2
-	}
-	switch mode {
-	case fakeBdOK:
-		fmt.Printf("id: %s\nstatus: open\n", os.Args[len(os.Args)-1])
-		return 0
-	case fakeBdWrong:
-		fmt.Print("no beads found\n")
-		return 0
-	case fakeBdFail:
-		// bd can name the bead and still fail; the exit status is the only sign.
-		fmt.Printf("id: %s\n", os.Args[len(os.Args)-1])
-		fmt.Fprint(os.Stderr, "bd: the Dolt endpoint refused the workspace\n")
-		return 1
-	default:
-		fmt.Fprintf(os.Stderr, "unknown fake bd mode %q\n", mode)
-		return 2
-	}
-}
-
-// fakeBdLink returns a symlink to this test binary named for the behaviour the
-// fake bd must show.
-func fakeBdLink(t *testing.T, dir, name string) string {
-	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.Symlink(os.Args[0], path); err != nil {
-		t.Fatalf("linking the test binary as %s: %v", name, err)
-	}
-	return path
-}
 
 // proofSetup is what the proof resolved from the environment.
 type proofSetup struct {
@@ -390,29 +347,34 @@ func TestIntegrationWorkspaceProofEnvBranches(t *testing.T) {
 }
 
 // TestIntegrationWorkspaceProofBdResult drives the proof's verdict on what bd
-// returns: a bead in the output passes, a bd that exits nonzero fails, and a
-// bd whose output omits the bead id fails. The fake bd is this test binary
-// reached through a symlink, so the proof runs its real exec and assertions.
+// returns: a command naming the bead passes, one exiting nonzero fails, and one
+// exiting 0 without the bead id fails. Coreutils commands stand in for bd, so
+// the proof runs its real exec and assertions without a Dolt endpoint.
 func TestIntegrationWorkspaceProofBdResult(t *testing.T) {
-	binDir := t.TempDir()
 	cases := []struct {
 		name     string
-		fake     string
+		command  string // the command the proof runs in bd's place
 		wantFail bool
 		wantText string
 	}{
-		{name: "bd names the bead", fake: fakeBdOK, wantText: "--- PASS: TestIntegrationWorkspaceProof"},
-		{name: "bd exits nonzero", fake: fakeBdFail, wantFail: true, wantText: "against the gateway workspace failed"},
-		{name: "bd omits the bead id", fake: fakeBdWrong, wantFail: true, wantText: "did not name the bead"},
+		{name: "bd names the bead", command: "echo", wantText: "--- PASS: TestIntegrationWorkspaceProof"},
+		// ls fails on the two path arguments and names the bead in its error, so
+		// only the exit-status check can reject this run.
+		{name: "bd exits nonzero", command: "ls", wantFail: true, wantText: "against the gateway workspace failed"},
+		{name: "bd omits the bead id", command: "true", wantFail: true, wantText: "did not name the bead"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			bin, lookErr := exec.LookPath(tc.command)
+			if lookErr != nil {
+				t.Fatalf("%s is not on PATH, so it cannot stand in for bd: %v", tc.command, lookErr)
+			}
 			out, err := runProofChild(t, []string{
 				proofRequireEnv + "=1",
 				proofBeadEnv + "=gt-probe-1",
 				proofDoltHostEnv + "=dolt.gateway.test",
 				proofDoltPortEnv + "=3307",
-				proofBdBinEnv + "=" + fakeBdLink(t, binDir, tc.fake),
+				proofBdBinEnv + "=" + bin,
 				"PATH=/nonexistent",
 			})
 			if tc.wantFail {
