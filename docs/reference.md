@@ -437,8 +437,8 @@ gate, the seat table and how to turn the ticker off.
 ### Story points
 
 A story point is a bead's expected polecat time on a Fibonacci scale. `gt spec
-estimate` writes an estimate before dispatch, and the landing worker writes the
-measure after the bead lands. The scale is in `internal/storypoints/points.go`.
+estimate` writes the estimate, and the landing worker writes the measure after
+the bead lands. The scale is in `internal/storypoints/points.go`.
 
 **Scale.** A time in minutes takes the lowest point whose upper edge it does not
 exceed; an edge belongs to the lower point. The edges are 1 up to 1.5 minutes,
@@ -448,7 +448,7 @@ NaN has no point (`ErrNoMinutes`) and is never read as 1.
 
 **Labels.** Four labels carry a bead's points:
 
-- `sp:N` is the estimate. `gt spec estimate` writes it.
+- `sp:N` is the estimate. **Shadow mode** below says who writes it.
 - `sp-minutes:<n>` is the blended minutes behind `sp:N`, to one decimal place.
   It is written beside `sp:N`.
 - `sp-rung:<rung>` names the inputs that made the estimate: `all`, `shape-jev`,
@@ -497,6 +497,8 @@ A bead with no text has no estimate, and a canceled run has none either.
   Unset, the embedding input is skipped.
 - `embedder_model` is required with `embedder_url`. The checked-in weights were
   fitted on `qwen3-embedding:4b-q8_0`. A URL with no model refuses the run.
+- `shadow` turns on the estimate that runs before each sling. It is off by
+  default. **Shadow mode** below states what each setting does.
 
 **Weights.** The model is `internal/storypoints/weights.json`, embedded in the
 binary. It holds the shape model, the Jev probability-to-minutes table, and the
@@ -523,8 +525,15 @@ knots are the checked-in model's and are not refit, so recalibrate before
 adopting a proposed file. The command never writes `weights.json`; a proposed
 file is adopted by committing it.
 
-The spec dispatcher does not estimate a bead before it slings it. `gt spec
-estimate` is the only writer of `sp:`, `sp-rung:` and `sp-minutes:` today.
+**Shadow mode.** With `story_points.shadow` off, the default, nothing is
+estimated before a sling, and `gt spec estimate` is the only writer of `sp:`,
+`sp-rung:` and `sp-minutes:`. With it on, the spec dispatcher runs the same
+estimate on each bead it has decided to sling, after the last-moment re-read and
+before the sling, and writes the same labels and note. The decision and the seat
+do not change. An estimate that fails, or runs past 20 seconds, logs one line on
+the tick and the bead is slung as it would be without the setting. An estimate
+the timeout cancels may still write its `sp-rung:none` outcome after the sling
+has started.
 
 The landings pane's points velocity is a separate reading of polecat time; see
 [Story-point velocity](#story-point-velocity).
