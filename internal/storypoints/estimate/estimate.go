@@ -177,15 +177,23 @@ func Note(r Result) string {
 	for _, s := range r.Skipped {
 		fmt.Fprintf(&b, "skipped %s: %s\n", s.Input, oneLine(s.Reason))
 	}
+	b.WriteString(NeighborsLine(r) + "\n")
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// NeighborsLine is Note's nearest-beads sentence: the past beads hm ranked
+// closest, or why there are none. The split route quotes it when it holds a
+// bead for splitting, so a person sees the comparison without the whole note
+// (gt-5d9k2f.18).
+func NeighborsLine(r Result) string {
 	switch {
 	case r.NeighborsSkipped != "":
-		fmt.Fprintf(&b, "nearest beads unavailable: %s\n", r.NeighborsSkipped)
+		return "nearest beads unavailable: " + r.NeighborsSkipped
 	case len(r.Neighbors) == 0:
-		b.WriteString("nearest beads: none\n")
+		return "nearest beads: none"
 	default:
-		b.WriteString("nearest beads: " + neighborList(r.Neighbors) + "\n")
+		return "nearest beads: " + neighborList(r.Neighbors)
 	}
-	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // sectionKeys are the sections SectionHash covers, in the order it writes them.

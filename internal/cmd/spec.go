@@ -1793,10 +1793,16 @@ type specDispatchEnv struct {
 	// sling (story_points.shadow, gt-5d9k2f.14). Off by default; a failed or
 	// timed-out estimate logs one line and the sling goes ahead.
 	StoryPointShadow bool
-	// StoryPointEstimate is the estimate the shadow runs for a bead, under a
+	// StoryPointSplitOver is the split route's trigger in minutes
+	// (story_points.split_over_minutes, gt-5d9k2f.18). Zero is off. When set, a
+	// bead at or over it on a rung of at least two inputs is labeled for
+	// splitting instead of slung.
+	StoryPointSplitOver float64
+	// StoryPointEstimate is the estimate the tick runs for a bead, under a
 	// context the tick cancels on timeout. Production is specStoryPointEstimate.
-	StoryPointEstimate func(ctx context.Context, beadID string) error
-	// After is the timer the shadow estimate's timeout waits on; nil is
+	// The outcome carries the numbers the split route reads.
+	StoryPointEstimate func(ctx context.Context, beadID string) (specEstimateOutcome, error)
+	// After is the timer the story-point estimate's timeout waits on; nil is
 	// time.After. A test injects one that fires at once, so no wall clock is
 	// read.
 	After func(d time.Duration) <-chan time.Time
@@ -2408,13 +2414,19 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: %s", id, specStaleReason, why)})
 			continue
 		}
-		// The shadow estimate (gt-5d9k2f.14) runs on a bead the tick has
-		// decided to sling, after its last-moment re-read and before the sling.
-		// It changes nothing the sling reads: a failure or a timeout is one
-		// logged line, and the bead is slung as it would be without the setting.
-		if env.StoryPointShadow {
-			if line := specStoryPointShadow(env, id); line != "" {
-				report.Notices = append(report.Notices, line)
+		// The story-point step (gt-5d9k2f.14, gt-5d9k2f.18) runs on a bead the
+		// tick has decided to sling, after its last-moment re-read and before
+		// the sling. The shadow setting only observes; the split route reads the
+		// same estimate and holds a bead over its trigger. A failed or
+		// timed-out estimate is one logged line, and the bead is slung as it
+		// would be without the setting.
+		if env.StoryPointShadow || env.StoryPointSplitOver > 0 {
+			step := specStoryPointStep(env, id, latest)
+			report.Notices = append(report.Notices, step.Notices...)
+			report.Errors = append(report.Errors, step.Errors...)
+			if step.Hold != "" {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: step.Hold})
+				continue
 			}
 		}
 		// Collected now, slung below: the seat is taken on the budget at once
@@ -3377,14 +3389,16 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	return runSpecDispatchAtWith(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv), specDispatchDryRun)
 }
 
-// specWireStoryPointShadow fills the tick's shadow estimate fields from the
-// town's dispatch config in one call, so the setting's read has a test of its
-// own: the operator hold stops a tick before the candidate loop that uses the
-// fields, so a whole-tick test cannot reach them (gt-cgsivu).
-func specWireStoryPointShadow(env *specDispatchEnv, sd *config.SpecDispatchConfig, townRoot string) {
-	// The shadow estimate reads its setting from the same block as the other
-	// spec_dispatch knobs, and has no environment variable (gt-5d9k2f.14).
+// specWireStoryPoints fills the tick's story-point fields from the town's
+// dispatch config in one call, so the settings' read has a test of its own: the
+// operator hold stops a tick before the candidate loop that uses the fields, so
+// a whole-tick test cannot reach them (gt-cgsivu).
+func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, townRoot string) {
+	// The story-point settings read from the same block as the other
+	// spec_dispatch knobs, and have no environment variable (gt-5d9k2f.14,
+	// gt-5d9k2f.18).
 	env.StoryPointShadow = sd.StoryPointsShadow()
+	env.StoryPointSplitOver = sd.StoryPointsSplitOver()
 	env.StoryPointEstimate = specStoryPointEstimate(townRoot)
 }
 
@@ -3596,7 +3610,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// candidate's own row already read it (gt-hgt9j.12).
 		BlockerRead: specBlockerRead(reads, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }),
 	}
-	specWireStoryPointShadow(&env, sd, townRoot)
+	specWireStoryPoints(&env, sd, townRoot)
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)
 	annotations.save()

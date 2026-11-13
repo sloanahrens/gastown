@@ -544,6 +544,7 @@ func TestDispatchableWaitingIgnoresReasonsSpecDispatchWrites(t *testing.T) {
 		"rig hold":                   specdispatch.SkipRigHold + " paused",
 		"per-tick limit":             specdispatch.SkipPerTickLimit + " 2 reached",
 		"unresolved blocker":         specdispatch.SkipBlocked + "gt-aaaaa (deferred)",
+		"split route":                specdispatch.SkipSplitOver + "estimated 20.0 min at or over the 15-minute trigger",
 		"not started":                specSlingNotStartedReason + "one is already running for it",
 	} {
 		if dispatchableSkip(reason) {

@@ -34,4 +34,10 @@ const (
 	// weighs, never a line the tick reports, so it does not wear SkipBlocked
 	// (gt-mz7v7).
 	SkipPeerBlocked = "peer blocked by "
+	// SkipSplitOver starts the reason a bead the story-point split route held
+	// is reported under: its estimate is at or over the trigger, and a person
+	// or bird has to cut it into smaller beads. The split label keeps it off
+	// the dispatcher's later ticks, so the line is for the tick that held it
+	// (gt-5d9k2f.18).
+	SkipSplitOver = "split: "
 )

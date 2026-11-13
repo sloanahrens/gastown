@@ -124,6 +124,10 @@ type specEstimateOutcome struct {
 	AddLabels    []string `json:"add_labels,omitempty"`
 	RemoveLabels []string `json:"remove_labels,omitempty"`
 	Comment      string   `json:"comment,omitempty"`
+	// Neighbors is the nearest-beads line of the estimate note the run wrote,
+	// or the one it found current. The split route quotes it. It is not part of
+	// --json: Comment is what this run wrote.
+	Neighbors string `json:"-"`
 }
 
 func runSpecEstimate(cmd *cobra.Command, args []string) error {
@@ -187,7 +191,13 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 	}
 	hash := estimate.SectionHash(issue)
 	if !opts.Force && latestEstimateHash(comments) == hash {
-		return specEstimateOutcome{ID: beadID, Action: "unchanged", Hash: hash}, nil
+		note := latestEstimateNote(comments)
+		outcome := specEstimateOutcome{ID: beadID, Action: "unchanged", Hash: hash, Neighbors: specEstimateNoteNeighbors(note)}
+		specEstimateFromLabels(&outcome, issue.Labels)
+		if outcome.Rung == "none" {
+			outcome.Reason = specEstimateNoteReason(note)
+		}
+		return outcome, nil
 	}
 
 	deps, err := run.Deps()
@@ -246,6 +256,7 @@ func planSpecEstimate(beadID, hash string, existing []string, r estimate.Result,
 		AddLabels:    add,
 		RemoveLabels: staleEstimateLabels(existing, add),
 		Comment:      estimate.Note(r),
+		Neighbors:    estimate.NeighborsLine(r),
 	}
 }
 
@@ -285,22 +296,83 @@ func staleEstimateLabels(existing, add []string) []string {
 	return stale
 }
 
-// latestEstimateHash is the hash in the note of the latest comment that begins
-// SP ESTIMATE v1, or "" when there is no such comment or it names no hash.
-// Comments are oldest first.
-func latestEstimateHash(comments []beads.Comment) string {
+// latestEstimateNote is the text of the latest comment that begins SP ESTIMATE
+// v1, trimmed, or "" when there is none. Comments are oldest first.
+func latestEstimateNote(comments []beads.Comment) string {
 	for i := len(comments) - 1; i >= 0; i-- {
 		text := strings.TrimSpace(comments[i].Text)
-		if !strings.HasPrefix(text, specEstimateNotePrefix) {
-			continue
+		if strings.HasPrefix(text, specEstimateNotePrefix) {
+			return text
 		}
-		first, _, _ := strings.Cut(text, "\n")
-		for _, field := range strings.Fields(first) {
-			if h, ok := strings.CutPrefix(field, "hash:"); ok {
-				return h
-			}
-		}
+	}
+	return ""
+}
+
+// latestEstimateHash is the hash in the note of the latest comment that begins
+// SP ESTIMATE v1, or "" when there is no such comment or it names no hash.
+func latestEstimateHash(comments []beads.Comment) string {
+	text := latestEstimateNote(comments)
+	if text == "" {
 		return ""
+	}
+	first, _, _ := strings.Cut(text, "\n")
+	for _, field := range strings.Fields(first) {
+		if h, ok := strings.CutPrefix(field, "hash:"); ok {
+			return h
+		}
+	}
+	return ""
+}
+
+// specEstimateFromLabels fills an outcome whose estimate already stood from the
+// labels the command wrote on an earlier run. A value the bead's labels disagree
+// on is left unset, so a caller reads the estimate as absent rather than
+// guessing between two.
+func specEstimateFromLabels(o *specEstimateOutcome, labels []string) {
+	if points, ok := storypoints.EstimateOf(labels); ok {
+		o.Points = points
+	}
+	rungs := map[string]bool{}
+	minutes := map[float64]bool{}
+	for _, l := range labels {
+		l = strings.TrimSpace(l)
+		if rung, ok := strings.CutPrefix(l, "sp-rung:"); ok {
+			rungs[rung] = true
+		}
+		if parsed, err := storypoints.ParseLabel(l); err == nil && parsed.Kind == storypoints.KindMinutes {
+			minutes[parsed.Minutes] = true
+		}
+	}
+	if len(rungs) == 1 {
+		for rung := range rungs {
+			o.Rung = rung
+		}
+	}
+	if len(minutes) == 1 {
+		for m := range minutes {
+			o.Minutes = m
+		}
+	}
+}
+
+// specEstimateNoteReason is the reason line of a note the command wrote for an
+// estimate it could not make, or "" when the note carries none.
+func specEstimateNoteReason(note string) string {
+	for _, line := range strings.Split(note, "\n") {
+		if reason, ok := strings.CutPrefix(line, "no estimate: "); ok {
+			return reason
+		}
+	}
+	return ""
+}
+
+// specEstimateNoteNeighbors is the nearest-beads sentence of an estimate note,
+// or "" when the note has none.
+func specEstimateNoteNeighbors(note string) string {
+	for _, line := range strings.Split(note, "\n") {
+		if strings.HasPrefix(line, "nearest beads:") || strings.HasPrefix(line, "nearest beads unavailable:") {
+			return line
+		}
 	}
 	return ""
 }
