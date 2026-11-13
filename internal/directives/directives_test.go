@@ -256,3 +256,42 @@ func TestPolecatDirectiveChecklistPointsAtRule17(t *testing.T) {
 		}
 	})
 }
+
+// TestPolecatDirectiveLocalRoundSection pins gt-k51hb1: the "Local review round
+// before gt done" section states when to run the preview, what blocks a submit
+// and what a skipped gate prints, and it points at docs/design/local-round.md
+// for the reply forms instead of restating syntax that page owns.
+func TestPolecatDirectiveLocalRoundSection(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	const heading = "\n## Local review round before gt done\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("polecat.md has no \"Local review round before gt done\" section")
+	}
+	section := text[start+len(heading):]
+	for _, want := range []struct {
+		name   string
+		phrase string
+	}{
+		{"when to run the preview", "After `make presubmit` and before `gt done`, run `gt review-preview`"},
+		{"the blocking rule", "`gt done` refuses while the last round has a major or critical finding with no reply"},
+		{"the skipped gate", "local-round gate skipped:"},
+		{"the source-of-truth pointer", "docs/design/local-round.md"},
+	} {
+		t.Run(want.name, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(section, want.phrase) {
+				t.Errorf("the local review round section does not state %q (%q)", want.name, want.phrase)
+			}
+		})
+	}
+	t.Run("points at the design page instead of restating the reply syntax", func(t *testing.T) {
+		t.Parallel()
+		for _, copy := range []string{"gt review-preview reply <id>", "--fixed", "--disputed"} {
+			if strings.Contains(section, copy) {
+				t.Errorf("the local review round section restates the reply syntax docs/design/local-round.md owns: %q", copy)
+			}
+		}
+	})
+}
