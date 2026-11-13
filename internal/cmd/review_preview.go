@@ -217,6 +217,16 @@ func ensureOriginHead(head string, remoteTip func() (string, error), push func()
 	return push()
 }
 
+// reviewPreviewNotes returns the notes of iss, the bead Show read for bead. A
+// Show that returns no issue is an error, never an empty notes list: an empty
+// list would look like a bead no round has answered.
+func reviewPreviewNotes(bead string, iss *beads.Issue) (string, error) {
+	if iss == nil {
+		return "", fmt.Errorf("bead %s not found", bead)
+	}
+	return iss.Notes, nil
+}
+
 // reviewPreviewBeadFromBranch is the work bead a polecat branch names. ok is
 // false for a branch that names none.
 func reviewPreviewBeadFromBranch(branch string) (string, bool) {
@@ -266,10 +276,7 @@ func runReviewPreview(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return "", err
 		}
-		if iss == nil {
-			return "", fmt.Errorf("bead %s not found", bead)
-		}
-		return iss.Notes, nil
+		return reviewPreviewNotes(bead, iss)
 	}
 	p.appendNote = func(note string) error { return client.AppendNotes(bead, note) }
 	return p.run()

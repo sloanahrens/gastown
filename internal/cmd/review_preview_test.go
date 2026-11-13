@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -323,6 +324,21 @@ func TestReviewPreviewEnsureOriginHead(t *testing.T) {
 				t.Fatalf("pushed = %v, want %v", pushed, c.wantPush)
 			}
 		})
+	}
+}
+
+func TestReviewPreviewNotesOfShownBead(t *testing.T) {
+	t.Parallel()
+
+	if _, err := reviewPreviewNotes("gt-jx66mp", nil); err == nil {
+		t.Fatal("reviewPreviewNotes(nil issue) = nil error, want an error: a missing bead is not an empty notes list")
+	}
+	notes, err := reviewPreviewNotes("gt-jx66mp", &beads.Issue{ID: "gt-jx66mp", Notes: "LOCAL ROUND REQUEST head=" + previewHead})
+	if err != nil {
+		t.Fatalf("reviewPreviewNotes() error = %v, want nil", err)
+	}
+	if notes != previewRequest {
+		t.Fatalf("reviewPreviewNotes() = %q, want the bead's notes %q", notes, previewRequest)
 	}
 }
 
