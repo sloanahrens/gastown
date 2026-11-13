@@ -168,3 +168,50 @@ func TestScanFileArgsLeavesOtherCallsAlone(t *testing.T) {
 		})
 	}
 }
+
+// TestScanFileArgsNeverReadsAValueAsAShorthandGroup: a flag's value is text, not
+// a flag. Bead text starting with "- " (a checkbox list, a bullet) or with "-f"
+// after a text flag passes through unchanged, while a real group that holds the
+// file letter after the first, "-xf", is still refused. The "- [ ] ..." value
+// made `bd create --acceptance "- [ ] ..."` fail through the wrapper with
+// "groups shorthands with the file flag -f" (gt-qq5kv4 watch hour).
+func TestScanFileArgsNeverReadsAValueAsAShorthandGroup(t *testing.T) {
+	t.Parallel()
+	const boxes = "- [ ] `go test ./x -run 'T' -count=1` passes: it is fine\n- [ ] second -f box"
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"create --acceptance with checkboxes", []string{"create", "--title", "t", "--acceptance", boxes}},
+		{"create --acceptance with an f before any =", []string{"create", "--title", "t", "--acceptance", "- [ ] `go test ./cmd/gt-wrap -run 'TestConfigNativeAccepts' -count=1` passes"}},
+		{"create --acceptance=", []string{"create", "--title", "t", "--acceptance=" + boxes}},
+		{"update --acceptance", []string{"update", "gt-x", "--acceptance", boxes}},
+		{"create --description bullet", []string{"create", "--description", "- a"}},
+		{"create --description with -f and a space", []string{"create", "--description", "-f x"}},
+		{"create --description -fx", []string{"create", "--description", "-fx"}},
+		{"create --title -fdone", []string{"create", "--title", "-fdone"}},
+		{"create --design -foo", []string{"create", "--design", "-foo"}},
+		{"update --notes -foo", []string{"update", "gt-x", "--notes", "-foo"}},
+		{"comments add positional bullet", []string{"comments", "add", "gt-x", "- a note with f"}},
+		{"create short -d bullet", []string{"create", "-d", "- a thing"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, file, err := ScanFileArgs("bd", tc.args)
+			if err != nil || file != nil || !slices.Equal(got, tc.args) {
+				t.Fatalf("ScanFileArgs(%q) = %q, %v, %v; want the call unchanged, no file, no error", tc.args, got, file, err)
+			}
+		})
+	}
+
+	for _, args := range [][]string{
+		{"create", "--title", "t", "-xf", "notes.txt"},
+		{"comments", "add", "gt-x", "-xf", "n.txt"},
+		{"comments", "add", "gt-x", "-xfn.txt"},
+		{"create", "--acceptance", boxes, "-xf", "notes.txt"},
+	} {
+		if _, _, err := ScanFileArgs("bd", args); err == nil || !strings.Contains(err.Error(), "groups shorthands with the file flag -f") {
+			t.Errorf("ScanFileArgs(%q) = %v, want the grouped-shorthand refusal", args, err)
+		}
+	}
+}
