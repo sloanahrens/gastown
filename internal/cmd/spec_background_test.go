@@ -10,8 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -285,6 +289,141 @@ func TestBackgroundSlingFailureLabelsTheBeadLikeAForegroundOne(t *testing.T) {
 	}
 	if !slices.Equal(bg.notes["gt-a"], fg.notes["gt-a"]) || len(bg.notes["gt-a"]) != 1 {
 		t.Fatalf("notes: background %v, foreground %v, want the same one note", bg.notes["gt-a"], fg.notes["gt-a"])
+	}
+}
+
+// censusJobSeat is the sandboxed seat the job's census tests read. The gateway
+// listing below never names it, so a census read answers ErrSeatNotLive with no
+// probe and a bare probe is the only other answer a read can give.
+const censusJobSeat = "gt-gastown-p0"
+
+// censusJobTown is a town with one sandboxed seat and a gateway fake that lists
+// only another sandbox. The job's census is pointed at it.
+func censusJobTown(t *testing.T) (string, *sandbox.Fake) {
+	t.Helper()
+	town := t.TempDir()
+	session.ResetSandboxRoutingForTest(town)
+	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
+	if err := session.WriteSandboxRecord(town, session.SandboxRecord{
+		Session: censusJobSeat, Rig: "gastown", Polecat: "p0", Gateway: "gw",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gateway := &sandbox.Fake{Reply: map[string]string{
+		"list": `{"sandboxes":[{"name":"gt-gastown-other","phase":"Ready"}]}`,
+	}}
+	prev := specSlingCensusRunner
+	//testpolicy:allow no-global-swap — the job's openshell runner is a production seam; restored below
+	specSlingCensusRunner = gateway.Runner()
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the seam swapped above
+		specSlingCensusRunner = prev
+	})
+	return town, gateway
+}
+
+// censusJobEnv runs each job through step as its sling, with the fake town's
+// stubs for the label and note a failed sling writes.
+func censusJobEnv(t *testing.T, step func() error) {
+	t.Helper()
+	f := newFakeSpecTown()
+	env := f.env()
+	env.Sling = func(specCandidate, string, specdispatch.SeatChoice) (string, error) {
+		if err := step(); err != nil {
+			return "", err
+		}
+		return "p", nil
+	}
+	prev := specSlingEnvFor
+	//testpolicy:allow no-global-swap — the job's env builder is a production seam; restored below
+	specSlingEnvFor = func(string, string, *specSlingTraces) specDispatchEnv { return env }
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the seam swapped above
+		specSlingEnvFor = prev
+	})
+}
+
+// censusSeatRead answers the seat's has-session read and reports the probes it
+// made.
+func censusSeatRead() (probes int, err error) {
+	_, err = session.SandboxCensusRead(censusJobSeat, "has-session", nil, func() (bool, error) {
+		probes++
+		return true, nil
+	})
+	return probes, err
+}
+
+// runCensusJob runs one job through the command's own entry point.
+func runCensusJob(t *testing.T, town string) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runSpecSlingInTown(cmd, town, censusSlingJob, "", nil); err != nil {
+		t.Fatalf("runSpecSlingInTown: %v\n%s", err, out.String())
+	}
+}
+
+// A `gt spec sling` job runs under the per-sling sandbox census the foreground
+// sling starts (gt-4pg3uu): a read inside its sling step goes through the
+// census, and the census is gone when the job returns, including when the sling
+// fails.
+//
+//testpolicy:allow parallel — swaps the process-wide sandbox routing and the job's seams, which another test must not see mid-run
+func TestSpecSlingJobRunsUnderASandboxCensus(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		slingErr error
+	}{
+		{name: "the job succeeds"},
+		{name: "the job fails", slingErr: errors.New("spawn: tmux: boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			town, gateway := censusJobTown(t)
+			var probes int
+			var readErr error
+			censusJobEnv(t, func() error {
+				probes, readErr = censusSeatRead()
+				return tc.slingErr
+			})
+			runCensusJob(t, town)
+
+			if !errors.Is(readErr, session.ErrSeatNotLive) || probes != 0 {
+				t.Errorf("the read inside the job = %d probes, %v; want the census's not-live answer and no probe", probes, readErr)
+			}
+			listCalls := len(gateway.Calls())
+			probes, readErr = censusSeatRead()
+			if readErr != nil || probes != 1 {
+				t.Errorf("the read after the job = %d probes, %v; want the bare probe", probes, readErr)
+			}
+			if after := len(gateway.Calls()); after != listCalls {
+				t.Errorf("a read after the job listed the gateway (%d calls, was %d); the census must end with the job", after, listCalls)
+			}
+		})
+	}
+}
+
+// Each `gt spec sling` job starts its own census: the listing the first job
+// fetched is not seen by the second (gt-4pg3uu).
+//
+//testpolicy:allow parallel — swaps the process-wide sandbox routing and the job's seams, which another test must not see mid-run
+func TestSpecSlingJobsDoNotShareACensus(t *testing.T) {
+	town, gateway := censusJobTown(t)
+	underCensus := 0
+	censusJobEnv(t, func() error {
+		if probes, err := censusSeatRead(); errors.Is(err, session.ErrSeatNotLive) && probes == 0 {
+			underCensus++
+		}
+		return nil
+	})
+	runCensusJob(t, town)
+	runCensusJob(t, town)
+
+	if underCensus != 2 {
+		t.Errorf("reads under a census = %d, want one per job", underCensus)
+	}
+	if listCalls := len(gateway.Calls()); listCalls != 2 {
+		t.Errorf("gateway listings = %d, want one per job: the first job's listing must not be seen by the second", listCalls)
 	}
 }
 

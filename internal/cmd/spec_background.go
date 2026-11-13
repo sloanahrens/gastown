@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/imagedrift"
 	"github.com/steveyegge/gastown/internal/installpending"
+	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -71,6 +72,13 @@ var (
 	// ticks with, since the tick that planned the sling is the one that filled
 	// the cache (gt-nebs9).
 	specSlingDetailCacheOwner string
+	// specSlingCensusRunner is the openshell runner this job's sandbox census
+	// uses; nil runs the openshell binary, as a sling's census does. A test
+	// replaces it so the census answers without a gateway (gt-4pg3uu).
+	specSlingCensusRunner sandbox.Runner
+	// specSlingEnvFor builds the env one job runs with. A test replaces it to
+	// watch a job from inside its sling step without a town (gt-4pg3uu).
+	specSlingEnvFor = specSlingEnv
 )
 
 var specSlingCmd = &cobra.Command{
@@ -263,6 +271,12 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 // The census source is a parameter so a test hands rows without a bd subprocess
 // (gt-3y319).
 func runSpecSlingInTown(cmd *cobra.Command, townRoot, jobJSON, censusPath string, census func() []beads.CensusRow) error {
+	// One census of the sandbox seats for this job: the sling's seat decision
+	// and its admission read the seats through the router, and share one
+	// listing and one probe per seat (gt-4pg3uu). It ends with the job, so
+	// nothing of it carries into the next sling the daemon runs. The runner is
+	// nil in production, which runs the openshell binary.
+	defer session.BeginSandboxCensus(specSlingCensusRunner)()
 	job, err := parseSpecSlingJob(jobJSON)
 	if err != nil {
 		return err
@@ -287,7 +301,7 @@ func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
 		slingActor = specDispatchActor
 	}
 	traces := &specSlingTraces{}
-	env := specSlingEnv(townRoot, specSlingDetailCacheOwner, traces)
+	env := specSlingEnvFor(townRoot, specSlingDetailCacheOwner, traces)
 	report := runSpecSlingJob(env, job)
 	report.Notices = append(report.Notices, traces.notices()...)
 	return report
