@@ -307,6 +307,33 @@ const (
 	TrackerURLEnv = "TRACKER_URL"
 )
 
+// trackerd's own share, small and separate from the daemon's Values.CPU and
+// Values.Memory (gt-pau2nv). The daemon's figures are sized for the town's whole
+// workload, and a tracker pod that asks for them leaves the control node too
+// little room for a tier-sweep Job. trackerd serves HTTP over a Postgres pool
+// capped at 30 connections (tracker/cmd/trackerd/pool.go, defaultPoolMaxConns),
+// so its footprint is a Go runtime plus those connections: 250m and 256Mi carry
+// the service at rest, and 1 CPU and 1Gi bound a burst of queries with headroom
+// above the request. The request stays below the limit because a query burst is
+// short and the tracker has no measured share to reserve.
+const (
+	trackerCPURequest    = "250m"
+	trackerMemoryRequest = "256Mi"
+	trackerCPULimit      = "1"
+	trackerMemoryLimit   = "1Gi"
+)
+
+// trackerResourceRequests is trackerd's requested share; each call builds its own
+// map, so requests and limits never share one.
+func trackerResourceRequests() map[string]string {
+	return map[string]string{"cpu": trackerCPURequest, "memory": trackerMemoryRequest}
+}
+
+// trackerResourceLimits is trackerd's share at its ceiling.
+func trackerResourceLimits() map[string]string {
+	return map[string]string{"cpu": trackerCPULimit, "memory": trackerMemoryLimit}
+}
+
 // The tracker's nightly dump is a CronJob beside the tracker (gt-a6dyl2). Its pod
 // has an init container that copies trackerbackup out of the daemon image into an
 // emptyDir, and a main container from the postgres image, whose pg_dump is the one
@@ -1519,8 +1546,10 @@ func trackerDeployment(v Values, namespace string) Deployment {
 
 // trackerContainer runs trackerd on its loopback port. trackerd refuses any other
 // listen, so the relay is the only way another pod reaches it. Its resources are
-// the daemon's share: Values.CPU and Values.Memory are the only figures the
-// renderer has.
+// its own small pair (trackerResourceRequests and trackerResourceLimits), not the
+// daemon's Values.CPU and Values.Memory: those are sized for the town, and the
+// tracker pod that asked for them starved the tier sweep's capacity preflight
+// (gt-pau2nv).
 func trackerContainer(v Values) Container {
 	return Container{
 		Name:    TrackerName,
@@ -1535,8 +1564,8 @@ func trackerContainer(v Values) Container {
 			}},
 		}},
 		Resources: &ContainerResources{
-			Requests: resourceList(v),
-			Limits:   resourceList(v),
+			Requests: trackerResourceRequests(),
+			Limits:   trackerResourceLimits(),
 		},
 		ReadinessProbe: trackerProbe(20, 15, 10, 3),
 		// Liveness is no stricter than readiness: every number is at least the

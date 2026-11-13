@@ -619,7 +619,7 @@ func TestTrackerDaemonGolden(t *testing.T) {
 // TestTrackerDeployment walks the tracker pod: trackerd on loopback with the DSN
 // Secret's dsn key in TRACKER_DSN, the relay sidecar publishing TrackerPort from
 // TrackerListenPort, and the pod shape that reaches nothing else: no
-// ServiceAccount token, no volume, Recreate, requests equal to limits.
+// ServiceAccount token, no volume, Recreate, its own small resource pair.
 func TestTrackerDeployment(t *testing.T) {
 	t.Parallel()
 	v := trackerValues(t)
@@ -648,8 +648,8 @@ func TestTrackerDeployment(t *testing.T) {
 	if want := []string{"-listen", fmt.Sprintf("127.0.0.1:%d", TrackerListenPort)}; !slices.Equal(ctr.Args, want) {
 		t.Errorf("the trackerd args = %q, want %q: trackerd refuses a non-loopback listen", ctr.Args, want)
 	}
-	if ctr.Resources == nil || !maps.Equal(ctr.Resources.Requests, resourceList(v)) || !maps.Equal(ctr.Resources.Limits, resourceList(v)) {
-		t.Errorf("the trackerd resources = %+v, want requests and limits equal to %v", ctr.Resources, resourceList(v))
+	if ctr.Resources == nil || !maps.Equal(ctr.Resources.Requests, trackerResourceRequests()) || !maps.Equal(ctr.Resources.Limits, trackerResourceLimits()) {
+		t.Errorf("the trackerd resources = %+v, want requests %v and limits %v", ctr.Resources, trackerResourceRequests(), trackerResourceLimits())
 	}
 	var dsn *EnvVar
 	for i := range ctr.Env {
@@ -696,6 +696,54 @@ func TestTrackerDeployment(t *testing.T) {
 		if labels[k] == want {
 			t.Errorf("the tracker pod carries the daemon's selector %s=%s", k, want)
 		}
+	}
+}
+
+// TestTrackerdResourcesIndependentOfDaemon holds trackerd to the pair of its own
+// at the render flags that starved the tier sweep (gt-pau2nv): with --cpu 3
+// --memory 6Gi the tracker pod must not ask for the daemon's share.
+func TestTrackerdResourcesIndependentOfDaemon(t *testing.T) {
+	t.Parallel()
+	v := trackerValues(t)
+	v.CPU = "3"
+	v.Memory = "6Gi"
+	m := mustBuild(t, v)
+
+	ctr := m.TrackerDeployment.Spec.Template.Spec.Containers[0]
+	if ctr.Resources == nil {
+		t.Fatalf("the trackerd container carries no resources, want requests %v and limits %v", trackerResourceRequests(), trackerResourceLimits())
+	}
+	if got, want := ctr.Resources.Requests, trackerResourceRequests(); !maps.Equal(got, want) {
+		t.Errorf("the trackerd requests = %v, want %v", got, want)
+	}
+	if got, want := ctr.Resources.Limits, trackerResourceLimits(); !maps.Equal(got, want) {
+		t.Errorf("the trackerd limits = %v, want %v", got, want)
+	}
+	// The failure the bead names: trackerd carrying the daemon's share at the
+	// render flags that starved the sweep.
+	if maps.Equal(ctr.Resources.Requests, resourceList(v)) || maps.Equal(ctr.Resources.Limits, resourceList(v)) {
+		t.Errorf("the trackerd resources = %+v ask for the daemon's %v: --cpu and --memory size the daemon, not trackerd", ctr.Resources, resourceList(v))
+	}
+}
+
+// TestDaemonAndDashboardResourcesIgnoreTheTracker: turning the tracker on leaves
+// the other Deployments' shares as they were. The daemon keeps Values.CPU and
+// Values.Memory, and the dashboard carries none.
+func TestDaemonAndDashboardResourcesIgnoreTheTracker(t *testing.T) {
+	t.Parallel()
+	v := dashboardValues(t)
+	v.Tracker = true
+	v.TrackerDSNSecret = "town-tracker-dsn"
+	v.CPU = "3"
+	v.Memory = "6Gi"
+	m := mustBuild(t, v)
+
+	daemon := m.Deployment.Spec.Template.Spec.Containers[0]
+	if daemon.Resources == nil || !maps.Equal(daemon.Resources.Requests, resourceList(v)) || !maps.Equal(daemon.Resources.Limits, resourceList(v)) {
+		t.Errorf("the daemon resources = %+v, want requests and limits %v from --cpu and --memory", daemon.Resources, resourceList(v))
+	}
+	if dashboard := m.DashboardDeployment.Spec.Template.Spec.Containers[0].Resources; dashboard != nil {
+		t.Errorf("the dashboard resources = %+v, want the none it carried before", dashboard)
 	}
 }
 
