@@ -2667,3 +2667,38 @@ func TestAddRig_KeepsRegistryChangesLandedDuringClone(t *testing.T) {
 		t.Errorf("rigc, the rig this add registered, is missing: %v", after.Rigs)
 	}
 }
+
+// The hermetic harness poisons BEADS_DOLT_PORT with port 1 for the whole test
+// process. A rig's own dolt-server.port must win over that inherited poison in
+// every bd call rig setup makes, or bd dials port 1 (gt-xnv94x).
+func TestInitBeadsRigPortWinsOverHarnessPoison(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("4407"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, _, bd := testManager("", nil)
+	manager.env = []string{"PATH=/usr/bin", "BEADS_DOLT_PORT=1", "BEADS_DOLT_SERVER_PORT=1"}
+	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+		t.Fatalf("InitBeads: %v", err)
+	}
+	calls := bd.recorded()
+	if len(calls) == 0 {
+		t.Fatal("InitBeads made no bd calls")
+	}
+	for _, c := range calls {
+		for _, entry := range c.Env {
+			if entry == "BEADS_DOLT_PORT=1" || entry == "BEADS_DOLT_SERVER_PORT=1" {
+				t.Errorf("bd %s carries the harness poison %q in %v", c.argv(), entry, c.Env)
+			}
+		}
+		if got := rigEnvMap(c.Env)["BEADS_DOLT_PORT"]; got != "4407" {
+			t.Errorf("bd %s BEADS_DOLT_PORT = %q, want the rig's port 4407", c.argv(), got)
+		}
+	}
+}

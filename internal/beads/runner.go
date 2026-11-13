@@ -161,10 +161,23 @@ type CLIError struct {
 }
 
 func (e *CLIError) Error() string {
-	if msg := strings.TrimSpace(string(e.Stderr)); msg != "" {
+	if msg := lastNonWarningLine(e.Stderr); msg != "" {
 		return fmt.Sprintf("bd %s: %s", strings.Join(e.Args, " "), msg)
 	}
 	return fmt.Sprintf("bd %s: %v", strings.Join(e.Args, " "), e.Err)
+}
+
+// lastNonWarningLine is the last line of out that is not a "Warning:" line.
+// bd prints a permissions warning on every run, so a failure whose only other
+// text is that warning would otherwise name nothing (gt-xnv94x).
+func lastNonWarningLine(out []byte) string {
+	lines := strings.Split(string(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" && !strings.HasPrefix(line, "Warning:") {
+			return line
+		}
+	}
+	return ""
 }
 
 // Output is bd's stdout followed by its stderr, trimmed: what the

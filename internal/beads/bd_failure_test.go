@@ -137,3 +137,25 @@ func TestIsStoreUnavailableReadsTheStoreExit(t *testing.T) {
 		})
 	}
 }
+
+// bd prints a permissions warning on every run, so a failure whose only other
+// text is that warning must still say why it failed.
+func TestCLIErrorNamesLastNonWarningLine(t *testing.T) {
+	t.Parallel()
+	const permissions = "Warning: .beads has permissions 0755 (recommended: 0700)\n"
+	for _, tc := range []struct {
+		name, stderr, want string
+	}{
+		{"error after the warning", permissions + "Error: database \"forkrig\" not found\n", "bd rename-prefix: Error: database \"forkrig\" not found"},
+		{"error between warnings", "Warning: a\nError: store unavailable\nWarning: b\n", "bd rename-prefix: Error: store unavailable"},
+		{"warning only falls back to the exit error", permissions, "bd rename-prefix: " + codedExit(1).Error()},
+		{"no output falls back to the exit error", "", "bd rename-prefix: " + codedExit(1).Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &CLIError{Args: []string{"rename-prefix"}, Stderr: []byte(tc.stderr), Err: codedExit(1)}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
