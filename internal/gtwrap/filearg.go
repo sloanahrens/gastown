@@ -89,6 +89,32 @@ var valueFlags = map[string]bool{
 	"--template": true, "--from-export": true,
 }
 
+// textFlags are bd flags whose value is free text, so the next argument is that
+// text whatever it starts with: pflag takes the next argument as the value of a
+// string flag even when it begins with a dash. The scanner skips it instead of
+// reading it as a flag. The list is the text flags a bead is filed or edited
+// with; it only ever makes the scanner skip more, never refuse.
+var textFlags = map[string]bool{
+	"--title": true, "--description": true, "--acceptance": true, "--design": true,
+	"--notes": true, "--append-notes": true, "--reason": true, "--message": true,
+	"--comment": true, "--assignee": true, "--labels": true, "--label": true,
+	"--type": true, "--priority": true, "--parent": true, "--deps": true,
+	"--status": true, "--set-labels": true, "--add-label": true, "--remove-label": true,
+}
+
+// shorthandGroup reports whether a single-dash token can be pflag shorthands: the
+// character after the dash is a letter or a digit. A dash followed by a space, a
+// bracket or a backtick is text that merely starts with a dash, such as a "- [ ]"
+// checkbox line or a bullet, and is never a flag. What follows the first letter
+// may be an attached value ("-fnotes.txt"), so it is not restricted.
+func shorthandGroup(token string) bool {
+	if len(token) < 2 {
+		return false
+	}
+	c := token[1]
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 // fileShorthands are the one-letter file flags of the command, for the attached
 // forms pflag accepts: "-fFILE", "-f=FILE" and a group such as "-xf FILE".
 func fileShorthands(tool, command, sub string) string {
@@ -161,7 +187,7 @@ func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg
 			if name, v, ok := strings.Cut(flag, "="); ok {
 				flag, value, inline, sep = name, v, true, "="
 			}
-		case strings.HasPrefix(flag, "-") && len(flag) > 2:
+		case strings.HasPrefix(flag, "-") && len(flag) > 2 && shorthandGroup(flag):
 			name, _, _ := strings.Cut(flag[1:], "=")
 			at := -1
 			if shorthands != "" {
@@ -183,6 +209,12 @@ func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg
 		}
 		if !inline && i+1 < len(out) {
 			value = out[i+1]
+		}
+		// A text flag's value is text, never a flag: skip it before it can be read
+		// as a group of shorthands.
+		if !inline && tool == "bd" && textFlags[flag] {
+			i++
+			continue
 		}
 		if flag == "--stdin" && tool == "bd" {
 			stdinUsed = true
