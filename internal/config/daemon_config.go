@@ -2689,6 +2689,20 @@ type SpecDispatchConfig struct {
 
 	// Template overrides the spec template path.
 	Template string `json:"template,omitempty"`
+
+	// StoryPoints configures the story-point estimate that gt spec estimate
+	// writes (gt-5d9k2f.13). Nil, or an empty embedder_url, leaves the embedding
+	// input out of the estimate, which then names the skip in its note.
+	StoryPoints *StoryPointsConfig `json:"story_points,omitempty"`
+}
+
+// StoryPointsConfig is the story_points block under spec_dispatch: where the
+// embedding ridge's embedder runs. The URL is an ollama server, and the URL
+// needs a model next to it. The checked-in weights were fitted on
+// qwen3-embedding:4b-q8_0; another model's vectors are not what the ridge reads.
+type StoryPointsConfig struct {
+	EmbedderURL   string `json:"embedder_url,omitempty"`
+	EmbedderModel string `json:"embedder_model,omitempty"`
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
