@@ -137,6 +137,10 @@ const (
 	// seat holds its pool slot and worktree, and the reason the keep gave is the
 	// one the overseer has to act on (gt-l38v7r).
 	RuleSandboxSeatKept = "sandbox.seat_kept"
+
+	// RuleHoldStale is a bead held for the overseer that nobody has released:
+	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
+	RuleHoldStale = "hold.stale"
 )
 
 var (
@@ -232,6 +236,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A kept seat past its window holds a pool slot and a worktree while its
 	// reason stands: the overseer is woken to act on the reason (gt-l38v7r).
 	RuleSandboxSeatKept: flagsWake,
+	// A held bead nobody has released is the overseer's to release or act on:
+	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
+	RuleHoldStale: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -341,6 +348,7 @@ var kindRules = map[Kind]string{
 	KindImagesFailed:             RuleImagesFailed,
 	KindImagesUnknown:            RuleImagesUnknown,
 	KindSandboxSeatKept:          RuleSandboxSeatKept,
+	KindHoldStale:                RuleHoldStale,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule
