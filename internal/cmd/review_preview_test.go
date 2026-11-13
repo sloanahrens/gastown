@@ -80,6 +80,7 @@ func previewBlock(head string) string {
 }
 
 func TestReviewPreviewPrintsFindings(t *testing.T) {
+	t.Parallel()
 	f := newPreviewFixture(t)
 	f.daemon = func(f *previewFixture) {
 		if f.polls == 2 {
@@ -107,6 +108,7 @@ func TestReviewPreviewPrintsFindings(t *testing.T) {
 }
 
 func TestReviewPreviewApprovingRoundSaysNoFindings(t *testing.T) {
+	t.Parallel()
 	f := newPreviewFixture(t)
 	f.daemon = func(f *previewFixture) {
 		if f.polls == 1 {
@@ -123,6 +125,7 @@ func TestReviewPreviewApprovingRoundSaysNoFindings(t *testing.T) {
 }
 
 func TestReviewPreviewUnavailableNeverBlocks(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		// daemon writes the daemon's answer, if any, on each poll.
@@ -168,6 +171,7 @@ func TestReviewPreviewUnavailableNeverBlocks(t *testing.T) {
 }
 
 func TestReviewPreviewRequestsOncePerHead(t *testing.T) {
+	t.Parallel()
 	f := newPreviewFixture(t)
 
 	// The daemon does not answer in time: the request is open.
@@ -210,6 +214,7 @@ func TestReviewPreviewRequestsOncePerHead(t *testing.T) {
 }
 
 func TestReviewPreviewRequestsAgainAfterUnavailable(t *testing.T) {
+	t.Parallel()
 	f := newPreviewFixture(t)
 	f.daemon = func(f *previewFixture) {
 		if f.polls == 1 {
@@ -231,6 +236,7 @@ func TestReviewPreviewRequestsAgainAfterUnavailable(t *testing.T) {
 }
 
 func TestReviewPreviewFailuresNeverBlock(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		mutate func(f *previewFixture)
@@ -291,6 +297,7 @@ func TestReviewPreviewFailuresNeverBlock(t *testing.T) {
 }
 
 func TestReviewPreviewEnsureOriginHead(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		tip      string
@@ -320,6 +327,7 @@ func TestReviewPreviewEnsureOriginHead(t *testing.T) {
 }
 
 func TestReviewPreviewBeadFromBranch(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		branch string
 		want   string
