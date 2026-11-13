@@ -40,6 +40,7 @@ A sandbox profile's `driver` field names the compute driver its gateway runs. It
 - A `docker` profile, or one with no `driver`, keeps the Docker cache volume when it names a `cache_volume`.
 - Any other value is refused at validation: `want docker or kubernetes`.
 - A `kubernetes` profile may set `kubernetes_cache_claim` to a shared PersistentVolumeClaim, which the driver mounts at `/tmp/gt-cache` as the agent container's only mount. `/sandbox` is the sandbox's workspace PVC, and any mount under it replaces that PVC, so the pod loses its workspace.
+- A `kubernetes` profile may set `kubernetes_namespace` to the namespace the gateway places its sandbox pods in. It defaults to `openshell`, the namespace the OpenShell chart creates them in. gt sends nothing to the gateway for it: the daemon reads that namespace's pods to raise the sandbox-pending item, so it must match where the gateway runs them. A `docker` profile that sets it is refused at validation.
 - A `kubernetes` profile may also set `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `requests` and `limits`. gt sends them to the gateway as the create call's driver config, so the gateway needs `allow_driver_config = true` in `[openshell.drivers.kubernetes]` as well; `deploy/k8s/values/kind.yaml` sets the chart's `server.drivers.kubernetes.allowDriverConfig` for the town cluster. A `docker` profile that sets any of the six is refused at validation, and a `kubernetes` profile that sets none sends no driver config.
 
 ## Restart

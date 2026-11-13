@@ -1850,6 +1850,12 @@ type SandboxProfile struct {
 	// PVC. Validate refuses it on a docker profile (the Docker cache path is
 	// closed).
 	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
+	// KubernetesNamespace names the namespace the gateway places this profile's
+	// sandbox pods in; "" means defaultSandboxKubernetesNamespace (see
+	// PodNamespace). The daemon reads that namespace's pods to raise a
+	// sandbox-pending item (gt-1gtq5g). Validate refuses it on a docker profile
+	// and a value that is not a DNS-1123 label.
+	KubernetesNamespace string `json:"kubernetes_namespace,omitempty"`
 
 	// Kubernetes pod placement and sizing, sent as driver config only for a
 	// kubernetes driver. Validate refuses them on a docker profile.
@@ -1889,6 +1895,19 @@ const (
 	SandboxDriverDocker     = "docker"
 	SandboxDriverKubernetes = "kubernetes"
 )
+
+// defaultSandboxKubernetesNamespace is the namespace the OpenShell chart creates
+// sandbox pods in, used when a kubernetes profile names no KubernetesNamespace.
+const defaultSandboxKubernetesNamespace = "openshell"
+
+// PodNamespace is the namespace the profile's kubernetes sandbox pods run in:
+// KubernetesNamespace when it is set, else the OpenShell chart's namespace.
+func (p SandboxProfile) PodNamespace() string {
+	if p.KubernetesNamespace == "" {
+		return defaultSandboxKubernetesNamespace
+	}
+	return p.KubernetesNamespace
+}
 
 // WithDefaults returns p with the unset defaulted fields filled in. Seats
 // applies it to a seat's profile before validating, so a seat's profile that
@@ -1949,6 +1968,9 @@ func (p SandboxProfile) Validate(name string) error {
 		if p.KubernetesCacheClaim != "" {
 			return fmt.Errorf("sandboxes.%s.kubernetes_cache_claim %q: only a kubernetes driver mounts a cache claim; remove it or set driver to kubernetes", name, p.KubernetesCacheClaim)
 		}
+		if p.KubernetesNamespace != "" {
+			return fmt.Errorf("sandboxes.%s.kubernetes_namespace %q: only a kubernetes driver places pods in a namespace; remove it or set driver to kubernetes", name, p.KubernetesNamespace)
+		}
 		if field := p.kubernetesOnlyField(); field != "" {
 			return fmt.Errorf("sandboxes.%s.%s: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes", name, field)
 		}
@@ -1958,6 +1980,9 @@ func (p SandboxProfile) Validate(name string) error {
 		}
 		if p.KubernetesCacheClaim != "" && !validDNS1123Label(p.KubernetesCacheClaim) {
 			return fmt.Errorf("sandboxes.%s.kubernetes_cache_claim %q: want a DNS-1123 name: lowercase letters, digits and hyphens, at most 63 characters, starting and ending with a letter or digit", name, p.KubernetesCacheClaim)
+		}
+		if p.KubernetesNamespace != "" && !validDNS1123Label(p.KubernetesNamespace) {
+			return fmt.Errorf("sandboxes.%s.kubernetes_namespace %q: want a DNS-1123 name: lowercase letters, digits and hyphens, at most 63 characters, starting and ending with a letter or digit", name, p.KubernetesNamespace)
 		}
 		if err := p.validateKubernetes(name); err != nil {
 			return err

@@ -789,6 +789,11 @@ type Daemon struct {
 	// whose daily report was missing or late (gt-cbsat). The check replaces it
 	// and the attention tick reads it, both on the run loop.
 	birdReportStale birdReportStale
+
+	// sandboxPendingUntimed holds the sandbox pods (namespace/name) whose missing
+	// creation time has been logged this daemon run, so the line is said once
+	// per pod (gt-1gtq5g).
+	sandboxPendingUntimed sync.Map
 	// birdReportLoc is the zone start_hour is read in; nil is time.Local. A
 	// test sets a fixed zone so the check does not depend on the host's clock.
 	birdReportLoc *time.Location

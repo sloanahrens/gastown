@@ -19,15 +19,23 @@ import (
 // pods' ages against, so no test reads the wall clock.
 var pendingSandboxNow = time.Date(2026, 11, 12, 22, 0, 0, 0, time.UTC)
 
+// pendingSandboxNamespace is the namespace an unset kubernetes_namespace reads,
+// the OpenShell chart's namespace (config pins the default in
+// TestSandboxProfileKubernetesNamespace).
+const pendingSandboxNamespace = "openshell"
+
 // pendingSandboxFixture is one daemon whose sandbox pod read is answered in
-// process: the reply to the pods call, and the profiles the town settings hold.
+// process: the reply to the pods call (or a reply per namespace's pods call),
+// the profiles the town settings hold, and the daemon's log.
 type pendingSandboxFixture struct {
 	d        *Daemon
 	cli      *fakeCLI
 	src      *attentionSources
 	reply    cliReply
+	byVerb   map[string]cliReply
 	runErr   error
 	profiles map[string]agentconfig.SandboxProfile
+	logs     bytes.Buffer
 }
 
 func newPendingSandboxFixture(t *testing.T) *pendingSandboxFixture {
@@ -38,19 +46,22 @@ func newPendingSandboxFixture(t *testing.T) *pendingSandboxFixture {
 			"polecat-k8s": {Driver: agentconfig.SandboxDriverKubernetes},
 		},
 	}
-	var logs bytes.Buffer
 	f.cli = newFakeCLIFor(func(c cliCall) cliReply {
 		if f.runErr != nil {
 			return cliReply{code: 1, stderr: f.runErr.Error()}
 		}
-		if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
+		verb := cacheTrimVerb(c.args)
+		if reply, ok := f.byVerb[verb]; ok {
+			return reply
+		}
+		if strings.HasPrefix(verb, "get pods ") {
 			return f.reply
 		}
 		return cliReply{}
 	})
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logs, "", 0),
+		logger: log.New(&f.logs, "", 0),
 		clock:  clockwork.NewFakeClockAt(pendingSandboxNow),
 	}
 	d.execCmd = f.cli.run
@@ -94,12 +105,12 @@ func TestCollectPendingSandboxPods(t *testing.T) {
 	f := newPendingSandboxFixture(t)
 	const schedulerMessage = "0/3 nodes are available: 3 Insufficient cpu, 3 Insufficient memory."
 	f.reply = cliReply{stdout: sandboxPodListJSON(
-		sandboxPodJSON("default--gt-nux", sandboxPodNamespace, "Pending", "False", "Unschedulable", schedulerMessage, pendingSandboxNow.Add(-3*time.Minute)),
-		sandboxPodJSON("default--gt-splendid", sandboxPodNamespace, "Pending", "False", "Unschedulable", schedulerMessage, pendingSandboxNow.Add(-30*time.Second)),
-		sandboxPodJSON("default--gt-puller", sandboxPodNamespace, "Pending", "True", "", "", pendingSandboxNow.Add(-10*time.Minute)),
+		sandboxPodJSON("default--gt-nux", pendingSandboxNamespace, "Pending", "False", "Unschedulable", schedulerMessage, pendingSandboxNow.Add(-3*time.Minute)),
+		sandboxPodJSON("default--gt-splendid", pendingSandboxNamespace, "Pending", "False", "Unschedulable", schedulerMessage, pendingSandboxNow.Add(-30*time.Second)),
+		sandboxPodJSON("default--gt-puller", pendingSandboxNamespace, "Pending", "True", "", "", pendingSandboxNow.Add(-10*time.Minute)),
 		// Gated, not unschedulable: the scheduler has not refused it.
-		sandboxPodJSON("default--gt-gated", sandboxPodNamespace, "Pending", "False", "SchedulingGated", "", pendingSandboxNow.Add(-10*time.Minute)),
-		sandboxPodJSON("default--gt-live", sandboxPodNamespace, "Running", "True", "", "", pendingSandboxNow.Add(-time.Hour)),
+		sandboxPodJSON("default--gt-gated", pendingSandboxNamespace, "Pending", "False", "SchedulingGated", "", pendingSandboxNow.Add(-10*time.Minute)),
+		sandboxPodJSON("default--gt-live", pendingSandboxNamespace, "Running", "True", "", "", pendingSandboxNow.Add(-time.Hour)),
 	)}
 
 	items, err := f.collect(t)
@@ -110,18 +121,18 @@ func TestCollectPendingSandboxPods(t *testing.T) {
 		t.Fatalf("items = %+v, want one (the 30s pod, the image pull, the gated pod and the running pod raise none)", items)
 	}
 	it := items[0]
-	if it.Key != "sandbox-pending:default/default--gt-nux" || it.Kind != attention.KindSandboxPending ||
+	if it.Key != "sandbox-pending:openshell/default--gt-nux" || it.Kind != attention.KindSandboxPending ||
 		it.Severity != attention.SeverityHigh {
-		t.Errorf("item = %+v, want a high sandbox-pending item on default/default--gt-nux", it)
+		t.Errorf("item = %+v, want a high sandbox-pending item on openshell/default--gt-nux", it)
 	}
-	want := "sandbox pod default/default--gt-nux pending 3m, unschedulable: " + schedulerMessage
+	want := "sandbox pod openshell/default--gt-nux pending 3m, unschedulable: " + schedulerMessage
 	if it.Summary != want {
 		t.Errorf("summary = %q, want %q", it.Summary, want)
 	}
 
 	// The pod runs on the next tick: its item clears.
 	f.reply = cliReply{stdout: sandboxPodListJSON(
-		sandboxPodJSON("default--gt-nux", sandboxPodNamespace, "Running", "True", "", "", pendingSandboxNow.Add(-4*time.Minute)),
+		sandboxPodJSON("default--gt-nux", pendingSandboxNamespace, "Running", "True", "", "", pendingSandboxNow.Add(-4*time.Minute)),
 	)}
 	items, err = f.collect(t)
 	if err != nil {
@@ -134,8 +145,8 @@ func TestCollectPendingSandboxPods(t *testing.T) {
 
 // TestPendingSandboxReadNamesTheSandboxNamespace: the read is the daemon's
 // kubectl call against the sandbox kubeconfig and context, in the namespace
-// the profiles run in, so the item is about the cluster's pods and not a
-// guessed list (gt-1gtq5g).
+// the profile names, so the item is about the cluster's pods and not a guessed
+// list (gt-1gtq5g).
 func TestPendingSandboxReadNamesTheSandboxNamespace(t *testing.T) {
 	t.Parallel()
 	f := newPendingSandboxFixture(t)
@@ -144,12 +155,62 @@ func TestPendingSandboxReadNamesTheSandboxNamespace(t *testing.T) {
 	}
 	var found bool
 	for _, call := range f.cli.recorded() {
-		if verb := cacheTrimVerb(call.args); verb == "get pods -n "+sandboxPodNamespace+" -o json" {
+		if verb := cacheTrimVerb(call.args); verb == "get pods -n "+pendingSandboxNamespace+" -o json" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("kubectl calls = %+v, want get pods in namespace %s", f.cli.recorded(), sandboxPodNamespace)
+		t.Errorf("kubectl calls = %+v, want get pods in namespace %s", f.cli.recorded(), pendingSandboxNamespace)
+	}
+}
+
+// TestPendingSandboxReadsEachProfileNamespaceOnce: every kubernetes profile's
+// namespace is read, a namespace two profiles share is read once, and a
+// docker profile contributes none. Each namespace's pod is raised from its own
+// reply (gt-1gtq5g).
+func TestPendingSandboxReadsEachProfileNamespaceOnce(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	f.profiles = map[string]agentconfig.SandboxProfile{
+		"polecat-k8s":   {Driver: agentconfig.SandboxDriverKubernetes},
+		"seat-b":        {Driver: agentconfig.SandboxDriverKubernetes, KubernetesNamespace: "sandboxes-b"},
+		"seat-b-second": {Driver: agentconfig.SandboxDriverKubernetes, KubernetesNamespace: "sandboxes-b"},
+		"docker-seat":   {Driver: agentconfig.SandboxDriverDocker},
+	}
+	f.byVerb = map[string]cliReply{
+		"get pods -n openshell -o json": {stdout: sandboxPodListJSON(
+			sandboxPodJSON("default--gt-nux", "openshell", "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient cpu.", pendingSandboxNow.Add(-3*time.Minute)),
+		)},
+		"get pods -n sandboxes-b -o json": {stdout: sandboxPodListJSON(
+			sandboxPodJSON("default--gt-b", "sandboxes-b", "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient memory.", pendingSandboxNow.Add(-4*time.Minute)),
+		)},
+	}
+
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, it := range items {
+		keys = append(keys, it.Key)
+	}
+	want := []string{"sandbox-pending:openshell/default--gt-nux", "sandbox-pending:sandboxes-b/default--gt-b"}
+	if fmt.Sprint(keys) != fmt.Sprint(want) {
+		t.Errorf("item keys = %v, want %v", keys, want)
+	}
+	reads := map[string]int{}
+	for _, call := range f.cli.recorded() {
+		if verb := cacheTrimVerb(call.args); strings.HasPrefix(verb, "get pods ") {
+			reads[verb]++
+		}
+	}
+	for _, verb := range []string{"get pods -n openshell -o json", "get pods -n sandboxes-b -o json"} {
+		if reads[verb] != 1 {
+			t.Errorf("%q read %d times, want once; calls = %+v", verb, reads[verb], f.cli.recorded())
+		}
+	}
+	if len(reads) != 2 {
+		t.Errorf("pod reads = %v, want exactly the two kubernetes namespaces", reads)
 	}
 }
 
@@ -175,6 +236,64 @@ func TestPendingSandboxReadsNoPodWithoutAKubernetesProfile(t *testing.T) {
 	}
 }
 
+// TestPendingSandboxUntimedPodIsLoggedOnce: a Pending unschedulable pod with no
+// creation time has no age to judge, so it raises nothing and is not skipped
+// without a word: its missing time is logged once per daemon run, and the same
+// pod with a real time older than a minute raises its item (gt-1gtq5g).
+func TestPendingSandboxUntimedPodIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	untimed := `{"metadata":{"name":"default--gt-untimed","namespace":"openshell"},"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"0/3 nodes are available: 3 Insufficient cpu."}]}}`
+	f.reply = cliReply{stdout: sandboxPodListJSON(untimed)}
+
+	for tick := 0; tick < 2; tick++ {
+		items, err := f.collect(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("tick %d: items = %+v for a pod with no creation time, want none", tick, items)
+		}
+	}
+	const line = "sandbox pod openshell/default--gt-untimed has no creation timestamp; treated as new\n"
+	if got := f.logs.String(); got != line {
+		t.Errorf("log after two collections = %q, want the line once: %q", got, line)
+	}
+
+	f.reply = cliReply{stdout: sandboxPodListJSON(
+		sandboxPodJSON("default--gt-untimed", pendingSandboxNamespace, "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient cpu.", pendingSandboxNow.Add(-2*time.Minute)),
+	)}
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "sandbox-pending:openshell/default--gt-untimed" {
+		t.Errorf("items once the pod has a real time = %+v, want its item", items)
+	}
+}
+
+// TestPendingSandboxEmptyMessageStillRaises: an unschedulable pod whose
+// scheduler gave no message still raises its item, saying so in place of the
+// message, so the refusal is not hidden by an empty string (gt-1gtq5g).
+func TestPendingSandboxEmptyMessageStillRaises(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	f.reply = cliReply{stdout: sandboxPodListJSON(
+		sandboxPodJSON("default--gt-quiet", pendingSandboxNamespace, "Pending", "False", "Unschedulable", "", pendingSandboxNow.Add(-5*time.Minute)),
+	)}
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one for the pod with no scheduler message", items)
+	}
+	want := "sandbox pod openshell/default--gt-quiet pending 5m and unschedulable; the scheduler gave no message"
+	if items[0].Summary != want {
+		t.Errorf("summary = %q, want %q", items[0].Summary, want)
+	}
+}
+
 // TestPendingSandboxCollectorSurvivesAClusterReadFailure is the bead's third
 // box. A failed read returns the error and no items, so the collector's own
 // previous items stand rather than clearing on an unanswered read; the next
@@ -193,13 +312,13 @@ func TestPendingSandboxCollectorSurvivesAClusterReadFailure(t *testing.T) {
 
 	f.runErr = nil
 	f.reply = cliReply{stdout: sandboxPodListJSON(
-		sandboxPodJSON("default--gt-nux", sandboxPodNamespace, "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient cpu.", pendingSandboxNow.Add(-5*time.Minute)),
+		sandboxPodJSON("default--gt-nux", pendingSandboxNamespace, "Pending", "False", "Unschedulable", "0/3 nodes are available: 3 Insufficient cpu.", pendingSandboxNow.Add(-5*time.Minute)),
 	)}
 	items, err = f.collect(t)
 	if err != nil {
 		t.Fatalf("the collection after a failed read: %v", err)
 	}
-	if len(items) != 1 || items[0].Key != "sandbox-pending:default/default--gt-nux" {
+	if len(items) != 1 || items[0].Key != "sandbox-pending:openshell/default--gt-nux" {
 		t.Errorf("items after the read recovers = %+v, want the unschedulable pod's item", items)
 	}
 }

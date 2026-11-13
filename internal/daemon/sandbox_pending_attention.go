@@ -26,14 +26,6 @@ const (
 	// minute is longer than a healthy schedule takes (gt-1gtq5g).
 	sandboxPendingAfter = time.Minute
 
-	// sandboxPodNamespace is the namespace the OpenShell kubernetes driver
-	// places a sandbox pod in. The gateway holds that setting, not the town's
-	// sandbox profiles, so gt names the one value its cluster runs here; the
-	// pods of the 2026-11-12 evidence (default--gt-nux, default--gt-splendid)
-	// ran in default. A town whose gateway names another namespace reads none
-	// of its sandbox pods, and this is the line to change (gt-1gtq5g).
-	sandboxPodNamespace = "default"
-
 	// sandboxPendingKeyPrefix is the item key's prefix; the pod's namespace and
 	// name follow it, so one pod has one item however many ticks it stays
 	// unschedulable.
@@ -73,17 +65,24 @@ func (s *attentionSources) collectPendingSandboxPods(ctx context.Context) ([]att
 	return out, nil
 }
 
-// sandboxPendingNamespaces is the namespaces the profiles' sandbox pods run in.
-// A profile that does not use the kubernetes driver has no pod in the cluster
-// and names none, so a town with no kubernetes profile raises nothing and no
-// pod is read.
+// sandboxPendingNamespaces is the distinct namespaces the kubernetes profiles'
+// sandbox pods run in, sorted so each is read once in a fixed order. A profile
+// that does not use the kubernetes driver has no pod in the cluster and names
+// none, so a town with no kubernetes profile reads no pod and raises nothing.
 func sandboxPendingNamespaces(profiles map[string]agentconfig.SandboxProfile) []string {
+	seen := make(map[string]bool)
+	var namespaces []string
 	for _, profile := range profiles {
-		if profile.Driver == agentconfig.SandboxDriverKubernetes {
-			return []string{sandboxPodNamespace}
+		if profile.Driver != agentconfig.SandboxDriverKubernetes {
+			continue
+		}
+		if namespace := profile.PodNamespace(); !seen[namespace] {
+			seen[namespace] = true
+			namespaces = append(namespaces, namespace)
 		}
 	}
-	return nil
+	slices.Sort(namespaces)
+	return namespaces
 }
 
 // pendingSandboxPod is the part of a pod the unschedulable read decides on.
@@ -128,8 +127,9 @@ func pendingSandboxUnplaced(pod pendingSandboxPod) (string, bool) {
 //
 // A reply that cannot be decoded, names no item list, or names a pod of another
 // namespace refuses: an unreadable list would read as no pod waiting, which is
-// a false clear. A pod with no creation time is not judged, since its age is
-// unknown, and it raises nothing.
+// a false clear. A pod with no creation time has no age to judge, so it is
+// treated as just created: it raises nothing yet, and its missing time is
+// logged once per daemon run rather than skipped without a word.
 func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace string, now time.Time) ([]attention.Item, error) {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json")
 	if err != nil {
@@ -150,7 +150,11 @@ func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace s
 			return nil, fmt.Errorf("the pod list for namespace %s names the pod %s in %s", namespace, pod.Metadata.Name, pod.Metadata.Namespace)
 		}
 		message, unplaced := pendingSandboxUnplaced(pod)
-		if !unplaced || pod.Metadata.CreationTimestamp.IsZero() {
+		if !unplaced {
+			continue
+		}
+		if pod.Metadata.CreationTimestamp.IsZero() {
+			d.logSandboxPendingUntimed(namespace, pod.Metadata.Name)
 			continue
 		}
 		age := now.Sub(pod.Metadata.CreationTimestamp)
@@ -170,6 +174,17 @@ func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace s
 	}
 	slices.SortFunc(items, func(a, b attention.Item) int { return strings.Compare(a.Key, b.Key) })
 	return items, nil
+}
+
+// logSandboxPendingUntimed says once per daemon run that an unschedulable pod
+// has no creation time, so the pod is treated as new and never alarms on an
+// age it does not have (gt-1gtq5g).
+func (d *Daemon) logSandboxPendingUntimed(namespace, name string) {
+	key := namespace + "/" + name
+	if _, seen := d.sandboxPendingUntimed.LoadOrStore(key, true); seen {
+		return
+	}
+	d.logger.Printf("sandbox pod %s has no creation timestamp; treated as new", key)
 }
 
 // pendingSandboxItem picks the unschedulable-pod items out of the kind's
