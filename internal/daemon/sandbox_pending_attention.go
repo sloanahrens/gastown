@@ -41,7 +41,9 @@ const (
 //
 // A pod Pending for another reason is not this item: an image pull has the pod
 // scheduled already (PodScheduled is True), so only the scheduler's own
-// Unschedulable refusal counts here.
+// Unschedulable refusal counts here. Every Unschedulable pod in the namespace
+// counts, not only the seats' sandboxes: a pod that is not a sandbox but cannot
+// schedule on the sandbox pool is still a capacity signal.
 //
 // A profile read or a cluster read that fails returns the error and no items,
 // so the previous tick's items are kept rather than cleared by an unanswered
@@ -54,14 +56,20 @@ func (s *attentionSources) collectPendingSandboxPods(ctx context.Context) ([]att
 		return nil, fmt.Errorf("reading the town's sandbox profiles: %w", err)
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, seams.getenv)
+	// The first-seen map is replaced only when every namespace read succeeds:
+	// a failed read keeps the previous map, and a full read prunes it to the
+	// pods it listed, so a pod that left or was recreated starts a new window.
+	prev := d.sandboxPendingFirstSeen
+	next := make(map[string]time.Time)
 	var out []attention.Item
 	for _, namespace := range sandboxPendingNamespaces(profiles) {
-		items, err := d.pendingSandboxPods(ctx, kubeconfig, namespace, s.now)
+		items, err := d.pendingSandboxPods(ctx, kubeconfig, namespace, s.now, prev, next)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, items...)
 	}
+	d.sandboxPendingFirstSeen = next
 	return out, nil
 }
 
@@ -88,9 +96,9 @@ func sandboxPendingNamespaces(profiles map[string]agentconfig.SandboxProfile) []
 // pendingSandboxPod is the part of a pod the unschedulable read decides on.
 type pendingSandboxPod struct {
 	Metadata struct {
-		Name              string    `json:"name"`
-		Namespace         string    `json:"namespace"`
-		CreationTimestamp time.Time `json:"creationTimestamp"`
+		Name              string `json:"name"`
+		Namespace         string `json:"namespace"`
+		CreationTimestamp string `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Status struct {
 		Phase      string                    `json:"phase"`
@@ -127,10 +135,13 @@ func pendingSandboxUnplaced(pod pendingSandboxPod) (string, bool) {
 //
 // A reply that cannot be decoded, names no item list, or names a pod of another
 // namespace refuses: an unreadable list would read as no pod waiting, which is
-// a false clear. A pod with no creation time has no age to judge, so it is
-// treated as just created: it raises nothing yet, and its missing time is
-// logged once per daemon run rather than skipped without a word.
-func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace string, now time.Time) ([]attention.Item, error) {
+// a false clear. A pod whose creation time is missing or does not parse has no
+// age to judge, so its age runs from the first tick that saw it unschedulable
+// (prevFirstSeen carries that across ticks; nextFirstSeen receives this read's
+// untimed pods). Such a pod raises once that age passes sandboxPendingAfter, and
+// its missing time is logged once per daemon run rather than skipped without a
+// word.
+func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace string, now time.Time, prevFirstSeen, nextFirstSeen map[string]time.Time) ([]attention.Item, error) {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json")
 	if err != nil {
 		return nil, err
@@ -153,20 +164,34 @@ func (d *Daemon) pendingSandboxPods(ctx context.Context, kubeconfig, namespace s
 		if !unplaced {
 			continue
 		}
-		if pod.Metadata.CreationTimestamp.IsZero() {
+		ref := namespace + "/" + pod.Metadata.Name
+		var summary string
+		if created, err := time.Parse(time.RFC3339, pod.Metadata.CreationTimestamp); err == nil {
+			age := now.Sub(created)
+			if age <= sandboxPendingAfter {
+				continue
+			}
+			summary = fmt.Sprintf("sandbox pod %s pending %s, unschedulable: %s", ref, parkedAge(age), message)
+			if message == "" {
+				summary = fmt.Sprintf("sandbox pod %s pending %s and unschedulable; the scheduler gave no message", ref, parkedAge(age))
+			}
+		} else {
 			d.logSandboxPendingUntimed(namespace, pod.Metadata.Name)
-			continue
-		}
-		age := now.Sub(pod.Metadata.CreationTimestamp)
-		if age <= sandboxPendingAfter {
-			continue
-		}
-		summary := fmt.Sprintf("sandbox pod %s/%s pending %s, unschedulable: %s", namespace, pod.Metadata.Name, parkedAge(age), message)
-		if message == "" {
-			summary = fmt.Sprintf("sandbox pod %s/%s pending %s and unschedulable; the scheduler gave no message", namespace, pod.Metadata.Name, parkedAge(age))
+			first, seen := prevFirstSeen[ref]
+			if !seen {
+				first = now
+			}
+			nextFirstSeen[ref] = first
+			if now.Sub(first) <= sandboxPendingAfter {
+				continue
+			}
+			summary = fmt.Sprintf("sandbox pod %s pending Unschedulable, age unknown, first seen %s: %s", ref, first.UTC().Format(time.RFC3339), message)
+			if message == "" {
+				summary = fmt.Sprintf("sandbox pod %s pending Unschedulable, age unknown, first seen %s; the scheduler gave no message", ref, first.UTC().Format(time.RFC3339))
+			}
 		}
 		items = append(items, attention.Item{
-			Key:      sandboxPendingKeyPrefix + namespace + "/" + pod.Metadata.Name,
+			Key:      sandboxPendingKeyPrefix + ref,
 			Kind:     attention.KindSandboxPending,
 			Severity: attention.SeverityHigh,
 			Summary:  summary,

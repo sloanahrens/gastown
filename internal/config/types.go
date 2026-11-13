@@ -1898,6 +1898,8 @@ const (
 
 // defaultSandboxKubernetesNamespace is the namespace the OpenShell chart creates
 // sandbox pods in, used when a kubernetes profile names no KubernetesNamespace.
+// Sandbox pods are named default--<seat> and live in namespace openshell: the
+// `default` in the name is the OpenShell workspace prefix, not a namespace.
 const defaultSandboxKubernetesNamespace = "openshell"
 
 // PodNamespace is the namespace the profile's kubernetes sandbox pods run in:

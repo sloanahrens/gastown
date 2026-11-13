@@ -790,13 +790,20 @@ type Daemon struct {
 	// and the attention tick reads it, both on the run loop.
 	birdReportStale birdReportStale
 
+	// birdReportLoc is the zone start_hour is read in; nil is time.Local. A
+	// test sets a fixed zone so the check does not depend on the host's clock.
+	birdReportLoc *time.Location
+
 	// sandboxPendingUntimed holds the sandbox pods (namespace/name) whose missing
 	// creation time has been logged this daemon run, so the line is said once
 	// per pod (gt-1gtq5g).
 	sandboxPendingUntimed sync.Map
-	// birdReportLoc is the zone start_hour is read in; nil is time.Local. A
-	// test sets a fixed zone so the check does not depend on the host's clock.
-	birdReportLoc *time.Location
+
+	// sandboxPendingFirstSeen is when each untimed, unschedulable sandbox pod
+	// (namespace/name) was first seen unschedulable: the clock its age runs on.
+	// The attention tick replaces it after each full read, so a pod that leaves
+	// or stops being unschedulable drops out (gt-1gtq5g).
+	sandboxPendingFirstSeen map[string]time.Time
 
 	// scheduledSlingsHold and queuedWorkHold remember the operator dispatch
 	// hold each dispatcher last saw, so a hold is logged once when it appears,

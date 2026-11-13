@@ -272,6 +272,181 @@ func TestPendingSandboxUntimedPodIsLoggedOnce(t *testing.T) {
 	}
 }
 
+// untimedSandboxPodJSON is one unschedulable pod whose reply carries no creation
+// time, the shape a pod has when the cluster reports none.
+func untimedSandboxPodJSON(name, message string) string {
+	return fmt.Sprintf(`{"metadata":{"name":%q,"namespace":%q},"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":%q}]}}`,
+		name, pendingSandboxNamespace, message)
+}
+
+// TestCollectPendingSandboxPodsUntimedAgesFromFirstSeen: an unschedulable pod with no
+// usable creation time ages from the first tick that saw it unschedulable. It
+// raises nothing at zero or fifty-nine seconds, and one item at sixty-one
+// seconds that names when it was first seen (gt-1gtq5g).
+func TestCollectPendingSandboxPodsUntimedAgesFromFirstSeen(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	const message = "0/3 nodes are available: 3 Insufficient cpu."
+	f.reply = cliReply{stdout: sandboxPodListJSON(untimedSandboxPodJSON("default--gt-untimed", message))}
+	for _, step := range []struct {
+		after time.Duration
+		want  int
+	}{{0, 0}, {59 * time.Second, 0}, {61 * time.Second, 1}} {
+		f.src.now = pendingSandboxNow.Add(step.after)
+		items, err := f.collect(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != step.want {
+			t.Fatalf("at +%s: items = %+v, want %d", step.after, items, step.want)
+		}
+		if step.want == 1 {
+			want := "sandbox pod openshell/default--gt-untimed pending Unschedulable, age unknown, first seen 2026-11-12T22:00:00Z: " + message
+			if items[0].Summary != want {
+				t.Errorf("summary = %q, want %q", items[0].Summary, want)
+			}
+		}
+	}
+}
+
+// TestCollectPendingSandboxPodsUntimedWindowRestartsWhenPodLeaves: a pod that leaves the
+// list drops its first-seen entry, and when it returns untimed its window
+// starts again from the tick it returns on (gt-1gtq5g).
+func TestCollectPendingSandboxPodsUntimedWindowRestartsWhenPodLeaves(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	const key = "openshell/default--gt-untimed"
+	const message = "0/3 nodes are available: 3 Insufficient cpu."
+	pod := cliReply{stdout: sandboxPodListJSON(untimedSandboxPodJSON("default--gt-untimed", message))}
+	gone := cliReply{stdout: `{"items":[]}`}
+	t0 := pendingSandboxNow
+	for _, step := range []struct {
+		after time.Duration
+		reply cliReply
+	}{{0, pod}, {30 * time.Second, gone}, {100 * time.Second, pod}} {
+		f.src.now = t0.Add(step.after)
+		f.reply = step.reply
+		items, err := f.collect(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("at +%s: items = %+v, want none while the window is open or restarting", step.after, items)
+		}
+	}
+	if got := f.d.sandboxPendingFirstSeen[key]; !got.Equal(t0.Add(100 * time.Second)) {
+		t.Errorf("first seen after the pod returns = %s, want the return tick %s", got, t0.Add(100*time.Second))
+	}
+	f.src.now = t0.Add(161 * time.Second)
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || !strings.Contains(items[0].Summary, "first seen 2026-11-12T22:01:40Z") {
+		t.Errorf("items at +161s = %+v, want one item first seen at the return tick", items)
+	}
+}
+
+// TestCollectPendingSandboxPodsUntimedDropsAbsentPod: after a full read the first-seen
+// map holds only pods the read listed as unschedulable and untimed, so a pod
+// that left is not kept in memory (gt-1gtq5g).
+func TestCollectPendingSandboxPodsUntimedDropsAbsentPod(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	f.reply = cliReply{stdout: sandboxPodListJSON(untimedSandboxPodJSON("default--gt-untimed", "0/3 nodes are available."))}
+	if _, err := f.collect(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.d.sandboxPendingFirstSeen) != 1 {
+		t.Fatalf("first-seen entries after the pod is listed = %v, want the one pod", f.d.sandboxPendingFirstSeen)
+	}
+	f.reply = cliReply{stdout: `{"items":[]}`}
+	if _, err := f.collect(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.d.sandboxPendingFirstSeen) != 0 {
+		t.Errorf("first-seen entries after the pod is gone = %v, want none", f.d.sandboxPendingFirstSeen)
+	}
+}
+
+// TestPendingSandboxFailedReadKeepsFirstSeen: a read that fails keeps the
+// first-seen map as it was, so the age keeps running across the failure and
+// the item raises when the read recovers past the window (gt-1gtq5g).
+func TestPendingSandboxFailedReadKeepsFirstSeen(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	const key = "openshell/default--gt-untimed"
+	t0 := pendingSandboxNow
+	f.reply = cliReply{stdout: sandboxPodListJSON(untimedSandboxPodJSON("default--gt-untimed", "0/3 nodes are available."))}
+	if _, err := f.collect(t); err != nil {
+		t.Fatal(err)
+	}
+	f.src.now = t0.Add(30 * time.Second)
+	f.runErr = errors.New("the server is unavailable")
+	if _, err := f.collect(t); err == nil {
+		t.Fatal("collector read a failed kubectl call as clean")
+	}
+	if got := f.d.sandboxPendingFirstSeen[key]; !got.Equal(t0) {
+		t.Fatalf("first seen after a failed read = %s, want the first tick %s kept", got, t0)
+	}
+	f.runErr = nil
+	f.src.now = t0.Add(61 * time.Second)
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Errorf("items after the read recovers = %+v, want the pod's item", items)
+	}
+}
+
+// TestPendingSandboxTimedPodIgnoresFirstSeen: a pod with a usable creation time
+// ages from that time, not from the first-seen map, and an untimed pod beside
+// it does not change that (gt-1gtq5g).
+func TestPendingSandboxTimedPodIgnoresFirstSeen(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	f.reply = cliReply{stdout: sandboxPodListJSON(
+		sandboxPodJSON("default--gt-timed", pendingSandboxNamespace, "Pending", "False", "Unschedulable", "0/3 nodes are available.", pendingSandboxNow.Add(-2*time.Minute)),
+		untimedSandboxPodJSON("default--gt-untimed", "0/3 nodes are available."),
+	)}
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "sandbox-pending:openshell/default--gt-timed" {
+		t.Fatalf("items = %+v, want only the timed pod's item", items)
+	}
+	if !strings.Contains(items[0].Summary, "pending 2m, unschedulable:") {
+		t.Errorf("summary = %q, want the age from the pod's own creation time", items[0].Summary)
+	}
+	if _, ok := f.d.sandboxPendingFirstSeen["openshell/default--gt-timed"]; ok {
+		t.Error("first-seen map holds the timed pod; only untimed pods belong there")
+	}
+}
+
+// TestPendingSandboxUnparseableTimestampIsUntimed: a creation time that does
+// not parse is an untimed pod, not a refused list, so the other pods in the
+// reply are still read and the bad pod ages from first seen (gt-1gtq5g).
+func TestPendingSandboxUnparseableTimestampIsUntimed(t *testing.T) {
+	t.Parallel()
+	f := newPendingSandboxFixture(t)
+	f.reply = cliReply{stdout: `{"items":[` +
+		`{"metadata":{"name":"default--gt-badstamp","namespace":"openshell","creationTimestamp":"not-a-time"},"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"0/3 nodes are available."}]}},` +
+		sandboxPodJSON("default--gt-nux", pendingSandboxNamespace, "Pending", "False", "Unschedulable", "0/3 nodes are available.", pendingSandboxNow.Add(-5*time.Minute)) +
+		`]}`}
+	items, err := f.collect(t)
+	if err != nil {
+		t.Fatalf("an unparseable creation time refused the whole list: %v", err)
+	}
+	if len(items) != 1 || items[0].Key != "sandbox-pending:openshell/default--gt-nux" {
+		t.Errorf("items = %+v, want only the timed pod's item", items)
+	}
+	if _, ok := f.d.sandboxPendingFirstSeen["openshell/default--gt-badstamp"]; !ok {
+		t.Error("the pod with an unparseable time is not tracked as untimed")
+	}
+}
+
 // TestPendingSandboxEmptyMessageStillRaises: an unschedulable pod whose
 // scheduler gave no message still raises its item, saying so in place of the
 // message, so the refusal is not hidden by an empty string (gt-1gtq5g).
