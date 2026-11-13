@@ -28,6 +28,9 @@ type BranchRepo interface {
 	RefExists(ref string) (bool, error)
 	FirstParentContains(commit, descendant string) (bool, error)
 	Cherry(upstream, head string) (string, error)
+	// MergeCommitsAhead counts a branch's merge commits beyond a base, which
+	// Cherry omits: it lists non-merge commits only.
+	MergeCommitsAhead(base, branch string) (int, error)
 	CountCommitsBehind(ref string) (int, error)
 	CurrentBranch() (string, error)
 	ListBranches(pattern string) ([]string, error)
@@ -577,6 +580,35 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 		if n, err := g.CountCommitsBehind("origin/main"); err != nil || n != 1 {
 			t.Errorf("CountCommitsBehind = %d, %v; want 1", n, err)
+		}
+
+		// A merge commit is the one thing Cherry cannot list, so the count
+		// reads the range rather than the patch marks: none here, then one,
+		// then two.
+		if n, err := g.MergeCommitsAhead("origin/main", "origin/"+fixtureBranch); err != nil || n != 0 {
+			t.Errorf("MergeCommitsAhead of a branch with no merge = %d, %v; want 0", n, err)
+		}
+		if _, err := g.MergeCommitsAhead("origin/main", "no-such-branch"); err == nil {
+			t.Error("MergeCommitsAhead of an unknown branch succeeded")
+		}
+		for _, merge := range []struct{ branch, file string }{
+			{branch: "mergework", file: "m.txt"},
+			{branch: "mergework2", file: "n.txt"},
+		} {
+			if err := g.CheckoutNewBranch(merge.branch, "origin/"+fixtureBranch); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(fx.clone, merge.file), merge.branch+"\n")
+			env.CommitWorktree(t, fx.clone, merge.branch+": keep")
+			if err := g.Checkout("main"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.MergeNoFF(merge.branch, "merge "+merge.branch); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n, err := g.MergeCommitsAhead("origin/main", "main"); err != nil || n != 2 {
+			t.Errorf("MergeCommitsAhead after two merges = %d, %v; want 2", n, err)
 		}
 	})
 

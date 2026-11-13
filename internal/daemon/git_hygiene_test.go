@@ -792,6 +792,117 @@ func TestRunGitHygiene_EmptyCrewBranchIsDeletedOnlyOnceOlderThanTheInterval(t *t
 	}
 }
 
+// git cherry lists non-merge commits only: a crew branch whose every commit
+// beyond the default is a merge prints nothing, and the interval rule must not
+// read that as an empty branch. Its merge can carry content no patch on the
+// default branch reproduces, so it is kept and the log says why (gt-eyy06f).
+func TestRunGitHygiene_KeepsMergeOnlyCrewBranch(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	landed := f.Commit(t, origin, "main", "landed on main", map[string]string{"l.txt": "l\n"})
+	f.SetRef(t, origin, "refs/heads/side", base)
+	side := f.Commit(t, origin, "side", "side work", map[string]string{"s.txt": "s\n"})
+
+	// main's history takes both sides, and the crew branch merges the same two
+	// commits the way main did: each of its parents is on main, the merge itself
+	// is not, and cherry has nothing left to list.
+	work := filepath.Join(t.TempDir(), "work")
+	f.Clone(t, origin, work)
+	f.SetRef(t, work, "refs/heads/side", side)
+	f.SetHead(t, work, "main")
+	if err := f.Open(work).MergeNoFF("side", "main merge"); err != nil {
+		t.Fatal(err)
+	}
+	f.SetRef(t, origin, "refs/heads/main", f.Ref(work, "refs/heads/main"))
+	f.SetRef(t, work, "refs/heads/crew/m", landed)
+	f.SetHead(t, work, "crew/m")
+	if err := f.Open(work).MergeNoFF("side", "crew merge"); err != nil {
+		t.Fatal(err)
+	}
+	crew := f.Ref(work, "refs/heads/crew/m")
+	f.SetRef(t, origin, "refs/heads/crew/m", crew)
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{GitHygiene: &PatrolConfig{Interval: "1h"}}}
+	tip, err := d.gitAt(origin).CommitTime(crew)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.clock = clockwork.NewFakeClockAt(tip.Add(2 * time.Hour))
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/m"); got != crew {
+		t.Errorf("origin crew/m = %q, want the merge-only branch kept at %s", got, crew)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/m: it has a merge commit beyond origin/main, which cherry cannot judge") {
+		t.Errorf("log does not say why crew/m was kept:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "0 merged, 0 orphan, 0 remote, 0 crew") {
+		t.Errorf("log counts a kept merge-only branch as deleted:\n%s", logs.String())
+	}
+}
+
+// A crew branch can hold both a patch-landed non-merge commit, which cherry
+// prints as "-", and a merge beyond the base, which cherry never prints. The
+// non-empty cherry output must not hide the merge: the branch is kept and the
+// log names the merge (gt-eyy06f).
+func TestRunGitHygiene_KeepsLandedCrewBranchThatAlsoHoldsAMerge(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	// side is on main's history, so cherry never lists it on either branch.
+	f.SetRef(t, origin, "refs/heads/side", base)
+	side := f.Commit(t, origin, "side", "side work", map[string]string{"s.txt": "s\n"})
+	// main lands a change by patch, then merges side.
+	f.Commit(t, origin, "main", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+
+	work := filepath.Join(t.TempDir(), "work")
+	f.Clone(t, origin, work)
+	f.SetRef(t, work, "refs/heads/side", side)
+	f.SetHead(t, work, "main")
+	if err := f.Open(work).MergeNoFF("side", "main merge"); err != nil {
+		t.Fatal(err)
+	}
+	f.SetRef(t, origin, "refs/heads/main", f.Ref(work, "refs/heads/main"))
+
+	// The crew branch lands the same patch under its own SHA, then merges side.
+	f.SetRef(t, work, "refs/heads/crew/mixed", base)
+	f.SetHead(t, work, "crew/mixed")
+	f.Commit(t, work, "crew/mixed", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	if err := f.Open(work).MergeNoFF("side", "crew merge"); err != nil {
+		t.Fatal(err)
+	}
+	crew := f.Ref(work, "refs/heads/crew/mixed")
+	f.SetRef(t, origin, "refs/heads/crew/mixed", crew)
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/mixed"); got != crew {
+		t.Errorf("origin crew/mixed = %q, want the branch kept at %s for its merge", got, crew)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/mixed: it has a merge commit beyond origin/main, which cherry cannot judge") {
+		t.Errorf("log does not say why crew/mixed was kept:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "0 merged, 0 orphan, 0 remote, 0 crew") {
+		t.Errorf("log counts a kept branch as deleted:\n%s", logs.String())
+	}
+}
+
 // A crew branch whose cherry check errors is kept with the reason in the log,
 // and so is the integration branch, which the sweep never deletes (gt-t9vl4).
 func TestRunGitHygiene_KeepsCrewBranchWhoseCherryFailsAndLogsTheIntegrationBranch(t *testing.T) {
@@ -857,6 +968,70 @@ func TestRunGitHygiene_KeepsEmptyCrewBranchWhoseTipTimeFails(t *testing.T) {
 	}
 }
 
+// An empty cherry output clears a crew branch of holding unlanded non-merge
+// commits, but not of holding merges: the merge count decides that, and when
+// it cannot be read the branch is kept, as every unknown answer keeps it.
+func TestRunGitHygiene_KeepsEmptyCrewBranchWhenTheMergeCheckFails(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/empty", base)
+	f.Commit(t, origin, "main", "later", map[string]string{"b.txt": "b\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{GitHygiene: &PatrolConfig{Interval: "1h"}}}
+	tip, err := d.gitAt(origin).CommitTime(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.clock = clockwork.NewFakeClockAt(tip.Add(2 * time.Hour))
+	withGit(d, func(g daemonGit) daemonGit { return mergeCountFails{g} })
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/empty"); got != base {
+		t.Errorf("origin crew/empty = %q, want the branch kept at %s when the merge check fails", got, base)
+	}
+	if !strings.Contains(logs.String(), "keep origin/crew/empty: cannot tell whether it has landed: merges: boom") {
+		t.Errorf("log does not report the failed merge check:\n%s", logs.String())
+	}
+}
+
+// A crew branch whose non-merge commits were all landed on main by patch (so
+// cherry marks each "-") and which holds no merge beyond the base is reaped
+// without an age gate: the branch does hold commits beyond the base, and every
+// one of them has landed (gt-eyy06f).
+func TestRunGitHygiene_ReapsRebaseLandedCrewBranch(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/crew/rebased", base)
+	f.Commit(t, origin, "crew/rebased", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	f.Commit(t, origin, "main", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "refinery", "rig")
+	f.Clone(t, origin, repo)
+
+	d.runGitHygiene()
+
+	if got := f.Ref(origin, "refs/heads/crew/rebased"); got != "" {
+		t.Errorf("origin crew/rebased = %q, want the patch-equivalent branch deleted", got)
+	}
+	if !strings.Contains(logs.String(), "1 crew branch(es) deleted") {
+		t.Errorf("log does not count the reaped patch-equivalent branch:\n%s", logs.String())
+	}
+}
+
 // A crew branch is kept when the default base cannot be settled: the sweep
 // judges it against origin's default branch, and an integration base that
 // cannot be fetched leaves that answer unknown.
@@ -919,6 +1094,13 @@ func TestRunGitHygiene_KeepsLandedCrewBranchWhenTheDeleteIsRefused(t *testing.T)
 	if !strings.Contains(logs.String(), "0 merged, 0 orphan, 0 remote, 0 crew") {
 		t.Errorf("log counts a refused delete as deleted:\n%s", logs.String())
 	}
+}
+
+// mergeCountFails is a daemonGit whose merge-commit count always errors.
+type mergeCountFails struct{ daemonGit }
+
+func (mergeCountFails) MergeCommitsAhead(base, branch string) (int, error) {
+	return 0, errors.New("merges: boom")
 }
 
 // commitTimeFails is a daemonGit whose CommitTime always errors.
