@@ -308,6 +308,7 @@ func checkEnsureService(raw []byte) error {
 		checkEnsureEnvFile(svc),
 		checkEnsureDependsOn(svc),
 		checkEnsureCommand(svc),
+		checkNoPasswordLiteral(raw),
 	)
 }
 
@@ -393,11 +394,21 @@ func commandText(svc map[string]any) string {
 	return strings.Join(parts, "\n")
 }
 
+// unescapedDollar matches a single $ that compose reads as interpolation
+// start. A literal $ in the command is written $$, which compose turns into $.
+var unescapedDollar = regexp.MustCompile(`(^|[^$])\$([^$]|$)`)
+
+// ensureProbeGuard matches the probe's psql command substitution followed by a
+// status test, so a probe that cannot answer fails the service instead of
+// reading as an absent database and falling into the create branch.
+var ensureProbeGuard = regexp.MustCompile(`\$\(psql[^)]*\)\s*\|\|`)
+
 func checkEnsureCommand(svc map[string]any) error {
 	cmd := commandText(svc)
 	if strings.TrimSpace(cmd) == "" {
 		return fmt.Errorf("%s has no entrypoint or command", ensureService)
 	}
+	var problems []error
 	var missing []string
 	for _, token := range ensureCommandTokens {
 		if !strings.Contains(cmd, token) {
@@ -405,9 +416,15 @@ func checkEnsureCommand(svc map[string]any) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("%s command lacks %s", ensureService, strings.Join(missing, ", "))
+		problems = append(problems, fmt.Errorf("%s command lacks %s", ensureService, strings.Join(missing, ", ")))
 	}
-	return nil
+	if unescapedDollar.MatchString(cmd) {
+		problems = append(problems, fmt.Errorf("%s command carries an unescaped $; write $$ so compose leaves the shell's $ alone", ensureService))
+	}
+	if !ensureProbeGuard.MatchString(cmd) {
+		problems = append(problems, fmt.Errorf("%s does not test the probe's exit status, so a failed probe falls into the create branch", ensureService))
+	}
+	return errors.Join(problems...)
 }
 
 // TestTrackerComposeLimits runs the contract against the real compose file.
@@ -674,7 +691,19 @@ func TestTrackerComposeEnsureServiceRefusals(t *testing.T) {
 				svc := d.service(t, ensureService)
 				setEnsureScript(t, svc, rewrite(t, ensureScript(t, svc), "$$POSTGRES_PASSWORD", "hunter2"))
 			})
-		}, "$$POSTGRES_PASSWORD"},
+		}, "sets a password literal"},
+		{"unescaped dollar", func(t *testing.T) []byte {
+			return ensureFixture(t, func(d *composeDoc) {
+				svc := d.service(t, ensureService)
+				setEnsureScript(t, svc, rewrite(t, ensureScript(t, svc), "$$POSTGRES_PASSWORD", "$POSTGRES_PASSWORD"))
+			})
+		}, "unescaped $"},
+		{"probe failure folded into create", func(t *testing.T) []byte {
+			return ensureFixture(t, func(d *composeDoc) {
+				svc := d.service(t, ensureService)
+				setEnsureScript(t, svc, rewrite(t, ensureScript(t, svc), `'tracker'") || exit 1`, `'tracker'")`))
+			})
+		}, "does not test the probe's exit status"},
 		{"no pg_database probe", func(t *testing.T) []byte {
 			return ensureFixture(t, func(d *composeDoc) {
 				svc := d.service(t, ensureService)

@@ -88,6 +88,14 @@ file needs lives in `tracker-db.env` beside it. trackerd reaches the same
 database through the `TRACKER_DSN` Secret of its Deployment; no plist holds
 these settings, so a database elsewhere is named by that Secret.
 
+The compose file also carries a one-shot `tracker-db-ensure` service for that
+create connection. A fresh data directory can come up without the `tracker`
+database: its first init's temporary server fails on the bind mount ("data
+directory has wrong ownership"), so the entrypoint never runs the `POSTGRES_DB`
+creation. Once `tracker-db` is healthy, the service creates `tracker` owned by
+`tracker` when it is missing, prints what it did, and exits; a start with the
+database already present changes nothing.
+
 The DSNs carry no password. libpq takes it from `PGPASSWORD`, which you set to
 the password in `tracker-db.env` beside the compose file, or from a `0600`
 `~/.pgpass` entry for `127.0.0.1:5432`. A block whose first lines find neither
