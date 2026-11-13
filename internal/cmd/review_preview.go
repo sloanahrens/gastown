@@ -217,10 +217,14 @@ func ensureOriginHead(head string, remoteTip func() (string, error), push func()
 	return push()
 }
 
-// reviewPreviewNotes returns the notes of iss, the bead Show read for bead. A
-// Show that returns no issue is an error, never an empty notes list: an empty
-// list would look like a bead no round has answered.
-func reviewPreviewNotes(bead string, iss *beads.Issue) (string, error) {
+// reviewPreviewNotes reads the notes of bead through show, the bead store's
+// Show. A failed read is an error, and so is a Show that returns no issue: an
+// empty notes list would look like a bead no round has answered.
+func reviewPreviewNotes(bead string, show func(id string) (*beads.Issue, error)) (string, error) {
+	iss, err := show(bead)
+	if err != nil {
+		return "", err
+	}
 	if iss == nil {
 		return "", fmt.Errorf("bead %s not found", bead)
 	}
@@ -271,13 +275,7 @@ func runReviewPreview(cmd *cobra.Command, _ []string) error {
 			func() (string, error) { return g.PushRemoteBranchTip("origin", branch) },
 			func() error { return g.Push("origin", branch, false) })
 	}
-	p.readNotes = func() (string, error) {
-		iss, err := client.Show(bead)
-		if err != nil {
-			return "", err
-		}
-		return reviewPreviewNotes(bead, iss)
-	}
+	p.readNotes = func() (string, error) { return reviewPreviewNotes(bead, client.Show) }
 	p.appendNote = func(note string) error { return client.AppendNotes(bead, note) }
 	return p.run()
 }

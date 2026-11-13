@@ -330,15 +330,29 @@ func TestReviewPreviewEnsureOriginHead(t *testing.T) {
 func TestReviewPreviewNotesOfShownBead(t *testing.T) {
 	t.Parallel()
 
-	if _, err := reviewPreviewNotes("gt-jx66mp", nil); err == nil {
-		t.Fatal("reviewPreviewNotes(nil issue) = nil error, want an error: a missing bead is not an empty notes list")
+	cases := []struct {
+		name      string
+		issue     *beads.Issue
+		showErr   error
+		wantNotes string
+		wantErr   bool
+	}{
+		{name: "the bead's notes", issue: &beads.Issue{ID: "gt-jx66mp", Notes: previewRequest}, wantNotes: previewRequest},
+		{name: "the store cannot read the bead", showErr: errors.New("bd unreachable"), wantErr: true},
+		{name: "the store returns no bead", wantErr: true},
 	}
-	notes, err := reviewPreviewNotes("gt-jx66mp", &beads.Issue{ID: "gt-jx66mp", Notes: "LOCAL ROUND REQUEST head=" + previewHead})
-	if err != nil {
-		t.Fatalf("reviewPreviewNotes() error = %v, want nil", err)
-	}
-	if notes != previewRequest {
-		t.Fatalf("reviewPreviewNotes() = %q, want the bead's notes %q", notes, previewRequest)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			notes, err := reviewPreviewNotes("gt-jx66mp", func(string) (*beads.Issue, error) {
+				return c.issue, c.showErr
+			})
+			if (err != nil) != c.wantErr {
+				t.Fatalf("reviewPreviewNotes() error = %v, want error %v", err, c.wantErr)
+			}
+			if notes != c.wantNotes {
+				t.Fatalf("reviewPreviewNotes() = %q, want %q", notes, c.wantNotes)
+			}
+		})
 	}
 }
 
