@@ -78,6 +78,13 @@ type DaemonPatrolConfig struct {
 	// toolchain or engine (gt-1oz0t). The launchd daemon ignores it and runs
 	// everything. The host agent runs the same names on the host.
 	ContainerOffSetting []string `json:"container_off,omitempty"`
+
+	// LocalRoundSetting is the polecat's local om round: its switch and the
+	// wall bound one round may run for (gt-mwbdzb). It is the one switch the
+	// overseer owns; off means the daemon never serves a LOCAL ROUND REQUEST.
+	// Read it through LocalRoundEnabled and LocalRoundTimeout; the latter
+	// refuses an invalid bound rather than reading it as the default.
+	LocalRoundSetting *LocalRoundConfig `json:"local_round,omitempty"`
 	// PolecatImageSourceSetting names the CI registry repository the daemon's
 	// dev-tag step copies the polecat image from: a bare host:port and a
 	// repository path, such as forgejo:3000/bot-registry/gastown-polecat. Read
@@ -259,6 +266,54 @@ func (c *DaemonPatrolConfig) ContainerOff() []string {
 		return nil
 	}
 	return c.ContainerOffSetting
+}
+
+// LocalRoundConfig is the daemon.local_round block: the polecat's local om
+// round switch and the wall bound one round may run for (gt-mwbdzb).
+type LocalRoundConfig struct {
+	// Enabled is the switch: false means no local round request is ever
+	// served.
+	Enabled bool `json:"enabled,omitempty"`
+	// TimeoutSeconds bounds one round. Unset or 0 takes
+	// DefaultLocalRoundTimeout; a value above MaxLocalRoundTimeout is refused.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
+const (
+	// DefaultLocalRoundTimeout is the wall bound a local round runs under when
+	// daemon.local_round.timeout_seconds is unset or 0.
+	DefaultLocalRoundTimeout = 300 * time.Second
+	// MaxLocalRoundTimeout is the longest wall bound
+	// daemon.local_round.timeout_seconds accepts.
+	MaxLocalRoundTimeout = 900 * time.Second
+)
+
+// LocalRoundEnabled reports whether the daemon serves local om round requests.
+// It is false when the town sets no daemon block, no local_round block, or
+// enabled false: this is the one switch the overseer owns, and off means no
+// request is ever served.
+func (c *DaemonPatrolConfig) LocalRoundEnabled() bool {
+	return c != nil && c.LocalRoundSetting != nil && c.LocalRoundSetting.Enabled
+}
+
+// LocalRoundTimeout returns the wall bound one local round may run for. An
+// unset timeout_seconds or 0 takes DefaultLocalRoundTimeout; a negative value
+// or one above MaxLocalRoundTimeout is an error naming
+// daemon.local_round.timeout_seconds, never the default.
+func (c *DaemonPatrolConfig) LocalRoundTimeout() (time.Duration, error) {
+	if c == nil || c.LocalRoundSetting == nil {
+		return DefaultLocalRoundTimeout, nil
+	}
+	secs := c.LocalRoundSetting.TimeoutSeconds
+	if secs == 0 {
+		return DefaultLocalRoundTimeout, nil
+	}
+	maxSeconds := int(MaxLocalRoundTimeout / time.Second)
+	if secs < 0 || secs > maxSeconds {
+		return 0, fmt.Errorf("daemon.local_round.timeout_seconds %d: want a value from 1 to %d seconds; 0 takes the %d second default",
+			secs, maxSeconds, int(DefaultLocalRoundTimeout/time.Second))
+	}
+	return time.Duration(secs) * time.Second, nil
 }
 
 // ContainerName returns the container the container supervisor manages.
