@@ -48,8 +48,8 @@ one round is `daemon.local_round.timeout_seconds`. It defaults to 300 seconds,
 and a value above 900 seconds is refused with an error that names the key.
 
 When the switch is off, the patrol still answers each open request, with an
-unavailable line that says the switch is off. A polecat's preview therefore
-returns at once and the submit goes ahead.
+unavailable line that says the switch is off. A polecat's preview receives
+that answer at the patrol's next tick and the submit goes ahead.
 
 ## Channel
 
@@ -82,6 +82,8 @@ the round's head. Minor and info findings never block. No flag skips the gate.
 ## Turning it off
 
 Set `daemon.local_round.enabled` to false in the daemon section of the town's
-configuration. The patrol reads the switch on each request, so the next request
-after the daemon reloads its patrol configuration sees the change. Polecats then receive unavailable answers and submit as
-they did before the feature existed.
+configuration. The daemon re-reads the patrol configuration on its next
+heartbeat after the setting changes, and the patrol takes the switch in force
+each time it serves a request, so a request it serves after that reload gets
+the unavailable answer. Polecats then receive unavailable answers and submit
+as they did before the feature existed.
