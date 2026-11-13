@@ -94,11 +94,6 @@ type Daemon struct {
 	// survives records coming and going between ticks.
 	sandboxRecordCursor string
 
-	// sandboxGatewayRetryLimit is how many ticks a kept sandbox seat's gateway may
-	// stay silent before the queue raises the seat's item. Zero is
-	// defaultSandboxGatewayRetryTicks (gt-7h38pd).
-	sandboxGatewayRetryLimit int
-
 	// gatewayTallies counts, per kept sandbox seat, the patrol ticks its gateway
 	// has stayed silent, in memory so the alarm does not depend on the kept
 	// record being written (sandbox_gateway_retry.go, gt-7h38pd).

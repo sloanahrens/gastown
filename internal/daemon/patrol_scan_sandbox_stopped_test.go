@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -319,22 +320,6 @@ func TestGatewayThatDoesNotAnswerIsRetriedEveryTick(t *testing.T) {
 		}
 		if len(p.deleted) != 0 {
 			t.Errorf("sandboxes deleted = %v, want none while the gateway is silent", p.deleted)
-		}
-	})
-
-	t.Run("the retry limit is the daemon's to set", func(t *testing.T) {
-		t.Parallel()
-		p := newStoppedSeatPatrol(t, true)
-		p.host.d.sandboxGatewayRetryLimit = 2
-		p.host.sandboxExists = func(string, string) (bool, error) {
-			return false, errors.New("signal: killed")
-		}
-		for tick := 1; tick <= 2; tick++ {
-			p.clk.Advance(time.Minute)
-			p.host.patrolScanSandboxRecords()
-		}
-		if items := keptSeatItems(t, p.host.d, p.clk.Now()); len(items) != 1 {
-			t.Fatalf("kept-seat items after two silent ticks at limit 2 = %v, want one", items)
 		}
 	})
 
@@ -747,4 +732,143 @@ func TestGatewayTickCounterThatCannotBeKeptRaisesTheAlarm(t *testing.T) {
 			t.Errorf("kept-seat items after the answer = %v, want none", items)
 		}
 	})
+
+	t.Run("a seat lock that is not free raises the counter reason", func(t *testing.T) {
+		t.Parallel()
+		p := newStoppedSeatPatrol(t, true)
+		silentGateway(p)
+		p.host.sandboxSeatLock = func(string, string, func() error) error {
+			return polecat.ErrSandboxSeatLockBusy
+		}
+
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+
+		items := keptSeatItems(t, p.host.d, p.clk.Now())
+		want := "cannot count gateway tries for " + endRig + "/" + endPolecat + ":"
+		if len(items) != 1 || !strings.Contains(items[0], want) || !strings.Contains(items[0], polecat.ErrSandboxSeatLockBusy.Error()) {
+			t.Fatalf("kept-seat items = %v, want one carrying %q and the busy lock", items, want)
+		}
+	})
+
+	t.Run("the alarm clears when a write works again and the tries are saved", func(t *testing.T) {
+		t.Parallel()
+		p := newStoppedSeatPatrol(t, true)
+		silentGateway(p)
+		failing := true
+		p.host.keptSeatWrite = func(town, rig, name string, rec keptSandboxSeatRecord) error {
+			if failing {
+				return errors.New("disk full")
+			}
+			return writeKeptSandboxSeat(town, rig, name, rec)
+		}
+		for tick := 1; tick <= 2; tick++ {
+			p.clk.Advance(time.Minute)
+			p.host.patrolScanSandboxRecords()
+		}
+		if items := keptSeatItems(t, p.host.d, p.clk.Now()); len(items) != 1 || !strings.Contains(items[0], "disk full") {
+			t.Fatalf("kept-seat items after two failed writes = %v, want one naming the write error", items)
+		}
+
+		failing = false
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+
+		if items := keptSeatItems(t, p.host.d, p.clk.Now()); len(items) != 0 {
+			t.Errorf("kept-seat items after the write works = %v, want none", items)
+		}
+		if got := p.keptSeatOf(t).Tries; got != 3 {
+			t.Errorf("saved tries after the write works = %d, want 3", got)
+		}
+	})
+}
+
+// The count is made on a record read under the seat lock. A record that goes
+// bad, or is rewritten without landing facts, between the tick's first read and
+// its lock is never counted from the stale read (gt-7h38pd).
+func TestGatewayTickUnderTheLockReadsTheRecordItCounts(t *testing.T) {
+	t.Parallel()
+	silentGateway := func(p *keptSeatPatrol) {
+		p.host.sandboxExists = func(string, string) (bool, error) {
+			return false, errors.New("signal: killed")
+		}
+	}
+	t.Run("a record that cannot be read under the lock raises the counter reason", func(t *testing.T) {
+		t.Parallel()
+		p := newStoppedSeatPatrol(t, true)
+		silentGateway(p)
+		p.host.sandboxSeatLock = func(_ string, _ string, fn func() error) error {
+			corruptKeptSeat(t, p)
+			return fn()
+		}
+
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+
+		items := keptSeatItems(t, p.host.d, p.clk.Now())
+		want := "cannot count gateway tries for " + endRig + "/" + endPolecat + ":"
+		if len(items) != 1 || !strings.Contains(items[0], want) {
+			t.Fatalf("kept-seat items = %v, want one carrying %q", items, want)
+		}
+	})
+
+	t.Run("a record rewritten without landing facts under the lock is not counted", func(t *testing.T) {
+		t.Parallel()
+		p := newStoppedSeatPatrol(t, true)
+		silentGateway(p)
+		const other = "some other keep"
+		p.host.sandboxSeatLock = func(_ string, _ string, fn func() error) error {
+			rec := keptSandboxSeatRecord{Bead: endBead, Reason: other, Since: p.clk.Now()}
+			if err := writeKeptSandboxSeat(p.town, endRig, endPolecat, rec); err != nil {
+				t.Fatal(err)
+			}
+			return fn()
+		}
+
+		p.clk.Advance(time.Minute)
+		p.host.patrolScanSandboxRecords()
+
+		kept := p.keptSeatOf(t)
+		if kept.Reason != other || kept.Tries != 0 || kept.Landing != nil {
+			t.Errorf("kept record = %+v, want the other keep untouched with no tries", kept)
+		}
+	})
+}
+
+// A landing takes the seat lock and clears the kept record while a silent tick
+// is between its first read and its lock. The tick must not write the record
+// back: it re-reads under the lock, finds the record gone, and writes nothing,
+// so no item is raised for the seat (gt-7h38pd).
+func TestGatewayTickDoesNotRecreateAClearedRecord(t *testing.T) {
+	t.Parallel()
+	p := newStoppedSeatPatrol(t, true)
+	p.host.sandboxExists = func(string, string) (bool, error) {
+		return false, errors.New("signal: killed")
+	}
+	locked := false
+	p.host.sandboxSeatLock = func(_ string, _ string, fn func() error) error {
+		locked = true
+		// The landing has cleared the record before the tick gets the lock.
+		if err := removeKeptSandboxSeat(p.town, endRig, endPolecat); err != nil {
+			t.Fatal(err)
+		}
+		return fn()
+	}
+
+	p.clk.Advance(time.Minute)
+	p.host.patrolScanSandboxRecords()
+
+	if !locked {
+		t.Fatal("the silent tick did not take the seat lock")
+	}
+	path, err := keptSandboxSeatPath(p.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("kept record after the tick: stat err = %v, want not exist: the tick recreated a cleared record", err)
+	}
+	if items := keptSeatItems(t, p.host.d, p.clk.Now()); len(items) != 0 {
+		t.Errorf("kept-seat items after the tick = %v, want none", items)
+	}
 }

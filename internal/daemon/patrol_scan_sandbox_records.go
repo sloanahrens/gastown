@@ -212,11 +212,7 @@ func (h *patrolScanHost) deleteHeldSandbox(name string, rec session.SandboxRecor
 	if err := polecat.CheckSandboxSeatNames(rec.Rig, rec.Polecat); err != nil {
 		return false, err.Error()
 	}
-	lock := h.sandboxSeatLock
-	if lock == nil {
-		lock = polecat.WithSandboxSeatLock
-	}
-	err := lock(filepath.Join(h.town(), rec.Rig), rec.Polecat, func() error {
+	err := h.withSeatLock(rec.Rig, rec.Polecat, func() error {
 		current, ok, err := session.ReadSandboxRecord(h.town(), name)
 		if err != nil {
 			why = "cannot re-read its sandbox record under its seat lock: " + err.Error()
@@ -239,6 +235,17 @@ func (h *patrolScanHost) deleteHeldSandbox(name string, rec session.SandboxRecor
 		return false, "its seat lock could not be taken: " + err.Error()
 	}
 	return dropped, why
+}
+
+// withSeatLock runs fn under the seat lock of rig/name: the sandboxSeatLock seam
+// when set, else polecat.WithSandboxSeatLock. A lock that is not free in time is
+// an error, and fn does not run.
+func (h *patrolScanHost) withSeatLock(rig, name string, fn func() error) error {
+	lock := h.sandboxSeatLock
+	if lock == nil {
+		lock = polecat.WithSandboxSeatLock
+	}
+	return lock(filepath.Join(h.town(), rig), name, fn)
 }
 
 // endHeldSandbox ends a held sandbox the gateway still has, whose seat has
@@ -277,8 +284,11 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 // proves the work landed, and the seat still holds that landed bead and branch
 // (staleStoppedKeep). The transcripts may not be copied out of a stopped
 // sandbox, so the delete is warned, naming the seat, and goes on. A seat whose
-// work is not proven landed stays, kept with stoppedUnlandedReason. It returns
-// the reason the sandbox is kept, or "" when it was deleted (gt-7h38pd).
+// work is not proven landed stays, kept with stoppedUnlandedReason. The agent
+// bead's ended state is deliberately not an alternative: only a kept record with
+// landing facts, bound to the seat's current bead and branch, authorizes the
+// delete. It returns the reason the sandbox is kept, or "" when it was deleted
+// (gt-7h38pd).
 func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.SandboxRecord) string {
 	if rec.Rig == "" || rec.Polecat == "" {
 		return "its record names no seat, so its seat's end cannot be read"

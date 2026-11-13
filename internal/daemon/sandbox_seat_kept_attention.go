@@ -49,7 +49,6 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 	if len(unalarmed) > 0 {
 		return nil, fmt.Errorf("unreadable kept sandbox seat records: %s", strings.Join(unalarmed, ", "))
 	}
-	limit := s.d.gatewayRetryLimit()
 	var out []attention.Item
 	seen := make(map[string]bool, len(seats))
 	for _, seat := range seats {
@@ -60,7 +59,7 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 		// A seat whose gateway has stayed silent for the retry limit's ticks is
 		// raised whatever its age (gt-7h38pd). The tally counts the same ticks
 		// when the record cannot hold the count.
-		if tally.alarm == "" && kept <= keptSeatAttentionAfter && max(seat.Tries, tally.tries) < limit {
+		if tally.alarm == "" && kept <= keptSeatAttentionAfter && max(seat.Tries, tally.tries) < gatewaySilentTickLimit {
 			continue
 		}
 		reason := seat.Reason

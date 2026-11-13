@@ -25,18 +25,10 @@ const stoppedUnlandedReason = "stopped, work not proven landed"
 // the bead and branch the seat holds now (gt-7h38pd).
 const sandboxKeptRecordStaleReason = "kept record names %s/%s, the seat now holds %s/%s"
 
-// defaultSandboxGatewayRetryTicks is how many ticks a kept seat's gateway may
-// stay silent before the queue raises the seat's item (gt-7h38pd).
-const defaultSandboxGatewayRetryTicks = 6
-
-// gatewayRetryLimit is the tick count at which a silent gateway's kept seat is
-// raised: Daemon.sandboxGatewayRetryLimit when set, else the default.
-func (d *Daemon) gatewayRetryLimit() int {
-	if d.sandboxGatewayRetryLimit > 0 {
-		return d.sandboxGatewayRetryLimit
-	}
-	return defaultSandboxGatewayRetryTicks
-}
+// gatewaySilentTickLimit is how many patrol ticks a kept seat's gateway may stay
+// silent before the queue raises the seat's item. It is a constant on purpose,
+// not a config key or a field: the limit was decided on the bead (gt-7h38pd).
+const gatewaySilentTickLimit = 6
 
 // gatewayNoAnswerKeepReason is the reason of a keep whose last gateway question
 // went unanswered at last.
@@ -140,8 +132,9 @@ func (h *patrolScanHost) writeKeptSeat(rig, name string, rec keptSandboxSeatReco
 // for a patrol tick that found the gateway silent, and false for the landing's
 // own question, which is the first try and not a tick. A keep that cannot be
 // read is dated from now. The count of ticks is kept in memory as well as the
-// record: when the record cannot be written, the tally's alarm raises the seat
-// (gt-7h38pd).
+// record: when the record cannot be written, the tally's alarm raises the seat,
+// and a write that works again clears that alarm. The caller holds the seat's
+// lock: the landing's end does, and countGatewayTryLocked does (gt-7h38pd).
 func (h *patrolScanHost) recordGatewayNoAnswer(rig, name string, landing sandboxSeatLanding, tick bool) {
 	now := h.d.clk().Now().UTC()
 	since, prevTries := now, 0
@@ -163,14 +156,19 @@ func (h *patrolScanHost) recordGatewayNoAnswer(rig, name string, landing sandbox
 	if err := h.writeKeptSeat(rig, name, rec); err != nil {
 		h.alarmGatewayTries(rig, name, err)
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the gateway keep: %v; the seat is kept all the same", rig, name, err)
+		return
 	}
+	h.d.updateGatewayTally(rig, name, func(t *gatewayTally) { t.alarm = "" })
 }
 
 // countGatewayTry counts a patrol tick that found the gateway of the sandbox rec
-// names silent. A seat whose end is recorded with landing facts is counted. A
+// names silent. A seat whose end is recorded with landing facts is counted, under
+// the seat lock the landing's end takes, so a tick cannot write back a record a
+// landing has just cleared. The read outside the lock only decides whether the
+// seat is kept and worth the lock; the count is made on a read taken under it. A
 // record that cannot be read raises the tally's alarm on this tick, since its
-// tries cannot be kept. Any other seat is asked again on the next tick with
-// nothing recorded (gt-7h38pd).
+// tries cannot be kept, and so does a lock that is not free in time. Any other
+// seat is asked again on the next tick with nothing recorded (gt-7h38pd).
 func (h *patrolScanHost) countGatewayTry(rec session.SandboxRecord) {
 	if rec.Rig == "" || rec.Polecat == "" {
 		return
@@ -180,7 +178,36 @@ func (h *patrolScanHost) countGatewayTry(rec session.SandboxRecord) {
 	case err != nil:
 		h.alarmGatewayTries(rec.Rig, rec.Polecat, err)
 		h.d.logger.Printf("patrol_scan: sandbox record %s: its kept record cannot be read, so the gateway try is not counted: %v", rec.Session, err)
+		return
 	case !ok || kept.Landing == nil:
+		return
+	}
+	err = h.withSeatLock(rec.Rig, rec.Polecat, func() error {
+		h.countGatewayTryLocked(rec)
+		return nil
+	})
+	if err != nil {
+		h.alarmGatewayTries(rec.Rig, rec.Polecat, err)
+		h.d.logger.Printf("patrol_scan: sandbox record %s: the seat lock is not taken, so the gateway try is not counted: %v", rec.Session, err)
+	}
+}
+
+// countGatewayTryLocked is the count countGatewayTry makes once it holds the seat
+// lock. It re-reads the kept record there, never using the read taken before the
+// lock: a landing that held the lock and cleared the record in between must not
+// be undone by this tick's write. A record that is gone counts nothing, writes
+// nothing, and drops the seat's tally. A record that no longer holds landing
+// facts is not a keep the tick can count, so it is left as it is (gt-7h38pd).
+func (h *patrolScanHost) countGatewayTryLocked(rec session.SandboxRecord) {
+	kept, ok, err := h.readKeptSeatFor(rec.Rig, rec.Polecat)
+	switch {
+	case err != nil:
+		h.alarmGatewayTries(rec.Rig, rec.Polecat, err)
+		h.d.logger.Printf("patrol_scan: sandbox record %s: its kept record cannot be read, so the gateway try is not counted: %v", rec.Session, err)
+	case !ok:
+		h.d.clearGatewayTally(rec.Rig, rec.Polecat)
+		h.d.logger.Printf("patrol_scan: sandbox record %s: the kept record of %s/%s is gone; no try counted", rec.Session, rec.Rig, rec.Polecat)
+	case kept.Landing == nil:
 		return
 	default:
 		h.recordGatewayNoAnswer(rec.Rig, rec.Polecat, *kept.Landing, true)
