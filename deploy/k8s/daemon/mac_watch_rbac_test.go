@@ -52,13 +52,17 @@ type macWatchSubject struct {
 	Namespace string `yaml:"namespace"`
 }
 
-// macWatchDoc is the part of one manifest document the check reads.
+// macWatchDoc is the part of one manifest document the check reads. The
+// decoder refuses any other key, so a field this struct does not hold stops the
+// check instead of passing unread (gt-s76m0s); APIVersion is here because every
+// document in the manifest carries it.
 type macWatchDoc struct {
-	Kind     string            `yaml:"kind"`
-	Metadata macWatchMeta      `yaml:"metadata"`
-	Rules    []macWatchRule    `yaml:"rules"`
-	RoleRef  macWatchRoleRef   `yaml:"roleRef"`
-	Subjects []macWatchSubject `yaml:"subjects"`
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   macWatchMeta      `yaml:"metadata"`
+	Rules      []macWatchRule    `yaml:"rules"`
+	RoleRef    macWatchRoleRef   `yaml:"roleRef"`
+	Subjects   []macWatchSubject `yaml:"subjects"`
 }
 
 // macWatchGrant is one RBAC grant: a verb on a resource of an API group.
@@ -80,9 +84,12 @@ var macWatchGrants = []macWatchGrant{
 
 // parseMacWatchRBAC parses every document of the manifest, and returns an error
 // rather than no documents when the manifest is unreadable or empty: a check
-// over nothing would pass for the wrong reason.
+// over nothing would pass for the wrong reason. A key into no field of
+// macWatchDoc is an error too, so a rule field the check never reads cannot
+// slip through.
 func parseMacWatchRBAC(data []byte) ([]macWatchDoc, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
 	var docs []macWatchDoc
 	for {
 		var doc macWatchDoc
@@ -91,7 +98,7 @@ func parseMacWatchRBAC(data []byte) ([]macWatchDoc, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("not valid YAML: %w", err)
+			return nil, fmt.Errorf("not a manifest this check can read: %w", err)
 		}
 		if doc.Kind != "" {
 			docs = append(docs, doc)
@@ -438,9 +445,14 @@ func TestMacWatchRBACParseRefusals(t *testing.T) {
 		manifest string
 		want     string
 	}{
-		{name: "not YAML", manifest: "kind: [", want: "not valid YAML"},
+		{name: "not YAML", manifest: "kind: [", want: "not a manifest this check can read"},
 		{name: "a comment only", manifest: "# nothing to grant\n", want: "holds no objects"},
 		{name: "empty documents", manifest: "---\n---\n", want: "holds no objects"},
+		{
+			name:     "a rule field the check never reads",
+			manifest: "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: mac-watch\n  namespace: gt\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"pods\"]\n    verbs: [\"get\"]\n    resourceNames: [daemon]\n",
+			want:     "resourceNames",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

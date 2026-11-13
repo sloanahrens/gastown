@@ -25,11 +25,14 @@ const (
 // carries the variables the compile must drop, so a test sees them dropped.
 var testEnv = []string{"PATH=/usr/bin:/bin", "HOME=/home/builder", "GOFLAGS=-mod=mod", "GOWORK=/elsewhere/go.work"}
 
-// recorded is one call a fake runner was given.
+// recorded is one call a fake runner was given, and the module the directory it
+// ran in declared at that moment: the worktree is removed after the build, so
+// the tree a build read exists only while the call is made.
 type recorded struct {
-	dir  string
-	env  []string
-	argv []string
+	dir    string
+	env    []string
+	argv   []string
+	module string
 }
 
 // worktreeAdd is one `git worktree add` a build ran: the checkout it ran in, the
@@ -55,10 +58,12 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) error {
+	module := moduleAt(dir)
 	f.calls = append(f.calls, recorded{
-		dir:  dir,
-		env:  append([]string(nil), env...),
-		argv: append([]string(nil), argv...),
+		dir:    dir,
+		env:    append([]string(nil), env...),
+		argv:   append([]string(nil), argv...),
+		module: module,
 	})
 	if f.failPkg != "" && argv[len(argv)-1] == f.failPkg {
 		return errors.New("build failed")
@@ -72,6 +77,21 @@ func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) erro
 	return nil
 }
 
+// fakeTrackerModule is the module path the fake worktree's tracker/go.mod
+// declares: the shape a gt checkout has, where tracker/ is a module of its own.
+const fakeTrackerModule = "github.com/steveyegge/gastown/tracker"
+
+// addWorktree makes the worktree a fake `git worktree add` reports: the tracker
+// module under tracker/ and nothing at the root, so a build pointed at the root
+// of the tree cannot reach the module the tracker packages live in.
+func addWorktree(dir string) error {
+	module := filepath.Join(dir, TrackerdModuleDir)
+	if err := os.MkdirAll(module, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(module, "go.mod"), []byte("module "+fakeTrackerModule+"\n"), 0o644)
+}
+
 // git is gitHolding over known, and records every worktree a build adds to f.
 func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 	holding := gitHolding(known)
@@ -81,9 +101,11 @@ func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 		}
 		if len(args) == 5 && args[0] == "worktree" && args[1] == "add" {
 			f.adds = append(f.adds, worktreeAdd{src: dir, dir: args[3], commit: args[4]})
+			return nil, addWorktree(args[3])
 		}
 		if len(args) == 4 && args[0] == "worktree" && args[1] == "remove" {
 			f.removed = append(f.removed, args[3])
+			return nil, os.RemoveAll(args[3])
 		}
 		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--short" {
 			f.shortDirs = append(f.shortDirs, dir)
@@ -299,11 +321,29 @@ func TestBuildBinariesBuildsFromTheTrackerModule(t *testing.T) {
 			t.Errorf("%s worktree = checkout %s at %s, want the gt checkout %s at %s", build.name, add.src, add.commit, b.GTSrc, testRev)
 		}
 		// tracker/ is its own module: a compile run from the worktree root cannot
-		// name its packages, which failed every image build (gt-voam40).
-		if want := filepath.Join(add.dir, TrackerdModuleDir); call.dir != want {
-			t.Errorf("%s build ran in %q, want the tracker module directory %q of its worktree", build.name, call.dir, want)
+		// name its packages, which failed every image build (gt-voam40). The fake
+		// worktree declares the module under tracker/ and nothing at its root, so
+		// this fails when the build is pointed at the root.
+		if got := call.module; got != fakeTrackerModule {
+			t.Errorf("%s build ran in %q, which declared module %q when it ran; want the tracker module %q", build.name, call.dir, got, fakeTrackerModule)
 		}
 	}
+}
+
+// moduleAt is the module path dir's go.mod declares, and "" when dir holds no
+// go.mod: the directory a build runs in has to be a module that can name the
+// package it compiles.
+func moduleAt(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "module "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
 }
 
 func TestBuildBinariesStartsFromTheHermeticEnvironment(t *testing.T) {
