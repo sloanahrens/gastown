@@ -55,15 +55,26 @@ func specStoryPointShadow(env specDispatchEnv, beadID string) string {
 // the shape cannot judge is an error here, so the tick logs why; the bead still
 // gets its sp-rung:none note from the command.
 func specStoryPointEstimate(townRoot string) func(ctx context.Context, beadID string) error {
+	return specStoryPointEstimateFor(
+		func(beadID string) specEstimateStore {
+			return beads.New(resolveBeadDirFromTownRoot(townRoot, beadID))
+		},
+		func(beadID string) specEstimateRunner {
+			return specEstimateRunner{
+				Estimate: estimate.Estimate,
+				Deps: func() (estimate.Deps, error) {
+					return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), os.Stderr)
+				},
+			}
+		})
+}
+
+// specStoryPointEstimateFor is specStoryPointEstimate with the store and the
+// runner given for a bead, so a test drives the labels and the note the shadow
+// writes without bd, hm or Jev.
+func specStoryPointEstimateFor(newStore func(beadID string) specEstimateStore, runnerFor func(beadID string) specEstimateRunner) func(ctx context.Context, beadID string) error {
 	return func(ctx context.Context, beadID string) error {
-		run := specEstimateRunner{
-			Estimate: estimate.Estimate,
-			Deps: func() (estimate.Deps, error) {
-				return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), os.Stderr)
-			},
-		}
-		store := beads.New(resolveBeadDirFromTownRoot(townRoot, beadID))
-		outcome, err := specEstimateBead(ctx, beadID, store, specEstimateOpts{}, run)
+		outcome, err := specEstimateBead(ctx, beadID, newStore(beadID), specEstimateOpts{}, runnerFor(beadID))
 		return specShadowErr(outcome, err)
 	}
 }
