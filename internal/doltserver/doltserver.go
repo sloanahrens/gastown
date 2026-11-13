@@ -4604,6 +4604,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// Patch dolt server fields. Only write when values actually change so tracked
 	// metadata.json files in source repos stay clean.
 	changed := false
+	dropKey := false
 	if existing["database"] != "dolt" {
 		existing["database"] = "dolt"
 		changed = true
@@ -4648,10 +4649,10 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		}
 		// The deprecated dolt_server_port key is never written: bd warns on it
 		// and it can leak across projects. An existing one is removed, only
-		// here, where the port file carries the same port (gt-49f3pn). A town
+		// here, after the port file carries the port (gt-49f3pn). A town
 		// without an endpoint keeps it: it would be the only port source.
 		if _, ok := existing["dolt_server_port"]; ok {
-			delete(existing, "dolt_server_port")
+			dropKey = true
 			changed = true
 		}
 	}
@@ -4663,6 +4664,16 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		return writeDoltPortFile(beadsDir, config.Port)
 	}
 
+	// The port file goes first. Once metadata.json no longer carries the key,
+	// the port file is the only port source, so a failed write must leave
+	// metadata.json as it was, key included (gt-49f3pn).
+	if err := writeDoltPortFile(beadsDir, config.Port); err != nil {
+		return err
+	}
+	if dropKey {
+		delete(existing, "dolt_server_port")
+	}
+
 	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling metadata: %w", err)
@@ -4672,7 +4683,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		return fmt.Errorf("writing metadata.json: %w", err)
 	}
 
-	return writeDoltPortFile(beadsDir, config.Port)
+	return nil
 }
 
 // writeDoltPortFile writes the decimal port to beadsDir/dolt-server.port, the

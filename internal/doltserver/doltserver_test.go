@@ -2216,6 +2216,38 @@ func TestEnsureMetadataPortFileWriteFailureIsReturned(t *testing.T) {
 	}
 }
 
+// TestEnsureMetadataPortFileFailureKeepsTheKey verifies that when the port file
+// cannot be written, metadata.json keeps the deprecated key byte for byte: the
+// key is the beads directory's only port source until the port file exists
+// (gt-49f3pn). The write order is what this pins: the key is dropped only after
+// the port file is written.
+func TestEnsureMetadataPortFileFailureKeepsTheKey(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().townPort(3307).host()
+	townRoot := t.TempDir()
+
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt-server.port"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	original := []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":4407}` + "\n")
+	if err := os.WriteFile(metaPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.EnsureMetadata(townRoot, "hq"); err == nil {
+		t.Fatal("EnsureMetadata succeeded with dolt-server.port blocked by a directory, want an error")
+	}
+	got, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("metadata.json changed after a failed port-file write:\n got %s\nwant %s", got, original)
+	}
+}
+
 // TestEnsureMetadataNoPortNoPortFile verifies that a town without an endpoint
 // writes no dolt-server.port and does not fail, as it writes no
 // dolt_server_port key (gt-y3pgh.3).
