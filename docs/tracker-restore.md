@@ -28,8 +28,9 @@ A `.dump` file is one PostgreSQL custom-format archive of the whole `tracker`
 database. The runner publishes a night by renaming `<date>.dump.partial` to
 `<date>.dump`, so a name that still ends in `.partial` is never restorable.
 
-The claim is mounted by no other pod, and a job's pod exits when its run ends,
-so nothing is running to copy from. The render writes a reader Pod for that,
+A job's pod mounts the claim for its run and exits when the run ends, so
+between nights nothing is running to copy from. The render writes a reader Pod
+for that,
 `15-pod-tracker-backup-reader.yaml`, beside the CronJob. It mounts the claim
 read-only at `/backups` on the image `--tracker-backup-image` names, and it is
 never restarted. The render does not apply it. The reader runs `sleep` and the
