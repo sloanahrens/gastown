@@ -132,11 +132,15 @@ is accepted and ignored. Epics, agent beads (gt:agent) and wisps are refused
 as "not a work bead" without reading a shape.
 
 Prints one line naming the bead and the first missing field. --json prints
-{id, ok, needs_planning, refusals[], advice[], hints[]} instead, listing every
-failure; advice and hints are present only when there are lines to show. A
-human-form run that does not exit 0 also writes the required skeleton to
-stderr — every section with a one-phrase hint and the command that re-lints
-the bead.
+{id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead,
+listing every failure; advice, warnings and hints are present only when there
+are lines to show. A human-form run that does not exit 0 also writes the
+required skeleton to stderr — every section with a one-phrase hint and the
+command that re-lints the bead.
+
+A bead whose text names three or more paths on the target branch's risk list
+(internal/land/riskpaths.txt) gets one WARN line saying one risk path per bead.
+The warning changes neither the verdict line nor the exit code.
 
 A bead whose Goal or Constraints names a probe, guard, hold, drain, install,
 lock, lease, gc step or heartbeat, and whose acceptance list says nothing about
@@ -240,7 +244,7 @@ the seat the bad block dropped. The operator hold file and ESTOP stop the tick.`
 
 func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
-	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], hints[]} instead of one line")
+	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead of one line")
 	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
@@ -1102,7 +1106,30 @@ func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, 
 	spec.Rig = specBeadRig(townRoot, beadID)
 	spec.TownRigs = rigs
 	spec.Target = specLintTarget(townRoot, beadID, open)
+	spec.RiskPaths, spec.RiskPathsErr = specRiskPaths(spec, spec.Target)
 	return specWithBlockerCreates(spec, read, beadID)
+}
+
+// specRiskPaths is the paths a bead's text names that match the risk list at
+// the target branch, and why the list could not be read. The text is the
+// bead's title, description and acceptance, the whole of what a filer writes
+// about the work. internal/land does the matching, so the lint warns about
+// exactly the paths a landing would label (docs/design/rework-program.md,
+// lever 2).
+func specRiskPaths(spec specdispatch.Spec, target *specdispatch.TargetTree) ([]string, string) {
+	if target == nil {
+		// No branch was read, so the check did not run: name that rather than
+		// reading an unread branch as one with no risk list.
+		return nil, "the target branch was not read"
+	}
+	if target.RiskGlobsErr != "" {
+		return nil, target.RiskGlobsErr
+	}
+	if len(target.RiskGlobs) == 0 {
+		return nil, ""
+	}
+	text := spec.Title + "\n" + spec.Description + "\n" + spec.Acceptance
+	return land.MatchRiskPaths(target.RiskGlobs, specdispatch.PathTokens(text)), ""
 }
 
 // specBeadRig is the rig beadID belongs to, by its ID prefix: the rig the lint's
@@ -1161,10 +1188,11 @@ func cachedSpecTarget(townRoot string, open treeOpener) func(beadID string) *spe
 	}
 }
 
-// treeReader reads a revision's file inventory: a *git.Git in a tick, a fake
-// in a test.
+// treeReader reads a revision's file inventory and one file from it: a
+// *git.Git in a tick, a fake in a test.
 type treeReader interface {
 	TreeFileBlobs(rev string) (map[string]string, error)
+	ShowFileAtRev(ref, path string) (string, error)
 }
 
 // treeOpener opens the treeReader of a repo directory.
@@ -1208,9 +1236,28 @@ func specTargetTree(rigPath string, open treeOpener) *specdispatch.TargetTree {
 		for path := range blobs {
 			files[path] = struct{}{}
 		}
-		return &specdispatch.TargetTree{Branch: branch, Files: files}
+		tree := &specdispatch.TargetTree{Branch: branch, Files: files}
+		tree.RiskGlobs, tree.RiskGlobsErr = specRiskGlobs(reader, ref)
+		return tree
 	}
 	return &specdispatch.TargetTree{Branch: branch, Err: fmt.Sprintf("cannot read %s in %s: %s", branch, repo, firstErrLine(lastErr))}
+}
+
+// specRiskGlobs reads the risk list from the same ref the target inventory came
+// from, with the loader the landing worker uses (internal/land): a submission
+// cannot unlist its own paths, and the lint and the landing read one file one
+// way. A list absent at ref is no globs and no error, as land.RiskPathGlobs
+// answers; any other failure is carried so the lint names a check that did not
+// run instead of passing it.
+func specRiskGlobs(reader treeReader, ref string) ([]string, string) {
+	text, err := reader.ShowFileAtRev(ref, land.RiskPathsFile)
+	if errors.Is(err, git.ErrNotAtRef) {
+		return nil, ""
+	}
+	if err != nil {
+		return nil, firstErrLine(err)
+	}
+	return land.ParseRiskPathGlobs(text), ""
 }
 
 // validTargetBranch reports whether name can be handed to git as one branch
@@ -1248,6 +1295,10 @@ type specLintReport struct {
 	// they change neither ok nor the exit code. The array is omitted when
 	// there is none.
 	Advice []string `json:"advice,omitempty"`
+	// Warnings are the lint's advisory WARN lines — the risk-path warning and
+	// a risk check that could not run — which likewise change neither ok nor
+	// the exit code. The array is omitted when there is none.
+	Warnings []string `json:"warnings,omitempty"`
 	// Hints are the town's prior records on slow tests, shown when the bead's
 	// text mentions one. The array is omitted when there are none (gt-p07bw).
 	Hints []hmhints.Hit `json:"hints,omitempty"`
@@ -1363,6 +1414,7 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 	report.OK = verdict.Clean()
 	report.NeedsPlanning = verdict.Route == specdispatch.RoutePlanning
 	report.Refusals = append(report.Refusals, verdict.Refusals...)
+	report.Warnings = verdict.Warnings
 	code := specLintExitRefused
 	switch verdict.Route {
 	case specdispatch.RouteDispatch:
@@ -1441,6 +1493,14 @@ func writeSpecAdvice(w io.Writer, advice []string) {
 	}
 }
 
+// writeSpecWarnings prints the lint's WARN lines, one per line, on errOut
+// beside the verdict. A warning changes neither the verdict nor the exit code.
+func writeSpecWarnings(w io.Writer, warnings []string) {
+	for _, line := range warnings {
+		fmt.Fprintf(w, "WARN: %s\n", line)
+	}
+}
+
 func emitSpecLint(out, errOut io.Writer, tmpl specdispatch.Template, report specLintReport, line string, code int, asJSON bool) error {
 	if asJSON {
 		data, err := json.Marshal(report)
@@ -1450,6 +1510,7 @@ func emitSpecLint(out, errOut io.Writer, tmpl specdispatch.Template, report spec
 		fmt.Fprintln(out, string(data))
 	} else {
 		fmt.Fprintln(out, line)
+		writeSpecWarnings(errOut, report.Warnings)
 		writeSpecAdvice(errOut, report.Advice)
 		if code != 0 {
 			// Best effort: the exit code carries the verdict, not this write.
