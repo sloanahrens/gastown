@@ -63,17 +63,48 @@ func Select(run Runner, wd, base, head string) (Selection, error) {
 		// An empty diff selects no package; the caller prints NONE.
 		return Selection{}, nil
 	}
-	if err := requireHeadTree(run, head); err != nil {
-		return Selection{All: true}, err
-	}
-	graph, err := readGraph(run)
+	graph, err := loadGraph(run, wd, head)
 	if err != nil {
 		return Selection{All: true}, err
 	}
-	if !sameDir(wd, graph.root) {
-		return Selection{All: true}, fmt.Errorf("go list ran in %q, not the module root %q: run affected at the repository root", wd, graph.root)
-	}
 	return graph.selectFiles(files)
+}
+
+// DirectImporters returns the repo-relative directories of the packages that
+// import one of dirs directly, in their own code or in their tests, sorted and
+// without dirs themselves. Packages that import dirs only through another
+// package are not returned: the caller tests the direct importers of the
+// packages it changed, not their whole reverse closure (gt-cwkzxk).
+//
+// dirs are repo-relative directories ("internal/rig"). A dir the graph does not
+// hold, or an importer with no directory of its own, is an error, as is a graph
+// that cannot be read: the caller must not fall back to the changed packages
+// alone. The graph is read only when dirs is non-empty.
+func DirectImporters(run Runner, wd, head string, dirs []string) ([]string, error) {
+	if len(dirs) == 0 {
+		return nil, nil
+	}
+	graph, err := loadGraph(run, wd, head)
+	if err != nil {
+		return nil, err
+	}
+	return graph.directImporters(dirs)
+}
+
+// loadGraph reads the import graph of the module at wd and checks it is the
+// graph of head's tree, so a selection over it is about the commit under test.
+func loadGraph(run Runner, wd, head string) (*pkgGraph, error) {
+	if err := requireHeadTree(run, head); err != nil {
+		return nil, err
+	}
+	graph, err := readGraph(run)
+	if err != nil {
+		return nil, err
+	}
+	if !sameDir(wd, graph.root) {
+		return nil, fmt.Errorf("go list ran in %q, not the module root %q: run affected at the repository root", wd, graph.root)
+	}
+	return graph, nil
 }
 
 // splitPaths reads `git diff --name-only -z` output, which is a NUL-terminated
@@ -137,12 +168,15 @@ func requireHeadTree(run Runner, head string) error {
 
 // pkgGraph is what one `go list -deps -test -json ./...` run reports: the
 // import path each repo directory holds, the edges of the import graph, and the
-// main module path a package the graph does not know yet is named from.
+// main module path a package the graph does not know yet is named from. deps
+// holds every package a package reaches, transitively; imports holds only the
+// packages it imports directly.
 type pkgGraph struct {
-	module string
-	root   string
-	byDir  map[string]string
-	deps   map[string][]string
+	module  string
+	root    string
+	byDir   map[string]string
+	deps    map[string][]string
+	imports map[string][]string
 }
 
 // listPackage is the part of one `go list -json` record the selector reads.
@@ -150,6 +184,7 @@ type listPackage struct {
 	ImportPath string
 	Dir        string
 	Deps       []string
+	Imports    []string
 	ForTest    string
 	Module     *listModule
 	Error      *listError
@@ -195,7 +230,7 @@ func parseGraph(out []byte) (*pkgGraph, error) {
 		}
 		records = append(records, rec)
 	}
-	graph := &pkgGraph{byDir: map[string]string{}, deps: map[string][]string{}}
+	graph := &pkgGraph{byDir: map[string]string{}, deps: map[string][]string{}, imports: map[string][]string{}}
 	forTest := map[string]string{}
 	known := map[string]bool{}
 	var moduleDir string
@@ -226,6 +261,11 @@ func parseGraph(out []byte) (*pkgGraph, error) {
 		src := baseImportPath(rec.ImportPath, forTest, known)
 		for _, dep := range rec.Deps {
 			graph.deps[src] = append(graph.deps[src], baseImportPath(dep, forTest, known))
+		}
+		// A test variant's Imports carry the test's own imports, so a test-only
+		// import is a direct edge from the package the test belongs to.
+		for _, imp := range rec.Imports {
+			graph.imports[src] = append(graph.imports[src], baseImportPath(imp, forTest, known))
 		}
 	}
 	return graph, nil
@@ -296,6 +336,51 @@ func (g *pkgGraph) selectFiles(files []string) (Selection, error) {
 		return Selection{All: true}, fmt.Errorf("no package owns %s", unplaced[0])
 	}
 	return Selection{Packages: reverseClosure(pkgs, g.deps)}, nil
+}
+
+// directImporters names the directory of each package that imports one of dirs
+// directly, sorted, leaving out dirs themselves. A dir the graph does not hold
+// is an error: an unknown package has no importers the caller could test.
+func (g *pkgGraph) directImporters(dirs []string) ([]string, error) {
+	targets := map[string]bool{}
+	for _, dir := range dirs {
+		importPath, ok := g.byDir[dir]
+		if !ok {
+			return nil, fmt.Errorf("no package in the import graph is in %s", dir)
+		}
+		targets[importPath] = true
+	}
+	dirOf := make(map[string]string, len(g.byDir))
+	for dir, importPath := range g.byDir {
+		dirOf[importPath] = dir
+	}
+	found := map[string]bool{}
+	for src, imports := range g.imports {
+		if targets[src] || !importsAny(imports, targets) {
+			continue
+		}
+		dir, ok := dirOf[src]
+		if !ok {
+			return nil, fmt.Errorf("importer %s has no directory in the module", src)
+		}
+		found[dir] = true
+	}
+	out := make([]string, 0, len(found))
+	for dir := range found {
+		out = append(out, dir)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// importsAny reports whether one of imports is in set.
+func importsAny(imports []string, set map[string]bool) bool {
+	for _, imp := range imports {
+		if set[imp] {
+			return true
+		}
+	}
+	return false
 }
 
 // packagesOfFiles names the import path of the package that owns each file, and

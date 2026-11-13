@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/presubmit"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
@@ -25,11 +27,16 @@ const testDoc = "## The inventory\n\n" +
 	"- `internal/c/c.go:12` names docker in prose.\n"
 
 // fakeSeams records what a run asked for; its runInventory returns inventory.
+// importers is the selection the direct-importer seam returns, importErr its
+// error; importedFrom records the changed directories it was asked about.
 type fakeSeams struct {
-	doc       string
-	docErr    error
-	inventory error
-	runs      int
+	doc          string
+	docErr       error
+	inventory    error
+	runs         int
+	importers    land.ImporterSelection
+	importErr    error
+	importedFrom []string
 }
 
 func (f *fakeSeams) seams() seams {
@@ -45,6 +52,10 @@ func (f *fakeSeams) seams() seams {
 			return f.inventory
 		},
 		hasGo: func(string) bool { return true },
+		importers: func(dirs []string) (land.ImporterSelection, error) {
+			f.importedFrom = dirs
+			return f.importers, f.importErr
+		},
 	}
 }
 
@@ -164,6 +175,96 @@ func TestRunPrintsThePodEnginePackageOnlyWhenAPinnedFileChanges(t *testing.T) {
 				t.Fatalf("the default mode ran the inventory %d times, want 0", f.runs)
 			}
 		})
+	}
+}
+
+// TestRunListsTheDirectImportersAndNamesTheLeftOutOnes: the importers join the
+// changed packages in the list, once each and sorted, and each heavy importer
+// presubmit leaves out is named on stderr with its reason.
+func TestRunListsTheDirectImportersAndNamesTheLeftOutOnes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nameStatus string
+		importers  land.ImporterSelection
+		want       string
+	}{
+		{
+			name:       "a direct importer is listed beside the changed package",
+			nameStatus: nameStatus("M internal/rig/rig.go"),
+			importers:  land.ImporterSelection{Add: []string{"internal/townstate"}},
+			want:       "./internal/rig\n./internal/townstate\n",
+		},
+		{
+			name:       "an importer the inventory already lists is listed once",
+			nameStatus: nameStatus("M internal/a/a.go"),
+			importers:  land.ImporterSelection{Add: []string{"internal/podengine", "internal/x"}},
+			want:       "./internal/a\n./internal/podengine\n./internal/x\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeSeams{doc: testDoc, importers: tt.importers}
+			var stdout, stderr bytes.Buffer
+			if code := run(options{}, tt.nameStatus, f.seams(), &stdout, &stderr); code != 0 {
+				t.Fatalf("run = %d, stderr %q; want 0", code, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestRunNamesEachLeftOutImporterWithItsReason(t *testing.T) {
+	t.Parallel()
+	f := &fakeSeams{doc: testDoc, importers: land.ImporterSelection{
+		Add:     []string{"internal/townstate"},
+		LeftOut: []land.LeftOut{{Dir: "internal/cmd", Reason: "takes minutes to run in full"}},
+	}}
+	var stdout, stderr bytes.Buffer
+	if code := run(options{}, nameStatus("M internal/rig/rig.go"), f.seams(), &stdout, &stderr); code != 0 {
+		t.Fatalf("run = %d, stderr %q; want 0", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "internal/cmd") {
+		t.Errorf("stdout = %q, want the left-out importer absent", stdout.String())
+	}
+	want := "changedpkgs: left out direct importer internal/cmd: takes minutes to run in full\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if !slices.Equal(f.importedFrom, []string{"internal/rig"}) {
+		t.Errorf("importers asked about %v, want the changed package internal/rig", f.importedFrom)
+	}
+}
+
+// TestRunRefusesAnImporterSelectionThatFails: when the graph cannot be read,
+// the run fails with the cause and lists nothing, so presubmit never passes on
+// the changed packages alone.
+func TestRunRefusesAnImporterSelectionThatFails(t *testing.T) {
+	t.Parallel()
+	f := &fakeSeams{doc: testDoc, importErr: errors.New("direct importers of the changed packages: go list: exit status 1")}
+	var stdout, stderr bytes.Buffer
+	if code := run(options{}, nameStatus("M internal/rig/rig.go"), f.seams(), &stdout, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing listed", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "go list") {
+		t.Errorf("stderr = %q, want the cause named", stderr.String())
+	}
+}
+
+// TestRunCommandRefusesAProgramOtherThanGitAndGo: the refusal runs nothing, so
+// no argv that names another program, or none at all, reaches a process.
+func TestRunCommandRefusesAProgramOtherThanGitAndGo(t *testing.T) {
+	t.Parallel()
+	for _, argv := range [][]string{nil, {}, {"sh", "-c", "true"}, {"/bin/git", "status"}} {
+		if _, err := runCommand(argv); err == nil {
+			t.Errorf("runCommand(%q) error = nil, want a refusal", argv)
+		}
 	}
 }
 

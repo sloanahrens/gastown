@@ -21,9 +21,17 @@
 // runs the inventory tests and, when a pinned file moved and they fail, prints
 // the one-line recovery. presubmit calls it once, after its changed-package
 // tests fail, so the hint prints once and names the renumber steps.
+//
+// The list also names the direct importers of the changed packages
+// (gt-cwkzxk): a change to internal/rig tests internal/townstate, whose test
+// imports it, so a break in an importer fails presubmit rather than the
+// landing gate.
+// The heavy packages among them (land.SelectImporters) are left out and named
+// on stderr with the reason. A graph that cannot be read fails the run.
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,6 +58,7 @@ type seams struct {
 	readDoc      func() ([]byte, error)
 	runInventory func() error
 	hasGo        func(dir string) bool
+	importers    func(dirs []string) (land.ImporterSelection, error)
 }
 
 func main() {
@@ -79,6 +88,9 @@ func main() {
 			return exec.Command("go", "test", "-count=1", "./"+presubmit.PodEngineDir).Run()
 		},
 		hasGo: func(d string) bool { return land.PackageDirHasGo(repoRoot, d) },
+		importers: func(dirs []string) (land.ImporterSelection, error) {
+			return land.SelectImporters(runCommand, repoRoot, "HEAD", dirs)
+		},
 	}
 	os.Exit(run(options{guards: *guards, recovery: *recovery}, string(out), s, os.Stdout, os.Stderr))
 }
@@ -123,10 +135,50 @@ func run(o options, nameStatus string, s seams, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	// The direct importers of the changed packages are tested too (gt-cwkzxk).
+	// A graph that cannot be read fails the run: the changed packages alone
+	// would let a change to a widely imported package pass presubmit.
+	sel, err := s.importers(dirs)
+	if err != nil {
+		return fail(err)
+	}
+	for _, l := range sel.LeftOut {
+		fmt.Fprintf(stderr, "changedpkgs: left out direct importer %s: %s\n", l.Dir, l.Reason)
+	}
+	listed := map[string]bool{}
+	for _, dir := range dirs {
+		listed[dir] = true
+	}
+	for _, dir := range sel.Add {
+		if !listed[dir] {
+			listed[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+	sort.Strings(dirs)
 	for _, dir := range dirs {
 		fmt.Fprintln(stdout, "./"+dir)
 	}
 	return 0
+}
+
+// runCommand runs argv in the working directory and returns its standard
+// output, with the tool's own diagnostics left on the terminal. The error is
+// the command's failure, never its output, which this cannot judge for secrets.
+// The selector reads only git and go, so the program is named literally and
+// anything else is refused.
+func runCommand(argv []string) ([]byte, error) {
+	var cmd *exec.Cmd
+	switch {
+	case len(argv) > 0 && argv[0] == "git":
+		cmd = exec.Command("git", argv[1:]...)
+	case len(argv) > 0 && argv[0] == "go":
+		cmd = exec.Command("go", argv[1:]...)
+	default:
+		return nil, errors.New("refusing to run a program other than git or go")
+	}
+	cmd.Stderr = os.Stderr
+	return cmd.Output()
 }
 
 // printGuards writes one line of `go test` arguments, or nothing when the
