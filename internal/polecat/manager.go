@@ -1137,6 +1137,11 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 	return p, err
 }
 
+// resumeFetchTimeout bounds the fetch of a resume branch. That fetch carries a
+// whole branch's history, not the small targeted query git.RemoteQueryTimeout
+// bounds, so a slow link must not cut it at the query's 30 seconds (gt-nh02an).
+const resumeFetchTimeout = 2 * time.Minute
+
 // addWithOptionsLocked performs the expensive parts of polecat creation
 // (worktree, beads, settings) after the directory has been created.
 // Caller MUST hold the polecat lock and have already created polecatDir.
@@ -1188,7 +1193,8 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 			cleanupOnError()
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
-		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
+		if err := repoGit.FetchBranchWithTimeout("origin", opts.ResumeBranch, resumeFetchTimeout); err != nil {
+			// Offline is a supported resume: continue from the refs already here.
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
 		if err := repoGit.WorktreeAddExistingForce(clonePath, opts.ResumeBranch); err != nil {

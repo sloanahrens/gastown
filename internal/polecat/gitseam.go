@@ -40,6 +40,7 @@ type gitRepo interface {
 
 	Fetch(remote string) error
 	FetchBranch(remote, branch string) error
+	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	Push(remote, branch string, force bool) error
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
