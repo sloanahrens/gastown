@@ -115,6 +115,11 @@ func TestRidgeRefusesBadInput(t *testing.T) {
 	wide[2][3] = math.NaN()
 	wideY := []float64{1, 2, 3, 4, 5}
 	nanTarget := []float64{1, 2, math.NaN(), 4, 5, 6}
+	infRows := ridgeRows(6, 2)
+	infRows[0][0] = math.Inf(-1)
+	// Two samples of 1e200 overflow the Gram matrix to +Inf while every input is a
+	// finite number, so the factorization is what breaks down.
+	overflow := [][]float64{{1e200}, {-1e200}}
 	cases := []struct {
 		name  string
 		x     [][]float64
@@ -129,9 +134,11 @@ func TestRidgeRefusesBadInput(t *testing.T) {
 		{"zero penalty", good, goodY, 0, nil},
 		{"negative penalty", good, goodY, -1, nil},
 		{"infinite penalty", good, goodY, math.Inf(1), nil},
-		{"NaN feature", nanRows, goodY, 1, ErrNotPositive},
-		{"NaN feature, dual form", wide, wideY, 1, ErrNotPositive},
-		{"NaN target", good, nanTarget, 1, ErrNotPositive},
+		{"NaN feature", nanRows, goodY, 1, ErrNonFinite},
+		{"NaN feature, dual form", wide, wideY, 1, ErrNonFinite},
+		{"NaN target", good, nanTarget, 1, ErrNonFinite},
+		{"infinite feature", infRows, goodY, 1, ErrNonFinite},
+		{"finite inputs whose Gram matrix overflows", overflow, []float64{1, 2}, 1, ErrNotPositive},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

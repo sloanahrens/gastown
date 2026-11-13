@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -92,6 +93,8 @@ type trainTestBead struct {
 	noText  bool   // the bead has no Constraints or Acceptance section
 	missing bool   // the bead is not in the store
 	badTime bool   // the landing time does not parse
+	// sameTimeAsPrev gives the bead the landing time of the bead before it.
+	sameTimeAsPrev bool
 }
 
 // badTimeBeads is a measured fixture whose first landing time does not parse.
@@ -161,15 +164,21 @@ func newTrainTestFixture(t *testing.T, beadsIn []trainTestBead) trainTestFixture
 	}
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	rows := make([]Row, 0, len(beadsIn))
+	var prev time.Time
 	for i, b := range beadsIn {
-		landed := start.Add(time.Duration(i) * time.Hour).Format(time.RFC3339)
+		landed := start.Add(time.Duration(i) * time.Hour)
+		if b.sameTimeAsPrev && i > 0 {
+			landed = prev
+		}
+		prev = landed
+		landedText := landed.Format(time.RFC3339)
 		if b.badTime {
-			landed = "last tuesday"
+			landedText = "last tuesday"
 		}
 		rows = append(rows, Row{
 			"bead":                b.id,
 			"rig":                 "gastown",
-			"landed_at":           landed,
+			"landed_at":           landedText,
 			"seat_class":          b.seat,
 			"polecat_secs":        fmt.Sprintf("%g", b.minutes*60),
 			"polecat_lower_bound": b.bound,
@@ -384,7 +393,238 @@ func TestStoryPointsTrainSkipsAndCountsUnreadBeads(t *testing.T) {
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report = %q, want the line %q", out.String(), want)
 	}
-	if !strings.Contains(out.String(), "n=87\n") {
-		t.Errorf("report does not count 87 fitted beads:\n%s", out.String())
+	// The 87 beads read are split: the earlier 70 are the fit and the latest 17 the holdout.
+	if !strings.Contains(out.String(), "n=70)") {
+		t.Errorf("report does not count 70 fitted beads:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "holdout: latest 17 beads") {
+		t.Errorf("report does not count 17 holdout beads:\n%s", out.String())
+	}
+}
+
+// TestStoryPointsTrainRemovesStaleProposedFiles: a run removes the proposed file an
+// earlier run left under either name, so the day's directory holds only the one file
+// this run writes.
+func TestStoryPointsTrainRemovesStaleProposedFiles(t *testing.T) {
+	t.Parallel()
+	proposed := storyPointsProposedName
+	rejected := storyPointsProposedName + storyPointsRejectedSuffix
+	cases := []struct {
+		name  string
+		beads []trainTestBead
+		stale string
+		want  string
+	}{
+		// Seed 2 with no signal is rejected (see TestStoryPointsTrainRejectsAHoldoutBelowTheBar).
+		{"a rejecting run clears a passing file", trainTestBeads(90, 2, false), proposed, rejected},
+		// Seed 1 with signal clears the bar (see TestStoryPointsTrainWritesProposedFileThatLoads).
+		{"a passing run clears a rejected file", trainTestBeads(90, 1, true), rejected, proposed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fix := newTrainTestFixture(t, tc.beads)
+			if err := os.WriteFile(filepath.Join(fix.outDir, tc.stale), []byte("stale\n"), 0o644); err != nil {
+				t.Fatalf("write stale file: %v", err)
+			}
+			var out strings.Builder
+			c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+			if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+				t.Fatalf("storypoints-train: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(fix.outDir, tc.want)); err != nil {
+				t.Errorf("this run's file %s: %v", tc.want, err)
+			}
+			if _, err := os.Stat(filepath.Join(fix.outDir, tc.stale)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("stale %s survived the run (stat err %v)", tc.stale, err)
+			}
+		})
+	}
+}
+
+// TestStoryPointsTrainRejectsAHoldoutTooShortToRead: when the latest beads share a
+// landing time the holdout boundary moves past them, leaving eight holdout beads. That
+// is fewer than storyPointsMinHoldout, so the correlation is not measurable and the
+// proposed file is rejected whatever the fit.
+func TestStoryPointsTrainRejectsAHoldoutTooShortToRead(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(60, 6, true)
+	for i := 47; i <= 51; i++ {
+		beads[i].sameTimeAsPrev = true
+	}
+	fix := newTrainTestFixture(t, beads)
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+		t.Fatalf("storypoints-train: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fix.outDir, storyPointsProposedName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("unsuffixed proposed file exists (stat err %v), want only the rejected one", err)
+	}
+	if _, err := os.Stat(filepath.Join(fix.outDir, storyPointsProposedName+storyPointsRejectedSuffix)); err != nil {
+		t.Fatalf("rejected file: %v", err)
+	}
+	want := fmt.Sprintf("holdout rank correlation of the proposed weights: not measurable (8 holdout beads, want at least %d)", storyPointsMinHoldout)
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report does not say the holdout is too short, want %q:\n%s", want, out.String())
+	}
+}
+
+// TestStoryPointsTrainUnmeasurableHoldout: a holdout that no rank correlation can be read
+// from decides the file name by the proposed model alone. An unmeasurable proposed model
+// is rejected. An unmeasurable checked-in model is reported and does not reject a good
+// proposal.
+func TestStoryPointsTrainUnmeasurableHoldout(t *testing.T) {
+	t.Parallel()
+	// holdout builds n holdout beads whose measured minutes rise with their position, so
+	// the predictions alone decide whether a correlation is measurable.
+	holdout := func(n int, proposed, checked func(i int) float64) []storypoints.Holdout {
+		hold := make([]storypoints.Holdout, n)
+		for i := range hold {
+			hold[i] = storypoints.Holdout{Actual: float64(i + 1), Proposed: proposed(i), Checked: checked(i)}
+		}
+		return hold
+	}
+	constant := func(int) float64 { return 5 }
+	rising := func(i int) float64 { return float64(i + 1) }
+	rejected := storyPointsProposedName + storyPointsRejectedSuffix
+	cases := []struct {
+		name     string
+		holdout  []storypoints.Holdout
+		wantName string
+		wantLine string
+	}{
+		{"constant proposed predictions", holdout(12, constant, rising), rejected,
+			"holdout rank correlation of the proposed weights: not measurable"},
+		{"too few holdout beads", holdout(storyPointsMinHoldout-1, rising, rising), rejected,
+			"holdout rank correlation of the proposed weights: not measurable"},
+		{"constant checked-in predictions, good proposal", holdout(12, rising, constant), storyPointsProposedName,
+			"checked-in: not measurable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			score := holdoutRanks(tc.holdout)
+			name := score.fileName()
+			if name != tc.wantName {
+				t.Errorf("file name = %q, want %q", name, tc.wantName)
+			}
+			report := storyPointsTrainReport(storypoints.Model{Holdout: tc.holdout, TrainedOn: "fixture"}, trainSkips{}, name, score)
+			if !strings.Contains(report, tc.wantLine) {
+				t.Errorf("report does not say %q:\n%s", tc.wantLine, report)
+			}
+		})
+	}
+}
+
+// TestStoryPointsTrainReportsTheScoredFile: the proposed file the step writes is the model
+// the report scores. LoadWeights reads it back, the holdout beads are scored with it, and
+// the rank correlation is the one the report prints. The first line says the file is the
+// earlier-80% fit, and the knots line says they are the checked-in model's.
+func TestStoryPointsTrainReportsTheScoredFile(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	store := fix.store()
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, store)
+	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+		t.Fatalf("storypoints-train: %v", err)
+	}
+	report := out.String()
+	firstLine, _, _ := strings.Cut(report, "\n")
+	if !strings.Contains(firstLine, "the proposed weights are the fit on the earlier 80%") {
+		t.Errorf("first line = %q, want it to say the proposed weights are the earlier 80%% fit", firstLine)
+	}
+	const knots = "fits-to-minutes knots are the checked-in model's, not refit: recalibrate before adopting"
+	if !strings.Contains(report, knots) {
+		t.Errorf("report does not carry the knots line %q:\n%s", knots, report)
+	}
+
+	f, err := os.Open(filepath.Join(fix.outDir, storyPointsProposedName))
+	if err != nil {
+		t.Fatalf("proposed file: %v", err)
+	}
+	defer f.Close()
+	read, err := storypoints.LoadWeights(f)
+	if err != nil {
+		t.Fatalf("LoadWeights(proposed): %v", err)
+	}
+
+	// The step's own samples, in the order it fitted them: the latest 18 of the 90 beads
+	// are the holdout, and the earlier 72 are the fit.
+	data, err := os.ReadFile(filepath.Join(fix.outDir, landingsName))
+	if err != nil {
+		t.Fatalf("read landings: %v", err)
+	}
+	_, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ReadLandings: %v", err)
+	}
+	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return store }}
+	samples, _, err := trainingSamples(context.Background(), env, fix.town, rows, trainTestEmbedder{})
+	if err != nil {
+		t.Fatalf("trainingSamples: %v", err)
+	}
+	var actual, predicted []float64
+	for _, s := range samples[72:] {
+		shape, err := read.ShapeMinutes(s.Shape)
+		if err != nil {
+			t.Fatalf("ShapeMinutes: %v", err)
+		}
+		embed, err := read.EmbeddingMinutes(s.Vector)
+		if err != nil {
+			t.Fatalf("EmbeddingMinutes: %v", err)
+		}
+		actual = append(actual, s.Minutes)
+		predicted = append(predicted, math.Sqrt(shape*embed))
+	}
+	rho, err := Spearman(actual, predicted)
+	if err != nil {
+		t.Fatalf("Spearman over the holdout: %v", err)
+	}
+	want := fmt.Sprintf("holdout rank correlation of the proposed weights: %.3f", rho)
+	if !strings.Contains(report, want) {
+		t.Errorf("report does not print the correlation of the written file, want %q:\n%s", want, report)
+	}
+}
+
+// TestStoryPointsEmbedderReadsItsURLFromTheEnvironment: the default embedder sends to the
+// URL the environment names, or to the local default when the name is unset or empty. It
+// takes the model and dimension from the checked-in weights and the bound from the step.
+// No request is sent.
+func TestStoryPointsEmbedderReadsItsURLFromTheEnvironment(t *testing.T) {
+	t.Parallel()
+	base := trainTestBase(t)
+	cases := []struct {
+		name    string
+		setting string
+		want    string
+	}{
+		{"set", "http://embed.example:9999", "http://embed.example:9999"},
+		{"empty", "", storyPointsEmbedDefaultURL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(name string) string {
+				if name != storyPointsEmbedURLEnv {
+					t.Errorf("looked up %q, want %q", name, storyPointsEmbedURLEnv)
+				}
+				return tc.setting
+			}
+			e := storyPointsEmbedder(base, getenv)
+			if e.URL != tc.want {
+				t.Errorf("URL = %q, want %q", e.URL, tc.want)
+			}
+			if e.Timeout != storyPointsEmbedTimeout {
+				t.Errorf("Timeout = %v, want %v", e.Timeout, storyPointsEmbedTimeout)
+			}
+			if e.Model != "test-embed" || e.Dim != trainTestDim {
+				t.Errorf("Model, Dim = %q, %d; want the checked-in model and dimension", e.Model, e.Dim)
+			}
+			if e.HTTP == nil {
+				t.Errorf("HTTP client is nil, so the embedder would refuse every request")
+			}
+		})
 	}
 }

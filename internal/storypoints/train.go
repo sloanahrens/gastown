@@ -207,11 +207,18 @@ func chooseAlpha(rows []Sample, learn learner) (float64, error) {
 // from the checked-in file: the fits-to-minutes knots, the embedding model and its
 // input text, and the checked-in predictions the holdout compares against.
 //
-// The penalties are chosen on the earlier 80% of the samples in landing order, the
-// fit that scores the holdout is the same earlier 80%, and the proposed weights are
-// fitted on every sample at the chosen penalties. The holdout is the latest 20%; the
-// boundary moves forward past a landing time shared with the sample before it, so
-// one time never falls in both.
+// The penalties are chosen on the earlier 80% of the samples in landing order. The
+// proposed weights are fitted on that same earlier 80% at the chosen penalties, and
+// the holdout, the latest 20%, is scored on those weights. The weights Retrain
+// returns are the ones that were scored: they are not refitted on every sample,
+// because that would put the holdout's beads into a model nobody measured. A person
+// who wants a model on all the beads retrains later. The holdout boundary moves
+// forward past a landing time shared with the sample before it, so one time never
+// falls in both.
+//
+// The fits-to-minutes knots are the checked-in model's and are not refit here: they
+// are copied into the proposed weights unchanged, so recalibrate them before the
+// file is adopted.
 func Retrain(base Weights, samples []Sample) (Model, error) {
 	if base.EmbeddingDimension() == 0 || len(base.shapeCoef) != len(shapeFeatureNames) {
 		return Model{}, ErrNoWeights
@@ -226,6 +233,18 @@ func Retrain(base Weights, samples []Sample) (Model, error) {
 		}
 		if len(s.Vector) != dim {
 			return Model{}, fmt.Errorf("storypoints: retrain sample %d has a %d-number embedding, want %d", i, len(s.Vector), dim)
+		}
+		// A value that is not a number would give the holdout a prediction that is not
+		// one, so it stops the retrain here, whichever side of the split it falls on.
+		for _, x := range s.Shape.vector() {
+			if !isFinite(x) {
+				return Model{}, fmt.Errorf("storypoints: retrain sample %d has a shape feature that is not a finite number", i)
+			}
+		}
+		for _, x := range s.Vector {
+			if !isFinite(float64(x)) {
+				return Model{}, fmt.Errorf("storypoints: retrain sample %d has an embedding value that is not a finite number", i)
+			}
 		}
 		if s.LandedAt.IsZero() {
 			return Model{}, fmt.Errorf("storypoints: retrain sample %d has no landing time", i)
@@ -255,9 +274,9 @@ func Retrain(base Weights, samples []Sample) (Model, error) {
 	m := Model{
 		ShapeAlpha: shapeAlpha,
 		EmbedAlpha: embedAlpha,
-		Trained:    len(sorted),
+		Trained:    len(fit),
 		TrainedOn: fmt.Sprintf("landed beads %s..%s, n=%d",
-			sorted[0].LandedAt.Format(time.DateOnly), sorted[len(sorted)-1].LandedAt.Format(time.DateOnly), len(sorted)),
+			fit[0].LandedAt.Format(time.DateOnly), fit[len(fit)-1].LandedAt.Format(time.DateOnly), len(fit)),
 	}
 
 	holdFit, err := fitBoth(fit, shapeAlpha, embedAlpha)
@@ -273,19 +292,15 @@ func Retrain(base Weights, samples []Sample) (Model, error) {
 		})
 	}
 
-	all, err := fitBoth(sorted, shapeAlpha, embedAlpha)
-	if err != nil {
-		return Model{}, err
-	}
 	m.Weights = Weights{
-		shapeMean:      all.shape.mean,
-		shapeScale:     all.shape.scale,
-		shapeCoef:      all.shape.coef,
-		shapeIntercept: all.shape.intercept,
+		shapeMean:      holdFit.shape.mean,
+		shapeScale:     holdFit.shape.scale,
+		shapeCoef:      holdFit.shape.coef,
+		shapeIntercept: holdFit.shape.intercept,
 		knots:          base.knots,
 		embedModel:     base.embedModel,
-		embedCoef:      all.embed.coef,
-		embedIntercept: all.embed.intercept,
+		embedCoef:      holdFit.embed.coef,
+		embedIntercept: holdFit.embed.intercept,
 		embedInput:     base.embedInput,
 	}
 	return m, nil
@@ -320,7 +335,8 @@ func fitBoth(rows []Sample, shapeAlpha, embedAlpha float64) (fitted, error) {
 
 // Encode writes the model in the weights file's layout, which LoadWeights reads
 // back. It carries the training span and the penalties, which LoadWeights does not
-// read, so a person adopting the file can see how it was fitted.
+// read, so a person adopting the file can see how it was fitted. The knots are the
+// checked-in model's, copied unchanged (see Retrain).
 func (m Model) Encode(w io.Writer) error {
 	knots := make([][]float64, len(m.Weights.knots))
 	for i, k := range m.Weights.knots {

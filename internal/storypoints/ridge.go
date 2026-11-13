@@ -6,9 +6,13 @@ import (
 	"math"
 )
 
-// ErrNotPositive reports a ridge system that Cholesky cannot factor: the design
-// holds a value that is not a finite number, or the factorization breaks down.
+// ErrNotPositive reports a ridge system whose factorization breaks down: Cholesky
+// meets a pivot that is not positive or not finite.
 var ErrNotPositive = errors.New("storypoints: ridge system is not positive definite")
+
+// ErrNonFinite reports a ridge value that is not a finite number: a NaN or Inf
+// sample, target or coefficient.
+var ErrNonFinite = errors.New("storypoints: ridge value is not a finite number")
 
 // ridgeFit is one design, centered and ready to solve at any penalty. The Gram
 // matrix is built once, so a search over penalties costs one factorization each.
@@ -49,7 +53,13 @@ func newRidge(x [][]float64, y []float64) (*ridgeFit, error) {
 			return nil, fmt.Errorf("storypoints: ridge sample %d has %d features, want %d", i, len(row), d)
 		}
 		for j, v := range row {
+			if !isFinite(v) {
+				return nil, fmt.Errorf("storypoints: ridge sample %d feature %d: %w", i, j, ErrNonFinite)
+			}
 			r.xm[j] += v
+		}
+		if !isFinite(y[i]) {
+			return nil, fmt.Errorf("storypoints: ridge target %d: %w", i, ErrNonFinite)
 		}
 		r.ym += y[i]
 	}
@@ -168,11 +178,16 @@ func choleskySolve(m [][]float64, b []float64) ([]float64, error) {
 		x[i] = t / m[i][i]
 	}
 	for _, v := range x {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, ErrNotPositive
+		if !isFinite(v) {
+			return nil, ErrNonFinite
 		}
 	}
 	return x, nil
+}
+
+// isFinite reports whether v is neither NaN nor an infinity.
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // dot is the inner product of two equal-length vectors.

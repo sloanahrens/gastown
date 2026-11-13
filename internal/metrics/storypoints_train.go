@@ -3,8 +3,10 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -37,6 +39,11 @@ const storyPointsTrainReportName = "storypoints-train.txt"
 // storyPointsHoldoutBar is the rank correlation a proposed model must reach on its
 // own holdout to be adopted: the design's bar.
 const storyPointsHoldoutBar = 0.4
+
+// storyPointsMinHoldout is the fewest holdout beads a rank correlation is read from.
+// The package has no minimum for a holdout, so this names one: under it a correlation
+// says too little to adopt or reject a file on, and it is not measurable.
+const storyPointsMinHoldout = 10
 
 // storyPointsEmbedURLEnv names the ollama server the embedder reads. Its default
 // is the local server.
@@ -73,6 +80,11 @@ type trainCandidate struct {
 // Out. It refuses a run with no landings table, and a table with too few measured
 // beads to fit.
 func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env Env) error {
+	// The outputs of an earlier run go first, so a run that refuses below leaves no
+	// proposed file and no report that describes the run before it.
+	if err := removeStoryPointsOutputs(real.Extract.OutDir); err != nil {
+		return err
+	}
 	path := filepath.Join(real.Extract.OutDir, landingsName)
 	data, err := env.ReadFile(path)
 	if err != nil {
@@ -88,7 +100,7 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	}
 	embedder := c.Embedder
 	if embedder == nil {
-		embedder = storyPointsEmbedder(base)
+		embedder = storyPointsEmbedder(base, os.Getenv)
 	}
 	samples, skips, err := trainingSamples(ctx, env, real.Town, rows, embedder)
 	if err != nil {
@@ -100,10 +112,7 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	}
 
 	score := holdoutRanks(model.Holdout)
-	name := storyPointsProposedName
-	if score.proposedErr != nil || score.proposed < storyPointsHoldoutBar {
-		name += storyPointsRejectedSuffix
-	}
+	name := score.fileName()
 	if err := writeAtomic(real.Extract.OutDir, name, model.Encode); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
@@ -199,54 +208,112 @@ func trainSeat(class string) (storypoints.Seat, bool) {
 	return storypoints.SeatUnknown, false
 }
 
-// holdoutScore is the holdout read for the report. proposed is the rank correlation
-// of the proposed model's minutes with the measured minutes; proposedErr is set when
-// it cannot be computed (no spread in one series), which is never read as clearing
-// the bar. checked is the rank correlation of the checked-in and the proposed
-// models with each other, and checkedErr is set when that cannot be computed. A
-// checked-in model that predicts one value for every bead has no spread, so its
-// error reports the comparison as unmeasured without deciding the proposed file.
+// holdoutScore is the holdout read for the report. Each correlation has its error
+// beside it, set when the correlation cannot be computed (too few beads, or no spread
+// in one series). An unmeasurable correlation is never read as a number.
+//
+// proposed is the proposed model against the measured minutes. It alone decides the
+// file name. checkedIn is the checked-in model against the measured minutes: when it
+// is unmeasurable, the report says so and the proposed file is not affected. agree is
+// the checked-in model against the proposed one.
 type holdoutScore struct {
-	proposed    float64
-	proposedErr error
-	checked     float64
-	checkedErr  error
+	proposed     float64
+	proposedErr  error
+	checkedIn    float64
+	checkedInErr error
+	agree        float64
+	agreeErr     error
 }
 
-// holdoutRanks scores the holdout of a retrain.
+// holdoutRanks scores the holdout of a retrain. A holdout under storyPointsMinHoldout
+// beads is unmeasurable for every correlation.
 func holdoutRanks(holdout []storypoints.Holdout) holdoutScore {
+	var s holdoutScore
+	if len(holdout) < storyPointsMinHoldout {
+		err := fmt.Errorf("%d holdout beads, want at least %d", len(holdout), storyPointsMinHoldout)
+		s.proposedErr, s.checkedInErr, s.agreeErr = err, err, err
+		return s
+	}
 	actual := make([]float64, len(holdout))
 	prop := make([]float64, len(holdout))
 	chk := make([]float64, len(holdout))
 	for i, h := range holdout {
 		actual[i], prop[i], chk[i] = h.Actual, h.Proposed, h.Checked
 	}
-	var s holdoutScore
 	s.proposed, s.proposedErr = Spearman(actual, prop)
-	s.checked, s.checkedErr = Spearman(chk, prop)
+	s.checkedIn, s.checkedInErr = Spearman(actual, chk)
+	s.agree, s.agreeErr = Spearman(chk, prop)
 	return s
+}
+
+// clears reports whether the proposed model's holdout correlation reaches the bar. An
+// unmeasurable one does not clear it.
+func (s holdoutScore) clears() bool {
+	return s.proposedErr == nil && s.proposed >= storyPointsHoldoutBar
+}
+
+// fileName is the name the proposed file is written under: the rejected name unless the
+// holdout clears the bar.
+func (s holdoutScore) fileName() string {
+	if s.clears() {
+		return storyPointsProposedName
+	}
+	return storyPointsProposedName + storyPointsRejectedSuffix
+}
+
+// removeStoryPointsOutputs removes the proposed file under either of its names, and the
+// report, that an earlier run left in dir. A directory under one of those names is not a
+// file an earlier run wrote, so it is left in place for the write to fail on and name.
+func removeStoryPointsOutputs(dir string) error {
+	for _, name := range []string{
+		storyPointsProposedName,
+		storyPointsProposedName + storyPointsRejectedSuffix,
+		storyPointsTrainReportName,
+	} {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if info.IsDir() {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // storyPointsTrainReport is the report the step writes and prints: what was read,
 // the penalties chosen, the holdout scores, and the verdict on the proposed file.
 func storyPointsTrainReport(m storypoints.Model, skips trainSkips, name string, score holdoutScore) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "story points retrain: %s\n", m.TrainedOn)
+	fmt.Fprintf(&b, "story points retrain: the proposed weights are the fit on the earlier 80%% of landed beads (%s); the holdout scores that same fit, which is not refitted on all rows\n", m.TrainedOn)
 	fmt.Fprintf(&b, "not read: seat class %d, unmeasured %d, bead not in store %d, no Constraints or Acceptance %d, rig without a directory %d\n",
 		skips.seat, skips.unmeasured, skips.noBead, skips.noText, skips.badRig)
 	fmt.Fprintf(&b, "penalties: shape %g, embedding %g\n", m.ShapeAlpha, m.EmbedAlpha)
-	fmt.Fprintf(&b, "holdout: latest %d beads (the earlier beads fit the penalties)\n", len(m.Holdout))
+	b.WriteString("fits-to-minutes knots are the checked-in model's, not refit: recalibrate before adopting\n")
+	fmt.Fprintf(&b, "holdout: latest %d beads (the earlier beads fit the penalties and the weights)\n", len(m.Holdout))
 	if score.proposedErr == nil {
 		fmt.Fprintf(&b, "holdout rank correlation of the proposed weights: %.3f (bar %.2f)\n", score.proposed, storyPointsHoldoutBar)
 	} else {
 		fmt.Fprintf(&b, "holdout rank correlation of the proposed weights: not measurable (%v)\n", score.proposedErr)
 	}
-	if score.checkedErr == nil {
-		fmt.Fprintf(&b, "rank correlation of checked-in and proposed weights on the holdout: %.3f\n", score.checked)
+	if score.checkedInErr == nil {
+		fmt.Fprintf(&b, "holdout rank correlation of the checked-in weights: %.3f\n", score.checkedIn)
 	} else {
-		fmt.Fprintf(&b, "rank correlation of checked-in and proposed weights on the holdout: not measurable (%v)\n", score.checkedErr)
+		fmt.Fprintf(&b, "checked-in: not measurable (%v); the proposed file does not depend on it\n", score.checkedInErr)
 	}
-	if score.proposedErr == nil && score.proposed >= storyPointsHoldoutBar {
+	if score.agreeErr == nil {
+		fmt.Fprintf(&b, "rank correlation of checked-in and proposed weights on the holdout: %.3f\n", score.agree)
+	} else {
+		fmt.Fprintf(&b, "rank correlation of checked-in and proposed weights on the holdout: not measurable (%v)\n", score.agreeErr)
+	}
+	if score.clears() {
 		fmt.Fprintf(&b, "verdict: clears the bar; wrote %s, adopt it by committing it as a bead\n", name)
 	} else {
 		fmt.Fprintf(&b, "verdict: below the bar; wrote %s, not adopted\n", name)
@@ -254,10 +321,11 @@ func storyPointsTrainReport(m storypoints.Model, skips trainSkips, name string, 
 	return b.String()
 }
 
-// storyPointsEmbedder is the ollama embedder the checked-in weights name, at the
-// URL the environment gives, else the local default.
-func storyPointsEmbedder(base storypoints.Weights) storypoints.Embedder {
-	url := os.Getenv(storyPointsEmbedURLEnv)
+// storyPointsEmbedder is the ollama embedder the checked-in weights name. Its URL is
+// the value getenv gives for storyPointsEmbedURLEnv, else the local default. The step
+// passes os.Getenv; a test passes its own lookup.
+func storyPointsEmbedder(base storypoints.Weights, getenv func(string) string) storypoints.OllamaEmbedder {
+	url := getenv(storyPointsEmbedURLEnv)
 	if url == "" {
 		url = storyPointsEmbedDefaultURL
 	}
@@ -266,6 +334,7 @@ func storyPointsEmbedder(base storypoints.Weights) storypoints.Embedder {
 		Model:   base.EmbeddingModel(),
 		Dim:     base.EmbeddingDimension(),
 		Timeout: storyPointsEmbedTimeout,
-		HTTP:    &http.Client{Transport: &http.Transport{Proxy: nil}},
+		// A zero Transport has no proxy, so the process proxy environment is not read.
+		HTTP: &http.Client{Transport: &http.Transport{}},
 	}
 }

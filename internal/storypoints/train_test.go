@@ -185,6 +185,47 @@ func TestRetrainEncodesWhatLoadWeightsReads(t *testing.T) {
 	}
 }
 
+// TestRetrainHoldoutScoresTheWrittenFile: the holdout's proposed predictions are the
+// predictions of the file a retrain writes, read back by LoadWeights. A file fitted on
+// more beads than the holdout was scored on would fail this.
+func TestRetrainHoldoutScoresTheWrittenFile(t *testing.T) {
+	t.Parallel()
+	base := testBase(t, 3)
+	samples := syntheticSamples(120, 5, 3)
+	m, err := Retrain(base, samples)
+	if err != nil {
+		t.Fatalf("Retrain: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := m.Encode(&buf); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	read, err := LoadWeights(&buf)
+	if err != nil {
+		t.Fatalf("LoadWeights(encoded): %v", err)
+	}
+	// The samples are in landing order and one hour apart, so the holdout is the last
+	// fifth of them: the 24 beads after the first 96.
+	hold := samples[len(samples)-len(m.Holdout):]
+	if len(m.Holdout) != 24 {
+		t.Fatalf("holdout has %d samples, want 24", len(m.Holdout))
+	}
+	for i, h := range m.Holdout {
+		s := hold[i]
+		shape, err := read.ShapeMinutes(s.Shape)
+		if err != nil {
+			t.Fatalf("read ShapeMinutes: %v", err)
+		}
+		embed, err := read.EmbeddingMinutes(s.Vector)
+		if err != nil {
+			t.Fatalf("read EmbeddingMinutes: %v", err)
+		}
+		if got := math.Sqrt(shape * embed); math.Abs(got-h.Proposed) > 1e-9*h.Proposed {
+			t.Errorf("holdout bead %d: the written file predicts %v, the holdout scored %v", i, got, h.Proposed)
+		}
+	}
+}
+
 // TestRetrainRefusesWhatItCannotFit: a base with no model, a sample whose values are
 // not numbers the ridge can solve, and samples that all landed at one time stop the
 // retrain with an error rather than a model.
