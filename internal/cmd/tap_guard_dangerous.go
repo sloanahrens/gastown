@@ -193,6 +193,14 @@ const maxDangerousNestDepth = 3
 // by the same gate, except the two judgeDisagreeingShellText reads; that
 // fail-closed trade is decided in gt-wnblap.
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
+	return evaluateDangerousCommandWith(command, depth, sess, dangerousReadTokens)
+}
+
+// evaluateDangerousCommandWith judges command as evaluateDangerousCommand does,
+// reading every text token line with read. The reader is a parameter so the
+// property test drives the production path with a reading that loses the
+// separators (TestDangerousParsedVerdictNeverLoosens).
+func evaluateDangerousCommandWith(command string, depth int, sess guardSession, read dangerousReader) (reason, alternative string) {
 	script, err := shellparse.Parse(command)
 	if err != nil {
 		// The parser could not read the command, so the command is refused whole,
@@ -203,7 +211,124 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 		}
 		return dangerousUnreadable(err), ""
 	}
-	return judgeDangerousScript(script, command, depth, sess)
+	return judgeDangerousScript(script, command, depth, sess, read)
+}
+
+// dangerousReader reads a command into the argv-like tokens this guard's text
+// reads judge it on: the token line of the two shapes the parser misreads
+// (judgeDisagreeingShellText), the done/slot loop rule (judgeDangerousLoopText,
+// dangerousSubstitutionLoop) and the idle gate's segment walk
+// (idleGateHeldAction).
+type dangerousReader func(command string) []string
+
+// dangerousReadTokens is the production reader: the parsedTokens reading of
+// gt-crn9gu. shellTokenize is the fallback for a command shellparse cannot
+// read and for a command dangerousParsedUnsafe names. shellTokenize is the
+// reading gt-crn9gu retires; it stays as the fallback until that plan removes
+// it.
+func dangerousReadTokens(command string) []string {
+	tokens, readable := parsedTokens(command)
+	if !readable || dangerousParsedUnsafe(command) {
+		return shellTokenize(command)
+	}
+	return tokens
+}
+
+// dangerousParsedUnsafe reports whether command has a shape the parsed reading
+// cannot judge as strictly as the text reading, so shellTokenize reads it
+// instead. The rule reads the command text, because the parsed tokens lack the
+// very structure it has to detect: parsedTokens turns each compound command
+// into its body's commands, so the keywords of the block that runs them are
+// gone, and a loop around `gt done` reads as a bare invocation. It only ever
+// sends a command to the reading the guard used before this move, so a rule
+// that is too broad costs the parsed reading and never strictness.
+//
+// The shapes are:
+//   - a compound command (for, while, until, if, case, select, a function, a
+//     { } or ( ) group): parsedTokens keeps the body's commands but drops the
+//     keywords and the group boundary, so the done/slot loop rule cannot see
+//     the block that closes around them, and the idle gate's segment walk
+//     cannot see that a cd inside a subshell does not carry to the line;
+//   - a zsh loop form (repeat, foreach, end), the same loss;
+//   - a [[ ]] or $[ ] expression, whose words parsedTokens drops;
+//   - a bash pipe-and-stderr operator "|&", which parsedTokens does not keep;
+//   - a `#` that starts a word (a shell comment), whose end the two readings
+//     spell differently: shellTokenize emits the newline after it as a
+//     separator, parsedTokens emits none, and a backslash before that newline
+//     is read by each on its own rule (gt-4otugt);
+//   - an ANSI-C string opened across a backslash-newline, which bash joins
+//     and the parser does not (dangerousANSICContinuation, gt-javvg).
+func dangerousParsedUnsafe(command string) bool {
+	if dangerousANSICContinuation(command) || dangerousGroupMarker(command) {
+		return true
+	}
+	if strings.Contains(command, "[[") || strings.Contains(command, "$[") || strings.Contains(command, "|&") {
+		return true
+	}
+	for _, w := range dangerousCommandWords(command) {
+		if dangerousCompoundKeywords[w] {
+			return true
+		}
+	}
+	return startsShellComment(command)
+}
+
+// dangerousCompoundKeywords are the words that open or close a compound
+// command. parsedTokens emits none of them as a token: it keeps the commands
+// their body runs, so a loop written this way could not be seen on the parsed
+// tokens.
+var dangerousCompoundKeywords = map[string]bool{
+	"for": true, "while": true, "until": true, "do": true, "done": true,
+	"if": true, "then": true, "else": true, "elif": true, "fi": true,
+	"case": true, "esac": true, "select": true, "function": true,
+	"repeat": true, "foreach": true, "end": true,
+}
+
+// dangerousGroupMarker reports whether command holds a subshell or brace
+// group: a "(" that no substitution opened, or a "{" or "}" outside a
+// ${...} parameter expansion. parsedTokens drops the group's delimiters and
+// keeps its commands, so the group is not visible on the parsed tokens; a "("
+// of "$(", "<(", ">(" or a backquote is a substitution, whose delimiters the
+// parsed reading keeps as part of its word, and a parameter expansion's braces
+// are the same kind of delimiter: the parsed reading keeps the whole
+// expansion as one word.
+func dangerousGroupMarker(command string) bool {
+	// parameterDepth counts the "${" that no "}" has closed yet.
+	parameterDepth := 0
+	for i := 0; i < len(command); i++ {
+		switch c := command[i]; {
+		case c == '$' && i+1 < len(command) && command[i+1] == '{':
+			parameterDepth++
+			i++
+		case c == '}' && parameterDepth > 0:
+			parameterDepth--
+		case c == '{' || c == '}':
+			return true
+		case c == '(':
+			if i > 0 {
+				switch command[i-1] {
+				case '$', '<', '>', '`':
+					continue
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// dangerousCommandWords splits command at the runes that separate a keyword
+// from its neighbors: blanks, the shell operators, and the group and quoting
+// punctuation a keyword can touch, so "(while" and "done)" are seen as the
+// keywords they are.
+func dangerousCommandWords(command string) []string {
+	return strings.FieldsFunc(command, func(r rune) bool {
+		switch r {
+		case ';', '&', '|', '(', ')', '{', '}', '`', '"', '\'':
+			return true
+		}
+		return unicode.IsSpace(r)
+	})
 }
 
 // judgeDangerousScript judges one command line the parser read. The token
@@ -216,7 +341,7 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 // substitutions it judges from the parsed script (dangerousSubstitutionLoop).
 // The two shapes the parser reads differently from the shell keep the shell's
 // text for their token checks (judgeDisagreeingScript).
-func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
+func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession, read dangerousReader) (reason, alternative string) {
 	// A declaration builtin's word spelling "<<" is a here-document to the
 	// shell's lexer, which reads the operator before the builtin sees its
 	// argument: "let y=1<<x" feeds the next lines to the body as data. The
@@ -225,16 +350,16 @@ func judgeDangerousScript(script shellparse.Script, text string, depth int, sess
 	// follows the shell for its token checks rather than the parsed words that
 	// would judge the body as live commands.
 	if dangerousDeclarationHeredoc(script) || dangerousANSICContinuation(text) {
-		return judgeDisagreeingScript(script, text, depth, sess)
+		return judgeDisagreeingScript(script, text, depth, sess, read)
 	}
 	tokens := dangerousTokenLine(script)
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	if reason, alternative = judgeDangerousLoopText(text, script, depth); reason != "" {
+	if reason, alternative = judgeDangerousLoopText(text, script, depth, read); reason != "" {
 		return reason, alternative
 	}
-	return evaluateDangerousScriptNested(script, depth, sess)
+	return evaluateDangerousScriptNested(script, depth, sess, read)
 }
 
 // dangerousDeclarationBuiltins are the builtins shellparse reads as a
@@ -353,11 +478,11 @@ func dangerousANSICContinuation(text string) bool {
 // live. A payload the parser places elsewhere is not judged here; the parser's
 // reading is the only structured reading the nested checks have (gt-7ydceb).
 // Pinned by TestDisagreeingShapesJudgeNestedPayloads.
-func judgeDisagreeingScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
-	if reason, alternative = judgeDisagreeingShellText(text, script, depth, sess); reason != "" {
+func judgeDisagreeingScript(script shellparse.Script, text string, depth int, sess guardSession, read dangerousReader) (reason, alternative string) {
+	if reason, alternative = judgeDisagreeingShellText(text, script, depth, sess, read); reason != "" {
 		return reason, alternative
 	}
-	return evaluateDangerousScriptNested(script, depth, sess)
+	return evaluateDangerousScriptNested(script, depth, sess, read)
 }
 
 // judgeDisagreeingShellText judges a command the parser reads differently from
@@ -370,12 +495,12 @@ func judgeDisagreeingScript(script shellparse.Script, text string, depth int, se
 // reading of these lines, so the text is the only reading the matchers have
 // there. Pinned by TestHeredocDoesNotHideRealCommand and
 // TestDangerousGuardANSICLineContinuation.
-func judgeDisagreeingShellText(command string, script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
-	tokens := shellTokenize(stripHeredocBodies(command))
+func judgeDisagreeingShellText(command string, script shellparse.Script, depth int, sess guardSession, read dangerousReader) (reason, alternative string) {
+	tokens := read(stripHeredocBodies(command))
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	return judgeDangerousLoopText(command, script, depth)
+	return judgeDangerousLoopText(command, script, depth, read)
 }
 
 // judgeDangerousLoopText is the done/slot loop rule read from the command text.
@@ -390,12 +515,12 @@ func judgeDisagreeingShellText(command string, script shellparse.Script, depth i
 // not passed (doneSlotLoopFileWrittenBodies). The rule reads the unstripped text
 // because a heredoc body the command writes to a FILE can hold the retry script;
 // the heredoc bodies it finds are the parsed ones (doneSlotLoopFileWrittenBodies).
-func judgeDangerousLoopText(text string, script shellparse.Script, depth int) (reason, alternative string) {
-	tokens := shellTokenize(stripHeredocBodies(text))
+func judgeDangerousLoopText(text string, script shellparse.Script, depth int, read dangerousReader) (reason, alternative string) {
+	tokens := read(stripHeredocBodies(text))
 	if reason, alternative = matchesDoneSlotLoop(text, tokens, toLowerTokens(tokens)); reason != "" {
 		return reason, alternative
 	}
-	return dangerousSubstitutionLoop(script, depth)
+	return dangerousSubstitutionLoop(script, depth, read)
 }
 
 // judgeDangerousTokens is the dangerous rules read over one token line.
@@ -460,7 +585,7 @@ func judgeDangerousTokens(tokens, lowerTokens []string, sess guardSession) (reas
 // are judged as text — each is a command line of its own, parsed and gated by
 // evaluateDangerousCommand — and every substitution the shell expands is judged
 // as the already-parsed script it is.
-func evaluateDangerousScriptNested(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
+func evaluateDangerousScriptNested(script shellparse.Script, depth int, sess guardSession, read dangerousReader) (reason, alternative string) {
 	payloads := nestedCommands(script)
 	payloads = append(payloads, dangerousHeredocBodies(script)...)
 	subs := dangerousScriptSubs(script)
@@ -475,12 +600,12 @@ func evaluateDangerousScriptNested(script shellparse.Script, depth int, sess gua
 		return "", ""
 	}
 	for _, payload := range payloads {
-		if r, alt := evaluateDangerousCommand(payload, depth+1, sess); r != "" {
+		if r, alt := evaluateDangerousCommandWith(payload, depth+1, sess, read); r != "" {
 			return r, alt
 		}
 	}
 	for _, sub := range subs {
-		if r, alt := evaluateDangerousScript(sub, depth+1, sess); r != "" {
+		if r, alt := evaluateDangerousScript(sub, depth+1, sess, read); r != "" {
 			return r, alt
 		}
 	}
@@ -492,7 +617,7 @@ func evaluateDangerousScriptNested(script shellparse.Script, depth int, sess gua
 // recurses into what it nests. The substitution was parsed as part of the
 // command that held it, so there is no text left to gate: whatever it runs, the
 // parser read.
-func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
+func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSession, read dangerousReader) (reason, alternative string) {
 	// The script is judged on the token line rebuilt from its segments, as the
 	// top-level script is in judgeDangerousScript. The done/slot
 	// loop rule is not read here: a substitution keeps no text, so that rule
@@ -502,7 +627,7 @@ func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSess
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	return evaluateDangerousScriptNested(script, depth, sess)
+	return evaluateDangerousScriptNested(script, depth, sess, read)
 }
 
 // nestedCommands returns the command lines a parsed script hands to another
@@ -619,7 +744,7 @@ func dangerousScriptSubs(script shellparse.Script) []shellparse.Script {
 // body's own substitutions are read one level deeper from its parsed Script. It
 // answers only that rule: every other nested judgment comes from the parsed
 // Script (gt-7ydceb).
-func dangerousSubstitutionLoop(script shellparse.Script, depth int) (reason, alternative string) {
+func dangerousSubstitutionLoop(script shellparse.Script, depth int, read dangerousReader) (reason, alternative string) {
 	if depth >= maxDangerousNestDepth {
 		return "", ""
 	}
@@ -628,11 +753,11 @@ func dangerousSubstitutionLoop(script shellparse.Script, depth int) (reason, alt
 		if body == "" {
 			continue
 		}
-		tokens := shellTokenize(body)
+		tokens := read(body)
 		if r, alt := matchesDoneSlotLoop(body, tokens, toLowerTokens(tokens)); r != "" {
 			return r, alt
 		}
-		if r, alt := dangerousSubstitutionLoop(sub, depth+1); r != "" {
+		if r, alt := dangerousSubstitutionLoop(sub, depth+1, read); r != "" {
 			return r, alt
 		}
 	}
@@ -641,7 +766,7 @@ func dangerousSubstitutionLoop(script shellparse.Script, depth int) (reason, alt
 			if !h.Quoted {
 				continue
 			}
-			if r, alt := quotedHeredocBodyLoop(h.Body, depth); r != "" {
+			if r, alt := quotedHeredocBodyLoop(h.Body, depth, read); r != "" {
 				return r, alt
 			}
 		}
@@ -657,7 +782,7 @@ func dangerousSubstitutionLoop(script shellparse.Script, depth int) (reason, alt
 // substitutions is refused whether or not a file is written (gt-bogfce). A body
 // the parser cannot read that may hold a substitution is refused too, since no
 // substitution in it can be ruled out.
-func quotedHeredocBodyLoop(body string, depth int) (reason, alternative string) {
+func quotedHeredocBodyLoop(body string, depth int, read dangerousReader) (reason, alternative string) {
 	script, err := shellparse.Parse(body)
 	if err != nil {
 		if mayHoldSubstitution(body) {
@@ -665,7 +790,7 @@ func quotedHeredocBodyLoop(body string, depth int) (reason, alternative string) 
 		}
 		return "", ""
 	}
-	return dangerousSubstitutionLoop(script, depth+1)
+	return dangerousSubstitutionLoop(script, depth+1, read)
 }
 
 // quotedHeredocBodyUnreadableReason is the refusal for a quoted here-document
@@ -3979,7 +4104,14 @@ func idleGateAlternative(heldAction string) string {
 // (gt-me4vs), the same hole the container-suite and test-scope rules had
 // (gt-5mc21).
 func idleGateHeldAction(proc guardProcess, command string) string {
-	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
+	return idleGateHeldActionWith(proc, command, dangerousReadTokens)
+}
+
+// idleGateHeldActionWith is idleGateHeldAction reading its tokens with read.
+// The reader is a parameter so a test can hand the walk a reading that loses
+// the separators.
+func idleGateHeldActionWith(proc guardProcess, command string, read dangerousReader) string {
+	tokens := read(strings.TrimSpace(stripHeredocBodies(command)))
 	vars := shellVarAssignments(tokens)
 	cwd, _ := proc.getwd()
 	var segment []string
