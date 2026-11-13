@@ -282,7 +282,8 @@ func commonGitDir(gitDir string) string {
 // This ensures the pre-push hook blocks pushes to invalid branches (no internal PRs).
 type HooksPathConfiguredCheck struct {
 	FixableCheck
-	unconfiguredClones []string
+	gaps       []hooksPathGap
+	unreadable []string
 }
 
 // NewHooksPathConfiguredCheck creates a new hooks path check.
@@ -309,7 +310,8 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	c.unconfiguredClones = nil
+	c.gaps = nil
+	c.unreadable = nil
 
 	for _, clonePath := range rigCloneDirs(rigPath) {
 		// Skip if no .githooks directory exists
@@ -317,19 +319,27 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		// Check core.hooksPath
-		hooksPath, err := ctx.git(clonePath).ConfigGet("core.hooksPath")
-		if err != nil || strings.TrimSpace(hooksPath) != ".githooks" {
-			// Get relative path for cleaner output
+		gap, err := readHooksPath(ctx, clonePath)
+		if err != nil {
 			relPath, _ := filepath.Rel(rigPath, clonePath)
-			if relPath == "" {
-				relPath = clonePath
-			}
-			c.unconfiguredClones = append(c.unconfiguredClones, clonePath)
+			c.unreadable = append(c.unreadable, fmt.Sprintf("%s: %v", relPath, err))
+			continue
+		}
+		if gap != nil {
+			c.gaps = append(c.gaps, *gap)
 		}
 	}
 
-	if len(c.unconfiguredClones) == 0 {
+	if len(c.unreadable) > 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusError,
+			Message: fmt.Sprintf("%d clone(s) with an unreadable core.hooksPath", len(c.unreadable)),
+			Details: c.unreadable,
+		}
+	}
+
+	if len(c.gaps) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -339,18 +349,18 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Build details with relative paths
 	var details []string
-	for _, clonePath := range c.unconfiguredClones {
-		relPath, _ := filepath.Rel(rigPath, clonePath)
+	for _, gap := range c.gaps {
+		relPath, _ := filepath.Rel(rigPath, gap.clone)
 		if relPath == "" {
-			relPath = clonePath
+			relPath = gap.clone
 		}
-		details = append(details, relPath)
+		details = append(details, hooksPathDetail(relPath, gap))
 	}
 
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d clone(s) missing hooks configuration", len(c.unconfiguredClones)),
+		Message: fmt.Sprintf("%d clone(s) missing hooks configuration", len(c.gaps)),
 		Details: details,
 		FixHint: "Run 'gt doctor fix hooks-path-configured' to configure hooks",
 	}
@@ -358,12 +368,7 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 // Fix configures core.hooksPath for all unconfigured clones.
 func (c *HooksPathConfiguredCheck) Fix(ctx *CheckContext) error {
-	for _, clonePath := range c.unconfiguredClones {
-		if err := ctx.git(clonePath).ConfigSet("core.hooksPath", ".githooks"); err != nil {
-			return fmt.Errorf("failed to configure hooks for %s: %w", clonePath, err)
-		}
-	}
-	return nil
+	return fixHooksPathGaps(ctx, c.gaps)
 }
 
 // PolecatClonesValidCheck verifies each polecat directory is a valid clone.

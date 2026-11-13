@@ -977,6 +977,28 @@ func (g *Git) ConfigureHooksPath() error {
 	return configureHooksPath(g.runner(), g.workDir)
 }
 
+// HooksPathTargetExists reports whether a core.hooksPath value names an existing
+// directory. A relative value is taken from repoPath, as git takes it; an empty
+// value names none. A stat failure other than not-exist is an error, because the
+// caller then cannot tell whether a value is set.
+func HooksPathTargetExists(repoPath, value string) (bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false, nil
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(repoPath, value)
+	}
+	info, err := os.Stat(value)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading core.hooksPath target %s: %w", value, err)
+	}
+	return info.IsDir(), nil
+}
+
 // configureRefspec sets remote.origin.fetch to the standard refspec for bare repos.
 // Bare clones don't have this set by default, which breaks worktrees that need to
 // fetch and see origin/* refs. Without this, `git fetch` only updates FETCH_HEAD

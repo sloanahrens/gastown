@@ -61,6 +61,7 @@ type Repo interface {
 	WorktreeAddExistingForce(path, branch string) error
 	WorktreeRemove(path string, force bool) error
 	WorktreePrune() error
+	WorktreeList() ([]git.Worktree, error)
 }
 
 var _ Repo = (*git.Git)(nil)

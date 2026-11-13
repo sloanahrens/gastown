@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // HooksPathAllRigsCheck verifies all clones across all rigs have core.hooksPath set.
@@ -12,7 +11,8 @@ import (
 // The pre-push hook enforces integration branch landing guardrails.
 type HooksPathAllRigsCheck struct {
 	FixableCheck
-	unconfiguredClones []string
+	gaps       []hooksPathGap
+	unreadable []string
 }
 
 // NewHooksPathAllRigsCheck creates a new global hooks path check.
@@ -39,7 +39,8 @@ func (c *HooksPathAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	c.unconfiguredClones = nil
+	c.gaps = nil
+	c.unreadable = nil
 	totalClones := 0
 
 	for _, rigPath := range rigs {
@@ -51,14 +52,27 @@ func (c *HooksPathAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			totalClones++
 
-			hooksPath, err := ctx.git(clonePath).ConfigGet("core.hooksPath")
-			if err != nil || strings.TrimSpace(hooksPath) != ".githooks" {
-				c.unconfiguredClones = append(c.unconfiguredClones, clonePath)
+			gap, err := readHooksPath(ctx, clonePath)
+			if err != nil {
+				c.unreadable = append(c.unreadable, fmt.Sprintf("%s: %v", clonePath, err))
+				continue
+			}
+			if gap != nil {
+				c.gaps = append(c.gaps, *gap)
 			}
 		}
 	}
 
-	if len(c.unconfiguredClones) == 0 {
+	if len(c.unreadable) > 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusError,
+			Message: fmt.Sprintf("%d clone(s) with an unreadable core.hooksPath across all rigs", len(c.unreadable)),
+			Details: c.unreadable,
+		}
+	}
+
+	if len(c.gaps) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -67,18 +81,18 @@ func (c *HooksPathAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var details []string
-	for _, clonePath := range c.unconfiguredClones {
-		relPath, _ := filepath.Rel(ctx.TownRoot, clonePath)
+	for _, gap := range c.gaps {
+		relPath, _ := filepath.Rel(ctx.TownRoot, gap.clone)
 		if relPath == "" {
-			relPath = clonePath
+			relPath = gap.clone
 		}
-		details = append(details, relPath)
+		details = append(details, hooksPathDetail(relPath, gap))
 	}
 
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d clone(s) missing core.hooksPath across all rigs", len(c.unconfiguredClones)),
+		Message: fmt.Sprintf("%d clone(s) missing core.hooksPath across all rigs", len(c.gaps)),
 		Details: details,
 		FixHint: "Run 'gt doctor fix hooks-path-all-rigs' to configure hooks",
 	}
@@ -86,12 +100,7 @@ func (c *HooksPathAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 
 // Fix configures core.hooksPath for all unconfigured clones.
 func (c *HooksPathAllRigsCheck) Fix(ctx *CheckContext) error {
-	for _, clonePath := range c.unconfiguredClones {
-		if err := ctx.git(clonePath).ConfigSet("core.hooksPath", ".githooks"); err != nil {
-			return fmt.Errorf("failed to configure hooks for %s: %w", clonePath, err)
-		}
-	}
-	return nil
+	return fixHooksPathGaps(ctx, c.gaps)
 }
 
 // findRigClones returns all git clone paths within a rig.
