@@ -157,3 +157,42 @@ func TestGroups(t *testing.T) {
 		t.Errorf("Describe(nowhere) = %q; want empty", d)
 	}
 }
+
+// TestHandRunMetricsCommandsSitWithMetrics pins the metrics pipeline steps to
+// host, beside the gt metrics entry: internal is gt's own plumbing, and a person
+// starts these steps by hand (gt-c9tmkq).
+func TestHandRunMetricsCommandsSitWithMetrics(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		"metrics all",
+		"metrics analyse",
+		"metrics extract",
+		"metrics import-versions",
+		"metrics run",
+		"metrics snapshot",
+		"metrics storypoints-train",
+	} {
+		e, ok := Lookup(path)
+		if !ok {
+			t.Errorf("Lookup(%q) found no entry; the command needs a task map entry", path)
+			continue
+		}
+		if e.Group != "host" {
+			t.Errorf("Lookup(%q).Group = %q, want \"host\" beside gt metrics", path, e.Group)
+		}
+	}
+}
+
+// TestInternalHoldsNoMetricsCommands guards the same rule from the other side:
+// no metrics command belongs in internal, so one added there later fails this
+// test (gt-c9tmkq).
+func TestInternalHoldsNoMetricsCommands(t *testing.T) {
+	t.Parallel()
+
+	for _, e := range ByGroup("internal") {
+		if strings.HasPrefix(e.Path, "metrics") {
+			t.Errorf("ByGroup(internal) holds %q; a metrics command is a tool a person runs, not gt plumbing", e.Path)
+		}
+	}
+}
