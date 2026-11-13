@@ -18,6 +18,13 @@ import (
 	"github.com/steveyegge/gastown/internal/update"
 )
 
+// podSwapOldDaemonRef and podSwapOldPolecatRef are the pair the fake's Deployment
+// ran before an install: the pair the running pair read returns.
+var (
+	podSwapOldDaemonRef  = "registry.internal:5000/town/gastown-daemon@sha256:" + strings.Repeat("1", 64)
+	podSwapOldPolecatRef = "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("2", 64)
+)
+
 // podDaemonKubectl stands in for kubectl against a daemon that runs as a pod. A
 // patch puts the daemon on the build of the daemon digest it names, and an exec
 // reports the build the pod runs, so the rollout wait reads the commit the patch
@@ -28,6 +35,14 @@ type podDaemonKubectl struct {
 	commits map[string]string
 	running string
 	pods    []podPairPod
+	// image and polecat are the pair the daemon Deployment's pod template runs:
+	// its daemon container's image and its polecat image annotation. A patch of
+	// the daemon Deployment sets them to the pair it carries.
+	image, polecat string
+	// readErr and readExit fail the running pair read; the knobs above fail a
+	// patch, the rollout wait or the pod list instead.
+	readErr  error
+	readExit int
 	// failOnce is a kubectl step, such as "patch deployment/dashboard", whose first
 	// command exits 1. failed records that it did.
 	failOnce string
@@ -42,12 +57,14 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 	}
 	switch {
 	case containsArg(args, "patch"):
-		joined := strings.Join(args, " ")
-		for ref, commit := range k.commits {
-			if strings.Contains(joined, ref) {
-				k.running = commit
-			}
+		k.patched(args[len(args)-1])
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.Name):
+		// The running pair read: the Deployment's daemon image and polecat
+		// annotation, on the two lines the swap reads.
+		if k.readErr != nil || k.readExit != 0 {
+			return "SECRET-TOKEN in the pair read", k.readExit, k.readErr
 		}
+		return k.image + "\n" + k.polecat, 0, nil
 	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
 		// The dashboard's existence read: the town this fake stands in for has one.
 		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
@@ -57,6 +74,27 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 		return "gt version " + k.running + " built on test\n", 0, nil
 	}
 	return "", 0, nil
+}
+
+// patched applies a daemon Deployment patch to the fake's state: the pair the
+// Deployment carries and the build the pod runs for it. A patch of any other
+// Deployment, such as the dashboard's, leaves the pair alone.
+func (k *podDaemonKubectl) patched(body string) {
+	var patch podSwapPatchBody
+	if err := json.Unmarshal([]byte(body), &patch); err != nil {
+		return
+	}
+	for _, c := range patch.Spec.Template.Spec.Containers {
+		if c.Name == k8sdaemon.Name {
+			k.image = c.Image
+		}
+	}
+	if polecat, ok := patch.Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; ok {
+		k.polecat = polecat
+	}
+	if commit, ok := k.commits[k.image]; ok {
+		k.running = commit
+	}
 }
 
 // patchBody decodes the body of the first patch the fake was asked to run.
@@ -137,8 +175,14 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		townRoot: townRoot,
 		compose:  compose,
 		verify:   compose,
-		kube:     &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, pods: podPairHealthy()},
-		host:     &podHostInstaller{},
+		kube: &podDaemonKubectl{
+			running: rollbackNewCommit,
+			commits: map[string]string{podSwapDigestRef: rollbackNewCommit},
+			image:   podSwapOldDaemonRef,
+			polecat: podSwapOldPolecatRef,
+			pods:    podPairHealthy(),
+		},
+		host: &podHostInstaller{},
 	}
 	seams := updateSeams{
 		FindTownRoot: func() (string, error) { return townRoot, nil },
@@ -298,7 +342,13 @@ func runCountedPodCommand(t *testing.T, withImages bool, args ...string) (podRun
 	compose := &rollbackTestSwap{}
 	got := podRunCounts{
 		host: &podHostInstaller{},
-		kube: &podDaemonKubectl{running: rollbackNewCommit, commits: map[string]string{podSwapDigestRef: rollbackNewCommit}, pods: podPairHealthy()},
+		kube: &podDaemonKubectl{
+			running: rollbackNewCommit,
+			commits: map[string]string{podSwapDigestRef: rollbackNewCommit},
+			image:   podSwapOldDaemonRef,
+			polecat: podSwapOldPolecatRef,
+			pods:    podPairHealthy(),
+		},
 	}
 	seams := updateSeams{
 		FindTownRoot: func() (string, error) {
@@ -572,6 +622,11 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 		if swap.RolloutTimeout != updateRestartWait {
 			t.Errorf("rollout timeout = %v, want the restart bound %v", swap.RolloutTimeout, updateRestartWait)
 		}
+		if reading, ok := inst.Images.Running.(podDaemonSwap); !ok {
+			t.Errorf("running pair read = %T, want the pod swap: only the Deployment can say which pair ran before", inst.Images.Running)
+		} else if reading.Namespace != podSwapNamespace {
+			t.Errorf("running pair read names namespace %q, want %q", reading.Namespace, podSwapNamespace)
+		}
 		probe, ok := got.deps.Verify.(podVerifyProbes)
 		if !ok {
 			t.Fatalf("daemon probe = %T, want the pod probe", got.deps.Verify)
@@ -621,6 +676,9 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 		}
 		if inst.Images.Swap != update.ImageSwap(got.compose) {
 			t.Errorf("daemon swap = %T, want the compose swap the town seam returned", inst.Images.Swap)
+		}
+		if _, ok := inst.Images.Running.(update.RecordedRunningPair); !ok {
+			t.Errorf("running pair read = %T, want the container daemon's record", inst.Images.Running)
 		}
 		if got.deps.Verify != update.VerifyProbes(got.verify) {
 			t.Errorf("daemon probe = %T, want the state-file probe the deps factory returned", got.deps.Verify)
@@ -814,6 +872,7 @@ func TestUpdatePodHalfMovedPairIsRestoredToThePrevious(t *testing.T) {
 			oldPolecat := "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("a", 64)
 			previous := update.ImagePair{Daemon: oldDaemon, Polecat: oldPolecat, Commit: rollbackOldCommit}
 			got.kube.commits[oldDaemon] = rollbackOldCommit
+			got.kube.image, got.kube.polecat = oldDaemon, oldPolecat
 			got.kube.failOnce = tt.failOnce
 			ledger := update.FileImageLedger{Dir: update.Dir(got.townRoot)}
 			if err := ledger.Write(update.ImageRecord{Current: previous, Previous: previous}); err != nil {
@@ -857,8 +916,11 @@ func TestUpdatePodHalfMovedPairIsRestoredToThePrevious(t *testing.T) {
 			if c := lastPatch(k8sdaemon.DashboardName).Spec.Template.Spec.Containers; len(c) != 1 || c[0].Image != oldDaemon {
 				t.Errorf("last dashboard patch containers = %+v, want the previous daemon %q", c, oldDaemon)
 			}
-			if rec, err := ledger.Read(); err != nil || !samePairs(rec, update.ImageRecord{Current: previous, Previous: previous}) {
-				t.Errorf("ledger after the restore = %+v (err %v), want the previous pair as both current and previous", rec, err)
+			// The restored pair is the one read from the Deployment, which names no
+			// commit: the record holds the images the daemon runs.
+			restored := update.ImagePair{Daemon: oldDaemon, Polecat: oldPolecat}
+			if rec, err := ledger.Read(); err != nil || !samePairs(rec, update.ImageRecord{Current: restored, Previous: restored}) {
+				t.Errorf("ledger after the restore = %+v (err %v), want the Deployment's pair as both current and previous", rec, err)
 			}
 		})
 	}

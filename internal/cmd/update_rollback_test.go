@@ -219,6 +219,31 @@ func TestUpdateRollbackRestoresThePair(t *testing.T) {
 		}
 	})
 
+	t.Run("a pair read from the daemon's Deployment is restored with no commit", func(t *testing.T) {
+		t.Parallel()
+		f := newImageRollbackFixture(t, true)
+		// The record holds the pair an install read from the cluster: both digests,
+		// and no commit, since a Deployment carries no build.
+		previous := update.ImagePair{Daemon: f.previous.Daemon, Polecat: f.previous.Polecat}
+		f.record(t, update.ImageRecord{Current: f.running, Previous: previous})
+		out, err := f.runRollback(t)
+		if err != nil {
+			t.Fatalf("gt update rollback: %v", err)
+		}
+		if len(f.swap.applied) != 1 || f.swap.applied[0] != previous {
+			t.Fatalf("the daemon was put on %+v, want exactly the recorded previous pair %+v", f.swap.applied, previous)
+		}
+		if got := f.ledgerNow(t); !samePairs(got, update.ImageRecord{Current: previous, Previous: previous}) {
+			t.Errorf("ledger after the rollback = %+v, want the restored pair as both current and previous", got)
+		}
+		if !strings.Contains(out, previous.Daemon) || !strings.Contains(out, previous.Polecat) {
+			t.Errorf("output %q does not name both restored images", out)
+		}
+		if strings.Contains(out, "at commit") {
+			t.Errorf("output %q names a commit the pair does not have", out)
+		}
+	})
+
 	t.Run("nothing recorded is refused with nothing changed", func(t *testing.T) {
 		t.Parallel()
 		f := newImageRollbackFixture(t, true)

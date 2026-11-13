@@ -56,6 +56,12 @@ func (l *fakeImageLedger) Write(rec ImageRecord) error {
 	return nil
 }
 
+// RunningPair is the container daemon's read: the record's current pair.
+func (l *fakeImageLedger) RunningPair(context.Context) (ImagePair, error) {
+	rec, err := l.Read()
+	return rec.Current, err
+}
+
 // fakeImageSwap is the daemon's side of a swap and the probe that reads it. A
 // pair whose daemon ref is in stuck is applied, but the daemon comes up
 // reporting no build; a ref in fail refuses the swap outright.
@@ -137,14 +143,15 @@ func newImageFixture(t *testing.T, recorded ImageRecord) *imageFixture {
 			Inner: host,
 			Path:  path,
 			Images: ImageDeps{
-				Ledger: ledger,
-				Swap:   swap,
-				Verify: swap,
-				Clock:  clock,
-				Sleep:  clock.sleep,
-				Wait:   imgWait,
-				Poll:   imgPoll,
-				Notify: notes,
+				Ledger:  ledger,
+				Running: ledger,
+				Swap:    swap,
+				Verify:  swap,
+				Clock:   clock,
+				Sleep:   clock.sleep,
+				Wait:    imgWait,
+				Poll:    imgPoll,
+				Notify:  notes,
 			},
 		},
 		host:   host,
@@ -153,6 +160,167 @@ func newImageFixture(t *testing.T, recorded ImageRecord) *imageFixture {
 		notify: notes,
 		clock:  clock,
 		path:   path,
+	}
+}
+
+// fakeRunningPair is the pod's read of the pair its Deployment runs: the daemon
+// container's image and the polecat annotation, with no commit, as a Deployment
+// names none.
+type fakeRunningPair struct {
+	pair  ImagePair
+	err   error
+	calls int
+}
+
+func (r *fakeRunningPair) RunningPair(context.Context) (ImagePair, error) {
+	r.calls++
+	if r.err != nil {
+		return ImagePair{}, r.err
+	}
+	return r.pair, nil
+}
+
+// clusterPair is the pair a Deployment ran before an install: both images, and
+// no commit to name the build with.
+var clusterPair = ImagePair{Daemon: imgRef("gastown-daemon", "5"), Polecat: imgRef("gastown-polecat", "6")}
+
+// TestPodInstallRestoresTheClusterPair holds a pod install's restore: the values
+// file the update Job's init container wrote names only the new pair, and no
+// digest install has run in this town, so the record names nothing. The pair the
+// Deployment runs is read before the swap and recorded as previous, and a check
+// that fails puts it back.
+func TestPodInstallRestoresTheClusterPair(t *testing.T) {
+	t.Parallel()
+	f := newImageFixture(t, ImageRecord{})
+	running := &fakeRunningPair{pair: clusterPair}
+	f.inst.Images.Running = running
+	f.inst.PairCheck = func(context.Context, ImagePair) error {
+		return PairCheckError{Check: CheckRunningDigests, Err: errors.New("the pod runs another digest")}
+	}
+
+	res, err := f.inst.Install(context.Background(), newPair.Commit)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if ClassifyInstall(res) != ResultFailed {
+		t.Fatalf("result = %+v, want the failed check to fail the install", res)
+	}
+	if running.calls != 1 {
+		t.Errorf("the cluster pair was read %d times, want once before the swap", running.calls)
+	}
+	if want := (ImageRecord{Current: newPair, Previous: clusterPair}); f.swap.seenAtApply[0] != want {
+		t.Errorf("the record at the swap = %+v, want the cluster pair recorded as previous before the service changes", f.swap.seenAtApply[0])
+	}
+	if got := f.swap.applied; len(got) != 2 || got[0] != newPair || got[1] != clusterPair {
+		t.Errorf("applied = %+v, want the new pair, then the cluster pair put back", got)
+	}
+	if want := (RollbackRecord{Check: CheckRunningDigests, Restored: clusterPair}); res.Rollback == nil || *res.Rollback != want {
+		t.Errorf("rollback = %+v, want %+v", res.Rollback, want)
+	}
+	if want := (ImageRecord{Current: clusterPair, Previous: clusterPair}); f.ledger.rec != want {
+		t.Errorf("record after the restore = %+v, want %+v", f.ledger.rec, want)
+	}
+	if n := len(f.notify.Escalations()); n != 0 {
+		t.Errorf("a restore that holds raised %d escalations, want none", n)
+	}
+}
+
+// TestPodInstallRefusesWhenTheRunningPairIsUnreadable: an install that cannot
+// read the pair the daemon runs could not put anything back, so it refuses
+// before the host install, the swap or any write.
+func TestPodInstallRefusesWhenTheRunningPairIsUnreadable(t *testing.T) {
+	t.Parallel()
+	f := newImageFixture(t, ImageRecord{Current: oldPair})
+	f.inst.Images.Running = &fakeRunningPair{err: errors.New("kubectl for the running pair read exited 1")}
+
+	res, err := f.inst.Install(context.Background(), newPair.Commit)
+	if err == nil || !strings.Contains(err.Error(), "the pair the daemon runs now") || !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("Install = %+v, %v; want the unreadable pair refused with nothing changed", res, err)
+	}
+	if f.host.calls != 0 {
+		t.Errorf("the host install ran %d times, want none", f.host.calls)
+	}
+	if len(f.swap.applied) != 0 {
+		t.Errorf("the daemon was swapped to %+v, want no swap", f.swap.applied)
+	}
+	if want := (ImageRecord{Current: oldPair}); f.ledger.rec != want || len(f.ledger.writes) != 0 {
+		t.Errorf("record = %+v after %d writes, want %+v and none", f.ledger.rec, len(f.ledger.writes), want)
+	}
+}
+
+// TestInstallRefusesWithoutAReadOfTheRunningPair: an install with no seam that
+// reads the pair the daemon runs could record nothing to restore, so it refuses
+// before the host install, the swap or any write.
+func TestInstallRefusesWithoutAReadOfTheRunningPair(t *testing.T) {
+	t.Parallel()
+	f := newImageFixture(t, ImageRecord{Current: oldPair})
+	f.inst.Images.Running = nil
+
+	res, err := f.inst.Install(context.Background(), newPair.Commit)
+	if err == nil || !strings.Contains(err.Error(), "no read of the pair the daemon runs is wired") {
+		t.Fatalf("Install = %+v, %v; want the missing running pair read refused", res, err)
+	}
+	if f.host.calls != 0 {
+		t.Errorf("the host install ran %d times, want none", f.host.calls)
+	}
+	if len(f.swap.applied) != 0 {
+		t.Errorf("the daemon was swapped to %+v, want no swap", f.swap.applied)
+	}
+	if want := (ImageRecord{Current: oldPair}); f.ledger.rec != want || len(f.ledger.writes) != 0 {
+		t.Errorf("record = %+v after %d writes, want %+v and none", f.ledger.rec, len(f.ledger.writes), want)
+	}
+}
+
+// TestRecordedRunningPair is the container daemon's read of the pair it runs: the
+// current pair its record holds. A record that cannot be read is an error, never
+// an empty pair, which would read as nothing to restore.
+func TestRecordedRunningPair(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the record's current pair is the pair the daemon runs", func(t *testing.T) {
+		t.Parallel()
+		ledger := &fakeImageLedger{rec: ImageRecord{Current: oldPair, Previous: newPair}}
+		pair, err := (RecordedRunningPair{Ledger: ledger}).RunningPair(context.Background())
+		if err != nil {
+			t.Fatalf("RunningPair: %v", err)
+		}
+		if pair != oldPair {
+			t.Errorf("RunningPair = %+v, want the record's current pair %+v", pair, oldPair)
+		}
+	})
+
+	t.Run("an unreadable record is an error, not an empty pair", func(t *testing.T) {
+		t.Parallel()
+		ledger := &fakeImageLedger{readErr: errors.New("images.json is unreadable")}
+		pair, err := (RecordedRunningPair{Ledger: ledger}).RunningPair(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "reading the daemon image record") {
+			t.Fatalf("RunningPair = %+v, %v; want the unreadable record refused", pair, err)
+		}
+		if pair != (ImagePair{}) {
+			t.Errorf("RunningPair returned %+v with the error, want no pair", pair)
+		}
+	})
+}
+
+// TestInstallAcceptsARecordedClusterPair: a record left by a restored pod install
+// holds the images the Deployment ran and no commit. The next install accepts it
+// rather than refusing it as damaged, and reads the same pair from the daemon.
+func TestInstallAcceptsARecordedClusterPair(t *testing.T) {
+	t.Parallel()
+	f := newImageFixture(t, ImageRecord{Current: clusterPair, Previous: clusterPair})
+
+	res, err := f.inst.Install(context.Background(), newPair.Commit)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if ClassifyInstall(res) != ResultOK {
+		t.Fatalf("result = %+v, want a successful install", res)
+	}
+	if got := f.swap.applied; len(got) != 1 || got[0] != newPair {
+		t.Errorf("applied = %+v, want one swap to %+v", got, newPair)
+	}
+	if want := (ImageRecord{Current: newPair, Previous: clusterPair}); f.swap.seenAtApply[0] != want {
+		t.Errorf("the record at the swap = %+v, want the cluster pair recorded as previous", f.swap.seenAtApply[0])
 	}
 }
 

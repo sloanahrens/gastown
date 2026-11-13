@@ -31,6 +31,10 @@ type podSwapCall struct {
 // The dashboard's existence read (a get) answers present by default. absent makes
 // it answer that the Deployment is not there. readExit and readErr fail the read,
 // and readOut, when set, is the read's whole answer.
+//
+// The running pair read (a get of the daemon Deployment) answers the swap's pair
+// by default. pairOut, when set, is its whole answer, and pairExit and pairErr
+// fail it.
 type podSwapFake struct {
 	calls      []podSwapCall
 	verb       string
@@ -41,10 +45,19 @@ type podSwapFake struct {
 	readExit   int
 	readErr    error
 	readOut    string
+	pairOut    string
+	pairExit   int
+	pairErr    error
 }
 
 func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 	f.calls = append(f.calls, podSwapCall{name: name, args: args})
+	if containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.Name) {
+		if f.pairErr != nil || f.pairExit != 0 {
+			return podSwapOutput, f.pairExit, f.pairErr
+		}
+		return f.pairAnswer(), 0, nil
+	}
 	if containsArg(args, "get") {
 		if f.readErr != nil || f.readExit != 0 {
 			return podSwapOutput, f.readExit, f.readErr
@@ -71,6 +84,15 @@ func (f *podSwapFake) readAnswer() string {
 	default:
 		return "deployment.apps/" + k8sdaemon.DashboardName + "\n"
 	}
+}
+
+// pairAnswer is what the running pair read prints: pairOut when a test sets one,
+// else the pair podSwapPair names, as the two lines the read's jsonpath prints.
+func (f *podSwapFake) pairAnswer() string {
+	if f.pairOut != "" {
+		return f.pairOut
+	}
+	return podSwapPair.Daemon + "\n" + podSwapPair.Polecat
 }
 
 const (
@@ -271,6 +293,147 @@ func TestPodDaemonSwapRefusesAnUnreadableDashboardRead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPodDaemonSwapReadsTheRunningPair holds the read an install records before
+// it swaps: one kubectl get of the daemon's Deployment, in the swap's context and
+// namespace, whose two lines are the daemon container's image and the pod
+// template's polecat annotation. The pair names no commit, since a Deployment
+// carries no build.
+func TestPodDaemonSwapReadsTheRunningPair(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a swap with no runner refuses before any command", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		swap := podSwapFor(fake)
+		swap.Run = nil
+		if _, err := swap.RunningPair(context.Background()); err == nil || !strings.Contains(err.Error(), "no command runner wired") {
+			t.Fatalf("RunningPair error = %v, want the missing runner refused", err)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("commands = %+v, want none", fake.calls)
+		}
+	})
+
+	t.Run("the read names the Deployment in the swap's context and namespace", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		pair, err := podSwapFor(fake).RunningPair(context.Background())
+		if err != nil {
+			t.Fatalf("RunningPair: %v", err)
+		}
+		if want := (update.ImagePair{Daemon: podSwapPair.Daemon, Polecat: podSwapPair.Polecat}); pair != want {
+			t.Errorf("RunningPair = %+v, want %+v", pair, want)
+		}
+		if len(fake.calls) != 1 {
+			t.Fatalf("commands = %+v, want one read", fake.calls)
+		}
+		want := []string{
+			"--context", podSwapContext, "-n", podSwapNamespace,
+			"get", "deployment/" + k8sdaemon.Name,
+			"-o", "jsonpath=" + runningPairJSONPath,
+		}
+		if !slices.Equal(fake.calls[0].args, want) {
+			t.Errorf("read argv = %q, want %q", fake.calls[0].args, want)
+		}
+	})
+
+	t.Run("in-cluster the read names no context", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		swap := podSwapFor(fake)
+		swap.Context, swap.InCluster = "", true
+		if _, err := swap.RunningPair(context.Background()); err != nil {
+			t.Fatalf("RunningPair: %v", err)
+		}
+		if want := []string{"-n", podSwapNamespace}; !slices.Equal(fake.calls[0].args[:2], want) {
+			t.Errorf("read argv = %q, want it to start with %q", fake.calls[0].args, want)
+		}
+	})
+}
+
+// TestPodSwapRefusesWhenCurrentPairUnreadable holds the read's refusals: a
+// command that fails, prints no pair, or names a half that is not a digest
+// reference is an error naming the step, never an error carrying the command's
+// output, and the install it feeds stops before any swap.
+func TestPodSwapRefusesWhenCurrentPairUnreadable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fake podSwapFake
+		want string
+	}{
+		{
+			name: "a read that exits nonzero fails the step",
+			fake: podSwapFake{pairExit: 1},
+			want: "the running pair read exited 1",
+		},
+		{
+			name: "a read the runner cannot run fails the step",
+			fake: podSwapFake{pairErr: errors.New("kubectl not found")},
+			want: "running kubectl for the running pair read",
+		},
+		{
+			name: "a read that prints no pair fails the step",
+			fake: podSwapFake{pairOut: podSwapOutput},
+			want: "the running pair read printed no pair",
+		},
+		{
+			name: "a daemon image that is a tag is refused",
+			fake: podSwapFake{pairOut: "gt-daemon:latest\n" + podSwapPolecatRef},
+			want: `daemon image "gt-daemon:latest"`,
+		},
+		{
+			name: "a polecat annotation that is missing is refused",
+			fake: podSwapFake{pairOut: podSwapDigestRef + "\n"},
+			want: "polecat image",
+		},
+		{
+			name: "a polecat annotation that is a tag is refused",
+			fake: podSwapFake{pairOut: podSwapDigestRef + "\ngt-polecat:latest"},
+			want: `polecat image "gt-polecat:latest"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := tt.fake
+			pair, err := podSwapFor(&fake).RunningPair(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("RunningPair error = %v, want one containing %q", err, tt.want)
+			}
+			if pair != (update.ImagePair{}) {
+				t.Errorf("RunningPair returned %+v with the error, want no pair", pair)
+			}
+			if strings.Contains(err.Error(), podSwapOutput) {
+				t.Errorf("RunningPair error carries the command's output: %v", err)
+			}
+		})
+	}
+
+	t.Run("the digest install refuses before any swap", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		got.kube.readErr = errors.New("kubectl not found")
+
+		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
+		if err == nil || !strings.Contains(err.Error(), "the pair the daemon runs now") {
+			t.Fatalf("Install = %+v, %v; want the unreadable pair refused", res, err)
+		}
+		if update.ClassifyInstall(res) == update.ResultOK {
+			t.Errorf("Install result = %+v, want no successful install", res)
+		}
+		for _, call := range got.kube.calls {
+			if containsArg(call, "patch") {
+				t.Errorf("kubectl ran %q, want no patch before the pair is read", call)
+			}
+		}
+		rec, rerr := (update.FileImageLedger{Dir: update.Dir(got.townRoot)}).Read()
+		if rerr != nil || rec != (update.ImageRecord{}) {
+			t.Errorf("record = %+v, %v; want nothing recorded before the swap", rec, rerr)
+		}
+	})
 }
 
 // containsArg reports whether args holds exactly arg.

@@ -34,11 +34,13 @@ func isDNSLabel(name string) bool {
 // dashboard is optional, so Apply asks the cluster whether its Deployment exists
 // and moves it only when it does. It patches what it moves, then waits for each
 // rollout, so the pair moves as one step and the caller's wait, restore and
-// escalation work as they do for the container daemon. Apply refuses a pair whose
-// daemon or polecat is not a digest reference, and a swap missing its context,
-// namespace or rollout timeout, before any command runs. A failed step is named
-// by the step and its exit, never by the command's output, which can hold a
-// secret.
+// escalation work as they do for the container daemon. RunningPair reads the
+// pair the Deployment runs now, which an install records before it swaps: the
+// update Job's init container rewrites the values file with the new pair first.
+// Apply refuses a pair whose daemon or polecat is not a digest reference, and a
+// swap missing its context, namespace or rollout timeout, before any command
+// runs. A failed step is named by the step and its exit, never by the command's
+// output, which can hold a secret.
 type podDaemonSwap struct {
 	// Context is the kubectl context the Deployment runs in. Required unless
 	// InCluster, and refused with it.
@@ -65,10 +67,49 @@ type podDaemonSwap struct {
 }
 
 var _ update.ImageSwap = podDaemonSwap{}
+var _ update.ImageRunningPair = podDaemonSwap{}
 
 // dashboardAbsentLine is what Apply prints when the cluster has no dashboard
 // Deployment, so the operator can see the dashboard was not moved.
 const dashboardAbsentLine = "dashboard Deployment not found; not moved"
+
+// runningPairJSONPath reads the pair the daemon's Deployment runs: the daemon
+// container's image, then the pod template's polecat image annotation, on two
+// lines. The annotation key's dot is escaped, as jsonpath requires. Both halves
+// are read in one command, so a pair is one Deployment read.
+var runningPairJSONPath = `{.spec.template.spec.containers[?(@.name=="` + k8sdaemon.Name + `")].image}{"\n"}{.spec.template.metadata.annotations.` +
+	strings.ReplaceAll(k8sdaemon.PolecatImageAnnotation, ".", `\.`) + `}`
+
+// RunningPair reads the pair the daemon's Deployment runs now: its daemon
+// container's image and its pod template's polecat image annotation. An install
+// records the result before it swaps, so a failed install puts back the pair the
+// cluster ran. The pair names no commit, since a Deployment carries no build.
+// A command that fails, prints no pair, or names a half that is not a digest
+// reference is an error naming the step; the command's output is not.
+func (s podDaemonSwap) RunningPair(ctx context.Context) (update.ImagePair, error) {
+	if err := s.validateTarget(); err != nil {
+		return update.ImagePair{}, err
+	}
+	const step = "the running pair read"
+	out, err := s.kubectlOutput(ctx, step, "get", "deployment/"+s.deployment(), "-o", "jsonpath="+runningPairJSONPath)
+	if err != nil {
+		return update.ImagePair{}, err
+	}
+	daemon, polecat, found := strings.Cut(out, "\n")
+	if !found {
+		return update.ImagePair{}, fmt.Errorf("%s printed no pair", step)
+	}
+	pair := update.ImagePair{Daemon: strings.TrimSpace(daemon), Polecat: strings.TrimSpace(polecat)}
+	for _, half := range []struct{ what, ref string }{
+		{"daemon", pair.Daemon},
+		{"polecat", pair.Polecat},
+	} {
+		if !imagevalues.ValidRef(half.ref) {
+			return update.ImagePair{}, fmt.Errorf("%s found %s image %q, which is not a digest reference, so the pair cannot be restored to it", step, half.what, half.ref)
+		}
+	}
+	return pair, nil
+}
 
 // Apply patches the daemon's Deployment, then the dashboard's when the cluster has
 // one, with the pair, and then waits for each rollout. Both bodies are encoded
@@ -198,6 +239,21 @@ func (s podDaemonSwap) deployment() string {
 // validate refuses a swap whose inputs cannot reach kubectl as intended, before
 // any command runs.
 func (s podDaemonSwap) validate(pair update.ImagePair) error {
+	if err := s.validateTarget(); err != nil {
+		return err
+	}
+	if s.RolloutTimeout <= 0 {
+		return errors.New("the pod daemon swap has no rollout timeout")
+	}
+	if err := checkPodDigest("daemon", pair.Daemon); err != nil {
+		return err
+	}
+	return checkPodDigest("polecat", pair.Polecat)
+}
+
+// validateTarget refuses a runner or a Deployment the swap cannot name in a
+// kubectl command, before any command runs.
+func (s podDaemonSwap) validateTarget() error {
 	if s.Run == nil {
 		return errors.New("the pod daemon swap has no command runner wired")
 	}
@@ -210,13 +266,7 @@ func (s podDaemonSwap) validate(pair update.ImagePair) error {
 	if !isDNSLabel(s.deployment()) {
 		return fmt.Errorf("the pod daemon swap deployment %q is not a Kubernetes name", s.deployment())
 	}
-	if s.RolloutTimeout <= 0 {
-		return errors.New("the pod daemon swap has no rollout timeout")
-	}
-	if err := checkPodDigest("daemon", pair.Daemon); err != nil {
-		return err
-	}
-	return checkPodDigest("polecat", pair.Polecat)
+	return nil
 }
 
 // checkPodContext refuses a kubectl context that is empty or would read as a flag.

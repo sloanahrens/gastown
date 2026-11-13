@@ -91,6 +91,11 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNam
 	if err != nil {
 		return fmt.Errorf("gt update rollback: %w", err)
 	}
+	if prev.Commit == "" {
+		// A pair read from the daemon's Deployment names no commit.
+		fmt.Fprintf(cmd.OutOrStdout(), "rolled the daemon back to %s and polecat image %s\n", prev.Daemon, prev.Polecat)
+		return nil
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "rolled the daemon back to %s and polecat image %s at commit %s\n", prev.Daemon, prev.Polecat, prev.Commit)
 	return nil
 }
