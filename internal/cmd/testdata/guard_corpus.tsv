@@ -588,3 +588,6 @@ dangerous	polecat	"echo ok && git reset --hard"	refuse	Hard reset discards all u
 dangerous	polecat	"seq 1 300 | xargs -I{} bash -c 'gt done'"	refuse	Never poll the slot or script a gt done retry	gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
 container_suite	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
 test_scope	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
+dangerous	polecat	"rm -rf / # cleanup"	refuse	filesystem destruction	gt-6pbp0y	ed89e6f03d3a33a33df1b850f095305498a7a96b0d96e28bf940dfd5b3306ff5
+container_suite	polecat	"rm -rf / # cleanup"	allow		gt-6pbp0y	ed89e6f03d3a33a33df1b850f095305498a7a96b0d96e28bf940dfd5b3306ff5
+test_scope	polecat	"rm -rf / # cleanup"	allow		gt-6pbp0y	ed89e6f03d3a33a33df1b850f095305498a7a96b0d96e28bf940dfd5b3306ff5
