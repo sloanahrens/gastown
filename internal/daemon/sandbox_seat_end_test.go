@@ -459,6 +459,8 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 		noRecord    bool
 		corruptRec  bool
 		liveSession bool
+		tmuxErr     bool
+		gone        bool
 		wantAsked   bool
 		wantDeleted bool
 		wantReason  string
@@ -477,12 +479,25 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 			wantReason: sandboxSessionLiveReason,
 		},
 		{
+			// A probe that errors is no proof the session is not live, so the
+			// landing keeps the sandbox and asks its marker nothing.
+			name: "a tmux error keeps the sandbox", landing: landed, marker: true, tmuxErr: true,
+			wantReason: "cannot ask tmux whether its session is live, so the sandbox is left for the patrol: tmux: server timed out",
+		},
+		{
 			// keepReason asks the sandbox first, so unlanded work behind a held
-			// sandbox keeps the seat for the sandbox, and the landing asks its
-			// marker nothing.
-			name: "unlanded work keeps the sandbox", marker: true,
+			// sandbox keeps the seat for the sandbox's own fact, and the landing
+			// asks its marker nothing.
+			name: "unlanded work keeps a held sandbox", marker: true,
 			landing:    sandboxSeatLanding{BeadID: endBead, Branch: endBranch},
 			wantReason: sandboxNotGoneReason,
+		},
+		{
+			// Once the gateway has confirmed the sandbox gone, the unlanded work is
+			// the reason the seat is kept, and the landing takes no held path.
+			name: "unlanded work keeps a gone sandbox for its own reason", gone: true,
+			landing:    sandboxSeatLanding{BeadID: endBead, Branch: endBranch},
+			wantReason: "no landing record proves its work landed (unlanded)",
 		},
 		{
 			name: "a deleter that fails keeps the sandbox", landing: landed, marker: true,
@@ -511,6 +526,9 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 			if tt.liveSession {
 				f.host.d.tmux.(*fakeTmux).addSession(sessionName, "claude", testEpoch)
 			}
+			if tt.tmuxErr {
+				f.host.d.tmux.(*fakeTmux).hasErr = errors.New("tmux: server timed out")
+			}
 			switch {
 			case tt.corruptRec:
 				path := filepath.Join(session.SandboxRegistryDir(f.town), sessionName+".json")
@@ -529,7 +547,7 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 			}
 			var logs strings.Builder
 			f.host.d.logger = log.New(&logs, "", 0)
-			f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+			f.host.sandboxExists = func(string, string) (bool, error) { return !tt.gone, nil }
 			var asked, deleted int
 			f.host.sandboxEndedMarker = func(string, string) (bool, error) {
 				asked++

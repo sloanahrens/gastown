@@ -84,7 +84,12 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			continue
 		}
 		checked++
-		if h.sandboxSeatSessionLive("patrol_scan", name) {
+		// A tmux error counts as not live: the patrol still requires the
+		// sandbox's own answer before it deletes, as it always has (gt-0vb2fy).
+		live, err := h.sandboxSeatSessionLive(name)
+		if err != nil {
+			h.d.logger.Printf("patrol_scan: sandbox record %s: cannot ask tmux, treating it as not live and asking the gateway: %v", name, err)
+		} else if live {
 			continue
 		}
 		exists, err := h.sandboxStillExists(rec.Gateway, name)
@@ -152,18 +157,12 @@ func (h *patrolScanHost) completeKeptSeatEnd(rec session.SandboxRecord) {
 }
 
 // sandboxSeatSessionLive asks tmux whether a session answers to the sandbox's
-// name, and reports the answer. The routed tmux client asks the sandbox itself,
-// so a running sandboxed seat answers live, and a set ended marker alone does
-// not prove that session has ended. A tmux error counts as not live and is
-// logged with the caller's label: every caller still requires the sandbox's own
-// answer before it deletes (gt-0vb2fy).
-func (h *patrolScanHost) sandboxSeatSessionLive(caller, name string) bool {
-	live, err := h.d.tmux.HasSession(name)
-	if err != nil {
-		h.d.logger.Printf("%s: sandbox record %s: cannot ask tmux, treating it as not live: %v", caller, name, err)
-		return false
-	}
-	return live
+// name. The routed tmux client asks the sandbox itself, so a running sandboxed
+// seat answers live, and a set ended marker alone does not prove that session
+// has ended. It returns the tmux error rather than a verdict: a caller decides
+// what an unknown answer means (gt-0vb2fy).
+func (h *patrolScanHost) sandboxSeatSessionLive(name string) (bool, error) {
+	return h.d.tmux.HasSession(name)
 }
 
 // deleteHeldSandbox deletes a held sandbox the patrol's pass found, under the

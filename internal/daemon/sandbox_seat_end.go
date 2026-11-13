@@ -615,13 +615,18 @@ func (h *patrolScanHost) removeErroredSeatSandbox(rig, name, gateway string) str
 // It returns the reason the seat is kept, or "" when the sandbox and its record
 // are gone. It asks the same live-session probe the patrol asks before either
 // deletes (sandboxSeatSessionLive), and keeps the sandbox, with the probe's
-// reason, when a session still answers to the seat's name. A record that cannot
-// be read or is absent, and every refusal endHeldSandbox makes, keep the seat
-// with that refusal's own reason, so the patrol deletes the sandbox as it does
-// today.
+// reason, when a session still answers to the seat's name. A probe that errors
+// keeps it too: the landing has no proof the session is not live, so it fails
+// closed. A record that cannot be read or is absent, and every refusal
+// endHeldSandbox makes, keep the seat with that refusal's own reason, so the
+// patrol deletes the sandbox as it does today.
 func (h *patrolScanHost) endHeldSandboxAtLanding(rig, name string) string {
 	sessionName := h.sessionName(rig, name)
-	if h.sandboxSeatSessionLive("sandbox seat end", sessionName) {
+	live, err := h.sandboxSeatSessionLive(sessionName)
+	if err != nil {
+		return "cannot ask tmux whether its session is live, so the sandbox is left for the patrol: " + err.Error()
+	}
+	if live {
 		return sandboxSessionLiveReason
 	}
 	rec, ok, err := session.ReadSandboxRecord(h.town(), sessionName)
