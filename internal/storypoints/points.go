@@ -155,6 +155,25 @@ func ParseLabel(s string) (Label, error) {
 	return Label{}, badLabel(s)
 }
 
+// EstimateOf returns the points of the one sp:N estimate among labels. A label
+// that is not an estimate, or that ParseLabel refuses, is not an estimate. A
+// bead with no estimate, or with two different ones, has none: the result is
+// (0, false), never a guessed point.
+func EstimateOf(labels []string) (int, bool) {
+	points, found := 0, false
+	for _, l := range labels {
+		p, err := ParseLabel(l)
+		if err != nil || p.Kind != KindEstimate {
+			continue
+		}
+		if found && p.Points != points {
+			return 0, false
+		}
+		points, found = p.Points, true
+	}
+	return points, found
+}
+
 // parsePoints reads the digits of a points label and accepts only a point on
 // the scale.
 func parsePoints(digits string) (int, error) {

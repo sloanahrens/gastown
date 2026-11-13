@@ -34,6 +34,11 @@ type QueueBead struct {
 	Priority  int       `json:"priority"`
 	Labels    []string  `json:"labels,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
+
+	// SPEstimate is the bead's sp: estimate, read from its labels; absent when
+	// the bead has none or two that conflict (gt-cdhagm).
+	SPEstimate *int `json:"sp_estimate,omitempty"`
+
 	// UpdatedAt is the bead's last write: for a bead waiting to land, the label
 	// write gt done makes is normally its last write, so this is when the wait
 	// started, which is how the Landings pane ages it.

@@ -417,7 +417,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: landingBuilder(rec.Branch, rec.Rig, rec.Bead, names.submitter),
 			Outcome: "landed", Verdict: omOutcome(rec.OMVerdict), Commit: shortSHA(rec.LandedCommit),
 			Route: rec.Route, Risk: len(rec.RiskPaths) > 0, Crew: isCrewLandingBranch(rec.Branch),
-			Agent: rec.Agent, Priority: rec.Priority,
+			Agent: rec.Agent, Priority: rec.Priority, SPEstimate: rec.SPEstimate,
 		}
 		if row.Crew {
 			// Polecat already names a crew branch's agent segment; carry it
@@ -441,6 +441,11 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			row.PolecatSecs = &secs
 		}
 		row.PolecatLowerBound, row.PolecatUpperBound = rec.PolecatLowerBound, rec.PolecatUpperBound
+		// The actual is read off the time the row carries, so it is measured
+		// whether or not the bead has an estimate (gt-cdhagm).
+		if pts, weighted := storypoints.Actual(rec.PolecatSecs, rec.PolecatLowerBound, rec.PolecatUpperBound); weighted {
+			row.SPActual = &pts
+		}
 		for _, a := range rec.PolecatAttempts {
 			row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound, UpperBound: a.UpperBound})
 		}

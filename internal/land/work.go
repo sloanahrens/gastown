@@ -115,6 +115,11 @@ type Work struct {
 	// worker before the landing. Nil when the read failed or the worker did not
 	// read it; the record then leaves the priority out (gt-tnml1k).
 	Priority *int
+	// SPEstimate is the landed bead's sp: estimate, read from the bead by the
+	// landing worker before the landing. Nil when the bead has none, the read
+	// failed, or the worker did not read it; the record then leaves it out
+	// (gt-cdhagm).
+	SPEstimate *int
 	// Submitted is when the bead was submitted for landing, and is what the
 	// landing worker orders the ready queue by: a comment on the bead is not
 	// a submission and does not move it (gt-t2jhf). Zero on a bead submitted

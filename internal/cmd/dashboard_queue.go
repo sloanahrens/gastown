@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // dashQueueStore is what the queue reader needs from one beads store, so the
@@ -111,6 +112,9 @@ func dashQueueRow(rig string, i *beads.Issue) dashboard.QueueBead {
 	row := dashboard.QueueBead{
 		ID: i.ID, Rig: rig, Title: i.Title, Type: i.Type, Status: i.Status,
 		Assignee: i.Assignee, Priority: i.Priority, Labels: i.Labels, BlockedBy: i.BlockedBy,
+	}
+	if n, ok := storypoints.EstimateOf(i.Labels); ok {
+		row.SPEstimate = &n
 	}
 	if t, err := time.Parse(time.RFC3339, i.CreatedAt); err == nil {
 		row.CreatedAt = t
