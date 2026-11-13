@@ -146,6 +146,7 @@ The daemon is one long-running program. It does not think about code. It keeps t
 - **Maintenance.** The nightly Dolt backup and the other housekeeping run in a scheduled window.
 - **Tier sweeps.** The hourly run of the slow test tiers.
 - **Update.** The update patrol, off until `daemon.patrols.update.enabled` is set. In a pod it starts the roll as a Kubernetes Job, and holds it while main's tip is red, its verdict is unreadable or still pending past the bound in `internal/daemon/update_job.go`, or a previous roll's Job or run is unfinished; `docs/guides/gt-update.md` has the pod facts, and `deploy/k8s/update-rbac.yaml` has what that Job can reach.
+- **Cloud check.** The `cloud_check` patrol runs the devops `cloudcheck` binary, which the daemon image carries, on its own interval. It is opt-in: it runs only when `daemon.patrols.cloud_check.enabled` is set, and it is off by default. A run without its key does nothing. Its status file is written to the town state, where the dashboard's Cloud pane reads it (`internal/daemon/cloud_check.go`).
 
 The Deployment runs exactly one replica with the `Recreate` strategy, because two daemons must never write the same town at once. It has no shutdown hook. On `SIGTERM` it gets a grace period long enough to finish the landing it is in.
 
@@ -190,7 +191,7 @@ The workflow files in Forgejo are protected: only a human account may change the
 
 ### The dashboard
 
-The dashboard is a second Deployment of the same image. It serves one read-only page. A single hub polls the town's files on its own clock and pushes the result to every open browser tab, so a second tab costs nothing and a page nobody has open costs nothing. Nothing publishes it. The operator reaches it with a `kubectl port-forward` from the Mac to the dashboard Deployment (local port 8788 to the pod's 8787) and opens the page in a browser tab. The panes include: Attention, Polecats, Rigs, Landings, om review, Forgejo, Cost, Deploys, Cloud, Machine, Birds, Beads and Events.
+The dashboard is a second Deployment of the same image. It serves one read-only page. A single hub polls the town's files on its own clock and pushes the result to every open browser tab, so a second tab costs nothing and a page nobody has open costs nothing. Nothing publishes it. The operator reaches it with a `kubectl port-forward` from the Mac to the dashboard Deployment (local port 8788 to the pod's 8787) and opens the page in a browser tab. The panes include: Attention, Birds, Beads, Cloud (with Deploys), Cost, Events, Forgejo, Landings (with Polecats), Machine, om review, Rigs and Tier sweeps.
 
 ## The data plane
 
@@ -450,7 +451,6 @@ flowchart TB
 
 These are stated plans and open questions, not running systems.
 
-- **The cloud check moves into the daemon pod.** The cloud-check patrol that the gt-cloud user runs today is moving into the daemon pod, with the read-only cloud auditor key held in a Secret in the `gt` namespace (gastown bead `gt-c57pax`).
 - **What the gt-cloud deployer becomes.** The deployer is still a Colima profile on the Mac with its own macOS account and launchd jobs, while the rest of the town now runs in the control cluster. What it becomes is undecided: its own Kubernetes cluster, an isolated namespace in the control cluster with its credentials kept apart, or a cloud-side runner. The answer decides where the release bot and the per-app deploy runners live. It is tracked as devops bead `dv-8qse`.
 - **Retiring `<rig>/mayor/rig`.** Each rig used to keep a working clone under `mayor/rig` that held its beads directory, directives and plugin source. These are moving to the bare repository, `<rig>/.beads`, `<town>/directives` and a build checkout under `.runtime/`. Until the work is complete a rig may still hold the old directory.
 
