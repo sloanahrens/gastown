@@ -242,6 +242,17 @@ func TestWorkspaceValidation(t *testing.T) {
 			manifest: func(map[string]string) string { return "" },
 			want:     ErrWorkspaceManifestMismatch,
 		},
+		{
+			name: "a path that collides with a file in the same document",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				// base holds gt/.beads/redirect as a file; this path needs it to
+				// be a directory, which no tree can be both of.
+				files["gt/.beads/redirect/.beads/config.yaml"] = "x"
+				return files
+			},
+			want: ErrWorkspacePathCollision,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -266,6 +277,21 @@ func TestWorkspaceValidation(t *testing.T) {
 			}
 		})
 	}
+
+	// A refused file name is quoted in the error, so an overlong one is
+	// shortened rather than echoed whole.
+	t.Run("an overlong file name is shortened in the error", func(t *testing.T) {
+		s, _ := openTestStore(t)
+		files := maps.Clone(base)
+		files["gt/.beads/"+strings.Repeat("x", 4096)] = "x"
+		_, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(files), Files: files})
+		if !errors.Is(err, ErrWorkspaceFileName) {
+			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceFileName)
+		}
+		if len(err.Error()) > 256 {
+			t.Errorf("the refusal echoed %d bytes of the caller's name", len(err.Error()))
+		}
+	})
 }
 
 // TestWorkspaceAtomicSwap checks that a push replaces the whole tree and that a
@@ -465,9 +491,9 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 		}
 	})
 
-	t.Run("a restore failure is reported and the old tree stays readable", func(t *testing.T) {
+	t.Run("a failed restore leaves no live tree and says so", func(t *testing.T) {
 		s, root := openTestStore(t)
-		pushWorkspace(t, s, first)
+		before := pushWorkspace(t, s, first)
 		beforeTree := readWorkspace(t, root)
 		calls := 0
 		s.fs.rename = func(oldpath, newpath string) error {
@@ -479,14 +505,74 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 		}
 
 		_, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(testWorkspaceFiles("two")), Files: testWorkspaceFiles("two")})
-		if !errors.Is(err, ErrWorkspaceSwap) {
-			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceSwap)
+		if !errors.Is(err, ErrWorkspaceSwap) || !errors.Is(err, ErrWorkspaceLiveTreeLost) {
+			t.Fatalf("Put error = %v, want %v and %v", err, ErrWorkspaceSwap, ErrWorkspaceLiveTreeLost)
 		}
-		if !strings.Contains(err.Error(), "restoring the previous tree") {
+		if !strings.Contains(err.Error(), "could not be restored") {
 			t.Errorf("error does not say the restore failed: %v", err)
 		}
-		if got := readWorkspace(t, root+suffixOld); !maps.Equal(beforeTree, got) {
-			t.Errorf("the tree moved aside = %v, want the previous tree %v", got, beforeTree)
+		if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("a failed restore left a tree at the root: %v", err)
+		}
+		wantEmpty := WorkspaceManifest(map[string]string{})
+		if got := s.Manifest(); got != wantEmpty {
+			t.Errorf("Manifest() = %s, want the empty workspace's %s", got, wantEmpty)
+		}
+		header := http.Header{}
+		s.AddWorkspaceHeader(header)
+		if got := header.Get(WorkspaceHashHeader); got != wantEmpty {
+			t.Errorf("%s = %q, want the empty workspace's %q", WorkspaceHashHeader, got, wantEmpty)
+		}
+
+		// The tree the swap moved aside is the last published one, so a restart
+		// serves it rather than the empty workspace.
+		reopened, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("reopening after a failed restore: %v", err)
+		}
+		if got := reopened.Manifest(); got != before {
+			t.Errorf("a reopened store reports %s, want the previous tree's %s", got, before)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after reopening = %v, want %v", got, beforeTree)
+		}
+	})
+
+	t.Run("a crash between the renames keeps the previous tree", func(t *testing.T) {
+		s, root := openTestStore(t)
+		before := pushWorkspace(t, s, first)
+		beforeTree := readWorkspace(t, root)
+
+		// The process stopped after moving the live tree aside, before
+		// publishing the new one, and left its temp tree behind.
+		if err := os.Rename(root, root+".old"); err != nil {
+			t.Fatalf("moving the live tree aside: %v", err)
+		}
+		leftover := filepath.Join(filepath.Dir(root), filepath.Base(root)+".new.1")
+		if err := os.Mkdir(leftover, 0o700); err != nil {
+			t.Fatalf("creating the leftover temp tree: %v", err)
+		}
+
+		reopened, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("opening after a crashed swap: %v", err)
+		}
+		if got := reopened.Manifest(); got != before {
+			t.Errorf("a store opened after a crash reports %s, want the previous tree's %s", got, before)
+		}
+		if got := readWorkspace(t, root); !maps.Equal(beforeTree, got) {
+			t.Errorf("live tree after a crash = %v, want %v", got, beforeTree)
+		}
+
+		second := testWorkspaceFiles("two")
+		if got := pushWorkspace(t, reopened, second); got != WorkspaceManifest(second) {
+			t.Errorf("the push after a crash returned %s, want %s", got, WorkspaceManifest(second))
+		}
+		if got := readWorkspace(t, root); !maps.Equal(second, got) {
+			t.Errorf("live tree after the next push = %v, want %v", got, second)
+		}
+		if siblings := siblingNames(t, root); len(siblings) != 1 {
+			t.Errorf("siblings after the push = %v, want only the tree it replaced", siblings)
 		}
 	})
 
@@ -528,9 +614,6 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 		}
 	})
 }
-
-// suffixOld is the name a replacement gives the tree it moves aside.
-const suffixOld = ".old"
 
 // TestWorkspaceManifestHeader checks the manifest hash's two jobs: it follows
 // the content exactly, and every answer names the live tree's hash.
@@ -666,6 +749,49 @@ func TestWorkspaceHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("a path collision is refused", func(t *testing.T) {
+		s, _ := openTestStore(t)
+		push(t, s)
+		before := s.Manifest()
+		files := maps.Clone(testWorkspaceFiles("one"))
+		files["gt/.beads/redirect/.beads/config.yaml"] = "x"
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/workspace", strings.NewReader(body(t, files))))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "workspace_path_collision") {
+			t.Errorf("body does not name the refusal code: %s", rec.Body.String())
+		}
+		if got := rec.Header().Get(WorkspaceHashHeader); got != before {
+			t.Errorf("refusal header = %q, want the live hash %q", got, before)
+		}
+	})
+
+	t.Run("a lost live tree answers with the empty workspace", func(t *testing.T) {
+		s, _ := openTestStore(t)
+		push(t, s)
+		calls := 0
+		s.fs.rename = func(oldpath, newpath string) error {
+			calls++
+			if calls >= 2 { // publishing fails, and so does moving the old tree back
+				return errors.New("rename refused")
+			}
+			return os.Rename(oldpath, newpath)
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/workspace", strings.NewReader(body(t, testWorkspaceFiles("two")))))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "workspace_live_tree_lost") {
+			t.Errorf("body does not name the refusal code: %s", rec.Body.String())
+		}
+		if got, want := rec.Header().Get(WorkspaceHashHeader), WorkspaceManifest(map[string]string{}); got != want {
+			t.Errorf("failure header = %q, want the empty workspace's %q", got, want)
+		}
+	})
+
 	t.Run("a method other than PUT is refused", func(t *testing.T) {
 		s, _ := openTestStore(t)
 		rec := httptest.NewRecorder()
@@ -782,6 +908,15 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			},
 		},
 		{
+			name: "a tree with an empty directory",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/.beads/redirect", "x")
+				if err := os.MkdirAll(filepath.Join(root, "gt", "empty"), 0o700); err != nil {
+					t.Fatalf("creating the empty directory: %v", err)
+				}
+			},
+		},
+		{
 			name: "a tree with a symlink",
 			build: func(t *testing.T, root string) {
 				writeFileIn(t, root, "gt/.beads/target", "x")
@@ -805,6 +940,26 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		fsys := osWorkspaceFS()
 		fsys.lstat = func(string) (os.FileInfo, error) { return nil, errors.New("permission denied") }
 		if _, err := openWorkspaceStore(filepath.Join(t.TempDir(), "ws"), fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+
+	// The recovery check reads the root first, so this fails the read that
+	// readTree makes itself.
+	t.Run("a root that becomes unreadable after the recovery check", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, "gt/.beads/redirect", "x")
+		fsys := osWorkspaceFS()
+		lstat := fsys.lstat
+		calls := 0
+		fsys.lstat = func(p string) (os.FileInfo, error) {
+			calls++
+			if calls > 1 {
+				return nil, errors.New("permission denied")
+			}
+			return lstat(p)
+		}
+		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
 		}
 	})
@@ -840,6 +995,46 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			}
 			return readDir(dir)
 		}
+		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+
+	t.Run("a tree a swap moved aside that cannot be inspected", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		fsys := osWorkspaceFS()
+		fsys.lstat = func(p string) (os.FileInfo, error) {
+			if p == root {
+				return nil, fs.ErrNotExist
+			}
+			return nil, errors.New("permission denied")
+		}
+		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+
+	t.Run("a swap-moved entry that is not a tree", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		if err := os.WriteFile(root+".old", []byte("x"), 0o600); err != nil {
+			t.Fatalf("writing the moved-aside file: %v", err)
+		}
+		if _, err := OpenWorkspaceStore(root); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+		if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("a refused recovery moved a foreign file to the root: %v", err)
+		}
+	})
+
+	t.Run("a tree a swap moved aside that cannot be restored", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, "gt/.beads/redirect", "x")
+		if err := os.Rename(root, root+".old"); err != nil {
+			t.Fatalf("moving the live tree aside: %v", err)
+		}
+		fsys := osWorkspaceFS()
+		fsys.rename = func(string, string) error { return errors.New("rename refused") }
 		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
 		}

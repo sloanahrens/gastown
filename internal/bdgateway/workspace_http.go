@@ -77,6 +77,8 @@ func workspaceRefusal(err error) (int, string) {
 		return http.StatusBadRequest, "workspace_path_refused"
 	case errors.Is(err, ErrWorkspaceFileName):
 		return http.StatusBadRequest, "workspace_file_name_refused"
+	case errors.Is(err, ErrWorkspacePathCollision):
+		return http.StatusBadRequest, "workspace_path_collision"
 	case errors.Is(err, ErrWorkspaceFileTooLarge):
 		return http.StatusRequestEntityTooLarge, "workspace_file_too_large"
 	case errors.Is(err, ErrWorkspaceTooLarge):
@@ -85,6 +87,8 @@ func workspaceRefusal(err error) (int, string) {
 		return http.StatusBadRequest, "workspace_no_files"
 	case errors.Is(err, ErrWorkspaceManifestMismatch):
 		return http.StatusBadRequest, "workspace_manifest_mismatch"
+	case errors.Is(err, ErrWorkspaceLiveTreeLost):
+		return http.StatusInternalServerError, "workspace_live_tree_lost"
 	default:
 		return http.StatusInternalServerError, "workspace_store_failed"
 	}

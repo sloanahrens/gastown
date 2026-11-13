@@ -67,12 +67,20 @@ var (
 	// differs from the hash of the files it carries: the pusher sent content
 	// other than what it hashed.
 	ErrWorkspaceManifestMismatch = errors.New("bdgateway: workspace manifest does not match the files")
+	// ErrWorkspacePathCollision is two paths of one document that a single tree
+	// cannot hold, because one of them would be a directory of the other.
+	ErrWorkspacePathCollision = errors.New("bdgateway: workspace paths collide")
 	// ErrWorkspaceRoot is a store root the gateway will not own: empty, not a
 	// directory, or a tree holding an entry the store did not write.
 	ErrWorkspaceRoot = errors.New("bdgateway: bad workspace root")
 	// ErrWorkspaceSwap is a push that failed while building or publishing the
 	// temp tree. The previous tree is restored where the filesystem allows.
 	ErrWorkspaceSwap = errors.New("bdgateway: workspace swap failed")
+	// ErrWorkspaceLiveTreeLost is a swap that could neither publish its tree nor
+	// restore the previous one: no tree is live at the root, so the store serves
+	// the empty workspace, and a later Open recovers the tree the swap moved
+	// aside.
+	ErrWorkspaceLiveTreeLost = errors.New("bdgateway: workspace live tree lost")
 )
 
 // workspaceFileNames is every file the workspace holds, by base name. bd reads
@@ -123,9 +131,17 @@ func validatedManifest(doc WorkspaceDocument) (string, error) {
 		return "", ErrWorkspaceNoFiles
 	}
 	total := 0
-	for _, name := range slices.Sorted(maps.Keys(doc.Files)) {
+	names := slices.Sorted(maps.Keys(doc.Files))
+	for i, name := range names {
 		if err := validateWorkspacePath(name); err != nil {
 			return "", err
+		}
+		// A path that is also a directory of another path in the document cannot
+		// exist in one tree: the write fails on the file that is already there,
+		// which the store would report as a disk failure. In sorted order such a
+		// pair is always adjacent, so one comparison finds it before any write.
+		if i > 0 && strings.HasPrefix(name, names[i-1]+"/") {
+			return "", fmt.Errorf("%w: %q would be a directory of %q", ErrWorkspacePathCollision, shown(names[i-1]), shown(name))
 		}
 		size := len(doc.Files[name])
 		if size > MaxWorkspaceFileBytes {
@@ -173,7 +189,7 @@ func validateWorkspacePath(name string) error {
 		return fmt.Errorf("%w: %q is not directly under a .beads directory", ErrWorkspaceFileName, shown(name))
 	}
 	if base := parts[len(parts)-1]; !workspaceFileNames[base] {
-		return fmt.Errorf("%w: %q is not one of the workspace's files", ErrWorkspaceFileName, base)
+		return fmt.Errorf("%w: %q is not one of the workspace's files", ErrWorkspaceFileName, shown(base))
 	}
 	return nil
 }
@@ -245,12 +261,42 @@ func openWorkspaceStore(root string, fsys workspaceFS) (*WorkspaceStore, error) 
 		return nil, fmt.Errorf("%w: empty path", ErrWorkspaceRoot)
 	}
 	s := &WorkspaceStore{root: root, fs: fsys}
+	if err := s.recoverSwapped(); err != nil {
+		return nil, err
+	}
 	files, err := s.readTree()
 	if err != nil {
 		return nil, err
 	}
 	s.manifest = WorkspaceManifest(files)
 	return s, nil
+}
+
+// recoverSwapped restores the previous tree when the process stopped between
+// the two renames a replacement makes: the root is absent and the tree moved
+// aside is still there. Recovering here is what keeps a crash from turning a
+// pushed workspace into an empty one, and it runs on Open, before a later push's
+// sweep can remove the only copy of the tree. A root that exists is left alone;
+// the tree beside it is then a leftover the next push sweeps.
+func (s *WorkspaceStore) recoverSwapped() error {
+	if _, err := s.fs.lstat(s.root); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: reading the live tree: %v", ErrWorkspaceRoot, err)
+	}
+	info, err := s.fs.lstat(s.oldPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%w: reading the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s is not a directory", ErrWorkspaceRoot, s.oldPath())
+	}
+	if err := s.fs.rename(s.oldPath(), s.root); err != nil {
+		return fmt.Errorf("%w: restoring the tree a swap moved aside: %v", ErrWorkspaceRoot, err)
+	}
+	return nil
 }
 
 // Manifest returns the manifest hash of the live tree. Every gateway response
@@ -290,6 +336,12 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 	entries, err := s.fs.readDir(dir)
 	if err != nil {
 		return err
+	}
+	// The store writes a directory only as the parent of a file, so a nested
+	// directory with no entries is an entry it did not write; the root itself
+	// may be empty, which is the empty workspace.
+	if prefix != "" && len(entries) == 0 {
+		return fmt.Errorf("%w: %q is an empty directory", ErrWorkspacePath, shown(prefix))
 	}
 	for _, entry := range entries {
 		name := path.Join(prefix, entry.Name())
@@ -344,6 +396,12 @@ func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 		return "", errors.Join(err, s.removeTempTree(tmp))
 	}
 	if err := s.swap(tmp); err != nil {
+		// The restore failed too, so no tree is live at the root: the store now
+		// serves the empty workspace, and the header must name that tree, not
+		// the one a later Open recovers from beside the root.
+		if errors.Is(err, ErrWorkspaceLiveTreeLost) {
+			s.manifest = WorkspaceManifest(map[string]string{})
+		}
 		return "", err
 	}
 	s.manifest = manifest
@@ -369,10 +427,12 @@ func (s *WorkspaceStore) writeTree(root string, files map[string]string) error {
 // swap publishes the temp tree at the root. A first push is one rename, which
 // is atomic. A replacement moves the live tree aside, publishes the new one and
 // leaves the old for the next sweep: if the publish fails, the old tree is
-// moved back, and the caller's error says so when even that fails. Between the
+// moved back. When even that rename fails, the error wraps
+// ErrWorkspaceLiveTreeLost, which tells the caller no tree is live. Between the
 // two renames the root is briefly absent, never half-written; a reader in that
-// window sees a missing tree, not a mixed one. A rename that cannot run at all
-// (the root is a mount point, say) fails before the live tree moves.
+// window sees a missing tree, not a mixed one, and a process that stops there
+// is recovered by the next Open. A rename that cannot run at all (the root is a
+// mount point, say) fails before the live tree moves.
 func (s *WorkspaceStore) swap(tmp string) error {
 	old := s.oldPath()
 	_, err := s.fs.lstat(s.root)
@@ -391,7 +451,7 @@ func (s *WorkspaceStore) swap(tmp string) error {
 	if err := s.fs.rename(tmp, s.root); err != nil {
 		joined := []error{fmt.Errorf("%w: publishing the new tree: %v", ErrWorkspaceSwap, err)}
 		if restoreErr := s.fs.rename(old, s.root); restoreErr != nil {
-			joined = append(joined, fmt.Errorf("restoring the previous tree: %v", restoreErr))
+			joined = append(joined, fmt.Errorf("%w: the previous tree could not be restored: %v", ErrWorkspaceLiveTreeLost, restoreErr))
 		}
 		joined = append(joined, s.removeTempTree(tmp))
 		return errors.Join(joined...)
