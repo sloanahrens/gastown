@@ -1,0 +1,18 @@
+bead: gt-abc
+workspace: customer-zero
+rig: gastown
+seat: nux
+complete: true
+start: 2026-11-13T10:00:00Z
+end: 2026-11-13T11:00:00Z
+sessions: 1
+calls: 3
+input: 112
+cache_creation: 40
+cache_read: 1250
+output: 42
+uncached: 194
+est_cost_usd: 0.0000
+wall_s: 600
+models:
+  claude-sonnet-5-5: calls 3, input 112, cache_creation 40, cache_read 1250, output 42
