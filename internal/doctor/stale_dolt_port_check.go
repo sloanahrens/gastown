@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -112,7 +113,10 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // Fix removes stale Dolt port files and removes the deprecated dolt_server_port
-// key from metadata.json files that carry it (gt-49f3pn).
+// key from metadata.json files that carry it (gt-49f3pn). The key goes only
+// where the same beads directory has a port file, which Fix writes from the
+// town's endpoint when none is left; with neither, the key is bd's only port
+// source and is kept, and the file is reported.
 func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 	// Remove stale port files
 	for _, info := range c.stalePorts {
@@ -121,11 +125,13 @@ func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
+	correctPort := c.getCorrectPort(ctx)
+
 	// Every file is tried: one unparseable metadata.json is reported but does
 	// not stop the key coming out of the others (gt-49f3pn).
 	var errs []error
 	for _, metaFile := range c.findMetadataFiles(ctx.TownRoot) {
-		if err := c.removeDeprecatedPort(metaFile); err != nil {
+		if err := c.removeDeprecatedPort(metaFile, correctPort); err != nil {
 			errs = append(errs, fmt.Errorf("could not fix metadata.json %s: %w", metaFile, err))
 		}
 	}
@@ -223,7 +229,10 @@ func (c *StaleDoltPortCheck) findMetadataFiles(townRoot string) []string {
 
 // removeDeprecatedPort deletes the dolt_server_port key from a metadata.json
 // file, preserving every other field. A file without the key is not rewritten.
-func (c *StaleDoltPortCheck) removeDeprecatedPort(path string) error {
+// The key is deleted only once the beads directory holds a port file: an
+// existing one, or one written here from correctPort. With neither (no town
+// endpoint) the key stays, since it is the only port source there.
+func (c *StaleDoltPortCheck) removeDeprecatedPort(path string, correctPort int) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -237,6 +246,16 @@ func (c *StaleDoltPortCheck) removeDeprecatedPort(path string) error {
 	if _, ok := metadata["dolt_server_port"]; !ok {
 		return nil
 	}
+
+	portFile := filepath.Join(filepath.Dir(path), "dolt-server.port")
+	if !hasPortFile(portFile) {
+		if correctPort <= 0 {
+			return errors.New("dolt_server_port kept: no port file to replace it and no town endpoint to write one from")
+		}
+		if err := atomicfile.WriteFile(portFile, []byte(strconv.Itoa(correctPort)), 0644); err != nil {
+			return fmt.Errorf("writing dolt-server.port before removing the key: %w", err)
+		}
+	}
 	delete(metadata, "dolt_server_port")
 
 	newData, err := json.MarshalIndent(metadata, "", "  ")
@@ -245,4 +264,15 @@ func (c *StaleDoltPortCheck) removeDeprecatedPort(path string) error {
 	}
 
 	return os.WriteFile(path, newData, 0644)
+}
+
+// hasPortFile reports whether path holds a usable port. A file that does not
+// parse is not a port source, so the caller replaces it.
+func hasPortFile(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	return err == nil && port > 0
 }

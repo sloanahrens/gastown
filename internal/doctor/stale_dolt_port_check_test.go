@@ -61,8 +61,8 @@ listener:
 
 // TestStaleDoltPortCheckIgnoresTheDeprecatedPort verifies the check does not
 // report metadata.json for its deprecated dolt_server_port key, and that Fix
-// removes the key from a file that carries it while keeping every other field
-// and the port file (gt-49f3pn).
+// removes the key from a file that carries it, after it has replaced the stale
+// port file with the town's port, and keeps every other field (gt-49f3pn).
 func TestStaleDoltPortCheckIgnoresTheDeprecatedPort(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -93,8 +93,10 @@ func TestStaleDoltPortCheckIgnoresTheDeprecatedPort(t *testing.T) {
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix() failed: %v", err)
 	}
-	if _, err := os.Stat(portFile); !os.IsNotExist(err) {
-		t.Errorf("stale port file survived Fix (stat err: %v)", err)
+	// The stale 3306 is replaced by the town's 3307 before the key goes, so the
+	// beads directory keeps a port source.
+	if data, err := os.ReadFile(portFile); err != nil || string(data) != "3307" {
+		t.Errorf("Fix must replace the stale port file with the town's 3307, got %q (err %v)", data, err)
 	}
 	data, err := os.ReadFile(metaFile)
 	if err != nil {
@@ -314,10 +316,69 @@ func TestStaleDoltPortCheck_PortlessTownJSONFallsThroughToConfigYAML(t *testing.
 	}
 }
 
-// TestStaleDoltPortCheck_UnknownPortSkipsAndFixKeepsPortFile verifies that a
-// town naming no Dolt port is reported unknown, and Fix keeps the port file
-// (it removes only the deprecated key, which needs no port to judge).
-func TestStaleDoltPortCheck_UnknownPortSkipsAndFixKeepsPortFile(t *testing.T) {
+// TestStaleDoltPortCheck_UnknownPortKeepsTheKeyWithoutAPortFile verifies that
+// a town naming no Dolt port is reported unknown, and that Fix keeps the key
+// when its beads directory has no port file: with no endpoint to write one
+// from, the key is the only port source left (gt-49f3pn).
+func TestStaleDoltPortCheck_UnknownPortKeepsTheKeyWithoutAPortFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	metaFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3310}`)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+	if result.Status != StatusSkipped {
+		t.Fatalf("expected StatusSkipped, got %v: %s", result.Status, result.Message)
+	}
+
+	err := check.Fix(ctx)
+	if err == nil || !strings.Contains(err.Error(), "kept") {
+		t.Fatalf("Fix() error = %v, want the kept key reported", err)
+	}
+	data, readErr := os.ReadFile(metaFile)
+	if readErr != nil || !strings.Contains(string(data), "dolt_server_port") {
+		t.Errorf("the key is the only port source and must be kept, got %q (err %v)", data, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, ".beads", "dolt-server.port")); !os.IsNotExist(statErr) {
+		t.Errorf("Fix wrote a port file with no town endpoint to write it from (stat err %v)", statErr)
+	}
+}
+
+// TestStaleDoltPortCheck_FixKeepsTheKeyWhenThePortFileCannotBeWritten verifies
+// that a failed port-file write stops Fix from removing the key, so the beads
+// directory keeps its only port source and Fix reports the file (gt-49f3pn).
+func TestStaleDoltPortCheck_FixKeepsTheKeyWhenThePortFileCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  port: 3307\n")
+	metaFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3307,"dolt_database":"hq"}`)
+	// A directory where the port file belongs can be neither read as a port
+	// nor replaced by a file, so the write must fail.
+	if err := os.Mkdir(filepath.Join(tmpDir, ".beads", "dolt-server.port"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	err := check.Fix(ctx)
+	if err == nil || !strings.Contains(err.Error(), metaFile) {
+		t.Fatalf("Fix() error = %v, want an error naming %s", err, metaFile)
+	}
+	data, readErr := os.ReadFile(metaFile)
+	if readErr != nil || !strings.Contains(string(data), "dolt_server_port") {
+		t.Errorf("the key must stay when its port file cannot be written, got %q (err %v)", data, readErr)
+	}
+}
+
+// TestStaleDoltPortCheck_UnknownPortRemovesTheKeyBesideAPortFile verifies that
+// with no town endpoint, a port file beside the key lets Fix remove the key,
+// and the port file itself is kept (gt-49f3pn).
+func TestStaleDoltPortCheck_UnknownPortRemovesTheKeyBesideAPortFile(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
