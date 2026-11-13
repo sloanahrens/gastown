@@ -79,8 +79,8 @@ func SupervisorFilePath() (path, kind string) {
 func (h supervisorHost) filePath() (path, kind string) {
 	switch h.goos {
 	case "darwin":
-		if p, err := h.launchdPlistPath(); err == nil {
-			return p, "launchd"
+		if homeDir, err := h.homeDir(); err == nil {
+			return filepath.Join(homeDir, "Library", "LaunchAgents", launchdPlistName), "launchd"
 		}
 	case "linux":
 		if p, err := h.systemdUnitPath(); err == nil {

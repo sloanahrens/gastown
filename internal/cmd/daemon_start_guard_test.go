@@ -89,7 +89,7 @@ func freshHeartbeatOf(owner daemon.Owner) daemon.State {
 // for town, so a start finds the file current and rewrites nothing.
 func writeCurrentSupervisorFile(t *testing.T, town string) string {
 	t.Helper()
-	body, ok, err := templates.SupervisorFileContent("systemd", town, daemon.ShutdownBudget)
+	body, ok, err := templates.SupervisorFileContent("systemd", town)
 	if err != nil || !ok {
 		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
 	}
@@ -157,7 +157,7 @@ func startPaths() []startPath {
 				c, _ := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "gastown-daemon.service"), templates.SupervisorState{}, nil)
 				c.guard = guardProbe(probe)
 				provisioned := false
-				provision := func(string, time.Duration) (string, error) { provisioned = true; return "", nil }
+				provision := func(string) (string, error) { provisioned = true; return "", nil }
 				run := func() error {
 					return enableSupervisor(town, provision, func(townRoot string) error {
 						return c.guardStart(townRoot, c.hostSupervisorJob(), false)
