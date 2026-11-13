@@ -214,6 +214,9 @@ func subagentShare(sub, total int64) float64 {
 // unsafeFileChars matches the characters usage-attrib's safe() replaces in a bead name (gt-6qc3nw).
 var unsafeFileChars = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
+// recordsSubdir is the directory under the usage root that holds one record file per bead and kind.
+const recordsSubdir = "beads"
+
 // WorkRecordPath is the file a bead's work usage record is written to under usageDir.
 func WorkRecordPath(usageDir, bead string) string {
 	return recordPath(usageDir, bead, dashboard.UsageKindWork)

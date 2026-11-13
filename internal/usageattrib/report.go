@@ -70,9 +70,6 @@ type Report struct {
 	Skipped int `json:"skipped"`
 }
 
-// recordsSubdir is the directory under the usage root that holds one record file per bead and kind.
-const recordsSubdir = "beads"
-
 // ReadRecords decodes every record file under usageDir. A file that cannot be read or decoded is an
 // error that names it: a report that dropped it would understate the window, so no record is read as
 // absent. A missing records directory is an error wrapping fs.ErrNotExist.
