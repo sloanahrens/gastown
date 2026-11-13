@@ -140,7 +140,45 @@ func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition po
 	if err != nil {
 		return nil, probed, &poolOccupancyError{err: err}
 	}
-	return append(append(live, dead...), landing...), probed, nil
+	occupied, err := withoutLandedSeats(townRoot, append(append(live, dead...), landing...))
+	if err != nil {
+		return nil, probed, &poolOccupancyError{err: err}
+	}
+	return occupied, probed, nil
+}
+
+// withoutLandedSeats drops the polecat seats whose submitted work is recorded
+// as landed (gt-jhz3t0). Every occupancy source — a live session, a dead hook,
+// a seat mid-landing — passes through this one filter, so a landed seat is free
+// whichever of them named it. A landing seat is already decided by
+// poolLandingSessions and is kept as it is. A seat that names no polecat holds
+// nothing this check reads, and is kept.
+//
+// A seat whose intent record cannot be read is not known to be landed, so it
+// is kept and counts; the seat-class read has already warned about that record
+// (poolSeatAgentTo). A landing log that cannot be read is an error, as it is
+// for a seat mid-landing.
+func withoutLandedSeats(townRoot string, sessions []poolSession) ([]poolSession, error) {
+	out := make([]poolSession, 0, len(sessions))
+	for _, s := range sessions {
+		if s.landing || s.rig == "" || s.polecat == "" {
+			out = append(out, s)
+			continue
+		}
+		rec, err := intent.Read(townRoot, intent.Seat{Rig: s.rig, Role: constants.RolePolecat, Name: s.polecat})
+		if err != nil {
+			out = append(out, s)
+			continue
+		}
+		landed, err := polecat.SubmissionLanded(townRoot, s.rig, rec)
+		if err != nil {
+			return nil, fmt.Errorf("reading the landing record of %s/%s: %w", s.rig, s.polecat, err)
+		}
+		if !landed {
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
 
 // liveSeatKeys names the seats a live session already accounts for, keyed
@@ -1161,6 +1199,7 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 
 	type landing struct {
 		rig, name, bead, agent string
+		record                 intent.Record
 	}
 	var candidates []landing
 	dir := filepath.Join(constants.TownRuntimePath(townRoot), "agents")
@@ -1198,10 +1237,11 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 			return nil // a live session already holds the seat
 		}
 		candidates = append(candidates, landing{
-			rig:   rig,
-			name:  name,
-			bead:  rec.WorkBead,
-			agent: slungAgent(rec, fallback(rig)),
+			rig:    rig,
+			name:   name,
+			bead:   rec.WorkBead,
+			agent:  slungAgent(rec, fallback(rig)),
+			record: rec,
 		})
 		return nil
 	})
@@ -1232,6 +1272,17 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 	for _, c := range candidates {
 		if !polecat.IsSubmittedWork(issues[c.bead]) {
 			continue // the bead no longer waits to land: the seat is free
+		}
+		// The landing log decides a seat whose bead still carries the label: a
+		// landing recorded before the label came off is the landing's, not a
+		// submission still waiting (gt-jhz3t0). An unreadable log fails the
+		// picture, as an unreadable record does above.
+		landed, err := polecat.SubmissionLanded(townRoot, c.rig, c.record)
+		if err != nil {
+			return nil, fmt.Errorf("reading the landing record of %s/%s: %w", c.rig, c.name, err)
+		}
+		if landed {
+			continue
 		}
 		// created is left zero on purpose: a landing seat is not a spawn, and
 		// the spec dispatcher's stagger (min_spawn_gap) must not arm from a

@@ -3349,6 +3349,19 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 	return SlotReuseDecision{Reusable: d.Reusable, Reason: d.Reason}
 }
 
+// seatLandingRecorded reports whether polecat name's submitted work is recorded
+// as landed (gt-jhz3t0). An unreadable intent record or landing log reads as
+// not landed, so the seat keeps counting toward capacity: a count that cannot
+// be read holds the seat rather than freeing it.
+func (m *Manager) seatLandingRecorded(name string) bool {
+	rec, err := intent.Read(m.townRoot, intentSeat(m.rig.Name, name))
+	if err != nil {
+		return false
+	}
+	landed, err := SubmissionLanded(m.townRoot, m.rig.Name, rec)
+	return err == nil && landed
+}
+
 func (m *Manager) workstateInputForPolecat(name string, state State, issue string) WorkstateInput {
 	facts := WorkstateFacts{State: state, CleanupStatus: CleanupUnknown, HookBeadSafe: true}
 	agentID := m.agentBeadID(name)
@@ -3368,6 +3381,9 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		facts.HookBeadSafe = hookDisposition.Safe
 		facts.HookBeadTerminal = hookDisposition.Terminal
 		facts.HookBeadSubmitted = hookDisposition.Submitted
+		if facts.HookBeadSubmitted || state == StateSubmitted {
+			facts.LandingRecorded = m.seatLandingRecorded(name)
+		}
 		facts.HookBead = fields.HookBead
 		facts.PushFailed = fields.PushFailed
 		facts.MRFailed = fields.MRFailed

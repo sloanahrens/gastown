@@ -63,7 +63,12 @@ type WorkstateInput struct {
 	// for landing (HookBeadDisposition.Submitted). The hook is still set — by
 	// design, the landing worker needs it — so without this the classifier
 	// reads a submitted seat as a seat still holding work.
-	HookBeadSubmitted              bool
+	HookBeadSubmitted bool
+	// LandingRecorded reports that the seat's submitted work is recorded as
+	// landed (SubmissionLanded). Such a seat no longer counts toward capacity:
+	// its work is on the target and it waits only for its sandbox to end
+	// (gt-jhz3t0). A failed or rejected landing leaves it false.
+	LandingRecorded                bool
 	CleanupStatus                  CleanupStatus
 	IgnoreCleanupStatus            bool
 	PartialSpawnWithoutDurableHook bool
@@ -242,6 +247,13 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 			Reason:               "submitted-for-landing",
 			ReuseStatus:          "idle-submitted",
 			CountsTowardCapacity: true,
+		}
+		// A landing the record shows as landed releases the seat: the work is
+		// on the target, and only the sandbox's end is left (gt-jhz3t0). The
+		// seat is still held until that record exists (gt-2z8k1).
+		if in.LandingRecorded {
+			d.Reason = "landing-recorded"
+			d.CountsTowardCapacity = false
 		}
 		// Report-only: landing reads the pushed branch, so a worktree the probe
 		// found dirty does not change the verdict, but a reader should not have
@@ -649,7 +661,11 @@ type WorkstateFacts struct {
 	HookBeadTerminal bool
 	// HookBeadSubmitted comes from ClassifyHookBead on the same lookup that
 	// produced HookBeadTerminal — see WorkstateInput.HookBeadSubmitted.
-	HookBeadSubmitted              bool
+	HookBeadSubmitted bool
+	// LandingRecorded is SubmissionLanded for the seat, set by the caller that
+	// read the seat's intent record and landing log (gt-jhz3t0); see
+	// WorkstateInput.LandingRecorded.
+	LandingRecorded                bool
 	PartialSpawnWithoutDurableHook bool
 	WorktreeStructurallyMissing    bool
 	// AgentBeadRead marks that the caller successfully read the polecat's
@@ -754,6 +770,7 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 	input := WorkstateInput{
 		State:                          f.State,
 		HookBeadSubmitted:              f.HookBeadSubmitted,
+		LandingRecorded:                f.LandingRecorded,
 		CleanupStatus:                  f.CleanupStatus,
 		PartialSpawnWithoutDurableHook: f.PartialSpawnWithoutDurableHook,
 		PushFailed:                     f.PushFailed,
