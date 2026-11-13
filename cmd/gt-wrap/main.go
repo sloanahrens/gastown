@@ -24,6 +24,9 @@ const (
 	defaultTarget = "docker"
 	// kubernetesTarget is the target that execs into the daemon pod.
 	kubernetesTarget = "kubernetes"
+	// bdGatewayTarget is the target that sends a bd call to the bd gateway over
+	// HTTP.
+	bdGatewayTarget = "bdgateway"
 	// doctorFlag asks the wrapper to report its ladder instead of running the
 	// tool. It is the wrapper's own flag, read only as the first argument, so a
 	// tool's own arguments are never taken for it.
@@ -51,7 +54,8 @@ type target interface {
 // surface is the process a run reads. A test supplies its own, so the wiring is
 // driven with a fake target and a temp town instead of the operator's.
 type surface struct {
-	// getenv reads HOME, which names the config file, and GT_TOWN_ROOT.
+	// getenv reads HOME, which names the config file, GT_TOWN_ROOT, and the
+	// bdgateway target's BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE fallbacks.
 	getenv func(string) string
 	// environ is the environment the plan filters and forwards.
 	environ  func() []string
@@ -67,6 +71,8 @@ type surface struct {
 	// newKubectl builds the kubernetes target for a town, reaching the Deployment
 	// named by kube, and tool is the name the wrapper was invoked as.
 	newKubectl func(town string, kube kubeConfig, tool string) target
+	// newBdGateway builds the bdgateway target for a town.
+	newBdGateway func(town string, cfg bdGatewayConfig) target
 	// executable is the wrapper binary install copies into each tool's place.
 	executable func() (string, error)
 	// files is the filesystem the cutover changes; nil uses the system's.
@@ -111,6 +117,19 @@ func osSurface() surface {
 				Note:       os.Stderr,
 				Stdout:     os.Stdout,
 				Stderr:     os.Stderr,
+			}
+		},
+		newBdGateway: func(town string, cfg bdGatewayConfig) target {
+			return gtwrap.BdGateway{
+				Town:      town,
+				URL:       cfg.URL,
+				TokenFile: cfg.TokenFile,
+				Caller:    cfg.Caller,
+				TimeoutMS: cfg.TimeoutMS,
+				Stdin:     os.Stdin,
+				Stdout:    os.Stdout,
+				Stderr:    os.Stderr,
+				Note:      os.Stderr,
 			}
 		},
 		executable: os.Executable,
@@ -189,12 +208,24 @@ func run(argv []string, s surface) int {
 }
 
 // targetConfig is what the config file names: the target, and for the kubernetes
-// target the Deployment it reaches.
+// target the Deployment it reaches and for the bdgateway target the gateway it
+// calls.
 type targetConfig struct {
-	Target string
-	Kube   kubeConfig
+	Target    string
+	Kube      kubeConfig
+	BdGateway bdGatewayConfig
 	// Native holds the tools the config runs on the Mac, by tool name.
 	Native map[string]gtwrap.Native
+}
+
+// bdGatewayConfig is the bdgateway target's fields in the config file. The URL
+// and token file may come from the environment instead, which is how the daemon
+// pod's forwarder is configured (design, "Migration and rollback", stage 5).
+type bdGatewayConfig struct {
+	URL       string `json:"url"`
+	TokenFile string `json:"token_file"`
+	Caller    string `json:"caller"`
+	TimeoutMS int    `json:"timeout_ms"`
 }
 
 // kubeConfig is the kubernetes target's fields in the config file. Only that
@@ -229,6 +260,7 @@ func configTarget(s surface) (targetConfig, error) {
 		Target      string                 `json:"target"`
 		Native      map[string]nativeEntry `json:"native"`
 		PodTownRoot *string                `json:"pod_town_root"`
+		BdGateway   bdGatewayConfig        `json:"bdgateway"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return targetConfig{}, fmt.Errorf("gtwrap: parse the target config file %s: %w", path, err)
@@ -245,21 +277,35 @@ func configTarget(s surface) (targetConfig, error) {
 		return targetConfig{}, err
 	}
 	out := targetConfig{Target: cfg.Target, Native: native}
-	if cfg.Target != kubernetesTarget {
-		return out, nil
-	}
-	if err := json.Unmarshal(data, &out.Kube); err != nil {
-		return targetConfig{}, fmt.Errorf("gtwrap: parse the kubernetes target fields in %s: %w", path, err)
-	}
-	out.Kube.PodRoot = podRoot
-	for _, field := range []struct{ name, value string }{
-		{"context", out.Kube.Context},
-		{"namespace", out.Kube.Namespace},
-		{"deployment", out.Kube.Deployment},
-		{"container", out.Kube.Container},
-	} {
-		if field.value == "" {
-			return targetConfig{}, fmt.Errorf("gtwrap: the target config file %s names the kubernetes target but no %q; add %q there", path, field.name, field.name)
+	switch cfg.Target {
+	case kubernetesTarget:
+		if err := json.Unmarshal(data, &out.Kube); err != nil {
+			return targetConfig{}, fmt.Errorf("gtwrap: parse the kubernetes target fields in %s: %w", path, err)
+		}
+		out.Kube.PodRoot = podRoot
+		for _, field := range []struct{ name, value string }{
+			{"context", out.Kube.Context},
+			{"namespace", out.Kube.Namespace},
+			{"deployment", out.Kube.Deployment},
+			{"container", out.Kube.Container},
+		} {
+			if field.value == "" {
+				return targetConfig{}, fmt.Errorf("gtwrap: the target config file %s names the kubernetes target but no %q; add %q there", path, field.name, field.name)
+			}
+		}
+	case bdGatewayTarget:
+		out.BdGateway = cfg.BdGateway
+		if out.BdGateway.URL == "" {
+			out.BdGateway.URL = s.getenv("BD_GATEWAY_URL")
+		}
+		if out.BdGateway.TokenFile == "" {
+			out.BdGateway.TokenFile = s.getenv("BD_GATEWAY_TOKEN_FILE")
+		}
+		if out.BdGateway.URL == "" {
+			return targetConfig{}, fmt.Errorf("gtwrap: the target config file %s names the bdgateway target but no \"url\", and BD_GATEWAY_URL is unset; add \"bdgateway\": {\"url\": ...} to the file or set BD_GATEWAY_URL", path)
+		}
+		if out.BdGateway.TokenFile == "" {
+			return targetConfig{}, fmt.Errorf("gtwrap: the target config file %s names the bdgateway target but no \"token_file\", and BD_GATEWAY_TOKEN_FILE is unset; add \"bdgateway\": {\"token_file\": ...} to the file or set BD_GATEWAY_TOKEN_FILE", path)
 		}
 	}
 	return out, nil
@@ -288,8 +334,16 @@ func openTarget(cfg targetConfig, town, tool string, s surface) (target, error) 
 		return s.newDocker(town), nil
 	case kubernetesTarget:
 		return s.newKubectl(town, cfg.Kube, tool), nil
+	case bdGatewayTarget:
+		if tool != "bd" {
+			return nil, fmt.Errorf("gtwrap: the bdgateway target runs bd, but the wrapper was invoked as %q; install the wrapper under bd for this target", tool)
+		}
+		if s.newBdGateway == nil {
+			return nil, errors.New("gtwrap: no bdgateway target is wired, so the call is refused")
+		}
+		return s.newBdGateway(town, cfg.BdGateway), nil
 	}
-	return nil, fmt.Errorf("gtwrap: the target config names %q; the targets are docker and kubernetes", cfg.Target)
+	return nil, fmt.Errorf("gtwrap: the target config names %q; the targets are docker, kubernetes and bdgateway", cfg.Target)
 }
 
 // townFor is the town root the target is built for. The docker target runs from
@@ -394,10 +448,24 @@ func reportMissingTown(stdout io.Writer, err error) int {
 	})
 }
 
-// report prints a diagnosis in the doctor's four-line form and returns the
-// doctor's status for it.
+// report prints a diagnosis in the doctor's line form and returns the doctor's
+// status for it. The rung and the reason always print; the target's own fields
+// print when it has them, so a docker or kubernetes diagnosis keeps its four
+// lines and the bdgateway diagnosis names the URL and token file instead of a
+// container and image.
 func report(stdout io.Writer, diag gtwrap.Diagnosis) int {
-	fmt.Fprintf(stdout, "rung: %s\ncontainer: %s\nimage: %s\nreason: %s\n", diag.Rung, diag.Container, diag.Image, diag.Reason)
+	fmt.Fprintf(stdout, "rung: %s\n", diag.Rung)
+	for _, field := range []struct{ name, value string }{
+		{"url", diag.URL},
+		{"token_file", diag.TokenFile},
+		{"container", diag.Container},
+		{"image", diag.Image},
+	} {
+		if field.value != "" {
+			fmt.Fprintf(stdout, "%s: %s\n", field.name, field.value)
+		}
+	}
+	fmt.Fprintf(stdout, "reason: %s\n", diag.Reason)
 	if diag.Rung == gtwrap.RungDown {
 		return exitFailure
 	}

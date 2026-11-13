@@ -11,18 +11,20 @@ import (
 )
 
 // maxFileArgBytes bounds a file the wrapper reads and sends: a bead's text,
-// comment or design is far smaller, and the file travels in the kubectl exec.
+// comment or design is far smaller, and the file travels in the kubectl exec or
+// on the gateway's stdin, which the design caps at 1 MiB.
 const maxFileArgBytes = 1 << 20
 
-// fileArgs makes a Mac file the call names reach the pod. Only the kubernetes
-// target needs it: the pod cannot read a Mac path, so the wrapper reads the file
-// here, before any kubectl call, and returns it as the call's stdin with the
-// flag's value rewritten to "-". The file must be a regular file of at most
-// maxFileArgBytes, read once; anything else is refused with the same line as an
-// unreadable file. A call that names no file comes back unchanged
+// fileArgs makes a file the call names reach a target that cannot read the
+// caller's tree. The kubernetes target's pod cannot read a Mac path, and the
+// bdgateway target's workspace mirrors the town but not the caller's filesystem,
+// so the wrapper reads the file here, before any request, and returns it as the
+// call's stdin with the flag's value rewritten to "-". The file must be a regular
+// file of at most maxFileArgBytes, read once; anything else is refused with the
+// same line as an unreadable file. A call that names no file comes back unchanged
 // with a nil reader. A relative path is read from dir, the caller's directory.
 func fileArgs(cfg targetConfig, tool string, args []string, dir string, s surface) ([]string, io.Reader, error) {
-	if cfg.Target != kubernetesTarget {
+	if cfg.Target != kubernetesTarget && cfg.Target != bdGatewayTarget {
 		return args, nil, nil
 	}
 	rewritten, file, err := gtwrap.ScanFileArgs(tool, args)

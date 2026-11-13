@@ -30,12 +30,15 @@ func (r Rung) String() string {
 }
 
 // Diagnosis is what the doctor reports without running the tool: the rung a
-// call would take, the container and image it would reach, and why.
+// call would take, the container and image it would reach, and why. The bdgateway
+// target has no container, so it names the gateway URL and the token file instead.
 type Diagnosis struct {
 	Rung      Rung
 	Container string
 	Image     string
 	Reason    string
+	URL       string
+	TokenFile string
 }
 
 // Doctor reports the rung Launch would use for a call, with the reason and the
