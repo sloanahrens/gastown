@@ -47,7 +47,8 @@ dashboard's Service and Deployment are written too, in the same order. With
 --tracker, trackerd's Service and Deployment follow the same way; the render
 names the Secret holding its DSN and never reads the DSN. With --tracker-backup
 too, the nightly dump's claim and CronJob follow them, and the render names the
-image the dump runs in.
+image the dump runs in. The dump's reader Pod, which mounts the claim read-only
+for a copy-out, is written last and is not applied with the rest.
 
 Secret documents are not written. The command prints, for each Secret the
 Deployment mounts, one kubectl line that creates it from the operator's existing
@@ -108,36 +109,38 @@ var clusterRender clusterRenderFlags
 // test supplies its own, so no unit test reads the live town or fails a real
 // write to find out what the render does then.
 type clusterRenderDeps struct {
-	findTown     func() (string, error)
-	containerEnv func(townRoot string) (map[string]string, error)
-	readFile     func(path string) ([]byte, error)
-	lstat        func(path string) (fs.FileInfo, error)
-	getenv       func(key string) string
-	userHome     func() (string, error)
-	build        func(k8sdaemon.Values) (k8sdaemon.Manifests, error)
-	render       func(io.Writer, k8sdaemon.Manifests) error
-	buildHelper  func(k8sdaemon.Values) (k8sdaemon.Helper, error)
-	encode       func(io.Writer, any) error
-	mkdirAll     func(path string) error
-	writeFile    func(path string, data []byte) error
-	out          io.Writer
+	findTown                 func() (string, error)
+	containerEnv             func(townRoot string) (map[string]string, error)
+	readFile                 func(path string) ([]byte, error)
+	lstat                    func(path string) (fs.FileInfo, error)
+	getenv                   func(key string) string
+	userHome                 func() (string, error)
+	build                    func(k8sdaemon.Values) (k8sdaemon.Manifests, error)
+	render                   func(io.Writer, k8sdaemon.Manifests) error
+	buildHelper              func(k8sdaemon.Values) (k8sdaemon.Helper, error)
+	buildTrackerBackupReader func(k8sdaemon.Values) (k8sdaemon.TrackerBackupReader, error)
+	encode                   func(io.Writer, any) error
+	mkdirAll                 func(path string) error
+	writeFile                func(path string, data []byte) error
+	out                      io.Writer
 }
 
 // realClusterRenderDeps is the host's. The environment is the one the compose
 // writer renders into its ComposeSpec.Env, read through the same function.
 func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 	return clusterRenderDeps{
-		findTown:     workspace.FindFromCwdOrError,
-		containerEnv: realDaemonComposeDeps(out).containerEnv,
-		readFile:     os.ReadFile,
-		lstat:        os.Lstat,
-		getenv:       os.Getenv,
-		userHome:     os.UserHomeDir,
-		build:        k8sdaemon.Build,
-		render:       k8sdaemon.Render,
-		buildHelper:  k8sdaemon.BuildHelper,
-		encode:       k8sdaemon.YAML,
-		mkdirAll:     func(path string) error { return os.MkdirAll(path, 0o755) },
+		findTown:                 workspace.FindFromCwdOrError,
+		containerEnv:             realDaemonComposeDeps(out).containerEnv,
+		readFile:                 os.ReadFile,
+		lstat:                    os.Lstat,
+		getenv:                   os.Getenv,
+		userHome:                 os.UserHomeDir,
+		build:                    k8sdaemon.Build,
+		render:                   k8sdaemon.Render,
+		buildHelper:              k8sdaemon.BuildHelper,
+		buildTrackerBackupReader: k8sdaemon.BuildTrackerBackupReader,
+		encode:                   k8sdaemon.YAML,
+		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
 		writeFile: func(path string, data []byte) error {
 			return os.WriteFile(path, data, 0o644) //nolint:gosec // manifests hold no secret; the operator reads them
 		},
@@ -411,6 +414,19 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		}
 		objects = append(objects, applyObject{rank: applyRank["Pod"], kind: "Pod", name: k8sdaemon.HelperName, body: body.Bytes()})
 	}
+	// The reader ranks past the CronJob, so it is the last file written. It is
+	// not applied with the rest: trackerBackupReaderLine says so.
+	if f.trackerBackup {
+		reader, err := d.buildTrackerBackupReader(v)
+		if err != nil {
+			return fmt.Errorf("cannot render the tracker dump's reader, and no file was written: %w", err)
+		}
+		var body bytes.Buffer
+		if err := d.encode(&body, reader); err != nil {
+			return fmt.Errorf("cannot encode the tracker dump's reader, and no file was written: %w", err)
+		}
+		objects = append(objects, applyObject{rank: applyRank["CronJob"] + 1, kind: "Pod", name: k8sdaemon.TrackerBackupReaderName, body: body.Bytes()})
+	}
 	sort.SliceStable(objects, func(i, j int) bool { return objects[i].rank < objects[j].rank })
 	lines, err := secretCreateLines(m, namespace, f.configDir, f.openShellConfigDir, townRoot)
 	if err != nil {
@@ -452,6 +468,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	}
 	if f.trackerBackup {
 		fmt.Fprintf(d.out, "  %s\n", trackerBackupLine(strings.TrimSpace(f.trackerBackupImage), strings.TrimSpace(f.trackerDSNSecret)))
+		fmt.Fprintf(d.out, "  %s\n", trackerBackupReaderLine())
 	}
 	if !f.rehearsal {
 		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
@@ -639,6 +656,13 @@ func trackerSecretLine(name string) string {
 // the render never sees the DSN.
 func trackerBackupLine(image, secret string) string {
 	return fmt.Sprintf("the nightly tracker dump runs in image %s and reads its DSN from Secret %s under key %s, the same Secret trackerd reads; this render does not read it", image, secret, k8sdaemon.TrackerDSNKey)
+}
+
+// trackerBackupReaderLine names the reader Pod and says it is not applied with the
+// rest. It is a note, like trackerBackupLine: the operator applies the reader only
+// to copy a dump out, and deletes it after.
+func trackerBackupReaderLine() string {
+	return fmt.Sprintf("the %s Pod, the last file listed, is not applied with the rest: apply it only to copy a dump out, and delete it before the nightly run, since the claim is ReadWriteOnce", k8sdaemon.TrackerBackupReaderName)
 }
 
 // fromFileArg is one --from-file argument: the Secret key and the operator's

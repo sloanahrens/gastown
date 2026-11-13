@@ -105,19 +105,20 @@ func clusterRenderTestDeps(t *testing.T, out io.Writer) clusterRenderDeps {
 	t.Helper()
 	town := clusterRenderTestTown(t)
 	return clusterRenderDeps{
-		findTown:     func() (string, error) { return town, nil },
-		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
-		readFile:     os.ReadFile,
-		lstat:        os.Lstat,
-		getenv:       func(string) string { return "" },
-		userHome:     func() (string, error) { return "/fake/home", nil },
-		build:        k8sdaemon.Build,
-		render:       k8sdaemon.Render,
-		buildHelper:  k8sdaemon.BuildHelper,
-		encode:       k8sdaemon.YAML,
-		mkdirAll:     func(path string) error { return os.MkdirAll(path, 0o755) },
-		writeFile:    func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
-		out:          out,
+		findTown:                 func() (string, error) { return town, nil },
+		containerEnv:             func(string) (map[string]string, error) { return map[string]string{}, nil },
+		readFile:                 os.ReadFile,
+		lstat:                    os.Lstat,
+		getenv:                   func(string) string { return "" },
+		userHome:                 func() (string, error) { return "/fake/home", nil },
+		build:                    k8sdaemon.Build,
+		render:                   k8sdaemon.Render,
+		buildHelper:              k8sdaemon.BuildHelper,
+		buildTrackerBackupReader: k8sdaemon.BuildTrackerBackupReader,
+		encode:                   k8sdaemon.YAML,
+		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
+		writeFile:                func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:                      out,
 	}
 }
 
@@ -1659,6 +1660,7 @@ func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
 			"12-deployment-trackerd.yaml",
 			"13-persistentvolumeclaim-tracker-backup.yaml",
 			"14-cronjob-tracker-backup.yaml",
+			"15-pod-tracker-backup-reader.yaml",
 		}
 		if got := dirNames(t, f.out); !slices.Equal(got, want) {
 			t.Fatalf("file names = %v, want %v", got, want)
@@ -1744,6 +1746,86 @@ func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
 			if strings.Contains(string(data), "postgres://") {
 				t.Errorf("%s holds a DSN-shaped string", name)
 			}
+		}
+	})
+
+	t.Run("the reader mounts the claim read-only, never restarts, and is not applied with the rest", func(t *testing.T) {
+		f := backupFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(f.out, "15-pod-tracker-backup-reader.yaml"))
+		if err != nil {
+			t.Fatalf("reading the reader: %v", err)
+		}
+		var pod struct {
+			Spec struct {
+				RestartPolicy string `yaml:"restartPolicy"`
+				Containers    []struct {
+					Image        string `yaml:"image"`
+					VolumeMounts []struct {
+						MountPath string `yaml:"mountPath"`
+						ReadOnly  bool   `yaml:"readOnly"`
+					} `yaml:"volumeMounts"`
+				} `yaml:"containers"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal(data, &pod); err != nil {
+			t.Fatalf("the reader does not parse back: %v", err)
+		}
+		if kind := renderedKind(t, filepath.Join(f.out, "15-pod-tracker-backup-reader.yaml")); kind != "Pod" {
+			t.Errorf("the reader's kind = %q, want Pod", kind)
+		}
+		if pod.Spec.RestartPolicy != "Never" {
+			t.Errorf("the reader's restartPolicy = %q, want Never", pod.Spec.RestartPolicy)
+		}
+		if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != backupImage {
+			t.Fatalf("the reader's containers = %+v, want one on the dump image %s", pod.Spec.Containers, backupImage)
+		}
+		mounts := pod.Spec.Containers[0].VolumeMounts
+		if len(mounts) != 1 || mounts[0].MountPath != "/backups" || !mounts[0].ReadOnly {
+			t.Errorf("the reader's mounts = %+v, want the claim at /backups read-only", mounts)
+		}
+		if !strings.Contains(out.String(), "tracker-backup-reader Pod") || !strings.Contains(out.String(), "is not applied with the rest") {
+			t.Errorf("the output does not say the reader is not applied with the rest:\n%s", out.String())
+		}
+	})
+
+	t.Run("a reader that cannot render or encode refuses and writes nothing", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(d *clusterRenderDeps)
+			cause  string
+		}{
+			{
+				name: "the builder refuses",
+				mutate: func(d *clusterRenderDeps) {
+					d.buildTrackerBackupReader = func(k8sdaemon.Values) (k8sdaemon.TrackerBackupReader, error) {
+						return k8sdaemon.TrackerBackupReader{}, errors.New("refused")
+					}
+				},
+				cause: "cannot render the tracker dump's reader",
+			},
+			{
+				name: "the encoder fails",
+				mutate: func(d *clusterRenderDeps) {
+					d.encode = func(io.Writer, any) error { return errors.New("encode") }
+				},
+				cause: "cannot encode the tracker dump's reader",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				f := backupFixture(t)
+				var out bytes.Buffer
+				d := clusterRenderTestDeps(t, &out)
+				tt.mutate(&d)
+				requireErrorNames(t, runClusterRender(d, f), tt.cause, "no file was written")
+				if got := outState(f.out); got != "absent" {
+					t.Errorf("the refused render left --out %s, want it untouched", got)
+				}
+			})
 		}
 	})
 }
