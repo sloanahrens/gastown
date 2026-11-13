@@ -280,6 +280,8 @@ func mangoHead(target string, p Prepared) []string {
 		"### " + target,
 		fmt.Sprintf("Train: %d rows, %d positive. Holdout: %d rows, %d positive.",
 			len(p.Train), p.TrainPositives, len(p.Holdout), p.HoldoutPositives),
+		fmt.Sprintf("Train eras: %s. Holdout eras: %s.",
+			eraCountsText(eraCounts(p.Train)), eraCountsText(eraCounts(p.Holdout))),
 	}
 	if p.LastPositiveAt != "" {
 		last := p.LastPositiveAt

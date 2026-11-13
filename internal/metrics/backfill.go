@@ -35,6 +35,10 @@ const regimeBackfillDayLayout = "20060102"
 // seats in force, not the day each was configured.
 var regimeSandboxMoveAt = time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
 
+// regimePodMoveAt is the day the daemon moved from the host into the control
+// cluster: the start of the pod era (runtime_era.go).
+var regimePodMoveAt = time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+
 // regimeBackfillMoves are the moves the town made before the runtime record
 // existed, so the analysis can cut a series at them. The record holds every
 // change `gt regime record` wrote since; a later move is recorded there live
@@ -48,7 +52,7 @@ var regimeBackfillMoves = []RegimeEventRecord{
 		Source: "mango-evaluation review",
 	},
 	{
-		TS:     time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+		TS:     regimePodMoveAt,
 		Kind:   "platform",
 		Reason: "daemon moved from the host into the control cluster",
 		Source: "mango-evaluation review",

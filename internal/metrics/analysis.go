@@ -276,6 +276,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		Events:         panelEvents(env, o.Reportf),
 		MissingColumns: panelMissingColumns(joinHeader),
 		Split:          split,
+		SplitEras:      panelEras(joined),
 	}, now)
 	panelJSON, err := json.MarshalIndent(panel, "", "  ")
 	if err != nil {
@@ -640,7 +641,7 @@ func writeFile(path string, r io.Reader) error {
 // here, not from whichever target happens to come first.
 func analyseTargets(ctx context.Context, env Env, o AnalysisOptions, header []string, rows []Row, explainOnly []string) ([]TargetResult, PanelSplit, error) {
 	results := make([]TargetResult, 0, len(mangoTargets))
-	train, holdout := SplitByDate(rows, defaultTrainFraction)
+	train, holdout := SplitByEra(rows)
 	split := panelSplit(train, holdout)
 	for _, target := range mangoTargets {
 		p := Prepare(header, rows, explainOnly, target)

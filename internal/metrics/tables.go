@@ -137,6 +137,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"sp_estimated_at":         stampCell(b.EstimatedAt),
 			"om_rounds":               roundsCell(rounds[l.Bead]),
 			"polecat_attempts":        polecatAttemptsCell(l),
+			"runtime_era":             runtimeEra(l.LandedAt),
 		})
 	}
 	return rows, nil

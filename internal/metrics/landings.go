@@ -57,12 +57,16 @@ var storyPointLandingColumns = []string{"sp", "sp_rung", "sp_minutes", "sp_estim
 // They follow the story-point columns, so every column keeps the place it had before.
 var omLandingColumns = []string{"om_rounds", "polecat_attempts"}
 
+// eraLandingColumns is the runtime era a landing ran under, read from landed_at
+// (runtime_era.go). It follows the om columns, append-only.
+var eraLandingColumns = []string{"runtime_era"}
+
 // landingColumns is the header landings.csv is written with: the legacy header
 // then the appended columns, then the Jev columns, then the story-point
-// columns, then the om columns. Columns are append-only: an existing column
-// keeps its name and its place, so a reader of an older file reads the new one
-// under the same names.
-var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns)
+// columns, then the om columns, then the runtime era. Columns are append-only: an
+// existing column keeps its name and its place, so a reader of an older file
+// reads the new one under the same names.
+var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns, eraLandingColumns)
 
 // polecatSecsCell is a landing's polecat time in seconds, "" when the ledger
 // line carries none. The writer omits a zero time, so a zero or negative value

@@ -353,7 +353,8 @@ func TestMangoSectionReportsASummaryWriteFailure(t *testing.T) {
 
 func TestMangoSectionRendersTheBoxTableWithExplainMeans(t *testing.T) {
 	t.Parallel()
-	// Train is October and the holdout is November. The box is rig a, which
+	// Every landing is in the pre-sandbox era, so the split is the 70/30 cut by
+	// date and the holdout is the last twelve rows. The box is rig a, which
 	// holds four of the holdout's positives in six rows; lines_total is 100
 	// inside the box against 10 outside, so the explain cell reads 100 vs 55.
 	rows := make([]Row, 40)
@@ -369,11 +370,7 @@ func TestMangoSectionRendersTheBoxTableWithExplainMeans(t *testing.T) {
 			rej = "1"
 		}
 		row["rig"], row["lines_total"], row["rejected_before_landing"] = rig, lines, rej
-		if i < 28 {
-			row["landed_at"] = fmt.Sprintf("2026-10-%02dT00:00:00Z", 1+i)
-		} else {
-			row["landed_at"] = fmt.Sprintf("2026-11-%02dT00:00:00Z", i-27)
-		}
+		row["landed_at"] = fmt.Sprintf("2026-10-%02dT%02d:00:00Z", 1+i/2, i%2*12)
 		rows[i] = row
 	}
 	result := `{

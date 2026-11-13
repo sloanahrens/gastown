@@ -116,12 +116,14 @@ type mangoPanel struct {
 	SnapshotHours int    `json:"snapshot_hours"`
 	// MissingColumns and the split's spans are the writer's additive footer
 	// keys: a panel from before they existed carries none.
-	MissingColumns []string      `json:"missing_columns"`
-	Train          *mangoSpan    `json:"train"`
-	Holdout        *mangoSpan    `json:"holdout"`
-	Weekly         []mangoWeek   `json:"weekly"`
-	Events         []mangoEvent  `json:"events"`
-	Targets        []mangoTarget `json:"targets"`
+	MissingColumns []string       `json:"missing_columns"`
+	Train          *mangoSpan     `json:"train"`
+	Holdout        *mangoSpan     `json:"holdout"`
+	TrainEras      map[string]int `json:"train_eras"`
+	HoldoutEras    map[string]int `json:"holdout_eras"`
+	Weekly         []mangoWeek    `json:"weekly"`
+	Events         []mangoEvent   `json:"events"`
+	Targets        []mangoTarget  `json:"targets"`
 }
 
 // mangoSpan is one side of the split's day range as the file writes it.
@@ -268,6 +270,11 @@ type Mango struct {
 	// carried no usable range for that side.
 	Train   *MangoSpan `json:"train,omitempty"`
 	Holdout *MangoSpan `json:"holdout,omitempty"`
+	// TrainEras and HoldoutEras count each side's landings by runtime era, so
+	// the footer names the regimes each side was drawn from. Absent when the
+	// panel carried none.
+	TrainEras   map[string]int `json:"train_eras,omitempty"`
+	HoldoutEras map[string]int `json:"holdout_eras,omitempty"`
 	// Weekly is the rejected-share trend, oldest first, and Events the regime
 	// changes drawn against it. Both are empty lists, never null, on a panel
 	// that carried neither.
@@ -320,6 +327,7 @@ func ReadMango(dir string, now time.Time) *Mango {
 	m.Items, m.SnapshotHours = p.Items, p.SnapshotHours
 	m.MissingColumns = mangoColumnNames(p.MissingColumns)
 	m.Train, m.Holdout = mangoSpanOf(p.Train), mangoSpanOf(p.Holdout)
+	m.TrainEras, m.HoldoutEras = p.TrainEras, p.HoldoutEras
 	m.Weekly, m.Events = mangoWeeks(p.Weekly), mangoEvents(p.Events)
 	m.Targets, m.Counts = targets, counts
 	m.State, m.Note = mangoFreshness(gen, now)

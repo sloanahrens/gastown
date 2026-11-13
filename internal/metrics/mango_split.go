@@ -36,9 +36,7 @@ const defaultTrainFraction = 0.7
 // float is implementation-defined. NaN has no nearer end, so it cuts at the
 // start, which is an empty train.
 func SplitByDate(rows []Row, trainFraction float64) (train, holdout []Row) {
-	ordered := make([]Row, len(rows))
-	copy(ordered, rows)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i]["landed_at"] < ordered[j]["landed_at"] })
+	ordered := sortedByLandedAt(rows)
 	f := trainFraction
 	switch {
 	case math.IsNaN(f) || f < 0:
@@ -48,6 +46,15 @@ func SplitByDate(rows []Row, trainFraction float64) (train, holdout []Row) {
 	}
 	k := int(float64(len(ordered))*f + 1e-9)
 	return ordered[:k], ordered[k:]
+}
+
+// sortedByLandedAt is a copy of rows ordered by landed_at, stable for equal
+// dates, so the caller's slice is left alone.
+func sortedByLandedAt(rows []Row) []Row {
+	ordered := make([]Row, len(rows))
+	copy(ordered, rows)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i]["landed_at"] < ordered[j]["landed_at"] })
+	return ordered
 }
 
 // ReadSidecar reads a landings.sidecar.json's explain_only list; keys the
@@ -79,7 +86,7 @@ type Prepared struct {
 	LastPositiveAt string
 }
 
-// Prepare splits rows at the default train fraction and computes the predictor
+// Prepare splits rows by runtime era (SplitByEra) and computes the predictor
 // columns and the target's positive counts.
 //
 // A column is dropped when the sidecar names it explain-only, when it is a
@@ -87,7 +94,7 @@ type Prepared struct {
 // header column none of those name is carried as a predictor whether or not
 // this package knows it.
 func Prepare(header []string, rows []Row, explainOnly []string, target string) Prepared {
-	train, holdout := SplitByDate(rows, defaultTrainFraction)
+	train, holdout := SplitByEra(rows)
 	drop := make(map[string]bool, len(explainOnly)+len(mangoTargets)+len(mangoIdentity)+len(mangoDuplicate))
 	for _, c := range explainOnly {
 		drop[c] = true

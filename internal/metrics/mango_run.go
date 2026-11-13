@@ -25,9 +25,10 @@ const (
 // the CLI reports the reason it stopped in the last lines.
 const mangoOutputTail = 800
 
-// mangoRegime are the columns that describe the om regime rather than a
-// landing, so a box made only of them reads as a period, not a predictor.
-var mangoRegime = map[string]bool{"om_threshold": true, "dominant_model": true}
+// mangoRegime are the columns that describe the regime a landing ran under (the
+// om regime or the runtime era) rather than the landing itself, so a box made
+// only of them reads as a period, not a predictor.
+var mangoRegime = map[string]bool{"om_threshold": true, "dominant_model": true, "runtime_era": true}
 
 // MangoOptions are an explore run's parameters and the seam it reads the
 // result through. A zero field asks for the experiment's default, so the zero

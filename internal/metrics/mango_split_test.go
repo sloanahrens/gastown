@@ -175,7 +175,7 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	// the extract does not compare an estimate's write time with the dispatch, so
 	// an estimate written after dispatch can reach a predictor. Only the report
 	// applies that check (it scores on sp_estimated_at, which is explain-only).
-	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,sp_minutes,unknown_metric"
+	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,jev_fits20,jev_size,sp,sp_rung,sp_minutes,runtime_era,unknown_metric"
 	tests := []struct {
 		target string
 		want   string
