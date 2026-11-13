@@ -167,9 +167,44 @@ type crewRepo interface {
 	HasUncommittedChanges() (bool, error)
 	Pull(remote, branch string) error
 	CommonDir() (string, error)
+	ConfigGet(key string) (string, error)
+	ConfigSet(key, value string) error
 }
 
 var _ crewRepo = (*git.Git)(nil)
+
+// configureHooksPath points a new crew clone at its .githooks directory, the
+// pre-push guard, when the tree carries one. A value already set that names an
+// existing directory is kept. A value that names none is replaced, and one that
+// cannot be read is refused: an unreadable value is not known to be dangling.
+func configureHooksPath(repo crewRepo, clonePath string) error {
+	info, err := os.Stat(filepath.Join(clonePath, ".githooks"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading .githooks: %w", err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	current, err := repo.ConfigGet("core.hooksPath")
+	if err != nil {
+		return fmt.Errorf("reading core.hooksPath: %w", err)
+	}
+	named, err := git.HooksPathTargetExists(clonePath, current)
+	if err != nil {
+		return err
+	}
+	if named {
+		return nil
+	}
+	if err := repo.ConfigSet("core.hooksPath", ".githooks"); err != nil {
+		return fmt.Errorf("setting core.hooksPath: %w", err)
+	}
+	return nil
+}
 
 // Manager handles crew worker lifecycle.
 type Manager struct {
@@ -324,6 +359,10 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 	}
 
 	crewGit := m.gitAt(crewPath)
+	if err := configureHooksPath(crewGit, crewPath); err != nil {
+		_ = os.RemoveAll(crewPath) // best-effort cleanup
+		return nil, fmt.Errorf("configuring hooks path: %w", err)
+	}
 	branchName := defaultBranch
 
 	// Optionally create a working branch
