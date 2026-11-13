@@ -39,6 +39,7 @@ var townMetricsCommands = []struct{ name, short string }{
 	{metrics.CommandBacktest, "Backtest the weekly metrics against the regime events"},
 	{metrics.CommandReport, "Write the dated town metrics digest into the docs directory"},
 	{metrics.CommandStoryPoints, "Print the story-points shadow report from today's landings table"},
+	{metrics.CommandStoryPointsTrain, "Fit proposed story-points weights from today's landings table; writes a proposed file and a report, never the checked-in weights"},
 	{metrics.CommandAll, "Run extract, mango, backtest and report in order"},
 }
 

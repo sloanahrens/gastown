@@ -141,13 +141,19 @@ func (w Weights) EmbeddingMinutes(vec []float32) (float64, error) {
 	if len(vec) != len(w.embedCoef) {
 		return 0, fmt.Errorf("storypoints: embedding has %d numbers, want %d", len(vec), len(w.embedCoef))
 	}
-	z := w.embedIntercept
-	for i, x := range vec {
-		z += w.embedCoef[i] * float64(x)
-	}
-	m := math.Exp(z)
+	m := math.Exp(w.embedLog(vec))
 	if math.IsNaN(m) || math.IsInf(m, 0) {
 		return 0, errors.New("storypoints: embedding minutes are not a finite number")
 	}
 	return m, nil
+}
+
+// embedLog is the embedding ridge's log minutes for vec. The caller checks the
+// length against the weights' dimension; the result may be non-finite.
+func (w Weights) embedLog(vec []float32) float64 {
+	z := w.embedIntercept
+	for i, x := range vec {
+		z += w.embedCoef[i] * float64(x)
+	}
+	return z
 }

@@ -35,10 +35,12 @@ var shapeFeatureNames = []string{
 // weightsFile is the wire form of weights.json. The fields this code does not
 // use (trained_on, minutes_target, alpha) are not decoded.
 type weightsFile struct {
-	Version   int            `json:"version"`
-	Shape     shapeBlock     `json:"shape"`
-	Knots     [][]float64    `json:"fits_twenty_minutes_to_minutes_knots"`
-	Embedding embeddingBlock `json:"embedding"`
+	Version       int            `json:"version"`
+	TrainedOn     string         `json:"trained_on"`
+	MinutesTarget string         `json:"minutes_target"`
+	Shape         shapeBlock     `json:"shape"`
+	Knots         [][]float64    `json:"fits_twenty_minutes_to_minutes_knots"`
+	Embedding     embeddingBlock `json:"embedding"`
 }
 
 type shapeBlock struct {
@@ -47,11 +49,14 @@ type shapeBlock struct {
 	Scale     []float64 `json:"scale"`
 	Coef      []float64 `json:"coef"`
 	Intercept float64   `json:"intercept"`
+	Alpha     float64   `json:"alpha"`
 }
 
 type embeddingBlock struct {
 	Model     string    `json:"model"`
 	Dim       int       `json:"dim"`
+	Input     string    `json:"input"`
+	Alpha     float64   `json:"alpha"`
 	Coef      []float64 `json:"coef"`
 	Intercept float64   `json:"intercept"`
 }
@@ -69,6 +74,7 @@ type Weights struct {
 	knots []knot
 
 	embedModel     string
+	embedInput     string
 	embedCoef      []float64
 	embedIntercept float64
 }
@@ -172,6 +178,7 @@ func (f weightsFile) check() (Weights, error) {
 		shapeIntercept: f.Shape.Intercept,
 		knots:          knots,
 		embedModel:     f.Embedding.Model,
+		embedInput:     f.Embedding.Input,
 		embedCoef:      f.Embedding.Coef,
 		embedIntercept: f.Embedding.Intercept,
 	}, nil
@@ -188,11 +195,18 @@ func (w Weights) ShapeMinutes(s Shape) (float64, error) {
 	if len(w.shapeMean) != n || len(w.shapeScale) != n || len(w.shapeCoef) != n {
 		return 0, ErrNoWeights
 	}
+	return math.Exp(w.shapeLog(s)), nil
+}
+
+// shapeLog is the shape model's log minutes for s. It reads the shape lists as
+// LoadWeights checked them, so it has no error to return; ShapeMinutes checks
+// that a Weights has them at all.
+func (w Weights) shapeLog(s Shape) float64 {
 	z := w.shapeIntercept
 	for i, x := range s.vector() {
 		z += w.shapeCoef[i] * (x - w.shapeMean[i]) / w.shapeScale[i]
 	}
-	return math.Exp(z), nil
+	return z
 }
 
 // ShapeMean returns the training mean of the named shape feature. ok is false
@@ -203,6 +217,12 @@ func (w Weights) ShapeMean(feature string) (mean float64, ok bool) {
 		return 0, false
 	}
 	return w.shapeMean[i], true
+}
+
+// EmbeddingModel is the name of the embedding model the embedding ridge was fitted
+// on, "" when w has no embedding ridge.
+func (w Weights) EmbeddingModel() string {
+	return w.embedModel
 }
 
 // vector returns the features in shapeFeatureNames order.

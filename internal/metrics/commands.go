@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // The command layer: Main, the four steps it runs (extract, mango, backtest,
@@ -28,6 +30,10 @@ const (
 	// CommandStoryPoints is the story-points shadow report. It is not part of
 	// CommandAll: it reads the extract's table and prints, it writes no digest.
 	CommandStoryPoints = "storypoints"
+	// CommandStoryPointsTrain is the monthly retrain of the story-points weights. It
+	// writes a proposed file and a report, never the checked-in weights, and is not
+	// part of CommandAll.
+	CommandStoryPointsTrain = "storypoints-train"
 )
 
 // usageText is Main's answer to an argv that names no command, kept verbatim so
@@ -61,6 +67,12 @@ type Commands struct {
 	Mango func(town string) string
 	// Out takes the receipt lines; nil is the process's stdout.
 	Out io.Writer
+	// StoryPointsBase is the checked-in story-points weights the retrain keeps from
+	// and compares against; nil is storypoints.Default().
+	StoryPointsBase *storypoints.Weights
+	// Embedder embeds a bead's section text for the retrain; nil is the ollama
+	// embedder the checked-in weights name, at STORYPOINTS_EMBED_URL.
+	Embedder storypoints.Embedder
 }
 
 // withDefaults fills each seam the caller left unset with the host's, so the
@@ -131,13 +143,18 @@ func Run(ctx context.Context, command string, c Commands) error {
 			return fmt.Errorf("storypoints: %w", err)
 		}
 	}
+	if command == CommandStoryPointsTrain {
+		if err := c.runStoryPointsTrain(ctx, real, env); err != nil {
+			return fmt.Errorf("storypoints-train: %w", err)
+		}
+	}
 	return nil
 }
 
 // isCommand reports whether name is one of main's subcommands.
 func isCommand(name string) bool {
 	switch name {
-	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints:
+	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints, CommandStoryPointsTrain:
 		return true
 	}
 	return false
