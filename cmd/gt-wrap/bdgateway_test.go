@@ -120,6 +120,24 @@ func TestRunRefusesABdGatewayCallNotNamedBd(t *testing.T) {
 	}
 }
 
+// TestRunRefusesAnUnwiredBdGatewayTarget: a wrapper built without a bdgateway
+// constructor refuses rather than panicking, and launches nothing.
+func TestRunRefusesAnUnwiredBdGatewayTarget(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, bdGatewayConfigFile)
+	h.surface.newBdGateway = nil
+	if exit := h.run("bd", "show", "gt-x"); exit != 1 {
+		t.Fatalf("run = %d, want 1", exit)
+	}
+	if !strings.Contains(h.stderr.String(), "no bdgateway target is wired") {
+		t.Fatalf("stderr %q does not say the target is unwired", h.stderr)
+	}
+	if h.fake.launched {
+		t.Fatal("an unwired bdgateway target launched a call")
+	}
+}
+
 // TestDoctorPrintsTheBdGatewayLines: a bdgateway diagnosis names the URL and the
 // token file rather than a container and image.
 func TestDoctorPrintsTheBdGatewayLines(t *testing.T) {

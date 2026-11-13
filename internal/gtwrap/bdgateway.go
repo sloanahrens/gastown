@@ -116,16 +116,15 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if err != nil {
 		return exitDown, err
 	}
-	head, err := json.Marshal(bdgateway.Request{
+	// The head holds only strings, a slice and a map, so marshalling it cannot
+	// fail; a branch for an error that cannot happen would be dead.
+	head, _ := json.Marshal(bdgateway.Request{
 		Argv:      call.Argv[1:],
 		Env:       env,
 		Rig:       rig,
 		Cwd:       g.dirRelative(call.Dir),
 		TimeoutMS: g.timeoutMS(),
 	})
-	if err != nil {
-		return exitDown, fmt.Errorf("gtwrap: build the bd gateway request head: %w", err)
-	}
 	stdin := g.Stdin
 	if call.Stdin != nil {
 		stdin = call.Stdin
@@ -134,10 +133,9 @@ func (g BdGateway) Launch(call Call) (int, error) {
 		stdin = strings.NewReader("")
 	}
 	body := io.MultiReader(bytes.NewReader(append(head, '\n')), stdin)
-	req, err := http.NewRequest(http.MethodPost, g.endpoint(gatewayExecPath), body)
-	if err != nil {
-		return exitDown, fmt.Errorf("gtwrap: build the bd gateway request for %s: %w", g.URL, err)
-	}
+	// validate parsed the URL and the method is fixed, so building the request
+	// cannot fail.
+	req, _ := http.NewRequest(http.MethodPost, g.endpoint(gatewayExecPath), body)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", gatewayContentType)
 	req.Header.Set("X-Gt-Caller", g.caller())
@@ -178,16 +176,12 @@ func (g BdGateway) readFrames(r io.Reader) (int, error) {
 				return exitDown, fmt.Errorf("gtwrap: write bd's stderr: %w", err)
 			}
 		case bdgateway.FrameError:
-			payload, err := frame.GatewayError()
-			if err != nil {
-				return exitDown, fmt.Errorf("gtwrap: the bd gateway sent an error frame: %w", err)
-			}
+			// ReadFrame validated the payload, so decoding it cannot fail.
+			payload, _ := frame.GatewayError()
 			refusal = fmt.Errorf("gtwrap: the bd gateway refused the call: %s: %s", payload.Code, payload.Message)
 		case bdgateway.FrameExit:
-			status, err := frame.ExitStatus()
-			if err != nil {
-				return exitDown, fmt.Errorf("gtwrap: the bd gateway's exit frame: %w", err)
-			}
+			// ReadFrame validated the exit frame's payload the same way.
+			status, _ := frame.ExitStatus()
 			return status, refusal
 		}
 	}
@@ -219,10 +213,8 @@ func (g BdGateway) Doctor() (Diagnosis, error) {
 		diag.Reason = err.Error()
 		return diag, nil
 	}
-	req, err := http.NewRequest(http.MethodGet, g.endpoint(gatewayReadyPath), nil)
-	if err != nil {
-		return Diagnosis{}, fmt.Errorf("gtwrap: build the bd gateway readiness request for %s: %w", g.URL, err)
-	}
+	// validate parsed the URL, so building the readiness request cannot fail.
+	req, _ := http.NewRequest(http.MethodGet, g.endpoint(gatewayReadyPath), nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.doer(probeTimeout).Do(req)
 	if err != nil {

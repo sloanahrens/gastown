@@ -39,6 +39,16 @@ func statusResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
 }
 
+// errWriter fails every write, so a test drives the output write failure.
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// errReader fails every read, so a test drives a broken response stream.
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
+
 // writeGatewayToken writes a token file and returns its path.
 func writeGatewayToken(t *testing.T, token string) string {
 	t.Helper()
@@ -345,6 +355,41 @@ func TestBdGatewayErrors(t *testing.T) {
 			wantErr: "ended before an exit status", wantExit: exitDown,
 		},
 		{
+			name: "response stream breaks",
+			mutate: func(g *BdGateway, _ *Call) {
+				g.HTTP = doerFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(errReader{errors.New("broken pipe")}), Header: make(http.Header)}, nil
+				})
+			},
+			wantErr: "read the bd gateway's answer", wantExit: exitDown,
+		},
+		{
+			name: "stdout write fails",
+			mutate: func(g *BdGateway, _ *Call) {
+				g.Stdout = errWriter{errors.New("closed pipe")}
+				g.HTTP = doerFunc(func(*http.Request) (*http.Response, error) {
+					return gatewayResponse(t,
+						bdgateway.Frame{Kind: bdgateway.FrameStdout, Payload: []byte("x")},
+						bdgateway.ExitFrame(0),
+					), nil
+				})
+			},
+			wantErr: "write bd's stdout", wantExit: exitDown,
+		},
+		{
+			name: "stderr write fails",
+			mutate: func(g *BdGateway, _ *Call) {
+				g.Stderr = errWriter{errors.New("closed pipe")}
+				g.HTTP = doerFunc(func(*http.Request) (*http.Response, error) {
+					return gatewayResponse(t,
+						bdgateway.Frame{Kind: bdgateway.FrameStderr, Payload: []byte("x")},
+						bdgateway.ExitFrame(0),
+					), nil
+				})
+			},
+			wantErr: "write bd's stderr", wantExit: exitDown,
+		},
+		{
 			name: "BD_ALLOW_NEW_DATABASE",
 			mutate: func(_ *BdGateway, c *Call) {
 				c.Env = append(c.Env, "BD_ALLOW_NEW_DATABASE=1")
@@ -357,6 +402,13 @@ func TestBdGatewayErrors(t *testing.T) {
 				c.Argv = []string{"gt", "status"}
 			},
 			wantErr: "the bdgateway target runs bd", wantExit: exitDown,
+		},
+		{
+			name: "a call that names no tool",
+			mutate: func(_ *BdGateway, c *Call) {
+				c.Argv = nil
+			},
+			wantErr: "the call names no tool to run", wantExit: exitDown,
 		},
 		{
 			name: "no token file configured",
@@ -385,6 +437,13 @@ func TestBdGatewayErrors(t *testing.T) {
 				g.Town = "gt"
 			},
 			wantErr: "must be an absolute path", wantExit: exitDown,
+		},
+		{
+			name: "URL that does not parse",
+			mutate: func(g *BdGateway, _ *Call) {
+				g.URL = "http://gw:7440/%zz"
+			},
+			wantErr: "does not parse", wantExit: exitDown,
 		},
 		{
 			name: "URL that is not http",
