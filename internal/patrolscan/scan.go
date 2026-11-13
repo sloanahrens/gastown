@@ -223,6 +223,9 @@ type Escalation struct {
 	RelatedBead string
 	// Open is true while the escalation has not been closed.
 	Open bool
+	// CreatedAt and ClosedAt are when the escalation was raised and closed,
+	// zero when the record carries no such time. SeatAnsweredAt reads them.
+	CreatedAt, ClosedAt time.Time
 }
 
 // EscalationVerdict is what the escalations a seat raised for one work bead
@@ -271,20 +274,7 @@ type SeatEscalation struct {
 // exists — a decision is still pending. Only when none is open does a closed
 // one release it.
 func SeatEscalationVerdict(rig, name, bead string, raised []Escalation) SeatEscalation {
-	seat := rig + "/polecats/" + name
-	matches := make([]Escalation, 0, len(raised))
-	for _, e := range raised {
-		if !strings.EqualFold(strings.TrimSpace(e.EscalatedBy), seat) {
-			continue
-		}
-		if !escalationNamesBead(e, bead) {
-			continue
-		}
-		matches = append(matches, e)
-	}
-	// The listing order is bd's, so the verdict is taken over a sorted copy:
-	// the same set of escalations must answer the same way on every tick.
-	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	matches := seatEscalationMatches(rig, name, bead, raised)
 	for _, e := range matches {
 		if e.Open {
 			return SeatEscalation{Verdict: EscalationPending, ID: e.ID,
@@ -296,6 +286,54 @@ func SeatEscalationVerdict(rig, name, bead string, raised []Escalation) SeatEsca
 	}
 	return SeatEscalation{Verdict: EscalationUnnamed,
 		Detail: "agent_state stuck: exit ESCALATED and no escalation of the seat's names " + bead}
+}
+
+// seatEscalationMatches returns the escalations the seat raised that name bead,
+// sorted by ID: the raiser is the seat's own address and the bead is named by
+// escalationNamesBead. The listing order is bd's, so the answer is taken over
+// a sorted copy: the same set of escalations must answer the same way on every
+// tick.
+func seatEscalationMatches(rig, name, bead string, raised []Escalation) []Escalation {
+	seat := rig + "/polecats/" + name
+	matches := make([]Escalation, 0, len(raised))
+	for _, e := range raised {
+		if !strings.EqualFold(strings.TrimSpace(e.EscalatedBy), seat) {
+			continue
+		}
+		if !escalationNamesBead(e, bead) {
+			continue
+		}
+		matches = append(matches, e)
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	return matches
+}
+
+// SeatAnsweredAt returns when the decision a seat stopped on at exitedAt was
+// answered: the latest close of an escalation the seat raised for bead before
+// that exit and closed after it. It is zero when that cannot be shown: no such
+// escalation, or any of the seat's escalations for bead still open (the seat is
+// pending, SeatEscalationVerdict). An escalation whose raise time is unknown or
+// after the exit, or whose close time is unknown or not after it, is not
+// counted, so an escalation raised later by a seat that kept working is not
+// read as the stop's answer.
+//
+// The overrun guard restarts a stopped seat's clock from this time, so a zero
+// answer leaves the clock where the stop left it.
+func SeatAnsweredAt(rig, name, bead string, exitedAt time.Time, raised []Escalation) time.Time {
+	var answered time.Time
+	for _, e := range seatEscalationMatches(rig, name, bead, raised) {
+		if e.Open {
+			return time.Time{}
+		}
+		if e.CreatedAt.IsZero() || e.CreatedAt.After(exitedAt) {
+			continue
+		}
+		if e.ClosedAt.After(exitedAt) && e.ClosedAt.After(answered) {
+			answered = e.ClosedAt
+		}
+	}
+	return answered
 }
 
 // SeatEscalationHold is the one answer to "is this seat waiting on an

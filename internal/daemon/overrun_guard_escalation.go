@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"time"
+
 	"github.com/steveyegge/gastown/internal/patrolscan"
 )
 
@@ -37,6 +39,19 @@ func newOverrunEscalationReader(d *Daemon) *overrunEscalationReader {
 	return &overrunEscalationReader{d: d, raised: map[string]overrunRaised{}}
 }
 
+// rigRaised returns the rig's escalations as this cycle reads them, read once
+// and kept for the cycle's other seats of the rig.
+func (r *overrunEscalationReader) rigRaised(rig string) overrunRaised {
+	raised, ok := r.raised[rig]
+	if !ok {
+		h := &patrolScanHost{d: r.d}
+		escalations, err := h.PolecatEscalations(rig)
+		raised = overrunRaised{escalations: escalations, err: err}
+		r.raised[rig] = raised
+	}
+	return raised
+}
+
 // waiting reports whether the seat is stopped on an open escalation it raised for
 // its bead: its record says it stopped on one and the escalation is still open
 // (patrolscan.SeatEscalationHold). A live seat that raised an escalation and kept
@@ -50,19 +65,14 @@ func newOverrunEscalationReader(d *Daemon) *overrunEscalationReader {
 // counts all of the seat's time, the direction that stops rather than lets a seat
 // run unbounded.
 func (r *overrunEscalationReader) waiting(seat overrunSeat) (bool, error) {
-	h := &patrolScanHost{d: r.d}
-	raised, ok := r.raised[seat.Rig]
-	if !ok {
-		escalations, err := h.PolecatEscalations(seat.Rig)
-		raised = overrunRaised{escalations: escalations, err: err}
-		r.raised[seat.Rig] = raised
-	}
+	raised := r.rigRaised(seat.Rig)
 	if raised.err != nil {
 		return false, raised.err
 	}
 	if patrolscan.SeatEscalationVerdict(seat.Rig, seat.Polecat, seat.Bead, raised.escalations).Verdict != patrolscan.EscalationPending {
 		return false, nil
 	}
+	h := &patrolScanHost{d: r.d}
 	rec, err := h.AgentRecord(seat.Rig, seat.Polecat)
 	if err != nil {
 		return false, err
@@ -74,4 +84,33 @@ func (r *overrunEscalationReader) waiting(seat overrunSeat) (bool, error) {
 		return false, err
 	}
 	return verdict.Verdict == patrolscan.EscalationPending, nil
+}
+
+// answeredAt is when the escalation the seat's ESCALATED stop was for got its
+// answer: the close of the seat's escalation for the bead, when it was raised
+// before the stop and closed after it (patrolscan.SeatAnsweredAt). Zero when no
+// such answer is shown, and a seat whose bead carries no ESCALATED run end has
+// none. The guard starts the clock there, because the seat could not resume
+// until then (overrunAnsweredFloor). A read that fails is an error, which the
+// caller turns into counting the seat's whole run.
+func (r *overrunEscalationReader) answeredAt(seat overrunSeat) (time.Time, error) {
+	if seat.EscalatedEnd.IsZero() {
+		return time.Time{}, nil
+	}
+	raised := r.rigRaised(seat.Rig)
+	if raised.err != nil {
+		return time.Time{}, raised.err
+	}
+	return patrolscan.SeatAnsweredAt(seat.Rig, seat.Polecat, seat.Bead, seat.EscalatedEnd, raised.escalations), nil
+}
+
+// overrunAnsweredFloor is the clock a seat's run is measured from once its
+// ESCALATED stop was answered: the answer, when it is later than the run's
+// clock (slung), else slung. A zero answer changes nothing. An answer no later
+// than the clock is the run's own boundary already.
+func overrunAnsweredFloor(slung, answered time.Time) time.Time {
+	if answered.After(slung) {
+		return answered
+	}
+	return slung
 }

@@ -174,6 +174,9 @@ type overrunFake struct {
 	// escalationWaiting answers whether the seat waits on an escalation it
 	// raised. nil leaves the seam unset: no exemption.
 	escalationWaiting func(seat overrunSeat) (bool, error)
+	// escalationAnsweredAt answers when the seat's ESCALATED stop was answered.
+	// nil leaves the seam unset: the clock stays where the stop left it.
+	escalationAnsweredAt func(seat overrunSeat) (time.Time, error)
 
 	// lapsed and lapsedErr are what the resumed-stop re-check answers.
 	lapsed    string
@@ -231,10 +234,11 @@ func (f *overrunFake) baseSeams() overrunSeams {
 		submittedNow: func(overrunSeat) bool {
 			return f.submitted || (f.readyAfterStop && len(f.stops) > 0)
 		},
-		gateRunning:       f.gateRunning,
-		escalationWaiting: f.escalationWaiting,
-		pause:             func(seat overrunSeat) error { return f.step("pause", seat) },
-		clearPause:        func(seat overrunSeat) error { return f.step("clear-pause", seat) },
+		gateRunning:          f.gateRunning,
+		escalationWaiting:    f.escalationWaiting,
+		escalationAnsweredAt: f.escalationAnsweredAt,
+		pause:                func(seat overrunSeat) error { return f.step("pause", seat) },
+		clearPause:           func(seat overrunSeat) error { return f.step("clear-pause", seat) },
 		stopSession: func(seat overrunSeat) error {
 			if err := f.step("stop", seat); err != nil {
 				return err
