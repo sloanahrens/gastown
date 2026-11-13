@@ -242,7 +242,7 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 }
 
 // escalationCloseMessage is what the seat reads when its escalation closes. The
-// close reason is text another agent typed, so it is sanitized and labelled as
+// close reason is text another agent typed, so it is sanitized and labeled as
 // a recorded reason, not an instruction.
 func escalationCloseMessage(e patrolscan.Escalation) string {
 	reason := sanitizeEscalationCloseReason(e.CloseReason)

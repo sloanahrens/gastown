@@ -684,7 +684,7 @@ func TestEscalationCloseFailureBranchesLogged(t *testing.T) {
 }
 
 // TestEscalationCloseMessage pins the close text a seat reads: the reason is
-// sanitized, labelled as the closer's recorded reason, and cut at
+// sanitized, labeled as the closer's recorded reason, and cut at
 // escalationCloseReasonMax runes, never inside a character.
 func TestEscalationCloseMessage(t *testing.T) {
 	t.Parallel()
