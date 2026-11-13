@@ -220,6 +220,11 @@ func chooseAlpha(rows []Sample, learn learner) (float64, error) {
 // are copied into the proposed weights unchanged, so recalibrate them before the
 // file is adopted.
 func Retrain(base Weights, samples []Sample) (Model, error) {
+	return retrain(base, samples, shapeLearner, embedLearner)
+}
+
+// retrain is Retrain with the two learners given, so a test can make one of them fail.
+func retrain(base Weights, samples []Sample, shapeLearn, embedLearn learner) (Model, error) {
 	if base.EmbeddingDimension() == 0 || len(base.shapeCoef) != len(shapeFeatureNames) {
 		return Model{}, ErrNoWeights
 	}
@@ -262,11 +267,11 @@ func Retrain(base Weights, samples []Sample) (Model, error) {
 	}
 	fit, hold := sorted[:cut], sorted[cut:]
 
-	shapeAlpha, err := chooseAlpha(fit, shapeLearner)
+	shapeAlpha, err := chooseAlpha(fit, shapeLearn)
 	if err != nil {
 		return Model{}, fmt.Errorf("storypoints: shape penalty: %w", err)
 	}
-	embedAlpha, err := chooseAlpha(fit, embedLearner)
+	embedAlpha, err := chooseAlpha(fit, embedLearn)
 	if err != nil {
 		return Model{}, fmt.Errorf("storypoints: embedding penalty: %w", err)
 	}
@@ -279,7 +284,7 @@ func Retrain(base Weights, samples []Sample) (Model, error) {
 			fit[0].LandedAt.Format(time.DateOnly), fit[len(fit)-1].LandedAt.Format(time.DateOnly), len(fit)),
 	}
 
-	holdFit, err := fitBoth(fit, shapeAlpha, embedAlpha)
+	holdFit, err := fitBoth(fit, shapeAlpha, embedAlpha, shapeLearn, embedLearn)
 	if err != nil {
 		return Model{}, err
 	}
@@ -312,9 +317,9 @@ type fitted struct {
 	embed embedFit
 }
 
-// fitBoth fits both ridges over rows at the given penalties.
-func fitBoth(rows []Sample, shapeAlpha, embedAlpha float64) (fitted, error) {
-	shapeAt, err := shapeLearner(rows)
+// fitBoth fits both ridges over rows at the given penalties, with the given learners.
+func fitBoth(rows []Sample, shapeAlpha, embedAlpha float64, shapeLearn, embedLearn learner) (fitted, error) {
+	shapeAt, err := shapeLearn(rows)
 	if err != nil {
 		return fitted{}, fmt.Errorf("storypoints: shape fit: %w", err)
 	}
@@ -322,7 +327,7 @@ func fitBoth(rows []Sample, shapeAlpha, embedAlpha float64) (fitted, error) {
 	if err != nil {
 		return fitted{}, fmt.Errorf("storypoints: shape fit: %w", err)
 	}
-	embedAt, err := embedLearner(rows)
+	embedAt, err := embedLearn(rows)
 	if err != nil {
 		return fitted{}, fmt.Errorf("storypoints: embedding fit: %w", err)
 	}

@@ -120,6 +120,12 @@ func TestRidgeRefusesBadInput(t *testing.T) {
 	// Two samples of 1e200 overflow the Gram matrix to +Inf while every input is a
 	// finite number, so the factorization is what breaks down.
 	overflow := [][]float64{{1e200}, {-1e200}}
+	// Two samples of 3 features take the dual form, whose kernel entry is the dot
+	// product of the two rows: 1e200 squared overflows it.
+	overflowDual := [][]float64{{1e200, 0, 0}, {-1e200, 0, 0}}
+	// The Gram matrix is finite but tiny and the targets are huge, so the solution
+	// overflows: the coefficient is not a finite number.
+	solutionOverflow := [][]float64{{1e-160}, {-1e-160}}
 	cases := []struct {
 		name  string
 		x     [][]float64
@@ -139,6 +145,8 @@ func TestRidgeRefusesBadInput(t *testing.T) {
 		{"NaN target", good, nanTarget, 1, ErrNonFinite},
 		{"infinite feature", infRows, goodY, 1, ErrNonFinite},
 		{"finite inputs whose Gram matrix overflows", overflow, []float64{1, 2}, 1, ErrNotPositive},
+		{"finite inputs whose kernel matrix overflows", overflowDual, []float64{1, 2}, 1, ErrNotPositive},
+		{"finite inputs whose solution overflows", solutionOverflow, []float64{1e200, -1e200}, 1e-300, ErrNonFinite},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

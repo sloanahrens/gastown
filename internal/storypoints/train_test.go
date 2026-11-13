@@ -294,17 +294,17 @@ func TestLearnersRefuseNoRowsAndNoPenalty(t *testing.T) {
 	if _, err := embedAt(0); err == nil {
 		t.Errorf("embedding fit at penalty 0 returned no error")
 	}
-	if _, err := fitBoth(rows, 0, 1); err == nil {
+	if _, err := fitBoth(rows, 0, 1, shapeLearner, embedLearner); err == nil {
 		t.Errorf("fitBoth with shape penalty 0 returned no error")
 	}
-	if _, err := fitBoth(rows, 1, 0); err == nil {
+	if _, err := fitBoth(rows, 1, 0, shapeLearner, embedLearner); err == nil {
 		t.Errorf("fitBoth with embedding penalty 0 returned no error")
 	}
-	if _, err := fitBoth(nil, 1, 1); err == nil {
+	if _, err := fitBoth(nil, 1, 1, shapeLearner, embedLearner); err == nil {
 		t.Errorf("fitBoth over no rows returned no error")
 	}
 	noVectors := syntheticSamples(MinRetrainSamples, 7, 0)
-	if _, err := fitBoth(noVectors, 1, 1); err == nil {
+	if _, err := fitBoth(noVectors, 1, 1, shapeLearner, embedLearner); err == nil {
 		t.Errorf("fitBoth over embeddings with no numbers returned no error")
 	}
 }
@@ -323,6 +323,41 @@ func TestChooseAlphaReportsALearnerFailure(t *testing.T) {
 		if _, err := chooseAlpha(rows, learn); !errors.Is(err, boom) {
 			t.Errorf("%s failure: err = %v, want the learner's error", name, err)
 		}
+	}
+}
+
+// TestRetrainReportsALearnerFailure: a learner that fails stops the retrain with its
+// error, whether it fails in the penalty search of the shape or the embedding ridge, or
+// in the fit over the whole fit set.
+func TestRetrainReportsALearnerFailure(t *testing.T) {
+	t.Parallel()
+	base := testBase(t, 3)
+	samples := syntheticSamples(MinRetrainSamples+10, 10, 3)
+	boom := errors.New("boom")
+	failing := func([]Sample) (func(float64) (predictor, error), error) { return nil, boom }
+	// The 70 samples split 56 to fit. The penalty search fits on 14, 28 and 42 of them,
+	// so only the fit over all 56 reaches this learner at that size.
+	failOnFullFit := func(rows []Sample) (func(float64) (predictor, error), error) {
+		if len(rows) == 56 {
+			return nil, boom
+		}
+		return shapeLearner(rows)
+	}
+	cases := []struct {
+		name         string
+		shape, embed learner
+	}{
+		{"shape penalty search", failing, embedLearner},
+		{"embedding penalty search", shapeLearner, failing},
+		{"shape fit over the fit set", failOnFullFit, embedLearner},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := retrain(base, samples, tc.shape, tc.embed); !errors.Is(err, boom) {
+				t.Errorf("err = %v, want the learner's error", err)
+			}
+		})
 	}
 }
 

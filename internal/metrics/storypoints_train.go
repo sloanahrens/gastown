@@ -82,7 +82,7 @@ type trainCandidate struct {
 func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env Env) error {
 	// The outputs of an earlier run go first, so a run that refuses below leaves no
 	// proposed file and no report that describes the run before it.
-	if err := removeStoryPointsOutputs(real.Extract.OutDir); err != nil {
+	if err := removeStoryPointsOutputs(real.Extract.OutDir, os.Remove); err != nil {
 		return err
 	}
 	path := filepath.Join(real.Extract.OutDir, landingsName)
@@ -262,9 +262,10 @@ func (s holdoutScore) fileName() string {
 }
 
 // removeStoryPointsOutputs removes the proposed file under either of its names, and the
-// report, that an earlier run left in dir. A directory under one of those names is not a
-// file an earlier run wrote, so it is left in place for the write to fail on and name.
-func removeStoryPointsOutputs(dir string) error {
+// report, that an earlier run left in dir, through remove. A directory under one of those
+// names is not a file an earlier run wrote, so it is left in place for the write to fail
+// on and name.
+func removeStoryPointsOutputs(dir string, remove func(string) error) error {
 	for _, name := range []string{
 		storyPointsProposedName,
 		storyPointsProposedName + storyPointsRejectedSuffix,
@@ -281,7 +282,7 @@ func removeStoryPointsOutputs(dir string) error {
 		if info.IsDir() {
 			continue
 		}
-		if err := os.Remove(path); err != nil {
+		if err := remove(path); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}

@@ -343,6 +343,17 @@ func TestStoryPointsTrainRefusals(t *testing.T) {
 			setup: blockAt(storyPointsProposedName)},
 		{name: "report cannot be written", beads: trainTestBeads(90, 1, true), wrote: true, wantErr: storyPointsTrainReportName,
 			setup: blockAt(storyPointsTrainReportName)},
+		// The output path is a file, so the names under it cannot be looked up: the run
+		// refuses before it reads anything.
+		{name: "output directory is a file", beads: trainTestBeads(90, 1, true), wantErr: storyPointsProposedName,
+			setup: func(t *testing.T, outDir string) {
+				if err := os.Rename(outDir, outDir+".moved"); err != nil {
+					t.Fatalf("move output directory: %v", err)
+				}
+				if err := os.WriteFile(outDir, []byte("not a directory\n"), 0o644); err != nil {
+					t.Fatalf("write output path as a file: %v", err)
+				}
+			}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -439,6 +450,25 @@ func TestStoryPointsTrainRemovesStaleProposedFiles(t *testing.T) {
 				t.Errorf("stale %s survived the run (stat err %v)", tc.stale, err)
 			}
 		})
+	}
+}
+
+// TestRemoveStoryPointsOutputsReportsARemovalFailure: a stale file the step cannot remove
+// stops the run with an error that names the file, so the file is never read as the
+// verdict of this run.
+func TestRemoveStoryPointsOutputsReportsARemovalFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, storyPointsProposedName), []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write stale file: %v", err)
+	}
+	boom := errors.New("read-only directory")
+	err := removeStoryPointsOutputs(dir, func(string) error { return boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the remove error", err)
+	}
+	if !strings.Contains(err.Error(), storyPointsProposedName) {
+		t.Errorf("err = %q, want it to name %s", err, storyPointsProposedName)
 	}
 }
 
