@@ -675,6 +675,58 @@ func TestInitBeadsSetsIssuePrefix(t *testing.T) {
 	}
 }
 
+// bd refuses `config set issue_prefix` once bd init has persisted it, and the
+// refusal's wording differs by bd build. A refusal whose stored value already
+// matches the prefix is not a failure, whatever the refusal says.
+func TestInitBeadsAcceptsIssuePrefixRefusalWhenStoredPrefixMatches(t *testing.T) {
+	t.Parallel()
+	const prefix = "myrig"
+	refusal := &beads.CLIError{
+		Args:   []string{"config", "set", "issue_prefix", prefix},
+		Stdout: []byte("{\n  \"error\": {\"kind\": \"internal\"}\n}\n"),
+		Stderr: []byte("Error: issue_prefix must be changed with bd rename-prefix\n"),
+		Err:    errors.New("exit status 1"),
+	}
+	readErr := errors.New("bd config get: database not initialized")
+	cases := []struct {
+		name    string
+		stored  string
+		getErr  error
+		wantErr bool
+	}{
+		{"stored prefix matches", prefix, nil, false},
+		{"stored prefix differs", "other", nil, true},
+		{"read-back fails", prefix, readErr, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+				t.Fatalf("mkdir mayor/rig: %v", err)
+			}
+			manager, _, bd := testManager("", nil)
+			bd.config = map[string]string{"issue_prefix": tc.stored}
+			bd.fail = func(c bdCall) error {
+				if c.Verb == "config get" && tc.getErr != nil {
+					return tc.getErr
+				}
+				if c.Verb == "config set" && len(c.Args) > 0 && c.Args[0] == "issue_prefix" {
+					return refusal
+				}
+				return nil
+			}
+			err := manager.InitBeads(rigPath, "myrig", "")
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "bd config set issue_prefix failed")) {
+				t.Fatalf("InitBeads = %v, want the refused issue_prefix to fail", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("InitBeads: %v", err)
+			}
+		})
+	}
+}
+
 func TestInitBeadsPassesCanonicalDatabase(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
