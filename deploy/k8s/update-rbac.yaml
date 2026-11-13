@@ -11,10 +11,20 @@
 # exec resolves its pod from the Deployment's selector, so the pod's name is not known
 # when the grant is written.
 #
-# The gt-update-launch Role is the daemon's grant to start the roll as a Job: create,
-# get, list, watch and delete on jobs in gt, and nothing else. It is bound to the
-# daemon's ServiceAccount, not to gt-update, so the daemon can start the Job that
-# holds the rest of the access and cannot read or patch anything itself.
+# The gt-update-launch Role lets the daemon's ServiceAccount create, get, list, watch
+# and delete Jobs in gt, so the daemon can start the roll as a Job that outlives the
+# pod it replaces. WHAT THIS REACHES: through a Job the daemon can (1) run a pod as
+# the gt-update ServiceAccount and use its grants above (patch and get on the
+# Deployments daemon and dashboard, get and list pods, create pods/exec in gt); (2)
+# mount any Secret in gt, because the kubelet mounts what the pod's own spec names,
+# which includes gt-cloud-check-gcp, the cloud check's key, which the daemon pod
+# mounts only when the operator's key file is set; (3) run any image the nodes can
+# pull. WHY ACCEPTED: the daemon is the town's own control process, it already mounts
+# most of the Secrets in gt, and the roll must outlive the pod it replaces, so it
+# needs a creator other than that pod. WHAT BOUNDS IT: namespace gt only, and the
+# verbs on jobs only. The rendered Job template (deploy/k8s/update-job) is what the
+# daemon creates, but nothing enforces that. FOLLOW-UP, not in this change: a
+# ValidatingAdmissionPolicy that pins the Job's serviceAccountName, volumes and image.
 #
 # This file is not applied by the daemon. The operator's apply step applies it with
 # the Job's manifests. TestPodUpdateRBACManifestParses, TestPodUpdateRBACCoversEveryRead

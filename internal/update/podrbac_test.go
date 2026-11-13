@@ -856,6 +856,58 @@ func TestPodUpdateLaunchRBAC(t *testing.T) {
 	}
 }
 
+// podRBACLaunchReaches are the three reaches the launch Role's comment must state, in
+// the words the comment uses. A Job's pod spec is chosen by its creator, so the daemon
+// reaches each of them through a Job (gt-1qnr01).
+var podRBACLaunchReaches = []string{
+	"run a pod as the gt-update ServiceAccount",
+	"mount any Secret in gt",
+	"run any image the nodes can pull",
+}
+
+// podRBACRestrictionClaim is the wording the header must not use: it says the daemon
+// cannot read or patch, which a Job it creates makes false (gt-1qnr01).
+const podRBACRestrictionClaim = "cannot read or patch"
+
+// podRBACHeaderText returns the manifest's leading comment block as one line of words:
+// the "#" markers dropped and the lines joined, so a phrase that wraps still matches.
+func podRBACHeaderText(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.FromSlash(podRBACManifest))
+	if err != nil {
+		t.Fatalf("reading %s: %v", podRBACManifest, err)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "#") {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "#"))
+	}
+	return strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
+}
+
+// TestPodUpdateLaunchReachIsStated holds the launch Role's comment to the three reaches,
+// so the statement of what the daemon can reach through a Job cannot be dropped.
+func TestPodUpdateLaunchReachIsStated(t *testing.T) {
+	t.Parallel()
+	header := podRBACHeaderText(t)
+	for _, reach := range podRBACLaunchReaches {
+		if !strings.Contains(header, reach) {
+			t.Errorf("%s: the header does not state the launch Role's reach %q", podRBACManifest, reach)
+		}
+	}
+}
+
+// TestPodUpdateLaunchClaimsNoRestriction refuses a header that claims the daemon cannot
+// read or patch: through a Job it can, so the claim would mislead the next reader.
+func TestPodUpdateLaunchClaimsNoRestriction(t *testing.T) {
+	t.Parallel()
+	if header := podRBACHeaderText(t); strings.Contains(header, podRBACRestrictionClaim) {
+		t.Errorf("%s: the header claims %q, which a Job the daemon creates makes false", podRBACManifest, podRBACRestrictionClaim)
+	}
+}
+
 // podRBACBindingOrFail returns the RoleBinding named name in a fixture, failing the
 // test when the fixture holds none, so an edit never runs against nothing.
 func podRBACBindingOrFail(t *testing.T, docs []podRBACDoc, name string) *podRBACDoc {

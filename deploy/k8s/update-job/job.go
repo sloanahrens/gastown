@@ -1,8 +1,8 @@
 // Package updatejob renders the Kubernetes objects of the pod update's Job on the
 // control cluster (gt-1qnr01): one Job and a CronJob named gt-update, suspended,
 // that carry the same pod template. The roll runs as a Job, not in the daemon's
-// pod, because the daemon's pod is the thing the roll replaces, and a run that
-// lived there would die with it. The overseer starts a hand run with
+// pod; the reason, and what the daemon's grant to start it reaches, are in the
+// header of deploy/k8s/update-rbac.yaml. The overseer starts a hand run with
 // `kubectl -n gt create job --from=cronjob/gt-update gt-update-manual`, and the
 // daemon creates its Jobs from the same template. It renders only, so no apply path
 // and no Kubernetes client lives here.
