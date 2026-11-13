@@ -932,14 +932,14 @@ func TestValidateRefusesARootPodRoot(t *testing.T) {
 	}
 }
 
-// TestPodTownRootIsTheSharedConstant: the compiled-in root the wrapper maps onto and
-// the TownRootPath the Deployment is rendered with are both the literal the pod
-// mounts the town-state claim at, so a call with no pod_town_root maps onto that
-// path. The literal is written out here rather than read from the constant, so a
-// change to the constant fails this test.
+// TestPodTownRootIsTheSharedConstant: the pod mounts the town-state claim at the
+// Mac town root's own path, so with no pod_town_root configured the wrapper's
+// compiled-in root and the Deployment's TownRootPath must both spell the file's
+// kubeTown fixture. The expected value comes from that fixture rather than the
+// constant, so a change to the constant fails this test (gt-gxl0hx).
 func TestPodTownRootIsTheSharedConstant(t *testing.T) {
 	t.Parallel()
-	const wantPodTownRoot = "/Users/sloan/gt"
+	const wantPodTownRoot = kubeTown
 	f := healthyKube()
 	var note bytes.Buffer
 	if exit, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig", false)); err != nil || exit != 0 {
@@ -947,10 +947,10 @@ func TestPodTownRootIsTheSharedConstant(t *testing.T) {
 	}
 	argv := f.attached[0]
 	if root := argv[len(argv)-5]; root != wantPodTownRoot {
-		t.Fatalf("the wrapper's root argument is %q, want the literal pod town root %q", root, wantPodTownRoot)
+		t.Fatalf("the wrapper's root argument is %q, want the pod town root %q", root, wantPodTownRoot)
 	}
 	if k8sdaemon.TownRootPath != wantPodTownRoot {
-		t.Fatalf("the rendered TownRootPath is %q, want the literal pod town root %q", k8sdaemon.TownRootPath, wantPodTownRoot)
+		t.Fatalf("the rendered TownRootPath is %q, want the pod town root %q", k8sdaemon.TownRootPath, wantPodTownRoot)
 	}
 }
 
