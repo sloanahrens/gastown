@@ -846,7 +846,7 @@ func TestTapGuardBdCreateStoreUnreadableRefused(t *testing.T) {
 		{"open quote, bd from a hex escape, no --db to spell it", b.town, `$'\x62'd create "`, true},
 		{"open quote, bd from an octal escape, no --db to spell it", b.town, `$'\142\144' create "`, true},
 		{"open quote, bd and create built from star globs", b.town, `b* *reate "`, true},
-		{"open quote, bd's b built from a bracket glob", b.town, `[a]d create "`, true},
+		{"open quote, bd's b built from a bracket glob", b.town, `[b]d create "`, true},
 		{"open quote, expansion but no create", b.town, `echo "$HOME" "`, false},
 		{"open quote, no create", b.town, `bd list "`, false},
 		{"open quote, no bd", b.town, `echo "create`, false},
