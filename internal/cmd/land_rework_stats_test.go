@@ -527,6 +527,25 @@ func TestLandReworkStatsUnwritableOutput(t *testing.T) {
 	}
 }
 
+// TestLandReworkStatsHelpLeavesTheThresholdToTheOutput: the help names the
+// thin-week marker the report prints, and does not restate the bead threshold
+// or the criteria the program is judged on. The threshold lives in the code
+// and the criteria in docs/design/rework-program.md.
+func TestLandReworkStatsHelpLeavesTheThresholdToTheOutput(t *testing.T) {
+	t.Parallel()
+	help := landReworkStatsCmd.Long
+	for _, restated := range []string{"fewer than 20", "judged on", "not judged"} {
+		t.Run(restated, func(t *testing.T) {
+			if strings.Contains(help, restated) {
+				t.Errorf("help restates %q:\n%s", restated, help)
+			}
+		})
+	}
+	if !strings.Contains(help, "too few to say") {
+		t.Errorf("help does not name the thin-week marker the report prints:\n%s", help)
+	}
+}
+
 // TestLandReworkStatsEmptyTown: a town that has not landed yet has no
 // landings directory, and that is an empty report rather than a failure.
 func TestLandReworkStatsEmptyTown(t *testing.T) {

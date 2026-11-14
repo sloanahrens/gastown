@@ -47,11 +47,11 @@ var landReworkStatsCmd = &cobra.Command{
 	Short: "Report the rework program's weekly rework share and polecat minutes",
 	Long: `Report the rework program's two numbers, week by week.
 
-Lever 6 of the rework program (docs/design/rework-program.md) is judged on two
-figures from the landing record: the share of landed beads that needed two or
-more om review rounds, and the mean polecat minutes per landed bead. The report
-prints both per week, beside the share that needed two or more polecat seats and
-the week's bead count.
+The two figures come from the landing record: the share of landed beads that
+needed two or more om review rounds, and the mean polecat minutes per landed
+bead. The report prints both per week, beside the share that needed two or more
+polecat seats and the week's bead count. docs/design/rework-program.md (lever 6)
+says what they are for.
 
 Reads the rig landing ledgers (.runtime/landings/<rig>.jsonl) and the review log
 (.runtime/landings/reviews.jsonl), the files the other gt land commands read. A
@@ -60,8 +60,7 @@ the polecat_attempts its landing record carries. A landing recorded with no
 polecat time is counted in the No time column and left out of the mean, never
 read as zero. A bead landed twice counts once, in the week of its last landing.
 
-A week with fewer than 20 beads prints "too few to say": the program's figure is
-not judged on fewer beads than that.
+A week too thin to give a share or a mean prints "too few to say" in their place.
 
 The command reads only: it writes no file. --json prints the same numbers.
 
