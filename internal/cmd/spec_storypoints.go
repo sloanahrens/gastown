@@ -91,6 +91,11 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 		return res
 	}
 	answer := specStoryPointRun(env, beadID)
+	// The estimate appends its log line whatever the settings read next, so a
+	// failed append is reported even when the shadow setting is off.
+	if line := specEstimateLogLine(beadID, answer.outcome); line != "" {
+		res.Notices = append(res.Notices, line)
+	}
 	if env.StoryPointShadow {
 		if line := specStoryPointShadowLine(beadID, answer); line != "" {
 			res.Notices = append(res.Notices, line)
@@ -226,6 +231,7 @@ func specStoryPointEstimate(townRoot string) func(ctx context.Context, beadID st
 				Deps: func() (estimate.Deps, error) {
 					return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), os.Stderr)
 				},
+				Log: specEstimateAppendLog(townRoot, time.Now),
 			}
 		})
 }

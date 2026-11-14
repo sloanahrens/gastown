@@ -70,12 +70,32 @@ type Skip struct {
 	Reason string
 }
 
+// ComponentMinutes is each input's predicted minutes, as the estimate log
+// records them beside the features the inputs were built from.
+type ComponentMinutes struct {
+	// Shape is the shape model's minutes; a result always has one.
+	Shape *float64
+	// Embed is the embedding ridge's minutes; nil when the estimate had no
+	// embedding input.
+	Embed *float64
+	// Jev is the minutes the fits_twenty_minutes probability maps to; nil when
+	// the estimate had no Jev input.
+	Jev *float64
+}
+
 // Result is one estimate and everything the note says about it.
 type Result struct {
 	// Points is the point the blended minutes round to.
 	Points int
 	// Minutes is the blended estimate before rounding.
 	Minutes float64
+	// Shape is the twelve shape features the estimate read.
+	Shape storypoints.Shape
+	// Embedding is the vector the embedding ridge read; nil when the estimate
+	// had no embedding input.
+	Embedding []float32
+	// ComponentMinutes is each input's predicted minutes.
+	ComponentMinutes ComponentMinutes
 	// Inputs names the inputs the blend averaged, in the blend's names:
 	// shape, embed, jev.
 	Inputs []string
@@ -112,6 +132,18 @@ func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error
 // storypoints.Blend fail; the seam drives the refusal that would otherwise be
 // unreachable.
 func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func(storypoints.Inputs) (storypoints.Blended, error)) (Result, error) {
+	return estimateWithJev(ctx, deps, issue, blend, func(w storypoints.Weights, fits float64) (float64, error) {
+		return w.JevMinutes(fits)
+	})
+}
+
+// estimateWithJev is estimateWith with the step that maps the Jev probability
+// to minutes passed in. A successful blend has already mapped it, so that step
+// cannot fail with the same weights; the seam drives the refusal a successful
+// blend makes unreachable.
+func estimateWithJev(ctx context.Context, deps Deps, issue *beads.Issue,
+	blend func(storypoints.Inputs) (storypoints.Blended, error),
+	jevMinutes func(storypoints.Weights, float64) (float64, error)) (Result, error) {
 	if issue == nil {
 		return Result{}, ErrNoBead
 	}
@@ -128,15 +160,17 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	if err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: shape input: %w", err)
 	}
+	componentMinutes := ComponentMinutes{Shape: &shapeMinutes}
 
 	in := storypoints.Inputs{ShapeMinutes: &shapeMinutes, Weights: weights}
 	var skipped []Skip
 
-	embedMinutes, skip := embedInput(ctx, deps, weights, issue)
+	embedMinutes, vector, skip := embedInput(ctx, deps, weights, issue)
 	if skip != nil {
 		skipped = append(skipped, *skip)
 	} else {
 		in.EmbedMinutes = &embedMinutes
+		componentMinutes.Embed = &embedMinutes
 	}
 
 	jevFits, skip := jevInput(ctx, deps, issue)
@@ -149,6 +183,13 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	blended, err := blend(in)
 	if err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: %w", err)
+	}
+	if in.JevFits != nil {
+		jevMinutesValue, err := jevMinutes(weights, *in.JevFits)
+		if err != nil {
+			return Result{}, fmt.Errorf("storypoints/estimate: jev input: %w", err)
+		}
+		componentMinutes.Jev = &jevMinutesValue
 	}
 
 	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue)
@@ -164,6 +205,9 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	return Result{
 		Points:           blended.Points,
 		Minutes:          blended.Minutes,
+		Shape:            shape,
+		Embedding:        vector,
+		ComponentMinutes: componentMinutes,
 		Inputs:           blended.Inputs,
 		Skipped:          skipped,
 		Rung:             blended.Rung,
@@ -251,26 +295,27 @@ func writeHashField(h hash.Hash, name, value string) {
 	fmt.Fprintf(h, "%d:%s%d:%s", len(name), name, len(value), value)
 }
 
-// embedInput builds the embedding minutes, or the skip that says why not. A
-// nil embedder, a bead with no section text, an embedder failure and a ridge
-// that refuses the vector are all skips: the blend drops the input.
-func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *beads.Issue) (float64, *Skip) {
+// embedInput builds the embedding minutes and the vector the ridge read, or the
+// skip that says why not. A nil embedder, a bead with no section text, an
+// embedder failure and a ridge that refuses the vector are all skips: the blend
+// drops the input.
+func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *beads.Issue) (float64, []float32, *Skip) {
 	if deps.Embedder == nil {
-		return 0, &Skip{Input: "embed", Reason: "no embedder"}
+		return 0, nil, &Skip{Input: "embed", Reason: "no embedder"}
 	}
 	text, err := storypoints.SectionText(issue)
 	if err != nil {
-		return 0, &Skip{Input: "embed", Reason: err.Error()}
+		return 0, nil, &Skip{Input: "embed", Reason: err.Error()}
 	}
 	vec, err := deps.Embedder.Embed(ctx, text)
 	if err != nil {
-		return 0, &Skip{Input: "embed", Reason: err.Error()}
+		return 0, nil, &Skip{Input: "embed", Reason: err.Error()}
 	}
 	minutes, err := w.EmbeddingMinutes(vec)
 	if err != nil {
-		return 0, &Skip{Input: "embed", Reason: err.Error()}
+		return 0, nil, &Skip{Input: "embed", Reason: err.Error()}
 	}
-	return minutes, nil
+	return minutes, vec, nil
 }
 
 // jevInput asks the battery for the fits_twenty_minutes probability, or returns

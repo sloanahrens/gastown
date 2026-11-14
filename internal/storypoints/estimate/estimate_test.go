@@ -174,6 +174,126 @@ func TestEstimateAllInputs(t *testing.T) {
 	}
 }
 
+// TestEstimateResultCarriesTheFeaturesTheEstimatorRead: the result holds the
+// shape features, the embedding vector and each component's minutes, so the
+// estimate log records what the model saw rather than what the bead says later.
+func TestEstimateResultCarriesTheFeaturesTheEstimatorRead(t *testing.T) {
+	t.Parallel()
+	issue := sampleBead()
+	w := storypoints.Default()
+	vec := make([]float32, w.EmbeddingDimension())
+	vec[0], vec[1] = 0.25, -1.5
+	deps := workingDeps()
+	deps.Embedder = fakeEmbedder{vec: vec}
+
+	got, err := Estimate(context.Background(), deps, issue)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	wantShape := storypoints.Features(storypoints.EstimateText(issue), "gastown", storypoints.SeatUnknown, w)
+	if got.Shape != wantShape {
+		t.Fatalf("Shape = %+v, want %+v", got.Shape, wantShape)
+	}
+	if !slices.Equal(got.Embedding, vec) {
+		t.Fatalf("Embedding = %v, want %v", got.Embedding, vec)
+	}
+	wantShapeMinutes, err := w.ShapeMinutes(wantShape)
+	if err != nil {
+		t.Fatalf("shape minutes: %v", err)
+	}
+	wantEmbedMinutes, err := w.EmbeddingMinutes(vec)
+	if err != nil {
+		t.Fatalf("embedding minutes: %v", err)
+	}
+	wantJevMinutes, err := w.JevMinutes(0.5)
+	if err != nil {
+		t.Fatalf("jev minutes: %v", err)
+	}
+	if got.ComponentMinutes.Shape == nil || *got.ComponentMinutes.Shape != wantShapeMinutes {
+		t.Fatalf("component shape minutes = %v, want %v", got.ComponentMinutes.Shape, wantShapeMinutes)
+	}
+	if got.ComponentMinutes.Embed == nil || *got.ComponentMinutes.Embed != wantEmbedMinutes {
+		t.Fatalf("component embed minutes = %v, want %v", got.ComponentMinutes.Embed, wantEmbedMinutes)
+	}
+	if got.ComponentMinutes.Jev == nil || *got.ComponentMinutes.Jev != wantJevMinutes {
+		t.Fatalf("component jev minutes = %v, want %v", got.ComponentMinutes.Jev, wantJevMinutes)
+	}
+}
+
+// TestEstimateComponentMinutesFollowTheInputs: a component the estimate did not
+// have leaves its minutes nil and its embedding absent, so the log cannot
+// record a number the estimate never made.
+func TestEstimateComponentMinutesFollowTheInputs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		deps          func() Deps
+		wantEmbedding bool
+		wantEmbed     bool
+		wantJev       bool
+	}{
+		{"every input", workingDeps, true, true, true},
+		{"no embedder", func() Deps {
+			d := workingDeps()
+			d.Embedder = nil
+			return d
+		}, false, false, true},
+		{"the ridge refuses the vector", func() Deps {
+			d := workingDeps()
+			d.Embedder = fakeEmbedder{vec: []float32{1, 2, 3}}
+			return d
+		}, false, false, true},
+		{"no Jev asker", func() Deps {
+			d := workingDeps()
+			d.JevAsk = nil
+			return d
+		}, true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Estimate(context.Background(), tt.deps(), sampleBead())
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			if got.ComponentMinutes.Shape == nil {
+				t.Fatal("component shape minutes are nil; every result has one")
+			}
+			if (got.Embedding != nil) != tt.wantEmbedding {
+				t.Fatalf("Embedding = %v, want present = %v", got.Embedding, tt.wantEmbedding)
+			}
+			if (got.ComponentMinutes.Embed != nil) != tt.wantEmbed {
+				t.Fatalf("component embed minutes = %v, want present = %v", got.ComponentMinutes.Embed, tt.wantEmbed)
+			}
+			if (got.ComponentMinutes.Jev != nil) != tt.wantJev {
+				t.Fatalf("component jev minutes = %v, want present = %v", got.ComponentMinutes.Jev, tt.wantJev)
+			}
+		})
+	}
+}
+
+// TestEstimateRefusesJevMinutesItCannotMap: the minutes the log records for the
+// Jev input are mapped by the weights the blend used, so a mapping failure
+// refuses the estimate rather than recording a component the estimator could
+// not compute. A successful blend has already mapped the value, so the seam
+// drives a failure the real blend makes unreachable.
+func TestEstimateRefusesJevMinutesItCannotMap(t *testing.T) {
+	t.Parallel()
+	blend := func(storypoints.Inputs) (storypoints.Blended, error) {
+		return storypoints.Blended{Minutes: 6, Points: 3, Inputs: []string{"shape", "jev"}, Rung: "shape-jev"}, nil
+	}
+	unmappable := func(storypoints.Weights, float64) (float64, error) {
+		return 0, storypoints.ErrNoWeights
+	}
+	got, err := estimateWithJev(context.Background(), workingDeps(), sampleBead(), blend, unmappable)
+	if !errors.Is(err, storypoints.ErrNoWeights) {
+		t.Fatalf("estimateWithJev error = %v, want %v", err, storypoints.ErrNoWeights)
+	}
+	if got.Points != 0 || got.Rung != "" {
+		t.Fatalf("estimateWithJev = %+v, want no result", got)
+	}
+}
+
 // TestEstimateSkippedInputs drives each way an optional input can fail: the rung
 // falls, and the note names the input and the reason.
 func TestEstimateSkippedInputs(t *testing.T) {
