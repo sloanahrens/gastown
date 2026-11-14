@@ -517,7 +517,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// With a bd gateway configured, initialise the rig's database through bd.real
+	// With a bd gateway configured, initialize the rig's database through bd.real
 	// in a temporary workspace and push the town copy, so the rig is usable through
 	// the gateway at once. A failure is reported; the rig add stands and the
 	// daemon's reconcile converges a failed push (docs/design/bd-container.md, G8b).

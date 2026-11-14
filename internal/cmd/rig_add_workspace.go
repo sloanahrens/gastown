@@ -15,7 +15,7 @@ import (
 )
 
 // rigAddWorkspace is the gateway half of gt rig add (docs/design/bd-container.md,
-// task G8b). With a bd gateway configured, the new rig's database is initialised
+// task G8b). With a bd gateway configured, the new rig's database is initialized
 // through bd.real in a temporary workspace, and then the town copy is pushed so the
 // rig is usable through the gateway from the moment it exists. Without a gateway
 // it does nothing: no temporary workspace, no bd.real, no push.
@@ -30,7 +30,7 @@ type rigAddWorkspace struct {
 	// init passes it as --server-port so bd.real reaches the town's server, as the
 	// rig's own init does.
 	serverPort func(townRoot string) int
-	// tempDir makes the workspace bd.real initialises in; removeDir takes it back.
+	// tempDir makes the workspace bd.real initializes in; removeDir takes it back.
 	tempDir   func() (string, error)
 	removeDir func(path string) error
 }
@@ -52,7 +52,7 @@ func processRigAddWorkspace(getenv func(string) string) rigAddWorkspace {
 	}
 }
 
-// run initialises the rig's database through bd.real in a temporary workspace and
+// run initializes the rig's database through bd.real in a temporary workspace and
 // then pushes the town copy. The init runs first, so the database exists before the
 // gateway is sent the metadata that names it; the workspace bd writes stays in the
 // temporary directory, and the database itself lives in Dolt. A failure is returned,
@@ -63,7 +63,7 @@ func (w rigAddWorkspace) run(ctx context.Context, townRoot, rig, prefix string) 
 		return nil
 	}
 	if w.push == nil || w.bdReal == nil || w.serverPort == nil || w.tempDir == nil || w.removeDir == nil {
-		return fmt.Errorf("rig %s: the bd gateway step has no %s wired; the workspace was not initialised or pushed", rig, unwiredRigAddStep(w))
+		return fmt.Errorf("rig %s: the bd gateway step has no %s wired; the workspace was not initialized or pushed", rig, unwiredRigAddStep(w))
 	}
 	dir, err := w.tempDir()
 	if err != nil {
