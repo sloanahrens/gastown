@@ -52,7 +52,9 @@ for a copy-out, is written last and is not applied with the rest.
 
 Secret documents are not written. The command prints, for each Secret the
 Deployment mounts, one kubectl line that creates it from the operator's existing
-file, so no agent reads a secret. No file is opened to print those lines.
+file, so no agent reads a secret. No file is opened to print those lines. The
+one exception is the daemon's bd gateway token Secret, which --daemon-bd-gateway-url
+mounts: the operator creates it, and the command prints a note in place of a line.
 
 The image values file is read from under --dir, where imagevalues places it;
 a missing file is refused, since a render needs a digest. A live render also
@@ -100,6 +102,10 @@ type clusterRenderFlags struct {
 	trackerDSNSecret   string
 	trackerBackup      bool
 	trackerBackupImage string
+	daemonBdGatewayURL string
+	// daemonBdGatewayURLSet is whether the flag was named at all, so an empty value
+	// is refused rather than read as absent.
+	daemonBdGatewayURLSet bool
 }
 
 var clusterRender clusterRenderFlags
@@ -197,12 +203,15 @@ func init() {
 		"also write the nightly tracker dump beside trackerd: the tracker-backup claim and its CronJob, after trackerd's Deployment; it needs --tracker and --tracker-backup-image")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerBackupImage, "tracker-backup-image", "",
 		"the postgres image the nightly dump runs in, by digest; its pg_dump must match the server's major version; it needs --tracker-backup")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonBdGatewayURL, "daemon-bd-gateway-url", "",
+		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
 }
 
 func runTownClusterRender(cmd *cobra.Command, _ []string) error {
+	clusterRender.daemonBdGatewayURLSet = cmd.Flags().Changed("daemon-bd-gateway-url")
 	return runClusterRender(realClusterRenderDeps(cmd.OutOrStdout()), clusterRender)
 }
 
@@ -253,6 +262,10 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
 	case f.bdGatewayURL != "" && !f.dashboard:
 		return errors.New("--bd-gateway-url is for the dashboard: name --dashboard with it, or drop the flag")
+	case (f.daemonBdGatewayURLSet || f.daemonBdGatewayURL != "") && strings.TrimSpace(f.daemonBdGatewayURL) == "":
+		// Checked here, before any write; the URL's shape is checked by the
+		// Build call, which names Values.DaemonBdGatewayURL and never echoes it.
+		return errors.New("--daemon-bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
 	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
 		return fmt.Errorf("--daemon-claude-dir %q must be an absolute path: the pod names the host directory", f.daemonClaudeDir)
 	case f.rehearsal && f.tracker:
@@ -391,6 +404,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),
 		TrackerBackup:           f.trackerBackup,
 		TrackerBackupImage:      strings.TrimSpace(f.trackerBackupImage),
+		DaemonBdGatewayURL:      strings.TrimSpace(f.daemonBdGatewayURL),
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token
@@ -477,6 +491,11 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if f.trackerBackup {
 		fmt.Fprintf(d.out, "  %s\n", trackerBackupLine(strings.TrimSpace(f.trackerBackupImage), strings.TrimSpace(f.trackerDSNSecret)))
 		fmt.Fprintf(d.out, "  %s\n", trackerBackupReaderLine())
+	}
+	// The daemon's gateway Secret is operator-created and skipped by secretCreateLines,
+	// so this note names it in its place. The render never reads the token.
+	if f.daemonBdGatewayURL != "" {
+		fmt.Fprintf(d.out, "  %s\n", daemonBdGatewayTokenLine())
 	}
 	if !f.rehearsal {
 		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
@@ -620,6 +639,11 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 			continue
 		}
 		name := vol.Secret.SecretName
+		// The daemon's gateway token Secret is operator-created and named by its own
+		// note (daemonBdGatewayTokenLine), so it has no create line here.
+		if name == k8sdaemon.BdGatewayDaemonSecretName {
+			continue
+		}
 		sec, ok := secrets[name]
 		if !ok {
 			return nil, fmt.Errorf("the Deployment mounts Secret %s, which the render did not write, so no create command can be printed for it", name)
@@ -664,6 +688,14 @@ func trackerSecretLine(name string) string {
 // the render never sees the DSN.
 func trackerBackupLine(image, secret string) string {
 	return fmt.Sprintf("the nightly tracker dump runs in image %s and reads its DSN from Secret %s under key %s, the same Secret trackerd reads; this render does not read it", image, secret, k8sdaemon.TrackerDSNKey)
+}
+
+// daemonBdGatewayTokenLine names the Secret the daemon reads the bd gateway's token
+// from, and where the pod mounts it. It is a note, like trackerBackupLine: the
+// operator creates the Secret, and the render neither creates it nor reads the
+// token.
+func daemonBdGatewayTokenLine() string {
+	return fmt.Sprintf("the daemon reads its bd gateway token from Secret %s under key %s, mounted at %s: create it yourself before the apply; this render does not create it or read the token", k8sdaemon.BdGatewayDaemonSecretName, k8sdaemon.BdGatewayTokenKey, k8sdaemon.BdGatewayTokenDir)
 }
 
 // trackerBackupReaderLine names the reader Pod and says it is not applied with the
