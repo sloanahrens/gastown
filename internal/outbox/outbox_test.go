@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
 	const beadID = "gt-swfo9e"
 	tests := []struct {
 		name  string
@@ -52,6 +53,7 @@ func TestValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := Validate([]byte(tt.raw), []byte(tt.notes), beadID)
 			if err != nil {
 				t.Fatalf("Validate() error = %v, want nil", err)
@@ -64,6 +66,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestValidateMalformed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		raw  string
@@ -78,6 +81,7 @@ func TestValidateMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := Validate([]byte(tt.raw), nil, "gt-swfo9e")
 			if err == nil {
 				t.Fatalf("Validate(%q) = %#v, nil; want an error", tt.raw, got)
