@@ -3,18 +3,16 @@ package land
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // TestLocalRoundDocStatesTheRules holds the local round design page to the rules
-// the code enforces. The bound and the switch are built from the constant and
-// the config names that enforce them, so a changed rule fails here until the
-// page states it; the unavailable rule's sentence is pinned as the page writes
-// it.
+// the code enforced. The bound is built from the constant that enforced it, so
+// a changed rule fails here until the page states it; the unavailable rule's
+// sentence is pinned as the page writes it. The page's switch section is not
+// pinned: the setting left the schema (gt-i9rw9d), so a row for its key would
+// check the page against a literal no code declares.
 func TestLocalRoundDocStatesTheRules(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "design", "local-round.md"))
@@ -27,9 +25,8 @@ func TestLocalRoundDocStatesTheRules(t *testing.T) {
 		phrase string
 	}{
 		{"the bound", wordForBound(t, localRoundsPerDay) + " per bead per day"},
-		{"the switch", localRoundSwitchKey(t)},
-		// The patrol fetches before Allow counts (internal/daemon/local_round.go),
-		// so a fetch failure spends no round; the page must say so.
+		// The retired daemon patrol fetched the head before Allow counted the
+		// round, so a fetch failure spent no round; the page states the rule.
 		{"a fetch failure is not a round", "A request whose head cannot be fetched is not a round"},
 		// gt done's gate enforces this rule (internal/cmd/done_local_round.go),
 		// and no land constant carries its sentence to build the row from.
@@ -77,28 +74,4 @@ func wordForBound(t *testing.T, n int) string {
 		t.Fatalf("localRoundsPerDay = %d has no word here; extend wordForBound and state the new bound on the design page", n)
 	}
 	return words[n]
-}
-
-// localRoundSwitchKey is the daemon setting the page names: the daemon file's
-// name, then the JSON names the daemon config reads, so a renamed key fails
-// here until the page names the new one.
-func localRoundSwitchKey(t *testing.T) string {
-	t.Helper()
-	return "daemon." + jsonFieldName(t, config.DaemonPatrolConfig{}, "LocalRoundSetting") +
-		"." + jsonFieldName(t, config.LocalRoundConfig{}, "Enabled")
-}
-
-// jsonFieldName is the JSON name of v's field, which is the key a daemon config
-// file sets it by.
-func jsonFieldName(t *testing.T, v any, field string) string {
-	t.Helper()
-	f, ok := reflect.TypeOf(v).FieldByName(field)
-	if !ok {
-		t.Fatalf("%T has no field %s", v, field)
-	}
-	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-	if name == "" || name == "-" {
-		t.Fatalf("%T.%s has no JSON name", v, field)
-	}
-	return name
 }

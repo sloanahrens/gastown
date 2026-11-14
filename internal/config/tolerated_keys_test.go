@@ -85,6 +85,63 @@ func TestToleratedTierSweepKeyWarnsOncePerProcess(t *testing.T) {
 	}
 }
 
+// The polecat's local om round left the schema (gt-i9rw9d). A deployed
+// settings file still carries daemon.local_round, so a load accepts it and
+// reads no part of it; the daemon reads the "daemon" section, and a legacy
+// mayor/daemon.json, as a bare patrol document, so both shapes load.
+func TestToleratedLocalRoundKeysDecode(t *testing.T) {
+	t.Parallel()
+	const block = `"local_round":{"enabled":true,"timeout_seconds":300}`
+	t.Run("town settings section", func(t *testing.T) {
+		t.Parallel()
+		body := `{"type":"town-settings","version":1,"daemon":{"container_off":["ci"],` + block + `}}`
+		var s TownSettings
+		if err := DecodeJSONFile("settings/config.json", []byte(body), &s); err != nil {
+			t.Fatalf("DecodeJSONFile: %v", err)
+		}
+		if s.Daemon == nil || !slices.Equal(s.Daemon.ContainerOff(), []string{"ci"}) {
+			t.Fatalf("the daemon section did not load around the tolerated block: %+v", s.Daemon)
+		}
+	})
+	t.Run("patrol document", func(t *testing.T) {
+		t.Parallel()
+		body := `{"type":"daemon-patrol-config","version":1,"container_off":["ci"],` + block + `}`
+		var cfg DaemonPatrolConfig
+		if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+			t.Fatalf("DecodeJSONFile: %v", err)
+		}
+		if !slices.Equal(cfg.ContainerOff(), []string{"ci"}) {
+			t.Fatalf("container_off = %v, want the key beside the tolerated block read", cfg.ContainerOff())
+		}
+	})
+	t.Run("a misspelt local round key is still refused", func(t *testing.T) {
+		t.Parallel()
+		body := `{"type":"town-settings","version":1,"daemon":{"local_roun":{"enabled":true}}}`
+		var s TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(body), &s)
+		var pe *ParseError
+		if !errors.As(err, &pe) {
+			t.Fatalf("DecodeJSONFile = %v, want a ParseError for the misspelling", err)
+		}
+		if want := []string{"daemon.local_roun"}; !slices.Equal(pe.Keys, want) {
+			t.Errorf("Keys = %v, want only the misspelling %v", pe.Keys, want)
+		}
+	})
+	t.Run("the bare key at the top of another file is refused", func(t *testing.T) {
+		t.Parallel()
+		body := `{"type":"town-settings","version":1,` + block + `}`
+		var s TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(body), &s)
+		var pe *ParseError
+		if !errors.As(err, &pe) {
+			t.Fatalf("DecodeJSONFile = %v, want a ParseError for a key outside the daemon section", err)
+		}
+		if want := []string{"local_round"}; !slices.Equal(pe.Keys, want) {
+			t.Errorf("Keys = %v, want only the key outside the daemon section %v", pe.Keys, want)
+		}
+	})
+}
+
 // The forgejo block left the schema with the power states (gt-a2uug4.17). Its
 // tolerated entry went once no live settings file carried it (gt-x4wnny), so a
 // load now refuses the block as an undeclared key.
