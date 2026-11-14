@@ -118,13 +118,18 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 			points = p
 		}
 	}
-	if err := env.AddLabel(beadID, specdispatch.SplitLabel); err != nil {
+	// The note goes first: the label is what the guard above reads on the next
+	// tick, so a label that landed before a failed note would hold the bead
+	// without its note. Annotate keys the note by its prefix, so a retry after a
+	// label that did not land writes no second copy.
+	if err := env.Annotate(beadID, specStoryPointSplitNotePrefix, specSplitNote(answer.outcome, points, minutes, splitOver)); err != nil {
+		// A note that did not land leaves the bead unlabeled: it is held here,
+		// and the next tick judges it again and writes the note.
+		res.Errors = append(res.Errors, fmt.Sprintf("%s: split note: %v", beadID, err))
+	} else if err := env.AddLabel(beadID, specdispatch.SplitLabel); err != nil {
 		// A label that did not land does not change the estimate: the bead is
 		// held here, and the next tick retries the label.
 		res.Errors = append(res.Errors, fmt.Sprintf("%s: split label: %v", beadID, err))
-	}
-	if err := env.Annotate(beadID, specStoryPointSplitNotePrefix, specSplitNote(answer.outcome, points, minutes, splitOver)); err != nil {
-		res.Errors = append(res.Errors, fmt.Sprintf("%s: split note: %v", beadID, err))
 	}
 	res.Hold = fmt.Sprintf("%s: %sestimated %s min (sp:%d, rung %s), at or over the %s-minute trigger; held for splitting",
 		beadID, specdispatch.SkipSplitOver, specMinutesText(minutes), points, rung, specTriggerText(splitOver))
