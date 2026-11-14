@@ -1011,6 +1011,12 @@ func (b *openshellBackend) createOrReplaceEndedSeat(ctx context.Context, create 
 	if rec.Gateway != b.profile.Gateway {
 		return fmt.Errorf("%w; the record of the sandbox holding the name names gateway %q, not this spawn's %q, so it is left alone", createErr, rec.Gateway, b.profile.Gateway)
 	}
+	// The ended marker is asked of create.Name, and the copy and the delete below
+	// act on the record's session. A record that names another sandbox would have
+	// those act on a sandbox the marker never read, so it is refused first.
+	if rec.Session != create.Name {
+		return fmt.Errorf("%w; the record of the sandbox holding the name names sandbox %q, not %q, so it is left alone", createErr, rec.Session, create.Name)
+	}
 	ended, err := sandboxEndedMarkerPresentWith(b.cli, create.Name)
 	if err != nil {
 		return fmt.Errorf("%w; asking the sandbox holding the name for its ended marker: %v", createErr, err)

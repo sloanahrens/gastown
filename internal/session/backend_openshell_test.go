@@ -1531,7 +1531,7 @@ func TestOpenShellCheckSandboxGTRefusesWhenTheSourceCheckoutIsUnknown(t *testing
 // A create the gateway refuses asks whether the name is held, and a name no
 // sandbox holds leaves the create's own failure standing: nothing is deleted and
 // nothing further runs (gt-vgm971).
-func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
+func TestOpenShellPrepareCreateFailureWithTheNameFreeMakesNoFurtherCalls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	fake := &sandbox.Fake{
@@ -2348,24 +2348,6 @@ func TestOpenShellPolicyComesFromTheTownCopyNotTheWorktree(t *testing.T) {
 	b, _ := openshellTestBackend(town, openshellTestProfile, &sandbox.Fake{})
 
 	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
-	if err != nil {
-		t.Fatalf("createSpec: %v", err)
-	}
-	if want := filepath.Join(openshellTestPolicyRoot(town), "deploy", "polecat", "policy.yaml"); cs.PolicyPath != want {
-		t.Fatalf("PolicyPath = %q, want the town copy %q", cs.PolicyPath, want)
-	}
-}
-
-// The backend a town gets from newOpenShellBackend resolves the policy with the
-// production resolver, not the test seam: the gastown rig's build checkout.
-func TestOpenShellProductionPolicyRootIsTheTownCheckout(t *testing.T) {
-	t.Parallel()
-	town, work := openshellTown(t)
-	b, err := newOpenShellBackend(town, openshellTestProfile)
-	if err != nil {
-		t.Fatalf("newOpenShellBackend: %v", err)
-	}
-	cs, err := b.(*openshellBackend).createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}

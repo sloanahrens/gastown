@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path"
@@ -109,6 +110,7 @@ type replacedSeatOpts struct {
 	record             bool   // write the old run's record first
 	corruptRecord      bool   // write an unreadable record instead
 	recordGateway      string // the record's gateway; "" is the profile's
+	recordSession      string // the record filed under the held name names this session instead
 	getErr             error  // the gateway cannot say whether the name is held
 	marker             string // the ended marker answer: "present", "absent" or ""
 	markerErr          error  // the ended marker exec fails
@@ -159,6 +161,12 @@ func TestOpenShellPrepareCreateOverAHeldSeatRefusals(t *testing.T) {
 			name:        "the record names another gateway",
 			opts:        replacedSeatOpts{held: true, record: true, recordGateway: "elsewhere"},
 			wantErr:     `names gateway "elsewhere"`,
+			wantCreates: 1,
+		},
+		{
+			name:        "the record under the name names another sandbox",
+			opts:        replacedSeatOpts{held: true, recordSession: "gt-gastown-sandbox-other", marker: "present"},
+			wantErr:     `names sandbox "gt-gastown-sandbox-other"`,
 			wantCreates: 1,
 		},
 		{
@@ -217,6 +225,22 @@ func TestOpenShellPrepareCreateOverAHeldSeatRefusals(t *testing.T) {
 					rec.Gateway = tt.opts.recordGateway
 				}
 				if err := WriteSandboxRecord(town, rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.opts.recordSession != "" {
+				// WriteSandboxRecord files a record under its own session, so the
+				// record that names another sandbox is written under the held name by hand.
+				rec := replacedSeatRecord()
+				rec.Session = tt.opts.recordSession
+				data, err := json.Marshal(rec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(SandboxRegistryDir(town), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(sandboxRecordPath(town, openshellTestSession), data, 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
