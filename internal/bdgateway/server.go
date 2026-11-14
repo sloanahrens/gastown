@@ -131,7 +131,7 @@ func (g *Gateway) BeginShutdown() { g.closing.Store(true) }
 // readiness never starts bd, so a missing binary surfaces on the first call.
 func (g *Gateway) Ready() error {
 	switch {
-	case g == nil || g.auth == nil:
+	case g.auth == nil:
 		return errors.New("bdgateway: no token loader is configured")
 	case !g.auth.Loaded():
 		return errors.New("bdgateway: no token table is loaded")

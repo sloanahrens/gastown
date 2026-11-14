@@ -372,7 +372,8 @@ func TestBdgwReadyReasons(t *testing.T) {
 	}{
 		{name: "no authenticator", g: &Gateway{policy: mustPolicy(t), workspaces: mustStore(t)}, want: "no token loader"},
 		{name: "no verbs file", g: &Gateway{auth: testAuthenticator(t), workspaces: mustStore(t)}, want: "no verbs file"},
-		{name: "no workspace", g: &Gateway{auth: testAuthenticator(t), policy: mustPolicy(t), workspaces: mustStore(t)}, want: "no workspace is loaded"},
+		{name: "no workspace store", g: &Gateway{auth: testAuthenticator(t), policy: mustPolicy(t)}, want: "no workspace is loaded"},
+		{name: "no workspace loaded", g: &Gateway{auth: testAuthenticator(t), policy: mustPolicy(t), workspaces: mustStore(t)}, want: "no workspace is loaded"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
