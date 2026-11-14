@@ -4,8 +4,10 @@
 // at deploy/ci/images.workflow.yml calls it; the logic and its refusal tests
 // live in internal/ci/imagepublish.
 //
-//	imagepublish push  -registry <host:port> -owner <account> -daemon <name> -polecat <name> -tag <sha12> -sha <full sha>
-//	imagepublish check -registry <host:port> -owner <account> -daemon <name> -polecat <name> -tag <sha12> -sha <full sha>
+//	imagepublish push  -registry <host:port> -owner <account> -daemon <name> -polecat <name> [-bd <name>] -tag <sha12> -sha <full sha>
+//	imagepublish check -registry <host:port> -owner <account> -daemon <name> -polecat <name> [-bd <name>] -tag <sha12> -sha <full sha>
+//
+// -bd is the bd gateway image; leave it out for a commit that built none.
 package main
 
 import (
@@ -37,6 +39,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.Owner, "owner", "", "the registry account that owns the images")
 	fs.StringVar(&o.Daemon, "daemon", "", "the daemon image's name")
 	fs.StringVar(&o.Polecat, "polecat", "", "the polecat image's name")
+	fs.StringVar(&o.Bd, "bd", "", "the bd gateway image's name; empty when the commit built none")
 	fs.StringVar(&o.Tag, "tag", "", "the twelve-character tag both images carry")
 	fs.StringVar(&o.SHA, "sha", "", "the full green commit both images must carry")
 	if err := fs.Parse(args[1:]); err != nil {
