@@ -40,6 +40,11 @@ bead under the rig's runtime directory. A later day restarts the count. A
 state file that cannot be read or parsed is an error, and the count is never
 reset to zero to get past it.
 
+A request whose head cannot be fetched is not a round. The patrol fetches the
+head before it takes a count, so the count does not move, and the answer is
+unavailable. A round that reaches the reviewer and then fails, by an error or by
+the wall bound, has used one of the day's rounds.
+
 ## Switch
 
 The switch is `daemon.local_round.enabled` in the daemon section of the town's
