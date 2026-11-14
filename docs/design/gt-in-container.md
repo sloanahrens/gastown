@@ -28,7 +28,7 @@ Ladder, in order:
 
 Rung 2 must be an allowlist, because a throwaway container can run beside a daemon the probe missed. The wrapper may run a rung-2 call only when its arguments match a command the allowlist names as read-only: `gt status`, `gt prime`, `gt hook`, `gt mail inbox`, `bd show`, `bd list` and `bd ready`. Every other call must be refused under rung 2 with the rung-3 start command, and the refusal exits non-zero. Commands that start, stop, restart or repair the daemon or Dolt must never be on the list, for example `gt daemon`, `gt dolt`, `gt up`, `gt down`, and the start and stop verbs of rigs, crews and sessions. A command added later is refused under rung 2 until the list names it.
 
-Not yet enforced: `internal/gtwrap` `Launch` still runs any call under rung 2. The allowlist is a separate code change, decided by gt-6dob1b; until it lands, this paragraph is the required behaviour, not the current one.
+Enforced: `internal/gtwrap` `Launch` runs a call under rung 2 only when its leading arguments match an entry of `rung2Allowlist` in `internal/gtwrap/rung2_allow.go`, which names the seven calls above as exact argv prefixes. Any other call is refused before `docker run`, with the rung-3 start command and a non-zero exit. A test fails when a daemon or Dolt start, stop, restart or repair verb is added to that table. Rung 1 (a running daemon container) is not gated.
 
 Behaviour:
 
