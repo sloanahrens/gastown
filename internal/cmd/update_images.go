@@ -166,6 +166,7 @@ func updateImagesRepoFile(path string) rig.RepoFileReader { return git.NewGit(pa
 // newUpdateImagesCmd builds `gt update images` over seams.
 func newUpdateImagesCmd(seams updateImagesSeams) *cobra.Command {
 	var sha, out string
+	var withBd bool
 	c := &cobra.Command{
 		Use:   "images",
 		Short: "Record the daemon and polecat image digests for one green commit",
@@ -178,6 +179,11 @@ sha256:<64 lowercase hex>, or commit labels that differ from each other or from
 --sha. Each digest is the hash of the bytes the registry served, and each label
 is read from the config blob those bytes describe. A refusal writes no values
 file.
+
+With --bd the command also reads the bd gateway image at the same tag and
+records its digest under the bd key. That image must carry --sha as its commit
+label; a missing tag or another commit is a refusal. Without --bd the values
+file has no bd key and is written as it always was.
 
 The viewer credential goes over https. It goes over http only to a loopback
 address or to the town's own Forgejo at forgejo:3000, which has no https
@@ -199,17 +205,19 @@ where it names instead.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateImages(cmd, seams, sha, out)
+			return runUpdateImages(cmd, seams, sha, out, withBd)
 		},
 	}
 	c.Flags().StringVar(&sha, "sha", "", "The full green commit both images carry")
 	c.Flags().StringVar(&out, "out", "", "The values file to write; default is the shared path under the town's gastown directory")
+	c.Flags().BoolVar(&withBd, "bd", false, "Also record the bd gateway image built for --sha under the bd key")
 	return c
 }
 
 // runUpdateImages reads both images, holds their commits to sha, and records
-// the pair once it is known good.
-func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out string) error {
+// the pair once it is known good. withBd also reads the bd gateway image at the
+// same tag and records it under the bd key.
+func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out string, withBd bool) error {
 	if !imagevalues.ValidCommit(sha) {
 		return fmt.Errorf("gt update images: --sha %q is not a full 40-character lowercase commit", sha)
 	}
@@ -268,6 +276,16 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 		Polecat: registry.Ref(imagevalues.PolecatImage, polecat.Digest),
 		Commit:  sha,
 	}
+	if withBd {
+		bd, err := reader.image(cmd.Context(), "bd", imagevalues.BdImage, tag)
+		if err != nil {
+			return fmt.Errorf("gt update images: %w", err)
+		}
+		if bd.Commit != sha {
+			return fmt.Errorf("gt update images: the bd image %s carries commit %q, not the requested %s; the bd image was not built for this commit", bd.Repo, bd.Commit, sha)
+		}
+		next.Bd = registry.Ref(imagevalues.BdImage, bd.Digest)
+	}
 	return writeUpdateImagesValues(cmd, seams, out, next)
 }
 
@@ -278,10 +296,13 @@ func plaintextHostOf(r imagevalues.Registry) string {
 	return forgejo.PlaintextHostOf(r.Scheme, r.Host)
 }
 
-// refuseToReplaceARecordedPair answers nil when the file is absent or records
-// another commit (so the caller writes), errNoValueWrite when it already
-// records this pair (so the caller writes nothing), and an error for a file
-// that cannot be read, a malformed file, or a rebuilt image under the same tag.
+// refuseToReplaceARecordedPair answers nil when the file is absent, records
+// another commit, or records this commit's daemon and polecat without a bd key
+// that this run adds (so the caller writes). It answers errNoValueWrite when
+// the file already holds what this run would write, or when this run names no
+// bd image and the file keeps the one it has (so the caller writes nothing). It
+// answers an error for a file that cannot be read, a malformed file, or a
+// rebuilt image under the same tag, the bd digest included.
 func refuseToReplaceARecordedPair(path string, next imagevalues.Values) error {
 	existing, err := imagevalues.Load(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -293,8 +314,15 @@ func refuseToReplaceARecordedPair(path string, next imagevalues.Values) error {
 	if existing.Commit != next.Commit {
 		return nil
 	}
-	if existing == next {
-		return errNoValueWrite
+	if existing.Daemon == next.Daemon && existing.Polecat == next.Polecat {
+		switch {
+		case next.Bd == "" || existing.Bd == next.Bd:
+			return errNoValueWrite
+		case existing.Bd == "":
+			return nil
+		}
+		return fmt.Errorf("gt update images: %s records bd %s for commit %s, but the registry now answers %s; an image rebuilt under the same tag is a finding, not a silent replace",
+			path, existing.Bd, next.Commit, next.Bd)
 	}
 	return fmt.Errorf("gt update images: %s records daemon %s and polecat %s for commit %s, but the registry now answers %s and %s; an image rebuilt under the same tag is a finding, not a silent replace",
 		path, existing.Daemon, existing.Polecat, next.Commit, next.Daemon, next.Polecat)

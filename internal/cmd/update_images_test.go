@@ -1638,3 +1638,238 @@ func TestUpdateImagesUsesTheSharedPath(t *testing.T) {
 		}
 	})
 }
+
+// testUpdateImagesThreeKeyBytes is what the writer produces for the pair a run
+// with no bd image records: a run without --bd must still write exactly these
+// bytes. The three-key literal is pinned once, in imagevalues' golden test; it
+// is derived here from the same writer rather than written out a second time.
+func testUpdateImagesThreeKeyBytes(t *testing.T, address imagevalues.Registry, registry *fakeRegistry) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "images.yaml")
+	pair := imagevalues.Values{
+		Daemon:  address.Ref(imagevalues.DaemonImage, registry.reported(imagevalues.DaemonImage)),
+		Polecat: address.Ref(imagevalues.PolecatImage, registry.reported(imagevalues.PolecatImage)),
+		Commit:  testUpdateImagesSHA,
+	}
+	if err := imagevalues.Write(path, pair); err != nil {
+		t.Fatalf("writing the expected three-key file: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the expected three-key file: %v", err)
+	}
+	return string(data)
+}
+
+// TestUpdateImagesBdWritesTheBdKeyForABuiltImage holds the --bd path: the bd
+// image built for --sha is recorded under the bd key by digest, beside the
+// daemon and polecat pair.
+func TestUpdateImagesBdWritesTheBdKeyForABuiltImage(t *testing.T) {
+	t.Parallel()
+	registry, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+		imagevalues.BdImage:      matchingContents(testUpdateImagesSHA),
+	})
+	writes := 0
+	out := filepath.Join(t.TempDir(), "deploy", "values", "images.yaml")
+
+	_, stderr, err := runUpdateImagesCommand(t, testUpdateImagesSeams(t, server, &writes), "--sha", testUpdateImagesSHA, "--out", out, "--bd")
+	if err != nil {
+		t.Fatalf("gt update images --bd: %v (stderr %q)", err, stderr)
+	}
+	address := testRegistryFor(t, server)
+	got, err := imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if want := address.Ref(imagevalues.BdImage, registry.reported(imagevalues.BdImage)); got.Bd != want {
+		t.Errorf("the bd key = %q, want %q", got.Bd, want)
+	}
+	if got.Daemon != address.Ref(imagevalues.DaemonImage, registry.reported(imagevalues.DaemonImage)) || got.Commit != testUpdateImagesSHA {
+		t.Errorf("the values file's daemon or commit changed: %+v", got)
+	}
+	if writes != 1 {
+		t.Errorf("the values file was written %d times, want once", writes)
+	}
+}
+
+// TestUpdateImagesBdLeavesTheFileAloneWithoutTheFlag holds the byte rule: with
+// no --bd the file has no bd key, is written byte-for-byte as before, and the
+// bd image is never read.
+func TestUpdateImagesBdLeavesTheFileAloneWithoutTheFlag(t *testing.T) {
+	t.Parallel()
+	registry, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+		imagevalues.BdImage:      matchingContents(testUpdateImagesSHA),
+	})
+	writes := 0
+	out := filepath.Join(t.TempDir(), "images.yaml")
+
+	if _, stderr, err := runUpdateImagesCommand(t, testUpdateImagesSeams(t, server, &writes), "--sha", testUpdateImagesSHA, "--out", out); err != nil {
+		t.Fatalf("gt update images: %v (stderr %q)", err, stderr)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if want := testUpdateImagesThreeKeyBytes(t, testRegistryFor(t, server), registry); string(data) != want {
+		t.Errorf("the values file = %q, want the three-key format %q", data, want)
+	}
+	if reported := registry.reported(imagevalues.BdImage); reported != "" {
+		t.Errorf("the bd image was read without --bd (digest %s)", reported)
+	}
+}
+
+// TestUpdateImagesBdRefusesAnImageNotBuiltForTheCommit holds every refusal of
+// the bd read: a bd tag that is missing, a bd image built for another commit,
+// and a registry error. Each names the bd image, and no values file is written.
+func TestUpdateImagesBdRefusesAnImageNotBuiltForTheCommit(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		bd   *fakeRegistryImage
+	}{
+		{"a missing tag", &fakeRegistryImage{MissingTag: true}},
+		{"another commit", matchingContents(testUpdateImagesOtherSHA)},
+		{"a registry error", &fakeRegistryImage{Status: http.StatusInternalServerError, Commit: testUpdateImagesSHA}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+				imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+				imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+				imagevalues.BdImage:      row.bd,
+			})
+			writes := 0
+			out := filepath.Join(t.TempDir(), "images.yaml")
+
+			_, _, err := runUpdateImagesCommand(t, testUpdateImagesSeams(t, server, &writes), "--sha", testUpdateImagesSHA, "--out", out, "--bd")
+			if err == nil {
+				t.Fatal("a bd image not built for the commit succeeded, want a refusal")
+			}
+			if !strings.Contains(err.Error(), imagevalues.BdImage) {
+				t.Errorf("the refusal %q does not name the bd image", err)
+			}
+			if writes != 0 {
+				t.Errorf("the refused run wrote the values file %d times, want none", writes)
+			}
+			if _, statErr := os.Stat(out); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Errorf("the refused run left a values file behind: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestUpdateImagesBdAddsTheKeyToARecordedPairAndNeverReplaces holds the bd key
+// on a file that already holds the pair: a run with --bd adds the key once, a
+// repeat changes nothing, and a bd image rebuilt under the same tag is refused
+// with the recorded bd digest left in place.
+func TestUpdateImagesBdAddsTheKeyToARecordedPairAndNeverReplaces(t *testing.T) {
+	t.Parallel()
+	registry, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+		imagevalues.BdImage:      matchingContents(testUpdateImagesSHA),
+	})
+	writes := 0
+	seams := testUpdateImagesSeams(t, server, &writes)
+	out := filepath.Join(t.TempDir(), "images.yaml")
+
+	if _, _, err := runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA, "--out", out); err != nil {
+		t.Fatalf("first run without --bd: %v", err)
+	}
+	if _, _, err := runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA, "--out", out, "--bd"); err != nil {
+		t.Fatalf("run adding --bd: %v", err)
+	}
+	added, err := imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if added.Bd == "" {
+		t.Fatal("the run with --bd did not add the bd key")
+	}
+	if writes != 2 {
+		t.Errorf("the values file was written %d times, want 2 (the pair, then the bd key)", writes)
+	}
+
+	stdout, _, err := runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA, "--out", out, "--bd")
+	if err != nil {
+		t.Fatalf("repeat run with --bd: %v", err)
+	}
+	if !strings.Contains(stdout, "nothing changed") || writes != 2 {
+		t.Errorf("the repeat run wrote again (writes %d) or reported %q", writes, stdout)
+	}
+
+	_, _, err = runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA, "--out", out)
+	if err != nil {
+		t.Fatalf("run without --bd on a file that holds a bd key: %v", err)
+	}
+	kept, err := imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if kept != added {
+		t.Errorf("a run without --bd changed the file: %+v, want %+v", kept, added)
+	}
+
+	registry.set(imagevalues.BdImage, func(img *fakeRegistryImage) { img.Marker = "rebuilt" })
+	_, _, err = runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA, "--out", out, "--bd")
+	if err == nil || !strings.Contains(err.Error(), "finding") {
+		t.Fatalf("a rebuilt bd image under a recorded tag = %v, want a refusal naming the finding", err)
+	}
+	kept, err = imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file after the refused run: %v", err)
+	}
+	if kept != added {
+		t.Errorf("the refused run replaced the bd key: %+v, want %+v", kept, added)
+	}
+	if writes != 2 {
+		t.Errorf("the refused run wrote the values file, writes %d, want 2", writes)
+	}
+}
+
+// TestUpdateImagesBdNewCommitDropsTheOldBdKey holds the new-commit path: a
+// values file that records another commit, with its bd key, is replaced by this
+// commit's pair. With no --bd that pair has no bd key, so the old commit's bd
+// digest does not carry over to the new commit.
+func TestUpdateImagesBdNewCommitDropsTheOldBdKey(t *testing.T) {
+	t.Parallel()
+	_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+		imagevalues.BdImage:      matchingContents(testUpdateImagesSHA),
+	})
+	writes := 0
+	out := filepath.Join(t.TempDir(), "images.yaml")
+	address := testRegistryFor(t, server)
+	old := imagevalues.Values{
+		Daemon:  address.Ref(imagevalues.DaemonImage, "sha256:"+strings.Repeat("a", 64)),
+		Polecat: address.Ref(imagevalues.PolecatImage, "sha256:"+strings.Repeat("b", 64)),
+		Bd:      address.Ref(imagevalues.BdImage, "sha256:"+strings.Repeat("c", 64)),
+		Commit:  testUpdateImagesOtherSHA,
+	}
+	if err := imagevalues.Write(out, old); err != nil {
+		t.Fatalf("writing the previous commit's values file: %v", err)
+	}
+
+	if _, stderr, err := runUpdateImagesCommand(t, testUpdateImagesSeams(t, server, &writes), "--sha", testUpdateImagesSHA, "--out", out); err != nil {
+		t.Fatalf("gt update images for the new commit: %v (stderr %q)", err, stderr)
+	}
+	got, err := imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if got.Commit != testUpdateImagesSHA {
+		t.Errorf("the commit = %q, want the new commit %q", got.Commit, testUpdateImagesSHA)
+	}
+	if got.Bd != "" {
+		t.Errorf("the new commit's values file kept the previous commit's bd key %q", got.Bd)
+	}
+	if writes != 1 {
+		t.Errorf("the values file was written %d times, want once", writes)
+	}
+}

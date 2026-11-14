@@ -417,3 +417,103 @@ func TestImageValuesValidators(t *testing.T) {
 		}
 	}
 }
+
+// testBdRef is the bd gateway image's digest reference at the fixture
+// registry: the optional bd key a values file may carry.
+func testBdRef() string {
+	return testRegistry.Ref(imagevalues.BdImage, testDigest)
+}
+
+// TestBdKeyRoundTrips holds the bd key's round trip: a pair with a bd digest
+// is written with the key and loads back unchanged.
+func TestBdKeyRoundTrips(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "images.yaml")
+	want := testValues()
+	want.Bd = testBdRef()
+	if err := imagevalues.Write(path, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := imagevalues.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got != want {
+		t.Errorf("Load = %+v, want %+v", got, want)
+	}
+}
+
+// TestBdKeyLoadsAFileWithoutIt holds the compatibility rule: a values file
+// with no bd key loads with Bd empty, and a pair with no bd digest is written
+// byte-for-byte as the three-key format it always was.
+func TestBdKeyLoadsAFileWithoutIt(t *testing.T) {
+	t.Parallel()
+	good := testValues()
+	golden := "# The daemon and polecat image pair for one green commit, written by gt update images. Do not edit.\n" +
+		"daemon: " + good.Daemon + "\n" +
+		"polecat: " + good.Polecat + "\n" +
+		"commit: " + good.Commit + "\n"
+
+	path := filepath.Join(t.TempDir(), "images.yaml")
+	if err := os.WriteFile(path, []byte(golden), 0o600); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	got, err := imagevalues.Load(path)
+	if err != nil {
+		t.Fatalf("Load of a file with no bd key: %v", err)
+	}
+	if got != good {
+		t.Errorf("Load = %+v, want %+v with Bd empty", got, good)
+	}
+
+	written := filepath.Join(t.TempDir(), "images.yaml")
+	if err := imagevalues.Write(written, good); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	data, err := os.ReadFile(written)
+	if err != nil {
+		t.Fatalf("reading the written file: %v", err)
+	}
+	if string(data) != golden {
+		t.Errorf("Write without a bd digest = %q, want the three-key format %q", data, golden)
+	}
+}
+
+// TestBdKeyRefusesTag holds the bd key's digest rule: a bd reference that is a
+// tag, or any text that is not repo@sha256:<64 lowercase hex>, is refused with
+// ErrBdNotDigest, both when written and when read from a file.
+func TestBdKeyRefusesTag(t *testing.T) {
+	t.Parallel()
+	good := testValues()
+	tagged := testRegistry.Repo(imagevalues.BdImage) + ":0123456789ab"
+	upper := strings.Replace(testBdRef(), "sha256:1111", "sha256:111A", 1)
+	rows := []struct {
+		name string
+		bd   string
+	}{
+		{"a tag", tagged},
+		{"an uppercase digest", upper},
+		{"a bare repository", testRegistry.Repo(imagevalues.BdImage)},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			v := good
+			v.Bd = row.bd
+
+			writeErr := imagevalues.Write(filepath.Join(t.TempDir(), "images.yaml"), v)
+			if !errors.Is(writeErr, imagevalues.ErrBdNotDigest) {
+				t.Errorf("Write with bd %q = %v, want ErrBdNotDigest", row.bd, writeErr)
+			}
+
+			file := "daemon: " + good.Daemon + "\npolecat: " + good.Polecat + "\nbd: " + row.bd + "\ncommit: " + good.Commit + "\n"
+			path := filepath.Join(t.TempDir(), "images.yaml")
+			if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+				t.Fatalf("writing the fixture: %v", err)
+			}
+			if _, err := imagevalues.Load(path); !errors.Is(err, imagevalues.ErrBdNotDigest) {
+				t.Errorf("Load of bd %q = %v, want ErrBdNotDigest", row.bd, err)
+			}
+		})
+	}
+}
