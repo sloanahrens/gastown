@@ -43,36 +43,59 @@ func testHandlerRows(t *testing.T, verb string) {
 	t.Helper()
 	fixture, keep := readFixture(t)
 	town := newTown(t, routeFixture)
-	rows := 0
+	rows := handlerRowsOf(verb)
+	if len(rows) == 0 {
+		t.Fatalf("no %s golden row to answer", verb)
+	}
+	runHandlerRows(rows, keep, func(name string, check func(testing.TB, rowAnswer)) {
+		t.Run(name, func(st *testing.T) {
+			check(st, func(argv []string) ([]byte, []byte, int, error) {
+				return runFixtureRowWithStderr(st, town, fixture, argv)
+			})
+		})
+	})
+}
+
+// handlerRowsOf is the golden rows of verb the handler tests answer. A row the
+// shim answers differently from bd by design is pinned by the differential test
+// (knownSeatDivergences), not compared here.
+func handlerRowsOf(verb string) []differentialRow {
+	var rows []differentialRow
 	for _, row := range differentialRows {
 		if verbOf(row.argv) != verb {
 			continue
 		}
-		// A row the shim answers differently from bd by design is pinned by the
-		// differential test (knownSeatDivergences), not compared here.
 		if _, diverges := knownSeatDivergences[row.stem]; diverges {
 			continue
 		}
-		rows++
-		t.Run(row.stem, func(t *testing.T) {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// rowSubtest runs one named row check. testHandlerRows passes a t.Run over the
+// shim; a test passes a recorder and a canned answer.
+type rowSubtest func(name string, check func(testing.TB, rowAnswer))
+
+// runHandlerRows checks each row against its golden and reports, through the TB
+// of the row's subtest, every way the answer differs. The loop that turns each
+// failure into a tb.Error lives here, so a test drives it with a recording TB.
+func runHandlerRows(rows []differentialRow, keep map[string]bool, subtest rowSubtest) {
+	for _, row := range rows {
+		subtest(row.stem, func(tb testing.TB, answer rowAnswer) {
+			tb.Helper()
 			want, wantExit, err := readGolden(goldenDirectory, row.stem)
 			if err != nil {
-				t.Fatalf("reading the golden: %v", err)
-			}
-			answer := func(argv []string) ([]byte, []byte, int, error) {
-				return runFixtureRowWithStderr(t, town, fixture, argv)
+				tb.Fatalf("reading the golden: %v", err)
 			}
 			failures, err := checkHandlerRow(row.argv, want, wantExit, answer, keep)
 			if err != nil {
-				t.Fatalf("%v: %v", row.argv, err)
+				tb.Fatalf("%v: %v", row.argv, err)
 			}
 			for _, msg := range failures {
-				t.Error(msg)
+				tb.Error(msg)
 			}
 		})
-	}
-	if rows == 0 {
-		t.Fatalf("no %s golden row to answer", verb)
 	}
 }
 
@@ -112,7 +135,7 @@ func rowFailure(argv []string, what string, stderr []byte) string {
 
 // TestCheckHandlerRowReportsShimStderr: a row whose stdout and exit both differ
 // from bd's answer reports both failures, and each carries the shim's stderr. The
-// row check is the call testHandlerRows makes for every golden row.
+// row check is the call runHandlerRows makes for every golden row.
 func TestCheckHandlerRowReportsShimStderr(t *testing.T) {
 	t.Parallel()
 	argv := []string{"defer", "--reason", "x", "fx-1"}
@@ -164,6 +187,126 @@ func TestHandlersRowFailureShowsStderr(t *testing.T) {
 	}
 	if quiet := rowFailure(argv, "exit code is 1, want bd's 0", nil); strings.Contains(quiet, "shim stderr") {
 		t.Errorf("a row with no stderr mentions it: %q", quiet)
+	}
+}
+
+// recordingTB stands in for a row's subtest: it records what the row check
+// reports, so a test sees the failures testHandlerRows would print without
+// failing its own test. Fatalf records and then unwinds the check, as FailNow
+// stops a subtest.
+type recordingTB struct {
+	testing.TB
+	errors []string
+	fatals []string
+}
+
+// stoppedRow is the value Fatalf panics with to end a row check early.
+type stoppedRow struct{}
+
+func (r *recordingTB) Helper() {}
+
+func (r *recordingTB) Error(args ...any) {
+	r.errors = append(r.errors, fmt.Sprint(args...))
+}
+
+func (r *recordingTB) Fatalf(format string, args ...any) {
+	r.fatals = append(r.fatals, fmt.Sprintf(format, args...))
+	panic(stoppedRow{})
+}
+
+// TestHandlerRowsStopAtARowItCannotCheck: a row with no golden, or whose answer
+// fails, stops its own check with the reason and reports no difference for it.
+func TestHandlerRowsStopAtARowItCannotCheck(t *testing.T) {
+	t.Parallel()
+	_, keep := readFixture(t)
+	failingAnswer := func(argv []string) ([]byte, []byte, int, error) {
+		return nil, nil, 0, errors.New("no store")
+	}
+	tests := []struct {
+		name   string
+		row    differentialRow
+		answer rowAnswer
+		reason string
+	}{
+		{
+			name:   "a row with no golden",
+			row:    differentialRow{stem: "no-such-golden", argv: []string{"show", "--json", "fx-1"}},
+			answer: failingAnswer,
+			reason: "reading the golden",
+		},
+		{
+			name:   "a row whose answer fails",
+			row:    differentialRow{stem: "show-json", argv: []string{"show", "--json", "fx-1"}},
+			answer: failingAnswer,
+			reason: "no store",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tb := &recordingTB{}
+			func() {
+				defer func() {
+					if r := recover(); r != nil && r != (stoppedRow{}) {
+						panic(r)
+					}
+				}()
+				runHandlerRows([]differentialRow{tc.row}, keep, func(_ string, check func(testing.TB, rowAnswer)) {
+					check(tb, tc.answer)
+				})
+			}()
+			if len(tb.fatals) != 1 || !strings.Contains(tb.fatals[0], tc.reason) {
+				t.Errorf("the row check stopped with %q, want one stop naming %q", tb.fatals, tc.reason)
+			}
+			if len(tb.errors) != 0 {
+				t.Errorf("a stopped row also reported %q", tb.errors)
+			}
+		})
+	}
+}
+
+// TestHandlerRowsReportEachFailingRowWithItsStderr drives the row loop
+// testHandlerRows runs. A row whose answer matches its golden records nothing;
+// a row whose answer differs records each way it differs, and each message
+// names the row and carries the shim's stderr.
+func TestHandlerRowsReportEachFailingRowWithItsStderr(t *testing.T) {
+	t.Parallel()
+	_, keep := readFixture(t)
+	golden, goldenExit, err := readGolden(goldenDirectory, "show-json")
+	if err != nil {
+		t.Fatalf("reading the golden: %v", err)
+	}
+	passing := differentialRow{stem: "show-json", argv: []string{"show", "--json", "fx-1"}}
+	failing := differentialRow{stem: "list-json", argv: []string{"list", "--json"}}
+	answer := func(argv []string) ([]byte, []byte, int, error) {
+		if slices.Equal(argv, passing.argv) {
+			return golden, nil, goldenExit, nil
+		}
+		return nil, []byte("bdshim: list: store refused\n"), 1, nil
+	}
+	recorded := map[string]*recordingTB{}
+	runHandlerRows([]differentialRow{passing, failing}, keep, func(name string, check func(testing.TB, rowAnswer)) {
+		tb := &recordingTB{}
+		recorded[name] = tb
+		check(tb, answer)
+	})
+	for _, tb := range recorded {
+		if len(tb.fatals) != 0 {
+			t.Fatalf("a row check stopped with %q", tb.fatals)
+		}
+	}
+	if got := recorded[passing.stem].errors; len(got) != 0 {
+		t.Errorf("the matching row %s reported %q, want nothing", passing.stem, got)
+	}
+	failures := recorded[failing.stem].errors
+	if len(failures) != 2 {
+		t.Fatalf("the failing row %s reported %d messages, want 2 (stdout and exit): %q", failing.stem, len(failures), failures)
+	}
+	for _, msg := range failures {
+		for _, want := range []string{"[list --json]", "shim stderr: bdshim: list: store refused"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the failure message lacks %q: %q", want, msg)
+			}
+		}
 	}
 }
 
