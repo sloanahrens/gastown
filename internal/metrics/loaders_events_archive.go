@@ -14,25 +14,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
-// The events archive is the Dolt events table exported for analysis: one
-// events-<database>.csv.gz per database under one directory, each with a header
-// and one row per event. The daemon's history archive names each day's file
-// events-<database>-<UTC date>.csv.gz, and a day's export overlaps the one before
-// it (the lookback window), so an event can sit in two files; it is counted once,
-// and the ids kept to match a repeat are pruned to that window, outside which
-// the writer never repeats an event (gt-7nxj4). LoadBeadChangesArchive rolls the
-// rows up to one BeadChangeRow per bead, and WriteBeadChangesCSV publishes them
-// for a dataset loader. A bead created before the archive's retention start has
-// no created event; its creation time is then the created_at inside an updated
-// row's old_value, which is the issue as it stood before that change.
-//
-// Every row the loader refuses is recorded in the Dropped log with its file and
-// row number, so the row counts a report publishes always account for the
-// archive. A file the loader cannot read in full is recorded as failed and
-// returned as an error beside the rows that did load, so a caller never
-// publishes a partial archive as complete.
+// The events archive is the Dolt events table exported for analysis: one gzip
+// CSV per database under one directory, each with a header and one row per
+// event. The file names are events-<database>.csv.gz, or the daemon's dated
+// events-<database>-<UTC date>.csv.gz; the constants below name the file-name
+// parts and the dedupe window. LoadBeadChangesArchive documents what the names
+// mean and how the rows roll up to one BeadChangeRow per bead.
 
 const (
 	eventsArchivePrefix = "events-"
@@ -117,13 +108,14 @@ type BeadChangeRow struct {
 // LoadBeadChangesArchive reads every events archive file directly under dir of
 // fsys and returns one BeadChangeRow per database and issue id, sorted by
 // database then issue id. A file is events-<database>.csv.gz or the daemon's
-// dated events-<database>-<UTC date>.csv.gz. An event id already counted from
-// another file is counted once, and every repeat is reported as one Dropped
-// line. A row it cannot parse is recorded in dropped and the other rows still
-// load; a file it cannot read is recorded as failed, and the rows that did load
-// are returned beside an error naming that file. A directory that cannot be
-// listed is an error, since no rows there does not mean no changes were
-// archived.
+// dated events-<database>-<UTC date>.csv.gz; a trailing dash and exactly eight
+// digits is a date, never part of the database name. An event id already
+// counted from another file is counted once, and every repeat is reported as
+// one Dropped line. A row it cannot parse is recorded in dropped and the other
+// rows still load; a file it cannot read is recorded as failed, and the rows
+// that did load are returned beside an error naming that file. A directory that
+// cannot be listed is an error, since no rows there does not mean no changes
+// were archived.
 //
 // Only the files this load failed count against it: a caller may share one
 // Dropped between loaders.
@@ -185,6 +177,27 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 			len(failed), strings.Join(failed, ", "))
 	}
 	return rows, nil
+}
+
+// MetricsArchiveDir returns the directory the metrics extract reads the
+// daemon's history archive from for the town at townRoot: the
+// patrols.scheduled_maintenance.archive_dir the daemon config names, which the
+// scheduled maintenance cycle writes its dated events files into. An unset
+// directory means the archive is off, and no default path is invented for it; a
+// config that cannot be read is an error, so the bead-change table never reads
+// a directory nobody named.
+func MetricsArchiveDir(townRoot string) (string, error) {
+	cfg, err := config.LoadDaemonPatrolConfig(config.DaemonPatrolConfigPath(townRoot))
+	if errors.Is(err, config.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("metrics archive dir: %w", err)
+	}
+	if cfg == nil || cfg.Patrols == nil {
+		return "", nil
+	}
+	return cfg.Patrols.ScheduledMaintenance.ParseArchiveDir()
 }
 
 // archiveFileDatabase returns the database an events archive file belongs to:
@@ -367,8 +380,9 @@ func readEventsArchiveFile(fsys fs.FS, path, database string, aggs map[string]*b
 // readEventsArchiveCSV reads the header and every record of one archive file
 // and returns the newest created_at it counted. A row whose id seen already
 // holds was counted already, in this file or an earlier one: repeats records it
-// for the load's one-line report and the row is not folded in again. A row with
-// an empty id has no key to match, so it is folded in as read.
+// for the load's one-line report and the row is not folded in again. Every row
+// counted has an id, since parseArchiveEvent refuses an empty one, so every
+// event is matched across files by its key.
 func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[string]*beadChangeAgg, seen map[string]time.Time, dropped *Dropped, repeats *archiveRepeats) time.Time {
 	header, err := r.Read()
 	if err != nil {
@@ -417,13 +431,11 @@ func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[strin
 			dropped.Add(source, fmt.Sprintf("row %d: %v", n, err))
 			continue
 		}
-		if ev.id != "" {
-			if _, counted := seen[ev.id]; counted {
-				repeats.add(source, n, ev.id)
-				continue
-			}
-			seen[ev.id] = ev.at
+		if _, counted := seen[ev.id]; counted {
+			repeats.add(source, n, ev.id)
+			continue
 		}
+		seen[ev.id] = ev.at
 		if ev.at.After(newest) {
 			newest = ev.at
 		}
@@ -473,6 +485,12 @@ func parseArchiveEvent(rec []string, columns map[string]int) (archiveEvent, erro
 	}
 	if ev.issue == "" {
 		return archiveEvent{}, errors.New("empty issue_id")
+	}
+	if ev.id == "" {
+		// The id is the row's key: without one an event cannot be matched
+		// against a repeat in another file, so it is refused like any other
+		// row outside the archive's shape.
+		return archiveEvent{}, errors.New("empty id")
 	}
 	if !archiveEventTypes[ev.kind] {
 		return archiveEvent{}, fmt.Errorf("unknown event_type %q", ev.kind)
