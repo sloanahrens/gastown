@@ -423,7 +423,9 @@ type PatrolsConfig struct {
 	TownStateBackup      *TownStateBackupConfig      `json:"town_state_backup,omitempty"`
 	// WorkspaceReconcile sets how often the daemon re-pushes the town's
 	// workspace to the bd gateway. It acts only when BD_GATEWAY_URL is set
-	// (internal/daemon/workspace_reconcile.go), so it is not a registered patrol.
+	// (internal/daemon/workspace_reconcile.go). It is classified in the audit
+	// table (daemonSteps) as a patrol; it runs on its own ticker, not as a
+	// heartbeat step.
 	WorkspaceReconcile *WorkspaceReconcileConfig `json:"workspace_reconcile,omitempty"`
 
 	// ResourceSampler appends the host's CPU and memory rows every interval,

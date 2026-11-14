@@ -379,6 +379,11 @@ type Daemon struct {
 	// reconcile test opens no socket and installs nothing process-wide.
 	workspacePusher bdgateway.WorkspacePusher
 
+	// installWorkspacePusher receives the GatewayPusher the reconcile builds
+	// from BD_GATEWAY_URL; nil installs it with bdgateway.SetWorkspacePusher.
+	// Tests set it to record the install without touching the process-wide slot.
+	installWorkspacePusher func(bdgateway.WorkspacePusher)
+
 	// maint replaces scheduled maintenance's side effects in tests (see
 	// maintenanceSeams); the zero value is production.
 	maint maintenanceSeams

@@ -35,7 +35,11 @@ func (d *Daemon) startWorkspaceReconcile() {
 	} else {
 		// The installed pusher is what every writer of the town copy pushes
 		// through, so the reconcile and the writers share one push order.
-		bdgateway.SetWorkspacePusher(bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv)})
+		install := d.installWorkspacePusher
+		if install == nil {
+			install = bdgateway.SetWorkspacePusher
+		}
+		install(bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv)})
 	}
 	ticks := d.clk().NewTicker(interval)
 	go runWorkspaceReconcile(d.ctx, ticks, push, d.config.TownRoot, d.logger.Printf)
