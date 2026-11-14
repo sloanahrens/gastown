@@ -610,14 +610,42 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		nudge: func(seat overrunSeat, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()
-			// Queue mode: the message waits for the seat's next hook. The
-			// default waits up to 15 s for an idle prompt and then watches the
-			// busy seat for 60 s more, which outlasts this context. A seat
-			// running tool turns drains the queue through the polecat
-			// PostToolUse hook, gt tap nudge-drain (gt-drwph).
-			return d.notify().Nudge(ctx, seat.Rig+"/"+seat.Polecat, msg, notify.Queue())
+			target := seat.Rig + "/" + seat.Polecat
+			// A seat idle at its prompt drains no queue, and a sandbox seat's
+			// hooks read a filesystem this one does not write, so the default
+			// delivery types the nudge into its pane (gt-mq5x52, gt-700w3u).
+			// That delivery waits up to 15 s for the idle prompt, inside this
+			// context, so it is called only for a seat already read idle.
+			idle, err := d.overrunSeatIdle(seat)
+			if err != nil {
+				// Unknown is not idle: a queued nudge the seat never reads is
+				// the miss this delivery exists to fix, so the failed read is
+				// the nudge's failure and the next tick retries it.
+				return err
+			}
+			if idle {
+				return d.notify().Nudge(ctx, target, msg)
+			}
+			// A seat running a turn keeps the queue: the default would watch
+			// the busy seat for 60 s more, which outlasts this context, and a
+			// busy seat drains the queue through the polecat PostToolUse hook,
+			// gt tap nudge-drain (gt-drwph, gt-t61ft).
+			return d.notify().Nudge(ctx, target, msg, notify.Queue())
 		},
 	})
+}
+
+// overrunSeatIdle reports whether the seat's session sits at its input prompt
+// now. It reads the seat with the escalation-close nudge's own seat read
+// (escalationSeatState), so the guard adds no probe. A read that fails is an
+// error, so the caller's nudge fails and is retried rather than queued where
+// the seat may never read it.
+func (d *Daemon) overrunSeatIdle(seat overrunSeat) (bool, error) {
+	st, err := d.escalationSeatState(seat.Rig, seat.Polecat)
+	if err != nil {
+		return false, err
+	}
+	return st.Idle, nil
 }
 
 // overrunWorkingSeats lists every polecat with a live session that holds a
