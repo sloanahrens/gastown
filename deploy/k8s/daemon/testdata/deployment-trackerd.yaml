@@ -1,0 +1,86 @@
+# no hostAliases: this pod has no gateway alias, so host.docker.internal does not resolve in it
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trackerd
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: trackerd
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trackerd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: trackerd
+    spec:
+      automountServiceAccountToken: false
+      initContainers:
+        - name: tracker-relay
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:7433,fork,reuseaddr
+            - TCP:127.0.0.1:7434
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+          restartPolicy: Always
+      containers:
+        - name: trackerd
+          image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          command:
+            - trackerd
+          args:
+            - -listen
+            - 127.0.0.1:7434
+          env:
+            - name: TRACKER_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: town-tracker-dsn
+                  key: dsn
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command:
+                - curl
+                - -sS
+                - -o
+                - /dev/null
+                - --max-time
+                - "5"
+                - http://127.0.0.1:7433/v1/stats
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - curl
+                - -sS
+                - -o
+                - /dev/null
+                - --max-time
+                - "5"
+                - http://127.0.0.1:7433/v1/stats
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 5
