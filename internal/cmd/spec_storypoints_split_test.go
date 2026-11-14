@@ -452,6 +452,55 @@ func TestSpecDispatchSplitRouteNoteFailureStillHolds(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchSplitRouteNoteFailureRetriesNextTick: a split note that fails
+// on the first tick leaves the bead unlabeled, so the next tick judges it again
+// and writes the note. The label is written only after the note lands, so the
+// guard that holds an already-labeled bead never skips a note that is missing.
+func TestSpecDispatchSplitRouteNoteFailureRetriesNextTick(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.StoryPointSplitOver = 15
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		return splitOutcome("estimated", 13, 20, "all", "nearest beads: none"), nil
+	}
+	noteWrites := 0
+	annotate := env.Annotate
+	env.Annotate = func(id, key, text string) error {
+		noteWrites++
+		if noteWrites == 1 {
+			return errors.New("bd refused")
+		}
+		return annotate(id, key, text)
+	}
+	runSpecDispatchCycle(env)
+
+	if labels := f.labels["gt-a"]; slices.Contains(labels, specdispatch.SplitLabel) {
+		t.Fatalf("labels = %v after a failed split note, want the split label not yet written", labels)
+	}
+
+	r := runSpecDispatchCycle(env)
+
+	if notes := splitNotes(f, "gt-a"); len(notes) != 1 {
+		t.Errorf("split notes = %q after the retry, want exactly one", notes)
+	}
+	splitLabels := 0
+	for _, l := range f.labels["gt-a"] {
+		if l == specdispatch.SplitLabel {
+			splitLabels++
+		}
+	}
+	if splitLabels != 1 {
+		t.Errorf("split label written %d time(s) after the retry, want once: %v", splitLabels, f.labels["gt-a"])
+	}
+	if len(f.slung) != 0 {
+		t.Errorf("slung %v after the retry, want the bead held", f.slung)
+	}
+	if lines := splitHoldLines(r.Skipped); len(lines) != 1 {
+		t.Errorf("split hold lines = %q after the retry, want the bead reported held", lines)
+	}
+}
+
 // TestSpecDispatchSplitRouteVerdictRefusals: every estimate the route cannot
 // judge returns a reason, and the caller says so and slings; the shape-only
 // rung is a verdict the route reads and leaves alone.
