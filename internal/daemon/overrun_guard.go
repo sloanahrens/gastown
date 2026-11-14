@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -40,6 +41,12 @@ const (
 // overrunNudgeTimeout bounds one nudge. Queue mode only writes a file, so it
 // is generous.
 const overrunNudgeTimeout = 30 * time.Second
+
+// errOverrunNudgeNotAttempted marks a nudge the production seam did not
+// attempt: the seat's session has gone, or its pane could not be read. Neither
+// is a delivery the notifier refused, so the guard retries at the next tick
+// without spending one of the sling's attempts (gt-tnv41j).
+var errOverrunNudgeNotAttempted = errors.New("overrun nudge not attempted")
 
 // overrunMaxGateCharge is how much gate time one tick may charge a seat: twice
 // the guard's interval. A cycle takes the interval plus its own bd reads, so
@@ -539,6 +546,13 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				continue
 			}
 			if err := s.nudge(seat, overrunNudgeMessage); err != nil {
+				if errors.Is(err, errOverrunNudgeNotAttempted) {
+					// Nothing was delivered, so the tick spent none of the
+					// sling's attempts and starts no backoff: the next tick
+					// reads the seat again (gt-tnv41j).
+					d.logger.Printf("overrun_guard: nudge %s on %s not attempted, will retry next tick: %v", who, seat.Bead, err)
+					continue
+				}
 				state.NudgeFailures = state.nudgeFailures(clockStart) + 1
 				state.NudgeFailedAt = now
 				d.logger.Printf("overrun_guard: nudge %s on %s failed (attempt %d of %d): %v",
@@ -616,14 +630,19 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 			// delivery types the nudge into its pane (gt-mq5x52, gt-700w3u).
 			// That delivery waits up to 15 s for the idle prompt, inside this
 			// context, so it is called only for a seat already read idle.
-			idle, err := d.overrunSeatIdle(seat)
+			st, err := d.escalationSeatState(seat.Rig, seat.Polecat)
 			if err != nil {
-				// Unknown is not idle: a queued nudge the seat never reads is
-				// the miss this delivery exists to fix, so the failed read is
-				// the nudge's failure and the next tick retries it.
-				return err
+				// Unknown is not idle: a queued nudge an idle seat never reads
+				// is the miss this delivery exists to fix, so the seat is left
+				// for the next tick rather than queued.
+				return fmt.Errorf("%w: cannot read %s's pane: %w", errOverrunNudgeNotAttempted, target, err)
 			}
-			if idle {
+			if !st.Live {
+				// The guard listed this seat live and its session left since:
+				// a queue write would have no reader.
+				return fmt.Errorf("%w: %s has no session", errOverrunNudgeNotAttempted, target)
+			}
+			if st.Idle {
 				return d.notify().Nudge(ctx, target, msg)
 			}
 			// A seat running a turn keeps the queue: the default would watch
@@ -633,19 +652,6 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 			return d.notify().Nudge(ctx, target, msg, notify.Queue())
 		},
 	})
-}
-
-// overrunSeatIdle reports whether the seat's session sits at its input prompt
-// now. It reads the seat with the escalation-close nudge's own seat read
-// (escalationSeatState), so the guard adds no probe. A read that fails is an
-// error, so the caller's nudge fails and is retried rather than queued where
-// the seat may never read it.
-func (d *Daemon) overrunSeatIdle(seat overrunSeat) (bool, error) {
-	st, err := d.escalationSeatState(seat.Rig, seat.Polecat)
-	if err != nil {
-		return false, err
-	}
-	return st.Idle, nil
 }
 
 // overrunWorkingSeats lists every polecat with a live session that holds a
