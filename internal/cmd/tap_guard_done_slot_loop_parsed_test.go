@@ -1,3 +1,9 @@
+// Verdict-change record for the move to parsedTokens (gt-ppuk8j, reviewed at
+// gt-x5gkqj). The guard's production reader and shellTokenize give the same
+// verdict for every command in doneSlotLoopCommands, so the move changed no
+// verdict on that set: no tightening and no loosening. TestDoneSlotLoopMoveChangesNoVerdict
+// pins that equality over the set; TestDoneSlotLoopParsedVerdictNeverLoosens
+// asserts the one-way property over the same set.
 package cmd
 
 import (
@@ -166,11 +172,29 @@ func TestDoneSlotLoopProductionReader(t *testing.T) {
 	}
 }
 
-// TestDoneSlotLoopParsedVerdictNeverLoosens proves, over every command the
-// parser reads, that the guard's verdict through parsedTokens is never less
-// strict than the shellTokenize verdict. A command whose parsed reading would
-// allow what shellTokenize refuses is routed to shellTokenize by
-// doneSlotLoopParsedUnsafe, so the property holds for it too.
+// TestDoneSlotLoopMoveChangesNoVerdict pins the verdict-change record in this
+// file's header: over doneSlotLoopCommands, the production reader gives every
+// command the verdict shellTokenize gives it. A change to the reader that moves
+// a verdict fails here, and the record in the header must then be updated.
+func TestDoneSlotLoopMoveChangesNoVerdict(t *testing.T) {
+	t.Parallel()
+	for _, c := range doneSlotLoopCommands(t) {
+		want, _ := doneSlotLoopVerdictWith(c, shellTokenize)
+		got, _ := doneSlotLoopVerdictWith(c, doneSlotLoopReadTokens)
+		if got != want {
+			t.Errorf("verdict of %q is %q through the production reader and %q through shellTokenize", c, got, want)
+		}
+	}
+}
+
+// TestDoneSlotLoopParsedVerdictNeverLoosens checks, over the commands in
+// doneSlotLoopCommands, that the guard's verdict through parsedTokens is never
+// less strict than the shellTokenize verdict. That set is a sample of the
+// commands the parser reads, so the check is not a proof over every readable
+// command. A command whose parsed reading would allow what shellTokenize refuses
+// is routed to shellTokenize by doneSlotLoopParsedUnsafe; that routing rule is
+// the argument for the commands outside the sample, and the subtests below
+// exercise it only on the sampled set.
 func TestDoneSlotLoopParsedVerdictNeverLoosens(t *testing.T) {
 	t.Parallel()
 	commands := doneSlotLoopCommands(t)
