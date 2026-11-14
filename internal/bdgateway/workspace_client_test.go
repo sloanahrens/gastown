@@ -964,7 +964,7 @@ func TestPusherSlotOrdersItsPushes(t *testing.T) {
 	select {
 	case <-entered:
 		t.Errorf("the second push reached the pusher while the first held the slot")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond): //testpolicy:allow no-sleep — a negative proof: nothing reaches the pusher while the slot is held; the bound is the settle for an asynchronous entry, and the wait ends the moment one arrives
 	}
 	close(gate)
 	wg.Wait()

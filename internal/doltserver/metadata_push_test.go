@@ -258,10 +258,10 @@ func TestEnsureMetadataMarksStaleWhenThePortFileChangedAndTheWriteFails(t *testi
 	}
 	err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq")
 	if err == nil {
-		t.Skip("the metadata write did not fail on this layout, so the ordering cannot be driven")
+		t.Fatal("the metadata write did not fail on this layout, so the ordering cannot be driven")
 	}
 	if _, statErr := os.Stat(filepath.Join(beadsDir, "dolt-server.port")); statErr != nil {
-		t.Skipf("the pass failed before the port file was written (%v): %v", err, statErr)
+		t.Fatalf("the pass failed before the port file was written (%v): %v", err, statErr)
 	}
 	if !h.isWorkspaceStale() {
 		t.Errorf("the port file changed and the metadata write failed (%v), but the workspace is not marked stale", err)
