@@ -97,6 +97,8 @@ func TestHowGolden(t *testing.T) {
 		{name: "a group lists its sorted commands", args: []string{"roll"}, golden: "roll.golden"},
 		{name: "a word lists the matching commands", args: []string{"this"}, golden: "search.golden"},
 		{name: "a word with no match says so", args: []string{"bogus"}, golden: "nomatch.golden"},
+		{name: "an empty word says nothing matches", args: []string{""}, golden: "empty.golden"},
+		{name: "a blank word says nothing matches", args: []string{"   "}, golden: "blank.golden"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

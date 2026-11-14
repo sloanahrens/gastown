@@ -139,9 +139,13 @@ func writeHowGroup(b *strings.Builder, m howMap, g taskmap.Group) {
 // writeHowSearch writes word's matches, "gt <path>  <use>", in the order
 // Search returns them. With no match it writes the one line that sends the
 // agent back to the group list, so a guess at a word ends in a next step rather
-// than an empty screen.
+// than an empty screen. A blank word takes that line too: it is a substring of
+// every path and use, so searching for it would list the whole map instead.
 func writeHowSearch(b *strings.Builder, m howMap, word string) {
-	entries := m.Search(word)
+	var entries []taskmap.Entry
+	if strings.TrimSpace(word) != "" {
+		entries = m.Search(word)
+	}
 	if len(entries) == 0 {
 		fmt.Fprintf(b, "nothing matches %s; run gt how for the groups\n", word)
 		return
