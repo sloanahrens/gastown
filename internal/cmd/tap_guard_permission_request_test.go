@@ -394,21 +394,110 @@ func TestPromptShapeParsedReading(t *testing.T) {
 	}
 }
 
-// TestPermissionRequestUnreadableCommandKeepsShapeAndGuidance pins the fallback:
-// a command shellparse cannot read is still labelled from the shellTokenize
-// reading, so its denial keeps the shape and the guidance that reading gives.
-func TestPermissionRequestUnreadableCommandKeepsShapeAndGuidance(t *testing.T) {
+// TestUnreadableCommandFailsClosedInPermissionRequest pins the fail-closed reading
+// of a command the parser cannot read (gt-mh2pm3): the denial is labelled
+// unreadable and carries the unreadable guidance, and no cd or glob shape is
+// guessed from the text. The cd and glob rows would read as those shapes if the
+// text were split by hand, so a guess back to a shape turns them red.
+func TestUnreadableCommandFailsClosedInPermissionRequest(t *testing.T) {
 	t.Parallel()
-	command := `cd /tmp/x && touch "f`
-	if _, readable := parsedTokens(command); readable {
-		t.Fatalf("fixture %q parses, so it does not exercise the unreadable fallback", command)
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"cd then write, unterminated quote", `cd /tmp/x && touch "f`},
+		{"glob removal, unterminated quote", `rm -rf /tmp/x/* "`},
+		{"unterminated substitution holding a cd", `echo $(cd /tmp/x && touch f`},
+		{"unterminated quote naming gh pr create", `echo "gh pr create`},
 	}
-	hook := payloadInput(t, bashPermissionPayload(command))
-	if got := promptShape(hook); got != "bash cd-compound-write" {
-		t.Errorf("promptShape(%q) = %q, want bash cd-compound-write", command, got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, readable := parsedTokens(tt.command); readable {
+				t.Fatalf("fixture %q parses, so it does not exercise the unreadable reading", tt.command)
+			}
+			if _, readable := commandSegments(tt.command); readable {
+				t.Fatalf("commandSegments(%q) reads the command; it must report it unreadable", tt.command)
+			}
+			hook := payloadInput(t, bashPermissionPayload(tt.command))
+			if got := promptShape(hook); got != "bash unreadable" {
+				t.Errorf("promptShape(%q) = %q, want bash unreadable", tt.command, got)
+			}
+			if got := promptRetryGuidance(hook); got != guidanceUnreadable {
+				t.Errorf("promptRetryGuidance(%q) = %q, want the unreadable guidance", tt.command, got)
+			}
+
+			env := map[string]string{"GT_ROLE": polecatEnv["GT_ROLE"], "TMPDIR": t.TempDir()}
+			escalator, sent := fakeParkedPromptEscalator(true)
+			var out bytes.Buffer
+			if err := tapGuardPermissionRequest(strings.NewReader(bashPermissionPayload(tt.command)), &out, fakeGuardProcess(env, ""), escalator, nil); err != nil {
+				t.Fatalf("tapGuardPermissionRequest: %v", err)
+			}
+			var decoded permissionRequestOutput
+			if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &decoded); err != nil {
+				t.Fatalf("denial is not one JSON object (%v): %q", err, out.String())
+			}
+			if got := decoded.HookSpecificOutput.Decision.Behavior; got != "deny" {
+				t.Errorf("decision.behavior = %q, want deny", got)
+			}
+			if !strings.Contains(decoded.HookSpecificOutput.Decision.Message, guidanceUnreadable) {
+				t.Errorf("denial lost the unreadable guidance: %q", decoded.HookSpecificOutput.Decision.Message)
+			}
+			if len(*sent) != 1 || !strings.HasPrefix(strings.SplitN((*sent)[0], "\n", 2)[0], "Parked prompt denied: bash unreadable") {
+				t.Errorf("escalation not labelled bash unreadable: %v", *sent)
+			}
+		})
 	}
-	if got := promptRetryGuidance(hook); got != guidanceCD {
-		t.Errorf("promptRetryGuidance(%q) = %q, want the cd guidance", command, got)
+}
+
+// TestPermissionRequestReadableVerdictsUnchanged pins that a command the parser
+// reads keeps its deny verdict and its shape label after the fail-closed change
+// (gt-mh2pm3). The guard must not allow a readable command in an unattended
+// session, and must not relabel it unreadable: a readable command that is
+// allowed, or whose shape moves, turns this red.
+func TestPermissionRequestReadableVerdictsUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		command      string
+		wantShape    string
+		wantGuidance string
+	}{
+		{"cd compound write", `cd /tmp/x && rm -rf *`, "bash cd-compound-write", guidanceCD},
+		{"glob removal", `rm -rf /tmp/x/*`, "bash rm-glob", guidanceGlob},
+		{"plain command", `go test ./internal/cmd/ -run TestFoo`, "bash", guidancePlain},
+		{"subshell cd then write", `(cd /tmp/x && touch f)`, "bash cd-compound-write", guidanceCD},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, readable := commandSegments(tt.command); !readable {
+				t.Fatalf("fixture %q does not parse, so it is not a readable command", tt.command)
+			}
+			env := map[string]string{"GT_ROLE": polecatEnv["GT_ROLE"], "TMPDIR": t.TempDir()}
+			escalator, sent := fakeParkedPromptEscalator(true)
+			var out bytes.Buffer
+			if err := tapGuardPermissionRequest(strings.NewReader(bashPermissionPayload(tt.command)), &out, fakeGuardProcess(env, ""), escalator, nil); err != nil {
+				t.Fatalf("tapGuardPermissionRequest: %v", err)
+			}
+			var decoded permissionRequestOutput
+			if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &decoded); err != nil {
+				t.Fatalf("denial is not one JSON object (%v): %q", err, out.String())
+			}
+			if got := decoded.HookSpecificOutput.Decision.Behavior; got != "deny" {
+				t.Errorf("decision.behavior = %q for a readable command, want deny", got)
+			}
+			message := decoded.HookSpecificOutput.Decision.Message
+			if !strings.Contains(message, tt.wantGuidance) {
+				t.Errorf("denial lost the readable guidance %q: %q", tt.wantGuidance, message)
+			}
+			if strings.Contains(message, "could not be read") {
+				t.Errorf("readable command was labelled unreadable: %q", message)
+			}
+			if len(*sent) != 1 || strings.SplitN((*sent)[0], "\n", 2)[0] != "Parked prompt denied: "+tt.wantShape {
+				t.Errorf("escalation shape moved: got %v, want shape %q", *sent, tt.wantShape)
+			}
+		})
 	}
 }
 

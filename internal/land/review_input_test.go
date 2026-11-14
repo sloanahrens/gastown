@@ -151,6 +151,46 @@ func TestReviewInputGuard(t *testing.T) {
 				[]string{"fixture.go:4 new(ReviewInput)"},
 			},
 			{
+				"slice literal with elided elements",
+				"package land\n\nfunc assemble() []ReviewInput {\n\treturn []ReviewInput{{Dir: \"work\"}}\n}\n",
+				[]string{"fixture.go:4 composite literal"},
+			},
+			{
+				"slice of pointers with elided elements",
+				"package land\n\nfunc assemble() []*ReviewInput {\n\treturn []*ReviewInput{{Dir: \"work\"}}\n}\n",
+				[]string{"fixture.go:4 composite literal"},
+			},
+			{
+				"nested slice with elided elements",
+				"package land\n\nfunc assemble() [][]ReviewInput {\n\treturn [][]ReviewInput{{{Dir: \"work\"}}}\n}\n",
+				[]string{"fixture.go:4 composite literal"},
+			},
+			{
+				"map literal of ReviewInput",
+				"package land\n\nfunc assemble() map[string]ReviewInput {\n\treturn map[string]ReviewInput{\"a\": {Dir: \"work\"}}\n}\n",
+				[]string{"fixture.go:4 composite literal"},
+			},
+			{
+				"array literal of ReviewInput",
+				"package land\n\nfunc assemble() [1]ReviewInput {\n\treturn [...]ReviewInput{{Dir: \"work\"}}\n}\n",
+				[]string{"fixture.go:4 composite literal"},
+			},
+			{
+				"declared slice",
+				"package land\n\nfunc assemble() []ReviewInput {\n\tvar in []ReviewInput\n\treturn in\n}\n",
+				[]string{"fixture.go:4 variable declaration"},
+			},
+			{
+				"made slice",
+				"package land\n\nfunc assemble() []ReviewInput {\n\treturn make([]ReviewInput, 0, 4)\n}\n",
+				[]string{"fixture.go:4 make(ReviewInput)"},
+			},
+			{
+				"a slice parameter is no assembly",
+				"package land\n\nfunc consume(in []ReviewInput) int {\n\treturn len(in)\n}\n",
+				nil,
+			},
+			{
 				"the one assembly is allowed",
 				"package land\n\nfunc BuildReviewInput() ReviewInput {\n\treturn ReviewInput{Dir: \"work\"}\n}\n",
 				nil,
@@ -200,8 +240,13 @@ type reviewInputConstruction struct {
 // reviewInputConstructions parses one Go source file and returns every
 // ReviewInput construction it holds outside the declarations allowed to build
 // one. The shapes it flags are a composite literal, a variable declared at the
-// type, and new(ReviewInput); a file that only calls BuildReviewInput has
-// none.
+// type, and new or make of the type, where the type is ReviewInput or a slice,
+// array, map or pointer that holds one. An element written without its type
+// (`{Dir: ...}` inside `[]ReviewInput{...}`) is covered by the literal that
+// names the slice, so it is one hit. It reads only the types written in the
+// file: a construction through a named type (`type inputs []ReviewInput`) or
+// through a struct field's elided type is not followed. A file that only calls
+// BuildReviewInput has none.
 func reviewInputConstructions(name string, src []byte) ([]reviewInputConstruction, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, name, src, 0)
@@ -218,16 +263,23 @@ func reviewInputConstructions(name string, src []byte) ([]reviewInputConstructio
 			// An allowed body is the assembly; walk nothing below it.
 			return !allowedAssembly(node)
 		case *ast.CompositeLit:
-			if isReviewInputType(node.Type) {
+			// node.Type is nil for an elided element; its enclosing literal names
+			// the type and is the hit.
+			if holdsReviewInput(node.Type) {
 				add(node.Pos(), "composite literal")
 			}
 		case *ast.ValueSpec:
-			if node.Type != nil && isReviewInputType(node.Type) {
+			if node.Type != nil && holdsReviewInput(node.Type) {
 				add(node.Pos(), "variable declaration")
 			}
 		case *ast.CallExpr:
-			if id, ok := node.Fun.(*ast.Ident); ok && id.Name == "new" && len(node.Args) == 1 && isReviewInputType(node.Args[0]) {
-				add(node.Pos(), "new(ReviewInput)")
+			if id, ok := node.Fun.(*ast.Ident); ok && len(node.Args) >= 1 && holdsReviewInput(node.Args[0]) {
+				switch id.Name {
+				case "new":
+					add(node.Pos(), "new(ReviewInput)")
+				case "make":
+					add(node.Pos(), "make(ReviewInput)")
+				}
 			}
 		}
 		return true
@@ -272,5 +324,23 @@ func isReviewInputType(expr ast.Expr) bool {
 		return e.Sel != nil && e.Sel.Name == "ReviewInput"
 	default:
 		return false
+	}
+}
+
+// holdsReviewInput reports whether expr is ReviewInput, or a slice, array, map
+// or pointer type that holds one at any depth: the type a literal, declaration
+// or make call builds ReviewInput values under. A nil expr holds none.
+func holdsReviewInput(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.ArrayType:
+		return holdsReviewInput(e.Elt)
+	case *ast.MapType:
+		return holdsReviewInput(e.Key) || holdsReviewInput(e.Value)
+	case *ast.StarExpr:
+		return holdsReviewInput(e.X)
+	case *ast.ParenExpr:
+		return holdsReviewInput(e.X)
+	default:
+		return isReviewInputType(expr)
 	}
 }

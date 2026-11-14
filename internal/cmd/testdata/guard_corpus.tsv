@@ -585,6 +585,7 @@ test_scope	polecat	"grep -rn TODO {town}/gastown/mayor"	allow		gt-3lvcjz.30	2552
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads && echo ok"	refuse	targets testcontainers-backed package(s)	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
 test_scope	polecat	"echo ok && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
 dangerous	polecat	"echo ok && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-37c9aw	01fbc76efca257ff877f00db2e8f0b77c95dde662ac112c5511c2b4af23be825
+# --- gt-ppuk8j: the done-slot-loop guard now reads its payloads through parsedTokens; the dangerous row is the retry loop it judges on that payload. The container_suite and test_scope rows pin that those two guards allow the readable "bd show" command tap_guard_done_slot_loop_parsed_test.go expects allowed. The three rows share one stamp (guardSourceHash) ---
 dangerous	polecat	"seq 1 300 | xargs -I{} bash -c 'gt done'"	refuse	Never poll the slot or script a gt done retry	gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
 container_suite	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
 test_scope	polecat	"bd show gt-ppuk8j"	allow		gt-ppuk8j	f7e9525e1ac85ad40e6db8603e73362da5063d96d7d2ed1e0e5d084b69849ce5
@@ -600,3 +601,7 @@ test_scope	polecat	"(while true; do gt slot status; done) &"	allow		gt-q590oi	1e
 container_suite	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
 dangerous	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
 test_scope	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
+# --- gt-mh2pm3: commandSegments reads an unreadable command as unreadable (no shellTokenize fallback in tap_guard_permission_request.go); one real case per freeze guard carries the new stamp, each with the verdict its guard already gives ---
+container_suite	polecat	"cd /tmp/x && touch \"f"	refuse	cannot be read	gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
+dangerous	polecat	"cd /tmp/x && touch \"f"	refuse	cannot be read	gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
+test_scope	polecat	"cd /tmp/x && touch \"f"	allow		gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
