@@ -589,6 +589,15 @@ func TestAppendFailureReturnsRows(t *testing.T) {
 	}
 }
 
+func TestAppendLineReportsAFailedWrite(t *testing.T) {
+	t.Parallel()
+	refused := errors.New("day file went away")
+	err := appendLine([]byte("{}\n"), func([]byte) (int, error) { return 0, refused })
+	if !errors.Is(err, refused) {
+		t.Fatalf("a failed write returned %v, want the write's error", err)
+	}
+}
+
 func TestHostComponent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

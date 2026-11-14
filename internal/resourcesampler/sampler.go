@@ -335,19 +335,20 @@ func AppendRow(metricsDir string, row Row, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("resource sampler: rows file: %w", err)
 	}
-	line, err := json.Marshal(row)
-	if err != nil {
-		file.Close()
-		return fmt.Errorf("resource sampler: encode row: %w", err)
-	}
-	if _, err := file.Write(append(line, '\n')); err != nil {
-		file.Close()
+	defer file.Close()
+	// A Row holds only numbers, strings and pointers to them, so its JSON cannot
+	// fail to encode (specdispatch.OutcomeLine drops the same impossible error).
+	line, _ := json.Marshal(row)
+	return appendLine(append(line, '\n'), file.Write)
+}
+
+// appendLine appends line through write, a day file's Write in production. The
+// write is a parameter so a test can fail it, which no filesystem a unit test
+// can build will do, and so a failed append is returned instead of reported as
+// a line that landed.
+func appendLine(line []byte, write func([]byte) (int, error)) error {
+	if _, err := write(line); err != nil {
 		return fmt.Errorf("resource sampler: append row: %w", err)
-	}
-	// A close that fails leaves the last line possibly unwritten, so the caller
-	// that believes it appended one must hear about it rather than not.
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("resource sampler: close rows file: %w", err)
 	}
 	return nil
 }

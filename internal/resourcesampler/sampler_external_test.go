@@ -123,6 +123,22 @@ func TestAppendRowFilesUnderTheUTCDay(t *testing.T) {
 	}
 }
 
+func TestAppendRowReportsADayFileItCannotOpen(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	// A directory where the day file belongs: the open fails, so no line can
+	// have been written and the call must say so.
+	blocker := filepath.Join(dir, "resources", "2026-11-14.jsonl")
+	if err := os.MkdirAll(blocker, 0o755); err != nil {
+		t.Fatalf("build the blocker: %v", err)
+	}
+
+	if err := resourcesampler.AppendRow(dir, seatRow(), now); err == nil {
+		t.Fatal("a day file that cannot be opened was reported as written")
+	}
+}
+
 func TestAppendRowRefusesEmptyMetricsDir(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
