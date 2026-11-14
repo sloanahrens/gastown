@@ -101,7 +101,8 @@ type specEstimateRunner struct {
 	Deps     func() (estimate.Deps, error)
 	// Log appends the estimate log's line for an estimate this run computed;
 	// nil appends none. Its error is reported as the outcome's LogError and
-	// never fails the estimate.
+	// never fails the estimate; the estimate's note is left unwritten so the
+	// next run appends the line.
 	Log func(beadID, hash string, r estimate.Result) error
 }
 
@@ -127,7 +128,8 @@ type specEstimateOutcome struct {
 	// Reason says why there is no estimate; empty otherwise.
 	Reason string `json:"reason,omitempty"`
 	// LogError is the one line a failed estimate-log append reported; it never
-	// fails the estimate. Empty when the line was appended or no log is wired.
+	// fails the estimate, and the note is left for the next run to write with
+	// the retried line. Empty when the line was appended or no log is wired.
 	LogError     string   `json:"log_error,omitempty"`
 	AddLabels    []string `json:"add_labels,omitempty"`
 	RemoveLabels []string `json:"remove_labels,omitempty"`
@@ -240,16 +242,25 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 	if err := store.Update(beadID, beads.UpdateOptions{AddLabels: outcome.AddLabels, RemoveLabels: outcome.RemoveLabels}); err != nil {
 		return specEstimateOutcome{}, fmt.Errorf("labeling %s: %w", beadID, err)
 	}
-	if err := store.AddComment(beadID, outcome.Comment); err != nil {
-		return specEstimateOutcome{}, fmt.Errorf("commenting on %s: %w", beadID, err)
-	}
-	// The log line records an estimate whose labels and note are already on the
-	// bead. Text the bead's note already names was estimated before, so a forced
-	// re-estimate of it appends none: the log keeps one line per bead and hash.
+	// The log line comes before the note, whose hash is the record that answers
+	// the log's one-line-per-bead-and-hash rule: a note written first would make
+	// a failed append look done, and that hash's line would never be retried
+	// (gt-l5buel). A failed append leaves the bead with no note for this hash, so
+	// the next run estimates it again and appends the line; a note write that
+	// fails after the line landed costs one duplicate line on the next run. Text
+	// the bead's note already names was estimated before, so a forced re-estimate
+	// of it appends none: the log keeps one line per bead and hash.
 	if run.Log != nil && outcome.Action == "estimated" && !estimatedBefore {
 		if err := run.Log(beadID, hash, result); err != nil {
 			outcome.LogError = firstErrLine(err)
+			// The note this run would have written is left for the retry, and the
+			// outcome says so: Comment is what the run wrote.
+			outcome.Comment = ""
+			return outcome, nil
 		}
+	}
+	if err := store.AddComment(beadID, outcome.Comment); err != nil {
+		return specEstimateOutcome{}, fmt.Errorf("commenting on %s: %w", beadID, err)
 	}
 	return outcome, nil
 }
