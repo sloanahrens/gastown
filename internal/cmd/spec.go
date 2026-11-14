@@ -136,9 +136,11 @@ checked instead: Goal, Constraints, Out of scope, Gate and Size.
 
 To have the estimate made first, run gt spec lint <bead-id> --estimate: it runs
 the same estimate gt spec estimate makes (writing the sp: labels and the note),
-then checks them. The lint makes that run only when --estimate asks for it. An
-estimate that fails, or makes none, is reported as a refusal naming its
-error: a bead the estimate could not judge is not a small one.
+then checks them. The lint makes that run only when --estimate asks for it, and
+cuts it off at ` + specLintEstimateWait.String() + `: a run still going at the
+bound is refused as a timeout, not waited out. An estimate that fails, or makes
+none, is reported as a refusal naming its error: a bead the estimate could not
+judge is not a small one.
 
 Shape is a property of every work bead: the lint checks a task, bug or feature
 the same way and never refuses one for its type. The label spec is retired: it
@@ -260,7 +262,7 @@ func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead of one line")
 	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
-	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, "Run the bead's story-point estimate first (the same run gt spec estimate makes) and check the sp-minutes label it writes; a failing estimate is a refusal naming its error")
+	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, fmt.Sprintf("Run the bead's story-point estimate first (the same run gt spec estimate makes) and check the sp-minutes label it writes; the run is cut off at %s and refused as a timeout, and a failing estimate is a refusal naming its error", specLintEstimateWait))
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)

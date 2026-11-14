@@ -208,6 +208,14 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 	defer cancel()
 	result, estErr := run.Estimate(estCtx, deps, issue)
 
+	// A context error is the caller giving up or the estimate's own deadline
+	// passing, not a verdict on the bead. It is returned before any write: the
+	// none note is keyed to the section hash, so recording it would make later
+	// runs skip the bead as unchanged (gt-floskq).
+	if errors.Is(estErr, context.DeadlineExceeded) || errors.Is(estErr, context.Canceled) {
+		return specEstimateOutcome{}, fmt.Errorf("estimating %s: %w", beadID, estErr)
+	}
+
 	outcome := planSpecEstimate(beadID, hash, issue.Labels, result, estErr)
 	outcome.DryRun = opts.DryRun
 	if opts.DryRun {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +183,19 @@ func TestSpecLintHelpNamesEstimateFlag(t *testing.T) {
 			t.Errorf("the --estimate usage %q does not name %q", flag.Usage, want)
 		}
 	}
+	// Both help texts say the run is cut off at the lint's bound and refused
+	// then, taking the bound from the constant so the text cannot drift from
+	// the code (gt-floskq).
+	for _, got := range []struct{ name, text string }{
+		{"gt spec lint --help", specLintCmd.Long},
+		{"the --estimate usage", flag.Usage},
+	} {
+		for _, want := range []string{specLintEstimateWait.String(), "refused as a timeout"} {
+			if !strings.Contains(got.text, want) {
+				t.Errorf("%s does not name %q: %q", got.name, want, got.text)
+			}
+		}
+	}
 	// The help states what the flag does, not how long an estimate took when it
 	// was measured (gt-floskq).
 	for _, got := range []struct{ name, text string }{
@@ -203,6 +217,24 @@ func specEstimateRunnerForContext(fn func(context.Context, *beads.Issue) (estima
 		},
 		Deps: func() (estimate.Deps, error) { return estimate.Deps{}, nil },
 	}
+}
+
+// specEstimateWriteCounter is a store that counts the writes it is asked for,
+// so a test can assert a refused run wrote nothing.
+type specEstimateWriteCounter struct {
+	specEstimateStore
+	updates  int
+	comments int
+}
+
+func (c *specEstimateWriteCounter) Update(id string, opts beads.UpdateOptions) error {
+	c.updates++
+	return c.specEstimateStore.Update(id, opts)
+}
+
+func (c *specEstimateWriteCounter) AddComment(id, text string) error {
+	c.comments++
+	return c.specEstimateStore.AddComment(id, text)
 }
 
 // TestSpecLintEstimateRunsUnderTheLintsBound: --estimate's run is bounded by
@@ -269,19 +301,22 @@ func TestSpecLintDefaultEstimateWaitIsABound(t *testing.T) {
 }
 
 // TestSpecLintEstimateTimeoutIsRefused: an estimate that waits past the lint's
-// bound is refused with the context error, never passed on a label it did not
-// write (gt-floskq).
+// bound is refused with the context error and writes nothing — a rung:none note
+// left on a timed-out bead is keyed to the section hash, so later runs would
+// read it as unchanged (gt-floskq).
 func TestSpecLintEstimateTimeoutIsRefused(t *testing.T) {
 	t.Parallel()
 	run := specEstimateRunnerForContext(func(ctx context.Context, _ *beads.Issue) (estimate.Result, error) {
 		<-ctx.Done()
 		return estimate.Result{}, ctx.Err()
 	})
+	db := specEstimateSeed()
+	store := &specEstimateWriteCounter{specEstimateStore: db}
 	opts := specLintOpts{
 		LintOverMinutes: 11,
 		EstimateWait:    20 * time.Millisecond,
 		Estimate: specLintEstimateRunFor(
-			func(string) specEstimateStore { return specEstimateSeed() },
+			func(string) specEstimateStore { return store },
 			func(string) specEstimateRunner { return run }),
 	}
 	spec := cleanSpec("gt-est", 2, "2026-01-01")
@@ -295,6 +330,50 @@ func TestSpecLintEstimateTimeoutIsRefused(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "spec lint ok") {
 		t.Errorf("a bead whose estimate timed out was read as clean: %q", out.String())
+	}
+	if store.updates != 0 || store.comments != 0 {
+		t.Errorf("the timed-out estimate wrote %d label updates and %d comments, want 0 each", store.updates, store.comments)
+	}
+	if labels := specEstimateLabelsOn(t, db); len(labels) != 0 {
+		t.Errorf("labels = %v, want none written", labels)
+	}
+	if comments := specEstimateCommentsOn(t, db); len(comments) != 0 {
+		t.Errorf("comments = %q, want none written", comments)
+	}
+}
+
+// TestSpecLintEstimateFailureStillRecordsNone: an estimator that fails on its
+// own — not the lint giving up — keeps gt spec estimate's behaviour and records
+// rung:none and its note, so the lint's refusal is explained on the bead
+// (gt-floskq).
+func TestSpecLintEstimateFailureStillRecordsNone(t *testing.T) {
+	t.Parallel()
+	db := specEstimateSeed()
+	store := &specEstimateWriteCounter{specEstimateStore: db}
+	stub := &specEstimateStub{err: errors.New("jev unreachable")}
+	opts := specLintOpts{
+		LintOverMinutes: 11,
+		Estimate: specLintEstimateRunFor(
+			func(string) specEstimateStore { return store },
+			func(string) specEstimateRunner { return specEstimateRunnerFor(stub) }),
+	}
+	spec := cleanSpec("gt-est", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+	if code, _ := IsSilentExit(err); code != specLintExitRefused {
+		t.Fatalf("exit code = %d, want %d (err %v, out %q)", code, specLintExitRefused, err, out.String())
+	}
+	if !strings.Contains(out.String(), "refused: estimate: no estimate: jev unreachable") {
+		t.Errorf("verdict %q does not report the estimator's failure", out.String())
+	}
+	if store.updates != 1 || store.comments != 1 {
+		t.Errorf("the failed estimate wrote %d label updates and %d comments, want one each", store.updates, store.comments)
+	}
+	if labels := specEstimateLabelsOn(t, db); !slices.Contains(labels, "sp-rung:none") {
+		t.Errorf("labels = %v, want sp-rung:none recorded", labels)
+	}
+	if comments := specEstimateCommentsOn(t, db); !strings.Contains(strings.Join(comments, "\n"), "jev unreachable") {
+		t.Errorf("comments = %q, want the none note naming the failure", comments)
 	}
 }
 
