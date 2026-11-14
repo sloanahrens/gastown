@@ -1704,6 +1704,11 @@ type specRoster struct {
 	// seat that holds no hook is skipped before that read, so this is what the
 	// roster pays the worktree probe on (gt-gg9hv.73).
 	ProbedWorktrees int
+	// SandboxRecords are the live sandbox records this tick read: one per
+	// record in the town's registry. A record outlives a seat that deferred
+	// its bead, so a bead a record's Branch still names is held off a second
+	// seat (gt-712i5k).
+	SandboxRecords []session.SandboxRecord
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -2172,6 +2177,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// (gt-vty1v).
 		if hold := env.RigHold(c.Rig); hold != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
+			continue
+		}
+		// A live sandbox record whose branch still names this bead is a seat
+		// already on it, so a second sling would put two seats on one bead
+		// (gt-712i5k). Nothing is written: the records are this tick's roster
+		// read, so the bead is a candidate again once the record is gone.
+		if why, held := specdispatch.LiveSeatHold(id, roster.SandboxRecords); held {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipLiveSeat, why)})
 			continue
 		}
 		// Blocked-work admission (gt-e3hl2, gt-ndad8): a bead one of whose
@@ -3277,7 +3290,7 @@ func specRosterStep(read func() (poolSeatSnapshot, error), ts *config.TownSettin
 // (specRosterStep), so a test can drive the wiring with fakes (gt-97ppg).
 func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSettings, lister func() sessionLister, storeFor func(dir string) beads.Client, snapshot *atomic.Pointer[poolSeatSnapshot]) func() (specRoster, error) {
 	return func() (specRoster, error) {
-		return specRosterStep(
+		roster, err := specRosterStep(
 			func() (poolSeatSnapshot, error) {
 				return specRosterSnapshotWith(reads, townRoot, ts.PolecatPool, lister(), storeFor, time.Now)
 			},
@@ -3290,7 +3303,60 @@ func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSe
 			// (snapshotOccupied) instead of every polecat directory again.
 			func(seats poolSeatSnapshot) { snapshot.Store(&seats) },
 		)
+		if err != nil {
+			return specRoster{}, err
+		}
+		// The live sandbox records, read once per tick so the candidate check
+		// costs no read per bead: a record still names the bead its seat
+		// deferred, and a listing that fails is not an empty one
+		// (gt-712i5k).
+		records, err := specLiveSandboxRecords(townRoot)
+		if err != nil {
+			return specRoster{}, fmt.Errorf("listing live sandbox records: %w", err)
+		}
+		roster.SandboxRecords = records
+		return roster, nil
 	}
+}
+
+// specLiveSandboxRecords reads every sandbox record in townRoot's registry,
+// whose branches may still name a ready bead (gt-712i5k). A record's presence
+// is its liveness: the entry is removed when the sandbox is deleted. A missing
+// registry is no record; any other read failure is an error, never an empty
+// set.
+func specLiveSandboxRecords(townRoot string) ([]session.SandboxRecord, error) {
+	return specLiveSandboxRecordsWith(townRoot, session.ReadSandboxRecord)
+}
+
+// specLiveSandboxRecordsWith is specLiveSandboxRecords with the record read
+// injected, so a test can drive a record that is listed and then cannot be
+// read.
+func specLiveSandboxRecordsWith(townRoot string, read func(town, name string) (session.SandboxRecord, bool, error)) ([]session.SandboxRecord, error) {
+	entries, err := os.ReadDir(session.SandboxRegistryDir(townRoot))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []session.SandboxRecord
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".json")
+		rec, ok, err := read(townRoot, name)
+		if err != nil {
+			return nil, fmt.Errorf("reading sandbox record %s: %w", e.Name(), err)
+		}
+		if !ok {
+			// Listed a moment ago, unreadable now: unknown is not absent,
+			// because the record may be a live seat's.
+			return nil, fmt.Errorf("sandbox record %s is listed but cannot be read", e.Name())
+		}
+		out = append(out, rec)
+	}
+	return out, nil
 }
 
 // specRecountSeatFor is the tick's seat recount over one town: the occupancy read
