@@ -4709,9 +4709,9 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		if err != nil {
 			return err
 		}
-		if !portChanged {
-			// Nothing bd reads changed, so the tree the gateway holds is
-			// current; a push here would resend it on every pass.
+		if !portChanged && !h.isWorkspaceStale() {
+			// Nothing bd reads changed and the last push landed, so the tree the
+			// gateway holds is current; a push here would resend it on every pass.
 			return nil
 		}
 		return h.pushWorkspaceAfterWrite(townRoot)

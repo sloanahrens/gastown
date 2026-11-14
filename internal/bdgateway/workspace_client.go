@@ -82,6 +82,11 @@ var (
 	// ErrManifestDiffers is a 200 answer whose hash is not the one the caller
 	// sent: the gateway stored a tree other than the one pushed.
 	ErrManifestDiffers = errors.New("bdgateway: the gateway stored a different manifest")
+	// ErrLinkOutsideTown is a file the builder would read through a symlink that
+	// names nothing or resolves outside the town. The builder refuses it rather
+	// than carry the file's content into the pushed tree, and a dangling link is
+	// refused rather than read as an absent file.
+	ErrLinkOutsideTown = errors.New("bdgateway: a symlink names nothing or resolves outside the town")
 )
 
 // HTTPDoer sends one request and returns its response. *http.Client is one; a
@@ -120,6 +125,13 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	if err != nil {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: resolving the town root %s: %w", shown(townRoot), err)
 	}
+	// townconfig.Load reads the town's registry itself, so its two files are
+	// checked first. A missing file is left to the load, which names it.
+	for _, rel := range []string{townconfig.FileTown, townconfig.FileRigs} {
+		if _, err := townFileLink(root, filepath.Join(root, filepath.FromSlash(rel))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return WorkspaceDocument{}, fmt.Errorf("bdgateway: %s: %w", rel, err)
+		}
+	}
 	town, err := townconfig.Load(root)
 	if err != nil {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: reading the town at %s: %w", shown(root), err)
@@ -132,7 +144,7 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	if !insideTown(root, townBeads) {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: the town's .beads resolves outside the town")
 	}
-	if err := addBeadsFiles(files, townBeads, ".beads"); err != nil {
+	if err := addBeadsFiles(files, root, townBeads, ".beads"); err != nil {
 		return WorkspaceDocument{}, err
 	}
 	// The route table: one line per route, with every path bd resolves inside
@@ -175,7 +187,7 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 		return fmt.Errorf("bdgateway: rig %q resolves outside the town", shown(rig))
 	}
 	redirectPath := filepath.Join(rigDir, ".beads", "redirect")
-	data, err := os.ReadFile(redirectPath) //nolint:gosec // G304: path under the town root
+	data, err := readTownFile(townRoot, redirectPath)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		beadsDir := filepath.Join(rigDir, ".beads")
@@ -188,7 +200,7 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 		// Required here too: the stat above only picks the refusal's message,
 		// and a metadata.json removed between the two calls must not turn the
 		// rig's files into a silent no-op.
-		return addBeadsFiles(files, beadsDir, path.Join(rig, ".beads"))
+		return addBeadsFiles(files, townRoot, beadsDir, path.Join(rig, ".beads"))
 	case err != nil:
 		return fmt.Errorf("bdgateway: reading rig %q's redirect: %w", rig, err)
 	}
@@ -200,7 +212,7 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 	// The target must hold the database metadata: a redirect to a tree with no
 	// metadata.json names no database, and pushing it would send bd a rig that
 	// cannot open.
-	return addBeadsFiles(files, filepath.Join(townRoot, filepath.FromSlash(target)), target)
+	return addBeadsFiles(files, townRoot, filepath.Join(townRoot, filepath.FromSlash(target)), target)
 }
 
 // insideTown reports whether p, with symlinks resolved, is a path inside the
@@ -255,9 +267,9 @@ func redirectTarget(townRoot, rig, content string) (string, error) {
 // pushed without. config.yaml and dolt-server.port are optional: a rig may have
 // no config, and a town with no Dolt endpoint on disk has no port file (the
 // design removes it then).
-func addBeadsFiles(files map[string]string, beadsDir, prefix string) error {
+func addBeadsFiles(files map[string]string, townRoot, beadsDir, prefix string) error {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	metadata, err := os.ReadFile(metadataPath) //nolint:gosec // G304: path under the town root
+	metadata, err := readTownFile(townRoot, metadataPath)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("bdgateway: %s holds no metadata.json, so bd has no database to open", beadsDir)
@@ -269,7 +281,7 @@ func addBeadsFiles(files map[string]string, beadsDir, prefix string) error {
 	// rewrites are the redirect's and the route's.
 	files[path.Join(prefix, "metadata.json")] = string(metadata)
 	for _, name := range []string{"config.yaml", "dolt-server.port"} {
-		data, err := os.ReadFile(filepath.Join(beadsDir, name)) //nolint:gosec // G304: path under the town root
+		data, err := readTownFile(townRoot, filepath.Join(beadsDir, name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -279,6 +291,38 @@ func addBeadsFiles(files map[string]string, beadsDir, prefix string) error {
 		files[path.Join(prefix, name)] = string(data)
 	}
 	return nil
+}
+
+// readTownFile reads the file at p, a path under townRoot, and returns its
+// content. The read follows symlinks, and the file it reaches must be inside the
+// town: a link out of the town is refused, so its content never enters the
+// pushed tree. A missing file wraps os.ErrNotExist, so an optional file reads as
+// absent; a link that names nothing is ErrLinkOutsideTown, never absence.
+func readTownFile(townRoot, p string) ([]byte, error) {
+	resolved, err := townFileLink(townRoot, p)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(resolved) //nolint:gosec // G304: resolved and checked inside the town
+}
+
+// townFileLink resolves p, a path under townRoot, through its symlinks and
+// returns the real path, which must be inside the town. A path that does not
+// exist wraps os.ErrNotExist. A link that names nothing, or names a path outside
+// the town, wraps ErrLinkOutsideTown. The message names p, the path the build
+// reads, and not the link's target.
+func townFileLink(townRoot, p string) (string, error) {
+	if _, err := os.Lstat(p); err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", ErrLinkOutsideTown, shown(p))
+	}
+	if _, err := townRelative(townRoot, resolved); err != nil {
+		return "", fmt.Errorf("%w: %s", ErrLinkOutsideTown, shown(p))
+	}
+	return resolved, nil
 }
 
 // holdsBeadsMetadata reports whether dir holds the metadata.json that makes it
@@ -297,7 +341,7 @@ func holdsBeadsMetadata(dir string) bool {
 // only route lines; a line that is neither is refused rather than dropped, so a
 // route gt cannot read does not silently vanish from the workspace.
 func rewrittenRoutes(routesPath, townRoot string) (string, error) {
-	data, err := os.ReadFile(routesPath) //nolint:gosec // G304: path under the town root
+	data, err := readTownFile(townRoot, routesPath)
 	if err != nil {
 		return "", fmt.Errorf("bdgateway: reading %s: %w", routesPath, err)
 	}
@@ -509,7 +553,9 @@ func (g GatewayPusher) endpoint() (string, error) {
 	}
 	u, err := url.Parse(g.URL)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway url %s does not parse: %w", shown(redactedURL(g.URL)), err)
+		// url.Parse's error quotes the whole URL, which may carry credentials, so
+		// it is dropped rather than wrapped.
+		return "", errors.New("bdgateway: invalid gateway URL")
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return "", fmt.Errorf("bdgateway: the gateway url %s is not an http or https URL with a host", shown(redactedURL(g.URL)))

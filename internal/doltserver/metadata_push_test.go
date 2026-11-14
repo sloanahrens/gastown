@@ -41,6 +41,7 @@ func TestEnsureMetadataDoesNotPushWhenNothingChanged(t *testing.T) {
 	t.Parallel()
 	pushed := 0
 	h := &host{
+		workspace: &workspaceState{},
 		pushWorkspace: func(context.Context, string) (string, error) {
 			pushed++
 			return "manifest", nil
@@ -129,6 +130,50 @@ func TestEnsureMetadataFastPathReportsAPortFileFailure(t *testing.T) {
 	}
 	if pushed != 0 {
 		t.Errorf("pushed %d times after a failed port-file write, want none", pushed)
+	}
+}
+
+// TestEnsureMetadataRetriesAFailedPush: a push the gateway missed is sent again
+// by the next pass, even when that pass changes nothing; once a push lands, a
+// pass over the same files pushes nothing.
+func TestEnsureMetadataRetriesAFailedPush(t *testing.T) {
+	t.Parallel()
+	pushed := 0
+	failures := 1
+	h := &host{
+		workspace: &workspaceState{},
+		pushWorkspace: func(context.Context, string) (string, error) {
+			pushed++
+			if failures > 0 {
+				failures--
+				return "", errors.New("the gateway at gw:7440 did not answer")
+			}
+			return "manifest", nil
+		},
+	}
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The first pass writes the files and its push fails.
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err == nil {
+		t.Fatal("the first pass succeeded with a failed push")
+	}
+	// The second pass changes nothing, so it must still push the tree the
+	// gateway did not get.
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the retry pass: %v", err)
+	}
+	if pushed != 2 {
+		t.Fatalf("pushed %d times after a failed push and a retry, want two", pushed)
+	}
+	// The retry landed, so a third pass over the same files does not push.
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the pass after the retry: %v", err)
+	}
+	if pushed != 2 {
+		t.Errorf("pushed %d times after a landed push on an unchanged pass, want still two", pushed)
 	}
 }
 

@@ -1,9 +1,8 @@
 package taskmap
 
-// Placement for gt bd, the town's view of the bd gateway's workspace, which
-// came after the P batches were cut and so has no line in testdata/unplaced
-// (gt-eatndg). The parent commands exist only to reach the push, the map's one
-// verb: what the bd container serves is repaired by pushing the town to it.
+// Placement for gt bd, the town's view of the bd gateway's workspace. The
+// parent commands exist only to reach the push, the map's one verb: what the bd
+// container serves is repaired by pushing the town to it.
 func init() {
 	Register(
 		Entry{Path: "bd", Group: "dolt", Use: "Use this to manage what the bd gateway container reads: the workspace of routes, redirects and beads metadata it runs bd against."},

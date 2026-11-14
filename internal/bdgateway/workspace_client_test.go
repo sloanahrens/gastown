@@ -407,6 +407,74 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			},
 			want: "outside the town",
 		},
+		{
+			name: "a metadata.json that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				linkFile(t, root, "toolbox/.beads/metadata.json", filepath.Join(writeOutsideBeads(t), "metadata.json"))
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
+		{
+			name: "a config.yaml that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				outside := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(outside, []byte("issue-prefix: x\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				linkFile(t, root, "toolbox/.beads/config.yaml", outside)
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
+		{
+			name: "a dangling config.yaml symlink is refused, not read as absent",
+			spoil: func(t *testing.T, root string) {
+				linkFile(t, root, "toolbox/.beads/config.yaml", filepath.Join(t.TempDir(), "gone.yaml"))
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "names nothing",
+		},
+		{
+			name: "a routes.jsonl that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				linkFile(t, root, ".beads/routes.jsonl", filepath.Join(writeOutsideBeads(t), "metadata.json"))
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
+		{
+			name: "a redirect that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				outside := filepath.Join(t.TempDir(), "redirect")
+				if err := os.WriteFile(outside, []byte("mayor/rig/.beads\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				linkFile(t, root, "gastown/.beads/redirect", outside)
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
+		{
+			name: "a dangling redirect is refused, not read as a rig with no redirect",
+			spoil: func(t *testing.T, root string) {
+				linkFile(t, root, "gastown/.beads/redirect", filepath.Join(t.TempDir(), "gone"))
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "names nothing",
+		},
+		{
+			name: "a rigs.json that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				outside := filepath.Join(t.TempDir(), "rigs.json")
+				if err := os.WriteFile(outside, []byte(`{"version":1,"rigs":{"evil":{}}}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				linkFile(t, root, "mayor/rigs.json", outside)
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "mayor/rigs.json",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -435,6 +503,35 @@ func removePath(t *testing.T, root, rel string) {
 	t.Helper()
 	if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// linkFile replaces a fixture file with a symlink to target.
+func linkFile(t *testing.T, root, rel, target string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBuildWorkspaceDocumentFollowsTownLinks: a symlink whose target is another
+// file inside the town is read as itself, so the document carries the target's
+// content under the link's own path.
+func TestBuildWorkspaceDocumentFollowsTownLinks(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	writePath(t, root, "shared/issue-prefix.yaml", "issue-prefix: shared\n")
+	linkFile(t, root, "toolbox/.beads/config.yaml", filepath.Join(root, "shared", "issue-prefix.yaml"))
+	doc, err := BuildWorkspaceDocument(root)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	if got, want := doc.Files["toolbox/.beads/config.yaml"], "issue-prefix: shared\n"; got != want {
+		t.Errorf("toolbox/.beads/config.yaml = %q, want the linked file's content %q", got, want)
 	}
 }
 
@@ -566,7 +663,15 @@ func TestGatewayPusherRefusals(t *testing.T) {
 		{
 			name:   "a url that does not parse",
 			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://127.0.0.1:7440/%zz"; return g },
-			want:   "does not parse",
+			want:   "invalid gateway URL",
+		},
+		{
+			// url.Parse's own error quotes the whole URL, so the credentials in it
+			// must not reach the message.
+			name:       "an unparseable url carrying credentials",
+			pusher:     func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://pusher:hunter2@[::1"; return g },
+			want:       "invalid gateway URL",
+			notContain: "hunter2",
 		},
 		{
 			name:   "a url that is not http",
@@ -714,6 +819,19 @@ func TestGatewayPusherRefusals(t *testing.T) {
 			town:   func(t *testing.T) string { return "relative/town" },
 			want:   "must be an absolute path",
 		},
+		{
+			// The builder refuses the link before any request is made: the fixture
+			// doer fails the test if a request reaches it.
+			name:   "a town whose metadata.json links outside the town",
+			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { return g },
+			town: func(t *testing.T) string {
+				root := clientTown(t)
+				linkFile(t, root, "toolbox/.beads/metadata.json", filepath.Join(writeOutsideBeads(t), "metadata.json"))
+				return root
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -799,43 +917,57 @@ func TestPusherSlotUsesTheInstalledPusher(t *testing.T) {
 }
 
 // TestPusherSlotOrdersItsPushes: the slot runs one push to completion before it
-// starts the next, so a writer's document is built under the same order it is
-// sent in and an older document cannot land last. Without the order the
-// delegates run at the same time and the test records the overlap.
+// starts the next, so a writer's document is built in the order it is sent and
+// an older document cannot land last. The first push is held inside the pusher
+// behind a gate the test controls. The second push is started, and the test
+// yields a bounded number of times; it must not reach the pusher while the first
+// holds the slot. Then the gate opens and the pushes must not overlap.
 func TestPusherSlotOrdersItsPushes(t *testing.T) {
 	t.Parallel()
-	var entered, active int32
-	var overlapped int32
 	slot := &pusherSlot{}
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	var inside, overlapped int32
 	slot.set(pusherFunc(func(context.Context, string) (string, error) {
-		atomic.AddInt32(&entered, 1)
-		if atomic.AddInt32(&active, 1) != 1 {
+		if atomic.AddInt32(&inside, 1) != 1 {
 			atomic.StoreInt32(&overlapped, 1)
 		}
-		// Give a second goroutine time to reach the delegate if the slot lets
-		// it: a bounded yield, no clock.
-		for i := 0; i < 100; i++ {
-			runtime.Gosched()
-		}
-		atomic.AddInt32(&active, -1)
+		entered <- struct{}{}
+		<-gate
+		atomic.AddInt32(&inside, -1)
 		return "manifest", nil
 	}))
 
-	const pushes = 4
 	var wg sync.WaitGroup
-	wg.Add(pushes)
-	for i := 0; i < pushes; i++ {
-		go func() {
-			defer wg.Done()
-			if _, err := slot.push(context.Background(), "town"); err != nil {
-				t.Errorf("push: %v", err)
-			}
-		}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := slot.push(context.Background(), "first"); err != nil {
+			t.Errorf("push first: %v", err)
+		}
+	}()
+	<-entered // the first push is inside the pusher and holds the slot
+
+	started := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		close(started)
+		if _, err := slot.push(context.Background(), "second"); err != nil {
+			t.Errorf("push second: %v", err)
+		}
+	}()
+	<-started
+	// A bounded run of yields, no clock: a second push the slot lets through
+	// reaches the pusher within them, and one the slot holds does not.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
 	}
+	if n := len(entered); n != 0 {
+		t.Errorf("the second push reached the pusher while the first held the slot")
+	}
+	close(gate)
 	wg.Wait()
-	if got := atomic.LoadInt32(&entered); got != pushes {
-		t.Errorf("%d pushes reached the pusher, want %d", got, pushes)
-	}
 	if atomic.LoadInt32(&overlapped) != 0 {
 		t.Error("two pushes ran at the same time, so an older document can be stored after a newer one")
 	}
