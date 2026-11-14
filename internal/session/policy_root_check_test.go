@@ -98,7 +98,9 @@ func TestPolicyRootCheckAtTheSlingCallSiteWithoutACheckout(t *testing.T) {
 
 // The sling call site over a town whose gt source checkout holds the profile's
 // policy: createSpec resolves that copy's path. The pass case is asserted here,
-// beside the refusal, so the call site's two answers are read together.
+// beside the refusal, so the call site's two answers are read together. It goes
+// through newOpenShellBackend, which resolves the policy with the production
+// resolver, not the test seam.
 func TestPolicyRootCheckAtTheSlingCallSiteResolvesTheTownCopy(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
