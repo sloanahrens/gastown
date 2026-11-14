@@ -180,9 +180,23 @@ type podVerifyProbes struct {
 	run    update.RunFunc
 }
 
+// GTVersion is the build the pod's gt runs, read through kubectl exec under
+// podProbeBound. The embedded probe reads the executable of the run, which in
+// the update Job is the build the Job was started from, not the build the cycle
+// installed; the pod carries the installed build, so the pod is read instead.
+func (p podVerifyProbes) GTVersion(ctx context.Context) (string, error) {
+	return p.podCommit(ctx)
+}
+
 // DaemonVersion is the build the pod's daemon runs, read through kubectl exec
 // under podProbeBound.
 func (p podVerifyProbes) DaemonVersion(ctx context.Context) (string, error) {
+	return p.podCommit(ctx)
+}
+
+// podCommit reads the pod's commit under podProbeBound. GTVersion and
+// DaemonVersion both read the pod, so the two checks name one build.
+func (p podVerifyProbes) podCommit(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, podProbeBound)
 	defer cancel()
 	return podDaemonCommit(ctx, p.run, p.target.Context, p.target.Namespace, p.target.Deployment, p.target.InCluster)
