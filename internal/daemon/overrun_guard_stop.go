@@ -818,13 +818,14 @@ func overrunSeatOwnsBead(seat overrunSeat, status, assignee string) bool {
 // refuses as non-fast-forward succeeds when the tip adds nothing origin lacks:
 // such a push had nothing left to send.
 func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
-	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
-	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
-	if workDir == "" {
+	g, _, err := d.overrunSeatGit(seat)
+	if err != nil {
+		// A seat with no worktree has nothing to push, which is today's answer
+		// for it; the save and the dirty check refuse the same seat because
+		// they cannot see the work it may hold.
 		d.logger.Printf("overrun_guard: %s/%s: no worktree to push", seat.Rig, seat.Polecat)
 		return nil
 	}
-	g := d.gitAt(workDir)
 	branch := seat.Branch
 	if branch == "" {
 		current, err := g.CurrentBranch()
@@ -882,18 +883,17 @@ func overrunSaveMessage(bead string) string {
 // unpushed. A refused commit or push is an error, and the stop keeps the
 // sandbox.
 func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
-	workDir, err := d.overrunSeatWorktree(seat)
+	g, _, err := d.overrunSeatGit(seat)
 	if err != nil {
 		return overrunSave{}, err
 	}
 	committed := false
-	switch d.checkpointWorktreeAs(workDir, seat.Rig, seat.Polecat, overrunSaveMessage(seat.Bead)) {
+	switch d.checkpointWith(g, seat.Rig, seat.Polecat, overrunSaveMessage(seat.Bead)) {
 	case checkpointCreated:
 		committed = true
 	case checkpointRefused:
 		return overrunSave{}, errors.New("uncommitted work could not be committed; it may remain in the worktree")
 	}
-	g := d.gitAt(workDir)
 	branch := seat.Branch
 	if branch == "" {
 		current, err := g.CurrentBranch()
@@ -952,14 +952,37 @@ func (d *Daemon) overrunSeatWorktree(seat overrunSeat) (string, error) {
 	return workDir, nil
 }
 
+// overrunHostWorktreeLabel names the host worktree a seat's git handle runs
+// on. A later bead adds a seat whose handle runs inside its sandbox and names
+// that kind instead (gt-bh77is).
+const overrunHostWorktreeLabel = "host worktree"
+
+// overrunSeatGit is the one seam that picks the git handle the overrun stop's
+// save, dirty check, push and reset run over, and a label naming the worktree
+// kind. Every seat gets its host worktree's handle today; gt-bh77is takes the
+// seam over for a seat with a sandbox record, so the same save, push and reset
+// code runs inside the sandbox. A worktree that cannot be resolved is an
+// error, never a nil handle: the caller cannot save work it cannot see.
+func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, string, error) { //nolint:unparam // the label names the worktree kind; the sandbox handle names its kind at this seam (gt-bh77is), and the routing test reads it
+
+	if d.overrunSeatGitFn != nil {
+		return d.overrunSeatGitFn(seat)
+	}
+	workDir, err := d.overrunSeatWorktree(seat)
+	if err != nil {
+		return nil, "", err
+	}
+	return d.gitAt(workDir), overrunHostWorktreeLabel, nil
+}
+
 // overrunWorktreeDirty reports whether the seat's worktree holds uncommitted
 // work now. A status that cannot be read is an error, never clean.
 func (d *Daemon) overrunWorktreeDirty(seat overrunSeat) (bool, error) {
-	workDir, err := d.overrunSeatWorktree(seat)
+	g, _, err := d.overrunSeatGit(seat)
 	if err != nil {
 		return false, err
 	}
-	status, err := d.gitAt(workDir).Status()
+	status, err := g.Status()
 	if err != nil {
 		return false, fmt.Errorf("read status of %s/%s: %w", seat.Rig, seat.Polecat, err)
 	}
@@ -1022,12 +1045,12 @@ func overrunTipInHistory(g daemonGit, tip, upstream string) bool {
 // leaves; origin holding its tip is what makes that safe.
 func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	who := seat.Rig + "/" + seat.Polecat
-	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
-	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
-	if workDir == "" {
+	g, _, err := d.overrunSeatGit(seat)
+	if err != nil {
+		// A seat with no worktree has nothing to reset, the answer this step
+		// has always given it.
 		return nil
 	}
-	g := d.gitAt(workDir)
 	branch := seat.Branch
 	if branch == "" || branch == "(unknown)" {
 		current, err := g.CurrentBranch()
