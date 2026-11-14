@@ -41,6 +41,11 @@ type SandboxRecord struct {
 	// record written before that push existed.
 	Branch  string `json:"branch,omitempty"`
 	WorkDir string `json:"work_dir,omitempty"`
+	// WorkBead is the bead the spawn's polecat was slung, from
+	// SpawnSpec.WorkBeadID, so the resource sampler attributes the seat's rows
+	// to it without a bead read per tick (plan row B2a). Empty on a record
+	// written before the field existed, or on a polecat that was slung none.
+	WorkBead string `json:"work_bead,omitempty"`
 }
 
 // SandboxRegistryDir is where the records live.
