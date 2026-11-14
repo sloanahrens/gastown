@@ -1,6 +1,8 @@
 package bd
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -10,6 +12,15 @@ import (
 const (
 	dockerfileName = "Dockerfile.bd"
 	basePinName    = "base-pin"
+
+	// zeroDigest is the all-zero sha256 digest, which is no image's digest.
+	zeroDigest = "0000000000000000000000000000000000000000000000000000000000000000"
+
+	// basePinPlaceholder is the base reference written before the beads base
+	// image is published. The real pin is written by gt update bd-base once the
+	// beads base image is published (operator step O1). Until then this exact
+	// reference is the only all-zero digest basePinError accepts.
+	basePinPlaceholder = "forgejo:3000/bot-registry/beads-bd@sha256:" + zeroDigest
 )
 
 // basePinShape is a base reference pinned by digest: a registry host with an
@@ -17,11 +28,28 @@ const (
 // hex characters. A colon may only introduce the port, so a tag is refused.
 var basePinShape = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+@sha256:[0-9a-f]{64}$`)
 
+// basePinError returns nil when ref is a base reference pinned by digest. The
+// placeholder is accepted only as its exact value; any other all-zero digest is
+// refused, and so is any reference that is not a sha256 digest pin.
+func basePinError(ref string) error {
+	if ref == basePinPlaceholder {
+		return nil
+	}
+	if !basePinShape.MatchString(ref) {
+		return fmt.Errorf("reference %q is not pinned by sha256 digest with no tag", ref)
+	}
+	if strings.HasSuffix(ref, "@sha256:"+zeroDigest) {
+		return fmt.Errorf("reference %q has the all-zero digest; only the exact placeholder %q is accepted", ref, basePinPlaceholder)
+	}
+	return nil
+}
+
 // numericNonRootUser is a USER instruction naming a uid, or uid:gid, above zero.
 var numericNonRootUser = regexp.MustCompile(`^USER ([1-9][0-9]*)(:[0-9]+)?$`)
 
 // readInstructions returns the Dockerfile's instruction lines, trimmed, with
 // comments and blank lines dropped.
+// Each line is in canonical form; see canonicalInstruction.
 func readInstructions(t *testing.T) []string {
 	t.Helper()
 	raw, err := os.ReadFile(dockerfileName)
@@ -34,6 +62,7 @@ func readInstructions(t *testing.T) []string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		line = canonicalInstruction(line)
 		out = append(out, line)
 	}
 	return out
@@ -94,24 +123,25 @@ func TestDockerfileBdShape(t *testing.T) {
 }
 
 // TestBasePinIsDigest: base-pin holds one reference pinned by digest, and a
-// reference with a tag, or no digest at all, is refused.
+// reference with a tag, no digest at all, or an all-zero digest other than the
+// placeholder is refused.
 func TestBasePinIsDigest(t *testing.T) {
 	t.Parallel()
-	pin := readBasePin(t)
-	if !basePinShape.MatchString(pin) {
-		t.Fatalf("%s holds %q, want a reference pinned by sha256 digest with no tag", basePinName, pin)
+	if err := basePinError(readBasePin(t)); err != nil {
+		t.Fatalf("%s: %v", basePinName, err)
 	}
 	for _, tc := range []struct{ name, ref string }{
 		{"a latest tag", "forgejo:3000/bot-registry/beads-bd:latest"},
 		{"a commit tag", "forgejo:3000/bot-registry/beads-bd:b7e5e9c"},
-		{"a tag and a digest", "forgejo:3000/bot-registry/beads-bd:latest@sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+		{"a tag and a digest", "forgejo:3000/bot-registry/beads-bd:latest@sha256:" + zeroDigest},
 		{"a short digest", "forgejo:3000/bot-registry/beads-bd@sha256:abc"},
 		{"an uppercase digest", "forgejo:3000/bot-registry/beads-bd@sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000"},
 		{"no digest", "forgejo:3000/bot-registry/beads-bd"},
+		{"an all-zero digest in another repo", "forgejo:3000/bot-registry/other-bd@sha256:" + zeroDigest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if basePinShape.MatchString(tc.ref) {
+			if err := basePinError(tc.ref); err == nil {
 				t.Errorf("reference %q passed the digest check, want it refused", tc.ref)
 			}
 		})
@@ -120,10 +150,69 @@ func TestBasePinIsDigest(t *testing.T) {
 
 // contains reports whether want is one of lines.
 func contains(lines []string, want string) bool {
+	// want is canonicalized here; lines come from readInstructions, already canonical.
+	want = canonicalInstruction(want)
 	for _, l := range lines {
 		if l == want {
 			return true
 		}
 	}
 	return false
+}
+
+// canonicalInstruction returns an instruction line in one spelling: the keyword
+// upper-cased, runs of whitespace collapsed to one space, and a JSON exec form
+// re-encoded with no spaces. Two spellings of one instruction then compare equal.
+func canonicalInstruction(line string) string {
+	kw, rest := line, ""
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		kw, rest = line[:i], strings.TrimSpace(line[i:])
+	}
+	var args []string
+	if json.Unmarshal([]byte(rest), &args) == nil {
+		if enc, err := json.Marshal(args); err == nil {
+			rest = string(enc)
+		}
+	} else {
+		rest = strings.Join(strings.Fields(rest), " ")
+	}
+	if rest == "" {
+		return strings.ToUpper(kw)
+	}
+	return strings.ToUpper(kw) + " " + rest
+}
+
+// TestCanonicalInstruction: one instruction, however it is spaced or cased, has
+// one canonical form.
+func TestCanonicalInstruction(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, line, want string }{
+		{"keyword case", "from forgejo:3000/x@sha256:0", "FROM forgejo:3000/x@sha256:0"},
+		{"run of spaces", "COPY   --chmod=0755  bdgw   /usr/local/bin/bdgw", "COPY --chmod=0755 bdgw /usr/local/bin/bdgw"},
+		{"tab separator", "USER\t65532:65532", "USER 65532:65532"},
+		{"exec form spacing", `ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]`, `ENTRYPOINT ["/usr/local/bin/bdgw","serve"]`},
+		{"bare keyword", "run", "RUN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := canonicalInstruction(tc.line); got != tc.want {
+				t.Errorf("canonicalInstruction(%q) = %q, want %q", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestContainsIgnoresSpelling: a wanted instruction written with other spacing
+// or keyword case is found in the Dockerfile.
+func TestContainsIgnoresSpelling(t *testing.T) {
+	t.Parallel()
+	lines := readInstructions(t)
+	for _, want := range []string{
+		"from   " + readBasePin(t),
+		`entrypoint ["/usr/local/bin/bdgw",   "serve"]`,
+	} {
+		if !contains(lines, want) {
+			t.Errorf("contains(%q) = false, want true for the same instruction in another spelling", want)
+		}
+	}
 }
