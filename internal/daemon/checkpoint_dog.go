@@ -338,7 +338,7 @@ func (d *Daemon) checkpointWith(g daemonGit, rigName, polecatName, message strin
 	// revert other polecats' already-merged work under a generic "WIP:
 	// checkpoint (auto)" subject. Checked here, after staging, because the
 	// check needs the tree the pending commit would actually record.
-	if blocked, reason := d.checkpointRevertGuardWith(g, rigName, polecatName); blocked {
+	if blocked, reason := d.checkpointRevertGuard(g, rigName, polecatName); blocked {
 		d.logger.Printf("checkpoint_dog: refusing checkpoint in %s/%s: %s", rigName, polecatName, reason)
 		return checkpointRefused
 	}
@@ -439,12 +439,7 @@ const checkpointRevertTargetDefault = "main"
 // fork's stale copy there, not the shared history the guard needs to protect
 // (internal/done's submit path, CleanBaseRef). This mirrors
 // that same resolution so the two guards agree on what "already merged" means.
-func (d *Daemon) checkpointRevertTarget(workDir, rigName string) string {
-	return d.checkpointRevertTargetWith(d.gitAt(workDir), rigName)
-}
-
-// checkpointRevertTargetWith is checkpointRevertTarget over a caller's handle.
-func (d *Daemon) checkpointRevertTargetWith(g daemonGit, rigName string) string {
+func (d *Daemon) checkpointRevertTarget(g daemonGit, rigName string) string {
 	defaultBranch := checkpointRevertTargetDefault
 	if d.config != nil && d.config.TownRoot != "" {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
@@ -476,13 +471,8 @@ func (d *Daemon) checkpointRevertTargetWith(g daemonGit, rigName string) string 
 // in an environment that simply lacks the ref. Once the target does resolve,
 // any further failure to complete the check fails closed: a check that could
 // not run must not read as a check that passed.
-func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (blocked bool, reason string) {
-	return d.checkpointRevertGuardWith(d.gitAt(workDir), rigName, polecatName)
-}
-
-// checkpointRevertGuardWith is checkpointRevertGuard over a caller's handle.
-func (d *Daemon) checkpointRevertGuardWith(g daemonGit, rigName, polecatName string) (blocked bool, reason string) {
-	target := d.checkpointRevertTargetWith(g, rigName)
+func (d *Daemon) checkpointRevertGuard(g daemonGit, rigName, polecatName string) (blocked bool, reason string) {
+	target := d.checkpointRevertTarget(g, rigName)
 	if _, err := g.Rev(target); err != nil {
 		return false, ""
 	}
@@ -517,7 +507,7 @@ func (d *Daemon) checkpointRevertGuardWith(g daemonGit, rigName, polecatName str
 	// changed under the reads does not inherit a waiver for a different
 	// deletion (gt-0h4i0).
 	reverted := report.Reverted
-	if issue := d.checkpointWaiverBeadWith(g, rigName, polecatName); issue != nil {
+	if issue := d.checkpointWaiverBead(g, rigName, polecatName); issue != nil {
 		reverts, err := d.revertsNow(g, target)
 		if err != nil {
 			return true, fmt.Sprintf("could not re-inspect the pending checkpoint after reading the deletes-by-spec bead: %v", err)
@@ -561,16 +551,11 @@ func (d *Daemon) checkpointRevertGuardWith(g daemonGit, rigName, polecatName str
 // or read waives nothing — nil — so the refusal stands, because a check that
 // could not run must not read as a check that passed. The caller decides the
 // waiver against the tree staged after this read (revertwaiver.Note).
-func (d *Daemon) checkpointWaiverBead(workDir, rigName, polecatName string) *beads.Issue {
-	return d.checkpointWaiverBeadWith(d.gitAt(workDir), rigName, polecatName)
-}
-
-// checkpointWaiverBeadWith is checkpointWaiverBead over a caller's handle.
-func (d *Daemon) checkpointWaiverBeadWith(g daemonGit, rigName, polecatName string) *beads.Issue {
+func (d *Daemon) checkpointWaiverBead(g daemonGit, rigName, polecatName string) *beads.Issue {
 	if d.config == nil || d.config.TownRoot == "" {
 		return nil
 	}
-	id, err := d.checkpointedWorkBeadWith(g, rigName, polecatName)
+	id, err := d.checkpointedWorkBead(g, rigName, polecatName)
 	if err != nil || id == "" {
 		return nil
 	}
@@ -604,12 +589,7 @@ func (d *Daemon) revertsNow(g daemonGit, target string) ([]gtgit.RevertedMerge, 
 // (gt-aupx1). The seat's assigned active bead answers alone only when the
 // branch names no issue for this seat — a legacy branch, a detached HEAD, or a
 // branch another seat wrote — and only when there is exactly one of them.
-func (d *Daemon) checkpointedWorkBead(workDir, rigName, polecatName string) (string, error) {
-	return d.checkpointedWorkBeadWith(d.gitAt(workDir), rigName, polecatName)
-}
-
-// checkpointedWorkBeadWith is checkpointedWorkBead over a caller's handle.
-func (d *Daemon) checkpointedWorkBeadWith(g daemonGit, rigName, polecatName string) (string, error) {
+func (d *Daemon) checkpointedWorkBead(g daemonGit, rigName, polecatName string) (string, error) {
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	if branch, err := g.CurrentBranch(); err == nil {
 		if meta, ok := polecat.ParseBranchName(branch); ok && meta.Issue != "" && meta.Polecat == polecatName {

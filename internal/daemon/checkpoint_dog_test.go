@@ -890,7 +890,7 @@ func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
 	workDir, _, _ := checkpointClone(t, d, map[string]string{"base.txt": "base\n"})
 
-	if got, want := d.checkpointRevertTarget(workDir, "rig"), "origin/trunk"; got != want {
+	if got, want := d.checkpointRevertTarget(d.gitAt(workDir), "rig"), "origin/trunk"; got != want {
 		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
 	}
 }
@@ -921,7 +921,7 @@ func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := d.checkpointRevertTarget(workDir, "rig"), "upstream/main"; got != want {
+	if got, want := d.checkpointRevertTarget(d.gitAt(workDir), "rig"), "upstream/main"; got != want {
 		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
 	}
 }
@@ -935,7 +935,7 @@ func TestCheckpointRevertTarget_NoRigConfigFallsBackToMain(t *testing.T) {
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 	polecat, _ := newCheckpointRevertScenario(t, d)
 
-	if got, want := d.checkpointRevertTarget(polecat, "rig"), "origin/main"; got != want {
+	if got, want := d.checkpointRevertTarget(d.gitAt(polecat), "rig"), "origin/main"; got != want {
 		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
 	}
 }
@@ -1312,7 +1312,7 @@ func TestCheckpointRevertGuardJudgesTheWaiverAgainstTheTreeAfterTheBeadRead(t *t
 				}
 			}
 
-			blocked, reason := d.checkpointRevertGuard(polecat, "rig", "polecat")
+			blocked, reason := d.checkpointRevertGuard(d.gitAt(polecat), "rig", "polecat")
 			if blocked != tt.wantBlocked {
 				t.Fatalf("checkpointRevertGuard blocked = %v (%q), want %v", blocked, reason, tt.wantBlocked)
 			}
@@ -1366,7 +1366,7 @@ func TestCheckpointWaiverBeadFailsClosed(t *testing.T) {
 			}
 			useGitfake(t, d)
 
-			issue := d.checkpointWaiverBead(t.TempDir(), "rig", "polecat")
+			issue := d.checkpointWaiverBead(d.gitAt(t.TempDir()), "rig", "polecat")
 			if (issue != nil) != tt.want {
 				t.Fatalf("checkpointWaiverBead = %+v, want a bead: %v", issue, tt.want)
 			}
@@ -1397,7 +1397,7 @@ func TestCheckpointedWorkBeadCustomBranchTemplateWithTwoActiveAssignmentsNamesNo
 	// issue this package can read.
 	polecat, _ := newCheckpointRevertScenarioOn(t, d, "feature/gt-custom")
 
-	got, err := d.checkpointedWorkBead(polecat, "rig", "polecat")
+	got, err := d.checkpointedWorkBead(d.gitAt(polecat), "rig", "polecat")
 	if err != nil {
 		t.Fatalf("checkpointedWorkBead: %v", err)
 	}
