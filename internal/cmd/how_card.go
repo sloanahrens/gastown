@@ -1,0 +1,57 @@
+package cmd
+
+import (
+	_ "embed"
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
+
+// overseerCardFile holds the overseer card's rule lines, one per line and no
+// headings: what a just-compacted overseer reads before it acts (gt-j669b4.8).
+// The lines are the design's first set (section 5), given verbatim by the
+// overseer on that bead; TestHowCardRulesPinTheFile fails when a line changes,
+// so an edit to the card is reviewed as a diff.
+//
+// It sits under howdata beside this package's code so the card is reviewed like
+// code and deployed with the binary. It is not a file under directives/, which
+// internal/config/directives.go lists as role directives and
+// directives_deploy.go installs.
+//
+//go:embed howdata/overseer-card.md
+var overseerCardFile string
+
+const (
+	// overseerCardPath names the embedded card in a validation error, so a
+	// failing test points at the file to fix.
+	overseerCardPath = "internal/cmd/howdata/overseer-card.md"
+	// overseerCardMaxLine is the most characters one rule line may carry.
+	overseerCardMaxLine = 200
+)
+
+// overseerCardRules returns the card's rule lines, in file order. It has no
+// caller in this tree yet: gt how --card (gt-4n47gt) is the next bead and reads
+// the card through this function. A card that does not validate is an error,
+// never an empty list.
+func overseerCardRules() ([]string, error) {
+	return parseOverseerCard(overseerCardFile)
+}
+
+// parseOverseerCard splits text into rule lines and refuses a card that would
+// read as broken: an empty line, or a line over overseerCardMaxLine characters.
+// The error names the file and the 1-based line, so a test that trips it names
+// the line to fix, and it returns no lines, so a caller cannot print a card
+// that failed validation.
+func parseOverseerCard(text string) ([]string, error) {
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for i, line := range lines {
+		n := i + 1
+		if strings.TrimSpace(line) == "" {
+			return nil, fmt.Errorf("%s: line %d: empty line", overseerCardPath, n)
+		}
+		if c := utf8.RuneCountInString(line); c > overseerCardMaxLine {
+			return nil, fmt.Errorf("%s: line %d: %d characters, more than %d", overseerCardPath, n, c, overseerCardMaxLine)
+		}
+	}
+	return lines, nil
+}
