@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/doctor"
@@ -176,7 +177,7 @@ func doltComposeStatus(townRoot string, deps doltComposeDeps, w io.Writer) error
 	if err != nil {
 		return err
 	}
-	out, err := deps.run(u.argv("ps", "--all", "--format", "{{.Service}} {{.State}} {{.Health}}"), u.env(deps.environ()))
+	out, err := deps.run(u.argv("ps", "--all", "--format", doctor.DataUnitPsFormat), u.env(deps.environ()))
 	if err != nil {
 		return fmt.Errorf("docker compose ps for %s: %w", doltComposeProject, err)
 	}
@@ -203,9 +204,19 @@ func doltComposePsFor(deps doltComposeDeps) func(townRoot string) ([]byte, error
 	}
 }
 
-// dataUnitTokenDir names the gateway's token directory for the data unit check.
-// The town config has no key for it yet, and a setting is not read from the
-// environment, so the token rung refuses by name rather than guess a directory.
-func dataUnitTokenDir(_ string) (string, error) {
-	return "", errors.New("the bd gateway's token directory is not in the town config, so the token rung cannot read it")
+// dataUnitTokenEnv names the gateway's token directory. The compose unit requires
+// it, and the check reads the same variable compose sees.
+const dataUnitTokenEnv = "GT_BD_TOKEN_DIR"
+
+// dataUnitTokenDir returns the gateway's token directory from the environment,
+// for the data unit check. An empty result fails the token rung by name.
+func dataUnitTokenDir() string {
+	return os.Getenv(dataUnitTokenEnv)
+}
+
+// registerDataUnitCheck registers the data unit check on d, reading the unit with
+// deps. It is opt-in by name, like mac-crew-hooks: named in names, it reads the
+// compose unit through docker; otherwise it reports SKIPPED and calls nothing.
+func registerDataUnitCheck(d *doctor.Doctor, names []string, deps doltComposeDeps) {
+	d.Register(doctor.NewDataUnitCheck(slices.Contains(names, doctor.DataUnitCheckName), doltComposePsFor(deps), dataUnitTokenDir))
 }

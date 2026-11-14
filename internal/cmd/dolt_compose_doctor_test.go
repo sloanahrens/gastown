@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,31 +9,41 @@ import (
 	"github.com/steveyegge/gastown/internal/doctor"
 )
 
-// TestDataUnitDoctorRegisteredByName: --check data-unit reaches the data unit
-// check, so the run names it rather than refusing an unknown check. The town has
-// no compose values file, so the status reader refuses before docker runs and
-// the run fails on the unit rung.
-//
-//testpolicy:allow parallel — runDoctor reads the --check flag variable and the working directory, both process-wide
-func TestDataUnitDoctorRegisteredByName(t *testing.T) {
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-		t.Fatal(err)
+// TestDataUnitDoctorRegistration: the data unit check is registered on the
+// doctor, and it reads the unit only when --check names it. Named, the status
+// reader is the injected docker call, so the unit rung runs one ps through the
+// fake and fails on its empty output. Unnamed, the check is skipped and calls
+// nothing. No real docker or environment is read.
+func TestDataUnitDoctorRegistration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		names      []string
+		wantStatus doctor.CheckStatus
+		wantCalls  int
+	}{
+		{name: "named by --check runs the unit through the injected docker", names: []string{doctor.DataUnitCheckName}, wantStatus: doctor.StatusError, wantCalls: 1},
+		{name: "not named is skipped and calls nothing", names: nil, wantStatus: doctor.StatusSkipped, wantCalls: 0},
 	}
-	//testpolicy:allow no-chdir — the cwd is the input under test: runDoctor finds the town from the working directory
-	t.Chdir(townRoot)
-
-	savedCheck := doctorCheck
-	t.Cleanup(func() {
-		//testpolicy:allow no-global-swap — restores the flag variable swapped below
-		doctorCheck = savedCheck
-	})
-	//testpolicy:allow no-global-swap — runDoctor reads the --check flag variable; it is not an argument
-	doctorCheck = []string{doctor.DataUnitCheckName}
-
-	err := runDoctor(doctorCmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "doctor found 1 error(s)") {
-		t.Fatalf("runDoctor(--check data-unit) = %v, want the run to fail on the data unit check", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := composeTown(t, composeRef("gastown-bd"))
+			var calls []composeCall
+			d := doctor.NewDoctor()
+			registerDataUnitCheck(d, tt.names, fakeComposeDeps(townRoot, &calls, nil, nil))
+			checks := d.Checks()
+			if len(checks) != 1 || checks[0].Name() != doctor.DataUnitCheckName {
+				t.Fatalf("registered checks = %d, want the data unit check alone", len(checks))
+			}
+			res := checks[0].Run(&doctor.CheckContext{TownRoot: townRoot})
+			if res.Status != tt.wantStatus {
+				t.Errorf("status = %v, want %v; message %q", res.Status, tt.wantStatus, res.Message)
+			}
+			if len(calls) != tt.wantCalls {
+				t.Errorf("docker calls = %d, want %d", len(calls), tt.wantCalls)
+			}
+		})
 	}
 }
 
@@ -83,16 +92,6 @@ func TestDataUnitDoctorPsRefusesWithoutBdKey(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("docker calls = %d, want 0 when the unit is refused", len(calls))
-	}
-}
-
-// TestDataUnitDoctorTokenDirRefuses: until the town config names the token
-// directory, the check names none, so the token rung cannot pass on a guess.
-func TestDataUnitDoctorTokenDirRefuses(t *testing.T) {
-	t.Parallel()
-	dir, err := dataUnitTokenDir(t.TempDir())
-	if err == nil || dir != "" {
-		t.Fatalf("dataUnitTokenDir = %q, %v; want a refusal and no directory", dir, err)
 	}
 }
 

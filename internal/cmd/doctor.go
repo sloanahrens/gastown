@@ -147,11 +147,10 @@ it warns there instead of passing.
 
 Use --check data-unit to check the data compose unit (gt-data): the Dolt and bd
 services healthy in docker compose ps, the gateway's /readyz with the daemon
-token, and every token file in the gateway's token directory at mode 0600. The
-town config does not name that directory yet, so the token rung reports that
-it cannot read it. The unit is read through the same project and file as
-gt dolt start, and the check never starts or repairs anything. Without the flag
-it reports SKIPPED and never fails.`,
+token, and every token file in the gateway's token directory (GT_BD_TOKEN_DIR)
+at mode 0600. The unit is read through the same project and file as gt dolt
+start, and the check never starts or repairs anything. Without the flag it
+reports SKIPPED and never fails.`,
 	RunE: runDoctor,
 }
 
@@ -204,9 +203,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// default run never registers it.
 		d.Register(doctor.NewMacCrewHooksCheck())
 	}
-	// Opt-in by name, like mac-crew-hooks: it reads the compose unit through
-	// docker, so a default run reports it SKIPPED and calls nothing.
-	d.Register(doctor.NewDataUnitCheck(slices.Contains(names, doctor.DataUnitCheckName), doltComposePsFor(doltComposeRealDeps()), dataUnitTokenDir))
+	registerDataUnitCheck(d, names, doltComposeRealDeps())
 	if err := selectDoctorChecks(d, names); err != nil {
 		return err
 	}

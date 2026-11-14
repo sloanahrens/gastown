@@ -42,8 +42,9 @@ const (
 // by others.
 //
 // The check is opt-in by name: it runs only when 'gt doctor --check data-unit'
-// names it, and otherwise reports SKIPPED with the reason and never fails. It
-// reads, never writes: no start, stop or repair.
+// names it. Otherwise it reports SKIPPED with the reason and never fails; that
+// SKIPPED line is intended, and a default 'gt doctor' run lists it. It reads,
+// never writes: no start, stop or repair.
 type DataUnitCheck struct {
 	BaseCheck
 
@@ -55,18 +56,19 @@ type DataUnitCheck struct {
 	// not pass.
 	ps func(townRoot string) ([]byte, error)
 
-	// tokenDir names the gateway's token directory for the town. Nil is refused
-	// when the check is named, and an error from it fails the token rung.
-	tokenDir func(townRoot string) (string, error)
+	// tokenDir returns the gateway's token directory, GT_BD_TOKEN_DIR as the
+	// compose unit reads it. Nil is refused when the check is named. An empty
+	// result fails the tokens rung by name.
+	tokenDir func() string
 
 	// http answers /readyz. Nil is a client bounded by readyzTimeout.
 	http *http.Client
 }
 
 // NewDataUnitCheck creates the data compose unit check. named is whether
-// --check named it; ps reads the unit's services; tokenDir names the token
+// --check named it; ps reads the unit's services; tokenDir returns the token
 // directory.
-func NewDataUnitCheck(named bool, ps func(townRoot string) ([]byte, error), tokenDir func(townRoot string) (string, error)) *DataUnitCheck {
+func NewDataUnitCheck(named bool, ps func(townRoot string) ([]byte, error), tokenDir func() string) *DataUnitCheck {
 	return &DataUnitCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        DataUnitCheckName,
@@ -117,12 +119,9 @@ func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 		passed = append(passed, fmt.Sprintf("service %s is running and healthy", service))
 	}
 
-	dir, err := c.tokenDir(ctx.TownRoot)
-	if err != nil {
-		return fail("tokens", err)
-	}
+	dir := c.tokenDir()
 	if dir == "" {
-		return fail("tokens", errors.New("the gateway's token directory is empty, so it is unknown"))
+		return fail("tokens", errors.New("GT_BD_TOKEN_DIR is not set: the compose unit needs the same directory (docker-compose.yml)"))
 	}
 	daemonFile, wide, err := dataUnitTokenFiles(dir)
 	if len(wide) > 0 {

@@ -71,12 +71,7 @@ func newDataUnitCheck(t *testing.T, fx dataUnitFixture) (*DataUnitCheck, *dataUn
 			return nil, errors.New("docker compose ps for gt-data: docker exited with status 1")
 		}
 		return []byte(fx.ps), nil
-	}, func(string) (string, error) {
-		if fx.tokens == nil && !fx.missingDir {
-			return "", errors.New("the bd gateway's token directory is not in the town config")
-		}
-		return dir, nil
-	})
+	}, func() string { return dir })
 	if fx.readyz == 0 {
 		c.http = &http.Client{Transport: failingTransport{}}
 	} else {
@@ -316,6 +311,27 @@ func TestDataUnitDoctorReadyzBadURL(t *testing.T) {
 	}
 }
 
+// TestDataUnitDoctorTokenDirUnset: with GT_BD_TOKEN_DIR unset the tokens rung
+// fails by name with the reason the compose unit needs the same directory. The
+// unit rung has passed, and /readyz is not asked.
+func TestDataUnitDoctorTokenDirUnset(t *testing.T) {
+	t.Parallel()
+	fx := healthyDataUnit()
+	fx.tokens = nil
+	c, calls := newDataUnitCheck(t, fx)
+	res := c.Run(&CheckContext{TownRoot: t.TempDir()})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v, want StatusError; message %q", res.Status, res.Message)
+	}
+	const want = "data unit rung tokens failed: GT_BD_TOKEN_DIR is not set: the compose unit needs the same directory (docker-compose.yml)"
+	if res.Message != want {
+		t.Errorf("message = %q, want %q", res.Message, want)
+	}
+	if calls.ps != 1 || calls.readyz != 0 {
+		t.Errorf("ps calls = %d, readyz requests = %d; want 1 and 0", calls.ps, calls.readyz)
+	}
+}
+
 func TestDataUnitDoctorTokenMode(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -389,7 +405,7 @@ func TestDataUnitDoctorSkipped(t *testing.T) {
 					return []byte(healthyPs), nil
 				}
 			}
-			c := NewDataUnitCheck(tt.named, ps, func(string) (string, error) { return t.TempDir(), nil })
+			c := NewDataUnitCheck(tt.named, ps, func() string { return t.TempDir() })
 			c.http = &http.Client{Transport: handlerTransport{dataUnitReadyzHandler(http.StatusOK, calls)}}
 			res := c.Run(&CheckContext{TownRoot: t.TempDir()})
 			if res.Status != tt.wantStatus {
@@ -414,7 +430,7 @@ func TestDataUnitDoctorReadsTheRunTown(t *testing.T) {
 	c := NewDataUnitCheck(true, func(townRoot string) ([]byte, error) {
 		got = townRoot
 		return nil, errors.New("docker compose ps for gt-data: docker exited with status 1")
-	}, func(string) (string, error) { return t.TempDir(), nil })
+	}, func() string { return t.TempDir() })
 	res := c.Run(&CheckContext{TownRoot: town})
 	if got != town {
 		t.Errorf("status reader got town %q, want %q", got, town)
