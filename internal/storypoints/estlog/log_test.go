@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -90,6 +91,29 @@ func equalPtr(a, b *float64) bool {
 	return *a == *b
 }
 
+// assertOpensForAppend checks every open asked for writing at the log's end and
+// never truncation: O_APPEND is what keeps a second writer's lines.
+func assertOpensForAppend(t *testing.T, flagCalls []int) {
+	t.Helper()
+	if len(flagCalls) == 0 {
+		t.Fatal("the log was never opened")
+	}
+	for i, flags := range flagCalls {
+		if flags&os.O_APPEND == 0 {
+			t.Errorf("open %d asked for %#x, want O_APPEND", i+1, flags)
+		}
+		if flags&os.O_WRONLY == 0 {
+			t.Errorf("open %d asked for %#x, want O_WRONLY", i+1, flags)
+		}
+		if flags&os.O_CREATE == 0 {
+			t.Errorf("open %d asked for %#x, want O_CREATE", i+1, flags)
+		}
+		if flags&os.O_TRUNC != 0 {
+			t.Errorf("open %d asked for %#x, want no O_TRUNC", i+1, flags)
+		}
+	}
+}
+
 func TestPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -150,15 +174,18 @@ func TestAppendWritesOneWholeLine(t *testing.T) {
 			if opened := fsys.openCalls(); !slices.Equal(opened, []string{Path("/town")}) {
 				t.Errorf("opened %q, want once on %q", opened, Path("/town"))
 			}
+			assertOpensForAppend(t, fsys.openFlagCalls())
 		})
 	}
 }
 
 // TestAppendKeepsEveryLineOfTheTownLog: Append goes through the host
 // filesystem and the path Path names, opening the log for append rather than
-// truncation, so a second call keeps the first line. This is the one test that
-// writes a real file: the open flags are the behavior under test, and the
-// filesystem seam below replaces everything a fake can stand in for.
+// truncation, so a second call keeps the first line. This is the single
+// real-disk success test: a fake cannot show that the host really appends
+// across two opens, and the open flags it would take on trust are what this
+// drives. TestAppendReportsTheHostRefusingTheDirectoryOrTheOpen covers the
+// host's refusals.
 func TestAppendKeepsEveryLineOfTheTownLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -188,10 +215,57 @@ func TestAppendKeepsEveryLineOfTheTownLog(t *testing.T) {
 	}
 }
 
-// TestAppendTwoWritersKeepWholeLines: two writers appending at once leave every
-// line whole and lose none, because each append is one write of one line to the
-// shared log.
-func TestAppendTwoWritersKeepWholeLines(t *testing.T) {
+// TestAppendReportsTheHostRefusingTheDirectoryOrTheOpen: a refusal from the
+// host filesystem, not the fake, must reach the caller naming the log, so each
+// one is planted on a temp directory and driven through the exported Append:
+// a regular file where the log's directory belongs, then a directory where the
+// log itself belongs.
+func TestAppendReportsTheHostRefusingTheDirectoryOrTheOpen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		plant func(t *testing.T, townRoot string)
+	}{
+		{
+			name: "a file where the log directory belongs",
+			plant: func(t *testing.T, townRoot string) {
+				if err := os.WriteFile(filepath.Join(townRoot, ".runtime"), nil, 0o644); err != nil {
+					t.Fatalf("plant the file that blocks the directory: %v", err)
+				}
+			},
+		},
+		{
+			name: "a directory where the log belongs",
+			plant: func(t *testing.T, townRoot string) {
+				if err := os.MkdirAll(Path(townRoot), 0o755); err != nil {
+					t.Fatalf("plant the directory that blocks the open: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			tt.plant(t, townRoot)
+			err := Append(townRoot, sampleRecord("gt-p4aqut"))
+			if err == nil {
+				t.Fatalf("Append = nil, want the host's refusal")
+			}
+			if !strings.Contains(err.Error(), Path(townRoot)) {
+				t.Errorf("error = %q, want it to name %q", err, Path(townRoot))
+			}
+		})
+	}
+}
+
+// TestAppendTwoWritersAskForAppendAndWriteOneLineEach: under two writers, every
+// append opens the log for append and hands its record to the file in one Write
+// call ending in a newline, and no line is lost. A fake cannot tear a write the
+// way the kernel can, so this pins the part the code decides — append mode and
+// one write per record — and TestAppendKeepsEveryLineOfTheTownLog drives the
+// real O_APPEND.
+func TestAppendTwoWritersAskForAppendAndWriteOneLineEach(t *testing.T) {
 	t.Parallel()
 	fsys := &fakeLogFS{}
 	const writers, each = 2, 40
@@ -216,7 +290,12 @@ func TestAppendTwoWritersKeepWholeLines(t *testing.T) {
 		t.Fatalf("appendRecord: %v", err)
 	}
 
-	for i, write := range fsys.writeCalls() {
+	assertOpensForAppend(t, fsys.openFlagCalls())
+	writes := fsys.writeCalls()
+	if len(writes) != writers*each {
+		t.Fatalf("appendRecord made %d writes, want one per record (%d)", len(writes), writers*each)
+	}
+	for i, write := range writes {
 		if bytes.Count(write, []byte("\n")) != 1 || !bytes.HasSuffix(write, []byte("\n")) {
 			t.Fatalf("write %d is not exactly one line: %q", i+1, write)
 		}
@@ -327,19 +406,25 @@ func TestAppendRefusesUnencodableRecord(t *testing.T) {
 
 // fakeLogFS is the filesystem appendRecord writes through, with the log kept in
 // memory. Each error field makes one step of a healthy append fail; the
-// recorded calls and writes let a test read what appendRecord asked of the
-// filesystem.
+// recorded calls, open flags and writes let a test read what appendRecord asked
+// of the filesystem.
 type fakeLogFS struct {
 	mu       sync.Mutex
 	log      bytes.Buffer
 	writes   [][]byte
-	opened   []string
+	opened   []openCall
 	mkdirs   []string
 	mkdirErr error
 	openErr  error
 	writeErr error
 	closeErr error
 	shortBy  int
+}
+
+// openCall is one OpenAppend the fake was asked for.
+type openCall struct {
+	path  string
+	flags int
 }
 
 func (f *fakeLogFS) MkdirAll(dir string, _ os.FileMode) error {
@@ -352,13 +437,18 @@ func (f *fakeLogFS) MkdirAll(dir string, _ os.FileMode) error {
 	return nil
 }
 
-func (f *fakeLogFS) OpenAppend(path string) (io.WriteCloser, error) {
+func (f *fakeLogFS) OpenAppend(path string, flags int) (io.WriteCloser, error) {
 	if f.openErr != nil {
 		return nil, f.openErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.opened = append(f.opened, path)
+	f.opened = append(f.opened, openCall{path: path, flags: flags})
+	// A handle not opened for append, or opened to truncate, starts the file
+	// over, as a host open with the same flags would.
+	if flags&os.O_APPEND == 0 || flags&os.O_TRUNC != 0 {
+		f.log.Reset()
+	}
 	return &fakeLogFile{fs: f}, nil
 }
 
@@ -373,7 +463,7 @@ func (f *fakeLogFile) Write(p []byte) (int, error) {
 		return 0, f.fs.writeErr
 	}
 	f.fs.writes = append(f.fs.writes, slices.Clone(p))
-	n := len(p) - f.fs.shortBy
+	n := max(0, len(p)-f.fs.shortBy)
 	f.fs.log.Write(p[:n]) // a bytes.Buffer write cannot fail
 	return n, nil
 }
@@ -393,7 +483,22 @@ func (f *fakeLogFS) writeCalls() [][]byte {
 func (f *fakeLogFS) openCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.opened)
+	out := make([]string, len(f.opened))
+	for i, open := range f.opened {
+		out[i] = open.path
+	}
+	return out
+}
+
+// openFlagCalls returns the flags of every open, in the order they were asked.
+func (f *fakeLogFS) openFlagCalls() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]int, len(f.opened))
+	for i, open := range f.opened {
+		out[i] = open.flags
+	}
+	return out
 }
 
 func (f *fakeLogFS) mkdirCalls() []string {

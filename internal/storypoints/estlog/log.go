@@ -85,15 +85,20 @@ func Append(townRoot string, r Record) error {
 	return appendRecord(osLogFS{}, townRoot, r)
 }
 
+// appendFlags opens the log for writing at its end, creating it if missing, so
+// a second writer keeps the lines the first wrote. Truncating would lose them.
+const appendFlags = os.O_WRONLY | os.O_APPEND | os.O_CREATE
+
 // logFS is the two filesystem calls an append makes: the directory the log
-// lives in, and the append-only handle the line goes through. Production passes
-// osLogFS; a test passes an in-memory fake, so every failure branch runs
-// without a disk.
+// lives in, and the handle the line goes through. Production passes osLogFS; a
+// test passes an in-memory fake that sees the open flags, so every failure
+// branch runs without a disk and the append mode is still asserted.
 type logFS interface {
 	// MkdirAll creates dir and the parents it needs.
 	MkdirAll(dir string, perm os.FileMode) error
-	// OpenAppend opens path for appending, creating the file.
-	OpenAppend(path string) (io.WriteCloser, error)
+	// OpenAppend opens path with flags, which the caller chooses so a test can
+	// read back that it asked for append.
+	OpenAppend(path string, flags int) (io.WriteCloser, error)
 }
 
 // osLogFS is the host filesystem.
@@ -102,9 +107,9 @@ type osLogFS struct{}
 // MkdirAll creates dir and the parents it needs.
 func (osLogFS) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
 
-// OpenAppend opens path for appending, creating it.
-func (osLogFS) OpenAppend(path string) (io.WriteCloser, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+// OpenAppend opens path with flags.
+func (osLogFS) OpenAppend(path string, flags int) (io.WriteCloser, error) {
+	return os.OpenFile(path, flags, 0o644)
 }
 
 // appendRecord is Append through fsys, so a test can drive the directory, open,
@@ -122,7 +127,7 @@ func appendRecord(fsys logFS, townRoot string, r Record) error {
 	if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("storypoints/estlog: creating the directory for %s: %w", path, err)
 	}
-	f, err := fsys.OpenAppend(path)
+	f, err := fsys.OpenAppend(path, appendFlags)
 	if err != nil {
 		return fmt.Errorf("storypoints/estlog: opening %s: %w", path, err)
 	}
