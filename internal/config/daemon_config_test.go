@@ -1817,16 +1817,16 @@ func TestSpecDispatchStoryPointsSplitOverDecodes(t *testing.T) {
 	}
 }
 
-// story_points.lint_over_minutes decodes to the accessor the size gate reads; a
-// zero or negative value is off, so the gate ships disabled (gt-ljb57x).
+// story_points.lint_over_minutes loads through LoadDaemonPatrolConfig to the
+// accessor the size gate reads; a zero or negative value is off, so the gate
+// ships disabled (gt-ljb57x).
 func TestSpecDispatchStoryPointsLintOverDecodes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		body string // empty is a nil config
+		body string
 		want float64
 	}{
-		{"nil config", "", 0},
 		{"set", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":11}}}}`, 11},
 		{"fractional", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":11.5}}}}`, 11.5},
 		{"zero", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":0}}}}`, 0},
@@ -1836,21 +1836,25 @@ func TestSpecDispatchStoryPointsLintOverDecodes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var cfg *DaemonPatrolConfig
-			if tc.body != "" {
-				cfg = &DaemonPatrolConfig{}
-				if err := DecodeJSONFile("daemon.json", []byte(tc.body), cfg); err != nil {
-					t.Fatalf("decode: %v", err)
-				}
+			path := filepath.Join(t.TempDir(), "mayor", "daemon.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("creating mayor dir: %v", err)
 			}
-			var sd *SpecDispatchConfig
-			if cfg != nil {
-				sd = cfg.Patrols.SpecDispatch
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("writing daemon.json: %v", err)
 			}
-			if got := sd.StoryPointsLintOver(); got != tc.want {
+			cfg, err := LoadDaemonPatrolConfig(path)
+			if err != nil {
+				t.Fatalf("LoadDaemonPatrolConfig: %v", err)
+			}
+			if got := cfg.Patrols.SpecDispatch.StoryPointsLintOver(); got != tc.want {
 				t.Errorf("StoryPointsLintOver() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+	var nilBlock *SpecDispatchConfig
+	if got := nilBlock.StoryPointsLintOver(); got != 0 {
+		t.Errorf("nil spec_dispatch block reads a trigger of %v, want 0", got)
 	}
 }
 
