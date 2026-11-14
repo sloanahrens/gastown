@@ -52,6 +52,7 @@ func readGolden(t *testing.T, name string) string {
 // TestAssembleFullGolden pins the whole text for the acceptance box's fixture
 // and shows that a second run assembles the same bytes.
 func TestAssembleFullGolden(t *testing.T) {
+	t.Parallel()
 	golden := readGolden(t, "full.md")
 	first := Assemble(fullInput())
 	if first != golden {
@@ -65,6 +66,7 @@ func TestAssembleFullGolden(t *testing.T) {
 // TestAssembleOmitsEmptySections covers the acceptance box for a bead with no
 // notes, no comments and no boxes: no heading stands over nothing.
 func TestAssembleOmitsEmptySections(t *testing.T) {
+	t.Parallel()
 	out := Assemble(Input{
 		BeadID:      "gt-min1",
 		Title:       "A bead with no lists",
@@ -81,6 +83,7 @@ func TestAssembleOmitsEmptySections(t *testing.T) {
 }
 
 func TestAssembleHeading(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   Input
@@ -94,6 +97,7 @@ func TestAssembleHeading(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := Assemble(tt.in); got != tt.want {
 				t.Errorf("Assemble() = %q, want %q", got, tt.want)
 			}
@@ -104,6 +108,7 @@ func TestAssembleHeading(t *testing.T) {
 // TestAssembleOmitsFieldsNotPassed is one row per field a caller can leave out:
 // each one leaves no heading for that field behind.
 func TestAssembleOmitsFieldsNotPassed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		in     Input
@@ -117,6 +122,7 @@ func TestAssembleOmitsFieldsNotPassed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if out := Assemble(tt.in); strings.Contains(out, tt.absent) {
 				t.Errorf("output carries %q for a field not passed:\n%s", tt.absent, out)
 			}
@@ -125,6 +131,7 @@ func TestAssembleOmitsFieldsNotPassed(t *testing.T) {
 }
 
 func TestAssembleCommentLabel(t *testing.T) {
+	t.Parallel()
 	at := time.Date(2026, 11, 14, 22, 40, 0, 0, time.UTC)
 	tests := []struct {
 		name    string
@@ -149,6 +156,7 @@ func TestAssembleCommentLabel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := Assemble(Input{Comments: []Comment{tt.comment}}); got != tt.want {
 				t.Errorf("Assemble() = %q, want %q", got, tt.want)
 			}
@@ -159,6 +167,7 @@ func TestAssembleCommentLabel(t *testing.T) {
 // TestAssembleCommentTimeIsUTC keeps the same instant assembling to the same
 // bytes whatever zone the caller's time carries.
 func TestAssembleCommentTimeIsUTC(t *testing.T) {
+	t.Parallel()
 	utc := time.Date(2026, 11, 14, 22, 40, 0, 0, time.UTC)
 	zone := time.FixedZone("X", 2*60*60)
 	shifted := utc.In(zone)
