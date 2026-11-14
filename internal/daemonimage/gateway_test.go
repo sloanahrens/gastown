@@ -136,6 +136,20 @@ func TestBuildGatewayReportsAFailedUndo(t *testing.T) {
 	}
 }
 
+// TestBuildGatewayRefusesARevTheSourceLacks: a rev the gt checkout does not hold
+// is refused before any build runs, so a stamp never names a commit the build
+// did not read.
+func TestBuildGatewayRefusesARevTheSourceLacks(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	if _, err := b.BuildGateway(context.Background(), "1111111111111111111111111111111111111111"); err == nil {
+		t.Fatal("BuildGateway built from a rev the gt checkout does not hold")
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("a refused call ran %d builds, want none", len(run.calls))
+	}
+}
+
 // TestBuildGatewayRefusesBeforeAnyBuild: each input BuildGateway cannot build
 // from is refused before the first build runs, so the refusal writes nothing.
 func TestBuildGatewayRefusesBeforeAnyBuild(t *testing.T) {
@@ -148,6 +162,9 @@ func TestBuildGatewayRefusesBeforeAnyBuild(t *testing.T) {
 		{"no output directory", func(b *Builder) { b.Out = "" }},
 		{"no gt source", func(b *Builder) { b.GTSrc = "" }},
 		{"no runner", func(b *Builder) { b.Run = nil }},
+		{"no git", func(b *Builder) { b.Git = nil }},
+		{"gt source inside a canonical clone", func(b *Builder) { b.GTSrc = filepath.Join("town", "rig", "mayor", "rig") }},
+		{"output directory that does not exist", func(b *Builder) { b.Out = filepath.Join(b.Out, "missing") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
