@@ -484,6 +484,50 @@ func TestEscalationCloseNudgeCutAtItsDeadlineIsNotRetried(t *testing.T) {
 	}
 }
 
+// A send whose context ends with the deadline before it has run for the commit
+// point has typed nothing and queued nothing, however long a share it was
+// granted: it is a failed send, and the close stays owed for the next tick. The
+// commit check reads how long the send ran, not the timeout it was given
+// (gt-2fgnjc).
+func TestEscalationCloseNudgeDeadlineBeforeTheCommitPointStaysOwed(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+	var sent []string
+	logs := &recordingLogger{}
+	seams := escalationCloseSeams{
+		escalations: func(string) ([]patrolscan.Escalation, error) {
+			return []patrolscan.Escalation{{ID: closeTestEscID, EscalatedBy: closeTestSeat,
+				RelatedBead: closeTestBead, CloseReason: closeTestReason}}, nil
+		},
+		holding: func(string, string) (string, error) { return closeTestBead, nil },
+		seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
+		nudge: func(target, _ string, timeout time.Duration) error {
+			// The send is granted a long share but hangs early: the context
+			// ends with the deadline well before the delivery types or queues.
+			if timeout < escalationCloseSendCommitPoint {
+				t.Errorf("the share %s is under the commit point %s: the case needs a long share", timeout, escalationCloseSendCommitPoint)
+			}
+			sent = append(sent, target)
+			clk.Advance(time.Second)
+			return context.DeadlineExceeded
+		},
+		now:  clk.Now,
+		save: func(escalationCloseState) error { return nil },
+		logf: logs.Printf,
+	}
+	next := runEscalationCloseNudges(seams, escalationCloseState{Watch: map[string]bool{closeTestEscID: true}}, []string{"gastown"})
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d nudges in the pass, want 1", len(sent))
+	}
+	if !next.Watch[closeTestEscID] {
+		t.Errorf("%s was settled although the send ended after 1s, before anything was typed or queued: %+v", closeTestEscID, next.Watch)
+	}
+	if hasLogLine(logs.lines, "typed or queued") {
+		t.Errorf("a send cut before the commit point was logged as delivered: %q", logs.lines)
+	}
+}
+
 // The close nudges of one pass share a send budget: a send takes a share of
 // what is left, and reading escalations between sends spends none of it, so
 // the pass's send time is bounded by the budget whatever the reads cost

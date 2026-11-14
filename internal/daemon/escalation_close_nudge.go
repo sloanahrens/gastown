@@ -64,8 +64,8 @@ const escalationCloseNudgeHeadroom = 11 * time.Second
 // given. A context shorter than the delivery's own waits ends with the
 // wait-idle fallback still in flight, and the pass then sends the close again,
 // so the seat reads it twice (gt-2fgnjc); a send given less than this, its
-// share when several closes divide a pass, is covered by
-// escalationCloseSendCommitted. It is not overrunNudgeTimeout, so tuning the
+// share when several closes divide a pass, is told apart by how long it ran
+// (escalationCloseSendCommitted). It is not overrunNudgeTimeout, so tuning the
 // overrun guard does not change this send.
 const escalationCloseNudgeTimeout = escalationCloseDeliveryWorstCase + escalationCloseNudgeHeadroom
 
@@ -145,19 +145,17 @@ func (b *escalationSendBudget) spend(start time.Time) {
 
 // escalationCloseSendCommitted reports whether a send that returned err has
 // delivered the message anyway, so the pass must not send it again. The close
-// nudge uses deliver's wait-idle mode (gt-h7f9cc): once a send's context has
-// lasted escalationCloseSendCommitPoint the delivery has either typed the
-// message into the pane or queued it and started the poller that drains that
-// queue into the same pane, so a context that ends later fails the send with
-// the context's deadline while the message is already delivered; retrying it
-// types a second copy, the resend gt-2fgnjc fixes. A send cut before the
-// commit point has done neither, so it is a failed send and the next tick
-// retries it.
-// deadline while the message is already delivered; retrying it types a second
-// copy, the resend gt-2fgnjc fixes. A send cut before the commit point has done
-// neither, so it is a failed send and the next tick retries it.
-func escalationCloseSendCommitted(err error, timeout time.Duration) bool {
-	return errors.Is(err, context.DeadlineExceeded) && timeout >= escalationCloseSendCommitPoint
+// nudge uses deliver's wait-idle mode (gt-h7f9cc): once a send has run for
+// escalationCloseSendCommitPoint the delivery has either typed the message
+// into the pane or queued it and started the poller that drains that queue
+// into the same pane, so a send that the context then ends fails with the
+// context's deadline while the message is already delivered; retrying it types
+// a second copy, the resend gt-2fgnjc fixes. ran is how long the send actually
+// ran, not the share it was granted: a send that hangs early, before the
+// delivery types or queues anything, ran for less than the commit point even
+// when its share was long, and it is a failed send the next tick retries.
+func escalationCloseSendCommitted(err error, ran time.Duration) bool {
+	return errors.Is(err, context.DeadlineExceeded) && ran >= escalationCloseSendCommitPoint
 }
 
 // escalationCloseState is what the pass remembers between ticks.
@@ -196,8 +194,8 @@ type escalationCloseSeams struct {
 	// send gives up after timeout, its share of what is left of the pass's send
 	// budget, so one hung send cannot hold the tick for its own timeout once
 	// per escalation, nor take the turns of the closes after it. A send that
-	// gives up after escalationCloseSendCommitPoint has delivered the message
-	// already (escalationCloseSendCommitted).
+	// ran for escalationCloseSendCommitPoint before it gave up has delivered
+	// the message already (escalationCloseSendCommitted).
 	nudge func(target, msg string, timeout time.Duration) error
 	// now reads the clock the pass's send budget runs on.
 	now func() time.Time
@@ -378,10 +376,11 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	}
 	start := s.now()
 	err = s.nudge(target, escalationCloseMessage(e), timeout)
+	ran := s.now().Sub(start)
 	budget.spend(start)
 	if err != nil {
-		if escalationCloseSendCommitted(err, timeout) {
-			s.logf("escalation_close: %s: nudge for %s ended at its %s deadline with the message typed or queued; not retrying", target, e.ID, timeout)
+		if escalationCloseSendCommitted(err, ran) {
+			s.logf("escalation_close: %s: nudge for %s ended at its deadline after %s with the message typed or queued; not retrying", target, e.ID, ran)
 			return escalationNudged
 		}
 		s.logf("escalation_close: %s: nudge for %s failed, will retry: %v", target, e.ID, err)
