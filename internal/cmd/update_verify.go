@@ -166,8 +166,9 @@ func (p podImageLabelProbes) ImageLabel(ctx context.Context) (string, error) {
 }
 
 // podTargetImageLabel reads the commit label of the polecat image the values file
-// at imagesPath names, through the town's registry reader. It runs no command.
-// The registry answers the manifest and config bytes, and the reader checks each
+// at imagesPath names, through the town's registry reader, in process: its only
+// inputs are the registry seams, the town root and the images file, and no
+// command runner is among them. The registry answers the manifest and config bytes, and the reader checks each
 // against the digest it was asked by. The town copy of the values file is not
 // read: until the Job's own checks pass it names the previous pair.
 func podTargetImageLabel(seams updateImagesSeams, townRoot, imagesPath string) func(context.Context) (string, error) {

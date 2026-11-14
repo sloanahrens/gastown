@@ -63,9 +63,27 @@ func (r *podLabelRegistry) addRebuild(commit, marker string) string {
 	}
 	body := []byte(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"` + cfgDigest + `"}` + annotation + `}`)
 	digest := testDigestOf(body)
+	r.mu.Lock()
 	r.manifests[digest] = podLabelManifest{body: body}
 	r.blobs[cfgDigest] = cfg
+	r.mu.Unlock()
 	return digest
+}
+
+// manifest and blob read what the registry holds under its lock, so a request
+// served on the server's goroutine never races an image added by the test.
+func (r *podLabelRegistry) manifest(ref string) (podLabelManifest, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.manifests[ref]
+	return m, ok
+}
+
+func (r *podLabelRegistry) blob(ref string) ([]byte, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.blobs[ref]
+	return b, ok
 }
 
 // askedRefs is every path the registry was asked for, in order.
@@ -88,7 +106,7 @@ func (r *podLabelRegistry) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	endpoint, ref, _ := strings.Cut(rest, "/")
 	switch endpoint {
 	case "manifests":
-		m, held := r.manifests[ref]
+		m, held := r.manifest(ref)
 		if !held {
 			http.NotFound(w, req)
 			return
@@ -101,7 +119,7 @@ func (r *podLabelRegistry) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		_, _ = w.Write(m.body)
 	case "blobs":
-		b, held := r.blobs[ref]
+		b, held := r.blob(ref)
 		if !held {
 			http.NotFound(w, req)
 			return
