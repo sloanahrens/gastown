@@ -105,7 +105,6 @@ func serve(ctx context.Context, sc *serveConfig) error {
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
-		defer signal.Stop(hup)
 		if err := auth.WatchSignals(ctx, hup, func(err error) {
 			fmt.Fprintln(os.Stderr, "bdgw serve: token reload:", err)
 		}); err != nil {
@@ -138,6 +137,10 @@ func serve(ctx context.Context, sc *serveConfig) error {
 		defer cancel()
 		serveErr = srv.Shutdown(drainCtx)
 	}
+	// Stop the notification before closing, so a SIGHUP arriving now is never
+	// sent to a closed channel; then closing the channel ends the watcher when
+	// the server stopped on its own rather than on ctx.
+	signal.Stop(hup)
 	close(hup)
 	<-watchDone
 	return serveErr
