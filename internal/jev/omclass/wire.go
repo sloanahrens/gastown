@@ -31,6 +31,13 @@ type Settings struct {
 // cursor, and the cap read from the same ledger. warnings receives the ledger's
 // own warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
+	return openPass(townRoot, s, warnings)
+}
+
+// openPass is Open with the client's extra options named. Open passes none, so
+// the key comes from the host's own locations; a test passes jev.WithKeyPaths
+// to read a key it wrote instead.
+func openPass(townRoot string, s Settings, warnings io.Writer, extra ...jev.Option) (*Pass, error) {
 	capUSD := s.MaxUSDPerDay
 	if capUSD == 0 {
 		capUSD = DefaultMaxUSDPerDay
@@ -40,11 +47,12 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		return nil, fmt.Errorf("jev_omclass: %w", err)
 	}
 
-	client, err := jev.NewClient(jev.BatteryOptions(townRoot, Caller, warnings, jev.BatteryScrub{
+	opts := append(jev.BatteryOptions(townRoot, Caller, warnings, jev.BatteryScrub{
 		Scrub:      s.Scrub,
 		ScrubCheck: s.ScrubCheck,
 		Allows:     town.AllowsNow,
-	})...)
+	}), extra...)
+	client, err := jev.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}

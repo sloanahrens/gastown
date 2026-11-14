@@ -95,6 +95,7 @@ func readLog(t *testing.T, path string) []Line {
 }
 
 func TestOMClassQuestionOptionsAreClassNamesPlusNone(t *testing.T) {
+	t.Parallel()
 	q, ok := Questions()[QRuleClass]
 	if !ok {
 		t.Fatalf("no %s question", QRuleClass)
@@ -113,6 +114,7 @@ func TestOMClassQuestionOptionsAreClassNamesPlusNone(t *testing.T) {
 }
 
 func TestOMClassKeywordLabelsAFindingByTheTable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		f    land.ReviewFindingText
@@ -132,6 +134,7 @@ func TestOMClassKeywordLabelsAFindingByTheTable(t *testing.T) {
 }
 
 func TestOMClassRunFirstPassSetsCursorOnly(t *testing.T) {
+	t.Parallel()
 	asker := &fakeAsker{choice: "fail-open"}
 	p := newPass(t, asker, fakeReviews{recs: []land.ReviewRecord{review("gt-a", 1, t0.Add(time.Minute), failOpen)}}, time.Time{})
 	sum, err := p.Run(context.Background())
@@ -144,6 +147,7 @@ func TestOMClassRunFirstPassSetsCursorOnly(t *testing.T) {
 }
 
 func TestOMClassRunAsksEachNewFinding(t *testing.T) {
+	t.Parallel()
 	asker := &fakeAsker{choice: "fail-open"}
 	recs := []land.ReviewRecord{
 		review("gt-old", 1, t0.Add(-time.Minute), failOpen),
@@ -176,6 +180,7 @@ func TestOMClassRunAsksEachNewFinding(t *testing.T) {
 }
 
 func TestOMClassRunLogHoldsNoFindingText(t *testing.T) {
+	t.Parallel()
 	p := newPass(t, &fakeAsker{choice: "fail-open"}, fakeReviews{recs: []land.ReviewRecord{review("gt-new", 1, t0.Add(time.Minute), failOpen)}}, t0)
 	if _, err := p.Run(context.Background()); err != nil {
 		t.Fatal(err)
@@ -192,6 +197,7 @@ func TestOMClassRunLogHoldsNoFindingText(t *testing.T) {
 // TestOMClassRunAsksEveryFindingInOrder takes twelve findings from one review.
 // An unpadded index would sort "/10" before "/2" and the cursor would skip them.
 func TestOMClassRunAsksEveryFindingInOrder(t *testing.T) {
+	t.Parallel()
 	var findings []land.ReviewFindingText
 	for i := 0; i < 12; i++ {
 		findings = append(findings, land.ReviewFindingText{Title: fmt.Sprintf("finding %d", i), Claim: "claim"})
@@ -213,6 +219,7 @@ func TestOMClassRunAsksEveryFindingInOrder(t *testing.T) {
 }
 
 func TestOMClassRunCapsAt300(t *testing.T) {
+	t.Parallel()
 	var findings []land.ReviewFindingText
 	for i := 0; i < MaxFindingsPerRun+1; i++ {
 		findings = append(findings, land.ReviewFindingText{Title: fmt.Sprintf("finding %d", i), Claim: "claim"})
@@ -243,6 +250,7 @@ func TestOMClassRunCapsAt300(t *testing.T) {
 // usable answer skips the finding and moves the cursor past it; a branch that
 // fails the pass leaves the cursor on the finding it could not take.
 func TestOMClassRunRefusals(t *testing.T) {
+	t.Parallel()
 	recs := []land.ReviewRecord{review("gt-a", 1, t0.Add(time.Minute), failOpen)}
 	cases := []struct {
 		name           string
@@ -330,6 +338,7 @@ func TestOMClassRunRefusals(t *testing.T) {
 }
 
 func TestOMClassRunBusyWhenAnotherPassHoldsTheLock(t *testing.T) {
+	t.Parallel()
 	p := newPass(t, &fakeAsker{choice: "fail-open"}, fakeReviews{}, t0)
 	release, err := battery.Lock(p.CursorPath + ".lock")
 	if err != nil {
