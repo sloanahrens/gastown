@@ -8,9 +8,10 @@ decision](../adr/0006-tracker-replaces-dolt-backed-beads.md).
 Nothing here is built. Facts below were read from origin/main at 440acced9 and
 from the live town on 2026-11-13; "not verified" marks what was not checked.
 
-The tracker program is deferred (operator, 2026-11-14, gt-gi5lhe): the bd shim
-ships in neither image, and the gateway runs the real bd as `bd`. Plan text below
-that names the shim describes the deferred tracker state.
+The tracker program is deferred (operator, 2026-11-14): Dolt stays the store and
+no image carries the bd shim; `gt-bd` runs the real bd as `bd`. Until the program
+restarts, gt-p85pw holds the shim's design and beads; plan text below that names
+the shim describes that deferred state.
 
 ## Goal
 
@@ -19,7 +20,7 @@ image, built by CI, runs as a long-lived container in the Mac's local Docker
 beside Dolt, in one compose unit started at system startup. Every caller that
 runs bd today calls that container instead, through a small authenticated
 gateway. The bd shim (tracker routing) is deferred with the tracker program
-(gt-gi5lhe), so the image runs the real bd. Seats keep their own bd until
+(gt-p85pw), so the image runs the real bd. Seats keep their own bd until
 approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
 
 ## Facts this design rests on
@@ -37,9 +38,9 @@ approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
   Other users: internal/mail/bd.go, internal/metrics/bdsnap.go (`bd sample`),
   townstate/migrate.go (`bd list --limit 1`). hm-sync's own use of bd is not
   verified.
-- Every path is absolute. gt sets `BEADS_DIR` to an absolute town path and the
-  shim finds `routes.jsonl` by walking up from it. Today the town path is
-  `/Users/sloan/gt` on the Mac and in the pod.
+- Every path is absolute. gt sets `BEADS_DIR` to an absolute town path, and the
+  gateway rewrites it under `/ws`. Today the town path is `/Users/sloan/gt` on the
+  Mac and in the pod.
 - The pod's town is NOT the Mac's town. The pod mounts the `town-state` claim at
   `/Users/sloan/gt` (daemon Deployment volumes). After the one-town-copy cutover
   (gt-qq5kv4) the claim is the only town and the Mac keeps none. A container in
@@ -226,11 +227,10 @@ renames a verb fails the gate instead of the daemon.
 One JSON line per call to a file in a mounted log volume, rotated at 50 MB with
 seven files kept: time, token class, `X-Gt-Caller`, `BD_ACTOR`, rig, the verb
 path, the flag names (not values) and bead ids found in argv, stdin byte count,
-stdout and stderr byte counts, exit status, duration, whether the call was served
-by the shim or by bd.real. Free-text values (titles, descriptions, comment
-bodies) are never logged. `GET /v1/stats` (class `read`) returns counts and
-latency percentiles per verb and caller for the last hour, which is the evidence
-for revisiting the 1 CPU and 1 GiB limit (decision 7).
+stdout and stderr byte counts, exit status and duration. Free-text values
+(titles, descriptions, comment bodies) are never logged. `GET /v1/stats` (class
+`read`) returns counts and latency percentiles per verb and caller for the last
+hour, which is the evidence for revisiting the 1 CPU and 1 GiB limit (decision 7).
 
 ## The workspace
 
@@ -270,8 +270,8 @@ Under B:
   compares it with the hash of the files it believes current (the daemon knows;
   other callers skip the check) and the daemon's doctor reports a mismatch as
   drift, which is how staleness is noticed, not only prevented.
-- The tracker shim needs the same tree: it finds `routes.jsonl` by walking up
-  from `BEADS_DIR`, which the gateway sets under `/ws`.
+- `readyz` reads `routes.jsonl` from the same tree, at `/ws/.beads/`; the deferred
+  shim finds it by walking up from `BEADS_DIR`, which the gateway sets under `/ws`.
 - Dolt's own databases are not in the workspace; they stay in Dolt.
 
 Open: how `bd init` (a rig add) works under B. Init is not served over the
@@ -302,8 +302,9 @@ and p99 against the same calls through the in-pod bd.
 
 ## Images and CI
 
-Two layers (decision 6), because the shim is under gastown's `internal/bdshim`,
-which another module cannot import.
+Two layers (decision 6): the beads repo builds the base image with the real bd,
+and gastown's CI adds `bdgw` on top, because `cmd/bdgw` is gastown's and the
+beads repo cannot build it.
 
 1. **Base image `bd`, built by the beads rig.** A `Dockerfile` in the beads repo:
    Debian slim, `tini`, a non-root user, the town-style bd (linux/arm64,
@@ -433,10 +434,6 @@ change, not a rebuild.
 - The `bd` copy in `deploy/daemon/Dockerfile` (line 54) and the "build bd" step in
   `internal/daemonimage/build.go` (the build moves to the beads CI); the
   polecat image keeps bd until approach A.
-- gt-q68hh2 and gt-jqrnty (the shim-in-image beads, held by gt-ow0dyw): the
-  daemon one is closed as replaced; the polecat one stays valid only if seats
-  keep their bd on a tracker rig, so it is re-scoped to "seats' bd is the shim"
-  or closed with approach A.
 - gt-wrap's kubernetes-target special cases for bd (file-argument rewrite stays,
   it moves with the forwarder; the `BEADS_DOLT_SERVER_HOST` rewrite and the
   `pod_town_root` path rewriting for bd go).
@@ -592,8 +589,7 @@ G2, G3, G4, G5 and G7 touch different files and can run in parallel after G1.
 - **G19 [gt]** Deletions: the daemon image's bd copy and the "build bd" step, the
   wrapper's kubernetes-target bd special cases, the `BEADS_DOLT_SERVER_HOST`
   rewrite, `ContainerPlan` and its flag, the `LookPath` probes turned into the
-  readiness check; closes gt-q68hh2 and re-scopes gt-jqrnty. Needs: all of
-  Stage 5 done and a week clean.
+  readiness check. Needs: all of Stage 5 done and a week clean.
 
 ## Hand steps, in order
 
