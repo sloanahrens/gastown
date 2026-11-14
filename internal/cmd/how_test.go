@@ -130,16 +130,20 @@ func TestHowRefusesGroupWithNoDescription(t *testing.T) {
 	m := howFixture()
 	m.describe = func(taskmap.Group) string { return "" }
 
-	var out bytes.Buffer
-	err := runHow(&out, m, nil)
-	if err == nil {
-		t.Fatal("runHow listed groups whose descriptions are empty, want an error")
-	}
-	if !strings.Contains(err.Error(), "orient") {
-		t.Errorf("error %q does not name the group with no description", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("runHow wrote %q before refusing", out.String())
+	// Both ways to the group list reach the check: no argument, and a word that
+	// names no group.
+	for _, args := range [][]string{nil, {"rolls"}} {
+		var out bytes.Buffer
+		err := runHow(&out, m, args)
+		if err == nil {
+			t.Fatalf("runHow(%v) listed groups whose descriptions are empty, want an error", args)
+		}
+		if !strings.Contains(err.Error(), "orient") {
+			t.Errorf("runHow(%v) error %q does not name the group with no description", args, err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("runHow(%v) wrote %q before refusing", args, out.String())
+		}
 	}
 }
 
