@@ -1,20 +1,11 @@
 # The town's data unit on the Mac: Dolt and the bd gateway, one compose project
-# (gt-data). docs/design/bd-container.md, "The compose unit".
+# (gt-data). The design is docs/design/bd-container.md, "The compose unit".
 #
-# Nothing here is a secret or a host path. The image digests, the host
-# directories and the token directory come from the environment that starts
-# the unit (gt dolt start, G15):
-#   GT_DOLT_IMAGE   the dolt-sql-server image, pinned by digest
-#   GT_DOLT_CONFIG  the Dolt config file, mounted read-only
-#   GT_DOLT_DATA    the .dolt-data directory, the same path inside the container
-#   GT_DOLT_BACKUPS the backups directory, the same path inside the container
-#   BD_IMAGE        the gt-bd image as a digest reference (name@sha256:...),
-#                   never a tag; the one variable that names the bd image
-#   GT_BD_TOKEN_DIR the gateway's token directory (0600 files), read-only
-#   GT_TRACKER_URL  the tracker endpoint; empty when the town runs no tracker
-#
-# Each path has no default, so an unset variable stops compose instead of
-# writing data to a path nobody chose.
+# The file holds no secret: the gateway reads its tracker token from the token
+# directory. The image references and host paths come from the environment
+# that starts the unit (gt dolt start), and the file names each variable it
+# reads. Those without a default stop compose when unset, so no data goes to a
+# path nobody chose.
 name: gt-data
 
 services:
