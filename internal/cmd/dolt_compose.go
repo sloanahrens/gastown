@@ -54,21 +54,26 @@ func doltComposeRealDeps() doltComposeDeps {
 }
 
 // runDoltComposeCommand runs one docker call. Its stderr goes to the terminal,
-// where compose's progress and errors belong. A failure names the exit status
-// only: what the call wrote can carry host detail.
+// where compose's progress and errors belong.
 func runDoltComposeCommand(argv, env []string) ([]byte, error) {
 	c := exec.Command(argv[0], argv[1:]...)
 	c.Env = env
 	c.Stderr = os.Stderr
 	out, err := c.Output()
 	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			return nil, fmt.Errorf("docker exited with status %d", exit.ExitCode())
-		}
-		return nil, errors.New("the docker command could not be run")
+		return nil, doltComposeRunError(err)
 	}
 	return out, nil
+}
+
+// doltComposeRunError names a failed docker call by its exit status only: what
+// the call wrote can carry host detail. A call that never started has no status.
+func doltComposeRunError(err error) error {
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) {
+		return fmt.Errorf("docker exited with status %d", exit.ExitCode())
+	}
+	return errors.New("the docker command could not be run")
 }
 
 // doltComposeUnit is what the compose unit runs: its file, and the host paths
