@@ -203,6 +203,8 @@ func markerHoldsPins(files SeedFiles, root string, pins []cachevol.Pin) (bool, e
 //
 // token authenticates the clones when Forgejo does not serve them anonymously: it reaches git in
 // the child's environment only, and a child's output is scrubbed of it before it can reach an error.
+// A token clone first refuses a git older than GIT_CONFIG_COUNT's 2.31, which would ignore the
+// token and clone anonymously.
 func CloneSeed(dest, claim string, pins []cachevol.Pin, token string, files SeedFiles, run SeedRunner, logf func(string, ...any)) error {
 	if len(pins) == 0 {
 		return errors.New("the seed clone names no pin, so it would check nothing out")
@@ -228,6 +230,11 @@ func CloneSeed(dest, claim string, pins []cachevol.Pin, token string, files Seed
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dest, err)
 	}
+	if token != "" {
+		if err := checkGitCarriesTokenEnv(run); err != nil {
+			return err
+		}
+	}
 	env := cloneTokenEnv(token)
 	for _, pin := range pins {
 		dir := path.Join(dest, pin.Rig)
@@ -247,8 +254,17 @@ func CloneSeed(dest, claim string, pins []cachevol.Pin, token string, files Seed
 	return nil
 }
 
+// gitConfigEnvMajor and gitConfigEnvMinor are the first git release that honors GIT_CONFIG_COUNT.
+// An older git ignores the variable, so the header would never reach the clone and it would go out
+// anonymously; checkGitCarriesTokenEnv refuses that git before any clone runs.
+const (
+	gitConfigEnvMajor = 2
+	gitConfigEnvMinor = 31
+)
+
 // cloneTokenEnv answers the environment that hands git a token: GIT_CONFIG_* is git's mechanism for
 // a config value set for one process, so the Authorization header never appears in an argument.
+// Only git 2.31 and newer reads it, which CloneSeed checks before it clones with a token.
 func cloneTokenEnv(token string) []string {
 	if token == "" {
 		return nil
@@ -258,6 +274,46 @@ func cloneTokenEnv(token string) []string {
 		"GIT_CONFIG_KEY_0=http.extraHeader",
 		"GIT_CONFIG_VALUE_0=Authorization: token " + token,
 	}
+}
+
+// checkGitCarriesTokenEnv refuses a token clone when the git the pass would run is older than
+// GIT_CONFIG_COUNT: such a git ignores the header silently, so the clone would fail as an
+// anonymous one against a repository the token exists to open.
+func checkGitCarriesTokenEnv(run SeedRunner) error {
+	out, err := run(SeedCmd{Argv: []string{"git", "--version"}, UID: -1, GID: -1})
+	if err != nil {
+		return fmt.Errorf("asking git whether it carries the clone token's GIT_CONFIG_COUNT: %w: %s", err, reason(out))
+	}
+	major, minor, ok := parseGitVersion(out)
+	if !ok {
+		return fmt.Errorf("git --version printed no version this pass can judge, so it cannot show it carries GIT_CONFIG_COUNT from git %d.%d", gitConfigEnvMajor, gitConfigEnvMinor)
+	}
+	if major < gitConfigEnvMajor || (major == gitConfigEnvMajor && minor < gitConfigEnvMinor) {
+		return fmt.Errorf("git %d.%d is older than git %d.%d, which GIT_CONFIG_COUNT needs: this git would ignore the clone token and clone anonymously", major, minor, gitConfigEnvMajor, gitConfigEnvMinor)
+	}
+	return nil
+}
+
+// parseGitVersion reads the major and minor numbers of a `git --version` line, which reads
+// "git version 2.43.0" and may carry a distributor's suffix after the patch number.
+func parseGitVersion(out string) (major, minor int, ok bool) {
+	fields := strings.Fields(out)
+	if len(fields) < 3 || fields[0] != "git" || fields[1] != "version" {
+		return 0, 0, false
+	}
+	parts := strings.Split(fields[2], ".")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // readCloneToken reads the token file the seed Job mounted. The error names the file and the read's
