@@ -33,9 +33,9 @@ const (
 	// costs this much and no more (gt-hlo2ac is the same class).
 	updateJobCreateTimeout = 30 * time.Second
 
-	// updateJobRequestSlack is how much shorter kubectl's own --request-timeout is
-	// than updateJobCreateTimeout, so kubectl gives up before the daemon abandons
-	// the call and the two bounds agree.
+	// updateJobRequestSlack is how much shorter the create's request timeout is
+	// than updateJobCreateTimeout, so the deadline on kubectl's context fires
+	// before the daemon abandons the call and the two bounds agree.
 	updateJobRequestSlack = 5 * time.Second
 
 	// updateJobBackoffBase is the wait after the first failed launch. Each further
@@ -90,7 +90,7 @@ func newKubectlUpdateJob(townRoot string) updateJobClient {
 //
 // The bound is a context deadline, not kubectl's --request-timeout: with that flag
 // kubectl loses its in-cluster config in the daemon pod and sends every request to
-// http://localhost:8080, so the create fails (reproduced 2026-11-14, kubectl
+// http://localhost:8080, so the create fails (gt-ye543d, reproduced with kubectl
 // v1.37.0). The deadline kills kubectl at the same point its own timeout would have.
 func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
 	if requestTimeout <= 0 {
