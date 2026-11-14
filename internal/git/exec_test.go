@@ -114,7 +114,9 @@ func TestExecTypesAreAliasesOfTheUnexportedTypes(t *testing.T) {
 func TestNewGitLeavesExecNil(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]*Git{
-		"NewGit":                           NewGit(dir),
+		//testpolicy:allow no-git — this test reads the constructor's exec field and runs no git; WithoutGit fails the run if it starts one
+		"NewGit": NewGit(dir),
+		//testpolicy:allow no-git — same, for the explicit git-dir constructor
 		"NewGitWithDir":                    NewGitWithDir("", dir),
 		"NewGitWithExec with a nil runner": NewGitWithExec(dir, nil),
 	}
