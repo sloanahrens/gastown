@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -36,9 +35,6 @@ type RoleInfo struct {
 	// formulaOpen is the formula engine prime cooks with; nil is the bd on
 	// PATH. Tests set it so prime never starts bd.
 	formulaOpen func(formulaSite) formulaEngine
-	// molecules reads poured molecules for prime's checklist; nil is the
-	// rig's beads. Tests set it to a beadsfake.
-	molecules beads.Client
 }
 
 // formulaCooker is the bd cook this role's prime renders formulas with.
