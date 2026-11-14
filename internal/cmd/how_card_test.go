@@ -292,6 +292,28 @@ func TestHowCardRefusesACardOverTheLimit(t *testing.T) {
 	}
 }
 
+// TestHowCardRefusesAGroupWithNoDescription checks the card refuses a group
+// description of "" (writeHowGroups' error) rather than print a group line with
+// nothing after the name, and that no partial card reaches the writer.
+func TestHowCardRefusesAGroupWithNoDescription(t *testing.T) {
+	t.Parallel()
+
+	m := howFixture()
+	m.describe = func(taskmap.Group) string { return "" }
+
+	var out bytes.Buffer
+	err := runHowCard(&out, m, nil)
+	if err == nil {
+		t.Fatal("runHowCard printed a card for a group with no description, want an error")
+	}
+	if !strings.Contains(err.Error(), "no description") {
+		t.Errorf("runHowCard error %q does not name the missing description", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
 // TestHowCardIsNotARoleDirective checks the card reaches an agent through gt
 // how --card only: the repo's directives/ directory, which gt directive list
 // scans, carries no card file, and every file it does carry reaches a role. The
