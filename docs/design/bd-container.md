@@ -73,7 +73,8 @@ their own bd until approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
   policy, one auth and one call log: `bdgw serve` (HTTP) and `bdgw exec -- <bd
   args>` (local, for the Mac wrapper's docker target, so a Mac call is checked
   and logged the same way).
-- Inside the container `/usr/local/bin/bd` is the shim (`cmd/bdshim`) and the
+- Inside the bd container (image `gt-bd`; the daemon image has no shim and keeps
+  the real bd as `bd`), `/usr/local/bin/bd` is the shim (`cmd/bdshim`) and the
   real bd is `/usr/local/bin/bd.real` beside it, exactly the layout
   `internal/bdshim/osmain.go` looks for. The gateway only ever runs `bd`.
 - The bd container reaches Dolt over the compose network by service name, never
