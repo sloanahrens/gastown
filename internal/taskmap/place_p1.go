@@ -9,6 +9,7 @@ func init() {
 		Entry{Path: "attention ack", Group: "orient", Use: "Use this when you have dealt with an attention item, or judged it noise, and want it hidden until its condition clears.", Check: "gt attention no longer lists the acked key"},
 		Entry{Path: "cloud-check", Group: "review", Use: "Use this to see, after a deploy, whether each app still answers its health URL.", Check: "gt cloud-check exits 0"},
 		Entry{Path: "dashboard", Group: "orient", Use: "Use this when you want the whole town on one page in a browser, rather than in a terminal."},
+		Entry{Path: "directive size", Group: "orient", Use: "Use this to see the bytes a role's directive adds to the seat prompt, in total and per source file."},
 		Entry{Path: "doctor", Group: "orient", Use: "Use this when something in the town seems wrong and you need to know which check is failing, before you change anything."},
 		Entry{Path: "doctor fix", Group: "host", Use: "Use this when doctor has named one failing check and that one check needs repairing, not the whole town.", Check: "gt doctor shows the check passing"},
 		Entry{Path: "escalate", Group: "orient", Use: "Use this when you are blocked on a decision or a fault that a person must handle before you can go on.", Check: "gt escalate list shows the new escalation"},

@@ -38,6 +38,7 @@ Subcommands:
   show    Display the active directive for a role
   edit    Open a directive in $EDITOR (creates if needed)
   list    List all directive files
+  size    Print the rendered size of a directive in bytes
 
 File layout (the absolute paths 'gt directive list' prints):
   Central layer, every rig: %s/<role>.md
