@@ -42,26 +42,39 @@ func (v Values) validateBdGateway() error {
 	if !v.Dashboard {
 		return errors.New("Values.BdGatewayURL is set but Values.Dashboard is not: nothing in the pod reads the gateway settings, so the URL would be dropped")
 	}
-	return validateBdGatewayURL(v.BdGatewayURL)
+	return validateGatewayURL("Values.BdGatewayURL", v.BdGatewayURL)
+}
+
+// validateDaemonBdGateway refuses the daemon's gateway value a pod cannot use. A
+// rehearsal mounts no token, so it refuses the URL rather than render a gateway
+// the pod cannot read.
+func (v Values) validateDaemonBdGateway() error {
+	if v.DaemonBdGatewayURL == "" {
+		return nil
+	}
+	if v.Rehearsal {
+		return errors.New("Values.DaemonBdGatewayURL is set with Values.Rehearsal: the gateway token is a live-pod credential, and a rehearsal mounts none")
+	}
+	return validateGatewayURL("Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL)
 }
 
 // bdGatewayURL matches an http or https URL whose authority is a host name or an
-// IPv4 address with an optional port. A path is allowed; a query, a fragment, a
-// space, user information and a bracketed IPv6 literal are not. The renderer may
-// not import net/url (imports_test.go), so the form is matched here.
-var bdGatewayURL = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[^?#\s]*)?$`)
+// IPv4 address with an optional port in 1 to 65535. A path is allowed; a query, a
+// fragment, a space, user information and a bracketed IPv6 literal are not. The
+// renderer may not import net/url (imports_test.go), so the form is matched here.
+var bdGatewayURL = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[^?#\s]*)?$`)
 
-// validateBdGatewayURL accepts a URL of bdGatewayURL's form. The URL is not
-// echoed in the error: a credential may sit in it, and the token file is the only
-// credential the pod should carry.
-func validateBdGatewayURL(raw string) error {
+// validateGatewayURL accepts a URL of bdGatewayURL's form for the named field. The
+// URL is not echoed in the error: a credential may sit in it, and the token file
+// is the only credential the pod should carry.
+func validateGatewayURL(field, raw string) error {
 	_, rest, _ := strings.Cut(raw, "://")
 	authority, _, _ := strings.Cut(rest, "/")
 	if strings.Contains(authority, "@") {
-		return fmt.Errorf("Values.BdGatewayURL: the URL names a user, and the bearer token in %s is the only credential the pod carries", BdGatewayTokenPath)
+		return fmt.Errorf("%s: the URL names a user, and the bearer token in %s is the only credential the pod carries", field, BdGatewayTokenPath)
 	}
 	if !bdGatewayURL.MatchString(raw) {
-		return errors.New("Values.BdGatewayURL: want an http or https URL with a host, such as http://host.docker.internal:7440")
+		return fmt.Errorf("%s: want an http or https URL with a host, such as http://host.docker.internal:7440", field)
 	}
 	return nil
 }

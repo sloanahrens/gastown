@@ -807,6 +807,13 @@ type Values struct {
 	// DefaultTrackerBackupSchedule when empty. The render does not check it: the
 	// API server refuses a malformed one at apply.
 	TrackerBackupSchedule string
+	// DaemonBdGatewayURL is the bd gateway's base URL the daemon's forwarder calls.
+	// Set, the daemon pod carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE and
+	// mounts the daemon-class token Secret (BdGatewayDaemonSecretName) read-only at
+	// BdGatewayTokenDir. The render never creates that Secret. It is for the live
+	// pod only: a rehearsal refuses it, since a rehearsal mounts no token. Empty
+	// renders none of this, and the dashboard's Values.BdGatewayURL is separate.
+	DaemonBdGatewayURL string
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard,
@@ -1318,6 +1325,11 @@ func containerEnvironment(v Values) []EnvVar {
 	if v.Tracker {
 		env = append(env, EnvVar{Name: TrackerURLEnv, Value: trackerURL()})
 	}
+	// The forwarder reads the daemon's gateway from these two names, so the pod
+	// names the gateway and the token file only when the render mounts the token.
+	if v.DaemonBdGatewayURL != "" {
+		env = append(env, bdGatewayEnv(v.DaemonBdGatewayURL)...)
+	}
 	kept := make(map[string]string, len(v.Env)+1)
 	for name, value := range v.Env {
 		kept[name] = value
@@ -1803,6 +1815,9 @@ func volumes(v Values) ([]Volume, error) {
 			},
 		})
 	}
+	if v.DaemonBdGatewayURL != "" {
+		vols = append(vols, bdGatewayVolume(BdGatewayDaemonSecretName))
+	}
 	return vols, nil
 }
 
@@ -1946,6 +1961,9 @@ func mounts(v Values) []VolumeMount {
 			ReadOnly:  true,
 		})
 	}
+	if v.DaemonBdGatewayURL != "" {
+		m = append(m, bdGatewayMount())
+	}
 	return m
 }
 
@@ -2072,6 +2090,9 @@ func (v Values) validate() error {
 		return err
 	}
 	if err := v.validateBdGateway(); err != nil {
+		return err
+	}
+	if err := v.validateDaemonBdGateway(); err != nil {
 		return err
 	}
 	if err := v.validateTracker(); err != nil {
@@ -2413,6 +2434,8 @@ func (v Values) validateEnv() error {
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.ForgeHost when one is given, so a caller's value would be dropped", name)
 		case name == TrackerURLEnv:
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.Tracker when the tracker is rendered, so a caller's value would be dropped", name)
+		case name == BdGatewayURLEnv || name == BdGatewayTokenFileEnv:
+			return fmt.Errorf("Values.Env[%q]: the pod names this variable itself from Values.DaemonBdGatewayURL, so a caller's value is refused, not mixed with it", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
 		case decision.drop != "":

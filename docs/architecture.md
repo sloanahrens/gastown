@@ -151,6 +151,8 @@ The daemon is one long-running program. It does not think about code. It keeps t
 
 The Deployment runs exactly one replica with the `Recreate` strategy, because two daemons must never write the same town at once. It has no shutdown hook. On `SIGTERM` it gets a grace period long enough to finish the landing it is in.
 
+With `--daemon-bd-gateway-url` the daemon's bd forwarder points at the bd gateway: the Deployment carries `BD_GATEWAY_URL` and `BD_GATEWAY_TOKEN_FILE`, and mounts the daemon-class token Secret (`bd-gateway-daemon`) read-only at `/run/gt/bd-gateway`. The render names that Secret and never creates it, and no token value reaches a manifest; the operator creates the Secret before the apply. The dashboard's read-class Secret is its own, as [the dashboard](#the-dashboard) describes. Without the flag the Deployment is unchanged.
+
 The daemon is granted the right to start the pod update's Job, so the roll outlives the pod it replaces. Through that Job it reaches the update ServiceAccount's grants and every Secret in `gt`, and it can run any image the nodes pull. The reason it is accepted is in the header of `deploy/k8s/update-rbac.yaml`, and what bounds it is in the header of `deploy/k8s/update-admission.yaml`.
 
 ### The town-state claim
