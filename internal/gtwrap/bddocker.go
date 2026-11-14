@@ -15,8 +15,8 @@ import (
 // This file is the bddocker target: it runs one bd call inside the local bd
 // container by `docker exec <container> bdgw exec`, with the same town-relative
 // translation as the bdgateway target, so a Mac call is checked and logged by the
-// gateway's own `exec` mode. The design is docs/design/bd-container.md, "Call
-// path from each caller" and task G10 of the plan.
+// gateway's own `exec` mode. The design is docs/design/bd-container.md, section
+// "Call path from each caller".
 
 // bdDockerContainerRE matches the container names the target accepts. Docker
 // names hold letters, digits, dots, dashes and underscores and start with a

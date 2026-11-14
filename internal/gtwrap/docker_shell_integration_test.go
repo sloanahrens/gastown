@@ -100,6 +100,32 @@ func TestIntegrationCaptureReturnsAHealthyProbeWhileAChildHoldsStdoutBriefly(t *
 	}
 }
 
+// TestIntegrationProbeDockerBoundsAProbeThatHoldsStdout runs the shared docker
+// probe, which the Docker and BdDocker targets both use, over a real shell. A
+// child that keeps stdout open past the bound must not hold the probe: it must
+// return near the deadline with the status of a killed probe.
+func TestIntegrationProbeDockerBoundsAProbeThatHoldsStdout(t *testing.T) {
+	t.Parallel()
+	argv := holdingProbe(t, `sleep 30 & echo $! > "$1"; exec sleep 30`)
+	type result struct {
+		exit int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, exit, err := probeDocker(OSShell{}, time.Second, argv)
+		done <- result{exit, err}
+	}()
+	select {
+	case got := <-done:
+		if got.exit != 137 {
+			t.Fatalf("probeDocker = exit %d, err %v; want 137, the status of a probe the deadline killed", got.exit, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("probeDocker did not return: a child holding stdout open kept the probe past its bound")
+	}
+}
+
 // TestIntegrationOSShellAttachStreamsPipesTheOutput: a real process started by
 // AttachStreams writes to writers that are not the wrapper's own files, so exec
 // copies its output through a pipe, which is the path the kubernetes target's
