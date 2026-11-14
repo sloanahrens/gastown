@@ -1,9 +1,9 @@
 // Verdict-change record for the move to parsedTokens (gt-ppuk8j, reviewed at
 // gt-x5gkqj). The guard's production reader and shellTokenize give the same
 // verdict for every command in doneSlotLoopCommands, so the move changed no
-// verdict on that set: no tightening and no loosening. No test asserts the
-// equality over the set; TestDoneSlotLoopParsedVerdictNeverLoosens asserts only
-// that the parsed reading never loosens.
+// verdict on that set: no tightening and no loosening. TestDoneSlotLoopMoveChangesNoVerdict
+// pins that equality over the set; TestDoneSlotLoopParsedVerdictNeverLoosens
+// asserts the one-way property over the same set.
 package cmd
 
 import (
@@ -169,6 +169,21 @@ func TestDoneSlotLoopProductionReader(t *testing.T) {
 				t.Errorf("doneSlotLoopReadTokens(%q) = %q, want %q", tt.command, got, want)
 			}
 		})
+	}
+}
+
+// TestDoneSlotLoopMoveChangesNoVerdict pins the verdict-change record in this
+// file's header: over doneSlotLoopCommands, the production reader gives every
+// command the verdict shellTokenize gives it. A change to the reader that moves
+// a verdict fails here, and the record in the header must then be updated.
+func TestDoneSlotLoopMoveChangesNoVerdict(t *testing.T) {
+	t.Parallel()
+	for _, c := range doneSlotLoopCommands(t) {
+		want, _ := doneSlotLoopVerdictWith(c, shellTokenize)
+		got, _ := doneSlotLoopVerdictWith(c, doneSlotLoopReadTokens)
+		if got != want {
+			t.Errorf("verdict of %q is %q through the production reader and %q through shellTokenize", c, got, want)
+		}
 	}
 }
 
