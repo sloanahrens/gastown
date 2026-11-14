@@ -2,6 +2,7 @@ package daemonimage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -109,6 +110,32 @@ func TestBuildGatewayFailsWhenTheOutputCannotBeMoved(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "bdgw" {
 		t.Errorf("the output directory holds %d entries after a failed move, want only the blocking bdgw directory", len(entries))
+	}
+}
+
+// TestBuildGatewayMoveUsesTheFileOpsSeam: the move into Out goes through the
+// same fileOps seam the plugin and mango moves use, so a refused rename fails
+// the call the way a real one does (gt-xye8y5).
+func TestBuildGatewayMoveUsesTheFileOpsSeam(t *testing.T) {
+	t.Parallel()
+	b, _ := builderFor(t)
+	b.rename = func(string, string) error { return errors.New("rename refused") }
+	paths, err := b.BuildGateway(context.Background(), testRev)
+	if err == nil || !strings.Contains(err.Error(), "cannot move bdgw") {
+		t.Fatalf("BuildGateway = %q, %v; want an error naming the bdgw move", paths, err)
+	}
+	if !strings.Contains(err.Error(), "rename refused") {
+		t.Errorf("BuildGateway error = %v, want it to carry the seam's refusal", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("a failed move listed %q, want no paths", paths)
+	}
+	entries, err := os.ReadDir(b.Out)
+	if err != nil {
+		t.Fatalf("reading the output directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a failed move left %d entries in the output directory, want none", len(entries))
 	}
 }
 
