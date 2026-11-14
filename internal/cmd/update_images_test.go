@@ -1639,14 +1639,26 @@ func TestUpdateImagesUsesTheSharedPath(t *testing.T) {
 	})
 }
 
-// testUpdateImagesGolden is the three-key values file the writer produced
-// before the bd key existed: a run with no bd image must still write exactly
-// these bytes.
-func testUpdateImagesGolden(address imagevalues.Registry, registry *fakeRegistry) string {
-	return "# The daemon and polecat image pair for one green commit, written by gt update images. Do not edit.\n" +
-		"daemon: " + address.Ref(imagevalues.DaemonImage, registry.reported(imagevalues.DaemonImage)) + "\n" +
-		"polecat: " + address.Ref(imagevalues.PolecatImage, registry.reported(imagevalues.PolecatImage)) + "\n" +
-		"commit: " + testUpdateImagesSHA + "\n"
+// testUpdateImagesThreeKeyBytes is what the writer produces for the pair a run
+// with no bd image records: a run without --bd must still write exactly these
+// bytes. The three-key literal is pinned once, in imagevalues' golden test; it
+// is derived here from the same writer rather than written out a second time.
+func testUpdateImagesThreeKeyBytes(t *testing.T, address imagevalues.Registry, registry *fakeRegistry) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "images.yaml")
+	pair := imagevalues.Values{
+		Daemon:  address.Ref(imagevalues.DaemonImage, registry.reported(imagevalues.DaemonImage)),
+		Polecat: address.Ref(imagevalues.PolecatImage, registry.reported(imagevalues.PolecatImage)),
+		Commit:  testUpdateImagesSHA,
+	}
+	if err := imagevalues.Write(path, pair); err != nil {
+		t.Fatalf("writing the expected three-key file: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the expected three-key file: %v", err)
+	}
+	return string(data)
 }
 
 // TestUpdateImagesBdWritesTheBdKeyForABuiltImage holds the --bd path: the bd
@@ -1702,7 +1714,7 @@ func TestUpdateImagesBdLeavesTheFileAloneWithoutTheFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the values file: %v", err)
 	}
-	if want := testUpdateImagesGolden(testRegistryFor(t, server), registry); string(data) != want {
+	if want := testUpdateImagesThreeKeyBytes(t, testRegistryFor(t, server), registry); string(data) != want {
 		t.Errorf("the values file = %q, want the three-key format %q", data, want)
 	}
 	if reported := registry.reported(imagevalues.BdImage); reported != "" {
@@ -1817,5 +1829,47 @@ func TestUpdateImagesBdAddsTheKeyToARecordedPairAndNeverReplaces(t *testing.T) {
 	}
 	if writes != 2 {
 		t.Errorf("the refused run wrote the values file, writes %d, want 2", writes)
+	}
+}
+
+// TestUpdateImagesBdNewCommitDropsTheOldBdKey holds the new-commit path: a
+// values file that records another commit, with its bd key, is replaced by this
+// commit's pair. With no --bd that pair has no bd key, so the old commit's bd
+// digest does not carry over to the new commit.
+func TestUpdateImagesBdNewCommitDropsTheOldBdKey(t *testing.T) {
+	t.Parallel()
+	_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+		imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+		imagevalues.BdImage:      matchingContents(testUpdateImagesSHA),
+	})
+	writes := 0
+	out := filepath.Join(t.TempDir(), "images.yaml")
+	address := testRegistryFor(t, server)
+	old := imagevalues.Values{
+		Daemon:  address.Ref(imagevalues.DaemonImage, "sha256:"+strings.Repeat("a", 64)),
+		Polecat: address.Ref(imagevalues.PolecatImage, "sha256:"+strings.Repeat("b", 64)),
+		Bd:      address.Ref(imagevalues.BdImage, "sha256:"+strings.Repeat("c", 64)),
+		Commit:  testUpdateImagesOtherSHA,
+	}
+	if err := imagevalues.Write(out, old); err != nil {
+		t.Fatalf("writing the previous commit's values file: %v", err)
+	}
+
+	if _, stderr, err := runUpdateImagesCommand(t, testUpdateImagesSeams(t, server, &writes), "--sha", testUpdateImagesSHA, "--out", out); err != nil {
+		t.Fatalf("gt update images for the new commit: %v (stderr %q)", err, stderr)
+	}
+	got, err := imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if got.Commit != testUpdateImagesSHA {
+		t.Errorf("the commit = %q, want the new commit %q", got.Commit, testUpdateImagesSHA)
+	}
+	if got.Bd != "" {
+		t.Errorf("the new commit's values file kept the previous commit's bd key %q", got.Bd)
+	}
+	if writes != 1 {
+		t.Errorf("the values file was written %d times, want once", writes)
 	}
 }

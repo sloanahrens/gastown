@@ -100,9 +100,9 @@ func (r Registry) Validate() error {
 	return nil
 }
 
-// ErrBdNotDigest is a bd key that is not a digest reference: a tag, or any
-// other text, which a deploy could not pin.
-var ErrBdNotDigest = errors.New("the values file's bd line is not a digest reference")
+// ErrBdNotDigest is a bd reference that is not a digest reference: a tag, or
+// any other text, which a deploy could not pin. Write and Load both return it.
+var ErrBdNotDigest = errors.New("the bd image reference is not a digest reference")
 
 // Values is the image pair recorded for one commit, and the bd gateway image
 // when one was built for it.
