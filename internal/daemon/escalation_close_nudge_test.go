@@ -18,6 +18,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -422,6 +423,111 @@ func TestEscalationCloseNudgeRetriesFailedSend(t *testing.T) {
 	}
 }
 
+// The close nudge's context must outlive every wait the wait-idle delivery
+// makes. A context that ends with the fallback still in flight makes the pass
+// retry a message the seat already has, so the seat reads the close twice
+// (gt-2fgnjc).
+func TestEscalationCloseNudgeTimeoutOutlivesWaitIdle(t *testing.T) {
+	t.Parallel()
+	worst := deliver.WaitIdleTimeout + deliver.WatchTimeout + deliver.PollInterval + deliver.ProbeWindow
+	if escalationCloseNudgeTimeout < worst {
+		t.Errorf("escalationCloseNudgeTimeout = %v, want at least the wait-idle worst case %v", escalationCloseNudgeTimeout, worst)
+	}
+}
+
+// A close nudge whose send ends at its context deadline after the wait-idle
+// commit point has already typed the message into the pane or queued it for
+// the poller, so the pass must settle it rather than send it again. The double
+// stands for the production send, notify.TownNudger.Nudge reaching
+// deliver.Delivery.waitIdle: a real one spends about the delivery's full worst
+// case in wall time and needs a real context deadline, neither of which a
+// hermetic test can afford.
+//
+// The other side of the rule, a send cut before the commit point delivering
+// nothing and staying owed, is pinned by
+// TestEscalationCloseSendBudgetFloorLeavesRestOwed, whose sends are cut at the
+// floor.
+func TestEscalationCloseNudgeCutAtItsDeadlineIsNotRetried(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+	var sent []string
+	logs := &recordingLogger{}
+	seams := escalationCloseSeams{
+		escalations: func(string) ([]patrolscan.Escalation, error) {
+			return []patrolscan.Escalation{{ID: closeTestEscID, EscalatedBy: closeTestSeat,
+				RelatedBead: closeTestBead, CloseReason: closeTestReason}}, nil
+		},
+		holding: func(string, string) (string, error) { return closeTestBead, nil },
+		seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
+		nudge: func(target, _ string, timeout time.Duration) error {
+			// The seat never reaches its prompt: the delivery queues the
+			// message, watches it, and the context ends.
+			sent = append(sent, target)
+			clk.Advance(timeout)
+			return context.DeadlineExceeded
+		},
+		now:  clk.Now,
+		save: func(escalationCloseState) error { return nil },
+		logf: logs.Printf,
+	}
+	next := runEscalationCloseNudges(seams, escalationCloseState{Watch: map[string]bool{closeTestEscID: true}}, []string{"gastown"})
+	runEscalationCloseNudges(seams, next, []string{"gastown"})
+
+	if len(sent) != 1 {
+		t.Errorf("sent %d nudges over two passes, want 1: the delivered close was retried", len(sent))
+	}
+	if next.Watch[closeTestEscID] {
+		t.Errorf("%s still owed after its message was typed or queued: %+v", closeTestEscID, next.Watch)
+	}
+	if !hasLogLine(logs.lines, "typed or queued") {
+		t.Errorf("no log line naming the committed send: %q", logs.lines)
+	}
+}
+
+// A send whose context ends with the deadline before it has run for the commit
+// point has typed nothing and queued nothing, however long a share it was
+// granted: it is a failed send, and the close stays owed for the next tick. The
+// commit check reads how long the send ran, not the timeout it was given
+// (gt-2fgnjc).
+func TestEscalationCloseNudgeDeadlineBeforeTheCommitPointStaysOwed(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+	var sent []string
+	logs := &recordingLogger{}
+	seams := escalationCloseSeams{
+		escalations: func(string) ([]patrolscan.Escalation, error) {
+			return []patrolscan.Escalation{{ID: closeTestEscID, EscalatedBy: closeTestSeat,
+				RelatedBead: closeTestBead, CloseReason: closeTestReason}}, nil
+		},
+		holding: func(string, string) (string, error) { return closeTestBead, nil },
+		seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
+		nudge: func(target, _ string, timeout time.Duration) error {
+			// The send is granted a long share but hangs early: the context
+			// ends with the deadline well before the delivery types or queues.
+			if timeout < escalationCloseSendCommitPoint {
+				t.Errorf("the share %s is under the commit point %s: the case needs a long share", timeout, escalationCloseSendCommitPoint)
+			}
+			sent = append(sent, target)
+			clk.Advance(time.Second)
+			return context.DeadlineExceeded
+		},
+		now:  clk.Now,
+		save: func(escalationCloseState) error { return nil },
+		logf: logs.Printf,
+	}
+	next := runEscalationCloseNudges(seams, escalationCloseState{Watch: map[string]bool{closeTestEscID: true}}, []string{"gastown"})
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d nudges in the pass, want 1", len(sent))
+	}
+	if !next.Watch[closeTestEscID] {
+		t.Errorf("%s was settled although the send ended after 1s, before anything was typed or queued: %+v", closeTestEscID, next.Watch)
+	}
+	if hasLogLine(logs.lines, "typed or queued") {
+		t.Errorf("a send cut before the commit point was logged as delivered: %q", logs.lines)
+	}
+}
+
 // The close nudges of one pass share a send budget: a send takes a share of
 // what is left, and reading escalations between sends spends none of it, so
 // the pass's send time is bounded by the budget whatever the reads cost
@@ -549,6 +655,11 @@ func TestEscalationCloseHungSendDoesNotStarveLaterCloses(t *testing.T) {
 	}
 	clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
 	var targets []string
+	// A send that spends its whole share and then fails. It is a send error,
+	// not the context's deadline: a deadline after the wait-idle commit point
+	// means the message was typed or queued and the close is settled instead
+	// (escalationCloseSendCommitted).
+	hungSend := errors.New("gt nudge: tmux: no server running")
 	seams := escalationCloseSeams{
 		escalations: func(string) ([]patrolscan.Escalation, error) { return escs, nil },
 		holding:     func(_ string, name string) (string, error) { return seats[name], nil },
@@ -556,9 +667,8 @@ func TestEscalationCloseHungSendDoesNotStarveLaterCloses(t *testing.T) {
 		nudge: func(target, _ string, timeout time.Duration) error {
 			targets = append(targets, target)
 			if target == "gastown/one" {
-				// Hung: blocks until its context ends.
 				clk.Advance(timeout)
-				return context.DeadlineExceeded
+				return hungSend
 			}
 			return nil
 		},
