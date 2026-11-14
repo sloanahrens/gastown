@@ -40,6 +40,7 @@ func fakeRigAddWorkspace(t *testing.T, gatewayURL string) (rigAddWorkspace, *[]s
 }
 
 func TestRigAddWorkspaceInitThenPush(t *testing.T) {
+	t.Parallel()
 	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
 
 	if err := w.run(context.Background(), "/town", "gastown", "gt"); err != nil {
@@ -58,6 +59,7 @@ func TestRigAddWorkspaceInitThenPush(t *testing.T) {
 }
 
 func TestRigAddWorkspaceInitPassesTownPort(t *testing.T) {
+	t.Parallel()
 	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
 	w.serverPort = func(townRoot string) int {
 		if townRoot != "/town" {
@@ -82,6 +84,7 @@ func TestRigAddWorkspaceInitPassesTownPort(t *testing.T) {
 }
 
 func TestRigAddWorkspaceOff(t *testing.T) {
+	t.Parallel()
 	w, events, _ := fakeRigAddWorkspace(t, "")
 
 	if err := w.run(context.Background(), "/town", "gastown", "gt"); err != nil {
@@ -93,6 +96,7 @@ func TestRigAddWorkspaceOff(t *testing.T) {
 }
 
 func TestRigAddWorkspacePushFails(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("gateway answered 503")
 	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
 	w.push = func(_ context.Context, _ string) (string, error) {
@@ -119,6 +123,7 @@ func TestRigAddWorkspacePushFails(t *testing.T) {
 }
 
 func TestRigAddWorkspaceRefusals(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("cause")
 	tests := []struct {
 		name       string
