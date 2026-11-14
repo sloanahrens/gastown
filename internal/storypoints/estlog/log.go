@@ -77,10 +77,39 @@ type Minutes struct {
 	Jev   *float64 `json:"jev,omitempty"`
 }
 
-// Append writes r to the estimate log of townRoot as one JSON line. Each call
-// is one write to a file opened for append, so two writers may append at once
-// without a line being torn or interleaved.
+// Append writes r to the estimate log of townRoot as one JSON line, creating
+// the file and the directory that holds it. Each call is one write to a file
+// opened for append, so two writers may append at once without a line being
+// torn or interleaved.
 func Append(townRoot string, r Record) error {
+	return appendRecord(osLogFS{}, townRoot, r)
+}
+
+// logFS is the two filesystem calls an append makes: the directory the log
+// lives in, and the append-only handle the line goes through. Production passes
+// osLogFS; a test passes an in-memory fake, so every failure branch runs
+// without a disk.
+type logFS interface {
+	// MkdirAll creates dir and the parents it needs.
+	MkdirAll(dir string, perm os.FileMode) error
+	// OpenAppend opens path for appending, creating the file.
+	OpenAppend(path string) (io.WriteCloser, error)
+}
+
+// osLogFS is the host filesystem.
+type osLogFS struct{}
+
+// MkdirAll creates dir and the parents it needs.
+func (osLogFS) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
+
+// OpenAppend opens path for appending, creating it.
+func (osLogFS) OpenAppend(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+}
+
+// appendRecord is Append through fsys, so a test can drive the directory, open,
+// write, short-write and close failures a healthy host does not offer.
+func appendRecord(fsys logFS, townRoot string, r Record) error {
 	path := Path(townRoot)
 	if path == "" {
 		return ErrNoTownRoot
@@ -89,22 +118,11 @@ func Append(townRoot string, r Record) error {
 	if err != nil {
 		return fmt.Errorf("storypoints/estlog: encoding the record for %s: %w", path, err)
 	}
-	return appendLine(path, append(line, '\n'))
-}
-
-// appendLine appends line to path, creating the file and the directory that
-// holds it.
-func appendLine(path string, line []byte) error {
-	return appendLineWith(openLogFile, path, line)
-}
-
-// appendLineWith is appendLine through open, so a test can drive the open,
-// write, short-write and close failures a healthy host does not offer.
-func appendLineWith(open func(string) (io.WriteCloser, error), path string, line []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	line = append(line, '\n')
+	if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("storypoints/estlog: creating the directory for %s: %w", path, err)
 	}
-	f, err := open(path)
+	f, err := fsys.OpenAppend(path)
 	if err != nil {
 		return fmt.Errorf("storypoints/estlog: opening %s: %w", path, err)
 	}
@@ -121,9 +139,4 @@ func appendLineWith(open func(string) (io.WriteCloser, error), path string, line
 		return fmt.Errorf("storypoints/estlog: closing %s: %w", path, closeErr)
 	}
 	return nil
-}
-
-// openLogFile opens path for appending, creating the file.
-func openLogFile(path string) (io.WriteCloser, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
 }
