@@ -5608,18 +5608,16 @@ func hasTrackedGitmodules(run runFunc, repoPath string) bool {
 	return err == nil
 }
 
-// InitSparseCheckout initializes sparse checkout with cone mode and configures
-// the given paths. If paths is empty, initializes with cone mode only (checkout root files).
-// The calls run through g's runner, so a handle carrying a run observer
-// (WithRunObserver) counts each process it starts (gt-74tzuk).
+// InitSparseCheckout initializes cone-mode sparse checkout of paths in the
+// repository at repoPath through g's runner, so a handle carrying a run
+// observer (WithRunObserver) counts each process it starts; an empty paths
+// initializes cone mode only (gt-74tzuk).
 func (g *Git) InitSparseCheckout(repoPath string, paths []string) error {
 	return initSparseCheckout(g.runner(), repoPath, paths)
 }
 
-// InitSparseCheckout initializes sparse checkout with cone mode and configures
-// the given paths, running real git: the variant for a caller that holds no
-// handle to observe. A caller with a handle uses (*Git).InitSparseCheckout,
-// whose processes then count.
+// InitSparseCheckout is (*Git).InitSparseCheckout running real git, for a
+// caller with no handle to observe.
 func InitSparseCheckout(repoPath string, paths []string) error {
 	return initSparseCheckout(realRun, repoPath, paths)
 }
