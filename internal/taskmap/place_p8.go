@@ -3,6 +3,10 @@ package taskmap
 // The P8 batch of task map entries: the gt daemon commands. Each Use names the
 // situation an agent or an operator is in, not what the command does inside.
 //
+// The batch's bead listed seventeen daemon paths, four of them the gt daemon
+// scratch commands deleted before this batch landed (gt-b2rxeg); the thirteen
+// that remain are the entries below.
+//
 // Every entry here is in group host, because each one inspects or changes the
 // daemon process on this machine: starting it, stopping it, reading its log,
 // or rendering and checking the container it runs in. None of them is a step an
@@ -13,7 +17,7 @@ func init() {
 	Register(
 		Entry{Path: "daemon", Group: "host", Use: "Use this to manage the town's background daemon, which pokes agents, restarts their sessions and runs their lifecycle requests."},
 		Entry{Path: "daemon clear-backoff", Group: "host", Use: "Use this when an agent has crashed repeatedly and the daemon has stopped restarting it, once you have fixed the cause.", Check: "gt daemon logs shows the agent restarting again"},
-		Entry{Path: "daemon compose", Group: "host", Use: "Use this to render the compose file the town's daemon container is started from."},
+		Entry{Path: "daemon compose", Group: "host", Use: "Use this to reach the steps for the town's daemon container compose file; daemon compose write is the one that renders and writes it."},
 		Entry{Path: "daemon compose write", Group: "host", Use: "Use this when the town's daemon settings have changed and the live compose file must be rewritten before the container is started again.", Check: "the command prints the Wrote line naming the compose file and the container it describes"},
 		Entry{Path: "daemon enable-supervisor", Group: "host", Use: "Use this when the daemon must come back by itself after a crash or a reboot, on a Linux host with systemd.", Check: "gt daemon status exits 0"},
 		Entry{Path: "daemon image", Group: "host", Use: "Use this when the daemon container needs an image for a gt revision, reading the dry-run plan first and building with --apply."},
