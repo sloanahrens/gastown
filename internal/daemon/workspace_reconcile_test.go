@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,22 +14,27 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// workspaceHangGuard bounds each wait for a push in the reconcile tests. It is a
-// hang guard only: the wait ends on the push it means, and a push that never
-// comes fails here rather than hanging the test.
+// workspaceHangGuard bounds each wait for a push or a timer in the reconcile
+// tests. It is a hang guard only: each wait ends on the event it means, and an
+// event that never comes fails the test rather than hanging it.
 const workspaceHangGuard = 10 * time.Second
 
-// fakeWorkspacePusher stands in for the gateway. Each push sends its call number
-// on calls, so a test waits for the push it means before it moves the clock; the
-// reconcile loop is the only caller, so n needs no lock.
+// fakeWorkspacePusher stands in for the gateway. The reconcile loop is the only
+// caller, so n needs no lock. onCall runs before each call is sent, so a test can
+// retune the daemon between two pushes; the send then tells the test the push
+// happened, before it moves the clock.
 type fakeWorkspacePusher struct {
-	calls chan int
-	n     int
-	fail  func(call int) error
+	calls  chan int
+	n      int
+	onCall func(call int)
+	fail   func(call int) error
 }
 
 func (f *fakeWorkspacePusher) Push(_ context.Context, _ string) (string, error) {
 	f.n++
+	if f.onCall != nil {
+		f.onCall(f.n)
+	}
 	f.calls <- f.n
 	if f.fail != nil {
 		if err := f.fail(f.n); err != nil {
@@ -44,27 +48,51 @@ func (f *fakeWorkspacePusher) Push(_ context.Context, _ string) (string, error) 
 // fails the test if none comes within the hang guard.
 func awaitPush(t *testing.T, calls <-chan int) int {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
 	select {
 	case n := <-calls:
 		return n
-	case <-time.After(workspaceHangGuard): //testpolicy:allow no-sleep — a hang guard only: the push is the event the test waits for, and a reconcile that never pushes fails here rather than hanging the test
+	case <-ctx.Done():
 		t.Fatalf("no push within %s", workspaceHangGuard)
 		return 0
 	}
 }
 
-// heartbeatStepNames is the daemon's heartbeat patrol list, in order.
-func heartbeatStepNames() []string {
-	names := make([]string, 0, len(heartbeatSteps))
-	for _, s := range heartbeatSteps {
-		names = append(names, s.name)
+// advanceToTick waits until the reconcile is waiting on the clock, then moves the
+// clock by d, so that wait ends at its deadline.
+func advanceToTick(t *testing.T, clk *clockwork.FakeClock, d time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
+	if err := clk.BlockUntilContext(ctx, 1); err != nil {
+		t.Fatalf("the reconcile is not waiting on the clock: %v", err)
 	}
-	return names
+	clk.Advance(d)
+}
+
+// gatewayEnv is the environment of a daemon with a bd gateway named.
+func gatewayEnv() map[string]string {
+	return map[string]string{bdgateway.WorkspaceURLEnv: "http://localhost:7440"}
+}
+
+// withPatrols returns a daemon patrol config whose reconcile interval is s.
+func withPatrols(s string) *config.DaemonPatrolConfig {
+	return &config.DaemonPatrolConfig{Patrols: &config.PatrolsConfig{
+		WorkspaceReconcile: &config.WorkspaceReconcileConfig{IntervalStr: s},
+	}}
+}
+
+// setPatrolConfig swaps the patrol config a daemon reads, as a reload does.
+func setPatrolConfig(d *Daemon, cfg *config.DaemonPatrolConfig) {
+	d.patrolMu.Lock()
+	defer d.patrolMu.Unlock()
+	d.patrolConfig = cfg
 }
 
 // newWorkspaceDaemon builds a daemon whose environment, clock, pusher and log are
-// the test's. Its patrol config is nil, so the reconcile takes the default
-// interval unless a test sets one.
+// the test's. Its patrol config is the one given, so nil takes the default
+// interval.
 func newWorkspaceDaemon(t *testing.T, env map[string]string, clk clockwork.Clock, p bdgateway.WorkspacePusher, logs *lockedBuffer, patrols *config.DaemonPatrolConfig) *Daemon {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -80,74 +108,174 @@ func newWorkspaceDaemon(t *testing.T, env map[string]string, clk clockwork.Clock
 	}
 }
 
-// TestWorkspaceReconcile: with a gateway named, the daemon pushes once at start,
-// pushes again at each five-minute tick of its clock, and a push that failed is
-// retried at the next tick.
+// TestWorkspaceReconcile: with a gateway named, the daemon pushes at start and at
+// each tick of its clock. A push that failed is logged and retried at the next
+// tick.
 func TestWorkspaceReconcile(t *testing.T) {
 	t.Parallel()
-	clk := newFixedClock()
-	pusher := &fakeWorkspacePusher{
-		calls: make(chan int, 10),
-		fail: func(call int) error {
-			if call == 2 {
-				return errors.New("gateway unreachable")
+	failSecond := func(call int) error {
+		if call == 2 {
+			return errors.New("gateway unreachable")
+		}
+		return nil
+	}
+	tests := []struct {
+		name       string
+		fail       func(call int) error
+		wantFailed int
+	}{
+		{name: "every push succeeds", fail: nil, wantFailed: 0},
+		{name: "a failed push is retried at the next tick", fail: failSecond, wantFailed: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := newFixedClock()
+			pusher := &fakeWorkspacePusher{calls: make(chan int, 10), fail: tt.fail}
+			logs := &lockedBuffer{}
+			d := newWorkspaceDaemon(t, gatewayEnv(), clk, pusher, logs, nil)
+
+			if !d.startWorkspaceReconcile() {
+				t.Fatal("startWorkspaceReconcile() = false with a gateway named, want true")
 			}
-			return nil
-		},
-	}
-	logs := &lockedBuffer{}
-	env := map[string]string{bdgateway.WorkspaceURLEnv: "http://localhost:7440"}
-	d := newWorkspaceDaemon(t, env, clk, pusher, logs, nil)
+			for want := 1; want <= 3; want++ {
+				if want > 1 {
+					advanceToTick(t, clk, config.DefaultWorkspaceReconcileInterval)
+				}
+				if got := awaitPush(t, pusher.calls); got != want {
+					t.Fatalf("push = call %d, want %d", got, want)
+				}
+			}
 
-	d.startWorkspaceReconcile()
-	if got := awaitPush(t, pusher.calls); got != 1 {
-		t.Fatalf("start push = call %d, want 1", got)
-	}
-
-	clk.Advance(config.DefaultWorkspaceReconcileInterval)
-	if got := awaitPush(t, pusher.calls); got != 2 {
-		t.Fatalf("first tick push = call %d, want 2", got)
-	}
-
-	// The failure is logged after Push returns, so the log is read only once
-	// the next push has been received: that push starts after the log line.
-	clk.Advance(config.DefaultWorkspaceReconcileInterval)
-	if got := awaitPush(t, pusher.calls); got != 3 {
-		t.Fatalf("second tick push = call %d, want 3 (the retry)", got)
-	}
-	if n := strings.Count(logs.String(), "was not updated"); n != 1 {
-		t.Errorf("failed pushes logged = %d, want 1 (only call 2 failed): %q", n, logs.String())
-	}
-	if !strings.Contains(logs.String(), "retrying at the next tick") {
-		t.Errorf("the failed push was not logged as retried: %q", logs.String())
+			// A failure is logged after its Push returns and before the next push
+			// starts, so the log is complete once push 3 has been received.
+			if n := strings.Count(logs.String(), "was not updated"); n != tt.wantFailed {
+				t.Errorf("failed pushes logged = %d, want %d: %q", n, tt.wantFailed, logs.String())
+			}
+			if tt.wantFailed > 0 && !strings.Contains(logs.String(), "retrying at the next tick") {
+				t.Errorf("the failed push was not logged as retried: %q", logs.String())
+			}
+		})
 	}
 }
 
-// TestWorkspaceReconcileOff: with no gateway named, the reconcile installs no
-// pusher, so nothing can push, logs nothing, and the daemon's heartbeat patrol
-// list is the one it was before the start. A reconcile that did start would push
-// on its own goroutine, so the test reads the install, which runs in the start
-// call itself, rather than a push that may not have happened yet.
-func TestWorkspaceReconcileOff(t *testing.T) {
+// TestWorkspaceReconcileInterval: each wait is the interval the patrol config
+// holds when the wait starts. An unset or valid setting is used as given; a
+// refused setting is logged by name and the default is used; a setting changed
+// between two ticks takes effect at the next wait.
+func TestWorkspaceReconcileInterval(t *testing.T) {
 	t.Parallel()
-	clk := newFixedClock()
-	logs := &lockedBuffer{}
-	d := newWorkspaceDaemon(t, map[string]string{}, clk, nil, logs, nil)
-	installs := 0
-	d.installWorkspacePusher = func(bdgateway.WorkspacePusher) { installs++ }
-	patrolsBefore := heartbeatStepNames()
-
-	d.startWorkspaceReconcile()
-	clk.Advance(3 * config.DefaultWorkspaceReconcileInterval)
-
-	if installs != 0 {
-		t.Errorf("pusher installs with no gateway = %d, want 0", installs)
+	tests := []struct {
+		name string
+		// start is the patrol config at daemon start.
+		start *config.DaemonPatrolConfig
+		// changeAtPush2 replaces the patrol config during push 2, before the
+		// reconcile reads the interval for the wait after it. Nil changes nothing.
+		changeAtPush2 *config.DaemonPatrolConfig
+		// ticks are the waits: each advances the clock, and the push it ends is
+		// the next in order.
+		ticks []time.Duration
+		// wantLogs are substrings the daemon log must hold. Empty checks nothing.
+		wantLogs []string
+	}{
+		{
+			name:  "an unset interval takes the default",
+			start: nil,
+			ticks: []time.Duration{config.DefaultWorkspaceReconcileInterval},
+		},
+		{
+			name:  "a valid interval is used",
+			start: withPatrols("1m"),
+			ticks: []time.Duration{time.Minute},
+		},
+		{
+			name:  "a refused interval falls back to the default and is logged",
+			start: withPatrols("soon"),
+			ticks: []time.Duration{config.DefaultWorkspaceReconcileInterval},
+			wantLogs: []string{
+				"patrols.workspace_reconcile.interval \"soon\"",
+				"using the " + config.DefaultWorkspaceReconcileInterval.String() + " default",
+			},
+		},
+		{
+			name:          "a setting changed between ticks applies at the next wait",
+			start:         nil,
+			changeAtPush2: withPatrols("1m"),
+			ticks:         []time.Duration{config.DefaultWorkspaceReconcileInterval, time.Minute},
+		},
 	}
-	if logs.String() != "" {
-		t.Errorf("log with no gateway = %q, want none", logs.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := newFixedClock()
+			pusher := &fakeWorkspacePusher{calls: make(chan int, 10)}
+			logs := &lockedBuffer{}
+			d := newWorkspaceDaemon(t, gatewayEnv(), clk, pusher, logs, tt.start)
+			pusher.onCall = func(call int) {
+				if call == 2 && tt.changeAtPush2 != nil {
+					setPatrolConfig(d, tt.changeAtPush2)
+				}
+			}
+
+			d.startWorkspaceReconcile()
+			if got := awaitPush(t, pusher.calls); got != 1 {
+				t.Fatalf("start push = call %d, want 1", got)
+			}
+			for i, wait := range tt.ticks {
+				advanceToTick(t, clk, wait)
+				if got := awaitPush(t, pusher.calls); got != i+2 {
+					t.Fatalf("push after a %s wait = call %d, want %d", wait, got, i+2)
+				}
+			}
+			for _, want := range tt.wantLogs {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("log does not hold %q: %q", want, logs.String())
+				}
+			}
+		})
 	}
-	if got := heartbeatStepNames(); !slices.Equal(got, patrolsBefore) {
-		t.Errorf("heartbeat patrol list changed with no gateway: got %v, want %v", got, patrolsBefore)
+}
+
+// TestWorkspaceReconcileRegistration: the reconcile is in the daemon's start-up
+// list exactly when a gateway is named. The list is what startWorkspaceReconcile
+// reports, and Start calls it. With no gateway it installs nothing and logs
+// nothing; with a gateway its first push runs.
+func TestWorkspaceReconcileRegistration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		env            map[string]string
+		wantRegistered bool
+	}{
+		{name: "no gateway: the reconcile is not registered", env: map[string]string{}, wantRegistered: false},
+		{name: "a gateway named: the reconcile is registered", env: gatewayEnv(), wantRegistered: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := newFixedClock()
+			pusher := &fakeWorkspacePusher{calls: make(chan int, 10)}
+			logs := &lockedBuffer{}
+			installs := 0
+			d := newWorkspaceDaemon(t, tt.env, clk, pusher, logs, nil)
+			d.installWorkspacePusher = func(bdgateway.WorkspacePusher) { installs++ }
+
+			if got := d.startWorkspaceReconcile(); got != tt.wantRegistered {
+				t.Fatalf("startWorkspaceReconcile() = %v, want %v", got, tt.wantRegistered)
+			}
+			if !tt.wantRegistered {
+				if installs != 0 {
+					t.Errorf("pusher installs with no gateway = %d, want 0", installs)
+				}
+				if logs.String() != "" {
+					t.Errorf("log with no gateway = %q, want none", logs.String())
+				}
+				return
+			}
+			if got := awaitPush(t, pusher.calls); got != 1 {
+				t.Errorf("start push = call %d, want 1", got)
+			}
+		})
 	}
 }
 
@@ -177,29 +305,5 @@ func TestWorkspaceReconcileInstallsGatewayPusher(t *testing.T) {
 	}
 	if gp.URL != url || gp.TokenFile != tokenFile {
 		t.Errorf("installed pusher = {URL %q, TokenFile %q}, want {URL %q, TokenFile %q}", gp.URL, gp.TokenFile, url, tokenFile)
-	}
-}
-
-// TestWorkspaceReconcileBadInterval: an interval the config refuses stops the
-// reconcile before any push, and the log names the setting.
-func TestWorkspaceReconcileBadInterval(t *testing.T) {
-	t.Parallel()
-	patrols := &config.DaemonPatrolConfig{Patrols: &config.PatrolsConfig{
-		WorkspaceReconcile: &config.WorkspaceReconcileConfig{IntervalStr: "soon"},
-	}}
-	clk := newFixedClock()
-	pusher := &fakeWorkspacePusher{calls: make(chan int, 10)}
-	logs := &lockedBuffer{}
-	env := map[string]string{bdgateway.WorkspaceURLEnv: "http://localhost:7440"}
-	d := newWorkspaceDaemon(t, env, clk, pusher, logs, patrols)
-
-	d.startWorkspaceReconcile()
-
-	if pusher.n != 0 {
-		t.Errorf("pushes with a refused interval = %d, want 0", pusher.n)
-	}
-	if !strings.Contains(logs.String(), "Workspace reconcile not started") ||
-		!strings.Contains(logs.String(), "patrols.workspace_reconcile.interval") {
-		t.Errorf("log does not name the refused setting: %q", logs.String())
 	}
 }

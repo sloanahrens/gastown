@@ -20,10 +20,10 @@ func TestWorkspaceReconcileInterval(t *testing.T) {
 		want    time.Duration
 		wantErr string
 	}{
-		{name: "nil config takes the default", cfg: nil, want: 5 * time.Minute},
-		{name: "no patrols block takes the default", cfg: &DaemonPatrolConfig{}, want: 5 * time.Minute},
-		{name: "no reconcile block takes the default", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, want: 5 * time.Minute},
-		{name: "empty interval takes the default", cfg: withInterval(""), want: 5 * time.Minute},
+		{name: "nil config takes the default", cfg: nil, want: DefaultWorkspaceReconcileInterval},
+		{name: "no patrols block takes the default", cfg: &DaemonPatrolConfig{}, want: DefaultWorkspaceReconcileInterval},
+		{name: "no reconcile block takes the default", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, want: DefaultWorkspaceReconcileInterval},
+		{name: "empty interval takes the default", cfg: withInterval(""), want: DefaultWorkspaceReconcileInterval},
 		{name: "configured interval is used", cfg: withInterval("30s"), want: 30 * time.Second},
 		{name: "unparseable interval is refused", cfg: withInterval("soon"), wantErr: "patrols.workspace_reconcile.interval"},
 		{name: "zero interval is refused", cfg: withInterval("0s"), wantErr: "patrols.workspace_reconcile.interval"},

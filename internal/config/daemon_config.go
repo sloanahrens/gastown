@@ -424,7 +424,7 @@ type PatrolsConfig struct {
 	// WorkspaceReconcile sets how often the daemon re-pushes the town's
 	// workspace to the bd gateway. It acts only when BD_GATEWAY_URL is set
 	// (internal/daemon/workspace_reconcile.go). It is classified in the audit
-	// table (daemonSteps) as a patrol; it runs on its own ticker, not as a
+	// table (daemonSteps) as a patrol; it runs on its own timer loop, not as a
 	// heartbeat step.
 	WorkspaceReconcile *WorkspaceReconcileConfig `json:"workspace_reconcile,omitempty"`
 
@@ -1061,8 +1061,9 @@ type CompactorDogConfig struct {
 // Unset takes the default interval; the reconcile itself runs only when the
 // daemon's environment names a gateway.
 type WorkspaceReconcileConfig struct {
-	// IntervalStr is how often to re-push, as a duration string (e.g., "5m").
-	// Default 5m.
+	// IntervalStr is how often to re-push, as a duration string. Unset takes
+	// DefaultWorkspaceReconcileInterval; a refused value is logged and that
+	// default is used for the wait.
 	IntervalStr string `json:"interval,omitempty"`
 }
 
