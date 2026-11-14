@@ -502,6 +502,40 @@ func TestSandboxGitExecPassesGitDashCAndTheArguments(t *testing.T) {
 	}
 }
 
+// An argument after the verb is never git's global option, so an attached form
+// of -c or -C reaches the subcommand instead of being refused as the global
+// flag (gt-c8rbn5).
+func TestSandboxGitExecSendsAnAttachedShortOption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "directory short with the value attached", args: []string{"log", "-C/etc"}},
+		{name: "config short with the value attached", args: []string{"status", "-ccore.pager=sh"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{Reply: map[string]string{"exec": "ok"}}
+			b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+			rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+			if _, err := b.sandboxGitExec(rec)(rec.WorkDir, tt.args...); err != nil {
+				t.Fatalf("sandbox git %v: %v", tt.args, err)
+			}
+			calls := fake.Calls()
+			if len(calls) != 1 {
+				t.Fatalf("openshell calls = %v, want one exec for %v", calls, tt.args)
+			}
+			want := append([]string{"--", "git", "-C", rec.WorkDir}, tt.args...)
+			if got := calls[0][len(calls[0])-len(want):]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("exec argv ends %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // A sandbox the client reports as gone has no clone left to read, so the
 // runner answers ErrNothingToPush rather than a git failure (gt-c8rbn5).
 func TestSandboxGitExecOfAGoneSandboxIsNothingToPush(t *testing.T) {
@@ -547,6 +581,12 @@ func TestSandboxGitRunnerRefusesWhenNoRunnerIsLinked(t *testing.T) {
 	}
 	if runner != nil {
 		t.Fatal("unlinked runner is non-nil, want none to fall back from")
+	}
+	// A linked hook that builds no runner is refused the same way, so a caller
+	// gets an error to report rather than a nil func that panics when called.
+	buildsNone := func(string, SandboxRecord) func(string, ...string) ([]byte, error) { return nil }
+	if runner, err := sandboxGitRunner(buildsNone, "/town", SandboxRecord{Session: openshellTestSession}); !errors.Is(err, ErrNoSandboxGitExec) || runner != nil {
+		t.Fatalf("runner from a nil-building hook = (nil=%v, %v), want (nil, ErrNoSandboxGitExec)", runner == nil, err)
 	}
 	if _, err := SandboxGitRunner("/town", SandboxRecord{Session: openshellTestSession}); err != nil {
 		t.Fatalf("SandboxGitRunner of the linked binary = %v, want a runner", err)
@@ -614,9 +654,7 @@ func TestSandboxGitExecRefusesAVerbOrAnOptionBeforeSending(t *testing.T) {
 		{name: "verb outside the allowlist", args: []string{"checkout", "--", "x"}},
 		{name: "an option is not a verb", args: []string{"--version"}},
 		{name: "config short", args: []string{"status", "-c", "core.pager=sh"}},
-		{name: "config short with the value attached", args: []string{"status", "-ccore.pager=sh"}},
 		{name: "directory short", args: []string{"status", "-C", "/etc"}},
-		{name: "directory short with the value attached", args: []string{"status", "-C/etc"}},
 		{name: "git dir", args: []string{"status", "--git-dir=/etc/git"}},
 		{name: "git dir as a separate argument", args: []string{"status", "--git-dir", "/etc/git"}},
 		{name: "work tree", args: []string{"status", "--work-tree=/etc"}},
@@ -625,6 +663,13 @@ func TestSandboxGitExecRefusesAVerbOrAnOptionBeforeSending(t *testing.T) {
 		{name: "receive pack", args: []string{"push", "--receive-pack=sh", "origin", "b"}},
 		{name: "exec", args: []string{"log", "--exec=sh"}},
 		{name: "config env", args: []string{"status", "--config-env=core.pager=sh"}},
+		{name: "upload pack prefix", args: []string{"fetch", "--upload=sh"}},
+		{name: "upload pack prefix with a value", args: []string{"fetch", "--upload-p=sh"}},
+		{name: "receive pack prefix with a value", args: []string{"push", "--receive=sh", "origin", "b"}},
+		{name: "exec path prefix", args: []string{"log", "--exec-pa=/tmp"}},
+		{name: "git dir prefix", args: []string{"status", "--git-d=/etc/git"}},
+		{name: "work tree prefix", args: []string{"status", "--work=/etc"}},
+		{name: "config env prefix", args: []string{"status", "--config=core.pager=sh"}},
 		{name: "holds a newline", args: []string{"status", "--porcelain\n"}},
 		{name: "holds a NUL", args: []string{"status", "--porcelain\x00x"}},
 	}

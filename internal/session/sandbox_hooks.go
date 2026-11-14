@@ -46,9 +46,9 @@ var (
 )
 
 // SandboxGitRunner is the in-sandbox git runner for rec: through the linked
-// SandboxGitExec, or ErrNoSandboxGitExec when no runner is linked. The runner
-// runs one git command per call in dir inside the sandbox; its refusal rules
-// are the implementation's.
+// SandboxGitExec, or ErrNoSandboxGitExec when no runner is linked or the link
+// builds none. The runner runs one git command per call in dir inside the
+// sandbox; its refusal rules are the implementation's.
 func SandboxGitRunner(townRoot string, rec SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
 	return sandboxGitRunner(SandboxGitExec, townRoot, rec)
 }
@@ -57,7 +57,11 @@ func sandboxGitRunner(linked func(townRoot string, rec SandboxRecord) func(dir s
 	if linked == nil {
 		return nil, ErrNoSandboxGitExec
 	}
-	return linked(townRoot, rec), nil
+	runner := linked(townRoot, rec)
+	if runner == nil {
+		return nil, ErrNoSandboxGitExec
+	}
+	return runner, nil
 }
 
 // CleanupSandboxWith removes what a sandboxed session left: the sandbox

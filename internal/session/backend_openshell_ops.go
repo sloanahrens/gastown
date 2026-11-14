@@ -239,19 +239,37 @@ var sandboxGitVerbs = map[string]bool{
 	"cat-file": true,
 }
 
+// sandboxGitDeniedLong are the long options that change what git runs. git
+// accepts any unambiguous prefix of a long option, so a name is refused when it
+// is a prefix of one of these, not only when it matches exactly.
+var sandboxGitDeniedLong = []string{
+	"--git-dir", "--work-tree", "--exec-path", "--upload-pack",
+	"--receive-pack", "--exec", "--config-env",
+}
+
 // sandboxGitDeniedOption reports whether arg is an option that changes what git
 // runs: another config (-c, --config-env), directory (-C, --git-dir,
 // --work-tree), executable (--exec-path, --exec), or remote helper
-// (--upload-pack, --receive-pack). Short options count with a value attached
-// (-Cdir); long ones with or without "=".
+// (--upload-pack, --receive-pack). It refuses the exact short flags -c and -C;
+// an argument after the verb is never git's global option, so an attached form
+// such as -Cdir is left to the subcommand. A long option is refused when its
+// name, with or without "=", is a prefix of a denied one, so an abbreviation
+// git would accept is refused too. The denylist covers options that change
+// what git runs, not what it destroys: limiting a push or a reset is the
+// caller's job.
 func sandboxGitDeniedOption(arg string) bool {
-	for _, opt := range []string{"-c", "-C"} {
-		if strings.HasPrefix(arg, opt) {
-			return true
-		}
+	if arg == "-c" || arg == "-C" {
+		return true
 	}
-	for _, opt := range []string{"--git-dir", "--work-tree", "--exec-path", "--upload-pack", "--receive-pack", "--exec", "--config-env"} {
-		if arg == opt || strings.HasPrefix(arg, opt+"=") {
+	if !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	name, _, _ := strings.Cut(arg, "=")
+	if len(name) <= 2 {
+		return false
+	}
+	for _, opt := range sandboxGitDeniedLong {
+		if strings.HasPrefix(opt, name) {
 			return true
 		}
 	}
