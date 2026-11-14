@@ -9,6 +9,10 @@ import (
 
 // overseerCardFile holds the overseer card's rule lines, one per line and no
 // headings: what a just-compacted overseer reads before it acts (gt-j669b4.8).
+// The lines are the design's first set (section 5), given verbatim by the
+// overseer on that bead; TestHowCardRulesPinTheFile fails when a line changes,
+// so an edit to the card is reviewed as a diff.
+//
 // It sits under howdata beside this package's code so the card is reviewed like
 // code and deployed with the binary. It is not a file under directives/, which
 // internal/config/directives.go lists as role directives and

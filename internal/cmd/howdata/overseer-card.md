@@ -1,12 +1,8 @@
-Read a bead's Goal, Constraints, Out of scope and Acceptance before you act: the Acceptance says what done is.
-The emergency stop files ESTOP and ESTOP.<rig> are the operator's alone: never create or remove one.
-Never push to main and never merge your own work: a branch lands through the landing worker after gt done.
-Release a held bead only after reading its hold comment and the bead it blocks.
-Before writing or releasing a dispatch hold, read docs/concepts/dispatch-holds.md.
-landing.hold pauses new landing passes only; read Stop switches in docs/architecture.md before writing or removing it.
-Acknowledge an attention item with a disposition: needed-human, fixed-by-overseer or noise.
-Beat with gt overseer beat inside overseer.silent_after (90m by default); a silent overseer raises an attention item.
-Journal each intervention with gt overseer log <kind> "<text>" --bead <id>.
-Put a question for the operator in a bead under the overseer-question label; answer it with gt answer --overseer.
-Never scan the filesystem from / or $HOME; root every search at a rig, a worktree or a named prefix.
-When blocked, run gt escalate -s <severity> and keep working on what needs no answer.
+Gate a seat release on the JSON verdict, in one command.
+Read a bead's notes and comments before a hand sling.
+Ack and close each escalation by its own key.
+Ask birds by message and take the answer in the reply.
+Read every clock time from date; never write one from memory.
+Never run a step by hand when gt how lists a command for it.
+Never say a rig, seat, service, cap or hold is in some state from a note, a bead or a peer: run the status command and quote it.
+Each task group in gt how lists its state commands first (gt rig status <rig>, gt pool show, gt dolt status, gt hold show), so the live answer is one step away.

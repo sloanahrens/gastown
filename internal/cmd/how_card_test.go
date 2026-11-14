@@ -20,6 +20,19 @@ func TestHowCardRulesReadTheFile(t *testing.T) {
 	}
 }
 
+// TestHowCardRulesPinTheFile pins the card's wording. A rule line changed in
+// overseer-card.md without rewriting testdata/how/card.golden fails here, so a
+// card edit is reviewed as a diff instead of slipping in through the embed.
+func TestHowCardRulesPinTheFile(t *testing.T) {
+	t.Parallel()
+
+	lines, err := overseerCardRules()
+	if err != nil {
+		t.Fatalf("overseerCardRules: %v", err)
+	}
+	checkHowGolden(t, "card.golden", []byte(strings.Join(lines, "\n")+"\n"))
+}
+
 // TestHowCardRulesRefuseBadLines checks the two shapes the card must never
 // have and the line the error names for each.
 func TestHowCardRulesRefuseBadLines(t *testing.T) {
