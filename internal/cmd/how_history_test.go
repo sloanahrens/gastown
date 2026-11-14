@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/taskmap"
@@ -39,7 +40,11 @@ func howListing(t *testing.T, args []string) string {
 	return listing.String()
 }
 
-func TestHmHistoryRunsTheQueryAndRendersHits(t *testing.T) {
+// TestHowHistoryRunnerRunsTheQueryAndRendersHits drives the production runner
+// through its exec seam. Its TestHowHistory prefix, like its sibling's, is what
+// a -run TestHowHistory filter selects; a rename that drops the prefix hides
+// these runner tests from that filter.
+func TestHowHistoryRunnerRunsTheQueryAndRendersHits(t *testing.T) {
 	t.Parallel()
 
 	const hits = `[
@@ -80,7 +85,7 @@ func TestHmHistoryRunsTheQueryAndRendersHits(t *testing.T) {
 	}
 }
 
-func TestHmHistoryReportsAFailedQueryWithNoLines(t *testing.T) {
+func TestHowHistoryRunnerReportsAFailedQueryWithNoLines(t *testing.T) {
 	t.Parallel()
 
 	run := func(context.Context, []string) ([]byte, error) {
@@ -168,6 +173,28 @@ func TestHowHistoryDegradesOnQueryError(t *testing.T) {
 	}
 
 	want := howListing(t, []string{"roll"}) + "history: not available (hm query: exit status 1)\n"
+	if out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+}
+
+// TestHowHistoryReportsAMissingHm drives the section with the error the real
+// runner returns on a host without hm, so the degrade line is the one
+// production prints rather than a fabricated one.
+func TestHowHistoryReportsAMissingHm(t *testing.T) {
+	t.Parallel()
+
+	run := func(context.Context, []string) ([]byte, error) {
+		return nil, &exec.Error{Name: "hm", Err: exec.ErrNotFound}
+	}
+
+	var out bytes.Buffer
+	if err := runHowHistory(context.Background(), &out, howFixture(), hmHistory{run: run}, []string{"roll"}); err != nil {
+		t.Fatalf("runHowHistory returned %v, want the section to degrade instead", err)
+	}
+
+	want := howListing(t, []string{"roll"}) +
+		`history: not available (hm is not installed: exec: "hm": executable file not found in $PATH)` + "\n"
 	if out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
 	}
