@@ -1,6 +1,10 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // fakeEnv is a process with environment kv and a stdout that is (tty) or is
 // not a terminal.
@@ -153,11 +157,67 @@ func TestInitTheme_DefaultsToAuto(t *testing.T) {
 
 func TestHasDarkBackground_ForcedModes(t *testing.T) {
 	t.Parallel()
-	if !detectDarkBackground(ThemeModeDark) {
+	if !fakeEnv(false, nil).detectDarkBackground(ThemeModeDark) {
 		t.Error("Expected a dark background when mode is dark")
 	}
-	if detectDarkBackground(ThemeModeLight) {
+	if fakeEnv(false, nil).detectDarkBackground(ThemeModeLight) {
 		t.Error("Expected a light background when mode is light")
+	}
+}
+
+// TestDetectDarkBackground pins how auto mode reads COLORFGBG and that the
+// theme from GT_THEME or the config wins over it.
+func TestDetectDarkBackground(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		config string
+		env    map[string]string
+		want   bool
+	}{
+		{"GT_THEME dark over a light COLORFGBG", "", map[string]string{"GT_THEME": "dark", "COLORFGBG": "0;15"}, true},
+		{"GT_THEME light over a dark COLORFGBG", "", map[string]string{"GT_THEME": "light", "COLORFGBG": "15;0"}, false},
+		{"configured dark over a light COLORFGBG", "dark", map[string]string{"COLORFGBG": "0;15"}, true},
+		{"configured light over a dark COLORFGBG", "light", map[string]string{"COLORFGBG": "15;0"}, false},
+		{"COLORFGBG dark background", "", map[string]string{"COLORFGBG": "15;0"}, true},
+		{"COLORFGBG light background", "", map[string]string{"COLORFGBG": "0;15"}, false},
+		{"COLORFGBG grey background is light", "", map[string]string{"COLORFGBG": "0;7"}, false},
+		{"COLORFGBG unparseable", "", map[string]string{"COLORFGBG": "0;bogus"}, true},
+		{"COLORFGBG empty background", "", map[string]string{"COLORFGBG": "0;"}, true},
+		{"COLORFGBG without a separator", "", map[string]string{"COLORFGBG": "0"}, true},
+		{"nothing set", "", nil, true},
+	}
+	for _, tc := range cases {
+		e := fakeEnv(false, tc.env)
+		if got := e.detectDarkBackground(e.resolveThemeMode(tc.config)); got != tc.want {
+			t.Errorf("%s: detectDarkBackground = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestApplyThemeSetsLipglossBackground: applyTheme must leave lipgloss's
+// default renderer on the resolved background even with no terminal, since
+// that is the case ApplyThemeMode skips and lipgloss would then query the
+// terminal for the answer (gt-xvekee).
+func TestApplyThemeSetsLipglossBackground(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		config string
+		env    map[string]string
+		want   bool
+	}{
+		{"COLORFGBG dark background", "", map[string]string{"COLORFGBG": "15;0"}, true},
+		{"COLORFGBG light background", "", map[string]string{"COLORFGBG": "0;15"}, false},
+		{"GT_THEME light over a dark COLORFGBG", "", map[string]string{"GT_THEME": "light", "COLORFGBG": "15;0"}, false},
+	}
+	for _, tc := range cases {
+		if _, got := fakeEnv(false, tc.env).applyTheme(tc.config); got != tc.want {
+			t.Errorf("%s: applyTheme dark = %v, want %v", tc.name, got, tc.want)
+		}
+		if got := lipgloss.HasDarkBackground(); got != tc.want {
+			t.Errorf("%s: lipgloss.HasDarkBackground = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
