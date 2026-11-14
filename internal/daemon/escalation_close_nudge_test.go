@@ -332,10 +332,11 @@ func TestRunEscalationCloseNudgesJudgesAgainstState(t *testing.T) {
 			},
 			holding: func(string, string) (string, error) { return closeTestBead, nil },
 			seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
-			nudge: func(target, msg string) error {
+			nudge: func(target, msg string, _ time.Duration) error {
 				*sent = msg
 				return nil
 			},
+			now:  time.Now,
 			save: func(escalationCloseState) error { return nil },
 			logf: func(string, ...any) {},
 		}
@@ -378,10 +379,11 @@ func TestRunEscalationCloseNudgesRejectsMalformedSeatName(t *testing.T) {
 		escalations: func(string) ([]patrolscan.Escalation, error) { return []patrolscan.Escalation{closed}, nil },
 		holding:     func(string, string) (string, error) { return closeTestBead, nil },
 		seat:        func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
-		nudge: func(target, msg string) error {
+		nudge: func(target, msg string, _ time.Duration) error {
 			sent = target
 			return nil
 		},
+		now:  time.Now,
 		save: func(escalationCloseState) error { return nil },
 		logf: func(string, ...any) {},
 	}
@@ -416,6 +418,89 @@ func TestEscalationCloseNudgeRetriesFailedSend(t *testing.T) {
 	w.tick()
 	if got := len(w.delivered()); got != 1 {
 		t.Errorf("after the send recovers: %d delivered nudges, want exactly 1", got)
+	}
+}
+
+// The close nudges of one pass share a send budget: each send gets the lesser
+// of its per-send timeout and what is left of the budget, and a send that would
+// start after the budget is spent is not attempted, so a slow send cannot hold
+// the patrol_scan tick for its timeout once per escalation (gt-d8wdwk).
+func TestEscalationCloseSendBudgetBoundsThePass(t *testing.T) {
+	t.Parallel()
+	closed := func(id string) patrolscan.Escalation {
+		return patrolscan.Escalation{ID: id, EscalatedBy: closeTestSeat,
+			RelatedBead: closeTestBead, CloseReason: closeTestReason}
+	}
+	tests := []struct {
+		name string
+		// spend is how much of the budget the first send uses.
+		spend time.Duration
+		// readSpend is how long the pass spends reading escalations before
+		// the sends. It must not spend the send budget.
+		readSpend time.Duration
+		// wantTimeouts is the timeout of each send the pass may make.
+		wantTimeouts []time.Duration
+		// wantOwed is the escalation still owed a nudge after the pass.
+		wantOwed string
+		wantLog  bool
+	}{
+		{
+			name:         "each send gets what is left of the budget",
+			spend:        escalationCloseSendBudget / 3,
+			wantTimeouts: []time.Duration{escalationCloseNudgeTimeout, escalationCloseNudgeTimeout - escalationCloseSendBudget/3},
+		},
+		{
+			name:         "a slow read does not spend the send budget",
+			readSpend:    2 * escalationCloseSendBudget,
+			wantTimeouts: []time.Duration{escalationCloseNudgeTimeout, escalationCloseNudgeTimeout},
+		},
+		{
+			name:         "the send that spends the budget leaves the rest owed",
+			spend:        escalationCloseSendBudget,
+			wantTimeouts: []time.Duration{escalationCloseNudgeTimeout},
+			wantOwed:     "hq-esc2",
+			wantLog:      true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+			var timeouts []time.Duration
+			logs := &recordingLogger{}
+			seams := escalationCloseSeams{
+				escalations: func(string) ([]patrolscan.Escalation, error) {
+					clk.Advance(tt.readSpend)
+					return []patrolscan.Escalation{closed("hq-esc1"), closed("hq-esc2")}, nil
+				},
+				holding: func(string, string) (string, error) { return closeTestBead, nil },
+				seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
+				nudge: func(_ string, _ string, timeout time.Duration) error {
+					timeouts = append(timeouts, timeout)
+					clk.Advance(tt.spend)
+					return nil
+				},
+				now:  clk.Now,
+				save: func(escalationCloseState) error { return nil },
+				logf: logs.Printf,
+			}
+			next := runEscalationCloseNudges(seams, escalationCloseState{
+				Watch: map[string]bool{"hq-esc1": true, "hq-esc2": true}}, []string{"gastown"})
+
+			if !slices.Equal(timeouts, tt.wantTimeouts) {
+				t.Errorf("send timeouts = %v, want %v", timeouts, tt.wantTimeouts)
+			}
+			if tt.wantOwed != "" {
+				if !next.Watch[tt.wantOwed] {
+					t.Errorf("%s not owed after the budget was spent: %+v", tt.wantOwed, next)
+				}
+			} else if len(next.Watch) != 0 {
+				t.Errorf("closes still owed after both sends: %+v", next.Watch)
+			}
+			if got := hasLogLine(logs.lines, "send budget is spent"); got != tt.wantLog {
+				t.Errorf("budget-spent log line = %v, want %v: %q", got, tt.wantLog, logs.lines)
+			}
+		})
 	}
 }
 
@@ -488,11 +573,12 @@ func (f *escalationCloseFixture) seams() escalationCloseSeams {
 		},
 		holding: func(string, string) (string, error) { return closeTestBead, nil },
 		seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
-		nudge: func(target, msg string) error {
+		nudge: func(target, msg string, _ time.Duration) error {
 			f.events = append(f.events, "send")
 			f.sent = append(f.sent, target)
 			return nil
 		},
+		now: time.Now,
 		save: func(st escalationCloseState) error {
 			f.events = append(f.events, "save")
 			if f.saveErr != nil {
@@ -629,6 +715,7 @@ func TestEscalationCloseNudgeLeavesSharedSliceOrderAlone(t *testing.T) {
 			defer wg.Done()
 			seams := escalationCloseSeams{
 				escalations: func(string) ([]patrolscan.Escalation, error) { return shared, nil },
+				now:         time.Now,
 				save:        func(escalationCloseState) error { return nil },
 				logf:        func(string, ...any) {},
 			}
@@ -665,6 +752,7 @@ func TestEscalationCloseStateCapsNewestAnnounced(t *testing.T) {
 	var saved escalationCloseState
 	seams := escalationCloseSeams{
 		escalations: func(string) ([]patrolscan.Escalation, error) { return escs, nil },
+		now:         time.Now,
 		save: func(st escalationCloseState) error {
 			saved = st.clone()
 			return nil
@@ -713,7 +801,7 @@ func TestEscalationCloseFailureBranchesLogged(t *testing.T) {
 			}, "cannot read the session", 0},
 		{"send failed",
 			func(s *escalationCloseSeams) {
-				s.nudge = func(string, string) error { return errBoom }
+				s.nudge = func(string, string, time.Duration) error { return errBoom }
 			}, "nudge for hq-esc1 failed", 0},
 		{"state write failed",
 			func(s *escalationCloseSeams) {
@@ -729,10 +817,11 @@ func TestEscalationCloseFailureBranchesLogged(t *testing.T) {
 				escalations: func(string) ([]patrolscan.Escalation, error) { return []patrolscan.Escalation{closed}, nil },
 				holding:     func(string, string) (string, error) { return closeTestBead, nil },
 				seat:        func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
-				nudge: func(target, msg string) error {
+				nudge: func(target, msg string, _ time.Duration) error {
 					sent = append(sent, target)
 					return nil
 				},
+				now:  time.Now,
 				save: func(escalationCloseState) error { return nil },
 				logf: logs.Printf,
 			}
@@ -770,10 +859,11 @@ func TestEscalationCloseIdleProbeFailureLoggedOncePerSeat(t *testing.T) {
 		},
 		holding: func(string, string) (string, error) { return closeTestBead, nil },
 		seat:    w.daemon().escalationSeatState,
-		nudge: func(_, msg string) error {
+		nudge: func(_, msg string, _ time.Duration) error {
 			sent = append(sent, msg)
 			return nil
 		},
+		now:  time.Now,
 		save: func(escalationCloseState) error { return nil },
 		logf: logs.Printf,
 	}

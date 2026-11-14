@@ -51,6 +51,35 @@ const escalationCloseAnnouncedMax = 500
 // overrunNudgeTimeout, so tuning the overrun guard does not change this send.
 const escalationCloseNudgeTimeout = 30 * time.Second
 
+// escalationCloseSendBudget bounds, together, every close nudge one pass sends.
+// The per-send timeout bounds one send, but the pass sends each closed
+// escalation's nudge in turn, so without this a hung send could hold the
+// patrol_scan tick for the timeout once per escalation. A close the pass does
+// not reach stays owed, and the next tick tries it again. One send's worth is
+// what the nudges may take, since the rest of the tick still has its work.
+const escalationCloseSendBudget = escalationCloseNudgeTimeout
+
+// escalationSendBudget is the send time one pass may spend on close nudges,
+// shared by every nudge of the pass. Only the sends spend it: the reads between
+// them do not, so a tick slow at reading escalations cannot defer every close
+// for ever.
+type escalationSendBudget struct {
+	now   func() time.Time
+	spent time.Duration
+}
+
+// timeout is how long the next send may take: its per-send timeout, or less
+// once the budget is nearly spent. It is not positive when the budget is spent,
+// and the send waits for the next tick.
+func (b *escalationSendBudget) timeout() time.Duration {
+	return min(escalationCloseNudgeTimeout, escalationCloseSendBudget-b.spent)
+}
+
+// spend records how long a send that started at start took.
+func (b *escalationSendBudget) spend(start time.Time) {
+	b.spent += b.now().Sub(start)
+}
+
 // escalationCloseState is what the pass remembers between ticks.
 type escalationCloseState struct {
 	// Watch holds the escalations seen open at an earlier tick, and the closed
@@ -83,8 +112,13 @@ type escalationCloseSeams struct {
 	// seat reads the seat's session.
 	seat func(rig, name string) (escalationSeat, error)
 	// nudge types msg into target's pane, a "rig/name" seat address, using
-	// the default wait-idle delivery rather than the target's file queue.
-	nudge func(target, msg string) error
+	// the default wait-idle delivery rather than the target's file queue. The
+	// send gives up after timeout, which is what is left of the pass's send
+	// budget, so one hung send cannot hold the tick for its own timeout once
+	// per escalation.
+	nudge func(target, msg string, timeout time.Duration) error
+	// now reads the clock the pass's send budget runs on.
+	now func() time.Time
 	// save persists the state a pass reached.
 	save func(escalationCloseState) error
 	// logf reports what the pass did and what it could not read.
@@ -127,11 +161,12 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 			return work.ID, nil
 		},
 		seat: d.escalationSeatState,
-		nudge: func(target, msg string) error {
-			ctx, cancel := context.WithTimeout(context.Background(), escalationCloseNudgeTimeout)
+		nudge: func(target, msg string, timeout time.Duration) error {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			return d.notify().Nudge(ctx, target, msg)
 		},
+		now: d.clk().Now,
 		save: func(st escalationCloseState) error {
 			return saveEscalationCloseState(path, st)
 		},
@@ -150,8 +185,13 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 // next announcement would be unrecorded too. A failed read also stops the pass:
 // the rigs after it are not judged this tick, and the observations already made
 // are saved, so an escalation seen open before the stop is not forgotten.
+//
+// The nudges share one send budget: a close the pass cannot reach before it is
+// spent stays owed for the next tick, since a slow send must not hold the
+// patrol tick once per escalation (escalationCloseSendBudget).
 func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, rigs []string) escalationCloseState {
 	s.seat = readSeatOncePerPass(s.seat, s.logf)
+	budget := &escalationSendBudget{now: s.now}
 	cur, saved := st.clone(), st.clone()
 	listed := map[string]bool{}
 	writeFailed := false
@@ -182,7 +222,7 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 			case slices.Contains(cur.Announced, e.ID):
 				delete(cur.Watch, e.ID)
 			case cur.Watch[e.ID]:
-				if judgeEscalationClose(s, rig, e) == escalationPending {
+				if judgeEscalationClose(s, rig, e, budget) == escalationPending {
 					continue
 				}
 				cur.announce(e.ID)
@@ -213,8 +253,9 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 // judgeEscalationClose decides what a closed, watched escalation owes its
 // seat. The seat is named by escalated_by; the bead by related_bead. The seat
 // is nudged only when it still holds that bead, has a live session, and sits
-// at its prompt.
-func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escalation) escalationOutcome {
+// at its prompt. The nudge is sent with what is left of the pass's send budget,
+// and one that starts after it is spent waits for the next tick.
+func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escalation, budget *escalationSendBudget) escalationOutcome {
 	name, ok := strings.CutPrefix(strings.TrimSpace(e.EscalatedBy), rig+"/polecats/")
 	if !ok || name == "" || strings.ContainsAny(name, "/ \t\r\n") || strings.TrimSpace(e.RelatedBead) == "" {
 		// The name becomes a session name and a nudge target, so one that is
@@ -242,7 +283,15 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 		return escalationPending
 	}
 	target := rig + "/" + name
-	if err := s.nudge(target, escalationCloseMessage(e)); err != nil {
+	timeout := budget.timeout()
+	if timeout <= 0 {
+		s.logf("escalation_close: %s: this tick's send budget is spent; the nudge for %s waits, will retry", target, e.ID)
+		return escalationPending
+	}
+	start := s.now()
+	err = s.nudge(target, escalationCloseMessage(e), timeout)
+	budget.spend(start)
+	if err != nil {
 		s.logf("escalation_close: %s: nudge for %s failed, will retry: %v", target, e.ID, err)
 		return escalationPending
 	}
