@@ -62,10 +62,10 @@ var bindMount = regexp.MustCompile(`^["']?[/$]`)
 // read-only, taken from GT_BD_TOKEN_DIR with no default.
 var tokenMount = regexp.MustCompile(`^\$\{GT_BD_TOKEN_DIR:\?[^}]+\}:/run/bdgw/tokens:ro$`)
 
-// valuesImage matches an image read from an environment variable with no
-// default, ${NAME:?message}. The digest comes from the values file through that
-// variable, so the file never carries a tag or a digest of its own.
-func valuesImage(name string) *regexp.Regexp {
+// variableImage matches an image read from an environment variable with no
+// default, ${NAME:?message}. The variable carries the image reference, so the
+// file never carries a tag or a digest of its own.
+func variableImage(name string) *regexp.Regexp {
 	return regexp.MustCompile(`^\$\{` + name + `:\?[^}]+\}$`)
 }
 
@@ -196,14 +196,13 @@ func checkDependsOn(u composeUnit) error {
 }
 
 // checkImages requires each image to come from its environment variable with
-// no default, so the digest is the one the values file or the operator gave and
-// nothing runs a tag.
+// no default, so the image is the one the operator gave and nothing runs a tag.
 func checkImages(u composeUnit) error {
 	var errs []error
-	if bd := u.Services[bdService].Image; !valuesImage("GT_BD_IMAGE").MatchString(bd) {
-		errs = append(errs, fmt.Errorf("bd image %q must be ${GT_BD_IMAGE:?...}, the gt-bd digest from deploy/values/images.yaml", bd))
+	if bd := u.Services[bdService].Image; !variableImage("BD_IMAGE").MatchString(bd) {
+		errs = append(errs, fmt.Errorf("bd image %q must be ${BD_IMAGE:?...}, the one variable that names the gt-bd digest reference", bd))
 	}
-	if dolt := u.Services[doltService].Image; !valuesImage("GT_DOLT_IMAGE").MatchString(dolt) {
+	if dolt := u.Services[doltService].Image; !variableImage("GT_DOLT_IMAGE").MatchString(dolt) {
 		errs = append(errs, fmt.Errorf("dolt image %q must be ${GT_DOLT_IMAGE:?...}, a dolt-sql-server image pinned by digest", dolt))
 	}
 	return errors.Join(errs...)
@@ -305,9 +304,9 @@ func TestComposeDependsOn(t *testing.T) {
 	}
 }
 
-// TestComposeImageFromValues holds the bd image to the values file's digest:
-// the image is the GT_BD_IMAGE variable, required, never a literal or a tag.
-func TestComposeImageFromValues(t *testing.T) {
+// TestComposeBdImageVariable holds the bd image to the one documented variable,
+// BD_IMAGE, required: never a literal, a tag, or a default that renders without it.
+func TestComposeBdImageVariable(t *testing.T) {
 	t.Parallel()
 	_, u := loadCompose(t)
 	if err := checkImages(u); err != nil {
@@ -348,7 +347,9 @@ var refusals = []struct {
 	{"bd keep label wrong", `org.gastown.keep: "true"` + "\n    ports:\n      - \"127.0.0.1:7440", `org.gastown.keep: "false"` + "\n    ports:\n      - \"127.0.0.1:7440", "bd lacks the org.gastown.keep=true label"},
 	{"bd depends_on removed", "    depends_on:\n      dolt:\n        condition: service_healthy\n", "", "bd depends_on has no dolt entry"},
 	{"bd depends_on not healthy", "condition: service_healthy", "condition: service_started", `bd depends_on dolt condition="service_started"; want service_healthy`},
-	{"bd image literal", "${GT_BD_IMAGE:?set GT_BD_IMAGE to the gt-bd digest in deploy/values/images.yaml}", "forgejo:3000/bot-registry/gt-bd:latest", "must be ${GT_BD_IMAGE:?...}"},
+	{"bd image literal", "${BD_IMAGE:?set BD_IMAGE to the gt-bd image as a digest reference (name@sha256:...)}", "forgejo:3000/bot-registry/gt-bd:latest", "must be ${BD_IMAGE:?...}"},
+	{"bd image old variable name", "${BD_IMAGE:?set", "${GT_BD_IMAGE:?set", "must be ${BD_IMAGE:?...}"},
+	{"bd image default renders unset", "${BD_IMAGE:?set BD_IMAGE to the gt-bd image as a digest reference (name@sha256:...)}", "${BD_IMAGE:-forgejo:3000/bot-registry/gt-bd:latest}", "must be ${BD_IMAGE:?...}"},
 	{"dolt image literal", "${GT_DOLT_IMAGE:?set GT_DOLT_IMAGE to the dolt-sql-server image pinned by digest}", "dolthub/dolt-sql-server:2.7.2", "must be ${GT_DOLT_IMAGE:?...}"},
 	{"bd town mount", "      - bd-logs:/var/log/bdgw\n", "      - bd-logs:/var/log/bdgw\n      - /Users/sloan/gt:/Users/sloan/gt\n", "its only bind mount is the token directory"},
 	{"bd token mount writable", ":/run/bdgw/tokens:ro", ":/run/bdgw/tokens", "its only bind mount is the token directory"},

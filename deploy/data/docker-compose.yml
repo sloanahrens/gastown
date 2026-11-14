@@ -8,7 +8,8 @@
 #   GT_DOLT_CONFIG  the Dolt config file, mounted read-only
 #   GT_DOLT_DATA    the .dolt-data directory, the same path inside the container
 #   GT_DOLT_BACKUPS the backups directory, the same path inside the container
-#   GT_BD_IMAGE     the gt-bd image digest: the bd: key of deploy/values/images.yaml
+#   BD_IMAGE        the gt-bd image as a digest reference (name@sha256:...),
+#                   never a tag; the one variable that names the bd image
 #   GT_BD_TOKEN_DIR the gateway's token directory (0600 files), read-only
 #   GT_TRACKER_URL  the tracker endpoint; empty when the town runs no tracker
 #
@@ -42,7 +43,7 @@ services:
       retries: 5
 
   bd:
-    image: ${GT_BD_IMAGE:?set GT_BD_IMAGE to the gt-bd digest in deploy/values/images.yaml}
+    image: ${BD_IMAGE:?set BD_IMAGE to the gt-bd image as a digest reference (name@sha256:...)}
     container_name: gt-bd
     restart: unless-stopped
     depends_on:
