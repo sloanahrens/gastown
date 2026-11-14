@@ -14,6 +14,10 @@ const (
 	// RungDown is no step: Docker or the daemon cannot be reached, or their
 	// state cannot be read.
 	RungDown
+	// RungLocal runs the call from the real bd beside the wrapper, with no
+	// container and no gateway. It is last so the three rungs above keep their
+	// values.
+	RungLocal
 )
 
 // String is the rung's name, the word the doctor prints.
@@ -25,6 +29,8 @@ func (r Rung) String() string {
 		return "run"
 	case RungDown:
 		return "down"
+	case RungLocal:
+		return "local"
 	}
 	return fmt.Sprintf("Rung(%d)", int(r))
 }
