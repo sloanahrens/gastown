@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// ErrNoTownRoot reports an Append with no town root, which names no log.
-var ErrNoTownRoot = errors.New("storypoints/estlog: append needs a town root")
+// ErrNoTownRoot reports a call with no town root, which names no log.
+var ErrNoTownRoot = errors.New("storypoints/estlog: needs a town root")
 
 // Path returns the estimate log file of townRoot,
 // <townRoot>/.runtime/storypoints/estimates.jsonl; an empty town root names no
