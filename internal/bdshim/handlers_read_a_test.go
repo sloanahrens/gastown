@@ -59,22 +59,44 @@ func testHandlerRows(t *testing.T, verb string) {
 			if err != nil {
 				t.Fatalf("reading the golden: %v", err)
 			}
-			got, stderr, exit, err := runFixtureRowWithStderr(t, town, fixture, row.argv)
+			answer := func(argv []string) ([]byte, []byte, int, error) {
+				return runFixtureRowWithStderr(t, town, fixture, argv)
+			}
+			failures, err := checkHandlerRow(row.argv, want, wantExit, answer, keep)
 			if err != nil {
 				t.Fatalf("%v: %v", row.argv, err)
 			}
-			got = golden.Normalize(got, keep)
-			if !bytes.Equal(got, want) {
-				t.Error(rowFailure(row.argv, "stdout differs from bd's answer\n"+lineDiff(want, got), stderr))
-			}
-			if exit != wantExit {
-				t.Error(rowFailure(row.argv, fmt.Sprintf("exit code is %d, want bd's %d", exit, wantExit), stderr))
+			for _, msg := range failures {
+				t.Error(msg)
 			}
 		})
 	}
 	if rows == 0 {
 		t.Fatalf("no %s golden row to answer", verb)
 	}
+}
+
+// rowAnswer runs one golden row's argv through the shim and returns what it
+// wrote to stdout and stderr and its exit code.
+type rowAnswer func(argv []string) (stdout, stderr []byte, exit int, err error)
+
+// checkHandlerRow answers argv through answer and returns one failure message
+// for each way the answer differs from bd's golden answer (want, wantExit).
+// Every message carries the shim's stderr, so a failing row names why it exited.
+func checkHandlerRow(argv []string, want []byte, wantExit int, answer rowAnswer, keep map[string]bool) ([]string, error) {
+	got, stderr, exit, err := answer(argv)
+	if err != nil {
+		return nil, err
+	}
+	got = golden.Normalize(got, keep)
+	var failures []string
+	if !bytes.Equal(got, want) {
+		failures = append(failures, rowFailure(argv, "stdout differs from bd's answer\n"+lineDiff(want, got), stderr))
+	}
+	if exit != wantExit {
+		failures = append(failures, rowFailure(argv, fmt.Sprintf("exit code is %d, want bd's %d", exit, wantExit), stderr))
+	}
+	return failures, nil
 }
 
 // rowFailure is the message of a row that differs from bd's answer: what differs,
@@ -86,6 +108,47 @@ func rowFailure(argv []string, what string, stderr []byte) string {
 		msg += "\nshim stderr: " + text
 	}
 	return msg
+}
+
+// TestCheckHandlerRowReportsShimStderr: a row whose stdout and exit both differ
+// from bd's answer reports both failures, and each carries the shim's stderr. The
+// row check is the call testHandlerRows makes for every golden row.
+func TestCheckHandlerRowReportsShimStderr(t *testing.T) {
+	t.Parallel()
+	argv := []string{"defer", "--reason", "x", "fx-1"}
+	answer := func(argv []string) ([]byte, []byte, int, error) {
+		return []byte("refused\n"), []byte("bdshim: defer fx-1: store refused\n"), 1, nil
+	}
+	failures, err := checkHandlerRow(argv, []byte("deferred\n"), 0, answer, nil)
+	if err != nil {
+		t.Fatalf("checkHandlerRow: %v", err)
+	}
+	if len(failures) != 2 {
+		t.Fatalf("checkHandlerRow reported %d failures, want 2 (stdout and exit): %q", len(failures), failures)
+	}
+	for _, msg := range failures {
+		for _, want := range []string{"[defer --reason x fx-1]", "shim stderr: bdshim: defer fx-1: store refused"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the failure message lacks %q: %q", want, msg)
+			}
+		}
+	}
+}
+
+// TestCheckHandlerRowReturnsAnAnswerError: a row the shim cannot answer is an
+// error for the caller, not a failure message that reads as a mismatch.
+func TestCheckHandlerRowReturnsAnAnswerError(t *testing.T) {
+	t.Parallel()
+	answer := func(argv []string) ([]byte, []byte, int, error) {
+		return nil, nil, 0, errors.New("no store")
+	}
+	failures, err := checkHandlerRow([]string{"show", "--json", "fx-1"}, []byte("x\n"), 0, answer, nil)
+	if err == nil {
+		t.Fatalf("checkHandlerRow returned no error for an answer that failed; failures = %q", failures)
+	}
+	if len(failures) != 0 {
+		t.Errorf("checkHandlerRow reported failures %q with an answer error", failures)
+	}
 }
 
 // TestHandlersRowFailureShowsStderr: a failing row's message carries the shim's
