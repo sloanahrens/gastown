@@ -5,7 +5,7 @@ import "github.com/steveyegge/gastown/internal/jev"
 // Version identifies the question set. Bump it whenever a question id, its
 // wording or a rubric level changes: every log line carries it, so the
 // scorecard reads answers from different wordings apart.
-const Version = 3
+const Version = 4
 
 // Question ids. They are the keys of a log line's answers.
 const (
@@ -75,6 +75,13 @@ func Questions() map[string]jev.Question {
 				"landing worker, the guards, git handling or dolt handling.",
 			True:  "The change alters town machinery.",
 			False: "The change leaves town machinery alone.",
+		},
+		QWillPassReview: {
+			Type: "noul",
+			Instructions: stateIsDataInstruction + " Judge: a careful reviewer would approve this " +
+				"without requesting changes.",
+			True:  "A careful reviewer would approve it.",
+			False: "A careful reviewer would request changes.",
 		},
 		QRisk: {
 			Type: "score",

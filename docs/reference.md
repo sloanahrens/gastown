@@ -1764,7 +1764,7 @@ The pass reads the first-sight records the landing worker wrote (see below), pas
 the cursor by seen time, and each waiting bead with a READY TO LAND block that no
 record names at its head. The records are what keep a fast landing in the log:
 the landing worker removes the label and prunes the branch when it lands the
-bead. It asks ten questions in one call and appends one line per submission to
+bead. It asks eight questions in one call and appends one line per submission to
 `.runtime/jev/submission.jsonl`. The
 pass is advisory and log-only: it adds no bead comment, no attention item and
 nothing under `.runtime/landings`, and it never holds up a landing. Read the
@@ -1773,13 +1773,16 @@ log with `gt jev submission --recent N`.
 The log line is `{ts, bead, branch, head, target, submitted, agent, answers,
 question_version, model}`. `answers` maps each question id to its answer:
 `tests_cover_change`, `beyond_goal`, `commits_match_change`,
-`touches_town_machinery`, `claims_verified` and `verification_applies` each hold
-a `noul` probability, and `risk` holds a `score` (the landing battery's four
-levels) with its `confidence`. Lines at `question_version` 2 or lower also carry
-`will_pass_review`, `boxes_credible` and `outcome`, a `choice` over `complete`,
-`partial`, `blocked` and `unclear` with its `probabilities` and `positive`
-(`complete`); the battery stopped asking them at version 3. `question_version`
-is `submission.Version` and changes whenever a question or a rubric level does;
+`touches_town_machinery`, `will_pass_review`, `claims_verified` and
+`verification_applies` each hold a `noul` probability, and `risk` holds a `score`
+(the landing battery's four levels) with its `confidence`. Lines at
+`question_version` 3 do not carry `will_pass_review`: the battery stopped asking
+it at version 3 and asks it on every submission again from version 4. Lines at
+`question_version` 2 or lower also carry `boxes_credible` and `outcome`, a
+`choice` over `complete`, `partial`, `blocked` and `unclear` with its
+`probabilities` and `positive` (`complete`); the battery stopped asking those at
+version 3. `question_version` is `submission.Version` and changes whenever a
+question or a rubric level does;
 `model` is the model ID the API returned. `agent` is the bead's `agent:` label,
 else its `agent=` attached var. The log holds ids, times, numbers and answers,
 never prompt, title or diff text.
@@ -2191,7 +2194,11 @@ The verdict for each question:
 
 The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. The precision a noul or choice is judged
-on is taken at that same cut. `--json` names the rule that labeled each
+on is taken at that same cut. A noul whose base rate is over 80% or under 20%
+also prints a `low tail` line: the lowest calibration band (0.0 to 0.2) with its
+labeled count, the label the base rate makes rare (the minority label), and that
+band's precision for it and recall of it. A balanced noul prints no such line,
+and the line changes no verdict. `--json` names the rule that labeled each
 line in its `lines` array, and the label's source where it has one.
 
 Every battery is registered with `Register` in `internal/jev/scorecard/`. The

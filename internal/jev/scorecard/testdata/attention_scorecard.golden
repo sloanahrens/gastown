@@ -53,6 +53,7 @@ routine_action_fixes (noul)
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
   calibration error 0.90, brier 0.81, monotone: n/a
+  low tail, band 0.0-0.2 (labeled 3), minority label false: precision 0.0%, recall n/a
   verdict: not-yet
 
 urgency (score)

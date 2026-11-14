@@ -14,6 +14,7 @@ beyond_goal (noul)
     0.6-0.8      1  0.700  1.000
     0.8-1.0      0  n/a  n/a
   calibration error 0.30, brier 0.09, monotone: n/a
+  low tail, band 0.0-0.2 (labeled 0), minority label false: precision n/a, recall n/a
   verdict: not-yet
 
 commits_match_change (noul)
@@ -46,6 +47,7 @@ tests_cover_change (noul)
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
   calibration error 0.40, brier 0.16, monotone: n/a
+  low tail, band 0.0-0.2 (labeled 0), minority label true: precision n/a, recall n/a
   verdict: not-yet
 
 touches_town_machinery (noul)
