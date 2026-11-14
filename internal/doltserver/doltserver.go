@@ -4750,13 +4750,12 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 func writeDoltPortFile(beadsDir string, port int) (bool, error) {
 	portPath := filepath.Join(beadsDir, "dolt-server.port")
 	if port <= 0 {
-		if err := os.Remove(portPath); err != nil {
-			if os.IsNotExist(err) {
-				return false, nil
-			}
+		err := os.Remove(portPath)
+		if err != nil && !os.IsNotExist(err) {
 			return false, fmt.Errorf("removing dolt-server.port: %w", err)
 		}
-		return true, nil
+		// A file already absent is the state a removal wants: no change, no error.
+		return err == nil, nil
 	}
 	want := []byte(strconv.Itoa(port))
 	if data, err := os.ReadFile(portPath); err == nil && bytes.Equal(data, want) {
