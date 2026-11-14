@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/logtriage"
 	"github.com/steveyegge/gastown/internal/jev/notes"
+	"github.com/steveyegge/gastown/internal/jev/omclass"
 	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/jev/rework"
 	"github.com/steveyegge/gastown/internal/jev/rules"
@@ -179,6 +180,10 @@ var Batteries = []Battery{
 	{
 		Name: "notes", ConfigKey: "jev_notes", Cadence: Weekly,
 		Caller: notes.Caller, LogPath: notes.LogPath,
+	},
+	{
+		Name: "omclass", ConfigKey: "jev_omclass", Cadence: QuarterHour,
+		Caller: omclass.Caller, LogPath: omclass.LogPath, CursorPath: omclass.CursorPath,
 	},
 	{
 		Name: "progress", ConfigKey: "jev_progress", Cadence: OnEvent,

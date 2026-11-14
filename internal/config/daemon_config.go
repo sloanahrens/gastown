@@ -521,6 +521,12 @@ type PatrolsConfig struct {
 	// same reason as JevDedupe.
 	JevRework *JevReworkConfig `json:"jev_rework,omitempty"`
 
+	// JevOMClass asks Jev, for each new om finding, which lesson class of the
+	// class table it belongs to, and logs the answer beside the keyword class
+	// (internal/jev/omclass). It acts on nothing. Opt-in for the same reason as
+	// JevDedupe.
+	JevOMClass *JevOMClassConfig `json:"jev_omclass,omitempty"`
+
 	// JevThrash asks Jev, for each bead just placed on a seat, whether the
 	// polecat will be respawned on it and whether the overrun guard will stop
 	// it for running long, and logs both answers (internal/jev/thrash). It
@@ -2204,6 +2210,22 @@ func (c *JevScorecardConfig) UnmarshalJSON(data []byte) error {
 // Jev spend. The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevReworkConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
+}
+
+// JevOMClassConfig switches on the lesson-class battery and prices its Jev
+// spend. The pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevOMClassConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend

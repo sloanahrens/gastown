@@ -116,6 +116,17 @@ var classes = []Class{
 	},
 }
 
+// ClassNames maps each class id of the table to its name, so a battery can
+// offer the table's classes as the options of a question. The map is a copy:
+// a caller may not change the table through it.
+func ClassNames() map[string]string {
+	names := make(map[string]string, len(classes))
+	for _, c := range classes {
+		names[c.ID] = c.Name
+	}
+	return names
+}
+
 // Bounds is one window: half-open, from Start's first moment to End's.
 type Bounds struct {
 	Start, End time.Time
