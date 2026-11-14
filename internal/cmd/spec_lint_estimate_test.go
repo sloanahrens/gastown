@@ -185,14 +185,11 @@ func TestSpecLintHelpNamesEstimateFlag(t *testing.T) {
 
 // TestSpecLintEstimateWithGraphIsRefused: --graph checks an epic's children, so
 // --estimate has no one bead to estimate; the pair is refused rather than
-// silently dropping the estimate. Serial, because it sets the flag variable the
-// command parses into (gt-5ynb86).
+// silently dropping the estimate (gt-5ynb86).
 func TestSpecLintEstimateWithGraphIsRefused(t *testing.T) {
-	old := specLintEstimate
-	specLintEstimate = true
-	t.Cleanup(func() { specLintEstimate = old })
-	err := runSpecLintOn(&cobra.Command{}, []string{"gt-epic"}, t.TempDir(), true, slingStores{})
+	t.Parallel()
+	err := runSpecLintOnWith(&cobra.Command{}, []string{"gt-epic"}, t.TempDir(), true, slingStores{}, true)
 	if err == nil || !strings.Contains(err.Error(), "--estimate") {
-		t.Fatalf("runSpecLintOn(--graph --estimate) = %v, want a refusal naming --estimate", err)
+		t.Fatalf("runSpecLintOnWith(--graph --estimate) = %v, want a refusal naming --estimate", err)
 	}
 }

@@ -1081,11 +1081,17 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 // runSpecLintOn is runSpecLint with the town root, the --graph flag and the
 // stores given, so a test can drive the graph branch through fake stores.
 func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores) error {
+	return runSpecLintOnWith(cmd, args, townRoot, graph, stores, specLintEstimate)
+}
+
+// runSpecLintOnWith is runSpecLintOn with --estimate's flag value given, so a
+// test drives the flag pair without swapping the package variable.
+func runSpecLintOnWith(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores, withEstimate bool) error {
 	if graph {
 		// --graph checks an epic's children, so there is no one bead for
 		// --estimate to estimate; the pair is refused rather than silently
 		// dropping the estimate (gt-5ynb86).
-		if specLintEstimate {
+		if withEstimate {
 			return errors.New("--estimate estimates one bead; --graph checks an epic's children, so there is no one bead to estimate")
 		}
 		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), stores, townRoot, args[0], specLintJSON)
@@ -1099,7 +1105,7 @@ func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph boo
 	}
 	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, read, openRigTree)
-	opts := specLintOptsFor(sd, townRoot, specLintEstimate, cmd.ErrOrStderr())
+	opts := specLintOptsFor(sd, townRoot, withEstimate, cmd.ErrOrStderr())
 	return runSpecLintAtWith(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now(), opts)
 }
 
