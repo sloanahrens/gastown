@@ -814,12 +814,16 @@ func overrunSeatOwnsBead(seat overrunSeat, status, assignee string) bool {
 // overrunPushBranch pushes the seat's kept branch to origin at the commit the
 // local branch holds (git push origin <sha>:refs/heads/<branch>), never forced.
 // A seat with no worktree or no branch has nothing to push; a branch that
-// cannot be read or pushed is an error, so the stop retries it. A push origin
-// refuses as non-fast-forward succeeds when the tip adds nothing origin lacks:
-// such a push had nothing left to send.
+// cannot be read or pushed is an error, so the stop retries it, and so is a git
+// handle the seam cannot pick for any reason other than a missing worktree.
+// A push origin refuses as non-fast-forward succeeds when the tip adds nothing
+// origin lacks: such a push had nothing left to send.
 func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
-	g, _, err := d.overrunSeatGit(seat)
+	g, err := d.overrunSeatGit(seat)
 	if err != nil {
+		if !errors.Is(err, errOverrunNoWorktree) {
+			return fmt.Errorf("pick the seat's git handle: %w", err)
+		}
 		// A seat with no worktree has nothing to push, which is today's answer
 		// for it; the save and the dirty check refuse the same seat because
 		// they cannot see the work it may hold.
@@ -883,7 +887,7 @@ func overrunSaveMessage(bead string) string {
 // unpushed. A refused commit or push is an error, and the stop keeps the
 // sandbox.
 func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
-	g, _, err := d.overrunSeatGit(seat)
+	g, err := d.overrunSeatGit(seat)
 	if err != nil {
 		return overrunSave{}, err
 	}
@@ -940,45 +944,47 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	return overrunSave{Head: sha, Committed: committed}, nil
 }
 
-// overrunSeatWorktree is the seat's worktree. One that cannot be resolved is an
-// error, never an empty answer: the save and the dirty check cannot see a
-// worktree they cannot resolve, and that worktree may hold the seat's work.
+// errOverrunNoWorktree is the answer a seat with no resolvable worktree gets
+// from overrunSeatGit. The save and the dirty check refuse it, because they
+// cannot see work it may hold; the push and the reset have nothing to do for
+// it. Any other error from the seam is a failure neither may read as "nothing
+// to do".
+var errOverrunNoWorktree = errors.New("worktree cannot be resolved")
+
+// overrunSeatWorktree is the seat's worktree. One that cannot be resolved is
+// errOverrunNoWorktree, never an empty answer: the save and the dirty check
+// cannot see a worktree they cannot resolve, and that worktree may hold the
+// seat's work.
 func (d *Daemon) overrunSeatWorktree(seat overrunSeat) (string, error) {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
 	if workDir == "" {
-		return "", fmt.Errorf("worktree of %s/%s cannot be resolved, so its work cannot be saved", seat.Rig, seat.Polecat)
+		return "", fmt.Errorf("%w: %s/%s, so its work cannot be saved", errOverrunNoWorktree, seat.Rig, seat.Polecat)
 	}
 	return workDir, nil
 }
 
-// overrunHostWorktreeLabel names the host worktree a seat's git handle runs
-// on. A later bead adds a seat whose handle runs inside its sandbox and names
-// that kind instead (gt-bh77is).
-const overrunHostWorktreeLabel = "host worktree"
-
 // overrunSeatGit is the one seam that picks the git handle the overrun stop's
-// save, dirty check, push and reset run over, and a label naming the worktree
-// kind. Every seat gets its host worktree's handle today; gt-bh77is takes the
-// seam over for a seat with a sandbox record, so the same save, push and reset
-// code runs inside the sandbox. A worktree that cannot be resolved is an
-// error, never a nil handle: the caller cannot save work it cannot see.
-func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, string, error) { //nolint:unparam // the label names the worktree kind; the sandbox handle names its kind at this seam (gt-bh77is), and the routing test reads it
-
+// save, dirty check, push and reset run over. Every seat gets its host
+// worktree's handle today; gt-bh77is takes the seam over for a seat with a
+// sandbox record, so the same save, push and reset code runs inside the
+// sandbox. A worktree that cannot be resolved is errOverrunNoWorktree, never a
+// nil handle: the caller cannot save work it cannot see.
+func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
 	}
 	workDir, err := d.overrunSeatWorktree(seat)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return d.gitAt(workDir), overrunHostWorktreeLabel, nil
+	return d.gitAt(workDir), nil
 }
 
 // overrunWorktreeDirty reports whether the seat's worktree holds uncommitted
 // work now. A status that cannot be read is an error, never clean.
 func (d *Daemon) overrunWorktreeDirty(seat overrunSeat) (bool, error) {
-	g, _, err := d.overrunSeatGit(seat)
+	g, err := d.overrunSeatGit(seat)
 	if err != nil {
 		return false, err
 	}
@@ -1040,13 +1046,18 @@ func overrunTipInHistory(g daemonGit, tip, upstream string) bool {
 // else — no worktree or branch, a branch already gone, origin unreachable or
 // holding another commit, HEAD off the branch, work at risk — leaves the
 // worktree untouched and returns nil: the push step already stands for the
-// branch, and the seat reads as it did before this reset existed. The delete is
-// forced because the branch is no longer merged into the HEAD the detach
-// leaves; origin holding its tip is what makes that safe.
+// branch, and the seat reads as it did before this reset existed. A git handle
+// the seam cannot pick for any other reason is an error, so a failure to reach
+// the worktree is not read as nothing to reset. The delete is forced because
+// the branch is no longer merged into the HEAD the detach leaves; origin
+// holding its tip is what makes that safe.
 func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	who := seat.Rig + "/" + seat.Polecat
-	g, _, err := d.overrunSeatGit(seat)
+	g, err := d.overrunSeatGit(seat)
 	if err != nil {
+		if !errors.Is(err, errOverrunNoWorktree) {
+			return fmt.Errorf("pick the seat's git handle: %w", err)
+		}
 		// A seat with no worktree has nothing to reset, the answer this step
 		// has always given it.
 		return nil

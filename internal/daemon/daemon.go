@@ -339,7 +339,7 @@ type Daemon struct {
 	// (see overrunSeatGit); nil is the seat's host worktree. Tests hand it a
 	// recording fake, so they can prove which handle the overrun stop's save,
 	// dirty check, push and reset ran on.
-	overrunSeatGitFn func(seat overrunSeat) (daemonGit, string, error)
+	overrunSeatGitFn func(seat overrunSeat) (daemonGit, error)
 
 	// postLandIsAncestor is the ancestry reader a rig's post-land runner orders
 	// its verdicts with (see newRigLandingWorker); nil reads the rig's own
