@@ -370,7 +370,7 @@ func TestLandReworkStatsRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(target, filepath.Join(dir, "gastown.jsonl")); err != nil {
-			t.Skipf("symlinks are not available here: %v", err)
+			t.Fatalf("making the unreadable ledger: %v", err)
 		}
 		return town
 	}
