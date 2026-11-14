@@ -307,6 +307,10 @@ func init() {
 
 	doltMigrateCmd.Flags().BoolVar(&doltMigrateDry, "dry-run", false, "Preview what would be migrated without making changes")
 
+	for _, c := range []*cobra.Command{doltStartCmd, doltStopCmd, doltStatusCmd} {
+		c.Flags().BoolVar(&doltUseComposeUnit, "compose-unit", false, "Operate the compose unit deploy/data/docker-compose.yml (project gt-data) instead of the single Dolt container")
+	}
+
 	rootCmd.AddCommand(doltCmd)
 }
 
@@ -314,6 +318,9 @@ func runDoltStart(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if doltUseComposeUnit {
+		return doltComposeStart(townRoot, doltComposeRealDeps())
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
@@ -424,6 +431,9 @@ func runDoltStop(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if doltUseComposeUnit {
+		return doltComposeStop(townRoot, doltComposeRealDeps())
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
@@ -578,6 +588,9 @@ func runDoltStatusWith(w io.Writer, reads doltStatusReads) error {
 	townRoot, err := reads.townRoot()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if doltUseComposeUnit {
+		return doltComposeStatus(townRoot, doltComposeRealDeps(), w)
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
