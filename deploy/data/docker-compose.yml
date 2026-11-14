@@ -1,0 +1,76 @@
+# The town's data unit on the Mac: Dolt and the bd gateway, one compose project
+# (gt-data). The design is docs/design/bd-container.md, "The compose unit".
+#
+# The file holds no secret: the gateway reads its tracker token from the token
+# directory. The image references and host paths come from the environment
+# that starts the unit (gt dolt start), and the file names each variable it
+# reads. Those without a default stop compose when unset, so no data goes to a
+# path nobody chose.
+name: gt-data
+
+services:
+  dolt:
+    image: ${GT_DOLT_IMAGE:?set GT_DOLT_IMAGE to the dolt-sql-server image pinned by digest}
+    container_name: gt-dolt
+    restart: unless-stopped
+    command:
+      - --config
+      - ${GT_DOLT_CONFIG:?set GT_DOLT_CONFIG to the Dolt config file}
+    labels:
+      org.gastown.keep: "true"
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - dolt-var:/var/lib/dolt
+      - "${GT_DOLT_DATA:?set GT_DOLT_DATA to the .dolt-data directory}:${GT_DOLT_DATA}"
+      - "${GT_DOLT_BACKUPS:?set GT_DOLT_BACKUPS to the Dolt backups directory}:${GT_DOLT_BACKUPS}"
+      - "${GT_DOLT_CONFIG}:${GT_DOLT_CONFIG}:ro"
+    mem_limit: 8g
+    memswap_limit: 8g
+    healthcheck:
+      test: ["CMD", "dolt", "--host", "127.0.0.1", "--port", "3306", "-u", "root", "sql", "-q", "select 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bd:
+    image: ${BD_IMAGE:?set BD_IMAGE to a digest reference name@sha256:<digest>}
+    container_name: gt-bd
+    restart: unless-stopped
+    depends_on:
+      dolt:
+        condition: service_healthy
+    # The image's entrypoint is bdgw serve; these are its flags.
+    command:
+      - --tokens-dir
+      - /run/bdgw/tokens
+      - --verbs
+      - /etc/bdgw/verbs.json
+      - --log-dir
+      - /var/log/bdgw
+      - --workspace
+      - /ws
+    environment:
+      HOME: /home/bdgw
+      TRACKER_URL: "${GT_TRACKER_URL:-}"
+      TRACKER_TOKEN_FILE: /run/bdgw/tokens/tracker
+    labels:
+      org.gastown.keep: "true"
+    ports:
+      - "127.0.0.1:7440:7440"
+    volumes:
+      - "${GT_BD_TOKEN_DIR:?set GT_BD_TOKEN_DIR to the gateway token directory}:/run/bdgw/tokens:ro"
+      - bd-logs:/var/log/bdgw
+      - bd-ws:/ws
+    mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bdgw", "ready", "--tokens-dir", "/run/bdgw/tokens", "--verbs", "/etc/bdgw/verbs.json", "--workspace", "/ws"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  dolt-var:
+  bd-logs:
+  bd-ws:
