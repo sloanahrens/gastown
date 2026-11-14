@@ -4854,7 +4854,9 @@ func specSlingDeps(trace *session.SandboxTrace, extra ...beads.Option) *slingDep
 // decision uses instead of listing every polecat again (gt-thy6r). The tick's
 // docked memo rides it too, so the spawn's own rig guard answers from the read
 // the tick already made (gt-ze7z5). staleNames are the rig's pool names whose
-// gateway sandbox is stale, which the spawn's draw must pass over (gt-zapy97).
+// gateway sandbox is stale, which the spawn's draw must pass over (gt-zapy97);
+// a sling that names its seat draws nothing, so this wrapper refuses that name
+// here rather than leaving the named-seat path uncovered (gt-p77cm7).
 func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error), occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo, staleNames []string) func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	return func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		opts.trace = trace
@@ -4863,6 +4865,14 @@ func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, 
 		}
 		if docked != nil {
 			opts.rigParked = docked.parkedOrDocked
+		}
+		// A named sling reuses or creates exactly the polecat it names, so the
+		// pool's pass over stale names never sees it (gt-p77cm7). The session
+		// would die at the start, so the sling is refused instead; the refusal
+		// marker makes the tick defer the bead until the sandbox is deleted.
+		if opts.Name != "" && slices.Contains(staleNames, opts.Name) {
+			return nil, fmt.Errorf("%s seat %s/%s is not slung to: the gateway holds a sandbox of that name in a failure phase, so the seat's session would die at the start; delete the sandbox and retry",
+				dispatch.SlingRefusalMarker, rigName, opts.Name)
 		}
 		opts.staleSeatNames = staleNames
 		return spawn(rigName, opts)
