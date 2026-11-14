@@ -319,18 +319,60 @@ func TestBdgwGracefulShutdown(t *testing.T) {
 	}
 }
 
-// freeAddr is a loopback address nothing holds at the moment it is returned.
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for a free port: %v", err)
+// errPipeClosed is what a dial gets once the in-memory listener has closed.
+var errPipeClosed = errors.New("the in-memory listener is closed")
+
+// pipeAddr is the address of the in-memory listener.
+type pipeAddr struct{}
+
+func (pipeAddr) Network() string { return "pipe" }
+func (pipeAddr) String() string  { return "pipe" }
+
+// pipeListener is an in-memory net.Listener. Each dial is a net.Pipe whose far
+// end the server accepts, so serve runs its real listener and drain with no
+// socket.
+type pipeListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newPipeListener() *pipeListener {
+	return &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
 	}
-	addr := l.Addr().String()
-	if err := l.Close(); err != nil {
-		t.Fatalf("close the probe listener: %v", err)
+}
+
+func (l *pipeListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr { return pipeAddr{} }
+
+// dial returns the client end of a new connection, or errPipeClosed once the
+// listener has closed.
+func (l *pipeListener) dial(ctx context.Context) (net.Conn, error) {
+	client, server := net.Pipe()
+	select {
+	case l.conns <- server:
+		return client, nil
+	case <-l.done:
+		_ = client.Close()
+		_ = server.Close()
+		return nil, errPipeClosed
+	case <-ctx.Done():
+		_ = client.Close()
+		_ = server.Close()
+		return nil, ctx.Err()
 	}
-	return addr
 }
 
 // waitFor yields until cond holds, and fails the test when bound ends first.
@@ -344,31 +386,18 @@ func waitFor(t *testing.T, bound context.Context, what string, cond func() bool)
 	}
 }
 
-// dialable reports whether a connection to addr is accepted right now.
-func dialable(t *testing.T, addr string) bool {
-	t.Helper()
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		return false
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("close the probe connection: %v", err)
-	}
-	return true
-}
-
-// TestBdgwServeDrainsInFlightCall: serve runs the real listener and drain. Once
-// shutdown begins, the listener closes at once, yet a call already in flight
-// over the socket finishes with its status, and serve returns nil only after
-// that. The executor is a blocking runner, injected through the gateway seam, so
-// the call stays in flight until the test releases it.
+// TestBdgwServeDrainsInFlightCall: serve runs its accept loop and drain on an
+// in-memory listener. Once shutdown begins, the listener closes at once, yet a
+// call already in flight on its connection finishes with its status, and serve
+// returns nil only after that. The executor is a blocking runner, injected
+// through the gateway seam, so the call stays in flight until the test releases
+// it.
 func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 	t.Parallel()
 	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 
 	sc := newServeConfig()
-	sc.addr = freeAddr(t)
 	sc.tokensDir = t.TempDir()
 	writeFile(t, filepath.Join(sc.tokensDir, "read.dash.token"), testReadToken, 0o600)
 	sc.verbsPath = filepath.Join(t.TempDir(), "verbs.json")
@@ -379,6 +408,23 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 	sc.newGateway = func(opts bdgateway.GatewayOptions) (*bdgateway.Gateway, error) {
 		opts.Runner = runner
 		return bdgateway.NewGateway(opts)
+	}
+	pl := newPipeListener()
+	sc.listen = func(string) (net.Listener, error) { return pl, nil }
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return pl.dial(ctx) },
+	}}
+	t.Cleanup(client.CloseIdleConnections)
+	// accepts reports whether the listener takes a new connection right now.
+	accepts := func() bool {
+		c, err := pl.dial(bound)
+		if err != nil {
+			return false
+		}
+		if err := c.Close(); err != nil {
+			t.Errorf("close the probe connection: %v", err)
+		}
+		return true
 	}
 
 	ctx, stop := context.WithCancel(context.Background())
@@ -398,7 +444,7 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 		return finished
 	}
 	waitFor(t, bound, "the server listens", func() bool {
-		return returned() || dialable(t, sc.addr)
+		return returned() || accepts()
 	})
 	if returned() {
 		t.Fatalf("serve returned before any shutdown: %v", serveErr)
@@ -415,13 +461,13 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 	}
 	inFlight := make(chan reply, 1)
 	go func() {
-		req, err := http.NewRequestWithContext(bound, http.MethodPost, "http://"+sc.addr+"/v1/exec", strings.NewReader(string(head)+"\n"))
+		req, err := http.NewRequestWithContext(bound, http.MethodPost, "http://bdgw.test/v1/exec", strings.NewReader(string(head)+"\n"))
 		if err != nil {
 			inFlight <- reply{err: err}
 			return
 		}
 		req.Header.Set("Authorization", "Bearer "+testReadToken)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			inFlight <- reply{err: err}
 			return
@@ -439,7 +485,7 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 	stop()
 	// The listener closes as the drain begins, while the call is still held.
 	waitFor(t, bound, "the drain closes the listener", func() bool {
-		return !dialable(t, sc.addr)
+		return !accepts()
 	})
 	if returned() {
 		t.Fatal("serve returned while a call was still in flight")
