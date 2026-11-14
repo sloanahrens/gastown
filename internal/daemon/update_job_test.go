@@ -847,10 +847,9 @@ func TestKubectlUpdateJobRefusesAnUnwritableDirectory(t *testing.T) {
 	}
 }
 
-// TestUpdateJobCreateRefusesZeroTimeout: kubectl reads a zero request timeout as
-// no bound, so a create with none is refused before kubectl runs or the manifest
-// is written.
-func TestUpdateJobCreateRefusesZeroTimeout(t *testing.T) {
+// TestKubectlUpdateJobRefusesNoRequestTimeout: kubectl reads a zero request
+// timeout as no bound, so a create with none is refused before kubectl runs.
+func TestKubectlUpdateJobRefusesNoRequestTimeout(t *testing.T) {
 	t.Parallel()
 	const name = "gt-update-abcdef012345"
 	dir := t.TempDir()
@@ -865,9 +864,8 @@ func TestUpdateJobCreateRefusesZeroTimeout(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "the manifest was written for a create that was refused")
 }
 
-// TestUpdateJobCreateSendsNoRequestTimeout: kubectl under --request-timeout loses
-// its in-cluster config in the daemon pod, so the create's args carry no
-// request-timeout at all.
+// TestUpdateJobCreateSendsNoRequestTimeout: the create's args carry no request
+// timeout; the bound is the context deadline (see CreateJob).
 func TestUpdateJobCreateSendsNoRequestTimeout(t *testing.T) {
 	t.Parallel()
 	const name = "gt-update-abcdef012345"
@@ -882,8 +880,7 @@ func TestUpdateJobCreateSendsNoRequestTimeout(t *testing.T) {
 	assert.Equal(t, []string{"create", "-f", path}, gotArgs)
 }
 
-// TestUpdateJobCreateBoundedByContext: the bound moved from kubectl's flag to the
-// context handed to kubectl, so kubectl's context carries a deadline of
+// TestUpdateJobCreateBoundedByContext: kubectl's context carries a deadline of
 // requestTimeout from the call and no later.
 func TestUpdateJobCreateBoundedByContext(t *testing.T) {
 	t.Parallel()
