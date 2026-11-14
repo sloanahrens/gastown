@@ -2,9 +2,8 @@
 // images at one green commit and publish each registry digest, then read the
 // commit label back from each of them (gt-gg9hv.62). The bd gateway image is
 // the third, optional one: a commit that built none is reported, not an error.
-// The workflow text in
-// deploy/ci/images.workflow.yml only calls it, so every refusal here is driven
-// by a unit test through the injected runner.
+// The workflow text in deploy/ci/images.workflow.yml only calls it, so every
+// refusal here is driven by a unit test through the injected runner.
 package imagepublish
 
 import (
@@ -129,7 +128,8 @@ func (o Options) docker(args ...string) (Result, error) {
 
 // Push pushes the commit's images, reads each registry digest back, and prints
 // the IMAGE line the deploy reads, only for an image whose digest the registry
-// answered. A commit with no bd image gets a NOIMAGE line for it instead.
+// answered. A commit with no bd image gets a NOIMAGE line for it instead; no
+// step parses that line, so the job log is its only reader.
 func Push(o Options) error {
 	if err := o.validate(); err != nil {
 		return err

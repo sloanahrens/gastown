@@ -211,6 +211,41 @@ func TestPushRefusesWhenTheRegistryListsNoSingleDigest(t *testing.T) {
 	}
 }
 
+// TestPushKeepsTheEarlierImageLinesWhenALaterDigestIsRefused holds the lines of
+// the images before a refused one: the daemon's IMAGE line is printed, the
+// polecat's refusal fails the push, and the bd image is never pushed.
+func TestPushKeepsTheEarlierImageLinesWhenALaterDigestIsRefused(t *testing.T) {
+	t.Parallel()
+	o, rec, out, _ := testOptions(t)
+	o.Bd = bdName
+	rec.reply = func(c call) imagepublish.Result {
+		if c.args[0] != "image" {
+			return imagepublish.Result{}
+		}
+		if c.last() == daemonRef() {
+			return imagepublish.Result{Stdout: daemonBase() + "@" + daemonDigest + "\n"}
+		}
+		return imagepublish.Result{Stdout: polecatBase() + "@" + daemonDigest + "\n" + polecatBase() + "@" + polecatDigest + "\n"}
+	}
+
+	err := imagepublish.Push(o)
+	if err == nil {
+		t.Fatal("Push accepted a polecat registry answer with two digests")
+	}
+	if !strings.Contains(err.Error(), "listed 2 digests") || !strings.Contains(err.Error(), polecatBase()) {
+		t.Errorf("Push error = %q, want it to name %s and list 2 digests", err, polecatBase())
+	}
+	want := "IMAGE daemon " + testTag + " " + daemonDigest + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("Push printed %q, want %q before the refusal", got, want)
+	}
+	for _, c := range rec.calls {
+		if strings.Contains(c.last(), bdBase()) {
+			t.Errorf("Push ran %q after the polecat refusal", c.last())
+		}
+	}
+}
+
 // TestPushStopsAtTheFirstFailedCommand holds the failure rule: a failed docker
 // call fails the step, and no IMAGE line follows it.
 func TestPushStopsAtTheFirstFailedCommand(t *testing.T) {
