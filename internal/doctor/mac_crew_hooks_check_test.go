@@ -272,6 +272,28 @@ func TestMacCrewHooksInAPodStillReportsAFinding(t *testing.T) {
 	}
 }
 
+// TestMacCrewHooksDefaultGetenvReadsThePodVariable: a check with no getenv set
+// reads the process environment. The test sets the pod variable itself, so the
+// result does not depend on whether the test runs in a pod. It is not parallel,
+// because t.Setenv changes a process-wide variable.
+func TestMacCrewHooksDefaultGetenvReadsThePodVariable(t *testing.T) {
+	config := "[core]\n\thooksPath = .githooks\n"
+	town, clone := crewHooksTown(t, &config)
+	if err := os.MkdirAll(filepath.Join(clone, ".githooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(podEnv, "")
+	if res := NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town}); res.Status != StatusOK {
+		t.Fatalf("outside a pod: Status = %v, want StatusOK: %+v", res.Status, res)
+	}
+
+	t.Setenv(podEnv, "10.0.0.1")
+	if res := NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town}); res.Status != StatusWarning {
+		t.Fatalf("inside a pod: Status = %v, want StatusWarning: %+v", res.Status, res)
+	}
+}
+
 // TestMacCrewHooksWithNoCrewDirectoriesWarns: a town with no crew clones gives a
 // WARNING that says to run the check on a native gt. It is not a pass, so a run in
 // the pod cannot report clean.
@@ -300,6 +322,9 @@ func TestMacCrewHooksWithNoCrewDirectoriesWarns(t *testing.T) {
 			}
 			if !strings.Contains(res.Message, "run this check on a native gt on the Mac") {
 				t.Errorf("Message = %q, want the native-gt instruction", res.Message)
+			}
+			if res.FixHint != macCrewHooksNativeHint {
+				t.Errorf("FixHint = %q, want the same hint as the pod warning %q", res.FixHint, macCrewHooksNativeHint)
 			}
 		})
 	}
