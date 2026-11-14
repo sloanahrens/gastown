@@ -208,6 +208,8 @@ The tracker is an issue service the town owns: `trackerd`, a Postgres-backed pro
 
 When the tracker is rendered, the daemon container carries `TRACKER_URL`, the trackerd Service's address, so the daemon and every `gt` and `bd` it starts reach the tracker without a per-process file. The render refuses a `Values.Env` entry that sets `TRACKER_URL`, since the pod sets it from `Values.Tracker` itself.
 
+trackerd's requests and limits come from its own pair in `deploy/k8s/daemon/daemon.go` (`trackerResourceRequests` and `trackerResourceLimits`), not from the daemon's `Values.CPU` and `Values.Memory`. Those are sized for the whole town, and a tracker pod that asked for them left the control node too little room for a tier-sweep Job (gt-pau2nv).
+
 ## The data plane
 
 The data plane is where facts live. Four stores matter.
