@@ -566,8 +566,8 @@ G2, G3, G4, G5 and G7 touch different files and can run in parallel after G1.
   the test that holds a live copy equal to it. Needs: B1.
 - **G12 [gt]** `deploy/bd/Dockerfile.bd` (FROM the base by digest from
   `deploy/bd/base-pin`, adds `bdgw`, links `bd` to the real bd at `bd.real`),
-  and the daemonimage build step that cross-compiles `bdgw` and `bdshim` for
-  it. Needs: G6, B1.
+  and the daemonimage build step that cross-compiles `bdgw` for it. Needs:
+  G6, B1.
 - **G13 [gt]** `imagevalues` gains the `bd:` key; `imagepublish` pushes and checks
   the third image; `gt update images` writes it; `gt update bd-base` resolves the
   base tag to a digest and writes the pin; `images.yml` reviewed text gains the
