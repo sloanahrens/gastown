@@ -33,8 +33,8 @@ type Process interface {
 }
 
 // processRunner starts one process. It is the seam the executor's tests put a
-// fake behind; executor_real_test.go replaces it with the real one that runs
-// this package's test binary as bd.
+// fake behind; executor_real_test.go leaves the real runner in place and points
+// the binary at this package's own test binary, which acts as bd.
 type processRunner interface {
 	Start(binary string, argv, env []string, dir string) (Process, error)
 }

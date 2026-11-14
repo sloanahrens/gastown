@@ -1223,6 +1223,13 @@ func testWorkspace(t *testing.T) string {
 
 func newTestExecutor(t *testing.T, root string, runner processRunner) *Executor {
 	t.Helper()
+	return newTestExecutorGrace(t, root, runner, 0)
+}
+
+// newTestExecutorGrace is newTestExecutor with the kill grace named, so a test of
+// a wait bounded by it need not wait the default two seconds.
+func newTestExecutorGrace(t *testing.T, root string, runner processRunner, grace time.Duration) *Executor {
+	t.Helper()
 	if r, ok := runner.(*fakeRunner); ok && r.bound == nil {
 		r.bound = waitCtx(t)
 	}
@@ -1235,6 +1242,7 @@ func newTestExecutor(t *testing.T, root string, runner processRunner) *Executor 
 		DoltPort:         "3307",
 		TrackerURL:       "http://127.0.0.1:7433",
 		TrackerTokenFile: "/run/secrets/tracker.token",
+		KillGrace:        grace,
 		runner:           runner,
 	})
 	if err != nil {
@@ -1276,4 +1284,60 @@ func envMap(env []string) map[string]string {
 		}
 	}
 	return m
+}
+
+// stalledWriter is a client stream that stopped reading: every Write blocks until
+// release is closed.
+type stalledWriter struct{ release <-chan struct{} }
+
+func (w stalledWriter) Write(p []byte) (int, error) {
+	<-w.release
+	return len(p), nil
+}
+
+// TestExecutorStalledClientStream: a pump blocked writing to a client that
+// stopped reading must not hold Exec past the deadline plus the kill grace. The
+// wait is bounded by the test's own deadline, not by the code under test.
+func TestExecutorStalledClientStream(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	proc := newBlockingFake("output the client never reads")
+	e := newTestExecutorGrace(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}}, 50*time.Millisecond)
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 20}, nil, stalledWriter{release})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Exec returned nil although the client stream stalled and the deadline fired")
+		}
+	case <-waitCtx(t).Done():
+		t.Fatal("Exec was held past the deadline plus the kill grace by a stalled client stream")
+	}
+	if !proc.wasKilled() {
+		t.Error("the process group was not killed")
+	}
+}
+
+// TestExecutorCallerDeadlineIsNotTheTimeout: the caller's own context deadline is
+// the caller giving up, not the call's limit running out, so it is reported as
+// the client gone and never as ErrTimeout.
+func TestExecutorCallerDeadlineIsNotTheTimeout(t *testing.T) {
+	t.Parallel()
+	proc := newBlockingFake("")
+	e := newTestExecutor(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := e.Exec(ctx, Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 60000}, nil, io.Discard)
+	if err == nil {
+		t.Fatal("Exec returned nil after the caller's deadline")
+	}
+	if errors.Is(err, ErrTimeout) {
+		t.Errorf("the caller's own deadline was reported as the call's timeout: %v", err)
+	}
+	if !errors.Is(err, ErrClientGone) || !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("Exec = %v, want ErrClientGone naming the caller's deadline", err)
+	}
 }

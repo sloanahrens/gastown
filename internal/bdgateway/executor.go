@@ -249,7 +249,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 				return
 			}
 		}
-		out.setEnding(callEndingOf(runCtx))
+		out.setEnding(callEndingOf(ctx, runCtx))
 		err := proc.Kill()
 		switch {
 		case err == nil:
@@ -310,11 +310,27 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		case <-runCtx.Done():
 			_ = proc.Stdin().Close()
 			proc.CloseOutputs()
-			for ; pending > 0; pending-- {
-				if err := <-pumpErrs; !errors.Is(err, os.ErrClosed) {
-					record(err)
+			// Closing bd's ends frees a pump that is reading, but not one that
+			// is writing to a client that stopped reading its stream, so the
+			// wait for the pumps has the same bound as the wait for bd. A pump
+			// still writing after it is the client's: it ends when its write
+			// returns (pumpErrs has room for both), the call is recorded as a
+			// failed write, and nothing more is written to that client.
+			grace := time.NewTimer(e.killGrace)
+			for pending > 0 {
+				select {
+				case err := <-pumpErrs:
+					pending--
+					if !errors.Is(err, os.ErrClosed) {
+						record(err)
+					}
+				case <-grace.C:
+					record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
+					frames = io.Discard
+					pending = 0
 				}
 			}
+			grace.Stop()
 		}
 	}
 	// The stdin write is bounded the same way: closing our end ends it even
@@ -409,11 +425,12 @@ const (
 	canceledEnding
 )
 
-// callEndingOf names the ending a fired runCtx stands for. The deadline is the
-// timeout; any other end of the context is a cancel, from the client or from a
-// pump that could not write.
-func callEndingOf(ctx context.Context) callEnding {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+// callEndingOf names the ending a fired runCtx stands for. The call's own limit
+// running out is the timeout; any other end is a cancel: the caller's context
+// ending (its own deadline included, which is not this call's limit), or a pump
+// that could not write.
+func callEndingOf(caller, run context.Context) callEnding {
+	if caller.Err() == nil && errors.Is(run.Err(), context.DeadlineExceeded) {
 		return deadlineEnding
 	}
 	return canceledEnding
