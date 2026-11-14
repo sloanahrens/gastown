@@ -58,18 +58,28 @@ func riskSpec(goal string, labels ...string) specdispatch.Spec {
 // risk list is read from the target branch, the bead's text is matched against
 // it, and the lint prints the WARN line. Three or more risk paths get one WARN
 // naming the count and the paths; two, none, a size-ok label and a branch with
-// no risk list stay silent; an unread list warns that the check did not run.
-// Every row keeps the verdict and the exit code a warning never changes.
+// no risk list stay silent; an unread list, and a target tree whose inventory
+// could not be read, warn that the check did not run. Every row keeps the
+// verdict and the exit code a warning never changes.
 func TestSpecLintRiskPathWarn(t *testing.T) {
 	t.Parallel()
 	const three = "Change internal/daemon/supervisor.go, internal/land/riskpaths.txt and the Makefile"
 	tests := []struct {
-		name     string
-		goal     string
-		labels   []string
+		name string
+		goal string
+		// labels are the bead's labels.
+		labels []string
+		// riskList is the risk list at origin/main; empty is no such file.
 		riskList string
-		readErr  error
-		want     []string
+		// readErr is the failure reading the risk list from a readable tree.
+		readErr error
+		// treeMissing makes the target tree itself unreadable, so the risk
+		// list is never asked for.
+		treeMissing bool
+		// want is the exact WARN lines; wantPrefix matches a line whose reason
+		// carries the test's temp-dir path.
+		want       []string
+		wantPrefix string
 	}{
 		{
 			name:     "three risk paths get one WARN naming the count and the paths",
@@ -103,6 +113,13 @@ func TestSpecLintRiskPathWarn(t *testing.T) {
 			readErr: errors.New("git: boom"),
 			want:    []string{"WARN: the risk-path check did not run: git: boom"},
 		},
+		{
+			name:        "an unread target tree warns that the check did not run",
+			goal:        three,
+			riskList:    riskListText,
+			treeMissing: true,
+			wantPrefix:  "WARN: the risk-path check did not run: cannot read main in ",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,10 +131,17 @@ func TestSpecLintRiskPathWarn(t *testing.T) {
 				files = append(files, "internal/land/riskpaths.txt")
 				content["origin/main:internal/land/riskpaths.txt"] = tc.riskList
 			}
+			refs := fakeTree{"origin/main": files}
+			if tc.treeMissing {
+				// A reader with no refs fails the inventory read, so
+				// specTargetTree carries the failure and never asks for the
+				// risk list.
+				refs = fakeTree{}
+			}
 			target := specTargetTree(rigPath, func(string) treeReader {
-				return fakeRiskTree{fakeTree: fakeTree{"origin/main": files}, content: content, readErr: tc.readErr}
+				return fakeRiskTree{fakeTree: refs, content: content, readErr: tc.readErr}
 			})
-			if target.Err != "" {
+			if target.Err != "" && !tc.treeMissing {
 				t.Fatalf("target inventory: %s", target.Err)
 			}
 			spec := riskSpec(tc.goal, tc.labels...)
@@ -134,6 +158,12 @@ func TestSpecLintRiskPathWarn(t *testing.T) {
 				if strings.HasPrefix(line, "WARN: ") {
 					warns = append(warns, line)
 				}
+			}
+			if tc.wantPrefix != "" {
+				if len(warns) != 1 || !strings.HasPrefix(warns[0], tc.wantPrefix) {
+					t.Errorf("WARN lines = %q, want one starting %q\nstderr:\n%s", warns, tc.wantPrefix, errOut.String())
+				}
+				return
 			}
 			if !slices.Equal(warns, tc.want) {
 				t.Errorf("WARN lines = %q, want %q\nstderr:\n%s", warns, tc.want, errOut.String())

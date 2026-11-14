@@ -1122,6 +1122,12 @@ func specRiskPaths(spec specdispatch.Spec, target *specdispatch.TargetTree) ([]s
 		// reading an unread branch as one with no risk list.
 		return nil, "the target branch was not read"
 	}
+	if target.Err != "" {
+		// The inventory read failed, so specTargetTree never got to the risk
+		// list: carry that reason rather than letting the empty globs read as a
+		// branch with no risk list.
+		return nil, target.Err
+	}
 	if target.RiskGlobsErr != "" {
 		return nil, target.RiskGlobsErr
 	}
