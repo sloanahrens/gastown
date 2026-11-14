@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
+	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -98,6 +99,10 @@ type specEstimateStore interface {
 type specEstimateRunner struct {
 	Estimate func(ctx context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error)
 	Deps     func() (estimate.Deps, error)
+	// Log appends the estimate log's line for an estimate this run computed;
+	// nil appends none. Its error is reported as the outcome's LogError and
+	// never fails the estimate.
+	Log func(beadID, hash string, r estimate.Result) error
 }
 
 // specEstimateOpts are the command's flags.
@@ -120,7 +125,10 @@ type specEstimateOutcome struct {
 	Minutes float64 `json:"minutes,omitempty"`
 	Hash    string  `json:"hash"`
 	// Reason says why there is no estimate; empty otherwise.
-	Reason       string   `json:"reason,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	// LogError is the one line a failed estimate-log append reported; it never
+	// fails the estimate. Empty when the line was appended or no log is wired.
+	LogError     string   `json:"log_error,omitempty"`
 	AddLabels    []string `json:"add_labels,omitempty"`
 	RemoveLabels []string `json:"remove_labels,omitempty"`
 	Comment      string   `json:"comment,omitempty"`
@@ -161,6 +169,7 @@ func runSpecEstimateWired(cmd *cobra.Command, args []string, findTown func() (st
 		Deps: func() (estimate.Deps, error) {
 			return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), cmd.ErrOrStderr())
 		},
+		Log: specEstimateAppendLog(townRoot, time.Now),
 	}
 	opts := specEstimateOpts{Force: specEstimateForce, DryRun: specEstimateDryRun, JSON: specEstimateJSON}
 	return runSpecEstimateOn(cmd.OutOrStdout(), beadID, newStore(townRoot, beadID), opts, run)
@@ -190,7 +199,11 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 		return specEstimateOutcome{}, fmt.Errorf("reading the comments on %s: %w", beadID, err)
 	}
 	hash := estimate.SectionHash(issue)
-	if !opts.Force && latestEstimateHash(comments) == hash {
+	// The note's hash is the bead's own record of the text it was last
+	// estimated on, so it answers the log's one-line-per-bead-and-hash rule
+	// without a growing read of the log itself.
+	estimatedBefore := latestEstimateHash(comments) == hash
+	if !opts.Force && estimatedBefore {
 		note := latestEstimateNote(comments)
 		outcome := specEstimateOutcome{ID: beadID, Action: "unchanged", Hash: hash, Neighbors: specEstimateNoteNeighbors(note)}
 		specEstimateFromLabels(&outcome, issue.Labels)
@@ -229,6 +242,14 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 	}
 	if err := store.AddComment(beadID, outcome.Comment); err != nil {
 		return specEstimateOutcome{}, fmt.Errorf("commenting on %s: %w", beadID, err)
+	}
+	// The log line records an estimate whose labels and note are already on the
+	// bead. Text the bead's note already names was estimated before, so a forced
+	// re-estimate of it appends none: the log keeps one line per bead and hash.
+	if run.Log != nil && outcome.Action == "estimated" && !estimatedBefore {
+		if err := run.Log(beadID, hash, result); err != nil {
+			outcome.LogError = firstErrLine(err)
+		}
 	}
 	return outcome, nil
 }
@@ -302,6 +323,61 @@ func staleEstimateLabels(existing, add []string) []string {
 		stale = append(stale, l)
 	}
 	return stale
+}
+
+// specEstimateAppendLog is the production estimate-log appender: one record per
+// estimate under the town root. A failed append is returned for the caller to
+// report as one line, so a log that cannot be written never fails the estimate.
+// now is the clock the record's time comes from.
+func specEstimateAppendLog(townRoot string, now func() time.Time) func(beadID, hash string, r estimate.Result) error {
+	return func(beadID, hash string, r estimate.Result) error {
+		return estlog.Append(townRoot, specEstimateLogRecord(beadID, hash, r, now()))
+	}
+}
+
+// specEstimateLogRecord is the line one estimate appends: the bead and the hash
+// of the text the estimator read, the shape features and embedding it read, each
+// component's minutes, the blended minutes and the weights version, so a retrain
+// fits on what the estimator saw after the bead's text has changed.
+func specEstimateLogRecord(beadID, hash string, r estimate.Result, at time.Time) estlog.Record {
+	return estlog.Record{
+		BeadID:          beadID,
+		DescriptionHash: hash,
+		Shape: estlog.Shape{
+			Boxes:   r.Shape.Boxes,
+			Paths:   r.Shape.Paths,
+			Pkgs:    r.Shape.Pkgs,
+			DLen:    r.Shape.DLen,
+			NCons:   r.Shape.NCons,
+			NLab:    r.Shape.NLab,
+			PodEng:  r.Shape.PodEng,
+			Tests:   r.Shape.Tests,
+			NBt:     r.Shape.NBt,
+			RigGT:   r.Shape.RigGT,
+			RigDV:   r.Shape.RigDV,
+			IsHaiku: r.Shape.IsHaiku,
+		},
+		Embedding: r.Embedding,
+		Minutes: estlog.Minutes{
+			Shape: r.ComponentMinutes.Shape,
+			Embed: r.ComponentMinutes.Embed,
+			Jev:   r.ComponentMinutes.Jev,
+		},
+		BlendedMinutes: r.Minutes,
+		WeightsVersion: r.WeightsVersion,
+		Time:           at,
+	}
+}
+
+// specEstimateLogLine is the one line a failed estimate-log append logs, or ""
+// when the line was appended or no log is wired. The dispatcher tick reports it
+// as a notice: the daemon discards a successful tick's stderr, so a log that
+// silently stopped growing would read as a tick with nothing to log.
+func specEstimateLogLine(beadID string, o specEstimateOutcome) string {
+	if o.LogError == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s: story points estimate log: %s", beadID, o.LogError)
 }
 
 // latestEstimateNote is the text of the latest comment that begins SP ESTIMATE
@@ -500,6 +576,9 @@ func writeSpecEstimate(out io.Writer, o specEstimateOutcome, asJSON bool) error 
 	default:
 		fmt.Fprintf(out, "%s: sp:%d rung:%s minutes:%s\n", o.ID, o.Points, o.Rung, strconv.FormatFloat(o.Minutes, 'f', -1, 64))
 	}
+	if line := specEstimateLogLine(o.ID, o); line != "" {
+		fmt.Fprintln(out, line)
+	}
 	if o.DryRun {
 		fmt.Fprintf(out, "dry run: nothing written\n")
 		fmt.Fprintf(out, "add: %s\n", strings.Join(o.AddLabels, ", "))
@@ -565,7 +644,13 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 		return lines
 	}
 	for _, id := range specEstimateAheadPick(cands, specEstimateAheadLimit) {
-		if line := specEstimateAheadLine(id, specStoryPointRun(env, id)); line != "" {
+		answer := specStoryPointRun(env, id)
+		if line := specEstimateAheadLine(id, answer); line != "" {
+			lines = append(lines, line)
+		}
+		// The estimate appends its log line on the same path the sling hook
+		// uses, so a failed append is reported here as it is there.
+		if line := specEstimateLogLine(id, answer.outcome); line != "" {
 			lines = append(lines, line)
 		}
 	}

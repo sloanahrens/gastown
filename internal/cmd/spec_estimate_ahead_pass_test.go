@@ -449,6 +449,31 @@ func TestSpecEstimateAheadPassRefusals(t *testing.T) {
 	}
 }
 
+// TestSpecEstimateAheadLogFailureIsOneLine: the estimate the ahead pass runs
+// appends its log line on the sling hook's own path, so a failed append is one
+// line here as it is there.
+func TestSpecEstimateAheadLogFailureIsOneLine(t *testing.T) {
+	t.Parallel()
+	env := specDispatchEnv{StoryPointShadow: true, After: neverTimer}
+	env.EstimateAheadRead = func(_ context.Context, id string) (*beads.Issue, []beads.Comment, error) {
+		return &beads.Issue{ID: id, Status: string(beads.StatusOpen)}, nil, nil
+	}
+	env.StoryPointEstimate = func(_ context.Context, id string) (specEstimateOutcome, error) {
+		return specEstimateOutcome{Action: "estimated", Rung: "all", Minutes: 5, Points: 3, LogError: "no space left on device"}, nil
+	}
+
+	lines := specEstimateAheadPass(env, []string{"gt-a"}, nil)
+	var logLines []string
+	for _, line := range lines {
+		if strings.Contains(line, "story points estimate log") {
+			logLines = append(logLines, line)
+		}
+	}
+	if len(logLines) != 1 || !strings.Contains(logLines[0], "no space left on device") {
+		t.Fatalf("lines = %q, want one naming the failed estimate log", lines)
+	}
+}
+
 // TestSpecEstimateAheadReadLimit: the pass reads at most
 // specEstimateAheadReadLimit candidates per tick, in the order the board gave
 // them, says so in one line when the set was cut, and still estimates at most

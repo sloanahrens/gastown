@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -19,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
+	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 )
 
 // specEstimateBody is a bead description with the sections the hash covers.
@@ -749,6 +751,158 @@ func setEmbeddingDim(t *testing.T, f map[string]any, dim int) {
 	}
 	embedding["dim"] = dim
 	embedding["coef"] = coef
+}
+
+// specEstimateLogTime is the fixed instant the estimate-log appender stamps its
+// records with in a test.
+func specEstimateLogTime() time.Time {
+	return time.Date(2026, 11, 14, 12, 30, 0, 0, time.UTC)
+}
+
+// specEstimateWithFeatures is an estimate whose log line can be checked in every
+// field: a distinct shape, embedding and component minutes.
+func specEstimateWithFeatures() *specEstimateStub {
+	stub := specEstimateOK()
+	stub.result.Shape = storypoints.Shape{
+		Boxes: 3, Paths: 4, Pkgs: 2, DLen: 7.6, NCons: 2, NLab: 5,
+		PodEng: 1, Tests: 3, NBt: 13, RigGT: 1, RigDV: 0, IsHaiku: 0.5,
+	}
+	stub.result.Embedding = []float32{0.25, -1.5, 3}
+	shape, embed, jev := 5.5, 7.25, 6.0
+	stub.result.ComponentMinutes = estimate.ComponentMinutes{Shape: &shape, Embed: &embed, Jev: &jev}
+	stub.result.WeightsVersion = "embedded v1"
+	return stub
+}
+
+// specEstimateLogRunner is the runner a log test drives: the stub estimate and
+// the production appender under town, stamped with the fixed time.
+func specEstimateLogRunner(stub *specEstimateStub, town string) specEstimateRunner {
+	run := specEstimateRunnerFor(stub)
+	run.Log = specEstimateAppendLog(town, specEstimateLogTime)
+	return run
+}
+
+// TestSpecEstimateAppendsOneLogLine: an estimate appends one estimate-log line
+// carrying the hash of the text it read, the features and the blended minutes.
+func TestSpecEstimateAppendsOneLogLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	db := specEstimateSeed()
+	stub := specEstimateWithFeatures()
+
+	var out bytes.Buffer
+	if err := runSpecEstimateOn(&out, "gt-est", db, specEstimateOpts{}, specEstimateLogRunner(stub, town)); err != nil {
+		t.Fatalf("runSpecEstimateOn: %v", err)
+	}
+
+	records, malformed, err := estlog.Read(town)
+	if err != nil {
+		t.Fatalf("read the estimate log: %v", err)
+	}
+	if malformed != 0 {
+		t.Fatalf("malformed lines = %d, want none", malformed)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want the one estimate", len(records))
+	}
+	got := records[0]
+	if got.BeadID != "gt-est" {
+		t.Errorf("BeadID = %q, want gt-est", got.BeadID)
+	}
+	if want := specEstimateHashOf(t, db); got.DescriptionHash != want {
+		t.Errorf("DescriptionHash = %q, want %q", got.DescriptionHash, want)
+	}
+	wantShape := estlog.Shape{
+		Boxes: 3, Paths: 4, Pkgs: 2, DLen: 7.6, NCons: 2, NLab: 5,
+		PodEng: 1, Tests: 3, NBt: 13, RigGT: 1, RigDV: 0, IsHaiku: 0.5,
+	}
+	if got.Shape != wantShape {
+		t.Errorf("Shape = %+v, want %+v", got.Shape, wantShape)
+	}
+	if !slices.Equal(got.Embedding, stub.result.Embedding) {
+		t.Errorf("Embedding = %v, want %v", got.Embedding, stub.result.Embedding)
+	}
+	for name, pair := range map[string]struct{ got, want *float64 }{
+		"shape": {got.Minutes.Shape, stub.result.ComponentMinutes.Shape},
+		"embed": {got.Minutes.Embed, stub.result.ComponentMinutes.Embed},
+		"jev":   {got.Minutes.Jev, stub.result.ComponentMinutes.Jev},
+	} {
+		if pair.got == nil || pair.want == nil || *pair.got != *pair.want {
+			t.Errorf("%s minutes = %v, want %v", name, pair.got, pair.want)
+		}
+	}
+	if got.BlendedMinutes != stub.result.Minutes {
+		t.Errorf("BlendedMinutes = %v, want %v", got.BlendedMinutes, stub.result.Minutes)
+	}
+	if got.WeightsVersion != "embedded v1" {
+		t.Errorf("WeightsVersion = %q, want embedded v1", got.WeightsVersion)
+	}
+	if !got.Time.Equal(specEstimateLogTime()) {
+		t.Errorf("Time = %v, want %v", got.Time, specEstimateLogTime())
+	}
+}
+
+// TestSpecEstimateLogsOneLineForEachBeadAndHash: a forced second estimate of
+// the same text appends nothing, so the log keeps one line per bead and hash
+// however often the bead is re-estimated.
+func TestSpecEstimateLogsOneLineForEachBeadAndHash(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	db := specEstimateSeed()
+	stub := specEstimateOK()
+	run := specEstimateLogRunner(stub, town)
+	for i := 0; i < 2; i++ {
+		if err := runSpecEstimateOn(io.Discard, "gt-est", db, specEstimateOpts{Force: true}, run); err != nil {
+			t.Fatalf("run %d: %v", i+1, err)
+		}
+	}
+	if stub.calls != 2 {
+		t.Fatalf("the estimate ran %d time(s), want 2: a forced rerun must reach the log", stub.calls)
+	}
+	records, _, err := estlog.Read(town)
+	if err != nil {
+		t.Fatalf("read the estimate log: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want the one line for the bead and hash", len(records))
+	}
+}
+
+// TestSpecEstimateLogFailureIsOneLineAndKeepsTheEstimate: a log that cannot be
+// written is one reported line; the estimate's labels and note are still on the
+// bead and the run succeeds.
+func TestSpecEstimateLogFailureIsOneLineAndKeepsTheEstimate(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A regular file where the log's directory goes makes every append fail.
+	if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", filepath.Join(town, ".runtime"), err)
+	}
+	db := specEstimateSeed()
+	stub := specEstimateOK()
+
+	var out bytes.Buffer
+	if err := runSpecEstimateOn(&out, "gt-est", db, specEstimateOpts{}, specEstimateLogRunner(stub, town)); err != nil {
+		t.Fatalf("runSpecEstimateOn: %v", err)
+	}
+	labels := specEstimateLabelsOn(t, db)
+	for _, want := range []string{"sp:5", "sp-rung:shape-jev", "sp-minutes:6.3"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("labels = %v, want %s", labels, want)
+		}
+	}
+	if comments := specEstimateCommentsOn(t, db); len(comments) != 1 {
+		t.Fatalf("comments = %d, want the one estimate note", len(comments))
+	}
+	var logLines []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "story points estimate log") {
+			logLines = append(logLines, line)
+		}
+	}
+	if len(logLines) != 1 {
+		t.Fatalf("estimate-log lines = %v, want exactly one", logLines)
+	}
 }
 
 // writeSpecEstimateRuntimeWeights writes f as town's runtime weights file.

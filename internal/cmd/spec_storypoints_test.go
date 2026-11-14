@@ -36,6 +36,33 @@ func storyPointNotices(notices []string) []string {
 	return out
 }
 
+// TestSpecDispatchStoryPointLogFailureIsOneNotice: an estimate whose log line
+// could not be appended reports it as one notice, so the failure survives the
+// daemon's discard of a successful tick's stderr.
+func TestSpecDispatchStoryPointLogFailureIsOneNotice(t *testing.T) {
+	t.Parallel()
+	env := specDispatchEnv{StoryPointShadow: true, After: neverTimer}
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		return specEstimateOutcome{
+			Action:   "estimated",
+			Rung:     "all",
+			Minutes:  6.3,
+			Points:   5,
+			LogError: "storypoints/estlog: opening /town/.runtime/storypoints/estimates.jsonl: permission denied",
+		}, nil
+	}
+	step := specStoryPointStep(env, "gt-a", specdispatch.Spec{ID: "gt-a"})
+
+	if len(step.Notices) != 1 {
+		t.Fatalf("notices = %q, want the one estimate-log line", step.Notices)
+	}
+	for _, want := range []string{"gt-a", "story points estimate log", "permission denied"} {
+		if !strings.Contains(step.Notices[0], want) {
+			t.Errorf("notice = %q, want it to name %q", step.Notices[0], want)
+		}
+	}
+}
+
 // TestSpecDispatchStoryPointShadowOffNeverEstimates: with the setting off the
 // tick attempts no estimate, and the beads are slung as they were.
 func TestSpecDispatchStoryPointShadowOffNeverEstimates(t *testing.T) {
