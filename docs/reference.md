@@ -496,10 +496,11 @@ A bead with no text has no estimate, and a canceled run has none either.
   over this many minutes, on a rung of two or more inputs, is held for splitting
   instead of slung. Zero, the default, is off. **Shadow mode** below states what
   the route does.
-- `lint_over_minutes` is the size gate's trigger: `gt spec lint` refuses a bead
-  whose `sp-minutes` label is at or over this many minutes and says to split it
-  (gt-mtzx6s). The check reads the label already on the bead and never estimates
-  one itself. Zero, the default, is off, and lint changes nothing.
+- `lint_over_minutes` is the size gate's trigger: the refusal that reads it is
+  gt-mtzx6s's; until it lands, `gt spec lint` leaves the setting alone. A bead
+  whose `sp-minutes` label is at or over this many minutes will then be refused
+  with a split instruction; the check reads the label already on the bead and
+  never estimates one itself. Zero, the default, is off.
 
 **Weights.** The model is `internal/storypoints/weights.json`, embedded in the
 binary. It holds the shape model, the Jev probability-to-minutes table, and the
