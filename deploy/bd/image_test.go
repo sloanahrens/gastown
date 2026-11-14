@@ -85,7 +85,7 @@ func TestDockerfileBdShape(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
 		{"base is the pin by digest", "FROM " + pin},
 		{"the real bd is checked in place", "RUN test -x /usr/local/bin/bd.real"},
-		{"the shim is bd", "COPY --chmod=0755 bdshim /usr/local/bin/bd"},
+		{"the real bd is bd on PATH", "RUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd"},
 		{"the gateway is copied in", "COPY --chmod=0755 bdgw /usr/local/bin/bdgw"},
 		{"the gateway is the entrypoint", `ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]`},
 	} {
@@ -96,6 +96,16 @@ func TestDockerfileBdShape(t *testing.T) {
 			}
 		})
 	}
+	t.Run("no instruction names the shim", func(t *testing.T) {
+		t.Parallel()
+		// The tracker program is deferred: the image runs the real bd as bd, and
+		// a bdshim copied or invoked here would put the shim back on PATH.
+		for _, l := range lines {
+			if strings.Contains(l, "bdshim") {
+				t.Errorf("%s has a line naming bdshim (%q), want the real bd on PATH", dockerfileName, l)
+			}
+		}
+	})
 	t.Run("one base, by digest", func(t *testing.T) {
 		t.Parallel()
 		var froms []string
