@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/taskfile"
 )
 
@@ -85,6 +86,44 @@ func TestParseAcceptanceBoxes(t *testing.T) {
 			t.Parallel()
 			if got := parseAcceptanceBoxes(tt.text); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseAcceptanceBoxes(%q) = %+v, want %+v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTaskInputFromBeadBoxesNameTheHostsBox covers the parity the box text
+// promises: a box TASK.md shows is a box the host's TickAcceptanceBox finds, so
+// a seat's tick lands on the box it read. An open box changes the text; a
+// ticked one is a no-op there.
+func TestTaskInputFromBeadBoxesNameTheHostsBox(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "a plain box", text: "- [ ] first\n- [ ] second"},
+		{name: "padding around the text", text: "1. [ ]   spaced text  \n- [ ] second"},
+		{name: "a tab after the box", text: "- [ ]\ta tabbed box\n- [ ] other"},
+		{name: "a nested box under a ticked one", text: "- [x] outer\n  - [ ] nested"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			boxes := taskInputFromBead(beadTaskFields{Acceptance: tt.text}).Boxes
+			if len(boxes) == 0 {
+				t.Fatalf("taskInputFromBead(%q).Boxes is empty", tt.text)
+			}
+			for i, box := range boxes {
+				got, err := beads.TickAcceptanceBox(tt.text, box.Text)
+				if err != nil {
+					t.Fatalf("TickAcceptanceBox(%q) with box %d %q = error %v, want the box found", tt.text, i, box.Text, err)
+				}
+				if box.Ticked && got != tt.text {
+					t.Errorf("TickAcceptanceBox(%q) with ticked box %q = %q, want it unchanged", tt.text, box.Text, got)
+				}
+				if !box.Ticked && got == tt.text {
+					t.Errorf("TickAcceptanceBox(%q) with open box %q changed nothing", tt.text, box.Text)
+				}
 			}
 		})
 	}

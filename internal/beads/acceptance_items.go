@@ -21,6 +21,7 @@ type AcceptanceItem struct {
 	Nested  bool   // indented under another item
 	Boxed   bool   // the text opens with a "[ ]" or "[x]" checkbox
 	Checked bool   // the box is "[x]" or "[X]"
+	Box     string // the text after the checkbox, trimmed; set only when Boxed
 }
 
 // AcceptanceItems returns the list items of text, in order. A fenced code
@@ -36,14 +37,13 @@ func AcceptanceItems(text string) []AcceptanceItem {
 }
 
 // acceptanceItemAt is an item with where it sits in its text: line is the
-// index of its line in strings.Split(text, "\n"), boxAt is the byte offset of
-// the "[" that opens its checkbox in that line, and box is the text after the
-// checkbox, trimmed. boxAt and box are unset when the item is not boxed.
+// index of its line in strings.Split(text, "\n") and boxAt is the byte offset
+// of the "[" that opens its checkbox in that line. boxAt is set only when the
+// item is boxed.
 type acceptanceItemAt struct {
 	AcceptanceItem
 	line  int
 	boxAt int
-	box   string
 }
 
 // acceptanceItemsAt is AcceptanceItems with each item's line index, so a
@@ -78,7 +78,7 @@ func acceptanceItemsAt(text string) []acceptanceItemAt {
 			at.Boxed = true
 			at.Checked = box[1] != " "
 			at.boxAt = strings.Index(line, "[")
-			at.box = strings.TrimSpace(m[1][len(box[0]):])
+			at.Box = strings.TrimSpace(m[1][len(box[0]):])
 		}
 		items = append(items, at)
 	}
@@ -111,7 +111,7 @@ func TickAcceptanceBox(block, box string) (string, error) {
 	}
 	var open, ticked []acceptanceItemAt
 	for _, at := range acceptanceItemsAt(block) {
-		if !at.Boxed || at.box != box {
+		if !at.Boxed || at.Box != box {
 			continue
 		}
 		if at.Checked {
