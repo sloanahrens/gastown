@@ -6,8 +6,9 @@ import (
 )
 
 // TestHowCardRulesReadTheFile drives the production loader over the embedded
-// card. A blank line or a line over the limit in overseer-card.md makes this
-// test fail with the validator's error, which names the file and the line.
+// card. A blank line, a line over the limit, or a card over the byte budget in
+// overseer-card.md makes this test fail with the validator's error, which names
+// the file and the line or size.
 func TestHowCardRulesReadTheFile(t *testing.T) {
 	t.Parallel()
 
@@ -33,25 +34,25 @@ func TestHowCardRulesPinTheFile(t *testing.T) {
 	checkHowGolden(t, "card.golden", []byte(strings.Join(lines, "\n")+"\n"))
 }
 
-// TestHowCardRulesStayUnderByteLimit guards the card's 2500-byte budget: the
-// per-line validator passes each line, so only a whole-file check stops the card
-// growing past what a compacted session will read (gt-0rix8g).
-func TestHowCardRulesStayUnderByteLimit(t *testing.T) {
-	t.Parallel()
-
-	const maxBytes = 2500
-	if n := len(overseerCardFile); n > maxBytes {
-		t.Fatalf("overseer-card.md is %d bytes, more than the %d-byte card budget", n, maxBytes)
-	}
-}
-
-// TestHowCardRulesRefuseBadLines checks the two shapes the card must never
-// have and the line the error names for each.
+// TestHowCardRulesRefuseBadLines checks the shapes the card must never have and
+// the line or size the error names for each, and that a card at each limit is
+// accepted.
 func TestHowCardRulesRefuseBadLines(t *testing.T) {
 	t.Parallel()
 
 	atLimit := strings.Repeat("x", overseerCardMaxLine)
 	overLimit := strings.Repeat("x", overseerCardMaxLine+1)
+
+	// atByteBudget is thirteen valid lines and exactly overseerCardMaxBytes, so
+	// only the whole-file check decides it; overByteBudget is one byte more.
+	// Twelve lines sit at the line limit, which the per-line check accepts.
+	atByteBudget := strings.Repeat(atLimit+"\n", 12) + strings.Repeat("y", 88)
+	overByteBudget := strings.Repeat(atLimit+"\n", 12) + strings.Repeat("y", 89)
+	atByteBudgetLines := make([]string, 0, 13)
+	for i := 0; i < 12; i++ {
+		atByteBudgetLines = append(atByteBudgetLines, atLimit)
+	}
+	atByteBudgetLines = append(atByteBudgetLines, strings.Repeat("y", 88))
 
 	tests := []struct {
 		name    string
@@ -73,6 +74,16 @@ func TestHowCardRulesRefuseBadLines(t *testing.T) {
 			name: "a line at the limit is accepted",
 			text: atLimit,
 			want: []string{atLimit},
+		},
+		{
+			name: "a card at the byte budget is accepted",
+			text: atByteBudget,
+			want: atByteBudgetLines,
+		},
+		{
+			name:    "a card over the byte budget",
+			text:    overByteBudget,
+			wantErr: []string{"2501 bytes", "more than the 2500-byte card budget"},
 		},
 		{
 			name:    "an empty line",
