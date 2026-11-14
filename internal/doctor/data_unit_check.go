@@ -2,102 +2,97 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/templates"
 )
 
+// DataUnitCheckName is the name 'gt doctor --check' takes for DataUnitCheck.
+const DataUnitCheckName = "data-unit"
+
+// DataUnitPsFormat is the docker compose ps template the check reads the unit's
+// services with: one line per service, its name, state and health. The compose
+// unit's status command prints the same template.
+const DataUnitPsFormat = "{{.Service}} {{.State}} {{.Health}}"
+
 // The data compose unit (deploy/data/docker-compose.yml, project gt-data) runs
-// Dolt and the bd gateway. The names and the port below are the ones that file
-// fixes; a change to it is a change here.
+// Dolt and the bd gateway. The service names, the port and the token directory
+// variable below are the ones that file fixes; a change to it is a change here.
 const (
-	dataUnitDoltContainer = "gt-dolt"
-	dataUnitBdContainer   = "gt-bd"
+	dataUnitDoltService = "dolt"
+	dataUnitBdService   = "bd"
 	// dataUnitGatewayURL is the gateway's published address on the Mac host.
 	dataUnitGatewayURL = "http://127.0.0.1:7440"
-	// dataUnitTokenDirEnv names the token directory the compose unit mounts.
-	dataUnitTokenDirEnv = "GT_BD_TOKEN_DIR"
 	// dataUnitTokenPrefix starts the token file the readiness rung presents,
 	// the daemon class's (`<class>.<caller>.token`).
 	dataUnitTokenPrefix = "daemon."
 	// dataUnitTokenMode is the only mode a gateway token file may hold.
 	dataUnitTokenMode = os.FileMode(0o600)
-	// dataUnitInspectFormat prints a container's state and health as two
-	// fields, so a container with no health check reads as "none".
-	dataUnitInspectFormat = "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
 )
 
 // DataUnitCheck reports whether the data compose unit is healthy. It walks the
-// rungs in order and names the first that fails: the Dolt container, the bd
-// container, the token directory's modes, then the gateway's /readyz with a
-// daemon token. A token file wider than 0600 stops the walk before /readyz, so
-// the gateway is never asked with a token that is readable by others.
+// rungs in order and names the first that fails: the unit's status, the Dolt
+// service, the bd service, the token directory's modes, then the gateway's
+// /readyz with a daemon token. A token file wider than 0600 stops the walk
+// before /readyz, so the gateway is never asked with a token that is readable
+// by others.
 //
-// The check is skipped, not failed, when the compose unit is not the town's
-// selected Dolt path. Report only; it starts and repairs nothing.
+// The check is opt-in by name: it runs only when 'gt doctor --check data-unit'
+// names it, and otherwise reports SKIPPED with the reason and never fails. It
+// reads, never writes: no start, stop or repair.
 type DataUnitCheck struct {
 	BaseCheck
 
-	// selected reports whether the compose unit is the town's selected Dolt
-	// path. Nil is refused: a check that cannot tell whether it applies must
+	// named reports whether --check named this check.
+	named bool
+
+	// ps returns the unit's services in DataUnitPsFormat, for the town. Nil is
+	// refused when the check is named: a check that cannot read the unit must
 	// not pass.
-	selected func(townRoot string) (bool, error)
+	ps func(townRoot string) ([]byte, error)
 
-	// getenv reads GT_BD_TOKEN_DIR. Nil is os.Getenv.
-	getenv func(string) string
-
-	// docker inspects the containers. Nil is templates.RunDockerInspect.
-	docker templates.ContainerDocker
+	// tokenDir names the gateway's token directory for the town. Nil is refused
+	// when the check is named, and an error from it fails the token rung.
+	tokenDir func(townRoot string) (string, error)
 
 	// http answers /readyz. Nil is a client bounded by readyzTimeout.
 	http *http.Client
 }
 
-// NewDataUnitCheck creates the data compose unit check.
-func NewDataUnitCheck() *DataUnitCheck {
+// NewDataUnitCheck creates the data compose unit check. named is whether
+// --check named it; ps reads the unit's services; tokenDir names the token
+// directory.
+func NewDataUnitCheck(named bool, ps func(townRoot string) ([]byte, error), tokenDir func(townRoot string) (string, error)) *DataUnitCheck {
 	return &DataUnitCheck{
 		BaseCheck: BaseCheck{
-			CheckName:        "data-unit",
-			CheckDescription: "Check the data compose unit: Dolt and bd containers healthy, gateway readyz, token file modes",
+			CheckName:        DataUnitCheckName,
+			CheckDescription: "Check the data compose unit: Dolt and bd services healthy, gateway readyz, token file modes",
 			CheckCategory:    CategoryInfrastructure,
 		},
+		named:    named,
+		ps:       ps,
+		tokenDir: tokenDir,
 	}
 }
 
 // Run walks the rungs of the data compose unit.
 func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 	res := &CheckResult{Name: c.Name(), Category: c.Category()}
-	if c.selected == nil {
-		res.Status = StatusError
-		res.Message = "the compose unit's selection is not wired, so the data unit check cannot tell whether it applies"
-		return res
-	}
-	on, err := c.selected(ctx.TownRoot)
-	if err != nil {
-		res.Status = StatusError
-		res.Message = "cannot read whether the compose unit is the selected Dolt path"
-		res.Details = []string{err.Error()}
-		return res
-	}
-	if !on {
+	if !c.named {
 		res.Status = StatusSkipped
-		res.Message = "the compose unit is not the selected Dolt path; not applicable"
+		res.Message = "not selected: name it with --check data-unit"
+		return res
+	}
+	if c.ps == nil || c.tokenDir == nil {
+		res.Status = StatusError
+		res.Message = "the compose unit's status or token directory is not wired, so the data unit check cannot read them"
 		return res
 	}
 
-	getenv := c.getenv
-	if getenv == nil {
-		getenv = os.Getenv
-	}
-	run := c.docker
-	if run == nil {
-		run = templates.RunDockerInspect
-	}
 	client := c.http
 	if client == nil {
 		client = &http.Client{Timeout: readyzTimeout}
@@ -111,20 +106,23 @@ func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 		return res
 	}
 
-	for _, container := range []string{dataUnitDoltContainer, dataUnitBdContainer} {
-		rung := "dolt"
-		if container == dataUnitBdContainer {
-			rung = "bd"
+	out, err := c.ps(ctx.TownRoot)
+	if err != nil {
+		return fail("unit", err)
+	}
+	for _, service := range []string{dataUnitDoltService, dataUnitBdService} {
+		if err := dataUnitServiceHealthy(out, service); err != nil {
+			return fail(service, err)
 		}
-		if err := dataUnitContainerHealthy(run, container); err != nil {
-			return fail(rung, err)
-		}
-		passed = append(passed, fmt.Sprintf("%s: %s is running and healthy", rung, container))
+		passed = append(passed, fmt.Sprintf("service %s is running and healthy", service))
 	}
 
-	dir := getenv(dataUnitTokenDirEnv)
+	dir, err := c.tokenDir(ctx.TownRoot)
+	if err != nil {
+		return fail("tokens", err)
+	}
 	if dir == "" {
-		return fail("tokens", fmt.Errorf("%s is not set, so the gateway's token directory is unknown", dataUnitTokenDirEnv))
+		return fail("tokens", errors.New("the gateway's token directory is empty, so it is unknown"))
 	}
 	daemonFile, wide, err := dataUnitTokenFiles(dir)
 	if len(wide) > 0 {
@@ -139,7 +137,7 @@ func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return fail("readyz", fmt.Errorf("the daemon token file %s cannot be read", daemonFile))
 	}
-	if err := dataUnitReadyz(client, strings.TrimSpace(string(token))); err != nil {
+	if err := dataUnitReadyz(client, dataUnitGatewayURL, strings.TrimSpace(string(token))); err != nil {
 		return fail("readyz", err)
 	}
 	passed = append(passed, fmt.Sprintf("readyz: %s answers true with %s", dataUnitGatewayURL, daemonFile))
@@ -150,25 +148,37 @@ func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 	return res
 }
 
-// dataUnitContainerHealthy is nil when the named container is running and its
-// health check reports healthy. Anything else is named by its state. The docker
-// error is its exit alone, never its output.
-func dataUnitContainerHealthy(run templates.ContainerDocker, container string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), templates.ContainerInspectTimeout)
-	defer cancel()
-	out, err := run(ctx, []string{"docker", "inspect", "-f", dataUnitInspectFormat, container})
-	if err != nil {
-		return fmt.Errorf("container %s could not be inspected: %v", container, err)
+// dataUnitServiceHealthy is nil when service is listed once in out, running, and
+// its health check reports healthy. out is DataUnitPsFormat's lines. Each other
+// case is an error that names the service and what it is: missing, listed twice,
+// not running, or not healthy. A service with no health check reads as "none".
+func dataUnitServiceHealthy(out []byte, service string) error {
+	var fields []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || f[0] != service {
+			continue
+		}
+		if fields != nil {
+			return fmt.Errorf("service %s is listed more than once", service)
+		}
+		fields = f
 	}
-	state := strings.Fields(string(out))
-	if len(state) != 2 {
-		return fmt.Errorf("container %s reported no state and health", container)
+	if fields == nil {
+		return fmt.Errorf("service %s is not in the compose unit", service)
 	}
-	if state[0] != "running" {
-		return fmt.Errorf("container %s is %s, not running", container, state[0])
+	if len(fields) < 2 {
+		return fmt.Errorf("service %s reports no state", service)
 	}
-	if state[1] != "healthy" {
-		return fmt.Errorf("container %s is running but its health is %s, not healthy", container, state[1])
+	if fields[1] != "running" {
+		return fmt.Errorf("service %s is %s, not running", service, fields[1])
+	}
+	health := "none"
+	if len(fields) > 2 {
+		health = fields[2]
+	}
+	if health != "healthy" {
+		return fmt.Errorf("service %s is running but its health is %s, not healthy", service, health)
 	}
 	return nil
 }
@@ -182,6 +192,12 @@ func dataUnitTokenFiles(dir string) (daemonFile string, wide []string, err error
 	if err != nil {
 		return "", nil, fmt.Errorf("the token directory %s cannot be read: %w", dir, err)
 	}
+	return dataUnitTokenEntries(dir, entries)
+}
+
+// dataUnitTokenEntries is dataUnitTokenFiles over the directory's entries, so a
+// test can hand it an entry whose stat fails.
+func dataUnitTokenEntries(dir string, entries []fs.DirEntry) (daemonFile string, wide []string, err error) {
 	if len(entries) == 0 {
 		return "", nil, fmt.Errorf("the token directory %s holds no token files", dir)
 	}
@@ -207,22 +223,22 @@ func dataUnitTokenFiles(dir string) (daemonFile string, wide []string, err error
 	return daemonFile, nil, nil
 }
 
-// dataUnitReadyz asks the gateway's /readyz with token. Only HTTP 200 is ready,
-// as the gateway's own client reads it. The token is never put in an error.
-func dataUnitReadyz(client *http.Client, token string) error {
+// dataUnitReadyz asks the gateway's /readyz at base with token. Only HTTP 200 is
+// ready, as the gateway's own client reads it. The token is never put in an
+// error, and the body is not read: its status alone decides the rung.
+func dataUnitReadyz(client *http.Client, base, token string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), readyzTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dataUnitGatewayURL+"/readyz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/readyz", nil)
 	if err != nil {
 		return fmt.Errorf("the gateway readiness request cannot be built: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("the gateway at %s did not answer /readyz: %w", dataUnitGatewayURL, err)
+		return fmt.Errorf("the gateway at %s did not answer /readyz: %w", base, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, readyzBodyLimit))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("the gateway answered /readyz with HTTP %d, not ready", resp.StatusCode)
 	}
