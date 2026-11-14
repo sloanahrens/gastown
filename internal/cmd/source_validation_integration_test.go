@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,8 +53,30 @@ func setupRoutedSubmitGitRepo(t *testing.T, workDir string, pushBranch bool) str
 
 func installSubmitSourceBDRecorder(t *testing.T, currentBeadsDir, ownerBeadsDir string) string {
 	t.Helper()
+	return installSubmitSourceBDRecorderWithNotes(t, currentBeadsDir, ownerBeadsDir, "")
+}
+
+// installSubmitSourceBDRecorderWithNotes is installSubmitSourceBDRecorder with
+// the source bead's notes set to notes, for a test that needs the work bead to
+// carry text a reader of the bead can see.
+func installSubmitSourceBDRecorderWithNotes(t *testing.T, currentBeadsDir, ownerBeadsDir, notes string) string {
+	t.Helper()
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
+	// notesPath holds notes JSON-encoded, quotes included, so the script needs
+	// no quoting of its own; empty leaves the source bead without a notes
+	// field, as it was before this helper took notes.
+	notesPath := ""
+	if notes != "" {
+		data, err := json.Marshal(notes)
+		if err != nil {
+			t.Fatalf("marshal source notes: %v", err)
+		}
+		notesPath = filepath.Join(t.TempDir(), "source-notes.json")
+		if err := os.WriteFile(notesPath, data, 0o644); err != nil {
+			t.Fatalf("write source notes: %v", err)
+		}
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "--allow-stale" ]; then
   shift
@@ -77,13 +100,15 @@ if [ "$1" = "show" ] && [ "$2" = "gt-gastown-polecat-refuge" ]; then
 fi
 labels='[]'
 if [ -e %q.ready ]; then labels='["gt:ready-to-land"]'; fi
+source_notes=''
+if [ -s %q ]; then source_notes=",\"notes\":$(cat %q)"; fi
 if [ "$1" = "show" ] && [ "$2" = "bd-source" ]; then
   if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
+    printf '%%s\n' '[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\nmerge_strategy: mr"'"$source_notes"'}]'
     exit 0
   fi
   if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
+    printf '%%s\n' '[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\nmerge_strategy: mr"'"$source_notes"'}]'
     exit 0
   fi
   echo "Issue not found in $BEADS_DIR" >&2
@@ -121,7 +146,7 @@ if [ "$1" = "close" ]; then
 fi
 echo "unexpected bd command: $*" >&2
 exit 1
-`, logPath, logPath, logPath, currentBeadsDir, ownerBeadsDir)
+`, logPath, logPath, logPath, notesPath, notesPath, currentBeadsDir, ownerBeadsDir)
 	path := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write bd recorder: %v", err)
