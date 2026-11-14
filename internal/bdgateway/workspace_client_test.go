@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // doerFunc is an HTTPDoer a test scripts: the request runs against the response
@@ -958,13 +958,13 @@ func TestPusherSlotOrdersItsPushes(t *testing.T) {
 		}
 	}()
 	<-started
-	// A bounded run of yields, no clock: a second push the slot lets through
-	// reaches the pusher within them, and one the slot holds does not.
-	for i := 0; i < 1000; i++ {
-		runtime.Gosched()
-	}
-	if n := len(entered); n != 0 {
+	// The second push either waits on the slot or reaches the pusher; the pusher
+	// signals entry on a channel, so the wait ends the moment it is reached, and
+	// a slot that holds the second push is proven by the bound passing with none.
+	select {
+	case <-entered:
 		t.Errorf("the second push reached the pusher while the first held the slot")
+	case <-time.After(100 * time.Millisecond):
 	}
 	close(gate)
 	wg.Wait()
@@ -991,5 +991,47 @@ func TestPushWorkspaceNoPusher(t *testing.T) {
 	}
 	if manifest != "" {
 		t.Errorf("manifest = %q, want none: no gateway was pushed to", manifest)
+	}
+}
+
+// TestReadTownFileChecksTheFileBeforeReadingIt: a town file is read only when it
+// is a regular file within the gateway's per-file cap, so a link to a directory
+// or a huge file is refused before the read and before the push slot is taken.
+func TestReadTownFileChecksTheFileBeforeReadingIt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	good := filepath.Join(town, "routes.jsonl")
+	if err := os.WriteFile(good, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readTownFile(town, good); err != nil || string(got) != "{}\n" {
+		t.Fatalf("a regular small file: got %q, %v", got, err)
+	}
+
+	dir := filepath.Join(town, "adir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(town, "link-to-dir")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTownFile(town, link); !errors.Is(err, ErrWorkspaceFileName) {
+		t.Errorf("a link to a directory inside the town: got %v, want ErrWorkspaceFileName", err)
+	}
+
+	big := filepath.Join(town, "big")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxWorkspaceFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTownFile(town, big); !errors.Is(err, ErrWorkspaceFileTooLarge) {
+		t.Errorf("a file over the cap: got %v, want ErrWorkspaceFileTooLarge", err)
 	}
 }

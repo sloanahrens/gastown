@@ -4720,8 +4720,14 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// The port file goes first. Once metadata.json no longer carries the key,
 	// the port file is the only port source, so a failed write must leave
 	// metadata.json as it was, key included (gt-49f3pn).
-	if _, err := writeDoltPortFile(beadsDir, filePort); err != nil {
+	portWritten, err := writeDoltPortFile(beadsDir, filePort)
+	if err != nil {
 		return err
+	}
+	if portWritten {
+		// bd reads the port file, so the gateway's tree is out of date from here
+		// on; a later failure in this function must leave it marked, not clean.
+		h.setWorkspaceStale(true)
 	}
 	if dropKey {
 		delete(existing, "dolt_server_port")

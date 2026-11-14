@@ -202,3 +202,68 @@ func TestEnsureMetadataReportsAFailedPush(t *testing.T) {
 		t.Errorf("error = %v, want the push's own failure", err)
 	}
 }
+
+// TestFreshWorkspaceRecordPushesOnTheFirstPass: a process that has pushed nothing
+// knows nothing about the gateway's tree, so its first pass over files that are
+// already current still pushes: a push the previous process missed before it
+// restarted is not lost.
+func TestFreshWorkspaceRecordPushesOnTheFirstPass(t *testing.T) {
+	t.Parallel()
+	if !newWorkspaceState().stale {
+		t.Fatal("a fresh workspace record reads as current")
+	}
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := newFakeHost().townNamesPort(DefaultPort).host()
+	first.pushWorkspace = func(context.Context, string) (string, error) { return "m", nil }
+	if err := first.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the first process: %v", err)
+	}
+	pushed := 0
+	second := newFakeHost().townNamesPort(DefaultPort).host()
+	second.workspace = newWorkspaceState()
+	second.pushWorkspace = func(context.Context, string) (string, error) {
+		pushed++
+		return "m", nil
+	}
+	if err := second.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the restarted process: %v", err)
+	}
+	if pushed != 1 {
+		t.Errorf("the restarted process pushed %d times over current files, want one", pushed)
+	}
+	if err := second.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the second pass: %v", err)
+	}
+	if pushed != 1 {
+		t.Errorf("a landed push was resent: %d pushes, want one", pushed)
+	}
+}
+
+// TestEnsureMetadataMarksStaleWhenThePortFileChangedAndTheWriteFails: bd reads the
+// port file, so once it changed the gateway's tree is out of date even if the
+// metadata.json write after it fails.
+func TestEnsureMetadataMarksStaleWhenThePortFileChangedAndTheWriteFails(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().townNamesPort(DefaultPort).host()
+	h.workspace = &workspaceState{} // known current before the pass
+	h.pushWorkspace = func(context.Context, string) (string, error) { return "m", nil }
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "metadata.json"), 0o755); err != nil {
+		t.Fatal(err) // a directory where the file belongs: the write after the port file fails
+	}
+	err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq")
+	if err == nil {
+		t.Skip("the metadata write did not fail on this layout, so the ordering cannot be driven")
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, "dolt-server.port")); statErr != nil {
+		t.Skipf("the pass failed before the port file was written (%v): %v", err, statErr)
+	}
+	if !h.isWorkspaceStale() {
+		t.Errorf("the port file changed and the metadata write failed (%v), but the workspace is not marked stale", err)
+	}
+}

@@ -303,6 +303,16 @@ func readTownFile(townRoot, p string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrWorkspaceFileName, shown(p))
+	}
+	if info.Size() > MaxWorkspaceFileBytes {
+		return nil, fmt.Errorf("%w: %s is %d bytes, cap %d", ErrWorkspaceFileTooLarge, shown(p), info.Size(), MaxWorkspaceFileBytes)
+	}
 	return os.ReadFile(resolved) //nolint:gosec // G304: resolved and checked inside the town
 }
 

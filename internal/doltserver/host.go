@@ -106,8 +106,14 @@ type workspaceState struct {
 	stale bool
 }
 
+// newWorkspaceState is the record of a process that has pushed nothing yet. It
+// starts stale: a push the previous process missed before it restarted left the
+// gateway on an older tree, and a fresh record has no way to know, so the first
+// pass pushes (isWorkspaceStale: unknown counts as stale).
+func newWorkspaceState() *workspaceState { return &workspaceState{stale: true} }
+
 // std is the real machine.
-var std = &host{probeTimeout: productionProbeTimeout, workspace: &workspaceState{}}
+var std = &host{probeTimeout: productionProbeTimeout, workspace: newWorkspaceState()}
 
 // warnf writes a warning to this host's warnings sink: h.warn, or the
 // process's stderr when the host names none.
