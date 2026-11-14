@@ -272,25 +272,31 @@ func TestEstimateComponentMinutesFollowTheInputs(t *testing.T) {
 	}
 }
 
-// TestEstimateRefusesJevMinutesItCannotMap: the minutes the log records for the
-// Jev input are mapped by the weights the blend used, so a mapping failure
-// refuses the estimate rather than recording a component the estimator could
-// not compute. A successful blend has already mapped the value, so the seam
-// drives a failure the real blend makes unreachable.
-func TestEstimateRefusesJevMinutesItCannotMap(t *testing.T) {
+// TestEstimateComponentJevIsTheBlendMapping: the minutes the log records for
+// the Jev input are the ones the blend mapped, not a second mapping of the
+// probability. The blend answers a number the weights do not map 0.5 to, so a
+// separate mapping in the estimate fails here.
+func TestEstimateComponentJevIsTheBlendMapping(t *testing.T) {
 	t.Parallel()
+	blendJev := 42.0
 	blend := func(storypoints.Inputs) (storypoints.Blended, error) {
-		return storypoints.Blended{Minutes: 6, Points: 3, Inputs: []string{"shape", "jev"}, Rung: "shape-jev"}, nil
+		return storypoints.Blended{
+			Minutes:    6,
+			Points:     3,
+			Inputs:     []string{"shape", "jev"},
+			Rung:       "shape-jev",
+			JevMinutes: &blendJev,
+		}, nil
 	}
-	unmappable := func(storypoints.Weights, float64) (float64, error) {
-		return 0, storypoints.ErrNoWeights
+	got, err := estimateWith(context.Background(), workingDeps(), sampleBead(), blend)
+	if err != nil {
+		t.Fatalf("estimateWith: %v", err)
 	}
-	got, err := estimateWithJev(context.Background(), workingDeps(), sampleBead(), blend, unmappable)
-	if !errors.Is(err, storypoints.ErrNoWeights) {
-		t.Fatalf("estimateWithJev error = %v, want %v", err, storypoints.ErrNoWeights)
+	if got.ComponentMinutes.Jev == nil {
+		t.Fatal("component jev minutes are nil; the estimate had a Jev input")
 	}
-	if got.Points != 0 || got.Rung != "" {
-		t.Fatalf("estimateWithJev = %+v, want no result", got)
+	if *got.ComponentMinutes.Jev != blendJev {
+		t.Fatalf("component jev minutes = %v, want the blend's %v", *got.ComponentMinutes.Jev, blendJev)
 	}
 }
 
