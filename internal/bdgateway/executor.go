@@ -13,10 +13,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
+	// maxPumpGraces bounds how many further grace periods the drain waits for a
+	// pump that is not inside a client write before it stops waiting.
+	maxPumpGraces = 5
 	// MaxStdinBytes caps one call's stdin body: the design's 1 MiB, sized by
 	// the largest user, a bead body sent with --body-file=-.
 	MaxStdinBytes = 1 << 20
@@ -317,6 +321,11 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 			// returns (pumpErrs has room for both), the call is recorded as a
 			// failed write, and nothing more is written to that client.
 			grace := time.NewTimer(e.killGrace)
+			// A pump that missed one grace is not yet a stalled client: under load
+			// it may only be slow to be scheduled. The client is declared stalled
+			// when a pump is still inside a write to it at two graces in a row; a
+			// pump that is not writing is waited for again, up to maxPumpGraces.
+			inWriteBefore, idleGraces := false, 0
 			for pending > 0 {
 				select {
 				case err := <-pumpErrs:
@@ -325,9 +334,22 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 						record(err)
 					}
 				case <-grace.C:
-					record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
-					frames = io.Discard
-					pending = 0
+					switch {
+					case fw.writesInProgress() > 0 && inWriteBefore:
+						record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
+						frames = io.Discard
+						pending = 0
+					case fw.writesInProgress() > 0:
+						inWriteBefore = true
+						grace.Reset(e.killGrace)
+					case idleGraces >= maxPumpGraces:
+						record(fmt.Errorf("bdgateway: %d stream pump(s) did not end within %d grace periods of the call's end", pending, maxPumpGraces))
+						pending = 0
+					default:
+						inWriteBefore = false
+						idleGraces++
+						grace.Reset(e.killGrace)
+					}
 				}
 			}
 			grace.Stop()
@@ -666,9 +688,19 @@ var errRead = errors.New("bdgateway: reading bd's output")
 type frameWriter struct {
 	mu sync.Mutex
 	w  io.Writer
+	// writing counts the writes in progress or waiting for the lock. A pump that
+	// is only slow to be scheduled is not in a write; one blocked on a client that
+	// stopped reading is, and that is what the drain after a call's end tells
+	// apart (writesInProgress).
+	writing atomic.Int32
 }
 
+// writesInProgress is how many writes to the client have begun and not ended.
+func (f *frameWriter) writesInProgress() int { return int(f.writing.Load()) }
+
 func (f *frameWriter) write(kind FrameKind, payload []byte) error {
+	f.writing.Add(1)
+	defer f.writing.Add(-1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return WriteFrame(f.w, Frame{Kind: kind, Payload: payload})

@@ -1341,3 +1341,51 @@ func TestExecutorCallerDeadlineIsNotTheTimeout(t *testing.T) {
 		t.Errorf("Exec = %v, want ErrClientGone naming the caller's deadline", err)
 	}
 }
+
+// blockingWriter signals when a Write begins and blocks it until released.
+type blockingWriter struct {
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (w blockingWriter) Write(p []byte) (int, error) {
+	w.entered <- struct{}{}
+	<-w.release
+	return len(p), nil
+}
+
+// TestPumpsStalledOnlyInAWrite: the drain after a call's end calls a client
+// stalled only while a write to it is in progress. A pump that is merely slow to
+// be scheduled is not in a write, so it is never taken for a stalled client.
+func TestPumpsStalledOnlyInAWrite(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	fw := &frameWriter{w: blockingWriter{entered: entered, release: release}}
+	if n := fw.writesInProgress(); n != 0 {
+		t.Fatalf("an idle writer reports %d writes in progress", n)
+	}
+	done := make(chan error, 1)
+	go func() { done <- fw.write(FrameStdout, []byte("x")) }()
+	ctx := waitCtx(t)
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("the write never reached the client")
+	}
+	if n := fw.writesInProgress(); n != 1 {
+		t.Errorf("a write blocked on the client reports %d in progress, want 1", n)
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("the released write failed: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the released write did not finish")
+	}
+	if n := fw.writesInProgress(); n != 0 {
+		t.Errorf("a finished write still counts: %d in progress", n)
+	}
+}
