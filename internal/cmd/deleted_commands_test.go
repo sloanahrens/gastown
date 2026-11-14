@@ -74,6 +74,7 @@ var deletedCommands = [][]string{
 	{"session", "check"},  // gt-dj3xv: always exit 0; gt status prints the same polecat rows
 	{"daemon", "cutover"}, // gt-a2uug4.15: it drove the launchd supervisor commands, which left gt
 	{"power"},             // gt-a2uug4.17: the launchd-backed power states are macOS-only and left gt
+	{"rig", "detect"},     // gt-lpsnp5: the shell hook that called it is gone
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

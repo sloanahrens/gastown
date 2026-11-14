@@ -100,6 +100,34 @@ func resolveDirectiveRigIn(townRoot, explicitRig, cwd string) (string, error) {
 	return detectRigFromPath(townRoot, cwd), nil
 }
 
+// detectRigFromPath returns the rig whose directory holds absPath, or "" when
+// absPath is the town root, a town-level directory, outside the town, or a
+// directory with no rig config.json.
+func detectRigFromPath(townRoot, absPath string) string {
+	rel, err := filepath.Rel(townRoot, absPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) == 0 || parts[0] == "." {
+		return ""
+	}
+
+	candidateRig := parts[0]
+
+	if config.IsTownLevelDir(candidateRig) {
+		return ""
+	}
+
+	rigConfigPath := filepath.Join(townRoot, candidateRig, "config.json")
+	if _, err := os.Stat(rigConfigPath); err == nil {
+		return candidateRig
+	}
+
+	return ""
+}
+
 // validateDirectiveRig rejects an explicit --rig that cannot name a directory
 // the loaders read. The name is joined into a path, so a separator or ".."
 // would write outside the town, and a name missing from the registry (a typo)
