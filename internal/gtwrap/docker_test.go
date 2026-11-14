@@ -765,8 +765,8 @@ func TestHMConfigTownPathIsTheWriteTarget(t *testing.T) {
 // TestRunnerRefusesAMissingHMConfig: a throwaway hm run is refused, naming the
 // derived config and the command that generates it, when that path is absent, a
 // directory, unreadable, or never checked, and it attaches no engine command. A
-// regular file plans as before. Launch drives the run rung: the container is
-// stopped, so the call would otherwise be a throwaway run.
+// regular file plans as before. Run is called directly: hm is not on the rung-2
+// allowlist, so Launch would refuse it before the config is checked.
 func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
 	t.Parallel()
 	hmCall := Call{Argv: []string{"hm", "status"}, Env: []string{"GT_TOWN=" + testTown}, Dir: testDir}
@@ -784,9 +784,9 @@ func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
 			t.Parallel()
 			shell := &fakeShell{}
 			d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: tt.stat}
-			_, err := d.Launch(hmCall)
+			_, err := d.Run(hmCall)
 			if err == nil {
-				t.Fatalf("Launch planned a throwaway hm run with %s, want a refusal", tt.name)
+				t.Fatalf("Run planned a throwaway hm run with %s, want a refusal", tt.name)
 			}
 			for _, want := range []string{testHMConfig, "gt daemon compose write"} {
 				if !strings.Contains(err.Error(), want) {
@@ -802,8 +802,8 @@ func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
 		t.Parallel()
 		shell := &fakeShell{}
 		d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: fakeStat(map[string]fs.FileMode{testHMConfig: 0o600})}
-		if _, err := d.Launch(hmCall); err != nil {
-			t.Fatalf("Launch returned an error for a regular file: %v", err)
+		if _, err := d.Run(hmCall); err != nil {
+			t.Fatalf("Run returned an error for a regular file: %v", err)
 		}
 		if len(shell.attached) != 1 {
 			t.Fatalf("attached %d lines, want 1", len(shell.attached))

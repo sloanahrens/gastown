@@ -124,6 +124,9 @@ func (d Docker) Launch(call Call) (int, error) {
 	case RungExec:
 		return d.Exec(call)
 	case RungRun:
+		if !rung2Allows(call.Argv) {
+			return exitDown, fmt.Errorf("gtwrap: %s is not on the rung-2 allowlist, and the daemon container %s is not running, so the call did not run; start the daemon with `%s`, then run the command again", strings.Join(call.Argv, " "), svc.ContainerName, d.startCommand())
+		}
 		return d.Run(call)
 	default:
 		return exitDown, fmt.Errorf("gtwrap: %s", reason)
@@ -171,7 +174,8 @@ func (d Docker) Exec(call Call) (int, error) {
 // also mounts the derived config read-only where HM_CONFIG names it, since a
 // throwaway container does not inherit the compose service's mounts. The derived
 // config must be a regular file first: a bind of a missing path makes the engine
-// create a directory there, which hm would read as its config.
+// create a directory there, which hm would read as its config. Run does not check
+// the rung-2 allowlist; Launch does before it calls Run.
 func (d Docker) Run(call Call) (int, error) {
 	svc, err := d.daemonService()
 	if err != nil {
@@ -300,8 +304,13 @@ func (d Docker) daemonService() (daemonService, error) {
 // which takes the container down with it, and the compose command that starts
 // the daemon once Docker answers.
 func (d Docker) downText(svc daemonService) string {
-	start := strings.Join(d.dockerArgv("compose", "-p", composeProject, "-f", d.composePath(), "up", "-d", composeService), " ")
-	return fmt.Sprintf("Docker is down: docker info did not answer, so the container %s cannot be reached. Start Docker Desktop with `open -a Docker`, then start the daemon with `%s`, and run the command again", svc.ContainerName, start)
+	return fmt.Sprintf("Docker is down: docker info did not answer, so the container %s cannot be reached. Start Docker Desktop with `open -a Docker`, then start the daemon with `%s`, and run the command again", svc.ContainerName, d.startCommand())
+}
+
+// startCommand is the rung-3 command that starts the daemon once Docker answers.
+// downText and the rung-2 refusal both name it.
+func (d Docker) startCommand() string {
+	return strings.Join(d.dockerArgv("compose", "-p", composeProject, "-f", d.composePath(), "up", "-d", composeService), " ")
 }
 
 // probe runs one docker command that only reads state, bounded by ProbeTimeout.
