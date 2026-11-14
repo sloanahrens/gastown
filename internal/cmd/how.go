@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
@@ -12,7 +13,8 @@ import (
 
 // how.go is `gt how`: the task groups an agent looks a job up by, one group's
 // commands with their use lines (gt-j669b4.6), or the commands a word matches
-// (gt-j669b4.24). The map is read through howMap, so the tests drive the
+// (gt-j669b4.24); how_history.go adds the history-man section --history asks
+// for (gt-j669b4.7). The map is read through howMap, so the tests drive the
 // command from a fixed map and a placement file landing later cannot change a
 // golden.
 
@@ -56,10 +58,16 @@ ignoring case, and prints each match in the same "gt <path>  <use>" form. A
 word that matches nothing prints "nothing matches <word>; run gt how for the
 groups". Both exit 0.
 
+With --history, a "history:" section follows the listing: up to five
+history-man hits for the word, searched together with its group's description
+when it names one, in hm's order. When there is nothing to look up, or hm is
+missing or the query fails, one line says so and the command still succeeds.
+
 Examples:
   gt how
   gt how roll
-  gt how install`,
+  gt how install
+  gt how roll --history`,
 	Args:         cobra.MaximumNArgs(1),
 	RunE:         runHowCmd,
 	SilenceUsage: true,
@@ -70,13 +78,26 @@ func init() {
 }
 
 func runHowCmd(cmd *cobra.Command, args []string) error {
-	return runHow(cmd.OutOrStdout(), howDefault{taskmap.Default()}, args)
+	m := howDefault{taskmap.Default()}
+	if !howHistoryFlag {
+		return runHow(cmd.OutOrStdout(), m, args)
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), historyQueryTimeout)
+	defer cancel()
+	return runHowHistory(ctx, cmd.OutOrStdout(), m, hmHistory{}, args)
 }
 
-// runHow writes the listing for args to out: every group for no argument, one
-// group's entries for a group, and the matching commands for any other word. It
-// writes once, at the end, so a listing that cannot be built never reaches out.
+// runHow writes the listing for args to out, with no history section.
 func runHow(out io.Writer, m howMap, args []string) error {
+	return runHowHistory(context.Background(), out, m, nil, args)
+}
+
+// runHowHistory writes the listing for args to out: every group for no
+// argument, one group's entries for a group, and the matching commands for any
+// other word. When h is not nil, the history section follows the listing. It
+// writes once, at the end, so a listing that cannot be built never reaches out
+// and a failed query cannot leave half a section.
+func runHowHistory(ctx context.Context, out io.Writer, m howMap, h historyRunner, args []string) error {
 	var b strings.Builder
 	switch len(args) {
 	case 0:
@@ -92,6 +113,9 @@ func runHow(out io.Writer, m howMap, args []string) error {
 		}
 	default:
 		return fmt.Errorf("want at most one group or word, got %d arguments", len(args))
+	}
+	if h != nil {
+		writeHowHistory(ctx, &b, h, m, args)
 	}
 	_, err := io.WriteString(out, b.String())
 	return err
