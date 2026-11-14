@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1451,12 +1452,10 @@ func TestEndingFramesWaitForALivePump(t *testing.T) {
 		}
 	}
 	close(release)
-	for _, done := range []<-chan struct{}{endDone} {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			t.Fatal("the ending never finished after the pump was released")
-		}
+	select {
+	case <-endDone:
+	case <-ctx.Done():
+		t.Fatal("the ending never finished after the pump was released")
 	}
 	if err := <-pumpDone; err != nil {
 		t.Fatalf("the pump's write: %v", err)
@@ -1502,12 +1501,22 @@ func TestDiscardedWriterDoesNotTakeTheLock(t *testing.T) {
 	}
 }
 
-// stubbornReader ignores the executor closing the pipe: it returns only once the
-// test releases it, like a read the close does not reach.
-type stubbornReader struct{ release <-chan struct{} }
+// stubbornReader ignores the executor closing the pipe: it returns one late
+// chunk and then EOF only once the test releases it, like a read the close does
+// not reach. ended is closed when the pump has seen the EOF, i.e. after its late
+// write was attempted.
+type stubbornReader struct {
+	release <-chan struct{}
+	ended   chan struct{}
+	n       *atomic.Int32
+}
 
-func (r stubbornReader) Read([]byte) (int, error) {
+func (r stubbornReader) Read(p []byte) (int, error) {
 	<-r.release
+	if r.n.Add(1) == 1 {
+		return copy(p, "late"), nil
+	}
+	close(r.ended)
 	return 0, io.EOF
 }
 
@@ -1518,9 +1527,9 @@ func (r stubbornReader) Read([]byte) (int, error) {
 func TestExecutorGivesUpOnAPumpThatIgnoresTheClose(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+	ended := make(chan struct{})
 	proc := newBlockingFake("")
-	proc.stdout = stubbornReader{release: release}
+	proc.stdout = stubbornReader{release: release, ended: ended, n: new(atomic.Int32)}
 	e := newTestExecutorGrace(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}}, 10*time.Millisecond)
 	var out bytes.Buffer
 	done := make(chan error, 1)
@@ -1538,5 +1547,16 @@ func TestExecutorGivesUpOnAPumpThatIgnoresTheClose(t *testing.T) {
 	frames := readFrames(t, out.Bytes())
 	if len(frames) != 2 || frames[0].Kind != FrameError || frames[1].Kind != FrameExit {
 		t.Fatalf("frames = %+v, want the error frame and the exit frame written to the client that did not stall", frames)
+	}
+	// Release the pump Exec gave up on: its late chunk and its end must reach
+	// nothing, so the stream still ends with the exit frame.
+	close(release)
+	select {
+	case <-ended:
+	case <-waitCtx(t).Done():
+		t.Fatal("the released pump never finished its late write")
+	}
+	if late := readFrames(t, out.Bytes()); len(late) != 2 {
+		t.Errorf("a pump written after the call ended changed the stream: %+v", late)
 	}
 }

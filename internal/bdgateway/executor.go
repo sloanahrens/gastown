@@ -234,6 +234,10 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	// all go through its lock, so a pump still alive when the call ends can never
 	// interleave its frames with the ending's.
 	fw := &frameWriter{w: frames}
+	// Once Exec returns the call's stream is closed to its pumps: a pump the drain
+	// gave up on, or one that outlived the call, writes nothing after the ending
+	// frames. The defer runs after the ending is written.
+	defer fw.discard.Store(true)
 	proc, err := e.runner.Start(e.binary, req.Argv, env, dir)
 	if err != nil {
 		writeEnding(fw, CodeStartFailed, 125, err.Error())
