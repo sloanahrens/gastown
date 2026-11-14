@@ -125,6 +125,12 @@ checked instead: Goal, Constraints, Out of scope, Gate and Size.
   - every required "## " section present and non-empty
   - 1-6 acceptance items (3-6 preferred)
   - Size is one worker, one MR
+  - the bead's own sp-minutes label is under
+    daemon.patrols.spec_dispatch.story_points.lint_over_minutes, when that
+    setting is above 0: a bead at or over it is refused and told to split. A
+    bead labeled size-ok, or whose sp-rung is none, passes, and so does a label
+    that does not read (the lint warns that the gate did not run). The lint
+    reads the label already on the bead and never estimates by itself.
 
 Shape is a property of every work bead: the lint checks a task, bug or feature
 the same way and never refuses one for its type. The label spec is retired: it
@@ -1068,13 +1074,17 @@ func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph boo
 	if graph {
 		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), stores, townRoot, args[0], specLintJSON)
 	}
+	// The dispatch block is read once: it holds both the template path and the
+	// story-point size gate the lint applies (gt-mtzx6s).
+	sd := loadSpecDispatchConfig(townRoot)
 	path := specLintTemplate
 	if path == "" {
-		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
+		path = specTemplatePath(sd)
 	}
 	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, read, openRigTree)
-	return runSpecLintAt(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now())
+	opts := specLintOptsFrom(sd)
+	return runSpecLintAtWith(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now(), opts)
 }
 
 // specForLint reads beadID for gt spec lint with the target inventory the
@@ -1395,14 +1405,35 @@ func writeSpecHints(w io.Writer, hits []hmhints.Hit) {
 // form and carried in the report's advice array with --json; like the hint,
 // they change neither the verdict nor the exit code.
 func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool) error {
-	_, err := specLintVerdict(out, errOut, beadID, spec, showErr, templatePath, hint, asJSON)
+	_, err := specLintVerdict(out, errOut, beadID, spec, showErr, templatePath, hint, asJSON, specLintOpts{})
 	return err
+}
+
+// specLintOpts are the settings one gt spec lint run reads besides the bead and
+// the template.
+type specLintOpts struct {
+	// LintOverMinutes is story_points.lint_over_minutes: the size at or over
+	// which the lint refuses a bead by its own sp-minutes label. Zero is off,
+	// and the lint then reads no story-point label (gt-mtzx6s).
+	LintOverMinutes float64
+}
+
+// specLintOptsFrom is the settings gt spec lint runs with, read from the town's
+// spec_dispatch block: the story-point size gate (gt-mtzx6s). A nil block is
+// every setting off.
+func specLintOptsFrom(sd *config.SpecDispatchConfig) specLintOpts {
+	return specLintOpts{LintOverMinutes: sd.StoryPointsLintOver()}
+}
+
+// lintOptions is the lint's own view of the settings.
+func (o specLintOpts) lintOptions() specdispatch.LintOptions {
+	return specdispatch.LintOptions{LintOverMinutes: o.LintOverMinutes}
 }
 
 // specLintVerdict is specLint, also returning the verdict it printed (a
 // refusal naming "bead" when the bead did not read) so a caller can record it
-// (gt-hgt9j.7).
-func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool) (specdispatch.LintVerdict, error) {
+// (gt-hgt9j.7). opts are the town's settings the lint reads (gt-mtzx6s).
+func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool, opts specLintOpts) (specdispatch.LintVerdict, error) {
 	tmpl := specdispatch.LoadTemplate(templatePath)
 	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
 	if showErr != nil {
@@ -1416,7 +1447,7 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 		report.Refusals = append(report.Refusals, verdict.Refusals...)
 		return verdict, emitSpecLint(out, errOut, tmpl, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
 	}
-	verdict := specdispatch.Lint(spec, tmpl)
+	verdict := specdispatch.LintWith(spec, tmpl, opts.lintOptions())
 	report.OK = verdict.Clean()
 	report.NeedsPlanning = verdict.Route == specdispatch.RoutePlanning
 	report.Refusals = append(report.Refusals, verdict.Refusals...)
@@ -1444,7 +1475,13 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 // recording failure is one warning on errOut and leaves the exit code to the
 // verdict (gt-hgt9j.7).
 func runSpecLintAt(out, errOut io.Writer, townRoot, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool, now time.Time) error {
-	verdict, lintErr := specLintVerdict(out, errOut, beadID, spec, showErr, templatePath, hint, asJSON)
+	return runSpecLintAtWith(out, errOut, townRoot, beadID, spec, showErr, templatePath, hint, asJSON, now, specLintOpts{})
+}
+
+// runSpecLintAtWith is runSpecLintAt with the town's settings given, so a test
+// can drive the size gate through the command (gt-mtzx6s).
+func runSpecLintAtWith(out, errOut io.Writer, townRoot, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool, now time.Time, opts specLintOpts) error {
+	verdict, lintErr := specLintVerdict(out, errOut, beadID, spec, showErr, templatePath, hint, asJSON, opts)
 	if townRoot != "" {
 		if err := recordSpecLintOutcome(townRoot, beadID, verdict, now); err != nil {
 			fmt.Fprintf(errOut, "gt spec lint: lint outcome not recorded: %v\n", err)
@@ -1870,6 +1907,11 @@ type specDispatchEnv struct {
 	// bead at or over it on a rung of at least two inputs is labeled for
 	// splitting instead of slung.
 	StoryPointSplitOver float64
+	// StoryPointLintOver is the size gate's trigger in minutes
+	// (story_points.lint_over_minutes, gt-mtzx6s). Zero is off. When set, the
+	// lint refuses a candidate whose own sp-minutes label is at or over it, so
+	// the bead is split before a seat finds out at the overrun stop.
+	StoryPointLintOver float64
 	// StoryPointEstimate is the estimate the tick runs for a bead, under a
 	// context the tick cancels on timeout. Production is specStoryPointEstimate.
 	// The outcome carries the numbers the split route reads.
@@ -2264,8 +2306,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				continue
 			}
 			full = walked
-			verdict = specdispatch.Lint(full, env.Template)
+			verdict = specdispatch.LintWith(full, env.Template, specdispatch.LintOptions{LintOverMinutes: env.StoryPointLintOver})
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
+		}
+		// An sp-minutes label the gate cannot read leaves it unrun. The sling
+		// decision does not change — an unknown size is never refused — but a
+		// check that did not run must not pass in silence, so the tick says so
+		// once for the bead, naming it, its labels and the warning (gt-mtzx6s).
+		if w := specdispatch.StoryPointsSizeGateWarning(full, env.StoryPointLintOver); w != "" {
+			report.Notices = append(report.Notices, fmt.Sprintf("%s: labels [%s]: %s", id, strings.Join(full.Labels, " "), w))
 		}
 		shapeNote := ""
 		if env.ShapeGate != specdispatch.ShapeGateOff {
@@ -3532,6 +3581,9 @@ func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, to
 	// gt-5d9k2f.18).
 	env.StoryPointShadow = sd.StoryPointsShadow()
 	env.StoryPointSplitOver = sd.StoryPointsSplitOver()
+	// The size gate that refuses an over-estimate bead at lint time lives in
+	// the same block (gt-mtzx6s).
+	env.StoryPointLintOver = sd.StoryPointsLintOver()
 	env.StoryPointEstimate = specStoryPointEstimate(townRoot)
 }
 
@@ -3613,7 +3665,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	// The shape-and-label verdicts of the candidates the scan already read,
 	// kept across the daemon's ticks beside the annotations (gt-km9jt).
 	verdicts := newSpecCandidateVerdicts(annotations.memory,
-		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, targetOf, townRigs))
+		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, sd.StoryPointsLintOver(), targetOf, townRigs))
 	// The tick's children read, grouped per rig once the board is known.
 	var children func(beadID string) ([]specdispatch.Child, error)
 	env := specDispatchEnv{

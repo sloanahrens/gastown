@@ -32,7 +32,12 @@ lessons the lint cannot check.
 | 1-6 acceptance items (3-6 preferred) | `acceptance` |
 | every repo file the `## Files` section names, or without one the Constraints names, as a file it changes exists on the target branch | `## Files`, or `## Constraints` without one |
 | no Goal, Constraints, Gate or acceptance text names a path inside another rig's directory (`~/gt/<rig>/`, `/Users/<user>/gt/<rig>/`, `/sandbox/gt/<rig>/`) | `## Goal`, `## Constraints`, `## Gate` or `acceptance`, naming the rig and the path |
+| the bead's own `sp-minutes` label is at or over `story_points.lint_over_minutes`, when that setting is above 0 | `size` |
 | Size says one worker, one MR | `size` |
+
+A bead the size gate passes — one labeled `size-ok`, one whose `sp-rung` is
+none, or one whose label does not read — is not refused; [the configuration
+reference](../reference.md) says what each case means for dispatch.
 
 A non-work bead is refused before any shape is read: no sections are required
 of an epic, and the reason names what the bead is (`type epic`, `label

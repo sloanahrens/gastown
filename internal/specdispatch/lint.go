@@ -25,10 +25,12 @@ package specdispatch
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -289,6 +291,18 @@ type Spec struct {
 	// Advice says the prose check did not run when the bead names another rig's
 	// read (gt-qotsst).
 	TownRigs []string
+}
+
+// LintOptions are the dispatcher settings a lint reads besides the bead and the
+// template. The zero value has every setting at its off value, so Lint answers
+// exactly what it answered before a setting existed.
+type LintOptions struct {
+	// LintOverMinutes refuses a work bead whose own sp-minutes label is at or
+	// over this many minutes
+	// (patrols.spec_dispatch.story_points.lint_over_minutes). Zero or below is
+	// off, the default: the lint then reads no story-point label at all
+	// (gt-mtzx6s).
+	LintOverMinutes float64
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -745,7 +759,12 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //     rig's directory: a polecat's sandbox holds only its own rig. The rig list
 //     narrows the segments read as rigs; without it every other rig-shaped
 //     segment is refused (gt-qotsst)
-//  8. size: needs-planning label, a Size that says planning, or more than
+//  8. a bead whose own sp-minutes label is at or over LintOptions'
+//     LintOverMinutes is refused, with the label, the setting and the split
+//     rule named; a label that does not read, or two that disagree, leaves the
+//     gate unrun and says so in Warnings, and a bead labeled size-ok or whose
+//     rung is none passes (gt-mtzx6s)
+//  9. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused. A bead labeled overseer-only or operator-only may
 //     say one session of its owner instead (gt-hgt9j.13)
@@ -757,7 +776,14 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 // computed beside it and changes neither the route nor the exit code
 // (docs/design/rework-program.md, lever 2).
 func Lint(s Spec, t Template) LintVerdict {
-	return lint(s, t, true)
+	return LintWith(s, t, LintOptions{})
+}
+
+// LintWith is Lint with the dispatcher's settings given. Lint is LintWith with
+// every setting at its off value, so a caller that reads no settings keeps the
+// shape check it always made (gt-mtzx6s).
+func LintWith(s Spec, t Template, opts LintOptions) LintVerdict {
+	return lint(s, t, true, opts)
 }
 
 // LintShape is Lint without the target branch's files, for a caller that
@@ -765,25 +791,30 @@ func Lint(s Spec, t Template) LintVerdict {
 // queue badge, the tier sweep's reshape — and has no inventory to check the
 // Constraints paths against (gt-7t1im). Every dispatch decision reads Lint:
 // this one answers a bead it cannot see the base of as shape-clean, which is
-// why it is not the dispatcher's question.
+// why it is not the dispatcher's question. It is Lint with LintOptions{}: the
+// story-point size gate decides a dispatch, so it is asked where a dispatch is
+// decided (gt-mtzx6s).
 func LintShape(s Spec, t Template) LintVerdict {
-	return lint(s, t, false)
+	return lint(s, t, false, LintOptions{})
 }
 
-func lint(s Spec, t Template, paths bool) LintVerdict {
-	v := lintShape(s, t, paths)
+func lint(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
+	v := lintShape(s, t, paths, opts)
 	// An epic, a wisp and the other runtime beads are not work one worker
 	// takes, and a container's text names many paths by design: the risk-path
 	// warning is for work beads only.
 	if NotWorkBead(s) == "" {
 		v.Warnings = riskPathWarnings(s)
+		if w := StoryPointsSizeGateWarning(s, opts.LintOverMinutes); w != "" {
+			v.Warnings = append(v.Warnings, w)
+		}
 	}
 	return v
 }
 
 // lintShape is lint's shape checks: the route, its refusals and its size. The
 // caller adds the warnings that ride beside the route.
-func lintShape(s Spec, t Template, paths bool) LintVerdict {
+func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if why := NotWorkBead(s); why != "" {
 		return refusal(Refusal{Field: "not a work bead", Reason: why})
 	}
@@ -835,6 +866,14 @@ func lintShape(s Spec, t Template, paths bool) LintVerdict {
 		}
 	}
 	failures = append(failures, otherRigRefusals(s, sections)...)
+	// A bead whose own estimate is at or over the operator's setting is
+	// refused here, when it is linted, rather than at the dispatcher's overrun
+	// stop (gt-mtzx6s). The check reads the label already on the bead and never
+	// estimates one: lint runs thousands of times a week, and an estimate costs
+	// seconds.
+	if r, refused := storyPointsSizeRefusal(s, opts.LintOverMinutes); refused {
+		failures = append(failures, r)
+	}
 	if len(failures) > 0 {
 		return refusal(failures...)
 	}
@@ -864,6 +903,110 @@ func ownerSessionSize(s Spec, size string) bool {
 		return false
 	}
 	return s.HasLabel(dispatch.OverseerOnlyLabel) || s.HasLabel(dispatch.OperatorOnlyLabel)
+}
+
+// The story-point size gate (gt-mtzx6s): a bead whose own sp-minutes label is
+// at or over lint_over_minutes is refused when it is linted, rather than found
+// out at the dispatcher's overrun stop. The grammar of the two label forms read
+// here is repeated from internal/storypoints, which imports this package and so
+// cannot be imported back; a test in internal/storypoints pins the two copies
+// together.
+const (
+	minutesLabelPrefix = "sp-minutes:"
+	noneRungLabel      = "sp-rung:none"
+)
+
+// storyPointsSizeRefusal is the size gate's verdict on a spec: the refusal when
+// the bead's own estimate says it is at or over overMinutes, false otherwise.
+// Off (overMinutes <= 0) reads no label. A bead labeled size-ok passes — the
+// overseer accepted its estimate — and so does one whose rung is none: no
+// estimate could be made, so no label can judge the size.
+func storyPointsSizeRefusal(s Spec, overMinutes float64) (Refusal, bool) {
+	if !sizeGateApplies(s, overMinutes) {
+		return Refusal{}, false
+	}
+	label, minutes, found, err := storyPointsMinutes(s.Labels)
+	if err != nil || !found || minutes < overMinutes {
+		return Refusal{}, false
+	}
+	return Refusal{Field: "size", Reason: fmt.Sprintf(
+		"%s is at or over lint_over_minutes %s: split the bead into beads of about twenty minutes each, one deliverable each, or remove the label with the reason if the estimate is wrong (a bead the overseer marks %s with a comment passes)",
+		label, minutesString(overMinutes), sizeOkLabel)}, true
+}
+
+// StoryPointsSizeGateWarning is the WARN line a bead whose sp-minutes labels
+// cannot be read gets while the gate is on: the label is not a small bead's, it
+// is a bead the gate did not judge, and a check that did not run must not read
+// as one that passed. Empty when the gate is off, the bead is waived, or the
+// labels read. Lint puts it in its verdict's Warnings; the dispatcher calls it
+// to say the same thing on a bead it slings (gt-mtzx6s).
+func StoryPointsSizeGateWarning(s Spec, overMinutes float64) string {
+	if !sizeGateApplies(s, overMinutes) {
+		return ""
+	}
+	if _, _, _, err := storyPointsMinutes(s.Labels); err != nil {
+		return "the size gate did not run: " + err.Error()
+	}
+	return ""
+}
+
+// sizeGateApplies reports whether the size gate reads s at all: it is off at
+// zero or below, and a bead the overseer waived (size-ok) or one with no
+// estimate (sp-rung:none) is never judged by a label.
+func sizeGateApplies(s Spec, overMinutes float64) bool {
+	return overMinutes > 0 && !s.HasLabel(sizeOkLabel) && !s.HasLabel(noneRungLabel)
+}
+
+// storyPointsMinutes reads the one sp-minutes:<n> label among labels. A label
+// with the prefix that does not parse, or two labels that disagree, is an
+// error: an unreadable size is not a small one, and picking between two values
+// could pass a bead the larger one refuses.
+func storyPointsMinutes(labels []string) (label string, minutes float64, found bool, err error) {
+	for _, raw := range labels {
+		l := strings.TrimSpace(raw)
+		rest, ok := cutMinutesLabelPrefix(l)
+		if !ok {
+			continue
+		}
+		m, ok := parseMinutesLabel(rest)
+		if !ok {
+			return "", 0, false, fmt.Errorf("the label %q is unreadable as sp-minutes", l)
+		}
+		if found && m != minutes {
+			return "", 0, false, fmt.Errorf("the labels %q and %q disagree on the bead's minutes", label, l)
+		}
+		label, minutes, found = l, m, true
+	}
+	return label, minutes, found, nil
+}
+
+// cutMinutesLabelPrefix returns the value after an sp-minutes: prefix. The
+// prefix is matched ignoring case, as HasLabel matches a label's name: a bead
+// labeled "SP-MINUTES:40" carries an estimate like any other, and reading only
+// the lower-case spelling would leave that bead's gate silently unrun.
+func cutMinutesLabelPrefix(l string) (string, bool) {
+	if len(l) < len(minutesLabelPrefix) || !strings.EqualFold(l[:len(minutesLabelPrefix)], minutesLabelPrefix) {
+		return "", false
+	}
+	return l[len(minutesLabelPrefix):], true
+}
+
+// parseMinutesLabel reads the value of an sp-minutes label, accepting exactly
+// the spellings internal/storypoints writes: a positive, finite number in its
+// shortest decimal form. Another spelling is refused rather than rounded into a
+// size the bead never declared.
+func parseMinutesLabel(rest string) (float64, bool) {
+	m, err := strconv.ParseFloat(rest, 64)
+	if err != nil || math.IsNaN(m) || math.IsInf(m, 0) || m <= 0 || minutesString(m) != rest {
+		return 0, false
+	}
+	return m, true
+}
+
+// minutesString renders minutes as the sp-minutes label carries them, so the
+// refusal names the setting the way the label names the estimate.
+func minutesString(m float64) string {
+	return strconv.FormatFloat(m, 'f', -1, 64)
 }
 
 func hasSection(t Template, name string) bool {

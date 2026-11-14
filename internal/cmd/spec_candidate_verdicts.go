@@ -53,6 +53,10 @@ type specCandidateInputs struct {
 	// sorted order: a verdict reached with another rig list is another verdict,
 	// so a verdict stored before the check existed is decided again (gt-qotsst).
 	Rigs string `json:"rigs"`
+	// LintOver is the lint_over_minutes the size gate checked against, zero
+	// when the gate was off: a verdict stored before the operator set it is
+	// decided again rather than served as clean (gt-mtzx6s).
+	LintOver float64 `json:"lint_over"`
 }
 
 // specCandidateEdges marks a record written since a tick stopped remembering
@@ -100,10 +104,12 @@ func newSpecCandidateVerdicts(memory *specAnnotated, inputs func(rig string) spe
 }
 
 // specCandidateInputsFor is the inputs factory a tick uses: the loaded
-// template, the town's gate and ceiling, the rig's target inventory, and the
-// town's rig names. target is the tick's own per-rig cache, so a digest is
-// computed once a tick. rigs is the sorted list specTownRigs reads.
-func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPriority int, target func(rig string) *specdispatch.TargetTree, rigs []string) func(rig string) specCandidateInputs {
+// template, the town's gate, ceiling and size gate, the rig's target inventory,
+// and the town's rig names. target is the tick's own per-rig cache, so a digest
+// is computed once a tick. rigs is the sorted list specTownRigs reads.
+// lintOver is story_points.lint_over_minutes, which the lint's size gate reads
+// (gt-mtzx6s).
+func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPriority int, lintOver float64, target func(rig string) *specdispatch.TargetTree, rigs []string) func(rig string) specCandidateInputs {
 	template := specTemplateKey(tmpl)
 	rigKey := strings.Join(rigs, ",")
 	targets := map[string]string{}
@@ -113,7 +119,7 @@ func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPri
 			key = specTargetKey(target(rig))
 			targets[rig] = key
 		}
-		return specCandidateInputs{Template: template, ShapeGate: shapeGate, MaxPriority: maxPriority, Target: key, Rigs: rigKey}
+		return specCandidateInputs{Template: template, ShapeGate: shapeGate, MaxPriority: maxPriority, Target: key, Rigs: rigKey, LintOver: lintOver}
 	}
 }
 
