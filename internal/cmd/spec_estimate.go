@@ -502,3 +502,61 @@ func writeSpecEstimate(out io.Writer, o specEstimateOutcome, asJSON bool) error 
 	}
 	return nil
 }
+
+// The estimate-ahead pass (gt-hzb051) gives an a priori estimate to beads the
+// dispatcher is not about to sling. After the tick's sling decisions, with
+// story_points.shadow on, it estimates at most specEstimateAheadLimit shaped
+// candidates the tick left and writes the labels and note gt spec estimate
+// writes. It is bounded by the shadow estimate's timeout, and an estimate that
+// fails or times out is one logged line.
+
+// specEstimateAheadPass estimates the beads specEstimateAheadPick chooses among
+// the shaped candidates the tick did not sling, and returns the lines the tick
+// logs. It does nothing with the setting off, and writes nothing in a dry run.
+func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[string]bool) []string {
+	if !env.StoryPointShadow || env.DryRun {
+		return nil
+	}
+	var ids []string
+	for _, id := range shaped {
+		if !slung[id] {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if env.EstimateAheadRead == nil {
+		// A pass wired to no reader must not look like a tick with nothing to
+		// estimate: the estimate would silently stop for every bead.
+		return []string{"story points estimate ahead: no bead reader is wired; nothing estimated"}
+	}
+	var cands []specEstimateAheadBead
+	var lines []string
+	for _, id := range ids {
+		issue, comments, err := env.EstimateAheadRead(id)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: story points estimate ahead: cannot read: %s", id, firstErrLine(err)))
+			continue
+		}
+		cands = append(cands, specEstimateAheadBead{Issue: issue, Comments: comments, CommentsRead: true, Shaped: true})
+	}
+	for _, id := range specEstimateAheadPick(cands, specEstimateAheadLimit) {
+		if line := specEstimateAheadLine(id, specStoryPointRun(env, id)); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// specEstimateAheadLine is the one line a failed or timed-out ahead estimate
+// logs, or "" when the estimate wrote its labels and note.
+func specEstimateAheadLine(beadID string, answer specStoryPointAnswer) string {
+	if answer.timedOut {
+		return fmt.Sprintf("%s: story points estimate ahead: no estimate within %s", beadID, specStoryPointTimeout)
+	}
+	if err := specShadowErr(answer.outcome, answer.err); err != nil {
+		return fmt.Sprintf("%s: story points estimate ahead: %s", beadID, firstErrLine(err))
+	}
+	return ""
+}

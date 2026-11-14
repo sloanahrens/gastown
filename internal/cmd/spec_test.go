@@ -157,6 +157,13 @@ type fakeSpecTown struct {
 	// claim (gt-n6jbw). claimErr fails the read for every candidate.
 	claims   map[string][]specdispatch.Claimant
 	claimErr error
+	// aheadComments is each bead's comments as the estimate-ahead pass reads
+	// them (gt-hzb051); an id absent here has none.
+	aheadComments map[string][]beads.Comment
+	// aheadErr fails the estimate-ahead pass's read of the bead it names.
+	aheadErr map[string]error
+	// aheadReads names the beads the estimate-ahead pass read, in order.
+	aheadReads []string
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -191,7 +198,8 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
 		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}, blockers: map[string][]beads.IssueDep{},
-		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{}}
+		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{},
+		aheadComments: map[string][]beads.Comment{}, aheadErr: map[string]error{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -304,6 +312,19 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		// The fake town has no seat picture to re-read, so every planned sling
 		// passes the recount; a test that wants one sets it.
 		RecountSeat: func(agent string) (specSeatRecount, error) { return specSeatRecount{}, nil },
+		// The estimate-ahead pass reads the bead from the fake's own specs,
+		// with the comments the test set (gt-hzb051).
+		EstimateAheadRead: func(id string) (*beads.Issue, []beads.Comment, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.aheadReads = append(f.aheadReads, id)
+			if err := f.aheadErr[id]; err != nil {
+				return nil, nil, err
+			}
+			issue := specAheadIssue(f.specs[id])
+			issue.Dependencies = f.blockers[id]
+			return &issue, f.aheadComments[id], nil
+		},
 		Annotate: func(id, key, text string) error {
 			for _, n := range f.notes[id] {
 				if strings.HasPrefix(n, key) {

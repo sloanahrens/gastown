@@ -2053,6 +2053,12 @@ type specDispatchEnv struct {
 	// context the tick cancels on timeout. Production is specStoryPointEstimate.
 	// The outcome carries the numbers the split route reads.
 	StoryPointEstimate func(ctx context.Context, beadID string) (specEstimateOutcome, error)
+	// EstimateAheadRead reads a shaped candidate in full, with its comments, for
+	// the estimate-ahead pass (gt-hzb051). The pass runs after the slings, so
+	// the comments are read fresh: an estimate the sling hook just wrote is the
+	// bead's current one. Nil leaves the pass unable to read a candidate, which
+	// it logs as one line rather than reading as nothing to estimate.
+	EstimateAheadRead func(beadID string) (*beads.Issue, []beads.Comment, error)
 	// After is the timer the story-point estimate's timeout waits on; nil is
 	// time.After. A test injects one that fires at once, so no wall clock is
 	// read.
@@ -2318,6 +2324,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// walked, before the sling runs, and one tick's hold is accepted over
 	// walking the board again.
 	slated := make(map[string]bool)
+	// The shaped candidates this tick read, in board order, for the
+	// estimate-ahead pass after the slings (gt-hzb051).
+	var shapedAhead []string
 
 	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
@@ -2445,6 +2454,12 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			full = walked
 			verdict = specdispatch.LintWith(full, env.Template, specdispatch.LintOptions{LintOverMinutes: env.StoryPointLintOver})
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
+		}
+		// A clean verdict is the only shape the estimate-ahead pass reads: the
+		// lint did not clear the others, and a candidate held before this line
+		// never reached it (gt-hzb051).
+		if verdict.Clean() {
+			shapedAhead = append(shapedAhead, id)
 		}
 		// An sp-minutes label the gate cannot read leaves it unrun. The sling
 		// decision does not change — an unknown size is never refused — but a
@@ -2714,6 +2729,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		specRunPendingSlings(env, pending, &report, &budget)
 	}
 	report.SlingTook = env.Now().Sub(slingAt)
+	// The estimate-ahead pass runs after the slings, so no estimate it makes
+	// can delay or change a decision the tick already took (gt-hzb051).
+	report.Notices = append(report.Notices, specEstimateAheadPass(env, shapedAhead, slated)...)
 	return report
 }
 
@@ -3932,6 +3950,21 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// A blocker the walk reads is served from this tick's ledger when the
 		// candidate's own row already read it (gt-hgt9j.12).
 		BlockerRead: specBlockerRead(reads, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }),
+		// The estimate-ahead pass reads the bead in full and its comments fresh
+		// after the slings, so an estimate the sling hook wrote this tick is the
+		// bead's current one (gt-hzb051).
+		EstimateAheadRead: func(beadID string) (*beads.Issue, []beads.Comment, error) {
+			issue, err := reads.show(beadID, func() (*beads.Issue, error) { return showBead(townRoot, beadID) })
+			if err != nil {
+				return nil, nil, err
+			}
+			reads.call()
+			comments, err := beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)).Comments(beadID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return issue, comments, nil
+		},
 	}
 	specWireStoryPoints(&env, sd, townRoot)
 	report := runSpecDispatchCycle(env)
