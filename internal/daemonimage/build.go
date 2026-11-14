@@ -161,17 +161,17 @@ type Builder struct {
 	// that fetch.
 	Fetch Fetcher
 
-	// The fields below are test seams for the filesystem calls the plugin and
-	// mango moves and their rollbacks make; nil means the os function of the same
-	// shape.
+	// The fields below are test seams for the filesystem calls the plugin,
+	// mango and gateway moves and their rollbacks make; nil means the os
+	// function of the same shape.
 	rename func(oldpath, newpath string) error
 	remove func(path string) error
 	lstat  func(path string) (os.FileInfo, error)
 }
 
-// fileOps is the filesystem the plugin and mango moves publish and roll back
-// with: the os functions of the same shape, or the test seams standing in for
-// them.
+// fileOps is the filesystem the plugin, mango and gateway moves publish and
+// roll back with: the os functions of the same shape, or the test seams
+// standing in for them.
 type fileOps struct {
 	rename func(oldpath, newpath string) error
 	remove func(path string) error

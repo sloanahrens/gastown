@@ -55,7 +55,7 @@ func (b Builder) BuildGateway(ctx context.Context, rev string) ([]string, error)
 		return nil, err
 	}
 	path := filepath.Join(b.Out, build.name)
-	if err := os.Rename(filepath.Join(stage, build.name), path); err != nil {
+	if err := b.fileOps().rename(filepath.Join(stage, build.name), path); err != nil {
 		return nil, fmt.Errorf("daemonimage: cannot move %s into %s: %w", build.name, b.Out, err)
 	}
 	return []string{path}, nil
