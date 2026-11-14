@@ -34,6 +34,17 @@ func (m fixedHowMap) Describe(g taskmap.Group) string {
 
 func (m fixedHowMap) ByGroup(g taskmap.Group) []taskmap.Entry { return m.entries[g] }
 
+// Search runs the package's matcher over the fixture's entries only, so the
+// golden pins the command's formatting and no-match line, not a copy of the
+// matching rules, and no placement file can add a match.
+func (m fixedHowMap) Search(word string) []taskmap.Entry {
+	reg := taskmap.NewRegistry()
+	for _, entries := range m.entries {
+		reg.Register(entries...)
+	}
+	return reg.Search(word)
+}
+
 // howFixture is the map the golden tests read: three groups, one with no
 // entries, and roll's entries in the reverse of the order they print in.
 func howFixture() fixedHowMap {
@@ -84,6 +95,8 @@ func TestHowGolden(t *testing.T) {
 	}{
 		{name: "no argument lists the groups", golden: "groups.golden"},
 		{name: "a group lists its sorted commands", args: []string{"roll"}, golden: "roll.golden"},
+		{name: "a word lists the matching commands", args: []string{"this"}, golden: "search.golden"},
+		{name: "a word with no match says so", args: []string{"bogus"}, golden: "nomatch.golden"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,19 +109,6 @@ func TestHowGolden(t *testing.T) {
 			checkHowGolden(t, tc.golden, out.Bytes())
 		})
 	}
-}
-
-// TestHowUnknownGroupPrintsGroups pins the behaviour until gt how <word>
-// searches the map (gt-j669b4.24): a word that names no group prints the group
-// list and exits 0.
-func TestHowUnknownGroupPrintsGroups(t *testing.T) {
-	t.Parallel()
-
-	var out bytes.Buffer
-	if err := runHow(&out, howFixture(), []string{"rolls"}); err != nil {
-		t.Fatalf("runHow: %v", err)
-	}
-	checkHowGolden(t, "groups.golden", out.Bytes())
 }
 
 func TestHowEmptyGroup(t *testing.T) {
@@ -130,20 +130,16 @@ func TestHowRefusesGroupWithNoDescription(t *testing.T) {
 	m := howFixture()
 	m.describe = func(taskmap.Group) string { return "" }
 
-	// Both ways to the group list reach the check: no argument, and a word that
-	// names no group.
-	for _, args := range [][]string{nil, {"rolls"}} {
-		var out bytes.Buffer
-		err := runHow(&out, m, args)
-		if err == nil {
-			t.Fatalf("runHow(%v) listed groups whose descriptions are empty, want an error", args)
-		}
-		if !strings.Contains(err.Error(), "orient") {
-			t.Errorf("runHow(%v) error %q does not name the group with no description", args, err)
-		}
-		if out.Len() != 0 {
-			t.Errorf("runHow(%v) wrote %q before refusing", args, out.String())
-		}
+	var out bytes.Buffer
+	err := runHow(&out, m, nil)
+	if err == nil {
+		t.Fatal("runHow listed groups whose descriptions are empty, want an error")
+	}
+	if !strings.Contains(err.Error(), "orient") {
+		t.Errorf("runHow error %q does not name the group with no description", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHow wrote %q before refusing", out.String())
 	}
 }
 
