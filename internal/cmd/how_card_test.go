@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -164,7 +165,7 @@ func TestHowCardRulesRefuseBadLines(t *testing.T) {
 func TestHowCardContent(t *testing.T) {
 	t.Parallel()
 
-	card, err := howCardText(howDefault{taskmap.Default()})
+	card, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
 	if err != nil {
 		t.Fatalf("howCardText: %v", err)
 	}
@@ -236,7 +237,7 @@ func TestHowCardCommandRunsTheCard(t *testing.T) {
 		t.Fatalf("runHowCmd with --card: %v", err)
 	}
 
-	want, err := howCardText(howDefault{taskmap.Default()})
+	want, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
 	if err != nil {
 		t.Fatalf("howCardText: %v", err)
 	}
@@ -369,6 +370,23 @@ func TestHowCardRefusesAGroupWithNoDescription(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardReturnsALoaderError checks the card refuses to print when the rule
+// loader fails, and returns the loader's error rather than an empty card.
+func TestHowCardReturnsALoaderError(t *testing.T) {
+	t.Parallel()
+
+	loadErr := errors.New("the rule file could not be read")
+	card, err := howCardText(howFixture(), func() ([]string, error) {
+		return nil, loadErr
+	})
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("howCardText error = %v, want the loader's %v", err, loadErr)
+	}
+	if card != "" {
+		t.Errorf("howCardText returned %q with the loader's error, want no card", card)
 	}
 }
 

@@ -92,7 +92,7 @@ func runHowCard(out io.Writer, m howMap, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("gt how --card takes no group or word, got %q", strings.Join(args, " "))
 	}
-	card, err := howCardText(m)
+	card, err := howCardText(m, overseerCardRules)
 	if err != nil {
 		return err
 	}
@@ -101,12 +101,14 @@ func runHowCard(out io.Writer, m howMap, args []string) error {
 }
 
 // howCardText builds the card in one string: the title line, the lookup rule,
-// every task group with its one-line description, then the rule lines. A group
-// with no description (writeHowGroups) or a rule file that does not validate is
-// an error, and so is a card over overseerCardPrintMaxBytes: a card that cannot
-// be printed whole is not printed at all, so a failure writes nothing to out.
-func howCardText(m howMap) (string, error) {
-	rules, err := overseerCardRules()
+// every task group with its one-line description, then the rule lines. loadRules
+// supplies the rule lines, so the command passes overseerCardRules and a test
+// can pass a loader that fails. A group with no description (writeHowGroups), a
+// failed loader, or a card over overseerCardPrintMaxBytes is an error: a card
+// that cannot be printed whole is not printed at all, so a failure writes
+// nothing to out.
+func howCardText(m howMap, loadRules func() ([]string, error)) (string, error) {
+	rules, err := loadRules()
 	if err != nil {
 		return "", err
 	}
