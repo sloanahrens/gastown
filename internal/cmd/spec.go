@@ -34,6 +34,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -101,6 +102,7 @@ var (
 	specDispatchDryRun bool
 	specLintJSON       bool
 	specLintTemplate   string
+	specLintEstimate   bool
 )
 
 var specCmd = &cobra.Command{
@@ -132,6 +134,13 @@ checked instead: Goal, Constraints, Out of scope, Gate and Size.
     that does not read (the lint warns that the gate did not run). The lint
     reads the label already on the bead and never estimates by itself.
 
+To have the estimate made first, run gt spec lint <bead-id> --estimate: it runs
+the same estimate gt spec estimate makes (writing the sp: labels and the note),
+then checks them. The estimate costs 3 to 4 seconds, which is why the lint does
+not run it unless asked. An estimate that fails, or makes none, is reported as
+a refusal naming its error: a bead the estimate could not judge is not a small
+one.
+
 Shape is a property of every work bead: the lint checks a task, bug or feature
 the same way and never refuses one for its type. The label spec is retired: it
 is accepted and ignored. Epics, agent beads (gt:agent) and wisps are refused
@@ -161,7 +170,7 @@ missing or slow prints nothing.
 
 Exit codes:
   0  clean: the dispatcher would slot it
-  1  refused: a required field is missing
+  1  refused: a required field is missing, or --estimate's estimator failed
   2  needs planning: label needs-planning, a Size that says planning, or more
      than 6 acceptance items`,
 	Args:          cobra.ExactArgs(1),
@@ -252,6 +261,7 @@ func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead of one line")
 	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
+	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, "Run the bead's story-point estimate first (3 to 4 seconds, the same run gt spec estimate makes) and check the sp-minutes label it writes; a failing estimate is a refusal naming its error")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1071,7 +1081,19 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 // runSpecLintOn is runSpecLint with the town root, the --graph flag and the
 // stores given, so a test can drive the graph branch through fake stores.
 func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores) error {
+	return runSpecLintOnWith(cmd, args, townRoot, graph, stores, specLintEstimate)
+}
+
+// runSpecLintOnWith is runSpecLintOn with --estimate's flag value given, so a
+// test drives the flag pair without swapping the package variable.
+func runSpecLintOnWith(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores, withEstimate bool) error {
 	if graph {
+		// --graph checks an epic's children, so there is no one bead for
+		// --estimate to estimate; the pair is refused rather than silently
+		// dropping the estimate (gt-5ynb86).
+		if withEstimate {
+			return errors.New("--estimate estimates one bead; --graph checks an epic's children, so there is no one bead to estimate")
+		}
 		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), stores, townRoot, args[0], specLintJSON)
 	}
 	// The dispatch block is read once: it holds both the template path and the
@@ -1083,7 +1105,7 @@ func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph boo
 	}
 	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, read, openRigTree)
-	opts := specLintOptsFrom(sd)
+	opts := specLintOptsFor(sd, townRoot, withEstimate, cmd.ErrOrStderr())
 	return runSpecLintAtWith(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now(), opts)
 }
 
@@ -1416,6 +1438,10 @@ type specLintOpts struct {
 	// which the lint refuses a bead by its own sp-minutes label. Zero is off,
 	// and the lint then reads no story-point label (gt-mtzx6s).
 	LintOverMinutes float64
+	// Estimate is --estimate's run of one bead's estimate, nil when the flag
+	// is off. It writes the labels and the note before the check, and the lint
+	// reads the size that run wrote (gt-5ynb86).
+	Estimate func(ctx context.Context, beadID string) (specEstimateOutcome, error)
 }
 
 // specLintOptsFrom is the settings gt spec lint runs with, read from the town's
@@ -1425,14 +1451,106 @@ func specLintOptsFrom(sd *config.SpecDispatchConfig) specLintOpts {
 	return specLintOpts{LintOverMinutes: sd.StoryPointsLintOver()}
 }
 
+// specLintOptsFor is the settings and flags one gt spec lint run reads: the
+// size gate from the town's spec_dispatch block, and --estimate's run when the
+// flag is set (gt-5ynb86). The estimate is attached only when asked for: it
+// costs seconds, and the lint runs thousands of times a week.
+func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimate bool, errw io.Writer) specLintOpts {
+	opts := specLintOptsFrom(sd)
+	if withEstimate {
+		opts.Estimate = specLintEstimateRun(townRoot, errw)
+	}
+	return opts
+}
+
 // lintOptions is the lint's own view of the settings.
 func (o specLintOpts) lintOptions() specdispatch.LintOptions {
 	return specdispatch.LintOptions{LintOverMinutes: o.LintOverMinutes}
 }
 
+// gt spec lint --estimate (gt-5ynb86): the lint never estimates by itself, so
+// a filer who wants the answer before the bead is slung asks for the estimate
+// with the flag. It is the same run gt spec estimate makes — the same labels
+// and note — so the lint then reads exactly the size the estimate command
+// would have written.
+
+// specLintEstimateRun is --estimate's run of one bead's estimate: the
+// estimate command's own specEstimateBead, writing the labels and the note.
+// errw takes the estimate's own warnings (a Jev battery that cannot open, for
+// one), as gt spec estimate writes them.
+func specLintEstimateRun(townRoot string, errw io.Writer) func(ctx context.Context, beadID string) (specEstimateOutcome, error) {
+	return specLintEstimateRunFor(
+		func(beadID string) specEstimateStore {
+			return beads.New(resolveBeadDirFromTownRoot(townRoot, beadID))
+		},
+		func(beadID string) specEstimateRunner {
+			return specEstimateRunner{
+				Estimate: estimate.Estimate,
+				Deps: func() (estimate.Deps, error) {
+					return specEstimateDeps(townRoot, specBeadRig(townRoot, beadID), errw)
+				},
+			}
+		})
+}
+
+// specLintEstimateRunFor is specLintEstimateRun with the bead's store and
+// runner given, so a test drives --estimate without bd, hm or Jev.
+func specLintEstimateRunFor(newStore func(beadID string) specEstimateStore, runnerFor func(beadID string) specEstimateRunner) func(ctx context.Context, beadID string) (specEstimateOutcome, error) {
+	return func(ctx context.Context, beadID string) (specEstimateOutcome, error) {
+		return specEstimateBead(ctx, beadID, newStore(beadID), specEstimateOpts{}, runnerFor(beadID))
+	}
+}
+
+// specLintEstimateFirst runs the estimate for beadID and returns spec with the
+// labels the run wrote, so the lint checks the size the estimate just made
+// without a second read of the bead. An estimate that errored, or whose run
+// made none (this time or in the note an earlier run left), is returned as an
+// error: the bead was not judged, and a bead the estimate could not judge must
+// not pass as a small one.
+func specLintEstimateFirst(ctx context.Context, beadID string, spec specdispatch.Spec, run func(context.Context, string) (specEstimateOutcome, error)) (specdispatch.Spec, error) {
+	outcome, err := run(ctx, beadID)
+	if err != nil {
+		return spec, err
+	}
+	// A run that made no estimate — the estimator failed, its result could not
+	// be labeled, or an earlier run recorded that no estimate was possible —
+	// leaves the bead unjudged, so the lint refuses it rather than reading the
+	// missing label as a small one.
+	if outcome.Action == "none" || outcome.Rung == "none" {
+		reason := outcome.Reason
+		if reason == "" {
+			reason = "the estimate was not made"
+		}
+		return spec, fmt.Errorf("no estimate: %s", reason)
+	}
+	return specWithEstimateLabels(spec, outcome), nil
+}
+
+// specWithEstimateLabels is spec with the labels an estimate run wrote: the
+// run's stale labels dropped and its new ones added. The run wrote the same
+// change to the bead; applying it here keeps the check on exactly what the run
+// made rather than on a second read.
+func specWithEstimateLabels(spec specdispatch.Spec, o specEstimateOutcome) specdispatch.Spec {
+	labels := make([]string, 0, len(spec.Labels)+len(o.AddLabels))
+	for _, l := range spec.Labels {
+		if !slices.Contains(o.RemoveLabels, l) {
+			labels = append(labels, l)
+		}
+	}
+	for _, l := range o.AddLabels {
+		if !slices.Contains(labels, l) {
+			labels = append(labels, l)
+		}
+	}
+	spec.Labels = labels
+	return spec
+}
+
 // specLintVerdict is specLint, also returning the verdict it printed (a
 // refusal naming "bead" when the bead did not read) so a caller can record it
-// (gt-hgt9j.7). opts are the town's settings the lint reads (gt-mtzx6s).
+// (gt-hgt9j.7). opts are the town's settings and flags the lint reads: the size
+// gate (gt-mtzx6s) and --estimate's run, which makes the estimate first
+// (gt-5ynb86).
 func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool, opts specLintOpts) (specdispatch.LintVerdict, error) {
 	tmpl := specdispatch.LoadTemplate(templatePath)
 	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
@@ -1446,6 +1564,25 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 		}
 		report.Refusals = append(report.Refusals, verdict.Refusals...)
 		return verdict, emitSpecLint(out, errOut, tmpl, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
+	}
+	// --estimate estimates before the check, as gt spec estimate does, and the
+	// lint then reads the labels that run wrote. A failed or absent estimate is
+	// a refusal naming its error: a bead the estimate could not judge has not
+	// been checked, and must not pass as a small one (gt-5ynb86).
+	if opts.Estimate != nil {
+		estimated, estErr := specLintEstimateFirst(context.Background(), beadID, spec, opts.Estimate)
+		if estErr != nil {
+			reason := estErr.Error()
+			verdict := specdispatch.LintVerdict{
+				Route:    specdispatch.RouteRefuse,
+				Field:    "estimate",
+				Reason:   reason,
+				Refusals: []specdispatch.Refusal{{Field: "estimate", Reason: reason}},
+			}
+			report.Refusals = append(report.Refusals, verdict.Refusals...)
+			return verdict, emitSpecLint(out, errOut, tmpl, report, fmt.Sprintf("%s: spec lint refused: estimate: %v", beadID, estErr), specLintExitRefused, asJSON)
+		}
+		spec = estimated
 	}
 	verdict := specdispatch.LintWith(spec, tmpl, opts.lintOptions())
 	report.OK = verdict.Clean()
