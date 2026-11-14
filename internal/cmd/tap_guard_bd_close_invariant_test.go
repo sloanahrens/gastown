@@ -996,10 +996,11 @@ func TestParseBdCloseCoverageCatchesDroppedSeparator(t *testing.T) {
 		t.Error("a parsed tokenizer that drops separators loses no close on any command, so the coverage property cannot see a dropped separator")
 	}
 
-	// The guard's verdict is what must not loosen. An unknown marker judges the
-	// branch's bead, so a close the dropped reading merges into an unreadable run
-	// loses its id but keeps the refusal. The id-level check is the bare reader
-	// above and TestBdCloseLostWithKeepsLossBehindMarker.
+	// The guard's verdict is what must not loosen. The id-level check cannot hold
+	// through the production reader: a dropped separator loses the close inside an
+	// eval payload of a readable command whose unreadable part leaves only the unknown
+	// marker, so the refusal rests on that marker and only the verdict is asserted here.
+	// The id-level check is the bare reader above and TestBdCloseLostWithKeepsLossBehindMarker.
 	production := bdCloseReaderOf(dropped, shellTokenize)
 	for _, command := range commands {
 		if bdCloseRefusesWith(command, bdCloseShellReading) && !bdCloseRefusesWith(command, production) {
