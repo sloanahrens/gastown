@@ -8,15 +8,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
 // MacCrewHooksCheckName is the name 'gt doctor --check' takes for MacCrewHooksCheck.
 const MacCrewHooksCheckName = "mac-crew-hooks"
-
-// podEnv is the variable the kubelet sets in every pod. It repeats
-// internal/sweeprunner's envInClusterHost, which that package keeps unexported,
-// so the two must stay equal. sweeprunner's InClusterHost reads the same variable.
-const podEnv = "KUBERNETES_SERVICE_HOST"
 
 // macCrewHooksNativeHint sends the reader to the run that sees the Mac clones.
 const macCrewHooksNativeHint = "Run 'gt doctor --check mac-crew-hooks' on a native gt on the Mac, where the crew clones live"
@@ -35,8 +32,9 @@ const macCrewHooksNativeHint = "Run 'gt doctor --check mac-crew-hooks' on a nati
 // (gt-hhkgui).
 type MacCrewHooksCheck struct {
 	BaseCheck
-	// getenv reads the environment; nil reads os.Getenv. A test sets it so its
-	// result does not depend on whether the test process runs inside a pod.
+	// getenv reads the environment. NewMacCrewHooksCheck wires os.Getenv; a test
+	// replaces it so its result does not depend on whether the test process runs
+	// inside a pod.
 	getenv func(string) string
 }
 
@@ -48,6 +46,7 @@ func NewMacCrewHooksCheck() *MacCrewHooksCheck {
 			CheckDescription: "Report a crew clone whose core.hooksPath points at a missing directory or whose .git/config cannot be read",
 			CheckCategory:    CategoryConfig,
 		},
+		getenv: os.Getenv,
 	}
 }
 
@@ -121,11 +120,7 @@ func (c *MacCrewHooksCheck) Run(ctx *CheckContext) *CheckResult {
 // inPod reports whether the check runs in a pod, whose scan sees only the clones
 // mounted there (gt-hhkgui).
 func (c *MacCrewHooksCheck) inPod() bool {
-	getenv := c.getenv
-	if getenv == nil {
-		getenv = os.Getenv
-	}
-	return getenv(podEnv) != ""
+	return sweeprunner.InClusterHost(c.getenv)
 }
 
 func (c *MacCrewHooksCheck) result(status CheckStatus, msg string, details []string, hint string) *CheckResult {

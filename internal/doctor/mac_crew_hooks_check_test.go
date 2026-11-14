@@ -45,7 +45,7 @@ func crewHooksRun(town string) *CheckResult {
 func crewHooksRunWithPodEnv(town, host string) *CheckResult {
 	c := NewMacCrewHooksCheck()
 	c.getenv = func(key string) string {
-		if key == podEnv {
+		if key == "KUBERNETES_SERVICE_HOST" {
 			return host
 		}
 		return ""
@@ -269,32 +269,6 @@ func TestMacCrewHooksInAPodStillReportsAFinding(t *testing.T) {
 		if !strings.Contains(res.Details[0], want) {
 			t.Errorf("finding %q does not contain %q", res.Details[0], want)
 		}
-	}
-}
-
-// TestMacCrewHooksDefaultGetenvReadsThePodVariable: a check with no getenv set
-// reads the process environment. The test sets the pod variable itself, so the
-// result does not depend on whether the test runs in a pod. It is not parallel,
-// because t.Setenv changes a process-wide variable.
-//
-//testpolicy:allow parallel — t.Setenv sets the process environment, which every parallel test shares
-func TestMacCrewHooksDefaultGetenvReadsThePodVariable(t *testing.T) {
-	config := "[core]\n\thooksPath = .githooks\n"
-	town, clone := crewHooksTown(t, &config)
-	if err := os.MkdirAll(filepath.Join(clone, ".githooks"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	//testpolicy:allow no-env — the process environment is the value under test: the nil getenv default reads it
-	t.Setenv(podEnv, "")
-	if res := NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town}); res.Status != StatusOK {
-		t.Fatalf("outside a pod: Status = %v, want StatusOK: %+v", res.Status, res)
-	}
-
-	//testpolicy:allow no-env — the process environment is the value under test: the nil getenv default reads it
-	t.Setenv(podEnv, "10.0.0.1")
-	if res := NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town}); res.Status != StatusWarning {
-		t.Fatalf("inside a pod: Status = %v, want StatusWarning: %+v", res.Status, res)
 	}
 }
 
