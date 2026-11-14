@@ -43,10 +43,12 @@ const (
 	dayLayout = "2006-01-02"
 )
 
-// Row is one host row of the schema's 30 s records, in the schema's field order:
+// Row is one row of the schema's 30 s records, in the schema's field order:
 // encoding/json writes struct fields in order, so the samplers and the readers
 // agree on the shape as well as the names. Workspace is appended after the
-// fields the schema shipped with, the position the plan gives it (gt-3mrzx).
+// fields the schema shipped with, the position the plan gives it (gt-3mrzx);
+// the sandbox sampling fields are appended after Workspace in the same way
+// (gt-caj962).
 type Row struct {
 	V             int      `json:"v"`
 	TS            string   `json:"ts"`
@@ -62,6 +64,15 @@ type Row struct {
 	MemBytes      int64    `json:"mem_bytes"`
 	MemLimitBytes *int64   `json:"mem_limit_bytes"`
 	Workspace     string   `json:"workspace"`
+	// The sampling fields are omitted when a row does not carry them, so a host
+	// row encodes byte for byte what it encoded before them (gt-caj962). Cluster
+	// stays a pointer: an explicitly empty name encodes as "", which the
+	// resources reader refuses, rather than vanishing into the unclustered series.
+	Cluster            *string  `json:"cluster,omitempty"`
+	PressureCPUSomePct *float64 `json:"pressure_cpu_some_pct,omitempty"`
+	PressureMemSomePct *float64 `json:"pressure_mem_some_pct,omitempty"`
+	PressureMemFullPct *float64 `json:"pressure_mem_full_pct,omitempty"`
+	Load1              *float64 `json:"load1,omitempty"`
 }
 
 // SetWorkspace stamps the row with the workspace id the map gives the rig it

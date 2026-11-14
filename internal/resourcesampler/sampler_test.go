@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -22,12 +23,24 @@ func TestMain(m *testing.M) {
 	os.Exit(unittier.Main(m))
 }
 
-// rowKeys is the schema's field order. A row written in another order still
-// reads, but two samplers writing one file should differ in values only.
+// rowKeys is the order a host row encodes: the schema's fields to workspace,
+// with no sampling field, since a host row carries none (gt-caj962). A row
+// written in another order still reads, but two samplers writing one file
+// should differ in values only.
 var rowKeys = []string{
 	"v", "ts", "interval_s", "source", "class", "component", "name",
 	"rig", "polecat", "bead", "cpu_pct", "mem_bytes", "mem_limit_bytes",
 	"workspace",
+}
+
+// samplingRowKeys is the order a row carrying the sandbox sampling fields
+// encodes: the host fields, then the fields the design appends after workspace,
+// whose names are the keys the reader takes (gt-caj962).
+var samplingRowKeys = []string{
+	"v", "ts", "interval_s", "source", "class", "component", "name",
+	"rig", "polecat", "bead", "cpu_pct", "mem_bytes", "mem_limit_bytes",
+	"workspace", "cluster", "pressure_cpu_some_pct", "pressure_mem_some_pct",
+	"pressure_mem_full_pct", "load1",
 }
 
 // fakeClock is the Clock a test moves by hand.
@@ -806,6 +819,138 @@ func TestRowWorkspaceField(t *testing.T) {
 		if row.Workspace != tc.want {
 			t.Errorf("%s: workspace = %q, want %q", tc.name, row.Workspace, tc.want)
 		}
+	}
+}
+
+// measure is a pointer to a reading a test sets on a row.
+func measure(value float64) *float64 { return &value }
+
+// A host row encodes byte for byte what it encoded before the sandbox sampling
+// fields existed, so a town with only the host source sees no new key
+// (gt-caj962).
+func TestHostRowBytesUnchanged(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeWorkspaceMap(t, townRoot, `{"default":"customer-zero"}`)
+	metricsDir := filepath.Join(townRoot, ".runtime", "metrics")
+	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	lister := &fakeLister{processes: []Process{
+		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
+	}}
+	sampler := New(metricsDir, townRoot, lister, clock, 30*time.Second)
+
+	lines := tick(t, sampler, clock.now)
+	if len(lines) != 1 {
+		t.Fatalf("the tick wrote %d rows, want the one component", len(lines))
+	}
+	want := `{"v":1,"ts":"2026-10-24T12:00:00Z","interval_s":30,"source":"host",` +
+		`"class":"control-plane","component":"dolt","name":"dolt",` +
+		`"rig":null,"polecat":null,"bead":null,"cpu_pct":null,` +
+		`"mem_bytes":1024000,"mem_limit_bytes":null,"workspace":"customer-zero"}`
+	if lines[0] != want {
+		t.Errorf("host row =\n%s\nwant\n%s", lines[0], want)
+	}
+}
+
+// A row with the cluster, pressure and load readings set encodes them under the
+// design's names, after workspace, and decodes back to the row it was
+// (gt-caj962).
+func TestSamplingFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
+	cluster, rig := "gt-sbx", "gastown"
+	row := Row{
+		V: SchemaVersion, TS: "2026-11-14T00:00:00Z", IntervalS: 60,
+		Source: "sandbox", Class: "sandbox", Component: "seat", Name: "seat-0",
+		Rig: &rig, CPUPct: measure(12.5), MemBytes: 2048,
+		Workspace:          "acme",
+		Cluster:            &cluster,
+		PressureCPUSomePct: measure(10),
+		PressureMemSomePct: measure(2.5),
+		PressureMemFullPct: measure(0.75),
+		Load1:              measure(3.5),
+	}
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("encode row: %v", err)
+	}
+	if keys := jsonKeys(t, string(encoded)); !slices.Equal(keys, samplingRowKeys) {
+		t.Fatalf("row keys = %v, want the design's %v", keys, samplingRowKeys)
+	}
+
+	var decoded Row
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode row: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, row) {
+		t.Errorf("decoded row = %+v, want %+v", decoded, row)
+	}
+}
+
+// A pressure the sampler measured as zero is a reading, not an unknown: the
+// key is written with its zero (gt-caj962).
+func TestMeasuredZeroPressureEncodes(t *testing.T) {
+	t.Parallel()
+	encoded, err := json.Marshal(Row{
+		PressureCPUSomePct: measure(0),
+		PressureMemSomePct: measure(0),
+		PressureMemFullPct: measure(0),
+	})
+	if err != nil {
+		t.Fatalf("encode row: %v", err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(encoded, &row); err != nil {
+		t.Fatalf("decode row: %v", err)
+	}
+	for _, key := range []string{"pressure_cpu_some_pct", "pressure_mem_some_pct", "pressure_mem_full_pct"} {
+		value, ok := row[key]
+		if !ok {
+			t.Errorf("%s is absent from %s, want the measured zero", key, encoded)
+			continue
+		}
+		if value != 0.0 {
+			t.Errorf("%s = %v, want 0", key, value)
+		}
+	}
+}
+
+// A row that sets none of the sampling fields carries none of their keys, so an
+// unknown reading is absent rather than a null a reader would count as one
+// (gt-caj962).
+func TestSamplingFieldsOmittedWhenUnset(t *testing.T) {
+	t.Parallel()
+	encoded, err := json.Marshal(Row{
+		V: SchemaVersion, TS: "2026-11-14T00:00:00Z", IntervalS: 30,
+		Source: "host", Class: "control-plane", Component: "dolt", Name: "dolt",
+		Workspace: "customer-zero",
+	})
+	if err != nil {
+		t.Fatalf("encode row: %v", err)
+	}
+	keys := jsonKeys(t, string(encoded))
+	for _, key := range []string{"cluster", "pressure_cpu_some_pct", "pressure_mem_some_pct", "pressure_mem_full_pct", "load1"} {
+		if slices.Contains(keys, key) {
+			t.Errorf("unset %s is in %s, want it absent", key, encoded)
+		}
+	}
+}
+
+// A cluster explicitly set to the empty string still encodes, so the resources
+// reader refuses the row instead of folding it into the unclustered series
+// (gt-caj962).
+func TestEmptyClusterEncodes(t *testing.T) {
+	t.Parallel()
+	empty := ""
+	encoded, err := json.Marshal(Row{Cluster: &empty})
+	if err != nil {
+		t.Fatalf("encode row: %v", err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(encoded, &row); err != nil {
+		t.Fatalf("decode row: %v", err)
+	}
+	if got, ok := row["cluster"]; !ok || got != "" {
+		t.Errorf("cluster = %v (present %v), want the empty string written in %s", got, ok, encoded)
 	}
 }
 
