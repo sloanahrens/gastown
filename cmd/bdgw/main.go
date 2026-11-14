@@ -53,7 +53,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `bdgw is the bd gateway.
+	// A usage line that cannot be written is the caller's output stream gone;
+	// the exit status is the answer either way.
+	_, _ = fmt.Fprint(w, `bdgw is the bd gateway.
 
   bdgw serve [flags]                  run the HTTP gateway
   bdgw exec [flags] -- <bd args>      run one bd call inside the container
