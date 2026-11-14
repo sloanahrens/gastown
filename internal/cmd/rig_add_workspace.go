@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // rigAddWorkspace is the gateway half of gt rig add (docs/design/bd-container.md,
@@ -24,6 +26,10 @@ type rigAddWorkspace struct {
 	push func(ctx context.Context, townRoot string) (string, error)
 	// bdReal runs bd.real init with argv in dir.
 	bdReal func(dir string, argv []string) error
+	// serverPort is the town's Dolt port, 0 when the town has no endpoint. The
+	// init passes it as --server-port so bd.real reaches the town's server, as the
+	// rig's own init does.
+	serverPort func(townRoot string) int
 	// tempDir makes the workspace bd.real initialises in; removeDir takes it back.
 	tempDir   func() (string, error)
 	removeDir func(path string) error
@@ -38,6 +44,7 @@ func processRigAddWorkspace(getenv func(string) string) rigAddWorkspace {
 		gatewayURL: url,
 		push:       pusher.Push,
 		bdReal:     runBdRealInit,
+		serverPort: config.ResolveDoltPort,
 		tempDir: func() (string, error) {
 			return os.MkdirTemp("", "gt-rig-workspace-")
 		},
@@ -55,7 +62,7 @@ func (w rigAddWorkspace) run(ctx context.Context, townRoot, rig, prefix string) 
 	if w.gatewayURL == "" {
 		return nil
 	}
-	if w.push == nil || w.bdReal == nil || w.tempDir == nil || w.removeDir == nil {
+	if w.push == nil || w.bdReal == nil || w.serverPort == nil || w.tempDir == nil || w.removeDir == nil {
 		return fmt.Errorf("rig %s: the bd gateway step has no %s wired; the workspace was not initialised or pushed", rig, unwiredRigAddStep(w))
 	}
 	dir, err := w.tempDir()
@@ -67,7 +74,7 @@ func (w rigAddWorkspace) run(ctx context.Context, townRoot, rig, prefix string) 
 			err = fmt.Errorf("rig %s: removing the temporary workspace %s: %w", rig, dir, rmErr)
 		}
 	}()
-	if err := w.bdReal(dir, rigInitArgv(rig, prefix)); err != nil {
+	if err := w.bdReal(dir, rigInitArgv(rig, prefix, w.serverPort(townRoot))); err != nil {
 		return fmt.Errorf("rig %s: bd.real init in the temporary workspace: %w", rig, err)
 	}
 	if _, err := w.push(ctx, townRoot); err != nil {
@@ -83,6 +90,8 @@ func unwiredRigAddStep(w rigAddWorkspace) string {
 		return "pusher"
 	case w.bdReal == nil:
 		return "bd.real runner"
+	case w.serverPort == nil:
+		return "server port"
 	case w.tempDir == nil:
 		return "temp directory"
 	default:
@@ -90,14 +99,19 @@ func unwiredRigAddStep(w rigAddWorkspace) string {
 	}
 }
 
-// rigInitArgv is bd init for one rig's database, with the flags the local init in
-// InitBeads uses (no server port: bd picks its default).
-func rigInitArgv(rig, prefix string) []string {
+// rigInitArgv is bd init for one rig's database, with the flags the rig's own init
+// in AddRig uses. port is the town's Dolt port, 0 for none: bd then takes its
+// endpoint from the environment.
+func rigInitArgv(rig, prefix string, port int) []string {
 	argv := []string{"init"}
 	if prefix != "" {
 		argv = append(argv, "--prefix", prefix)
 	}
-	return append(argv, "--database", rig, "--server", "--force", "--skip-agents")
+	argv = append(argv, "--database", rig, "--server")
+	if port > 0 {
+		argv = append(argv, "--server-port", strconv.Itoa(port))
+	}
+	return append(argv, "--force", "--skip-agents")
 }
 
 // rigInitBdRealTimeout bounds one bd.real init, so a hung init cannot hold up gt rig add.

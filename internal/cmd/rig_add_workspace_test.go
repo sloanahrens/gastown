@@ -27,6 +27,7 @@ func fakeRigAddWorkspace(t *testing.T, gatewayURL string) (rigAddWorkspace, *[]s
 			events = append(events, "init in "+workDir+": "+strings.Join(argv, " "))
 			return nil
 		},
+		serverPort: func(string) int { return 0 },
 		tempDir: func() (string, error) {
 			events = append(events, "tempdir")
 			return dir, nil
@@ -48,6 +49,30 @@ func TestRigAddWorkspaceInitThenPush(t *testing.T) {
 	want := []string{
 		"tempdir",
 		"init in " + dir + ": " + rigAddInitArgs,
+		"push /town",
+		"remove " + dir,
+	}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("events = %q\nwant %q", *events, want)
+	}
+}
+
+func TestRigAddWorkspaceInitPassesTownPort(t *testing.T) {
+	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
+	w.serverPort = func(townRoot string) int {
+		if townRoot != "/town" {
+			t.Errorf("serverPort(%q), want it asked about the town root", townRoot)
+		}
+		return 3307
+	}
+
+	if err := w.run(context.Background(), "/town", "gastown", "gt"); err != nil {
+		t.Fatalf("run() error = %v, want nil", err)
+	}
+
+	want := []string{
+		"tempdir",
+		"init in " + dir + ": init --prefix gt --database gastown --server --server-port 3307 --force --skip-agents",
 		"push /town",
 		"remove " + dir,
 	}
@@ -135,6 +160,38 @@ func TestRigAddWorkspaceRefusals(t *testing.T) {
 				w.push = nil
 			},
 			wantErr:    "pusher",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no bd.real runner wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.bdReal = nil
+			},
+			wantErr:    "bd.real runner",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no server port source wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.serverPort = nil
+			},
+			wantErr:    "server port",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no temp directory maker wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.tempDir = nil
+			},
+			wantErr:    "temp directory",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no temp directory remover wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.removeDir = nil
+			},
+			wantErr:    "temp directory remover",
 			wantEvents: func(string) []string { return nil },
 		},
 	}
