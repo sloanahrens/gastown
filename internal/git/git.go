@@ -5610,18 +5610,32 @@ func hasTrackedGitmodules(run runFunc, repoPath string) bool {
 
 // InitSparseCheckout initializes sparse checkout with cone mode and configures
 // the given paths. If paths is empty, initializes with cone mode only (checkout root files).
+// The calls run through g's runner, so a handle carrying a run observer
+// (WithRunObserver) counts each process it starts (gt-74tzuk).
+func (g *Git) InitSparseCheckout(repoPath string, paths []string) error {
+	return initSparseCheckout(g.runner(), repoPath, paths)
+}
+
+// InitSparseCheckout initializes sparse checkout with cone mode and configures
+// the given paths, running real git: the variant for a caller that holds no
+// handle to observe. A caller with a handle uses (*Git).InitSparseCheckout,
+// whose processes then count.
 func InitSparseCheckout(repoPath string, paths []string) error {
-	if err := EnsureSafeMutationWorkDir(repoPath); err != nil {
+	return initSparseCheckout(realRun, repoPath, paths)
+}
+
+func initSparseCheckout(run runFunc, repoPath string, paths []string) error {
+	if err := ensureSafeMutationWorkDir(run, repoPath); err != nil {
 		return err
 	}
 
 	// Initialize sparse checkout in cone mode
-	if _, stderr, err := realRun(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "init", "--cone"}}); err != nil {
+	if _, stderr, err := run(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "init", "--cone"}}); err != nil {
 		return fmt.Errorf("initializing sparse checkout: %s", strings.TrimSpace(stderr))
 	}
 	if len(paths) > 0 {
 		args := append([]string{"-C", repoPath, "sparse-checkout", "set"}, paths...)
-		if _, stderr, err := realRun(gitCall{args: args}); err != nil {
+		if _, stderr, err := run(gitCall{args: args}); err != nil {
 			return fmt.Errorf("setting sparse checkout paths: %s", strings.TrimSpace(stderr))
 		}
 	}

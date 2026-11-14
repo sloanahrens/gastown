@@ -81,6 +81,28 @@ func TestSlingCallsTwoHandlesCountSeparately(t *testing.T) {
 	}
 }
 
+// TestSlingCallsSparseCheckoutCountsThroughTheHandle drives InitSparseCheckout
+// on an observed handle: the town-root guard's rev-parse and the two
+// sparse-checkout calls each count (gt-74tzuk).
+func TestSlingCallsSparseCheckoutCountsThroughTheHandle(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	script := newScripted(map[string]reply{
+		"-C " + dir + " rev-parse --show-toplevel":   ok(dir),
+		"-C " + dir + " sparse-checkout init --cone": ok(""),
+		"-C " + dir + " sparse-checkout set one two": ok(""),
+	})
+	var count int
+	g := (&Git{exec: script.run}).WithRunObserver(func() { count++ })
+
+	if err := g.InitSparseCheckout(dir, []string{"one", "two"}); err != nil {
+		t.Fatalf("InitSparseCheckout: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("observer counted %d git processes for the guard and the two sparse-checkout calls, want 3", count)
+	}
+}
+
 func TestSlingCallsCountsARetryAsAnotherProcess(t *testing.T) {
 	t.Parallel()
 	var count int

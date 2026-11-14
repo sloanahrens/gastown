@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,18 +108,29 @@ type spawnGitSite struct {
 // construction that forgets the observer fails the guard instead of going
 // uncounted, and so does a known site whose observer is removed (gt-74tzuk).
 // The two functions listed with a reason carry no trace: IsRigName resolves a
-// CLI rig target in a helper that no traced path reaches — the spec dispatcher
-// resolves its target inside sling.Run, which does not call it — and getRigGit
-// returns a bare-repo handle its spawn-path caller observes before the first
-// call (detectSpawnIntegrationBranchTo), while its other callers run untraced.
+// `gt sling` command-line target (slingRun's isRigName and
+// workflowTargetOverride), and that command path creates no trace; the spec
+// dispatcher's traced dispatch goes through sling.Run, whose deps carry no
+// IsRigName. getRigGit returns a bare-repo handle its spawn-path caller
+// observes before the first call (detectSpawnIntegrationBranchTo), while its
+// other callers run untraced.
 var spawnPathGitSites = map[string]spawnGitSite{
 	"openSlingRig": {count: 2, observed: true},
 	"startSession": {count: 2, observed: true},
-	"IsRigName": {count: 1, reason: "resolves a CLI rig target, and no trace exists on any path " +
-		"that reaches it: the spec dispatcher resolves its target inside sling.Run"},
+	"IsRigName": {count: 1, reason: "resolves a `gt sling` command-line target (slingRun's isRigName " +
+		"and workflowTargetOverride), and that command path creates no trace; the spec dispatcher's " +
+		"traced dispatch goes through sling.Run, whose deps carry no IsRigName"},
 	"getRigGit": {count: 1, reason: "the spawn path's caller observes the returned handle; " +
 		"its other callers (polecat, batch, start) run with no trace"},
 }
+
+// minSpawnGitConstructions is the floor the git guard's scan must find before
+// it trusts itself; polecat_spawn.go builds more, and a scan that sees fewer
+// has stopped seeing the file.
+const minSpawnGitConstructions = 5
+
+// minSpawnManagerSites is the floor the manager guard's scan must find.
+const minSpawnManagerSites = 4
 
 // spawnManagerSite is what one function in polecat_spawn.go does with the
 // polecat Manager and SessionManager it builds: how many, and whether each
@@ -147,36 +160,45 @@ var spawnPathManagerSites = map[string]spawnManagerSite{
 // the git calls a step made (gt-74tzuk).
 func TestSlingCallsSpawnPathGitHandlesCarryTheObserver(t *testing.T) {
 	t.Parallel()
-	found := spawnFileGitConstructions(t)
+	for _, problem := range spawnPathGitProblems(spawnFileGitConstructions(t), spawnPathGitSites) {
+		t.Error(problem)
+	}
+}
+
+// spawnPathGitProblems returns one problem per way the scanned git
+// constructions in polecat_spawn.go deviate from the guard table.
+func spawnPathGitProblems(found map[string]spawnBuildCounts, sites map[string]spawnGitSite) []string {
 	total := 0
 	for _, site := range found {
 		total += site.observed + site.unobserved
 	}
-	if total < 5 {
-		t.Fatalf("found %d git constructions in polecat_spawn.go, want at least 5: the scanner has stopped seeing them", total)
+	if total < minSpawnGitConstructions {
+		return []string{fmt.Sprintf("found %d git constructions in polecat_spawn.go, want at least %d: the scanner has stopped seeing them", total, minSpawnGitConstructions)}
 	}
+	var problems []string
 	for _, name := range spawnFileSortedKeys(found) {
 		site := found[name]
-		want, known := spawnPathGitSites[name]
+		want, known := sites[name]
 		if !known {
-			t.Errorf("%s builds %d git handle(s); name it in spawnPathGitSites with the observer it carries or the reason it carries none", name, site.observed+site.unobserved)
+			problems = append(problems, fmt.Sprintf("%s builds %d git handle(s); name it in spawnPathGitSites with the observer it carries or the reason it carries none", name, site.observed+site.unobserved))
 			continue
 		}
 		if got := site.observed + site.unobserved; got != want.count {
-			t.Errorf("%s builds %d git handle(s), spawnPathGitSites says %d", name, got, want.count)
+			problems = append(problems, fmt.Sprintf("%s builds %d git handle(s), spawnPathGitSites says %d", name, got, want.count))
 		}
 		if want.observed && site.unobserved > 0 {
-			t.Errorf("%s builds %d git handle(s) without .WithRunObserver; the sling's git calls go uncounted there", name, site.unobserved)
+			problems = append(problems, fmt.Sprintf("%s builds %d git handle(s) without .WithRunObserver; the sling's git calls go uncounted there", name, site.unobserved))
 		}
 		if !want.observed && (site.observed > 0 || want.reason == "") {
-			t.Errorf("%s is listed as unobserved but %d handle(s) carry an observer or no reason is given; observe them and delete the entry, or state the reason", name, site.observed)
+			problems = append(problems, fmt.Sprintf("%s is listed as unobserved but %d handle(s) carry an observer or no reason is given; observe them and delete the entry, or state the reason", name, site.observed))
 		}
 	}
-	for name := range spawnPathGitSites {
+	for _, name := range spawnFileSortedKeys(sites) {
 		if _, ok := found[name]; !ok {
-			t.Errorf("spawnPathGitSites names %s, which no longer builds a git handle; delete the entry", name)
+			problems = append(problems, fmt.Sprintf("spawnPathGitSites names %s, which no longer builds a git handle; delete the entry", name))
 		}
 	}
+	return problems
 }
 
 // TestSlingCallsSpawnPathManagersTakeTheObserver fails when the spawn path
@@ -184,31 +206,241 @@ func TestSlingCallsSpawnPathGitHandlesCarryTheObserver(t *testing.T) {
 // counter at construction, or when a new build site appears unclassified.
 func TestSlingCallsSpawnPathManagersTakeTheObserver(t *testing.T) {
 	t.Parallel()
-	found := spawnFileManagerBuilds(t)
-	if len(found) < 4 {
-		t.Fatalf("found %d manager build sites in polecat_spawn.go, want at least 4: the scanner has stopped seeing them", len(found))
+	for _, problem := range spawnPathManagerProblems(spawnFileManagerBuilds(t), spawnPathManagerSites) {
+		t.Error(problem)
 	}
+}
+
+// spawnPathManagerProblems returns one problem per way the scanned manager
+// builds in polecat_spawn.go deviate from the guard table.
+func spawnPathManagerProblems(found map[string]spawnBuildCounts, sites map[string]spawnManagerSite) []string {
+	if len(found) < minSpawnManagerSites {
+		return []string{fmt.Sprintf("found %d manager build sites in polecat_spawn.go, want at least %d: the scanner has stopped seeing them", len(found), minSpawnManagerSites)}
+	}
+	var problems []string
 	for _, name := range spawnFileSortedKeys(found) {
 		site := found[name]
-		want, known := spawnPathManagerSites[name]
+		want, known := sites[name]
 		if !known {
-			t.Errorf("%s builds %d manager(s); name it in spawnPathManagerSites with the observer it takes or the reason it takes none", name, site.observed+site.unobserved)
+			problems = append(problems, fmt.Sprintf("%s builds %d manager(s); name it in spawnPathManagerSites with the observer it takes or the reason it takes none", name, site.observed+site.unobserved))
 			continue
 		}
 		if got := site.observed + site.unobserved; got != want.count {
-			t.Errorf("%s builds %d manager(s), spawnPathManagerSites says %d", name, got, want.count)
+			problems = append(problems, fmt.Sprintf("%s builds %d manager(s), spawnPathManagerSites says %d", name, got, want.count))
 		}
 		if want.observed && site.unobserved > 0 {
-			t.Errorf("%s builds %d manager(s) without the trace's observer at construction; their git calls go uncounted there", name, site.unobserved)
+			problems = append(problems, fmt.Sprintf("%s builds %d manager(s) without the trace's observer at construction; their git calls go uncounted there", name, site.unobserved))
 		}
 		if !want.observed && (site.observed > 0 || want.reason == "") {
-			t.Errorf("%s is listed as untraced but %d build(s) take an observer or no reason is given; delete the entry, or state the reason", name, site.observed)
+			problems = append(problems, fmt.Sprintf("%s is listed as untraced but %d build(s) take an observer or no reason is given; delete the entry, or state the reason", name, site.observed))
 		}
 	}
-	for name := range spawnPathManagerSites {
+	for _, name := range spawnFileSortedKeys(sites) {
 		if _, ok := found[name]; !ok {
-			t.Errorf("spawnPathManagerSites names %s, which no longer builds a manager; delete the entry", name)
+			problems = append(problems, fmt.Sprintf("spawnPathManagerSites names %s, which no longer builds a manager; delete the entry", name))
 		}
+	}
+	return problems
+}
+
+// TestSlingCallsSpawnPathGuardsRefuseEachBreach drives every failing branch of
+// the two box-3 guards with a fabricated scan, so each refusal is exercised by
+// a test and not only by the file the guard happens to scan today (gt-74tzuk).
+func TestSlingCallsSpawnPathGuardsRefuseEachBreach(t *testing.T) {
+	t.Parallel()
+	// The clean rows the breach rows start from: each names every site its
+	// guard table expects, so only the branch under test can fire.
+	cleanGitFound := map[string]spawnBuildCounts{
+		"openSlingRig": {observed: 2},
+		"startSession": {observed: 2},
+		"IsRigName":    {unobserved: 1},
+	}
+	cleanGitSites := map[string]spawnGitSite{
+		"openSlingRig": {count: 2, observed: true},
+		"startSession": {count: 2, observed: true},
+		"IsRigName":    {count: 1, reason: "no trace on its path"},
+	}
+	cleanManagerFound := map[string]spawnBuildCounts{
+		"openSlingRig":        {observed: 1},
+		"startSession":        {observed: 2},
+		"realIdleReuseEnv":    {unobserved: 1},
+		"prepareSlingPolecat": {unobserved: 1},
+	}
+	cleanManagerSites := map[string]spawnManagerSite{
+		"openSlingRig":        {count: 1, observed: true},
+		"startSession":        {count: 2, observed: true},
+		"realIdleReuseEnv":    {count: 1, reason: "opens no git handle"},
+		"prepareSlingPolecat": {count: 1, reason: "opens no git handle"},
+	}
+
+	git := func(found map[string]spawnBuildCounts, sites map[string]spawnGitSite) func() []string {
+		return func() []string { return spawnPathGitProblems(found, sites) }
+	}
+	manager := func(found map[string]spawnBuildCounts, sites map[string]spawnManagerSite) func() []string {
+		return func() []string { return spawnPathManagerProblems(found, sites) }
+	}
+
+	tests := []struct {
+		name  string
+		check func() []string
+		want  string // a substring of the one problem the check must return; "" means none
+	}{
+		{
+			name:  "git scan stops seeing the file",
+			check: git(map[string]spawnBuildCounts{}, cleanGitSites),
+			want:  "want at least 5",
+		},
+		{
+			name: "git site is unclassified",
+			check: git(map[string]spawnBuildCounts{
+				"openSlingRig": {observed: 2},
+				"startSession": {observed: 2},
+				"IsRigName":    {unobserved: 1},
+				"newSite":      {observed: 1},
+			}, cleanGitSites),
+			want: "newSite builds 1 git handle(s); name it in spawnPathGitSites",
+		},
+		{
+			name: "git site count drifts",
+			check: git(map[string]spawnBuildCounts{
+				"openSlingRig": {observed: 3},
+				"startSession": {observed: 2},
+				"IsRigName":    {unobserved: 1},
+			}, cleanGitSites),
+			want: "openSlingRig builds 3 git handle(s), spawnPathGitSites says 2",
+		},
+		{
+			name: "observed git site loses its observer",
+			check: git(map[string]spawnBuildCounts{
+				"openSlingRig": {unobserved: 2},
+				"startSession": {observed: 2},
+				"IsRigName":    {unobserved: 1},
+			}, cleanGitSites),
+			want: "openSlingRig builds 2 git handle(s) without .WithRunObserver",
+		},
+		{
+			name: "unobserved git site carries an observer",
+			check: git(map[string]spawnBuildCounts{
+				"openSlingRig": {observed: 2},
+				"startSession": {observed: 2},
+				"IsRigName":    {observed: 1},
+			}, cleanGitSites),
+			want: "IsRigName is listed as unobserved but 1 handle(s) carry an observer",
+		},
+		{
+			name: "unobserved git site states no reason",
+			check: git(cleanGitFound, map[string]spawnGitSite{
+				"openSlingRig": {count: 2, observed: true},
+				"startSession": {count: 2, observed: true},
+				"IsRigName":    {count: 1},
+			}),
+			want: "IsRigName is listed as unobserved but 0 handle(s) carry an observer or no reason is given",
+		},
+		{
+			name: "git table names a site the scan no longer finds",
+			check: git(cleanGitFound, map[string]spawnGitSite{
+				"openSlingRig": {count: 2, observed: true},
+				"startSession": {count: 2, observed: true},
+				"IsRigName":    {count: 1, reason: "no trace on its path"},
+				"getRigGit":    {count: 1, reason: "its caller observes it"},
+			}),
+			want: "spawnPathGitSites names getRigGit, which no longer builds a git handle",
+		},
+		{
+			name:  "git guard accepts a matching scan",
+			check: git(cleanGitFound, cleanGitSites),
+			want:  "",
+		},
+		{
+			name:  "manager scan stops seeing the file",
+			check: manager(map[string]spawnBuildCounts{"openSlingRig": {observed: 1}}, cleanManagerSites),
+			want:  "want at least 4",
+		},
+		{
+			name: "manager site is unclassified",
+			check: manager(map[string]spawnBuildCounts{
+				"openSlingRig":        {observed: 1},
+				"startSession":        {observed: 2},
+				"realIdleReuseEnv":    {unobserved: 1},
+				"prepareSlingPolecat": {unobserved: 1},
+				"newSite":             {observed: 1},
+			}, cleanManagerSites),
+			want: "newSite builds 1 manager(s); name it in spawnPathManagerSites",
+		},
+		{
+			name: "manager site count drifts",
+			check: manager(map[string]spawnBuildCounts{
+				"openSlingRig":        {observed: 2},
+				"startSession":        {observed: 2},
+				"realIdleReuseEnv":    {unobserved: 1},
+				"prepareSlingPolecat": {unobserved: 1},
+			}, cleanManagerSites),
+			want: "openSlingRig builds 2 manager(s), spawnPathManagerSites says 1",
+		},
+		{
+			name: "observed manager site loses the observer",
+			check: manager(map[string]spawnBuildCounts{
+				"openSlingRig":        {unobserved: 1},
+				"startSession":        {observed: 2},
+				"realIdleReuseEnv":    {unobserved: 1},
+				"prepareSlingPolecat": {unobserved: 1},
+			}, cleanManagerSites),
+			want: "openSlingRig builds 1 manager(s) without the trace's observer at construction",
+		},
+		{
+			name: "untraced manager site takes an observer",
+			check: manager(map[string]spawnBuildCounts{
+				"openSlingRig":        {observed: 1},
+				"startSession":        {observed: 2},
+				"realIdleReuseEnv":    {observed: 1},
+				"prepareSlingPolecat": {unobserved: 1},
+			}, cleanManagerSites),
+			want: "realIdleReuseEnv is listed as untraced but 1 build(s) take an observer",
+		},
+		{
+			name: "untraced manager site states no reason",
+			check: manager(cleanManagerFound, map[string]spawnManagerSite{
+				"openSlingRig":        {count: 1, observed: true},
+				"startSession":        {count: 2, observed: true},
+				"realIdleReuseEnv":    {count: 1},
+				"prepareSlingPolecat": {count: 1, reason: "opens no git handle"},
+			}),
+			want: "realIdleReuseEnv is listed as untraced but 0 build(s) take an observer or no reason is given",
+		},
+		{
+			name: "manager table names a site the scan no longer finds",
+			check: manager(cleanManagerFound, map[string]spawnManagerSite{
+				"openSlingRig":        {count: 1, observed: true},
+				"startSession":        {count: 2, observed: true},
+				"realIdleReuseEnv":    {count: 1, reason: "opens no git handle"},
+				"prepareSlingPolecat": {count: 1, reason: "opens no git handle"},
+				"retiredSite":         {count: 1, reason: "opens no git handle"},
+			}),
+			want: "spawnPathManagerSites names retiredSite, which no longer builds a manager",
+		},
+		{
+			name:  "manager guard accepts a matching scan",
+			check: manager(cleanManagerFound, cleanManagerSites),
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			problems := tt.check()
+			if tt.want == "" {
+				if len(problems) != 0 {
+					t.Fatalf("problems = %v, want none for a scan that matches the table", problems)
+				}
+				return
+			}
+			if len(problems) != 1 {
+				t.Fatalf("problems = %v, want exactly the one breach under test", problems)
+			}
+			if !strings.Contains(problems[0], tt.want) {
+				t.Fatalf("problem = %q, want it to hold %q", problems[0], tt.want)
+			}
+		})
 	}
 }
 
