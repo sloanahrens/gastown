@@ -66,7 +66,7 @@ func TestShapeMinutesMatchFixtures(t *testing.T) {
 			if fx.SeatClass == "haiku" {
 				seat = SeatHaiku
 			}
-			got, err := w.ShapeMinutes(Features(fx.Text, fx.Rig, seat))
+			got, err := w.ShapeMinutes(Features(fx.Text, fx.Rig, seat, w))
 			if err != nil {
 				t.Fatalf("ShapeMinutes: %v", err)
 			}
@@ -376,6 +376,71 @@ func TestLoadTownWeightsWithNoTownRootReadsNoFile(t *testing.T) {
 	}
 	if len(fake.logged) != 0 {
 		t.Fatalf("logged = %v, want none", fake.logged)
+	}
+}
+
+// TestShapeMeanWithoutShapeLists checks a Weights with no shape model answers
+// no mean instead of reading past its empty list.
+func TestShapeMeanWithoutShapeLists(t *testing.T) {
+	t.Parallel()
+	if mean, ok := (Weights{}).ShapeMean("is_haiku"); ok {
+		t.Errorf("ShapeMean(is_haiku) on the zero Weights = %v, true; want false", mean)
+	}
+}
+
+// TestTownWeightsLoaderLoadsEachTownOnce checks a town's file is read once and
+// its weights reused, while a second town gets its own load: the one line a
+// rejected file is reported in cannot repeat per estimate.
+func TestTownWeightsLoaderLoadsEachTownOnce(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{readErr: fs.ErrNotExist}
+	l := NewTownWeightsLoader(fake.read, fake.logf)
+	for i := 0; i < 3; i++ {
+		if got := l.Load(runtimeTown); got.Version() != "embedded v1" {
+			t.Fatalf("Load(%q) = %q, want the embedded weights", runtimeTown, got.Version())
+		}
+	}
+	if want := []string{runtimeWeightsPath}; !slices.Equal(fake.paths, want) {
+		t.Fatalf("read paths = %v, want %v", fake.paths, want)
+	}
+	l.Load("/other")
+	if len(fake.paths) != 2 || !strings.HasPrefix(fake.paths[1], "/other/") {
+		t.Fatalf("read paths = %v, want a second read under /other", fake.paths)
+	}
+}
+
+// TestTownWeightsLoaderKeepsTheRuntimeModel checks the cached value is the
+// runtime model, so the second call cannot fall back to the embedded weights.
+func TestTownWeightsLoaderKeepsTheRuntimeModel(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{data: weightsWith(t, func(f *weightsFile) { f.Shape.Intercept++ })}
+	l := NewTownWeightsLoader(fake.read, fake.logf)
+	for i := 0; i < 2; i++ {
+		if got := l.Load(runtimeTown); got.Version() != "runtime v1" {
+			t.Fatalf("Load call %d = %q, want runtime v1", i+1, got.Version())
+		}
+	}
+	if len(fake.paths) != 1 {
+		t.Fatalf("read paths = %v, want one read", fake.paths)
+	}
+}
+
+// TestTownWeightsLoaderReportsARejectedFileOnce checks the fallback line is
+// written on the load that rejects the file, not on every call.
+func TestTownWeightsLoaderReportsARejectedFileOnce(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{data: []byte("not json")}
+	l := NewTownWeightsLoader(fake.read, fake.logf)
+	for i := 0; i < 2; i++ {
+		if got := l.Load(runtimeTown); got.Version() != "embedded v1" {
+			t.Fatalf("Load call %d = %q, want the embedded weights", i+1, got.Version())
+		}
+	}
+	if len(fake.logged) != 1 {
+		t.Fatalf("logged = %q, want exactly one line", fake.logged)
+	}
+	if !strings.Contains(fake.logged[0], runtimeWeightsPath) {
+		t.Fatalf("logged line %q does not name the file", fake.logged[0])
 	}
 }
 

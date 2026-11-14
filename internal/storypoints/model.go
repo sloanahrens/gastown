@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync"
 )
 
 // embeddedWeights is the checked-in weights file, a byte-for-byte copy of
@@ -144,13 +145,52 @@ func RuntimeWeightsPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "storypoints", "weights.json")
 }
 
+// TownWeightsLoader loads a town's weights at most once per loader: Load
+// remembers the value it picked for each town root, so a runtime file is read
+// once and an unreadable or invalid one is reported in one line however many
+// estimates run. It is safe for concurrent use.
+type TownWeightsLoader struct {
+	mu     sync.Mutex
+	byTown map[string]Weights
+
+	read func(string) ([]byte, error)
+	logf func(string, ...any)
+}
+
+// NewTownWeightsLoader returns a loader that reads the runtime file with read
+// and reports a rejected file through logf; both must be non-nil.
+// LoadTownWeights is wired to os.ReadFile and log.Printf, and a test passes its
+// own read and logger.
+func NewTownWeightsLoader(read func(string) ([]byte, error), logf func(string, ...any)) *TownWeightsLoader {
+	return &TownWeightsLoader{read: read, logf: logf}
+}
+
+// Load returns the weights to estimate with in townRoot, loading them on the
+// first call for that town and returning the same value for every later call.
+func (l *TownWeightsLoader) Load(townRoot string) Weights {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if w, ok := l.byTown[townRoot]; ok {
+		return w
+	}
+	w := loadTownWeights(townRoot, l.read, l.logf)
+	if l.byTown == nil {
+		l.byTown = make(map[string]Weights)
+	}
+	l.byTown[townRoot] = w
+	return w
+}
+
+// townWeights is the process's loader, the one LoadTownWeights reads.
+var townWeights = NewTownWeightsLoader(os.ReadFile, log.Printf)
+
 // LoadTownWeights returns the weights to estimate with in townRoot: the runtime
-// file when it is present and loads, the embedded weights otherwise. A runtime
-// file that cannot be read or does not load is reported in one logged line and
-// is never an error, so an estimate always has weights; a missing file is
+// file when it is present and loads, the embedded weights otherwise. It loads a
+// town once per process, so the file is read once and a rejected runtime file
+// is reported in one logged line and never as an error; a missing file is
 // silent, because a town that has adopted no model is the normal case.
 func LoadTownWeights(townRoot string) Weights {
-	return loadTownWeights(townRoot, os.ReadFile, log.Printf)
+	return townWeights.Load(townRoot)
 }
 
 // loadTownWeights is LoadTownWeights with the file read and the logger passed
@@ -294,10 +334,11 @@ func (w Weights) shapeLog(s Shape) float64 {
 }
 
 // ShapeMean returns the training mean of the named shape feature. ok is false
-// when the name is not a shape feature.
+// when the name is not a shape feature or w has no shape model, such as the
+// zero Weights.
 func (w Weights) ShapeMean(feature string) (mean float64, ok bool) {
 	i := slices.Index(shapeFeatureNames, feature)
-	if i < 0 {
+	if i < 0 || i >= len(w.shapeMean) {
 		return 0, false
 	}
 	return w.shapeMean[i], true

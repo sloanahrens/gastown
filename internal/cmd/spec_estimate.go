@@ -396,11 +396,16 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 	if err != nil {
 		return estimate.Deps{}, fmt.Errorf("reading patrols.spec_dispatch: %w", err)
 	}
-	embedder, err := specEstimateEmbedder(sd)
+	// The weights are loaded once here and passed to the estimate, so the
+	// embedder's reply check and the ridge that reads its vectors are the same
+	// model; a second load in the estimate would let them disagree.
+	weights := storypoints.LoadTownWeights(townRoot)
+	embedder, err := specEstimateEmbedder(sd, weights)
 	if err != nil {
 		return estimate.Deps{}, err
 	}
 	return estimate.Deps{
+		Weights:  &weights,
 		TownRoot: townRoot,
 		Embedder: embedder,
 		JevAsk:   specEstimateJev(townRoot, errw),
@@ -411,8 +416,11 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 
 // specEstimateEmbedder builds the embedder from story_points, or returns a nil
 // embedder when none is configured. A URL with no model is refused, since the
-// embedder would send a request that names no model.
-func specEstimateEmbedder(sd *config.SpecDispatchConfig) (storypoints.Embedder, error) {
+// embedder would send a request that names no model. The embedder's model and
+// its reply dimension are the loaded weights': a runtime file fitted on another
+// embedding model, or one with no ridge, would mix sources inside one estimate,
+// so each is refused with the reason.
+func specEstimateEmbedder(sd *config.SpecDispatchConfig, w storypoints.Weights) (storypoints.Embedder, error) {
 	if sd == nil || sd.StoryPoints == nil || sd.StoryPoints.EmbedderURL == "" {
 		return nil, nil
 	}
@@ -420,13 +428,30 @@ func specEstimateEmbedder(sd *config.SpecDispatchConfig) (storypoints.Embedder, 
 	if sp.EmbedderModel == "" {
 		return nil, errors.New("patrols.spec_dispatch.story_points.embedder_url is set without embedder_model")
 	}
+	if w.EmbeddingDimension() == 0 {
+		return nil, fmt.Errorf("patrols.spec_dispatch.story_points.embedder_url is set but the %s weights have no embedding ridge",
+			weightsName(w))
+	}
+	if model := w.EmbeddingModel(); model != sp.EmbedderModel {
+		return nil, fmt.Errorf("the %s weights name embedding model %q, but patrols.spec_dispatch.story_points.embedder_model is %q",
+			weightsName(w), model, sp.EmbedderModel)
+	}
 	return storypoints.OllamaEmbedder{
 		URL:     sp.EmbedderURL,
 		Model:   sp.EmbedderModel,
-		Dim:     storypoints.Default().EmbeddingDimension(),
+		Dim:     w.EmbeddingDimension(),
 		Timeout: specEstimateEmbedTimeout,
 		HTTP:    &http.Client{},
 	}, nil
+}
+
+// weightsName names a Weights value in an error: its version, or the zero
+// value's lack of one.
+func weightsName(w storypoints.Weights) string {
+	if v := w.Version(); v != "" {
+		return v
+	}
+	return "loaded"
 }
 
 // specEstimateJev is the Jev input. When the battery cannot be opened, the

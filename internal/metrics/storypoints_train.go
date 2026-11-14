@@ -107,7 +107,7 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	if embedder == nil {
 		embedder = storyPointsEmbedder(base, os.Getenv)
 	}
-	samples, skips, err := trainingSamples(ctx, env, real.Town, rows, embedder)
+	samples, skips, err := trainingSamples(ctx, env, real.Town, rows, base, embedder)
 	if err != nil {
 		return err
 	}
@@ -135,9 +135,11 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 // present, its rig names a directory, and its bead is in the store with a
 // Constraints or Acceptance section. A lower-bound time is read at its floor:
 // dropping it would remove the long beads, which are the ones the bound marks.
-// The others are counted in skips. An embedder error fails the whole step: a bead
-// the embedder could not read is not a bead the fit may leave out without saying so.
-func trainingSamples(ctx context.Context, env Env, town string, rows []Row, embedder storypoints.Embedder) ([]storypoints.Sample, trainSkips, error) {
+// The others are counted in skips. base is the model the new one is fitted from,
+// and it supplies the shape features' is_haiku mean. An embedder error fails the
+// whole step: a bead the embedder could not read is not a bead the fit may leave
+// out without saying so.
+func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder) ([]storypoints.Sample, trainSkips, error) {
 	var skips trainSkips
 	var cands []trainCandidate
 	byDir := map[string][]string{}
@@ -197,7 +199,7 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, embe
 			return nil, skips, fmt.Errorf("storypoints-train: embed bead %s: %w", c.bead, err)
 		}
 		samples = append(samples, storypoints.Sample{
-			Shape:    storypoints.Features(storypoints.EstimateText(issue), c.rig, c.seat),
+			Shape:    storypoints.Features(storypoints.EstimateText(issue), c.rig, c.seat, base),
 			Vector:   vec,
 			Minutes:  c.minutes,
 			LandedAt: c.landed,

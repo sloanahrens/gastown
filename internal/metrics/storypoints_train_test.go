@@ -497,7 +497,7 @@ func TestStoryPointsTrainKeepsALowerBoundAtItsFloor(t *testing.T) {
 		t.Fatalf("ReadLandings: %v", err)
 	}
 	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fix.store() }}
-	samples, skips, err := trainingSamples(context.Background(), env, fix.town, rows, trainTestEmbedder{})
+	samples, skips, err := trainingSamples(context.Background(), env, fix.town, rows, storypoints.Default(), trainTestEmbedder{})
 	if err != nil {
 		t.Fatalf("trainingSamples: %v", err)
 	}
@@ -717,7 +717,7 @@ func TestStoryPointsTrainReportsTheScoredFile(t *testing.T) {
 		t.Fatalf("ReadLandings: %v", err)
 	}
 	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return store }}
-	samples, _, err := trainingSamples(context.Background(), env, fix.town, rows, trainTestEmbedder{})
+	samples, _, err := trainingSamples(context.Background(), env, fix.town, rows, storypoints.Default(), trainTestEmbedder{})
 	if err != nil {
 		t.Fatalf("trainingSamples: %v", err)
 	}

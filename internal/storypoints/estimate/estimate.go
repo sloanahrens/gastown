@@ -41,12 +41,15 @@ type JevAsker func(ctx context.Context, issue *beads.Issue) (dispatch.Answers, e
 // skipped, the reason goes in the result, and the blend falls to the rung its
 // remaining inputs make.
 type Deps struct {
-	// Weights is the model; nil means the weights LoadTownWeights picks for
-	// TownRoot: the town's runtime file when it loads, the embedded file
-	// otherwise.
+	// Weights is the model; a non-nil value is used as is and no runtime file
+	// is read. Nil falls to WeightsLoader, then to LoadTownWeights.
 	Weights *storypoints.Weights
-	// TownRoot is the town whose runtime weights the estimate reads. Empty
-	// reads none, so the embedded weights are used.
+	// WeightsLoader loads the weights for TownRoot when Weights is nil. The
+	// LoadTownWeights default loads each town once per process, so a rejected
+	// runtime file is reported in one line however many estimates run.
+	WeightsLoader *storypoints.TownWeightsLoader
+	// TownRoot is the town whose runtime weights are read when Weights is nil.
+	// Empty reads none, so the embedded weights are used.
 	TownRoot string
 	// Embedder turns the section text into the vector the embedding ridge reads.
 	Embedder storypoints.Embedder
@@ -116,14 +119,11 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		return Result{}, ErrNoBeadText
 	}
 
-	weights := storypoints.LoadTownWeights(deps.TownRoot)
-	if deps.Weights != nil {
-		weights = *deps.Weights
-	}
+	weights := weightsFor(deps)
 
 	// The seat is unknown before dispatch, so the shape input neutralizes its
 	// term with the training mean.
-	shape := storypoints.Features(storypoints.EstimateText(issue), deps.Rig, storypoints.SeatUnknown)
+	shape := storypoints.Features(storypoints.EstimateText(issue), deps.Rig, storypoints.SeatUnknown, weights)
 	shapeMinutes, err := weights.ShapeMinutes(shape)
 	if err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: shape input: %w", err)
@@ -172,6 +172,20 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		Hash:             SectionHash(issue),
 		WeightsVersion:   weights.Version(),
 	}, nil
+}
+
+// weightsFor picks the model the estimate runs on: the caller's override, which
+// reads no runtime file, else the caller's loader, else the process-wide loader
+// LoadTownWeights shares.
+func weightsFor(deps Deps) storypoints.Weights {
+	switch {
+	case deps.Weights != nil:
+		return *deps.Weights
+	case deps.WeightsLoader != nil:
+		return deps.WeightsLoader.Load(deps.TownRoot)
+	default:
+		return storypoints.LoadTownWeights(deps.TownRoot)
+	}
 }
 
 // Note renders the comment that carries r. The first line identifies the
