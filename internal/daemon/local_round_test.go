@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -233,26 +232,6 @@ func failingFetch(string, string) (localRoundTree, error) {
 	return localRoundTree{}, errors.New("no such commit")
 }
 
-// boundCount reads the stored round count for bead, or 0 when the bound holds
-// no state file for it yet.
-func boundCount(t *testing.T, bound land.Bound, bead string) int {
-	t.Helper()
-	body, err := os.ReadFile(filepath.Join(bound.Dir, bead+".json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return 0
-	}
-	if err != nil {
-		t.Fatalf("reading the bound state for %s: %v", bead, err)
-	}
-	var st struct {
-		Count int `json:"count"`
-	}
-	if err := json.Unmarshal(body, &st); err != nil {
-		t.Fatalf("parsing the bound state for %s: %v", bead, err)
-	}
-	return st.Count
-}
-
 // A request whose head cannot be fetched never reaches the reviewer, so it
 // spends none of the bead's daily rounds: three failures leave the bound at
 // zero, and the next fetchable request is the day's first round (gt-u9r6ey).
@@ -267,9 +246,6 @@ func TestLocalRoundFetchFailureDoesNotCountTowardTheBound(t *testing.T) {
 		if got := strings.Count(beadStore.issues[0].Notes, "unavailable - could not fetch the head"); got != i {
 			t.Fatalf("after %d unanswered fetches the notes carry %d fetch answers; want %d", i, got, i)
 		}
-		if got := boundCount(t, p.Bound, "gt-ryp1ff"); got != 0 {
-			t.Fatalf("after %d requests whose fetch failed the bound count = %d; want 0", i, got)
-		}
 		beadStore.issues[0].Notes += "\nLOCAL ROUND REQUEST head=abcdef1"
 	}
 	p.Fetch = func(string, string) (localRoundTree, error) {
@@ -278,8 +254,8 @@ func TestLocalRoundFetchFailureDoesNotCountTowardTheBound(t *testing.T) {
 
 	p.Tick(context.Background())
 
-	if got := boundCount(t, p.Bound, "gt-ryp1ff"); got != 1 {
-		t.Fatalf("the fetchable request left the bound at %d; want the day's first round", got)
+	if next, err := p.Bound.Allow("gt-ryp1ff"); err != nil || next != 2 {
+		t.Fatalf("the next round is %d (err %v); want 2, so the fetchable request spent one round", next, err)
 	}
 	if want := land.FormatLocalRound(4, "abcdef1", []land.Finding{oneFinding}, roundClock); !strings.HasSuffix(beadStore.issues[0].Notes, "\n"+want) {
 		t.Fatalf("notes after the fetchable request:\n%s\nwant round 4's block:\n%s", beadStore.issues[0].Notes, want)
@@ -324,8 +300,8 @@ func TestLocalRoundReviewFailureStillCounts(t *testing.T) {
 	if !strings.HasPrefix(line, "LOCAL ROUND (1): unavailable - ") || !strings.Contains(line, "the om review failed") {
 		t.Fatalf("answer %q; want an unavailable line naming the review failure", line)
 	}
-	if got := boundCount(t, p.Bound, "gt-ryp1ff"); got != 1 {
-		t.Fatalf("a failed review left the bound at %d; want 1", got)
+	if next, err := p.Bound.Allow("gt-ryp1ff"); err != nil || next != 2 {
+		t.Fatalf("the next round is %d (err %v); want 2, so the failed review spent one round", next, err)
 	}
 }
 
