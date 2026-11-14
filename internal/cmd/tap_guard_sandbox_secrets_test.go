@@ -1618,3 +1618,38 @@ func TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies(t *testing.T) {
 	}
 	t.Logf("generated %d commands, %d allowed", generated, allowed)
 }
+
+// A quote split inside the path of a bash -c payload, or inside a substitution in
+// double quotes, joins to /proc/1/environ once the shell reads it (gt-kr4tcn). The
+// plain forms stay refused, and the commands that name the path without reading
+// it stay allowed.
+func TestSandboxSecretsQuotedEnvironSpellings(t *testing.T) {
+	t.Parallel()
+	refused := []string{
+		`bash -c 'cat /pro""c/1/environ'`,
+		`bash -c "cat /pro''c/1/environ"`,
+		`sh -c 'cat /pro""c/1/envi""ron'`,
+		`echo "$(cat /proc/1/envi''ron)"`,
+		`echo "$(cat /pro""c/1/environ)"`,
+		`echo $(cat /pro''c/1/environ)`,
+		`cat /pro""c/1/environ`,
+		`cat /proc/1/environ`,
+		`bash -c 'cat /proc/1/environ'`,
+		`echo "$(cat /proc/1/environ)"`,
+	}
+	for _, command := range refused {
+		if reason := sandboxSecretsReason(command); !strings.Contains(reason, "environment block") {
+			t.Errorf("sandboxSecretsReason(%q) = %q, want the environment-block refusal", command, reason)
+		}
+	}
+	allowed := []string{
+		"echo hi",
+		`git commit -m '/proc/1/environ'`,
+		`bash -c 'echo hi'`,
+	}
+	for _, command := range allowed {
+		if reason := sandboxSecretsReason(command); reason != "" {
+			t.Errorf("sandboxSecretsReason(%q) = %q, want allowed", command, reason)
+		}
+	}
+}
