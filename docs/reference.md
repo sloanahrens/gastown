@@ -492,6 +492,10 @@ A bead with no text has no estimate, and a canceled run has none either.
   fitted on `qwen3-embedding:4b-q8_0`. A URL with no model refuses the run.
 - `shadow` turns on the estimate that runs before each sling. It is off by
   default. **Shadow mode** below states what each setting does.
+- `split_over_minutes` turns on the split route: a bead whose estimate is at or
+  over this many minutes, on a rung of two or more inputs, is held for splitting
+  instead of slung. Zero, the default, is off. **Shadow mode** below states what
+  the route does.
 
 **Weights.** The model is `internal/storypoints/weights.json`, embedded in the
 binary. It holds the shape model, the Jev probability-to-minutes table, and the
@@ -527,6 +531,17 @@ do not change. An estimate that fails, or runs past 20 seconds, logs one line on
 the tick and the bead is slung as it would be without the setting. An estimate
 the timeout cancels may still write its `sp-rung:none` outcome after the sling
 has started.
+
+**Split route.** With `story_points.split_over_minutes` at zero, the default,
+the route is off and the estimate changes nothing else. With it set, a bead
+whose rung is `all`, `shape-jev` or `shape-embed` and whose blended minutes are
+at or over the trigger is not slung. The dispatcher adds the split label, writes
+a comment with the estimate and the nearest beads, and logs one line; no seat is
+taken. A bead on the `shape` rung is slung whatever its estimate. A bead the
+route cannot judge (an estimate that errors or times out, or no rung) is slung,
+records `sp-rung:none`, and the shadow report counts it under rung `none`, not
+as below the trigger. A bead already carrying the split label is held and
+not touched again.
 
 The landings pane's points velocity is a separate reading of polecat time; see
 [Story-point velocity](#story-point-velocity).
