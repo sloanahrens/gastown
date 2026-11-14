@@ -19,7 +19,7 @@ func renderFormulaStepsFull(formulaName string, steps []checklistStep) string {
 	sb.WriteString("\n")
 	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(steps), formulaName)
 	for i, step := range steps {
-		fmt.Fprintf(&sb, "### Step %d: %s%s\n\n", i+1, step.Title, stepStatusSuffix(step))
+		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, step.Title)
 		if step.Description != "" {
 			sb.WriteString(step.Description)
 			sb.WriteString("\n\n")

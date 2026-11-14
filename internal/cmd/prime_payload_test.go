@@ -293,20 +293,26 @@ func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 	}
 }
 
-// The step an agent reads is where it learns what gt mol step done does with
-// its session: the next step arrives in this one, so a session does not wait
-// for a successor that never starts (gt-qgq55).
-func TestRenderFormulaStep_SaysWhereTheNextStepRuns(t *testing.T) {
+// gt-nzpmju: prime no longer tells a seat to finish each step with
+// `gt mol step done`; the seat follows the checklist in order.
+func TestPrimeTextDoesNotDirectToStepDone(t *testing.T) {
 	t.Parallel()
-	out, err := renderFormulaStep("mol-test-work", threeStepFormula().checklist(), 2)
+	step, err := renderFormulaStep("mol-test-work", threeStepFormula().checklist(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "gt mol step done") || !strings.Contains(out, "this session") {
-		t.Fatalf("step text must say the next step is handed to this session:\n%s", out)
+	var directive bytes.Buffer
+	outputAutonomousDirective(&directive, RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: t.TempDir(), Polecat: "scout"},
+		&beads.Issue{ID: "gt-test", Title: "test"}, true)
+
+	cases := []struct{ name, text string }{
+		{"step text", step},
+		{"molecule directive", directive.String()},
 	}
-	if strings.Contains(out, "espawn") {
-		t.Fatalf("step text must not claim a respawn:\n%s", out)
+	for _, c := range cases {
+		if strings.Contains(c.text, "mol step done") {
+			t.Errorf("%s must not tell the seat to run gt mol step done:\n%s", c.name, c.text)
+		}
 	}
 }
 
@@ -342,12 +348,11 @@ func TestShowChecklist_CookFailureRendersNothing(t *testing.T) {
 func TestAssemblePrimePayload_HookedPolecatFitsAndLeadsWithWork(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	molecules, mol := polecatMolecule(t)
-	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, molecules: molecules}
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaOpen: polecatChecklistRun()}
 	bead := &beads.Issue{
 		ID:    "gt-zz9",
 		Title: "Make the thing do the other thing",
-		Description: "attached_molecule: " + mol + "\nattached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-zz9\"]\n\n" +
+		Description: "attached_molecule: gt-wisp-live\nattached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-zz9\"]\n\n" +
 			strings.Repeat("A long description line that should be capped by the 5-line rule.\n", 20),
 	}
 	directive := strings.Repeat("Operator directive line.\n", 60) // ~1.5 KB
@@ -677,12 +682,11 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			molecules, mol := polecatMolecule(t)
-			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, molecules: molecules}
+			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaOpen: polecatChecklistRun()}
 			var bead *beads.Issue
 			if f, ok := workFormula[role]; ok {
 				bead = &beads.Issue{ID: "gt-fix1", Title: "A realistic bead title of ordinary length for the fixture",
-					Description: "attached_molecule: " + mol + "\nattached_formula: " + f + "\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
+					Description: "attached_molecule: gt-wisp-live\nattached_formula: " + f + "\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
 			}
 			parts := primeParts{
 				session:    func() string { return "GAS TOWN role:x pid:1 session:s\n" },

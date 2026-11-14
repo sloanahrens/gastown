@@ -43,7 +43,7 @@ func renderFormulaChecklist(formulaName string, steps []checklistStep, fullStep 
 	sb.WriteString("\n")
 	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(steps), formulaName)
 	for i, step := range steps {
-		fmt.Fprintf(&sb, "### Step %d: %s%s\n\n", i+1, step.Title, stepStatusSuffix(step))
+		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, step.Title)
 		if i+1 != fullStep {
 			continue
 		}
@@ -77,19 +77,6 @@ func renderFormulaChecklist(formulaName string, steps []checklistStep, fullStep 
 	fmt.Fprintf(&sb, "Only step %d is shown in full. Before starting any other step, read it with `%s prime --step <N> --formula %s`.\n\n",
 		fullStep, cli.Name(), formulaName)
 	return sb.String()
-}
-
-// stepStatusSuffix marks a poured step that is no longer open, so the agent
-// sees where its molecule stands. A cooked step has no status.
-func stepStatusSuffix(step checklistStep) string {
-	switch step.Status {
-	case "", string(beads.StatusOpen):
-		return ""
-	case string(beads.StatusClosed):
-		return " (done)"
-	default:
-		return " (" + step.Status + ")"
-	}
 }
 
 // primeHookBudget is the most prime will print as a SessionStart hook. Claude
@@ -294,14 +281,11 @@ func renderFormulaStep(formulaName string, steps []checklistStep, n int) (string
 	}
 	step := steps[n-1]
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "### Step %d: %s%s\n\n", n, step.Title, stepStatusSuffix(step))
+	fmt.Fprintf(&sb, "### Step %d: %s\n\n", n, step.Title)
 	if desc := step.Description; desc != "" {
 		sb.WriteString(desc)
 		sb.WriteString("\n")
 	}
-	// The next step is handed to the session reading this, so the step text
-	// says where it is worked (gt-qgq55).
-	sb.WriteString("\nFinish this step with `gt mol step done <step-id>`: the next one is handed to this session, where you keep working.\n")
 	return sb.String(), nil
 }
 

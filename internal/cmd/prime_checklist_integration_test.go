@@ -43,12 +43,11 @@ title = "EDITED STEP"
 description = "EDITED BODY"
 `
 
-// TestIntegrationPrimeChecklist_FormulaEditedAfterPour is gt-fd2cu.2 on real
-// bd (gt-jxiks): a molecule poured by bd, whose formula is then rewritten on
-// disk, still renders its poured steps in prime's checklist, gt prime --step
-// and the Ralph prompt. The cook of the edited file is the control: bd does
-// see the edit, prime just never reads it for a poured molecule.
-func TestIntegrationPrimeChecklist_FormulaEditedAfterPour(t *testing.T) {
+// TestIntegrationPrimeChecklist_RendersTheCookedFormula is gt-nzpmju on real
+// bd: a molecule poured by bd whose formula is then rewritten on disk renders
+// the formula as it now reads, in prime's checklist, gt prime --step and the
+// Ralph prompt. Poured steps are not read, so their bodies never reach a seat.
+func TestIntegrationPrimeChecklist_RendersTheCookedFormula(t *testing.T) {
 	t.Parallel()
 	requireBd(t)
 	dir, b := setupPatrolTestDB(t)
@@ -71,42 +70,34 @@ func TestIntegrationPrimeChecklist_FormulaEditedAfterPour(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx := RoleContext{Role: RolePolecat, TownRoot: dir, WorkDir: dir, molecules: b}
-	cooked, err := ctx.formulaCooker().cookForRender("mol-itest", dir, "", nil)
-	if err != nil || len(cooked.Steps) != 1 || cooked.Steps[0].Title != "EDITED STEP" {
-		t.Fatalf("control: bd cook of the edited formula = %+v, %v; want the edited step", cooked, err)
-	}
-
+	ctx := RoleContext{Role: RolePolecat, TownRoot: dir, WorkDir: dir}
 	att := &beads.AttachmentFields{AttachedFormula: "mol-itest", AttachedMolecule: mol}
 	c, err := ctx.attachmentChecklist(att)
-	if err != nil || len(c.steps) != 3 {
-		t.Fatalf("poured checklist = %+v, %v; want 3 steps", c.steps, err)
-	}
-	if err := b.Close(c.steps[0].ID); err != nil {
-		t.Fatal(err)
+	if err != nil || len(c.steps) != 1 || c.steps[0].Title != "EDITED STEP" {
+		t.Fatalf("checklist = %+v, %v; want the edited formula's one step", c.steps, err)
 	}
 
 	var buf strings.Builder
 	ctx.showChecklist(&buf, att)
 	got := buf.String()
-	for _, want := range []string{"(3 steps from mol-itest)", "### Step 1: Load context (done)", "### Step 2: Implement\n\nPOURED BODY implement", "### Step 3: Submit"} {
+	for _, want := range []string{"### Step 1: EDITED STEP", "EDITED BODY"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("checklist missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "EDITED") {
-		t.Errorf("checklist shows the edited formula:\n%s", got)
+	if strings.Contains(got, "POURED") {
+		t.Errorf("checklist shows a poured step:\n%s", got)
 	}
 
 	step, err := ctx.primeStepChecklist(&beads.Issue{ID: "gt-itest", Description: "attached_molecule: " + mol + "\nattached_formula: mol-itest\n"}, "mol-itest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body, err := renderFormulaStep(step.name, step.steps, 3); err != nil || !strings.Contains(body, "POURED BODY submit") {
-		t.Errorf("gt prime --step 3 = %q, %v; want the poured step", body, err)
+	if body, err := renderFormulaStep(step.name, step.steps, 1); err != nil || !strings.Contains(body, "EDITED BODY") {
+		t.Errorf("gt prime --step 1 = %q, %v; want the cooked step", body, err)
 	}
 	prompt, err := renderRalphLoopPrompt(ctx, att)
-	if err != nil || !strings.Contains(prompt, "POURED BODY load") || strings.Contains(prompt, "EDITED") {
-		t.Errorf("Ralph prompt = %v, want every poured step:\n%s", err, prompt)
+	if err != nil || !strings.Contains(prompt, "EDITED BODY") || strings.Contains(prompt, "POURED") {
+		t.Errorf("Ralph prompt = %v; want the cooked step only:\n%s", err, prompt)
 	}
 }
