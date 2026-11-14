@@ -4,8 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
-	"slices"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -13,364 +12,271 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	composeFile  = "docker-compose.yml"
-	doltService  = "dolt"
-	bdService    = "bd"
-	keepLabel    = "org.gastown.keep"
-	doltMemLimit = "8g"
-	bdMemLimit   = "1g"
-	bdCPUs       = 1
-)
+const composeFile = "docker-compose.yml"
 
-// composeUnit is the part of the compose file the contract reads.
-type composeUnit struct {
-	Services map[string]composeService `yaml:"services"`
-}
-
-type composeService struct {
-	Image        string                `yaml:"image"`
-	Restart      string                `yaml:"restart"`
-	Command      []string              `yaml:"command"`
-	Environment  map[string]string     `yaml:"environment"`
-	Labels       map[string]string     `yaml:"labels"`
-	Ports        []string              `yaml:"ports"`
-	Volumes      []string              `yaml:"volumes"`
-	MemLimit     string                `yaml:"mem_limit"`
-	MemswapLimit string                `yaml:"memswap_limit"`
-	CPUs         float64               `yaml:"cpus"`
-	Healthcheck  composeHealthcheck    `yaml:"healthcheck"`
-	DependsOn    map[string]composeDep `yaml:"depends_on"`
-}
-
-type composeHealthcheck struct {
-	Test []string `yaml:"test"`
-}
-
-type composeDep struct {
-	Condition string `yaml:"condition"`
-}
-
-// secretName matches a key or a KEY=value name that names a secret.
-var secretName = regexp.MustCompile(`(?i)password|passwd|token|secret`)
-
-// envEntry matches a list entry in KEY=value form, as compose's environment list takes.
-var envEntry = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
-
-// secretRef matches a value that names a secret without carrying it: a
-// variable with no default, or a file in the token directory. A default such
-// as ${NAME:-x} carries x, and a $$ escape is a literal dollar, so neither matches.
-var secretRef = regexp.MustCompile(`^(\$\{[A-Za-z_][A-Za-z0-9_]*(:\?[^}]*)?\}|\$[A-Za-z_][A-Za-z0-9_]*|/run/bdgw/tokens/[A-Za-z0-9._-]+)$`)
-
-// namedVolume matches a volume entry whose source is a Docker named volume: a
-// bare name with no path separator. Every other source is a host path.
-var namedVolume = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*:`)
-
-// tokenMount is the one host mount the bd gateway has: the token directory,
-// read-only, taken from GT_BD_TOKEN_DIR with no default.
-var tokenMount = regexp.MustCompile(`^\$\{GT_BD_TOKEN_DIR:\?[^}]+\}:/run/bdgw/tokens:ro$`)
-
-// variableImage matches an image read from an environment variable with no
-// default, ${NAME:?message}, whose message names the digest form. Compose cannot
-// validate the value it is given; the value is set where the unit is started (G15).
-func variableImage(name, digestForm string) *regexp.Regexp {
-	return regexp.MustCompile(`^\$\{` + name + `:\?[^}]*` + regexp.QuoteMeta(digestForm) + `[^}]*\}$`)
-}
-
-// probeArgv is the exec form of a healthcheck: CMD, then exactly these words.
-// A shell form, or a different command with the same words, does not match.
-func probeArgv(test []string, words []string) bool {
-	return len(test) == len(words)+1 && test[0] == "CMD" && slices.Equal(test[1:], words)
-}
-
-var (
-	doltProbe = []string{"dolt", "--host", "127.0.0.1", "--port", "3306", "-u", "root", "sql", "-q", "select 1"}
-	bdProbe   = []string{"/usr/local/bin/bdgw", "ready", "--tokens-dir", "/run/bdgw/tokens", "--verbs", "/etc/bdgw/verbs.json", "--workspace", "/ws"}
-)
-
-// parseUnit decodes the compose file. A file that does not parse, or lacks
-// either service, is refused before any other check runs.
-func parseUnit(raw []byte) (composeUnit, error) {
-	var u composeUnit
-	if err := yaml.Unmarshal(raw, &u); err != nil {
-		return u, fmt.Errorf("%s is not valid YAML: %w", composeFile, err)
+// expectedUnit is the whole compose file as the contract reads it. The file must
+// decode to exactly this document, so a key it does not name fails by
+// construction: privileged, network_mode, a literal in command or environment,
+// a service added, a bind in a top-level volume. Image values are compared as
+// their variable text and never resolved.
+func expectedUnit() map[string]any {
+	return map[string]any{
+		"name": "gt-data",
+		"services": map[string]any{
+			"dolt": map[string]any{
+				"image":          "${GT_DOLT_IMAGE:?set GT_DOLT_IMAGE to the dolt-sql-server image pinned by digest}",
+				"container_name": "gt-dolt",
+				"restart":        "unless-stopped",
+				"command": []any{
+					"--config",
+					"${GT_DOLT_CONFIG:?set GT_DOLT_CONFIG to the Dolt config file}",
+				},
+				"labels": map[string]any{"org.gastown.keep": "true"},
+				"ports":  []any{"127.0.0.1:3307:3306"},
+				"volumes": []any{
+					"dolt-var:/var/lib/dolt",
+					"${GT_DOLT_DATA:?set GT_DOLT_DATA to the .dolt-data directory}:${GT_DOLT_DATA}",
+					"${GT_DOLT_BACKUPS:?set GT_DOLT_BACKUPS to the Dolt backups directory}:${GT_DOLT_BACKUPS}",
+					"${GT_DOLT_CONFIG}:${GT_DOLT_CONFIG}:ro",
+				},
+				"mem_limit":     "8g",
+				"memswap_limit": "8g",
+				"healthcheck": map[string]any{
+					"test":     []any{"CMD", "dolt", "--host", "127.0.0.1", "--port", "3306", "-u", "root", "sql", "-q", "select 1"},
+					"interval": "10s",
+					"timeout":  "5s",
+					"retries":  5,
+				},
+			},
+			"bd": map[string]any{
+				"image":          "${BD_IMAGE:?set BD_IMAGE to a digest reference name@sha256:<digest>}",
+				"container_name": "gt-bd",
+				"restart":        "unless-stopped",
+				"depends_on": map[string]any{
+					"dolt": map[string]any{"condition": "service_healthy"},
+				},
+				"command": []any{
+					"--tokens-dir", "/run/bdgw/tokens",
+					"--verbs", "/etc/bdgw/verbs.json",
+					"--log-dir", "/var/log/bdgw",
+					"--workspace", "/ws",
+				},
+				"environment": map[string]any{
+					"HOME":               "/home/bdgw",
+					"TRACKER_URL":        "${GT_TRACKER_URL:-}",
+					"TRACKER_TOKEN_FILE": "/run/bdgw/tokens/tracker",
+				},
+				"labels": map[string]any{"org.gastown.keep": "true"},
+				"ports":  []any{"127.0.0.1:7440:7440"},
+				"volumes": []any{
+					"${GT_BD_TOKEN_DIR:?set GT_BD_TOKEN_DIR to the gateway token directory}:/run/bdgw/tokens:ro",
+					"bd-logs:/var/log/bdgw",
+					"bd-ws:/ws",
+				},
+				"mem_limit": "1g",
+				"cpus":      1,
+				"healthcheck": map[string]any{
+					"test": []any{"CMD", "/usr/local/bin/bdgw", "ready", "--tokens-dir", "/run/bdgw/tokens",
+						"--verbs", "/etc/bdgw/verbs.json", "--workspace", "/ws"},
+					"interval": "10s",
+					"timeout":  "5s",
+					"retries":  5,
+				},
+			},
+		},
+		"volumes": map[string]any{
+			"dolt-var": nil,
+			"bd-logs":  nil,
+			"bd-ws":    nil,
+		},
 	}
-	for _, name := range []string{doltService, bdService} {
-		if _, ok := u.Services[name]; !ok {
-			return u, fmt.Errorf("%s defines no %s service", composeFile, name)
-		}
-	}
-	return u, nil
 }
 
-// checkUnit returns every way raw breaks the compose contract, joined, or nil
-// when the contract holds.
+// decodeUnit parses the compose file into a generic document. A file that does
+// not parse is refused before any comparison runs.
+func decodeUnit(raw []byte) (map[string]any, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("%s is not valid YAML: %w", composeFile, err)
+	}
+	return doc, nil
+}
+
+// checkUnit returns every difference between the file and the expected document,
+// or nil when the file matches it exactly.
 func checkUnit(raw []byte) error {
-	u, err := parseUnit(raw)
+	doc, err := decodeUnit(raw)
 	if err != nil {
 		return err
 	}
-	return errors.Join(
-		checkRestart(u),
-		checkLimits(u),
-		checkLoopbackPorts(u),
-		checkHealthChecks(u),
-		checkKeepLabel(u),
-		checkDependsOn(u),
-		checkImages(u),
-		checkBdMounts(u),
-		checkNoSecrets(raw),
-	)
+	return checkDoc(doc)
 }
 
-func checkRestart(u composeUnit) error {
-	var errs []error
-	for _, name := range []string{doltService, bdService} {
-		if got := u.Services[name].Restart; got != "unless-stopped" {
-			errs = append(errs, fmt.Errorf("%s restart=%q; want unless-stopped", name, got))
+func checkDoc(doc map[string]any) error {
+	return diffError(diffDoc("", expectedUnit(), doc))
+}
+
+// checkSections compares each dotted path of the file with the same path of the
+// expected document. A path absent from both is equal.
+func checkSections(raw []byte, paths ...string) error {
+	doc, err := decodeUnit(raw)
+	if err != nil {
+		return err
+	}
+	want := expectedUnit()
+	var diffs []string
+	for _, p := range paths {
+		diffs = append(diffs, diffDoc(p, at(want, p), at(doc, p))...)
+	}
+	return diffError(diffs)
+}
+
+// at returns the value at a dotted path, or nil when the path is absent.
+func at(doc any, path string) any {
+	for _, k := range strings.Split(path, ".") {
+		m, ok := doc.(map[string]any)
+		if !ok {
+			return nil
 		}
+		doc = m[k]
 	}
-	return errors.Join(errs...)
+	return doc
 }
 
-// checkLimits holds the Dolt cap at the 8 GiB the container runs under today,
-// with swap equal so the cap is never exceeded through swap, and the bd
-// gateway at its design start of 1 CPU and 1 GiB.
-func checkLimits(u composeUnit) error {
-	dolt := u.Services[doltService]
-	bd := u.Services[bdService]
-	var errs []error
-	if dolt.MemLimit != doltMemLimit {
-		errs = append(errs, fmt.Errorf("dolt mem_limit=%q; want %s", dolt.MemLimit, doltMemLimit))
-	}
-	if dolt.MemswapLimit != dolt.MemLimit {
-		errs = append(errs, fmt.Errorf("dolt memswap_limit=%q; want it equal to mem_limit %q", dolt.MemswapLimit, dolt.MemLimit))
-	}
-	if bd.MemLimit != bdMemLimit {
-		errs = append(errs, fmt.Errorf("bd mem_limit=%q; want %s", bd.MemLimit, bdMemLimit))
-	}
-	if bd.CPUs != bdCPUs {
-		errs = append(errs, fmt.Errorf("bd cpus=%g; want %d", bd.CPUs, bdCPUs))
-	}
-	return errors.Join(errs...)
-}
-
-// checkLoopbackPorts requires every published port to bind 127.0.0.1, so the
-// Mac's loopback is the only address that reaches either service.
-func checkLoopbackPorts(u composeUnit) error {
-	var errs []error
-	for _, name := range []string{doltService, bdService} {
-		ports := u.Services[name].Ports
-		if len(ports) == 0 {
-			errs = append(errs, fmt.Errorf("%s publishes no port", name))
-		}
-		for _, p := range ports {
-			if !strings.HasPrefix(p, "127.0.0.1:") {
-				errs = append(errs, fmt.Errorf("%s port %q is not bound to 127.0.0.1", name, p))
-			}
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// checkHealthChecks requires each service to probe itself the way its design
-// names: Dolt by a query, the gateway by its own ready check, both in exec form.
-func checkHealthChecks(u composeUnit) error {
-	var errs []error
-	dolt := u.Services[doltService].Healthcheck.Test
-	if len(dolt) == 0 {
-		errs = append(errs, errors.New("dolt has no healthcheck"))
-	} else if !probeArgv(dolt, doltProbe) {
-		errs = append(errs, errors.New("dolt healthcheck does not run select 1 through dolt, in CMD form"))
-	}
-	bd := u.Services[bdService].Healthcheck.Test
-	if len(bd) == 0 {
-		errs = append(errs, errors.New("bd has no healthcheck"))
-	} else if !probeArgv(bd, bdProbe) {
-		errs = append(errs, errors.New("bd healthcheck does not run bdgw ready, in CMD form"))
-	}
-	return errors.Join(errs...)
-}
-
-// checkKeepLabel requires the keep label on both services: the slot reaper
-// skips containers that carry it.
-func checkKeepLabel(u composeUnit) error {
-	var errs []error
-	for _, name := range []string{doltService, bdService} {
-		if v, ok := u.Services[name].Labels[keepLabel]; !ok || v != "true" {
-			errs = append(errs, fmt.Errorf("%s lacks the %s=true label", name, keepLabel))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// checkDependsOn starts bd only once Dolt answers its health check.
-func checkDependsOn(u composeUnit) error {
-	dep, ok := u.Services[bdService].DependsOn[doltService]
-	if !ok {
-		return errors.New("bd depends_on has no dolt entry")
-	}
-	if dep.Condition != "service_healthy" {
-		return fmt.Errorf("bd depends_on dolt condition=%q; want service_healthy", dep.Condition)
-	}
-	return nil
-}
-
-// checkImages requires each image to come from its environment variable with
-// no default. The variable's message must name the digest form, so the
-// operator is told a digest is required. The value itself is checked where
-// it is set (gt dolt start, G15), not here.
-func checkImages(u composeUnit) error {
-	var errs []error
-	if bd := u.Services[bdService].Image; !variableImage("BD_IMAGE", "@sha256:").MatchString(bd) {
-		errs = append(errs, fmt.Errorf("bd image %q must be ${BD_IMAGE:?...} with a message naming the digest reference (name@sha256:...)", bd))
-	}
-	if dolt := u.Services[doltService].Image; !variableImage("GT_DOLT_IMAGE", "digest").MatchString(dolt) {
-		errs = append(errs, fmt.Errorf("dolt image %q must be ${GT_DOLT_IMAGE:?...} with a message naming the digest", dolt))
-	}
-	return errors.Join(errs...)
-}
-
-// checkBdMounts refuses any host mount on bd but the token directory. A
-// volume whose source is not a bare Docker name, including ./, ../ and ~/
-// paths and variables, is a host mount. The gateway holds no town tree: its
-// workspace is its own volume.
-func checkBdMounts(u composeUnit) error {
-	var errs []error
-	for _, v := range u.Services[bdService].Volumes {
-		if !namedVolume.MatchString(v) && !tokenMount.MatchString(v) {
-			errs = append(errs, fmt.Errorf("bd mounts %q; its only host mount is the token directory, read-only", v))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// checkNoSecrets decodes the file and walks every mapping key and every
-// KEY=value list entry. A name that names a secret must take a reference
-// (checked by secretRef), never a literal. Decoding first reads a flow mapping,
-// a quoted key, or a $$ escape as the value it carries, and comments are gone.
-func checkNoSecrets(raw []byte) error {
-	var doc any
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("%s is not valid YAML: %w", composeFile, err)
-	}
-	var errs []error
-	walkSecrets(doc, &errs)
-	return errors.Join(errs...)
-}
-
-// walkSecrets visits node and everything under it. String keys are visited in
-// sorted order, so the errors come out the same on every run.
-func walkSecrets(node any, errs *[]error) {
-	switch n := node.(type) {
+// diffDoc lists each place got differs from want, by dotted path. A key present
+// in only one of the two is a difference, so an extra key fails by construction.
+func diffDoc(path string, want, got any) []string {
+	switch w := want.(type) {
 	case map[string]any:
-		keys := make([]string, 0, len(n))
-		for k := range n {
+		g, ok := got.(map[string]any)
+		if !ok {
+			return []string{fmt.Sprintf("%s: want a mapping, got %v", path, got)}
+		}
+		keys := make([]string, 0, len(w)+len(g))
+		for k := range w {
 			keys = append(keys, k)
 		}
+		for k := range g {
+			if _, dup := w[k]; !dup {
+				keys = append(keys, k)
+			}
+		}
 		sort.Strings(keys)
+		var diffs []string
 		for _, k := range keys {
-			if secretName.MatchString(k) {
-				checkSecretValue(k, n[k], errs)
+			wv, inWant := w[k]
+			gv, inGot := g[k]
+			p := joinPath(path, k)
+			switch {
+			case !inWant:
+				diffs = append(diffs, fmt.Sprintf("%s: not in the expected document (got %v)", p, gv))
+			case !inGot:
+				diffs = append(diffs, fmt.Sprintf("%s: missing (want %v)", p, wv))
+			default:
+				diffs = append(diffs, diffDoc(p, wv, gv)...)
 			}
-			walkSecrets(n[k], errs)
 		}
-	case map[any]any:
-		for k, v := range n {
-			name := fmt.Sprint(k)
-			if secretName.MatchString(name) {
-				checkSecretValue(name, v, errs)
-			}
-			walkSecrets(v, errs)
-		}
+		return diffs
 	case []any:
-		for _, item := range n {
-			if s, ok := item.(string); ok {
-				if m := envEntry.FindStringSubmatch(s); m != nil && secretName.MatchString(m[1]) {
-					checkSecretValue(m[1], m[2], errs)
-				}
-				continue
-			}
-			walkSecrets(item, errs)
+		g, ok := got.([]any)
+		if !ok || len(g) != len(w) {
+			return []string{fmt.Sprintf("%s: want %v, got %v", path, w, got)}
 		}
-	}
-}
-
-// checkSecretValue refuses a literal under a secret name. An empty value and a
-// reference (secretRef) pass.
-func checkSecretValue(name string, value any, errs *[]error) {
-	s := ""
-	switch v := value.(type) {
-	case nil:
-	case string:
-		s = v
+		var diffs []string
+		for i := range w {
+			diffs = append(diffs, diffDoc(fmt.Sprintf("%s[%d]", path, i), w[i], g[i])...)
+		}
+		return diffs
 	default:
-		s = fmt.Sprint(v)
+		if reflect.DeepEqual(want, got) {
+			return nil
+		}
+		return []string{fmt.Sprintf("%s: want %v, got %v", path, want, got)}
 	}
-	if s == "" || secretRef.MatchString(s) {
-		return
-	}
-	*errs = append(*errs, fmt.Errorf("%s sets %s to a literal; take it from the token directory or the environment", composeFile, name))
 }
 
-// loadCompose reads the real compose file and parses it.
-func loadCompose(t *testing.T) ([]byte, composeUnit) {
+func joinPath(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+	return parent + "." + key
+}
+
+func diffError(diffs []string) error {
+	if len(diffs) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(diffs, "\n"))
+}
+
+// readCompose returns the real compose file.
+func readCompose(t *testing.T) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(composeFile)
 	if err != nil {
 		t.Fatalf("reading %s: %v", composeFile, err)
 	}
-	u, err := parseUnit(raw)
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return raw, u
+	return raw
 }
 
 func TestComposeLimits(t *testing.T) {
 	t.Parallel()
-	_, u := loadCompose(t)
-	if err := checkLimits(u); err != nil {
+	err := checkSections(readCompose(t),
+		"services.dolt.mem_limit", "services.dolt.memswap_limit",
+		"services.bd.mem_limit", "services.bd.cpus")
+	if err != nil {
 		t.Errorf("%s limits:\n%v", composeFile, err)
 	}
 }
 
 func TestComposeLoopbackPorts(t *testing.T) {
 	t.Parallel()
-	_, u := loadCompose(t)
-	if err := checkLoopbackPorts(u); err != nil {
+	err := checkSections(readCompose(t), "services.dolt.ports", "services.bd.ports")
+	if err != nil {
 		t.Errorf("%s ports:\n%v", composeFile, err)
 	}
 }
 
 func TestComposeHealthChecks(t *testing.T) {
 	t.Parallel()
-	_, u := loadCompose(t)
-	if err := checkHealthChecks(u); err != nil {
+	err := checkSections(readCompose(t), "services.dolt.healthcheck", "services.bd.healthcheck")
+	if err != nil {
 		t.Errorf("%s health checks:\n%v", composeFile, err)
 	}
 }
 
 func TestComposeKeepLabel(t *testing.T) {
 	t.Parallel()
-	_, u := loadCompose(t)
-	if err := checkKeepLabel(u); err != nil {
+	err := checkSections(readCompose(t), "services.dolt.labels", "services.bd.labels")
+	if err != nil {
 		t.Errorf("%s keep label:\n%v", composeFile, err)
 	}
 }
 
+// TestComposeNoSecrets compares the two places a literal secret can sit: the
+// command arrays and the environment maps of both services.
 func TestComposeNoSecrets(t *testing.T) {
 	t.Parallel()
-	raw, _ := loadCompose(t)
-	if err := checkNoSecrets(raw); err != nil {
-		t.Errorf("%s carries a secret:\n%v", composeFile, err)
+	err := checkSections(readCompose(t),
+		"services.dolt.command", "services.dolt.environment",
+		"services.bd.command", "services.bd.environment")
+	if err != nil {
+		t.Errorf("%s carries a secret or an unexpected argument:\n%v", composeFile, err)
+	}
+}
+
+func TestComposeVolumes(t *testing.T) {
+	t.Parallel()
+	err := checkSections(readCompose(t), "services.dolt.volumes", "services.bd.volumes", "volumes")
+	if err != nil {
+		t.Errorf("%s volumes:\n%v", composeFile, err)
 	}
 }
 
 func TestComposeDependsOn(t *testing.T) {
 	t.Parallel()
-	_, u := loadCompose(t)
-	if err := checkDependsOn(u); err != nil {
+	err := checkSections(readCompose(t), "services.bd.depends_on")
+	if err != nil {
 		t.Errorf("%s depends_on:\n%v", composeFile, err)
 	}
 }
@@ -379,92 +285,124 @@ func TestComposeDependsOn(t *testing.T) {
 // BD_IMAGE, required: never a literal, a tag, or a default that renders without it.
 func TestComposeBdImageVariable(t *testing.T) {
 	t.Parallel()
-	_, u := loadCompose(t)
-	if err := checkImages(u); err != nil {
-		t.Errorf("%s images:\n%v", composeFile, err)
+	err := checkSections(readCompose(t), "services.bd.image")
+	if err != nil {
+		t.Errorf("%s bd image:\n%v", composeFile, err)
 	}
 }
 
-// TestComposeContract runs every check against the real compose file.
+func TestComposeDoltImage(t *testing.T) {
+	t.Parallel()
+	err := checkSections(readCompose(t), "services.dolt.image")
+	if err != nil {
+		t.Errorf("%s dolt image:\n%v", composeFile, err)
+	}
+}
+
+// TestComposeContract compares the whole file with the expected document.
 func TestComposeContract(t *testing.T) {
 	t.Parallel()
-	raw, _ := loadCompose(t)
-	if err := checkUnit(raw); err != nil {
-		t.Errorf("%s breaks the compose contract:\n%v", composeFile, err)
+	if err := checkUnit(readCompose(t)); err != nil {
+		t.Errorf("%s does not match the expected document:\n%v", composeFile, err)
 	}
 }
 
-// refusals each mutate one line of the real compose file. Every row must fail
-// the contract with an error containing want.
-var refusals = []struct {
-	name string
-	old  string
-	new  string
-	want string
-}{
-	{"not YAML", "services:\n", "services: [\n", "is not valid YAML"},
-	{"no bd service", "  bd:\n    image:", "  bdx:\n    image:", "defines no bd service"},
-	{"dolt cap raised", "    mem_limit: 8g\n", "    mem_limit: 16g\n", `dolt mem_limit="16g"`},
-	{"dolt cap missing", "    mem_limit: 8g\n", "", `dolt mem_limit=""`},
-	{"dolt swap differs", "memswap_limit: 8g", "memswap_limit: 16g", `dolt memswap_limit="16g"`},
-	{"bd cap raised", "mem_limit: 1g", "mem_limit: 2g", `bd mem_limit="2g"`},
-	{"bd cpus missing", "    cpus: 1\n", "", "bd cpus=0"},
-	{"dolt port not loopback", `"127.0.0.1:3307:3306"`, `"3307:3306"`, `dolt port "3307:3306" is not bound to 127.0.0.1`},
-	{"bd publishes no port", "      - \"127.0.0.1:7440:7440\"\n", "", "bd publishes no port"},
-	{"dolt healthcheck not a query", `"-q", "select 1"]`, `"-q", "true"]`, "dolt healthcheck does not run select 1"},
-	{"dolt healthcheck is a shell form", `"CMD", "dolt", "--host"`, `"CMD-SHELL", "dolt", "--host"`, "dolt healthcheck does not run select 1"},
-	{"dolt has no healthcheck", "    memswap_limit: 8g\n    healthcheck:\n", "    memswap_limit: 8g\n    healthchek:\n", "dolt has no healthcheck"},
-	{"bd healthcheck not bdgw ready", `"/usr/local/bin/bdgw", "ready"`, `"/bin/true", "ready"`, "bd healthcheck does not run bdgw ready"},
-	{"bd healthcheck is a shell form", `"CMD", "/usr/local/bin/bdgw"`, `"CMD-SHELL", "/usr/local/bin/bdgw"`, "bd healthcheck does not run bdgw ready"},
-	{"bd has no healthcheck", "    cpus: 1\n    healthcheck:\n", "    cpus: 1\n    healthchek:\n", "bd has no healthcheck"},
-	{"bd keep label wrong", `org.gastown.keep: "true"` + "\n    ports:\n      - \"127.0.0.1:7440", `org.gastown.keep: "false"` + "\n    ports:\n      - \"127.0.0.1:7440", "bd lacks the org.gastown.keep=true label"},
-	{"bd depends_on removed", "    depends_on:\n      dolt:\n        condition: service_healthy\n", "", "bd depends_on has no dolt entry"},
-	{"bd depends_on not healthy", "condition: service_healthy", "condition: service_started", `bd depends_on dolt condition="service_started"; want service_healthy`},
-	{"bd image literal", "${BD_IMAGE:?set BD_IMAGE to the gt-bd image as a digest reference (name@sha256:...)}", "forgejo:3000/bot-registry/gt-bd:latest", "must be ${BD_IMAGE:?...}"},
-	{"bd image old variable name", "${BD_IMAGE:?set", "${GT_BD_IMAGE:?set", "must be ${BD_IMAGE:?...}"},
-	{"bd image default renders unset", "${BD_IMAGE:?set BD_IMAGE to the gt-bd image as a digest reference (name@sha256:...)}", "${BD_IMAGE:-forgejo:3000/bot-registry/gt-bd:latest}", "must be ${BD_IMAGE:?...}"},
-	{"bd image message names no digest", "(name@sha256:...)", "(name:latest)", "must be ${BD_IMAGE:?...}"},
-	{"dolt image literal", "${GT_DOLT_IMAGE:?set GT_DOLT_IMAGE to the dolt-sql-server image pinned by digest}", "dolthub/dolt-sql-server:2.7.2", "must be ${GT_DOLT_IMAGE:?...}"},
-	{"dolt image message names no digest", "pinned by digest}", "pinned by tag}", "must be ${GT_DOLT_IMAGE:?...}"},
-	{"bd town mount", "      - bd-logs:/var/log/bdgw\n", "      - bd-logs:/var/log/bdgw\n      - /Users/sloan/gt:/Users/sloan/gt\n", "its only host mount is the token directory"},
-	{"bd relative mount", "      - bd-logs:/var/log/bdgw\n", "      - bd-logs:/var/log/bdgw\n      - ./gt:/town\n", "its only host mount is the token directory"},
-	{"bd parent-relative mount", "      - bd-logs:/var/log/bdgw\n", "      - bd-logs:/var/log/bdgw\n      - ../gt:/town\n", "its only host mount is the token directory"},
-	{"bd home-relative mount", "      - bd-logs:/var/log/bdgw\n", "      - bd-logs:/var/log/bdgw\n      - ~/gt:/town\n", "its only host mount is the token directory"},
-	{"bd token mount writable", ":/run/bdgw/tokens:ro", ":/run/bdgw/tokens", "its only host mount is the token directory"},
-	{"restart wrong", "    restart: unless-stopped\n    depends_on:", "    restart: always\n    depends_on:", `bd restart="always"; want unless-stopped`},
-	{"password literal", "      HOME: /home/bdgw\n", "      HOME: /home/bdgw\n      DOLT_ROOT_PASSWORD: hunter2\n", "sets DOLT_ROOT_PASSWORD to a literal"},
-	{"password escaped dollar", "      HOME: /home/bdgw\n", "      HOME: /home/bdgw\n      DOLT_ROOT_PASSWORD: $$hunter2\n", "sets DOLT_ROOT_PASSWORD to a literal"},
-	{"password in flow mapping under an extension", "name: gt-data\n", "name: gt-data\nx-extra: {DOLT_ROOT_PASSWORD: hunter2}\n", "sets DOLT_ROOT_PASSWORD to a literal"},
-	{"password in list entry", "      - /ws\n", "      - /ws\n      - DOLT_ROOT_PASSWORD=hunter2\n", "sets DOLT_ROOT_PASSWORD to a literal"},
-	{"token literal", "TRACKER_TOKEN_FILE: /run/bdgw/tokens/tracker", "TRACKER_TOKEN_FILE: abc123", "sets TRACKER_TOKEN_FILE to a literal"},
-	{"token literal behind a slash", "TRACKER_TOKEN_FILE: /run/bdgw/tokens/tracker", "TRACKER_TOKEN_FILE: /etc/shadow", "sets TRACKER_TOKEN_FILE to a literal"},
-	{"token default carries a literal", "TRACKER_TOKEN_FILE: /run/bdgw/tokens/tracker", "TRACKER_TOKEN_FILE: ${TRACKER_TOKEN_FILE:-abc123}", "sets TRACKER_TOKEN_FILE to a literal"},
+// service returns a named service of a decoded document. The caller has matched
+// the document against the expected one first, so the shape holds.
+func service(doc map[string]any, name string) map[string]any {
+	return doc["services"].(map[string]any)[name].(map[string]any)
 }
 
-// TestComposeRefusals drives each refusal of the contract on a mutated copy of
-// the real file. Each row must name its own failure.
+// holes are the ways a file could slip past a looser check. Each mutates a fresh
+// decode of the real file; the comparison must reject it and name the path.
+var holes = []struct {
+	name   string
+	path   string
+	mutate func(doc map[string]any)
+}{
+	{
+		name: "secret passed as a command flag",
+		path: "services.dolt.command",
+		mutate: func(d map[string]any) {
+			cmd := service(d, "dolt")["command"].([]any)
+			service(d, "dolt")["command"] = append(cmd, "--password=hunter2")
+		},
+	},
+	{
+		name: "bind-style top-level volume",
+		path: "volumes.dolt-var",
+		mutate: func(d map[string]any) {
+			d["volumes"].(map[string]any)["dolt-var"] = map[string]any{
+				"driver_opts": map[string]any{"type": "none", "o": "bind", "device": "/Users/sloan/gt"},
+			}
+		},
+	},
+	{
+		name: "network_mode host",
+		path: "services.bd.network_mode",
+		mutate: func(d map[string]any) {
+			service(d, "bd")["network_mode"] = "host"
+		},
+	},
+	{
+		name: "privileged",
+		path: "services.bd.privileged",
+		mutate: func(d map[string]any) {
+			service(d, "bd")["privileged"] = true
+		},
+	},
+	{
+		name: "escaped dollar in an environment value",
+		path: "services.bd.environment.HOME",
+		mutate: func(d map[string]any) {
+			service(d, "bd")["environment"].(map[string]any)["HOME"] = "$$hunter2"
+		},
+	},
+	{
+		name: "service added",
+		path: "services.extra",
+		mutate: func(d map[string]any) {
+			d["services"].(map[string]any)["extra"] = map[string]any{"image": "alpine"}
+		},
+	},
+	{
+		name: "bd image a literal tag",
+		path: "services.bd.image",
+		mutate: func(d map[string]any) {
+			service(d, "bd")["image"] = "forgejo:3000/bot-registry/gt-bd:latest"
+		},
+	},
+	{
+		name: "bd image default renders unset",
+		path: "services.bd.image",
+		mutate: func(d map[string]any) {
+			service(d, "bd")["image"] = "${BD_IMAGE:-forgejo:3000/bot-registry/gt-bd@sha256:0000}"
+		},
+	},
+}
+
+// TestComposeRefusals drives each hole through the comparison on a fresh decode
+// of the real file. The unmutated file must match first.
 func TestComposeRefusals(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(composeFile)
-	if err != nil {
-		t.Fatalf("reading %s: %v", composeFile, err)
-	}
+	raw := readCompose(t)
 	if err := checkUnit(raw); err != nil {
-		t.Fatalf("the file must pass the contract before any mutation: %v", err)
+		t.Fatalf("the file must match the expected document before any mutation: %v", err)
 	}
-	for _, tt := range refusals {
+	for _, tt := range holes {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if n := strings.Count(string(raw), tt.old); n != 1 {
-				t.Fatalf("%q occurs %d times in %s; want exactly once", tt.old, n, composeFile)
+			doc, err := decodeUnit(raw)
+			if err != nil {
+				t.Fatalf("decoding the real file: %v", err)
 			}
-			mutated := strings.Replace(string(raw), tt.old, tt.new, 1)
-			err := checkUnit([]byte(mutated))
+			tt.mutate(doc)
+			err = checkDoc(doc)
 			if err == nil {
-				t.Fatalf("mutated file passed the contract; want an error containing %q", tt.want)
+				t.Fatalf("mutated document matched the expected document; want a difference at %s", tt.path)
 			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %v; want it to contain %q", err, tt.want)
+			if !strings.Contains(err.Error(), tt.path+":") {
+				t.Errorf("difference = %v; want it at %s", err, tt.path)
 			}
 		})
 	}
