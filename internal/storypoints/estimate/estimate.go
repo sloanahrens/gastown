@@ -176,6 +176,19 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 	// line cannot disagree with the number the average used.
 	componentMinutes.Jev = blended.JevMinutes
 
+	// The size input caps the blend: a bead that lists the work it asks for in a
+	// fenced list is no larger than that list says, whatever the three averaged
+	// inputs read from its prose. It lowers an estimate and never raises one,
+	// and the note's inputs line names it when it did (sizeMinutes).
+	if size, ok := sizeMinutes(issue); ok && size < blended.Minutes {
+		points, perr := storypoints.FromMinutes(size)
+		if perr != nil {
+			return Result{}, fmt.Errorf("storypoints/estimate: size input: %w", perr)
+		}
+		blended.Minutes, blended.Points = size, points
+		blended.Inputs = append(append([]string(nil), blended.Inputs...), "size")
+	}
+
 	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue)
 
 	// A dependency that saw the context end returns an error, which the input
