@@ -272,7 +272,7 @@ func TestUpdateBdBaseRefuses(t *testing.T) {
 	}{
 		{name: "registry has no such tag", f: fakeBdBase{found: false}, want: "has no tag"},
 		{name: "registry answers no digest", f: fakeBdBase{found: true, digest: ""}, want: "not sha256"},
-		{name: "registry answers a tag, not a digest", f: fakeBdBase{found: true, digest: "beads-bd:" + testBdBaseTag}},
+		{name: "registry answers a tag, not a digest", f: fakeBdBase{found: true, digest: "beads-bd:" + testBdBaseTag}, want: "not sha256"},
 		{name: "registry answers an uppercase digest", f: fakeBdBase{found: true, digest: "sha256:" + strings.Repeat("AB", 32)}},
 		{name: "registry read fails", f: fakeBdBase{found: true, digest: testBdBaseDigest, readErr: errors.New("the registry answered HTTP 500")}},
 		{name: "registry cannot be resolved", f: fakeBdBase{regErr: errors.New("no registry")}},
