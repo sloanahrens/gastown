@@ -85,8 +85,9 @@ func readFull(r io.Reader, buf []byte) error {
 }
 
 // WriteFrame writes one frame, refusing a frame its own reader would reject so a
-// malformed frame never reaches the stream. The header and payload are one write,
-// so concurrent writers cannot interleave a header with another frame's payload.
+// malformed frame never reaches the stream. The header and payload go out in one
+// Write call. That is not a guarantee against concurrent writers: io.Writer makes
+// no atomicity promise, so a caller sharing w must serialize its WriteFrame calls.
 func WriteFrame(w io.Writer, f Frame) error {
 	if err := validate(f); err != nil {
 		return err
@@ -151,9 +152,10 @@ func validate(f Frame) error {
 }
 
 // exitStatus parses an exit frame's payload: ASCII digits naming a status a
-// process can exit with. Leading zeros are taken, and a value over 255 is not a
-// status. The running total is bounded as it grows, so a long payload cannot
-// overflow it.
+// process can exit with. Leading zeros are accepted and add nothing to the value:
+// "007" is 7. The 255 limit applies to the value, not the digit count, so "0255"
+// is 255 and "256" is refused. The running total is bounded as it grows, so a
+// long payload cannot overflow it.
 func exitStatus(payload []byte) (int, error) {
 	if len(payload) == 0 {
 		return 0, fmt.Errorf("%w: empty payload", ErrBadExitStatus)
