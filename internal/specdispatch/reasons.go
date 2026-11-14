@@ -40,4 +40,7 @@ const (
 	// the dispatcher's later ticks, so the line is for the tick that held it
 	// (gt-5d9k2f.18).
 	SkipSplitOver = "split: "
+	// SkipLiveSeat starts LiveSeatHold's reason for a bead a live sandbox
+	// record's branch still names; the seat follows (gt-712i5k).
+	SkipLiveSeat = "live sandbox seat: "
 )
