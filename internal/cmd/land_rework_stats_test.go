@@ -384,6 +384,18 @@ func TestLandReworkStatsRefusals(t *testing.T) {
 		return town
 	}
 
+	unopenableReviewsTown := func(t *testing.T) string {
+		t.Helper()
+		town := t.TempDir()
+		path := filepath.Join(landReworkStatsTownDir(t, town), land.ReviewsFileName)
+		// A link to itself: the open fails with a loop, not a missing file, so
+		// the report must name it rather than read it as no records.
+		if err := os.Symlink(path, path); err != nil {
+			t.Fatalf("making the review log loop: %v", err)
+		}
+		return town
+	}
+
 	cases := []struct {
 		name    string
 		find    func(t *testing.T) func() (string, error)
@@ -421,6 +433,12 @@ func TestLandReworkStatsRefusals(t *testing.T) {
 			find:    func(t *testing.T) func() (string, error) { return landReworkStatsTown(unreadableReviewsTown(t)) },
 			weeks:   1,
 			wantErr: "reading the review records",
+		},
+		{
+			name:    "a review log that will not open",
+			find:    func(t *testing.T) func() (string, error) { return landReworkStatsTown(unopenableReviewsTown(t)) },
+			weeks:   1,
+			wantErr: "opening the review records",
 		},
 	}
 	for _, tc := range cases {
@@ -478,6 +496,17 @@ func TestLandReworkStatsWeekRefusals(t *testing.T) {
 				t.Errorf("error = %v, want it to name %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestLandReworkStatsWeekErrorReachesTheCaller: a week the report cannot name
+// is the run's error, not a partial report.
+func TestLandReworkStatsWeekErrorReachesTheCaller(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	_, err := landReworkStatsFromTown(landReworkStatsTown(town), landReworkStatsNow, 4, weekOfOnCall(1, "", errors.New("no clock")))
+	if err == nil || !strings.Contains(err.Error(), "the week of") {
+		t.Fatalf("error = %v, want the week refusal", err)
 	}
 }
 

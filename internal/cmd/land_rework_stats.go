@@ -121,7 +121,7 @@ type landReworkWeek struct {
 // so a test supplies the town and the clock without swapping the shared flag
 // variables.
 func landReworkStatsReportFrom(findTown func() (string, error), out io.Writer, now time.Time, weeks int, asJSON bool) error {
-	report, err := landReworkStatsFromTown(findTown, now, weeks)
+	report, err := landReworkStatsFromTown(findTown, now, weeks, metrics.WeekOf)
 	if err != nil {
 		return err
 	}
@@ -133,7 +133,7 @@ func landReworkStatsReportFrom(findTown func() (string, error), out io.Writer, n
 
 // landReworkStatsFromTown reads the town's landing ledgers and review log and
 // folds them into the report.
-func landReworkStatsFromTown(findTown func() (string, error), now time.Time, weeks int) (landReworkReport, error) {
+func landReworkStatsFromTown(findTown func() (string, error), now time.Time, weeks int, weekOf func(string) (string, error)) (landReworkReport, error) {
 	if weeks < 1 {
 		return landReworkReport{}, fmt.Errorf("--weeks %d: want at least 1", weeks)
 	}
@@ -150,7 +150,7 @@ func landReworkStatsFromTown(findTown func() (string, error), now time.Time, wee
 	if err != nil {
 		return landReworkReport{}, err
 	}
-	report, err := landReworkStatsAggregate(recs, reviews, now, weeks, metrics.WeekOf)
+	report, err := landReworkStatsAggregate(recs, reviews, now, weeks, weekOf)
 	if err != nil {
 		return landReworkReport{}, err
 	}
