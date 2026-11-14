@@ -161,8 +161,6 @@ The *town-state claim* is a persistent volume that holds the town's files: setti
 
 A call the wrapper's config covers under its `native` key runs on the Mac with that tool's own binary, not in the pod. Before editing which calls run natively, read [Native calls](design/gt-in-container.md#native-calls), which holds the set and why each call is on it.
 
-The same wrapper is the daemon image's `bd`: the image installs it first on `PATH` under that name, with the real binary as `bd.real` beside it. Called as `bd` with no config file and a `bd.real` beside it, the wrapper takes the route `gtwrap.DecideForwarder` names: the bd gateway `BD_GATEWAY_URL` points at, or the local `bd.real` when no URL is set. Before changing the forwarder, read the doc comment on `DecideForwarder` (it holds the rollback) and `docs/design/bd-container.md`, which holds the gateway protocol and the cutover stages.
-
 The daemon image's `bd` is the real binary with no wrapper in front of it. The bd shim that routes tracker rigs ships only in the bd gateway image (`deploy/bd/Dockerfile.bd`).
 
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
