@@ -13,11 +13,8 @@
 //	  "escalation": {"text": "HELP: the acceptance list names a missing file"}
 //	}
 //
-// bead_id is the bead the seat was given. status is "done" or "deferred".
-// ticked_boxes are zero-based indexes into the bead's acceptance list. findings
-// are the seat's discovered-defect texts. escalation is optional and carries the
-// text of the seat's request for help. A field the seat has nothing to report
-// for is omitted.
+// bead_id is the bead the seat was given. The seat omits a field it has nothing
+// to report for.
 //
 // The package does no I/O: the host reads the two files and hands their contents
 // to Validate.
@@ -42,7 +39,6 @@ const (
 // Result is a decoded outbox: the outcome a seat reports for its task, with the
 // notes it wrote alongside.
 type Result struct {
-	// Status is the outcome the seat reported.
 	Status Status
 	// Ticked is the zero-based indexes into the bead's acceptance list that the
 	// seat ticked.
