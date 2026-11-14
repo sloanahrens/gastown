@@ -1363,8 +1363,12 @@ type sandboxSecretsReader func(command string) []string
 
 // sandboxSecretsReadTokens is the production reader: the parsedTokens reading of
 // gt-crn9gu. shellTokenize is the fallback for a command shellparse cannot read
-// and for a command sandboxSecretsParsedUnsafe names. shellTokenize is the
-// reading gt-crn9gu retires; it stays only until the last guard moves off it.
+// and for a command sandboxSecretsParsedUnsafe names. The parsed reading is never
+// less strict than shellTokenize because the grammar's word-dropping constructs
+// all route to shellTokenize (gt-p0y85u), not because the sampled commands agree;
+// TestSandboxSecretsGrammarShapesRouteToText pins each construct in every position.
+// shellTokenize is the reading gt-crn9gu retires; it stays only until the last
+// guard moves off it.
 func sandboxSecretsReadTokens(command string) []string {
 	tokens, readable := parsedTokens(command)
 	if !readable || sandboxSecretsParsedUnsafe(command) {
