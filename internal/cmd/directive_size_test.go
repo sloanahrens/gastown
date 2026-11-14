@@ -245,6 +245,20 @@ func TestDirectiveCeiling(t *testing.T) {
 	}
 }
 
+// TestDirectiveCeilingTracksRenderedSize checks the committed ceiling is the
+// rendered size, not a cap left above it: the ceiling "moves down" only if every
+// cut lowers it in the same commit, and a ceiling that outlives a cut lets the
+// directive regrow to the old number before the ratchet notices.
+func TestDirectiveCeilingTracksRenderedSize(t *testing.T) {
+	t.Parallel()
+
+	total := committedPolecatDirectiveBytes(t)
+	ceiling := readDirectiveCeiling(t)
+	if ceiling != total {
+		t.Fatalf("the ceiling file holds %d bytes but the polecat directive renders %d: lower the ceiling to the size you got", ceiling, total)
+	}
+}
+
 // checkDirectiveCeiling returns the failure message for a rendered polecat
 // directive of size bytes against ceiling, or "" when it fits. The ceiling only
 // moves down, so the message sends the editor back to cut first and lower the
