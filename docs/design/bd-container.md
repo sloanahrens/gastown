@@ -3,7 +3,7 @@
 Status: draft for the overseer's vetting, written 2026-11-13 (dipper). Program
 bead: gt-2zigh5 (operator decisions 1 to 9, 2026-11-13). Related designs:
 [gt runs from the daemon image](gt-in-container.md), [the town tracker
-plan](../plans/2026-10-25-town-tracker-design.md).
+decision](../adr/0006-tracker-replaces-dolt-backed-beads.md).
 
 Nothing here is built. Facts below were read from origin/main at 440acced9 and
 from the live town on 2026-11-13; "not verified" marks what was not checked.
