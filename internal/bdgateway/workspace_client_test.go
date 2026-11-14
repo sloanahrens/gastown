@@ -610,6 +610,56 @@ func TestGatewayPusherRefusals(t *testing.T) {
 	}
 }
 
+// fakePusher is a WorkspacePusher a test installs: it records the town root it
+// was asked to push and answers with the manifest or the error the test set.
+type fakePusher struct {
+	towns    []string
+	manifest string
+	err      error
+}
+
+func (f *fakePusher) Push(_ context.Context, townRoot string) (string, error) {
+	f.towns = append(f.towns, townRoot)
+	return f.manifest, f.err
+}
+
+// TestPushWorkspaceUsesTheInstalledPusher: the pusher SetWorkspacePusher
+// installs is the one every writer's push reaches, with the town root the
+// writer handed it, and its manifest or failure is the push's own; setting nil
+// removes it again.
+//
+//testpolicy:allow parallel — the pusher is one package-level value this test installs and restores, so no parallel test may run beside it
+func TestPushWorkspaceUsesTheInstalledPusher(t *testing.T) {
+	t.Cleanup(func() { SetWorkspacePusher(nil) })
+	townRoot := t.TempDir()
+
+	good := &fakePusher{manifest: "abc123"}
+	SetWorkspacePusher(good)
+	manifest, err := PushWorkspace(context.Background(), townRoot)
+	if err != nil {
+		t.Fatalf("PushWorkspace: %v", err)
+	}
+	if manifest != "abc123" {
+		t.Errorf("manifest = %q, want the installed pusher's %q", manifest, "abc123")
+	}
+	if len(good.towns) != 1 || good.towns[0] != townRoot {
+		t.Errorf("pushed towns = %v, want the writer's town root %s once", good.towns, townRoot)
+	}
+
+	bad := &fakePusher{err: errors.New("the gateway at gw:7440 did not answer")}
+	SetWorkspacePusher(bad)
+	if manifest, err := PushWorkspace(context.Background(), townRoot); err == nil {
+		t.Fatalf("PushWorkspace returned %q for an installed pusher that failed", manifest)
+	} else if !strings.Contains(err.Error(), "did not answer") {
+		t.Errorf("error = %v, want the installed pusher's own failure", err)
+	}
+
+	SetWorkspacePusher(nil)
+	if manifest, err := PushWorkspace(context.Background(), townRoot); err != nil || manifest != "" {
+		t.Errorf("PushWorkspace after removing the pusher = %q, %v; want no manifest and no error", manifest, err)
+	}
+}
+
 // TestPushWorkspaceNoPusher: with no pusher installed — every test and every
 // town without a gateway — a push is a no-op that succeeds with no hash, so the
 // writers that call it behave exactly as they did before the gateway existed.

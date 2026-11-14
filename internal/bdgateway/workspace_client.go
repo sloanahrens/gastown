@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -325,10 +326,23 @@ type WorkspacePusher interface {
 	Push(ctx context.Context, townRoot string) (string, error)
 }
 
-// pusher is the installed pusher, nil until a town with a gateway installs one
-// at daemon start (G8b): every test and every Mac-only path then runs exactly as
-// before.
-var pusher WorkspacePusher
+// installed holds the pusher SetWorkspacePusher installs; nil until a town with
+// a gateway installs one at daemon start (G8b), so every test and every
+// Mac-only path runs exactly as before. The writers push from several
+// goroutines (EnsureAllMetadata), so a read takes the lock too.
+var installed struct {
+	mu sync.RWMutex
+	p  WorkspacePusher
+}
+
+// SetWorkspacePusher installs p as the pusher every writer of the town copy
+// pushes through, or removes it when p is nil. G8b's daemon start installs a
+// GatewayPusher when the town names a gateway; until then the pusher is nil.
+func SetWorkspacePusher(p WorkspacePusher) {
+	installed.mu.Lock()
+	defer installed.mu.Unlock()
+	installed.p = p
+}
 
 // PushWorkspace pushes the town's workspace through the installed pusher and
 // returns the manifest hash the gateway stored. With no pusher installed it is
@@ -336,10 +350,13 @@ var pusher WorkspacePusher
 // town without a gateway: the files were written, and there is nothing to send
 // them to.
 func PushWorkspace(ctx context.Context, townRoot string) (string, error) {
-	if pusher == nil {
+	installed.mu.RLock()
+	p := installed.p
+	installed.mu.RUnlock()
+	if p == nil {
 		return "", nil
 	}
-	return pusher.Push(ctx, townRoot)
+	return p.Push(ctx, townRoot)
 }
 
 // GatewayPusher is the WorkspacePusher that sends the document to a running bd
