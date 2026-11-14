@@ -1,4 +1,4 @@
-> Status: historical (2026-11). Merged in: gt-wfulze (the operator approved the design and the plan on 2026-11-14). Not maintained.
+> Status: historical (2026-11). Merged in: gt-wfulze. Not maintained.
 
 # Overrun sandbox save: implementation plan
 
@@ -98,7 +98,7 @@ one worker, one landing
 
 - [ ] A test builds a Git with NewGitWithExec and a recording ExecFunc, calls Rev and Status, and the recorder sees the git arguments and the working directory
 - [ ] A test shows an error returned by the ExecFunc comes back from the Git method unchanged in meaning (a non-zero exit keeps its exit code)
-- [ ] A test shows NewGit and the other existing constructors still run the real git and are unchanged
+- [ ] A test shows NewGit and the other existing constructors leave the exec function nil, so they still select the real runner, by reading that field; no git process runs in the test
 - [ ] Mutating NewGitWithExec to drop the exec function makes the first test fail
 
 ## T4: session: a git runner that executes inside a sandbox record's clone

@@ -1,4 +1,4 @@
-> Status: historical (2026-11). Merged in: gt-wfulze (the operator approved approach A and the six-bead list on 2026-11-14). Not maintained.
+> Status: historical (2026-11). Merged in: gt-wfulze. Not maintained.
 
 # The overrun stop saves a sandbox seat's work from inside its sandbox
 
@@ -74,11 +74,20 @@ The in-sandbox runner passes argv to the sandbox client as separate elements, wi
 ## Sandbox gone
 
 When the stop finds the sandbox gone, it asks origin whether it holds the seat's
-branch. If it does, the stop proceeds as today. If it does not, or if the read of origin itself fails (network, auth, timeout), the stop logs a
-WARNING that names the seat, the branch and what origin holds, raises an
-attention item for the overseer, and, when origin answered that it does not hold the branch, still hands the bead back, because nothing
-can be saved and the bead must not stay hooked. When the read itself failed, the answer is unknown, so the bead is NOT released and the stop retries on its next tick; a silent hand-back on an unreadable origin is the incident this design exists to prevent. It never writes "treating the
-push as done" for a case it cannot see.
+branch. There are three outcomes:
+
+- Origin holds the branch: the stop proceeds as today. Nothing is raised.
+- Origin answered that it does not hold the branch: the stop logs a WARNING that
+  names the seat, the branch and what origin holds, raises an attention item for
+  the overseer, and hands the bead back, because nothing can be saved and the
+  bead must not stay hooked.
+- The read of origin itself failed (network, auth, timeout): the answer is
+  unknown, so the stop logs the WARNING with the error, raises the attention
+  item, and does NOT release the bead. It retries on its next tick. A silent
+  hand-back on an unreadable origin is the incident this design exists to
+  prevent.
+
+It never writes "treating the push as done" for a case it cannot see.
 
 ## Logs
 
