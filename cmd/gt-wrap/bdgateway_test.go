@@ -159,6 +159,31 @@ func TestDoctorPrintsTheBdGatewayLines(t *testing.T) {
 	}
 }
 
+// TestDoctorPrintsTheBdGatewayLinesWhenDown: a gateway that does not answer is
+// down, and its report still names the URL and the token file, exits 1, and gives
+// the first failing step as the reason.
+func TestDoctorPrintsTheBdGatewayLinesWhenDown(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, bdGatewayConfigFile)
+	h.fake.diag = gtwrap.Diagnosis{
+		Rung:      gtwrap.RungDown,
+		URL:       "http://gw:7440",
+		TokenFile: "/run/secrets/daemon.token",
+		Reason:    "the bd gateway at http://gw:7440 did not answer, so nothing can run through it",
+	}
+	if exit := h.run("bd", doctorFlag); exit != 1 {
+		t.Fatalf("run(%s) = %d, want 1; stderr: %s", doctorFlag, exit, h.stderr)
+	}
+	want := "rung: down\nurl: http://gw:7440\ntoken_file: /run/secrets/daemon.token\nreason: the bd gateway at http://gw:7440 did not answer, so nothing can run through it\n"
+	if got := h.stdout.String(); got != want {
+		t.Fatalf("report = %q, want %q", got, want)
+	}
+	if h.fake.launched {
+		t.Fatal("--doctor launched the tool")
+	}
+}
+
 // TestRunFileArgRewrittenForBdGateway: the gateway's workspace does not mirror
 // the caller's tree, so a file a bd flag names travels as stdin with the flag's
 // value rewritten, exactly as through the kubernetes target.
