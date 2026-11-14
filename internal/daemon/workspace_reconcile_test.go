@@ -238,7 +238,7 @@ func TestWorkspaceReconcileInterval(t *testing.T) {
 
 // TestWorkspaceReconcileRegistration: the reconcile is in the daemon's start-up
 // list exactly when a gateway is named. The list is what startWorkspaceReconcile
-// reports, and Start calls it. With no gateway it installs nothing and logs
+// reports, and Run calls it. With no gateway it installs nothing and logs
 // nothing; with a gateway its first push runs.
 func TestWorkspaceReconcileRegistration(t *testing.T) {
 	t.Parallel()
