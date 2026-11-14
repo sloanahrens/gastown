@@ -714,7 +714,7 @@ func (f *frameWriter) write(kind FrameKind, payload []byte) error {
 	return f.send(Frame{Kind: kind, Payload: payload})
 }
 
-// send is the one place a frame reaches the client: it counts the write, honours
+// send is the one place a frame reaches the client: it counts the write, honors
 // discard without touching the lock, and writes under the lock.
 func (f *frameWriter) send(fr Frame) error {
 	return f.sendAll(fr)
