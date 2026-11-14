@@ -204,7 +204,7 @@ func init() {
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerBackupImage, "tracker-backup-image", "",
 		"the postgres image the nightly dump runs in, by digest; its pg_dump must match the server's major version; it needs --tracker-backup")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonBdGatewayURL, "daemon-bd-gateway-url", "",
-		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder: the daemon carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE and mounts the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret read-only; the render names the Secret and never creates it; a live render only")
+		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)

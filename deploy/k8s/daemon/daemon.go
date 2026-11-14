@@ -808,11 +808,8 @@ type Values struct {
 	// API server refuses a malformed one at apply.
 	TrackerBackupSchedule string
 	// DaemonBdGatewayURL is the bd gateway's base URL the daemon's forwarder calls.
-	// Set, the daemon pod carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE and
-	// mounts the daemon-class token Secret (BdGatewayDaemonSecretName) read-only at
-	// BdGatewayTokenDir. The render never creates that Secret. It is for the live
-	// pod only: a rehearsal refuses it, since a rehearsal mounts no token. Empty
-	// renders none of this, and the dashboard's Values.BdGatewayURL is separate.
+	// Empty renders no gateway. It is for the live pod only, since a rehearsal
+	// mounts no token. The dashboard's Values.BdGatewayURL is separate.
 	DaemonBdGatewayURL string
 }
 
