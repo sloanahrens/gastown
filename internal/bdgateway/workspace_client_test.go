@@ -173,6 +173,15 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			root:  "relative/town",
 		},
 		{
+			// An absolute root that names nothing: the symlink resolution fails
+			// before any file is read, and the error keeps the missing-file cause.
+			name:    "a town root that does not exist",
+			spoil:   func(*testing.T, string) {},
+			wantErr: os.ErrNotExist,
+			want:    "resolving the town root",
+			root:    "/gt-bdgateway-test-no-such-town",
+		},
+		{
 			name:  "a root that is not a town",
 			spoil: func(t *testing.T, root string) { removePath(t, root, "mayor/town.json") },
 			want:  "not a Gas Town root",
