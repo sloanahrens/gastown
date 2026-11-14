@@ -15,13 +15,12 @@ import (
 
 // State represents the global Gas Town state.
 type State struct {
-	Enabled          bool      `json:"enabled"`
-	Version          string    `json:"version"`
-	MachineID        string    `json:"machine_id"`
-	InstalledAt      time.Time `json:"installed_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	ShellIntegration string    `json:"shell_integration,omitempty"`
-	LastDoctorRun    time.Time `json:"last_doctor_run,omitempty"`
+	Enabled       bool      `json:"enabled"`
+	Version       string    `json:"version"`
+	MachineID     string    `json:"machine_id"`
+	InstalledAt   time.Time `json:"installed_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	LastDoctorRun time.Time `json:"last_doctor_run,omitempty"`
 }
 
 // environ is the slice of the process environment this package reads.
@@ -184,21 +183,6 @@ func (e environ) getMachineID() string {
 		return generateMachineID()
 	}
 	return s.MachineID
-}
-
-// SetShellIntegration records which shell integration is installed.
-func SetShellIntegration(shell string) error { return osEnviron().setShellIntegration(shell) }
-
-func (e environ) setShellIntegration(shell string) error {
-	s, err := e.load()
-	if err != nil {
-		s = &State{
-			InstalledAt: time.Now(),
-			MachineID:   generateMachineID(),
-		}
-	}
-	s.ShellIntegration = shell
-	return e.save(s)
 }
 
 // RecordDoctorRun records when doctor was last run.

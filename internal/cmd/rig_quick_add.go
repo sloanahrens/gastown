@@ -1,5 +1,5 @@
 // ABOUTME: Quick-add command for adding a repo to Gas Town with minimal friction.
-// ABOUTME: Used by shell hook for automatic "add to Gas Town?" prompts.
+// ABOUTME: Hidden command: infers the rig name from the path and the git remote.
 
 package cmd
 
@@ -27,7 +27,6 @@ var rigQuickAddCmd = &cobra.Command{
 	Hidden: true,
 	Long: `Quickly add a git repository to Gas Town with minimal interaction.
 
-This command is designed for the shell hook's "Add to Gas Town?" prompt.
 It infers the rig name from the directory and git URL from the remote.
 
 Examples:

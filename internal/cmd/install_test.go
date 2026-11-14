@@ -868,8 +868,7 @@ func TestRunInstallFailsWhenItCannotWriteTheTrackerEndpoint(t *testing.T) {
 	}
 }
 
-// The prompt hook is gone, and with it the only reason gt install ever wrote
-// shell integration (gt-lpsnp5).
+// The --shell flag retired with the hook it installed (gt-lpsnp5).
 func TestInstallHasNoShellOption(t *testing.T) {
 	t.Parallel()
 	if f := installCmd.Flags().Lookup("shell"); f != nil {
