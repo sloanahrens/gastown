@@ -173,13 +173,20 @@ func promptDeniedMessage(hook permissionRequestInput, escalation string) string 
 		promptRequestSummary(hook), promptRetryGuidance(hook), escalation)
 }
 
+// guidanceUnreadable is the retry guidance for a command the parser cannot read.
+// The guard cannot tell what the command runs, so it names no shape to avoid.
+const guidanceUnreadable = "The command could not be read, so it cannot be checked. Retry with every quote, substitution and group closed, or escalate if this call is genuinely required."
+
 // promptRetryGuidance names a formulation that raises no prompt, chosen from
 // the shape that raised this one.
 func promptRetryGuidance(hook permissionRequestInput) string {
 	if !isShellTool(hook.ToolName) {
 		return "Retry in a form that needs no approval, or escalate if this one is required."
 	}
-	segments := commandSegments(hook.ToolInput.Command)
+	segments, readable := commandSegments(hook.ToolInput.Command)
+	if !readable {
+		return guidanceUnreadable
+	}
 	if segmentsChangeDirAndWrite(segments) {
 		return `Retry without cd, naming the directory absolutely — "rm -rf \"$dir\"/*" or "touch /abs/path/f" rather than "cd $dir && ...".`
 	}
@@ -190,17 +197,15 @@ func promptRetryGuidance(hook permissionRequestInput) string {
 }
 
 // commandSegments splits a command into its per-segment token runs, the unit
-// Claude Code's own Bash permission rules are judged in. A command the parser
-// reads is split by parsedTokens; one it cannot read keeps the text tokenizer,
-// shellTokenize, as its fallback. That fallback is kept until the last guard
-// moves off shellTokenize (gt-crn9gu).
-func commandSegments(command string) [][]string {
+// Claude Code's own Bash permission rules are judged in. readable is false when
+// parsedTokens cannot read command; there are then no segments, and the caller
+// takes the unreadable reading rather than guessing at the shape (gt-mh2pm3).
+func commandSegments(command string) (segments [][]string, readable bool) {
 	command = stripHeredocBodies(strings.TrimSpace(command))
 	tokens, readable := parsedTokens(command)
 	if !readable {
-		tokens = shellTokenize(command)
+		return nil, false
 	}
-	var segments [][]string
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
@@ -215,7 +220,7 @@ func commandSegments(command string) [][]string {
 	if len(segment) > 0 {
 		segments = append(segments, segment)
 	}
-	return segments
+	return segments, true
 }
 
 // segmentsChangeDirAndWrite reports the shape the analyzer asks about as
@@ -487,8 +492,10 @@ func promptShape(hook permissionRequestInput) string {
 	if !isShellTool(hook.ToolName) {
 		return hook.ToolName
 	}
-	segments := commandSegments(hook.ToolInput.Command)
+	segments, readable := commandSegments(hook.ToolInput.Command)
 	switch {
+	case !readable:
+		return "bash unreadable"
 	case segmentsChangeDirAndWrite(segments):
 		return "bash cd-compound-write"
 	case segmentsGlobRemoval(segments):
