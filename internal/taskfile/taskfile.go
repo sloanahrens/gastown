@@ -9,14 +9,35 @@
 package taskfile
 
 import (
+	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // commentTimeLayout is how a comment's time is written: the bead CLI's own
 // "2026-11-14 22:40" shape, at minute precision, which is what a polecat reads
 // in a bead comment today.
 const commentTimeLayout = "2006-01-02 15:04"
+
+// maxNotes caps the notes section at the newest notes: a long bead's oldest
+// notes matter least, and the seat reads the file at spawn.
+const maxNotes = 20
+
+// maxTextKiB and maxTextBytes cap the whole assembled text at 64 KiB, so one
+// TASK.md stays small enough to hand a seat at spawn.
+const (
+	maxTextKiB   = 64
+	maxTextBytes = maxTextKiB * 1024
+)
+
+// truncationMarker is the line appended to text that exceeded maxTextBytes. It
+// states the cap so a reader knows the task text they hold is incomplete. The
+// size is read from maxTextKiB rather than written a second time, so the marker
+// cannot name a cap the assembler no longer applies.
+func truncationMarker() string {
+	return fmt.Sprintf("[TASK.md truncated: the text exceeded %d KiB and the rest is not shown]", maxTextKiB)
+}
 
 // Box is one acceptance checkbox: the criterion's text and whether the bead has
 // it ticked.
@@ -69,6 +90,10 @@ type Input struct {
 //
 // The text ends with exactly one newline. Slices render in caller order and
 // nothing is sorted or looked up in a map, so the result is deterministic.
+//
+// Two caps keep the file small: the notes section keeps only the newest
+// maxNotes entries, and a text longer than maxTextBytes is cut and ends with
+// truncationMarker on its own last line.
 func Assemble(in Input) string {
 	var chunks []string
 	if head := heading(in); head != "" {
@@ -92,7 +117,26 @@ func Assemble(in Input) string {
 	if len(chunks) == 0 {
 		return ""
 	}
-	return strings.Join(chunks, "\n\n") + "\n"
+	return capText(strings.Join(chunks, "\n\n") + "\n")
+}
+
+// capText cuts text that exceeds maxTextBytes to fit it, marker included, and
+// ends the result with truncationMarker on its last line. It cuts at a rune
+// boundary, so the result is valid UTF-8 whatever the caller wrote; a trailing
+// partial line is kept, and the marker sits on the line after it.
+func capText(text string) string {
+	if len(text) <= maxTextBytes {
+		return text
+	}
+	// The marker, the newline that starts its line and the final newline are
+	// part of the cap, so the result never exceeds maxTextBytes.
+	marker := truncationMarker()
+	budget := maxTextBytes - len(marker) - 2
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return strings.TrimRight(text[:cut], "\n") + "\n" + marker + "\n"
 }
 
 // heading is the one line naming the bead. Either the id or the title alone is
@@ -126,7 +170,13 @@ func assembleBoxes(boxes []Box) string {
 	return section("Acceptance", sb.String())
 }
 
+// assembleNotes renders the newest notes only. The cap counts the caller's
+// entries before empty ones drop out, so a trailing empty entry can leave fewer
+// than maxNotes bullets, never more.
 func assembleNotes(notes []Note) string {
+	if len(notes) > maxNotes {
+		notes = notes[len(notes)-maxNotes:]
+	}
 	var sb strings.Builder
 	for _, note := range notes {
 		writeItem(&sb, "- ", note.Text)
