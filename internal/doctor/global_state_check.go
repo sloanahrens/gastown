@@ -11,6 +11,9 @@ import (
 
 type GlobalStateCheck struct {
 	BaseCheck
+	// load reads the state file; tests supply a stub so the check stays off
+	// the process environment.
+	load func() (*state.State, error)
 }
 
 func NewGlobalStateCheck() *GlobalStateCheck {
@@ -20,6 +23,7 @@ func NewGlobalStateCheck() *GlobalStateCheck {
 			CheckDescription: "Validates Gas Town global state",
 			CheckCategory:    CategoryCore,
 		},
+		load: state.Load,
 	}
 }
 
@@ -32,7 +36,7 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 	var details []string
 	var warnings []string
 
-	s, err := state.Load()
+	s, err := c.load()
 	if err != nil {
 		if os.IsNotExist(err) {
 			result.Message = "Global state not initialized"
