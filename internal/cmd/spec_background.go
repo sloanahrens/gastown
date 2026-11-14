@@ -322,6 +322,9 @@ func specSlingReport(townRoot string, job specSlingJob, envFor func(townRoot, ca
 func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDispatchEnv {
 	specDetailCache.Store(specSlingDetailCacheFor(townRoot, cacheOwner))
 	recordLockTimeout, clearLockTimeout := specLockTimeoutCounter(townRoot)
+	// One gateway listing for this job's sling, as the tick reads one for its
+	// own slings (gt-zapy97).
+	staleSeats := newSpecStaleSeats(traces, time.Now, specTownRunsSandboxes(townRoot))
 	return specDispatchEnv{
 		Annotate: func(id, key, text string) error {
 			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
@@ -335,7 +338,7 @@ func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDisp
 		}),
 		Sling: func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
 			trace := session.NewSandboxTrace(time.Now)
-			name, err := slingSpec(townRoot, c, resume, seat, nil, trace, newRigDockedMemo(nil))
+			name, err := slingSpec(townRoot, c, resume, seat, nil, trace, newRigDockedMemo(nil), staleSeats.get(), townRegistry().PrefixForRig)
 			traces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
 			return name, err
 		},

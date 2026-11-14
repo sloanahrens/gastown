@@ -851,6 +851,11 @@ type Daemon struct {
 	// (gt-hlo2ac). Only the attention tick touches it.
 	sandboxPendingReads map[string]chan struct{}
 
+	// seatSandboxGuard remembers which gateway sandboxes have been in a
+	// failure phase and since when, so the item names an age across ticks
+	// (gt-zapy97). Only the attention tick touches it.
+	seatSandboxGuard *SeatNameGuard
+
 	// scheduledSlingsHold and queuedWorkHold remember the operator dispatch
 	// hold each dispatcher last saw, so a hold is logged once when it appears,
 	// changes, or lifts rather than on every tick (gt-ifijm).

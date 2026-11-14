@@ -160,6 +160,10 @@ const (
 	// past the window, so no agent runs in it and the scheduler's own message
 	// names what the pod cannot get (gt-1gtq5g).
 	KindSandboxPending Kind = "sandbox-pending"
+	// KindSeatSandboxStale: a seat's gateway sandbox sits in a terminal
+	// failure phase, so its seat name fails every sling drawn for it until the
+	// sandbox is deleted (gt-zapy97).
+	KindSeatSandboxStale Kind = "seat-sandbox-stale"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -177,7 +181,7 @@ func Kinds() []Kind {
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindSandboxPending, KindUpdateRolledBack,
+		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindUpdateRolledBack,
 	}
 }
 

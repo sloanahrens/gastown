@@ -150,6 +150,11 @@ const (
 	// window: the scheduler's message says what the pod cannot get, and the
 	// seat's agent never starts until it is given (gt-1gtq5g).
 	RuleSandboxPending = "sandbox.pending"
+
+	// RuleSeatSandboxStale is a seat's gateway sandbox left in a terminal
+	// failure phase: every sling to the seat name it names fails until the
+	// sandbox is deleted (gt-zapy97).
+	RuleSeatSandboxStale = "sandbox.seat_stale"
 )
 
 var (
@@ -254,6 +259,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A sandbox pod the scheduler cannot place never starts its agent: the
 	// overseer is woken to give it the resources or fix its request (gt-1gtq5g).
 	RuleSandboxPending: flagsWake,
+	// A stale seat sandbox blocks its seat name for every sling: the overseer
+	// is woken to delete the sandbox and free the name (gt-zapy97).
+	RuleSeatSandboxStale: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -366,6 +374,7 @@ var kindRules = map[Kind]string{
 	KindUpdateRolledBack:         RuleUpdateRolledBack,
 	KindHoldStale:                RuleHoldStale,
 	KindSandboxPending:           RuleSandboxPending,
+	KindSeatSandboxStale:         RuleSeatSandboxStale,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

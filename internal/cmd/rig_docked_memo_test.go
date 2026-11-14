@@ -136,7 +136,7 @@ func TestSpecSlingSpawnCarriesTheTicksDockedMemo(t *testing.T) {
 		return &SpawnedPolecatInfo{}, nil
 	}
 
-	if _, err := specSlingSpawn(spawn, nil, nil, docked)("testrig", SlingSpawnOptions{}); err != nil {
+	if _, err := specSlingSpawn(spawn, nil, nil, docked, nil)("testrig", SlingSpawnOptions{}); err != nil {
 		t.Fatalf("spawn error = %v", err)
 	}
 	if got.rigParked == nil {

@@ -368,6 +368,9 @@ type attentionSources struct {
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
+	// sandboxList is the gateway listing the stale-seat-sandbox collector
+	// reads (seat_name_guard.go); nil is the openshell CLI.
+	sandboxList seatSandboxList
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -712,6 +715,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A sandbox pod the scheduler cannot place (gt-1gtq5g). The owns
 		// predicate keeps only its own items when the cluster read fails.
 		{kind: attention.KindSandboxPending, collect: s.collectPendingSandboxPods, owns: pendingSandboxItem},
+		// A seat's gateway sandbox left in a failure phase, which blocks the
+		// seat name every sling draws (gt-zapy97).
+		{kind: attention.KindSeatSandboxStale, collect: s.collectStaleSeatSandboxes, owns: seatSandboxStaleItem},
 	}, s.questionCollectors()...)
 }
 
