@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -47,9 +49,32 @@ const escalationCloseReasonMax = 400
 // a dropped id cannot be nudged again.
 const escalationCloseAnnouncedMax = 500
 
-// escalationCloseNudgeTimeout bounds one close nudge. It is not
-// overrunNudgeTimeout, so tuning the overrun guard does not change this send.
-const escalationCloseNudgeTimeout = 30 * time.Second
+// escalationCloseDeliveryWorstCase is the longest a wait-idle delivery can run
+// before it reports: deliver.WaitIdleTimeout for the seat's prompt, then
+// deliver.WatchTimeout watching the queue it falls back to, polled every
+// deliver.PollInterval, and deliver.ProbeWindow watching for a reaction to the
+// keystrokes it typed.
+const escalationCloseDeliveryWorstCase = deliver.WaitIdleTimeout + deliver.WatchTimeout + deliver.PollInterval + deliver.ProbeWindow
+
+// escalationCloseNudgeHeadroom is scheduling slack over the delivery's own
+// bounds, so a delivery that runs to its last poll is not cut on the bound.
+const escalationCloseNudgeHeadroom = 11 * time.Second
+
+// escalationCloseNudgeTimeout is the longest context one close nudge may be
+// given. A context shorter than the delivery's own waits ends with the
+// wait-idle fallback still in flight, and the pass then sends the close again,
+// so the seat reads it twice (gt-2fgnjc); a send given less than this, its
+// share when several closes divide a pass, is covered by
+// escalationCloseSendCommitted. It is not overrunNudgeTimeout, so tuning the
+// overrun guard does not change this send.
+const escalationCloseNudgeTimeout = escalationCloseDeliveryWorstCase + escalationCloseNudgeHeadroom
+
+// escalationCloseSendCommitPoint is where a wait-idle send has put the message
+// in front of the seat: deliver.WaitIdleTimeout for the prompt, plus one poll
+// interval for the queue write the fallback makes when the prompt does not
+// come. A send cut after this point has typed the message or queued it, so the
+// pass must not send it again (escalationCloseSendCommitted).
+const escalationCloseSendCommitPoint = deliver.WaitIdleTimeout + deliver.PollInterval
 
 // escalationCloseSendBudget bounds, together, every close nudge one pass sends.
 // The per-send timeout bounds one send, but the pass sends each closed
@@ -118,6 +143,23 @@ func (b *escalationSendBudget) spend(start time.Time) {
 	b.spent += b.now().Sub(start)
 }
 
+// escalationCloseSendCommitted reports whether a send that returned err has
+// delivered the message anyway, so the pass must not send it again. The close
+// nudge uses deliver's wait-idle mode (gt-h7f9cc): once a send's context has
+// lasted escalationCloseSendCommitPoint the delivery has either typed the
+// message into the pane or queued it and started the poller that drains that
+// queue into the same pane, so a context that ends later fails the send with
+// the context's deadline while the message is already delivered; retrying it
+// types a second copy, the resend gt-2fgnjc fixes. A send cut before the
+// commit point has done neither, so it is a failed send and the next tick
+// retries it.
+// deadline while the message is already delivered; retrying it types a second
+// copy, the resend gt-2fgnjc fixes. A send cut before the commit point has done
+// neither, so it is a failed send and the next tick retries it.
+func escalationCloseSendCommitted(err error, timeout time.Duration) bool {
+	return errors.Is(err, context.DeadlineExceeded) && timeout >= escalationCloseSendCommitPoint
+}
+
 // escalationCloseState is what the pass remembers between ticks.
 type escalationCloseState struct {
 	// Watch holds the escalations seen open at an earlier tick, and the closed
@@ -153,7 +195,9 @@ type escalationCloseSeams struct {
 	// the default wait-idle delivery rather than the target's file queue. The
 	// send gives up after timeout, its share of what is left of the pass's send
 	// budget, so one hung send cannot hold the tick for its own timeout once
-	// per escalation, nor take the turns of the closes after it.
+	// per escalation, nor take the turns of the closes after it. A send that
+	// gives up after escalationCloseSendCommitPoint has delivered the message
+	// already (escalationCloseSendCommitted).
 	nudge func(target, msg string, timeout time.Duration) error
 	// now reads the clock the pass's send budget runs on.
 	now func() time.Time
@@ -167,7 +211,8 @@ type escalationCloseSeams struct {
 type escalationOutcome int
 
 const (
-	// escalationNudged: the seat was nudged with the close.
+	// escalationNudged: the seat was nudged with the close, or the wait-idle
+	// delivery had already typed or queued the message when its context ended.
 	escalationNudged escalationOutcome = iota
 	// escalationSettled: no nudge is due, because the seat no longer holds the
 	// bead, has no live session, or the escalation names no bead of a polecat
@@ -335,6 +380,10 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	err = s.nudge(target, escalationCloseMessage(e), timeout)
 	budget.spend(start)
 	if err != nil {
+		if escalationCloseSendCommitted(err, timeout) {
+			s.logf("escalation_close: %s: nudge for %s ended at its %s deadline with the message typed or queued; not retrying", target, e.ID, timeout)
+			return escalationNudged
+		}
 		s.logf("escalation_close: %s: nudge for %s failed, will retry: %v", target, e.ID, err)
 		return escalationPending
 	}
