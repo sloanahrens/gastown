@@ -14,7 +14,7 @@ func fencedList(n int) string {
 	var b strings.Builder
 	b.WriteString("## Goal\nPlace commands.\n\nCommand paths this bead places:\n```\n")
 	for i := 0; i < n; i++ {
-		b.WriteString("gt command " + strings.Repeat("x", i%5) + "\n")
+		b.WriteString("gt command" + strings.Repeat("x", i%5) + " arg\n")
 	}
 	b.WriteString("```\n\n## Size\nOne worker.\n")
 	return b.String()
@@ -43,9 +43,13 @@ func TestSizeMinutes(t *testing.T) {
 		{"two items is not an enumeration", fencedList(2), boxes(3), 0, false},
 		{"no fenced list", "## Goal\nDo it.\n", boxes(3), 0, false},
 		{"forty commands imply more than any cap", fencedList(40), boxes(3), 62, true},
-		{"unclosed fence counts to the end", "x\n```\na\nb\nc\nd\n", boxes(2), 8, true},
+		{"unclosed fence counts to the end", "x\n```\ngt a\ngt b\ngt c\ngt d\n", boxes(2), 8, true},
+		{"paths count as items", "```\ninternal/a/b.go\ninternal/c/d.go\ncmd/x/y.go\n```\n", boxes(2), 6.5, true},
+		{"a code sample is not a work list", "```\nfunc main() {\n\tx := 1\n\ty := 2\n\tz := 3\n}\n```\n", boxes(2), 0, false},
+		{"output with a prose line is not a work list", "```\ngt a\nok it passed\ngt b\ngt c\n```\n", boxes(2), 0, false},
+		{"checkboxes quoted in a fence are not boxes", fencedList(5) + "\n```\n- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d\n- [ ] e\n```\n", "", 9.5, true},
 		{"boxes from the description when the field is empty", fencedList(5) + "\n## Acceptance\n" + boxes(5), "", 0, false},
-		{"largest of two lists", fencedList(3) + "\n```\na\nb\nc\nd\ne\nf\n```\n", boxes(2), 11, true},
+		{"largest of two lists", fencedList(3) + "\n```\ngt a\ngt b\ngt c\ngt d\ngt e\ngt f\n```\n", boxes(2), 11, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
