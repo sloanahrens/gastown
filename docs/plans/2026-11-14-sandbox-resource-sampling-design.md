@@ -28,8 +28,10 @@ that does not exist rather than one that reads zero.
   share (`:50-65`). It is the host half of `scripts/resource-sampler.py`; its
   docker, kubectl and bead-peak sources are still only in the Python script
   (`internal/resourcesampler/sampler.go:4-9`).
-- The patrol ticks it every 30 s by default (`internal/daemon/resource_sampler.go:15-23`)
-  into `<town>/.runtime/metrics` (`:96-103`).
+- The patrol ticks it every 30 s by default
+  (`internal/resourcesampler/sampler.go:35-37`, taken as its
+  `defaultResourceSamplerInterval` at `internal/daemon/resource_sampler.go:15`)
+  into `<town>/.runtime/metrics` (`internal/daemon/resource_sampler.go:96-103`).
 - `internal/metrics/source_hostcpu.go:14-51` is the `host_cpu` group.
   `polecat_vm_cores` matches the Mac's `Virtualization.VirtualMachine ... gt-sbx`
   process and `docker_vm_cores` the Docker Desktop one (`:158-171`). A consumer
@@ -45,9 +47,12 @@ that does not exist rather than one that reads zero.
   (`deploy/k8s/daemon/daemon.go:476`, `:1200`), and a pod rendered without one
   says so (`:508-514`).
 - The sandbox cluster (`gt-sbx`, a Colima VM with a three-node kind cluster,
-  `docs/architecture.md:72`, `:98`) publishes one fixed port to the Mac:
-  nodePort 30443 to hostPort 28443 on 127.0.0.1
-  (`deploy/k8s/kind/cluster.yaml:22-26`, `deploy/k8s/kind/gateway-nodeport.yaml:17`).
+  `docs/architecture.md:72`, `:98`) publishes the gateway on the Mac's loopback:
+  nodePort 30443 to hostPort `GT_K8S_GATEWAY_PORT`, 28443 by default
+  (`deploy/k8s/kind/common.sh:19`), on 127.0.0.1
+  (`deploy/k8s/kind/cluster.yaml:22-26`, filled from the `__GATEWAY_PORT__`
+  placeholder by `deploy/k8s/kind/up.sh:105`;
+  `deploy/k8s/kind/gateway-nodeport.yaml:17` pins the nodePort).
   The API server gets kind's own ephemeral loopback port, which no manifest
   names. metrics-server v0.9.0 is installed, so `kubectl top` answers there
   (`deploy/k8s/kind/up.sh:151-172`).
@@ -190,8 +195,8 @@ rather than one with nulls: the series stops.
 
 ## Implementation beads
 
-Each is under 8 points. The order is `B1` first, then `B2a`; `B4` and `B5` are
-independent of the rest.
+Each is under 8 points. The order is `B1` first, then `B2a`; `B4` and `B5` each
+depend only on `B1`.
 
 - **B1 (3) — `resourcesampler` carries the new fields.** Add `Cluster`,
   `PressureCPUSomePct`, `PressureMemSomePct`, `PressureMemFullPct` and `Load1`
