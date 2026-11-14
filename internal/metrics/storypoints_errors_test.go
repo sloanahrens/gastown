@@ -42,8 +42,9 @@ func TestStorypointsNoExtractErrors(t *testing.T) {
 		// setup builds the town's metrics root; nil leaves it absent.
 		setup func(t *testing.T, town *commandTown)
 		// readDir, when set, is the directory listing the step gets instead of
-		// the host's.
-		readDir func(string) ([]DirEntry, error)
+		// the host's; nilReadDir leaves the seam unwired.
+		readDir    func(string) ([]DirEntry, error)
+		nilReadDir bool
 		// want is a fragment of the error; wantPath, when set, is a path the
 		// error must name.
 		want     string
@@ -52,6 +53,11 @@ func TestStorypointsNoExtractErrors(t *testing.T) {
 		{
 			name: "no metrics root",
 			want: "run extract first",
+		},
+		{
+			name:       "an unwired listing seam",
+			nilReadDir: true,
+			want:       "Env.ReadDir is unset",
 		},
 		{
 			name: "a root with no dated extract",
@@ -112,6 +118,9 @@ func TestStorypointsNoExtractErrors(t *testing.T) {
 			}
 			if tc.readDir != nil {
 				town.env.ReadDir = tc.readDir
+			}
+			if tc.nilReadDir {
+				town.env.ReadDir = nil
 			}
 			town.out.Reset()
 			code, err := town.run(t, CommandStoryPoints)

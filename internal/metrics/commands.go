@@ -258,6 +258,9 @@ func storyPointsExtract(env Env, outDir string) (dir string, data []byte, err er
 	case !errors.Is(err, fs.ErrNotExist):
 		return "", nil, fmt.Errorf("read %s: %w", today, err)
 	}
+	if env.ReadDir == nil {
+		return "", nil, errors.New("story points: Env.ReadDir is unset")
+	}
 	root := filepath.Dir(outDir)
 	entries, err := env.ReadDir(root)
 	switch {
