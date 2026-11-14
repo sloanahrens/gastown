@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -92,8 +95,8 @@ func TestOverrunSeatGitReadsTheSandboxCloneForASandboxSeat(t *testing.T) {
 }
 
 // TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox: a seat with no
-// sandbox record is a host seat and keeps its host handle; no in-sandbox runner
-// is built for it.
+// sandbox record is a host seat and keeps its host handle, the very one the
+// daemon's opener returns; no in-sandbox runner is built for it.
 func TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox(t *testing.T) {
 	t.Parallel()
 	f := newOverrunSeatGitFixture(t, nil, nil, "")
@@ -102,20 +105,51 @@ func TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox(t *testing.T) {
 		built = true
 		return nil, errors.New("no runner expected")
 	}
-	// The host stub is allowed here: replace the failing opener with a recorder.
+	host := git.NewGit(t.TempDir())
 	var opened []string
 	f.d.openGitFn = func(dir string) daemonGit {
 		opened = append(opened, dir)
-		return nil
+		return host
+	}
+	// The host worktree must resolve for the seat: the polecat directory holds one.
+	worktree := filepath.Join(f.d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	_, _ = f.d.overrunSeatGit(stopSeat)
+	got, err := f.d.overrunSeatGit(stopSeat)
 
+	if err != nil {
+		t.Fatalf("overrunSeatGit: %v", err)
+	}
+	if got != daemonGit(host) {
+		t.Errorf("overrunSeatGit = %v, want the host handle the opener returned", got)
+	}
+	if len(opened) != 1 || opened[0] != worktree {
+		t.Errorf("host handle opened for %v, want exactly the seat's worktree %q", opened, worktree)
+	}
 	if built {
 		t.Error("an in-sandbox runner was built for a seat with no sandbox record")
 	}
-	if len(opened) > 1 {
-		t.Errorf("host handle opened %d times, want at most once: %v", len(opened), opened)
+}
+
+// TestOverrunSeatGitRefusesAnUnreadableSandboxRecord: a record that cannot be
+// read is an error, never the host stub.
+func TestOverrunSeatGitRefusesAnUnreadableSandboxRecord(t *testing.T) {
+	t.Parallel()
+	f := newOverrunSeatGitFixture(t, overrunStopSandboxRecord("/sandbox/x"), nil, "")
+	f.d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		return session.SandboxRecord{}, false, errors.New("registry unreadable")
+	}
+
+	if g, err := f.d.overrunSeatGit(stopSeat); err == nil {
+		t.Fatalf("overrunSeatGit = %v, nil error; want a refusal", g)
+	}
+	if len(*f.hostDir) != 0 {
+		t.Errorf("the host worktree was opened: %v", *f.hostDir)
 	}
 }
 

@@ -76,6 +76,9 @@ func NewGitWithExec(workDir string, exec ExecFunc) *Git {
 // this host, so no call checks that it exists here (that check would refuse
 // every call), and exec alone answers for it. exec must not be nil.
 func NewGitWithRemoteExec(workDir string, exec ExecFunc) *Git {
+	if exec == nil {
+		panic("git: NewGitWithRemoteExec needs an exec: without one git would run on this host in a directory that is not here")
+	}
 	return &Git{workDir: workDir, exec: exec, remote: true}
 }
 

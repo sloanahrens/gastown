@@ -987,13 +987,14 @@ func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 // overrunSandboxGit is the git handle of a seat that runs in a sandbox: a Git
 // over the in-sandbox runner, in the clone directory its record names, so the
 // save, the dirty check, the push and the reset see the sandbox's work and not
-// the host stub, which stays at main. A seat with no sandbox record is not
-// sandboxed and gets false with no error: it keeps its host worktree. The bool is
-// only true with a handle; every error comes back with false, and the caller
-// checks the error first. A record that cannot be
-// read, one that names no clone directory, and a runner that is not linked are
-// errors, never the host stub: the stub would read a clean tree and call the
-// seat's work saved while it dies with the sandbox.
+// the host stub, which stays at main.
+//
+// A seat with no sandbox record is a host seat: false and no error, and it keeps
+// its host worktree. The bool is true only with a handle; every error comes back
+// with false, so the caller checks the error first. A record that cannot be
+// read, a record that names no clone directory and a runner that is not linked
+// are errors, never the host stub: the stub reads a clean tree and the seat's
+// work would be called saved while it dies with the sandbox.
 func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 	sb, err := d.overrunSandboxSession(seat)
 	if err != nil || sb.Session == "" {
