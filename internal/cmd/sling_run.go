@@ -336,14 +336,18 @@ func realSlingDepsFor(stores slingStores) *slingDeps {
 		logFeed:      events.LogFeed,
 		enqueueNudge: nudge.Enqueue,
 
-		findHookedFormula: findHookedFormulaSingletonFn,
+		findHookedFormula: func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
+			return findHookedFormulaSingletonFn(stores, workDir, targetAgent, formulaName)
+		},
 		cookFormula: func(formulaName, workDir, townRoot string) error {
 			return CookFormula(slingStores{}, formulaName, workDir, townRoot)
 		},
 		createWisp: createFormulaWisp,
 		hookWisp:   hookBeadWithRetryFn,
-		burnWisp:   burnSlingWispFn,
-		nudgePane:  func(pane, msg string) error { return nudgePaneFn(pane, msg) },
+		burnWisp: func(wispRootID, formulaWorkDir string) error {
+			return burnSlingWispFn(stores, wispRootID, formulaWorkDir)
+		},
+		nudgePane: func(pane, msg string) error { return nudgePaneFn(pane, msg) },
 
 		slingContexts: func(rigBeadsDir string) slingContextStore {
 			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir, stores.opts...)

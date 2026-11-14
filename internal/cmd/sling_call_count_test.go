@@ -331,12 +331,10 @@ func TestSlingCallsCountSeparatelyForConcurrentSlings(t *testing.T) {
 // not name, and when a named one no longer exists. A site moved or removed is
 // an entry to update; a site added is a decision about whether it counts.
 var slingBDExcludedSites = map[string]string{
-	"sling_formula.go:closeFormulaWisp":           "standalone formula sling: it builds no trace, so there is nothing to count on",
-	"sling_formula.go:findHookedFormulaSingleton": "standalone formula sling: it builds no trace, so there is nothing to count on",
-	"sling_pool.go:openClient":                    "the fallback for a seat read whose caller set no opener; a sling's seat reads come through open",
-	"pool_seats.go:poolSeatWorkFor":               "the operator seat listing's landing-seat read; a sling's seat decision confirms landing seats through its own storeFor",
-	"hook.go:runHook":                             "the operator's gt hook command, not a sling",
-	"hook.go:runHookShow":                         "the operator's gt hook show command, not a sling",
+	"sling_pool.go:openClient":      "the fallback for a seat read whose caller set no opener; a sling's seat reads come through open",
+	"pool_seats.go:poolSeatWorkFor": "the operator seat listing's landing-seat read; a sling's seat decision confirms landing seats through its own storeFor",
+	"hook.go:runHook":               "the operator's gt hook command, not a sling",
+	"hook.go:runHookShow":           "the operator's gt hook show command, not a sling",
 }
 
 // slingPathFiles are the files the bd constructions of a sling (and of the
