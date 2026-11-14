@@ -6,8 +6,8 @@ package taskmap
 // and so do the group and queue commands a sender uses to choose recipients
 // and to hand work out. Releasing a claim hands the work back for another
 // agent, as unsling does. Reading, searching, marking and previewing a
-// message orient you to what was sent, which is where the first half put
-// inbox, read and delete.
+// message orient you to what was sent, as the first half's delete and
+// archive do.
 func init() {
 	Register(
 		Entry{Path: "mail group delete", Group: "dispatch", Use: "Use this when a mail group should stop existing and a message to its name should no longer reach anyone.", Check: "gt mail group list no longer shows the group"},
@@ -27,7 +27,7 @@ func init() {
 		Entry{Path: "mail read", Group: "orient", Use: "Use this to open a message you were sent, which marks it read without removing it.", Check: "the printed header names the message's subject and sender"},
 		Entry{Path: "mail release", Group: "dispatch", Use: "Use this when you cannot finish a claimed queue message and another agent should be able to take it.", Check: "the command prints Released message back to queue"},
 		Entry{Path: "mail reply", Group: "dispatch", Use: "Use this when the sender of a message should get your answer in the same thread.", Check: "the command prints Reply sent to, naming the sender"},
-		Entry{Path: "mail search", Group: "orient", Use: "Use this to find a message by its text when you no longer know which one holds it.", Check: "the printed count and matches follow the query"},
+		Entry{Path: "mail search", Group: "orient", Use: "Use this to find a message by its text when you no longer know which one holds it.", Check: "the printed count and the matching messages answer the query"},
 		Entry{Path: "mail send", Group: "dispatch", Use: "Use this when another agent, or a whole group of them, must receive a message you can address by name.", Check: "the command prints Message sent to, naming the address"},
 		Entry{Path: "mail thread", Group: "orient", Use: "Use this to read a whole exchange in order when a message is one turn of a longer conversation.", Check: "the printed thread lists every message in order"},
 	)
