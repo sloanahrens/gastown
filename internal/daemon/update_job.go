@@ -83,11 +83,15 @@ func newKubectlUpdateJob(townRoot string) updateJobClient {
 	return kubectlUpdateJob{dir: update.Dir(townRoot), run: update.ExecRun}
 }
 
-// CreateJob applies manifest as the Job name, with kubectl's own request timeout
-// set to requestTimeout. kubectl reads zero as no bound, so a zero bound is
-// refused before anything is written. kubectl's AlreadyExists answer is
-// errUpdateJobExists; any other refusal names the exit status only, since the
-// output of kubectl is not echoed.
+// CreateJob applies manifest as the Job name, bounded by requestTimeout. kubectl
+// reads zero as no bound, so a zero bound is refused before anything is written.
+// kubectl's AlreadyExists answer is errUpdateJobExists; any other refusal names
+// the exit status only, since the output of kubectl is not echoed.
+//
+// The bound is a context deadline, not kubectl's --request-timeout: with that flag
+// kubectl loses its in-cluster config in the daemon pod and sends every request to
+// http://localhost:8080, so the create fails (reproduced 2026-11-14, kubectl
+// v1.37.0). The deadline kills kubectl at the same point its own timeout would have.
 func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
 	if requestTimeout <= 0 {
 		return fmt.Errorf("the create of %s has no request timeout to send", name)
@@ -99,7 +103,9 @@ func (k kubectlUpdateJob) CreateJob(ctx context.Context, name string, manifest [
 	if err := os.WriteFile(path, manifest, 0o600); err != nil {
 		return fmt.Errorf("write the manifest of %s: %w", name, err)
 	}
-	out, exit, err := k.run(ctx, "", nil, "kubectl", "create", "-f", path, "--request-timeout="+requestTimeout.String())
+	bounded, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	out, exit, err := k.run(bounded, "", nil, "kubectl", "create", "-f", path)
 	if err != nil {
 		return fmt.Errorf("running kubectl create for %s: %w", name, err)
 	}
