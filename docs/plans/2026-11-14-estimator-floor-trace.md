@@ -76,8 +76,11 @@ The geometric mean of the two model inputs is therefore `10.64`: embed and jev
 each landed near 10.6 minutes. No input reported the bead as small; the shape
 input was the largest of the three.
 
-The same arithmetic on the other four beads, whose notes match their current
-section hashes (shape recomputed now, so it is the value that estimate read):
+The same arithmetic on all five beads, whose notes match their current section
+hashes. Running the estimator again on each (`gt spec estimate --force
+--dry-run --json <bead>`, 2026-11-14) returned the minutes at one decimal —
+14.5, 9.9, 9.7, 10.8, 10.2 — so each two-decimal figure below is what that
+estimate read:
 
 | bead | shape minutes | note minutes | embed · jev | pair mean |
 |---|---|---|---|---|
@@ -101,14 +104,20 @@ The shape input does, for three reasons.
    this bead — 32% over the trigger. `Blend` refuses an estimate without it
    (`ErrNoShape`).
 2. Its base is the training target's centre. `exp(intercept) = 8.76` is what
-   the model predicts for a bead at every training mean, and a least-squares fit
-   on log minutes puts that near the geometric mean of the landed times: the
-   weights were fitted on landed beads 2026-10-26..11-06, n=1797 (weights.json,
-   `trained_on`). That era's landing record has a median of 7.0 minutes on the
-   Haiku seat and 8.6 on the DeepSeek seat, and the retrospective's pooled
-   training-period quantiles put the median at 7.4 and p70 at 13.0
-   ([retrospective](2026-11-11-story-points-retrospective.md) sections 1 and 2).
-   A prose-heavy bead is lifted from there, never lowered.
+   the model predicts for a bead at every training mean, because the feature
+   terms vanish there (`shapeFit.logMinutes`, internal/storypoints/train.go).
+   The ridge leaves the intercept unpenalized, setting it to the mean of the
+   training log-minutes less the coefficients on the feature means
+   (`ridgeFit.solve`, internal/storypoints/ridge.go), and `shapeLearner`
+   standardizes the features before the fit, so that mean is zero and the
+   intercept is the training target's mean. `exp(2.16992)` is therefore the
+   fit's geometric mean of the minutes it was trained on — landed beads
+   2026-10-26..11-06, n=1797 (weights.json, `trained_on`). The landing record's
+   medians for that era are lower: 7.0 minutes on the Haiku seat and 8.6 on the
+   DeepSeek seat, with a pooled training-period median of 7.4 and p70 of 13.0
+   ([retrospective](2026-11-11-story-points-retrospective.md) sections 1 and 2),
+   the order a geometric mean takes above the median of a right-skewed
+   distribution. A prose-heavy bead is lifted from that centre, never lowered.
 3. The two features that lift it measure prose, not work. `dlen` is
    `ln(1 + runes)` and multiplies the estimate by `exp(0.225) = 1.25` at this
    bead's 4,387 characters; `tests` counts matches of `\btest` and
@@ -125,10 +134,14 @@ estimator produced 11.8 because none of the three inputs saw a small bead, not
 because one of them caps the answer.
 
 The second half of the cause is the trigger's placement. The split trigger was
-11 minutes; the pooled landed median is 7.4 and p70 is 13.0. A threshold set
-there holds roughly the largest third of all beads, and the retrospective
-already recorded that the best low threshold flags four long beads for every six
-it holds that do not run long (section 7).
+11 minutes, against a pooled training-period median of 7.4 and p70 of 13.0
+(retrospective section 2); on actual minutes, 35.6% of span-era beads run past
+11 (the sum of that section's four columns above its 11-minute bound). Section
+7 sets the trigger on the estimate instead, as the split rule does: at 11
+estimated minutes its three-way blend flags 23% of beads, and 19% of the
+flagged beads run over 27.5 minutes. The best trigger shown there, 15 estimated
+minutes, flags 4% at precision 0.40 — four beads that run long for every six
+that do not (section 7's table; the summary's point 5 states the ratio).
 
 ## 4. Four smaller mechanisms next to the floor
 
@@ -136,10 +149,11 @@ it holds that do not run long (section 7).
   (internal/storypoints/shape.go) writes the bead's label list into the first
   line, so the `sp:`, `sp-rung:` and `sp-minutes:` labels a previous estimate
   wrote are text for the next one: `nlab` counts them and `dlen` measures them.
-  Stripping them from gt-j669b4.14 lowers its shape input from 14.51 to 13.78
-  minutes, 5%. `estimate.SectionHash` covers only the Goal, Constraints,
-  Acceptance and Size sections, so a bead whose description is edited is
-  re-estimated on a title line that has grown by every label written since.
+  Removing them from gt-j669b4.14's first line and repeating section 1's
+  arithmetic lowers its shape input from 14.51 to 13.78 minutes, 5%.
+  `estimate.SectionHash` covers only the Goal, Constraints, Acceptance and Size
+  sections, so a bead whose description is edited is re-estimated on a title
+  line that has grown by every label written since.
 - **A held bead keeps being estimated.** `specEstimateAheadPick`
   (internal/cmd/spec_estimate_ahead.go) does not exclude a bead carrying the
   split label, so editing gt-j669b4.14's text produced a fresh note at 22:04.
@@ -155,13 +169,13 @@ it holds that do not run long (section 7).
   log to read: on 2026-11-14 the town's `.runtime` held no `storypoints`
   directory, so `estimates.jsonl` (the path `estlog.Path` names,
   `<townRoot>/.runtime/storypoints/estimates.jsonl`) did not exist.
-  A forced estimate run now (`gt spec estimate --force --dry-run --json
-  gt-j669b4.14`) skipped both — the embedder URL `host.docker.internal:11434`
+  The forced estimate run in section 2 (`gt spec estimate --force --dry-run
+  --json <bead>`) skipped both — the embedder URL `host.docker.internal:11434`
   does not resolve from the sandbox, the files the battery reads hold no
-  `TYPESAFE_API_KEY` line, and hm is not installed — and returned rung `shape`,
-  14.5 minutes, which is how the shape component above was confirmed. The pair
-  product in section 2 is arithmetic on the recorded blend, not a measurement
-  of either input.
+  `TYPESAFE_API_KEY` line, and hm is not installed — and returned rung `shape`
+  for every bead, the one-decimal minutes section 2 quotes. That is how the
+  shape components above were confirmed. The pair product in section 2 is
+  arithmetic on the recorded blend, not a measurement of either input.
 - **Why the log is missing.** Either the daemon's binary predates the append
   (gt-a86xuu) or the append failed; the note's `LogError` is reported on the
   dispatcher tick, not on the bead, and I did not read the daemon's log.
