@@ -195,22 +195,22 @@ func TestInitRecordsTheImagesAndTheContainerRollsThem(t *testing.T) {
 // TestJobGitCredentialEnv holds git's credential helper to the viewer token and the
 // Forgejo Service: both the init container and the main container carry the three
 // GIT_CONFIG variables, and the helper line names the mounted token file and the
-// host the daemon's constants compose.
+// host. The expected values are literals, not rebuilt from the constants job.go
+// composes them from, so a change to one of those constants fails here.
 func TestJobGitCredentialEnv(t *testing.T) {
 	t.Parallel()
-	host := k8sdaemon.ForgejoName + ":" + strconv.Itoa(k8sdaemon.ForgejoPort)
-	// The goldens carry this host too: a change to the daemon's Service name or
-	// port is a deliberate change to the Job's helper line, and this check names
-	// the change instead of letting the two drift.
+	// The daemon's Service name and port must still compose this host. This is the
+	// one place the daemon's constants are read, and it fails with a named cause
+	// instead of letting the Job's helper line drift from the Service.
 	const wantHost = "forgejo:3000"
-	if host != wantHost {
+	if host := k8sdaemon.ForgejoName + ":" + strconv.Itoa(k8sdaemon.ForgejoPort); host != wantHost {
 		t.Fatalf("the daemon's Forgejo name and port compose %q, want %q", host, wantHost)
 	}
 	pod := podOf(mustBuild(t, goldenValues()))
 	want := []EnvVar{
 		{Name: "GIT_CONFIG_COUNT", Value: "1"},
-		{Name: "GIT_CONFIG_KEY_0", Value: "credential.http://" + host + ".helper"},
-		{Name: "GIT_CONFIG_VALUE_0", Value: "!gt git-credential-forgejo --host " + host + " --token-file " + ViewerTokenPath},
+		{Name: "GIT_CONFIG_KEY_0", Value: "credential.http://forgejo:3000.helper"},
+		{Name: "GIT_CONFIG_VALUE_0", Value: "!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env"},
 	}
 	for _, name := range []string{InitContainerName, ContainerName} {
 		c := containerNamed(t, pod, name)
