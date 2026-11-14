@@ -292,6 +292,64 @@ func TestHowCardRefusesACardOverTheLimit(t *testing.T) {
 	}
 }
 
+// TestHowCardRefusesACardAtTheLimit pins the bound's edge: a card of exactly
+// overseerCardPrintMaxBytes is refused, and one byte under it is printed and
+// measured, so "under" keeps its strict meaning.
+func TestHowCardRefusesACardAtTheLimit(t *testing.T) {
+	t.Parallel()
+
+	rules, err := overseerCardRules()
+	if err != nil {
+		t.Fatalf("overseerCardRules: %v", err)
+	}
+	// base is the card's size with a one-character group description: the title
+	// and lookup rule lines, a blank line, the one group's line, a blank line,
+	// then every rule line.
+	const group, placeholder = "g", "x"
+	base := len(overseerCardTitle) + 1 + len(overseerCardLookupRule) + 1 + 1 +
+		len(group) + 2 + len(placeholder) + 1 + 1
+	for _, rule := range rules {
+		base += len(rule) + 1
+	}
+
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "one byte under the limit is printed", size: overseerCardPrintMaxBytes - 1},
+		{name: "exactly at the limit is refused", size: overseerCardPrintMaxBytes, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := howFixture()
+			m.groups = []taskmap.Group{group}
+			desc := strings.Repeat("y", tc.size-base+1)
+			m.describe = func(taskmap.Group) string { return desc }
+
+			var out bytes.Buffer
+			err := runHowCard(&out, m, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("runHowCard printed a %d-byte card, want an error", tc.size)
+				}
+				if out.Len() != 0 {
+					t.Errorf("runHowCard wrote %q before refusing", out.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runHowCard refused a %d-byte card: %v", tc.size, err)
+			}
+			if got := out.Len(); got != tc.size {
+				t.Errorf("the card is %d bytes, want %d", got, tc.size)
+			}
+		})
+	}
+}
+
 // TestHowCardRefusesAGroupWithNoDescription checks the card refuses a group
 // description of "" (writeHowGroups' error) rather than print a group line with
 // nothing after the name, and that no partial card reaches the writer.
