@@ -640,3 +640,71 @@ func TestBuildRuntimeArchiveStampsNothingWhenThePromptStoreFails(t *testing.T) {
 		t.Errorf("comments = %v, want none when the prompt was not stored", comments.calls)
 	}
 }
+
+// A spawn that carries task text stages it at .gt/task/TASK.md in a directory
+// the archive creates, and a spawn with no task text stages nothing: its entry
+// set stays the five files every spawn gets. The file is read-only but readable
+// by every account in the sandbox, since the seat reads it and never writes it
+// (gt-0ne2hw).
+func TestRuntimeArchiveStagesTheTaskFile(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	const taskText = "## Goal\n\nFinish the hooked bead (gt-0ne2hw).\n"
+	wantEntries := func(staged bool) map[string]int64 {
+		claudeDir := "gt/" + openshellTestRig + "/polecats/.claude/"
+		entries := map[string]int64{
+			".claude.json":              0o600,
+			".gitconfig":                0o644,
+			".githelper":                0o755,
+			claudeDir + "settings.json": 0o644,
+			claudeDir + "system-prompt-" + openshellTestPolecat + ".md": 0o644,
+		}
+		if staged {
+			entries[path.Dir(runtimeTaskFile)+"/"] = 0o755
+			entries[runtimeTaskFile] = 0o444
+		}
+		return entries
+	}
+	cases := []struct {
+		name   string
+		task   []byte
+		staged bool
+	}{
+		{name: "task text", task: []byte(taskText), staged: true},
+		{name: "no task text", task: nil, staged: false},
+		{name: "empty task text", task: []byte{}, staged: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := openshellSpawn(town, work)
+			spec.TaskFile = tc.task
+			entries := untarRuntime(t, openshellArchiveBytes(t, spec, sandboxTracker{}))
+			want := wantEntries(tc.staged)
+			if len(entries) != len(want) {
+				t.Fatalf("archive entries = %v, want %v", entries, want)
+			}
+			for name, mode := range want {
+				entry, ok := entries[name]
+				if !ok {
+					t.Errorf("the archive stages no %s", name)
+					continue
+				}
+				if entry.mode != mode {
+					t.Errorf("%s mode = %o, want %o", name, entry.mode, mode)
+				}
+			}
+			for name := range entries {
+				if _, ok := want[name]; !ok {
+					t.Errorf("the archive stages %s, want only %v", name, want)
+				}
+			}
+			entry, ok := entries[runtimeTaskFile]
+			if !ok {
+				return
+			}
+			if entry.body != taskText {
+				t.Errorf("%s = %q, want exactly the spec's task text", runtimeTaskFile, entry.body)
+			}
+		})
+	}
+}

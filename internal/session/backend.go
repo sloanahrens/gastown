@@ -67,6 +67,11 @@ type SpawnSpec struct {
 	// one. The spawn stamps it with the stored prompt's hash, joining a
 	// landing's rejection to the prompt version its author had (gt-2lu00).
 	WorkBeadID string
+	// TaskFile is the rendered TASK.md a no-bead-access seat reads as its
+	// task, empty for none. A non-empty value is staged read-only in the
+	// sandbox's runtime archive at /sandbox/.gt/task/TASK.md, outside the
+	// seat's worktree (gt-0ne2hw). Nothing sets it yet (gt-kplyw2).
+	TaskFile []byte
 	// TrackerTokenPlaceholder stages SandboxTrackerPlaceholder in a
 	// tracker-routed sandbox's token file. False keeps today's 0400 file
 	// holding the real token; nothing sets it true until the per-seat

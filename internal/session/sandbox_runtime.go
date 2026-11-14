@@ -53,6 +53,11 @@ type runtimeFile struct {
 // extracts under /sandbox: the path TRACKER_TOKEN_FILE names.
 const runtimeTrackerToken = ".tracker/token"
 
+// runtimeTaskFile is the task file's name in the runtime archive, which
+// extracts under /sandbox: the task a no-bead-access seat reads at spawn. It
+// is outside the seat's worktree, so the seat's `git add -A` never sees it.
+const runtimeTaskFile = ".gt/task/TASK.md"
+
 // SandboxTrackerPlaceholder is the value a tracker-routed sandbox's token file
 // holds when the spawn asks for a placeholder instead of the seat's real token;
 // the client sends it as its bearer value and the supervisor swaps in the real
@@ -74,7 +79,8 @@ type promptCommentStore interface {
 // town root rewritten. The agent command names settings.json and the system
 // prompt, so a missing one is an error. A rig or polecat name that is not one
 // path segment is an error too. A tracker-routed seat's archive also carries
-// its token file at .tracker/token (gt-p85pw.84).
+// its token file at .tracker/token (gt-p85pw.84), and a spec with task text
+// carries it at .gt/task/TASK.md (gt-0ne2hw).
 //
 // The spawn log, the renderer and the comment store are seams: the production
 // caller passes its own, and a test captures the uploaded prompt's hash line
@@ -156,6 +162,16 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 		files = append(files,
 			runtimeFile{path.Dir(runtimeTrackerToken), nil, 0o700, true},
 			runtimeFile{runtimeTrackerToken, token, 0o400, false},
+		)
+	}
+	// A no-bead-access seat reads its task from a file instead of its bead
+	// (gt-1m0kb). The archive stages it owner- and world-readable but not
+	// writable, so the seat reads the text the host rendered and cannot edit
+	// it (gt-0ne2hw). A spawn with no task text stages nothing.
+	if len(spec.TaskFile) > 0 {
+		files = append(files,
+			runtimeFile{path.Dir(runtimeTaskFile), nil, 0o755, true},
+			runtimeFile{runtimeTaskFile, spec.TaskFile, 0o444, false},
 		)
 	}
 	// The bytes are kept by hash so a rejection can be joined to the prompt its
