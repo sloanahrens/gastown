@@ -22,6 +22,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
@@ -371,6 +372,12 @@ type Daemon struct {
 	// seams replaces the heartbeat, upgrade and main-branch
 	// collaborators in tests (see daemonSeams); the zero value is production.
 	seams daemonSeams
+
+	// workspacePusher replaces the bd gateway pusher the workspace reconcile
+	// pushes through (workspace_reconcile.go); nil uses the installed pusher,
+	// which the reconcile installs from BD_GATEWAY_URL. Tests set it, so a
+	// reconcile test opens no socket and installs nothing process-wide.
+	workspacePusher bdgateway.WorkspacePusher
 
 	// maint replaces scheduled maintenance's side effects in tests (see
 	// maintenanceSeams); the zero value is production.
@@ -1898,6 +1905,11 @@ func (d *Daemon) Run() (err error) {
 
 	// Landing workers (gt-v4ssj.2): opt-in, one goroutine per rig.
 	d.startLandingWorkers()
+
+	// The bd gateway's workspace reconcile (bd-container G8b): off unless
+	// BD_GATEWAY_URL names a gateway. It pushes from its own goroutine, so a
+	// slow or failed push never holds up the start.
+	d.startWorkspaceReconcile()
 
 	// Local round patrols (gt-ryp1ff): one per rig, serving the polecats' LOCAL
 	// ROUND REQUEST notes; the daemon.local_round switch gates each request.

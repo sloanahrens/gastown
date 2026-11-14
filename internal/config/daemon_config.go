@@ -316,6 +316,30 @@ func (c *DaemonPatrolConfig) LocalRoundTimeout() (time.Duration, error) {
 	return time.Duration(secs) * time.Second, nil
 }
 
+// DefaultWorkspaceReconcileInterval is the reconcile cadence when the town sets
+// none: five minutes, so a gateway that restarted or missed a push converges
+// within that bound (docs/design/bd-container.md, "The workspace").
+const DefaultWorkspaceReconcileInterval = 5 * time.Minute
+
+// WorkspaceReconcileInterval returns how often the workspace reconcile pushes.
+// An unset interval takes DefaultWorkspaceReconcileInterval; an interval that
+// does not parse or is not positive is an error naming
+// patrols.workspace_reconcile.interval, never the default.
+func (c *DaemonPatrolConfig) WorkspaceReconcileInterval() (time.Duration, error) {
+	if c == nil || c.Patrols == nil || c.Patrols.WorkspaceReconcile == nil || c.Patrols.WorkspaceReconcile.IntervalStr == "" {
+		return DefaultWorkspaceReconcileInterval, nil
+	}
+	raw := c.Patrols.WorkspaceReconcile.IntervalStr
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.workspace_reconcile.interval %q: %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("patrols.workspace_reconcile.interval %q: want a positive duration; leave it unset for the %s default", raw, DefaultWorkspaceReconcileInterval)
+	}
+	return d, nil
+}
+
 // ContainerName returns the container the container supervisor manages.
 func (c *DaemonPatrolConfig) ContainerName() string {
 	if c == nil || c.ContainerNameSetting == "" {
@@ -397,6 +421,10 @@ type PatrolsConfig struct {
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 	TownStateBackup      *TownStateBackupConfig      `json:"town_state_backup,omitempty"`
+	// WorkspaceReconcile sets how often the daemon re-pushes the town's
+	// workspace to the bd gateway. It acts only when BD_GATEWAY_URL is set
+	// (internal/daemon/workspace_reconcile.go), so it is not a registered patrol.
+	WorkspaceReconcile *WorkspaceReconcileConfig `json:"workspace_reconcile,omitempty"`
 
 	// ResourceSampler appends the host's CPU and memory rows every interval,
 	// which the metrics snapshot's resources group reads
@@ -1025,6 +1053,15 @@ type CompactorDogConfig struct {
 	// Deprecated: has no effect. The daemon patrol no longer compacts, so there
 	// is no recent history to preserve. See Mode.
 	KeepRecent int `json:"keep_recent,omitempty"`
+}
+
+// WorkspaceReconcileConfig holds the bd gateway workspace reconcile's settings.
+// Unset takes the default interval; the reconcile itself runs only when the
+// daemon's environment names a gateway.
+type WorkspaceReconcileConfig struct {
+	// IntervalStr is how often to re-push, as a duration string (e.g., "5m").
+	// Default 5m.
+	IntervalStr string `json:"interval,omitempty"`
 }
 
 // CheckpointDogConfig holds configuration for the checkpoint_dog patrol.
