@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -287,6 +288,40 @@ func TestWorkspaceReconcileRegistration(t *testing.T) {
 				t.Errorf("start push = call %d, want 1", got)
 			}
 		})
+	}
+}
+
+// TestWorkspaceReconcileOff: with no gateway configured the reconcile starts
+// nothing: no push is made, no pusher is installed, nothing is logged, and the
+// daemon's patrol config is the one it was given.
+func TestWorkspaceReconcileOff(t *testing.T) {
+	t.Parallel()
+	clk := newFixedClock()
+	pusher := &fakeWorkspacePusher{calls: make(chan int, 10)}
+	logs := &lockedBuffer{}
+	installs := 0
+	cfg := withPatrols("2m")
+	want := withPatrols("2m")
+	d := newWorkspaceDaemon(t, map[string]string{}, clk, pusher, logs, cfg)
+	d.installWorkspacePusher = func(bdgateway.WorkspacePusher) { installs++ }
+
+	if d.startWorkspaceReconcile() {
+		t.Fatal("startWorkspaceReconcile() = true with no gateway, want false")
+	}
+	clk.Advance(3 * config.DefaultWorkspaceReconcileInterval)
+	select {
+	case n := <-pusher.calls:
+		t.Errorf("push %d made with no gateway, want none", n)
+	default:
+	}
+	if installs != 0 {
+		t.Errorf("pusher installs with no gateway = %d, want 0", installs)
+	}
+	if logs.String() != "" {
+		t.Errorf("log with no gateway = %q, want none", logs.String())
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("patrol config changed with no gateway: got %+v, want %+v", cfg, want)
 	}
 }
 
