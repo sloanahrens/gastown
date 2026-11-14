@@ -1,0 +1,10 @@
+rework stats: 4 week(s), 2026-10-19 to 2026-11-09
+Week        Beads  2+ rounds       2+ seats        Mean polecat min  No time
+2026-10-19  24     33.3%           25.0%           10.0              2
+2026-10-26  4      too few to say  too few to say  too few to say    1
+2026-11-02  21     14.3%           9.5%            no timed rows     21
+2026-11-09  22     22.7%           18.2%           20.0              1
+
+1 landing(s) outside the window
+1 landing(s) with no landed_at, folded into no week
+3 unreadable record line(s) skipped

@@ -1,0 +1,54 @@
+{
+  "first_week": "2026-10-19",
+  "last_week": "2026-11-09",
+  "weeks": [
+    {
+      "week": "2026-10-19",
+      "beads": 24,
+      "two_rounds": 8,
+      "two_rounds_share": 0.3333333333333333,
+      "two_seats": 6,
+      "two_seats_share": 0.25,
+      "timed": 22,
+      "untimed": 2,
+      "mean_polecat_minutes": 10
+    },
+    {
+      "week": "2026-10-26",
+      "beads": 4,
+      "two_rounds": 2,
+      "two_rounds_share": null,
+      "two_seats": 1,
+      "two_seats_share": null,
+      "timed": 3,
+      "untimed": 1,
+      "mean_polecat_minutes": null,
+      "too_few_to_say": true
+    },
+    {
+      "week": "2026-11-02",
+      "beads": 21,
+      "two_rounds": 3,
+      "two_rounds_share": 0.14285714285714285,
+      "two_seats": 2,
+      "two_seats_share": 0.09523809523809523,
+      "timed": 0,
+      "untimed": 21,
+      "mean_polecat_minutes": null
+    },
+    {
+      "week": "2026-11-09",
+      "beads": 22,
+      "two_rounds": 5,
+      "two_rounds_share": 0.22727272727272727,
+      "two_seats": 4,
+      "two_seats_share": 0.18181818181818182,
+      "timed": 21,
+      "untimed": 1,
+      "mean_polecat_minutes": 20
+    }
+  ],
+  "outside_window": 1,
+  "no_landing_time": 1,
+  "unreadable_lines": 3
+}
