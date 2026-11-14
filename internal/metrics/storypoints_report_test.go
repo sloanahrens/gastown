@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSpearmanKnownRankings: a perfect ranking is 1, a reversed one is -1, and
@@ -340,5 +341,301 @@ func TestShadowReportNamesTheBeadsWithoutMinutesWhenSomeHaveThem(t *testing.T) {
 	want := "split trigger: not computed, 1 of 60 landings carry no estimated minutes\n"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report lacks %q:\n%s", want, out.String())
+	}
+}
+
+// driftRow is one landed bead's drift cells: it landed at landed, its a priori
+// estimate is estMinutes, and its measured polecat time is seconds. Its estimate
+// was written the day before its first dispatch, so it is an a priori estimate.
+func driftRow(bead string, landed time.Time, estMinutes, seconds float64) Row {
+	return Row{
+		"bead":                bead,
+		"landed_at":           landed.UTC().Format(time.RFC3339),
+		"sp_minutes":          strconv.FormatFloat(estMinutes, 'f', -1, 64),
+		"polecat_secs":        strconv.FormatFloat(seconds, 'f', -1, 64),
+		"polecat_lower_bound": "0",
+		"sp_estimated_at":     "2026-09-01T10:00:00Z",
+		"dispatched_at":       "2026-09-02T10:00:00Z",
+	}
+}
+
+// driftLandings builds n landed beads, the i-th estimated i+1 minutes, landed one
+// minute apart from base, with the measured ranks in the permutation measuredRank
+// gives.
+func driftLandings(n int, base time.Time, measuredRank func(i int) float64) []Row {
+	rows := make([]Row, 0, n)
+	for i := range n {
+		rows = append(rows, driftRow("gt-d"+strconv.Itoa(i), base.Add(time.Duration(i)*time.Minute),
+			float64(i+1), measuredRank(i)*60))
+	}
+	return rows
+}
+
+// TestStoryPointsDriftTable: over 30 landings whose estimate is 1..30 and whose
+// measured rank is the estimate with the two ends swapped (rank 1 and rank 30
+// change places, the other 28 keep theirs), the rank correlation is the hand
+// value. The two moved ranks each move 29 places, so the sum of squared rank
+// gaps is 2*29^2 = 1682, and rho = 1 - 6*1682/(30*(30^2-1)) = 16878/26970. The
+// measured time is the squared rank, so it ranks with the estimate but is not a
+// straight line in it: a correlation of the raw series does not give this value.
+func TestStoryPointsDriftTable(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	rows := driftLandings(30, base, func(i int) float64 {
+		switch i {
+		case 0:
+			return 30 * 30
+		case 29:
+			return 1
+		}
+		return float64((i + 1) * (i + 1))
+	})
+
+	got, err := StoryPointsDriftOver(rows, nil)
+	if err != nil {
+		t.Fatalf("StoryPointsDriftOver: %v", err)
+	}
+	if got.N != 30 {
+		t.Errorf("window N = %d, want 30", got.N)
+	}
+	if !got.Current.Measurable {
+		t.Fatalf("Current is not measurable: %s", got.Current.Why)
+	}
+	if want := 16878.0 / 26970.0; math.Abs(got.Current.Rho-want) > 1e-12 {
+		t.Errorf("Current.Rho = %.12f, want %.12f (hand-computed from 2*29^2 over 30 landings)", got.Current.Rho, want)
+	}
+	if got.Current.Why != "" {
+		t.Errorf("Current.Why = %q, want empty", got.Current.Why)
+	}
+}
+
+// TestStoryPointsDriftUsesTheLatestHundred: with 120 eligible landings and rows
+// that are not in landing order, the window is the 100 that landed last — the
+// oldest 20, whose measured time reverses their estimate, are not read. Five
+// ineligible rows land after every eligible one, so a filter that lets one
+// through would displace a landing of the window.
+func TestStoryPointsDriftUsesTheLatestHundred(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	rows := driftLandings(120, base, func(i int) float64 {
+		if i < 20 {
+			return float64(120 - i) // the oldest 20 reverse their estimate
+		}
+		return float64(i + 1) // the newest 100 rank with their estimate
+	})
+	// The ineligible rows land last, and each one's pair is out of rank order:
+	// let through, it would take the place of gt-d20 (estimate 21 minutes, measured
+	// 21) and break the perfect ranking, so the correlation and not only the count
+	// catches a filter that dropped it.
+	newest := base.Add(121 * time.Minute)
+	rows = append(rows,
+		rowWithout("sp_minutes")(driftRow("gt-no-minutes", newest, 21, 7200)),
+		rowWithout("polecat_secs")(driftRow("gt-no-seconds", newest, 21, 7200)),
+		rowWith("polecat_lower_bound", "1")(driftRow("gt-lower-bound", newest, 21, 7200)),
+		rowWith("sp_estimated_at", "2026-09-03T10:00:00Z")(driftRow("gt-after-dispatch", newest, 21, 7200)),
+		// A zero time would rank first while its estimate ranks last, so a filter
+		// that let it through would move the correlation.
+		rowWith("polecat_secs", "0")(driftRow("gt-zero-seconds", newest, 120, 0)),
+	)
+
+	var beads []string
+	got, err := StoryPointsDriftOver(rows, func(row Row) (float64, bool) {
+		beads = append(beads, row["bead"])
+		minutes, _ := strconv.ParseFloat(row["sp_minutes"], 64)
+		return minutes, true
+	})
+	if err != nil {
+		t.Fatalf("StoryPointsDriftOver: %v", err)
+	}
+	if got.N != 100 {
+		t.Errorf("window N = %d, want 100", got.N)
+	}
+	if !got.Current.Measurable || got.Current.Rho != 1 {
+		t.Errorf("Current = %+v, want the perfect ranking of the newest 100", got.Current)
+	}
+	if !got.Previous.Measurable || got.Previous.Rho != 1 {
+		t.Errorf("Previous = %+v, want the same landings ranked perfectly", got.Previous)
+	}
+	if len(beads) != 100 {
+		t.Fatalf("previous scored %d landings, want the window's 100", len(beads))
+	}
+	for i := range 20 {
+		old := "gt-d" + strconv.Itoa(i)
+		for _, bead := range beads {
+			if bead == old {
+				t.Errorf("previous weights scored %s, an old landing outside the window", old)
+			}
+		}
+	}
+}
+
+// rowWithout is the row with one cell absent.
+func rowWithout(column string) func(Row) Row {
+	return func(row Row) Row {
+		delete(row, column)
+		return row
+	}
+}
+
+// rowWith is the row with one cell set.
+func rowWith(column, value string) func(Row) Row {
+	return func(row Row) Row {
+		row[column] = value
+		return row
+	}
+}
+
+// TestStoryPointsDriftBelowThirtyIsUnmeasurable: 29 landings are too few to read
+// and report no number; 30 are read.
+func TestStoryPointsDriftBelowThirtyIsUnmeasurable(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	perfect := func(i int) float64 { return float64(i + 1) }
+
+	below, err := StoryPointsDriftOver(driftLandings(29, base, perfect), nil)
+	if err != nil {
+		t.Fatalf("StoryPointsDriftOver 29: %v", err)
+	}
+	if below.Current.Measurable || !math.IsNaN(below.Current.Rho) {
+		t.Errorf("29 landings = %+v, want unmeasurable and no number", below.Current)
+	}
+	if want := "29 landings with both an estimate and a measured time, need 30"; below.Current.Why != want {
+		t.Errorf("Why = %q, want %q", below.Current.Why, want)
+	}
+
+	at, err := StoryPointsDriftOver(driftLandings(30, base, perfect), nil)
+	if err != nil {
+		t.Fatalf("StoryPointsDriftOver 30: %v", err)
+	}
+	if !at.Current.Measurable || at.Current.Rho != 1 {
+		t.Errorf("30 landings = %+v, want a measurable perfect ranking", at.Current)
+	}
+}
+
+// TestStoryPointsDriftNoSpreadIsUnmeasurable: a window whose estimates are all
+// tied has no rank correlation to report.
+func TestStoryPointsDriftNoSpreadIsUnmeasurable(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	rows := driftLandings(30, base, func(i int) float64 { return float64(i+1) + 10 })
+	for i := range rows {
+		rows[i]["sp_minutes"] = "8"
+	}
+
+	got, err := StoryPointsDriftOver(rows, nil)
+	if err != nil {
+		t.Fatalf("StoryPointsDriftOver: %v", err)
+	}
+	if got.Current.Measurable || !math.IsNaN(got.Current.Rho) {
+		t.Errorf("Current = %+v, want unmeasurable and no number", got.Current)
+	}
+	if !strings.Contains(got.Current.Why, ErrNoSpread.Error()) {
+		t.Errorf("Why = %q, want it to name %v", got.Current.Why, ErrNoSpread)
+	}
+}
+
+// TestStoryPointsDriftRefusesBadCells: a cell that does not parse stops the
+// measure; it is not read as a landing without that value.
+func TestStoryPointsDriftRefusesBadCells(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		edit func(Row) Row
+	}{
+		{name: "sp_minutes not a number", edit: rowWith("sp_minutes", "soon")},
+		{name: "sp_minutes zero", edit: rowWith("sp_minutes", "0")},
+		{name: "polecat_secs not a number", edit: rowWith("polecat_secs", "soon")},
+		{name: "no landed_at", edit: rowWithout("landed_at")},
+		{name: "unreadable landed_at", edit: rowWith("landed_at", "soon")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := driftLandings(30, base, func(i int) float64 { return float64(i + 1) })
+			rows[0] = tc.edit(rows[0])
+			if _, err := StoryPointsDriftOver(rows, nil); err == nil {
+				t.Error("StoryPointsDriftOver returned no error")
+			}
+		})
+	}
+}
+
+// TestStoryPointsDriftRefusesANonNumberFromThePreviousWeights: a scorer that
+// says it scored a landing but returns no positive number is a caller bug, not a
+// landing to leave out.
+func TestStoryPointsDriftRefusesANonNumberFromThePreviousWeights(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	rows := driftLandings(30, base, func(i int) float64 { return float64(i + 1) })
+	for _, minutes := range []float64{math.NaN(), 0, -1, math.Inf(1)} {
+		_, err := StoryPointsDriftOver(rows, func(Row) (float64, bool) { return minutes, true })
+		if err == nil {
+			t.Errorf("previous score %v returned no error", minutes)
+		}
+	}
+}
+
+// TestStoryPointsDriftPreviousReading: the second reading is over the window,
+// and it is unmeasurable rather than a number over a smaller sample when the
+// previous weights cannot score every landing.
+func TestStoryPointsDriftPreviousReading(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	rows := driftLandings(30, base, func(i int) float64 { return float64(i + 1) })
+
+	tests := []struct {
+		name       string
+		previous   StoryPointsDriftPrevious
+		measurable bool
+		rho        float64
+		why        string
+	}{
+		{
+			name:       "every landing scored",
+			previous:   func(row Row) (float64, bool) { m, _ := strconv.ParseFloat(row["sp_minutes"], 64); return 3 * m, true },
+			measurable: true,
+			rho:        1,
+		},
+		{
+			name: "one landing not scored",
+			previous: func(row Row) (float64, bool) {
+				return 5, row["bead"] != "gt-d7"
+			},
+			why: "the previous weights cannot score 1 of 30 landings",
+		},
+		{
+			name: "no scorer",
+			why:  "no previous-weights score",
+		},
+		{
+			name:     "every landing scored the same",
+			previous: func(Row) (float64, bool) { return 5, true },
+			why:      ErrNoSpread.Error(),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := StoryPointsDriftOver(rows, tc.previous)
+			if err != nil {
+				t.Fatalf("StoryPointsDriftOver: %v", err)
+			}
+			if got.Previous.Measurable != tc.measurable {
+				t.Fatalf("Previous = %+v, want measurable %t", got.Previous, tc.measurable)
+			}
+			if tc.measurable {
+				if got.Previous.N != got.N || math.Abs(got.Previous.Rho-tc.rho) > 1e-12 {
+					t.Errorf("Previous = %+v, want rho %v over the window's %d landings", got.Previous, tc.rho, got.N)
+				}
+				return
+			}
+			if !math.IsNaN(got.Previous.Rho) {
+				t.Errorf("Previous.Rho = %v, want no number", got.Previous.Rho)
+			}
+			if !strings.Contains(got.Previous.Why, tc.why) {
+				t.Errorf("Why = %q, want it to name %q", got.Previous.Why, tc.why)
+			}
+		})
 	}
 }

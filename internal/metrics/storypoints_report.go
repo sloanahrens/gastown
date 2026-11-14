@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/storypoints"
 )
@@ -479,4 +480,211 @@ func fmtShare(v float64, ok bool) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%.2f", v)
+}
+
+// The story-points drift measure, for the weekly report. It reads the landings
+// table for the most recent estimated landings, correlates the a priori
+// estimate with the measured polecat time, and takes a second reading of the
+// same landings scored with the previous adopted weights. It is the measurement
+// only: the previous weights' score of a landing is a value the caller supplies.
+
+// storyPointsDriftWindow is how many of the most recent landings a drift reading
+// is taken over.
+const storyPointsDriftWindow = 100
+
+// storyPointsDriftMin is the fewest landings a drift reading is read from. Under
+// it the reading is unmeasurable, and no number is reported.
+const storyPointsDriftMin = 30
+
+// StoryPointsDriftReading is one rank correlation of an estimate series against
+// the measured polecat time, over the drift window.
+type StoryPointsDriftReading struct {
+	// N is the landings in the window the reading covers.
+	N int
+	// Rho is the rank correlation, NaN when Measurable is false, so a caller that
+	// ignores Measurable cannot print a zero as a result.
+	Rho float64
+	// Measurable is false when the window is under storyPointsDriftMin or a
+	// series has no spread.
+	Measurable bool
+	// Why says why the reading is unmeasurable, empty when it is measurable.
+	Why string
+}
+
+// StoryPointsDriftPrevious scores one landing in minutes under the previous
+// adopted weights. ok is false when those weights cannot score the landing.
+type StoryPointsDriftPrevious func(row Row) (minutes float64, ok bool)
+
+// StoryPointsDrift is the pair of readings the weekly report takes over one
+// window of landings: the a priori estimate against the measured polecat time,
+// and the same landings scored with the previous adopted weights.
+type StoryPointsDrift struct {
+	// N is the landings in the window: the most recent of the landings that carry
+	// both an a priori estimate and a measured polecat time, at most
+	// storyPointsDriftWindow.
+	N int
+	// Current is the a priori estimate against the measured time.
+	Current StoryPointsDriftReading
+	// Previous is the same N landings scored with the previous adopted weights.
+	Previous StoryPointsDriftReading
+}
+
+// driftLanding is one landing the drift window can hold: the row itself, its a
+// priori estimate and measured time in minutes, and when it landed.
+type driftLanding struct {
+	row      Row
+	est      float64
+	measured float64
+	landed   time.Time
+}
+
+// StoryPointsDriftOver takes the drift readings over the landings rows. A
+// landing is in the window when an estimate was written before its first
+// dispatch, sp_minutes holds it, and polecat_secs holds a measured time that is
+// not a lower bound; the window is the storyPointsDriftWindow most recent such
+// landings by landed_at. A cell that does not parse is an error: the table is
+// then not the contract, and a landing cannot be read into a window it was not
+// read into. previous scores each landing in the window for the second reading;
+// nil, a landing it cannot score, or a score that is not a finite positive
+// number of minutes makes the second reading unmeasurable or an error, never a
+// number over a smaller sample.
+func StoryPointsDriftOver(rows []Row, previous StoryPointsDriftPrevious) (StoryPointsDrift, error) {
+	window, err := driftWindow(rows)
+	if err != nil {
+		return StoryPointsDrift{}, err
+	}
+	est := make([]float64, len(window))
+	measured := make([]float64, len(window))
+	for i, l := range window {
+		est[i], measured[i] = l.est, l.measured
+	}
+	out := StoryPointsDrift{N: len(window)}
+	out.Current = rankReading(est, measured)
+	out.Previous, err = previousReading(window, measured, previous)
+	if err != nil {
+		return StoryPointsDrift{}, err
+	}
+	return out, nil
+}
+
+// driftWindow reads the eligible landings, keeps the most recent
+// storyPointsDriftWindow by landed_at, and returns them newest first. Ties in
+// landed_at keep the order the rows came in.
+func driftWindow(rows []Row) ([]driftLanding, error) {
+	var eligible []driftLanding
+	for _, row := range rows {
+		l, ok, err := driftLandingOf(row)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			eligible = append(eligible, l)
+		}
+	}
+	slices.SortStableFunc(eligible, func(a, b driftLanding) int { return b.landed.Compare(a.landed) })
+	if len(eligible) > storyPointsDriftWindow {
+		eligible = eligible[:storyPointsDriftWindow]
+	}
+	return eligible, nil
+}
+
+// driftLandingOf reads one landing the drift window can hold, or false when the
+// row is not one: it has no estimate minutes, no measured time, a lower-bound
+// time, or an estimate written at or after its first dispatch.
+func driftLandingOf(row Row) (driftLanding, bool, error) {
+	est, hasEstimate, err := parseMinutesCell(row["sp_minutes"])
+	if err != nil {
+		return driftLanding{}, false, fmt.Errorf("story points drift: %w", err)
+	}
+	if !hasEstimate {
+		return driftLanding{}, false, nil
+	}
+	measured, hasMeasure, err := measuredMinutesCell(row["polecat_secs"], row["polecat_lower_bound"])
+	if err != nil {
+		return driftLanding{}, false, fmt.Errorf("story points drift: %w", err)
+	}
+	if !hasMeasure || !estimatedBeforeDispatch(row) {
+		return driftLanding{}, false, nil
+	}
+	landed, err := ParseTS(row["landed_at"])
+	if err != nil {
+		return driftLanding{}, false, fmt.Errorf("story points drift: landed_at: %w", err)
+	}
+	return driftLanding{row: row, est: est, measured: measured, landed: landed}, true, nil
+}
+
+// measuredMinutesCell reads a landing's measured polecat time in minutes. An
+// empty, zero or negative cell is no time (the writer omits a zero), and a
+// lower-bound time is not a measurement, so both read as absent. A cell that is
+// not a finite number is an error.
+func measuredMinutesCell(secs, lowerBound string) (float64, bool, error) {
+	if secs == "" {
+		return 0, false, nil
+	}
+	seconds, err := strconv.ParseFloat(secs, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0, false, fmt.Errorf("metrics: polecat_secs %q is not a number", secs)
+	}
+	if seconds <= 0 || lowerBound == "1" {
+		return 0, false, nil
+	}
+	return seconds / 60, true, nil
+}
+
+// rankReading is the rank correlation of the estimate and measured series: a
+// window under storyPointsDriftMin, or a series with no spread, is unmeasurable
+// rather than a number.
+func rankReading(est, measured []float64) StoryPointsDriftReading {
+	r := StoryPointsDriftReading{N: len(est), Rho: math.NaN()}
+	if r.N < storyPointsDriftMin {
+		r.Why = driftTooFew(r.N)
+		return r
+	}
+	rho, err := Spearman(est, measured)
+	if err != nil {
+		r.Why = err.Error()
+		return r
+	}
+	r.Rho, r.Measurable = rho, true
+	return r
+}
+
+// driftTooFew is why a window of n landings is not read.
+func driftTooFew(n int) string {
+	return fmt.Sprintf("%d landings with both an estimate and a measured time, need %d", n, storyPointsDriftMin)
+}
+
+// previousReading scores the window with the previous adopted weights and
+// correlates those minutes with the same measured series. It reads the window
+// in full or not at all: a landing the previous weights cannot score makes the
+// reading unmeasurable, and a score that is not a finite positive number is an
+// error.
+func previousReading(window []driftLanding, measured []float64, previous StoryPointsDriftPrevious) (StoryPointsDriftReading, error) {
+	r := StoryPointsDriftReading{N: len(window), Rho: math.NaN()}
+	if r.N < storyPointsDriftMin {
+		r.Why = driftTooFew(r.N)
+		return r, nil
+	}
+	if previous == nil {
+		r.Why = "no previous-weights score"
+		return r, nil
+	}
+	scores := make([]float64, 0, r.N)
+	unscored := 0
+	for _, l := range window {
+		minutes, ok := previous(l.row)
+		if !ok {
+			unscored++
+			continue
+		}
+		if !(minutes > 0) || math.IsInf(minutes, 0) || math.IsNaN(minutes) {
+			return StoryPointsDriftReading{}, fmt.Errorf("story points drift: previous weights scored bead %q %v minutes", l.row["bead"], minutes)
+		}
+		scores = append(scores, minutes)
+	}
+	if unscored > 0 {
+		r.Why = fmt.Sprintf("the previous weights cannot score %d of %d landings", unscored, r.N)
+		return r, nil
+	}
+	return rankReading(scores, measured), nil
 }
