@@ -206,6 +206,10 @@ The dashboard is a second Deployment of the same image. It serves one read-only 
 
 The tracker is an issue service the town owns: `trackerd`, a Postgres-backed program rendered beside the daemon and the dashboard when `gt town cluster render --tracker` runs in a live render. The render names the Secret whose `dsn` key holds the connection string and never reads the DSN. `--tracker-backup` adds the nightly dump: a CronJob whose pod runs `trackerbackup` in the postgres image the caller names, writes the dumps into the `tracker-backup` claim, keeps the newest few, and forbids a run that starts while one is still going. It also writes a reader Pod that mounts the claim read-only: the CronJob's pods exit when a run ends, so nothing else holds the claim for a copy. Before relying on a dump, read [Restoring the tracker database from a nightly dump](tracker-restore.md), which copies one out and restores it.
 
+When the tracker is rendered, the daemon container carries `TRACKER_URL`, the trackerd Service's address, so the daemon and every `gt` and `bd` it starts reach the tracker without a per-process file. The render refuses a `Values.Env` entry that sets `TRACKER_URL`, since the pod sets it from `Values.Tracker` itself.
+
+trackerd's requests and limits come from its own pair in `deploy/k8s/daemon/daemon.go` (`trackerResourceRequests` and `trackerResourceLimits`), not from the daemon's `Values.CPU` and `Values.Memory`. Those are sized for the whole town, and a tracker pod that asked for them left the control node too little room for a tier-sweep Job (gt-pau2nv).
+
 ## The data plane
 
 The data plane is where facts live. Four stores matter.

@@ -1369,6 +1369,13 @@ type sandboxSecretsReader func(command string) []string
 // TestSandboxSecretsGrammarShapesRouteToText pins each construct in every position.
 // shellTokenize is the reading gt-crn9gu retires; it stays only until the last
 // guard moves off it.
+//
+// Two spellings gt-vf3529 left out of its scope are refused today, and
+// TestSandboxSecretsQuotedEnvironSpellings pins both (gt-kr4tcn), so this reader
+// does not own them:
+//
+//	bash -c 'cat /pro""c/1/environ'
+//	echo "$(cat /proc/1/envi''ron)"
 func sandboxSecretsReadTokens(command string) []string {
 	tokens, readable := parsedTokens(command)
 	if !readable || sandboxSecretsParsedUnsafe(command) {

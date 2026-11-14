@@ -205,8 +205,8 @@ func TestPodInstallRestoresTheClusterPair(t *testing.T) {
 	if ClassifyInstall(res) != ResultFailed {
 		t.Fatalf("result = %+v, want the failed check to fail the install", res)
 	}
-	if running.calls != 1 {
-		t.Errorf("the cluster pair was read %d times, want once before the swap", running.calls)
+	if running.calls != 2 {
+		t.Errorf("the cluster pair was read %d times, want once before the swap and once after the restore to confirm its images", running.calls)
 	}
 	if want := (ImageRecord{Current: newPair, Previous: clusterPair}); f.swap.seenAtApply[0] != want {
 		t.Errorf("the record at the swap = %+v, want the cluster pair recorded as previous before the service changes", f.swap.seenAtApply[0])

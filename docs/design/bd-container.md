@@ -3,7 +3,7 @@
 Status: draft for the overseer's vetting, written 2026-11-13 (dipper). Program
 bead: gt-2zigh5 (operator decisions 1 to 9, 2026-11-13). Related designs:
 [gt runs from the daemon image](gt-in-container.md), [the town tracker
-plan](../plans/2026-10-25-town-tracker-design.md).
+decision](../adr/0006-tracker-replaces-dolt-backed-beads.md).
 
 Nothing here is built. Facts below were read from origin/main at 440acced9 and
 from the live town on 2026-11-13; "not verified" marks what was not checked.
@@ -73,7 +73,8 @@ their own bd until approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
   policy, one auth and one call log: `bdgw serve` (HTTP) and `bdgw exec -- <bd
   args>` (local, for the Mac wrapper's docker target, so a Mac call is checked
   and logged the same way).
-- Inside the container `/usr/local/bin/bd` is the shim (`cmd/bdshim`) and the
+- Inside the bd container (image `gt-bd`; the daemon image has no shim and keeps
+  the real bd as `bd`), `/usr/local/bin/bd` is the shim (`cmd/bdshim`) and the
   real bd is `/usr/local/bin/bd.real` beside it, exactly the layout
   `internal/bdshim/osmain.go` looks for. The gateway only ever runs `bd`.
 - The bd container reaches Dolt over the compose network by service name, never

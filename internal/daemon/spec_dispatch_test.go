@@ -323,7 +323,10 @@ func TestDispatchRosterSeats(t *testing.T) {
 		{"claude-sonnet 1/2, deepseek-flash 3/3 (1 dead-hooked)", []townhealth.DispatchSeat{{Live: 1, Cap: 2}, {Live: 3, Cap: 3}}, false},
 		// The in-flight term Picture adds is part of the note, not a seat
 		// (gt-la4r78).
-		{"sbx-haiku 11/9 (8 live + 2 in flight + 1 dead-hooked), claude-sonnet 0/2", []townhealth.DispatchSeat{{Live: 11, Cap: 9}, {Live: 0, Cap: 2}}, false},
+		{"sbx-haiku 11/9 (8 live + 2 in flight (may double count) + 1 dead-hooked), claude-sonnet 0/2", []townhealth.DispatchSeat{{Live: 11, Cap: 9}, {Live: 0, Cap: 2}}, false},
+		// A seat whose parts do not add up carries a note of commas inside its
+		// parentheses; it still reads as its count (gt-lwu9an).
+		{"deepseek-flash 2/2 (counts do not add up: 0 in flight, 3 dead-hooked, 2 counted), claude-sonnet 0/2", []townhealth.DispatchSeat{{Live: 2, Cap: 2}, {Live: 0, Cap: 2}}, false},
 		// A seat carrying two parenthetical notes, a dead-hooked count and a
 		// closed window, still reads as its count (gt-rredd).
 		{"claude-haiku 1/1, deepseek-flash 1/1 (1 dead-hooked) (closed until 08:00)", []townhealth.DispatchSeat{{Live: 1, Cap: 1}, {Live: 1, Cap: 1}}, false},
