@@ -276,6 +276,8 @@ func TestMacCrewHooksInAPodStillReportsAFinding(t *testing.T) {
 // reads the process environment. The test sets the pod variable itself, so the
 // result does not depend on whether the test runs in a pod. It is not parallel,
 // because t.Setenv changes a process-wide variable.
+//
+//testpolicy:allow parallel — t.Setenv sets the process environment, which every parallel test shares
 func TestMacCrewHooksDefaultGetenvReadsThePodVariable(t *testing.T) {
 	config := "[core]\n\thooksPath = .githooks\n"
 	town, clone := crewHooksTown(t, &config)
@@ -283,11 +285,13 @@ func TestMacCrewHooksDefaultGetenvReadsThePodVariable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	//testpolicy:allow no-env — the process environment is the value under test: the nil getenv default reads it
 	t.Setenv(podEnv, "")
 	if res := NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town}); res.Status != StatusOK {
 		t.Fatalf("outside a pod: Status = %v, want StatusOK: %+v", res.Status, res)
 	}
 
+	//testpolicy:allow no-env — the process environment is the value under test: the nil getenv default reads it
 	t.Setenv(podEnv, "10.0.0.1")
 	if res := NewMacCrewHooksCheck().Run(&CheckContext{TownRoot: town}); res.Status != StatusWarning {
 		t.Fatalf("inside a pod: Status = %v, want StatusWarning: %+v", res.Status, res)
