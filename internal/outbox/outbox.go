@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 const (
@@ -33,6 +34,10 @@ const (
 	maxFindings = 5
 	// maxFindingBytes is the longest a single finding may be.
 	maxFindingBytes = 2 << 10
+	// maxResultBytes caps result.json; a longer file is refused.
+	maxResultBytes = 64 << 10
+	// maxNotesBytes caps notes.md; a longer file is refused.
+	maxNotesBytes = 256 << 10
 )
 
 // Status is how a seat finished the task it was given.
@@ -79,15 +84,28 @@ type wireResult struct {
 // Validate decodes the seat's result.json (raw) and notes.md (notes) into a
 // Result for beadID, the bead the seat was given.
 //
-// It refuses, with an error and no Result: an empty beadID; a raw that is not
-// exactly one JSON object of the shape the package doc gives; an unknown field,
-// which is how it refuses a label, assignee, close or other-bead field; a
-// bead_id that is not beadID; a status other than StatusDone or StatusDeferred;
-// more than 5 findings; a finding over 2 KB; a negative or repeated ticked box;
-// and an escalation whose text is empty.
+// It refuses, with an error and no Result: an empty beadID; a result.json over
+// 64 KB or a notes.md over 256 KB; a result.json or notes.md that is not valid
+// UTF-8; a raw that is not exactly one JSON object of the shape the package doc
+// gives; an unknown field, which is how it refuses a label, assignee, close or
+// other-bead field; a bead_id that is not beadID; a status other than StatusDone
+// or StatusDeferred; more than 5 findings; a finding over 2 KB; a negative or
+// repeated ticked box; and an escalation whose text is empty.
 func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	if beadID == "" {
 		return Result{}, errors.New("outbox: no bead id was given to validate against")
+	}
+	if len(raw) > maxResultBytes {
+		return Result{}, fmt.Errorf("outbox: result.json is %d bytes, more than the %d-byte cap", len(raw), maxResultBytes)
+	}
+	if !utf8.Valid(raw) {
+		return Result{}, errors.New("outbox: result.json is not valid UTF-8")
+	}
+	if len(notes) > maxNotesBytes {
+		return Result{}, fmt.Errorf("outbox: notes.md is %d bytes, more than the %d-byte cap", len(notes), maxNotesBytes)
+	}
+	if !utf8.Valid(notes) {
+		return Result{}, errors.New("outbox: notes.md is not valid UTF-8")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()

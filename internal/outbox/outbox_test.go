@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,9 @@ func TestValidate(t *testing.T) {
 	const beadID = "gt-swfo9e"
 	fullFinding := strings.Repeat("x", maxFindingBytes)
 	fullFindings := []string{fullFinding, fullFinding, fullFinding, fullFinding, fullFinding}
+	baseResult := `{"bead_id": "gt-swfo9e", "status": "done"}`
+	underCapResult := baseResult + strings.Repeat(" ", maxResultBytes-len(baseResult)-1)
+	underCapNotes := strings.Repeat("x", maxNotesBytes-1)
 	tests := []struct {
 		name  string
 		raw   string
@@ -65,6 +69,18 @@ func TestValidate(t *testing.T) {
 			notes: "",
 			want:  Result{Status: StatusDone, Findings: fullFindings},
 		},
+		{
+			name:  "a result one byte under the 64 KB cap",
+			raw:   underCapResult,
+			notes: "",
+			want:  Result{Status: StatusDone},
+		},
+		{
+			name:  "notes one byte under the 256 KB cap",
+			raw:   baseResult,
+			notes: underCapNotes,
+			want:  Result{Status: StatusDone, Notes: underCapNotes},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,12 +100,42 @@ func TestValidateRefused(t *testing.T) {
 	t.Parallel()
 	const beadID = "gt-swfo9e"
 	overlong := strings.Repeat("x", maxFindingBytes+1)
+	baseResult := `{"bead_id": "gt-swfo9e", "status": "done"}`
+	overCapResult := baseResult + strings.Repeat(" ", maxResultBytes-len(baseResult)+1)
+	overCapNotes := strings.Repeat("x", maxNotesBytes+1)
 	tests := []struct {
 		name    string
 		raw     string
+		notes   string
 		beadID  string
 		wantErr string
 	}{
+		{
+			name:    "a result one byte over the 64 KB cap",
+			raw:     overCapResult,
+			beadID:  beadID,
+			wantErr: fmt.Sprintf("result.json is %d bytes, more than the %d-byte cap", len(overCapResult), maxResultBytes),
+		},
+		{
+			name:    "notes one byte over the 256 KB cap",
+			raw:     baseResult,
+			notes:   overCapNotes,
+			beadID:  beadID,
+			wantErr: fmt.Sprintf("notes.md is %d bytes, more than the %d-byte cap", len(overCapNotes), maxNotesBytes),
+		},
+		{
+			name:    "invalid UTF-8 in the result",
+			raw:     "{\"bead_id\": \"gt-swfo9e\", \"status\": \"done\", \"findings\": [\"\xff\"]}",
+			beadID:  beadID,
+			wantErr: "result.json is not valid UTF-8",
+		},
+		{
+			name:    "invalid UTF-8 in the notes",
+			raw:     baseResult,
+			notes:   "note\xff",
+			beadID:  beadID,
+			wantErr: "notes.md is not valid UTF-8",
+		},
 		{
 			name:    "unknown label field",
 			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "labels": ["rework"]}`,
@@ -190,7 +236,7 @@ func TestValidateRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Validate([]byte(tt.raw), nil, tt.beadID)
+			got, err := Validate([]byte(tt.raw), []byte(tt.notes), tt.beadID)
 			if err == nil {
 				t.Fatalf("Validate(%q) = %#v, nil; want an error", tt.raw, got)
 			}
