@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,14 +86,15 @@ func (s trainTestStore) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 // trainTestBead is one landed bead of the fixture: its acceptance boxes drive the
 // minutes it took when the fixture has a signal.
 type trainTestBead struct {
-	id      string
-	seat    string
-	boxes   int
-	minutes float64
-	bound   string // the polecat_lower_bound cell: "0" measured, "1" a lower bound
-	noText  bool   // the bead has no Constraints or Acceptance section
-	missing bool   // the bead is not in the store
-	badTime bool   // the landing time does not parse
+	id         string
+	seat       string
+	boxes      int
+	minutes    float64
+	bound      string // the polecat_lower_bound cell: "0" measured, "1" a lower bound
+	noText     bool   // the bead has no Constraints or Acceptance section
+	missing    bool   // the bead is not in the store
+	badTime    bool   // the landing time does not parse
+	notPolecat bool   // the landing did not come through a polecat seat
 	// sameTimeAsPrev gives the bead the landing time of the bead before it.
 	sameTimeAsPrev bool
 }
@@ -175,6 +177,10 @@ func newTrainTestFixture(t *testing.T, beadsIn []trainTestBead) trainTestFixture
 		if b.badTime {
 			landedText = "last tuesday"
 		}
+		polecatWork := "1"
+		if b.notPolecat {
+			polecatWork = "0"
+		}
 		rows = append(rows, Row{
 			"bead":                b.id,
 			"rig":                 "gastown",
@@ -182,6 +188,7 @@ func newTrainTestFixture(t *testing.T, beadsIn []trainTestBead) trainTestFixture
 			"seat_class":          b.seat,
 			"polecat_secs":        fmt.Sprintf("%g", b.minutes*60),
 			"polecat_lower_bound": b.bound,
+			"polecat_work":        polecatWork,
 		})
 	}
 	var csvBuf strings.Builder
@@ -312,6 +319,33 @@ func TestStoryPointsTrainRefusals(t *testing.T) {
 			}
 		}
 	}
+	// dropAt rewrites the fixture's landings table without one column, the way an
+	// extract from before that column wrote it.
+	dropAt := func(column string) func(t *testing.T, outDir string) {
+		return func(t *testing.T, outDir string) {
+			t.Helper()
+			path := filepath.Join(outDir, landingsName)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read landings: %v", err)
+			}
+			header, rows, err := ReadLandings(bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("ReadLandings: %v", err)
+			}
+			i := slices.Index(header, column)
+			if i < 0 {
+				t.Fatalf("the fixture's header has no %s column", column)
+			}
+			var buf strings.Builder
+			if err := WriteLandings(&buf, slices.Delete(header, i, i+1), rows); err != nil {
+				t.Fatalf("WriteLandings: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(buf.String()), 0o644); err != nil {
+				t.Fatalf("write landings: %v", err)
+			}
+		}
+	}
 	cases := []struct {
 		name     string
 		beads    []trainTestBead
@@ -335,6 +369,8 @@ func TestStoryPointsTrainRefusals(t *testing.T) {
 					t.Fatalf("corrupt landings: %v", err)
 				}
 			}},
+		{name: "landings table from before the polecat_work column", beads: trainTestBeads(90, 1, true),
+			wantErr: "polecat_work", setup: dropAt("polecat_work")},
 		{name: "landing time that does not parse", beads: badTimeBeads(), wantErr: "invalid ISO timestamp"},
 		{name: "too few measured beads", beads: trainTestBeads(30, 3, true), wantErr: "samples"},
 		{name: "embedder fails", beads: trainTestBeads(90, 4, true), emb: trainTestEmbedder{fail: true}, wantErr: "embed bead"},
@@ -385,31 +421,121 @@ func TestStoryPointsTrainRefusals(t *testing.T) {
 	}
 }
 
-// TestStoryPointsTrainSkipsAndCountsUnreadBeads: a landing that is a lower bound, a
-// bead not in the store and a bead with no section text are left out of the fit and
-// counted in the report; the rest of the table is fitted.
+// TestStoryPointsTrainSkipsAndCountsUnreadBeads: a landing with no time, a landing
+// that is not polecat work, a bead not in the store and a bead with no section text
+// are left out of the fit and counted in the report; the rest of the table is fitted.
 func TestStoryPointsTrainSkipsAndCountsUnreadBeads(t *testing.T) {
 	t.Parallel()
 	bead := trainTestBeads(90, 5, true)
-	bead[0].bound = "1"
+	bead[0].minutes = 0
 	bead[1].missing = true
 	bead[2].noText = true
+	bead[3].notPolecat = true
 	fix := newTrainTestFixture(t, bead)
 	var out strings.Builder
 	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "not read: seat class 0, unmeasured 1, bead not in store 1, no Constraints or Acceptance 1, rig without a directory 0"
+	want := "not read: not polecat work 1, seat class 0, unmeasured 1, bead not in store 1, no Constraints or Acceptance 1, rig without a directory 0"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report = %q, want the line %q", out.String(), want)
 	}
-	// The 87 beads read are split: the earlier 70 are the fit and the latest 17 the holdout.
-	if !strings.Contains(out.String(), "n=70)") {
-		t.Errorf("report does not count 70 fitted beads:\n%s", out.String())
+	// The 86 beads read are split: the earlier 69 are the fit and the latest 17 the holdout.
+	if !strings.Contains(out.String(), "n=69)") {
+		t.Errorf("report does not count 69 fitted beads:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "holdout: latest 17 beads") {
 		t.Errorf("report does not count 17 holdout beads:\n%s", out.String())
+	}
+}
+
+// TestStoryPointsTrainFitsOnlyPolecatLandings: the retrain reads a landing that came
+// through a polecat seat and leaves an overseer, bird or crew landing out, whatever
+// time the table records for it, and the report counts the rows it skipped.
+func TestStoryPointsTrainFitsOnlyPolecatLandings(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(110, 9, true)
+	for i := 0; i < 30; i++ {
+		beads[i].notPolecat = true
+	}
+	fix := newTrainTestFixture(t, beads)
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+		t.Fatalf("storypoints-train: %v", err)
+	}
+	want := "not read: not polecat work 30, seat class 0, unmeasured 0, bead not in store 0, no Constraints or Acceptance 0, rig without a directory 0"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report = %q, want the line %q", out.String(), want)
+	}
+	// The 80 polecat landings are split: the earlier 64 fit and the latest 16 hold out.
+	if !strings.Contains(out.String(), "n=64)") {
+		t.Errorf("report does not count the 64 fitted beads:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "holdout: latest 16 beads") {
+		t.Errorf("report does not count the 16 holdout beads:\n%s", out.String())
+	}
+}
+
+// TestStoryPointsTrainKeepsALowerBoundAtItsFloor: a lower-bound time stays in the fit
+// at its floor value rather than being skipped as unmeasured, so the long beads the
+// bound marks are not dropped.
+func TestStoryPointsTrainKeepsALowerBoundAtItsFloor(t *testing.T) {
+	t.Parallel()
+	const floorMinutes = 7
+	beads := trainTestBeads(3, 11, true)
+	beads[0].bound = "1"
+	beads[0].minutes = floorMinutes
+	fix := newTrainTestFixture(t, beads)
+	data, err := os.ReadFile(filepath.Join(fix.outDir, landingsName))
+	if err != nil {
+		t.Fatalf("read landings: %v", err)
+	}
+	_, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ReadLandings: %v", err)
+	}
+	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fix.store() }}
+	samples, skips, err := trainingSamples(context.Background(), env, fix.town, rows, trainTestEmbedder{})
+	if err != nil {
+		t.Fatalf("trainingSamples: %v", err)
+	}
+	if skips.unmeasured != 0 || skips.notPolecat != 0 {
+		t.Errorf("skips = %+v, want the lower-bound row read", skips)
+	}
+	// The fixture lands the lower-bound bead first, an hour before the others.
+	landed := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var fitted *storypoints.Sample
+	for i := range samples {
+		if samples[i].LandedAt.Equal(landed) {
+			fitted = &samples[i]
+		}
+	}
+	if fitted == nil {
+		t.Fatalf("no sample landed at %s; samples = %d", landed, len(samples))
+	}
+	if fitted.Minutes != floorMinutes {
+		t.Errorf("lower-bound bead fitted at %v minutes, want its floor %d", fitted.Minutes, floorMinutes)
+	}
+}
+
+// TestStoryPointsTrainLeavesTheShadowReportUnfiltered: the shadow report counts every
+// estimated landing with a measured time, including one the retrain skips as not
+// polecat work, so the retrain's filter never shrinks the report.
+func TestStoryPointsTrainLeavesTheShadowReportUnfiltered(t *testing.T) {
+	t.Parallel()
+	rows := measuredRows(59)
+	crew := spLandingRow(99, "8", "3", "haiku", "all")
+	crew["polecat_work"] = "0"
+	rows = append(rows, crew)
+	var out bytes.Buffer
+	if err := WriteStoryPointsReport(&out, rows); err != nil {
+		t.Fatalf("WriteStoryPointsReport: %v", err)
+	}
+	want := "story points shadow report: 60 estimated landings with a measured time\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report does not count the non-polecat landing, want %q:\n%s", want, out.String())
 	}
 }
 

@@ -61,12 +61,17 @@ var omLandingColumns = []string{"om_rounds", "polecat_attempts"}
 // (runtime_era.go). It follows the om columns, append-only.
 var eraLandingColumns = []string{"runtime_era"}
 
+// polecatWorkLandingColumns is whether a landing came through a polecat seat,
+// read from its agent and route cells. It follows the runtime era, append-only.
+var polecatWorkLandingColumns = []string{"polecat_work"}
+
 // landingColumns is the header landings.csv is written with: the legacy header
 // then the appended columns, then the Jev columns, then the story-point
-// columns, then the om columns, then the runtime era. Columns are append-only: an
-// existing column keeps its name and its place, so a reader of an older file
-// reads the new one under the same names.
-var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns, eraLandingColumns)
+// columns, then the om columns, then the runtime era, then whether the landing
+// is polecat work. Columns are append-only: an existing column keeps its name
+// and its place, so a reader of an older file reads the new one under the same
+// names.
+var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns, eraLandingColumns, polecatWorkLandingColumns)
 
 // polecatSecsCell is a landing's polecat time in seconds, "" when the ledger
 // line carries none. The writer omits a zero time, so a zero or negative value
@@ -110,6 +115,16 @@ func spActualCell(l LedgerRow) string {
 		return ""
 	}
 	return strconv.Itoa(points)
+}
+
+// polecatWorkCell is the polecat_work cell. A landing with no agent and a
+// non-daemon route is an overseer, bird or crew landing, which has no polecat
+// seat and no polecat time, so the cell is 0; every other landing is 1.
+func polecatWorkCell(agent, route string) string {
+	if agent == "" && route != "daemon" {
+		return boolCell(false)
+	}
+	return boolCell(true)
 }
 
 // rungLabelNone is the label an estimate carries when no input made it. It is

@@ -21,8 +21,8 @@ import (
 var explainOnlyColumns = []string{
 	"agent", "attempts", "created_at", "dispatched_at", "file_entropy", "files_touched",
 	"gate_result", "lines_added", "lines_deleted", "lines_total", "om_rounds", "om_verdict",
-	"package_entropy", "polecat_attempts", "polecat_lower_bound", "polecat_secs", "seat_class", "sp_actual",
-	"sp_estimated_at", "submitted_at", "time_to_land_s", "unreadable",
+	"package_entropy", "polecat_attempts", "polecat_lower_bound", "polecat_secs", "polecat_work",
+	"seat_class", "sp_actual", "sp_estimated_at", "submitted_at", "time_to_land_s", "unreadable",
 }
 
 // DiffSource is where a landing's size and spread columns come from: Stats
@@ -138,6 +138,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"om_rounds":               roundsCell(rounds[l.Bead]),
 			"polecat_attempts":        polecatAttemptsCell(l),
 			"runtime_era":             runtimeEra(cuts, l.LandedAt),
+			"polecat_work":            polecatWorkCell(l.Agent, l.Route),
 		})
 	}
 	return rows, nil

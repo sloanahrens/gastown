@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// landingsFixture is testdata/landings.v4.csv, the header this join writes,
+// landingsFixture is testdata/landings.v5.csv, the header this join writes,
 // bytes included: its CRLF line endings are the extract's and the round trip is
-// measured against them. v4 is v3 with the story-point columns appended.
+// measured against them. v5 is v4 with the polecat_work column appended.
 func landingsFixture(t *testing.T) []byte {
 	t.Helper()
-	data, err := os.ReadFile("testdata/landings.v4.csv")
+	data, err := os.ReadFile("testdata/landings.v5.csv")
 	if err != nil {
 		t.Fatalf("read the landings fixture: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
 		t.Errorf("landingColumns starts %v, want the pinned header %v", got, legacy)
 	}
-	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns, eraLandingColumns)
+	want := slices.Concat(appendedLandingColumns, jevLandingColumns, storyPointLandingColumns, omLandingColumns, eraLandingColumns, polecatWorkLandingColumns)
 	if got := landingColumns[len(legacy):]; !slices.Equal(got, want) {
 		t.Errorf("appended columns = %v, want %v", got, want)
 	}
@@ -208,6 +208,44 @@ func TestPolecatCellsFollowTheLedgerLine(t *testing.T) {
 				if got := row[col]; got != want {
 					t.Errorf("%s = %q, want %q", col, got, want)
 				}
+			}
+		})
+	}
+}
+
+// polecatWorkLedgerLine is one ledger line with the route and agent the case
+// names, so the polecat_work cell is read from both columns.
+func polecatWorkLedgerLine(route, agent string) string {
+	line := `{"bead":"gt-p1","rig":"gastown","landed_commit":"c-p1","landed_at":"2026-10-24T12:00:00Z",` +
+		`"route":"` + route + `","om_verdict":"approve","gate_result":"build"`
+	if agent != "" {
+		line += `,"agent":"` + agent + `"`
+	}
+	return line + "}"
+}
+
+// TestPolecatWorkCellFollowsAgentAndRoute: polecat_work is 0 only for a landing
+// with no agent on a non-daemon route, the overseer, bird and crew landings that
+// carry no polecat time; a daemon route or a named agent is polecat work.
+func TestPolecatWorkCellFollowsAgentAndRoute(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		route string
+		agent string
+		want  string
+	}{
+		{"an agent on the daemon route", "daemon", "sbx-haiku", "1"},
+		{"no agent on a non-daemon route", "crew", "", "0"},
+		{"no agent on the daemon route", "daemon", "", "1"},
+		{"an agent on a non-daemon route", "overseer-manual", "sbx-flash", "1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := polecatCells(t, polecatWorkLedgerLine(tc.route, tc.agent))
+			if got := row["polecat_work"]; got != tc.want {
+				t.Errorf("polecat_work = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -308,7 +346,7 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
 		"jev_fits20", "jev_size", "sp", "sp_rung", "sp_minutes", "sp_estimated_at",
-		"om_rounds", "polecat_attempts", "runtime_era",
+		"om_rounds", "polecat_attempts", "runtime_era", "polecat_work",
 	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))
