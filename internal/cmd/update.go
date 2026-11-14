@@ -391,6 +391,11 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return fmt.Errorf("preparing the pod daemon: %w", err)
 	}
+	if pod != nil {
+		// The Job runs in a pod with no docker, so the image label of the target
+		// pair is read from the registry the --images file names.
+		deps.Verify = podImageLabelProbes{VerifyProbes: deps.Verify, label: podTargetImageLabel(seams.Images, townRoot, req.Images)}
+	}
 	if req.Images != "" {
 		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod, out)
 		if err != nil {

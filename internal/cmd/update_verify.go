@@ -151,6 +151,87 @@ func (p *verifyProbes) ImageLabel(ctx context.Context) (string, error) {
 	return label, nil
 }
 
+// podImageLabelProbes is the run's verify probes with the image label of a pod
+// target read from the registry. The update Job runs in a pod with no docker, so
+// the docker inspect ImageLabel makes cannot answer there.
+type podImageLabelProbes struct {
+	update.VerifyProbes
+	label func(context.Context) (string, error)
+}
+
+// ImageLabel is the commit label of the target pair's polecat image, from the
+// registry.
+func (p podImageLabelProbes) ImageLabel(ctx context.Context) (string, error) {
+	return p.label(ctx)
+}
+
+// podTargetImageLabel reads the commit label of the polecat image the values file
+// at imagesPath names, through the town's registry reader, in process: its only
+// inputs are the registry seams, the town root and the images file, and no
+// command runner is among them. The registry answers the manifest and config bytes, and the reader checks each
+// against the digest it was asked by. The town copy of the values file is not
+// read: until the Job's own checks pass it names the previous pair.
+func podTargetImageLabel(seams updateImagesSeams, townRoot, imagesPath string) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		values, err := imagevalues.Load(imagesPath)
+		if err != nil {
+			return "", fmt.Errorf("the --images values file: %w", err)
+		}
+		reader, err := townRegistryReader(seams, townRoot)
+		if err != nil {
+			return "", err
+		}
+		digest := podRefDigest(values.Polecat)
+		if want := reader.registry.Ref(imagevalues.PolecatImage, digest); values.Polecat != want {
+			return "", fmt.Errorf("the values file's polecat image %s is not %s in the town's registry", values.Polecat, want)
+		}
+		polecat, err := reader.image(ctx, "polecat", imagevalues.PolecatImage, digest)
+		if err != nil {
+			return "", fmt.Errorf("reading the target pair's polecat image: %w", err)
+		}
+		if polecat.Digest != digest {
+			return "", fmt.Errorf("the registry answered polecat digest %s for the digest %s it was asked for", polecat.Digest, digest)
+		}
+		if polecat.Commit != values.Commit {
+			return "", fmt.Errorf("image %s is labeled commit %s, but the values file names commit %s", polecat.Repo, polecat.Commit, values.Commit)
+		}
+		return polecat.Commit, nil
+	}
+}
+
+// townRegistryReader is the registry reader the town's images are read with: the
+// registry the town's Forgejo names and the viewer credential. A seam that is not
+// wired is an error, never a read made without it.
+func townRegistryReader(seams updateImagesSeams, townRoot string) (registryReader, error) {
+	switch {
+	case seams.Registry == nil:
+		return registryReader{}, errors.New("no registry is wired")
+	case seams.Credentials == nil:
+		return registryReader{}, errors.New("no credential reader is wired")
+	case seams.HTTPClient == nil:
+		return registryReader{}, errors.New("no HTTP client is wired")
+	}
+	registry, err := seams.Registry(townRoot)
+	if err != nil {
+		return registryReader{}, err
+	}
+	if err := registry.Validate(); err != nil {
+		return registryReader{}, err
+	}
+	user, token, err := seams.Credentials()
+	if err != nil {
+		return registryReader{}, fmt.Errorf("reading the viewer credential: %w", err)
+	}
+	return registryReader{
+		base:          registry.BaseURL(),
+		registry:      registry,
+		plaintextHost: plaintextHostOf(registry),
+		http:          seams.HTTPClient,
+		user:          user,
+		token:         token,
+	}, nil
+}
+
 // Health is the town's first health line. gt status --line exits nonzero for a
 // degraded town and its line still describes it, so the exit status is
 // ignored.

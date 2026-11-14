@@ -629,9 +629,19 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 		} else if reading.Namespace != podSwapNamespace {
 			t.Errorf("running pair read names namespace %q, want %q", reading.Namespace, podSwapNamespace)
 		}
-		probe, ok := got.deps.Verify.(podVerifyProbes)
+		// The image label of a pod run is read from the registry the --images file
+		// names: this fake registry serves no digest, so the read is refused there,
+		// and the refusal names the target pair's read rather than a docker inspect.
+		label, ok := got.deps.Verify.(podImageLabelProbes)
 		if !ok {
-			t.Fatalf("daemon probe = %T, want the pod probe", got.deps.Verify)
+			t.Fatalf("verify probe = %T, want the pod image label probe", got.deps.Verify)
+		}
+		if _, err := label.ImageLabel(context.Background()); err == nil || !strings.Contains(err.Error(), "target pair") {
+			t.Errorf("pod image label = %v, want the registry read of the --images pair", err)
+		}
+		probe, ok := label.VerifyProbes.(podVerifyProbes)
+		if !ok {
+			t.Fatalf("daemon probe = %T, want the pod probe", label.VerifyProbes)
 		}
 		if commit, err := probe.DaemonVersion(context.Background()); err != nil || commit != rollbackNewCommit {
 			t.Errorf("DaemonVersion = %q, %v; want the commit the pod runs, read through kubectl", commit, err)

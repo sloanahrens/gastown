@@ -105,32 +105,9 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNam
 // registry, and the registry must still hold that digest with bytes that hash
 // to it. The viewer credential is read here and never reaches an error.
 func imagePairRegistryCheck(seams updateImagesSeams, townRoot string) (func(context.Context, update.ImagePair) error, error) {
-	switch {
-	case seams.Registry == nil:
-		return nil, errors.New("no registry is wired")
-	case seams.Credentials == nil:
-		return nil, errors.New("no credential reader is wired")
-	case seams.HTTPClient == nil:
-		return nil, errors.New("no HTTP client is wired")
-	}
-	registry, err := seams.Registry(townRoot)
+	reader, err := townRegistryReader(seams, townRoot)
 	if err != nil {
 		return nil, err
-	}
-	if err := registry.Validate(); err != nil {
-		return nil, err
-	}
-	user, token, err := seams.Credentials()
-	if err != nil {
-		return nil, fmt.Errorf("reading the viewer credential: %w", err)
-	}
-	reader := registryReader{
-		base:          registry.BaseURL(),
-		registry:      registry,
-		plaintextHost: plaintextHostOf(registry),
-		http:          seams.HTTPClient,
-		user:          user,
-		token:         token,
 	}
 	return func(ctx context.Context, pair update.ImagePair) error {
 		for _, img := range []struct {
@@ -140,7 +117,7 @@ func imagePairRegistryCheck(seams updateImagesSeams, townRoot string) (func(cont
 			{kind: "polecat", name: imagevalues.PolecatImage, ref: pair.Polecat},
 		} {
 			_, digest, ok := strings.Cut(img.ref, "@")
-			if !ok || registry.Ref(img.name, digest) != img.ref {
+			if !ok || reader.registry.Ref(img.name, digest) != img.ref {
 				return fmt.Errorf("the recorded %s image %q is not a digest of the town's %s image", img.kind, img.ref, img.name)
 			}
 			if err := reader.digestAt(ctx, img.kind, img.name, digest); err != nil {
