@@ -215,7 +215,7 @@ func run(argv []string, s surface) int {
 		// --doctor still answers when there is no town: a diagnosis of down with
 		// the town error as its reason, rather than a refusal with no report.
 		if diagnose {
-			return reportMissingTown(s.stdout, err)
+			return reportMissingTown(s.stdout, err, cfg.Target)
 		}
 		return fail(s.stderr, err)
 	}
@@ -224,7 +224,7 @@ func run(argv []string, s surface) int {
 		return fail(s.stderr, err)
 	}
 	if diagnose {
-		return doctor(t, s.stdout, s.stderr)
+		return doctor(cfg.Target, t, s.stdout, s.stderr)
 	}
 	dir, err := s.getwd()
 	if err != nil {
@@ -544,41 +544,58 @@ func (s surface) hasTownMarker(dir string) (bool, error) {
 
 // doctor prints the rung, container, image and reason --doctor asks for, and
 // exits 0 when a rung holds and 1 when it is down or the diagnosis cannot be
-// made.
-func doctor(t target, stdout, stderr io.Writer) int {
+// made. targetName is the configured target the diagnosis is for.
+func doctor(targetName string, t target, stdout, stderr io.Writer) int {
 	diag, err := t.Doctor()
 	if err != nil {
 		// The target's error already names the wrapper, so it is printed as
 		// given rather than wrapped a second time.
 		return fail(stderr, err)
 	}
-	return report(stdout, diag)
+	return report(stdout, diag, targetName)
 }
 
 // reportMissingTown is --doctor's answer when no town root is found: down, with
 // the town error as the reason. The container and the image are read from the
 // compose file under the town, so with no town there is neither to name.
-func reportMissingTown(stdout io.Writer, err error) int {
+func reportMissingTown(stdout io.Writer, err error, targetName string) int {
 	return report(stdout, gtwrap.Diagnosis{
 		Rung:      gtwrap.RungDown,
 		Container: "unknown",
 		Image:     "unknown",
 		Reason:    err.Error(),
-	})
+	}, targetName)
+}
+
+// namesContainer reports whether a target's diagnosis always names a container and
+// an image. The docker and kubernetes targets do, so an empty one is printed as
+// unknown rather than dropped. bddocker names a container and no image, and
+// bdgateway and the forwarder name neither.
+func namesContainer(targetName string) bool {
+	return targetName == defaultTarget || targetName == kubernetesTarget
 }
 
 // report prints a diagnosis in the doctor's line form and returns the doctor's
 // status for it. The rung and the reason always print; the target's own fields
-// print when it has them, so a docker or kubernetes diagnosis keeps its four
-// lines and the bdgateway diagnosis names the URL and token file instead of a
-// container and image.
-func report(stdout io.Writer, diag gtwrap.Diagnosis) int {
+// print when it has them, so a bdgateway diagnosis names the URL and token file
+// instead of a container and image. A docker or kubernetes diagnosis keeps its
+// four lines, with unknown for a container or image it could not name.
+func report(stdout io.Writer, diag gtwrap.Diagnosis, targetName string) int {
 	fmt.Fprintf(stdout, "rung: %s\n", diag.Rung)
+	container, image := diag.Container, diag.Image
+	if namesContainer(targetName) {
+		if container == "" {
+			container = "unknown"
+		}
+		if image == "" {
+			image = "unknown"
+		}
+	}
 	for _, field := range []struct{ name, value string }{
 		{"url", diag.URL},
 		{"token_file", diag.TokenFile},
-		{"container", diag.Container},
-		{"image", diag.Image},
+		{"container", container},
+		{"image", image},
 	} {
 		if field.value != "" {
 			fmt.Fprintf(stdout, "%s: %s\n", field.name, field.value)
