@@ -70,19 +70,19 @@ func TestStorypointsNoExtractErrors(t *testing.T) {
 		},
 		{
 			name: "an unreadable root",
-			// A directory permission the owner can still open on some hosts, so
-			// the listing seam carries the failure.
+			// The listing seam returns the permission error, because a chmod
+			// cannot make the root unreadable to a test that runs as root.
 			readDir: func(string) ([]DirEntry, error) {
 				return nil, fs.ErrPermission
 			},
 			want: "list ",
 		},
 		{
-			name: "a backup's table unreadable",
+			name: "a newer day's table unreadable",
 			setup: func(t *testing.T, town *commandTown) {
-				// An older extract a fallback could read, and a newer day whose
-				// table cannot be read: the newer day is an error, not skipped
-				// for the older extract.
+				// An older dated extract a fallback could read, and a newer day
+				// whose table cannot be read: the newer day is an error, not
+				// skipped for the older extract.
 				town.writeExtractAt(t, "2026-10-20")
 				if err := os.MkdirAll(filepath.Join(filepath.Dir(town.outDir()), "2026-10-22", "landings.csv"), 0o755); err != nil {
 					t.Fatalf("make the newer day's table a directory: %v", err)
