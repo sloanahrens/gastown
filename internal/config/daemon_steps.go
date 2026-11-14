@@ -97,6 +97,7 @@ var daemonSteps = []DaemonStep{
 	{"scheduled_maintenance", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
 	{"scheduled_slings", DaemonStepPatrol, DaemonStepRuns, nil, "gt sling"},
 	{"wisp_reaper", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"workspace_reconcile", DaemonStepPatrol, DaemonStepRuns, nil, "in process: an HTTP push of the town's workspace to the bd gateway, and only when BD_GATEWAY_URL names one (internal/daemon/workspace_reconcile.go)"},
 }
 
 // daemonPatrolJevPrefix names in-process readers of the town's own files. They

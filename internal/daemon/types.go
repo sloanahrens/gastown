@@ -386,6 +386,15 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return *config.Patrols.LandingInfra.Enabled
 	}
+	// workspace_reconcile defaults ON: a gateway that restarted or missed a push
+	// converges only if something pushes again, and the reconcile does nothing
+	// unless BD_GATEWAY_URL names a gateway (workspace_reconcile.go).
+	if patrol == "workspace_reconcile" {
+		if config == nil || config.Patrols == nil || config.Patrols.WorkspaceReconcile == nil || config.Patrols.WorkspaceReconcile.Enabled == nil {
+			return true
+		}
+		return *config.Patrols.WorkspaceReconcile.Enabled
+	}
 	// events_prune defaults ON: .events.jsonl has no other bound, and a
 	// pruner that must be switched on leaves the file growing (gt-ori5j).
 	if patrol == "events_prune" {
