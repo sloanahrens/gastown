@@ -166,6 +166,11 @@ type streamSink struct {
 func (s *streamSink) Write(p []byte) (int, error) {
 	frame, err := bdgateway.ReadFrame(bytes.NewReader(p))
 	if err != nil {
+		if errors.Is(err, bdgateway.ErrBadErrorPayload) || errors.Is(err, bdgateway.ErrBadExitStatus) {
+			// The codec's error text can carry a byte of the frame, so the frame is
+			// named here and its payload is not printed.
+			fmt.Fprintln(s.stderr, "bdgw exec: the stream carried a malformed frame")
+		}
 		return 0, err
 	}
 	s.started = true

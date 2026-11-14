@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,6 +25,9 @@ type serveConfig struct {
 	// replaces it to drive the refusal of an unwired gateway, which serve's own
 	// pieces cannot produce.
 	newGateway func(bdgateway.GatewayOptions) (*bdgateway.Gateway, error)
+	// listen opens the socket serve accepts on. A test replaces it with an
+	// in-memory listener, so a unit test runs the real drain without a socket.
+	listen func(addr string) (net.Listener, error)
 }
 
 func newServeConfig() *serveConfig {
@@ -34,6 +38,9 @@ func newServeConfig() *serveConfig {
 		// running at shutdown finishes rather than being cut by the drain.
 		shutdownGrace: 130 * time.Second,
 		newGateway:    bdgateway.NewGateway,
+		listen: func(addr string) (net.Listener, error) {
+			return net.Listen("tcp", addr)
+		},
 	}
 }
 
@@ -103,6 +110,10 @@ func serve(ctx context.Context, sc *serveConfig) error {
 		return err
 	}
 
+	ln, err := sc.listen(sc.addr)
+	if err != nil {
+		return err
+	}
 	// Token rotation is a file replace followed by SIGHUP; a reload that fails
 	// keeps the old table and is reported without stopping the gateway.
 	hup := make(chan os.Signal, 1)
@@ -128,7 +139,7 @@ func serve(ctx context.Context, sc *serveConfig) error {
 		IdleTimeout:       2 * time.Minute,
 	}
 	listenErr := make(chan error, 1)
-	go func() { listenErr <- srv.ListenAndServe() }()
+	go func() { listenErr <- srv.Serve(ln) }()
 
 	var serveErr error
 	select {

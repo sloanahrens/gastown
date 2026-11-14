@@ -275,6 +275,60 @@ func TestBdgwExecLostExitFrame(t *testing.T) {
 	}
 }
 
+// rawFrame is one frame's bytes exactly as the wire carries them, for a frame
+// the codec refuses to write.
+func rawFrame(kind bdgateway.FrameKind, payload string) []byte {
+	return append([]byte{byte(kind), 0, 0, 0, byte(len(payload))}, payload...)
+}
+
+// splitRunner writes one stdout frame, then each raw frame as its own write, so
+// the sink reads the malformed frame as the stream's next frame.
+type splitRunner struct{ raw [][]byte }
+
+func (r splitRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.Reader, frames io.Writer) error {
+	if err := bdgateway.WriteFrame(frames, bdgateway.Frame{Kind: bdgateway.FrameStdout, Payload: []byte("out\n")}); err != nil {
+		return err
+	}
+	for _, raw := range r.raw {
+		if _, err := frames.Write(raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TestBdgwExecMalformedFrame: a frame the codec cannot read ends the stream as a
+// refusal, and exec says that a malformed frame ended it, without echoing the
+// frame's payload. An error frame and an exit frame are both covered.
+func TestBdgwExecMalformedFrame(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "error frame that is not JSON", raw: rawFrame(bdgateway.FrameError, "nope")},
+		{name: "exit frame that is not a status", raw: rawFrame(bdgateway.FrameExit, "nope")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			policy, log, ec := newExecFixture(t)
+			var stdout, stderr bytes.Buffer
+			status := execCall(context.Background(), policy, log, splitRunner{raw: [][]byte{tc.raw}}, ec,
+				[]string{"show"}, nil, strings.NewReader(""), &stdout, &stderr)
+			if status != exitRefused {
+				t.Errorf("status = %d, want %d: a stream ended by a malformed frame is not a success", status, exitRefused)
+			}
+			if !strings.Contains(stderr.String(), "malformed frame") {
+				t.Errorf("stderr = %q, want it to name the malformed frame", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "nope") {
+				t.Errorf("stderr = %q, want the frame's payload kept out of it", stderr.String())
+			}
+		})
+	}
+}
+
 // TestBdgwExecEnv: the process environment becomes the request's env map, with
 // an entry that names no value dropped rather than half-read.
 func TestBdgwExecEnv(t *testing.T) {
