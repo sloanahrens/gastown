@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -444,12 +445,60 @@ func TestSlingCallsSpawnPathGuardsRefuseEachBreach(t *testing.T) {
 	}
 }
 
+// TestSlingCallsClassifiersCountSyntheticSources drives the two classifiers
+// that the box-3 guard trusts (gitConstructionsIn and managerBuildsIn) with
+// small synthetic sources, so a classifier that always counted zero, or read a
+// nil observer as observed, fails here instead of staying silent until
+// polecat_spawn.go changes.
+func TestSlingCallsClassifiersCountSyntheticSources(t *testing.T) {
+	t.Parallel()
+	gitSrc := `package p
+func clean() { g := git.NewGit(d).WithRunObserver(o); _ = g }
+func bare() { g := git.NewGit(d); _ = g }
+func dir() { g := git.NewGitWithDir(a, b); _ = g }
+func mixed() { x := git.NewGit(d).WithRunObserver(o); y := git.NewGit(e); _, _ = x, y }
+func none() { _ = other.NewGit(d) }
+`
+	wantGit := map[string]spawnBuildCounts{
+		"clean": {observed: 1},
+		"bare":  {unobserved: 1},
+		"dir":   {unobserved: 1},
+		"mixed": {observed: 1, unobserved: 1},
+	}
+	if got := gitConstructionsIn(parseSpawnSource(t, gitSrc)); !reflect.DeepEqual(got, wantGit) {
+		t.Errorf("gitConstructionsIn = %+v, want %+v", got, wantGit)
+	}
+	mgrSrc := `package p
+func clean() { _ = polecat.NewManagerWithObserver(r, o); _ = polecat.NewSessionManagerWithObserver(r, o) }
+func nilObserver() { _ = polecat.NewManagerWithObserver(r, nil) }
+func nilSession() { _ = polecat.NewSessionManagerWithObserver(r, nil) }
+func plain() { _ = polecat.NewManager(r); _ = polecat.NewSessionManager(r) }
+func supervised() { _ = supervisedPolecatManager(r, o); _ = supervisedPolecatManager(r, nil) }
+func none() { _ = other.NewManager(r) }
+`
+	wantMgr := map[string]spawnBuildCounts{
+		"clean":       {observed: 2},
+		"nilObserver": {unobserved: 1},
+		"nilSession":  {unobserved: 1},
+		"plain":       {unobserved: 2},
+		"supervised":  {observed: 1, unobserved: 1},
+	}
+	if got := managerBuildsIn(parseSpawnSource(t, mgrSrc)); !reflect.DeepEqual(got, wantMgr) {
+		t.Errorf("managerBuildsIn = %+v, want %+v", got, wantMgr)
+	}
+}
+
 // spawnFileGitConstructions parses polecat_spawn.go and counts, per function,
 // the git handles it builds and whether each construction statement observes
 // them with .WithRunObserver.
 func spawnFileGitConstructions(t *testing.T) map[string]spawnBuildCounts {
 	t.Helper()
-	fn := parseSpawnFile(t)
+	return gitConstructionsIn(parseSpawnFile(t))
+}
+
+// gitConstructionsIn is spawnFileGitConstructions over an already parsed file,
+// so a test can feed the classifier a synthetic source.
+func gitConstructionsIn(fn *ast.File) map[string]spawnBuildCounts {
 	found := map[string]spawnBuildCounts{}
 	for name, body := range spawnFileFunctions(fn) {
 		observed := map[token.Pos]bool{}
@@ -487,7 +536,12 @@ func spawnFileGitConstructions(t *testing.T) map[string]spawnBuildCounts {
 // a constructor without an observer of its own, does not count as observed.
 func spawnFileManagerBuilds(t *testing.T) map[string]spawnBuildCounts {
 	t.Helper()
-	fn := parseSpawnFile(t)
+	return managerBuildsIn(parseSpawnFile(t))
+}
+
+// managerBuildsIn is spawnFileManagerBuilds over an already parsed file, so a
+// test can feed the classifier a synthetic source.
+func managerBuildsIn(fn *ast.File) map[string]spawnBuildCounts {
 	found := map[string]spawnBuildCounts{}
 	for name, body := range spawnFileFunctions(fn) {
 		site := spawnBuildCounts{}
@@ -575,6 +629,16 @@ func observedGitConstruction(call *ast.CallExpr) (*ast.CallExpr, bool) {
 		return nil, false
 	}
 	return inner, true
+}
+
+// parseSpawnSource parses a synthetic Go source for the classifier tests.
+func parseSpawnSource(t *testing.T, src string) *ast.File {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	return f
 }
 
 // parseSpawnFile parses the spawn file beside this test.

@@ -5616,12 +5616,6 @@ func (g *Git) InitSparseCheckout(repoPath string, paths []string) error {
 	return initSparseCheckout(g.runner(), repoPath, paths)
 }
 
-// InitSparseCheckout is (*Git).InitSparseCheckout running real git, for a
-// caller with no handle to observe.
-func InitSparseCheckout(repoPath string, paths []string) error {
-	return initSparseCheckout(realRun, repoPath, paths)
-}
-
 func initSparseCheckout(run runFunc, repoPath string, paths []string) error {
 	if err := ensureSafeMutationWorkDir(run, repoPath); err != nil {
 		return err
