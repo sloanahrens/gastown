@@ -10,10 +10,11 @@ import (
 	"github.com/steveyegge/gastown/internal/taskmap"
 )
 
-// how.go is `gt how`: the task groups an agent looks a job up by, or one
-// group's commands with their use lines (gt-j669b4.6). The map is read through
-// howMap, so the tests drive the command from a fixed map and a placement file
-// landing later cannot change a golden.
+// how.go is `gt how`: the task groups an agent looks a job up by, one group's
+// commands with their use lines (gt-j669b4.6), or the commands a word matches
+// (gt-j669b4.24). The map is read through howMap, so the tests drive the
+// command from a fixed map and a placement file landing later cannot change a
+// golden.
 
 // howMap is what a listing reads. howDefault supplies the real one.
 type howMap interface {
@@ -24,6 +25,9 @@ type howMap interface {
 	Describe(g taskmap.Group) string
 	// ByGroup returns g's entries.
 	ByGroup(g taskmap.Group) []taskmap.Entry
+	// Search returns the entries whose path or use contains word, ignoring
+	// case and sorted by path.
+	Search(word string) []taskmap.Entry
 }
 
 // howDefault is the real map: the entries the placement files register, plus
@@ -36,20 +40,26 @@ func (howDefault) Describe(g taskmap.Group) string { return taskmap.Describe(g) 
 
 func (h howDefault) ByGroup(g taskmap.Group) []taskmap.Entry { return h.reg.ByGroup(g) }
 
+func (h howDefault) Search(word string) []taskmap.Entry { return h.reg.Search(word) }
+
 var howCmd = &cobra.Command{
-	Use:     "how [group]",
+	Use:     "how [group|word]",
 	GroupID: GroupDiag,
-	Short:   "List the task groups, or the commands in one group",
+	Short:   "List the task groups, one group's commands, or the commands a word matches",
 	Long: `List the task groups an agent can look a job up by, one line each saying
 what the group is for. With a group, list that group's commands instead: one
 line each, "gt <path>  <use>", followed by "check: <sign>" when the map names a
 way to see the step worked.
 
-A word that names no group prints the group list and exits 0.
+A word that names no group searches the commands' paths and use lines for it,
+ignoring case, and prints each match in the same "gt <path>  <use>" form. A
+word that matches nothing prints "nothing matches <word>; run gt how for the
+groups". Both exit 0.
 
 Examples:
   gt how
-  gt how roll`,
+  gt how roll
+  gt how install`,
 	Args:         cobra.MaximumNArgs(1),
 	RunE:         runHowCmd,
 	SilenceUsage: true,
@@ -63,9 +73,9 @@ func runHowCmd(cmd *cobra.Command, args []string) error {
 	return runHow(cmd.OutOrStdout(), howDefault{taskmap.Default()}, args)
 }
 
-// runHow writes the listing for args to out: every group for no argument or a
-// word that names no group, one group's entries for a group. It writes once,
-// at the end, so a listing that cannot be built never reaches out.
+// runHow writes the listing for args to out: every group for no argument, one
+// group's entries for a group, and the matching commands for any other word. It
+// writes once, at the end, so a listing that cannot be built never reaches out.
 func runHow(out io.Writer, m howMap, args []string) error {
 	var b strings.Builder
 	switch len(args) {
@@ -77,11 +87,11 @@ func runHow(out io.Writer, m howMap, args []string) error {
 		g := taskmap.Group(args[0])
 		if hasGroup(m.Groups(), g) {
 			writeHowGroup(&b, m, g)
-		} else if err := writeHowGroups(&b, m); err != nil {
-			return err
+		} else {
+			writeHowSearch(&b, m, args[0])
 		}
 	default:
-		return fmt.Errorf("want at most one group, got %d arguments", len(args))
+		return fmt.Errorf("want at most one group or word, got %d arguments", len(args))
 	}
 	_, err := io.WriteString(out, b.String())
 	return err
@@ -123,6 +133,21 @@ func writeHowGroup(b *strings.Builder, m howMap, g taskmap.Group) {
 		if e.Check != "" {
 			fmt.Fprintf(b, "check: %s\n", e.Check)
 		}
+	}
+}
+
+// writeHowSearch writes word's matches, "gt <path>  <use>", in the order
+// Search returns them. With no match it writes the one line that sends the
+// agent back to the group list, so a guess at a word ends in a next step rather
+// than an empty screen.
+func writeHowSearch(b *strings.Builder, m howMap, word string) {
+	entries := m.Search(word)
+	if len(entries) == 0 {
+		fmt.Fprintf(b, "nothing matches %s; run gt how for the groups\n", word)
+		return
+	}
+	for _, e := range entries {
+		fmt.Fprintf(b, "gt %s  %s\n", e.Path, e.Use)
 	}
 }
 
