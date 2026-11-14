@@ -24,9 +24,9 @@ const specEstimateAheadLimit = 2
 
 // specEstimateAheadBead is one bead as the pick reads it.
 type specEstimateAheadBead struct {
-	// Issue is the bead's full read. Its Status, Assignee and Dependencies,
-	// and the description sections and acceptance field the estimate hashes,
-	// are what the pick decides on.
+	// Issue is the bead's full read. Its Status, Assignee, Labels and
+	// Dependencies, and the description sections and acceptance field the
+	// estimate hashes, are what the pick decides on.
 	Issue *beads.Issue
 	// Comments are the bead's comments, oldest first. They carry the note of
 	// the bead's latest estimate, whose hash says whether that estimate is
@@ -47,13 +47,16 @@ type specEstimateAheadBead struct {
 
 // specEstimateAheadPick returns the IDs of at most limit beads to estimate:
 // the open, unassigned, shaped beads with no unresolved blocking dependency
-// and no estimate note for their current sections, oldest first and ties by
-// ID. It returns no IDs when none qualifies or limit is not positive.
+// and no estimate for their current sections, oldest first and ties by ID. It
+// returns no IDs when none qualifies or limit is not positive.
 //
 // A bead whose latest estimate note carries its current hash is left alone.
 // That hash is the note's own record that the estimate was made from these
 // sections, which is the same predicate gt spec estimate reads to call a bead
-// unchanged; estimating again would replace the label the note records.
+// unchanged; estimating again would replace the labels the note records. A
+// bead already wearing those labels with no note to date them is left alone
+// too, because the pick cannot tell a current label from a stale one and the
+// pass must not overwrite either.
 func specEstimateAheadPick(cands []specEstimateAheadBead, limit int) []string {
 	if limit <= 0 {
 		return nil
@@ -103,7 +106,32 @@ func specEstimateAheadEligible(b specEstimateAheadBead) bool {
 	if specEstimateAheadBlocked(b.Issue) {
 		return false
 	}
-	return latestEstimateHash(b.Comments) != estimate.SectionHash(b.Issue)
+	current := estimate.SectionHash(b.Issue)
+	noted := latestEstimateHash(b.Comments)
+	if noted == current {
+		return false
+	}
+	// A bead already wearing the labels an estimate writes is left alone when
+	// its note names no hash: only a note dating the labels to other sections
+	// proves them stale, and with none the pass would overwrite a label it
+	// cannot show to be out of date.
+	return noted != "" || !specEstimateAheadLabeled(b.Issue)
+}
+
+// specEstimateAheadLabeled reports whether the bead wears any label gt spec
+// estimate writes: sp:N, sp-rung:<rung> or sp-minutes:<n>. A rerun replaces
+// exactly these, so one of them is a label the pass could overwrite.
+// sp-actual:N is the landing worker's measurement and is never an estimate's.
+func specEstimateAheadLabeled(issue *beads.Issue) bool {
+	for _, label := range issue.Labels {
+		label = strings.TrimSpace(label)
+		if strings.HasPrefix(label, "sp:") ||
+			strings.HasPrefix(label, "sp-rung:") ||
+			strings.HasPrefix(label, "sp-minutes:") {
+			return true
+		}
+	}
+	return false
 }
 
 // specEstimateAheadBlocked reports whether a dependency keeps the bead off an
