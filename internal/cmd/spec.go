@@ -4118,12 +4118,11 @@ func specTownRunsSandboxes(townRoot string) bool {
 	return ts != nil && len(ts.Sandboxes) > 0
 }
 
-// specGatewaySandboxes is the gateway's sandbox listing, bounded by
-// specSandboxListTimeout.
+// specGatewaySandboxes is the tick's listing, bounded by
+// specSandboxListTimeout through the listing the attention collector also
+// reads.
 func specGatewaySandboxes(ctx context.Context) ([]sandbox.Entry, error) {
-	ctx, cancel := context.WithTimeout(ctx, specSandboxListTimeout)
-	defer cancel()
-	return (&sandbox.CLI{}).List(ctx)
+	return daemon.GatewaySandboxListing(ctx, &sandbox.CLI{}, specSandboxListTimeout)
 }
 
 // get returns the guard, or nil when the listing could not be read or there is
