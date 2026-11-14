@@ -65,7 +65,10 @@ const escalationCloseSendBudget = escalationCloseNudgeTimeout
 // needs, and every one of them would fail. The floor also bounds a pass's
 // attempts while its sends hang: each spends at least the floor, so the budget
 // lasts escalationCloseSendBudget/escalationCloseSendShareFloor hung sends
-// rather than one.
+// rather than one. That many hung sends at once is the limit: if they come
+// first in list order, the closes after them wait a tick. Nothing is lost by
+// waiting: each of those closes stays watched, its escalation stays closed and
+// visible in the bead store, and the next tick tries the nudge again.
 const escalationCloseSendShareFloor = 5 * time.Second
 
 // escalationSendBudget is the send time one pass may spend on close nudges,
@@ -81,6 +84,13 @@ type escalationSendBudget struct {
 	// the watched set, which holds every close the pass could reach, and is
 	// taken down as each close is judged, so a send's share of what is left
 	// grows as the pass works through them.
+	//
+	// An id is judged at most once per pass: the escalations come from a bead
+	// store list keyed by id (one record per escalation bead), and an escalation
+	// names one rig, so its id appears in one rig's list. A watched id the pass
+	// does not judge, because it was still open or was pruned, leaves remaining
+	// above the true count; that only makes a share smaller, and the floor
+	// bounds it.
 	remaining int
 }
 

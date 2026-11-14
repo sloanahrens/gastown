@@ -422,9 +422,10 @@ func TestEscalationCloseNudgeRetriesFailedSend(t *testing.T) {
 	}
 }
 
-// The close nudges of one pass share a send budget: each send takes a share of
-// what is left, and a read between the sends spends none of it, so a tick slow
-// at reading escalations cannot defer every close (gt-d8wdwk).
+// The close nudges of one pass share a send budget: a send takes a share of
+// what is left, and reading escalations between sends spends none of it, so
+// the pass's send time is bounded by the budget whatever the reads cost
+// (gt-d8wdwk).
 func TestEscalationCloseSendBudgetBoundsThePass(t *testing.T) {
 	t.Parallel()
 	closed := func(id string) patrolscan.Escalation {
@@ -536,8 +537,8 @@ func TestEscalationCloseSendBudgetFloorLeavesRestOwed(t *testing.T) {
 
 // A send that hangs until its context ends spends only its share of the pass's
 // send budget, so the closes queued behind it are still attempted in the same
-// pass (gt-d8wdwk). Before the share, the first send took the whole budget and
-// every later close waited a tick, again and again while it kept hanging.
+// pass: one hung send cannot push every later close to the next tick
+// (gt-d8wdwk).
 func TestEscalationCloseHungSendDoesNotStarveLaterCloses(t *testing.T) {
 	t.Parallel()
 	seats := map[string]string{"one": "gt-work1", "two": "gt-work2", "three": "gt-work3"}
