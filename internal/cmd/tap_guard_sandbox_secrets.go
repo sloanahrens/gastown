@@ -323,7 +323,7 @@ func sandboxSecretsReasonWith(command string, read sandboxSecretsReader) string 
 	if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(command, read)) {
 		return "it reads a process's environment block"
 	}
-	reason, tooDeep := sandboxSecretsWalk(command, 0, nil)
+	reason, tooDeep := sandboxSecretsWalkWith(command, 0, nil, read)
 	if reason == "" && tooDeep && sandboxSecretsNamesEnvRe.MatchString(command) {
 		return "it nests commands too deeply to check and names the environment"
 	}
@@ -348,6 +348,14 @@ func sandboxSecretsReasonWith(command string, read sandboxSecretsReader) string 
 // substitution that holds a heredoc is judged with its body
 // (sandboxSecretsParsedSubstitutions).
 func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (reason string, tooDeep bool) {
+	return sandboxSecretsWalkWith(command, depth, inherited, sandboxSecretsReadTokens)
+}
+
+// sandboxSecretsWalkWith judges command as sandboxSecretsWalk does, but reads each
+// payload's environ path with read. Every payload the walk derives is read the same
+// way, including the payloads of a nested call, so a reading the caller injects
+// reaches the whole walk and not only the top-level command.
+func sandboxSecretsWalkWith(command string, depth int, inherited map[string]bool, read sandboxSecretsReader) (reason string, tooDeep bool) {
 	script, err := shellparse.Parse(command)
 	unplaced := err == nil && heredocReadersUnplaced(script)
 	if err != nil || unplaced {
@@ -492,10 +500,10 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		// A payload is a command the shell runs, so its environ path is read the way the
 		// top-level command's is: bash -c 'cat /pro""c/1/environ' and a substitution with
 		// a quote split in the path (gt-kr4tcn) join to the path once the shell reads them.
-		if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(payload, sandboxSecretsReadTokens)) {
+		if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(payload, read)) {
 			return "it reads a process's environment block", false
 		}
-		r, deep := sandboxSecretsWalk(payload, depth+1, tainted)
+		r, deep := sandboxSecretsWalkWith(payload, depth+1, tainted, read)
 		if r != "" {
 			return r, false
 		}

@@ -176,6 +176,31 @@ func TestSandboxSecretsProductionReader(t *testing.T) {
 	}
 }
 
+// TestSandboxSecretsPayloadReadsThroughInjectedReader pins that a payload the walk
+// derives is judged through the reader the verdict was handed, not the production
+// one. The reader shows the environ path only when it reads the payload "ls", so
+// "sh -c ls" is refused only if the payload check reads with the injected reader.
+// The production reader allows the same command, which shows the seam is what
+// decides the verdict.
+func TestSandboxSecretsPayloadReadsThroughInjectedReader(t *testing.T) {
+	t.Parallel()
+	const command = "sh -c ls"
+	const want = "it reads a process's environment block"
+	payloadReader := func(c string) []string {
+		if c == "ls" {
+			return []string{"cat", "/proc/1/environ"}
+		}
+		return sandboxSecretsReadTokens(c)
+	}
+	if got := sandboxSecretsReasonWith(command, payloadReader); got != want {
+		t.Errorf("sandboxSecretsReasonWith(%q) with the payload reader = %q, want %q; the payload is not read through the injected reader",
+			command, got, want)
+	}
+	if got := sandboxSecretsReason(command); got != "" {
+		t.Errorf("sandboxSecretsReason(%q) = %q, want allowed; the production reader must not see the payload's environ path", command, got)
+	}
+}
+
 // TestSandboxSecretsSubstitutionReadsPathAsText pins the verdict on the quoted
 // and escaped environ spellings inside a substitution. parsedTokens keeps a
 // substitution as one raw word, so these read an environment block only through
