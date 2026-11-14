@@ -41,8 +41,16 @@ type JevAsker func(ctx context.Context, issue *beads.Issue) (dispatch.Answers, e
 // skipped, the reason goes in the result, and the blend falls to the rung its
 // remaining inputs make.
 type Deps struct {
-	// Weights is the model; nil means storypoints.Default, the checked-in file.
+	// Weights is the model; a non-nil value is used as is and no runtime file
+	// is read. Nil falls to WeightsLoader, then to LoadTownWeights.
 	Weights *storypoints.Weights
+	// WeightsLoader loads the weights for TownRoot when Weights is nil. The
+	// LoadTownWeights default loads each town once per process, so a rejected
+	// runtime file is reported in one line however many estimates run.
+	WeightsLoader *storypoints.TownWeightsLoader
+	// TownRoot is the town whose runtime weights are read when Weights is nil.
+	// Empty reads none, so the embedded weights are used.
+	TownRoot string
 	// Embedder turns the section text into the vector the embedding ridge reads.
 	Embedder storypoints.Embedder
 	// JevAsk asks the battery; wrap a *dispatch.Pass's Ask method.
@@ -85,6 +93,9 @@ type Result struct {
 	// Hash is SectionHash of the bead the estimate was made from. A later run
 	// compares it with the hash in the last note to skip an unchanged bead.
 	Hash string
+	// WeightsVersion is Weights.Version of the model the estimate used, so a
+	// number can be traced to the file that made it. The note carries it.
+	WeightsVersion string
 }
 
 // Estimate builds every input it can, blends them into one estimate, and names
@@ -108,14 +119,11 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		return Result{}, ErrNoBeadText
 	}
 
-	weights := storypoints.Default()
-	if deps.Weights != nil {
-		weights = *deps.Weights
-	}
+	weights := weightsFor(deps)
 
 	// The seat is unknown before dispatch, so the shape input neutralizes its
 	// term with the training mean.
-	shape := storypoints.Features(storypoints.EstimateText(issue), deps.Rig, storypoints.SeatUnknown)
+	shape := storypoints.Features(storypoints.EstimateText(issue), deps.Rig, storypoints.SeatUnknown, weights)
 	shapeMinutes, err := weights.ShapeMinutes(shape)
 	if err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: shape input: %w", err)
@@ -162,17 +170,36 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		Neighbors:        neighbors,
 		NeighborsSkipped: neighborsSkipped,
 		Hash:             SectionHash(issue),
+		WeightsVersion:   weights.Version(),
 	}, nil
+}
+
+// weightsFor picks the model the estimate runs on: the caller's override, which
+// reads no runtime file, else the caller's loader, else the process-wide loader
+// LoadTownWeights shares.
+func weightsFor(deps Deps) storypoints.Weights {
+	switch {
+	case deps.Weights != nil:
+		return *deps.Weights
+	case deps.WeightsLoader != nil:
+		return deps.WeightsLoader.Load(deps.TownRoot)
+	default:
+		return storypoints.LoadTownWeights(deps.TownRoot)
+	}
 }
 
 // Note renders the comment that carries r. The first line identifies the
 // estimate, its rung and the hash of the bead text it was made from; the rest
-// gives the minutes, the inputs used, each skipped input with its reason, and
-// the nearest past beads, or why they are missing.
+// gives the minutes, the weights the estimate used, the inputs used, each
+// skipped input with its reason, and the nearest past beads, or why they are
+// missing. The weights line is written when r names a weights version.
 func Note(r Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "SP ESTIMATE v1 sp:%d rung:%s hash:%s\n", r.Points, r.Rung, r.Hash)
 	fmt.Fprintf(&b, "minutes: %s\n", strconv.FormatFloat(r.Minutes, 'f', 1, 64))
+	if r.WeightsVersion != "" {
+		fmt.Fprintf(&b, "weights: %s\n", r.WeightsVersion)
+	}
 	fmt.Fprintf(&b, "inputs: %s\n", strings.Join(r.Inputs, ", "))
 	for _, s := range r.Skipped {
 		fmt.Fprintf(&b, "skipped %s: %s\n", s.Input, oneLine(s.Reason))

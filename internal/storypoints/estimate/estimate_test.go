@@ -1,10 +1,14 @@
 package estimate
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -120,7 +124,7 @@ func TestEstimateAllInputs(t *testing.T) {
 	// The minutes are the geometric mean of the three inputs the estimate
 	// builds itself, so a wiring error that feeds the wrong value fails here.
 	w := storypoints.Default()
-	shape, err := w.ShapeMinutes(storypoints.Features(storypoints.EstimateText(issue), "gastown", storypoints.SeatUnknown))
+	shape, err := w.ShapeMinutes(storypoints.Features(storypoints.EstimateText(issue), "gastown", storypoints.SeatUnknown, w))
 	if err != nil {
 		t.Fatalf("shape minutes: %v", err)
 	}
@@ -408,6 +412,227 @@ func TestEstimateRefusals(t *testing.T) {
 				t.Fatalf("Estimate = %+v, want no result", got)
 			}
 		})
+	}
+}
+
+// TestEstimateWeightsSource drives the build of the estimate's weights: a
+// missing, unreadable or invalid runtime file leaves the embedded weights in
+// place, a valid one replaces them, and the version the result records names
+// the file the estimate read.
+func TestEstimateWeightsSource(t *testing.T) {
+	t.Parallel()
+	embedded, err := Estimate(context.Background(), Deps{}, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate(embedded): %v", err)
+	}
+	tests := []struct {
+		name        string
+		town        func(t *testing.T) string
+		wantVersion string
+		wantRuntime bool
+	}{
+		{"no town root", func(*testing.T) string { return "" }, "embedded v1", false},
+		{"a town with no runtime file", func(t *testing.T) string { return t.TempDir() }, "embedded v1", false},
+		{"a runtime file that does not parse", func(t *testing.T) string {
+			return townWithRuntimeFile(t, []byte("not json"))
+		}, "embedded v1", false},
+		{"a valid runtime file", func(t *testing.T) string {
+			return townWithRuntimeFile(t, runtimeWeightsWithIntercept(t, "4.0"))
+		}, "runtime v1", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Estimate(context.Background(), Deps{TownRoot: tc.town(t)}, sampleBead())
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			if got.WeightsVersion != tc.wantVersion {
+				t.Fatalf("WeightsVersion = %q, want %q", got.WeightsVersion, tc.wantVersion)
+			}
+			if want := "weights: " + tc.wantVersion; !strings.Contains(Note(got), want) {
+				t.Fatalf("note %q has no line %q", Note(got), want)
+			}
+			// A moved intercept tells the two models apart by their number, so
+			// a fallback that kept the runtime model would not pass by label.
+			if tc.wantRuntime && !(got.Minutes > embedded.Minutes) {
+				t.Fatalf("minutes = %v, want more than the embedded model's %v", got.Minutes, embedded.Minutes)
+			}
+			if !tc.wantRuntime && got.Minutes != embedded.Minutes {
+				t.Fatalf("minutes = %v, want the embedded model's %v", got.Minutes, embedded.Minutes)
+			}
+		})
+	}
+}
+
+// townWithRuntimeFile writes data as a town's runtime weights file and returns
+// the town root it sits under.
+func townWithRuntimeFile(t *testing.T, data []byte) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, ".runtime", "storypoints")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "weights.json"), data, 0o644); err != nil {
+		t.Fatalf("write the runtime weights: %v", err)
+	}
+	return root
+}
+
+// runtimeWeightsWithIntercept returns the embedded weights file with its shape
+// intercept replaced by intercept, so a model read from it answers differently
+// from the embedded one.
+func runtimeWeightsWithIntercept(t *testing.T, intercept string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("../weights.json")
+	if err != nil {
+		t.Fatalf("read the embedded weights: %v", err)
+	}
+	const old = `"intercept": 2.16992`
+	if n := bytes.Count(raw, []byte(old)); n != 1 {
+		t.Fatalf("%s occurs %d times in the weights file, want 1", old, n)
+	}
+	return bytes.Replace(raw, []byte(old), []byte(`"intercept": `+intercept), 1)
+}
+
+// fakeWeightsFile is the reader and logger a weights-loader test supplies: read
+// serves data or readErr and records each path it was given, and logf records
+// each line the loader wrote.
+type fakeWeightsFile struct {
+	data    []byte
+	readErr error
+	reads   []string
+	logged  []string
+}
+
+func (f *fakeWeightsFile) read(path string) ([]byte, error) {
+	f.reads = append(f.reads, path)
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.data, nil
+}
+
+func (f *fakeWeightsFile) logf(format string, args ...any) {
+	f.logged = append(f.logged, fmt.Sprintf(format, args...))
+}
+
+// runtimeWeightsWithIsHaikuMean returns the embedded weights file with its
+// is_haiku training mean set to mean, so a model read from it neutralizes the
+// unknown seat differently from the embedded one.
+func runtimeWeightsWithIsHaikuMean(t *testing.T, mean float64) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("../weights.json")
+	if err != nil {
+		t.Fatalf("read the embedded weights: %v", err)
+	}
+	var f map[string]any
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("parse the embedded weights: %v", err)
+	}
+	shape, ok := f["shape"].(map[string]any)
+	if !ok {
+		t.Fatal("the embedded weights have no shape block")
+	}
+	features, ok := shape["features"].([]any)
+	if !ok {
+		t.Fatal("the embedded weights have no shape feature names")
+	}
+	means, ok := shape["mean"].([]any)
+	if !ok {
+		t.Fatal("the embedded weights have no shape means")
+	}
+	i := slices.IndexFunc(features, func(v any) bool { return v == "is_haiku" })
+	if i < 0 || i >= len(means) {
+		t.Fatal("the embedded weights have no is_haiku mean")
+	}
+	means[i] = mean
+	out, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("encode the runtime weights: %v", err)
+	}
+	return out
+}
+
+// TestEstimateUsesTheRuntimeShapeMean runs a shape-only estimate on a town
+// whose runtime file moves the is_haiku mean. The estimate's unknown seat is
+// neutralized with the runtime model's own mean, so that term is exactly zero
+// and the minutes match the embedded model's. Had the feature kept the
+// embedded file's mean, the runtime model would read a non-zero term and the
+// minutes would move by about 12%, so the two equal is the evidence the
+// runtime mean was the one used.
+func TestEstimateUsesTheRuntimeShapeMean(t *testing.T) {
+	t.Parallel()
+	embedded, err := Estimate(context.Background(), Deps{}, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate(embedded): %v", err)
+	}
+
+	town := townWithRuntimeFile(t, runtimeWeightsWithIsHaikuMean(t, 0.9))
+	got, err := Estimate(context.Background(), Deps{TownRoot: town}, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if got.Rung != "shape" {
+		t.Fatalf("rung = %q, want shape", got.Rung)
+	}
+	if got.WeightsVersion != "runtime v1" {
+		t.Fatalf("WeightsVersion = %q, want runtime v1", got.WeightsVersion)
+	}
+	if math.Abs(got.Minutes-embedded.Minutes) > 1e-12 {
+		t.Fatalf("minutes = %v, want the embedded model's %v: the runtime mean did not neutralize the unknown seat", got.Minutes, embedded.Minutes)
+	}
+}
+
+// TestEstimateReadsNoRuntimeFileWhenWeightsAreGiven checks an override is used
+// as is: a broken runtime file cannot even log a fallback line for it.
+func TestEstimateReadsNoRuntimeFileWhenWeightsAreGiven(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWeightsFile{readErr: errors.New("read the runtime file")}
+	deps := workingDeps()
+	deps.TownRoot = "/town"
+	deps.WeightsLoader = storypoints.NewTownWeightsLoader(fake.read, fake.logf)
+	w := storypoints.Default()
+	deps.Weights = &w
+
+	got, err := Estimate(context.Background(), deps, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if got.WeightsVersion != "embedded v1" {
+		t.Fatalf("WeightsVersion = %q, want the override's embedded v1", got.WeightsVersion)
+	}
+	if len(fake.reads) != 0 {
+		t.Fatalf("read paths = %v, want none when the weights are given", fake.reads)
+	}
+	if len(fake.logged) != 0 {
+		t.Fatalf("logged = %v, want no line when the weights are given", fake.logged)
+	}
+}
+
+// TestEstimateReportsABrokenRuntimeFileOnce checks two estimates sharing one
+// loader read the runtime file once and report it in one line, so a broken
+// file does not repeat per estimate.
+func TestEstimateReportsABrokenRuntimeFileOnce(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWeightsFile{data: []byte("not json")}
+	loader := storypoints.NewTownWeightsLoader(fake.read, fake.logf)
+	deps := Deps{TownRoot: "/town", WeightsLoader: loader}
+	for i := 0; i < 2; i++ {
+		got, err := Estimate(context.Background(), deps, sampleBead())
+		if err != nil {
+			t.Fatalf("Estimate call %d: %v", i+1, err)
+		}
+		if got.WeightsVersion != "embedded v1" {
+			t.Fatalf("Estimate call %d: WeightsVersion = %q, want embedded v1", i+1, got.WeightsVersion)
+		}
+	}
+	if len(fake.reads) != 1 {
+		t.Fatalf("read paths = %v, want one read", fake.reads)
+	}
+	if len(fake.logged) != 1 {
+		t.Fatalf("logged = %v, want one line", fake.logged)
 	}
 }
 

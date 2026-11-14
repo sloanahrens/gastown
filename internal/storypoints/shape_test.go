@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"slices"
 	"testing"
 	"unicode/utf8"
 
@@ -57,7 +58,7 @@ func TestEstimateTextEmptyDescription(t *testing.T) {
 	if text != want {
 		t.Fatalf("EstimateText() = %q, want %q", text, want)
 	}
-	f := Features(text, "gastown", SeatHaiku)
+	f := Features(text, "gastown", SeatHaiku, Default())
 	if f.Boxes != 0 || f.Paths != 0 || f.Pkgs != 0 || f.NCons != 0 || f.Tests != 0 || f.NBt != 0 {
 		t.Errorf("Features(empty description) = %+v, want zero counts", f)
 	}
@@ -107,7 +108,7 @@ func TestFeaturesMatchFixtures(t *testing.T) {
 			if fx.SeatClass == "haiku" {
 				seat = SeatHaiku
 			}
-			got := namedFeatures(Features(fx.Text, fx.Rig, seat))
+			got := namedFeatures(Features(fx.Text, fx.Rig, seat, Default()))
 			if len(got) != len(fx.Features) {
 				t.Fatalf("fixture has %d features, Shape has %d", len(fx.Features), len(got))
 			}
@@ -122,7 +123,7 @@ func TestFeaturesMatchFixtures(t *testing.T) {
 
 func TestFeaturesEmptyText(t *testing.T) {
 	t.Parallel()
-	got := Features("", "devops", SeatFlash)
+	got := Features("", "devops", SeatFlash, Default())
 	want := Shape{RigDV: 1}
 	if got != want {
 		t.Errorf("Features(empty) = %+v, want %+v", got, want)
@@ -132,7 +133,7 @@ func TestFeaturesEmptyText(t *testing.T) {
 func TestFeaturesNoAcceptanceHeading(t *testing.T) {
 	t.Parallel()
 	text := "# T [open task P2]\n\n## Description\n\n- [ ] not counted\n- [x] not counted either\n"
-	if got := Features(text, "gastown", SeatHaiku).Boxes; got != 0 {
+	if got := Features(text, "gastown", SeatHaiku, Default()).Boxes; got != 0 {
 		t.Errorf("Boxes = %v, want 0 when there is no Acceptance heading", got)
 	}
 }
@@ -140,7 +141,7 @@ func TestFeaturesNoAcceptanceHeading(t *testing.T) {
 func TestFeaturesCountsBoxesAfterAcceptanceHeading(t *testing.T) {
 	t.Parallel()
 	text := "## Description\n\n- [x] before the heading\n\n## Acceptance\n\n- [x] one\n- [ ] two\n- [X] three\n"
-	if got := Features(text, "gastown", SeatHaiku).Boxes; got != 3 {
+	if got := Features(text, "gastown", SeatHaiku, Default()).Boxes; got != 3 {
 		t.Errorf("Boxes = %v, want 3", got)
 	}
 }
@@ -149,10 +150,10 @@ func TestFeaturesLabels(t *testing.T) {
 	t.Parallel()
 	withLabels := "# T [open task P2] labels: a, b, c\n\n## Description\n\nD\n"
 	withoutLabels := "# T [open task P2]\n\n## Description\n\nD\n"
-	if got := Features(withLabels, "gastown", SeatHaiku).NLab; got != 3 {
+	if got := Features(withLabels, "gastown", SeatHaiku, Default()).NLab; got != 3 {
 		t.Errorf("NLab with labels = %v, want 3", got)
 	}
-	if got := Features(withoutLabels, "gastown", SeatHaiku).NLab; got != 0 {
+	if got := Features(withoutLabels, "gastown", SeatHaiku, Default()).NLab; got != 0 {
 		t.Errorf("NLab without labels = %v, want 0", got)
 	}
 }
@@ -160,7 +161,7 @@ func TestFeaturesLabels(t *testing.T) {
 func TestFeaturesBacktickPath(t *testing.T) {
 	t.Parallel()
 	text := "Edit `internal/storypoints/shape.go` and nothing else.\n"
-	got := Features(text, "gastown", SeatHaiku)
+	got := Features(text, "gastown", SeatHaiku, Default())
 	if got.Paths != 1 {
 		t.Errorf("Paths = %v, want 1 for a path inside backticks", got.Paths)
 	}
@@ -169,14 +170,38 @@ func TestFeaturesBacktickPath(t *testing.T) {
 	}
 }
 
-func TestFeaturesUnknownSeatUsesMean(t *testing.T) {
+// TestFeaturesUnknownSeatUsesTheWeightsMean checks the unknown seat is
+// neutralized with the mean of the weights the features are for: a retrained
+// file's own mean, not the embedded file's.
+func TestFeaturesUnknownSeatUsesTheWeightsMean(t *testing.T) {
 	t.Parallel()
-	want := initialShapeMean(t, "is_haiku")
-	if got := Features("", "gastown", SeatUnknown).IsHaiku; got != want {
-		t.Errorf("IsHaiku for an unknown seat = %v, want the training mean %v", got, want)
+	retrained := loadWeightsFrom(t, weightsWith(t, func(f *weightsFile) {
+		f.Shape.Mean[slices.Index(shapeFeatureNames, "is_haiku")] = 0.9
+	}))
+	tests := []struct {
+		name string
+		w    Weights
+		want float64
+	}{
+		{"the embedded weights", Default(), initialShapeMean(t, "is_haiku")},
+		{"a retrained weights file", retrained, 0.9},
 	}
-	if got := Features("", "gastown", SeatHaiku).IsHaiku; got != 1 {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Features("", "gastown", SeatUnknown, tc.w).IsHaiku; got != tc.want {
+				t.Errorf("IsHaiku for an unknown seat = %v, want the weights' mean %v", got, tc.want)
+			}
+		})
+	}
+	if got := Features("", "gastown", SeatHaiku, retrained).IsHaiku; got != 1 {
 		t.Errorf("IsHaiku for the Haiku seat = %v, want 1", got)
+	}
+	if got := Features("", "gastown", SeatFlash, retrained).IsHaiku; got != 0 {
+		t.Errorf("IsHaiku for the Flash seat = %v, want 0", got)
+	}
+	if got := Features("", "gastown", SeatUnknown, Weights{}).IsHaiku; got != 0 {
+		t.Errorf("IsHaiku with no shape model = %v, want 0", got)
 	}
 }
 

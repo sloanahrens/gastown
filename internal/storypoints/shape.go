@@ -70,8 +70,10 @@ func EstimateText(issue *beads.Issue) string {
 }
 
 // Features computes the twelve shape features of the estimate text t for a bead
-// in rig and run by seat.
-func Features(t, rig string, seat Seat) Shape {
+// in rig and run by seat. w supplies the is_haiku training mean an unknown seat
+// is neutralized with, so the features are the ones the model that reads them
+// was fitted on.
+func Features(t, rig string, seat Seat, w Weights) Shape {
 	return Shape{
 		Boxes:   float64(countBoxes(t)),
 		Paths:   float64(distinct(pathRE, t)),
@@ -84,7 +86,7 @@ func Features(t, rig string, seat Seat) Shape {
 		NBt:     float64(strings.Count(t, "`")),
 		RigGT:   boolFloat(rig == "gastown"),
 		RigDV:   boolFloat(rig == "devops"),
-		IsHaiku: isHaiku(seat),
+		IsHaiku: isHaiku(seat, w),
 	}
 }
 
@@ -158,26 +160,26 @@ func distinct(re *regexp.Regexp, t string) int {
 	return len(seen)
 }
 
-func isHaiku(seat Seat) float64 {
+func isHaiku(seat Seat, w Weights) float64 {
 	switch seat {
 	case SeatHaiku:
 		return 1
 	case SeatFlash:
 		return 0
 	default:
-		return isHaikuMean()
+		return isHaikuMean(w)
 	}
 }
 
-// isHaikuMean is the training mean of is_haiku, read from the weights. Before a
-// seat is chosen the term is neutralized by this mean, not by 0, which would
-// read as the non-Haiku seat.
-func isHaikuMean() float64 {
-	mean, ok := Default().ShapeMean("is_haiku")
+// isHaikuMean is the training mean of is_haiku, read from the weights the
+// features are for. Before a seat is chosen the term is neutralized by this
+// mean, not by 0, which would read as the non-Haiku seat. A Weights with no
+// shape model has no mean: 0 keeps Features total, and ShapeMinutes refuses
+// such a Weights, so the value never reaches an estimate.
+func isHaikuMean(w Weights) float64 {
+	mean, ok := w.ShapeMean("is_haiku")
 	if !ok {
-		// Unreachable: LoadWeights accepts only the shapeFeatureNames list,
-		// which includes is_haiku.
-		panic("storypoints: weights have no is_haiku mean")
+		return 0
 	}
 	return mean
 }

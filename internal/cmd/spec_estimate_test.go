@@ -567,6 +567,9 @@ func TestSpecEstimateDepsReadTheTownSettings(t *testing.T) {
 	if deps.Embedder != nil {
 		t.Errorf("embedder = %T, want none without an embedder URL", deps.Embedder)
 	}
+	if deps.Weights == nil || deps.Weights.Version() != "embedded v1" {
+		t.Errorf("deps.Weights = %v, want the embedded weights a town with no runtime file gets", deps.Weights)
+	}
 	if deps.HMRunner == nil || deps.JevAsk == nil || deps.Rig != "gastown" {
 		t.Errorf("deps = %+v, want hm, a Jev asker and the rig", deps)
 	}
@@ -580,25 +583,78 @@ func TestSpecEstimateDepsReadTheTownSettings(t *testing.T) {
 	}
 }
 
-// The embedder is built from story_points: a URL with a model, nothing with no
-// URL, and a refusal for a URL with no model.
+// TestSpecEstimateDepsPairTheEmbedderWithTheRuntimeWeights checks the deps the
+// estimate runs with pair one model: the embedder's reply dimension and the
+// weights the estimate reads come from the town's runtime file, not the
+// embedded one.
+func TestSpecEstimateDepsPairTheEmbedderWithTheRuntimeWeights(t *testing.T) {
+	t.Parallel()
+	town := writeSpecEstimateDaemon(t, `{"patrols":{"spec_dispatch":{"story_points":{"embedder_url":"http://host:11434","embedder_model":"qwen3-embedding:4b-q8_0"}}}}`)
+	f := specWeightsFile(t)
+	setEmbeddingDim(t, f, 3)
+	writeSpecEstimateRuntimeWeights(t, town, f)
+
+	deps, err := specEstimateDeps(town, "gastown", io.Discard)
+	if err != nil {
+		t.Fatalf("specEstimateDeps: %v", err)
+	}
+	if deps.Weights == nil || deps.Weights.Version() != "runtime v1" {
+		t.Fatalf("deps.Weights = %v, want the town's runtime weights", deps.Weights)
+	}
+	o, ok := deps.Embedder.(storypoints.OllamaEmbedder)
+	if !ok {
+		t.Fatalf("embedder is %T, want storypoints.OllamaEmbedder", deps.Embedder)
+	}
+	if o.Dim != 3 {
+		t.Errorf("embedder dimension = %d, want the runtime ridge's 3", o.Dim)
+	}
+}
+
+// TestSpecEstimateDepsRefuseARuntimeModelTheEmbedderCannotPair checks a town
+// whose runtime file was fitted on another embedding model refuses the run
+// rather than estimating with mixed models.
+func TestSpecEstimateDepsRefuseARuntimeModelTheEmbedderCannotPair(t *testing.T) {
+	t.Parallel()
+	town := writeSpecEstimateDaemon(t, `{"patrols":{"spec_dispatch":{"story_points":{"embedder_url":"http://host:11434","embedder_model":"qwen3-embedding:4b-q8_0"}}}}`)
+	f := specWeightsFile(t)
+	f["embedding"].(map[string]any)["model"] = "other-embedding:1b"
+	writeSpecEstimateRuntimeWeights(t, town, f)
+
+	if _, err := specEstimateDeps(town, "gastown", io.Discard); err == nil {
+		t.Fatal("specEstimateDeps accepted a runtime file fitted on another embedding model")
+	}
+}
+
+// TestSpecEstimateEmbedderFromConfig checks the embedder is built from
+// story_points: a URL with a model, nothing with no URL, and a refusal for a
+// URL with no model or weights it cannot pair with. The reply dimension is the
+// weights' own, so a town's runtime ridge is what the embedder's replies are
+// checked against.
 func TestSpecEstimateEmbedderFromConfig(t *testing.T) {
 	t.Parallel()
+	embedded := storypoints.Default()
+	small := specWeights(t, specWeightsFile(t), func(f map[string]any) {
+		setEmbeddingDim(t, f, 3)
+	})
 	tests := []struct {
 		name    string
 		sd      *config.SpecDispatchConfig
+		w       storypoints.Weights
 		wantNil bool
 		wantErr bool
+		wantDim int
 	}{
-		{"no spec_dispatch block", nil, true, false},
-		{"no story_points block", &config.SpecDispatchConfig{}, true, false},
-		{"story_points without a URL", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderModel: "qwen3-embedding:4b-q8_0"}}, true, false},
-		{"URL with no model", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderURL: "http://host:11434"}}, false, true},
-		{"URL and model", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderURL: "http://host:11434", EmbedderModel: "qwen3-embedding:4b-q8_0"}}, false, false},
+		{"no spec_dispatch block", nil, embedded, true, false, 0},
+		{"no story_points block", &config.SpecDispatchConfig{}, embedded, true, false, 0},
+		{"story_points without a URL", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderModel: "qwen3-embedding:4b-q8_0"}}, embedded, true, false, 0},
+		{"URL with no model", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderURL: "http://host:11434"}}, embedded, false, true, 0},
+		{"URL and model", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderURL: "http://host:11434", EmbedderModel: "qwen3-embedding:4b-q8_0"}}, embedded, false, false, embedded.EmbeddingDimension()},
+		{"URL and model with a runtime ridge of another dimension", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderURL: "http://host:11434", EmbedderModel: "qwen3-embedding:4b-q8_0"}}, small, false, false, 3},
+		{"URL and model with weights that have no ridge", &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{EmbedderURL: "http://host:11434", EmbedderModel: "qwen3-embedding:4b-q8_0"}}, storypoints.Weights{}, false, true, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			emb, err := specEstimateEmbedder(tc.sd)
+			emb, err := specEstimateEmbedder(tc.sd, tc.w)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v, want error %v", err, tc.wantErr)
 			}
@@ -618,12 +674,95 @@ func TestSpecEstimateEmbedderFromConfig(t *testing.T) {
 			if o.URL != "http://host:11434" || o.Model != "qwen3-embedding:4b-q8_0" {
 				t.Errorf("embedder = %+v, want the configured URL and model", o)
 			}
-			if o.Dim != storypoints.Default().EmbeddingDimension() || o.Dim == 0 {
-				t.Errorf("embedder dimension = %d, want the weights' dimension", o.Dim)
+			if o.Dim != tc.wantDim || o.Dim == 0 {
+				t.Errorf("embedder dimension = %d, want %d", o.Dim, tc.wantDim)
 			}
 			if o.Timeout <= 0 || o.HTTP == nil {
 				t.Errorf("embedder has no timeout or client: %+v", o)
 			}
 		})
+	}
+}
+
+// TestSpecEstimateEmbedderRefusesAnotherModel checks a runtime file fitted on
+// an embedding model other than the configured one is refused, naming both: the
+// embedder that would send the vectors is not the one the ridge was fitted on.
+func TestSpecEstimateEmbedderRefusesAnotherModel(t *testing.T) {
+	t.Parallel()
+	w := specWeights(t, specWeightsFile(t), func(f map[string]any) {
+		f["embedding"].(map[string]any)["model"] = "other-embedding:1b"
+	})
+	sd := &config.SpecDispatchConfig{StoryPoints: &config.StoryPointsConfig{
+		EmbedderURL:   "http://host:11434",
+		EmbedderModel: "qwen3-embedding:4b-q8_0",
+	}}
+	_, err := specEstimateEmbedder(sd, w)
+	if err == nil {
+		t.Fatal("specEstimateEmbedder accepted weights fitted on another embedding model")
+	}
+	if !strings.Contains(err.Error(), "other-embedding:1b") || !strings.Contains(err.Error(), "qwen3-embedding:4b-q8_0") {
+		t.Errorf("error %q does not name both embedding models", err)
+	}
+}
+
+// specWeightsFile decodes the checked-in weights file, so a test can change one
+// field and load the result back as a Weights value.
+func specWeightsFile(t *testing.T) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile("../storypoints/weights.json")
+	if err != nil {
+		t.Fatalf("read the weights file: %v", err)
+	}
+	var f map[string]any
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("parse the weights file: %v", err)
+	}
+	return f
+}
+
+// specWeights loads f back into a Weights value after mutate has changed it.
+func specWeights(t *testing.T, f map[string]any, mutate func(map[string]any)) storypoints.Weights {
+	t.Helper()
+	mutate(f)
+	out, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("encode the weights: %v", err)
+	}
+	w, err := storypoints.LoadWeights(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("load the weights: %v", err)
+	}
+	return w
+}
+
+// setEmbeddingDim gives f an embedding ridge of dim coefficients, so the loaded
+// weights answer EmbeddingDimension dim.
+func setEmbeddingDim(t *testing.T, f map[string]any, dim int) {
+	t.Helper()
+	embedding, ok := f["embedding"].(map[string]any)
+	if !ok {
+		t.Fatal("the weights file has no embedding block")
+	}
+	coef := make([]any, dim)
+	for i := range coef {
+		coef[i] = 0.1
+	}
+	embedding["dim"] = dim
+	embedding["coef"] = coef
+}
+
+// writeSpecEstimateRuntimeWeights writes f as town's runtime weights file.
+func writeSpecEstimateRuntimeWeights(t *testing.T, town string, f map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("encode the runtime weights: %v", err)
+	}
+	dir := filepath.Join(town, ".runtime", "storypoints")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "weights.json"), data, 0o644); err != nil {
+		t.Fatalf("write the runtime weights: %v", err)
 	}
 }
