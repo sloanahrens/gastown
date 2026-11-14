@@ -141,6 +141,7 @@ These runners are in the daemon's closure. Each runs the program its caller pass
 
 These unresolved programs are in packages the daemon does not reach, so the daemon process does not link them and their calls are not the pod question this page answers. They have no rows. The guard holds this list to the scan: each function here holds an unresolved program outside the closure, and each such function is listed.
 
+- `internal/bdgateway/process.go` `realRunner.Start`
 - `internal/bdshim/osmain.go` `realCommand`
 - `internal/bdshim/recordexec.go` `execRunner`
 - `internal/ci/cmd/imagepreflight/main.go` `jqVersion`
