@@ -32,6 +32,24 @@ type gitCall struct {
 // with an ExitCode() method (see exitCode).
 type runFunc func(c gitCall) (stdout, stderr string, err error)
 
+// ExecCall is one git invocation, the value an ExecFunc is handed; it is an
+// alias of gitCall, so a runner here and a caller's runner receive the same
+// value.
+type ExecCall = gitCall
+
+// ExecFunc runs one git invocation and returns what it wrote to stdout and
+// stderr; it is an alias of runFunc, whose contract it keeps, so a caller
+// outside this package can pass its own runner to NewGitWithExec without a
+// conversion.
+type ExecFunc = runFunc
+
+// NewGitWithExec creates a Git wrapper for the given directory that sends every
+// git call through exec instead of running git on PATH; a nil exec keeps the
+// default, the real git on PATH, as NewGit has.
+func NewGitWithExec(workDir string, exec ExecFunc) *Git {
+	return &Git{workDir: workDir, exec: exec}
+}
+
 // errTimedOut is wrapped by a runFunc's error when a call ran out its
 // timeout and was killed.
 var errTimedOut = errors.New("git timed out")
