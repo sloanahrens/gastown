@@ -17,14 +17,15 @@ const maxFileArgBytes = 1 << 20
 
 // fileArgs makes a file the call names reach a target that cannot read the
 // caller's tree. The kubernetes target's pod cannot read a Mac path, and the
-// bdgateway target's workspace mirrors the town but not the caller's filesystem,
-// so the wrapper reads the file here, before any request, and returns it as the
-// call's stdin with the flag's value rewritten to "-". The file must be a regular
-// file of at most maxFileArgBytes, read once; anything else is refused with the
-// same line as an unreadable file. A call that names no file comes back unchanged
-// with a nil reader. A relative path is read from dir, the caller's directory.
+// bdgateway and bddocker targets' workspace and container mirror the town but not
+// the caller's filesystem, so the wrapper reads the file here, before any
+// request, and returns it as the call's stdin with the flag's value rewritten to
+// "-". The file must be a regular file of at most maxFileArgBytes, read once;
+// anything else is refused with the same line as an unreadable file. A call that
+// names no file comes back unchanged with a nil reader. A relative path is read
+// from dir, the caller's directory.
 func fileArgs(cfg targetConfig, tool string, args []string, dir string, s surface) ([]string, io.Reader, error) {
-	if cfg.Target != kubernetesTarget && cfg.Target != bdGatewayTarget {
+	if cfg.Target != kubernetesTarget && cfg.Target != bdGatewayTarget && cfg.Target != bdDockerTarget {
 		return args, nil, nil
 	}
 	rewritten, file, err := gtwrap.ScanFileArgs(tool, args)

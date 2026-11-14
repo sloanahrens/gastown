@@ -104,7 +104,7 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if call.Argv[0] != "bd" {
 		return exitDown, fmt.Errorf("gtwrap: the bdgateway target runs bd, but the call names %q", call.Argv[0])
 	}
-	rig, err := g.beadRig(call.Env)
+	rig, err := beadRig(g.Town, call.Env)
 	if err != nil {
 		return exitDown, err
 	}
@@ -122,7 +122,7 @@ func (g BdGateway) Launch(call Call) (int, error) {
 		Argv:      call.Argv[1:],
 		Env:       env,
 		Rig:       rig,
-		Cwd:       g.dirRelative(call.Dir),
+		Cwd:       dirRelative(g.Town, call.Dir, g.Note),
 		TimeoutMS: g.timeoutMS(),
 	})
 	stdin := g.Stdin
@@ -264,12 +264,14 @@ func (g BdGateway) validate() error {
 	return nil
 }
 
-// beadRig names the rig the gateway builds BEADS_DIR from: the caller's absolute
-// BEADS_DIR relative to the town root with its ".beads" component removed, which
-// is "" for the town's own beads. The absolute path never crosses; the gateway
-// joins the rig onto its own workspace. A BEADS_DIR the workspace cannot hold is
-// refused rather than sent, so the gateway never runs in the wrong database.
-func (g BdGateway) beadRig(env []string) (string, error) {
+// beadRig names the rig the bd gateway builds BEADS_DIR from: the caller's
+// absolute BEADS_DIR relative to the town root with its ".beads" component
+// removed, which is "" for the town's own beads. The absolute path never crosses;
+// the gateway joins the rig onto its own workspace. A BEADS_DIR the workspace
+// cannot hold is refused rather than sent, so the gateway never runs in the wrong
+// database. The bdgateway and bddocker targets share it, so the two cannot
+// translate a call differently.
+func beadRig(town string, env []string) (string, error) {
 	beadsDir, ok := envValue(env, "BEADS_DIR")
 	if !ok || beadsDir == "" {
 		return "", errors.New("gtwrap: the call sets no BEADS_DIR, so the bd gateway cannot be told which rig it runs in; set BEADS_DIR to the town's or a rig's .beads directory")
@@ -277,9 +279,9 @@ func (g BdGateway) beadRig(env []string) (string, error) {
 	if !filepath.IsAbs(beadsDir) {
 		return "", fmt.Errorf("gtwrap: BEADS_DIR is %q, which is not an absolute path, so the bd gateway cannot place it in its workspace", beadsDir)
 	}
-	rel, err := filepath.Rel(g.Town, beadsDir)
+	rel, err := filepath.Rel(town, beadsDir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("gtwrap: BEADS_DIR %q is outside the town %s, so the bd gateway cannot place it in its workspace", beadsDir, g.Town)
+		return "", fmt.Errorf("gtwrap: BEADS_DIR %q is outside the town %s, so the bd gateway cannot place it in its workspace", beadsDir, town)
 	}
 	if filepath.Base(rel) != ".beads" {
 		return "", fmt.Errorf("gtwrap: BEADS_DIR %q does not name a .beads directory, so the bd gateway cannot tell which rig it is", beadsDir)
@@ -291,17 +293,18 @@ func (g BdGateway) beadRig(env []string) (string, error) {
 	return filepath.ToSlash(rig), nil
 }
 
-// dirRelative maps the caller's working directory onto the gateway's workspace,
-// which mirrors the town. A directory under the town keeps its path relative to
-// it; any other directory runs in the town root, and the note says so, since the
-// protocol has no way to name an absolute path.
-func (g BdGateway) dirRelative(dir string) string {
+// dirRelative maps the caller's working directory onto the bd gateway's
+// workspace, which mirrors the town. A directory under the town keeps its path
+// relative to it; any other directory runs in the town root, and the note says
+// so, since the protocol has no way to name an absolute path. The bdgateway and
+// bddocker targets share it.
+func dirRelative(town, dir string, note io.Writer) string {
 	if dir == "" {
 		return "."
 	}
-	rel, err := filepath.Rel(g.Town, dir)
+	rel, err := filepath.Rel(town, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		fmt.Fprintf(g.Note, "gt-wrap: %s is outside the town %s, which the bd gateway's workspace does not mirror, so bd runs in the town root\n", dir, g.Town)
+		fmt.Fprintf(note, "gt-wrap: %s is outside the town %s, which the bd gateway's workspace does not mirror, so bd runs in the town root\n", dir, town)
 		return "."
 	}
 	return filepath.ToSlash(rel)

@@ -57,8 +57,11 @@ type harness struct {
 	// bdBuilt and bdCfg record the bdgateway target's build.
 	bdBuilt bool
 	bdCfg   bdGatewayConfig
-	stdout  *bytes.Buffer
-	stderr  *bytes.Buffer
+	// bdDockerBuilt and bdDockerCfg record the bddocker target's build.
+	bdDockerBuilt bool
+	bdDockerCfg   bdDockerConfig
+	stdout        *bytes.Buffer
+	stderr        *bytes.Buffer
 }
 
 func newHarness(t *testing.T) *harness {
@@ -103,6 +106,11 @@ func newHarness(t *testing.T) *harness {
 		newBdGateway: func(town string, cfg bdGatewayConfig) target {
 			h.builtTown = town
 			h.bdBuilt, h.bdCfg = true, cfg
+			return h.fake
+		},
+		newBdDocker: func(town string, cfg bdDockerConfig) target {
+			h.builtTown = town
+			h.bdDockerBuilt, h.bdDockerCfg = true, cfg
 			return h.fake
 		},
 	}

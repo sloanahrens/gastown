@@ -306,20 +306,32 @@ func (d Docker) downText(svc daemonService) string {
 
 // probe runs one docker command that only reads state, bounded by ProbeTimeout.
 func (d Docker) probe(args ...string) (string, int, error) {
-	limit := d.ProbeTimeout
+	return probeDocker(d.Shell, d.ProbeTimeout, d.dockerArgv(args...))
+}
+
+// probeDocker runs one docker command that only reads state, bounded by limit,
+// where zero means probeTimeout. The Docker and BdDocker targets share it, so
+// neither can leave a probe unbounded.
+func probeDocker(shell Shell, limit time.Duration, argv []string) (string, int, error) {
 	if limit <= 0 {
 		limit = probeTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
-	return d.Shell.Capture(ctx, d.dockerArgv(args...))
+	return shell.Capture(ctx, argv)
 }
 
 // dockerArgv is the docker command line for args, in the configured context.
 func (d Docker) dockerArgv(args ...string) []string {
+	return dockerCommand(d.Context, args...)
+}
+
+// dockerCommand is the docker command line for args, in the named context. An
+// empty context means the shell's current one.
+func dockerCommand(contextName string, args ...string) []string {
 	argv := []string{"docker"}
-	if d.Context != "" {
-		argv = append(argv, "--context", d.Context)
+	if contextName != "" {
+		argv = append(argv, "--context", contextName)
 	}
 	return append(argv, args...)
 }
