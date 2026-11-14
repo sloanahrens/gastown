@@ -224,7 +224,7 @@ func runPolecatIdentityAdd(cmd *cobra.Command, args []string) error {
 	if polecatName == "" {
 		polecatGit := git.NewGit(r.Path)
 		t := tmux.NewTmux()
-		mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt polecat identity add"))
+		mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt polecat identity add"), nil)
 		polecatName, err = mgr.AllocateName()
 		if err != nil {
 			return fmt.Errorf("generating polecat name: %w", err)

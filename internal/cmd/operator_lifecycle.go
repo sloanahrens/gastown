@@ -117,9 +117,10 @@ func polecatCleanup(sup *supervisor.Supervisor, reg *session.PrefixRegistry, rig
 // (session.CleanupSandboxWith); the hook itself stays a pure supervisor kill.
 
 // supervisedPolecatManager is polecat.NewManager with its housekeeping kills
-// routed through the operator supervisor's Cleanup.
-func supervisedPolecatManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, actor string) *polecat.Manager {
-	m := polecat.NewManager(r, g, t, townRegistry())
+// routed through the operator supervisor's Cleanup. observe is the run observer
+// every handle the manager opens carries; nil counts nothing.
+func supervisedPolecatManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, actor string, observe func()) *polecat.Manager {
+	m := polecat.NewManagerWithObserver(r, g, t, townRegistry(), observe)
 	m.SetCleanup(polecatCleanup(operatorSupervisor(filepath.Dir(r.Path)), townRegistry(), r.Name, actor))
 	return m
 }

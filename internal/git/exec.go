@@ -25,11 +25,9 @@ type gitCall struct {
 	timeout time.Duration
 }
 
-// runFunc runs one git invocation and returns what it wrote to stdout and
-// stderr. Git sends every git process through one, so tests can record and
-// answer them without starting git. A call that ran out its timeout returns
-// an error wrapping errTimedOut; a call that exited non-zero returns an error
-// with an ExitCode() method (see exitCode).
+// runFunc is the unexported name of ExecFunc, whose comment states the contract
+// a runner meets. Git sends every git process through one, so tests can record
+// and answer them without starting git.
 type runFunc func(c gitCall) (stdout, stderr string, err error)
 
 // ExecCall is one git invocation, the value an ExecFunc is handed; it is an
@@ -38,9 +36,10 @@ type runFunc func(c gitCall) (stdout, stderr string, err error)
 type ExecCall = gitCall
 
 // ExecFunc runs one git invocation and returns what it wrote to stdout and
-// stderr; it is an alias of runFunc, whose contract it keeps, so a caller
-// outside this package can pass its own runner to NewGitWithExec without a
-// conversion.
+// stderr. Its error carries a non-zero exit as an ExitCode() int method, as
+// *exec.ExitError does, and a deadline kill as ErrTimedOut, the two shapes the
+// Git methods read; it is an alias of runFunc, so a caller outside this package
+// can pass its own runner to NewGitWithExec without a conversion.
 type ExecFunc = runFunc
 
 // NewGitWithExec creates a Git wrapper for the given directory that sends every
@@ -55,16 +54,38 @@ func NewGitWithExec(workDir string, exec ExecFunc) *Git {
 var errTimedOut = errors.New("git timed out")
 
 // runner returns the runFunc g sends git through: the real git on PATH
-// unless a test set one.
+// unless a test set one. The observer, when set, wraps that run below the
+// config-read retry, so a retry is counted as the second process it starts.
 func (g *Git) runner() runFunc {
 	run := realRun
 	if g.exec != nil {
 		run = g.exec
 	}
+	if g.observe != nil {
+		run = observed(run, g.observe)
+	}
 	if g.configRetry {
 		return g.withConfigReadRetry(run)
 	}
 	return run
+}
+
+// WithRunObserver returns a copy of g whose every git process calls observe
+// once, before the process starts, so a caller can count the git calls a
+// piece of work makes. A call that fails is counted too. A nil observe counts
+// nothing. The receiver is left as it was.
+func (g *Git) WithRunObserver(observe func()) *Git {
+	c := *g
+	c.observe = observe
+	return &c
+}
+
+// observed wraps run so observe is called before each invocation of it.
+func observed(run runFunc, observe func()) runFunc {
+	return func(c gitCall) (string, string, error) {
+		observe()
+		return run(c)
+	}
 }
 
 // realRun runs git on PATH.

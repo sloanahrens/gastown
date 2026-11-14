@@ -76,6 +76,7 @@ type Repo interface {
 	ConfigurePushURL(remote, pushURL string) error
 	ClearPushURL(remote string) error
 	AddUpstreamRemote(upstreamURL string) error
+	InitSparseCheckout(repoPath string, paths []string) error
 	IsRepo() bool
 	IsEmpty() (bool, error)
 	DefaultBranch() string

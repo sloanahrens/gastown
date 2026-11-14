@@ -539,7 +539,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	if mayorCloned {
 		// Set up sparse checkout on mayor clone if requested
 		if len(opts.SparseCheckout) > 0 {
-			if err := git.InitSparseCheckout(mayorRigPath, opts.SparseCheckout); err != nil {
+			if err := m.git.InitSparseCheckout(mayorRigPath, opts.SparseCheckout); err != nil {
 				return nil, fmt.Errorf("initializing sparse checkout for mayor: %w", err)
 			}
 			fmt.Printf("   ✓ Configured sparse checkout: %v\n", opts.SparseCheckout)

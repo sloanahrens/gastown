@@ -439,7 +439,7 @@ func openSpawnedPolecatSandbox(townRoot, rigName string) (spawnedPolecatSandbox,
 	if err != nil {
 		return nil, err
 	}
-	mgr := supervisedPolecatManager(r, git.NewGit(r.Path), tmux.NewTmux(), operatorActor("gt sling"))
+	mgr := supervisedPolecatManager(r, git.NewGit(r.Path), tmux.NewTmux(), operatorActor("gt sling"), nil)
 	return rigPolecatSandbox{mgr: mgr, rigPath: r.Path}, nil
 }
 
