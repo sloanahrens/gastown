@@ -24,12 +24,12 @@ none of the host's Dolt state and plans the maintenance step not to run.
 
 | Step | What it does | When it skips |
 |------|--------------|---------------|
-| drain | Takes the dispatch hold if no hold exists, then waits up to 30 minutes for working polecats to finish. A working seat silent for 5 minutes counts as drained; no seat is ever stopped. | No install is planned. |
+| drain | Takes the dispatch hold if no hold exists, then waits up to 30 minutes for working polecats to finish. A working seat silent for 5 minutes counts as drained; no seat is ever stopped. | No install is planned; or the daemon runs as a pod, which drains itself on stop. |
 | maintenance | Asks the daemon for one maintenance cycle (history archive, backup, gc) and waits up to 30 minutes for its answer. | Nothing is due: the archive is current, today's backup exists, and no gc is due; or the daemon runs as a pod, whose Dolt maintenance runs on the host. |
 | install | Builds and installs the target build and publishes its sandbox image. | The installed build is main and its image is published. |
 | restart | Waits up to 15 minutes for the daemon to report the new build. | No install is planned. |
 | verify | Checks the installed gt, the running daemon and the image label against the target build, and that the town health line reads green. | No install is planned, or the restart timed out. |
-| lift | Releases the dispatch hold if this run created it. | No install is planned; a hold someone else set is left in place. |
+| lift | Releases the dispatch hold if this run created it. | No install is planned, or the daemon runs as a pod, which drains itself on stop; a hold someone else set is left in place. |
 
 A run ends:
 
