@@ -236,6 +236,38 @@ func TestSpecLintEstimateRunsUnderTheLintsBound(t *testing.T) {
 	}
 }
 
+// TestSpecLintDefaultEstimateWaitIsABound: the production constructor leaves
+// EstimateWait unset, so the lint's own wait has to bound the run — a zero
+// wait would expire the estimate before it read anything and refuse every
+// bead, so a filer's --estimate must run under a live deadline (gt-floskq).
+func TestSpecLintDefaultEstimateWaitIsABound(t *testing.T) {
+	t.Parallel()
+	opts := specLintOptsFor(nil, t.TempDir(), true, io.Discard)
+	opts.LintOverMinutes = 11
+	opts.Estimate = specLintEstimateRunFor(
+		func(string) specEstimateStore { return specEstimateSeed() },
+		func(string) specEstimateRunner {
+			return specEstimateRunnerForContext(func(ctx context.Context, issue *beads.Issue) (estimate.Result, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					return estimate.Result{}, errors.New("the estimate ran with no deadline")
+				}
+				if time.Until(deadline) > specLintEstimateWait {
+					return estimate.Result{}, errors.New("the estimate ran under a longer wait than the lint's default")
+				}
+				return estimate.Result{Points: 5, Minutes: 6.3, Inputs: []string{"shape"}, Rung: "shape", Hash: estimate.SectionHash(issue)}, nil
+			})
+		})
+	spec := cleanSpec("gt-est", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	if err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts); err != nil {
+		t.Fatalf("lint with the default estimate wait = %v, out %q", err, out.String())
+	}
+	if !strings.Contains(out.String(), "spec lint ok") {
+		t.Errorf("verdict %q, want the clean line", out.String())
+	}
+}
+
 // TestSpecLintEstimateTimeoutIsRefused: an estimate that waits past the lint's
 // bound is refused with the context error, never passed on a label it did not
 // write (gt-floskq).
