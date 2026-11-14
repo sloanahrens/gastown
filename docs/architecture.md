@@ -163,6 +163,8 @@ A call the wrapper's config covers under its `native` key runs on the Mac with t
 
 The same wrapper is the daemon image's `bd`: the image installs it first on `PATH` under that name, with the real binary as `bd.real` beside it. Called as `bd` with no config file and a `bd.real` beside it, the wrapper takes the route `gtwrap.DecideForwarder` names: the bd gateway `BD_GATEWAY_URL` points at, or the local `bd.real` when no URL is set. Before changing the forwarder, read the doc comment on `DecideForwarder` (it holds the rollback) and `docs/design/bd-container.md`, which holds the gateway protocol and the cutover stages.
 
+The daemon image's `bd` is the real bd, with no wrapper in front of it. `deploy/daemon/Dockerfile` copies `bd` to `/usr/local/bin/bd` and installs nothing as `bd.real`, because the revert that landed as `8ce9050` removed the shim install. The bd shim that routes tracker rigs ships in the bd gateway image instead (`deploy/bd/Dockerfile.bd`). The paragraph above describes the daemon image as it stood before that revert.
+
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 
 ### Secrets
