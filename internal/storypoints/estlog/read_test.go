@@ -83,7 +83,8 @@ func TestReadReturnsAppendedRecordsInOrder(t *testing.T) {
 }
 
 // TestReadSkipsAndCountsMalformedLines: a line that does not decode as a Record
-// is skipped and counted, and the records on either side of it still read.
+// is skipped and counted, and so is one that decodes to a Record naming no
+// bead. The records on either side of it still read.
 func TestReadSkipsAndCountsMalformedLines(t *testing.T) {
 	t.Parallel()
 	before, after := sampleRecord("gt-before"), shapeOnlyRecord("gt-after")
@@ -96,6 +97,9 @@ func TestReadSkipsAndCountsMalformedLines(t *testing.T) {
 		{"wrong field type", `{"minutes":{"shape":"soon"}}`},
 		{"JSON null", `null`},
 		{"null among spaces", `  null  `},
+		{"empty object", `{}`},
+		{"object with no record key", `{"unrelated":1}`},
+		{"empty bead id", `{"bead_id":""}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
