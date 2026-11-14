@@ -92,6 +92,16 @@ func addWorktree(dir string) error {
 	return os.WriteFile(filepath.Join(module, "go.mod"), []byte("module "+fakeTrackerModule+"\n"), 0o644)
 }
 
+// added reports whether dir is a worktree this fake made with `git worktree add`.
+func (f *fakeRunner) added(dir string) bool {
+	for _, a := range f.adds {
+		if a.dir == dir {
+			return true
+		}
+	}
+	return false
+}
+
 // git is gitHolding over known, and records every worktree a build adds to f.
 func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 	holding := gitHolding(known)
@@ -105,6 +115,9 @@ func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 		}
 		if len(args) == 4 && args[0] == "worktree" && args[1] == "remove" {
 			f.removed = append(f.removed, args[3])
+			if !f.added(args[3]) {
+				return nil, errors.New("fake git: " + args[3] + " is not a worktree this fake added; nothing is removed")
+			}
 			return nil, os.RemoveAll(args[3])
 		}
 		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--short" {
@@ -290,6 +303,21 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 		if run.removed[i] != run.adds[i].dir {
 			t.Errorf("worktree %d was removed at %q, want the directory it was made in, %q", i, run.removed[i], run.adds[i].dir)
 		}
+	}
+}
+
+// TestFakeWorktreeRemoveRefusesAPathItDidNotAdd: the fake removes only a
+// worktree it added. A path it never made is refused and left on disk, so a
+// removal aimed at a real directory cannot delete it.
+func TestFakeWorktreeRemoveRefusesAPathItDidNotAdd(t *testing.T) {
+	t.Parallel()
+	run := &fakeRunner{}
+	kept := t.TempDir()
+	if _, err := run.git(nil)(kept, "worktree", "remove", "--force", kept); err == nil {
+		t.Fatal("removing a path the fake never added returned no error")
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("a path the fake never added was deleted: %v", err)
 	}
 }
 
