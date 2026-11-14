@@ -606,12 +606,12 @@ func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
 			if len(sent.Questions) != len(Questions()) {
 				t.Errorf("request asks %d questions, want %d", len(sent.Questions), len(Questions()))
 			}
-			for _, id := range []string{QClaimsVerified, QVerificationApplies} {
+			for _, id := range []string{QClaimsVerified, QVerificationApplies, QWillPassReview} {
 				if _, ok := sent.Questions[id]; !ok {
 					t.Errorf("request does not ask %s", id)
 				}
 			}
-			for _, id := range []string{QWillPassReview, QBoxesCredible, QOutcome} {
+			for _, id := range []string{QBoxesCredible, QOutcome} {
 				if _, ok := sent.Questions[id]; ok {
 					t.Errorf("request still asks %s, want it dropped from the battery", id)
 				}

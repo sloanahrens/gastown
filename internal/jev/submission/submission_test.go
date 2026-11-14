@@ -107,6 +107,7 @@ func goodAnswers() *jev.Answers {
 			QBeyondGoal:           0.1,
 			QCommitsMatchChange:   0.9,
 			QTouchesTownMachinery: 0.2,
+			QWillPassReview:       0.8,
 			QClaimsVerified:       0.9,
 			QVerificationApplies:  0.6,
 		},
@@ -519,8 +520,11 @@ func TestJevSubmissionLineShape(t *testing.T) {
 		l.Agent != "claude-haiku" || l.QuestionVersion != Version || l.Model != "jev-1.13.0" {
 		t.Errorf("line = %+v", l)
 	}
-	if len(l.Answers) != 7 {
+	if len(l.Answers) != 8 {
 		t.Fatalf("answers = %+v, want one per question", l.Answers)
+	}
+	if n := l.Answers[QWillPassReview].Noul; n == nil || *n != 0.8 {
+		t.Errorf("will_pass_review = %+v, want noul 0.8", l.Answers[QWillPassReview])
 	}
 	if a := l.Answers[QRisk]; a.Score == nil || *a.Score != 1 || a.Confidence == nil || *a.Confidence != 0.6 || a.Noul != nil {
 		t.Errorf("risk = %+v, want score 1 at 0.6", a)
@@ -528,7 +532,7 @@ func TestJevSubmissionLineShape(t *testing.T) {
 	if a := l.Answers[QClaimsVerified]; a.Noul == nil || *a.Noul != 0.9 {
 		t.Errorf("claims_verified = %+v", a)
 	}
-	for _, id := range []string{QWillPassReview, QBoxesCredible, QOutcome} {
+	for _, id := range []string{QBoxesCredible, QOutcome} {
 		if a, ok := l.Answers[id]; ok {
 			t.Errorf("%s = %+v, want no answer: the question is no longer asked", id, a)
 		}
