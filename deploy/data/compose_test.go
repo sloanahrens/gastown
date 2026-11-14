@@ -1,8 +1,10 @@
 package data
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"sort"
@@ -95,9 +97,20 @@ func expectedUnit() map[string]any {
 // decodeUnit parses the compose file into a generic document. A file that does
 // not parse is refused before any comparison runs.
 func decodeUnit(raw []byte) (map[string]any, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var doc map[string]any
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("%s is not valid YAML: %w", composeFile, err)
+	}
+	// The exact-document check compares one document; a second one in the file
+	// would be read by nothing here and by compose as the file's own content, so
+	// any further document, empty or not, is refused.
+	var extra any
+	switch err := dec.Decode(&extra); {
+	case err == nil:
+		return nil, fmt.Errorf("%s holds more than one YAML document", composeFile)
+	case !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("%s is not valid YAML after its first document: %w", composeFile, err)
 	}
 	return doc, nil
 }
@@ -405,5 +418,33 @@ func TestComposeRefusals(t *testing.T) {
 				t.Errorf("difference = %v; want it at %s", err, tt.path)
 			}
 		})
+	}
+}
+
+// TestDecodeUnitRefusesASecondDocument: the whole file is the document, so a
+// second YAML document after a separator, however small, is refused rather than
+// left unread.
+func TestDecodeUnitRefusesASecondDocument(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(composeFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", composeFile, err)
+	}
+	if _, err := decodeUnit(raw); err != nil {
+		t.Fatalf("the committed file is refused: %v", err)
+	}
+	for _, tc := range []struct{ name, tail string }{
+		{"a service document", "\n---\nservices:\n  evil:\n    privileged: true\n"},
+		{"an empty trailing document", "\n---\n"},
+	} {
+		_, err := decodeUnit(append(append([]byte{}, raw...), tc.tail...))
+		if err == nil {
+			t.Errorf("%s after the first document was accepted", tc.name)
+		} else if !strings.Contains(err.Error(), "more than one YAML document") {
+			t.Errorf("%s was refused for the wrong reason: %v", tc.name, err)
+		}
+	}
+	if err := checkUnit(append(append([]byte{}, raw...), "\n---\nservices: {}\n"...)); err == nil {
+		t.Error("checkUnit accepted a file with a second document")
 	}
 }
