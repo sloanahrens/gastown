@@ -14,6 +14,9 @@ const (
 	releaseBeadID = "gt-work"
 	releaseSeat   = "gastown/polecats/nux"
 	releaseOther  = "gastown/polecats/agate"
+	// releaseEarlierNote is the note every seeded bead carries, so a row that
+	// must leave the bead alone can assert its notes are unchanged.
+	releaseEarlierNote = "earlier entry"
 )
 
 // releaseBead is the work bead a run holds, with the given status, assignee
@@ -203,6 +206,7 @@ func TestDeferredExitReleasesTheBeadItPaused(t *testing.T) {
 			t.Parallel()
 			db := beadsfake.New(beadsfake.WithPrefix("gt"))
 			if !tc.absent {
+				tc.seed.Notes = releaseEarlierNote
 				db.Seed(tc.seed)
 			}
 			var seen seenDoneEvent
@@ -229,6 +233,9 @@ func TestDeferredExitReleasesTheBeadItPaused(t *testing.T) {
 			hasNote := strings.Contains(got.Notes, "DEFERRED by "+releaseSeat)
 			if hasNote != tc.wantNote {
 				t.Errorf("DEFERRED note present = %v, want %v; notes %q", hasNote, tc.wantNote, got.Notes)
+			}
+			if !tc.wantNote && got.Notes != releaseEarlierNote {
+				t.Errorf("notes = %q, want them unchanged as %q", got.Notes, releaseEarlierNote)
 			}
 		})
 	}
