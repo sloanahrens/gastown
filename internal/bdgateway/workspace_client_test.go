@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -158,12 +161,16 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 		spoil   func(t *testing.T, root string)
 		wantErr error
 		want    string
+		// root replaces the fixture's root, for a row that must refuse before
+		// any file is read.
+		root string
 	}{
 		{
 			name: "a town root that is not absolute",
 			// The path never reaches the fixture: the check is first.
 			spoil: func(*testing.T, string) {},
 			want:  "must be an absolute path",
+			root:  "relative/town",
 		},
 		{
 			name:  "a root that is not a town",
@@ -300,14 +307,72 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			},
 			wantErr: ErrWorkspaceFileTooLarge,
 		},
+		{
+			name:  "a redirect target with no beads metadata",
+			spoil: func(t *testing.T, root string) { removePath(t, root, "gastown/mayor/rig/.beads/metadata.json") },
+			want:  "holds no metadata.json",
+		},
+		{
+			name: "a town beads directory that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				outside := writeOutsideBeads(t)
+				beads := filepath.Join(root, ".beads")
+				if err := os.RemoveAll(beads); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, beads); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "resolves outside the town",
+		},
+		{
+			name: "a rig beads directory that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				outside := writeOutsideBeads(t)
+				beads := filepath.Join(root, "toolbox", ".beads")
+				if err := os.RemoveAll(beads); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, beads); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "resolves outside the town",
+		},
+		{
+			name: "a redirect target that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				outside := writeOutsideBeads(t)
+				target := filepath.Join(root, "gastown", "mayor", "rig", ".beads")
+				if err := os.RemoveAll(target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, target); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "outside the town",
+		},
+		{
+			name: "a route path that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				outside := writeOutsideBeads(t)
+				if err := os.Symlink(outside, filepath.Join(root, "elsewhere")); err != nil {
+					t.Fatal(err)
+				}
+				writePath(t, root, ".beads/routes.jsonl", `{"path":"elsewhere","prefix":"xx-"}`+"\n")
+			},
+			want: "outside the town",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := clientTown(t)
 			tc.spoil(t, root)
-			if tc.name == "a town root that is not absolute" {
-				root = "relative/town"
+			if tc.root != "" {
+				root = tc.root
 			}
 			_, err := BuildWorkspaceDocument(root)
 			if err == nil {
@@ -329,6 +394,18 @@ func removePath(t *testing.T, root, rel string) {
 	if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeOutsideBeads makes a beads directory outside the town, holding the
+// metadata the builder would otherwise accept, so a refusal it drives can only
+// be about where the directory is.
+func writeOutsideBeads(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"dolt_database":"x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // writePath replaces a fixture file's content.
@@ -366,7 +443,7 @@ func TestGatewayPusherPush(t *testing.T) {
 	var got *http.Request
 	var sent WorkspaceDocument
 	pusher := GatewayPusher{
-		URL:       "http://gw:7440",
+		URL:       "http://127.0.0.1:7440",
 		TokenFile: clientToken(t, "  s3cret \n"),
 		HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
 			got = req
@@ -390,7 +467,7 @@ func TestGatewayPusherPush(t *testing.T) {
 	if got.Method != http.MethodPut {
 		t.Errorf("method = %s, want PUT", got.Method)
 	}
-	if want := "http://gw:7440" + WorkspacePath; got.URL.String() != want {
+	if want := "http://127.0.0.1:7440" + WorkspacePath; got.URL.String() != want {
 		t.Errorf("url = %s, want %s", got.URL, want)
 	}
 	if want := "Bearer s3cret"; got.Header.Get("Authorization") != want {
@@ -434,6 +511,9 @@ func TestGatewayPusherRefusals(t *testing.T) {
 		town    func(t *testing.T) string
 		wantErr error
 		want    string
+		// notContain must be absent from the error, for text that names a
+		// secret the test planted.
+		notContain string
 	}{
 		{
 			name:    "no url",
@@ -443,7 +523,7 @@ func TestGatewayPusherRefusals(t *testing.T) {
 		},
 		{
 			name:   "a url that does not parse",
-			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://gw:7440/%zz"; return g },
+			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://127.0.0.1:7440/%zz"; return g },
 			want:   "does not parse",
 		},
 		{
@@ -458,8 +538,22 @@ func TestGatewayPusherRefusals(t *testing.T) {
 		},
 		{
 			name:   "a url carrying a query",
-			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://gw:7440?x=1"; return g },
+			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://127.0.0.1:7440?x=1"; return g },
 			want:   "carries a query or fragment",
+		},
+		{
+			name: "a url carrying credentials",
+			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher {
+				g.URL = "http://pusher:hunter2@127.0.0.1:7440"
+				return g
+			},
+			want:       "carries credentials",
+			notContain: "hunter2",
+		},
+		{
+			name:   "plain http to another machine",
+			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://gw.example.com:7440"; return g },
+			want:   "plain http",
 		},
 		{
 			name:    "no token file",
@@ -589,7 +683,7 @@ func TestGatewayPusherRefusals(t *testing.T) {
 				root = tc.town(t)
 			}
 			good := GatewayPusher{
-				URL:       "http://gw:7440",
+				URL:       "http://127.0.0.1:7440",
 				TokenFile: clientToken(t, "tok"),
 				HTTP: doerFunc(func(*http.Request) (*http.Response, error) {
 					t.Fatal("the pusher sent a request it should have refused")
@@ -604,6 +698,9 @@ func TestGatewayPusherRefusals(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tc.want) {
 					t.Errorf("error = %v, want it to name %q", err, tc.want)
+				}
+				if tc.notContain != "" && strings.Contains(err.Error(), tc.notContain) {
+					t.Errorf("error = %v, want it not to echo the URL's credentials", err)
 				}
 			}
 		})
@@ -623,21 +720,20 @@ func (f *fakePusher) Push(_ context.Context, townRoot string) (string, error) {
 	return f.manifest, f.err
 }
 
-// TestPushWorkspaceUsesTheInstalledPusher: the pusher SetWorkspacePusher
-// installs is the one every writer's push reaches, with the town root the
-// writer handed it, and its manifest or failure is the push's own; setting nil
-// removes it again.
-//
-//testpolicy:allow parallel — the pusher is one package-level value this test installs and restores, so no parallel test may run beside it
-func TestPushWorkspaceUsesTheInstalledPusher(t *testing.T) {
-	t.Cleanup(func() { SetWorkspacePusher(nil) })
+// TestPusherSlotUsesTheInstalledPusher: the pusher a slot holds is the one its
+// push reaches, with the town root the writer handed it, and its manifest or
+// failure is the push's own; setting nil removes it again. The test drives its
+// own slot, so it moves no package state.
+func TestPusherSlotUsesTheInstalledPusher(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
+	slot := &pusherSlot{}
 
 	good := &fakePusher{manifest: "abc123"}
-	SetWorkspacePusher(good)
-	manifest, err := PushWorkspace(context.Background(), townRoot)
+	slot.set(good)
+	manifest, err := slot.push(context.Background(), townRoot)
 	if err != nil {
-		t.Fatalf("PushWorkspace: %v", err)
+		t.Fatalf("push: %v", err)
 	}
 	if manifest != "abc123" {
 		t.Errorf("manifest = %q, want the installed pusher's %q", manifest, "abc123")
@@ -647,17 +743,67 @@ func TestPushWorkspaceUsesTheInstalledPusher(t *testing.T) {
 	}
 
 	bad := &fakePusher{err: errors.New("the gateway at gw:7440 did not answer")}
-	SetWorkspacePusher(bad)
-	if manifest, err := PushWorkspace(context.Background(), townRoot); err == nil {
-		t.Fatalf("PushWorkspace returned %q for an installed pusher that failed", manifest)
+	slot.set(bad)
+	if manifest, err := slot.push(context.Background(), townRoot); err == nil {
+		t.Fatalf("push returned %q for an installed pusher that failed", manifest)
 	} else if !strings.Contains(err.Error(), "did not answer") {
 		t.Errorf("error = %v, want the installed pusher's own failure", err)
 	}
 
-	SetWorkspacePusher(nil)
-	if manifest, err := PushWorkspace(context.Background(), townRoot); err != nil || manifest != "" {
-		t.Errorf("PushWorkspace after removing the pusher = %q, %v; want no manifest and no error", manifest, err)
+	slot.set(nil)
+	if manifest, err := slot.push(context.Background(), townRoot); err != nil || manifest != "" {
+		t.Errorf("push after removing the pusher = %q, %v; want no manifest and no error", manifest, err)
 	}
+}
+
+// TestPusherSlotOrdersItsPushes: the slot runs one push to completion before it
+// starts the next, so a writer's document is built under the same order it is
+// sent in and an older document cannot land last. Without the order the
+// delegates run at the same time and the test records the overlap.
+func TestPusherSlotOrdersItsPushes(t *testing.T) {
+	t.Parallel()
+	var entered, active int32
+	var overlapped int32
+	slot := &pusherSlot{}
+	slot.set(pusherFunc(func(context.Context, string) (string, error) {
+		atomic.AddInt32(&entered, 1)
+		if atomic.AddInt32(&active, 1) != 1 {
+			atomic.StoreInt32(&overlapped, 1)
+		}
+		// Give a second goroutine time to reach the delegate if the slot lets
+		// it: a bounded yield, no clock.
+		for i := 0; i < 100; i++ {
+			runtime.Gosched()
+		}
+		atomic.AddInt32(&active, -1)
+		return "manifest", nil
+	}))
+
+	const pushes = 4
+	var wg sync.WaitGroup
+	wg.Add(pushes)
+	for i := 0; i < pushes; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := slot.push(context.Background(), "town"); err != nil {
+				t.Errorf("push: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt32(&entered); got != pushes {
+		t.Errorf("%d pushes reached the pusher, want %d", got, pushes)
+	}
+	if atomic.LoadInt32(&overlapped) != 0 {
+		t.Error("two pushes ran at the same time, so an older document can be stored after a newer one")
+	}
+}
+
+// pusherFunc is a WorkspacePusher a test scripts.
+type pusherFunc func(ctx context.Context, townRoot string) (string, error)
+
+func (f pusherFunc) Push(ctx context.Context, townRoot string) (string, error) {
+	return f(ctx, townRoot)
 }
 
 // TestPushWorkspaceNoPusher: with no pusher installed — every test and every

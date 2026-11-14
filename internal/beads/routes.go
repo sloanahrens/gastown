@@ -147,8 +147,20 @@ func RemoveRoute(townRoot string, prefix string) error {
 	return WriteRoutes(beadsDir, filtered)
 }
 
-// WriteRoutes writes routes to routes.jsonl, overwriting existing content.
+// pushWorkspaceFunc is how a routes write reaches the bd gateway's workspace.
+// It is a parameter rather than a package variable, so a caller and a test each
+// name the push they mean without swapping package state.
+type pushWorkspaceFunc func(ctx context.Context, townRoot string) (string, error)
+
+// WriteRoutes writes routes to routes.jsonl, overwriting existing content, and
+// tells the bd gateway the file changed.
 func WriteRoutes(beadsDir string, routes []Route) error {
+	return writeRoutes(beadsDir, routes, bdgateway.PushWorkspace)
+}
+
+// writeRoutes is WriteRoutes with the gateway push named by the caller: the
+// real one in WriteRoutes, a fake in a test.
+func writeRoutes(beadsDir string, routes []Route, push pushWorkspaceFunc) error {
 	// Ensure beads directory exists
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		return fmt.Errorf("creating beads directory: %w", err)
@@ -195,21 +207,15 @@ func WriteRoutes(beadsDir string, routes []Route) error {
 	if err := os.Rename(tmpPath, routesPath); err != nil {
 		return err
 	}
-	return pushWorkspaceAfterRoutesWrite(beadsDir)
+	return pushWorkspaceAfterRoutesWrite(beadsDir, push)
 }
-
-// pushWorkspaceFn is how a routes write reaches the bd gateway's workspace. It
-// is a variable so this package's tests drive a fake pusher instead of a
-// network, and it is bdgateway.PushWorkspace, which does nothing until a gateway
-// is installed (docs/design/bd-container.md, "The workspace").
-var pushWorkspaceFn = bdgateway.PushWorkspace
 
 // pushWorkspaceAfterRoutesWrite tells the bd gateway the route table changed. A
 // routes file is the town's own, so its town root is the directory holding
 // .beads. A failed push is returned: the container would otherwise keep routing
 // the prefixes the file no longer names.
-func pushWorkspaceAfterRoutesWrite(beadsDir string) error {
-	if _, err := pushWorkspaceFn(context.Background(), filepath.Dir(beadsDir)); err != nil {
+func pushWorkspaceAfterRoutesWrite(beadsDir string, push pushWorkspaceFunc) error {
+	if _, err := push(context.Background(), filepath.Dir(beadsDir)); err != nil {
 		return fmt.Errorf("routes.jsonl is written, but the bd gateway's workspace was not updated: %w", err)
 	}
 	return nil

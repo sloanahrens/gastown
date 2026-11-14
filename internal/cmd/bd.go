@@ -13,10 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// bd.go is `gt bd`, the town's view of the bd gateway. The one verb pushes the
-// workspace the gateway's bd reads: the town's routes.jsonl, each rig's
-// redirect and each rig's beads metadata files, rewritten into the gateway's
-// /ws tree. Before a change touches the gateway's workspace, read
+// bd.go is `gt bd`, the commands over the town's bd gateway. The design is
 // docs/design/bd-container.md, "The workspace".
 
 func init() {
@@ -29,22 +26,15 @@ var bdCmd = &cobra.Command{
 	Use:     "bd",
 	GroupID: GroupServices,
 	Short:   "Manage what the bd gateway serves",
-	Long: `Manage the bd gateway's copy of the town.
-
-The gateway container runs bd against a workspace tree it owns, not against the
-town: bd reads the town's routes, each rig's redirect and each rig's beads
-metadata files from /ws, and gt pushes them there.`,
-	RunE: requireSubcommand,
+	Long:    `Commands over the bd gateway: the bd container reads a workspace tree the town pushes to it.`,
+	RunE:    requireSubcommand,
 }
 
 var bdWorkspaceCmd = &cobra.Command{
 	Use:   "workspace",
 	Short: "Manage the gateway's workspace tree",
-	Long: `Manage the workspace tree the bd gateway owns.
-
-The push is the only writer: gt builds the whole tree from the town copy it runs
-in and replaces the gateway's copy in one request.`,
-	RunE: requireSubcommand,
+	Long:  `The push is the only writer: it replaces the gateway's tree in one request.`,
+	RunE:  requireSubcommand,
 }
 
 // workspacePushDeps is what a push reads from the process: where the town is,
@@ -77,12 +67,7 @@ func newWorkspacePushCmd(deps workspacePushDeps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Push the town's workspace to the bd gateway",
-		Long: `Send the town copy to the bd gateway.
-
-gt reads the town it runs in — the town's .beads/routes.jsonl, and each
-registered rig's redirect and beads metadata files — rewrites the paths bd will
-see to the gateway's /ws tree, and replaces the gateway's workspace with it in
-one request. The request carries the bearer token in --token-file.
+		Long: `Send the town copy to the bd gateway and print the manifest it stored.
 
 A rig whose beads directory cannot be read is named and the push stops, because
 the gateway would otherwise serve a tree that routes prefixes it cannot open.
@@ -103,8 +88,7 @@ the gateway would otherwise serve a tree that routes prefixes it cannot open.
 
 // runWorkspacePush builds the document from the town and sends it, printing the
 // manifest hash the gateway stored. Each setting falls back to its flag, then to
-// the environment the gateway's callers already use (G9's gt-wrap reads the same
-// two names).
+// the environment gt-wrap's bdgateway target reads.
 func runWorkspacePush(ctx context.Context, deps workspacePushDeps, townRoot, gatewayURL, tokenFile string) error {
 	if deps.out == nil {
 		return errors.New("gt bd workspace push: no output writer is wired, so the manifest hash would be lost")

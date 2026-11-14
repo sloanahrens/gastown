@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,24 +24,23 @@ import (
 // PUT /v1/workspace takes from the town copy gt runs in, sends it with the
 // caller's bearer token, and gives every writer of the town copy one
 // nil-by-default pusher. The design is docs/design/bd-container.md, "The
-// workspace" (option B), and the plan's G8.
+// workspace" (option B).
 //
-// The tree is the P0 proof tree (workspace_proof_integration_test.go), which is
-// the layout G7's store was written against: the gateway's /ws root mirrors the
-// town root, so `.beads/routes.jsonl` and a rig's `<rig>/mayor/rig/.beads/` are
-// the same relative paths on both sides. Only the two files that carry a host
-// path are rewritten: the redirect, to the absolute `/ws/<rel>` form the proof
-// showed a real bd following, and a routes path, to its town-relative form when
-// it was absolute.
+// The tree is the layout the gateway's store validates: the gateway's /ws root
+// mirrors the town root, so `.beads/routes.jsonl` and a rig's
+// `<rig>/mayor/rig/.beads/` are the same relative paths on both sides. Only the
+// two files that carry a host path are rewritten: the redirect, to the absolute
+// `/ws/<rel>` form a real bd follows from inside the container, and a routes
+// path, to its town-relative form when it was absolute.
 
 const (
-	// WorkspacePath is the endpoint G6 mounts the workspace store on.
+	// WorkspacePath is the endpoint the gateway's workspace store is mounted on.
 	WorkspacePath = "/v1/workspace"
 	// WorkspaceURLEnv names the gateway's base URL for `gt bd workspace push`,
-	// the same name gt-wrap's bdgateway target reads (G9).
+	// the same name gt-wrap's bdgateway target reads.
 	WorkspaceURLEnv = "BD_GATEWAY_URL"
 	// WorkspaceTokenEnv names the file holding the pusher's bearer token, the
-	// same name gt-wrap's bdgateway target reads (G9).
+	// same name gt-wrap's bdgateway target reads.
 	WorkspaceTokenEnv = "BD_GATEWAY_TOKEN_FILE"
 	// workspaceRootPath is the tree's own root inside the bd container. A
 	// redirect pushed by gt must name where bd will see the target, never where
@@ -113,28 +113,38 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	if townRoot == "" || !filepath.IsAbs(townRoot) {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: the town root %q must be an absolute path", townRoot)
 	}
-	town, err := townconfig.Load(townRoot)
+	// Every read below is checked against the town root with symlinks resolved:
+	// a link the operator did not intend must not carry a read — or the file's
+	// content into the pushed tree — out of the town.
+	root, err := filepath.EvalSymlinks(townRoot)
 	if err != nil {
-		return WorkspaceDocument{}, fmt.Errorf("bdgateway: reading the town at %s: %w", townRoot, err)
+		return WorkspaceDocument{}, fmt.Errorf("bdgateway: resolving the town root %s: %w", shown(townRoot), err)
+	}
+	town, err := townconfig.Load(root)
+	if err != nil {
+		return WorkspaceDocument{}, fmt.Errorf("bdgateway: reading the town at %s: %w", shown(root), err)
 	}
 	files := map[string]string{}
 
 	// The town's own beads directory: routes.jsonl and the hq metadata files.
 	// bd's call with no rig reads exactly this tree.
-	townBeads := filepath.Join(townRoot, ".beads")
-	if err := addBeadsFiles(files, townBeads, ".beads", true); err != nil {
+	townBeads := filepath.Join(root, ".beads")
+	if !insideTown(root, townBeads) {
+		return WorkspaceDocument{}, fmt.Errorf("bdgateway: the town's .beads resolves outside the town")
+	}
+	if err := addBeadsFiles(files, townBeads, ".beads"); err != nil {
 		return WorkspaceDocument{}, err
 	}
 	// The route table: one line per route, with every path bd resolves inside
 	// the container made relative to the workspace root.
-	routes, err := rewrittenRoutes(filepath.Join(townBeads, routesFileName), townRoot)
+	routes, err := rewrittenRoutes(filepath.Join(townBeads, routesFileName), root)
 	if err != nil {
 		return WorkspaceDocument{}, err
 	}
 	files[path.Join(".beads", routesFileName)] = routes
 
 	for _, rig := range town.RigNames() {
-		if err := addRigFiles(files, townRoot, rig); err != nil {
+		if err := addRigFiles(files, root, rig); err != nil {
 			return WorkspaceDocument{}, err
 		}
 	}
@@ -166,10 +176,16 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		beadsDir := filepath.Join(rigDir, ".beads")
+		if !insideTown(townRoot, beadsDir) {
+			return fmt.Errorf("bdgateway: rig %q's %s resolves outside the town", shown(rig), filepath.Join(rig, ".beads"))
+		}
 		if !holdsBeadsMetadata(beadsDir) {
 			return fmt.Errorf("bdgateway: rig %q has neither a redirect nor a beads metadata.json under %s", rig, filepath.Join(rig, ".beads"))
 		}
-		return addBeadsFiles(files, beadsDir, path.Join(rig, ".beads"), false)
+		// Required here too: the stat above only picks the refusal's message,
+		// and a metadata.json removed between the two calls must not turn the
+		// rig's files into a silent no-op.
+		return addBeadsFiles(files, beadsDir, path.Join(rig, ".beads"))
 	case err != nil:
 		return fmt.Errorf("bdgateway: reading rig %q's redirect: %w", rig, err)
 	}
@@ -178,7 +194,22 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 		return err
 	}
 	files[path.Join(rig, ".beads", "redirect")] = workspaceRootPath + "/" + target + "\n"
-	return addBeadsFiles(files, filepath.Join(townRoot, filepath.FromSlash(target)), target, false)
+	// The target must hold the database metadata: a redirect to a tree with no
+	// metadata.json names no database, and pushing it would send bd a rig that
+	// cannot open.
+	return addBeadsFiles(files, filepath.Join(townRoot, filepath.FromSlash(target)), target)
+}
+
+// insideTown reports whether p, with symlinks resolved, is a path inside the
+// town. A path that does not exist is checked as written: nothing is read
+// there, and the read that follows refuses a missing file on its own.
+func insideTown(townRoot, p string) bool {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		resolved = filepath.Clean(p)
+	}
+	_, err = townRelative(townRoot, resolved)
+	return err == nil
 }
 
 // redirectTarget resolves a redirect file's content to the town-relative slash
@@ -198,6 +229,13 @@ func redirectTarget(townRoot, rig, content string) (string, error) {
 	} else {
 		resolved = filepath.Join(townRoot, rig, filepath.FromSlash(raw))
 	}
+	// Resolve links before the check: a redirect to a link that points outside
+	// the town must be refused, and the rewrite must name the tree bd will
+	// actually read. A target that does not exist keeps its written form; the
+	// metadata read refuses it when the redirect is followed.
+	if real, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = real
+	}
 	rel, err := townRelative(townRoot, resolved)
 	if err != nil {
 		return "", fmt.Errorf("bdgateway: rig %q's redirect %q: %w", rig, shown(raw), err)
@@ -209,19 +247,17 @@ func redirectTarget(townRoot, rig, content string) (string, error) {
 }
 
 // addBeadsFiles adds the metadata files a beads directory holds, keyed under
-// prefix. metadata.json is required when requireMetadata is set — it is the file
-// that names bd's database — and optional otherwise, while config.yaml and
-// dolt-server.port are always optional: a rig may have no config, and a town
-// with no Dolt endpoint on disk has no port file (the design removes it then).
-func addBeadsFiles(files map[string]string, beadsDir, prefix string, requireMetadata bool) error {
+// prefix. metadata.json is required: it is the file that names bd's database,
+// and a tree without it is a rig bd cannot open, so it is refused rather than
+// pushed without. config.yaml and dolt-server.port are optional: a rig may have
+// no config, and a town with no Dolt endpoint on disk has no port file (the
+// design removes it then).
+func addBeadsFiles(files map[string]string, beadsDir, prefix string) error {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	metadata, err := os.ReadFile(metadataPath) //nolint:gosec // G304: path under the town root
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		if requireMetadata {
-			return fmt.Errorf("bdgateway: %s holds no metadata.json, so bd has no database to open", beadsDir)
-		}
-		return nil
+		return fmt.Errorf("bdgateway: %s holds no metadata.json, so bd has no database to open", beadsDir)
 	case err != nil:
 		return fmt.Errorf("bdgateway: reading %s: %w", metadataPath, err)
 	}
@@ -289,17 +325,27 @@ func rewrittenRoutes(routesPath, townRoot string) (string, error) {
 
 // workspaceRoutePath rewrites one route path into the town-relative slash form
 // the workspace uses. An absolute path must be inside the town; a relative one
-// is cleaned and must not climb out of it. The town's own route is "." and stays
-// so, because /ws/.beads is the town's beads directory.
+// must not climb out of it. Links are resolved first, so a path that leaves the
+// town through a symlink is refused rather than pushed as a tree the workspace
+// does not hold. The town's own route is "." and stays so, because /ws/.beads
+// is the town's beads directory.
 func workspaceRoutePath(townRoot, routePath string) (string, error) {
+	var joined string
 	if filepath.IsAbs(routePath) {
-		return townRelative(townRoot, filepath.Clean(routePath))
+		joined = filepath.Clean(routePath)
+	} else {
+		cleaned := path.Clean(filepath.ToSlash(routePath))
+		if cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
+			return "", fmt.Errorf("path %q leaves the town", shown(routePath))
+		}
+		joined = filepath.Join(townRoot, filepath.FromSlash(cleaned))
 	}
-	cleaned := path.Clean(filepath.ToSlash(routePath))
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
-		return "", fmt.Errorf("path %q leaves the town", shown(routePath))
+	// A path the town has not created yet keeps its written form: nothing is
+	// read through it, and bd resolves the same relative path in the workspace.
+	if real, err := filepath.EvalSymlinks(joined); err == nil {
+		joined = real
 	}
-	return cleaned, nil
+	return townRelative(townRoot, joined)
 }
 
 // townRelative returns p relative to townRoot in slash form, or an error when p
@@ -326,22 +372,53 @@ type WorkspacePusher interface {
 	Push(ctx context.Context, townRoot string) (string, error)
 }
 
-// installed holds the pusher SetWorkspacePusher installs; nil until a town with
-// a gateway installs one at daemon start (G8b), so every test and every
-// Mac-only path runs exactly as before. The writers push from several
-// goroutines (EnsureAllMetadata), so a read takes the lock too.
-var installed struct {
-	mu sync.RWMutex
-	p  WorkspacePusher
+// pusherSlot holds the one pusher the writers share. mu guards the installed
+// value, since the daemon installs it while other writers may be pushing; pushMu
+// orders whole pushes, so the tree the gateway ends with was built from the
+// newest files. Without that order two writers' pushes can interleave and the
+// older document can be the last one stored, which its manifest check cannot
+// see.
+//
+// The order holds within one process. A push from another process — the CLI's
+// `gt bd workspace push` — is not ordered against the daemon's; the design's
+// five-minute reconcile and doctor drift report cover that gap.
+type pusherSlot struct {
+	mu     sync.RWMutex
+	pushMu sync.Mutex
+	p      WorkspacePusher
 }
 
+// set installs p, or removes it when p is nil.
+func (s *pusherSlot) set(p WorkspacePusher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.p = p
+}
+
+// push sends the town through the installed pusher, one push at a time. With
+// no pusher installed it is a no-op that succeeds with no hash: there is
+// nothing to send the files to.
+func (s *pusherSlot) push(ctx context.Context, townRoot string) (string, error) {
+	s.mu.RLock()
+	p := s.p
+	s.mu.RUnlock()
+	if p == nil {
+		return "", nil
+	}
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	return p.Push(ctx, townRoot)
+}
+
+// installed is the slot the daemon's start fills with a GatewayPusher when the
+// town names a gateway; nil until then, so every test and every Mac-only path
+// runs exactly as before.
+var installed pusherSlot
+
 // SetWorkspacePusher installs p as the pusher every writer of the town copy
-// pushes through, or removes it when p is nil. G8b's daemon start installs a
-// GatewayPusher when the town names a gateway; until then the pusher is nil.
+// pushes through, or removes it when p is nil.
 func SetWorkspacePusher(p WorkspacePusher) {
-	installed.mu.Lock()
-	defer installed.mu.Unlock()
-	installed.p = p
+	installed.set(p)
 }
 
 // PushWorkspace pushes the town's workspace through the installed pusher and
@@ -350,13 +427,7 @@ func SetWorkspacePusher(p WorkspacePusher) {
 // town without a gateway: the files were written, and there is nothing to send
 // them to.
 func PushWorkspace(ctx context.Context, townRoot string) (string, error) {
-	installed.mu.RLock()
-	p := installed.p
-	installed.mu.RUnlock()
-	if p == nil {
-		return "", nil
-	}
-	return p.Push(ctx, townRoot)
+	return installed.push(ctx, townRoot)
 }
 
 // GatewayPusher is the WorkspacePusher that sends the document to a running bd
@@ -403,7 +474,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so the workspace was not pushed: %w", shown(g.URL), err)
+		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so the workspace was not pushed: %w", shown(redactedURL(g.URL)), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
@@ -427,22 +498,62 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 }
 
 // endpoint is the URL the push goes to, refusing a URL that is not http(s) with
-// a host, or that carries a query or fragment the endpoint does not take.
+// a host, that carries credentials or a query or fragment the endpoint does not
+// take, or that would send the bearer token in the clear to another machine.
 func (g GatewayPusher) endpoint() (string, error) {
 	if g.URL == "" {
 		return "", fmt.Errorf("%w: set --gateway-url or %s", ErrNoGatewayURL, WorkspaceURLEnv)
 	}
 	u, err := url.Parse(g.URL)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway url %q does not parse: %w", shown(g.URL), err)
+		return "", fmt.Errorf("bdgateway: the gateway url %s does not parse: %w", shown(redactedURL(g.URL)), err)
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("bdgateway: the gateway url %q is not an http or https URL with a host", shown(g.URL))
+		return "", fmt.Errorf("bdgateway: the gateway url %s is not an http or https URL with a host", shown(redactedURL(g.URL)))
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("bdgateway: the gateway url %s carries credentials, which the workspace endpoint does not take; the bearer token comes from the token file", shown(redactedURL(g.URL)))
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("bdgateway: the gateway url %q carries a query or fragment, which the workspace endpoint does not take", shown(g.URL))
+		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(g.URL)))
+	}
+	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
+		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https or a loopback address", shown(redactedURL(g.URL)))
 	}
 	return strings.TrimSuffix(g.URL, "/") + WorkspacePath, nil
+}
+
+// localGatewayHosts are the names a container uses for the machine its Docker
+// daemon runs on. The design binds the gateway to the Mac's loopback, and a
+// container reaches it by one of these names, so these are the hosts a plain
+// http gateway URL may name.
+var localGatewayHosts = map[string]bool{
+	"localhost":                true,
+	"host.docker.internal":     true,
+	"host.containers.internal": true,
+	"gateway.docker.internal":  true,
+}
+
+// localGatewayHost reports whether host is this machine: a loopback address or
+// one of the Docker host aliases.
+func localGatewayHost(host string) bool {
+	if localGatewayHosts[strings.ToLower(host)] {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// redactedURL is raw without the credentials a URL may carry, for an error
+// message an operator may paste elsewhere. A URL that does not parse is only
+// bounded: there is no userinfo to strip from text that is not a URL.
+func redactedURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return shown(raw)
+	}
+	u.User = nil
+	return shown(u.String())
 }
 
 // doer is the HTTP client a push uses: the injected one, or the real client

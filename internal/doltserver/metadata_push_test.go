@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// TestEnsureMetadataPushesTheWorkspace: every write of the files bd reads tells
-// the bd gateway its workspace is stale, including the pass that changes
-// nothing — the gateway serves its own copy, so a skipped push is a stale tree.
+// TestEnsureMetadataPushesTheWorkspace: a write of the files bd reads tells the
+// bd gateway its workspace is stale, naming the town root the push is built
+// from.
 func TestEnsureMetadataPushesTheWorkspace(t *testing.T) {
 	t.Parallel()
 	var pushed []string
@@ -26,14 +26,72 @@ func TestEnsureMetadataPushesTheWorkspace(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, pass := range []string{"the first write", "a pass that changes nothing"} {
-		pushed = nil
-		if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
-			t.Fatalf("EnsureMetadataForBeadsDir on %s: %v", pass, err)
-		}
-		if len(pushed) != 1 || pushed[0] != townRoot {
-			t.Errorf("%s pushed %v, want the town root %s once", pass, pushed, townRoot)
-		}
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir: %v", err)
+	}
+	if len(pushed) != 1 || pushed[0] != townRoot {
+		t.Errorf("pushed %v, want the town root %s once", pushed, townRoot)
+	}
+}
+
+// TestEnsureMetadataDoesNotPushWhenNothingChanged: a pass over files that are
+// already current pushes nothing, so the five-minute reconcile does not resend
+// the whole workspace on every tick.
+func TestEnsureMetadataDoesNotPushWhenNothingChanged(t *testing.T) {
+	t.Parallel()
+	pushed := 0
+	h := &host{
+		pushWorkspace: func(context.Context, string) (string, error) {
+			pushed++
+			return "manifest", nil
+		},
+	}
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the first pass: %v", err)
+	}
+	pushed = 0
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the second pass: %v", err)
+	}
+	if pushed != 0 {
+		t.Errorf("pushed %d times on an unchanged pass, want none", pushed)
+	}
+}
+
+// TestEnsureMetadataPushesAPortFileChange: a pass that leaves metadata.json
+// alone but rewrites dolt-server.port changes a file bd reads, so it pushes.
+func TestEnsureMetadataPushesAPortFileChange(t *testing.T) {
+	t.Parallel()
+	pushed := 0
+	h := newFakeHost().townNamesPort(DefaultPort).host()
+	h.pushWorkspace = func(context.Context, string) (string, error) {
+		pushed++
+		return "manifest", nil
+	}
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the first pass: %v", err)
+	}
+	// A wrong port with current metadata takes the fast path, writes the file
+	// and pushes the change.
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pushed = 0
+	if err := h.EnsureMetadataForBeadsDir(townRoot, beadsDir, "hq"); err != nil {
+		t.Fatalf("the port-file pass: %v", err)
+	}
+	if pushed != 1 {
+		t.Errorf("pushed %d times after a port-file change, want one", pushed)
 	}
 }
 

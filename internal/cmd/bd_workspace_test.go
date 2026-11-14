@@ -94,7 +94,7 @@ func TestWorkspacePushBuildsDocument(t *testing.T) {
 	}))
 	cmd := newWorkspacePushCmd(deps)
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	cmd.SetArgs([]string{"--town-root", root, "--gateway-url", "http://gw:7440", "--token-file", writePushToken(t, "tok")})
+	cmd.SetArgs([]string{"--town-root", root, "--gateway-url", "http://127.0.0.1:7440", "--token-file", writePushToken(t, "tok")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("gt bd workspace push: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestWorkspacePushRefused(t *testing.T) {
 	}))
 	cmd := newWorkspacePushCmd(deps)
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	cmd.SetArgs([]string{"--town-root", root, "--gateway-url", "http://gw:7440", "--token-file", writePushToken(t, "tok")})
+	cmd.SetArgs([]string{"--town-root", root, "--gateway-url", "http://127.0.0.1:7440", "--token-file", writePushToken(t, "tok")})
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("gt bd workspace push exited 0 on a refused push")
@@ -239,7 +239,7 @@ func TestWorkspacePushNeedsItsSettings(t *testing.T) {
 			name: "no token file",
 			deps: func(t *testing.T, root string) (workspacePushDeps, string, string, string) {
 				deps, _ := pushDeps(root, nil)
-				return deps, root, "http://gw:7440", ""
+				return deps, root, "http://127.0.0.1:7440", ""
 			},
 			wantErr:  bdgateway.ErrNoTokenFile,
 			wantText: bdgateway.WorkspaceTokenEnv,
@@ -249,7 +249,7 @@ func TestWorkspacePushNeedsItsSettings(t *testing.T) {
 			deps: func(t *testing.T, root string) (workspacePushDeps, string, string, string) {
 				deps, _ := pushDeps(root, nil)
 				deps.findTown = func() (string, error) { return "", errors.New("no town above this directory") }
-				return deps, "", "http://gw:7440", writePushToken(t, "tok")
+				return deps, "", "http://127.0.0.1:7440", writePushToken(t, "tok")
 			},
 			wantText: "finding the town",
 		},
@@ -258,7 +258,7 @@ func TestWorkspacePushNeedsItsSettings(t *testing.T) {
 			deps: func(t *testing.T, root string) (workspacePushDeps, string, string, string) {
 				deps, _ := pushDeps(root, nil)
 				deps.findTown = nil
-				return deps, "", "http://gw:7440", writePushToken(t, "tok")
+				return deps, "", "http://127.0.0.1:7440", writePushToken(t, "tok")
 			},
 			wantText: "pass --town-root",
 		},
@@ -267,7 +267,7 @@ func TestWorkspacePushNeedsItsSettings(t *testing.T) {
 			deps: func(t *testing.T, root string) (workspacePushDeps, string, string, string) {
 				deps, _ := pushDeps(root, nil)
 				deps.out = nil
-				return deps, root, "http://gw:7440", writePushToken(t, "tok")
+				return deps, root, "http://127.0.0.1:7440", writePushToken(t, "tok")
 			},
 			wantText: "no output writer is wired",
 		},
