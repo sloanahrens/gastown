@@ -511,6 +511,56 @@ func TestDoctorReportsEachRung(t *testing.T) {
 	}
 }
 
+// TestDoctorKeepsTheContainerAndImageLines: a docker or kubernetes diagnosis keeps
+// its four lines, so an empty container or image prints as unknown and the line
+// stays.
+func TestDoctorKeepsTheContainerAndImageLines(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config string
+		diag   gtwrap.Diagnosis
+		exit   int
+		want   string
+	}{
+		{
+			name: "docker with no image",
+			diag: gtwrap.Diagnosis{Rung: gtwrap.RungRun, Container: "gt-daemon", Reason: "the daemon container is not running"},
+			exit: 0,
+			want: "rung: run\ncontainer: gt-daemon\nimage: unknown\nreason: the daemon container is not running\n",
+		},
+		{
+			name: "docker with no container",
+			diag: gtwrap.Diagnosis{Rung: gtwrap.RungDown, Image: "gt-daemon:7f3e9a1", Reason: "Docker is down"},
+			exit: 1,
+			want: "rung: down\ncontainer: unknown\nimage: gt-daemon:7f3e9a1\nreason: Docker is down\n",
+		},
+		{
+			name:   "kubernetes with no container",
+			config: kubernetesConfig,
+			diag:   gtwrap.Diagnosis{Rung: gtwrap.RungDown, Image: "deployment/gt-daemon", Reason: "no Running pod"},
+			exit:   1,
+			want:   "rung: down\ncontainer: unknown\nimage: deployment/gt-daemon\nreason: no Running pod\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			if tt.config != "" {
+				h.writeConfig(t, tt.config)
+			}
+			h.fake.diag = tt.diag
+			if exit := h.run("gt", doctorFlag); exit != tt.exit {
+				t.Fatalf("run(%s) = %d, want %d; stderr: %s", doctorFlag, exit, tt.exit, h.stderr)
+			}
+			if got := h.stdout.String(); got != tt.want {
+				t.Fatalf("report = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestDoctorReportsDownWhenNoTownIsFound: a wrapper that cannot find a town
 // still answers --doctor, with down and the town error as the reason, rather
 // than refusing with no report at all.
