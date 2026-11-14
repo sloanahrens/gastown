@@ -49,7 +49,8 @@ type Step struct {
 
 // Input is every field Assemble reads. A field left at its zero value is a
 // field the caller did not pass, and it is left out of the text: no heading and
-// no section for it.
+// no section for it. A list entry with no text is left out the same way, so a
+// zero-value entry neither renders a bullet nor keeps its heading alive.
 type Input struct {
 	BeadID      string
 	Title       string
@@ -97,8 +98,8 @@ func Assemble(in Input) string {
 // heading is the one line naming the bead. Either the id or the title alone is
 // enough to name it; only when the caller passed neither is there no heading.
 func heading(in Input) string {
-	id := strings.TrimSpace(in.BeadID)
-	title := strings.TrimSpace(in.Title)
+	id := oneLine(in.BeadID)
+	title := oneLine(in.Title)
 	switch {
 	case id != "" && title != "":
 		return "# TASK " + id + ": " + title
@@ -108,6 +109,13 @@ func heading(in Input) string {
 		return "# TASK: " + title
 	}
 	return ""
+}
+
+// oneLine folds the whitespace in s to single spaces. A newline written raw in
+// the id or the title would end the heading line and turn the rest into body
+// text, so the heading is built from oneLine's result.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func assembleBoxes(boxes []Box) string {
@@ -184,8 +192,12 @@ func commentItem(c Comment) string {
 // writeItem writes one list item: the bullet prefix, the first line, and any
 // further lines indented so the item stays one item in rendered markdown. A
 // blank line inside the text stays empty rather than indented, so the file
-// carries no trailing whitespace.
+// carries no trailing whitespace. An item with no text writes nothing, so a
+// zero-value entry leaves no bare bullet behind.
 func writeItem(sb *strings.Builder, prefix, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	sb.WriteString(strings.TrimRight(prefix+lines[0], " "))
 	sb.WriteString("\n")

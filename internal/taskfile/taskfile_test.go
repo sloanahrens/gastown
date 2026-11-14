@@ -94,6 +94,9 @@ func TestAssembleHeading(t *testing.T) {
 		{"title only", Input{Title: "Fix it"}, "# TASK: Fix it\n"},
 		{"neither", Input{}, ""},
 		{"surrounding space", Input{BeadID: " gt-1 ", Title: " Fix it "}, "# TASK gt-1: Fix it\n"},
+		{"newline in title", Input{BeadID: "gt-1", Title: "Fix\nit"}, "# TASK gt-1: Fix it\n"},
+		{"newline in id", Input{BeadID: "gt\n1", Title: "Fix it"}, "# TASK gt 1: Fix it\n"},
+		{"newline in both", Input{BeadID: " gt-1\n", Title: " Fix\nit "}, "# TASK gt-1: Fix it\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +128,39 @@ func TestAssembleOmitsFieldsNotPassed(t *testing.T) {
 			t.Parallel()
 			if out := Assemble(tt.in); strings.Contains(out, tt.absent) {
 				t.Errorf("output carries %q for a field not passed:\n%s", tt.absent, out)
+			}
+		})
+	}
+}
+
+// TestAssembleEmptyEntries covers the no-empty-heading rule for list entries
+// that carry no text: a zero-value entry leaves no bullet and no heading
+// behind, and an empty entry between real ones drops out without disturbing
+// them.
+func TestAssembleEmptyEntries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{"box", Input{BeadID: "gt-1", Boxes: []Box{{}}}, "# TASK gt-1\n"},
+		{"ticked box", Input{BeadID: "gt-1", Boxes: []Box{{Ticked: true}}}, "# TASK gt-1\n"},
+		{"note", Input{BeadID: "gt-1", Notes: []Note{{}}}, "# TASK gt-1\n"},
+		{"comment", Input{BeadID: "gt-1", Comments: []Comment{{}}}, "# TASK gt-1\n"},
+		{"step", Input{BeadID: "gt-1", Steps: []Step{{}}}, "# TASK gt-1\n"},
+		{"whitespace note", Input{BeadID: "gt-1", Notes: []Note{{Text: " \n\t"}}}, "# TASK gt-1\n"},
+		{
+			"empty between real notes",
+			Input{BeadID: "gt-1", Notes: []Note{{Text: "a"}, {}, {Text: "b"}}},
+			"# TASK gt-1\n\n## Notes\n\n- a\n- b\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Assemble(tt.in); got != tt.want {
+				t.Errorf("Assemble() = %q, want %q", got, tt.want)
 			}
 		})
 	}
