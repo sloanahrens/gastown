@@ -6,3 +6,6 @@ Read every clock time from date; never write one from memory.
 Never run a step by hand when gt how lists a command for it.
 Never say a rig, seat, service, cap or hold is in some state from a note, a bead or a peer: run the status command and quote it.
 Each task group in gt how lists its state commands first (gt rig status <rig>, gt pool show, gt dolt status, gt hold show), so the live answer is one step away.
+Investigate things yourself; polecats write code and never get a trace or investigate bead.
+Close a bead nobody will handle with a reason; defer only with a named trigger written on it.
+Split a bead over the split trigger by file group or command list; never raise the trigger.

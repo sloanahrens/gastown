@@ -33,6 +33,18 @@ func TestHowCardRulesPinTheFile(t *testing.T) {
 	checkHowGolden(t, "card.golden", []byte(strings.Join(lines, "\n")+"\n"))
 }
 
+// TestHowCardRulesStayUnderByteLimit guards the card's 2500-byte budget: the
+// per-line validator passes each line, so only a whole-file check stops the card
+// growing past what a compacted session will read (gt-0rix8g).
+func TestHowCardRulesStayUnderByteLimit(t *testing.T) {
+	t.Parallel()
+
+	const maxBytes = 2500
+	if n := len(overseerCardFile); n > maxBytes {
+		t.Fatalf("overseer-card.md is %d bytes, more than the %d-byte card budget", n, maxBytes)
+	}
+}
+
 // TestHowCardRulesRefuseBadLines checks the two shapes the card must never
 // have and the line the error names for each.
 func TestHowCardRulesRefuseBadLines(t *testing.T) {
