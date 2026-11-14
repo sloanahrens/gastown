@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -31,9 +32,8 @@ const doltComposeRelPath = "deploy/data/docker-compose.yml"
 // wait with no end.
 const doltComposeWaitSeconds = "120"
 
-// doltUseComposeUnit is set by --compose-unit on gt dolt start, stop and
-// status. Off, those commands run the single-container path they always ran.
-var doltUseComposeUnit bool
+// composeUnitFlag names the --compose-unit flag on gt dolt start, stop and status.
+const composeUnitFlag = "compose-unit"
 
 // doltComposeDeps is what the compose path reaches outside the town: the docker
 // call, the environment that call inherits and the backup root. A test supplies
@@ -184,6 +184,11 @@ func doltComposeStatus(townRoot string, deps doltComposeDeps, w io.Writer) error
 	out, err := deps.run(u.argv("ps", "--all", "--format", doctor.DataUnitPsFormat), u.env(deps.environ()))
 	if err != nil {
 		return fmt.Errorf("docker compose ps for %s: %w", doltComposeProject, err)
+	}
+	// An empty listing is no state to report, so it is refused rather than
+	// printed as a status that exits 0. Whitespace is no listing either.
+	if len(bytes.TrimSpace(out)) == 0 {
+		return fmt.Errorf("docker compose ps for %s lists no services: the unit has no containers, so there is no status to report", doltComposeProject)
 	}
 	if _, err := fmt.Fprintf(w, "Dolt compose unit %s:\n%s", doltComposeProject, out); err != nil {
 		return fmt.Errorf("writing the status: %w", err)

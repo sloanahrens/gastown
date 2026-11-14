@@ -308,19 +308,63 @@ func init() {
 	doltMigrateCmd.Flags().BoolVar(&doltMigrateDry, "dry-run", false, "Preview what would be migrated without making changes")
 
 	for _, c := range []*cobra.Command{doltStartCmd, doltStopCmd, doltStatusCmd} {
-		c.Flags().BoolVar(&doltUseComposeUnit, "compose-unit", false, "Operate the compose unit deploy/data/docker-compose.yml (project gt-data) instead of the single Dolt container")
+		addComposeUnitFlag(c)
 	}
 
 	rootCmd.AddCommand(doltCmd)
 }
 
+// addComposeUnitFlag registers --compose-unit on c. Set, gt dolt start, stop and
+// status operate the compose unit; unset, they run the single-container path
+// they always ran.
+func addComposeUnitFlag(c *cobra.Command) {
+	c.Flags().Bool(composeUnitFlag, false, "Operate the compose unit deploy/data/docker-compose.yml (project gt-data) instead of the single Dolt container")
+}
+
+// doltStartRoute runs the compose unit's start when compose is set and reports
+// that it did. Unset, it does nothing and reports false, so the caller runs the
+// single-container path it always ran. The deps are the caller's, so a test
+// routes without a docker engine, a working directory or an environment.
+func doltStartRoute(townRoot string, compose bool, deps doltComposeDeps) (bool, error) {
+	if !compose {
+		return false, nil
+	}
+	return true, doltComposeStart(townRoot, deps)
+}
+
+// doltStopRoute is doltStartRoute for gt dolt stop.
+func doltStopRoute(townRoot string, compose bool, deps doltComposeDeps) (bool, error) {
+	if !compose {
+		return false, nil
+	}
+	return true, doltComposeStop(townRoot, deps)
+}
+
+// composeUnitRequested reports whether c was run with --compose-unit. It reads
+// the flag from the command that ran, not a package variable, so a test sets it
+// on a command of its own. A nil command has no flags set.
+func composeUnitRequested(c *cobra.Command) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	on, err := c.Flags().GetBool(composeUnitFlag)
+	if err != nil {
+		return false, fmt.Errorf("reading --%s: %w", composeUnitFlag, err)
+	}
+	return on, nil
+}
+
 func runDoltStart(cmd *cobra.Command, args []string) error {
+	compose, err := composeUnitRequested(cmd)
+	if err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	if doltUseComposeUnit {
-		return doltComposeStart(townRoot, doltComposeRealDeps())
+	if handled, err := doltStartRoute(townRoot, compose, doltComposeRealDeps()); handled {
+		return err
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
@@ -428,12 +472,16 @@ func runDoltKillImposters(cmd *cobra.Command, args []string) error {
 }
 
 func runDoltStop(cmd *cobra.Command, args []string) error {
+	compose, err := composeUnitRequested(cmd)
+	if err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	if doltUseComposeUnit {
-		return doltComposeStop(townRoot, doltComposeRealDeps())
+	if handled, err := doltStopRoute(townRoot, compose, doltComposeRealDeps()); handled {
+		return err
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
@@ -562,6 +610,10 @@ type doltStatusReads struct {
 	archiveReader      func(townRoot string, config *doltserver.Config, databases []string) archiveBehindReader
 	beadsRuntimeConfig func(w io.Writer, townRoot string)
 	strayWarning       func(townRoot string)
+	// composeUnit is set by --compose-unit: the status is the compose unit's.
+	composeUnit bool
+	// composeDeps are the compose unit's docker and path reads, used when composeUnit is set.
+	composeDeps doltComposeDeps
 }
 
 // liveDoltStatusReads is the status command's production reads.
@@ -579,7 +631,14 @@ func liveDoltStatusReads() doltStatusReads {
 }
 
 func runDoltStatus(cmd *cobra.Command, args []string) error {
-	return runDoltStatusWith(os.Stdout, liveDoltStatusReads())
+	compose, err := composeUnitRequested(cmd)
+	if err != nil {
+		return err
+	}
+	reads := liveDoltStatusReads()
+	reads.composeUnit = compose
+	reads.composeDeps = doltComposeRealDeps()
+	return runDoltStatusWith(os.Stdout, reads)
 }
 
 // runDoltStatusWith runs the status report, writing it to w. A test passes a
@@ -589,8 +648,8 @@ func runDoltStatusWith(w io.Writer, reads doltStatusReads) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	if doltUseComposeUnit {
-		return doltComposeStatus(townRoot, doltComposeRealDeps(), w)
+	if reads.composeUnit {
+		return doltComposeStatus(townRoot, reads.composeDeps, w)
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
