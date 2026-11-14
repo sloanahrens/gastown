@@ -515,10 +515,13 @@ of estimated beads that landed unmeasured and of rung `none`; and the split
 trigger table, computed from `sp-minutes:`.
 
 **Retrain.** Run `gt metrics extract`, then `gt metrics storypoints-train`. It
-fits the shape and embedding ridges on the landed beads that have a measured
-time and a seat class of haiku or flash, using the earlier 80% of them, and
-scores the latest beads as a holdout. It reads the embeddings from the ollama
-server at `STORYPOINTS_EMBED_URL` (default `http://127.0.0.1:11434`), not from
+fits the shape and embedding ridges on the landed beads that came through a
+polecat seat, have a polecat time and a seat class of haiku or flash, using the
+earlier 80% of them, and scores the latest beads as a holdout. A lower-bound time
+is read at its floor rather than dropped, since the bound marks the long beads.
+A table with no `polecat_work` column is from an older extract, and the command
+refuses it. It reads the embeddings from the ollama server at
+`STORYPOINTS_EMBED_URL` (default `http://127.0.0.1:11434`), not from
 `embedder_url`. It writes two files beside the day's tables:
 `storypoints-weights.proposed.json` and `storypoints-train.txt`. A proposed file
 whose holdout rank correlation does not reach 0.4 is written with a `.rejected`
