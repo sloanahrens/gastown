@@ -277,19 +277,81 @@ func committedPolecatDirectiveBytes(t *testing.T) int {
 }
 
 // readDirectiveCeiling reads the committed ceiling, refusing a file that holds
-// anything but a positive byte count.
+// anything but one positive byte count.
 func readDirectiveCeiling(t *testing.T) int {
 	t.Helper()
 	data, err := os.ReadFile(directiveCeilingPath)
 	if err != nil {
 		t.Fatalf("read the ceiling file: %v", err)
 	}
-	ceiling, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	ceiling, err := parseDirectiveCeiling(data)
 	if err != nil {
-		t.Fatalf("%s holds %q, not a byte count: %v", directiveCeilingPath, data, err)
-	}
-	if ceiling <= 0 {
-		t.Fatalf("%s holds %d; a ceiling must be a positive byte count", directiveCeilingPath, ceiling)
+		t.Fatalf("%s %v", directiveCeilingPath, err)
 	}
 	return ceiling
+}
+
+// parseDirectiveCeiling reads the ceiling file's text. Blank lines and '#'
+// comment lines are skipped, and exactly one other line must hold a positive
+// byte count, so a stray edit cannot move the ceiling unnoticed.
+func parseDirectiveCeiling(data []byte) (int, error) {
+	var values []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		values = append(values, line)
+	}
+	if len(values) != 1 {
+		return 0, fmt.Errorf("holds %d value lines, want exactly one byte count", len(values))
+	}
+	ceiling, err := strconv.Atoi(values[0])
+	if err != nil {
+		return 0, fmt.Errorf("holds %q, not a byte count: %v", values[0], err)
+	}
+	if ceiling <= 0 {
+		return 0, fmt.Errorf("holds %d; a ceiling must be a positive byte count", ceiling)
+	}
+	return ceiling, nil
+}
+
+// TestParseDirectiveCeiling checks the ceiling file reads its one number past
+// the comment header, and refuses every file that would hide or move the
+// ceiling: no number, two numbers, a zero, a negative, or text.
+func TestParseDirectiveCeiling(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		data    string
+		want    int
+		wantErr bool
+	}{
+		{name: "a bare number", data: "15384\n", want: 15384},
+		{name: "a comment header then the number", data: "# the ceiling\n# moves down\n15384\n", want: 15384},
+		{name: "only comments", data: "# the ceiling\n", wantErr: true},
+		{name: "two numbers", data: "15384\n12000\n", wantErr: true},
+		{name: "a zero", data: "0\n", wantErr: true},
+		{name: "a negative", data: "-5\n", wantErr: true},
+		{name: "text that is not a number", data: "fifteen\n", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseDirectiveCeiling([]byte(tc.data))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parsed %q as %d, want an error", tc.data, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.data, err)
+			}
+			if got != tc.want {
+				t.Errorf("parse %q = %d, want %d", tc.data, got, tc.want)
+			}
+		})
+	}
 }

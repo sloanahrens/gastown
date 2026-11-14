@@ -1,1 +1,5 @@
+# Rendered polecat directive size in bytes: the ratchet ceiling that
+# TestDirectiveCeiling holds the committed directive to (internal/cmd/directive_size_test.go).
+# It moves only down. A commit that cuts a rule or merges two lowers this number
+# to the size it renders; no commit raises it.
 15384
