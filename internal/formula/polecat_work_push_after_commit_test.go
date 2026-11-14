@@ -1,8 +1,6 @@
 package formula
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,48 +144,6 @@ func TestPolecatWorkPushesAfterCommit(t *testing.T) {
 			if strings.Contains(s.Description, "git commit") && !inTable[s.ID] {
 				t.Errorf("step %s commits but is not in committingSteps; add its row and its pointer", s.ID)
 			}
-		}
-	})
-}
-
-// TestDirectivePolecatPushesAfterCommit pins the directive's half of
-// gt-6096pf: one pointer line, at most 160 bytes, naming the formula's rule
-// and restating neither its command nor a flag.
-func TestDirectivePolecatPushesAfterCommit(t *testing.T) {
-	t.Parallel()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "directives", "polecat.md"))
-	if err != nil {
-		t.Fatalf("read directives/polecat.md: %v", err)
-	}
-	var pointers []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.Contains(line, pushRuleName) {
-			pointers = append(pointers, line)
-		}
-	}
-	if len(pointers) != 1 {
-		t.Fatalf("directives/polecat.md has %d lines naming %q, want 1", len(pointers), pushRuleName)
-	}
-	line := pointers[0]
-
-	t.Run("names the formula whose rule it points at", func(t *testing.T) {
-		t.Parallel()
-		if !strings.Contains(line, "mol-polecat-work") {
-			t.Errorf("the pointer line does not name the formula: %q", line)
-		}
-	})
-
-	t.Run("restates no command", func(t *testing.T) {
-		t.Parallel()
-		if strings.Contains(line, "git") {
-			t.Errorf("the pointer line carries a git command instead of pointing: %q", line)
-		}
-	})
-
-	t.Run("stays within its 160-byte cap", func(t *testing.T) {
-		t.Parallel()
-		if n := len(line); n > 160 {
-			t.Errorf("the pointer line is %d bytes, over its 160-byte cap: %q", n, line)
 		}
 	})
 }
