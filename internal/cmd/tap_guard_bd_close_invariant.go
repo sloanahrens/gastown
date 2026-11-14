@@ -424,8 +424,9 @@ func isBeadIDShaped(s string) bool {
 // command), split into per-segment sub-commands on shell operators, and each
 // segment is inspected on its own — `cd /tmp && bd close gt-x` must be found
 // on its second segment, and a heredoc body that merely mentions "bd close" is
-// data, not a command. The tokens come from parsedTokens, with shellTokenize as
-// the fallback (bdCloseReadTokens); this is the per-guard move of gt-crn9gu.
+// data, not a command. The tokens come from parsedTokens (bdCloseReadTokens); a
+// command it cannot read is judged by its text (bdCloseSpelled), not by a guessed
+// split (gt-k6z48o). This is the per-guard move of gt-crn9gu.
 //
 // Only a segment whose command word is literally `bd` (or a path ending in
 // /bd) followed by `close` is an invocation. Everything a close can carry is
@@ -438,30 +439,50 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 
 // bdCloseReader reads a command into the argv-like tokens the bd-close parser
 // walks. parsed reports whether the tokens came from parsedTokens; false means
-// shellTokenize's reading.
-type bdCloseReader func(command string) (tokens []string, parsed bool)
+// shellTokenize's reading. readable is false when parsedTokens cannot read the
+// command at all: tokens is then nil, and the caller judges the text instead
+// (gt-k6z48o).
+type bdCloseReader func(command string) (tokens []string, parsed, readable bool)
 
 // bdCloseReaderOf builds the production reader over the two readings it chooses
-// between: parsed, and shell as the fallback. A test passes its own readings, so
-// the production routing, unsafe shapes included, judges them without any package
-// variable being swapped.
+// between: parsed, and shell for a parsed reading the routing predicate rejects.
+// A command parsed cannot read has no reading here. A test passes its own
+// readings, so the production routing, unsafe shapes included, judges them
+// without any package variable being swapped.
 func bdCloseReaderOf(parsed func(string) ([]string, bool), shell func(string) []string) bdCloseReader {
-	return func(command string) ([]string, bool) {
+	return func(command string) ([]string, bool, bool) {
 		tokens, readable := parsed(command)
-		if !readable || bdCloseParsedUnsafe(tokens) {
-			return shell(command), false
+		if !readable {
+			return nil, false, false
 		}
-		return tokens, true
+		if bdCloseParsedUnsafe(tokens) {
+			return shell(command), false, true
+		}
+		return tokens, true, true
 	}
 }
 
 // bdCloseReadTokens is the production reader, the parsedTokens reading of gt-crn9gu.
-// It falls back to shellTokenize when parsedTokens cannot read the command, and
-// when the parsed tokens carry a shape the parsed reading does not cover
-// (bdCloseParsedUnsafe). shellTokenize is the reading gt-crn9gu retires; it stays
-// as the fallback until that plan removes it.
-func bdCloseReadTokens(command string) ([]string, bool) {
+// It reads with shellTokenize only when the parsed tokens carry a shape the parsed
+// reading does not cover (bdCloseParsedUnsafe). A command parsedTokens cannot read
+// is not read by shellTokenize: it is judged by its text (gt-k6z48o). The shell
+// reading stays for the routed shapes until gt-crn9gu retires it.
+func bdCloseReadTokens(command string) ([]string, bool, bool) {
 	return bdCloseReaderOf(parsedTokens, shellTokenize)(command)
+}
+
+// bdCloseSpelled reports whether text could spell a bd close. It reads the text
+// the way bdCreateSpelled reads a bd create (gt-j41yim): the letters the shell
+// could build its words from are read in order, and bd then close must both match
+// as subsequences, so a word built by quotes, an expansion or an escape still
+// shows its letters.
+func bdCloseSpelled(text string) bool {
+	rest, ok := bdCreateSubsequence(bdCreateLetters(text), "bd")
+	if !ok {
+		return false
+	}
+	_, ok = bdCreateSubsequence(rest, "close")
+	return ok
 }
 
 // parseBdCloseInvocationsWith is parseBdCloseInvocations over the reading read
@@ -469,7 +490,7 @@ func bdCloseReadTokens(command string) ([]string, bool) {
 // so one reading decides the whole command.
 func parseBdCloseInvocationsWith(command string, read bdCloseReader) []bdCloseInvocation {
 	stripped := stripHeredocBodies(strings.TrimSpace(command))
-	tokens, parsed := read(stripped)
+	tokens, parsed, readable := read(stripped)
 
 	var invocations []bdCloseInvocation
 	var segment []string
@@ -514,11 +535,15 @@ func parseBdCloseInvocationsWith(command string, read bdCloseReader) []bdCloseIn
 	// read may still hold a substitution whose close is unknown, so it is
 	// judged as a close of the branch's bead (IDsUnreadable), not passed.
 	trimmed := strings.TrimSpace(command)
-	bodies, readable := parsedSubstitutionBodies(blankQuotedHeredocBodies(trimmed))
-	if !readable {
-		if mayHoldSubstitution(trimmed) {
-			invocations = append(invocations, bdCloseInvocation{IDsUnreadable: true})
-		}
+	bodies, bodiesReadable := parsedSubstitutionBodies(blankQuotedHeredocBodies(trimmed))
+	// One marker covers both unknowns: a command no reading covers whose text
+	// could spell a bd close, and one whose substitutions cannot be read. The
+	// marker judges the branch's bead, whatever ids and reason the unreadable
+	// text seems to carry, so nothing in that text is trusted (gt-k6z48o).
+	if !readable && bdCloseSpelled(stripped) || !bodiesReadable && mayHoldSubstitution(trimmed) {
+		invocations = append(invocations, bdCloseInvocation{IDsUnreadable: true})
+	}
+	if !bodiesReadable {
 		return invocations
 	}
 	for _, body := range bodies {
