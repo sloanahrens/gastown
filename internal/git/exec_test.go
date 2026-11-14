@@ -11,6 +11,7 @@ import (
 // sends its git calls through the caller's ExecFunc, which sees each call's
 // arguments and working directory.
 func TestNewGitWithExecRunsMethodsThroughItsRunner(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	var calls []ExecCall
 	exec := ExecFunc(func(c ExecCall) (string, string, error) {
@@ -58,6 +59,7 @@ func TestNewGitWithExecRunsMethodsThroughItsRunner(t *testing.T) {
 // TestNewGitWithExecKeepsExitCode: an error the runner returns comes back from
 // the Git method with its exit code and stderr intact.
 func TestNewGitWithExecKeepsExitCode(t *testing.T) {
+	t.Parallel()
 	g := NewGitWithExec(t.TempDir(), func(ExecCall) (string, string, error) {
 		return "", "fatal: bad revision 'missing'", gitExit(5)
 	})
@@ -82,6 +84,7 @@ func TestNewGitWithExecKeepsExitCode(t *testing.T) {
 // aliases, not separate types, so either name is the same type the package's
 // own code uses and needs no conversion.
 func TestExecTypesAreAliasesOfTheUnexportedTypes(t *testing.T) {
+	t.Parallel()
 	// These assignments compile only while the exported names are aliases: a
 	// defined type with the same signature would need a conversion.
 	var (
@@ -112,6 +115,7 @@ func TestExecTypesAreAliasesOfTheUnexportedTypes(t *testing.T) {
 // TestNewGitLeavesExecNil: the existing constructors leave the exec function
 // nil, so they still select the real git on PATH. No git process runs here.
 func TestNewGitLeavesExecNil(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cases := map[string]*Git{
 		//testpolicy:allow no-git — this test reads the constructor's exec field and runs no git; WithoutGit fails the run if it starts one
