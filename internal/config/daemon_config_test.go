@@ -1817,6 +1817,43 @@ func TestSpecDispatchStoryPointsSplitOverDecodes(t *testing.T) {
 	}
 }
 
+// story_points.lint_over_minutes decodes to the accessor the size gate reads; a
+// zero or negative value is off, so the gate ships disabled (gt-ljb57x).
+func TestSpecDispatchStoryPointsLintOverDecodes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string // empty is a nil config
+		want float64
+	}{
+		{"nil config", "", 0},
+		{"set", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":11}}}}`, 11},
+		{"fractional", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":11.5}}}}`, 11.5},
+		{"zero", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":0}}}}`, 0},
+		{"negative", `{"patrols":{"spec_dispatch":{"story_points":{"lint_over_minutes":-3}}}}`, 0},
+		{"unset", `{"patrols":{"spec_dispatch":{"story_points":{"shadow":true}}}}`, 0},
+		{"no story_points block", `{"patrols":{"spec_dispatch":{"enabled":true}}}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg *DaemonPatrolConfig
+			if tc.body != "" {
+				cfg = &DaemonPatrolConfig{}
+				if err := DecodeJSONFile("daemon.json", []byte(tc.body), cfg); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+			}
+			var sd *SpecDispatchConfig
+			if cfg != nil {
+				sd = cfg.Patrols.SpecDispatch
+			}
+			if got := sd.StoryPointsLintOver(); got != tc.want {
+				t.Errorf("StoryPointsLintOver() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // The jev_scorecard patrol's block decodes its four keys, and a value the
 // patrol cannot act on is refused at decode rather than read as a default.
 func TestJevScorecardConfigDecodes(t *testing.T) {
