@@ -306,6 +306,13 @@ func (a *Authenticator) Reload() error {
 	return nil
 }
 
+// Loaded reports whether a token table is in service. It is false only before
+// the first successful load, which NewAuthenticator does before returning, or
+// after a Gateway was built without one; readiness refuses either way.
+func (a *Authenticator) Loaded() bool {
+	return a != nil && a.table.Load() != nil
+}
+
 // Authenticate returns the class and caller the bearer token authenticates to;
 // the request names neither. A missing, malformed or empty bearer token is
 // ErrNoToken; a well-formed token no file holds is ErrUnknownToken. Both are
