@@ -606,6 +606,36 @@ func TestBirdReportsSaysWhichPagesAreThere(t *testing.T) {
 	}
 }
 
+// A row can be behind on two counts at once: its summary names a decision list
+// the reader could not fully use, and its page is older than that summary. A
+// page older than its summary is the worse problem, so its note keeps the line
+// rather than being replaced by the list's note.
+func TestBirdReportsPageLagNoteKeepsTheLineOverUnreadItems(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+
+	lagged := birdSidecarFor("lagged", now.Add(-2*time.Hour), "title", "summary")
+	lagged.DecisionItems = json.RawMessage(`[{"q": 5}]`)
+	writeBird(t, root, "lagged", birdWrites{
+		json: birdSidecarJSON(t, lagged),
+		page: "<html>yesterday</html>",
+	})
+	birdSetMtime(t, filepath.Join(root, "lagged", "reports", "daily.html"), now.Add(-5*time.Hour))
+
+	row, ok := birdByName(NewBirdReportsReader(root).Read(now))["lagged"]
+	if !ok {
+		t.Fatal("lagged: no row, want one for a bird with a summary and a page")
+	}
+	if row.Note != "page older than its summary" {
+		t.Errorf("lagged: note %q, want the page-lag note to keep the line", row.Note)
+	}
+	if len(row.DecisionItems) != 0 {
+		t.Errorf("lagged carried %d items, want none from a list that could not be read", len(row.DecisionItems))
+	}
+}
+
 // decision_items is the reporter's own list of decisions to put on the one
 // "Needs you" list, so it is decoded on its own: a missing, null or malformed
 // array costs the row its list and never its summary, and a reporter that
