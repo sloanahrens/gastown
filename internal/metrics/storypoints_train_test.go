@@ -17,6 +17,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/storypoints"
+	"github.com/steveyegge/gastown/internal/storypoints/estimate"
+	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 )
 
 // trainTestDim is the embedding dimension of the fixture's weights and embedder.
@@ -437,7 +439,7 @@ func TestStoryPointsTrainSkipsAndCountsUnreadBeads(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "not read: not polecat work 1, seat class 0, unmeasured 1, bead not in store 1, no Constraints or Acceptance 1, rig without a directory 0"
+	want := "not read: not polecat work 1, seat class 0, unmeasured 1, log line without an embedding 0, log line embedding of another size 0, bead not in store 1, no Constraints or Acceptance 1, rig without a directory 0"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report = %q, want the line %q", out.String(), want)
 	}
@@ -465,7 +467,7 @@ func TestStoryPointsTrainFitsOnlyPolecatLandings(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "not read: not polecat work 30, seat class 0, unmeasured 0, bead not in store 0, no Constraints or Acceptance 0, rig without a directory 0"
+	want := "not read: not polecat work 30, seat class 0, unmeasured 0, log line without an embedding 0, log line embedding of another size 0, bead not in store 0, no Constraints or Acceptance 0, rig without a directory 0"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report = %q, want the line %q", out.String(), want)
 	}
@@ -497,12 +499,12 @@ func TestStoryPointsTrainKeepsALowerBoundAtItsFloor(t *testing.T) {
 		t.Fatalf("ReadLandings: %v", err)
 	}
 	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fix.store() }}
-	samples, skips, err := trainingSamples(context.Background(), env, fix.town, rows, storypoints.Default(), trainTestEmbedder{})
+	samples, counts, err := trainingSamples(context.Background(), env, fix.town, rows, storypoints.Default(), trainTestEmbedder{})
 	if err != nil {
 		t.Fatalf("trainingSamples: %v", err)
 	}
-	if skips.unmeasured != 0 || skips.notPolecat != 0 {
-		t.Errorf("skips = %+v, want the lower-bound row read", skips)
+	if counts.skips.unmeasured != 0 || counts.skips.notPolecat != 0 {
+		t.Errorf("counts = %+v, want the lower-bound row read", counts)
 	}
 	// The fixture lands the lower-bound bead first, an hour before the others.
 	landed := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -665,7 +667,7 @@ func TestStoryPointsTrainUnmeasurableHoldout(t *testing.T) {
 			if name != tc.wantName {
 				t.Errorf("file name = %q, want %q", name, tc.wantName)
 			}
-			report := storyPointsTrainReport(storypoints.Model{Holdout: tc.holdout, TrainedOn: "fixture"}, trainSkips{}, name, score)
+			report := storyPointsTrainReport(storypoints.Model{Holdout: tc.holdout, TrainedOn: "fixture"}, trainCounts{}, name, score)
 			if !strings.Contains(report, tc.wantLine) {
 				t.Errorf("report does not say %q:\n%s", tc.wantLine, report)
 			}
@@ -782,5 +784,301 @@ func TestStoryPointsEmbedderReadsItsURLFromTheEnvironment(t *testing.T) {
 				t.Errorf("HTTP client is nil, so the embedder would refuse every request")
 			}
 		})
+	}
+}
+
+// logRecord is one estimate log line for a fixture bead: the features the
+// estimator read, for the text its hash names.
+func logRecord(bead, hash string, shape estlog.Shape, vec []float32) estlog.Record {
+	return estlog.Record{
+		BeadID:          bead,
+		DescriptionHash: hash,
+		Shape:           shape,
+		Embedding:       vec,
+		Time:            time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// appendLog appends the records to the fixture town's estimate log through the
+// production writer, so the step reads the file the estimator writes.
+func (f trainTestFixture) appendLog(t *testing.T, records ...estlog.Record) {
+	t.Helper()
+	for _, r := range records {
+		if err := estlog.Append(f.town, r); err != nil {
+			t.Fatalf("append estimate log: %v", err)
+		}
+	}
+}
+
+// fixtureLanded is the landing time newTrainTestFixture gives its bead i.
+func fixtureLanded(i int) time.Time {
+	return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Hour)
+}
+
+// sampleLanded returns the sample the fixture's bead i produced.
+func sampleLanded(t *testing.T, samples []storypoints.Sample, i int) storypoints.Sample {
+	t.Helper()
+	for _, s := range samples {
+		if s.LandedAt.Equal(fixtureLanded(i)) {
+			return s
+		}
+	}
+	t.Fatalf("no sample landed at %s; samples = %d", fixtureLanded(i), len(samples))
+	return storypoints.Sample{}
+}
+
+// TestStoryPointsTrainFitsTheLoggedFeatures: every bead's current text carries
+// one acceptance box, so a fit on it cannot rank the beads, while each bead's
+// log line carries the box count its minutes followed. The proposed file clears
+// the bar only when the step reads the log lines, and the report counts the
+// beads it read them for.
+func TestStoryPointsTrainFitsTheLoggedFeatures(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(90, 21, true)
+	var records []estlog.Record
+	for i := range beads {
+		loggedBoxes := 1 + i%10
+		beads[i].boxes = 1
+		beads[i].minutes = math.Exp(0.25*float64(loggedBoxes) + 1)
+		records = append(records, logRecord(beads[i].id, "an-earlier-text", estlog.Shape{Boxes: float64(loggedBoxes)}, make([]float32, trainTestDim)))
+	}
+	fix := newTrainTestFixture(t, beads)
+	fix.appendLog(t, records...)
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+		t.Fatalf("storypoints-train: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fix.outDir, storyPointsProposedName)); err != nil {
+		t.Fatalf("proposed file: %v; the fit did not read the log lines:\n%s", err, out.String())
+	}
+	want := "read: from the estimate log 90, from the current text 0"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report does not say %q:\n%s", want, out.String())
+	}
+}
+
+// TestStoryPointsTrainJoinsTheLogOnBeadAndHash: the line a bead is fitted on is
+// the last one whose hash is the hash of its text now, else the last line the
+// bead has, and a line belongs to the bead it names. A bead whose text differs
+// from every logged hash therefore still fits on the logged features, and a bead
+// the store does not hold fits on its last line.
+func TestStoryPointsTrainJoinsTheLogOnBeadAndHash(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(2, 22, true)
+	issue := trainTestIssue(beads[0])
+	matching := logRecord(beads[0].id, estimate.SectionHash(issue), estlog.Shape{Boxes: 5}, []float32{0.5, 0.5, 0.5})
+	earlier := logRecord(beads[0].id, "an-earlier-text", estlog.Shape{Boxes: 2}, []float32{0.2, 0.2, 0.2})
+	later := logRecord(beads[0].id, "a-later-text", estlog.Shape{Boxes: 9}, []float32{0.9, 0.9, 0.9})
+	other := logRecord(beads[1].id, "another-beads-text", estlog.Shape{Boxes: 7}, []float32{0.7, 0.7, 0.7})
+	cases := []struct {
+		name  string
+		lines []estlog.Record
+		gone  bool // bead 0 is not in the store
+		want  float64
+	}{
+		{"the line for the text the bead carries now wins over a later one", []estlog.Record{earlier, matching, later}, false, 5},
+		{"the last line when the bead's text matches no logged hash", []estlog.Record{earlier, later}, false, 9},
+		{"each bead reads the line that names it", []estlog.Record{earlier, other}, false, 2},
+		{"a bead the store does not hold reads its last line", []estlog.Record{earlier, later}, true, 9},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines := tc.lines
+			if !slices.ContainsFunc(lines, func(r estlog.Record) bool { return r.BeadID == beads[1].id }) {
+				lines = append(slices.Clone(lines), other)
+			}
+			// Each case mutates its own beads: the store answers from the slice the
+			// fixture holds.
+			own := slices.Clone(beads)
+			own[0].missing = tc.gone
+			fit := newTrainTestFixture(t, own)
+			fit.appendLog(t, lines...)
+			data, err := os.ReadFile(filepath.Join(fit.outDir, landingsName))
+			if err != nil {
+				t.Fatalf("read landings: %v", err)
+			}
+			_, rows, err := ReadLandings(bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("ReadLandings: %v", err)
+			}
+			env := Env{Town: fit.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fit.store() }}
+			samples, counts, err := trainingSamples(context.Background(), env, fit.town, rows, trainTestBase(t), trainTestEmbedder{})
+			if err != nil {
+				t.Fatalf("trainingSamples: %v", err)
+			}
+			if got := sampleLanded(t, samples, 0).Shape.Boxes; got != tc.want {
+				t.Errorf("bead 0 fitted with %v boxes, want the logged %v", got, tc.want)
+			}
+			if got := sampleLanded(t, samples, 1).Shape.Boxes; got != 7 {
+				t.Errorf("bead 1 fitted with %v boxes, want its own line's 7", got)
+			}
+			if counts.logged != 2 {
+				t.Errorf("counts.logged = %d, want the two beads read from the log", counts.logged)
+			}
+		})
+	}
+}
+
+// TestStoryPointsTrainFallsBackToTheCurrentText: a bead with no estimate log
+// line is fitted on its text as it is now: the shape features of its estimate
+// text and the embedding of its section text.
+func TestStoryPointsTrainFallsBackToTheCurrentText(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(1, 23, true)
+	fix := newTrainTestFixture(t, beads)
+	data, err := os.ReadFile(filepath.Join(fix.outDir, landingsName))
+	if err != nil {
+		t.Fatalf("read landings: %v", err)
+	}
+	_, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ReadLandings: %v", err)
+	}
+	store := fix.store()
+	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return store }}
+	base := trainTestBase(t)
+	samples, counts, err := trainingSamples(context.Background(), env, fix.town, rows, base, trainTestEmbedder{})
+	if err != nil {
+		t.Fatalf("trainingSamples: %v", err)
+	}
+	if counts.currentText != 1 || counts.logged != 0 {
+		t.Errorf("counts = %+v, want one bead read from its current text", counts)
+	}
+	issue := store.issues[beads[0].id]
+	seat := storypoints.SeatHaiku
+	if beads[0].seat == "flash" {
+		seat = storypoints.SeatFlash
+	}
+	want := storypoints.Features(storypoints.EstimateText(issue), "gastown", seat, base)
+	text, err := storypoints.SectionText(issue)
+	if err != nil {
+		t.Fatalf("SectionText: %v", err)
+	}
+	wantVec, err := (trainTestEmbedder{}).Embed(context.Background(), text)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	got := sampleLanded(t, samples, 0)
+	if got.Shape != want {
+		t.Errorf("shape = %+v, want the current text's %+v", got.Shape, want)
+	}
+	if !slices.Equal(got.Vector, wantVec) {
+		t.Errorf("vector = %v, want the current text's %v", got.Vector, wantVec)
+	}
+}
+
+// TestStoryPointsTrainCountsTheFallbackInTheReport: a bead with no log line is
+// fitted on its current text, and the report counts the beads fitted on each
+// source.
+func TestStoryPointsTrainCountsTheFallbackInTheReport(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(90, 24, true)
+	fix := newTrainTestFixture(t, beads)
+	var records []estlog.Record
+	for i := 0; i < 30; i++ {
+		records = append(records, logRecord(beads[i].id, "an-earlier-text", estlog.Shape{Boxes: float64(beads[i].boxes)}, make([]float32, trainTestDim)))
+	}
+	fix.appendLog(t, records...)
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+		t.Fatalf("storypoints-train: %v", err)
+	}
+	want := "read: from the estimate log 30, from the current text 60"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report does not say %q:\n%s", want, out.String())
+	}
+}
+
+// TestStoryPointsTrainSkipsLogLinesItCannotFit: a log line with no embedding,
+// and one whose embedding is not the weights' size, are not fitted and are
+// counted; the bead with a line the ridges can read is fitted.
+func TestStoryPointsTrainSkipsLogLinesItCannotFit(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(3, 25, true)
+	fix := newTrainTestFixture(t, beads)
+	fix.appendLog(t,
+		logRecord(beads[0].id, "no-embedding", estlog.Shape{Boxes: 2}, nil),
+		logRecord(beads[1].id, "another-size", estlog.Shape{Boxes: 3}, make([]float32, trainTestDim+1)),
+		logRecord(beads[2].id, "readable", estlog.Shape{Boxes: 4}, make([]float32, trainTestDim)),
+	)
+	data, err := os.ReadFile(filepath.Join(fix.outDir, landingsName))
+	if err != nil {
+		t.Fatalf("read landings: %v", err)
+	}
+	_, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ReadLandings: %v", err)
+	}
+	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fix.store() }}
+	samples, counts, err := trainingSamples(context.Background(), env, fix.town, rows, trainTestBase(t), trainTestEmbedder{})
+	if err != nil {
+		t.Fatalf("trainingSamples: %v", err)
+	}
+	if len(samples) != 1 || counts.logged != 1 {
+		t.Errorf("samples = %d, counts.logged = %d, want only the readable line fitted", len(samples), counts.logged)
+	}
+	if counts.skips.logNoEmbed != 1 || counts.skips.logEmbedSize != 1 {
+		t.Errorf("skips = %+v, want one line of each kind left out", counts.skips)
+	}
+	report := storyPointsTrainReport(storypoints.Model{TrainedOn: "fixture"}, counts, storyPointsProposedName, holdoutScore{})
+	want := "log line without an embedding 1, log line embedding of another size 1"
+	if !strings.Contains(report, want) {
+		t.Errorf("report does not say %q:\n%s", want, report)
+	}
+}
+
+// TestStoryPointsTrainRefusesAnUnreadableLog: a log that cannot be read stops
+// the step naming the path, rather than reading as no log and fitting every
+// bead on text it may have edited.
+func TestStoryPointsTrainRefusesAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	// The log's path is a directory: opening it succeeds and reading it fails.
+	if err := os.MkdirAll(estlog.Path(fix.town), 0o755); err != nil {
+		t.Fatalf("make the log path a directory: %v", err)
+	}
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+	err := Run(context.Background(), CommandStoryPointsTrain, c)
+	if err == nil {
+		t.Fatalf("storypoints-train returned no error")
+	}
+	if !strings.Contains(err.Error(), "estimates.jsonl") {
+		t.Errorf("err = %v, want it to name the log", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(fix.outDir, storyPointsProposedName)); statErr == nil {
+		t.Errorf("a run that could not read the log wrote a proposed file")
+	}
+}
+
+// TestStoryPointsTrainCountsTheLogsMalformedLines: a line the log's reader skips
+// is counted in the report, so a torn log is visible and not read as a log with
+// fewer beads.
+func TestStoryPointsTrainCountsTheLogsMalformedLines(t *testing.T) {
+	t.Parallel()
+	beads := trainTestBeads(90, 1, true)
+	fix := newTrainTestFixture(t, beads)
+	fix.appendLog(t, logRecord(beads[0].id, "an-earlier-text", estlog.Shape{Boxes: 2}, make([]float32, trainTestDim)))
+	f, err := os.OpenFile(estlog.Path(fix.town), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open estimate log: %v", err)
+	}
+	if _, err := f.WriteString("{\"bead_id\":\n"); err != nil {
+		t.Fatalf("append torn line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close estimate log: %v", err)
+	}
+	var out strings.Builder
+	c := fix.commands(t, &out, trainTestEmbedder{}, fix.store())
+	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
+		t.Fatalf("storypoints-train: %v", err)
+	}
+	want := "(the log skipped 1 malformed line(s))"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("report does not say %q:\n%s", want, out.String())
 	}
 }
