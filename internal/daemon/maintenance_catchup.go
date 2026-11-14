@@ -194,7 +194,8 @@ func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked 
 // older than the catch-up age all mean no gc; the check fires every 5 minutes,
 // so a deferral simply retries on a later tick. Only a cycle that ran to its
 // end sets the retry gap, and only a failed one escalates (maintenanceGCCycle
-// does that).
+// does that). An external server's list sets the gap too when it fails or
+// finds nothing due, so the server is asked once per gap, not every tick.
 // Nothing here counts toward the skipped-window streak and nothing sets the
 // cycle-completion time the window folds into lastMaintenanceRun: the next
 // window still takes its own backup and runs its own gc.
@@ -243,7 +244,15 @@ func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 	} else {
 		databases, err = s.serverDatabases(d)
 	}
+	// A list over SQL is asked once per maintenanceCatchUpRetry, not on every
+	// tick: a list that fails, finds no database or finds none due starts the
+	// gap, so a fresh backup does not cost a server round trip every 5 minutes
+	// (gt-05bwxa). A due database that the backup split or the quiet guard
+	// defers below does not start it, and is retried on the next tick.
 	if err != nil || len(databases) == 0 {
+		if !localDataDir {
+			d.catchUpGCAttemptAt.Store(now.UnixNano())
+		}
 		return
 	}
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
@@ -255,7 +264,12 @@ func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 	}
 	due := catchUpGCDue(now, databases, st)
 	if len(due) == 0 {
-		return // nothing stale; this check fires every 5 minutes
+		// Nothing stale: an external server is not asked again until the gap
+		// has passed (gt-05bwxa).
+		if !localDataDir {
+			d.catchUpGCAttemptAt.Store(now.UnixNano())
+		}
+		return
 	}
 	// A fresh backup on disk is not a backup of a database created after it: a
 	// database no backup holds is logged and skipped, and the rest still run
