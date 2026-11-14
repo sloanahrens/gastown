@@ -104,7 +104,7 @@ func newVerdictTick(t *testing.T, n int) *verdictTick {
 	v.store = newCountingStore(db)
 	memory := newSpecAnnotatedTick(v.root, "daemon-1", func(string) beads.Client { return nil }).memory
 	v.env = v.wire(f, newSpecCandidateVerdicts(memory,
-		specCandidateInputsFor(f.env().Template, f.env().ShapeGate, f.env().MaxPriority,
+		specCandidateInputsFor(f.env().Template, f.env().ShapeGate, f.env().MaxPriority, f.env().StoryPointLintOver,
 			func(string) *specdispatch.TargetTree { return nil }, nil)))
 	return v
 }
@@ -285,7 +285,7 @@ func TestSpecCandidateVerdictsKeyOnTheRigList(t *testing.T) {
 	none := func(string) *specdispatch.TargetTree { return nil }
 	tmpl := specdispatch.LoadTemplate("")
 	inputs := func(rigs []string) specCandidateInputs {
-		return specCandidateInputsFor(tmpl, "warn", 2, none, rigs)("gastown")
+		return specCandidateInputsFor(tmpl, "warn", 2, 0, none, rigs)("gastown")
 	}
 	before := inputs(nil)
 	withOm := inputs([]string{"gastown", "om"})
@@ -294,6 +294,23 @@ func TestSpecCandidateVerdictsKeyOnTheRigList(t *testing.T) {
 	}
 	if again := inputs([]string{"gastown", "om"}); again != withOm {
 		t.Errorf("the same rig list keyed differently: %+v and %+v", again, withOm)
+	}
+}
+
+// The size gate is one of the knobs a verdict was decided under: a clean
+// verdict reached with lint_over_minutes off is not served to the tick that
+// runs with it set (gt-mtzx6s).
+func TestSpecCandidateVerdictsKeyOnTheSizeGate(t *testing.T) {
+	t.Parallel()
+	none := func(string) *specdispatch.TargetTree { return nil }
+	tmpl := specdispatch.LoadTemplate("")
+	off := specCandidateInputsFor(tmpl, "warn", 2, 0, none, nil)("gastown")
+	on := specCandidateInputsFor(tmpl, "warn", 2, 11, none, nil)("gastown")
+	if off == on {
+		t.Fatalf("a verdict with the size gate off and at 11 has the same key: %+v", off)
+	}
+	if again := specCandidateInputsFor(tmpl, "warn", 2, 11, none, nil)("gastown"); again != on {
+		t.Errorf("the same size gate keyed differently: %+v and %+v", again, on)
 	}
 }
 
@@ -354,7 +371,7 @@ func TestSpecCandidateVerdictsAreRereadWhenTheRulesChange(t *testing.T) {
 
 	tighter := v.retownWith(newFakeVerdictTown(v), newSpecCandidateVerdicts(v.env.Verdicts.memory,
 		specCandidateInputsFor(specdispatch.Template{Sections: append(append([]string(nil), v.env.Template.Sections...), "Notes"), Source: "built-in"},
-			v.env.ShapeGate, v.env.MaxPriority, func(string) *specdispatch.TargetTree { return nil }, nil)))
+			v.env.ShapeGate, v.env.MaxPriority, v.env.StoryPointLintOver, func(string) *specdispatch.TargetTree { return nil }, nil)))
 	tighter.Template = specdispatch.Template{Sections: append(append([]string(nil), v.env.Template.Sections...), "Notes"), Source: "built-in"}
 
 	r := runSpecDispatchCycle(tighter)

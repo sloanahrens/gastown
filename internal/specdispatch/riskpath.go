@@ -14,8 +14,9 @@ const riskPathWarnMin = 3
 
 // sizeOkLabel is the overseer's waiver of a bead's size: a bead wearing it is
 // one the overseer has looked at and accepted, so the risk-path warning is not
-// repeated on it. The label is the size gate's (gt-d4uh4f); the lint only
-// reads it here.
+// repeated on it. The lint reads the same label in the story-point size gate,
+// which passes a bead wearing it whatever its sp-minutes label says
+// (gt-d4uh4f, gt-mtzx6s).
 const sizeOkLabel = "size-ok"
 
 // riskPathWarnText is the one WARN line a bead naming riskPathWarnMin or more
