@@ -1,0 +1,62 @@
+om lessons proposals: 2026-10-24 to 2026-10-30 (7 days), against 2026-10-17 to 2026-10-23
+rules read from testdata/om_lessons_directives; a class needs 5 findings in the window to get a draft
+
+--- an error reads as success (fail-open)
+Coverage: violated-anyway: rule #1 covers it and it still appears
+Counts: 6 finding(s) on 4 bead(s), 2 round(s) burned; prior window 1 finding(s) on 1 bead(s), 0 round(s)
+Examples: gt-a, gt-b, gt-c
+
+Goal: a directive edit that stops om raising this class.
+Constraints: the edit goes to the directive files in testdata/om_lessons_directives; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.
+Out of scope: om's bar or threshold; turning anything on.
+Gate: go test ./internal/cmd -run TestLandOmLessons -count=1
+Size: one directive edit, one landing.
+Acceptance:
+- [ ] the rule for this class says what the case is and what to do instead
+- [ ] the next weekly pass counts fewer findings of this class than this window
+
+too few to say: a bad input is dropped without a word (0 finding(s) in the window)
+
+--- a refusal branch has no test (missing-refusal-test)
+Coverage: gap: the table names rule #3 and the directive has no rule #3
+Counts: 5 finding(s) on 5 bead(s), 0 round(s) burned; prior window 0 finding(s) on 0 bead(s), 0 round(s)
+Examples: gt-j, gt-k, gt-l
+
+Goal: a directive edit that stops om raising this class.
+Constraints: the edit goes to the directive files in testdata/om_lessons_directives; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.
+Out of scope: om's bar or threshold; turning anything on.
+Gate: go test ./internal/cmd -run TestLandOmLessons -count=1
+Size: one directive edit, one landing.
+Acceptance:
+- [ ] the rule for this class says what the case is and what to do instead
+- [ ] the next weekly pass counts fewer findings of this class than this window
+
+too few to say: no test goes red when the code is removed (0 finding(s) in the window)
+
+--- a wait or sleep on the wall clock (wall-clock-wait)
+Coverage: gap: no numbered rule covers it
+Counts: 5 finding(s) on 5 bead(s), 0 round(s) burned; prior window 0 finding(s) on 0 bead(s), 0 round(s)
+Examples: gt-e, gt-f, gt-g
+
+Goal: a directive edit that stops om raising this class.
+Constraints: the edit goes to the directive files in testdata/om_lessons_directives; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.
+Out of scope: om's bar or threshold; turning anything on.
+Gate: go test ./internal/cmd -run TestLandOmLessons -count=1
+Size: one directive edit, one landing.
+Acceptance:
+- [ ] the rule for this class says what the case is and what to do instead
+- [ ] the next weekly pass counts fewer findings of this class than this window
+
+too few to say: package state or a test on the host (0 finding(s) in the window)
+
+too few to say: a doc says what the code does not do (0 finding(s) in the window)
+
+too few to say: a comment carries a line number or an untrue claim (0 finding(s) in the window)
+
+too few to say: the change reaches past its scope (0 finding(s) in the window)
+
+too few to say: a secret reaches output (2 finding(s) in the window)
+
+too few to say: a new script holds the logic (0 finding(s) in the window)
+
+too few to say: a verification claim shows no output (0 finding(s) in the window)

@@ -329,3 +329,192 @@ func TestLandOmLessonsRejectsABadSince(t *testing.T) {
 		t.Errorf("error = %v, want it to name the accepted form", err)
 	}
 }
+
+// landOmLessonsFixtureDirectives is a directive set with rules 1, 2 and 7 in
+// polecat.md and none in the shared file: rule 3 is absent, so a class under it
+// reads as a gap naming the missing rule.
+var landOmLessonsFixtureDirectives = filepath.Join("testdata", "om_lessons_directives")
+
+// omLessonsProposeRecords is the review log the proposal cases read, all in the
+// window of 2026-10-24 to 2026-10-30: six fail-open findings (rule 1, which the
+// fixture directive has), five wall-clock findings (no rule), five
+// refusal-branch findings (rule 3, which the fixture lacks), two secret
+// findings (too few), one fail-open finding in the prior window, and one title
+// no class matches.
+func omLessonsProposeRecords() []land.ReviewRecord {
+	at := func(d int) time.Time { return time.Date(2026, 10, d, 10, 0, 0, 0, time.Local) }
+	rec := func(bead string, attempt, d int, sev, title string) land.ReviewRecord {
+		return land.ReviewRecord{BeadID: bead, Rig: "gastown", Attempt: attempt, Score: 0.5,
+			Verdict: land.VerdictRequestChanges, At: at(d),
+			FindingText: []land.ReviewFindingText{{ID: "f", Severity: sev, Title: title}}}
+	}
+	return []land.ReviewRecord{
+		rec("gt-a", 1, 24, "major", "the gate reads a failed read as clean"),
+		rec("gt-a", 2, 25, "major", "the gate reads a failed read as clean"),
+		rec("gt-b", 1, 25, "critical", "error reads as success on an empty status"),
+		rec("gt-c", 1, 26, "major", "treated as absent when the file is missing"),
+		rec("gt-c", 2, 27, "minor", "fail-open on unreadable routes"),
+		rec("gt-d", 1, 27, "major", "fail open when the lock is missing"),
+		rec("gt-e", 1, 24, "minor", "the test sleeps waiting for the daemon"),
+		rec("gt-f", 1, 25, "minor", "a busy-wait on the wall clock"),
+		rec("gt-g", 1, 26, "minor", "polls until the daemon answers"),
+		rec("gt-h", 1, 27, "minor", "a sleep before the check"),
+		rec("gt-i", 1, 28, "minor", "a wait of two seconds"),
+		rec("gt-j", 1, 24, "major", "the refusal branch has no test"),
+		rec("gt-k", 1, 25, "major", "the failing branch has no assertion"),
+		rec("gt-l", 1, 26, "major", "an untested error path"),
+		rec("gt-m", 1, 27, "major", "the error path has no test"),
+		rec("gt-n", 1, 28, "major", "lacks a test for the refusal"),
+		rec("gt-o", 1, 25, "major", "the token is echoed in the error"),
+		rec("gt-p", 1, 26, "major", "a password reaches the log"),
+		rec("gt-q", 1, 19, "major", "reads as clean on a bad input"),
+		rec("gt-r", 1, 29, "minor", "a finding from a class not yet seeded"),
+	}
+}
+
+// TestLandOmLessonsProposeGolden pins the drafts: a class with enough findings
+// gets one, with its coverage, counts and examples; a class under the threshold
+// is a too-few line with no draft.
+func TestLandOmLessonsProposeGolden(t *testing.T) {
+	t.Parallel()
+	path := writeLandOmLessonsRecords(t, t.TempDir(), omLessonsProposeRecords())
+	var out bytes.Buffer
+	if err := landOmLessonsProposeFrom(townThatFails, &out, landOmLessonsNow, "", omlessons.DefaultDays,
+		path, landOmLessonsFixtureDirectives); err != nil {
+		t.Fatal(err)
+	}
+	golden := filepath.Join("testdata", landOmLessonsProposeGoldenPath)
+	if *updateLandOmLessonsGolden {
+		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != string(want) {
+		t.Errorf("output differs from %s (rewrite with -update-land-om-lessons-golden):\n%s\nwant:\n%s", golden, out.String(), want)
+	}
+}
+
+const landOmLessonsProposeGoldenPath = "land_om_lessons_propose.golden"
+
+// TestLandOmLessonsProposeRefusesUnreadableRules: the coverage check reads the
+// directive files, so one that cannot be read, or a directive set with no
+// numbered rule at all, is an error. Without that, every class reads as a gap.
+func TestLandOmLessonsProposeRefusesUnreadableRules(t *testing.T) {
+	t.Parallel()
+	path := writeLandOmLessonsRecords(t, t.TempDir(), omLessonsProposeRecords())
+	cases := []struct {
+		name    string
+		dir     func(t *testing.T) string
+		wantErr string
+	}{
+		{
+			name:    "a directory that does not exist",
+			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") },
+			wantErr: "reading the directive",
+		},
+		{
+			name: "polecat.md missing",
+			dir: func(t *testing.T) string {
+				return writeLandOmLessonsDirectives(t, map[string]string{"_common.md": "## 1. shared rule\n"})
+			},
+			wantErr: "reading the directive",
+		},
+		{
+			name: "no numbered rule in either file",
+			dir: func(t *testing.T) string {
+				return writeLandOmLessonsDirectives(t, map[string]string{
+					"polecat.md": "## Tests\n\n## 1 without a dot is not a rule\n",
+					"_common.md": "## Changelog\n",
+				})
+			},
+			wantErr: "holds no numbered rules",
+		},
+		{
+			name: "a rule only in the shared file counts",
+			dir: func(t *testing.T) string {
+				return writeLandOmLessonsDirectives(t, map[string]string{
+					"polecat.md": "## Tests\n",
+					"_common.md": "## 1. shared rule\n",
+				})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := landOmLessonsProposeFrom(townThatFails, &out, landOmLessonsNow, "", omlessons.DefaultDays, path, tc.dir(t))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("error = %v, want none", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// writeLandOmLessonsDirectives writes the named directive files into a fresh
+// directory and returns it.
+func writeLandOmLessonsDirectives(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestLandOmLessonsProposeRunE drives the cobra command, so the --propose
+// dispatch and its refusal of --json are wired to the flags. It sets the
+// command's flags, which are package state, so it does not run in parallel and
+// restores the defaults when it is done.
+//
+//testpolicy:allow parallel — sets the om-lessons command's package-level flags, which a parallel test would share
+func TestLandOmLessonsProposeRunE(t *testing.T) {
+	path := writeLandOmLessonsRecords(t, t.TempDir(), omLessonsProposeRecords())
+	setFlag := func(name, value string) {
+		t.Helper()
+		if err := landOmLessonsCmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("setting --%s: %v", name, err)
+		}
+	}
+	t.Cleanup(func() {
+		setFlag("propose", "false")
+		setFlag("json", "false")
+		setFlag("since", "")
+		setFlag("records", "")
+		setFlag("directives", "directives")
+		landOmLessonsCmd.SetOut(nil)
+	})
+	setFlag("since", "2026-10-24")
+	setFlag("records", path)
+	setFlag("directives", landOmLessonsFixtureDirectives)
+
+	var out bytes.Buffer
+	landOmLessonsCmd.SetOut(&out)
+	setFlag("propose", "true")
+	if err := landOmLessonsCmd.RunE(landOmLessonsCmd, nil); err != nil {
+		t.Fatalf("RunE with --propose: %v", err)
+	}
+	if !strings.Contains(out.String(), "om lessons proposals: 2026-10-24 to 2026-10-30") {
+		t.Errorf("--propose did not print the proposals:\n%s", out.String())
+	}
+
+	setFlag("json", "true")
+	if err := landOmLessonsCmd.RunE(landOmLessonsCmd, nil); err == nil {
+		t.Error("--propose with --json: no error")
+	}
+}
