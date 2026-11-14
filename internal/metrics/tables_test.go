@@ -245,14 +245,16 @@ func TestExplainOnlyColumnsExtendThePinnedSet(t *testing.T) {
 			t.Errorf("explainOnlyColumns omits %q, which the pinned set marks explain-only", column)
 		}
 	}
-	// sp_estimated_at is the story-point write time: a timestamp, explain-only
-	// beside the stage stamps, and the one column past the appended set.
+	// sp_estimated_at is the story-point write time and polecat_work is derived
+	// from the landing's agent and route: both are known only after the landing,
+	// so they are explain-only past the appended set.
 	const storyPointTime = "sp_estimated_at"
-	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns)+1+len(omLandingColumns); got != want {
-		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended plus %s plus %d om",
-			got, len(legacy), len(appendedLandingColumns), storyPointTime, len(omLandingColumns))
+	polecatWork := polecatWorkLandingColumns[0]
+	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns)+1+len(omLandingColumns)+len(polecatWorkLandingColumns); got != want {
+		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended plus %s plus %d om plus %s",
+			got, len(legacy), len(appendedLandingColumns), storyPointTime, len(omLandingColumns), polecatWork)
 	}
-	for _, column := range slices.Concat(appendedLandingColumns, []string{storyPointTime}, omLandingColumns) {
+	for _, column := range slices.Concat(appendedLandingColumns, []string{storyPointTime}, omLandingColumns, polecatWorkLandingColumns) {
 		if !slices.Contains(explainOnlyColumns, column) {
 			t.Errorf("explainOnlyColumns omits the stage column %q", column)
 		}
@@ -300,6 +302,7 @@ const landingSidecarBytes = `{
   "polecat_attempts",
   "polecat_lower_bound",
   "polecat_secs",
+  "polecat_work",
   "seat_class",
   "sp_actual",
   "sp_estimated_at",

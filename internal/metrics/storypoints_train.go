@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -58,8 +59,9 @@ const storyPointsEmbedTimeout = 60 * time.Second
 // trainSkips counts the landed rows the retrain did not read, by reason. A row
 // skipped for a reason the report names is never read as a fitted bead.
 type trainSkips struct {
+	notPolecat int // the landing did not come through a polecat seat
 	seat       int // seat class is neither haiku nor flash
-	unmeasured int // no polecat time, or a lower bound
+	unmeasured int // no polecat time
 	noBead     int // the bead is not in its rig's store
 	noText     int // the bead has neither a Constraints nor an Acceptance section
 	badRig     int // the rig names no directory under the town
@@ -90,9 +92,12 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	if err != nil {
 		return fmt.Errorf("read %s (run %s first): %w", path, CommandExtract, err)
 	}
-	_, rows, err := ReadLandings(bytes.NewReader(data))
+	header, rows, err := ReadLandings(bytes.NewReader(data))
 	if err != nil {
 		return err
+	}
+	if !slices.Contains(header, "polecat_work") {
+		return fmt.Errorf("%s: no polecat_work column (run %s first): the table is from an older extract", path, CommandExtract)
 	}
 	base := storypoints.Default()
 	if c.StoryPointsBase != nil {
@@ -125,24 +130,29 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	return err
 }
 
-// trainingSamples reads the rows the retrain fits. A row is read when its seat
-// class is haiku or flash, its polecat time is measured (not a lower bound and not
-// absent), its rig names a directory, and its bead is in the store with a
-// Constraints or Acceptance section. The others are counted in skips. An embedder
-// error fails the whole step: a bead the embedder could not read is not a bead the
-// fit may leave out without saying so.
+// trainingSamples reads the rows the retrain fits. A row is read when it came
+// through a polecat seat, its seat class is haiku or flash, its polecat time is
+// present, its rig names a directory, and its bead is in the store with a
+// Constraints or Acceptance section. A lower-bound time is read at its floor:
+// dropping it would remove the long beads, which are the ones the bound marks.
+// The others are counted in skips. An embedder error fails the whole step: a bead
+// the embedder could not read is not a bead the fit may leave out without saying so.
 func trainingSamples(ctx context.Context, env Env, town string, rows []Row, embedder storypoints.Embedder) ([]storypoints.Sample, trainSkips, error) {
 	var skips trainSkips
 	var cands []trainCandidate
 	byDir := map[string][]string{}
 	for _, row := range rows {
+		if row["polecat_work"] != "1" {
+			skips.notPolecat++
+			continue
+		}
 		seat, ok := trainSeat(row["seat_class"])
 		if !ok {
 			skips.seat++
 			continue
 		}
 		secs, err := strconv.ParseFloat(row["polecat_secs"], 64)
-		if row["polecat_lower_bound"] != "0" || err != nil || !(secs > 0) {
+		if err != nil || !(secs > 0) {
 			skips.unmeasured++
 			continue
 		}
@@ -294,8 +304,8 @@ func removeStoryPointsOutputs(dir string, remove func(string) error) error {
 func storyPointsTrainReport(m storypoints.Model, skips trainSkips, name string, score holdoutScore) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "story points retrain: the proposed weights are the fit on the earlier 80%% of landed beads (%s); the holdout scores that same fit, which is not refitted on all rows\n", m.TrainedOn)
-	fmt.Fprintf(&b, "not read: seat class %d, unmeasured %d, bead not in store %d, no Constraints or Acceptance %d, rig without a directory %d\n",
-		skips.seat, skips.unmeasured, skips.noBead, skips.noText, skips.badRig)
+	fmt.Fprintf(&b, "not read: not polecat work %d, seat class %d, unmeasured %d, bead not in store %d, no Constraints or Acceptance %d, rig without a directory %d\n",
+		skips.notPolecat, skips.seat, skips.unmeasured, skips.noBead, skips.noText, skips.badRig)
 	fmt.Fprintf(&b, "penalties: shape %g, embedding %g\n", m.ShapeAlpha, m.EmbedAlpha)
 	b.WriteString("fits-to-minutes knots are the checked-in model's, not refit: recalibrate before adopting\n")
 	fmt.Fprintf(&b, "holdout: latest %d beads (the earlier beads fit the penalties and the weights)\n", len(m.Holdout))
