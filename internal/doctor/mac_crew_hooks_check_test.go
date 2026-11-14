@@ -272,6 +272,27 @@ func TestMacCrewHooksInAPodStillReportsAFinding(t *testing.T) {
 	}
 }
 
+// TestMacCrewHooksZeroValueCheckFallsBackInsteadOfPanicking: a check with no getenv
+// injected falls back to the process environment rather than dereferencing nil.
+// The pod variable is host state, so the result is either a pass or the pod
+// warning; the test asserts the run returns one of those on a healthy clone.
+func TestMacCrewHooksZeroValueCheckFallsBackInsteadOfPanicking(t *testing.T) {
+	t.Parallel()
+	config := "[core]\n\thooksPath = .githooks\n"
+	town, clone := crewHooksTown(t, &config)
+	if err := os.MkdirAll(filepath.Join(clone, ".githooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := (&MacCrewHooksCheck{}).Run(&CheckContext{TownRoot: town})
+	if res.Status != StatusOK && res.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusOK or StatusWarning: %+v", res.Status, res)
+	}
+	if len(res.Details) != 0 {
+		t.Errorf("Details = %v, want none", res.Details)
+	}
+}
+
 // TestMacCrewHooksWithNoCrewDirectoriesWarns: a town with no crew clones gives a
 // WARNING that says to run the check on a native gt. It is not a pass, so a run in
 // the pod cannot report clean.

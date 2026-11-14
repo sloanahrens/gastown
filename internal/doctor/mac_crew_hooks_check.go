@@ -32,9 +32,8 @@ const macCrewHooksNativeHint = "Run 'gt doctor --check mac-crew-hooks' on a nati
 // (gt-hhkgui).
 type MacCrewHooksCheck struct {
 	BaseCheck
-	// getenv reads the environment. NewMacCrewHooksCheck wires os.Getenv; a test
-	// replaces it so its result does not depend on whether the test process runs
-	// inside a pod.
+	// getenv reads the environment; nil reads os.Getenv. A test sets it so its
+	// result does not depend on whether the test process runs inside a pod.
 	getenv func(string) string
 }
 
@@ -46,7 +45,6 @@ func NewMacCrewHooksCheck() *MacCrewHooksCheck {
 			CheckDescription: "Report a crew clone whose core.hooksPath points at a missing directory or whose .git/config cannot be read",
 			CheckCategory:    CategoryConfig,
 		},
-		getenv: os.Getenv,
 	}
 }
 
@@ -120,7 +118,11 @@ func (c *MacCrewHooksCheck) Run(ctx *CheckContext) *CheckResult {
 // inPod reports whether the check runs in a pod, whose scan sees only the clones
 // mounted there (gt-hhkgui).
 func (c *MacCrewHooksCheck) inPod() bool {
-	return sweeprunner.InClusterHost(c.getenv)
+	getenv := c.getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return sweeprunner.InClusterHost(getenv)
 }
 
 func (c *MacCrewHooksCheck) result(status CheckStatus, msg string, details []string, hint string) *CheckResult {
