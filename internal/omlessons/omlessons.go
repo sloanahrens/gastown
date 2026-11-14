@@ -25,6 +25,9 @@ const (
 	// Unclassified is the id the report counts a finding under when no class
 	// matches it.
 	Unclassified = "unclassified"
+
+	// ExampleBeadLimit is how many bead ids a class row names as examples.
+	ExampleBeadLimit = 3
 )
 
 // Class is one rejection class: a row of the table that turns om's finding
@@ -184,6 +187,10 @@ type ClassRow struct {
 	Rule    int         `json:"rule,omitempty"`
 	Current ClassCounts `json:"current"`
 	Prior   ClassCounts `json:"prior"`
+	// ExampleBeads are the first ExampleBeadLimit bead ids, in sorted order, of
+	// the current window's findings in the class. They are the first ids, not a
+	// sample, so a rerun over the same log names the same beads.
+	ExampleBeads []string `json:"-"`
 }
 
 // ClassCounts is how one window's findings fell into a class.
@@ -234,6 +241,7 @@ func Cluster(records []land.ReviewRecord, sp Span) Report {
 		rep.Classes = append(rep.Classes, ClassRow{
 			ID: c.ID, Name: c.Name, Rule: c.Rule,
 			Current: cur.counts(c.ID), Prior: pri.counts(c.ID),
+			ExampleBeads: cur.examples(c.ID),
 		})
 	}
 	return rep
@@ -310,6 +318,24 @@ func (w *windowTally) counts(id string) ClassCounts {
 		}
 	}
 	return ClassCounts{Findings: t.findings, Beads: len(t.beads), Rounds: rounds}
+}
+
+// examples returns the first ExampleBeadLimit bead ids, sorted, that carry a
+// finding of the class in the window.
+func (w *windowTally) examples(id string) []string {
+	t := w.classes[id]
+	if t == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(t.beads))
+	for bead := range t.beads {
+		ids = append(ids, bead)
+	}
+	sort.Strings(ids)
+	if len(ids) > ExampleBeadLimit {
+		ids = ids[:ExampleBeadLimit]
+	}
+	return ids
 }
 
 func (w *windowTally) window(b Bounds) Window {

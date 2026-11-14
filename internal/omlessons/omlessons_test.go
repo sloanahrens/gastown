@@ -418,3 +418,41 @@ func TestClusterWindowsAreHalfOpen(t *testing.T) {
 			rep.Window.Verdicts, rep.Prior.Verdicts)
 	}
 }
+
+// TestClusterNamesTheFirstExampleBeads: a class names up to ExampleBeadLimit
+// bead ids, the first in sorted order, from the current window only, and a
+// class with no finding in the window names none.
+func TestClusterNamesTheFirstExampleBeads(t *testing.T) {
+	t.Parallel()
+	sp, err := Windows(day(30, 12), time.Time{}, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const drop = "the helper silently swallows the read error"
+	var recs []land.ReviewRecord
+	for _, bead := range []string{"gt-e", "gt-b", "gt-d", "gt-a", "gt-c"} {
+		recs = append(recs, land.ReviewRecord{BeadID: bead, Attempt: 1, Verdict: land.VerdictRequestChanges, At: day(26, 10),
+			FindingText: []land.ReviewFindingText{{Severity: "major", Title: drop}}})
+	}
+	// Sorts before every window bead, so naming it would show the prior
+	// window leaking into the examples.
+	recs = append(recs, land.ReviewRecord{BeadID: "gt-0", Attempt: 1, Verdict: land.VerdictRequestChanges, At: day(19, 10),
+		FindingText: []land.ReviewFindingText{{Severity: "major", Title: drop}}})
+	rep := Cluster(recs, sp)
+	examples := func(id string) []string {
+		t.Helper()
+		for _, c := range rep.Classes {
+			if c.ID == id {
+				return c.ExampleBeads
+			}
+		}
+		t.Fatalf("report has no class %q", id)
+		return nil
+	}
+	if got, want := examples("silent-drop"), []string{"gt-a", "gt-b", "gt-c"}; !slices.Equal(got, want) {
+		t.Errorf("silent-drop examples = %v, want %v", got, want)
+	}
+	if got := examples("wall-clock-wait"); len(got) != 0 {
+		t.Errorf("wall-clock-wait examples = %v, want none", got)
+	}
+}
