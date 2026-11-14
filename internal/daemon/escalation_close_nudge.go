@@ -14,7 +14,6 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
-	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -24,6 +23,11 @@ import (
 // the close reason (gt-jx0s09). Closing an escalation resumes a seat whose
 // session ended (gt-4hduq); this covers the seat that never went away. The
 // patrol_scan tick runs it once per cycle, after the rigs are scanned.
+//
+// The nudge is typed into the seat's pane by the default wait-idle delivery,
+// not written to the host's file queue: an idle seat drains no queue, and a
+// sandbox seat's hooks read a different filesystem, so a queued answer never
+// reaches it (gt-700w3u).
 //
 // A close is a move from open to closed between two ticks, so the pass only
 // announces an escalation whose id it saw open on an earlier tick. That state
@@ -78,7 +82,8 @@ type escalationCloseSeams struct {
 	holding func(rig, name string) (string, error)
 	// seat reads the seat's session.
 	seat func(rig, name string) (escalationSeat, error)
-	// nudge delivers msg to target, a "rig/name" seat address.
+	// nudge types msg into target's pane, a "rig/name" seat address, using
+	// the default wait-idle delivery rather than the target's file queue.
 	nudge func(target, msg string) error
 	// save persists the state a pass reached.
 	save func(escalationCloseState) error
@@ -125,7 +130,7 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 		nudge: func(target, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), escalationCloseNudgeTimeout)
 			defer cancel()
-			return d.notify().Nudge(ctx, target, msg, notify.Queue())
+			return d.notify().Nudge(ctx, target, msg)
 		},
 		save: func(st escalationCloseState) error {
 			return saveEscalationCloseState(path, st)

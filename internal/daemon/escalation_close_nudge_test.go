@@ -141,6 +141,29 @@ func TestEscalationCloseNudgesLiveSeatOnceAcrossTicks(t *testing.T) {
 	}
 }
 
+// The close nudge is typed into the seat's pane by the default wait-idle
+// delivery, not written to the host's file queue, which an idle seat never
+// drains and a sandbox seat cannot read (gt-h7f9cc, gt-700w3u). The recorded
+// send must take that path, so Queue is false.
+func TestEscalationCloseNudgeGoesToPane(t *testing.T) {
+	t.Parallel()
+	w := newEscalationCloseTown(t)
+	w.hold(closeTestBead, closeTestSeat)
+	w.session("capable", true, true)
+	w.escalate(closeTestEscID, closeTestSeat, closeTestBead, "open", "")
+	w.tick()
+	w.close(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason)
+	w.tick()
+
+	got := w.delivered()
+	if len(got) != 1 {
+		t.Fatalf("tick after close: %d nudges, want 1", len(got))
+	}
+	if got[0].Nudge.Queue {
+		t.Error("close nudge was queued, want the wait-idle delivery into the pane")
+	}
+}
+
 // A seat is nudged only when it still holds the escalation's bead, has a live
 // session, and is at its prompt. Each row opens the escalation, closes it, and
 // ticks once.
