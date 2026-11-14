@@ -616,6 +616,15 @@ func TestTrackerDaemonGolden(t *testing.T) {
 	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-tracker.yaml", document(t, built.Deployment))
 }
 
+// TestTrackerdDeploymentGolden holds the trackerd Deployment's rendered shape,
+// its pod and its own resource pair, when the tracker is rendered. The daemon's
+// golden does not cover it: TestTrackerDeployment walks the fields by hand.
+func TestTrackerdDeploymentGolden(t *testing.T) {
+	t.Parallel()
+	built := mustBuild(t, trackerValues(t))
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-trackerd.yaml", document(t, built.TrackerDeployment))
+}
+
 // TestTrackerDeployment walks the tracker pod: trackerd on loopback with the DSN
 // Secret's dsn key in TRACKER_DSN, the relay sidecar publishing TrackerPort from
 // TrackerListenPort, and the pod shape that reaches nothing else: no
