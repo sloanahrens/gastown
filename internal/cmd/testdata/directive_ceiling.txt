@@ -2,4 +2,7 @@
 # TestDirectiveCeiling holds the committed directive to (internal/cmd/directive_size_test.go).
 # It moves only down. A commit that cuts a rule or merges two lowers this number
 # to the size it renders; no commit raises it.
+# The target is 12 KB (12,288 bytes), set in docs/design/rework-program.md item 4.
+# The number below is the polecat directive's rendered size as TestDirectiveCeiling
+# renders it as of this commit: 3,096 bytes over the target.
 15384
