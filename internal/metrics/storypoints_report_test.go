@@ -583,6 +583,8 @@ func TestStoryPointsDriftRefusesBadCells(t *testing.T) {
 		{name: "sp_minutes not a number", edit: rowWith("sp_minutes", "soon")},
 		{name: "sp_minutes zero", edit: rowWith("sp_minutes", "0")},
 		{name: "polecat_secs not a number", edit: rowWith("polecat_secs", "soon")},
+		{name: "sp_estimated_at not a timestamp", edit: rowWith("sp_estimated_at", "soon")},
+		{name: "dispatched_at not a timestamp", edit: rowWith("dispatched_at", "soon")},
 		{name: "no landed_at", edit: rowWithout("landed_at")},
 		{name: "unreadable landed_at", edit: rowWith("landed_at", "soon")},
 	}
@@ -595,6 +597,29 @@ func TestStoryPointsDriftRefusesBadCells(t *testing.T) {
 				t.Error("StoryPointsDriftOver returned no error")
 			}
 		})
+	}
+}
+
+// TestStoryPointsDriftLeavesOutAMissingTimestamp: a landing with no estimate
+// write time, or no dispatch time, is not known to have been estimated first, so
+// it is not in the window; a missing cell is not the unreadable cell that stops
+// the measure.
+func TestStoryPointsDriftLeavesOutAMissingTimestamp(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	rows := driftLandings(32, base, func(i int) float64 { return float64(i + 1) })
+	rows[0] = rowWithout("sp_estimated_at")(rows[0])
+	rows[31] = rowWithout("dispatched_at")(rows[31])
+
+	got, err := StoryPointsDriftOver(rows, nil)
+	if err != nil {
+		t.Fatalf("StoryPointsDriftOver: %v", err)
+	}
+	if got.N != 30 {
+		t.Errorf("window N = %d, want the 30 landings whose write time is known", got.N)
+	}
+	if !got.Current.Measurable || got.Current.Rho != 1 {
+		t.Errorf("Current = %+v, want the perfect ranking of the remaining landings", got.Current)
 	}
 }
 

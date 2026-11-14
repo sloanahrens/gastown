@@ -603,7 +603,14 @@ func driftLandingOf(row Row) (driftLanding, bool, error) {
 	if err != nil {
 		return driftLanding{}, false, fmt.Errorf("story points drift: %w", err)
 	}
-	if !hasMeasure || !estimatedBeforeDispatch(row) {
+	if !hasMeasure {
+		return driftLanding{}, false, nil
+	}
+	before, err := driftEstimatedBeforeDispatch(row)
+	if err != nil {
+		return driftLanding{}, false, err
+	}
+	if !before {
 		return driftLanding{}, false, nil
 	}
 	landed, err := ParseTS(row["landed_at"])
@@ -611,6 +618,36 @@ func driftLandingOf(row Row) (driftLanding, bool, error) {
 		return driftLanding{}, false, fmt.Errorf("story points drift: landed_at: %w", err)
 	}
 	return driftLanding{row: row, est: est, measured: measured, landed: landed}, true, nil
+}
+
+// driftEstimatedBeforeDispatch reports whether a landing's estimate was written
+// before its first dispatch. A missing cell is a landing the table does not
+// place on that clock, so it is not in the window; a cell that is present and
+// does not parse is an error, since the table is then not the contract and the
+// landing cannot be read as one that was not written first.
+func driftEstimatedBeforeDispatch(row Row) (bool, error) {
+	written, ok, err := driftStamp(row["sp_estimated_at"], "sp_estimated_at")
+	if err != nil || !ok {
+		return false, err
+	}
+	dispatched, ok, err := driftStamp(row["dispatched_at"], "dispatched_at")
+	if err != nil || !ok {
+		return false, err
+	}
+	return written.Before(dispatched), nil
+}
+
+// driftStamp reads one of the two stamps the drift window compares. An empty
+// cell is no stamp, and a stamp that does not parse is an error.
+func driftStamp(cell, column string) (time.Time, bool, error) {
+	if cell == "" {
+		return time.Time{}, false, nil
+	}
+	at, err := ParseTS(cell)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("story points drift: %s: %w", column, err)
+	}
+	return at, true, nil
 }
 
 // measuredMinutesCell reads a landing's measured polecat time in minutes. An
