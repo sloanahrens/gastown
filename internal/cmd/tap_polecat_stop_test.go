@@ -448,13 +448,19 @@ func TestPolecatStopParsedReading(t *testing.T) {
 		{name: "make test as a conditional word", argv: `[[ make test ]]`, old: true, block: true},
 
 		// Unreadable to parsedTokens: the unreadable reading blocks every such
-		// argv (TestUnreadableCommandFailsClosedInPolecatStop), so a row the old
-		// shellTokenize reading allowed now blocks. Changed: an open quote hid
-		// the make test from the old reading.
+		// argv (TestUnreadableCommandFailsClosedInPolecatStop). The rows with
+		// old false are the gt-exndxu verdict flips: the shellTokenize reading
+		// allowed them and the Stop guard now blocks. Every flip tightens, and
+		// no flip is in guard_corpus.tsv, since the Stop guard has no corpus
+		// context.
 		{name: "unreadable stray double semicolon still blocks", argv: "echo a;; make test", old: true, block: true},
 		{name: "unreadable slot-run wrapper with an open quote still blocks", argv: "gt slot run --role x -- make test < /dev/null 'x", old: true, block: true},
 		{name: "unreadable eval with an open quote now blocks", argv: `sh -c 'make test`, old: false, block: true},
 		{name: "unreadable eval body and open quote now blocks", argv: `eval 'make test' ; echo 'unterminated`, old: false, block: true},
+		{name: "unreadable double quote with no gate now blocks", argv: `echo "hello`, old: false, block: true},
+		{name: "unreadable single quote with no gate now blocks", argv: `cat 'notes`, old: false, block: true},
+		{name: "unreadable glob removal with an open quote now blocks", argv: `rm -rf /tmp/x/* "`, old: false, block: true},
+		{name: "unreadable shell -c with no gate now blocks", argv: `sh -c 'echo hi`, old: false, block: true},
 
 		// Data, not a command, on both readings.
 		{name: "make test in double quotes is data", argv: `echo "make test"`, old: false, block: false},
@@ -478,7 +484,8 @@ func TestPolecatStopParsedReading(t *testing.T) {
 // an argv the parser cannot read (gt-bowsdz): the Stop guard blocks the stop and
 // says the command could not be read. Each row is one the text split alone
 // would allow, since its text holds no gate, so a fallback back to shellTokenize
-// turns the rows red.
+// turns the rows red. The verdict flips these rows make are listed, with their
+// old outcome, in TestPolecatStopParsedReading.
 func TestUnreadableCommandFailsClosedInPolecatStop(t *testing.T) {
 	t.Parallel()
 	const session = "gt-coral"
@@ -519,8 +526,11 @@ func TestUnreadableCommandFailsClosedInPolecatStop(t *testing.T) {
 
 // TestPolecatStopReadableVerdictsUnchanged pins the verdicts of commands the
 // parser reads (gt-bowsdz): the fail-closed reading for an unreadable argv must
-// not loosen or tighten a readable one. The rows run the production split and
-// suites, so a change to either side turns a row red.
+// not loosen or tighten a readable one. The expected outcome is the one the
+// shellTokenize reading gives, computed here rather than trusted from the row,
+// which is the outcome the guard gave before gt-crn9gu (see
+// TestPolecatStopParsedReading). The production split must match it, so a change
+// to either side turns a row red.
 func TestPolecatStopReadableVerdictsUnchanged(t *testing.T) {
 	t.Parallel()
 	suites := stopCheckMatchingSuites([]polecat.Invocation{
@@ -529,9 +539,9 @@ func TestPolecatStopReadableVerdictsUnchanged(t *testing.T) {
 		{Program: "make", Target: "build"},
 	})
 	tests := []struct {
-		name      string
-		argv      string
-		wantBlock bool
+		name  string
+		argv  string
+		block bool
 	}{
 		{"make test", `make test`, true},
 		{"gt slot run wrapper", `gt slot run --role x -- make test`, true},
@@ -550,9 +560,13 @@ func TestPolecatStopReadableVerdictsUnchanged(t *testing.T) {
 			if _, readable := parsedTokens(tt.argv); !readable {
 				t.Fatalf("fixture %q does not parse, so it is not a readable command", tt.argv)
 			}
+			_, oldOK := polecat.SuiteArgv(tt.argv, stopCheckShellTokens, suites)
+			if oldOK != tt.block {
+				t.Fatalf("shellTokenize reading of %q blocks = %v, but the row names the outcome as %v", tt.argv, oldOK, tt.block)
+			}
 			got, ok := polecat.SuiteArgv(tt.argv, stopCheckTokens, suites)
-			if ok != tt.wantBlock {
-				t.Fatalf("polecat.SuiteArgv(%q) = (%q, %v), want block=%v", tt.argv, got, ok, tt.wantBlock)
+			if ok != oldOK {
+				t.Fatalf("polecat.SuiteArgv(%q) = (%q, %v), want the shellTokenize outcome block=%v", tt.argv, got, ok, oldOK)
 			}
 		})
 	}
