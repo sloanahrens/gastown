@@ -439,7 +439,7 @@ func TestStoryPointsTrainSkipsAndCountsUnreadBeads(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "not read: not polecat work 1, seat class 0, unmeasured 1, log line without an embedding 0, log line embedding of another size 0, bead not in store 1, no Constraints or Acceptance 1, rig without a directory 0"
+	want := "not read: not polecat work 1, seat class 0, unmeasured 1, bead not in store 1, no Constraints or Acceptance 1, rig without a directory 0"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report = %q, want the line %q", out.String(), want)
 	}
@@ -467,7 +467,7 @@ func TestStoryPointsTrainFitsOnlyPolecatLandings(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "not read: not polecat work 30, seat class 0, unmeasured 0, log line without an embedding 0, log line embedding of another size 0, bead not in store 0, no Constraints or Acceptance 0, rig without a directory 0"
+	want := "not read: not polecat work 30, seat class 0, unmeasured 0, bead not in store 0, no Constraints or Acceptance 0, rig without a directory 0"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report = %q, want the line %q", out.String(), want)
 	}
@@ -858,15 +858,27 @@ func TestStoryPointsTrainFitsTheLoggedFeatures(t *testing.T) {
 	}
 }
 
-// TestStoryPointsTrainReadsTheBeadsLastLogLine: a landed bead is fitted on the
-// last estimate-log line that names it, whatever its text says now. The log
-// keeps one line per bead and description hash, so that line is the latest
-// estimate of the bead's text: a bead whose text differs from the logged hash
-// still fits on what the estimator saw, and a line belongs to the bead it names.
-func TestStoryPointsTrainReadsTheBeadsLastLogLine(t *testing.T) {
+// TestStoryPointsTrainJoinsTheLogOnTheBeadAndItsText: a landed bead is fitted
+// on the estimate-log line the log keeps for its id and the hash of the text it
+// carries now, so the features are the ones the estimate of the text that
+// landed read, even when a later line for other text sits after it. A bead
+// whose text matches no line, edited after its estimate, reads its last line; a
+// bead the store does not hold has no hash to match and reads its last line
+// too. The bead's text carries every section and the Acceptance field the
+// estimator's hash covers, and its line's hash is the estimator's own, so the
+// retrain's copy of the hash must answer what the estimator does for the line
+// to be found.
+func TestStoryPointsTrainJoinsTheLogOnTheBeadAndItsText(t *testing.T) {
 	t.Parallel()
 	beads := trainTestBeads(2, 22, true)
-	currentHash := estimate.SectionHash(trainTestIssue(beads[0]))
+	// The title and the notes are outside the hash; setting them keeps a copy
+	// that read them from matching.
+	issue := trainTestIssue(beads[0])
+	issue.Title = "a title the hash ignores"
+	issue.Description = "## Goal\ngo\n## Constraints\nkeep it small\n## Acceptance\n- [ ] one\n## Size\none worker\n"
+	issue.AcceptanceCriteria = "- [ ] field box\n"
+	issue.Notes = "notes the hash ignores"
+	currentHash := estimate.SectionHash(issue)
 	matching := logRecord(beads[0].id, currentHash, estlog.Shape{Boxes: 5}, []float32{0.5, 0.5, 0.5})
 	earlier := logRecord(beads[0].id, "an-earlier-text", estlog.Shape{Boxes: 2}, []float32{0.2, 0.2, 0.2})
 	later := logRecord(beads[0].id, "a-later-text", estlog.Shape{Boxes: 9}, []float32{0.9, 0.9, 0.9})
@@ -882,8 +894,8 @@ func TestStoryPointsTrainReadsTheBeadsLastLogLine(t *testing.T) {
 		gone  bool // bead 0 is not in the store
 		want  float64
 	}{
-		{"the latest estimate wins over an earlier one", []estlog.Record{earlier, later}, false, 9},
-		{"a line for the text the bead carries now does not outrank a later one", []estlog.Record{matching, later}, false, 9},
+		{"a line for the text the bead carries now wins over a later line for other text", []estlog.Record{matching, later}, false, 5},
+		{"a bead whose text matches no line reads its last line", []estlog.Record{earlier, later}, false, 9},
 		{"each bead reads the line that names it", []estlog.Record{earlier, other}, false, 2},
 		{"a bead the store does not hold reads its last line", []estlog.Record{earlier, later}, true, 9},
 	}
@@ -908,7 +920,11 @@ func TestStoryPointsTrainReadsTheBeadsLastLogLine(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadLandings: %v", err)
 			}
-			env := Env{Town: fit.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fit.store() }}
+			store := fit.store()
+			if !tc.gone {
+				store.issues[beads[0].id] = issue
+			}
+			env := Env{Town: fit.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return store }}
 			samples, counts, err := trainingSamples(context.Background(), env, fit.town, rows, trainTestBase(t), trainTestEmbedder{})
 			if err != nil {
 				t.Fatalf("trainingSamples: %v", err)
@@ -991,18 +1007,20 @@ func TestStoryPointsTrainCountsTheFallbackInTheReport(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "read: from the estimate log 30, from the current text 60"
+	want := "read: from the estimate log 30, from the current text 60 (no log line 60, log line without an embedding 0, log line embedding of another size 0;"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report does not say %q:\n%s", want, out.String())
 	}
 }
 
-// TestStoryPointsTrainSkipsLogLinesItCannotFit: a log line with no embedding,
-// and one whose embedding is not the weights' size, are not fitted and are
-// counted; the bead with a line the ridges can read is fitted.
-func TestStoryPointsTrainSkipsLogLinesItCannotFit(t *testing.T) {
+// TestStoryPointsTrainFallsBackWhenTheLogLineCannotBeFitted: a log line with no
+// embedding, and one whose embedding is not the weights' size, do not drop the
+// bead. Each falls back to being fitted on its current text, and the report
+// counts why. The bead with a line the ridges can read is fitted on it.
+func TestStoryPointsTrainFallsBackWhenTheLogLineCannotBeFitted(t *testing.T) {
 	t.Parallel()
 	beads := trainTestBeads(3, 25, true)
+	beads[2].boxes = 9
 	fix := newTrainTestFixture(t, beads)
 	fix.appendLog(t,
 		logRecord(beads[0].id, "no-embedding", estlog.Shape{Boxes: 2}, nil),
@@ -1017,21 +1035,35 @@ func TestStoryPointsTrainSkipsLogLinesItCannotFit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadLandings: %v", err)
 	}
-	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fix.store() }}
-	samples, counts, err := trainingSamples(context.Background(), env, fix.town, rows, trainTestBase(t), trainTestEmbedder{})
+	store := fix.store()
+	base := trainTestBase(t)
+	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return store }}
+	samples, counts, err := trainingSamples(context.Background(), env, fix.town, rows, base, trainTestEmbedder{})
 	if err != nil {
 		t.Fatalf("trainingSamples: %v", err)
 	}
-	if len(samples) != 1 || counts.logged != 1 {
-		t.Errorf("samples = %d, counts.logged = %d, want only the readable line fitted", len(samples), counts.logged)
+	if len(samples) != 3 || counts.logged != 1 || counts.currentText != 2 {
+		t.Fatalf("samples = %d, counts = %+v, want all three fitted, one from the log", len(samples), counts)
 	}
-	if counts.skips.logNoEmbed != 1 || counts.skips.logEmbedSize != 1 {
-		t.Errorf("skips = %+v, want one line of each kind left out", counts.skips)
+	if counts.logNoEmbed != 1 || counts.logEmbedSize != 1 || counts.noLine != 0 {
+		t.Errorf("counts = %+v, want one fallback of each log reason", counts)
+	}
+	if got := sampleLanded(t, samples, 2).Shape.Boxes; got != 4 {
+		t.Errorf("the bead with a readable line fitted with %v boxes, want the logged 4", got)
+	}
+	issue := store.issues[beads[0].id]
+	seat := storypoints.SeatHaiku
+	if beads[0].seat == "flash" {
+		seat = storypoints.SeatFlash
+	}
+	want := storypoints.Features(storypoints.EstimateText(issue), "gastown", seat, base)
+	if got := sampleLanded(t, samples, 0).Shape; got != want {
+		t.Errorf("the bead with no logged embedding fitted with %+v, want its current text's %+v", got, want)
 	}
 	report := storyPointsTrainReport(storypoints.Model{TrainedOn: "fixture"}, counts, storyPointsProposedName, holdoutScore{})
-	want := "log line without an embedding 1, log line embedding of another size 1"
-	if !strings.Contains(report, want) {
-		t.Errorf("report does not say %q:\n%s", want, report)
+	wantReport := "from the current text 2 (no log line 0, log line without an embedding 1, log line embedding of another size 1;"
+	if !strings.Contains(report, wantReport) {
+		t.Errorf("report does not say %q:\n%s", wantReport, report)
 	}
 }
 
@@ -1082,8 +1114,34 @@ func TestStoryPointsTrainCountsTheLogsMalformedLines(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "(the log skipped 1 malformed line(s))"
+	want := "another size 0; the log skipped 1 malformed line(s))"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report does not say %q:\n%s", want, out.String())
+	}
+}
+
+// TestStoryPointsTrainRefusesBaseWeightsWithoutAnEmbeddingRidge: the logged
+// line's size check reads the base weights' embedding dimension, so weights
+// with no ridge are refused before any row is read. Read as dimension 0, every
+// logged line would be another model's vector and the report would blame the
+// log for a weights file the step was handed.
+func TestStoryPointsTrainRefusesBaseWeightsWithoutAnEmbeddingRidge(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(2, 26, true))
+	data, err := os.ReadFile(filepath.Join(fix.outDir, landingsName))
+	if err != nil {
+		t.Fatalf("read landings: %v", err)
+	}
+	_, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ReadLandings: %v", err)
+	}
+	env := Env{Town: fix.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return fix.store() }}
+	_, counts, err := trainingSamples(context.Background(), env, fix.town, rows, storypoints.Weights{}, trainTestEmbedder{})
+	if err == nil {
+		t.Fatalf("trainingSamples returned no error; counts = %+v", counts)
+	}
+	if !strings.Contains(err.Error(), "no embedding ridge") {
+		t.Errorf("err = %v, want it to name the missing embedding ridge", err)
 	}
 }
