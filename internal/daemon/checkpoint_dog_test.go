@@ -480,6 +480,93 @@ func TestCheckpointWorktreeSkipsACleanWorktree(t *testing.T) {
 	}
 }
 
+// recordingGit records the staging calls a checkpoint makes on the handle it
+// was given, so a test can tell that handle apart from any other runner.
+type recordingGit struct {
+	daemonGit
+	adds    []string
+	commits []string
+}
+
+func (r *recordingGit) Add(pathspecs ...string) error {
+	r.adds = append(r.adds, pathspecs...)
+	return r.daemonGit.Add(pathspecs...)
+}
+
+func (r *recordingGit) Commit(message string) error {
+	r.commits = append(r.commits, message)
+	return r.daemonGit.Commit(message)
+}
+
+// TestCheckpointWithRunsOnTheGivenHandle is the seam the overrun stop's
+// sandbox save needs: checkpointWith stages and commits over the handle its
+// caller passes, never one it opens itself. The daemon's own opener fails the
+// test, so any handle the checkpoint opened on its own would be the failure.
+func TestCheckpointWithRunsOnTheGivenHandle(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, f, g := checkpointClone(t, d, map[string]string{"a.go": "package a\n"})
+	d.openGitFn = func(dir string) daemonGit {
+		t.Fatalf("checkpointWith opened a git handle for %s; want only the caller's handle", dir)
+		return nil
+	}
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// wip\n"})
+
+	rec := &recordingGit{daemonGit: f.Open(workDir).(daemonGit)}
+	if outcome := d.checkpointWith(rec, "rig", "polecat", "WIP: test"); outcome != checkpointCreated {
+		t.Fatalf("checkpointWith = %v, want checkpointCreated", outcome)
+	}
+	if len(rec.commits) != 1 || rec.commits[0] != "WIP: test" {
+		t.Fatalf("commits on the given handle = %q, want one WIP: test", rec.commits)
+	}
+	if !slices.Contains(rec.adds, "-A") {
+		t.Fatalf("adds on the given handle = %q, want -A", rec.adds)
+	}
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"a.go"}) {
+		t.Fatalf("checkpoint commit changed %q, want a.go", got)
+	}
+}
+
+// TestCheckpointWorktreeAsOpensTheHandleForItsDirectory covers the checkpoint
+// dog's directory form: it opens one handle for the directory it is given and
+// commits there, so the work of another checkout is left alone.
+func TestCheckpointWorktreeAsOpensTheHandleForItsDirectory(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	f := useGitfake(t, d)
+	dir := t.TempDir()
+	origin, workDir := filepath.Join(dir, "origin.git"), filepath.Join(dir, "polecat")
+	otherDir := filepath.Join(dir, "other")
+	f.InitBare(t, origin)
+	f.Commit(t, origin, "main", "initial", map[string]string{"a.go": "package a\n"})
+	f.Clone(t, origin, workDir)
+	f.Clone(t, origin, otherDir)
+	g := f.Open(workDir).(gitfake.WorkTree)
+	other := f.Open(otherDir).(gitfake.WorkTree)
+
+	var opened []string
+	d.openGitFn = func(dir string) daemonGit {
+		opened = append(opened, dir)
+		return f.Open(dir).(daemonGit)
+	}
+	before, beforeOther := headOf(t, g), headOf(t, other)
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// wip\n"})
+
+	if outcome := d.checkpointWorktreeAs(workDir, "rig", "polecat", "WIP: test"); outcome != checkpointCreated {
+		t.Fatalf("checkpointWorktreeAs = %v, want checkpointCreated", outcome)
+	}
+	if len(opened) != 1 || opened[0] != workDir {
+		t.Fatalf("git handles opened = %q, want exactly the given directory %q", opened, workDir)
+	}
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"a.go"}) {
+		t.Fatalf("checkpoint commit changed %q, want a.go in the given directory", got)
+	}
+	if after := headOf(t, other); after != beforeOther {
+		t.Fatalf("the other checkout's HEAD moved to %s, want %s", after, beforeOther)
+	}
+}
+
 // TestCheckpointWorktreeSkipsAMergeInProgress reproduces gt-kbp1t: a polecat
 // worktree stopped on a merge carries MERGE_HEAD in its git directory, and a
 // `git add -A` plus commit there would record the conflict markers — literal
