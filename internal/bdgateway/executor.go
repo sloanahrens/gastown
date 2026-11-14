@@ -13,10 +13,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
+	// maxPumpGraces bounds how many further grace periods the drain waits for a
+	// pump that is not inside a client write before it stops waiting.
+	maxPumpGraces = 5
 	// MaxStdinBytes caps one call's stdin body: the design's 1 MiB, sized by
 	// the largest user, a bead body sent with --body-file=-.
 	MaxStdinBytes = 1 << 20
@@ -226,9 +230,17 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	runCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 
+	// fw is the one writer of this call's stream: the pumps and the ending frames
+	// all go through its lock, so a pump still alive when the call ends can never
+	// interleave its frames with the ending's.
+	fw := &frameWriter{w: frames}
+	// Once Exec returns the call's stream is closed to its pumps: a pump the drain
+	// gave up on, or one that outlived the call, writes nothing after the ending
+	// frames. The defer runs after the ending is written.
+	defer fw.discard.Store(true)
 	proc, err := e.runner.Start(e.binary, req.Argv, env, dir)
 	if err != nil {
-		writeEnding(frames, CodeStartFailed, 125, err.Error())
+		writeEnding(fw, CodeStartFailed, 125, err.Error())
 		return fmt.Errorf("bdgateway: starting bd: %w", err)
 	}
 
@@ -274,7 +286,6 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		_ = proc.Stdin().Close()
 	}()
 
-	fw := &frameWriter{w: frames}
 	pumpErrs := make(chan error, 2)
 	go func() { pumpErrs <- fw.copy(proc.Stdout(), FrameStdout) }()
 	go func() { pumpErrs <- fw.copy(proc.Stderr(), FrameStderr) }()
@@ -317,6 +328,11 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 			// returns (pumpErrs has room for both), the call is recorded as a
 			// failed write, and nothing more is written to that client.
 			grace := time.NewTimer(e.killGrace)
+			// A pump that missed one grace is not yet a stalled client: under load
+			// it may only be slow to be scheduled. The client is declared stalled
+			// when a pump is still inside a write to it at two graces in a row; a
+			// pump that is not writing is waited for again, up to maxPumpGraces.
+			inWriteBefore, idleGraces := false, 0
 			for pending > 0 {
 				select {
 				case err := <-pumpErrs:
@@ -325,9 +341,22 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 						record(err)
 					}
 				case <-grace.C:
-					record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
-					frames = io.Discard
-					pending = 0
+					switch {
+					case fw.writesInProgress() > 0 && inWriteBefore:
+						record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
+						fw.discard.Store(true) // the lock is held by the blocked write, so stop writing without it
+						pending = 0
+					case fw.writesInProgress() > 0:
+						inWriteBefore = true
+						grace.Reset(e.killGrace)
+					case idleGraces >= maxPumpGraces:
+						record(fmt.Errorf("bdgateway: %d stream pump(s) did not end within %d grace periods of the call's end", pending, maxPumpGraces))
+						pending = 0
+					default:
+						inWriteBefore = false
+						idleGraces++
+						grace.Reset(e.killGrace)
+					}
 				}
 			}
 			grace.Stop()
@@ -370,36 +399,36 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 
 	end, killErr, killed, waited, status, waitErr := out.state()
 	if !waited {
-		return e.killFailed(frames, proc, end, killErr, killed, limit)
+		return e.killFailed(fw, proc, end, killErr, killed, limit)
 	}
 	switch end {
 	case deadlineEnding:
 		// The deadline ended this call, so its status is not bd's answer: a
 		// call killed at its deadline is never a success.
-		writeEnding(frames, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
+		writeEnding(fw, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
 		return withKillErr(fmt.Errorf("%w: %s", ErrTimeout, limit), killErr)
 	case canceledEnding:
 		switch {
 		case readErr != nil:
 			// A read the gateway could not make is its failure, even though the
 			// cancel it caused is what ended the wait.
-			writeEnding(frames, CodeWaitFailed, 125, readErr.Error())
+			writeEnding(fw, CodeWaitFailed, 125, readErr.Error())
 			return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), killErr)
 		case ctx.Err() != nil:
-			writeEnding(frames, CodeCanceled, 124, "the request ended before bd did")
+			writeEnding(fw, CodeCanceled, 124, "the request ended before bd did")
 			return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, ctx.Err()), killErr)
 		}
 		// The gateway stopped the call because the client's stream could not be
 		// written.
-		writeEnding(frames, CodeCanceled, 124, "the client's stream could not be written")
+		writeEnding(fw, CodeCanceled, 124, "the client's stream could not be written")
 		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, writeErr), killErr)
 	}
 	switch {
 	case waitErr != nil:
-		writeEnding(frames, CodeWaitFailed, 125, waitErr.Error())
+		writeEnding(fw, CodeWaitFailed, 125, waitErr.Error())
 		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), killErr)
 	case status < 0:
-		writeEnding(frames, CodeSignaled, 125, "bd was killed by a signal")
+		writeEnding(fw, CodeSignaled, 125, "bd was killed by a signal")
 		return withKillErr(ErrSignaled, killErr)
 	}
 	// bd exited with a status of its own, which is the answer when no ending
@@ -478,7 +507,7 @@ func (o *callOutcome) state() (end callEnding, killErr error, killed, waited boo
 // once with its named ending and ErrKillFailed, and the wait goroutine reaps bd
 // when it ends, so a process that ignores the kill holds neither Exec nor the
 // slot it took.
-func (e *Executor) killFailed(frames io.Writer, proc Process, end callEnding, killErr error, killed bool, limit time.Duration) error {
+func (e *Executor) killFailed(fw *frameWriter, proc Process, end callEnding, killErr error, killed bool, limit time.Duration) error {
 	named := fmt.Errorf("%w: %s", ErrTimeout, limit)
 	code := CodeTimeout
 	message := fmt.Sprintf("bd did not finish within %s and did not end after the kill", limit)
@@ -494,7 +523,7 @@ func (e *Executor) killFailed(frames io.Writer, proc Process, end callEnding, ki
 	if killErr != nil {
 		failed = errors.Join(failed, fmt.Errorf("bdgateway: killing bd's process group: %w", killErr))
 	}
-	writeEnding(frames, code, 124, message)
+	writeEnding(fw, code, 124, message)
 	return errors.Join(named, failed)
 }
 
@@ -666,12 +695,48 @@ var errRead = errors.New("bdgateway: reading bd's output")
 type frameWriter struct {
 	mu sync.Mutex
 	w  io.Writer
+	// writing counts the writes in progress or waiting for the lock. A pump that
+	// is only slow to be scheduled is not in a write; one blocked on a client that
+	// stopped reading is, and that is what the drain after a call's end tells
+	// apart (writesInProgress).
+	writing atomic.Int32
+	// discard, once set, makes every write a no-op that does not touch the lock:
+	// the client stopped reading and a pump blocked in a write holds the lock.
+	discard atomic.Bool
+	// holds counts how many times a write took the lock; an ending is one hold.
+	holds atomic.Int32
 }
 
+// writesInProgress is how many writes to the client have begun and not ended.
+func (f *frameWriter) writesInProgress() int { return int(f.writing.Load()) }
+
 func (f *frameWriter) write(kind FrameKind, payload []byte) error {
+	return f.send(Frame{Kind: kind, Payload: payload})
+}
+
+// send is the one place a frame reaches the client: it counts the write, honors
+// discard without touching the lock, and writes under the lock.
+func (f *frameWriter) send(fr Frame) error {
+	return f.sendAll(fr)
+}
+
+// sendAll writes frames in order under one hold of the lock, so nothing else
+// writes between them.
+func (f *frameWriter) sendAll(frames ...Frame) error {
+	if f.discard.Load() {
+		return nil
+	}
+	f.writing.Add(1)
+	defer f.writing.Add(-1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return WriteFrame(f.w, Frame{Kind: kind, Payload: payload})
+	f.holds.Add(1)
+	for _, fr := range frames {
+		if err := WriteFrame(f.w, fr); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // copy frames r until it ends. A read or write failure stops the copy, so the
@@ -697,9 +762,7 @@ func (f *frameWriter) copy(r io.Reader, kind FrameKind) error {
 }
 
 func (f *frameWriter) exit(status int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return WriteFrame(f.w, ExitFrame(status))
+	return f.send(ExitFrame(status))
 }
 
 // withKillErr adds a failed kill to the refusal that ended a call, so a call
@@ -714,14 +777,12 @@ func withKillErr(err, killErr error) error {
 // writeEnding writes the frame that explains a call the gateway ended, then
 // the exit frame the design pairs with it. A failed write is the client being
 // gone, which the caller already learns from the returned error.
-func writeEnding(out io.Writer, code string, status int, message string) {
+func writeEnding(fw *frameWriter, code string, status int, message string) {
 	payload, err := json.Marshal(ErrorPayload{Code: code, Message: message})
 	if err != nil {
 		return
 	}
-	fw := &frameWriter{w: out}
-	if err := fw.write(FrameError, payload); err != nil {
-		return
-	}
-	_ = fw.exit(status)
+	// One lock hold writes both frames, so a pump that is alive but not stalled
+	// can never put a frame between the error frame and its exit frame.
+	_ = fw.sendAll(Frame{Kind: FrameError, Payload: payload}, ExitFrame(status))
 }
