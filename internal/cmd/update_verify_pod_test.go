@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -148,7 +150,10 @@ func TestImageLabelPodNoExec(t *testing.T) {
 	if err := imagevalues.Write(imagesPath, podLabelValues(seams, digest, podTargetCommit)); err != nil {
 		t.Fatalf("writing the images file: %v", err)
 	}
-	run := &verifyProbeRun{}
+	// The command seam answers with another commit, as docker would for an image
+	// the target pair does not name. A read that ran docker would record a call
+	// and return this commit, failing both checks below.
+	run := &verifyProbeRun{output: podOtherCommit + "\n"}
 	probes := podImageLabelProbes{
 		VerifyProbes: newVerifyProbes(verifyProbeEnv{Run: run.run}),
 		label:        podTargetImageLabel(seams, t.TempDir(), imagesPath),
@@ -290,6 +295,29 @@ func TestImageLabelPodRefusals(t *testing.T) {
 			if !strings.Contains(err.Error(), commit) {
 				t.Errorf("error %q does not name commit %s", err, commit)
 			}
+		}
+	})
+
+	t.Run("a polecat digest that is not sha256 hex is refused before any request", func(t *testing.T) {
+		t.Parallel()
+		reg := newPodLabelRegistry()
+		seams := startPodLabelRegistry(t, reg)
+		v := podLabelValues(seams, reg.addImage(podTargetCommit), podTargetCommit)
+		registry, err := seams.Registry("")
+		if err != nil {
+			t.Fatalf("the test registry: %v", err)
+		}
+		badRef := registry.Ref(imagevalues.PolecatImage, "sha256:"+strings.Repeat("g", 64))
+		imagesPath := filepath.Join(t.TempDir(), "images.yaml")
+		raw := "daemon: " + strconv.Quote(v.Daemon) + "\npolecat: " + strconv.Quote(badRef) + "\ncommit: " + v.Commit + "\n"
+		if err := os.WriteFile(imagesPath, []byte(raw), 0o600); err != nil {
+			t.Fatalf("writing the images file: %v", err)
+		}
+		if _, err := podTargetImageLabel(seams, t.TempDir(), imagesPath)(ctx); err == nil {
+			t.Fatal("a polecat digest that is not sha256 hex reported no error")
+		}
+		if asked := reg.askedRefs(); len(asked) != 0 {
+			t.Errorf("asked %v for a malformed polecat digest, want no request", asked)
 		}
 	})
 
