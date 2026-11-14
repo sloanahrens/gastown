@@ -8,14 +8,19 @@ decision](../adr/0006-tracker-replaces-dolt-backed-beads.md).
 Nothing here is built. Facts below were read from origin/main at 440acced9 and
 from the live town on 2026-11-13; "not verified" marks what was not checked.
 
+The tracker program is deferred (operator, 2026-11-14, gt-gi5lhe): the bd shim
+ships in neither image, and the gateway runs the real bd as `bd`. Plan text below
+that names the shim describes the deferred tracker state.
+
 ## Goal
 
 The `bd` binary leaves the daemon image and the polecat image. One dedicated bd
 image, built by CI, runs as a long-lived container in the Mac's local Docker
 beside Dolt, in one compose unit started at system startup. Every caller that
 runs bd today calls that container instead, through a small authenticated
-gateway, and the bd shim (tracker routing) lives in the same image. Seats keep
-their own bd until approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
+gateway. The bd shim (tracker routing) is deferred with the tracker program
+(gt-gi5lhe), so the image runs the real bd. Seats keep their own bd until
+approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
 
 ## Facts this design rests on
 
@@ -62,7 +67,7 @@ their own bd until approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
  -----------                        --------------------                    ----------
  bd (gt-wrap, docker target)  --docker exec--> [ bd container "gt-bd" ]
                                                   bdgw  (gateway)      <--HTTP, bearer-- daemon pod, dashboard pod
-                                                  bd    (the shim)                        (bd = gt-wrap, bdgateway target,
+                                                  bd    (-> bd.real)                      (bd = gt-wrap, bdgateway target,
                                                   bd.real                                  via 192.168.5.2:7440)
                                                   workspace tree  -----------> Dolt  [ "gt-dolt" container, same compose unit ]
                                                   tracker client  -----------> trackerd Service (via 127.0.0.1:7433 forward)
@@ -73,10 +78,10 @@ their own bd until approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
   policy, one auth and one call log: `bdgw serve` (HTTP) and `bdgw exec -- <bd
   args>` (local, for the Mac wrapper's docker target, so a Mac call is checked
   and logged the same way).
-- Inside the bd container (image `gt-bd`; the daemon image has no shim and keeps
-  the real bd as `bd`), `/usr/local/bin/bd` is the shim (`cmd/bdshim`) and the
-  real bd is `/usr/local/bin/bd.real` beside it, exactly the layout
-  `internal/bdshim/osmain.go` looks for. The gateway only ever runs `bd`.
+- Inside the bd container (image `gt-bd`), `/usr/local/bin/bd` is the real bd:
+  `deploy/bd/Dockerfile.bd` links it to `/usr/local/bin/bd.real`, which the base
+  image sets. The tracker shim is deferred, so the gateway runs the real binary
+  and no shim is on PATH.
 - The bd container reaches Dolt over the compose network by service name, never
   through a published port.
 - The gateway holds one tracker credential: an operator-class tracker token
@@ -311,8 +316,8 @@ which another module cannot import.
    commit.
 2. **Gateway image `gt-bd`, built by gastown's image CI.** `Dockerfile.bd` in
    deploy/bd: `FROM forgejo:3000/bot-registry/beads-bd@<digest>` (the digest from
-   a pins file, never a tag), adds `bdgw` and the shim, moves `bd` to `bd.real`
-   if the base did not, sets the entrypoint. `images.yml` already builds the
+   a pins file, never a tag), adds `bdgw`, links `bd` to the real bd at
+   `bd.real`, sets the entrypoint. `images.yml` already builds the
    daemon and polecat images on a push to `green/**` and `imagepublish check`
    reads `org.gastown.gt-commit` back; it gains a third image.
 
@@ -560,9 +565,9 @@ G2, G3, G4, G5 and G7 touch different files and can run in parallel after G1.
 - **B2 [be]** beads repo `.forgejo/workflows/bd-image.yml` as reviewed text plus
   the test that holds a live copy equal to it. Needs: B1.
 - **G12 [gt]** `deploy/bd/Dockerfile.bd` (FROM the base by digest from
-  `deploy/bd/base-pin`, adds `bdgw` and the shim, `bd` becomes the shim and
-  `bd.real` the real bd), and the daemonimage build step that cross-compiles
-  `bdgw` and `bdshim` for it. Needs: G6, B1.
+  `deploy/bd/base-pin`, adds `bdgw`, links `bd` to the real bd at `bd.real`),
+  and the daemonimage build step that cross-compiles `bdgw` and `bdshim` for
+  it. Needs: G6, B1.
 - **G13 [gt]** `imagevalues` gains the `bd:` key; `imagepublish` pushes and checks
   the third image; `gt update images` writes it; `gt update bd-base` resolves the
   base tag to a digest and writes the pin; `images.yml` reviewed text gains the

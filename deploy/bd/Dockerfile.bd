@@ -1,8 +1,8 @@
-# The bd gateway image gt-bd: the beads bd image with bdgw and the shim added
+# The bd gateway image gt-bd: the beads bd image with bdgw added
 # (docs/design/bd-container.md, Images and CI, layer 2).
 #
-# Built from the bdgw and bdshim binaries daemonimage.BuildGateway cross-compiles
-# for linux/arm64, which the build context holds under those names.
+# Built from the bdgw binary daemonimage.BuildGateway cross-compiles for
+# linux/arm64, which the build context holds under that name.
 #
 # FROM names the base by digest. deploy/bd/base-pin holds the same reference, and
 # TestDockerfileBdShape fails when the two differ; a Dockerfile cannot read that
@@ -10,12 +10,13 @@
 FROM forgejo:3000/bot-registry/beads-bd@sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 # The base puts the real bd at /usr/local/bin/bd.real. Refuse to build when it is
-# missing, rather than put the shim over a bd the base never named.
+# missing, rather than link bd to a path the base never named.
 RUN test -x /usr/local/bin/bd.real
 
-# The shim takes the name bd on PATH and sends each command to bd.real or to a
-# tracker verb handler (internal/bdshim/osmain.go).
-COPY --chmod=0755 bdshim /usr/local/bin/bd
+# The gateway runs /usr/local/bin/bd, so the real bd takes that name. The tracker
+# program is deferred: bd.real stays, and bd is a link to it. -f replaces a bd
+# whose base already put one at that path.
+RUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd
 
 # The gateway is the container's entrypoint. This file sets no flags for it.
 COPY --chmod=0755 bdgw /usr/local/bin/bdgw

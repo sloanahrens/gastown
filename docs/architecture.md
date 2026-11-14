@@ -164,7 +164,7 @@ A call the wrapper's config covers under its `native` key runs on the Mac with t
 
 The wrapper's `bddocker` target runs a Mac `bd` call inside the local bd container (`gt-bd` in the compose unit), through the gateway's `exec` mode, so the call is checked and logged as it is over HTTP. It refuses when that container is absent, stopped or unhealthy. The target and its config are in `docs/design/bd-container.md`.
 
-The daemon image's `bd` is the real binary with no wrapper in front of it. The bd shim that routes tracker rigs ships only in the bd gateway image (`deploy/bd/Dockerfile.bd`).
+The daemon image's `bd` is the real binary with no wrapper in front of it, and so is the bd gateway image's: `deploy/bd/Dockerfile.bd` links `/usr/local/bin/bd` to the real bd the base puts at `bd.real`. The bd shim that routes tracker rigs is deferred with the tracker program and ships in neither image.
 
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 

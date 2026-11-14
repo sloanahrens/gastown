@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -47,23 +48,40 @@ func basePinError(ref string) error {
 // numericNonRootUser is a USER instruction naming a uid, or uid:gid, above zero.
 var numericNonRootUser = regexp.MustCompile(`^USER ([1-9][0-9]*)(:[0-9]+)?$`)
 
-// readInstructions returns the Dockerfile's instruction lines, trimmed, with
-// comments and blank lines dropped.
+// instructionLines returns the instruction lines in a Dockerfile's content,
+// trimmed, with comments and blank lines dropped.
 // Each line is in canonical form; see canonicalInstruction.
+func instructionLines(content string) []string {
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, canonicalInstruction(line))
+	}
+	return out
+}
+
+// readInstructions returns the Dockerfile's instruction lines.
 func readInstructions(t *testing.T) []string {
 	t.Helper()
 	raw, err := os.ReadFile(dockerfileName)
 	if err != nil {
 		t.Fatalf("reading %s: %v", dockerfileName, err)
 	}
+	return instructionLines(string(raw))
+}
+
+// shimInstructions returns the instruction lines that name the bdshim binary.
+// The tracker program is deferred: the image runs the real bd as bd, and a
+// bdshim copied or invoked here would put the shim back on PATH.
+func shimInstructions(lines []string) []string {
 	var out []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	for _, l := range lines {
+		if strings.Contains(l, "bdshim") {
+			out = append(out, l)
 		}
-		line = canonicalInstruction(line)
-		out = append(out, line)
 	}
 	return out
 }
@@ -85,7 +103,7 @@ func TestDockerfileBdShape(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
 		{"base is the pin by digest", "FROM " + pin},
 		{"the real bd is checked in place", "RUN test -x /usr/local/bin/bd.real"},
-		{"the shim is bd", "COPY --chmod=0755 bdshim /usr/local/bin/bd"},
+		{"the real bd is bd on PATH", "RUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd"},
 		{"the gateway is copied in", "COPY --chmod=0755 bdgw /usr/local/bin/bdgw"},
 		{"the gateway is the entrypoint", `ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]`},
 	} {
@@ -96,6 +114,12 @@ func TestDockerfileBdShape(t *testing.T) {
 			}
 		})
 	}
+	t.Run("no instruction names the shim", func(t *testing.T) {
+		t.Parallel()
+		if got := shimInstructions(lines); len(got) != 0 {
+			t.Errorf("%s has lines naming bdshim (%q), want the real bd on PATH", dockerfileName, got)
+		}
+	})
 	t.Run("one base, by digest", func(t *testing.T) {
 		t.Parallel()
 		var froms []string
@@ -120,6 +144,44 @@ func TestDockerfileBdShape(t *testing.T) {
 			t.Errorf("%s USER lines = %q, want one numeric uid above zero", dockerfileName, users)
 		}
 	})
+}
+
+// TestShimInstructions: a Dockerfile that copies or invokes bdshim has those
+// lines reported, so a shim returning to the image is caught, and one that
+// links the real bd as bd has none.
+func TestShimInstructions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, dockerfile string
+		want             []string
+	}{
+		{
+			name:       "a shim copy",
+			dockerfile: "FROM base\nCOPY --chmod=0755 bdshim /usr/local/bin/bd\n",
+			want:       []string{"COPY --chmod=0755 bdshim /usr/local/bin/bd"},
+		},
+		{
+			name:       "a shim invocation",
+			dockerfile: "FROM base\nRUN /usr/local/bin/bdshim --version\n",
+			want:       []string{"RUN /usr/local/bin/bdshim --version"},
+		},
+		{
+			name:       "the real bd linked as bd",
+			dockerfile: "FROM base\nRUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd\n",
+		},
+		{
+			name:       "a comment naming the shim",
+			dockerfile: "# the bdshim is deferred\nFROM base\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := shimInstructions(instructionLines(tc.dockerfile))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("shimInstructions(%q) = %q, want %q", tc.dockerfile, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestBasePinIsDigest: base-pin holds one reference pinned by digest, and a

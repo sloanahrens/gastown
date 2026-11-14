@@ -10,9 +10,9 @@ import (
 	"github.com/steveyegge/gastown/internal/bdgateway"
 )
 
-// The container's paths, as the design names them: /ws is the workspace tree
-// the gateway owns and /usr/local/bin/bd is the shim the gateway runs. A flag
-// overrides each, so a test or a Mac-side run names its own.
+// The container's paths: /ws is the workspace tree the gateway owns and
+// /usr/local/bin/bd is the real bd the gateway runs. A flag overrides each, so a
+// test or a Mac-side run names its own.
 const (
 	defaultWorkspaceRoot = "/ws"
 	defaultBinary        = "/usr/local/bin/bd"
