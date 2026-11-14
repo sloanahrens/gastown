@@ -112,7 +112,7 @@ name (`docs/metrics.md:81-86`).
 | `component` | `seat` | `node` | `vm` |
 | `name` | sandbox name (pod name without the StatefulSet ordinal, `scripts/resource-sampler.py:1186-1199`) | node name | `gt-sbx` |
 | `rig`, `polecat` | from the pod's `rig`/`polecat` labels | null | null |
-| `bead` | the seat record's `work_bead`, else null | null | null |
+| `bead` | the sandbox record's `work_bead`, written at create (B2a), else null | null | null |
 | `cpu_pct` | percent of one core from the `usage_usec` delta | millicores × 0.1 from `kubectl top node` | null |
 | `mem_bytes` | `memory.current` | `kubectl top node` memory | null |
 | `mem_limit_bytes` | `memory.max`, null when it reads `max` | null | null |
@@ -164,11 +164,16 @@ in the pod (the resource sampler already has its own ticker,
 `internal/daemon/daemon.go:2244-2250`), at 60 s with a timeout that covers
 one exec per live seat. One source's failure is logged and writes no rows; the
 host source's rows are unaffected, the rule the Python sampler states
-(`scripts/resource-sampler.py:21-22`). The seat list comes from the sandbox
-records under `.runtime/sandboxes` (`internal/session/sandbox_registry.go:28-53`);
-the bead from the seat's intent record, `.runtime/agents/<rig>/polecats.<name>.json`
-`work_bead` (`internal/intent/intent.go:79-82`, `:139`), and null once the seat
-submits. A seat whose exec fails is skipped for that tick. A sandbox or node
+(`scripts/resource-sampler.py:21-22`). The seat list and its rig and polecat come
+from the sandbox records under `.runtime/sandboxes`
+(`internal/session/sandbox_registry.go:28-53`). The bead is not there: the spawn
+knows it (`SpawnSpec.WorkBeadID`, `internal/session/backend.go:66-69`) and does
+not write it down, and the intent record names it only after the seat submits
+(`sandboxSeatBead`, `internal/session/sandbox_registry.go:87-103`), which is when
+the reading matters least. So B2a writes it into the record at create. A bounded
+assignee lookup is the alternative the Python sampler uses
+(`scripts/resource-sampler.py:881-921`); it costs one bd read per seat per tick,
+which B2a avoids. A seat whose exec fails is skipped for that tick. A sandbox or node
 name read from the cluster is validated before it goes into a request path or
 an exec argv, as the control node read already does
 (`internal/daemon/attention_host_node.go:161-181`).
@@ -185,19 +190,24 @@ rather than one with nulls: the series stops.
 
 ## Implementation beads
 
-Each is under 8 points. The order is `B1` first; `B4` and `B5` are independent
-of the rest.
+Each is under 8 points. The order is `B1` first, then `B2a`; `B4` and `B5` are
+independent of the rest.
 
 - **B1 (3) — `resourcesampler` carries the new fields.** Add `Cluster`,
   `PressureCPUSomePct`, `PressureMemSomePct`, `PressureMemFullPct` and `Load1`
   to `Row` after `Workspace`, export one row writer for a caller outside the
   package, and keep the first thirteen fields' order. No operator step.
   Unblocks B2-B6.
+- **B2a (2) — the sandbox record names its bead.** Add `WorkBead` to
+  `SandboxRecord` (`internal/session/sandbox_registry.go:28-44`) and write
+  `spec.WorkBeadID` where the record is created
+  (`internal/session/backend_openshell.go:1108-1119`). No operator step.
+  Unblocks the bead cell of B2.
 - **B2 (5) — the seat source.** New file in `internal/resourcesampler`: one row
   per live seat from the sandbox records, read through an exec seam the daemon
   fills with `sandbox.CLI`, with a per-seat bound and the cgroup reads above.
-  Rig and polecat from the record, bead from the intent record, workspace by
-  `SetWorkspace`. No operator step. Depends on B1.
+  Rig and polecat from the record, bead from `WorkBead`, workspace by
+  `SetWorkspace`. No operator step. Depends on B1 and B2a.
 - **B3 (3) — its patrol.** The daemon ticks the seat source on its own 60 s
   ticker with its own timeout; a failure logs and writes nothing. Depends on B2.
   No operator step.
