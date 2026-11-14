@@ -98,6 +98,10 @@ type QuestionReport struct {
 	// and is absent when no band holds enough labeled lines, so the report
 	// never answers from a rate nobody measured.
 	CalibrationMonotone *bool `json:"calibration_monotone,omitempty"`
+	// LowTail is set for a noul question whose base rate is over 80% or under
+	// 20%, and absent for a balanced one. It reads the lowest calibration band
+	// for the minority label. It changes no verdict.
+	LowTail *LowTail `json:"low_tail,omitempty"`
 	// MeanScorePositive and MeanScoreNegative are set for score questions only.
 	MeanScorePositive *float64 `json:"mean_score_positive,omitempty"`
 	MeanScoreNegative *float64 `json:"mean_score_negative,omitempty"`
@@ -109,6 +113,18 @@ type QuestionReport struct {
 	// another's. It is printed only when set.
 	Sources []SourceCount `json:"sources,omitempty"`
 	Verdict string        `json:"verdict"`
+}
+
+// LowTail is the lowest calibration band of a one-sided noul, read for its
+// minority label. Labeled is the band's labeled lines. Precision is the share of
+// those that carry the minority label, and Recall the share of the minority-label
+// lines that fall in the band; either is nil when its denominator is empty.
+type LowTail struct {
+	Band      string   `json:"band"`
+	Label     bool     `json:"label"`
+	Labeled   int      `json:"labeled"`
+	Precision *float64 `json:"precision"`
+	Recall    *float64 `json:"recall"`
 }
 
 // ContextCount is how many of a question's logged lines carry one context value.
@@ -185,6 +201,10 @@ func WriteText(w io.Writer, rep Report) error {
 			if q.ECE != nil && q.Brier != nil {
 				ew.printf("  calibration error %.2f, brier %.2f, monotone: %s\n", *q.ECE, *q.Brier, monotoneText(q.CalibrationMonotone))
 			}
+		}
+		if t := q.LowTail; t != nil {
+			ew.printf("  low tail, band %s (labeled %d), minority label %t: precision %s, recall %s\n",
+				t.Band, t.Labeled, t.Label, pct(t.Precision), pct(t.Recall))
 		}
 		ew.printf("  verdict: %s\n", q.Verdict)
 	}

@@ -342,6 +342,9 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 		if qr.BestThreshold != nil {
 			qr.PrecisionAtBest, qr.FlaggedAtBest = precisionAtCut(samples, *qr.BestThreshold)
 		}
+		if kind == KindNoul {
+			qr.LowTail = lowTail(samples, qr.Positives, qr.Labeled)
+		}
 	case KindScore:
 		qr.MeanScorePositive, qr.MeanScoreNegative = meanByLabel(samples)
 	}
@@ -538,6 +541,45 @@ func calibrationMetrics(bins []Bin, samples []sample) (ece, brier *float64, mono
 		return ptr(gap), ptr(squared / float64(len(samples))), nil
 	}
 	return ptr(gap), ptr(squared / float64(len(samples))), boolPtr(up)
+}
+
+// lowTail reads the lowest calibration band of a one-sided noul: one whose base
+// rate is over 80% or under 20%. The minority label is the one the base rate
+// makes rare, and the band's precision and recall are for it: precision is the
+// share of the band's labeled lines that carry it, and recall the share of the
+// minority-label lines that fall in the band. The base rate is compared as
+// integers, so a base of exactly 80% or 20% is balanced. It returns nil for a
+// balanced question, and for one with no labeled line.
+func lowTail(samples []sample, positives, labeled int) *LowTail {
+	var minority bool
+	switch {
+	case positives*5 > labeled*4:
+		minority = false
+	case positives*5 < labeled:
+		minority = true
+	default:
+		return nil
+	}
+	var inBand, hits, total int
+	for _, s := range samples {
+		if s.label == minority {
+			total++
+		}
+		if binOf(s.value) != 0 {
+			continue
+		}
+		inBand++
+		if s.label == minority {
+			hits++
+		}
+	}
+	return &LowTail{
+		Band:      Band(0),
+		Label:     minority,
+		Labeled:   inBand,
+		Precision: ratio(hits, inBand),
+		Recall:    ratio(hits, total),
+	}
 }
 
 func binOf(v float64) int {

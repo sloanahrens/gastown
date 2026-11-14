@@ -2194,7 +2194,11 @@ The verdict for each question:
 
 The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. The precision a noul or choice is judged
-on is taken at that same cut. `--json` names the rule that labeled each
+on is taken at that same cut. A noul whose base rate is over 80% or under 20%
+also prints a `low tail` line: the lowest calibration band (0.0 to 0.2) with its
+labeled count, the label the base rate makes rare (the minority label), and that
+band's precision for it and recall of it. A balanced noul prints no such line,
+and the line changes no verdict. `--json` names the rule that labeled each
 line in its `lines` array, and the label's source where it has one.
 
 Every battery is registered with `Register` in `internal/jev/scorecard/`. The

@@ -18,6 +18,7 @@ likely_defect (noul)
     0.6-0.8      2  0.650  0.500
     0.8-1.0      2  0.850  0.000
   calibration error 0.41, brier 0.31, monotone: n/a
+  low tail, band 0.0-0.2 (labeled 0), minority label true: precision n/a, recall 0.0%
   verdict: not-yet
 
 logic_churn (noul)

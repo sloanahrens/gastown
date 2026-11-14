@@ -59,4 +59,5 @@ worth_doing (noul)
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.900  1.000
   calibration error 0.10, brier 0.01, monotone: n/a
+  low tail, band 0.0-0.2 (labeled 0), minority label false: precision n/a, recall n/a
   verdict: not-yet

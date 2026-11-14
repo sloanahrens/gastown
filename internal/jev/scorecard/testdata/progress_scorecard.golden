@@ -27,6 +27,7 @@ drifted_from_bead (noul)
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
   calibration error 0.10, brier 0.01, monotone: n/a
+  low tail, band 0.0-0.2 (labeled 1), minority label true: precision 0.0%, recall n/a
   verdict: not-yet
 
 looping (noul)
