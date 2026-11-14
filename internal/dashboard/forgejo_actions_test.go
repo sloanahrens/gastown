@@ -479,10 +479,10 @@ func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	for _, repo := range []string{"operator/beads", "operator/mango"} {
 		assert.Equal(t, []string{
 			"/api/v1/repos/" + repo + "/activities/feeds?limit=30",
-			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=waiting",
-			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=blocked",
-			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=running",
-			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&page=1&status=waiting",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&page=1&status=blocked",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&page=1&status=running",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&page=1&status=success&status=failure&status=cancelled&status=skipped",
 		}, askedForRepo(stub.askedFor(), repo), "current is one bounded query per status, completed one for every finished status")
 	}
 }

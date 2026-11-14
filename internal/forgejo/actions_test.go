@@ -69,6 +69,52 @@ func TestListRunsQueuedRunHasNoTimingYet(t *testing.T) {
 	assert.Zero(t, got.Runs[0].Duration)
 }
 
+// A run list always carries a page: Forgejo reads a request without one as
+// unpaged, ignores limit and converts every run in the repository, so the list
+// costs the repo's whole run history (gt-0izqj9).
+func TestRunFilterValues_AlwaysSendsAPage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		filter    RunFilter
+		wantPage  string
+		wantLimit string // empty means the limit stays unset
+	}{
+		{name: "zero page defaults to 1", filter: RunFilter{}, wantPage: "1"},
+		{name: "negative page defaults to 1", filter: RunFilter{Page: -2}, wantPage: "1"},
+		{name: "explicit page is kept", filter: RunFilter{Page: 3}, wantPage: "3"},
+		{name: "zero limit stays unset", filter: RunFilter{Page: 1}, wantPage: "1"},
+		{name: "limit goes beside the page", filter: RunFilter{Page: 3, Limit: 7}, wantPage: "3", wantLimit: "7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			q := tt.filter.values()
+			assert.Equal(t, tt.wantPage, q.Get("page"))
+			if tt.wantLimit == "" {
+				assert.False(t, q.Has("limit"), "limit should be absent when zero")
+			} else {
+				assert.Equal(t, tt.wantLimit, q.Get("limit"))
+			}
+		})
+	}
+}
+
+// ListRuns sends the page its filter defaults to, so a caller that leaves Page
+// zero still gets one bounded page instead of the server's full conversion.
+func TestListRunsSendsPageOneForAZeroPageFilter(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{body: []byte(`{"total_count": 0, "workflow_runs": []}`)}
+	c := newTestClient(t, rec)
+
+	_, err := c.ListRuns(context.Background(), "sloan", "gastown", RunFilter{Status: []string{"waiting"}})
+	require.NoError(t, err)
+	q := rec.req.URL.Query()
+	assert.True(t, q.Has("page"), "the request must carry a page parameter")
+	assert.Equal(t, "1", q.Get("page"))
+	assert.False(t, q.Has("limit"), "a zero Limit stays unset")
+}
+
 // DeleteRun sends one DELETE to the run's own path with the token, so the
 // retention step removes exactly the run it planned.
 func TestDeleteRunSendsDeleteToTheRunPath(t *testing.T) {

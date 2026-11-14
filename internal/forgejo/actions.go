@@ -45,7 +45,9 @@ type RunList struct {
 	Runs       []ActionRun `json:"workflow_runs"`
 }
 
-// RunFilter narrows a run list; a zero field is not sent.
+// RunFilter narrows a run list; a zero field is not sent, except Page, which
+// always goes as at least 1: Forgejo without a page parameter ignores limit
+// and converts every run in the repository (gt-0izqj9).
 type RunFilter struct {
 	Event   []string
 	Status  []string
@@ -78,9 +80,11 @@ func (f RunFilter) values() url.Values {
 	if f.WorkflowID != "" {
 		q.Set("workflow_id", f.WorkflowID)
 	}
-	if f.Page > 0 {
-		q.Set("page", strconv.Itoa(f.Page))
+	page := f.Page
+	if page <= 0 {
+		page = 1
 	}
+	q.Set("page", strconv.Itoa(page))
 	if f.Limit > 0 {
 		q.Set("limit", strconv.Itoa(f.Limit))
 	}
