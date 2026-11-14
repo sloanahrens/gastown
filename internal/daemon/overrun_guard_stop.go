@@ -963,7 +963,8 @@ const overrunHostWorktreeLabel = "host worktree"
 // seam over for a seat with a sandbox record, so the same save, push and reset
 // code runs inside the sandbox. A worktree that cannot be resolved is an
 // error, never a nil handle: the caller cannot save work it cannot see.
-func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, string, error) {
+func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, string, error) { //nolint:unparam // the label names the worktree kind; the sandbox handle names its kind at this seam (gt-bh77is), and the routing test reads it
+
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
 	}
