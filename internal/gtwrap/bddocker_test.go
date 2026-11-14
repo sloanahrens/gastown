@@ -558,6 +558,38 @@ func TestBdDockerReturnsTheShellError(t *testing.T) {
 	}
 }
 
+// TestBdDockerDoctorRefusesAnInvalidTarget: a target the doctor cannot use is an
+// error naming the field, not a down diagnosis, and no probe runs.
+func TestBdDockerDoctorRefusesAnInvalidTarget(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name    string
+		mutate  func(*BdDocker)
+		wantErr string
+	}{
+		{"no town root", func(b *BdDocker) { b.Town = "" }, "town root"},
+		{"relative town root", func(b *BdDocker) { b.Town = "gt" }, "must be an absolute path"},
+		{"no container", func(b *BdDocker) { b.Container = "" }, "container is \"\""},
+		{"no shell", func(b *BdDocker) { b.Shell = nil }, "no shell"},
+		{"no note writer", func(b *BdDocker) { b.Note = nil }, "no note writer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			shell := healthyShell()
+			b := bdDockerTargetFor(town, shell)
+			tt.mutate(&b)
+			if _, err := b.Doctor(); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Doctor error = %v, want it to name %q", err, tt.wantErr)
+			}
+			if len(shell.captured) != 0 {
+				t.Errorf("an invalid target ran docker probes: %q", shell.captured)
+			}
+		})
+	}
+}
+
 // TestBdDockerLaunchHasNoThrowawayRung: when the container is missing, stopped
 // or unhealthy, a call is refused with the doctor's reason and nothing runs in a
 // throwaway container.
