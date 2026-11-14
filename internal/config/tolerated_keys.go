@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
-	"strings"
+	"reflect"
 	"sync"
 )
 
@@ -17,19 +17,30 @@ import (
 // nowhere to go but out.
 
 // toleratedKeys names the keys the schema stopped declaring. Each path is
-// written as it appears in the town settings file; a patrol document read on
-// its own (mayor/daemon.json, or settings/config.json's "daemon" section)
-// names the same key without the leading "daemon.".
+// written as it appears in the town settings file, under its "daemon" section.
 var toleratedKeys = map[string]bool{
 	// The sweep's idle wait went with its own Docker engine (gt-qpeei.8).
 	"daemon.patrols.tier_sweep.runner_idle_command": true,
 	"daemon.patrols.tier_sweep.runner_idle_wait":    true,
+	// The polecat's local om round is gone (gt-i9rw9d).
+	"daemon.local_round": true,
 }
 
+// daemonPatrolConfigType is the type a patrol document (mayor/daemon.json, or
+// the daemon section read on its own) decodes into.
+var daemonPatrolConfigType = reflect.TypeOf(DaemonPatrolConfig{})
+
 // toleratedKeyPath returns path in the form toleratedKeys writes it, and
-// whether the key is tolerated.
-func toleratedKeyPath(path string) (string, bool) {
-	if strings.HasPrefix(path, "patrols.") {
+// whether the key is tolerated. root is the type the document decodes into: a
+// DaemonPatrolConfig document is the town settings file's "daemon" section
+// read alone, so every path in it takes that section's "daemon." prefix. A
+// path is tolerated only in the document its key belonged to, so a bare
+// "local_round" at the top of some other config file is still refused.
+func toleratedKeyPath(root reflect.Type, path string) (string, bool) {
+	for root != nil && root.Kind() == reflect.Pointer {
+		root = root.Elem()
+	}
+	if root == daemonPatrolConfigType {
 		path = "daemon." + path
 	}
 	return path, toleratedKeys[path]
@@ -44,14 +55,11 @@ var (
 )
 
 // warnToleratedKeys writes one line per tolerated key in paths not yet named
-// this process, in the order the key walk found them. paths are as the walk
-// saw them.
+// this process, in the order the key walk found them. paths are already in
+// toleratedKeys' form (toleratedKeyPath), so a key is named the same way
+// whichever file held it.
 func warnToleratedKeys(warn io.Writer, paths []string) {
-	for _, p := range paths {
-		path, ok := toleratedKeyPath(p)
-		if !ok {
-			continue
-		}
+	for _, path := range paths {
 		toleratedWarnedMu.Lock()
 		said := toleratedWarned[path]
 		toleratedWarned[path] = true

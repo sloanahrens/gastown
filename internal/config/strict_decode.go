@@ -53,11 +53,12 @@ func decodeJSONStrict(path string, data []byte, v any) ([]string, error) {
 	if err != nil {
 		return nil, parseErrorFromJSON(path, data, err)
 	}
+	root := reflect.TypeOf(v)
 	var tolerated []string
 	unknown := make([]keyRef, 0, len(keys))
 	for _, k := range keys {
-		if _, ok := toleratedKeyPath(k.path); ok {
-			tolerated = append(tolerated, k.path)
+		if path, ok := toleratedKeyPath(root, k.path); ok {
+			tolerated = append(tolerated, path)
 			continue
 		}
 		unknown = append(unknown, k)
