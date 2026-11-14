@@ -28,6 +28,9 @@ func TestLocalRoundDocStatesTheRules(t *testing.T) {
 	}{
 		{"the bound", wordForBound(t, localRoundsPerDay) + " per bead per day"},
 		{"the switch", localRoundSwitchKey(t)},
+		// The patrol fetches before Allow counts (internal/daemon/local_round.go),
+		// so a fetch failure spends no round; the page must say so.
+		{"a fetch failure is not a round", "A request whose head cannot be fetched is not a round"},
 		// gt done's gate enforces this rule (internal/cmd/done_local_round.go),
 		// and no land constant carries its sentence to build the row from.
 		{"the unavailable rule", "An unavailable answer never blocks a submit"},
