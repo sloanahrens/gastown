@@ -568,8 +568,9 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 // returns the candidates the reads made, the lines for the reads that failed,
 // and whether the read phase finished. The reads run on their own goroutine so
 // the deadline can end the pass without waiting for a bd call that has not
-// returned; the deferred cancel stops the reads at the next candidate once the
-// pass has returned. A read phase that did not finish is one logged line.
+// returned; the deferred cancel makes each read the pass no longer waits for
+// stop before its next bd call. A read phase that did not finish is one logged
+// line.
 func specEstimateAheadReadCandidates(env specDispatchEnv, ids []string) (cands []specEstimateAheadBead, lines []string, finished bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -581,9 +582,6 @@ func specEstimateAheadReadCandidates(env specDispatchEnv, ids []string) (cands [
 	go func() {
 		var res readResult
 		for _, id := range ids {
-			if ctx.Err() != nil {
-				return
-			}
 			issue, comments, err := env.EstimateAheadRead(ctx, id)
 			if err != nil {
 				res.lines = append(res.lines, fmt.Sprintf("%s: story points estimate ahead: cannot read: %s", id, firstErrLine(err)))

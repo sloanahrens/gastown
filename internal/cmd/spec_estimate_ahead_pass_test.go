@@ -223,9 +223,11 @@ func TestSpecDispatchStoryPointsEstimateAheadTimeoutLogsOneLineAndKeepsSlings(t 
 	}
 	r := runSpecDispatchCycle(env)
 
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), specAheadTestWait)
+	defer cancelWait()
 	select {
 	case <-cancelled:
-	case <-time.After(specAheadTestWait):
+	case <-waitCtx.Done():
 		t.Fatal("the timed-out ahead estimate was not canceled when the tick returned")
 	}
 	if got := strings.Join(f.slung, " "); got != "gt-a" {
@@ -542,10 +544,12 @@ func TestSpecEstimateAheadReadTimeoutEndsThePass(t *testing.T) {
 	}
 	done := make(chan []string, 1)
 	go func() { done <- specEstimateAheadPass(env, []string{"gt-a"}, nil) }()
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), specAheadTestWait)
+	defer cancelWait()
 	var lines []string
 	select {
 	case lines = <-done:
-	case <-time.After(specAheadTestWait):
+	case <-waitCtx.Done():
 		t.Fatal("the pass did not end when its read phase timed out")
 	}
 
