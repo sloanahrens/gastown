@@ -367,6 +367,17 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRe
 	return m
 }
 
+// NewManagerWithObserver is NewManager whose own git handles — the worktrees,
+// the repo base and the rig config reads it opens — call observe once per git
+// process, as git.Git.WithRunObserver does. The sling passes its trace's
+// counter so the calls that reuse, repair and session start make are counted on
+// the step that made them (gt-74tzuk). A nil observe counts nothing.
+func NewManagerWithObserver(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRegistry, observe func()) *Manager {
+	m := NewManager(r, g, t, prefixes)
+	m.gits = m.gits.withObserver(observe)
+	return m
+}
+
 // NewManagerWithStore is NewManager over an injected bead database: nil store
 // is bd, and a store answers the work-bead and agent-bead reads alike, so a
 // unit test can run a real Manager without starting bd.

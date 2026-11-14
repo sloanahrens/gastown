@@ -114,6 +114,7 @@ type Git struct {
 	gitDir  string        // Optional: explicit git directory (for bare repos)
 	gh      ghFunc        // runs the gh CLI; nil means the real gh on PATH
 	exec    runFunc       // runs git; nil means the real git on PATH
+	observe func()        // called before each git process starts (WithRunObserver); nil counts nothing
 	timeout time.Duration // deadline for every call when set (WithTimeout)
 	env     []string      // added to every call's environment (WithEnv)
 	unset   []string      // removed from every call's environment (WithoutEnv)
@@ -5607,20 +5608,26 @@ func hasTrackedGitmodules(run runFunc, repoPath string) bool {
 	return err == nil
 }
 
-// InitSparseCheckout initializes sparse checkout with cone mode and configures
-// the given paths. If paths is empty, initializes with cone mode only (checkout root files).
-func InitSparseCheckout(repoPath string, paths []string) error {
-	if err := EnsureSafeMutationWorkDir(repoPath); err != nil {
+// InitSparseCheckout initializes cone-mode sparse checkout of paths in the
+// repository at repoPath through g's runner, so a handle carrying a run
+// observer (WithRunObserver) counts each process it starts; an empty paths
+// initializes cone mode only (gt-74tzuk).
+func (g *Git) InitSparseCheckout(repoPath string, paths []string) error {
+	return initSparseCheckout(g.runner(), repoPath, paths)
+}
+
+func initSparseCheckout(run runFunc, repoPath string, paths []string) error {
+	if err := ensureSafeMutationWorkDir(run, repoPath); err != nil {
 		return err
 	}
 
 	// Initialize sparse checkout in cone mode
-	if _, stderr, err := realRun(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "init", "--cone"}}); err != nil {
+	if _, stderr, err := run(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "init", "--cone"}}); err != nil {
 		return fmt.Errorf("initializing sparse checkout: %s", strings.TrimSpace(stderr))
 	}
 	if len(paths) > 0 {
 		args := append([]string{"-C", repoPath, "sparse-checkout", "set"}, paths...)
-		if _, stderr, err := realRun(gitCall{args: args}); err != nil {
+		if _, stderr, err := run(gitCall{args: args}); err != nil {
 			return fmt.Errorf("setting sparse checkout paths: %s", strings.TrimSpace(stderr))
 		}
 	}

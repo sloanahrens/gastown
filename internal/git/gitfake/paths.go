@@ -253,6 +253,21 @@ func (h *handle) DisableSparseCheckout() error {
 	return nil
 }
 
+// InitSparseCheckout records sparse checkout as on for the repository at
+// repoPath. The fake does not hide files for a sparse checkout, so the paths
+// are not modeled.
+func (h *handle) InitSparseCheckout(repoPath string, _ []string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	repoPath = clean(repoPath)
+	r, wt := h.f.at(repoPath)
+	if r == nil || !onDisk(r, wt) {
+		return gitErr(128, "fatal: not a git repository: "+repoPath, "sparse-checkout", "init")
+	}
+	r.configMap()["core.sparseCheckout"] = "true"
+	return nil
+}
+
 // FetchBranchWithTimeout fetches one named branch into its remote-tracking
 // ref, as git fetch <remote> <branch> does under the refspec a clone
 // configures.

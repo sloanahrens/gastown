@@ -203,6 +203,15 @@ func NewSessionManager(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistr
 	return m
 }
 
+// NewSessionManagerWithObserver is NewSessionManager whose worktree git handle
+// calls observe once per git process, as git.Git.WithRunObserver does (gt-74tzuk).
+// A nil observe counts nothing.
+func NewSessionManagerWithObserver(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistry, observe func()) *SessionManager {
+	m := NewSessionManager(t, r, prefixes)
+	m.gits = m.gits.withObserver(observe)
+	return m
+}
+
 // polecatAgentEnvConfig is the AgentEnv input for a polecat's session. The
 // resolved agent's own GOFLAGS rides along so the seat's -p cap follows what
 // the agent env says instead of replacing it (a session backend applies this

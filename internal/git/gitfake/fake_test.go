@@ -32,6 +32,27 @@ func TestFakeInspection(t *testing.T) {
 	}
 }
 
+// TestInitSparseCheckoutRecordsTheSetting drives the fake method rig add calls:
+// a repository takes the setting, and a path that is no repository is refused
+// (gt-74tzuk).
+func TestInitSparseCheckoutRecordsTheSetting(t *testing.T) {
+	t.Parallel()
+	f := New()
+	dir := filepath.Join(t.TempDir(), "clone")
+	f.InitRepo(t, dir)
+	h := f.Open(dir).(PathRepo)
+	if err := h.InitSparseCheckout(dir, []string{"a"}); err != nil {
+		t.Fatalf("InitSparseCheckout: %v", err)
+	}
+	if got, _ := h.ConfigGet("core.sparseCheckout"); got != "true" {
+		t.Errorf("core.sparseCheckout = %q after init, want true", got)
+	}
+	missing := filepath.Join(t.TempDir(), "absent")
+	if err := h.InitSparseCheckout(missing, nil); err == nil {
+		t.Error("InitSparseCheckout outside any repository succeeded")
+	}
+}
+
 func TestFakeBranchContract(t *testing.T) {
 	t.Parallel()
 	RunBranchContract(t, func(t *testing.T) BranchEnv { return New() })

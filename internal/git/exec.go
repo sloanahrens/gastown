@@ -55,16 +55,38 @@ func NewGitWithExec(workDir string, exec ExecFunc) *Git {
 var errTimedOut = errors.New("git timed out")
 
 // runner returns the runFunc g sends git through: the real git on PATH
-// unless a test set one.
+// unless a test set one. The observer, when set, wraps that run below the
+// config-read retry, so a retry is counted as the second process it starts.
 func (g *Git) runner() runFunc {
 	run := realRun
 	if g.exec != nil {
 		run = g.exec
 	}
+	if g.observe != nil {
+		run = observed(run, g.observe)
+	}
 	if g.configRetry {
 		return g.withConfigReadRetry(run)
 	}
 	return run
+}
+
+// WithRunObserver returns a copy of g whose every git process calls observe
+// once, before the process starts, so a caller can count the git calls a
+// piece of work makes. A call that fails is counted too. A nil observe counts
+// nothing. The receiver is left as it was.
+func (g *Git) WithRunObserver(observe func()) *Git {
+	c := *g
+	c.observe = observe
+	return &c
+}
+
+// observed wraps run so observe is called before each invocation of it.
+func observed(run runFunc, observe func()) runFunc {
+	return func(c gitCall) (string, string, error) {
+		observe()
+		return run(c)
+	}
 }
 
 // realRun runs git on PATH.
