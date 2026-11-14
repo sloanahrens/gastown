@@ -612,6 +612,18 @@ func TestLocalRoundFetchFailuresRefuseTheRound(t *testing.T) {
 			if got := len(tc.g.removed) == 1; got != tc.wantCleanup {
 				t.Fatalf("worktree cleanup ran %d times; want it run: %v", len(tc.g.removed), tc.wantCleanup)
 			}
+			// The early refusals return before the ref is written, so the ref cannot
+			// be found absent there. Before the write the round must delete nothing;
+			// the absence check is meaningful only once the round has written the ref.
+			if tc.g.revErr != nil || tc.g.updateErr != nil {
+				if len(tc.g.deleted) != 0 {
+					t.Fatalf("a refusal before the ref write deleted %v; want no ref delete", tc.g.deleted)
+				}
+				return
+			}
+			if len(tc.g.deleted) != 1 {
+				t.Fatalf("the refused round deleted %v; want refs/local-round/gt-ryp1ff deleted once", tc.g.deleted)
+			}
 			if _, ok := tc.g.refs["refs/local-round/gt-ryp1ff"]; ok {
 				t.Fatal("the refused round left refs/local-round/gt-ryp1ff behind")
 			}
