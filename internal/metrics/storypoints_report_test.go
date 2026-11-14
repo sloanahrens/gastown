@@ -371,41 +371,75 @@ func driftLandings(n int, base time.Time, measuredRank func(i int) float64) []Ro
 	return rows
 }
 
-// TestStoryPointsDriftTable: over 30 landings whose estimate is 1..30 and whose
-// measured rank is the estimate with the two ends swapped (rank 1 and rank 30
-// change places, the other 28 keep theirs), the rank correlation is the hand
-// value. The two moved ranks each move 29 places, so the sum of squared rank
-// gaps is 2*29^2 = 1682, and rho = 1 - 6*1682/(30*(30^2-1)) = 16878/26970. The
-// measured time is the squared rank, so it ranks with the estimate but is not a
-// straight line in it: a correlation of the raw series does not give this value.
+// TestStoryPointsDriftTable: over 30 landings whose estimate is 1..30 minutes and
+// whose measured rank is a fixed permutation of the estimate, the rank
+// correlation is the hand value: with no ties rho = 1 - 6*sum(d^2)/(30*(30^2-1))
+// = 1 - sum(d^2)/4495, where d is each rank's gap. The measured time is the
+// squared rank, so the series ranks with the estimate but is not a straight line
+// in it: a correlation of the raw series does not give these values.
 func TestStoryPointsDriftTable(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
-	rows := driftLandings(30, base, func(i int) float64 {
-		switch i {
-		case 0:
-			return 30 * 30
-		case 29:
-			return 1
+	swap := func(rank func(i int) float64, a, b int) func(int) float64 {
+		return func(i int) float64 {
+			switch i {
+			case a:
+				return rank(b)
+			case b:
+				return rank(a)
+			}
+			return rank(i)
 		}
-		return float64((i + 1) * (i + 1))
-	})
-
-	got, err := StoryPointsDriftOver(rows, nil)
-	if err != nil {
-		t.Fatalf("StoryPointsDriftOver: %v", err)
 	}
-	if got.N != 30 {
-		t.Errorf("window N = %d, want 30", got.N)
+	inOrder := func(i int) float64 { return float64(i + 1) }
+	tests := []struct {
+		name     string
+		measured func(i int) float64
+		want     float64
+	}{
+		{
+			// Ranks 1 and 30 moved 29 places each: +2*29^2 = 1682.
+			name:     "the two ends swap",
+			measured: swap(inOrder, 0, 29),
+			want:     16878.0 / 26970.0,
+		},
+		{
+			// Two pairs each move one place: 4 gaps of 1 = 4.
+			name:     "two pairs move one place",
+			measured: swap(swap(inOrder, 0, 1), 28, 29),
+			want:     26946.0 / 26970.0,
+		},
+		{
+			// Reversed: every rank is as far from its place as it can be.
+			name:     "reversed",
+			measured: func(i int) float64 { return 31 - inOrder(i) },
+			want:     -1,
+		},
 	}
-	if !got.Current.Measurable {
-		t.Fatalf("Current is not measurable: %s", got.Current.Why)
-	}
-	if want := 16878.0 / 26970.0; math.Abs(got.Current.Rho-want) > 1e-12 {
-		t.Errorf("Current.Rho = %.12f, want %.12f (hand-computed from 2*29^2 over 30 landings)", got.Current.Rho, want)
-	}
-	if got.Current.Why != "" {
-		t.Errorf("Current.Why = %q, want empty", got.Current.Why)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := driftLandings(30, base, func(i int) float64 {
+				r := tc.measured(i)
+				return r * r
+			})
+			got, err := StoryPointsDriftOver(rows, nil)
+			if err != nil {
+				t.Fatalf("StoryPointsDriftOver: %v", err)
+			}
+			if got.N != 30 {
+				t.Errorf("window N = %d, want 30", got.N)
+			}
+			if !got.Current.Measurable {
+				t.Fatalf("Current is not measurable: %s", got.Current.Why)
+			}
+			if math.Abs(got.Current.Rho-tc.want) > 1e-12 {
+				t.Errorf("Current.Rho = %.12f, want %.12f", got.Current.Rho, tc.want)
+			}
+			if got.Current.Why != "" {
+				t.Errorf("Current.Why = %q, want empty", got.Current.Why)
+			}
+		})
 	}
 }
 
@@ -441,7 +475,10 @@ func TestStoryPointsDriftUsesTheLatestHundred(t *testing.T) {
 	var beads []string
 	got, err := StoryPointsDriftOver(rows, func(row Row) (float64, bool) {
 		beads = append(beads, row["bead"])
-		minutes, _ := strconv.ParseFloat(row["sp_minutes"], 64)
+		minutes, err := strconv.ParseFloat(row["sp_minutes"], 64)
+		if err != nil {
+			t.Fatalf("scorer: sp_minutes %q: %v", row["sp_minutes"], err)
+		}
 		return minutes, true
 	})
 	if err != nil {
@@ -592,8 +629,14 @@ func TestStoryPointsDriftPreviousReading(t *testing.T) {
 		why        string
 	}{
 		{
-			name:       "every landing scored",
-			previous:   func(row Row) (float64, bool) { m, _ := strconv.ParseFloat(row["sp_minutes"], 64); return 3 * m, true },
+			name: "every landing scored",
+			previous: func(row Row) (float64, bool) {
+				m, err := strconv.ParseFloat(row["sp_minutes"], 64)
+				if err != nil {
+					t.Fatalf("scorer: sp_minutes %q: %v", row["sp_minutes"], err)
+				}
+				return 3 * m, true
+			},
 			measurable: true,
 			rho:        1,
 		},
