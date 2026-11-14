@@ -109,18 +109,12 @@ func execCall(ctx context.Context, policy *bdgateway.Policy, log *bdgateway.Call
 	}
 	start := time.Now()
 	sink := &streamSink{stdout: stdout, stderr: stderr}
-	err = runner.Exec(ctx, req, stdin, sink)
-	if !sink.Started() {
+	if err := runner.Exec(ctx, req, stdin, sink); !sink.Started() {
 		if err == nil {
 			err = errors.New("the call returned without a frame")
 		}
 		fmt.Fprintln(stderr, "bdgw exec:", err)
 		return exitRefused
-	}
-	if errors.Is(err, bdgateway.ErrBadErrorPayload) || errors.Is(err, bdgateway.ErrBadExitStatus) {
-		// The codec's error text can carry a byte of the frame, so the frame is
-		// named and its payload is not printed.
-		fmt.Fprintln(stderr, "bdgw exec: the stream carried a malformed frame")
 	}
 	status, seen := sink.Status()
 	if !seen {
@@ -172,6 +166,11 @@ type streamSink struct {
 func (s *streamSink) Write(p []byte) (int, error) {
 	frame, err := bdgateway.ReadFrame(bytes.NewReader(p))
 	if err != nil {
+		if errors.Is(err, bdgateway.ErrBadErrorPayload) || errors.Is(err, bdgateway.ErrBadExitStatus) {
+			// The codec's error text can carry a byte of the frame, so the frame is
+			// named here and its payload is not printed.
+			fmt.Fprintln(s.stderr, "bdgw exec: the stream carried a malformed frame")
+		}
 		return 0, err
 	}
 	s.started = true
