@@ -602,6 +602,7 @@ container_suite	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38
 dangerous	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
 test_scope	polecat	"echo $(cat /pro''c/1/environ)"	allow		gt-vf3529	15d9b38d1585621985afed32e2bb503eab6327a82348645f1046bc307a7dee22
 # --- gt-mh2pm3: commandSegments reads an unreadable command as unreadable (no shellTokenize fallback in tap_guard_permission_request.go); one real case per freeze guard carries the new stamp, each with the verdict its guard already gives ---
+# gt-mh2pm3 verdict changes: none. Its three rows below are additions; no existing row changed verdict (the landed diff adds lines and deletes none).
 container_suite	polecat	"cd /tmp/x && touch \"f"	refuse	cannot be read	gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
 dangerous	polecat	"cd /tmp/x && touch \"f"	refuse	cannot be read	gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
 test_scope	polecat	"cd /tmp/x && touch \"f"	allow		gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
