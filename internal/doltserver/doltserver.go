@@ -4705,14 +4705,29 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// file is written or removed on this path too, so a current metadata.json
 	// still gets it (gt-2r2och).
 	if !changed {
-		return writeDoltPortFile(beadsDir, filePort)
+		portChanged, err := writeDoltPortFile(beadsDir, filePort)
+		if err != nil {
+			return err
+		}
+		if !portChanged && !h.isWorkspaceStale() {
+			// Nothing bd reads changed and the last push landed, so the tree the
+			// gateway holds is current; a push here would resend it on every pass.
+			return nil
+		}
+		return h.pushWorkspaceAfterWrite(townRoot)
 	}
 
 	// The port file goes first. Once metadata.json no longer carries the key,
 	// the port file is the only port source, so a failed write must leave
 	// metadata.json as it was, key included (gt-49f3pn).
-	if err := writeDoltPortFile(beadsDir, filePort); err != nil {
+	portWritten, err := writeDoltPortFile(beadsDir, filePort)
+	if err != nil {
 		return err
+	}
+	if portWritten {
+		// bd reads the port file, so the gateway's tree is out of date from here
+		// on; a later failure in this function must leave it marked, not clean.
+		h.setWorkspaceStale(true)
 	}
 	if dropKey {
 		delete(existing, "dolt_server_port")
@@ -4727,32 +4742,35 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		return fmt.Errorf("writing metadata.json: %w", err)
 	}
 
-	return nil
+	return h.pushWorkspaceAfterWrite(townRoot)
 }
 
 // writeDoltPortFile writes the decimal port to beadsDir/dolt-server.port, the
-// source bd reads the port from (gt-2r2och). It rewrites the file only when its
-// content differs, so an unchanged port leaves the file's mtime alone. A port of
-// 0 removes the file, and any removal failure but the file being absent is
-// returned: the caller passes 0 for a town that names no endpoint on disk
-// (gt-k3kb52), and the port file must not outlive the endpoint it named
-// (gt-22vrye).
-func writeDoltPortFile(beadsDir string, port int) error {
+// source bd reads the port from (gt-2r2och), and reports whether the file
+// changed. It rewrites the file only when its content differs, so an unchanged
+// port leaves the file's mtime alone and a caller that pushes the workspace can
+// tell a real change from a pass over the same bytes. A port of 0 removes the
+// file, and any removal failure but the file being absent is returned: the
+// caller passes 0 for a town that names no endpoint on disk (gt-k3kb52), and
+// the port file must not outlive the endpoint it named (gt-22vrye).
+func writeDoltPortFile(beadsDir string, port int) (bool, error) {
 	portPath := filepath.Join(beadsDir, "dolt-server.port")
 	if port <= 0 {
-		if err := os.Remove(portPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing dolt-server.port: %w", err)
+		err := os.Remove(portPath)
+		if err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("removing dolt-server.port: %w", err)
 		}
-		return nil
+		// A file already absent is the state a removal wants: no change, no error.
+		return err == nil, nil
 	}
 	want := []byte(strconv.Itoa(port))
 	if data, err := os.ReadFile(portPath); err == nil && bytes.Equal(data, want) {
-		return nil
+		return false, nil
 	}
 	if err := atomicfile.WriteFile(portPath, want, 0644); err != nil {
-		return fmt.Errorf("writing dolt-server.port: %w", err)
+		return false, fmt.Errorf("writing dolt-server.port: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // persistedMetadataHost is the host metadata.json names. The town root is

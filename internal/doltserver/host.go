@@ -12,9 +12,11 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/beads"
 	configpkg "github.com/steveyegge/gastown/internal/config"
 )
@@ -86,10 +88,32 @@ type host struct {
 	// a file shared with the Mac must name (config.ResolveDoltEndpointFor with
 	// inContainer false).
 	persistedEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
+	// pushWorkspace sends the town's workspace to the bd gateway after the
+	// files bd reads change; nil is bdgateway.PushWorkspace, which does nothing
+	// until a gateway is installed.
+	pushWorkspace func(ctx context.Context, townRoot string) (string, error)
+	// workspace is what the host knows of the bd gateway's tree. It is a pointer
+	// so copies of the host (withEnv) share one record: the gateway is one.
+	workspace *workspaceState
 }
 
+// workspaceState is the host's record of the bd gateway's tree. stale is set
+// when a push fails and cleared when one lands, so a pass that changes nothing
+// still retries the push the gateway missed. mu guards it: writers run from
+// several goroutines.
+type workspaceState struct {
+	mu    sync.Mutex
+	stale bool
+}
+
+// newWorkspaceState is the record of a process that has pushed nothing yet. It
+// starts stale: a push the previous process missed before it restarted left the
+// gateway on an older tree, and a fresh record has no way to know, so the first
+// pass pushes (isWorkspaceStale: unknown counts as stale).
+func newWorkspaceState() *workspaceState { return &workspaceState{stale: true} }
+
 // std is the real machine.
-var std = &host{probeTimeout: productionProbeTimeout}
+var std = &host{probeTimeout: productionProbeTimeout, workspace: newWorkspaceState()}
 
 // warnf writes a warning to this host's warnings sink: h.warn, or the
 // process's stderr when the host names none.
@@ -122,6 +146,47 @@ func (h *host) resolvePersistedEndpoint(townRoot string) (configpkg.DoltEndpoint
 		return h.persistedEndpoint(townRoot)
 	}
 	return configpkg.ResolveDoltEndpointFor(townRoot, false)
+}
+
+// pushWorkspaceAfterWrite tells the bd gateway its workspace is stale, once a
+// writer has changed the files bd reads. A push failure is returned rather than
+// warned: the container would otherwise keep serving the tree the writer just
+// replaced (docs/design/bd-container.md, "The workspace").
+func (h *host) pushWorkspaceAfterWrite(townRoot string) error {
+	push := h.pushWorkspace
+	if push == nil {
+		push = bdgateway.PushWorkspace
+	}
+	if _, err := push(context.Background(), townRoot); err != nil {
+		h.setWorkspaceStale(true)
+		return fmt.Errorf("the files are written, but the bd gateway's workspace was not updated: %w", err)
+	}
+	h.setWorkspaceStale(false)
+	return nil
+}
+
+// setWorkspaceStale records whether the gateway is known to hold a tree other
+// than the town's. A push attempt is not a push: only a push that returned nil
+// clears the flag. A host with no record keeps nothing to set.
+func (h *host) setWorkspaceStale(stale bool) {
+	if h.workspace == nil {
+		return
+	}
+	h.workspace.mu.Lock()
+	defer h.workspace.mu.Unlock()
+	h.workspace.stale = stale
+}
+
+// isWorkspaceStale reports whether the gateway may not hold the town's tree: the
+// last push failed, or the host has no record to say otherwise. Unknown counts
+// as stale, so the fast path pushes rather than trust a tree it cannot check.
+func (h *host) isWorkspaceStale() bool {
+	if h.workspace == nil {
+		return true
+	}
+	h.workspace.mu.Lock()
+	defer h.workspace.mu.Unlock()
+	return h.workspace.stale
 }
 
 func (h *host) lookupEnvVar(key string) (string, bool) {
