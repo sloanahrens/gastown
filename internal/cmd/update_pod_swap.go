@@ -86,6 +86,9 @@ var runningPairJSONPath = `{.spec.template.spec.containers[?(@.name=="` + k8sdae
 // cluster ran. The pair names no commit, since a Deployment carries no build.
 // A command that fails, prints no pair, or names a half that is not a digest
 // reference is an error naming the step; the command's output is not.
+// A Deployment with no polecat annotation is refused on purpose: the update flow
+// is pair-based, and a roll without the polecat half would stop dispatch, so an
+// unannotated daemon is not a supported install target.
 func (s podDaemonSwap) RunningPair(ctx context.Context) (update.ImagePair, error) {
 	if err := s.validateTarget(); err != nil {
 		return update.ImagePair{}, err
