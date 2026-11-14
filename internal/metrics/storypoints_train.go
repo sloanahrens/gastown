@@ -3,8 +3,11 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"net/http"
@@ -16,7 +19,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/storypoints"
+	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 )
 
 // The story-points retrain step (gt-5d9k2f SP16). It reads the landings table the
@@ -56,15 +61,57 @@ const storyPointsEmbedDefaultURL = "http://127.0.0.1:11434"
 // the retrain rather than being read as a missing vector.
 const storyPointsEmbedTimeout = 60 * time.Second
 
+// trainCounts is what the report counts: the fitted beads by where their
+// features came from and, for a bead fitted on its current text, why the log's
+// line was not read; the estimate log's malformed lines; and the landed rows
+// the retrain did not read, by reason. currentText is the sum of the four
+// fallback reasons: every bead fitted on its current text is counted under one.
+type trainCounts struct {
+	logged       int // fitted on the estimate log's line for the text the bead carries now
+	currentText  int // fitted on the bead's text as it is now
+	noLine       int // current text because the log has no line for the bead
+	otherText    int // current text because the log's lines for the bead were estimated on other text
+	logNoEmbed   int // current text because the bead's log line carries no embedding
+	logEmbedSize int // current text because the log line's embedding is not the weights' size
+	malformedLog int // log lines that did not decode as a record of a bead
+	skips        trainSkips
+}
+
 // trainSkips counts the landed rows the retrain did not read, by reason. A row
 // skipped for a reason the report names is never read as a fitted bead.
 type trainSkips struct {
 	notPolecat int // the landing did not come through a polecat seat
 	seat       int // seat class is neither haiku nor flash
 	unmeasured int // no polecat time
-	noBead     int // the bead is not in its rig's store
-	noText     int // the bead has neither a Constraints nor an Acceptance section
+	noBead     int // the bead is not in its rig's store, so no log line can be checked against its text and there is no current text to fall back to
+	noText     int // the bead has no Constraints or Acceptance section, so there is no current text to fall back to
 	badRig     int // the rig names no directory under the town
+}
+
+// trainFallback is why a bead is fitted on its text as it is now rather than on
+// the estimate log's line.
+type trainFallback int
+
+const (
+	fallbackNoLine    trainFallback = iota // the log has no line for the bead
+	fallbackOtherText                      // the log's lines for the bead were estimated on other text
+	fallbackNoEmbed                        // the bead's log line carries no embedding
+	fallbackEmbedSize                      // the log line's embedding is not the weights' size
+)
+
+// count adds one bead fitted on its current text to counts under f's reason.
+func (f trainFallback) count(counts *trainCounts) {
+	counts.currentText++
+	switch f {
+	case fallbackOtherText:
+		counts.otherText++
+	case fallbackNoEmbed:
+		counts.logNoEmbed++
+	case fallbackEmbedSize:
+		counts.logEmbedSize++
+	default:
+		counts.noLine++
+	}
 }
 
 // trainCandidate is one landed row that passed the row filters, waiting for its
@@ -107,7 +154,7 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	if embedder == nil {
 		embedder = storyPointsEmbedder(base, os.Getenv)
 	}
-	samples, skips, err := trainingSamples(ctx, env, real.Town, rows, base, embedder)
+	samples, counts, err := trainingSamples(ctx, env, real.Town, rows, base, embedder)
 	if err != nil {
 		return err
 	}
@@ -122,7 +169,7 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 		return fmt.Errorf("%s: %w", name, err)
 	}
 
-	report := storyPointsTrainReport(model, skips, name, score)
+	report := storyPointsTrainReport(model, counts, name, score)
 	if err := writeText(real.Extract.OutDir, storyPointsTrainReportName, strings.TrimSuffix(report, "\n")); err != nil {
 		return err
 	}
@@ -132,50 +179,77 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 
 // trainingSamples reads the rows the retrain fits. A row is read when it came
 // through a polecat seat, its seat class is haiku or flash, its polecat time is
-// present, its rig names a directory, and its bead is in the store with a
-// Constraints or Acceptance section. A lower-bound time is read at its floor:
-// dropping it would remove the long beads, which are the ones the bound marks.
-// The others are counted in skips. base is the model the new one is fitted from,
-// and it supplies the shape features' is_haiku mean. An embedder error fails the
-// whole step: a bead the embedder could not read is not a bead the fit may leave
-// out without saying so.
-func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder) ([]storypoints.Sample, trainSkips, error) {
-	var skips trainSkips
+// present, and its rig names a directory. A lower-bound time is read at its
+// floor: dropping it would remove the long beads, which are the ones the bound
+// marks. Its features are the estimate log's line for the text the bead carries
+// now, so the fit sees what the estimator read for a bead whose text has not
+// changed since its estimate. A bead the log holds no such line for — no line at
+// all, a line estimated on other text, or a line the ridges cannot fit — is read
+// from its text as it is now, which needs it in the store with a Constraints or
+// Acceptance section. The others are counted in counts, and so is which source
+// each fitted bead came from. base is the model the new one is fitted from, and
+// it supplies the shape features' is_haiku mean. An embedder error fails the
+// whole step: a bead the embedder could not read is not a bead the fit may
+// leave out without saying so.
+func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder) ([]storypoints.Sample, trainCounts, error) {
+	var counts trainCounts
+	// The size check below reads the embedding ridge's dimension, which is 0
+	// when the base weights carry no ridge. Weights that are not loaded would
+	// otherwise read every logged line as another model's vector and fit none
+	// of them, blaming the log for a weights file the step was handed. Refuse
+	// that base here, naming it.
+	dim := base.EmbeddingDimension()
+	if dim == 0 {
+		return nil, counts, fmt.Errorf("storypoints-train: the base weights %q have no embedding ridge, so no logged embedding can be fitted", base.Version())
+	}
 	var cands []trainCandidate
 	byDir := map[string][]string{}
 	for _, row := range rows {
 		if row["polecat_work"] != "1" {
-			skips.notPolecat++
+			counts.skips.notPolecat++
 			continue
 		}
 		seat, ok := trainSeat(row["seat_class"])
 		if !ok {
-			skips.seat++
+			counts.skips.seat++
 			continue
 		}
 		secs, err := strconv.ParseFloat(row["polecat_secs"], 64)
 		if err != nil || !(secs > 0) {
-			skips.unmeasured++
+			counts.skips.unmeasured++
 			continue
 		}
 		landed, err := ParseTS(row["landed_at"])
 		if err != nil {
-			return nil, skips, fmt.Errorf("storypoints-train: bead %s: %w", row["bead"], err)
+			return nil, counts, fmt.Errorf("storypoints-train: bead %s: %w", row["bead"], err)
 		}
 		dir, ok := reviewDir(town, row["rig"])
 		if !ok {
-			skips.badRig++
+			counts.skips.badRig++
 			continue
 		}
 		cands = append(cands, trainCandidate{bead: row["bead"], rig: row["rig"], seat: seat, minutes: secs / 60, landed: landed})
 		byDir[dir] = append(byDir[dir], row["bead"])
 	}
 
+	// The log is read whole: the step runs monthly, and one read answers every
+	// bead. An unreadable log fails the step rather than reading as no log,
+	// which would fit every bead on text it may have edited.
+	logged, malformed, err := estlog.Read(town)
+	if err != nil {
+		return nil, counts, fmt.Errorf("storypoints-train: %w", err)
+	}
+	counts.malformedLog = malformed
+	byBead := map[string][]estlog.Record{}
+	for _, r := range logged {
+		byBead[r.BeadID] = append(byBead[r.BeadID], r)
+	}
+
 	issues := map[string]*beads.Issue{}
 	for dir, ids := range byDir {
 		found, err := showBeads(ctx, env, dir, ids)
 		if err != nil {
-			return nil, skips, fmt.Errorf("storypoints-train: read beads in %s: %w", dir, err)
+			return nil, counts, fmt.Errorf("storypoints-train: read beads in %s: %w", dir, err)
 		}
 		for id, issue := range found {
 			issues[id] = issue
@@ -185,19 +259,45 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 	var samples []storypoints.Sample
 	for _, c := range cands {
 		issue := issues[c.bead]
+		var fallback trainFallback
+		if lines := byBead[c.bead]; len(lines) == 0 {
+			fallback = fallbackNoLine
+		} else if rec, ok := trainLogLine(lines, issue); !ok {
+			fallback = fallbackOtherText
+		} else {
+			switch {
+			case rec.Embedding == nil:
+				fallback = fallbackNoEmbed
+			case len(rec.Embedding) != dim:
+				// A vector of another size came from another embedder model, and
+				// the ridges cannot read it. The bead is still a bead the fit can
+				// read, so it falls back to its text as it is now.
+				fallback = fallbackEmbedSize
+			default:
+				counts.logged++
+				samples = append(samples, storypoints.Sample{
+					Shape:    loggedShape(rec.Shape),
+					Vector:   rec.Embedding,
+					Minutes:  c.minutes,
+					LandedAt: c.landed,
+				})
+				continue
+			}
+		}
 		if issue == nil {
-			skips.noBead++
+			counts.skips.noBead++
 			continue
 		}
 		text, err := storypoints.SectionText(issue)
 		if err != nil {
-			skips.noText++
+			counts.skips.noText++
 			continue
 		}
 		vec, err := embedder.Embed(ctx, text)
 		if err != nil {
-			return nil, skips, fmt.Errorf("storypoints-train: embed bead %s: %w", c.bead, err)
+			return nil, counts, fmt.Errorf("storypoints-train: embed bead %s: %w", c.bead, err)
 		}
+		fallback.count(&counts)
 		samples = append(samples, storypoints.Sample{
 			Shape:    storypoints.Features(storypoints.EstimateText(issue), c.rig, c.seat, base),
 			Vector:   vec,
@@ -205,7 +305,83 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 			LandedAt: c.landed,
 		})
 	}
-	return samples, skips, nil
+	return samples, counts, nil
+}
+
+// trainLogLine returns the last estimate log line the retrain reads for a bead:
+// the last line whose description hash is the hash of the bead's text as it is
+// now, so the features are the ones the estimate of the text that landed read,
+// even when a later line for other text sits after it. ok is false when the log
+// holds no line estimated on that text: the bead's text was edited after every
+// estimate of it, or the store does not hold the bead, so its current hash is
+// unknown. A line estimated on other text is never returned, since its features
+// describe a text the bead does not carry and the fit would read the landing's
+// minutes against another text's shape and embedding.
+func trainLogLine(lines []estlog.Record, issue *beads.Issue) (estlog.Record, bool) {
+	if issue == nil {
+		return estlog.Record{}, false
+	}
+	textHash := trainSectionHash(issue)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i].DescriptionHash == textHash {
+			return lines[i], true
+		}
+	}
+	return estlog.Record{}, false
+}
+
+// trainSectionKeys are the sections trainSectionHash covers, in the order it
+// writes them: the estimator's list.
+var trainSectionKeys = []string{"goal", "constraints", "acceptance", "size"}
+
+// trainSectionHash is the hash of the bead text an estimate reads, as the
+// estimator keeps it in the estimate log's description_hash: the Goal,
+// Constraints, Acceptance and Size sections of the description, then the bead's
+// Acceptance field, which the estimate text carries too. The title, labels,
+// notes and comments are outside it. It is a copy of
+// internal/storypoints/estimate.SectionHash rather than a call to it: that
+// package reaches hmhints and the Jev client, which the daemon's import closure
+// must not pull in for a helper that only hashes text. The join test writes its
+// log line's hash with the estimator's, so a change to one side that the other
+// does not get fails.
+func trainSectionHash(issue *beads.Issue) string {
+	if issue == nil {
+		return ""
+	}
+	sections := specdispatch.Sections(issue.Description)
+	h := sha256.New()
+	for _, key := range trainSectionKeys {
+		trainHashField(h, key, sections[key])
+	}
+	trainHashField(h, "acceptance-field", issue.AcceptanceCriteria)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// trainHashField writes one length-prefixed field, so a section body can never
+// be read as another field's name or value.
+func trainHashField(h hash.Hash, name, value string) {
+	value = strings.TrimSpace(value)
+	fmt.Fprintf(h, "%d:%s%d:%s", len(name), name, len(value), value)
+}
+
+// loggedShape is the log's copy of the shape features in the package's layout.
+// The two types are separate because the log's field names are its file format,
+// which the in-memory Shape does not carry.
+func loggedShape(s estlog.Shape) storypoints.Shape {
+	return storypoints.Shape{
+		Boxes:   s.Boxes,
+		Paths:   s.Paths,
+		Pkgs:    s.Pkgs,
+		DLen:    s.DLen,
+		NCons:   s.NCons,
+		NLab:    s.NLab,
+		PodEng:  s.PodEng,
+		Tests:   s.Tests,
+		NBt:     s.NBt,
+		RigGT:   s.RigGT,
+		RigDV:   s.RigDV,
+		IsHaiku: s.IsHaiku,
+	}
 }
 
 // trainSeat maps a landing's seat_class cell to the seat the shape feature is
@@ -303,11 +479,13 @@ func removeStoryPointsOutputs(dir string, remove func(string) error) error {
 
 // storyPointsTrainReport is the report the step writes and prints: what was read,
 // the penalties chosen, the holdout scores, and the verdict on the proposed file.
-func storyPointsTrainReport(m storypoints.Model, skips trainSkips, name string, score holdoutScore) string {
+func storyPointsTrainReport(m storypoints.Model, counts trainCounts, name string, score holdoutScore) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "story points retrain: the proposed weights are the fit on the earlier 80%% of landed beads (%s); the holdout scores that same fit, which is not refitted on all rows\n", m.TrainedOn)
+	fmt.Fprintf(&b, "read: from the estimate log %d, from the current text %d (no log line %d, log line for other text %d, log line without an embedding %d, log line embedding of another size %d; the log skipped %d malformed line(s))\n",
+		counts.logged, counts.currentText, counts.noLine, counts.otherText, counts.logNoEmbed, counts.logEmbedSize, counts.malformedLog)
 	fmt.Fprintf(&b, "not read: not polecat work %d, seat class %d, unmeasured %d, bead not in store %d, no Constraints or Acceptance %d, rig without a directory %d\n",
-		skips.notPolecat, skips.seat, skips.unmeasured, skips.noBead, skips.noText, skips.badRig)
+		counts.skips.notPolecat, counts.skips.seat, counts.skips.unmeasured, counts.skips.noBead, counts.skips.noText, counts.skips.badRig)
 	fmt.Fprintf(&b, "penalties: shape %g, embedding %g\n", m.ShapeAlpha, m.EmbedAlpha)
 	b.WriteString("fits-to-minutes knots are the checked-in model's, not refit: recalibrate before adopting\n")
 	fmt.Fprintf(&b, "holdout: latest %d beads (the earlier beads fit the penalties and the weights)\n", len(m.Holdout))
