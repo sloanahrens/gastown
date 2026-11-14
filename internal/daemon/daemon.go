@@ -335,6 +335,12 @@ type Daemon struct {
 	// opens a *git.Git. Tests hand it a gitfake world.
 	openGitFn func(dir string) daemonGit
 
+	// overrunSeatGitFn replaces the handle overrunSeatGit picks for a seat
+	// (see overrunSeatGit); nil is the seat's host worktree. Tests hand it a
+	// recording fake, so they can prove which handle the overrun stop's save,
+	// dirty check, push and reset ran on.
+	overrunSeatGitFn func(seat overrunSeat) (daemonGit, string, error)
+
 	// postLandIsAncestor is the ancestry reader a rig's post-land runner orders
 	// its verdicts with (see newRigLandingWorker); nil reads the rig's own
 	// repository. Tests hand it a fake.
