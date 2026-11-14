@@ -1,6 +1,7 @@
 package bd
 
 import (
+	"encoding/json"
 	"os"
 	"regexp"
 	"strings"
@@ -22,6 +23,7 @@ var numericNonRootUser = regexp.MustCompile(`^USER ([1-9][0-9]*)(:[0-9]+)?$`)
 
 // readInstructions returns the Dockerfile's instruction lines, trimmed, with
 // comments and blank lines dropped.
+// Each line is in canonical form; see canonicalInstruction.
 func readInstructions(t *testing.T) []string {
 	t.Helper()
 	raw, err := os.ReadFile(dockerfileName)
@@ -34,6 +36,7 @@ func readInstructions(t *testing.T) []string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		line = canonicalInstruction(line)
 		out = append(out, line)
 	}
 	return out
@@ -120,10 +123,69 @@ func TestBasePinIsDigest(t *testing.T) {
 
 // contains reports whether want is one of lines.
 func contains(lines []string, want string) bool {
+	// want is canonicalized here; lines come from readInstructions, already canonical.
+	want = canonicalInstruction(want)
 	for _, l := range lines {
 		if l == want {
 			return true
 		}
 	}
 	return false
+}
+
+// canonicalInstruction returns an instruction line in one spelling: the keyword
+// upper-cased, runs of whitespace collapsed to one space, and a JSON exec form
+// re-encoded with no spaces. Two spellings of one instruction then compare equal.
+func canonicalInstruction(line string) string {
+	kw, rest := line, ""
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		kw, rest = line[:i], strings.TrimSpace(line[i:])
+	}
+	var args []string
+	if json.Unmarshal([]byte(rest), &args) == nil {
+		if enc, err := json.Marshal(args); err == nil {
+			rest = string(enc)
+		}
+	} else {
+		rest = strings.Join(strings.Fields(rest), " ")
+	}
+	if rest == "" {
+		return strings.ToUpper(kw)
+	}
+	return strings.ToUpper(kw) + " " + rest
+}
+
+// TestCanonicalInstruction: one instruction, however it is spaced or cased, has
+// one canonical form.
+func TestCanonicalInstruction(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, line, want string }{
+		{"keyword case", "from forgejo:3000/x@sha256:0", "FROM forgejo:3000/x@sha256:0"},
+		{"run of spaces", "COPY   --chmod=0755  bdgw   /usr/local/bin/bdgw", "COPY --chmod=0755 bdgw /usr/local/bin/bdgw"},
+		{"tab separator", "USER\t65532:65532", "USER 65532:65532"},
+		{"exec form spacing", `ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]`, `ENTRYPOINT ["/usr/local/bin/bdgw","serve"]`},
+		{"bare keyword", "run", "RUN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := canonicalInstruction(tc.line); got != tc.want {
+				t.Errorf("canonicalInstruction(%q) = %q, want %q", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestContainsIgnoresSpelling: a wanted instruction written with other spacing
+// or keyword case is found in the Dockerfile.
+func TestContainsIgnoresSpelling(t *testing.T) {
+	t.Parallel()
+	lines := readInstructions(t)
+	for _, want := range []string{
+		"from   " + readBasePin(t),
+		`entrypoint ["/usr/local/bin/bdgw",   "serve"]`,
+	} {
+		if !contains(lines, want) {
+			t.Errorf("contains(%q) = false, want true for the same instruction in another spelling", want)
+		}
+	}
 }
