@@ -383,6 +383,11 @@ func TestRunSeedChildPutsTheTokenEnvInTheChild(t *testing.T) {
 	}
 }
 
+// gitVersionCmd reports whether c is the `git --version` probe a token clone runs first.
+func gitVersionCmd(c SeedCmd) bool {
+	return len(c.Argv) == 2 && c.Argv[0] == "git" && c.Argv[1] == "--version"
+}
+
 // TestSeedCloneSendsTokenThroughEnvNotArgv: the clone authenticates through the git children's
 // environment, and the token reaches neither an argument nor a log line.
 func TestSeedCloneSendsTokenThroughEnvNotArgv(t *testing.T) {
@@ -392,16 +397,25 @@ func TestSeedCloneSendsTokenThroughEnvNotArgv(t *testing.T) {
 	var logged strings.Builder
 	run := func(c SeedCmd) (string, error) {
 		cmds = append(cmds, c)
+		if gitVersionCmd(c) {
+			return "git version 2.43.0\n", nil
+		}
 		return "", nil
 	}
 	logf := func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) }
 	if err := CloneSeed(t.TempDir(), "/cache", twoPins(), token, newSeedHarness(t), run, logf); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
 	}
-	if len(cmds) != 2*len(twoPins()) {
-		t.Fatalf("CloneSeed ran %d children, want a clone and a checkout per pin", len(cmds))
+	if len(cmds) != 1+2*len(twoPins()) {
+		t.Fatalf("CloneSeed ran %d children, want the version probe and a clone and a checkout per pin", len(cmds))
 	}
-	for _, c := range cmds {
+	if got := strings.Join(cmds[0].Argv, " "); got != "git --version" {
+		t.Fatalf("the first child = %q, want git --version before any clone", got)
+	}
+	if len(cmds[0].Env) != 0 {
+		t.Errorf("the version probe carried env %v, want none", cmds[0].Env)
+	}
+	for _, c := range cmds[1:] {
 		if strings.Contains(strings.Join(c.Argv, " "), token) {
 			t.Errorf("a child's argument carries the token: %v", c.Argv)
 		}
@@ -450,7 +464,10 @@ func TestCloneSeedScrubsTheTokenFromAFailedChild(t *testing.T) {
 	t.Parallel()
 	const token = "gt-forgejo-read-token-0123456789"
 	h := newSeedHarness(t)
-	h.reply = func(SeedCmd) (string, error) {
+	h.reply = func(c SeedCmd) (string, error) {
+		if gitVersionCmd(c) {
+			return "git version 2.43.0\n", nil
+		}
 		return "fatal: bad config: Authorization: token " + token + "\n", errors.New("exit status 128")
 	}
 	err := CloneSeed(t.TempDir(), "/cache", twoPins()[:1], token, h, h.run, func(string, ...any) {})
@@ -459,6 +476,92 @@ func TestCloneSeedScrubsTheTokenFromAFailedChild(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), token) {
 		t.Errorf("error quotes the token: %q", err)
+	}
+}
+
+// TestCloneSeedRefusesAGitThatCannotCarryTheTokenHeader: GIT_CONFIG_COUNT reached git in 2.31, so a
+// token clone refuses a git older than that, one it cannot read a version from, and one it cannot
+// ask, instead of cloning anonymously; no refusal quotes the token.
+func TestCloneSeedRefusesAGitThatCannotCarryTheTokenHeader(t *testing.T) {
+	t.Parallel()
+	const token = "gt-forgejo-read-token-0123456789"
+	tests := []struct {
+		name  string
+		reply func(SeedCmd) (string, error)
+		want  string
+	}{
+		{
+			name:  "a git older than 2.31",
+			reply: func(SeedCmd) (string, error) { return "git version 2.30.2\n", nil },
+			want:  "older than git 2.31",
+		},
+		{
+			name:  "a git from before the 2.x line",
+			reply: func(SeedCmd) (string, error) { return "git version 1.8.3.1\n", nil },
+			want:  "older than git 2.31",
+		},
+		{
+			name:  "a version this pass cannot read",
+			reply: func(SeedCmd) (string, error) { return "unexpected\n", nil },
+			want:  "printed no version this pass can judge",
+		},
+		{
+			name:  "a git that cannot be asked",
+			reply: func(SeedCmd) (string, error) { return "git: command not found\n", errors.New("exit status 127") },
+			want:  "asking git whether it carries",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSeedHarness(t)
+			h.reply = tc.reply
+			err := CloneSeed(t.TempDir(), "/cache", twoPins(), token, h, h.run, func(string, ...any) {})
+			if err == nil {
+				t.Fatal("CloneSeed() = nil, want the token clone refused")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("CloneSeed() = %v, want it to carry %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Errorf("the refusal quotes the token: %v", err)
+			}
+			for _, e := range h.events {
+				if strings.HasPrefix(e, "run: git clone") {
+					t.Errorf("a refused token clone still ran %q", e)
+				}
+			}
+		})
+	}
+}
+
+// TestCloneSeedScrubsTheTokenFileSentinelFromAFailedClone: the sentinel is the token file's own
+// content, read the way the init container reads it, and a failed clone that quotes the header must
+// carry no byte of it into the Job's error.
+func TestCloneSeedScrubsTheTokenFileSentinelFromAFailedClone(t *testing.T) {
+	t.Parallel()
+	const sentinel = "gt-token-file-sentinel-0123456789"
+	p := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(p, []byte(sentinel+"\n"), 0o400); err != nil {
+		t.Fatalf("planting the token file: %v", err)
+	}
+	token, err := readCloneToken(p)
+	if err != nil {
+		t.Fatalf("readCloneToken: %v", err)
+	}
+	h := newSeedHarness(t)
+	h.reply = func(c SeedCmd) (string, error) {
+		if gitVersionCmd(c) {
+			return "git version 2.43.0\n", nil
+		}
+		return "fatal: bad config: Authorization: token " + sentinel + "\n", errors.New("exit status 128")
+	}
+	err = CloneSeed(t.TempDir(), "/cache", twoPins()[:1], token, h, h.run, func(string, ...any) {})
+	if err == nil {
+		t.Fatal("CloneSeed() = nil, want the failed clone")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Errorf("the error quotes the token file's contents: %q", err)
 	}
 }
 
@@ -513,6 +616,29 @@ func TestSeedCloneTokenFileErrorsDoNotQuoteTheToken(t *testing.T) {
 				t.Errorf("stderr quotes the file's whitespace: %q", stderr.String())
 			}
 		})
+	}
+}
+
+// TestSeedCloneMainTokenFileSentinelNeverReachesTheError: the token file holds a sentinel and the
+// refusal that follows the read names the pin list, so the init container's own composition is what
+// this pins: a file the read accepts never has its contents printed.
+func TestSeedCloneMainTokenFileSentinelNeverReachesTheError(t *testing.T) {
+	t.Parallel()
+	const sentinel = "gt-token-file-sentinel-0123456789"
+	p := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(p, []byte(sentinel+"\n"), 0o400); err != nil {
+		t.Fatalf("planting the token file: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := seedCloneMain([]string{"--pins", "[]", "--dest", filepath.Join(t.TempDir(), "seed"), "--root", t.TempDir(), "--token-file", p}, &stdout, &stderr)
+	if code != 3 {
+		t.Fatalf("seedCloneMain() = %d, want 3: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "names no pin") {
+		t.Errorf("stderr = %q, want the pin list named", stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), sentinel) {
+		t.Errorf("the Job's output quotes the token file: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 }
 
