@@ -1392,7 +1392,7 @@ func TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testi
 
 	prevSpawn := spawnPolecatForSling
 	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	spawnPolecatForSling = func(_ slingStores, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		if rigName != "testrig" {
 			t.Fatalf("spawn rig = %q, want testrig", rigName)
 		}
@@ -1456,7 +1456,7 @@ func TestIntegrationSchedulerRigHoldKeepsContextQueuedUntilReleased(t *testing.T
 	spawned := 0
 	prevSpawn := spawnPolecatForSling
 	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	spawnPolecatForSling = func(_ slingStores, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		spawned++
 		return &SpawnedPolecatInfo{
 			RigName:     rigName,
@@ -1514,7 +1514,7 @@ func TestIntegrationSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *test
 
 	prevSpawn := spawnPolecatForSling
 	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	spawnPolecatForSling = func(_ slingStores, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		if rigName != "testrig" {
 			t.Fatalf("spawn rig = %q, want testrig", rigName)
 		}
@@ -1577,7 +1577,7 @@ func TestIntegrationSchedulerDispatchFailureRecordedInContextSourceDB(t *testing
 
 	prevSpawn := spawnPolecatForSling
 	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	spawnPolecatForSling = func(_ slingStores, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		if rigName != "testrig" {
 			t.Fatalf("spawn rig = %q, want testrig", rigName)
 		}

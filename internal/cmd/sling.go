@@ -1476,8 +1476,8 @@ func rawWorkflowFieldValues(info *beadInfo) (noMerge, reviewOnly bool, attachedA
 	return fields.NoMerge, fields.ReviewOnly, fields.AttachedAt
 }
 
-func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
-	return slingStores{}.restoreRawWorkflowFields(beadID, townRoot, hookWorkDir, info, originalInfo)
+func restoreRollbackRawWorkflowFields(stores slingStores, beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
+	return stores.restoreRawWorkflowFields(beadID, townRoot, hookWorkDir, info, originalInfo)
 }
 
 // restoreRawWorkflowFields is restoreRollbackRawWorkflowFields in s.
@@ -1511,20 +1511,20 @@ func (s slingStores) restoreRawWorkflowFields(beadID, townRoot, hookWorkDir stri
 	return true, nil
 }
 
-func clearRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info *beadInfo) (bool, error) {
-	return restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info, nil)
+func clearRollbackRawWorkflowFields(stores slingStores, beadID, townRoot, hookWorkDir string, info *beadInfo) (bool, error) {
+	return restoreRollbackRawWorkflowFields(stores, beadID, townRoot, hookWorkDir, info, nil)
 }
 
-func restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo) {
+func restoreRollbackRawWorkflowFieldsFromCurrent(stores slingStores, beadID, townRoot, hookWorkDir string, originalInfo *beadInfo) {
 	if beadID == "" || townRoot == "" {
 		return
 	}
-	info, err := getBeadInfoForRollback(beadID)
+	info, err := getBeadInfoForRollback(stores, beadID)
 	if err != nil {
 		fmt.Printf("  %s Could not inspect bead %s for raw workflow metadata rollback: %v\n", style.Dim.Render("Warning:"), beadID, err)
 		return
 	}
-	if restored, restoreErr := restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info, originalInfo); restoreErr != nil {
+	if restored, restoreErr := restoreRollbackRawWorkflowFields(stores, beadID, townRoot, hookWorkDir, info, originalInfo); restoreErr != nil {
 		fmt.Printf("  %s Could not restore raw workflow metadata on %s: %v\n", style.Dim.Render("Warning:"), beadID, restoreErr)
 	} else if restored {
 		fmt.Printf("  %s Restored raw workflow metadata on %s\n", style.Dim.Render("○"), beadID)
@@ -1540,12 +1540,12 @@ func restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir s
 // not land (declined or failed), so the caller's unguarded restores do not run
 // over a bead this sling no longer holds (gt-idly3); with no hold to restore
 // nothing was declined and it reports true.
-func restoreBeadHold(townRoot, beadID string, hold beadHold) bool {
+func restoreBeadHold(stores slingStores, townRoot, beadID string, hold beadHold) bool {
 	if townRoot == "" || beadID == "" || hold.Status == "" {
 		return true
 	}
 	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	restored, err := beads.TransferIfUnassigned(pinnedBd(dir), beadID, hold.Status, hold.Assignee)
+	restored, err := beads.TransferIfUnassigned(stores.pinnedAt(dir), beadID, hold.Status, hold.Assignee)
 	switch {
 	case err != nil:
 		fmt.Printf("  %s Could not restore bead %s to %s (%s): %v\n", style.Dim.Render("Warning:"), beadID, hold.Assignee, hold.Status, err)
@@ -1567,12 +1567,12 @@ func restoreBeadHold(townRoot, beadID string, hold beadHold) bool {
 // the pre-sling one rather than "open", so a bead re-slung out of a pin or
 // another holder's hook goes back to that state instead of into the dispatch
 // pool.
-func handBackHook(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool {
+func handBackHook(stores slingStores, townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool {
 	if townRoot == "" {
 		fmt.Printf("  %s Could not hand bead %s back from %s: no town root\n", style.Dim.Render("Warning:"), beadID, holder)
 		return false
 	}
-	return handBackHeld(newPolecatWorkReleaserFn(townRoot, hookWorkDir), beadID, holder, hold)
+	return handBackHeld(newPolecatWorkReleaserFn(stores, townRoot, hookWorkDir), beadID, holder, hold)
 }
 
 // handBackHeld is handBackHook over a polecatWorkReleaser, so tests run the
@@ -1606,11 +1606,11 @@ func handBackHeld(rel polecatWorkReleaser, beadID, holder string, hold beadHold)
 	return true
 }
 
-func restorePinnedBead(townRoot, beadID, assignee string) {
+func restorePinnedBead(stores slingStores, townRoot, beadID, assignee string) {
 	if townRoot == "" || beadID == "" {
 		return
 	}
-	restorePinnedOn(pinnedBd(beads.ResolveHookDir(townRoot, beadID, "")), beadID, assignee)
+	restorePinnedOn(stores.pinnedAt(beads.ResolveHookDir(townRoot, beadID, "")), beadID, assignee)
 }
 
 // restorePinnedOn puts the pin back, guarded on the bead being open and
@@ -1781,6 +1781,6 @@ func resolvePRBranch(prNumber int) (string, error) {
 // Cleanup is best-effort: each step logs warnings but continues to clean as much as possible.
 // beadID is the bead this sling touched ("" when the failure came before the
 // sling wrote to any bead); it is never unhooked from a different assignee.
-func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string) {
-	realSlingRollbackIn(townRoot, nil).rollback(spawnInfo, beadID, hookWorkDir)
+func rollbackSlingArtifacts(stores slingStores, spawnInfo *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string) {
+	realSlingRollbackIn(townRoot, nil, stores).rollback(spawnInfo, beadID, hookWorkDir)
 }

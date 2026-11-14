@@ -93,13 +93,13 @@ func TestEnrichReadsOnlyTheOlderBeadsThatOverlap(t *testing.T) {
 
 	var asked []string
 	p := newDuplicatePools(nil, nil)
-	p.details = func(_ string, ids []string) (map[string]duplicateDetail, error) {
+	p.details = func(_ slingStores, _ string, ids []string) (map[string]duplicateDetail, error) {
 		asked = append(asked, ids...)
 		return fetchDuplicateDetails(listLikeBD{Client: closedPoolFixture(time.Now())}, ids)
 	}
 	candidate := duplicateCandidate{ID: "gt-new", Refs: extractOverlapRefs("Edit internal/shared/target.go.")}
 
-	enriched := p.enrichOverlapping("beadsdir", candidate, pool)
+	enriched := p.enrichOverlapping(slingStores{}, "beadsdir", candidate, pool)
 
 	if want := []string{"gt-old-overlap"}; !slices.Equal(asked, want) {
 		t.Errorf("details asked for %v, want %v", asked, want)
@@ -127,17 +127,17 @@ func TestClosedBeadWithOverlapInNotesOnlyIsMissedOutside24h(t *testing.T) {
 		t.Fatalf("fetchDuplicatePoolFrom: %v", err)
 	}
 	p := newDuplicatePools(nil, nil)
-	p.details = func(_ string, ids []string) (map[string]duplicateDetail, error) {
+	p.details = func(_ slingStores, _ string, ids []string) (map[string]duplicateDetail, error) {
 		return fetchDuplicateDetails(listLikeBD{Client: closedPoolFixture(time.Now())}, ids)
 	}
 
 	older := duplicateCandidate{ID: "gt-new", Refs: extractOverlapRefs("Edit internal/hidden/notesonly.go.")}
-	if matches := findDuplicateMatches(older, p.enrichOverlapping("beadsdir", older, pool)); len(matches) != 0 {
+	if matches := findDuplicateMatches(older, p.enrichOverlapping(slingStores{}, "beadsdir", older, pool)); len(matches) != 0 {
 		t.Errorf("matched %d beads on a notes-only overlap with a bead closed two days ago, want the documented miss", len(matches))
 	}
 
 	recent := duplicateCandidate{ID: "gt-new", Refs: extractOverlapRefs("Edit internal/recent/only.go.")}
-	matches := findDuplicateMatches(recent, p.enrichOverlapping("beadsdir", recent, pool))
+	matches := findDuplicateMatches(recent, p.enrichOverlapping(slingStores{}, "beadsdir", recent, pool))
 	if len(matches) != 1 || matches[0].Bead.ID != "gt-recent" {
 		t.Errorf("matches = %+v, want the bead closed two hours ago", matches)
 	}

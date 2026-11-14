@@ -224,6 +224,15 @@ type slingDeps struct {
 // realSlingDeps is the running gt's collaborators. The package seams some of
 // them read are still replaced by tests of other commands.
 func realSlingDeps() *slingDeps {
+	return realSlingDepsFor(slingStores{})
+}
+
+// realSlingDepsFor is realSlingDeps whose bd stores are built from stores. A
+// spec sling arrives through specSlingDeps with the tick trace's stores, so
+// every bd call it makes is counted on the step that spends it (gt-h3bka5);
+// every other caller passes the zero slingStores, which is the bd on PATH and
+// counts nothing.
+func realSlingDepsFor(stores slingStores) *slingDeps {
 	d := &slingDeps{
 		getenv:        os.Getenv,
 		out:           os.Stdout,
@@ -251,11 +260,11 @@ func realSlingDeps() *slingDeps {
 		epicSchedule:           runEpicScheduleByID,
 		epicSling:              runEpicSlingByID,
 
-		verifyBead:         verifyBeadExists,
+		verifyBead:         func(beadID string) error { return verifyBeadExists(stores, beadID) },
 		verifyFormula:      verifyFormulaExists,
-		verifyInTargetRig:  verifyBeadExistsInTargetRigDatabase,
-		beadInfo:           getBeadInfo,
-		beadInfoInTown:     getBeadInfoFromTownRoot,
+		verifyInTargetRig:  stores.verifyInTargetRig,
+		beadInfo:           func(beadID string) (*beadInfo, error) { return stores.beadInfo("", beadID) },
+		beadInfoInTown:     stores.beadInfo,
 		lockBead:           tryAcquireSlingBeadLock,
 		lockAssignee:       tryAcquireSlingAssigneeLock,
 		rigParked:          IsRigParkedOrDocked,
@@ -263,65 +272,101 @@ func realSlingDeps() *slingDeps {
 		estopOn:            estop.ActiveFor,
 		agentDead:          isHookedAgentDeadFn,
 		survivingWorkGuard: reslingSurvivingWorkGuard,
-		checkDuplicates:    checkSlingDuplicates,
-		noteDispatched:     noteSlingCandidateDispatched,
-		crossRigGuard:      checkCrossRigGuard,
+		checkDuplicates: func(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
+			return checkSlingDuplicates(stores, townRoot, beadID, info)
+		},
+		noteDispatched: noteSlingCandidateDispatched,
+		crossRigGuard:  checkCrossRigGuard,
 
-		resolveSelf:    resolveSelfTarget,
-		spawnPolecat:   spawnPolecatForSling,
-		admitPolecat:   acquirePolecatAdmissionFn,
+		resolveSelf: resolveSelfTarget,
+		spawnPolecat: func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+			return spawnPolecatForSling(stores, rigName, opts)
+		},
+		admitPolecat: func(townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
+			return acquirePolecatAdmissionFn(stores, townRoot, rigName, beadID, operation)
+		},
 		startSession:   func(s *SpawnedPolecatInfo) (string, error) { return s.StartSession() },
 		cleanupSpawned: cleanupSpawnedPolecat,
 		resolveAgent:   resolveTargetAgentFn,
 		cwdTown:        townFromCwd,
 		crewExists:     crewDirExists,
 		peekPool:       peekPolecatPoolAgent,
-		pinnedAgent:    poolBeadAgent,
+		pinnedAgent:    func(townRoot, beadID string) (string, error) { return poolBeadAgent(stores, townRoot, beadID) },
 		peekNamed:      peekNamedPolecatSling,
 		wakeRig:        wakeRigAgents,
 
-		requester:          reassignRequester,
-		clearReassigned:    clearReassignedPolecatState,
-		unhook:             unhookFromPreviousOwner,
-		recordReassignment: recordReassignment,
+		requester:       reassignRequester,
+		clearReassigned: func(townRoot, assignee string) func() { return clearReassignedPolecatState(stores, townRoot, assignee) },
+		unhook:          func(townRoot, beadID string) error { return unhookFromPreviousOwner(stores, townRoot, beadID) },
+		recordReassignment: func(townRoot, beadID, from, to, requester string) {
+			recordReassignment(stores, townRoot, beadID, from, to, requester)
+		},
 
-		collectMolecules:      collectExistingMoleculesForBead,
-		burnMolecules:         burnExistingMolecules,
-		rigCommandVars:        loadRigCommandVars,
-		priorAttempt:          lookupPriorAttempt,
-		cook:                  CookFormula,
-		instantiateFormula:    InstantiateFormulaOnBead,
-		actor:                 resolveSlingActor,
-		daemon:                slingDaemonProcess,
-		identity:              slingProcessIdentity,
-		stdoutIsTTY:           ui.IsTerminal,
-		hookDir:               beads.ResolveHookDir,
-		storeFields:           storeFieldsInBeadFromTownRoot,
-		recordBlockerOverride: slingStores{}.recordBlockerOverride,
-		hook:                  hookBeadWithRetryWithTownRoot,
-		clearOrphanLabels:     clearOrphanEpisodeLabels,
-		updateAgentHook:       updateAgentHookBead,
-		updateAgentMode:       updateAgentMode,
-		logFeed:               events.LogFeed,
-		enqueueNudge:          nudge.Enqueue,
+		collectMolecules: func(info *beadInfo, beadID, townRoot string) ([]string, error) {
+			return collectExistingMoleculesForBead(stores, info, beadID, townRoot)
+		},
+		burnMolecules: func(molecules []string, beadID, townRoot string) error {
+			return burnExistingMolecules(stores, molecules, beadID, townRoot)
+		},
+		rigCommandVars: loadRigCommandVars,
+		priorAttempt:   func(beadsDir, issueID string) []string { return lookupPriorAttempt(stores, beadsDir, issueID) },
+		cook: func(formulaName, workDir, townRoot string) error {
+			return CookFormula(stores, formulaName, workDir, townRoot)
+		},
+		instantiateFormula: func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error) {
+			return InstantiateFormulaOnBead(stores, ctx, formulaName, beadID, title, hookWorkDir, townRoot, extraVars)
+		},
+		actor:       resolveSlingActor,
+		daemon:      slingDaemonProcess,
+		identity:    slingProcessIdentity,
+		stdoutIsTTY: ui.IsTerminal,
+		hookDir:     beads.ResolveHookDir,
+		storeFields: func(townRoot, beadID string, updates beadFieldUpdates) error {
+			return storeFieldsInBeadFromTownRoot(stores, townRoot, beadID, updates)
+		},
+		recordBlockerOverride: stores.recordBlockerOverride,
+		hook: func(beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error {
+			return hookBeadWithRetryWithTownRoot(stores, beadID, targetAgent, hookDir, townRoot, fields)
+		},
+		clearOrphanLabels: func(townRoot, beadID, workDir string) { clearOrphanEpisodeLabels(stores, townRoot, beadID, workDir) },
+		updateAgentHook:   updateAgentHookBead,
+		updateAgentMode: func(agentID, mode, workDir, townBeadsDir string) {
+			updateAgentMode(stores, agentID, mode, workDir, townBeadsDir)
+		},
+		logFeed:      events.LogFeed,
+		enqueueNudge: nudge.Enqueue,
 
-		findHookedFormula: findHookedFormulaSingletonFn,
-		cookFormula:       CookFormula,
-		createWisp:        createFormulaWisp,
-		hookWisp:          hookBeadWithRetryFn,
-		burnWisp:          burnSlingWispFn,
-		nudgePane:         func(pane, msg string) error { return nudgePaneFn(pane, msg) },
+		findHookedFormula: func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
+			return findHookedFormulaSingletonFn(stores, workDir, targetAgent, formulaName)
+		},
+		cookFormula: func(formulaName, workDir, townRoot string) error {
+			return CookFormula(slingStores{}, formulaName, workDir, townRoot)
+		},
+		createWisp: createFormulaWisp,
+		hookWisp:   hookBeadWithRetryFn,
+		burnWisp: func(wispRootID, formulaWorkDir string) error {
+			return burnSlingWispFn(stores, wispRootID, formulaWorkDir)
+		},
+		nudgePane: func(pane, msg string) error { return nudgePaneFn(pane, msg) },
 
 		slingContexts: func(rigBeadsDir string) slingContextStore {
-			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
+			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir, stores.opts...)
 		},
 		touchSlingContextStamp: beads.TouchSlingContextStamp,
 
-		rollbackArtifacts: rollbackSlingArtifactsFn,
-		restoreRawFields:  restoreRollbackRawWorkflowFieldsFromCurrent,
-		restorePinned:     restorePinnedBead,
-		restoreHold:       restoreBeadHold,
-		handBack:          handBackHook,
+		rollbackArtifacts: func(spawn *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string) {
+			rollbackSlingArtifactsFn(stores, spawn, townRoot, beadID, hookWorkDir)
+		},
+		restoreRawFields: func(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo) {
+			restoreRollbackRawWorkflowFieldsFromCurrent(stores, beadID, townRoot, hookWorkDir, originalInfo)
+		},
+		restorePinned: func(townRoot, beadID, assignee string) { restorePinnedBead(stores, townRoot, beadID, assignee) },
+		restoreHold: func(townRoot, beadID string, hold beadHold) bool {
+			return restoreBeadHold(stores, townRoot, beadID, hold)
+		},
+		handBack: func(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool {
+			return handBackHook(stores, townRoot, beadID, hookWorkDir, holder, hold)
+		},
 
 		sessionFromPane:   getSessionFromPane,
 		ensureAgentReady:  ensureAgentReady,
@@ -375,7 +420,7 @@ func setBDAutoCommitOff() (restore func()) {
 
 // unhookFromPreviousOwner sets a force-reassigned bead back to open with no
 // assignee.
-func unhookFromPreviousOwner(townRoot, beadID string) error {
+func unhookFromPreviousOwner(stores slingStores, townRoot, beadID string) error {
 	open, unassigned := string(beads.StatusOpen), ""
-	return pinnedBd(beads.ResolveHookDir(townRoot, beadID, "")).Update(beadID, beads.UpdateOptions{Status: &open, Assignee: &unassigned})
+	return stores.pinnedAt(beads.ResolveHookDir(townRoot, beadID, "")).Update(beadID, beads.UpdateOptions{Status: &open, Assignee: &unassigned})
 }

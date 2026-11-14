@@ -29,7 +29,7 @@ const polecatAdmissionReservationTTL = 30 * time.Minute
 // long as that same process lives, however old it is.
 const polecatAdmissionReservationMaxAge = 2 * polecatAdmissionReservationTTL
 
-var acquirePolecatAdmissionFn = acquirePolecatAdmission
+var acquirePolecatAdmissionFn = acquirePolecatAdmissionFor
 
 type polecatCapacitySnapshot struct {
 	Max             int `json:"max"`
@@ -57,9 +57,9 @@ func (s polecatCapacitySnapshot) occupied() int {
 // addRigOccupancy scans one rig's polecats into the snapshot and records how
 // many of them belong to that rig, so a per-rig cap reads the same numbers the
 // town total is built from.
-func (s *polecatCapacitySnapshot) addRigOccupancy(townRoot, rigName string, sessions polecatSessionSet) error {
+func (s *polecatCapacitySnapshot) addRigOccupancy(stores slingStores, townRoot, rigName string, sessions polecatSessionSet) error {
 	usedBefore := s.capacityUsed
-	if err := applyRigOccupancyToCapacitySnapshot(s, townRoot, rigName, sessions); err != nil {
+	if err := applyRigOccupancyToCapacitySnapshot(stores, s, townRoot, rigName, sessions); err != nil {
 		return err
 	}
 	s.trackRigUsage(rigName, s.capacityUsed-usedBefore)
@@ -220,6 +220,12 @@ func (e *polecatCapacityAdmissionError) Error() string {
 // admission chokepoint every sling and spawn path goes through, so a rig cap
 // binds in direct dispatch as well as under a town cap.
 func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
+	return acquirePolecatAdmissionFor(slingStores{}, townRoot, rigName, beadID, operation)
+}
+
+// acquirePolecatAdmissionFor is acquirePolecatAdmission with the sling's stores,
+// so a spec sling counts the capacity scan it spends on its trace (gt-h3bka5).
+func acquirePolecatAdmissionFor(stores slingStores, townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
@@ -244,7 +250,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	// of every rig in the town.
 	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}
 	if max > 0 {
-		snapshot, err = polecatCapacitySnapshotForTownNoCleanup(townRoot)
+		snapshot, err = polecatCapacitySnapshotForTownNoCleanup(stores, townRoot)
 		if err != nil {
 			return nil, polecatCapacitySnapshot{}, err
 		}
@@ -260,7 +266,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	if rigMax > 0 {
 		rigSnapshot := snapshot
 		if max <= 0 {
-			rigSnapshot, err = polecatRigOccupancySnapshot(townRoot, rigName)
+			rigSnapshot, err = polecatRigOccupancySnapshot(stores, townRoot, rigName)
 			if err != nil {
 				return nil, polecatCapacitySnapshot{}, err
 			}
@@ -333,7 +339,7 @@ func configuredRigMaxPolecats(townRoot, rigName string) int {
 	return 0
 }
 
-func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, error) {
+func polecatCapacitySnapshotForTown(stores slingStores, townRoot string) (polecatCapacitySnapshot, error) {
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
@@ -343,10 +349,10 @@ func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, e
 			return polecatCapacitySnapshot{}, err
 		}
 	}
-	return polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	return polecatCapacitySnapshotForTownNoCleanup(stores, townRoot)
 }
 
-func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySnapshot, error) {
+func polecatCapacitySnapshotForTownNoCleanup(stores slingStores, townRoot string) (polecatCapacitySnapshot, error) {
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
@@ -367,7 +373,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, err
 	}
 	for rigName := range rigsConfig.Rigs {
-		if err := snapshot.addRigOccupancy(townRoot, rigName, sessions); err != nil {
+		if err := snapshot.addRigOccupancy(stores, townRoot, rigName, sessions); err != nil {
 			return snapshot, err
 		}
 	}
@@ -388,7 +394,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 // same accounting the town-wide scan applies to every rig. It is also the whole
 // scan for a single capped rig in direct dispatch (gt-1kbi), so it must not
 // depend on any town-level state beyond townRoot.
-func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, townRoot, rigName string, sessions polecatSessionSet) error {
+func applyRigOccupancyToCapacitySnapshot(stores slingStores, snapshot *polecatCapacitySnapshot, townRoot, rigName string, sessions polecatSessionSet) error {
 	rigPath := filepath.Join(townRoot, rigName)
 	if _, err := os.Stat(rigPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -404,7 +410,7 @@ func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, town
 		return nil
 	}
 
-	rigBeads := beads.New(rigPath)
+	rigBeads := stores.open(rigPath)
 	agents, err := beads.ListAgentBeads(rigBeads)
 	if err != nil {
 		return fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
@@ -427,13 +433,13 @@ func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, town
 // rig that carries a max_polecats cap while the town runs without a scheduler
 // cap (direct dispatch). It is the same accounting the town snapshot does,
 // scoped to one rig so direct mode pays for one rig's worth of scanning.
-func polecatRigOccupancySnapshot(townRoot, rigName string) (polecatCapacitySnapshot, error) {
+func polecatRigOccupancySnapshot(stores slingStores, townRoot, rigName string) (polecatCapacitySnapshot, error) {
 	snapshot := polecatCapacitySnapshot{}
 	sessions, err := currentPolecatSessions(townRoot, townRegistry())
 	if err != nil {
 		return snapshot, err
 	}
-	if err := snapshot.addRigOccupancy(townRoot, rigName, sessions); err != nil {
+	if err := snapshot.addRigOccupancy(stores, townRoot, rigName, sessions); err != nil {
 		return snapshot, err
 	}
 	if err := snapshot.trackReservations(townRoot); err != nil {

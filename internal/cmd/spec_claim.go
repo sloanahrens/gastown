@@ -57,7 +57,9 @@ func claimOf(c duplicateCandidate) specdispatch.Claimant {
 // pool will not load, is an error: the tick holds the candidate rather than
 // dispatching on a claim set it could not read.
 func specTargetClaims(townRoot, beadID string) ([]specdispatch.Claimant, error) {
-	return specTargetClaimsFrom(beadID, duplicateBeadsDir(townRoot, beadID), slingDuplicatePools.poolFor)
+	return specTargetClaimsFrom(beadID, duplicateBeadsDir(townRoot, beadID), func(beadsDir string) ([]duplicateCandidate, error) {
+		return slingDuplicatePools.poolFor(slingStores{}, beadsDir)
+	})
 }
 
 // specTargetClaimsFrom is specTargetClaims with the beads directory resolution

@@ -292,12 +292,12 @@ func sortDuplicateMatches(candidate duplicateCandidate, matches []duplicateMatch
 // because of a check error, since a bd hiccup is not evidence of a duplicate.
 // A nil candidate means the check did not run — either the bead names no tests
 // or files, or the rig's bead directory could not be resolved.
-func checkSlingDuplicates(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
-	return slingDuplicatePools.check(townRoot, beadID, info)
+func checkSlingDuplicates(stores slingStores, townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
+	return slingDuplicatePools.check(stores, townRoot, beadID, info)
 }
 
 // check is checkSlingDuplicates against p's pools.
-func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
+func (p *duplicatePools) check(stores slingStores, townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
 	if info == nil {
 		return nil, nil, nil
 	}
@@ -322,14 +322,14 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 	if beadsDir == "" {
 		return candidate, nil, nil
 	}
-	pool, err := p.poolFor(beadsDir)
+	pool, err := p.poolFor(stores, beadsDir)
 	if err != nil {
 		return candidate, nil, fmt.Errorf("duplicate check skipped: %w", err)
 	}
-	pool = p.enrichOverlapping(beadsDir, *candidate, pool)
+	pool = p.enrichOverlapping(stores, beadsDir, *candidate, pool)
 	matches := findDuplicateMatches(*candidate, pool)
 	matches = dropRelatedMatches(*candidate, pool, matches)
-	return candidate, p.resolvePeerHolds(townRoot, beadsDir, *candidate, pool, matches), nil
+	return candidate, p.resolvePeerHolds(stores, townRoot, beadsDir, *candidate, pool, matches), nil
 }
 
 // resolvePeerHolds stamps each unstarted peer the guard's rank is about to
@@ -345,7 +345,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 // A pool built without a resolver leaves every peer un-asked, which is the
 // conservative reading of the same silence: each still holds the sling on its
 // rank alone.
-func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate duplicateCandidate, pool []duplicateCandidate, matches []duplicateMatch) []duplicateMatch {
+func (p *duplicatePools) resolvePeerHolds(stores slingStores, townRoot, beadsDir string, candidate duplicateCandidate, pool []duplicateCandidate, matches []duplicateMatch) []duplicateMatch {
 	if p.held == nil || len(matches) == 0 {
 		return matches
 	}
@@ -355,7 +355,7 @@ func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate d
 		if peer.Status != "open" || !sling.Precedes(peer, candidate) {
 			continue
 		}
-		matches[i].Bead.Held = p.held(townRoot, beadsDir, peer, pool)
+		matches[i].Bead.Held = p.held(stores, townRoot, beadsDir, peer, pool)
 		asked = true
 	}
 	if asked {
@@ -495,9 +495,11 @@ type duplicatePoolEntry struct {
 }
 
 // duplicatePools caches one comparison pool per rig bead database, read by
-// fetch. The process shares slingDuplicatePools; a test builds its own.
+// fetch. Each read takes the sling's stores as it runs, so the sling that pays
+// for it is the one whose trace counts it (gt-h3bka5). The process shares
+// slingDuplicatePools; a test builds its own.
 type duplicatePools struct {
-	fetch func(beadsDir string) ([]duplicateCandidate, error)
+	fetch func(stores slingStores, beadsDir string) ([]duplicateCandidate, error)
 	// held reports why the dispatcher would not sling a bead, "" when it would
 	// (sling.Duplicate.Held). It is a parameter of the check rather than part
 	// of the pool fetch because it is a question about the dispatcher's own
@@ -506,24 +508,24 @@ type duplicatePools struct {
 	// the peer's pool row and the pool rather than asking bd about the bead
 	// again (gt-mknmb). A nil resolver is the conservative reading: no peer is
 	// known to be held, so each still holds the sling on its rank.
-	held func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string
+	held func(stores slingStores, townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string
 	// details reads the design and notes of the named pool beads, for the
 	// closed beads whose list row overlaps a candidate (enrichOverlapping). Nil
 	// reads none: those beads keep the refs of their list row.
-	details func(beadsDir string, ids []string) (map[string]duplicateDetail, error)
+	details func(stores slingStores, beadsDir string, ids []string) (map[string]duplicateDetail, error)
 	mu      sync.Mutex
 	cache   map[string]*duplicatePoolEntry
 }
 
-func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string) *duplicatePools {
+func newDuplicatePools(fetch func(stores slingStores, beadsDir string) ([]duplicateCandidate, error), held func(stores slingStores, townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string) *duplicatePools {
 	return &duplicatePools{fetch: fetch, held: held, cache: map[string]*duplicatePoolEntry{}}
 }
 
 // slingDuplicatePools is the process-wide cache, read from the bd on PATH.
 var slingDuplicatePools = func() *duplicatePools {
 	p := newDuplicatePools(fetchDuplicatePool, specPeerHeldPinned)
-	p.details = func(beadsDir string, ids []string) (map[string]duplicateDetail, error) {
-		return fetchDuplicateDetails(slingStores{}.pinnedAt(beadsDir), ids)
+	p.details = func(stores slingStores, beadsDir string, ids []string) (map[string]duplicateDetail, error) {
+		return fetchDuplicateDetails(stores.pinnedAt(beadsDir), ids)
 	}
 	return p
 }()
@@ -531,7 +533,7 @@ var slingDuplicatePools = func() *duplicatePools {
 // poolFor returns the comparison pool for a rig, reusing a snapshot taken
 // within duplicatePoolTTL. Returns a slice shared with the cache; callers must
 // not mutate it.
-func (p *duplicatePools) poolFor(beadsDir string) ([]duplicateCandidate, error) {
+func (p *duplicatePools) poolFor(stores slingStores, beadsDir string) ([]duplicateCandidate, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -539,7 +541,7 @@ func (p *duplicatePools) poolFor(beadsDir string) ([]duplicateCandidate, error) 
 		return entry.candidates, nil
 	}
 
-	candidates, err := p.fetch(beadsDir)
+	candidates, err := p.fetch(stores, beadsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -556,8 +558,8 @@ func resetDuplicatePoolCache() {
 }
 
 // fetchDuplicatePool reads the live and recently-closed beads of one rig.
-func fetchDuplicatePool(beadsDir string) ([]duplicateCandidate, error) {
-	return fetchDuplicatePoolWith(slingStores{}.pinnedAt(beadsDir), warnDuplicateEnrichmentFailed, beadsDir, specDetailCache.Load())
+func fetchDuplicatePool(stores slingStores, beadsDir string) ([]duplicateCandidate, error) {
+	return fetchDuplicatePoolWith(stores.pinnedAt(beadsDir), warnDuplicateEnrichmentFailed, beadsDir, specDetailCache.Load())
 }
 
 // fetchDuplicatePoolFrom is fetchDuplicatePool read from store, with a
@@ -758,7 +760,7 @@ func listOnlyCandidates(rows []*beads.Issue) []duplicateCandidate {
 // in a new slice. A bead that shares nothing with the candidate is never shown,
 // so a closed bead older than duplicateRecentlyClosed whose only overlap is in
 // its design or notes is not seen. A failed read leaves the pool as it was.
-func (p *duplicatePools) enrichOverlapping(beadsDir string, candidate duplicateCandidate, pool []duplicateCandidate) []duplicateCandidate {
+func (p *duplicatePools) enrichOverlapping(stores slingStores, beadsDir string, candidate duplicateCandidate, pool []duplicateCandidate) []duplicateCandidate {
 	if p.details == nil {
 		return pool
 	}
@@ -774,7 +776,7 @@ func (p *duplicatePools) enrichOverlapping(beadsDir string, candidate duplicateC
 	if len(ids) == 0 {
 		return pool
 	}
-	got, err := p.details(beadsDir, ids)
+	got, err := p.details(stores, beadsDir, ids)
 	if err != nil || len(got) == 0 {
 		return pool
 	}

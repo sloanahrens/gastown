@@ -224,7 +224,7 @@ exit /b 0
 	// nudging would interrupt a live agent pane, and the stub bd below does
 	// not track hook state.
 	nudgePaneFn = func(_, _ string) error { return nil }
-	hookVerifyFn = func(string) func(beadID string) (*beadInfo, error) { return nil }
+	hookVerifyFn = func(slingStores, string) func(beadID string) (*beadInfo, error) { return nil }
 	// Poison the ambient beads target: all mutating commands must override this
 	// with the route-resolved target rig database.
 	t.Setenv("BEADS_DIR", filepath.Join(townRoot, ".beads"))

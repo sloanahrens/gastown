@@ -1915,7 +1915,7 @@ func TestSeatClaimsOfConcurrentSpawnsDoNotClobberEachOther(t *testing.T) {
 // from.
 func TestEachSpawnGetsItsOwnSeatClaimStore(t *testing.T) {
 	t.Parallel()
-	a, b := realSlingSeatSpawn(), realSlingSeatSpawn()
+	a, b := realSlingSeatSpawn(slingStores{}), realSlingSeatSpawn(slingStores{})
 	if a.seatClaims == nil || b.seatClaims == nil {
 		t.Fatal("a spawn must carry the store its seat claim lives in")
 	}
@@ -3563,7 +3563,7 @@ func TestPoolBeadAgentReadsTheTownSettingsFile(t *testing.T) {
 		"settings with no pool": write(t, `{"type":"town-settings","version":1}`),
 	} {
 		t.Run(name+" never reads the bead", func(t *testing.T) {
-			got, err := poolBeadAgent(town, "gt-unreadable")
+			got, err := poolBeadAgent(slingStores{}, town, "gt-unreadable")
 			if got != "" || err != nil {
 				t.Errorf("poolBeadAgent = %q, %v; want no agent and no error", got, err)
 			}

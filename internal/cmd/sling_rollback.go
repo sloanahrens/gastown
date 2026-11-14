@@ -35,20 +35,25 @@ type slingRollback struct {
 // The town root is a parameter rather than a lookup because the dispatch
 // engine runs from the daemon as well as from the cobra command, and the
 // daemon's cwd is not the town it dispatches into.
-func realSlingRollbackIn(townRoot string, err error) slingRollback {
+func realSlingRollbackIn(townRoot string, err error, stores slingStores) slingRollback {
 	if townRoot == "" && err == nil {
 		townRoot, err = workspace.FindFromCwdOrError()
 	}
 	return slingRollback{
 		townRoot:         townRoot,
 		townErr:          err,
-		getBeadInfo:      getBeadInfoForRollback,
+		stores:           stores,
+		getBeadInfo:      func(beadID string) (*beadInfo, error) { return getBeadInfoForRollback(stores, beadID) },
 		collectMolecules: collectExistingMoleculesForRollback,
-		burnMolecules:    burnExistingMoleculesForRollback,
-		releaseSeat:      func(spawn *SpawnedPolecatInfo) { spawn.releaseSeatClaim() },
-		newReleaser:      newPolecatWorkReleaserFn,
-		survivingWork:    survivingWorkForBeadFn,
-		openSandbox:      openSpawnedPolecatSandboxFn,
+		burnMolecules: func(molecules []string, beadID, townRoot string) error {
+			return burnExistingMoleculesForRollback(stores, molecules, beadID, townRoot)
+		},
+		releaseSeat: func(spawn *SpawnedPolecatInfo) { spawn.releaseSeatClaim() },
+		newReleaser: func(townRoot, hookWorkDir string) polecatWorkReleaser {
+			return newPolecatWorkReleaserFn(stores, townRoot, hookWorkDir)
+		},
+		survivingWork: survivingWorkForBeadFn,
+		openSandbox:   openSpawnedPolecatSandboxFn,
 	}
 }
 

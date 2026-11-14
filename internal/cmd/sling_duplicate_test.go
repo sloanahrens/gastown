@@ -521,7 +521,7 @@ func TestFindDuplicateMatchesSkipsSelfAndEmpty(t *testing.T) {
 func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
 	t.Parallel()
 	fetched := 0
-	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(slingStores, string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
 	}, noPeerHolds)
@@ -531,7 +531,7 @@ func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
 		Status:      "open",
 		Description: "attached_formula: mol-polecat-work\nattached_vars: [\"feature=Sling: a bead with bare prose\"]",
 	}
-	candidate, matches, err := pools.check(t.TempDir(), "gt-bare", info)
+	candidate, matches, err := pools.check(slingStores{}, t.TempDir(), "gt-bare", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
 func TestCheckSlingDuplicatesSkipsBeadNamingOnlyAPlan(t *testing.T) {
 	t.Parallel()
 	fetched := 0
-	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(slingStores, string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
 	}, noPeerHolds)
@@ -560,7 +560,7 @@ func TestCheckSlingDuplicatesSkipsBeadNamingOnlyAPlan(t *testing.T) {
 		Status:      "open",
 		Description: "Plan: docs/plans/2026-10-19-epic-plan.md",
 	}
-	candidate, matches, err := pools.check(t.TempDir(), "gt-plan-only", info)
+	candidate, matches, err := pools.check(slingStores{}, t.TempDir(), "gt-plan-only", info)
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestCheckSlingDuplicatesSkipsBeadNamingOnlyAPlan(t *testing.T) {
 // failure must never refuse a sling, only surface as a check error.
 func TestCheckSlingDuplicatesCheckErrorIsNotFatal(t *testing.T) {
 	t.Parallel()
-	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(slingStores, string) ([]duplicateCandidate, error) {
 		return nil, os.ErrDeadlineExceeded
 	}, noPeerHolds)
 
@@ -585,7 +585,7 @@ func TestCheckSlingDuplicatesCheckErrorIsNotFatal(t *testing.T) {
 		Status:      "open",
 		Description: "TestFoo fails on main.",
 	}
-	candidate, matches, err := pools.check(t.TempDir(), "gt-cand", info)
+	candidate, matches, err := pools.check(slingStores{}, t.TempDir(), "gt-cand", info)
 	if err == nil {
 		t.Fatal("expected the pool error to be reported")
 	}
@@ -604,7 +604,7 @@ func TestCheckSlingDuplicatesCheckErrorIsNotFatal(t *testing.T) {
 func TestDuplicateIntraBatchDetection(t *testing.T) {
 	t.Parallel()
 	fetched := 0
-	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(slingStores, string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
 	}, noPeerHolds)
@@ -659,8 +659,8 @@ func TestCheckSlingDuplicatesReadiesTheCandidate(t *testing.T) {
 		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
 	}
 	pools := newDuplicatePools(
-		func(string) ([]duplicateCandidate, error) { return nil, nil },
-		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+		func(slingStores, string) ([]duplicateCandidate, error) { return nil, nil },
+		func(_ slingStores, _, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
 			return specPeerHeldFrom(beadsfake.New(), knobs, peer, pool)
 		},
 	)
@@ -674,7 +674,7 @@ func TestCheckSlingDuplicatesReadiesTheCandidate(t *testing.T) {
 		Description: specTestDescription,
 		Acceptance:  specTestAcceptance,
 	}
-	candidate, _, err := pools.check(duplicateTown(t), "gt-first", info)
+	candidate, _, err := pools.check(slingStores{}, duplicateTown(t), "gt-first", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
@@ -712,7 +712,7 @@ func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 	t.Parallel()
 	townRoot := duplicateTown(t)
 	store := designNotesDuplicateStore()
-	pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 		return fetchDuplicatePoolFrom(store, func(dir string, err error) {
 			t.Errorf("enrichment of %s failed: %v", dir, err)
 		}, beadsDir)
@@ -722,7 +722,7 @@ func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 	// overlap refuses the candidate rather than the other way round.
 	info := &beadInfo{Title: "Fix TestFoo flake", Status: "open", Description: "TestFoo fails after the refactor.",
 		CreatedAt: "2026-10-15T10:00:00Z"}
-	candidate, matches, err := pools.check(townRoot, "gt-newbead", info)
+	candidate, matches, err := pools.check(slingStores{}, townRoot, "gt-newbead", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
@@ -768,7 +768,7 @@ func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
 
-	pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 		return fetchDuplicatePoolFrom(db, func(dir string, err error) {
 			t.Errorf("enrichment of %s failed: %v", dir, err)
 		}, beadsDir)
@@ -784,7 +784,7 @@ func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
 		Description:  "TestSharedStep fails at the base of the plan.",
 		Dependencies: []beads.IssueDep{{ID: "gt-plan.3", DependencyType: "blocks"}},
 	}
-	candidate, matches, err := pools.check(townRoot, "gt-plan.1", info)
+	candidate, matches, err := pools.check(slingStores{}, townRoot, "gt-plan.1", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
@@ -915,7 +915,7 @@ func ranked(c duplicateCandidate, priority int, createdAt string) duplicateCandi
 
 func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateCandidate {
 	t.Helper()
-	pool, err := pools.poolFor(beadsDir)
+	pool, err := pools.poolFor(slingStores{}, beadsDir)
 	if err != nil {
 		t.Fatalf("duplicatePoolFor: %v", err)
 	}
@@ -925,7 +925,9 @@ func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateC
 // noPeerHolds is the resolver for a pool whose test varies something other
 // than the peer-hold question: no peer is known to be held, so the guard's
 // rank decides alone, exactly as it did before the holds existed.
-func noPeerHolds(string, string, duplicateCandidate, []duplicateCandidate) string { return "" }
+func noPeerHolds(slingStores, string, string, duplicateCandidate, []duplicateCandidate) string {
+	return ""
+}
 
 func assertStrings(t *testing.T, label string, got, want []string) {
 	t.Helper()
@@ -1179,12 +1181,12 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 	// (gt-mknmb).
 	dispatched := func(db *beadsfake.Fake) []string {
 		pools := newDuplicatePools(
-			func(beadsDir string) ([]duplicateCandidate, error) {
+			func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 				return fetchDuplicatePoolFrom(db, func(dir string, err error) {
 					t.Errorf("enrichment of %s failed: %v", dir, err)
 				}, beadsDir)
 			},
-			func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+			func(_ slingStores, _, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
 				return specPeerHeldFrom(db, knobs, peer, pool)
 			},
 		)
@@ -1192,7 +1194,7 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 		if beadsDir == "" {
 			t.Fatal("the town routes no gt- bead to a rig, so the pass has no pool to read")
 		}
-		pool, err := pools.poolFor(beadsDir)
+		pool, err := pools.poolFor(slingStores{}, beadsDir)
 		if err != nil {
 			t.Fatalf("pool: %v", err)
 		}
@@ -1205,7 +1207,7 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", id, err)
 			}
-			candidate, matches, err := pools.check(townRoot, id, beadInfoOf(issue))
+			candidate, matches, err := pools.check(slingStores{}, townRoot, id, beadInfoOf(issue))
 			if err != nil {
 				t.Fatalf("check %s: %v", id, err)
 			}
@@ -1312,12 +1314,12 @@ func TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer(t *testing.T) {
 		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
 	}
 	pools := newDuplicatePools(
-		func(beadsDir string) ([]duplicateCandidate, error) {
+		func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 			return fetchDuplicatePoolFrom(db, func(dir string, err error) {
 				t.Errorf("enrichment of %s failed: %v", dir, err)
 			}, beadsDir)
 		},
-		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+		func(_ slingStores, _, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
 			return specPeerHeldFrom(db, knobs, peer, pool)
 		},
 	)
@@ -1335,7 +1337,7 @@ func TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", id, err)
 		}
-		candidate, matches, err := pools.check(townRoot, id, beadInfoOf(issue))
+		candidate, matches, err := pools.check(slingStores{}, townRoot, id, beadInfoOf(issue))
 		if err != nil {
 			t.Fatalf("check %s: %v", id, err)
 		}
@@ -1396,7 +1398,7 @@ func TestNoteDispatchedMarksCachedPeerHooked(t *testing.T) {
 	beadsDir := t.TempDir()
 	cached := ranked(newDuplicateCandidate("gt-cached", "guard blocks a nested command", "open",
 		"TestDangerousGuard_Integration fails in internal/cmd/tap_guard_dangerous.go."), 1, "2026-10-15T09:00:00Z")
-	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(slingStores, string) ([]duplicateCandidate, error) {
 		return []duplicateCandidate{cached}, nil
 	}, noPeerHolds)
 
@@ -1462,12 +1464,12 @@ func TestBatchSlingRefusesPeerOfJustSlungHeldLead(t *testing.T) {
 		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
 	}
 	pools := newDuplicatePools(
-		func(beadsDir string) ([]duplicateCandidate, error) {
+		func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 			return fetchDuplicatePoolFrom(db, func(dir string, err error) {
 				t.Errorf("enrichment of %s failed: %v", dir, err)
 			}, beadsDir)
 		},
-		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+		func(_ slingStores, _, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
 			return specPeerHeldFrom(db, knobs, peer, pool)
 		},
 	)
@@ -1484,7 +1486,7 @@ func TestBatchSlingRefusesPeerOfJustSlungHeldLead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", id, err)
 		}
-		candidate, matches, err := pools.check(townRoot, id, beadInfoOf(issue))
+		candidate, matches, err := pools.check(slingStores{}, townRoot, id, beadInfoOf(issue))
 		if err != nil {
 			t.Fatalf("check %s: %v", id, err)
 		}
@@ -1839,12 +1841,12 @@ func TestOverlapGuardAnswersAPeerLiveWorkHoldsByPriority(t *testing.T) {
 				Backoff: func(string) string { return "" },
 			}
 			pools := newDuplicatePools(
-				func(beadsDir string) ([]duplicateCandidate, error) {
+				func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 					return fetchDuplicatePoolFrom(db, func(dir string, err error) {
 						t.Errorf("enrichment of %s failed: %v", dir, err)
 					}, beadsDir)
 				},
-				func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+				func(_ slingStores, _, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
 					return specPeerHeldFrom(db, knobs, peer, pool)
 				},
 			)
@@ -1852,7 +1854,7 @@ func TestOverlapGuardAnswersAPeerLiveWorkHoldsByPriority(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read gt-tail: %v", err)
 			}
-			candidate, matches, err := pools.check(townRoot, "gt-tail", beadInfoOf(tail))
+			candidate, matches, err := pools.check(slingStores{}, townRoot, "gt-tail", beadInfoOf(tail))
 			if err != nil {
 				t.Fatalf("check gt-tail: %v", err)
 			}

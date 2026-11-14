@@ -411,7 +411,7 @@ func isScheduled(beadID string) bool {
 // Returns "epic" or "task". Convoys were retired (gt-gzhin.7): a convoy is no
 // longer schedulable, so its IDs fall through to the task path.
 func detectSchedulerIDType(id string) (string, error) {
-	info, err := getBeadInfo(id)
+	info, err := getBeadInfo(slingStores{}, id)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve bead '%s': %w", id, err)
 	}

@@ -3926,7 +3926,7 @@ func TestSpecPeerHeldFromWarnsOnReadFailure(t *testing.T) {
 		townRoot := duplicateTown(t)
 		writeModelsSettings(t, townRoot, "{not json")
 
-		if got := specPeerHeldPinnedTo(&warned, townRoot, filepath.Join(townRoot, "gastown", "mayor", "rig"), peer, nil); got != "" {
+		if got := specPeerHeldPinnedTo(&warned, slingStores{}, townRoot, filepath.Join(townRoot, "gastown", "mayor", "rig"), peer, nil); got != "" {
 			t.Errorf("unreadable settings held the peer: %q, want not held", got)
 		}
 		if out := warned.String(); !strings.Contains(out, "config.json") || !strings.Contains(out, "not held") {

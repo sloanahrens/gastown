@@ -91,6 +91,10 @@ type SpawnedPolecatInfo struct {
 	// trace times the sandbox phases of this spawn's session start, for the
 	// spec dispatcher's log. Nil for a sling that is not the dispatcher's.
 	trace *session.SandboxTrace
+
+	// stores are the sling's bead stores, recorded so the session start's own
+	// bd reads are counted on the same trace (gt-h3bka5). The zero value is bd.
+	stores slingStores
 }
 
 // releaseSeatClaim drops the pool seat this spawn reserved. Idempotent, and a
@@ -351,11 +355,11 @@ type idleReuseEnv struct {
 	seatLive liveSeatCounter
 }
 
-func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string), polecatMgr *polecat.Manager, trace *session.SandboxTrace) idleReuseEnv {
+func realIdleReuseEnv(stores slingStores, t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string), polecatMgr *polecat.Manager, trace *session.SandboxTrace) idleReuseEnv {
 	sessionName := polecat.NewSessionManager(t, r, townRegistry()).SessionName
 	return idleReuseEnv{
 		integrationBranch: func(hookBead string) string {
-			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead, trace)
+			return detectSpawnIntegrationBranch(stores, townRoot, rigName, r, hookBead, trace)
 		},
 		verifyWorktree: verifyWorktreeExists,
 		sessionName:    sessionName,
@@ -381,7 +385,7 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step f
 // this path holds no spawn record, so it has no pre-sling hold to restore to.
 // The sandbox predates this sling, so it stays, as a rollback keeps it.
 func releaseReusedPolecatWork(townRoot, rigName, polecatName, hookBead string) {
-	rel := newPolecatWorkReleaserFn(townRoot, "")
+	rel := newPolecatWorkReleaserFn(slingStores{}, townRoot, "")
 	agentID := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	releasePolecatWork(rel, agentID, hookBead, true)
 }
@@ -391,13 +395,13 @@ func releaseReusedPolecatWork(townRoot, rigName, polecatName, hookBead string) {
 // It returns "" when none applies or detection fails; a failure is warned on
 // stderr, so a rig that lost its bare repo does not turn detection off silently.
 // Its git calls are counted on trace (gt-74tzuk).
-func detectSpawnIntegrationBranch(townRoot, rigName string, r *rig.Rig, hookBead string, trace *session.SandboxTrace) string {
-	return detectSpawnIntegrationBranchTo(os.Stderr, townRoot, rigName, r, hookBead, trace)
+func detectSpawnIntegrationBranch(stores slingStores, townRoot, rigName string, r *rig.Rig, hookBead string, trace *session.SandboxTrace) string {
+	return detectSpawnIntegrationBranchTo(os.Stderr, stores, townRoot, rigName, r, hookBead, trace)
 }
 
 // detectSpawnIntegrationBranchTo is detectSpawnIntegrationBranch with its
 // failure warning written to w.
-func detectSpawnIntegrationBranchTo(w io.Writer, townRoot, rigName string, r *rig.Rig, hookBead string, trace *session.SandboxTrace) string {
+func detectSpawnIntegrationBranchTo(w io.Writer, stores slingStores, townRoot, rigName string, r *rig.Rig, hookBead string, trace *session.SandboxTrace) string {
 	if !polecatIntegrationEnabled(townRoot, rigName) {
 		return ""
 	}
@@ -407,7 +411,7 @@ func detectSpawnIntegrationBranchTo(w io.Writer, townRoot, rigName string, r *ri
 		return ""
 	}
 	repoGit = repoGit.WithRunObserver(trace.CountGit)
-	detected, detectErr := beads.DetectIntegrationBranch(beads.New(r.Path), repoGit, hookBead)
+	detected, detectErr := beads.DetectIntegrationBranch(stores.open(r.Path), repoGit, hookBead)
 	if detectErr != nil {
 		style.FprintWarning(w, "integration branch not detected for %s: %v", hookBead, detectErr)
 		return ""
@@ -813,7 +817,7 @@ func readBackCreatedPolecat(polecatMgr createdPolecatReader, rigName, polecatNam
 // <rig>/<name> with no live session) it reuses exactly that polecat, creates
 // it by that name under --create, or refuses (gt-2w4f9).
 // The caller (sling) handles hook attachment, session start and nudging.
-func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+func SpawnPolecatForSling(stores slingStores, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	// Find workspace
 	townRoot := opts.TownRoot
 	if townRoot == "" {
@@ -823,7 +827,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
 	}
-	spawnInfo, err := realSlingSeatSpawnWith(opts.occupied).spawn(townRoot, rigName, opts)
+	spawnInfo, err := realSlingSeatSpawnWith(stores, opts.occupied).spawn(townRoot, rigName, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -831,6 +835,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// daemon's in-process path, from a process whose cwd is not this town.
 	spawnInfo.townRoot = townRoot
 	spawnInfo.trace = opts.trace
+	spawnInfo.stores = stores
 	return spawnInfo, nil
 }
 
@@ -840,6 +845,9 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // polecat and its worktree. realSlingSeatSpawn wires the real ones.
 type slingSeatSpawn struct {
 	backpressure func(townRoot, rigName string, opts SlingSpawnOptions) error
+	// stores are the sling's bead stores, so the seat decision, the respawn gate
+	// and the rig reads it makes are counted on the sling's step trace.
+	stores slingStores
 	// resolvePool is the pool decision for this spawn, claiming a seat in
 	// seatClaims.
 	resolvePool func(townRoot, requested string) (agent, reason string, err error)
@@ -857,29 +865,32 @@ type slingSeatSpawn struct {
 	seatClaims *poolSeatClaimStore
 }
 
-func realSlingSeatSpawn() slingSeatSpawn {
-	return realSlingSeatSpawnWith(nil)
+func realSlingSeatSpawn(stores slingStores) slingSeatSpawn {
+	return realSlingSeatSpawnWith(stores, nil)
 }
 
 // realSlingSeatSpawnWith is realSlingSeatSpawn with the occupancy read the
 // pool decision uses. nil is the router's own full read (a hand-run gt
 // sling); the spec dispatcher passes snapshotOccupied over its roster.
-func realSlingSeatSpawnWith(occupied func() ([]poolSession, error)) slingSeatSpawn {
+func realSlingSeatSpawnWith(stores slingStores, occupied func() ([]poolSession, error)) slingSeatSpawn {
 	// One store per spawn, never one per process: the daemon dispatches
 	// concurrently inside a single process, and a shared store would let one
 	// dispatch's release drop a seat another is still standing on (gt-t8q5).
 	store := newPoolSeatClaimStore()
 	return slingSeatSpawn{
-		backpressure: checkSlingBackpressure,
-		pinnedAgent:  poolBeadAgent,
+		backpressure: func(townRoot, rigName string, opts SlingSpawnOptions) error {
+			return checkSlingBackpressure(stores, townRoot, rigName, opts)
+		},
+		pinnedAgent: func(townRoot, beadID string) (string, error) { return poolBeadAgent(stores, townRoot, beadID) },
 		resolvePool: func(townRoot, requested string) (agent, reason string, err error) {
-			r := poolRouterFor(townRoot, store)
+			r := poolRouterFor(stores, townRoot, store)
 			if occupied == nil {
 				return r.route(requested, true)
 			}
 			return r.routeWith(requested, true, occupied)
 		},
 		releaseSeat: store.release,
+		stores:      stores,
 		prepare:     prepareSlingPolecat,
 		seatClaims:  store,
 	}
@@ -943,7 +954,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// poolSeatClaimTTL (30m) because the process holding it is still alive
 	// (gt-t8q5). The spawn succeeds only by returning the polecat whose
 	// session the caller will start, so success is the hand-over.
-	info, err := s.prepare(townRoot, rigName, opts, slingStores{})
+	info, err := s.prepare(townRoot, rigName, opts, s.stores)
 	if err != nil {
 		s.releaseSeat()
 		return nil, err
@@ -1032,7 +1043,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 
 	var admission *polecatAdmissionHandle
 	if !opts.SkipAdmission {
-		admission, _, err = acquirePolecatAdmissionFn(townRoot, rigName, opts.HookBead, "spawn-or-reuse")
+		admission, _, err = acquirePolecatAdmissionFn(stores, townRoot, rigName, opts.HookBead, "spawn-or-reuse")
 		if err != nil {
 			return nil, err
 		}
@@ -1053,7 +1064,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// one bd read of each agent bead; it is dropped when the reuse step ends.
 	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
-		realIdleReuseEnv(t, r, townRoot, rigName, opts.step, polecatMgr, opts.trace), townRoot, rigName,
+		realIdleReuseEnv(stores, t, r, townRoot, rigName, opts.step, polecatMgr, opts.trace), townRoot, rigName,
 		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
 	endAgentBeadReads()
 	if err != nil {
@@ -1072,7 +1083,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	if opts.ResumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
 			// Auto-detect: check if the hooked bead's parent epic has an integration branch
-			if detected := detectSpawnIntegrationBranch(townRoot, rigName, r, opts.HookBead, opts.trace); detected != "" {
+			if detected := detectSpawnIntegrationBranch(stores, townRoot, rigName, r, opts.HookBead, opts.trace); detected != "" {
 				baseBranch = "origin/" + detected
 				fmt.Printf("  Auto-detected integration branch: %s\n", detected)
 			}
@@ -1414,7 +1425,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// on next attempt (gt-jn40ft).
 	pane, err := paneAfterStart(s.SessionName, getSessionPane, time.Sleep,
 		func() { s.killStartupDeath(sup, actor) },
-		s.startupDeathRollback(session.SandboxDeleter, beads.New(townRoot), townRoot))
+		s.startupDeathRollback(session.SandboxDeleter, s.stores.open(townRoot), townRoot))
 	if err != nil {
 		return "", err
 	}

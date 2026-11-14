@@ -65,7 +65,7 @@ func TestCapacitySnapshotCleansStaleReservations(t *testing.T) {
 		t.Fatalf("write stale reservation: %v", err)
 	}
 
-	snapshot, err := polecatCapacitySnapshotForTown(townRoot)
+	snapshot, err := polecatCapacitySnapshotForTown(slingStores{}, townRoot)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestCapacitySnapshotRemovesStructurallyInvalidReservations(t *testing.T) {
 		t.Fatalf("write invalid reservation: %v", err)
 	}
 
-	snapshot, err := polecatCapacitySnapshotForTown(townRoot)
+	snapshot, err := polecatCapacitySnapshotForTown(slingStores{}, townRoot)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestCapacitySnapshotRemovesMismatchedReservationFile(t *testing.T) {
 		t.Fatalf("write mismatched reservation: %v", err)
 	}
 
-	snapshot, err := polecatCapacitySnapshotForTown(townRoot)
+	snapshot, err := polecatCapacitySnapshotForTown(slingStores{}, townRoot)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
 		t.Fatalf("write live reservation: %v", err)
 	}
 
-	snapshot, err := polecatCapacitySnapshotForTown(townRoot)
+	snapshot, err := polecatCapacitySnapshotForTown(slingStores{}, townRoot)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}

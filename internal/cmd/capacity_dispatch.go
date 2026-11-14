@@ -27,10 +27,12 @@ import (
 // notices for one dispatch run.
 func schedulerDeps() schedulerrun.Deps {
 	return schedulerrun.Deps{
-		Sling:           schedulerSling,
-		Seats:           schedulerSeats,
-		Escalate:        fireCrossRigEscalation,
-		BeadInTargetRig: verifyBeadExistsInTargetRigDatabase,
+		Sling:    schedulerSling,
+		Seats:    schedulerSeats,
+		Escalate: fireCrossRigEscalation,
+		BeadInTargetRig: func(beadID, targetRig, townRoot string) error {
+			return verifyBeadExistsInTargetRigDatabase(slingStores{}, beadID, targetRig, townRoot)
+		},
 		// The marker is resolved here, where the environment is owned, as gt
 		// sling and the spec dispatcher resolve it; a test injects its own
 		// reader instead of whatever INSTALL_GT_DAEMON_DIR names (gt-2rp64).
@@ -70,9 +72,9 @@ func schedulerSeats(townRoot string, clean bool) (schedulerrun.Seats, error) {
 	var snapshot polecatCapacitySnapshot
 	var err error
 	if clean {
-		snapshot, err = polecatCapacitySnapshotForTown(townRoot)
+		snapshot, err = polecatCapacitySnapshotForTown(slingStores{}, townRoot)
 	} else {
-		snapshot, err = polecatCapacitySnapshotForTownNoCleanup(townRoot)
+		snapshot, err = polecatCapacitySnapshotForTownNoCleanup(slingStores{}, townRoot)
 	}
 	if err != nil {
 		return schedulerrun.Seats{}, err

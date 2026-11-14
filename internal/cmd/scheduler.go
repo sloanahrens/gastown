@@ -131,7 +131,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing scheduled beads: %w", err)
 	}
 
-	capacitySnapshot, err := polecatCapacitySnapshotForTown(townRoot)
+	capacitySnapshot, err := polecatCapacitySnapshotForTown(slingStores{}, townRoot)
 	if err != nil {
 		return fmt.Errorf("loading polecat capacity: %w", err)
 	}

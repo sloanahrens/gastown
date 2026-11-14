@@ -55,11 +55,11 @@ func trimJSONForError(jsonOutput []byte) string {
 	return s
 }
 
-func closeFormulaWisp(wispRootID, formulaWorkDir, reason string) error {
+func closeFormulaWisp(stores slingStores, wispRootID, formulaWorkDir, reason string) error {
 	if wispRootID == "" {
 		return nil
 	}
-	bd := beads.New(formulaWorkDir)
+	bd := stores.open(formulaWorkDir)
 	if _, err := forceCloseDescendants(bd, wispRootID); err != nil {
 		return fmt.Errorf("force-close descendants: %w", err)
 	}
@@ -70,8 +70,8 @@ func closeFormulaWisp(wispRootID, formulaWorkDir, reason string) error {
 }
 
 // burnSlingWispFn closes a formula wisp a failed or superseded sling owns.
-var burnSlingWispFn = func(wispRootID, formulaWorkDir string) error {
-	return closeFormulaWisp(wispRootID, formulaWorkDir, "burned: formula sling rolled back")
+var burnSlingWispFn = func(stores slingStores, wispRootID, formulaWorkDir string) error {
+	return closeFormulaWisp(stores, wispRootID, formulaWorkDir, "burned: formula sling rolled back")
 }
 
 // formulaSlingPrompt is the start prompt for a formula slung with args.
@@ -84,12 +84,12 @@ func formulaSlingPrompt(formulaName, args string) string {
 
 // findHookedFormulaSingleton returns the existing hooked bead for an assignee
 // when that bead already carries the same attached_formula metadata.
-func findHookedFormulaSingleton(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
+func findHookedFormulaSingleton(stores slingStores, workDir, targetAgent, formulaName string) (*beads.Issue, error) {
 	if workDir == "" || targetAgent == "" || formulaName == "" {
 		return nil, nil
 	}
 
-	b := beads.New(workDir)
+	b := stores.open(workDir)
 	hookedBeads, err := b.List(beads.ListOptions{
 		Status:    beads.StatusHooked,
 		Assignee:  targetAgent,

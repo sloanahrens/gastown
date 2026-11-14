@@ -27,7 +27,7 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 		return err
 	}
 
-	if err := verifyBeadExists(epicID); err != nil {
+	if err := verifyBeadExists(slingStores{}, epicID); err != nil {
 		return fmt.Errorf("epic '%s' not found", epicID)
 	}
 
@@ -177,7 +177,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 		return err
 	}
 
-	if err := verifyBeadExists(epicID); err != nil {
+	if err := verifyBeadExists(slingStores{}, epicID); err != nil {
 		return fmt.Errorf("epic '%s' not found", epicID)
 	}
 
@@ -327,7 +327,7 @@ func getEpicChildren(epicID string) ([]epicChild, error) {
 
 	children := make([]epicChild, 0, len(childIDs))
 	for _, id := range childIDs {
-		info, err := getBeadInfo(id)
+		info, err := getBeadInfo(slingStores{}, id)
 		if err != nil {
 			children = append(children, epicChild{
 				ID: id,

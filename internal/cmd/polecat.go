@@ -3383,7 +3383,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	}
 	releaser := deps.Releaser
 	if releaser == nil {
-		releaser = newPolecatWorkReleaserFn(beads.FindTownRoot(r.Path), "")
+		releaser = newPolecatWorkReleaserFn(slingStores{}, beads.FindTownRoot(r.Path), "")
 	}
 	survives := deps.SurvivingWork
 	if survives == nil {

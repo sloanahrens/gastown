@@ -178,7 +178,7 @@ func TestSpawnIntegrationDetectionWarnsWithoutRepoGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var warn bytes.Buffer
-	got := detectSpawnIntegrationBranchTo(&warn, townRoot, "testrig", &rig.Rig{Name: "testrig", Path: rigPath}, "gt-abc", nil)
+	got := detectSpawnIntegrationBranchTo(&warn, slingStores{}, townRoot, "testrig", &rig.Rig{Name: "testrig", Path: rigPath}, "gt-abc", nil)
 	if got != "" {
 		t.Errorf("detectSpawnIntegrationBranchTo = %q, want no branch for a rig without .repo.git", got)
 	}
