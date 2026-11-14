@@ -7,8 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 )
 
 // embeddedWeights is the checked-in weights file, a byte-for-byte copy of
@@ -21,6 +26,17 @@ var embeddedWeights []byte
 // LoadWeights is a bug in the checked-in data, so this panics at init rather
 // than handing every caller an error.
 var defaultWeights = loadEmbedded()
+
+// WeightsSource names the file a Weights value was read from.
+type WeightsSource string
+
+const (
+	// SourceEmbedded is the weights.json compiled into the binary.
+	SourceEmbedded WeightsSource = "embedded"
+	// SourceRuntime is the town's adopted weights, the file LoadTownWeights
+	// reads.
+	SourceRuntime WeightsSource = "runtime"
+)
 
 // weightsVersion is the only layout of the weights file this code reads.
 const weightsVersion = 1
@@ -62,10 +78,14 @@ type embeddingBlock struct {
 }
 
 // Weights is a validated weights file: the shape model, the fits-to-minutes
-// table and the embedding ridge. Make one with LoadWeights or Default; the
-// zero value has no model, so ShapeMinutes returns ErrNoWeights. The slices
-// are shared with the Default value, so callers must not modify them.
+// table and the embedding ridge. Make one with LoadWeights, Default or
+// LoadTownWeights; the zero value has no model, so ShapeMinutes returns
+// ErrNoWeights. The slices are shared with the Default value, so callers must
+// not modify them.
 type Weights struct {
+	version int
+	source  WeightsSource
+
 	shapeMean      []float64
 	shapeScale     []float64
 	shapeCoef      []float64
@@ -96,7 +116,70 @@ func loadEmbedded() Weights {
 	if err != nil {
 		panic("storypoints: embedded weights.json: " + err.Error())
 	}
+	w.source = SourceEmbedded
 	return w
+}
+
+// Version names the model these weights are: where they were read from and the
+// weights file's version, such as "embedded v1" or "runtime v1". Weights built
+// by LoadWeights from bytes the caller supplied name the file version alone,
+// and the zero Weights names nothing.
+func (w Weights) Version() string {
+	if w.version == 0 {
+		return ""
+	}
+	if w.source == "" {
+		return "v" + strconv.Itoa(w.version)
+	}
+	return string(w.source) + " v" + strconv.Itoa(w.version)
+}
+
+// RuntimeWeightsPath is the file a town adopts a retrained model into:
+// <townRoot>/.runtime/storypoints/weights.json. An empty town root names no
+// file, so a loader given one reads no runtime weights.
+func RuntimeWeightsPath(townRoot string) string {
+	if townRoot == "" {
+		return ""
+	}
+	return filepath.Join(townRoot, ".runtime", "storypoints", "weights.json")
+}
+
+// LoadTownWeights returns the weights to estimate with in townRoot: the runtime
+// file when it is present and loads, the embedded weights otherwise. A runtime
+// file that cannot be read or does not load is reported in one logged line and
+// is never an error, so an estimate always has weights; a missing file is
+// silent, because a town that has adopted no model is the normal case.
+func LoadTownWeights(townRoot string) Weights {
+	return loadTownWeights(townRoot, os.ReadFile, log.Printf)
+}
+
+// loadTownWeights is LoadTownWeights with the file read and the logger passed
+// in, so a test drives every branch without a filesystem or a real log.
+func loadTownWeights(townRoot string, read func(string) ([]byte, error), logf func(string, ...any)) Weights {
+	path := RuntimeWeightsPath(townRoot)
+	if path == "" {
+		return defaultWeights
+	}
+	data, err := read(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return defaultWeights
+		}
+		return reportRuntimeWeights(logf, path, err)
+	}
+	w, err := LoadWeights(bytes.NewReader(data))
+	if err != nil {
+		return reportRuntimeWeights(logf, path, err)
+	}
+	w.source = SourceRuntime
+	return w
+}
+
+// reportRuntimeWeights logs the one line a rejected runtime file gets and
+// returns the embedded weights the estimate goes on with.
+func reportRuntimeWeights(logf func(string, ...any), path string, err error) Weights {
+	logf("storypoints: runtime weights %s not used, the embedded weights are in use: %v", path, err)
+	return defaultWeights
 }
 
 // LoadWeights decodes and validates one weights file. It refuses a file whose
@@ -172,6 +255,7 @@ func (f weightsFile) check() (Weights, error) {
 	}
 
 	return Weights{
+		version:        f.Version,
 		shapeMean:      f.Shape.Mean,
 		shapeScale:     f.Shape.Scale,
 		shapeCoef:      f.Shape.Coef,

@@ -1,10 +1,13 @@
 package estimate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -409,6 +412,87 @@ func TestEstimateRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEstimateWeightsSource drives the build of the estimate's weights: a
+// missing, unreadable or invalid runtime file leaves the embedded weights in
+// place, a valid one replaces them, and the version the result records names
+// the file the estimate read.
+func TestEstimateWeightsSource(t *testing.T) {
+	t.Parallel()
+	embedded, err := Estimate(context.Background(), Deps{}, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate(embedded): %v", err)
+	}
+	tests := []struct {
+		name        string
+		town        func(t *testing.T) string
+		wantVersion string
+		wantRuntime bool
+	}{
+		{"no town root", func(*testing.T) string { return "" }, "embedded v1", false},
+		{"a town with no runtime file", func(t *testing.T) string { return t.TempDir() }, "embedded v1", false},
+		{"a runtime file that does not parse", func(t *testing.T) string {
+			return townWithRuntimeFile(t, []byte("not json"))
+		}, "embedded v1", false},
+		{"a valid runtime file", func(t *testing.T) string {
+			return townWithRuntimeFile(t, runtimeWeightsWithIntercept(t, "4.0"))
+		}, "runtime v1", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Estimate(context.Background(), Deps{TownRoot: tc.town(t)}, sampleBead())
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			if got.WeightsVersion != tc.wantVersion {
+				t.Fatalf("WeightsVersion = %q, want %q", got.WeightsVersion, tc.wantVersion)
+			}
+			if want := "weights: " + tc.wantVersion; !strings.Contains(Note(got), want) {
+				t.Fatalf("note %q has no line %q", Note(got), want)
+			}
+			// A moved intercept tells the two models apart by their number, so
+			// a fallback that kept the runtime model would not pass by label.
+			if tc.wantRuntime && !(got.Minutes > embedded.Minutes) {
+				t.Fatalf("minutes = %v, want more than the embedded model's %v", got.Minutes, embedded.Minutes)
+			}
+			if !tc.wantRuntime && got.Minutes != embedded.Minutes {
+				t.Fatalf("minutes = %v, want the embedded model's %v", got.Minutes, embedded.Minutes)
+			}
+		})
+	}
+}
+
+// townWithRuntimeFile writes data as a town's runtime weights file and returns
+// the town root it sits under.
+func townWithRuntimeFile(t *testing.T, data []byte) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, ".runtime", "storypoints")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "weights.json"), data, 0o644); err != nil {
+		t.Fatalf("write the runtime weights: %v", err)
+	}
+	return root
+}
+
+// runtimeWeightsWithIntercept returns the embedded weights file with its shape
+// intercept replaced by intercept, so a model read from it answers differently
+// from the embedded one.
+func runtimeWeightsWithIntercept(t *testing.T, intercept string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("../weights.json")
+	if err != nil {
+		t.Fatalf("read the embedded weights: %v", err)
+	}
+	const old = `"intercept": 2.16992`
+	if n := bytes.Count(raw, []byte(old)); n != 1 {
+		t.Fatalf("%s occurs %d times in the weights file, want 1", old, n)
+	}
+	return bytes.Replace(raw, []byte(old), []byte(`"intercept": `+intercept), 1)
 }
 
 // TestEstimateRefusesABlendFailure drives the blend error the inputs Estimate

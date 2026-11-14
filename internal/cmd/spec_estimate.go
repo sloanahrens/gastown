@@ -401,6 +401,7 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 		return estimate.Deps{}, err
 	}
 	return estimate.Deps{
+		TownRoot: townRoot,
 		Embedder: embedder,
 		JevAsk:   specEstimateJev(townRoot, errw),
 		HMRunner: hmhints.ExecRunner,

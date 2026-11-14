@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -219,6 +222,190 @@ func TestLoadWeightsRejectsBareNaN(t *testing.T) {
 	var syntax *json.SyntaxError
 	if _, err := LoadWeights(bytes.NewReader(data)); !errors.As(err, &syntax) {
 		t.Fatalf("LoadWeights(bare NaN) = %v, want a JSON syntax error", err)
+	}
+}
+
+// runtimeTown is the town root the loader tests ask about, and
+// runtimeWeightsPath is the runtime file the path must name under it.
+const (
+	runtimeTown        = "/town"
+	runtimeWeightsPath = "/town/.runtime/storypoints/weights.json"
+)
+
+// fakeRuntime is the reader and logger a LoadTownWeights test supplies: read
+// serves data or readErr for the path it is given, and logf records the lines
+// the loader wrote.
+type fakeRuntime struct {
+	data    []byte
+	readErr error
+	paths   []string
+	logged  []string
+}
+
+func (f *fakeRuntime) read(path string) ([]byte, error) {
+	f.paths = append(f.paths, path)
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.data, nil
+}
+
+func (f *fakeRuntime) logf(format string, args ...any) {
+	f.logged = append(f.logged, fmt.Sprintf(format, args...))
+}
+
+func TestRuntimeWeightsPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		town string
+		want string
+	}{
+		{"a town root", runtimeTown, runtimeWeightsPath},
+		{"no town root", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RuntimeWeightsPath(tc.town); got != tc.want {
+				t.Errorf("RuntimeWeightsPath(%q) = %q, want %q", tc.town, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadTownWeightsUsesTheRuntimeFile checks the runtime model's answer, not
+// only its label: the intercept is moved by one, so the shape minutes are e
+// times the embedded model's.
+func TestLoadTownWeightsUsesTheRuntimeFile(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{data: weightsWith(t, func(f *weightsFile) { f.Shape.Intercept++ })}
+	got := loadTownWeights(runtimeTown, fake.read, fake.logf)
+
+	if want := "runtime v1"; got.Version() != want {
+		t.Fatalf("Version() = %q, want %q", got.Version(), want)
+	}
+	shape := Shape{Boxes: 3}
+	embedded, err := Default().ShapeMinutes(shape)
+	if err != nil {
+		t.Fatalf("embedded ShapeMinutes: %v", err)
+	}
+	runtime, err := got.ShapeMinutes(shape)
+	if err != nil {
+		t.Fatalf("runtime ShapeMinutes: %v", err)
+	}
+	if math.Abs(runtime/embedded-math.E) > 1e-9 {
+		t.Fatalf("runtime ShapeMinutes = %v, %v times the embedded model; want e times", runtime, runtime/embedded)
+	}
+	if !slices.Equal(fake.paths, []string{runtimeWeightsPath}) {
+		t.Fatalf("read paths = %v, want %s", fake.paths, runtimeWeightsPath)
+	}
+	if len(fake.logged) != 0 {
+		t.Fatalf("logged = %v, want no line for a valid file", fake.logged)
+	}
+}
+
+func TestLoadTownWeightsSkipsAMissingFile(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{readErr: fs.ErrNotExist}
+	got := loadTownWeights(runtimeTown, fake.read, fake.logf)
+
+	if want := "embedded v1"; got.Version() != want {
+		t.Fatalf("Version() = %q, want %q", got.Version(), want)
+	}
+	if len(fake.logged) != 0 {
+		t.Fatalf("logged = %v, want no line for a town that adopted no model", fake.logged)
+	}
+}
+
+// TestLoadTownWeightsFallsBackAndReports drives every way a runtime file is
+// refused: each falls back to the embedded weights and writes exactly one line
+// naming the file and the reason.
+func TestLoadTownWeightsFallsBackAndReports(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		fake       *fakeRuntime
+		wantReason string
+	}{
+		{
+			name:       "unreadable file",
+			fake:       &fakeRuntime{readErr: fmt.Errorf("open %s: %w", runtimeWeightsPath, fs.ErrPermission)},
+			wantReason: "permission denied",
+		},
+		{
+			name:       "not JSON",
+			fake:       &fakeRuntime{data: []byte("not json")},
+			wantReason: "decode weights",
+		},
+		{
+			name:       "fails validation",
+			fake:       &fakeRuntime{data: weightsWith(t, func(f *weightsFile) { f.Version = 2 })},
+			wantReason: "weights version 2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := loadTownWeights(runtimeTown, tc.fake.read, tc.fake.logf)
+
+			if want := "embedded v1"; got.Version() != want {
+				t.Fatalf("Version() = %q, want %q", got.Version(), want)
+			}
+			if len(tc.fake.logged) != 1 {
+				t.Fatalf("logged = %q, want exactly one line", tc.fake.logged)
+			}
+			line := tc.fake.logged[0]
+			if !strings.Contains(line, runtimeWeightsPath) || !strings.Contains(line, tc.wantReason) {
+				t.Fatalf("logged line %q does not name the file and the reason %q", line, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestLoadTownWeightsWithNoTownRootReadsNoFile(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRuntime{data: weightsWith(t, func(*weightsFile) {})}
+	got := loadTownWeights("", fake.read, fake.logf)
+
+	if want := "embedded v1"; got.Version() != want {
+		t.Fatalf("Version() = %q, want %q", got.Version(), want)
+	}
+	if len(fake.paths) != 0 {
+		t.Fatalf("read paths = %v, want none", fake.paths)
+	}
+	if len(fake.logged) != 0 {
+		t.Fatalf("logged = %v, want none", fake.logged)
+	}
+}
+
+func TestWeightsVersionNamesTheSource(t *testing.T) {
+	t.Parallel()
+	town := func() Weights {
+		fake := &fakeRuntime{data: weightsWith(t, func(*weightsFile) {})}
+		return loadTownWeights(runtimeTown, fake.read, fake.logf)
+	}()
+	loaded, err := LoadWeights(bytes.NewReader(embeddedWeights))
+	if err != nil {
+		t.Fatalf("LoadWeights(embedded): %v", err)
+	}
+	tests := []struct {
+		name string
+		w    Weights
+		want string
+	}{
+		{"the embedded weights", Default(), "embedded v1"},
+		{"a town's runtime file", town, "runtime v1"},
+		{"bytes a caller supplied", loaded, "v1"},
+		{"the zero weights", Weights{}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.w.Version(); got != tc.want {
+				t.Errorf("Version() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
