@@ -23,7 +23,7 @@ The Evidence column's caller claims are prose the guard does not read. It checks
 
 The three container-mode gates were re-read on 2026-11-09 against the current render. `deploy/k8s/daemon/daemon.go:428` (the `ContainerModeEnv` entry of `podEnvDecisions`) sets it to the supervisor container value, and `deploy/k8s/daemon/daemon.go:1132` (in `containerEnvironment`) carries it into the pod's environment. The lines are a snapshot of this tree; the symbols `podEnvDecisions` and `containerEnvironment` are what to search for if they move. So `config.InContainerMode()` is true in the pod, and each gate takes its probe-file branch there.
 
-**What the scan reads.** The scan reads a program when it is a literal in the call's function or file, or a name bound to one. It cannot read, and reports as unresolved, a parameter of the function or function literal the call sits in (a variadic one included), or an element read by index from a name the file binds. An argv list written as a literal is read where it is written, so an index read of that list is not a second program. A program held in a struct field is not read. `host.probe` is the parameter case on the daemon's path: `probe(name string, args ...string)` at `internal/doltserver/host.go:277` runs `name`, and its caller `containerRunningState` passes `"docker"`, so the row for `host.probe` (listed under needs an engine) is the pod's answer for that call.
+**What the scan reads.** The scan reads a program when it is a literal in the call's function or file, or a name bound to one. It cannot read, and reports as unresolved, a parameter of the function or function literal the call sits in (a variadic one included), or an element read by index from a name the file binds. An argv list written as a literal is read where it is written, so an index read of that list is not a second program. A program held in a struct field is not read. `host.probe` is the parameter case on the daemon's path: `probe(name string, args ...string)` at `internal/doltserver/host.go:297` runs `name`, and its caller `containerRunningState` passes `"docker"`, so the row for `host.probe` (listed under needs an engine) is the pod's answer for that call.
 
 The daemon closure is the set of packages `internal/daemon` reaches through the import specs of its non-test files, and of the internal packages those files import in turn. It is the widest set the daemon can reach: no build constraint narrows it. An unresolved program in a package outside the closure has no row; it is listed under "Out of the daemon's closure". Inside the closure, a runner that takes its program from a caller is listed under "Runners the caller names" (gt-cesfam).
 
@@ -77,7 +77,7 @@ The guard in `internal/podengine` is the source of truth for these rows; this ta
 | `internal/doltserver/doltserver.go` | `host.startExternalContainer` | 2146 | `h.exec(exec.Command("docker", "start", name))` | starting the external Dolt container | needs-engine no bead yet | `internal/daemon/dolt.go:205` starts it when `dolt.external_container` is set (`dolt.go:681-685` sets containerMode); no pod gate |
 | `internal/doltserver/doltserver.go` | `host.stopExternalContainer` | 2180 | `h.exec(exec.Command("docker", "stop", "-t", grace, name))` | stopping the external Dolt container with a grace period | needs-engine no bead yet | `internal/doltserver/doltserver.go:2721` (`Stop`) reaches it; the daemon stops Dolt through `dolt.go`; no pod gate |
 | `internal/doltserver/doltserver.go` | `host.containerRunningState` | 2196 | `out, err := h.probe("docker", "inspect", "-f", "{{.State.Running}}", name)` | whether the external Dolt container is running | needs-engine no bead yet | `internal/doltserver/doltserver.go:2220` (`ContainerRunning`) is the daemon's interface (`internal/daemon/dolt.go:192`); no pod gate |
-| `internal/doltserver/host.go` | `host.probe` | 277 | `cmd := exec.CommandContext(ctx, name, args...)` | whatever program the caller passes; on the daemon's path, `docker` from `containerRunningState` | needs-engine no bead yet | the program is a parameter, which the scan reads (gt-cesfam); `containerRunningState` (the row above) passes `"docker"` at `internal/doltserver/doltserver.go:2196`, so the daemon's container probe fails in the pod with no gate |
+| `internal/doltserver/host.go` | `host.probe` | 297 | `cmd := exec.CommandContext(ctx, name, args...)` | whatever program the caller passes; on the daemon's path, `docker` from `containerRunningState` | needs-engine no bead yet | the program is a parameter, which the scan reads (gt-cesfam); `containerRunningState` (the row above) passes `"docker"` at `internal/doltserver/doltserver.go:2196`, so the daemon's container probe fails in the pod with no gate |
 | `internal/gtwrap/docker.go` | `dockerCommand` | 332 | `argv := []string{"docker"}` | the Mac wrapper's docker argv for one tool, in the daemon image or the bd container | mac-job | `internal/gtwrap/docker.go:165` runs it from the Docker target's attach and `internal/gtwrap/bddocker.go:96` from the bd container target's; `internal/daemon` does not import `gtwrap` |
 | `internal/hoststat/hoststat.go` | `psOutput` | 159 | `out, err := exec.CommandContext(ctx, name, args...).Output()` | the process table, `ps` on macOS and `top` on linux (not an engine call) | degrades internal/hoststat/hoststat.go:160 the sample reports the process table unread | `psOutput` is the `ps` probe of `hostProbes` (`internal/hoststat/hoststat.go:84`); an error is returned with the output (line 160), and the sample reports the table unread |
 | `internal/installer/image.go` | `startImageWorker` | 595 | `cmd := exec.Command(exe, workerArgs(b)...)` | starts the sandbox image worker (not an engine call) | mac-job | `internal/installer/image.go:567` is the installer's caller; `internal/daemon` does not import `installer` |
@@ -97,6 +97,7 @@ The guard in `internal/podengine` is the source of truth for these rows; this ta
 
 These runners are in the daemon's closure. Each runs the program its caller passes, which the scan does not read, so none has a row of its own. A caller that writes `"docker"` as a literal is already a row: the scan reads that literal as the program of a command, as an argument ahead of a call's subcommand, or as the first element of an argv list in a function, in any file under `internal/`. A docker program held in a name and passed in here is not read; the file check names every file that holds the literal, so such a file still needs a row or a named-file line. The guard holds this list to the scan: each runner here holds an unresolved program in the closure, and each unresolved program in the closure has a row or is listed here.
 
+- `internal/bdgateway/process.go` `realRunner.Start` — the gateway's executor picks it (`internal/bdgateway/executor.go:164`) and runs the program in `Options.Binary`, its "bd program to run" (`internal/bdgateway/executor.go:72`), never docker
 - `internal/beads/beads.go` `probeAllowStale`
 - `internal/beads/exec.go` `CommandContextWithPath`
 - `internal/beads/exec.go` `CommandWithPath`
@@ -141,7 +142,6 @@ These runners are in the daemon's closure. Each runs the program its caller pass
 
 These unresolved programs are in packages the daemon does not reach, so the daemon process does not link them and their calls are not the pod question this page answers. They have no rows. The guard holds this list to the scan: each function here holds an unresolved program outside the closure, and each such function is listed.
 
-- `internal/bdgateway/process.go` `realRunner.Start`
 - `internal/bdshim/osmain.go` `realCommand`
 - `internal/bdshim/recordexec.go` `execRunner`
 - `internal/ci/cmd/imagepreflight/main.go` `jqVersion`
@@ -210,7 +210,7 @@ The rows whose disposition is `needs-engine`, with the bead that supplies the po
 - `internal/doltserver/doltserver.go` `host.startExternalContainer` — no bead yet
 - `internal/doltserver/doltserver.go` `host.stopExternalContainer` — no bead yet
 - `internal/doltserver/doltserver.go` `host.containerRunningState` — no bead yet
-- `internal/doltserver/host.go` `host.probe` — no bead yet (the program is a parameter, read by the scan at line 277)
+- `internal/doltserver/host.go` `host.probe` — no bead yet (the program is a parameter, read by the scan at line 297)
 - `internal/session/backend_openshell.go` `runDocker` — no bead yet
 - `internal/slot/gate.go` `dockerCLI.Info` — no bead yet
 - `internal/templates/container_state.go` `ContainerJobState` — gt-wgr6ck (the startup owner guard)
