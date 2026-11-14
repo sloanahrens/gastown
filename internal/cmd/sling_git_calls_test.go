@@ -95,7 +95,7 @@ type spawnBuildCounts struct {
 
 // spawnGitSite is what one function in polecat_spawn.go does with the git
 // handles it builds: how many, and whether each construction hands the handle
-// the sling's run observer on the same statement.
+// to the sling's run observer on the same statement.
 type spawnGitSite struct {
 	count    int    // git.NewGit / git.NewGitWithDir calls in the function
 	observed bool   // each one's statement carries .WithRunObserver
@@ -129,10 +129,11 @@ type spawnManagerSite struct {
 }
 
 // spawnPathManagerSites names every polecat Manager and SessionManager
-// polecat_spawn.go builds. The two the sling runs take the trace's counter at
-// construction, so their git handles count on the step that made them without
-// a later mutation of the handle (gt-74tzuk). The other two read only a
-// session name and open no git handle.
+// polecat_spawn.go builds. The two the sling builds (openSlingRig, startSession)
+// take the trace's counter at construction, so their git handles count on the
+// step that made them without a later mutation of the handle (gt-74tzuk). The
+// other two (realIdleReuseEnv, prepareSlingPolecat) read only a session name
+// and open no git handle.
 var spawnPathManagerSites = map[string]spawnManagerSite{
 	"openSlingRig":        {count: 1, observed: true},
 	"startSession":        {count: 2, observed: true},

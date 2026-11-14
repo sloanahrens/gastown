@@ -118,7 +118,7 @@ func polecatCleanup(sup *supervisor.Supervisor, reg *session.PrefixRegistry, rig
 
 // supervisedPolecatManager is polecat.NewManager with its housekeeping kills
 // routed through the operator supervisor's Cleanup. observe is the run observer
-// the handles the manager opens carry; nil counts nothing.
+// every handle the manager opens carries; nil counts nothing.
 func supervisedPolecatManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, actor string, observe func()) *polecat.Manager {
 	m := polecat.NewManagerWithObserver(r, g, t, townRegistry(), observe)
 	m.SetCleanup(polecatCleanup(operatorSupervisor(filepath.Dir(r.Path)), townRegistry(), r.Name, actor))
