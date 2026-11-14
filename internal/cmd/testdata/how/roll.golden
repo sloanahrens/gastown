@@ -1,0 +1,4 @@
+gt land  Use this to bring a finished branch onto main.
+check: git log origin/main
+gt update  Use this to install the latest build and run the town's maintenance.
+check: gt update --dry-run
