@@ -505,10 +505,19 @@ func writeSpecEstimate(out io.Writer, o specEstimateOutcome, asJSON bool) error 
 
 // The estimate-ahead pass (gt-hzb051) gives an a priori estimate to beads the
 // dispatcher is not about to sling. After the tick's sling decisions, with
-// story_points.shadow on, it estimates at most specEstimateAheadLimit shaped
-// candidates the tick left and writes the labels and note gt spec estimate
-// writes. It is bounded by the shadow estimate's timeout, and an estimate that
-// fails or times out is one logged line.
+// story_points.shadow on, it reads at most specEstimateAheadReadLimit shaped
+// candidates the tick left, estimates at most specEstimateAheadLimit of them,
+// and writes the labels and note gt spec estimate writes. The read phase is
+// bounded by that limit and by specStoryPointTimeout, and each estimate by
+// specStoryPointTimeout again. A failed or timed-out read, a failed or
+// timed-out estimate, and a candidate set cut by the read limit are each one
+// logged line.
+
+// specEstimateAheadReadLimit is how many shaped candidates one tick reads for
+// the estimate-ahead pass. Each read is a bd show and a bd comments call, so a
+// board with many shaped beads would otherwise cost the tick two bd calls per
+// unslung candidate. A candidate past this limit waits for a later tick.
+const specEstimateAheadReadLimit = 8
 
 // specEstimateAheadPass estimates the beads specEstimateAheadPick chooses among
 // the shaped candidates the tick did not sling, and returns the lines the tick
@@ -531,15 +540,21 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 		// estimate: the estimate would silently stop for every bead.
 		return []string{"story points estimate ahead: no bead reader is wired; nothing estimated"}
 	}
-	var cands []specEstimateAheadBead
 	var lines []string
-	for _, id := range ids {
-		issue, comments, err := env.EstimateAheadRead(id)
-		if err != nil {
-			lines = append(lines, fmt.Sprintf("%s: story points estimate ahead: cannot read: %s", id, firstErrLine(err)))
-			continue
-		}
-		cands = append(cands, specEstimateAheadBead{Issue: issue, Comments: comments, CommentsRead: true, Shaped: true})
+	if len(ids) > specEstimateAheadReadLimit {
+		// The candidates stay in the board's order, so the same beads are read
+		// first on every tick and the rest are reached as the board drains.
+		lines = append(lines, fmt.Sprintf("story points estimate ahead: reading the first %d of %d shaped candidates (limit %d); the rest wait for a later tick",
+			specEstimateAheadReadLimit, len(ids), specEstimateAheadReadLimit))
+		ids = ids[:specEstimateAheadReadLimit]
+	}
+	cands, readLines, finished := specEstimateAheadReadCandidates(env, ids)
+	lines = append(lines, readLines...)
+	if !finished {
+		// The reads ran past the timeout, so the pass ends here: estimating
+		// from the candidates already read would hold the tick past the bound
+		// it just enforced.
+		return lines
 	}
 	for _, id := range specEstimateAheadPick(cands, specEstimateAheadLimit) {
 		if line := specEstimateAheadLine(id, specStoryPointRun(env, id)); line != "" {
@@ -549,17 +564,65 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 	return lines
 }
 
+// specEstimateAheadReadCandidates reads ids under specStoryPointTimeout and
+// returns the candidates the reads made, the lines for the reads that failed,
+// and whether the read phase finished. The reads run on their own goroutine so
+// the deadline can end the pass without waiting for a bd call that has not
+// returned; the deferred cancel stops the reads at the next candidate once the
+// pass has returned. A read phase that did not finish is one logged line.
+func specEstimateAheadReadCandidates(env specDispatchEnv, ids []string) (cands []specEstimateAheadBead, lines []string, finished bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type readResult struct {
+		cands []specEstimateAheadBead
+		lines []string
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		var res readResult
+		for _, id := range ids {
+			if ctx.Err() != nil {
+				return
+			}
+			issue, comments, err := env.EstimateAheadRead(ctx, id)
+			if err != nil {
+				res.lines = append(res.lines, fmt.Sprintf("%s: story points estimate ahead: cannot read: %s", id, firstErrLine(err)))
+				continue
+			}
+			res.cands = append(res.cands, specEstimateAheadBead{Issue: issue, Comments: comments, CommentsRead: true, Shaped: true})
+		}
+		done <- res
+	}()
+	after := env.EstimateAheadAfter
+	if after == nil {
+		after = time.After
+	}
+	select {
+	case res := <-done:
+		return res.cands, res.lines, true
+	case <-after(specStoryPointTimeout):
+		return nil, []string{fmt.Sprintf("story points estimate ahead: the bead reads did not finish within %s; nothing estimated this tick", specStoryPointTimeout)}, false
+	}
+}
+
 // specEstimateAheadRead returns the read the estimate-ahead pass makes for one
 // candidate: the bead from this tick's ledger, and its comments read fresh. The
 // ledger may already hold the issue from the board read, and that value is the
 // one the pass uses; the comments are a new call, so an estimate the sling hook
 // wrote this tick is the bead's current one. A failed show or comments read is
 // returned unchanged, and the pass logs it as one line rather than reading the
-// bead as nothing to estimate.
-func specEstimateAheadRead(reads *specTickReads, show func(id string) (*beads.Issue, error), comments func(id string) ([]beads.Comment, error)) func(id string) (*beads.Issue, []beads.Comment, error) {
-	return func(id string) (*beads.Issue, []beads.Comment, error) {
+// bead as nothing to estimate. A context that is done stops the read before its
+// next bd call; a call already running cannot be interrupted here.
+func specEstimateAheadRead(reads *specTickReads, show func(id string) (*beads.Issue, error), comments func(id string) ([]beads.Comment, error)) func(ctx context.Context, id string) (*beads.Issue, []beads.Comment, error) {
+	return func(ctx context.Context, id string) (*beads.Issue, []beads.Comment, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		issue, err := reads.show(id, func() (*beads.Issue, error) { return show(id) })
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
 		reads.call()

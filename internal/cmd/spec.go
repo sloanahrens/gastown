@@ -2056,9 +2056,17 @@ type specDispatchEnv struct {
 	// EstimateAheadRead reads a shaped candidate in full, with its comments, for
 	// the estimate-ahead pass (gt-hzb051). The pass runs after the slings, so
 	// the comments are read fresh: an estimate the sling hook just wrote is the
-	// bead's current one. Nil leaves the pass unable to read a candidate, which
-	// it logs as one line rather than reading as nothing to estimate.
-	EstimateAheadRead func(beadID string) (*beads.Issue, []beads.Comment, error)
+	// bead's current one. The context is done once the read phase's timeout has
+	// passed, so a reader stops before its next call rather than working on for
+	// a tick that no longer waits. Nil leaves the pass unable to read a
+	// candidate, which it logs as one line rather than reading as nothing to
+	// estimate.
+	EstimateAheadRead func(ctx context.Context, beadID string) (*beads.Issue, []beads.Comment, error)
+	// EstimateAheadAfter is the timer the estimate-ahead pass's read phase
+	// waits on; nil is time.After. A test injects one it controls, so a read
+	// phase's timeout is driven with no wall clock, beside the estimate's own
+	// After.
+	EstimateAheadAfter func(d time.Duration) <-chan time.Time
 	// After is the timer the story-point estimate's timeout waits on; nil is
 	// time.After. A test injects one that fires at once, so no wall clock is
 	// read.

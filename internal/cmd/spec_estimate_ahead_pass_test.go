@@ -8,12 +8,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 )
+
+// specAheadTestWait bounds a test's wait for work the tick must finish; it is
+// reached only when the code under test stopped doing that work, and the test
+// then fails naming what it waited for.
+const specAheadTestWait = 10 * time.Second
 
 // specAheadIssue is a board spec as the estimate-ahead pass reads the bead: the
 // sections the estimate hashes and the fields the pick decides on.
@@ -190,7 +196,9 @@ func TestSpecDispatchStoryPointsEstimateAheadFailureLogsOneLineAndKeepsSlings(t 
 
 // TestSpecDispatchStoryPointsEstimateAheadTimeoutLogsOneLineAndKeepsSlings: an
 // ahead estimate that runs past the shadow timeout is one logged line, and the
-// sling decisions are unchanged.
+// sling decisions are unchanged. The fake waits for the cancel the tick must
+// give it, and the test waits for that end under its own bound, so a tick that
+// never cancels fails the test instead of leaving the wait open.
 func TestSpecDispatchStoryPointsEstimateAheadTimeoutLogsOneLineAndKeepsSlings(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(
@@ -200,12 +208,26 @@ func TestSpecDispatchStoryPointsEstimateAheadTimeoutLogsOneLineAndKeepsSlings(t 
 	env.PerTick = 1
 	env.StoryPointShadow = true
 	env.After = firedTimer
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	cancelled := make(chan struct{})
+	var once sync.Once
 	env.StoryPointEstimate = func(ctx context.Context, _ string) (specEstimateOutcome, error) {
-		<-ctx.Done()
-		return specEstimateOutcome{}, ctx.Err()
+		select {
+		case <-ctx.Done():
+			once.Do(func() { close(cancelled) })
+			return specEstimateOutcome{}, ctx.Err()
+		case <-release:
+			return specEstimateOutcome{}, errors.New("the estimate was still running when the test ended")
+		}
 	}
 	r := runSpecDispatchCycle(env)
 
+	select {
+	case <-cancelled:
+	case <-time.After(specAheadTestWait):
+		t.Fatal("the timed-out ahead estimate was not canceled when the tick returned")
+	}
 	if got := strings.Join(f.slung, " "); got != "gt-a" {
 		t.Fatalf("slung %q after a timed-out ahead estimate, want only gt-a", got)
 	}
@@ -289,9 +311,9 @@ func TestSpecDispatchStoryPointsEstimateAheadSkipsACurrentEstimate(t *testing.T)
 }
 
 // TestSpecEstimateAheadRead: the pass's reader returns the bead and its
-// comments, serves a bead the ledger already holds without a second show, and
+// comments, serves a bead the ledger already holds without a second show,
 // returns a failed show or comments read unchanged rather than as an empty
-// bead.
+// bead, and starts no bd call once its context is done.
 func TestSpecEstimateAheadRead(t *testing.T) {
 	t.Parallel()
 	showErr := errors.New("bd show refused")
@@ -303,6 +325,8 @@ func TestSpecEstimateAheadRead(t *testing.T) {
 		ledgerHas        bool
 		showErr          error
 		commentsErr      error
+		doneBefore       bool
+		doneAfterShow    bool
 		wantIssue        *beads.Issue
 		wantComments     []beads.Comment
 		wantErr          error
@@ -313,6 +337,8 @@ func TestSpecEstimateAheadRead(t *testing.T) {
 		{name: "a bead the ledger holds is not shown again", ledgerHas: true, wantIssue: issue, wantComments: want, wantShows: 0, wantCommentReads: 1},
 		{name: "a failed show is returned", showErr: showErr, wantErr: showErr, wantShows: 1, wantCommentReads: 0},
 		{name: "a failed comments read is returned", commentsErr: commentsErr, wantErr: commentsErr, wantShows: 1, wantCommentReads: 1},
+		{name: "a context already done reads nothing", doneBefore: true, wantErr: context.Canceled},
+		{name: "a context done after the show skips the comments", doneAfterShow: true, wantErr: context.Canceled, wantShows: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -321,17 +347,25 @@ func TestSpecEstimateAheadRead(t *testing.T) {
 			if tc.ledgerHas {
 				reads.shows["gt-a"] = issue
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.doneBefore {
+				cancel()
+			}
 			shows, commentReads := 0, 0
 			read := specEstimateAheadRead(reads,
 				func(string) (*beads.Issue, error) {
 					shows++
+					if tc.doneAfterShow {
+						cancel()
+					}
 					return issue, tc.showErr
 				},
 				func(string) ([]beads.Comment, error) {
 					commentReads++
 					return want, tc.commentsErr
 				})
-			gotIssue, gotComments, err := read("gt-a")
+			gotIssue, gotComments, err := read(ctx, "gt-a")
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
@@ -376,7 +410,7 @@ func TestSpecEstimateAheadPassRefusals(t *testing.T) {
 		},
 		{
 			name: "a read that fails is one line",
-			env: specDispatchEnv{StoryPointShadow: true, EstimateAheadRead: func(string) (*beads.Issue, []beads.Comment, error) {
+			env: specDispatchEnv{StoryPointShadow: true, EstimateAheadRead: func(context.Context, string) (*beads.Issue, []beads.Comment, error) {
 				return nil, nil, readErr
 			}},
 			wantReads: 1,
@@ -390,9 +424,9 @@ func TestSpecEstimateAheadPassRefusals(t *testing.T) {
 			reads := 0
 			if env.EstimateAheadRead != nil {
 				read := env.EstimateAheadRead
-				env.EstimateAheadRead = func(id string) (*beads.Issue, []beads.Comment, error) {
+				env.EstimateAheadRead = func(ctx context.Context, id string) (*beads.Issue, []beads.Comment, error) {
 					reads++
-					return read(id)
+					return read(ctx, id)
 				}
 			}
 			lines := specEstimateAheadPass(env, []string{"gt-a"}, nil)
@@ -410,5 +444,115 @@ func TestSpecEstimateAheadPassRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSpecEstimateAheadReadLimit: the pass reads at most
+// specEstimateAheadReadLimit candidates per tick, in the order the board gave
+// them, says so in one line when the set was cut, and still estimates at most
+// specEstimateAheadLimit of the candidates it read.
+func TestSpecEstimateAheadReadLimit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		candidates   int
+		wantReads    int
+		wantEstimate int
+		wantCut      bool
+	}{
+		{name: "no candidates", candidates: 0},
+		{name: "one candidate", candidates: 1, wantReads: 1, wantEstimate: 1},
+		{name: "a full read phase", candidates: specEstimateAheadReadLimit, wantReads: specEstimateAheadReadLimit, wantEstimate: specEstimateAheadLimit},
+		{name: "more candidates than the read limit", candidates: 20, wantReads: specEstimateAheadReadLimit, wantEstimate: specEstimateAheadLimit, wantCut: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var ids []string
+			for i := 0; i < tc.candidates; i++ {
+				ids = append(ids, fmt.Sprintf("gt-%02d", i))
+			}
+			var read, estimated []string
+			env := specDispatchEnv{StoryPointShadow: true}
+			env.EstimateAheadRead = func(_ context.Context, id string) (*beads.Issue, []beads.Comment, error) {
+				read = append(read, id)
+				return &beads.Issue{ID: id, Status: string(beads.StatusOpen)}, nil, nil
+			}
+			env.StoryPointEstimate = func(_ context.Context, id string) (specEstimateOutcome, error) {
+				estimated = append(estimated, id)
+				return specEstimateOutcome{Action: "estimated", Rung: "all", Minutes: 5, Points: 3}, nil
+			}
+			lines := specEstimateAheadPass(env, ids, nil)
+
+			if want := ids[:tc.wantReads]; !slices.Equal(read, want) {
+				t.Errorf("read %v, want %v", read, want)
+			}
+			if want := ids[:tc.wantEstimate]; !slices.Equal(estimated, want) {
+				t.Errorf("estimated %v, want %v", estimated, want)
+			}
+			var cut []string
+			for _, line := range lines {
+				if strings.Contains(line, "(limit ") {
+					cut = append(cut, line)
+				}
+			}
+			if tc.wantCut {
+				if len(cut) != 1 || !strings.Contains(cut[0], fmt.Sprintf("the first %d of %d shaped candidates", tc.wantReads, tc.candidates)) {
+					t.Errorf("cut lines = %q, want one naming the first %d of %d", cut, tc.wantReads, tc.candidates)
+				}
+			} else if len(cut) != 0 {
+				t.Errorf("cut lines = %q, want none", cut)
+			}
+			if len(lines) != len(cut) {
+				t.Errorf("lines = %q, want only the cut line %q", lines, cut)
+			}
+		})
+	}
+}
+
+// TestSpecEstimateAheadReadTimeoutEndsThePass: a bead read that has not
+// returned when the read phase's timeout passes ends the pass in one line, and
+// no estimate runs, so the tick is not held past the bound.
+func TestSpecEstimateAheadReadTimeoutEndsThePass(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	// The timer fires only after the read is known to be waiting, so the pass
+	// cannot time out before the read it is meant to cut short has begun.
+	timer := make(chan time.Time, 1)
+	go func() {
+		<-started
+		timer <- time.Time{}
+	}()
+	estimates := 0
+	env := specDispatchEnv{StoryPointShadow: true, EstimateAheadAfter: func(time.Duration) <-chan time.Time { return timer }}
+	env.EstimateAheadRead = func(ctx context.Context, _ string) (*beads.Issue, []beads.Comment, error) {
+		started <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-release:
+			return nil, nil, errors.New("the read was still running when the test ended")
+		}
+	}
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		estimates++
+		return specEstimateOutcome{Action: "estimated"}, nil
+	}
+	done := make(chan []string, 1)
+	go func() { done <- specEstimateAheadPass(env, []string{"gt-a"}, nil) }()
+	var lines []string
+	select {
+	case lines = <-done:
+	case <-time.After(specAheadTestWait):
+		t.Fatal("the pass did not end when its read phase timed out")
+	}
+
+	if estimates != 0 {
+		t.Errorf("estimated %d bead(s) after the read phase timed out, want none", estimates)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "did not finish within") {
+		t.Errorf("lines = %q, want one saying the reads did not finish", lines)
 	}
 }

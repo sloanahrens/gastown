@@ -314,7 +314,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		RecountSeat: func(agent string) (specSeatRecount, error) { return specSeatRecount{}, nil },
 		// The estimate-ahead pass reads the bead from the fake's own specs,
 		// with the comments the test set (gt-hzb051).
-		EstimateAheadRead: func(id string) (*beads.Issue, []beads.Comment, error) {
+		EstimateAheadRead: func(_ context.Context, id string) (*beads.Issue, []beads.Comment, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.aheadReads = append(f.aheadReads, id)
