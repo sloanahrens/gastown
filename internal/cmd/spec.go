@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/models"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -3798,6 +3799,10 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	var snapshot atomic.Pointer[poolSeatSnapshot]
 	// The sandbox phase line of each sling that starts a sandbox session (gt-0uh64).
 	slingTraces := &specSlingTraces{}
+	// The gateway's stale seat sandboxes, read once for this tick's slings and
+	// logged to the same notice list (gt-zapy97). A town with no sandbox
+	// profile runs no gateway, so the read is skipped.
+	staleSeats := newSpecStaleSeats(slingTraces, time.Now, len(ts.Sandboxes) > 0)
 	if slingActor == "" {
 		slingActor = specDispatchActor
 	}
@@ -3944,7 +3949,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			if seats := snapshot.Load(); seats != nil {
 				occupied = snapshotOccupied(*seats, poolSeatAgentFor(townRoot), newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
 			}
-			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace, docked)
+			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace, docked, staleSeats.get(), townRegistry().PrefixForRig)
 			slingTraces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
 			return name, err
 		},
@@ -4073,6 +4078,74 @@ func (s *specSlingTraces) notices() []string {
 	out := append([]string(nil), s.lines...)
 	sort.Strings(out)
 	return out
+}
+
+// specSandboxListTimeout bounds the one gateway listing a tick's sling eats, so
+// a gateway that hangs costs the sling this read and no more.
+const specSandboxListTimeout = 15 * time.Second
+
+// specStaleSeats is a tick's one read of the gateway's sandbox listing: the
+// names whose sandbox sits in a failure phase, which a sling must not draw
+// (gt-zapy97). Slings run in parallel and each may retry, so the read is held
+// for the tick and the stale names are logged once.
+type specStaleSeats struct {
+	once sync.Once
+	list func(ctx context.Context) ([]sandbox.Entry, error)
+	// sandboxed is false for a town that names no sandbox profile: no gateway
+	// runs there, so the listing is not asked for.
+	sandboxed bool
+	traces    *specSlingTraces
+	now       func() time.Time
+	guard     *daemon.SeatNameGuard
+}
+
+// newSpecStaleSeats returns the memo a tick or a background job reads its one
+// listing through; sandboxed says whether the town names a sandbox profile.
+func newSpecStaleSeats(traces *specSlingTraces, now func() time.Time, sandboxed bool) *specStaleSeats {
+	return &specStaleSeats{list: specGatewaySandboxes, sandboxed: sandboxed, traces: traces, now: now}
+}
+
+// specTownRunsSandboxes reports whether the town names a sandbox profile, the
+// only way a seat's sandbox exists in a gateway. A settings file that cannot be
+// read is not a town without sandboxes: the listing is tried and its own failure
+// is logged, so an unreadable file cannot silently turn the check off
+// (gt-zapy97).
+func specTownRunsSandboxes(townRoot string) bool {
+	ts, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return true
+	}
+	return ts != nil && len(ts.Sandboxes) > 0
+}
+
+// specGatewaySandboxes is the gateway's sandbox listing, bounded by
+// specSandboxListTimeout.
+func specGatewaySandboxes(ctx context.Context) ([]sandbox.Entry, error) {
+	ctx, cancel := context.WithTimeout(ctx, specSandboxListTimeout)
+	defer cancel()
+	return (&sandbox.CLI{}).List(ctx)
+}
+
+// get returns the guard, or nil when the listing could not be read or there is
+// no gateway to ask. A failed read never holds a sling: a gateway that does not
+// answer would otherwise stop every dispatch, so the tick logs the blindness
+// once and slings as before (gt-zapy97).
+func (s *specStaleSeats) get() *daemon.SeatNameGuard {
+	s.once.Do(func() {
+		if !s.sandboxed {
+			return
+		}
+		entries, err := s.list(context.Background())
+		if err != nil {
+			s.traces.add("stale seat sandbox check skipped, slinging as before: " + firstErrLine(err))
+			return
+		}
+		s.guard = daemon.NewSeatNameGuard(entries, s.now())
+		for _, f := range s.guard.Findings() {
+			s.traces.add(f.Line())
+		}
+	})
+	return s.guard
 }
 
 // specRosterSnapshotWith is the seat picture poolSeatSessions draws, with its
@@ -4734,8 +4807,10 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resume
 // seat picture it reads to the end of the session start; nil times nothing.
 // docked is the tick's memo of the rigs' docked labels, so the sling's guard
 // and its spawn's guard share the tick's one read of the rig (gt-ze7z5); nil
-// asks bd each time.
-func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo) (string, error) {
+// asks bd each time. stale, when set, names the seat names the gateway's stale
+// sandboxes block; rigPrefix maps a rig to the prefix its sandbox names carry,
+// and nil leaves every name drawable (gt-zapy97).
+func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo, stale *daemon.SeatNameGuard, rigPrefix func(rig string) string) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
@@ -4750,7 +4825,11 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 		d.rigParked = docked.parkedOrDocked
 	}
 	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
-	d.spawnPolecat = specSlingSpawn(d.spawnPolecat, occupied, trace, docked)
+	var staleNames []string
+	if stale != nil && rigPrefix != nil {
+		staleNames = stale.Polecats(rigPrefix(c.Rig))
+	}
+	d.spawnPolecat = specSlingSpawn(d.spawnPolecat, occupied, trace, docked, staleNames)
 	result, err := d.executeSling(params)
 	if err != nil {
 		return "", err
@@ -4775,8 +4854,9 @@ func specSlingDeps(trace *session.SandboxTrace, extra ...beads.Option) *slingDep
 // and the tick's seat snapshot, when it has one, is the occupancy read the pool
 // decision uses instead of listing every polecat again (gt-thy6r). The tick's
 // docked memo rides it too, so the spawn's own rig guard answers from the read
-// the tick already made (gt-ze7z5).
-func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error), occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo) func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+// the tick already made (gt-ze7z5). staleNames are the rig's pool names whose
+// gateway sandbox is stale, which the spawn's draw must pass over (gt-zapy97).
+func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error), occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo, staleNames []string) func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	return func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		opts.trace = trace
 		if occupied != nil {
@@ -4785,6 +4865,7 @@ func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, 
 		if docked != nil {
 			opts.rigParked = docked.parkedOrDocked
 		}
+		opts.staleSeatNames = staleNames
 		return spawn(rigName, opts)
 	}
 }

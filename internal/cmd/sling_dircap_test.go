@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -348,7 +349,7 @@ func TestSlingRetriedSeatGetsSameSlingOptions(t *testing.T) {
 		t.Fatalf("reuse called %d times, want 2", len(fake.reuseOpts))
 	}
 	first, second := fake.reuseOpts[0], fake.reuseOpts[1]
-	if first != second {
+	if !reflect.DeepEqual(first, second) {
 		t.Errorf("options changed between seats: first %+v, retry %+v", first, second)
 	}
 	if second.HookBead != bead || second.ResumeBranch != resume {

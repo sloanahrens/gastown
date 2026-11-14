@@ -855,6 +855,11 @@ type AddOptions struct {
 	// not working and holds no hook for another bead qualifies, and a parked
 	// seat is still refused. The zero value keeps the gate's verdict.
 	AllowRecovery bool
+	// AvoidNames is the pool names this allocation must not draw: each one's
+	// gateway sandbox is in a terminal failure phase, so a session started on
+	// it dies before the seat exists (gt-zapy97). Only the draw is affected;
+	// a named allocation still creates exactly its own name.
+	AvoidNames []string
 }
 
 // Add creates a new polecat as a git worktree from the repo base.
@@ -1003,6 +1008,15 @@ func (m *Manager) allocateAndAddPoolLocked(opts AddOptions) (string, *Polecat, e
 	}
 
 	m.reconcilePoolInternal()
+
+	// A name whose gateway sandbox is stale cannot take a sling, so it is
+	// marked in use after the reconcile that rebuilds InUse from the
+	// directories: Allocate then draws the next free name, and the mark is
+	// gone with the next reconcile (gt-zapy97). An overflow name never comes
+	// back, so only a themed or seat-listed name is affected.
+	for _, name := range opts.AvoidNames {
+		m.namePool.MarkInUse(name)
+	}
 
 	// A drawn name can already be a polecat created outside the pool: the
 	// manual add path (gt polecat add → AddWithOptions) takes only the

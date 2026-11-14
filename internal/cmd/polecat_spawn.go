@@ -9,6 +9,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -175,6 +176,10 @@ type SlingSpawnOptions struct {
 	// and clears the count once a seat exists; an automated sling is held to
 	// the limit and spends it. The classifier is slingDeliberate.
 	Deliberate bool
+	// staleSeatNames are the pool names this sling must not draw because the
+	// gateway still holds a sandbox of that name in a failure phase; the spec
+	// dispatcher sets them from its one listing (gt-zapy97).
+	staleSeatNames []string
 }
 
 // step records the end of one spawn stage on the timer this spawn was handed,
@@ -201,6 +206,7 @@ func slingAddOptions(opts SlingSpawnOptions, baseBranch, resumeBranch string, al
 		BaseBranch:    baseBranch,
 		ResumeBranch:  resumeBranch,
 		AllowRecovery: allowRecovery,
+		AvoidNames:    opts.staleSeatNames,
 	}
 }
 
@@ -489,10 +495,18 @@ func reuseIdlePolecatForSlingWith(
 		pull, stop := iter.Pull(idle)
 		defer stop()
 		nextSeat = func() string {
-			if p, ok := pull(); ok && p != nil {
-				return p.Name
+			for {
+				p, ok := pull()
+				if !ok || p == nil {
+					return ""
+				}
+				// A name whose gateway sandbox is stale cannot take a sling:
+				// its session dies at the start, so the next seat is tried
+				// (gt-zapy97).
+				if !slices.Contains(opts.staleSeatNames, p.Name) {
+					return p.Name
+				}
 			}
-			return ""
 		}
 		if polecatName = nextSeat(); polecatName == "" {
 			return nil, nil
