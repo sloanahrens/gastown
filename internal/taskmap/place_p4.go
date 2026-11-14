@@ -46,7 +46,7 @@ func init() {
 		Entry{Path: "model apply", Group: "host", Use: "Use this when the model table has been edited by hand and every role it names must be written to the live config in one pass.", Check: "gt model show exits 0 with an empty DRIFT column"},
 		Entry{Path: "model set-default", Group: "host", Use: "Use this when the profile every role without a row of its own should run must change.", Check: "gt model show exits 0 with an empty DRIFT column"},
 		Entry{Path: "model set-role", Group: "host", Use: "Use this when one role's model is wrong and the roles beside it must keep theirs.", Check: "gt model show exits 0 with an empty DRIFT column"},
-		Entry{Path: "model show", Group: "host", Use: "Use this to check whether each role runs the model the town's table names, before you blame the model for how a role behaves.", Check: "the command exits 0 and prints no DRIFT value"},
+		Entry{Path: "model show", Group: "host", Use: "Use this to check whether each role runs the model the town's table names, before you blame the model for how a role behaves.", Check: "gt model show exits 0 with an empty DRIFT column"},
 
 		Entry{Path: "sandbox", Group: "sandboxes", Use: "Use this when you need a detail of the profile a seat's sandbox is built from, such as the Forgejo endpoint it reaches."},
 		Entry{Path: "sandbox endpoint", Group: "sandboxes", Use: "Use this when a gateway's forgejo-polecat profile must bind the Forgejo host, port and allowed IPs the sandboxes on it reach.", Check: "gt sandbox endpoint --gateway <name> --check <export> prints bound"},
