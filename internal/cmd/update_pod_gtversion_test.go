@@ -113,53 +113,27 @@ func TestPodVerifyGTVersionFailsWhenThePodIsBehind(t *testing.T) {
 	}
 }
 
-// TestPodVerifyGTVersionFailsWhenThePodCannotBeRead holds the failure branch: a
-// pod that cannot be read makes GTVersion fail. It never falls back to the
-// Job's own executable, which would pass a pod it never read.
-func TestPodVerifyGTVersionFailsWhenThePodCannotBeRead(t *testing.T) {
+// TestPodVerifyGTVersionDoesNotFallBackToTheJobBinary holds GTVersion's failure
+// branch: a pod that cannot be read makes GTVersion fail, and it never returns
+// the Job's own executable in its place. The Job here reports podTargetCommit,
+// so a fallback would pass a pod the probe never read. GTVersion and
+// DaemonVersion share podCommit, whose exec failure modes
+// TestUpdatePodProbeFailsWhenTheExecFails covers.
+func TestPodVerifyGTVersionDoesNotFallBackToTheJobBinary(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		run  update.RunFunc
-	}{
-		{
-			name: "exec exits nonzero",
-			run: func(context.Context, string, []string, string, ...string) (string, int, error) {
-				return "pod output SECRET-TOKEN", 1, nil
-			},
-		},
-		{
-			name: "exec cannot run",
-			run: func(context.Context, string, []string, string, ...string) (string, int, error) {
-				return "", 0, errors.New("exec: kubectl not found")
-			},
-		},
-		{
-			name: "exec prints no version line",
-			run: func(context.Context, string, []string, string, ...string) (string, int, error) {
-				return "panic: boom\n", 0, nil
-			},
+	probe := podVerifyProbes{
+		VerifyProbes: podVerifyJobProbes{jobCommit: podTargetCommit},
+		target:       podVerifyTarget,
+		run: func(context.Context, string, []string, string, ...string) (string, int, error) {
+			return "", 1, nil
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			probe := podVerifyProbes{
-				VerifyProbes: podVerifyJobProbes{jobCommit: podTargetCommit},
-				target:       podVerifyTarget,
-				run:          tc.run,
-			}
-			commit, err := probe.GTVersion(context.Background())
-			if err == nil {
-				t.Fatalf("GTVersion = %q, want an error: the pod was not read", commit)
-			}
-			if commit != "" {
-				t.Errorf("GTVersion returned commit %q with the error, want none", commit)
-			}
-			if strings.Contains(err.Error(), "SECRET-TOKEN") {
-				t.Errorf("error %q echoes the pod's output", err)
-			}
-		})
+	commit, err := probe.GTVersion(context.Background())
+	if err == nil {
+		t.Fatalf("GTVersion = %q, want an error: the pod was not read", commit)
+	}
+	if commit != "" {
+		t.Errorf("GTVersion returned commit %q with the error, want none", commit)
 	}
 }
 
