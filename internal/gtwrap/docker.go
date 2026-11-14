@@ -83,7 +83,7 @@ type Shell interface {
 	Capture(ctx context.Context, argv []string) (stdout string, exit int, err error)
 }
 
-// Docker reaches the daemon image through the docker CLI. Exec and Run are the
+// Docker reaches the daemon image through the docker CLI. Exec and run are the
 // first two rungs of the ladder; Launch chooses between them and refuses when
 // Docker is down.
 type Docker struct {
@@ -127,7 +127,7 @@ func (d Docker) Launch(call Call) (int, error) {
 		if !rung2Allows(call.Argv) {
 			return exitDown, fmt.Errorf("gtwrap: %s is not on the rung-2 allowlist, and the daemon container %s is not running, so the call did not run; start the daemon with `%s`, then run the command again", strings.Join(call.Argv, " "), svc.ContainerName, d.startCommand())
 		}
-		return d.Run(call)
+		return d.run(call)
 	default:
 		return exitDown, fmt.Errorf("gtwrap: %s", reason)
 	}
@@ -168,15 +168,15 @@ func (d Docker) Exec(call Call) (int, error) {
 	return d.Shell.Attach(d.dockerArgv(args...), env)
 }
 
-// Run runs call in a throwaway container of the daemon image with the town
+// run runs call in a throwaway container of the daemon image with the town
 // mounted at its own path: rung 2. The entrypoint is replaced by the tool,
 // because the image's entrypoint is the daemon's, not the tool's. An hm call
 // also mounts the derived config read-only where HM_CONFIG names it, since a
 // throwaway container does not inherit the compose service's mounts. The derived
 // config must be a regular file first: a bind of a missing path makes the engine
-// create a directory there, which hm would read as its config. Run does not check
-// the rung-2 allowlist; Launch does before it calls Run.
-func (d Docker) Run(call Call) (int, error) {
+// create a directory there, which hm would read as its config. run is unexported:
+// Launch, which holds the rung-2 allowlist gate, is the only way in from outside.
+func (d Docker) run(call Call) (int, error) {
 	svc, err := d.daemonService()
 	if err != nil {
 		return exitDown, err
@@ -345,7 +345,7 @@ func dockerCommand(contextName string, args ...string) []string {
 	return append(argv, args...)
 }
 
-// checkCall refuses a call with no tool to run: Run needs the tool for its
+// checkCall refuses a call with no tool to run: run needs the tool for its
 // entrypoint, and Exec would hand docker no command.
 func checkCall(call Call) error {
 	if len(call.Argv) == 0 {

@@ -1,6 +1,7 @@
 package gtwrap
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -40,21 +41,50 @@ var rung2Cases = []rung2Case{
 	{"an unknown tool", []string{"ls", "-la"}, false},
 }
 
-// rung2ForbiddenWords name a command that starts, stops, restarts or repairs the
-// daemon or Dolt, or the start and stop verbs of rigs, crews and sessions. The
-// cobra root of internal/cmd is not exported, so this test cannot walk the command
-// tree from gtwrap without changing that package. The list is literal instead, as
-// the bead allows.
-var rung2ForbiddenWords = []string{"daemon", "dolt", "up", "down", "start", "stop", "restart", "repair"}
+// rung2ReadOnlyCalls is the whole rung-2 table as docs/design/gt-in-container.md
+// names it: the seven read-only calls. The allowlist must equal this set, so no
+// command the design does not name can run beside a daemon: a daemon or Dolt
+// start, stop, restart or repair verb fails this check as every other addition
+// does. A list of forbidden words cannot hold that line, because it misses each
+// verb nobody wrote down.
+var rung2ReadOnlyCalls = [][]string{
+	{"gt", "status"},
+	{"gt", "prime"},
+	{"gt", "hook"},
+	{"gt", "mail", "inbox"},
+	{"bd", "show"},
+	{"bd", "list"},
+	{"bd", "ready"},
+}
 
-// rung2ForbiddenWord returns the forbidden word argv names, if it names one.
-func rung2ForbiddenWord(argv []string) (string, bool) {
-	for _, word := range argv {
-		if slices.Contains(rung2ForbiddenWords, word) {
-			return word, true
+// TestRung2AllowlistIsExactlyTheReadOnlyCalls refuses any table the design page
+// does not name, so a call reaches rung 2 only when the design and the test name
+// it together.
+func TestRung2AllowlistIsExactlyTheReadOnlyCalls(t *testing.T) {
+	t.Parallel()
+	if !slices.EqualFunc(rung2Allowlist, rung2ReadOnlyCalls, slices.Equal) {
+		t.Errorf("rung2Allowlist = %q, want exactly %q, the read-only calls the design page names; a new call is a policy change that updates rung2_allow.go's table, this set and docs/design/gt-in-container.md together", rung2Allowlist, rung2ReadOnlyCalls)
+	}
+}
+
+// TestRung2TheOnlyExportedCallRunnersAreExecAndLaunch pins Docker's exported
+// surface for running a call: Launch, which holds the rung-2 allowlist gate, and
+// Exec, which runs in the already-running container and is not gated. The
+// throwaway run is unexported, so no caller outside this package can reach one
+// without Launch; a new exported runner must be added here and gated.
+func TestRung2TheOnlyExportedCallRunnersAreExecAndLaunch(t *testing.T) {
+	t.Parallel()
+	runner := reflect.TypeOf((func(Docker, Call) (int, error))(nil))
+	var got []string
+	typ := reflect.TypeOf(Docker{})
+	for i := 0; i < typ.NumMethod(); i++ {
+		if m := typ.Method(i); m.Type == runner {
+			got = append(got, m.Name)
 		}
 	}
-	return "", false
+	if want := []string{"Exec", "Launch"}; !slices.Equal(got, want) {
+		t.Fatalf("Docker's exported call runners = %q, want %q; a throwaway run is reached only through Launch, which holds the rung-2 allowlist gate, so a new exported runner must be gated and named here", got, want)
+	}
 }
 
 func TestRung2RunsTheAllowlistedCalls(t *testing.T) {
@@ -142,39 +172,5 @@ func TestRung2GatesOnlyTheThrowawayRung(t *testing.T) {
 				t.Fatalf("attached %q, want one exec line", shell.attached)
 			}
 		})
-	}
-}
-
-func TestRung2TableHasNoDaemonOrDoltVerb(t *testing.T) {
-	t.Parallel()
-	for _, prefix := range rung2Allowlist {
-		if word, bad := rung2ForbiddenWord(prefix); bad {
-			t.Errorf("the allowlist names %q, which starts, stops, restarts or repairs the daemon or Dolt (%q)", strings.Join(prefix, " "), word)
-		}
-	}
-}
-
-func TestRung2ForbiddenWordFlagsTheVerbs(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		argv []string
-		want bool
-	}{
-		{[]string{"gt", "daemon", "start"}, true},
-		{[]string{"gt", "dolt", "status"}, true},
-		{[]string{"gt", "up"}, true},
-		{[]string{"gt", "down"}, true},
-		{[]string{"gt", "rig", "restart"}, true},
-		{[]string{"gt", "crew", "stop"}, true},
-		{[]string{"gt", "session", "start"}, true},
-		{[]string{"gt", "dolt", "repair"}, true},
-		{[]string{"gt", "status"}, false},
-		{[]string{"gt", "mail", "inbox"}, false},
-		{[]string{"bd", "ready"}, false},
-	}
-	for _, tt := range tests {
-		if _, got := rung2ForbiddenWord(tt.argv); got != tt.want {
-			t.Errorf("rung2ForbiddenWord(%q) = %v, want %v", tt.argv, got, tt.want)
-		}
 	}
 }
