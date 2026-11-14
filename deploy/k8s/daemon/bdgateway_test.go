@@ -109,13 +109,15 @@ func TestBdGatewayRefusals(t *testing.T) {
 		name      string
 		dashboard bool
 		url       string
+		// names is the field the refusal must name.
+		names string
 	}{
-		{"the URL without the dashboard", false, testBdGatewayURL},
-		{"a scheme that is not http", true, "ftp://host.docker.internal:7440"},
-		{"no scheme", true, "host.docker.internal:7440"},
-		{"no host", true, "http:///v1"},
-		{"user information", true, "http://gateway:hunter2@host.docker.internal:7440"},
-		{"an unparsable URL", true, "http://[::1"},
+		{"the URL without the dashboard", false, testBdGatewayURL, "Values.Dashboard"},
+		{"a scheme that is not http", true, "ftp://host.docker.internal:7440", "Values.BdGatewayURL"},
+		{"no scheme", true, "host.docker.internal:7440", "Values.BdGatewayURL"},
+		{"no host", true, "http:///v1", "Values.BdGatewayURL"},
+		{"user information", true, "http://gateway:hunter2@host.docker.internal:7440", "Values.BdGatewayURL"},
+		{"an unparsable URL", true, "http://[::1", "Values.BdGatewayURL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,6 +128,9 @@ func TestBdGatewayRefusals(t *testing.T) {
 			m, err := Build(v)
 			if err == nil {
 				t.Fatalf("Build with %s succeeded, want a refusal", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Errorf("the refusal = %q, want it to name %s", err, tc.names)
 			}
 			if m.DashboardDeployment.Kind != "" {
 				t.Errorf("a refused Build returned a dashboard Deployment")

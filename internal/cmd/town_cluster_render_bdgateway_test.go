@@ -106,6 +106,18 @@ func TestTownClusterRenderBdGatewayFlag(t *testing.T) {
 		}
 	})
 
+	t.Run("a whitespace-only URL refuses before a write", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.dashboard = true
+		f.bdGatewayURL = "   "
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
+		requireErrorNames(t, err, "--bd-gateway-url", "empty")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left %s: %s", f.out, got)
+		}
+	})
+
 	t.Run("a URL that is not http or https refuses before a write", func(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.dashboard = true

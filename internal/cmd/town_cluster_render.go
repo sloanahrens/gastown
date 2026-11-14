@@ -249,6 +249,8 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--dashboard-claude-dir is for the dashboard: name --dashboard with it, or drop the flag")
 	case f.dashboardClaudeDir != "" && !filepath.IsAbs(f.dashboardClaudeDir):
 		return fmt.Errorf("--dashboard-claude-dir %q must be an absolute path: the pod names the host directory", f.dashboardClaudeDir)
+	case f.bdGatewayURL != "" && strings.TrimSpace(f.bdGatewayURL) == "":
+		return errors.New("--bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
 	case f.bdGatewayURL != "" && !f.dashboard:
 		return errors.New("--bd-gateway-url is for the dashboard: name --dashboard with it, or drop the flag")
 	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
