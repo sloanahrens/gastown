@@ -34,7 +34,7 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var details []string
-	var warnings []string
+	var warning string
 
 	s, err := c.load()
 	if err != nil {
@@ -54,7 +54,7 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 		details = append(details, "Gas Town: enabled")
 	} else {
 		details = append(details, "Gas Town: disabled")
-		warnings = append(warnings, "Gas Town is disabled globally")
+		warning = "Gas Town is disabled globally"
 	}
 
 	if s.Version != "" {
@@ -67,9 +67,9 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 
 	result.Details = details
 
-	if len(warnings) > 0 {
+	if warning != "" {
 		result.Status = StatusWarning
-		result.Message = warnings[0]
+		result.Message = warning
 		result.FixHint = "Run from the town root: gt install . --force"
 	} else {
 		result.Message = "Global state healthy"
