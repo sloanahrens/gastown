@@ -165,9 +165,10 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 		)
 	}
 	// A no-bead-access seat reads its task from a file instead of its bead
-	// (gt-1m0kb). The archive stages it owner- and world-readable but not
-	// writable, so the seat reads the text the host rendered and cannot edit
-	// it (gt-0ne2hw). A spawn with no task text stages nothing.
+	// (gt-1m0kb). The archive stages it at 0444 in a 0755 directory: the mode
+	// stops an accidental edit, not a deliberate one, since the seat owns both
+	// and can chmod the file or replace it (gt-0ne2hw). A spawn with no task
+	// text stages nothing.
 	if len(spec.TaskFile) > 0 {
 		files = append(files,
 			runtimeFile{path.Dir(runtimeTaskFile), nil, 0o755, true},
