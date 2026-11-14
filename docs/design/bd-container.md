@@ -19,8 +19,8 @@ The `bd` binary leaves the daemon image and the polecat image. One dedicated bd
 image, built by CI, runs as a long-lived container in the Mac's local Docker
 beside Dolt, in one compose unit started at system startup. Every caller that
 runs bd today calls that container instead, through a small authenticated
-gateway. The bd shim (tracker routing) is deferred with the tracker program
-(gt-p85pw), so the image runs the real bd. Seats keep their own bd until
+gateway. The bd shim (tracker routing) belongs to the tracker program (the note
+above, gt-p85pw), so the image runs the real bd. Seats keep their own bd until
 approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
 
 ## Facts this design rests on
@@ -81,8 +81,8 @@ approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
   and logged the same way).
 - Inside the bd container (image `gt-bd`), `/usr/local/bin/bd` is the real bd:
   `deploy/bd/Dockerfile.bd` links it to `/usr/local/bin/bd.real`, which the base
-  image sets. The tracker shim is deferred, so the gateway runs the real binary
-  and no shim is on PATH.
+  image sets. The gateway runs that binary and no shim is on PATH; the shim
+  belongs to the tracker program (the note at the top).
 - The bd container reaches Dolt over the compose network by service name, never
   through a published port.
 - The gateway holds one tracker credential: an operator-class tracker token
@@ -434,6 +434,8 @@ change, not a rebuild.
 - The `bd` copy in `deploy/daemon/Dockerfile` (line 54) and the "build bd" step in
   `internal/daemonimage/build.go` (the build moves to the beads CI); the
   polecat image keeps bd until approach A.
+- gt-q68hh2 and gt-jqrnty, the shim-in-image beads: their disposition stays
+  with the tracker program, in gt-p85pw (the note at the top).
 - gt-wrap's kubernetes-target special cases for bd (file-argument rewrite stays,
   it moves with the forwarder; the `BEADS_DOLT_SERVER_HOST` rewrite and the
   `pod_town_root` path rewriting for bd go).
