@@ -49,11 +49,8 @@ const (
 	overseerCardPrintMaxBytes = 2500
 )
 
-// howCardFlag is --card: print the overseer card instead of the listing.
-var howCardFlag bool
-
 func init() {
-	howCmd.Flags().BoolVar(&howCardFlag, "card", false, "print the overseer card: the lookup rule, the task groups and the rule lines")
+	howCmd.Flags().Bool("card", false, "print the overseer card: the lookup rule, the task groups and the rule lines")
 }
 
 // overseerCardRules returns the card's rule lines, in file order. howCardText,

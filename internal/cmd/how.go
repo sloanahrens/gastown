@@ -84,7 +84,11 @@ func init() {
 
 func runHowCmd(cmd *cobra.Command, args []string) error {
 	m := howDefault{taskmap.Default()}
-	if howCardFlag {
+	card, err := cmd.Flags().GetBool("card")
+	if err != nil {
+		return fmt.Errorf("read --card: %w", err)
+	}
+	if card {
 		return runHowCard(cmd.OutOrStdout(), m, args)
 	}
 	if !howHistoryFlag {

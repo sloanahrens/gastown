@@ -181,8 +181,10 @@ func howRealMap(t *testing.T, args ...string) string {
 	t.Helper()
 
 	// The command supplies the writer, so the test uses a fresh one rather than
-	// the global howCmd.
+	// the global howCmd. It carries the --card flag runHowCmd reads; without
+	// the flag the command would be one production never builds.
 	cmd := &cobra.Command{}
+	cmd.Flags().Bool("card", false, "")
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	if err := runHowCmd(cmd, args); err != nil {

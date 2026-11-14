@@ -185,17 +185,13 @@ func TestHowCardContent(t *testing.T) {
 		have[line] = true
 	}
 
-	groups := taskmap.Groups()
-	width := 0
-	for _, g := range groups {
-		if n := len(g); n > width {
-			width = n
-		}
+	var groupLines strings.Builder
+	if err := writeHowGroups(&groupLines, howDefault{taskmap.Default()}); err != nil {
+		t.Fatalf("writeHowGroups: %v", err)
 	}
-	for _, g := range groups {
-		want := fmt.Sprintf("%-*s  %s", width, g, taskmap.Describe(g))
-		if !have[want] {
-			t.Errorf("the card does not carry group line %q", want)
+	for _, line := range strings.Split(strings.TrimSuffix(groupLines.String(), "\n"), "\n") {
+		if !have[line] {
+			t.Errorf("the card does not carry group line %q", line)
 		}
 	}
 
@@ -214,24 +210,20 @@ func TestHowCardContent(t *testing.T) {
 	}
 }
 
-// TestHowCardCommandRunsTheCard drives runHowCmd with --card set, so deleting
-// the flag branch in runHowCmd fails here even though runHowCard still builds a
-// card. Not parallel: --card is a package-level flag, and a listing test
-// running beside it would print a card instead of its listing.
-//
-//testpolicy:allow parallel — sets the package-level --card flag, which a listing test running mid-run would read
+// TestHowCardCommandRunsTheCard drives runHowCmd with --card set on the
+// command it reads, so deleting the flag branch in runHowCmd fails here even
+// though runHowCard still builds a card. The test command carries its own flag
+// set, so it runs beside the listing tests without touching howCmd's flag.
 func TestHowCardCommandRunsTheCard(t *testing.T) {
-	if err := howCmd.Flags().Set("card", "true"); err != nil {
-		t.Fatalf("set --card: %v", err)
+	t.Parallel()
+
+	if howCmd.Flags().Lookup("card") == nil {
+		t.Fatal("gt how registers no --card flag")
 	}
-	t.Cleanup(func() {
-		if err := howCmd.Flags().Set("card", "false"); err != nil {
-			t.Errorf("reset --card: %v", err)
-		}
-	})
 
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.Flags().Bool("card", true, "")
 	cmd.SetOut(&out)
 	if err := runHowCmd(cmd, nil); err != nil {
 		t.Fatalf("runHowCmd with --card: %v", err)
@@ -391,22 +383,38 @@ func TestHowCardReturnsALoaderError(t *testing.T) {
 }
 
 // TestHowCardIsNotARoleDirective checks the card reaches an agent through gt
-// how --card only: the repo's directives/ directory, which gt directive list
-// scans, carries no card file, and every file it does carry reaches a role. The
-// repo root is scanned because its directives/ directory is the town layer.
+// how --card only: gt directive list, run here over a town root the test
+// builds, reports a directives/overseer-card.md as UNUSED, because "overseer-card"
+// is no role name, while a role-named file lists as ok. The card itself is
+// embedded from howdata, not installed from directives/.
 func TestHowCardIsNotARoleDirective(t *testing.T) {
 	t.Parallel()
 
-	files, err := listableDirectiveFiles(filepath.Join("..", ".."))
+	townRoot := t.TempDir()
+	writeDirective(t, filepath.Join(townRoot, "directives", "polecat.md"), "polecat policy")
+	writeDirective(t, filepath.Join(townRoot, "directives", "overseer-card.md"), "a card dropped into directives")
+
+	files, err := listableDirectiveFiles(townRoot)
 	if err != nil {
 		t.Fatalf("listableDirectiveFiles: %v", err)
 	}
-	for _, f := range files {
-		if strings.Contains(f.Path, "overseer-card") {
-			t.Errorf("gt directive list reports the card as a directive: %s", f.Path)
+	var out bytes.Buffer
+	renderDirectiveList(&out, files)
+
+	rowFor := func(name string) string {
+		suffix := filepath.Join("directives", name+".md")
+		for _, line := range strings.Split(out.String(), "\n") {
+			if strings.HasSuffix(strings.TrimSpace(line), suffix) {
+				return line
+			}
 		}
-		if f.Unused() {
-			t.Errorf("gt directive list reports %s as reaching no role", f.Path)
-		}
+		t.Fatalf("gt directive list has no row for %s:\n%s", suffix, out.String())
+		return ""
+	}
+	if row := rowFor("overseer-card"); !strings.Contains(row, "UNUSED") {
+		t.Errorf("gt directive list does not report the card as reaching no role: %q", row)
+	}
+	if row := rowFor("polecat"); strings.Contains(row, "UNUSED") {
+		t.Errorf("gt directive list flags a role directive as unused: %q", row)
 	}
 }
