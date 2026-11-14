@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -314,6 +316,158 @@ func TestBdgwGracefulShutdown(t *testing.T) {
 	}
 	if status, err := frame.ExitStatus(); err != nil || status != 0 {
 		t.Errorf("exit status = %d (%v), want 0", status, err)
+	}
+}
+
+// freeAddr is a loopback address nothing holds at the moment it is returned.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for a free port: %v", err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatalf("close the probe listener: %v", err)
+	}
+	return addr
+}
+
+// waitFor yields until cond holds, and fails the test when bound ends first.
+func waitFor(t *testing.T, bound context.Context, what string, cond func() bool) {
+	t.Helper()
+	for !cond() {
+		if err := bound.Err(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		runtime.Gosched()
+	}
+}
+
+// dialable reports whether a connection to addr is accepted right now.
+func dialable(t *testing.T, addr string) bool {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		return false
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close the probe connection: %v", err)
+	}
+	return true
+}
+
+// TestBdgwServeDrainsInFlightCall: serve runs the real listener and drain. Once
+// shutdown begins, the listener closes at once, yet a call already in flight
+// over the socket finishes with its status, and serve returns nil only after
+// that. The executor is a blocking runner, injected through the gateway seam, so
+// the call stays in flight until the test releases it.
+func TestBdgwServeDrainsInFlightCall(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := newServeConfig()
+	sc.addr = freeAddr(t)
+	sc.tokensDir = t.TempDir()
+	writeFile(t, filepath.Join(sc.tokensDir, "read.dash.token"), testReadToken, 0o600)
+	sc.verbsPath = filepath.Join(t.TempDir(), "verbs.json")
+	writeFile(t, sc.verbsPath, cmdPolicy, 0o644)
+	sc.logDir = t.TempDir()
+	sc.workspaceRoot = t.TempDir()
+	runner := newBlockingRunner()
+	sc.newGateway = func(opts bdgateway.GatewayOptions) (*bdgateway.Gateway, error) {
+		opts.Runner = runner
+		return bdgateway.NewGateway(opts)
+	}
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	var serveErr error
+	finished := false
+	returned := func() bool {
+		if !finished {
+			select {
+			case serveErr = <-served:
+				finished = true
+			default:
+			}
+		}
+		return finished
+	}
+	waitFor(t, bound, "the server listens", func() bool {
+		return returned() || dialable(t, sc.addr)
+	})
+	if returned() {
+		t.Fatalf("serve returned before any shutdown: %v", serveErr)
+	}
+
+	head, err := json.Marshal(bdgateway.Request{Argv: []string{"show"}})
+	if err != nil {
+		t.Fatalf("marshal head: %v", err)
+	}
+	type reply struct {
+		status int
+		body   []byte
+		err    error
+	}
+	inFlight := make(chan reply, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(bound, http.MethodPost, "http://"+sc.addr+"/v1/exec", strings.NewReader(string(head)+"\n"))
+		if err != nil {
+			inFlight <- reply{err: err}
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+testReadToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			inFlight <- reply{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		inFlight <- reply{status: resp.StatusCode, body: body, err: err}
+	}()
+	select {
+	case <-runner.started:
+	case <-bound.Done():
+		t.Fatal("the call did not reach the executor within the test's bound")
+	}
+
+	stop()
+	// The listener closes as the drain begins, while the call is still held.
+	waitFor(t, bound, "the drain closes the listener", func() bool {
+		return !dialable(t, sc.addr)
+	})
+	if returned() {
+		t.Fatal("serve returned while a call was still in flight")
+	}
+
+	close(runner.release)
+	var got reply
+	select {
+	case got = <-inFlight:
+	case <-bound.Done():
+		t.Fatal("the in-flight call did not finish within the test's bound")
+	}
+	if got.err != nil {
+		t.Fatalf("the in-flight call failed in the drain: %v", got.err)
+	}
+	if got.status != http.StatusOK {
+		t.Fatalf("the in-flight call = %d, want 200", got.status)
+	}
+	frame, err := bdgateway.ReadFrame(bytes.NewReader(got.body))
+	if err != nil {
+		t.Fatalf("read the exit frame: %v", err)
+	}
+	if status, err := frame.ExitStatus(); err != nil || status != 0 {
+		t.Errorf("exit status = %d (%v), want 0", status, err)
+	}
+	waitFor(t, bound, "serve returns after the drain", returned)
+	if serveErr != nil {
+		t.Errorf("serve after a drain = %v, want nil", serveErr)
 	}
 }
 
