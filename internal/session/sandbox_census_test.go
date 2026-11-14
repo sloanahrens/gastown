@@ -300,14 +300,24 @@ func TestSlingCensus(t *testing.T) {
 		case <-time.After(censusTestGuard): //testpolicy:allow no-sleep — a failure guard, not a delay: the receive normally completes at once, and the bound only turns a deadlocked census into a named failure instead of a hung package
 			t.Fatal("no read reached the gateway's list call within the guard")
 		}
-		// The first read is inside the list call, which holds no census lock.
-		// A census lock held across that call makes TryLock fail, at once and
-		// without a timer.
+		// The first read is inside the list call, which holds no census
+		// lock. A lock held across that call is not released while the
+		// gateway is gated, so acquiring it in another goroutine and
+		// waiting on that acquisition bounded by the guard fails with the
+		// step named. A lock another seat took for a cache lookup is
+		// released at once, so the acquisition succeeds without a wait.
 		c := installedCensus()
-		if !c.mu.TryLock() {
+		acquired := make(chan struct{})
+		go func() {
+			c.mu.Lock()
+			close(acquired)
+			c.mu.Unlock()
+		}()
+		select {
+		case <-acquired:
+		case <-time.After(censusTestGuard): //testpolicy:allow no-sleep — a failure guard, not a delay: the acquisition normally completes at once, and the bound only turns a lock held across the list call into a named failure instead of a hung package
 			t.Fatal("the census lock is held while a list call is in flight: a second reader would wait on the gateway")
 		}
-		c.mu.Unlock()
 		if _, ok := c.cached(known); !ok {
 			t.Error("cache lookup during the in-flight list found no kept answer for the known seat")
 		}
