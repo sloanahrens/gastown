@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +141,36 @@ func TestExtractReadsToday(t *testing.T) {
 	requireFile(t, filepath.Join(town.outDir(), "landings.csv"))
 	if got := readFile(t, filepath.Join(older, "landings.csv")); got != before {
 		t.Error("the extract rewrote an older day's landings table")
+	}
+}
+
+// firstWriteFails refuses its first write and accepts the rest, so a case can
+// fail the fallback receipt alone and leave the report's write healthy.
+type firstWriteFails struct{ failed bool }
+
+func (w *firstWriteFails) Write(p []byte) (int, error) {
+	if !w.failed {
+		w.failed = true
+		return 0, errors.New("closed pipe")
+	}
+	return len(p), nil
+}
+
+// TestStorypointsReportsAFailedFallbackReceipt: a fallback line that cannot be
+// written fails the run, rather than printing a report nobody sees and
+// counting it as a success.
+func TestStorypointsReportsAFailedFallbackReceipt(t *testing.T) {
+	t.Parallel()
+	town := newCommandTown(t)
+	town.writeExtractAt(t, "2026-10-20")
+	town.out.Reset()
+	cmds := town.commands()
+	cmds.Out = &firstWriteFails{}
+	code, err := Main(context.Background(), []string{CommandStoryPoints}, cmds)
+	if err == nil || !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatalf("err = %v, want the failed receipt's error", err)
+	}
+	if code != 1 {
+		t.Errorf("code = %d, want 1 with the error returned", code)
 	}
 }
