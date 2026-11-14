@@ -91,9 +91,9 @@ func TestSpecDispatchConsidersTheBeadAgainOnceTheRecordIsGone(t *testing.T) {
 
 // TestSpecDispatchRosterReadsTheLiveSandboxRecords drives the production roster
 // wiring: the records the candidate check reads come from the town's registry,
-// read once with the roster. A record deleted after the listing is skipped, and
-// a registry or a record that cannot be read fails the roster instead of
-// dispatching on an empty set.
+// read once with the roster. A record deleted after the listing is skipped,
+// while a registry, a record that cannot be read, or an entry naming no sandbox
+// fails the roster instead of dispatching on an empty set.
 func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -127,6 +127,24 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 				}
 			},
 			want: "polecat/warboy/gt-712i5k+mwgjywwx",
+		},
+		{
+			name: "an entry naming no sandbox fails the roster",
+			setup: func(t *testing.T, town string) {
+				t.Helper()
+				dir := session.SandboxRegistryDir(town)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("creating the registry: %v", err)
+				}
+				// ReadSandboxRecord answers ok=false for a name that cannot
+				// name a sandbox, the same as for a record deleted since the
+				// listing, so the roster checks the shape and refuses this one
+				// (gt-oz7ops).
+				if err := os.WriteFile(filepath.Join(dir, "gt-bad name.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatalf("writing the record: %v", err)
+				}
+			},
+			wantNo: true,
 		},
 		{
 			name: "an unreadable registry fails the roster",
@@ -171,7 +189,7 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 				func(string) beads.Client { return beadsfake.New() }, &snap)()
 			if tc.wantNo {
 				if err == nil {
-					t.Fatal("roster read succeeded, want the unreadable registry to fail it")
+					t.Fatal("roster read succeeded, want it to fail")
 				}
 				return
 			}
