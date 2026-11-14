@@ -283,8 +283,8 @@ func TestSlingCallsCountSeparatelyForConcurrentSlings(t *testing.T) {
 	if !ok {
 		t.Fatal("the test needs a deadline to bound the slings")
 	}
-	timeout := time.NewTimer(time.Until(deadline))
-	defer timeout.Stop()
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 
 	totals := map[*slingCallBD]int{}
 	for i := 0; i < 2; i++ {
@@ -294,7 +294,7 @@ func TestSlingCallsCountSeparatelyForConcurrentSlings(t *testing.T) {
 				t.Fatalf("executeSling: %v", got.err)
 			}
 			_, totals[got.fake] = slingNoteBDCounts(t, got.trace.Summary())
-		case <-timeout.C:
+		case <-ctx.Done():
 			t.Fatal("the concurrent slings did not finish before the test deadline")
 		}
 	}
