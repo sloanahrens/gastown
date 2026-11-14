@@ -187,7 +187,7 @@ func TestDisableWithoutState(t *testing.T) {
 	}
 }
 
-func TestShellIntegrationAndDoctorRun(t *testing.T) {
+func TestRecordDoctorRun(t *testing.T) {
 	t.Parallel()
 	e := testEnviron(map[string]string{"XDG_STATE_HOME": t.TempDir()})
 
@@ -198,8 +198,8 @@ func TestShellIntegrationAndDoctorRun(t *testing.T) {
 		t.Errorf("getMachineID() with no state = %q, want a fresh 8-char id", got)
 	}
 
-	if err := e.setShellIntegration("zsh"); err != nil {
-		t.Fatalf("setShellIntegration() failed: %v", err)
+	if err := e.enable("1.2.3"); err != nil {
+		t.Fatalf("enable() failed: %v", err)
 	}
 	if err := e.recordDoctorRun(); err != nil {
 		t.Fatalf("recordDoctorRun() failed: %v", err)
@@ -207,9 +207,6 @@ func TestShellIntegrationAndDoctorRun(t *testing.T) {
 	s, err := e.load()
 	if err != nil {
 		t.Fatalf("load() failed: %v", err)
-	}
-	if s.ShellIntegration != "zsh" {
-		t.Errorf("ShellIntegration = %q, want zsh", s.ShellIntegration)
 	}
 	if s.LastDoctorRun.IsZero() {
 		t.Error("LastDoctorRun not recorded")
