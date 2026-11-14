@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 var specStaleSeatsNow = time.Date(2026, 11, 14, 19, 40, 0, 0, time.UTC)
@@ -102,17 +104,29 @@ func TestSpecSlingSpawnCarriesTheStaleNames(t *testing.T) {
 	}
 }
 
-// TestSlingPassesOverAnIdleSeatWhoseSandboxIsStale: the dispatcher draws the
-// next idle seat when the pool's first one is a name whose gateway sandbox is
-// stale (gt-zapy97).
+// TestSlingPassesOverAnIdleSeatWhoseSandboxIsStale: the dispatcher reads the
+// gateway's stale sandbox, logs its one line, and draws the next idle seat
+// instead of the name it keeps out (gt-zapy97).
 func TestSlingPassesOverAnIdleSeatWhoseSandboxIsStale(t *testing.T) {
 	t.Parallel()
 	const bead = "gt-stale"
+	const prefix = "rig"
 	townRoot, seats := fullRig(t, 30)
 	fake := &idlePolecatReuseFake{seats: seats}
+	staleSandbox := session.PolecatSessionName(prefix, seats[0].Name)
 
-	info, err := reuseOrRefuseAtDirCap(fake, fakeIdleReuseEnv(), townRoot, "rig", 30,
-		SlingSpawnOptions{HookBead: bead, staleSeatNames: []string{seats[0].Name}},
+	traces := &specSlingTraces{}
+	m := newSpecStaleSeats(traces, func() time.Time { return specStaleSeatsNow }, true)
+	m.list = func(context.Context) ([]sandbox.Entry, error) {
+		return []sandbox.Entry{{Name: staleSandbox, Phase: "Error"}}, nil
+	}
+	guard := m.get()
+	if guard == nil {
+		t.Fatal("guard is nil for a listing that named a stale sandbox")
+	}
+
+	info, err := reuseOrRefuseAtDirCap(fake, fakeIdleReuseEnv(), townRoot, prefix, 30,
+		SlingSpawnOptions{HookBead: bead, staleSeatNames: guard.Polecats(prefix)},
 		recordRespawnFn(t, townRoot, bead))
 
 	if err != nil || info == nil {
@@ -123,5 +137,63 @@ func TestSlingPassesOverAnIdleSeatWhoseSandboxIsStale(t *testing.T) {
 	}
 	if len(fake.reuseNames) != 1 || fake.reuseNames[0] != seats[1].Name {
 		t.Errorf("reuse was asked for %v, want only %q", fake.reuseNames, seats[1].Name)
+	}
+	lines := traces.notices()
+	if len(lines) != 1 || !strings.Contains(lines[0], staleSandbox) || !strings.Contains(lines[0], "Error") {
+		t.Errorf("notices = %q, want one line naming the stale sandbox %s", lines, staleSandbox)
+	}
+}
+
+// TestSpecSlingSpawnRefusesANamedStaleSeat: a sling that names its seat draws
+// no name, so the pool's pass over stale names never reaches it; the wrapper
+// refuses the named seat the gateway reports stale and lets a live one through
+// (gt-p77cm7).
+func TestSpecSlingSpawnRefusesANamedStaleSeat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		seat       string
+		stale      []string
+		wantRefuse bool
+	}{
+		{name: "a named seat whose sandbox is stale is refused", seat: "dag", stale: []string{"dag"}, wantRefuse: true},
+		{name: "a named seat with no stale sandbox is spawned", seat: "slit", stale: []string{"dag"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spawned := false
+			spawn := func(_ string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				spawned = true
+				if opts.Name != tt.seat {
+					t.Errorf("spawn's name = %q, want %q", opts.Name, tt.seat)
+				}
+				if !slices.Equal(opts.staleSeatNames, tt.stale) {
+					t.Errorf("spawn's stale seat names = %v, want %v", opts.staleSeatNames, tt.stale)
+				}
+				return &SpawnedPolecatInfo{}, nil
+			}
+
+			_, err := specSlingSpawn(spawn, nil, nil, nil, tt.stale)("gastown", SlingSpawnOptions{Name: tt.seat})
+
+			if tt.wantRefuse {
+				if err == nil {
+					t.Fatal("sling error = nil, want the stale named seat refused")
+				}
+				if !strings.Contains(err.Error(), dispatch.SlingRefusalMarker) || !strings.Contains(err.Error(), tt.seat) {
+					t.Errorf("error = %q, want a refusal naming %q", err, tt.seat)
+				}
+				if spawned {
+					t.Error("the spawn ran for a named seat the gateway reports stale")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sling error = %v, want the live named seat spawned", err)
+			}
+			if !spawned {
+				t.Error("the spawn did not run for a named seat with no stale sandbox")
+			}
+		})
 	}
 }
