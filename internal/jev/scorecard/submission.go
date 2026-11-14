@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/omlessons"
 )
 
 // SubmissionBattery is the submission adapter's name: the --battery value.
@@ -54,7 +55,9 @@ var (
 // two name the om verdict that set will_pass_review. The rest name the
 // rejection or landing that set the other labels, or, for
 // submission:no-rejection-block, the missing block a request_changes verdict
-// should have left; a line can carry several, space-separated.
+// should have left; ruleSubmissionTestsCoverClass names the om review finding
+// that set tests_cover_change true (gt-eh24dn). A line can carry several,
+// space-separated.
 const (
 	ruleSubmissionApprove              = "submission:om-approve"
 	ruleSubmissionRequestChanges       = "submission:om-request-changes"
@@ -64,6 +67,7 @@ const (
 	ruleSubmissionNoBlock              = "submission:no-rejection-block"
 	ruleSubmissionFirstAttemptRejected = "submission:first-attempt-rejected"
 	ruleSubmissionFirstAttemptApproved = "submission:first-attempt-approved"
+	ruleSubmissionTestsCoverClass      = "submission:tests-cover-class"
 )
 
 var (
@@ -235,6 +239,11 @@ func (a *submissionAdapter) labelJoin(bead, head string, submitted time.Time) (L
 	a.joined++
 	a.findings += row.Findings
 
+	if value, ok := testsCoverChangeFromReview(row.FindingText); ok {
+		labels[QuestionID(submission.QTestsCoverChange)] = value
+		rules = append(rules, ruleSubmissionTestsCoverClass)
+	}
+
 	notes, err := a.notesFor(bead)
 	if err != nil {
 		return Labeling{}, err
@@ -356,6 +365,26 @@ func (a *submissionAdapter) nextSubmission(bead string, after time.Time) (time.T
 		}
 	}
 	return next, found
+}
+
+// testsCoverChangeFromReview labels tests_cover_change from the findings the om
+// review recorded for the submission, by the class omlessons.Classify gives
+// each. A no-red-when-removed finding is raised against a test the change added
+// that passes with the fix removed: the change touched tests, which is what this
+// question asks (gt-eh24dn). A review that recorded findings but none of that
+// class answers no. A review that recorded none — an approval, or a row written
+// before the log kept finding text — stays unlabeled, because a missing finding
+// is not evidence that no test changed.
+func testsCoverChangeFromReview(findings []land.ReviewFindingText) (value, labeled bool) {
+	if len(findings) == 0 {
+		return false, false
+	}
+	for _, f := range findings {
+		if omlessons.Classify(f) == omlessons.ClassNoRedWhenRemoved {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // submissionFindingLabels labels tests_cover_change and beyond_goal from the

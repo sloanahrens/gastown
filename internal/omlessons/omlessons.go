@@ -28,6 +28,10 @@ const (
 
 	// ExampleBeadLimit is how many bead ids a class row names as examples.
 	ExampleBeadLimit = 3
+
+	// ClassNoRedWhenRemoved is the id of the class a finding joins when it says
+	// the test the change added passes with the fix removed.
+	ClassNoRedWhenRemoved = "no-red-when-removed"
 )
 
 // Class is one rejection class: a row of the table that turns om's finding
@@ -66,7 +70,7 @@ var classes = []Class{
 		Claim: []string{"no test drives", "only the success path", "is not tested", "no assertion", "the refusal branch"},
 	},
 	{
-		ID: "no-red-when-removed", Name: "no test goes red when the code is removed", Rule: 2,
+		ID: ClassNoRedWhenRemoved, Name: "no test goes red when the code is removed", Rule: 2,
 		Title: []string{"passes with the", "passed with the", "passes without", "would still pass", "goes red", "fails without the", "test always passes"},
 		Claim: []string{"would still pass", "still passes", "went red", "goes red", "fails when removed", "would pass with"},
 	},
@@ -346,6 +350,9 @@ func (w *windowTally) window(b Bounds) Window {
 		NoFindingText: w.noFindingText,
 	}
 }
+
+// Classify returns the id of the first class f matches, or Unclassified.
+func Classify(f land.ReviewFindingText) string { return classify(f) }
 
 // classify returns the id of the first class f matches, or Unclassified.
 func classify(f land.ReviewFindingText) string {
