@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -234,5 +235,151 @@ func TestSandboxTraceNoteIsCutToTheLogLineBudget(t *testing.T) {
 				t.Fatalf("Summary() = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// A phase that made bd or git calls shows both counts beside its duration, so
+// the log says how many calls a slow phase made as well as how long it took.
+func TestSandboxTraceSummaryListsCallsBesideEachPhaseDuration(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("guards", func() error {
+		trace.CountBD()
+		clock.Advance(time.Second)
+		return nil
+	})
+	trace.Phase("ready", func() error {
+		trace.CountBD()
+		trace.CountBD()
+		trace.CountGit()
+		clock.Advance(4 * time.Second)
+		return nil
+	})
+
+	if got, want := trace.Summary(), "guards 1s [bd 1, git 0], ready 4s [bd 2, git 1], total 5s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// Two slings run together keep their counts apart: each trace counts only the
+// calls made on it.
+func TestSandboxTraceCountsOfTwoTracesStayApart(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	first := NewSandboxTrace(clock.Now)
+	second := NewSandboxTrace(clock.Now)
+	first.CountBD()
+	second.CountGit()
+	second.CountGit()
+	first.CountBD()
+	first.CountGit()
+	clock.Advance(time.Second)
+
+	first.Mark("start")
+	second.Mark("start")
+
+	if got, want := first.Summary(), "start 1s [bd 2, git 1], total 1s"; got != want {
+		t.Fatalf("first trace Summary() = %q, want %q", got, want)
+	}
+	if got, want := second.Summary(), "start 1s [bd 0, git 2], total 1s"; got != want {
+		t.Fatalf("second trace Summary() = %q, want %q", got, want)
+	}
+}
+
+// A phase with no calls prints no calls field, so a log from before counting
+// is unchanged for the phases that made none.
+func TestSandboxTraceSummaryOmitsCallsForAPhaseWithNone(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("create", func() error { clock.Advance(time.Second); return nil })
+	trace.Phase("ready", func() error {
+		trace.CountGit()
+		clock.Advance(4 * time.Second)
+		return nil
+	})
+
+	if got, want := trace.Summary(), "create 1s, ready 4s [bd 0, git 1], total 5s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// The calls sit between the duration and the note, so the note still follows
+// the phase it explains.
+func TestSandboxTraceCallsSitBesideDurationBeforeTheNote(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("ready", func() error {
+		trace.CountBD()
+		clock.Advance(4 * time.Second)
+		return nil
+	})
+	trace.Note("DependenciesNotReady: Pod is pending")
+
+	if got, want := trace.Summary(), "ready 4s [bd 1, git 0] (DependenciesNotReady: Pod is pending), total 4s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// Calls made in the gap no phase timed are charged to the next record, as the
+// gap's time is, so the count sits beside the time it was spent in.
+func TestSandboxTraceChargesUntimedCallsToTheNextPhase(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	trace.Phase("ready", func() error {
+		trace.CountBD()
+		clock.Advance(4 * time.Second)
+		return nil
+	})
+	clock.Advance(2 * time.Second)
+	trace.CountGit()
+	trace.CountGit()
+
+	trace.Mark("start")
+
+	if got, want := trace.Summary(), "ready 4s [bd 1, git 0], start 2s [bd 0, git 2], total 6s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// Counts from many goroutines at once all land: the counters are atomic, so a
+// call made off the sling's goroutine is neither lost nor double-counted.
+func TestSandboxTraceCountsAreSafeForConcurrentCalls(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				trace.CountBD()
+				trace.CountGit()
+			}
+		}()
+	}
+	wg.Wait()
+
+	trace.Mark("start")
+
+	if got, want := trace.Summary(), "start 0s [bd 10000, git 10000], total 0s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// A nil trace counts nothing and does not panic, as its other methods do, so a
+// caller can count without guarding the trace.
+func TestSandboxTraceNilCountsAreNoOps(t *testing.T) {
+	t.Parallel()
+	var trace *SandboxTrace
+	trace.CountBD()
+	trace.CountGit()
+
+	if got := trace.Summary(); got != "" {
+		t.Fatalf("nil trace Summary() = %q, want empty", got)
 	}
 }

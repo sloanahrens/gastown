@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -12,18 +13,28 @@ import (
 // can say where a slow sling spent its time (gt-0uh64, gt-7nctk). A nil
 // *SandboxTrace times nothing, so callers never guard it.
 //
-// A trace belongs to one sling and is not safe for concurrent use.
+// A trace belongs to one sling and Phase, Mark and Note are not safe for
+// concurrent use. CountBD and CountGit are, so a call made on another goroutine
+// during the sling is still counted.
 type SandboxTrace struct {
 	now    func() time.Time
 	began  time.Time
 	last   time.Time
 	phases []tracePhase
+	bd     atomic.Int64
+	git    atomic.Int64
+	// bdAt and gitAt are the counts at the last record, so each phase is
+	// charged only the calls since the record before it.
+	bdAt  int64
+	gitAt int64
 }
 
 type tracePhase struct {
 	name string
 	took time.Duration
 	note string
+	bd   int64
+	git  int64
 }
 
 // NewSandboxTrace starts a trace whose total runs from now, read through now.
@@ -110,9 +121,34 @@ func noteLine(note string) string {
 	return note
 }
 
+// CountBD counts one bd call made under the trace. The call is charged to the
+// first phase recorded after it; a call made after the last phase has no phase
+// to show it on. It is a no-op for a nil trace and safe for concurrent use.
+func (t *SandboxTrace) CountBD() {
+	if t == nil {
+		return
+	}
+	t.bd.Add(1)
+}
+
+// CountGit counts one git call made under the trace, as CountBD counts bd.
+func (t *SandboxTrace) CountGit() {
+	if t == nil {
+		return
+	}
+	t.git.Add(1)
+}
+
 func (t *SandboxTrace) record(name string, from time.Time) {
 	end := t.now()
-	t.phases = append(t.phases, tracePhase{name: name, took: end.Sub(from)})
+	bd, git := t.bd.Load(), t.git.Load()
+	t.phases = append(t.phases, tracePhase{
+		name: name,
+		took: end.Sub(from),
+		bd:   bd - t.bdAt,
+		git:  git - t.gitAt,
+	})
+	t.bdAt, t.gitAt = bd, git
 	t.last = end
 }
 
@@ -166,10 +202,12 @@ func (t *SandboxTrace) Breakdown() Breakdown {
 }
 
 // Summary is the trace on one line: each phase with its duration, then the
-// total since the trace began. The time no phase named is reported as "other",
-// so the phases always add up to the total and a gap is visible rather than
-// folded into a neighbor (gt-7nctk). It is "" when no phase ran, which is how
-// a sling that never touched a sandbox is left out of the log.
+// total since the trace began. A phase that made bd or git calls shows them
+// after its duration as "[bd N, git M]", and a phase with none shows no field.
+// The time no phase named is reported as "other", so the phases always add up
+// to the total and a gap is visible rather than folded into a neighbor
+// (gt-7nctk). It is "" when no phase ran, which is how a sling that never
+// touched a sandbox is left out of the log.
 func (t *SandboxTrace) Summary() string {
 	if t == nil || len(t.phases) == 0 {
 		return ""
@@ -179,6 +217,9 @@ func (t *SandboxTrace) Summary() string {
 	for _, p := range t.phases {
 		timed += p.took
 		part := fmt.Sprintf("%s %s", p.name, p.took.Round(time.Millisecond))
+		if p.bd > 0 || p.git > 0 {
+			part += fmt.Sprintf(" [bd %d, git %d]", p.bd, p.git)
+		}
 		if p.note != "" {
 			part += " (" + p.note + ")"
 		}
