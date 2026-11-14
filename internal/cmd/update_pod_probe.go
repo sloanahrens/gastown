@@ -33,9 +33,9 @@ func podDaemonCommit(ctx context.Context, run update.RunFunc, kubeContext, names
 	if err := podArgument("deployment", deployment); err != nil {
 		return "", err
 	}
-	// The container is named: with two or more containers in the pod kubectl prints a
-	// "Defaulted container ..." line first, and the runner joins stderr to the output, so the
-	// first-line rule below read that notice instead of gt version (the roll 32 Job proof).
+	// The container is named: with two or more containers kubectl prints a "Defaulted container ..."
+	// line first, and the runner joins stderr to the output, so the first-line rule below would read
+	// that notice instead of gt version (gt-14a3pr).
 	argv := append(podKubectlPrefix(kubeContext, namespace, inCluster), "exec", "deployment/"+deployment, "-c", k8sdaemon.Name, "--", "gt", "version")
 	out, exit, err := run(ctx, "", nil, "kubectl", argv...)
 	if err != nil {
