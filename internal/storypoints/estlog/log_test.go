@@ -1,6 +1,7 @@
 package estlog
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +91,29 @@ func equalPtr(a, b *float64) bool {
 	return *a == *b
 }
 
+// assertOpensForAppend checks every open asked for writing at the log's end and
+// never truncation: O_APPEND is what keeps a second writer's lines.
+func assertOpensForAppend(t *testing.T, flagCalls []int) {
+	t.Helper()
+	if len(flagCalls) == 0 {
+		t.Fatal("the log was never opened")
+	}
+	for i, flags := range flagCalls {
+		if flags&os.O_APPEND == 0 {
+			t.Errorf("open %d asked for %#x, want O_APPEND", i+1, flags)
+		}
+		if flags&os.O_WRONLY == 0 {
+			t.Errorf("open %d asked for %#x, want O_WRONLY", i+1, flags)
+		}
+		if flags&os.O_CREATE == 0 {
+			t.Errorf("open %d asked for %#x, want O_CREATE", i+1, flags)
+		}
+		if flags&os.O_TRUNC != 0 {
+			t.Errorf("open %d asked for %#x, want no O_TRUNC", i+1, flags)
+		}
+	}
+}
+
 func TestPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -110,9 +134,10 @@ func TestPath(t *testing.T) {
 	}
 }
 
-// TestAppendWritesOneWholeLine: one Append call appends one newline-terminated
-// JSON line, and that line decodes to the record in every field, including the
-// absent embedding and component of a shape-only estimate.
+// TestAppendWritesOneWholeLine: one append is one write of one
+// newline-terminated JSON line, and that line decodes to the record in every
+// field, including the absent embedding and component of a shape-only
+// estimate.
 func TestAppendWritesOneWholeLine(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -125,35 +150,124 @@ func TestAppendWritesOneWholeLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
-			if err := Append(town, tt.record); err != nil {
-				t.Fatalf("Append: %v", err)
+			fsys := &fakeLogFS{}
+			if err := appendRecord(fsys, "/town", tt.record); err != nil {
+				t.Fatalf("appendRecord: %v", err)
 			}
-			raw, err := os.ReadFile(Path(town))
-			if err != nil {
-				t.Fatalf("read the log: %v", err)
+			writes := fsys.writeCalls()
+			if len(writes) != 1 {
+				t.Fatalf("appendRecord made %d writes, want one", len(writes))
 			}
-			if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-				t.Fatalf("log = %q, want one line ending in a newline", raw)
+			line := writes[0]
+			if len(line) == 0 || line[len(line)-1] != '\n' {
+				t.Fatalf("write = %q, want one line ending in a newline", line)
 			}
-			body := string(raw[:len(raw)-1])
+			body := string(line[:len(line)-1])
 			if strings.Contains(body, "\n") {
-				t.Fatalf("log holds more than one line: %q", raw)
+				t.Fatalf("write holds more than one line: %q", line)
 			}
 			var got Record
 			if err := json.Unmarshal([]byte(body), &got); err != nil {
 				t.Fatalf("the line does not decode: %v\nline: %s", err, body)
 			}
 			assertRecordEqual(t, got, tt.record)
+			if opened := fsys.openCalls(); !slices.Equal(opened, []string{Path("/town")}) {
+				t.Errorf("opened %q, want once on %q", opened, Path("/town"))
+			}
+			assertOpensForAppend(t, fsys.openFlagCalls())
 		})
 	}
 }
 
-// TestAppendTwoWritersKeepWholeLines: two writers appending at once leave every
-// line whole and lose none.
-func TestAppendTwoWritersKeepWholeLines(t *testing.T) {
+// TestAppendKeepsEveryLineOfTheTownLog: Append goes through the host
+// filesystem and the path Path names, opening the log for append rather than
+// truncation, so a second call keeps the first line. This is the single
+// real-disk success test: a fake cannot show that the host really appends
+// across two opens, and the open flags it would take on trust are what this
+// drives. TestAppendReportsTheHostRefusingTheDirectoryOrTheOpen covers the
+// host's refusals.
+func TestAppendKeepsEveryLineOfTheTownLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	records := []Record{sampleRecord("gt-p4aqut"), shapeOnlyRecord("gt-p4aqut")}
+	for _, r := range records {
+		if err := Append(town, r); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	raw, err := os.ReadFile(Path(town))
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		t.Fatalf("log = %q, want every line ending in a newline", raw)
+	}
+	lines := strings.Split(string(raw[:len(raw)-1]), "\n")
+	if len(lines) != len(records) {
+		t.Fatalf("log holds %d lines, want the %d appends: %q", len(lines), len(records), raw)
+	}
+	for i, line := range lines {
+		var got Record
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("line %d does not decode: %v", i+1, err)
+		}
+		assertRecordEqual(t, got, records[i])
+	}
+}
+
+// TestAppendReportsTheHostRefusingTheDirectoryOrTheOpen: a refusal from the
+// host filesystem, not the fake, must reach the caller naming the log, so each
+// one is planted on a temp directory and driven through the exported Append:
+// a regular file where the log's directory belongs, then a directory where the
+// log itself belongs.
+func TestAppendReportsTheHostRefusingTheDirectoryOrTheOpen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		plant func(t *testing.T, townRoot string)
+	}{
+		{
+			name: "a file where the log directory belongs",
+			plant: func(t *testing.T, townRoot string) {
+				if err := os.WriteFile(filepath.Join(townRoot, ".runtime"), nil, 0o644); err != nil {
+					t.Fatalf("plant the file that blocks the directory: %v", err)
+				}
+			},
+		},
+		{
+			name: "a directory where the log belongs",
+			plant: func(t *testing.T, townRoot string) {
+				if err := os.MkdirAll(Path(townRoot), 0o755); err != nil {
+					t.Fatalf("plant the directory that blocks the open: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			tt.plant(t, townRoot)
+			err := Append(townRoot, sampleRecord("gt-p4aqut"))
+			if err == nil {
+				t.Fatalf("Append = nil, want the host's refusal")
+			}
+			if !strings.Contains(err.Error(), Path(townRoot)) {
+				t.Errorf("error = %q, want it to name %q", err, Path(townRoot))
+			}
+		})
+	}
+}
+
+// TestAppendTwoWritersAskForAppendAndWriteOneLineEach: under two writers, every
+// append opens the log for append and hands its record to the file in one Write
+// call ending in a newline, and no line is lost. A fake cannot tear a write the
+// way the kernel can, so this pins the part the code decides — append mode and
+// one write per record — and TestAppendKeepsEveryLineOfTheTownLog drives the
+// real O_APPEND.
+func TestAppendTwoWritersAskForAppendAndWriteOneLineEach(t *testing.T) {
+	t.Parallel()
+	fsys := &fakeLogFS{}
 	const writers, each = 2, 40
 
 	errs := make(chan error, writers)
@@ -163,7 +277,7 @@ func TestAppendTwoWritersKeepWholeLines(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
-				if err := Append(town, sampleRecord(fmt.Sprintf("gt-%d-%d", w, i))); err != nil {
+				if err := appendRecord(fsys, "/town", sampleRecord(fmt.Sprintf("gt-%d-%d", w, i))); err != nil {
 					errs <- err
 					return
 				}
@@ -173,17 +287,20 @@ func TestAppendTwoWritersKeepWholeLines(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		t.Fatalf("Append: %v", err)
+		t.Fatalf("appendRecord: %v", err)
 	}
 
-	raw, err := os.ReadFile(Path(town))
-	if err != nil {
-		t.Fatalf("read the log: %v", err)
+	assertOpensForAppend(t, fsys.openFlagCalls())
+	writes := fsys.writeCalls()
+	if len(writes) != writers*each {
+		t.Fatalf("appendRecord made %d writes, want one per record (%d)", len(writes), writers*each)
 	}
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		t.Fatalf("log does not end in a newline: %q", raw)
+	for i, write := range writes {
+		if bytes.Count(write, []byte("\n")) != 1 || !bytes.HasSuffix(write, []byte("\n")) {
+			t.Fatalf("write %d is not exactly one line: %q", i+1, write)
+		}
 	}
-	lines := strings.Split(string(raw[:len(raw)-1]), "\n")
+	lines := fsys.logLines()
 	if len(lines) != writers*each {
 		t.Fatalf("lines = %d, want %d", len(lines), writers*each)
 	}
@@ -200,45 +317,45 @@ func TestAppendTwoWritersKeepWholeLines(t *testing.T) {
 	}
 }
 
-// TestAppendErrorsNameTheLogPath: a log write that cannot happen returns an
-// error naming the log file. A read-only directory does not drive this: a test
-// run as root writes into one anyway, so the rows put a file or directory where
-// the log needs a writable path.
-func TestAppendErrorsNameTheLogPath(t *testing.T) {
+// TestAppendFailuresNameTheLogPath: each step of an append that fails is
+// reported, every error naming the log file, and a close error never hides the
+// write error beside it.
+func TestAppendFailuresNameTheLogPath(t *testing.T) {
 	t.Parallel()
+	errMkdir := errors.New("mkdir refused")
+	errOpen := errors.New("open refused")
+	errWrite := errors.New("disk full")
+	errClose := errors.New("close failed")
 	tests := []struct {
-		name string
-		// block makes the log path or one of its parents unwritable.
-		block func(t *testing.T, town string)
+		name     string
+		fsys     *fakeLogFS
+		wantAll  []error
+		wantText string
 	}{
-		{
-			name: "the log path is a directory",
-			block: func(t *testing.T, town string) {
-				if err := os.MkdirAll(Path(town), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "a parent of the log path is a file",
-			block: func(t *testing.T, town string) {
-				if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("not a directory"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
+		{"the log directory cannot be made", &fakeLogFS{mkdirErr: errMkdir}, []error{errMkdir}, ""},
+		{"the log cannot be opened", &fakeLogFS{openErr: errOpen}, []error{errOpen}, ""},
+		{"write fails", &fakeLogFS{writeErr: errWrite}, []error{errWrite}, ""},
+		{"write and close fail", &fakeLogFS{writeErr: errWrite, closeErr: errClose}, []error{errWrite, errClose}, ""},
+		{"short write", &fakeLogFS{shortBy: 3}, nil, "short write"},
+		{"close fails", &fakeLogFS{closeErr: errClose}, []error{errClose}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
-			tt.block(t, town)
-			err := Append(town, sampleRecord("gt-p4aqut"))
+			err := appendRecord(tt.fsys, "/town", sampleRecord("gt-p4aqut"))
 			if err == nil {
-				t.Fatalf("Append = nil, want an error for an unwritable log")
+				t.Fatalf("appendRecord = nil, want an error")
 			}
-			if !strings.Contains(err.Error(), Path(town)) {
-				t.Fatalf("error = %q, want it to name %q", err, Path(town))
+			if !strings.Contains(err.Error(), Path("/town")) {
+				t.Errorf("error = %q, want it to name %q", err, Path("/town"))
+			}
+			for _, want := range tt.wantAll {
+				if !errors.Is(err, want) {
+					t.Errorf("error = %v, want it to wrap %v", err, want)
+				}
+			}
+			if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+				t.Errorf("error = %q, want it to contain %q", err, tt.wantText)
 			}
 		})
 	}
@@ -254,7 +371,7 @@ func TestAppendRefusesNoTownRoot(t *testing.T) {
 }
 
 // TestAppendRefusesUnencodableRecord: a NaN or infinite minute has no JSON
-// value, so the record is refused before any file is created.
+// value, so the record is refused before the filesystem is touched.
 func TestAppendRefusesUnencodableRecord(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -267,78 +384,136 @@ func TestAppendRefusesUnencodableRecord(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
+			fsys := &fakeLogFS{}
 			r := sampleRecord("gt-p4aqut")
 			tt.change(&r)
-			err := Append(town, r)
+			err := appendRecord(fsys, "/town", r)
 			if err == nil {
-				t.Fatalf("Append = nil, want the encoding error")
+				t.Fatalf("appendRecord = nil, want the encoding error")
 			}
-			if !strings.Contains(err.Error(), Path(town)) {
-				t.Errorf("error = %q, want it to name %q", err, Path(town))
+			if !strings.Contains(err.Error(), Path("/town")) {
+				t.Errorf("error = %q, want it to name %q", err, Path("/town"))
 			}
-			if _, statErr := os.Stat(Path(town)); !errors.Is(statErr, os.ErrNotExist) {
-				t.Errorf("the log exists after a refused record: stat error = %v", statErr)
+			if made := fsys.mkdirCalls(); len(made) != 0 {
+				t.Errorf("the log directory was made for a record that cannot encode: %q", made)
+			}
+			if opened := fsys.openCalls(); len(opened) != 0 {
+				t.Errorf("the log was opened for a record that cannot encode: %q", opened)
 			}
 		})
 	}
 }
 
-// fakeFile is the handle appendLineWith writes through; each field makes one
-// step of a healthy write fail.
-type fakeFile struct {
+// fakeLogFS is the filesystem appendRecord writes through, with the log kept in
+// memory. Each error field makes one step of a healthy append fail; the
+// recorded calls, open flags and writes let a test read what appendRecord asked
+// of the filesystem.
+type fakeLogFS struct {
+	mu       sync.Mutex
+	log      bytes.Buffer
+	writes   [][]byte
+	opened   []openCall
+	mkdirs   []string
+	mkdirErr error
+	openErr  error
 	writeErr error
 	closeErr error
 	shortBy  int
 }
 
-func (f *fakeFile) Write(p []byte) (int, error) {
-	if f.writeErr != nil {
-		return 0, f.writeErr
-	}
-	return len(p) - f.shortBy, nil
+// openCall is one OpenAppend the fake was asked for.
+type openCall struct {
+	path  string
+	flags int
 }
 
-func (f *fakeFile) Close() error { return f.closeErr }
+func (f *fakeLogFS) MkdirAll(dir string, _ os.FileMode) error {
+	if f.mkdirErr != nil {
+		return f.mkdirErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mkdirs = append(f.mkdirs, dir)
+	return nil
+}
 
-// TestAppendLineFailuresNameThePath: the write, short-write and close failures a
-// real file does not offer are reported, each naming the log path, and a close
-// error never hides the write error beside it.
-func TestAppendLineFailuresNameThePath(t *testing.T) {
-	t.Parallel()
-	errWrite := errors.New("disk full")
-	errClose := errors.New("close failed")
-	path := filepath.Join(t.TempDir(), "estimates.jsonl")
-	tests := []struct {
-		name     string
-		file     fakeFile
-		wantAll  []error
-		wantText string
-	}{
-		{"write fails", fakeFile{writeErr: errWrite}, []error{errWrite}, ""},
-		{"write and close fail", fakeFile{writeErr: errWrite, closeErr: errClose}, []error{errWrite, errClose}, ""},
-		{"short write", fakeFile{shortBy: 3}, nil, "short write"},
-		{"close fails", fakeFile{closeErr: errClose}, []error{errClose}, ""},
+func (f *fakeLogFS) OpenAppend(path string, flags int) (io.WriteCloser, error) {
+	if f.openErr != nil {
+		return nil, f.openErr
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			file := tt.file
-			open := func(string) (io.WriteCloser, error) { return &file, nil }
-			err := appendLineWith(open, path, []byte("{\"bead_id\":\"gt-p4aqut\"}\n"))
-			if err == nil {
-				t.Fatalf("appendLineWith = nil, want an error")
-			}
-			if !strings.Contains(err.Error(), path) {
-				t.Errorf("error = %q, want it to name %q", err, path)
-			}
-			for _, want := range tt.wantAll {
-				if !errors.Is(err, want) {
-					t.Errorf("error = %v, want it to wrap %v", err, want)
-				}
-			}
-			if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
-				t.Errorf("error = %q, want it to contain %q", err, tt.wantText)
-			}
-		})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opened = append(f.opened, openCall{path: path, flags: flags})
+	// A handle not opened for append, or opened to truncate, starts the file
+	// over, as a host open with the same flags would.
+	if flags&os.O_APPEND == 0 || flags&os.O_TRUNC != 0 {
+		f.log.Reset()
 	}
+	return &fakeLogFile{fs: f}, nil
+}
+
+// fakeLogFile is one handle fakeLogFS hands out. Its writes land end to end in
+// the shared log under the fake's lock, as appends to one file do.
+type fakeLogFile struct{ fs *fakeLogFS }
+
+func (f *fakeLogFile) Write(p []byte) (int, error) {
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
+	if f.fs.writeErr != nil {
+		return 0, f.fs.writeErr
+	}
+	f.fs.writes = append(f.fs.writes, slices.Clone(p))
+	n := max(0, len(p)-f.fs.shortBy)
+	f.fs.log.Write(p[:n]) // a bytes.Buffer write cannot fail
+	return n, nil
+}
+
+func (f *fakeLogFile) Close() error { return f.fs.closeErr }
+
+func (f *fakeLogFS) writeCalls() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]byte, len(f.writes))
+	for i, write := range f.writes {
+		out[i] = slices.Clone(write)
+	}
+	return out
+}
+
+func (f *fakeLogFS) openCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.opened))
+	for i, open := range f.opened {
+		out[i] = open.path
+	}
+	return out
+}
+
+// openFlagCalls returns the flags of every open, in the order they were asked.
+func (f *fakeLogFS) openFlagCalls() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]int, len(f.opened))
+	for i, open := range f.opened {
+		out[i] = open.flags
+	}
+	return out
+}
+
+func (f *fakeLogFS) mkdirCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.mkdirs)
+}
+
+// logLines returns the log split into its lines.
+func (f *fakeLogFS) logLines() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body := strings.TrimSuffix(f.log.String(), "\n")
+	if body == "" {
+		return nil
+	}
+	return strings.Split(body, "\n")
 }
