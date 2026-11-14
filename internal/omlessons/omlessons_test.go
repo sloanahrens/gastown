@@ -456,3 +456,22 @@ func TestClusterNamesTheFirstExampleBeads(t *testing.T) {
 		t.Errorf("wall-clock-wait examples = %v, want none", got)
 	}
 }
+
+// ClassNames offers every row of the table by id and name, and a caller that
+// changes the map leaves the table as it was.
+func TestClassNamesIsACopyOfTheTable(t *testing.T) {
+	t.Parallel()
+	names := ClassNames()
+	if len(names) != len(classes) {
+		t.Fatalf("ClassNames has %d entries, the table %d rows", len(names), len(classes))
+	}
+	for _, c := range classes {
+		if names[c.ID] != c.Name {
+			t.Errorf("ClassNames[%q] = %q, want %q", c.ID, names[c.ID], c.Name)
+		}
+	}
+	names[classes[0].ID] = "changed by the caller"
+	if ClassNames()[classes[0].ID] == "changed by the caller" {
+		t.Error("a change to the returned map reached the table")
+	}
+}

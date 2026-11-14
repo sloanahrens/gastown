@@ -42,6 +42,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/failcause"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/logtriage"
+	"github.com/steveyegge/gastown/internal/jev/omclass"
 	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/jev/rework"
 	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
@@ -1173,6 +1174,12 @@ type Daemon struct {
 	jevReworkRunning atomic.Bool
 	jevReworkOpen    func(townRoot string, s rework.Settings, warnings io.Writer) (*rework.Pass, error)
 
+	// jevOMClassRunning and jevOMClassOpen are the jev_omclass pass's
+	// single-flight guard and test seam (jev_omclass.go), as
+	// jevReworkRunning and jevReworkOpen are for jev_rework.
+	jevOMClassRunning atomic.Bool
+	jevOMClassOpen    func(townRoot string, s omclass.Settings, warnings io.Writer) (*omclass.Pass, error)
+
 	// jevFailcauseOpen builds the cause battery's pass for a rig's candidate
 	// gate (jev_failcause.go). Nil means failcause.Open; a test sets it to use
 	// a fake asker.
@@ -1256,6 +1263,7 @@ type Daemon struct {
 	jevLandingRun      patrolLastRunMemory
 	jevLogtriageRun    patrolLastRunMemory
 	jevReworkRun       patrolLastRunMemory
+	jevOMClassRun      patrolLastRunMemory
 	jevConflictRun     patrolLastRunMemory
 	jevNotesRun        patrolLastRunMemory
 	jevRulesRun        patrolLastRunMemory
@@ -2679,6 +2687,12 @@ var heartbeatSteps = []heartbeatStep{
 	// (internal/jev/rework). Opt-in and lifecycle, like jev-dedupe: the pass
 	// changes no landing.
 	{name: "jev-rework", lifecycle: true, run: (*Daemon).triggerJevRework},
+
+	// Ask Jev, for each new om finding, which lesson class of the class table
+	// it belongs to, and log the answer beside the keyword class
+	// (internal/jev/omclass). Opt-in and lifecycle, like jev-rework: the pass
+	// changes no landing.
+	{name: "jev-omclass", lifecycle: true, run: (*Daemon).triggerJevOMClass},
 
 	// Predict, for each bead just placed on a seat, how it will land, and log
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
