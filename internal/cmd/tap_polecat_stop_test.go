@@ -447,11 +447,14 @@ func TestPolecatStopParsedReading(t *testing.T) {
 		{name: "backslash-newline joins an ANSI-C quote", argv: "eval $\\\n'make test'", old: true, block: true},
 		{name: "make test as a conditional word", argv: `[[ make test ]]`, old: true, block: true},
 
-		// Unreadable to parsedTokens, so shellTokenize reads them alone, as before.
+		// Unreadable to parsedTokens: the unreadable reading blocks every such
+		// argv (TestUnreadableCommandFailsClosedInPolecatStop), so a row the old
+		// shellTokenize reading allowed now blocks. Changed: an open quote hid
+		// the make test from the old reading.
 		{name: "unreadable stray double semicolon still blocks", argv: "echo a;; make test", old: true, block: true},
 		{name: "unreadable slot-run wrapper with an open quote still blocks", argv: "gt slot run --role x -- make test < /dev/null 'x", old: true, block: true},
-		{name: "unreadable eval with an open quote still allows", argv: `sh -c 'make test`, old: false, block: false},
-		{name: "unreadable eval body and open quote still allows", argv: `eval 'make test' ; echo 'unterminated`, old: false, block: false},
+		{name: "unreadable eval with an open quote now blocks", argv: `sh -c 'make test`, old: false, block: true},
+		{name: "unreadable eval body and open quote now blocks", argv: `eval 'make test' ; echo 'unterminated`, old: false, block: true},
 
 		// Data, not a command, on both readings.
 		{name: "make test in double quotes is data", argv: `echo "make test"`, old: false, block: false},
@@ -466,6 +469,90 @@ func TestPolecatStopParsedReading(t *testing.T) {
 			got, ok := polecat.SuiteArgv(tc.argv, stopCheckTokens, stopCheckMatchingSuites(gates))
 			if ok != tc.block {
 				t.Fatalf("polecat.SuiteArgv(%q) = (%q, %v), want block=%v", tc.argv, got, ok, tc.block)
+			}
+		})
+	}
+}
+
+// TestUnreadableCommandFailsClosedInPolecatStop pins the fail-closed reading of
+// an argv the parser cannot read (gt-bowsdz): the Stop guard blocks the stop and
+// says the command could not be read. Each row is one the text split alone
+// would allow, since its text holds no gate, so a fallback back to shellTokenize
+// turns the rows red.
+func TestUnreadableCommandFailsClosedInPolecatStop(t *testing.T) {
+	t.Parallel()
+	const session = "gt-coral"
+	tests := []struct {
+		name string
+		argv string
+	}{
+		{"unterminated double quote", `echo "hello`},
+		{"unterminated single quote", `cat 'notes`},
+		{"glob removal with an open quote", `rm -rf /tmp/x/* "`},
+		{"shell -c with an open quote and no gate", `sh -c 'echo hi`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, readable := parsedTokens(tt.argv); readable {
+				t.Fatalf("fixture %q parses, so it does not exercise the unreadable reading", tt.argv)
+			}
+			// The pane's agent is the root and is not scanned; its child runs the unreadable argv.
+			procs := []polecat.Proc{
+				{PID: 100, PPID: 1, Args: "claude --session-id a"},
+				{PID: 101, PPID: 100, Args: tt.argv},
+			}
+			busy, reason, err := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: procs},
+				t.TempDir(), "gastown", "coral", session)
+			if err != nil {
+				t.Fatalf("err = %v, want nil: the reads succeeded", err)
+			}
+			if !busy {
+				t.Fatalf("busy = false for unreadable %q, want true: a stop must not be allowed on a command the guard cannot read", tt.argv)
+			}
+			if !strings.Contains(reason, "could not be read") {
+				t.Fatalf("reason = %q, want it to say the command could not be read", reason)
+			}
+		})
+	}
+}
+
+// TestPolecatStopReadableVerdictsUnchanged pins the verdicts of commands the
+// parser reads (gt-bowsdz): the fail-closed reading for an unreadable argv must
+// not loosen or tighten a readable one. The rows run the production split and
+// suites, so a change to either side turns a row red.
+func TestPolecatStopReadableVerdictsUnchanged(t *testing.T) {
+	t.Parallel()
+	suites := stopCheckMatchingSuites([]polecat.Invocation{
+		{Program: "make", Target: "test"},
+		{Program: "make", Target: "lint"},
+		{Program: "make", Target: "build"},
+	})
+	tests := []struct {
+		name      string
+		argv      string
+		wantBlock bool
+	}{
+		{"make test", `make test`, true},
+		{"gt slot run wrapper", `gt slot run --role x -- make test`, true},
+		{"bare go test", `go test ./internal/cmd/`, true},
+		// parsedTokens drops these bodies; the shellTokenize half of the union
+		// is what blocks them, so dropping that half turns these rows red.
+		{"make test in a substitution with blanks", `echo $( make test )`, true},
+		{"here-document body run by bash", "bash <<EOF\ngo test .\nEOF", true},
+		{"make test in double quotes is data", `echo "make test"`, false},
+		{"grep counts a quoted gate", `grep -c "make test" notes.txt`, false},
+		{"plain command", `echo hello`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, readable := parsedTokens(tt.argv); !readable {
+				t.Fatalf("fixture %q does not parse, so it is not a readable command", tt.argv)
+			}
+			got, ok := polecat.SuiteArgv(tt.argv, stopCheckTokens, suites)
+			if ok != tt.wantBlock {
+				t.Fatalf("polecat.SuiteArgv(%q) = (%q, %v), want block=%v", tt.argv, got, ok, tt.wantBlock)
 			}
 		})
 	}

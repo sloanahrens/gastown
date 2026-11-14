@@ -276,6 +276,8 @@ func polecatStopSuite(reads polecat.SuiteReads, townRoot, rigName, polecatName, 
 	switch {
 	case found.Slot.Held:
 		return true, fmt.Sprintf("container-gate slot %d held by %s (verification suite running)", found.Slot.Index, found.Slot.Owner.Role), err
+	case found.Invocation == stopCheckUnreadable:
+		return true, "a command in this polecat's pane could not be read, so a verification suite cannot be ruled out", err
 	case found.Invocation != "":
 		return true, fmt.Sprintf("%s is still running in this polecat's pane", found.Invocation), err
 	}
@@ -401,15 +403,17 @@ func stopCheckShellTokens(argv string) []string {
 // The join makes the read safe by construction. polecat's matcher looks for a
 // program and its target at adjacent tokens, or before the next separator, so a
 // match in either stream survives the other stream being appended after the
-// ";". A reading therefore never loses a block the other one gave. An argv
-// parsedTokens cannot read gives the shellTokenize reading alone, as it always
-// did.
+// ";". A reading therefore never loses a block the other one gave.
+//
+// An argv parsedTokens cannot read has no reading to allow on: the text split
+// can miss a gate the command runs. It reduces to stopCheckUnreadable alone, and
+// the guard blocks it (gt-bowsdz).
 func stopCheckRead(argv string) []string {
-	shell := shellTokenize(argv)
 	tokens, readable := parsedTokens(argv)
 	if !readable {
-		return shell
+		return []string{stopCheckUnreadable}
 	}
+	shell := shellTokenize(argv)
 	if len(shell) == 0 {
 		return tokens
 	}
@@ -464,8 +468,16 @@ func stopCheckSuites(townRoot, rigName string) []polecat.Invocation {
 	return stopCheckMatchingSuites(stopCheckGateInvocations(townRoot, rigName))
 }
 
+// stopCheckUnreadable is the one token an argv the parser cannot read reduces to
+// (stopCheckRead). It carries a NUL byte, which no argv or ps line can hold, so
+// only the unreadable reading matches it. It has no slash, so InvocationTokens'
+// basename keeps it whole, and as an Invocation with no target its name is the
+// token itself.
+const stopCheckUnreadable = "\x00unreadable"
+
 // stopCheckMatchingSuites puts the polecat's own always-on signals in front of
-// the rig's configured gates.
+// the rig's configured gates, and the unreadable sentinel last: an unreadable
+// argv carries no other token, so its place in the order does not matter.
 //
 // A backgrounded gt done clears the slot, pane-child, and grace-period checks
 // the moment its own gate finishes (GT_TEST_DOCKER=0 holds no slot) while the
@@ -475,7 +487,8 @@ func stopCheckSuites(townRoot, rigName string) []polecat.Invocation {
 func stopCheckMatchingSuites(gates []polecat.Invocation) []polecat.Invocation {
 	suites := []polecat.Invocation{{Program: "gt", Target: "done"}}
 	suites = append(suites, gates...)
-	return append(suites, commonBareVerificationInvocations...)
+	suites = append(suites, commonBareVerificationInvocations...)
+	return append(suites, polecat.Invocation{Program: stopCheckUnreadable})
 }
 
 // stopCheckGateInvocations reduces the rig's configured test, lint and build
