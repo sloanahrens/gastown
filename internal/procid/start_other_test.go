@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// Where StartToken has no reader, no ID can be taken for this process, and an
-// ID recorded with any token never reads as running. A caller that cannot
-// prove a process is its own must not signal it.
+// Build-only behaviour (darwin, since gt-qq5kv4): StartToken has no reader, so
+// no ID can be taken for this process, and an ID recorded with any token never
+// reads as running. A caller that cannot prove a process is its own must not
+// signal it.
 func TestStartTokenUnreadableWithoutReader(t *testing.T) {
 	t.Parallel()
 	if _, ok := StartToken(os.Getpid()); ok {
