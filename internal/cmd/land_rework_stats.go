@@ -150,7 +150,7 @@ func landReworkStatsFromTown(findTown func() (string, error), now time.Time, wee
 	if err != nil {
 		return landReworkReport{}, err
 	}
-	report, err := landReworkStatsAggregate(recs, reviews, now, weeks)
+	report, err := landReworkStatsAggregate(recs, reviews, now, weeks, metrics.WeekOf)
 	if err != nil {
 		return landReworkReport{}, err
 	}
@@ -234,15 +234,16 @@ func readLandReworkStatsReviews(path string) ([]land.ReviewRecord, int, error) {
 // landReworkStatsAggregate folds the landing records and review records into
 // the weeks ending with the one now falls in. The rounds of a bead are joined
 // by its id, which is unique town-wide and the key every other reader of these
-// two files joins on.
-func landReworkStatsAggregate(recs []landings.Record, reviews []land.ReviewRecord, now time.Time, weeks int) (landReworkReport, error) {
-	lastWeek, err := metrics.WeekOf(now.Format(time.RFC3339Nano))
+// two files joins on. weekOf names a timestamp's Monday; the report passes
+// metrics.WeekOf, and a test passes one that fails, to drive each refusal.
+func landReworkStatsAggregate(recs []landings.Record, reviews []land.ReviewRecord, now time.Time, weeks int, weekOf func(string) (string, error)) (landReworkReport, error) {
+	lastWeek, err := weekOf(now.Format(time.RFC3339Nano))
 	if err != nil {
 		return landReworkReport{}, fmt.Errorf("the week of %s: %w", now.Format(time.RFC3339), err)
 	}
 	// Subtracting whole weeks keeps the weekday, so its week is the one weeks-1
 	// before the last.
-	firstWeek, err := metrics.WeekOf(now.AddDate(0, 0, -7*(weeks-1)).Format(time.RFC3339Nano))
+	firstWeek, err := weekOf(now.AddDate(0, 0, -7*(weeks-1)).Format(time.RFC3339Nano))
 	if err != nil {
 		return landReworkReport{}, fmt.Errorf("the week of the window's first day: %w", err)
 	}
@@ -286,7 +287,7 @@ func landReworkStatsAggregate(recs []landings.Record, reviews []land.ReviewRecor
 	}
 	byWeek := map[string]*tally{}
 	for _, rec := range latest {
-		week, err := metrics.WeekOf(rec.LandedAt.Format(time.RFC3339Nano))
+		week, err := weekOf(rec.LandedAt.Format(time.RFC3339Nano))
 		if err != nil {
 			return landReworkReport{}, fmt.Errorf("the week of %s's landing: %w", rec.Bead, err)
 		}

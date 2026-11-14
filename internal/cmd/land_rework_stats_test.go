@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/metrics"
 )
 
 var updateLandReworkStatsGolden = flag.Bool("update-land-rework-stats-golden", false, "rewrite testdata/land_rework_stats.golden and .json.golden")
@@ -431,6 +433,66 @@ func TestLandReworkStatsRefusals(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error = %v, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// weekOfOnCall is metrics.WeekOf, except that its nth call returns week and err
+// instead, so a case picks which week the report cannot name: 1 is the current
+// week, 2 the window's first day, 3 the landing's week.
+func weekOfOnCall(n int, week string, err error) func(string) (string, error) {
+	calls := 0
+	return func(ts string) (string, error) {
+		calls++
+		if calls == n {
+			return week, err
+		}
+		return metrics.WeekOf(ts)
+	}
+}
+
+// TestLandReworkStatsWeekRefusals: a week the report cannot name stops it,
+// whichever week it is, and a first week that is not a date is no window.
+func TestLandReworkStatsWeekRefusals(t *testing.T) {
+	t.Parallel()
+	recs := []landings.Record{{Bead: "gt-a", Rig: "gastown", LandedAt: landReworkStatsNow}}
+	cases := []struct {
+		name    string
+		weekOf  func(string) (string, error)
+		wantErr string
+	}{
+		{name: "the current week", weekOf: weekOfOnCall(1, "", errors.New("no clock")), wantErr: "the week of"},
+		{name: "the window's first day", weekOf: weekOfOnCall(2, "", errors.New("no clock")), wantErr: "the window's first day"},
+		{name: "a landing's week", weekOf: weekOfOnCall(3, "", errors.New("no ledger date")), wantErr: "the week of gt-a's landing"},
+		{name: "a first week that is not a date", weekOf: weekOfOnCall(2, "not-a-day", nil), wantErr: "the window's first week"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := landReworkStatsAggregate(recs, nil, landReworkStatsNow, 4, tc.weekOf)
+			if err == nil {
+				t.Fatal("no error: the report named a week it could not read")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLandReworkStatsUnwritableOutput: a report the output cannot take is an
+// error in both forms, not a silent success.
+func TestLandReworkStatsUnwritableOutput(t *testing.T) {
+	t.Parallel()
+	errDiskFull := errors.New("disk full")
+	for _, asJSON := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", asJSON), func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			err := landReworkStatsReportFrom(landReworkStatsTown(town), refusingWriter{err: errDiskFull}, landReworkStatsNow, 1, asJSON)
+			if !errors.Is(err, errDiskFull) {
+				t.Fatalf("error = %v, want the write's error", err)
 			}
 		})
 	}
