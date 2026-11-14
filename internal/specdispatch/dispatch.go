@@ -394,17 +394,24 @@ func DeadHookedCount(n int) string {
 // SplitLiveDead names a seat's count as its parts: its live sessions, the
 // slings still running that the roster may not show yet, and the dead-hooked
 // seats no session holds. A seat of 11 with 2 in flight and 1 dead-hooked reads
-// "(8 live + 2 in flight + 1 dead-hooked)". total is the whole count the
-// dispatcher compares to the cap; the parts sum to it. It is empty when no
-// sling is in flight and no seat is dead-hooked, so a seat carrying neither
-// keeps the short wording.
+// "(8 live + 2 in flight (may double count) + 1 dead-hooked)". total is the
+// whole count the dispatcher compares to the cap. The live figure is total less
+// the other two terms, and the in-flight term can be counted in live too (see
+// Budget.Picture), so the parts are not a partition of total. It is empty when
+// no sling is in flight and no seat is dead-hooked, so a seat carrying neither
+// keeps the short wording. A negative count, or in-flight and dead-hooked
+// together above total, is not a split: it names the counts as they are rather
+// than print a negative live figure.
 func SplitLiveDead(total, inFlight, dead int) string {
 	if inFlight == 0 && dead == 0 {
 		return ""
 	}
+	if inFlight < 0 || dead < 0 || inFlight+dead > total {
+		return fmt.Sprintf("(counts do not add up: %d in flight, %d dead-hooked, %d counted)", inFlight, dead, total)
+	}
 	parts := []string{fmt.Sprintf("%d live", total-inFlight-dead)}
 	if inFlight > 0 {
-		parts = append(parts, fmt.Sprintf("%d in flight", inFlight))
+		parts = append(parts, fmt.Sprintf("%d in flight (may double count)", inFlight))
 	}
 	if dead > 0 {
 		parts = append(parts, DeadHookedCount(dead))
@@ -415,11 +422,11 @@ func SplitLiveDead(total, inFlight, dead int) string {
 // Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat's
 // count is split into its live sessions, the slings still running and its
 // dead-hooked seats, so a full seat that shows fewer live sessions than its
-// number says why: "11/9 (8 live + 2 in flight + 1 dead-hooked)" (gt-tldj4,
-// gt-la4r78). The parts sum to the number before the cap, which stays the count
-// the dispatcher decides with. A town with a total cap names it too, so the
-// picture a full town is reported with holds the cap that held it rather than
-// only the seats under it.
+// number says why: "11/9 (8 live + 2 in flight (may double count) + 1 dead-hooked)"
+// (gt-tldj4, gt-la4r78). The live figure is the count less the other two terms;
+// the count before the cap stays the number the dispatcher decides with. A town
+// with a total cap names it too, so the picture a full town is reported with
+// holds the cap that held it rather than only the seats under it.
 //
 // The live part can count a sling twice. The caller adds each sling still running
 // to its agent's count, and the roster shows the same polecat once it spawns, so

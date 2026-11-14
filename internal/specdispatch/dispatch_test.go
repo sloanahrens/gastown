@@ -546,13 +546,13 @@ func TestBudgetPictureNamesTheInFlightPartApart(t *testing.T) {
 	b.SetLive(map[string]int{"deepseek-flash": 4, "claude-sonnet": 1})
 	b.SetInFlight(map[string]int{"deepseek-flash": 2})
 	b.SetDeadHooked(map[string]int{"deepseek-flash": 1})
-	if got, want := b.Picture(), "deepseek-flash 4/2 (1 live + 2 in flight + 1 dead-hooked), claude-sonnet 1/2"; got != want {
+	if got, want := b.Picture(), "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 dead-hooked), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
 
 	// The refusal a full town prints carries the same split.
 	b.Seats[1].Live, b.Seats[1].Cap = 2, 2
-	if got := ChooseSeat(b, goodSpec()); !got.Skip || !strings.Contains(got.Reason, "deepseek-flash 4/2 (1 live + 2 in flight + 1 dead-hooked)") {
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || !strings.Contains(got.Reason, "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 dead-hooked)") {
 		t.Fatalf("ChooseSeat = %+v, want the in-flight seat named", got)
 	}
 
@@ -567,7 +567,9 @@ func TestBudgetPictureNamesTheInFlightPartApart(t *testing.T) {
 // TestSplitLiveDeadNamesTheDeadHookedPartApart is the one formatter every seat
 // count reads through: the tick line, `gt pool show` and the sling refusal. A
 // seat with neither a dead-hooked occupant nor a sling in flight prints nothing
-// extra; a seat with either prints the parts of its count, which sum to it.
+// extra; a seat with either prints the parts of its count, with the in-flight
+// term marked as possibly double counted and a split that cannot hold named as
+// such.
 func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -580,9 +582,12 @@ func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 		{"one of two is dead-hooked", 2, 0, 1, "(1 live + 1 dead-hooked)", "1 dead-hooked"},
 		{"the overshoot names its live part", 10, 0, 2, "(8 live + 2 dead-hooked)", "2 dead-hooked"},
 		{"every session is dead-hooked", 3, 0, 3, "(0 live + 3 dead-hooked)", "3 dead-hooked"},
-		{"a running sling is named apart from the roster", 3, 1, 0, "(2 live + 1 in flight)", ""},
-		{"two running slings and no dead-hooked seat", 12, 2, 0, "(10 live + 2 in flight)", ""},
-		{"a reading above a cap splits into its three parts", 11, 2, 1, "(8 live + 2 in flight + 1 dead-hooked)", "1 dead-hooked"},
+		{"a running sling is named apart from the roster", 3, 1, 0, "(2 live + 1 in flight (may double count))", ""},
+		{"two running slings and no dead-hooked seat", 12, 2, 0, "(10 live + 2 in flight (may double count))", ""},
+		{"a reading above a cap splits into its three parts", 11, 2, 1, "(8 live + 2 in flight (may double count) + 1 dead-hooked)", "1 dead-hooked"},
+		{"dead-hooked seats outnumber the count", 2, 0, 3, "(counts do not add up: 0 in flight, 3 dead-hooked, 2 counted)", "3 dead-hooked"},
+		{"in-flight and dead-hooked together outnumber the count", 2, 2, 1, "(counts do not add up: 2 in flight, 1 dead-hooked, 2 counted)", "1 dead-hooked"},
+		{"a negative in-flight count is refused", 3, -1, 0, "(counts do not add up: -1 in flight, 0 dead-hooked, 3 counted)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -593,6 +598,15 @@ func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 				t.Errorf("DeadHookedCount(%d) = %q, want %q", tc.dead, got, tc.wantDeadWord)
 			}
 		})
+	}
+}
+
+// TestSplitLiveDeadRefusesANegativeDeadHookedCount pins the refusal for a
+// negative dead-hooked count, which the split must not print as a live figure.
+func TestSplitLiveDeadRefusesANegativeDeadHookedCount(t *testing.T) {
+	t.Parallel()
+	if got, want := SplitLiveDead(3, 0, -1), "(counts do not add up: 0 in flight, -1 dead-hooked, 3 counted)"; got != want {
+		t.Errorf("SplitLiveDead(3, 0, -1) = %q, want %q", got, want)
 	}
 }
 
