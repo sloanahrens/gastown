@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -184,6 +185,11 @@ func doltComposeStatus(townRoot string, deps doltComposeDeps, w io.Writer) error
 	out, err := deps.run(u.argv("ps", "--all", "--format", doctor.DataUnitPsFormat), u.env(deps.environ()))
 	if err != nil {
 		return fmt.Errorf("docker compose ps for %s: %w", doltComposeProject, err)
+	}
+	// An empty listing is no state to report, so it is refused rather than
+	// printed as a status that exits 0.
+	if len(bytes.TrimSpace(out)) == 0 {
+		return fmt.Errorf("docker compose ps for %s lists no services: the unit has no containers, so there is no status to report", doltComposeProject)
 	}
 	if _, err := fmt.Fprintf(w, "Dolt compose unit %s:\n%s", doltComposeProject, out); err != nil {
 		return fmt.Errorf("writing the status: %w", err)

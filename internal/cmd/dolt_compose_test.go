@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/doltpause"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
 // composeCall is one docker call the fake runner received.
@@ -191,6 +192,22 @@ func TestDoltComposeNeedsBdKey(t *testing.T) {
 	}
 }
 
+// TestDoltComposeRefusesBdTagReference: a values file whose bd line names a tag
+// rather than a digest refuses the start before docker runs. The compose path
+// takes its bd image from that file, so the digest rule holds here too.
+func TestDoltComposeRefusesBdTagReference(t *testing.T) {
+	t.Parallel()
+	townRoot := composeTown(t, "registry.internal:5000/gt/gastown-bd:latest")
+	var calls []composeCall
+	err := doltComposeStart(townRoot, fakeComposeDeps(townRoot, &calls, nil, nil))
+	if !errors.Is(err, imagevalues.ErrBdNotDigest) {
+		t.Fatalf("doltComposeStart error = %v, want ErrBdNotDigest for a tag reference", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("refused start still made %d docker calls, want 0", len(calls))
+	}
+}
+
 // TestDoltComposeRefusesWithoutConfigFile: compose would bind-mount a missing
 // Dolt config into the container as a directory, so the start refuses first.
 func TestDoltComposeRefusesWithoutConfigFile(t *testing.T) {
@@ -265,6 +282,34 @@ func TestDoltComposeStatusPrintsServices(t *testing.T) {
 	}
 }
 
+// TestDoltComposeStatusRefusesEmptyServiceList: a unit whose docker compose ps
+// lists no services has no state to report. Status refuses by name, rather than
+// printing an empty list and exiting 0.
+func TestDoltComposeStatusRefusesEmptyServiceList(t *testing.T) {
+	t.Parallel()
+	townRoot := composeTown(t, composeRef("gastown-bd"))
+	tests := []struct {
+		name string
+		ps   []byte
+	}{
+		{"no output", nil},
+		{"blank lines", []byte("\n  \n")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []composeCall
+			var w bytes.Buffer
+			err := doltComposeStatus(townRoot, fakeComposeDeps(townRoot, &calls, tt.ps, nil), &w)
+			if err == nil || !strings.Contains(err.Error(), "lists no services") {
+				t.Fatalf("doltComposeStatus error = %v, want a refusal that names the empty service list", err)
+			}
+			if w.Len() != 0 {
+				t.Errorf("refused status still wrote %q, want nothing", w.String())
+			}
+		})
+	}
+}
+
 // composeArgvHas reports whether argv holds arg as one element.
 func composeArgvHas(argv []string, arg string) bool {
 	for _, a := range argv {
@@ -322,10 +367,12 @@ func TestDoltComposeFlagSelectsUnit(t *testing.T) {
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			//testpolicy:allow no-global-swap — the parsed --compose-unit flag sets doltUseComposeUnit, the package variable the command reads; the cleanup resets it
 			if err := c.cmd.Flags().Parse([]string{"--compose-unit"}); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
+				//testpolicy:allow no-global-swap — resets the doltUseComposeUnit flag variable that Parse set above
 				if err := c.cmd.Flags().Set("compose-unit", "false"); err != nil {
 					t.Errorf("resetting --compose-unit on gt dolt %s: %v", c.name, err)
 				}
