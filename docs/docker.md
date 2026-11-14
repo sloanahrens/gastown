@@ -37,7 +37,7 @@ docker compose exec gastown zsh
 The entrypoint runs `gt install /gt --git` automatically on first start. After you exec a shell into the running container, finish bootstrapping with the commands below.
 
 ```bash
-gt install /gt --force --shell
+gt install /gt --force
 gt up --restore
 gt status
 ```
@@ -205,10 +205,10 @@ The `exec` command drops you into a shell as the `agent` user with the right `PA
 
 ### Inside the container
 
-The entrypoint's `gt install /gt --git` does not run `gt up`, install shell integration, or restore agent settings. Those steps happen on first interactive use.
+The entrypoint's `gt install /gt --git` does not run `gt up` or restore agent settings. Those steps happen on first interactive use.
 
 ```bash
-gt install /gt --force --shell  # enable Gas Town and install zsh integration (sets GT_TOWN_ROOT, GT_RIG)
+gt install /gt --force
 gt up --restore     # start the daemon and restore crew and polecats
 ```
 

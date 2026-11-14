@@ -174,12 +174,12 @@ For full tmux-backed workflows on Windows, use WSL or another Linux environment.
 
 #### Create your workspace
 
-Run `gt install` to create your headquarters (HQ) at `~/gt`. The `--shell` flag installs shell integration and enables Gas Town globally. The `--git` flag initializes the HQ as a git repository. Before using `--git`, set `git config --global user.name` and `git config --global user.email` so the initial commit has a valid identity.
+Run `gt install` to create your headquarters (HQ) at `~/gt`. The `--git` flag initializes the HQ as a git repository. Before using `--git`, set `git config --global user.name` and `git config --global user.email` so the initial commit has a valid identity.
 
 ```bash
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
-gt install ~/gt --shell --git
+gt install ~/gt --git
 cd ~/gt
 ```
 
@@ -252,7 +252,7 @@ docker compose exec gastown zsh   # or bash
 Inside the container, finish bootstrapping.
 
 ```bash
-gt install /gt --force --shell    # enable Gas Town and install shell integration
+gt install /gt --force
 gt up --restore                   # start services and restore worker settings
 gh auth login                     # optional: required for private GitHub rigs
 gt status                         # confirm the town is up
@@ -269,7 +269,7 @@ Run
 ```shell
 git config --global user.name "Your Name" &&
 git config --global user.email "you@example.com" &&
-gt install ~/gt --shell --git &&
+gt install ~/gt --git &&
 cd ~/gt &&
 gt up &&
 gt doctor &&

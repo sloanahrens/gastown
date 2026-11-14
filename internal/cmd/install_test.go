@@ -867,3 +867,12 @@ func TestRunInstallFailsWhenItCannotWriteTheTrackerEndpoint(t *testing.T) {
 		t.Fatalf("runInstall over a torn town.json = %v, want it to name the tracker endpoint", err)
 	}
 }
+
+// The prompt hook is gone, and with it the only reason gt install ever wrote
+// shell integration (gt-lpsnp5).
+func TestInstallHasNoShellOption(t *testing.T) {
+	t.Parallel()
+	if f := installCmd.Flags().Lookup("shell"); f != nil {
+		t.Fatalf("gt install still carries a --shell flag (%q); the hook it installed is gone", f.Usage)
+	}
+}
