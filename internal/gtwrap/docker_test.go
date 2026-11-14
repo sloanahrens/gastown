@@ -200,7 +200,7 @@ func TestRunnerKeepsForwardedValuesOutOfArgv(t *testing.T) {
 		run  func(Docker, Call) (int, error)
 	}{
 		{"exec", Docker.Exec},
-		{"run", Docker.Run},
+		{"run", Docker.run},
 	}
 	for _, rung := range rungs {
 		t.Run(rung.name, func(t *testing.T) {
@@ -387,7 +387,7 @@ func TestLadderRefusesWhenTheComposeFileIsUnusable(t *testing.T) {
 	runs := []struct {
 		name string
 		run  func(Docker, Call) (int, error)
-	}{{"launch", Docker.Launch}, {"exec", Docker.Exec}, {"run", Docker.Run}}
+	}{{"launch", Docker.Launch}, {"exec", Docker.Exec}, {"run", Docker.run}}
 	for _, tt := range tests {
 		for _, r := range runs {
 			t.Run(tt.name+"/"+r.name, func(t *testing.T) {
@@ -470,7 +470,7 @@ func TestLadderRefusesWhenAProbeRunsOutOfTime(t *testing.T) {
 
 func TestLadderRefusesACallWithNoTool(t *testing.T) {
 	t.Parallel()
-	for _, run := range []func(Docker, Call) (int, error){Docker.Launch, Docker.Exec, Docker.Run} {
+	for _, run := range []func(Docker, Call) (int, error){Docker.Launch, Docker.Exec, Docker.run} {
 		shell := &fakeShell{psOut: "5c1e0a7f\n"}
 		d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
 		exit, err := run(d, Call{Dir: testDir})
@@ -539,7 +539,7 @@ func TestRunnerSetsTheDoltHost(t *testing.T) {
 		run  func(Docker, Call) (int, error)
 	}{
 		{"exec", Docker.Exec},
-		{"run", Docker.Run},
+		{"run", Docker.run},
 	}
 	for _, tt := range tests {
 		for _, rung := range rungs {
@@ -690,7 +690,7 @@ func TestRunnerSetsHMConfig(t *testing.T) {
 		run  func(Docker, Call) (int, error)
 	}{
 		{"exec", Docker.Exec},
-		{"run", Docker.Run},
+		{"run", Docker.run},
 	}
 	for _, tool := range tools {
 		for _, env := range envs {
@@ -765,8 +765,8 @@ func TestHMConfigTownPathIsTheWriteTarget(t *testing.T) {
 // TestRunnerRefusesAMissingHMConfig: a throwaway hm run is refused, naming the
 // derived config and the command that generates it, when that path is absent, a
 // directory, unreadable, or never checked, and it attaches no engine command. A
-// regular file plans as before. Run is called directly: hm is not on the rung-2
-// allowlist, so Launch would refuse it before the config is checked.
+// regular file plans as before. run is called directly, in-package: hm is not
+// on the rung-2 allowlist, so Launch would refuse it before the config is checked.
 func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
 	t.Parallel()
 	hmCall := Call{Argv: []string{"hm", "status"}, Env: []string{"GT_TOWN=" + testTown}, Dir: testDir}
@@ -784,9 +784,9 @@ func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
 			t.Parallel()
 			shell := &fakeShell{}
 			d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: tt.stat}
-			_, err := d.Run(hmCall)
+			_, err := d.run(hmCall)
 			if err == nil {
-				t.Fatalf("Run planned a throwaway hm run with %s, want a refusal", tt.name)
+				t.Fatalf("run planned a throwaway hm run with %s, want a refusal", tt.name)
 			}
 			for _, want := range []string{testHMConfig, "gt daemon compose write"} {
 				if !strings.Contains(err.Error(), want) {
@@ -802,8 +802,8 @@ func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
 		t.Parallel()
 		shell := &fakeShell{}
 		d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: fakeStat(map[string]fs.FileMode{testHMConfig: 0o600})}
-		if _, err := d.Run(hmCall); err != nil {
-			t.Fatalf("Run returned an error for a regular file: %v", err)
+		if _, err := d.run(hmCall); err != nil {
+			t.Fatalf("run returned an error for a regular file: %v", err)
 		}
 		if len(shell.attached) != 1 {
 			t.Fatalf("attached %d lines, want 1", len(shell.attached))
