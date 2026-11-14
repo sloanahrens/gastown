@@ -887,14 +887,16 @@ func bdCloseLostInProduction(command string) string {
 }
 
 // bdCloseLostWith is bdCloseLostInProduction over the reader read. Each invocation
-// of the shell reading must be covered by an invocation holding its ids. A reading
-// the parser cannot give carries no ids (gt-k6z48o): the unknown marker judges the
-// branch's bead for whatever text it holds, so a command that carries the marker
-// is covered, and the marker stands for the closes its unreadable reading hides.
-// A command without one must still list every id the shell reading finds.
+// of the shell reading must be covered by an invocation holding its ids. When the
+// command itself cannot be read (gt-k6z48o) it carries no ids, and the unknown
+// marker stands for every close the text may hide, so the marker covers it. In a
+// readable command a marker covers only the unreadable closes the shell reading
+// also finds, so a dropped separator still shows as a lost id.
 func bdCloseLostWith(command string, read bdCloseReader) string {
+	stripped := stripHeredocBodies(strings.TrimSpace(command))
+	_, _, readable := read(stripped)
 	got := parseBdCloseInvocationsWith(command, read)
-	if slices.ContainsFunc(got, func(g bdCloseInvocation) bool { return g.IDsUnreadable }) {
+	if !readable && slices.ContainsFunc(got, func(g bdCloseInvocation) bool { return g.IDsUnreadable }) {
 		return ""
 	}
 	return bdCloseMissed(got, parseBdCloseInvocationsWith(command, bdCloseShellReading))
@@ -994,14 +996,38 @@ func TestParseBdCloseCoverageCatchesDroppedSeparator(t *testing.T) {
 		t.Error("a parsed tokenizer that drops separators loses no close on any command, so the coverage property cannot see a dropped separator")
 	}
 
+	// The guard's verdict is what must not loosen. An unknown marker judges the
+	// branch's bead, so a close the dropped reading merges into an unreadable run
+	// loses its id but keeps the refusal. The id-level check is the bare reader
+	// above and TestBdCloseLostWithKeepsLossBehindMarker.
 	production := bdCloseReaderOf(dropped, shellTokenize)
 	for _, command := range commands {
-		if gap := bdCloseLostWith(command, production); gap != "" {
-			t.Errorf("parseBdCloseInvocations(%q) loses %q under a tokenizer that drops separators; the routing predicate must send it to the shell reading", command, gap)
+		if bdCloseRefusesWith(command, bdCloseShellReading) && !bdCloseRefusesWith(command, production) {
+			t.Errorf("parseBdCloseInvocations(%q) under a tokenizer that drops separators allows a close the shell reading refuses; the routing predicate must send it to the shell reading", command)
 		}
 	}
 	if real, mutant := bdCloseRoutedCount(commands, parsedTokens), bdCloseRoutedCount(commands, dropped); mutant <= real {
 		t.Errorf("the routing predicate routes %d commands under a tokenizer that drops separators and %d with the real one, want more under the dropped separators", mutant, real)
+	}
+}
+
+// TestBdCloseLostWithKeepsLossBehindMarker pins that the unknown marker does not
+// hide a dropped separator in a readable command. The command reads as a whole,
+// and its trailing substitution cannot be read, so the parser marks it unknown.
+// The reading is a stand-in for a tokenizer that drops the separators: it returns
+// the merged words, which open with echo, so neither close is found. The marker
+// covers only the unreadable substitution, so both lost closes are still reported.
+func TestBdCloseLostWithKeepsLossBehindMarker(t *testing.T) {
+	t.Parallel()
+	const command = "echo ok ; bd close gt-x ; bd close gt-y ; echo $("
+	merged := func(string) ([]string, bool, bool) {
+		return []string{"echo", "ok", "bd", "close", "gt-x", "bd", "close", "gt-y", "echo", "$("}, true, true
+	}
+	if !slices.ContainsFunc(parseBdCloseInvocationsWith(command, merged), func(g bdCloseInvocation) bool { return g.IDsUnreadable }) {
+		t.Fatalf("%q carries no unknown marker under the merged reading; the row does not exercise the marker", command)
+	}
+	if gap := bdCloseLostWith(command, merged); gap == "" {
+		t.Errorf("bdCloseLostWith(%q) reports no loss under a reading that drops separators; the marker hid the dropped closes", command)
 	}
 }
 

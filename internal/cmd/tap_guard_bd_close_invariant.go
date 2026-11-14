@@ -465,8 +465,11 @@ func bdCloseReaderOf(parsed func(string) ([]string, bool), shell func(string) []
 // bdCloseReadTokens is the production reader, the parsedTokens reading of gt-crn9gu.
 // It reads with shellTokenize only when the parsed tokens carry a shape the parsed
 // reading does not cover (bdCloseParsedUnsafe). A command parsedTokens cannot read
-// is not read by shellTokenize: it is judged by its text (gt-k6z48o). The shell
-// reading stays for the routed shapes until gt-crn9gu retires it.
+// is not read by shellTokenize: it is judged by its text (gt-k6z48o).
+//
+// The routed shapes that still use shellTokenize, until gt-crn9gu moves them
+// off it: a case-arm terminator (;;), a quoted id after a line continuation, a
+// substitution with a blank, and a close beside a redirection.
 func bdCloseReadTokens(command string) ([]string, bool, bool) {
 	return bdCloseReaderOf(parsedTokens, shellTokenize)(command)
 }
@@ -475,7 +478,8 @@ func bdCloseReadTokens(command string) ([]string, bool, bool) {
 // the way bdCreateSpelled reads a bd create (gt-j41yim): the letters the shell
 // could build its words from are read in order, and bd then close must both match
 // as subsequences, so a word built by quotes, an expansion or an escape still
-// shows its letters.
+// shows its letters. A command that only spells a close is refused even when it
+// is not one, which is the intended fail-closed reading of an unreadable command.
 func bdCloseSpelled(text string) bool {
 	rest, ok := bdCreateSubsequence(bdCreateLetters(text), "bd")
 	if !ok {
@@ -540,7 +544,7 @@ func parseBdCloseInvocationsWith(command string, read bdCloseReader) []bdCloseIn
 	// could spell a bd close, and one whose substitutions cannot be read. The
 	// marker judges the branch's bead, whatever ids and reason the unreadable
 	// text seems to carry, so nothing in that text is trusted (gt-k6z48o).
-	if !readable && bdCloseSpelled(stripped) || !bodiesReadable && mayHoldSubstitution(trimmed) {
+	if (!readable && bdCloseSpelled(stripped)) || (!bodiesReadable && mayHoldSubstitution(trimmed)) {
 		invocations = append(invocations, bdCloseInvocation{IDsUnreadable: true})
 	}
 	if !bodiesReadable {

@@ -606,6 +606,6 @@ container_suite	polecat	"cd /tmp/x && touch \"f"	refuse	cannot be read	gt-mh2pm3
 dangerous	polecat	"cd /tmp/x && touch \"f"	refuse	cannot be read	gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
 test_scope	polecat	"cd /tmp/x && touch \"f"	allow		gt-mh2pm3	38d3947e2d1a72ed39087d48a1efebbf76c9a2dc65d2054c950757b71f7fd7ca
 # --- gt-k6z48o: the bd-close guard judges a command it cannot read by its text (a spelled bd close is a possible close), not by shellTokenize; the freeze stamp moved, one real case per freeze guard carries the new stamp, each with the verdict its guard already gives ---
-container_suite	polecat	"bd close gt-x && ("	refuse	cannot be read	gt-k6z48o	84284e220138d9faab1f6ac298dc4540db26c53a10b73c2a4fdbedd8c98cfed0
-dangerous	polecat	"bd close gt-x && ("	refuse	cannot be read	gt-k6z48o	84284e220138d9faab1f6ac298dc4540db26c53a10b73c2a4fdbedd8c98cfed0
-test_scope	polecat	"bd close gt-x && ("	allow		gt-k6z48o	84284e220138d9faab1f6ac298dc4540db26c53a10b73c2a4fdbedd8c98cfed0
+container_suite	polecat	"bd close gt-x && ("	refuse	cannot be read	gt-k6z48o	4a9409e79bd10cec22f4bc94f96c53a95af4745f82af2e7cf1d638c1d91c527b
+dangerous	polecat	"bd close gt-x && ("	refuse	cannot be read	gt-k6z48o	4a9409e79bd10cec22f4bc94f96c53a95af4745f82af2e7cf1d638c1d91c527b
+test_scope	polecat	"bd close gt-x && ("	allow		gt-k6z48o	4a9409e79bd10cec22f4bc94f96c53a95af4745f82af2e7cf1d638c1d91c527b

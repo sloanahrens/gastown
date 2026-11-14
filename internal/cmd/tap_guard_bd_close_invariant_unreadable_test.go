@@ -15,7 +15,13 @@ func bdCloseVerdictScope() bdCloseInvariantScope {
 // bdCloseRefuses reports whether the guard refuses command: the production
 // reading of it is judged against the branch scope.
 func bdCloseRefuses(command string) bool {
-	_, refusal := firstBdCloseRefusal(bdCloseVerdictScope(), parseBdCloseInvocations(command), "")
+	return bdCloseRefusesWith(command, bdCloseReadTokens)
+}
+
+// bdCloseRefusesWith reports whether the guard refuses command under the reading
+// read gives, judged against the branch scope.
+func bdCloseRefusesWith(command string, read bdCloseReader) bool {
+	_, refusal := firstBdCloseRefusal(bdCloseVerdictScope(), parseBdCloseInvocationsWith(command, read), "")
 	return refusal != ""
 }
 
