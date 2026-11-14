@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,119 @@ func TestMetricsStoryPointsRefusesAnUnreadableTable(t *testing.T) {
 	}
 	if got := town.out.String(); got != "" {
 		t.Errorf("out = %q, want no report for an unreadable table", got)
+	}
+}
+
+// TestStorypointsNoExtractErrors: with no extract holding a landings table the
+// step says to run the extract first and names the root it searched. A
+// directory or table it cannot read is an error, never a reason to fall back.
+func TestStorypointsNoExtractErrors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// setup builds the town's metrics root; nil leaves it absent.
+		setup func(t *testing.T, town *commandTown)
+		// readDir, when set, is the directory listing the step gets instead of
+		// the host's; nilReadDir leaves the seam unwired.
+		readDir    func(string) ([]DirEntry, error)
+		nilReadDir bool
+		// want is a fragment of the error; wantPath, when set, is a path the
+		// error must name.
+		want     string
+		wantPath func(town *commandTown) string
+	}{
+		{
+			name: "no metrics root",
+			want: "run extract first",
+		},
+		{
+			name:       "an unwired listing seam",
+			nilReadDir: true,
+			want:       "Env.ReadDir is unset",
+		},
+		{
+			name: "a root with no dated extract",
+			setup: func(t *testing.T, town *commandTown) {
+				if err := os.MkdirAll(filepath.Join(filepath.Dir(town.outDir()), "cache"), 0o755); err != nil {
+					t.Fatalf("make cache: %v", err)
+				}
+			},
+			want: "run extract first",
+		},
+		{
+			name: "an unreadable root",
+			// A directory permission the owner can still open on some hosts, so
+			// the listing seam carries the failure.
+			readDir: func(string) ([]DirEntry, error) {
+				return nil, fs.ErrPermission
+			},
+			want: "list ",
+		},
+		{
+			name: "a backup's table unreadable",
+			setup: func(t *testing.T, town *commandTown) {
+				// An older extract a fallback could read, and a newer day whose
+				// table cannot be read: the newer day is an error, not skipped
+				// for the older extract.
+				town.writeExtractAt(t, "2026-10-20")
+				if err := os.MkdirAll(filepath.Join(filepath.Dir(town.outDir()), "2026-10-22", "landings.csv"), 0o755); err != nil {
+					t.Fatalf("make the newer day's table a directory: %v", err)
+				}
+			},
+			want: "read ",
+			wantPath: func(town *commandTown) string {
+				return filepath.Join(filepath.Dir(town.outDir()), "2026-10-22", landingsName)
+			},
+		},
+		{
+			name: "today's table unreadable",
+			setup: func(t *testing.T, town *commandTown) {
+				// A directory named landings.csv reads as an error, not as an
+				// absent file.
+				if err := os.MkdirAll(filepath.Join(town.outDir(), "landings.csv"), 0o755); err != nil {
+					t.Fatalf("make today's table a directory: %v", err)
+				}
+			},
+			// A listing with no day in it, so a run that mistook the unreadable
+			// table for an absent one reports the search instead.
+			readDir:  func(string) ([]DirEntry, error) { return nil, nil },
+			want:     "read ",
+			wantPath: func(town *commandTown) string { return filepath.Join(town.outDir(), landingsName) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := newCommandTown(t)
+			if tc.setup != nil {
+				tc.setup(t, town)
+			}
+			if tc.readDir != nil {
+				town.env.ReadDir = tc.readDir
+			}
+			if tc.nilReadDir {
+				town.env.ReadDir = nil
+			}
+			town.out.Reset()
+			code, err := town.run(t, CommandStoryPoints)
+			if err == nil {
+				t.Fatalf("storypoints returned no error (code %d); output %q", code, town.out.String())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to contain %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), filepath.Dir(town.outDir())) && tc.want == "run extract first" {
+				t.Errorf("err = %v, want it to name the root searched %s", err, filepath.Dir(town.outDir()))
+			}
+			if tc.wantPath != nil {
+				if path := tc.wantPath(town); !strings.Contains(err.Error(), path) {
+					t.Errorf("err = %v, want it to name %s", err, path)
+				}
+			}
+			if got := town.out.String(); got != "" {
+				t.Errorf("out = %q, want no report", got)
+			}
+		})
 	}
 }
 

@@ -2,16 +2,20 @@ package metrics
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/storypoints"
 )
@@ -216,18 +220,93 @@ func (c Commands) runBacktest(real RealTown, env Env) error {
 }
 
 // runStoryPoints is main's storypoints step: the shadow report over the
-// landings table the day's extract wrote, printed to Out.
+// landings table today's extract wrote, else over the newest extract that wrote
+// one, printed to Out. When the table came from another day, the report's first
+// line names that day, so a run before the daily extract still says which
+// extract it read.
 func (c Commands) runStoryPoints(real RealTown, env Env) error {
-	path := filepath.Join(real.Extract.OutDir, landingsName)
-	data, err := env.ReadFile(path)
+	dir, data, err := storyPointsExtract(env, real.Extract.OutDir)
 	if err != nil {
-		return fmt.Errorf("read %s (run %s first): %w", path, CommandExtract, err)
+		return err
+	}
+	if dir != real.Extract.OutDir {
+		if err := c.receipt("story points: today's extract is missing; reading the %s extract", filepath.Base(dir)); err != nil {
+			return err
+		}
 	}
 	_, rows, err := ReadLandings(bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	return WriteStoryPointsReport(c.Out, rows)
+}
+
+// storyPointsExtract resolves the extract storypoints reads: outDir when it
+// holds a landings table, else the newest directory named for a day that does.
+// The extract writes the day's directory directly under the metrics root
+// (RealEnv joins the runtime's metrics directory to the day), so the root is
+// outDir's parent.
+//
+// A table or directory that cannot be read is an error, never a reason to fall
+// back: only an absent table sends the search to an older day.
+func storyPointsExtract(env Env, outDir string) (dir string, data []byte, err error) {
+	today := filepath.Join(outDir, landingsName)
+	data, err = env.ReadFile(today)
+	switch {
+	case err == nil:
+		return outDir, data, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return "", nil, fmt.Errorf("read %s: %w", today, err)
+	}
+	if env.ReadDir == nil {
+		return "", nil, errors.New("story points: Env.ReadDir is unset")
+	}
+	root := filepath.Dir(outDir)
+	entries, err := env.ReadDir(root)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", nil, noExtractError(root)
+	case err != nil:
+		return "", nil, fmt.Errorf("list %s: %w", root, err)
+	}
+	for _, day := range extractDays(entries) {
+		path := filepath.Join(root, day, landingsName)
+		data, err := env.ReadFile(path)
+		switch {
+		case err == nil:
+			return filepath.Dir(path), data, nil
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		default:
+			return "", nil, fmt.Errorf("read %s: %w", path, err)
+		}
+	}
+	return "", nil, noExtractError(root)
+}
+
+// extractDays is the day directories among entries, newest first. Only a
+// canonical YYYY-MM-DD directory is an extract's day; the metrics root's cache
+// and latest directories are not candidates. Canonical day names sort as their
+// dates do.
+func extractDays(entries []DirEntry) []string {
+	days := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir {
+			continue
+		}
+		if _, err := time.Parse(time.DateOnly, entry.Name); err != nil {
+			continue
+		}
+		days = append(days, entry.Name)
+	}
+	slices.SortFunc(days, func(a, b string) int { return cmp.Compare(b, a) })
+	return days
+}
+
+// noExtractError is storypoints' answer to no extract holding a landings table:
+// it names the root searched and the step that writes one.
+func noExtractError(root string) error {
+	return fmt.Errorf("no %s under %s (run %s first)", landingsName, root, CommandExtract)
 }
 
 // runReport is main's report step: the digest rebuilt from the day's extract,
