@@ -585,7 +585,7 @@ cat > "$GL" <<J
 {"bead":"gt-g1","landed_commit":"$G1","landed_at":"2026-10-10T01:00:00Z","risk_paths":["internal/a/one.go"]}
 {"bead":"gt-g2","landed_commit":"$G2","landed_at":"2026-10-10T02:00:00Z","risk_paths":["internal/a/two.go"]}
 J
-green_state() { # sha, then the shell, integration and race verdicts -> the record at $TMP/gs.json
+green_state() { # sha shell integration race -> the record at $TMP/gs.json
   printf '{"last_green_sha":"%s","tiers":{"shell":{"verdict":"%s"},"integration":{"verdict":"%s"},"race":{"verdict":"%s"}}}\n' "$1" "$2" "$3" "$4" > "$TMP/gs.json"
 }
 green_state "$G1" GREEN GREEN GREEN
