@@ -4,6 +4,8 @@ Input to the no-bead-access design (approach A: TASK.md in, outbox file out, hos
 
 Citations verified at `4f9ec2c77`, 2026-11-14. None of the cited files changed through `78ce6dd70` (origin/main `037ba5a16`), the base this census was rebased onto.
 
+Docs gate: `make docs-lint` (`go run ./cmd/docs-lint`) exits 0 on this file.
+
 ## Method and limits
 
 - **Static.** Every count is derived from the formula text and the code paths. No seat was run and no sandbox was created, so no count is measured.
