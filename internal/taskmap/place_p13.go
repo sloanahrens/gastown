@@ -8,7 +8,7 @@ func init() {
 		Entry{Path: "answer", Group: "orient", Use: "Use this when an overseer question is waiting on an answer the operator gives, so the overseer can act on it.", Check: "gt questions shows the question as answered"},
 		Entry{Path: "ask", Group: "orient", Use: "Use this when a decision is the operator's to make and the work waiting on it must not start until it is answered.", Check: "gt questions lists the new question"},
 		Entry{Path: "cycle", Group: "seats", Use: "Use this when you are in a tmux session and want to see the commands that switch between the sessions of a group."},
-		Entry{Path: "cycle next", Group: "seats", Use: "Use this to switch to the next session in the same rig, as the C-b n keybinding does."},
+		Entry{Path: "cycle next", Group: "seats", Use: "Use this when you are in a tmux session and want to move to the next session of the same rig."},
 		Entry{Path: "cycle prev", Group: "seats", Use: "Use this to switch to the previous session in the same rig, as the C-b p keybinding does."},
 		Entry{Path: "down", Group: "shutdown", Use: "Use this to pause the town: it stops the infrastructure and leaves the worktrees in place, so gt up can bring it back.", Check: "gt status shows the services stopped"},
 		Entry{Path: "estop", Group: "shutdown", Use: "Use this when something is going wrong and everything must hold: no new dispatch and no restarts, while running sessions finish.", Check: "gt estop status shows the stop active"},

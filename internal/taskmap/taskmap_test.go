@@ -196,3 +196,20 @@ func TestInternalHoldsNoMetricsCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestSeatCycleUseNamesTheSituation pins the task map's rule for the cycle
+// command (gt-qme1t2): a Use names the situation that calls for the command,
+// so the tmux keybinding that usually invokes it is no part of the entry.
+func TestSeatCycleUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("cycle next")
+	if !ok {
+		t.Fatal(`Lookup("cycle next") found no entry`)
+	}
+	for _, binding := range []string{"C-b", "keybinding"} {
+		if strings.Contains(e.Use, binding) {
+			t.Errorf("cycle next Use = %q; it names a tmux keybinding (%q), not the situation that calls for the command", e.Use, binding)
+		}
+	}
+}
