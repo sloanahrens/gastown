@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -1662,29 +1663,46 @@ func TestAdmissionExpressionsBalanced(t *testing.T) {
 			t.Errorf("expression %d: %v: %.120s", i, err, e)
 		}
 	}
-	for _, bad := range []string{"(a && (b)", "a)", "(a]", "[(a])"} {
+	for _, bad := range []string{"(a && (b)", "a)", "(a]", "[(a])", `x == "abc`, `x == """abc""`} {
 		if balanced(bad) == nil {
 			t.Errorf("balanced(%q) accepted an unbalanced expression", bad)
 		}
 	}
-	if err := balanced(`has(a.b) && x == "(" && (c || [d])`); err != nil {
-		t.Errorf("balanced refused a balanced expression with a bracket inside a string: %v", err)
+	for _, good := range []string{
+		`has(a.b) && x == "(" && (c || [d])`,
+		`x == "\"(" && (y)`,
+		`x == 'it\'s (' && (y)`,
+		`x == "a\\" && (y)`,
+		`x == r"\" && (y)`,
+		`x == br"\" && (y)`,
+		`x == fooR"\"(" && (y)`,
+		`x == r"""a"(b""" && (y)`,
+		`x == """a"(b""" && (y)`,
+		`x == """a\"(""" && (y)`,
+	} {
+		if err := balanced(good); err != nil {
+			t.Errorf("balanced refused a balanced expression %q: %v", good, err)
+		}
 	}
 }
 
 // balanced reports the first unbalanced parenthesis or bracket in a CEL
-// expression, skipping single- and double-quoted string literals.
+// expression. String literals are skipped whole: a single- or double-quoted
+// literal ends at its first unescaped quote, a triple-quoted literal at the
+// matching triple, and an r or R prefix makes the literal raw, so a backslash is
+// not an escape. A literal that never closes is an error.
 func balanced(expr string) error {
+	rs := []rune(expr)
 	var stack []rune
-	var quote rune
-	for _, r := range expr {
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
 		switch {
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			}
 		case r == '\'' || r == '"':
-			quote = r
+			end, err := stringEnd(rs, i)
+			if err != nil {
+				return err
+			}
+			i = end
 		case r == '(' || r == '[':
 			stack = append(stack, r)
 		case r == ')' || r == ']':
@@ -1699,4 +1717,59 @@ func balanced(expr string) error {
 		return fmt.Errorf("%d group(s) never closed", len(stack))
 	}
 	return nil
+}
+
+// stringEnd returns the index of the last rune of the string literal that opens
+// at rs[open], or an error when the literal never closes.
+func stringEnd(rs []rune, open int) (int, error) {
+	quote := rs[open]
+	delim := 1
+	if open+2 < len(rs) && rs[open+1] == quote && rs[open+2] == quote {
+		delim = 3
+	}
+	raw := rawPrefix(rs, open)
+	for j := open + delim; j < len(rs); j++ {
+		switch {
+		case !raw && rs[j] == '\\':
+			j++ // the escaped rune is part of the literal, not its end
+		case closesAt(rs, j, quote, delim):
+			return j + delim - 1, nil
+		}
+	}
+	return 0, fmt.Errorf("string at offset %d never closes", open)
+}
+
+// closesAt reports whether the delimiter of a literal with quote and delim
+// characters starts at rs[j].
+func closesAt(rs []rune, j int, quote rune, delim int) bool {
+	if j+delim > len(rs) {
+		return false
+	}
+	for k := 0; k < delim; k++ {
+		if rs[j+k] != quote {
+			return false
+		}
+	}
+	return true
+}
+
+// rawPrefix reports whether the literal at rs[open] carries an r or R prefix,
+// alone or with b or B. The prefix must start a token, so bar"x" is not raw.
+func rawPrefix(rs []rune, open int) bool {
+	start := open
+	for start > 0 && open-start < 2 && strings.ContainsRune("rRbB", rs[start-1]) {
+		start--
+	}
+	if start == open {
+		return false
+	}
+	if start > 0 && isIdentRune(rs[start-1]) {
+		return false
+	}
+	return strings.ContainsAny(string(rs[start:open]), "rR")
+}
+
+// isIdentRune reports whether r can continue a CEL identifier.
+func isIdentRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
