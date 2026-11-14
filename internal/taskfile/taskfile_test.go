@@ -1,11 +1,13 @@
 package taskfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fullInput is the fixture the acceptance box names: a title, a description,
@@ -197,6 +199,147 @@ func TestAssembleCommentLabel(t *testing.T) {
 				t.Errorf("Assemble() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// numberedNotes is n notes whose texts read "note 00" through "note n-1", so a
+// test names each one and checks the order they render in.
+func numberedNotes(n int) []Note {
+	notes := make([]Note, n)
+	for i := range notes {
+		notes[i] = Note{Text: fmt.Sprintf("note %02d", i)}
+	}
+	return notes
+}
+
+// notesText is the exact text Assemble owes a bead with only these notes.
+func notesText(notes []Note) string {
+	var sb strings.Builder
+	sb.WriteString("# TASK gt-1\n\n## Notes\n\n")
+	for _, note := range notes {
+		sb.WriteString("- " + note.Text + "\n")
+	}
+	return sb.String()
+}
+
+// TestAssembleNotesCap keeps only the newest maxNotes notes, in caller order,
+// and an empty entry renders nothing wherever it lands.
+func TestAssembleNotesCap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		notes []Note
+		want  []Note
+	}{
+		{"at the cap", numberedNotes(20), numberedNotes(20)},
+		{"one over the cap", numberedNotes(21), numberedNotes(21)[1:]},
+		{"five over the cap", numberedNotes(25), numberedNotes(25)[5:]},
+		{
+			"empty entry dropped with the oldest",
+			append([]Note{{}}, numberedNotes(20)...),
+			numberedNotes(20),
+		},
+		{
+			"empty entry inside the cap window",
+			append(numberedNotes(20), Note{}),
+			numberedNotes(20)[1:],
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := Assemble(Input{BeadID: "gt-1", Notes: tt.notes})
+			if want := notesText(tt.want); got != want {
+				t.Errorf("Assemble() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestAssembleKeepsTextAtCap leaves text of exactly maxTextBytes untouched, so
+// the cut starts at one byte over rather than at the cap.
+func TestAssembleKeepsTextAtCap(t *testing.T) {
+	t.Parallel()
+	const head = "# TASK gt-1\n\n## Description\n\n"
+	body := strings.Repeat("a", maxTextBytes-len(head)-1)
+	out := Assemble(Input{BeadID: "gt-1", Description: body})
+	if want := maxTextBytes; len(out) != want {
+		t.Fatalf("fixture assembled to %d bytes, want %d", len(out), want)
+	}
+	if out != head+body+"\n" {
+		t.Error("text at the cap was changed")
+	}
+}
+
+// TestAssembleTruncatesOverCap cuts over-long text to maxTextBytes and ends it
+// with the marker line; the kept head is a prefix of the untruncated text.
+func TestAssembleTruncatesOverCap(t *testing.T) {
+	t.Parallel()
+	const head = "# TASK gt-1\n\n## Description\n\n"
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"one byte over the cap", strings.Repeat("a", maxTextBytes-len(head))},
+		{"ascii", strings.Repeat("a", maxTextBytes+1024)},
+		{"multibyte", strings.Repeat("é", (maxTextBytes+1024)/2)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := Assemble(Input{BeadID: "gt-1", Description: tt.body})
+			if len(out) > maxTextBytes {
+				t.Errorf("assembled %d bytes, cap is %d", len(out), maxTextBytes)
+			}
+			marker := truncationMarker()
+			lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+			if last := lines[len(lines)-1]; last != marker {
+				t.Errorf("last line = %q, want the marker %q", last, marker)
+			}
+			if !utf8.ValidString(out) {
+				t.Error("truncated text is not valid UTF-8")
+			}
+			kept := strings.TrimSuffix(out, "\n"+marker+"\n")
+			if full := head + tt.body + "\n"; !strings.HasPrefix(full, kept) {
+				t.Errorf("kept text is not a prefix of the untruncated text:\ngot:\n%q\nfull:\n%q", kept, full)
+			}
+		})
+	}
+}
+
+// TestAssembleTruncatesInsideRune drives the cut into the middle of a
+// multi-byte rune, where backing off to the rune start is what keeps the text
+// valid UTF-8.
+func TestAssembleTruncatesInsideRune(t *testing.T) {
+	t.Parallel()
+	const head = "# TASK gt-1\n\n## Description\n\n"
+	budget := maxTextBytes - len(truncationMarker()) - 2
+	// Pad so the cut offset lands on a continuation byte of a three-byte rune.
+	pad := ((budget-len(head))%3 + 1) % 3
+	body := strings.Repeat("a", pad) + strings.Repeat("€", maxTextBytes/3+1)
+	if utf8.RuneStart((head + body + "\n")[budget]) {
+		t.Fatalf("fixture offsets do not cut inside a rune (pad %d)", pad)
+	}
+	out := Assemble(Input{BeadID: "gt-1", Description: body})
+	if !utf8.ValidString(out) {
+		t.Error("truncated text is not valid UTF-8")
+	}
+	if len(out) > maxTextBytes {
+		t.Errorf("assembled %d bytes, cap is %d", len(out), maxTextBytes)
+	}
+}
+
+// TestTruncationMarkerNamesTheCap pins the size the marker states to the cap the
+// assembler applies, so a cap change cannot leave the marker naming the old one.
+func TestTruncationMarkerNamesTheCap(t *testing.T) {
+	t.Parallel()
+	marker := truncationMarker()
+	var stated int
+	if _, err := fmt.Sscanf(marker, "[TASK.md truncated: the text exceeded %d KiB and the rest is not shown]", &stated); err != nil {
+		t.Fatalf("marker does not state its size in KiB: %q", marker)
+	}
+	if want := maxTextBytes / 1024; stated != want {
+		t.Errorf("marker states a %d KiB cap, the assembler applies %d KiB", stated, want)
 	}
 }
 
