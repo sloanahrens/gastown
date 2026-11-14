@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,6 +142,24 @@ func TestDirectiveSizeCommandRegistered(t *testing.T) {
 		return
 	}
 	t.Fatal("gt directive size is not registered on gt directive")
+}
+
+// TestDirectiveSizeNoTown checks a town that cannot be found fails the report
+// instead of measuring the directives of whatever directory the command ran in.
+func TestDirectiveSizeNoTown(t *testing.T) {
+	t.Parallel()
+
+	notInTown := errors.New("not in a Gas Town workspace")
+	var buf bytes.Buffer
+	err := runDirectiveSizeWith(&buf, nil, "", func(string) (string, string, error) {
+		return "", "", notInTown
+	})
+	if !errors.Is(err, notInTown) {
+		t.Fatalf("runDirectiveSizeWith = %v, want the resolver's error", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("printed a report with no town: %q", buf.String())
+	}
 }
 
 // TestDirectiveSizeUnknownRole checks a role that names no directive file is

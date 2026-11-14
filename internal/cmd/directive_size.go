@@ -41,15 +41,23 @@ func init() {
 }
 
 func runDirectiveSize(cmd *cobra.Command, args []string) error {
+	return runDirectiveSizeWith(cmd.OutOrStdout(), args, directiveSizeRig, resolveDirectiveContext)
+}
+
+// runDirectiveSizeWith is the command body with the town and rig resolved by an
+// injected lookup, so a test can drive the failure when no town is found. A
+// resolution error is returned as it is: measuring the directives of whatever
+// directory the command ran in would report another town's size.
+func runDirectiveSizeWith(w io.Writer, args []string, rig string, resolve func(string) (string, string, error)) error {
 	role := directiveSizeDefaultRole
 	if len(args) == 1 {
 		role = args[0]
 	}
-	townRoot, rigName, err := resolveDirectiveContext(directiveSizeRig)
+	townRoot, rigName, err := resolve(rig)
 	if err != nil {
 		return err
 	}
-	return runDirectiveSizeIn(cmd.OutOrStdout(), role, townRoot, rigName)
+	return runDirectiveSizeIn(w, role, townRoot, rigName)
 }
 
 // runDirectiveSizeIn prints the directive size for a role in a known town. The
