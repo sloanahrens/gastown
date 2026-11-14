@@ -243,6 +243,8 @@ type updateSeams struct {
 	Run          func(context.Context, update.Deps, update.Options) (update.State, error)
 	// Images wires the images subcommand's registry reads and values write.
 	Images updateImagesSeams
+	// BdBase wires the bd-base subcommand's registry read and pin write.
+	BdBase updateBdBaseSeams
 	// ImageSwap is the daemon's swap a digest install and a rollback put a pair
 	// in force through.
 	ImageSwap func(townRoot string) (update.ImageSwap, error)
@@ -275,6 +277,7 @@ func productionUpdateSeams() updateSeams {
 		DepsFactory:  realUpdateDeps,
 		Run:          update.Run,
 		Images:       productionUpdateImagesSeams(),
+		BdBase:       productionUpdateBdBaseSeams(),
 		ImageSwap:    realImageSwap,
 		PodRun:       realRunFunc(),
 		InPod:        func() bool { return runsInPod(os.Getenv) },
@@ -349,6 +352,7 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	// the same town root, and it reads the wall clock for a heartbeat's age.
 	c.AddCommand(newUpdateStatusCmd(updateStatusSeams{FindTownRoot: seams.FindTownRoot, Now: time.Now}))
 	c.AddCommand(newUpdateImagesCmd(seams.Images))
+	c.AddCommand(newUpdateBdBaseCmd(seams.BdBase))
 	c.AddCommand(newUpdateRollbackCmd(seams))
 	return c
 }
