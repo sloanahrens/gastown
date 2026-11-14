@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Build-only behaviour (darwin, since gt-qq5kv4): StartToken has no reader, so
+// Build-only behaviour (every non-linux platform; darwin since gt-qq5kv4): StartToken has no reader, so
 // no ID can be taken for this process, and an ID recorded with any token never
 // reads as running. A caller that cannot prove a process is its own must not
 // signal it.
