@@ -88,27 +88,31 @@ func TestBuildGatewayFailsWithoutLeavingPartialOutput(t *testing.T) {
 
 // TestBuildGatewayRemovesBdgwWhenBdshimCannotBeMoved: when the second binary
 // cannot be placed, the first one already moved is taken back out, so the call
-// leaves no partial pair. A non-empty directory at the shim's path makes its
-// rename fail.
+// leaves no partial pair. The move and the undo are injected: bdshim's rename is
+// refused, and the removal of bdgw is recorded instead of run on disk.
 func TestBuildGatewayRemovesBdgwWhenBdshimCannotBeMoved(t *testing.T) {
 	t.Parallel()
 	b, _ := builderFor(t)
-	blocker := filepath.Join(b.Out, "bdshim")
-	if err := os.Mkdir(blocker, 0o700); err != nil {
-		t.Fatalf("making the blocking directory: %v", err)
+	var removed []string
+	b.rename = func(_, newpath string) error {
+		if filepath.Base(newpath) == "bdshim" {
+			return errors.New("rename refused")
+		}
+		return nil
 	}
-	if err := os.WriteFile(filepath.Join(blocker, "keep"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("filling the blocking directory: %v", err)
+	b.remove = func(p string) error {
+		removed = append(removed, p)
+		return nil
 	}
 	paths, err := b.BuildGateway(context.Background(), testRev)
 	if err == nil {
-		t.Fatalf("BuildGateway over a blocked bdshim path returned no error (paths %q)", paths)
+		t.Fatalf("BuildGateway returned no error when bdshim could not be moved (paths %q)", paths)
 	}
 	if len(paths) != 0 {
 		t.Errorf("BuildGateway listed %q, want no paths", paths)
 	}
-	if _, err := os.Stat(filepath.Join(b.Out, "bdgw")); !os.IsNotExist(err) {
-		t.Errorf("bdgw is still in the output directory after bdshim failed to move (stat err %v)", err)
+	if want := []string{filepath.Join(b.Out, "bdgw")}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("the undo removed %q, want %q", removed, want)
 	}
 }
 
