@@ -3,7 +3,10 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -214,6 +217,81 @@ func TestRigAddWorkspaceRefusals(t *testing.T) {
 			}
 			if want := tt.wantEvents(dir); !reflect.DeepEqual(*events, want) {
 				t.Errorf("events = %q\nwant %q", *events, want)
+			}
+		})
+	}
+}
+
+func TestBdRealInit(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("cause")
+	gtExe := func() (string, error) { return "/opt/gt/bin/gt", nil }
+	argv := []string{"init", "--database", "gastown"}
+	tests := []struct {
+		name    string
+		locate  func() (string, error)
+		run     func(*exec.Cmd) error
+		wantErr string
+		wantRun bool
+	}{
+		{
+			name:    "gt cannot be located, so bd.real is not started",
+			locate:  func() (string, error) { return "", cause },
+			run:     func(*exec.Cmd) error { return nil },
+			wantErr: "finding gt to locate bd.real",
+		},
+		{
+			name:    "bd.real exits with an error, named by its command",
+			locate:  gtExe,
+			run:     func(*exec.Cmd) error { return cause },
+			wantErr: "bd.real init",
+			wantRun: true,
+		},
+		{
+			name:    "bd.real runs beside gt in the workspace",
+			locate:  gtExe,
+			run:     func(*exec.Cmd) error { return nil },
+			wantRun: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			var started *exec.Cmd
+			err := bdRealInit(tt.locate, func(cmd *exec.Cmd) error {
+				started = cmd
+				return tt.run(cmd)
+			}, dir, argv)
+
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("bdRealInit() error = %v, want nil", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("bdRealInit() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if tt.wantErr == "bd.real init" && !errors.Is(err, cause) {
+				t.Errorf("bdRealInit() error = %v, want it to wrap the bd.real failure", err)
+			}
+			if !tt.wantRun {
+				if started != nil {
+					t.Errorf("bd.real was started, want it not started")
+				}
+				return
+			}
+			if got, want := started.Path, "/opt/gt/bin/bd.real"; got != want {
+				t.Errorf("bd.real path = %q, want %q", got, want)
+			}
+			if !reflect.DeepEqual(started.Args[1:], argv) {
+				t.Errorf("bd.real args = %q, want %q", started.Args[1:], argv)
+			}
+			if started.Dir != dir {
+				t.Errorf("bd.real dir = %q, want the temp workspace %q", started.Dir, dir)
+			}
+			for _, want := range []string{"BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_ALLOW_NEW_DATABASE=1"} {
+				if !slices.Contains(started.Env, want) {
+					t.Errorf("bd.real env lacks %q", want)
+				}
 			}
 		})
 	}

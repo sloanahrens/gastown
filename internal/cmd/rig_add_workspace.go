@@ -122,7 +122,13 @@ const rigInitBdRealTimeout = 5 * time.Minute
 // otherwise on a server that already carries databases (gt-89d3p). bd's output goes
 // to the terminal; the error names the command and never carries that output.
 func runBdRealInit(dir string, argv []string) error {
-	exe, err := os.Executable()
+	return bdRealInit(os.Executable, func(cmd *exec.Cmd) error { return cmd.Run() }, dir, argv)
+}
+
+// bdRealInit is runBdRealInit with the locator of the running gt and the runner
+// injected, so its failure paths are tested without starting bd.real.
+func bdRealInit(locate func() (string, error), run func(*exec.Cmd) error, dir string, argv []string) error {
+	exe, err := locate()
 	if err != nil {
 		return fmt.Errorf("finding gt to locate bd.real: %w", err)
 	}
@@ -136,7 +142,7 @@ func runBdRealInit(dir string, argv []string) error {
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return fmt.Errorf("bd.real %s: %w", argv[0], err)
 	}
 	return nil
