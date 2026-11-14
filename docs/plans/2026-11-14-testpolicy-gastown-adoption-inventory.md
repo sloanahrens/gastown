@@ -163,9 +163,9 @@ slice 1b; the other 68 files pin gastown's own rules and lists.
 `git grep` at `origin/main` finds only two packages outside `internal/testpolicy`
 that import this one: `internal/testpolicy/cmd/budget` and
 `internal/testpolicy/cmd/integrationvet`. Every other exported name has no
-caller outside the package; the package's own tests are its only users. No file
-in the repo-root `cmd/`, `internal/land` or `internal/presubmit` imports it; the
-policy tests are the entry point for the checkers.
+caller outside the package; the package's own code and tests are its only
+users. No file in the repo-root `cmd/`, `internal/land` or `internal/presubmit`
+imports it; the policy tests are the entry point for the checkers.
 
 | Exported name | Declared in | Caller outside the package |
 |---|---|---|
@@ -286,8 +286,9 @@ do not register through the seam:
 ## Implementation beads for gastown's adoption (slice 7)
 
 Each is under 8 points. Every bead is blocked by the operator's publication of
-the module version that carries its slice; the first needs at least slices 1a
-and 1b. Sizes are story points in this rig's scale.
+the module version that carries its slice: the first needs slice 1a, S7.1 needs
+1b, and each later bead needs the slices its files name. Sizes are story points
+in this rig's scale.
 
 1. **S7.0 — add `gt.local/testpolicy` and adopt the scanner, allow machinery and
    Rule seam.** 5 points. Depends on: operator publish (1a+1b), and this
