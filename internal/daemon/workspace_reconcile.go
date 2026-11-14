@@ -17,11 +17,15 @@ import (
 // environment names a gateway (BD_GATEWAY_URL): with none, the daemon starts and
 // patrols exactly as before.
 
-// startWorkspaceReconcile starts the reconcile when a gateway is configured, and
-// reports whether it did; Run ignores the answer, and the registration test
-// asserts it. The loop runs on its own goroutine, so a slow or failed push never
-// blocks the caller; a failed push is logged and retried at the next tick.
+// startWorkspaceReconcile starts the reconcile when the patrol is enabled and a
+// gateway is configured, and reports whether it did; Run ignores the answer, and
+// the registration test asserts it. The loop runs on its own goroutine, so a slow
+// or failed push never blocks the caller; a failed push is logged and retried at
+// the next tick.
 func (d *Daemon) startWorkspaceReconcile() bool {
+	if !IsPatrolEnabled(d.patrol(), "workspace_reconcile") {
+		return false
+	}
 	url := d.env(bdgateway.WorkspaceURLEnv)
 	if url == "" {
 		return false

@@ -83,6 +83,14 @@ func withPatrols(s string) *config.DaemonPatrolConfig {
 	}}
 }
 
+// reconcileEnabled returns a daemon patrol config whose reconcile enabled flag is
+// set to on, with the default interval.
+func reconcileEnabled(on bool) *config.DaemonPatrolConfig {
+	return &config.DaemonPatrolConfig{Patrols: &config.PatrolsConfig{
+		WorkspaceReconcile: &config.WorkspaceReconcileConfig{Enabled: &on},
+	}}
+}
+
 // setPatrolConfig swaps the patrol config a daemon reads, as a reload does.
 func setPatrolConfig(d *Daemon, cfg *config.DaemonPatrolConfig) {
 	d.patrolMu.Lock()
@@ -245,10 +253,13 @@ func TestWorkspaceReconcileRegistration(t *testing.T) {
 	tests := []struct {
 		name           string
 		env            map[string]string
+		patrols        *config.DaemonPatrolConfig
 		wantRegistered bool
 	}{
 		{name: "no gateway: the reconcile is not registered", env: map[string]string{}, wantRegistered: false},
 		{name: "a gateway named: the reconcile is registered", env: gatewayEnv(), wantRegistered: true},
+		{name: "a gateway named, enabled set to true: the reconcile is registered", env: gatewayEnv(), patrols: reconcileEnabled(true), wantRegistered: true},
+		{name: "a gateway named, enabled set to false: the reconcile is not registered", env: gatewayEnv(), patrols: reconcileEnabled(false), wantRegistered: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -257,7 +268,7 @@ func TestWorkspaceReconcileRegistration(t *testing.T) {
 			pusher := &fakeWorkspacePusher{calls: make(chan int, 10)}
 			logs := &lockedBuffer{}
 			installs := 0
-			d := newWorkspaceDaemon(t, tt.env, clk, pusher, logs, nil)
+			d := newWorkspaceDaemon(t, tt.env, clk, pusher, logs, tt.patrols)
 			d.installWorkspacePusher = func(bdgateway.WorkspacePusher) { installs++ }
 
 			if got := d.startWorkspaceReconcile(); got != tt.wantRegistered {

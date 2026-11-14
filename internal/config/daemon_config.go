@@ -1061,6 +1061,11 @@ type CompactorDogConfig struct {
 // Unset takes the default interval; the reconcile itself runs only when the
 // daemon's environment names a gateway.
 type WorkspaceReconcileConfig struct {
+	// Enabled turns the reconcile off when set to false. Nil means on, so a
+	// block that tunes only "interval" does not switch it off. The profile for a
+	// rehearsal pod writes false here, and the daemon then pushes nothing.
+	Enabled *bool `json:"enabled,omitempty"`
+
 	// IntervalStr is how often to re-push, as a duration string. Unset takes
 	// DefaultWorkspaceReconcileInterval; a refused value is logged and that
 	// default is used for the wait.
