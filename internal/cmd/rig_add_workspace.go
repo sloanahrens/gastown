@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
@@ -24,8 +25,8 @@ type rigAddWorkspace struct {
 	gatewayURL string
 	// push sends the town copy to the gateway and returns the manifest hash it stored.
 	push func(ctx context.Context, townRoot string) (string, error)
-	// bdReal runs bd.real init with argv in dir.
-	bdReal func(dir string, argv []string) error
+	// bdReal runs bd.real init with argv in dir, and stops it when ctx is done.
+	bdReal func(ctx context.Context, dir string, argv []string) error
 	// serverPort is the town's Dolt port, 0 when the town has no endpoint. The
 	// init passes it as --server-port so bd.real reaches the town's server, as the
 	// rig's own init does.
@@ -57,7 +58,7 @@ func processRigAddWorkspace(getenv func(string) string) rigAddWorkspace {
 // gateway is sent the metadata that names it; the workspace bd writes stays in the
 // temporary directory, and the database itself lives in Dolt. A failure is returned,
 // naming the rig and the step, and the caller reports it; the rig add itself is not
-// undone, and the daemon's reconcile converges a failed push.
+// undone, and a failed push is retried with gt bd workspace push.
 func (w rigAddWorkspace) run(ctx context.Context, townRoot, rig, prefix string) (err error) {
 	if w.gatewayURL == "" {
 		return nil
@@ -74,11 +75,12 @@ func (w rigAddWorkspace) run(ctx context.Context, townRoot, rig, prefix string) 
 			err = fmt.Errorf("rig %s: removing the temporary workspace %s: %w", rig, dir, rmErr)
 		}
 	}()
-	if err := w.bdReal(dir, rigInitArgv(rig, prefix, w.serverPort(townRoot))); err != nil {
-		return fmt.Errorf("rig %s: bd.real init in the temporary workspace: %w", rig, err)
+	argv := rigInitArgv(rig, prefix, w.serverPort(townRoot))
+	if err := w.bdReal(ctx, dir, argv); err != nil {
+		return fmt.Errorf("rig %s: bd.real init in the temporary workspace: %w; the rig's database is not in the gateway yet, so run `bd.real %s` from an empty directory with BEADS_DIR set to that directory's .beads and BD_ALLOW_NEW_DATABASE=1, then `gt bd workspace push`", rig, err, strings.Join(argv, " "))
 	}
 	if _, err := w.push(ctx, townRoot); err != nil {
-		return fmt.Errorf("rig %s: pushing the workspace to the bd gateway: %w; the daemon's five-minute reconcile retries the push", rig, err)
+		return fmt.Errorf("rig %s: pushing the workspace to the bd gateway: %w; retry it with `gt bd workspace push` once the gateway answers", rig, err)
 	}
 	return nil
 }
@@ -118,16 +120,21 @@ func rigInitArgv(rig, prefix string, port int) []string {
 const rigInitBdRealTimeout = 5 * time.Minute
 
 // runBdRealInit runs bd.real beside the running gt binary, in dir, with BEADS_DIR
-// pinned to dir/.beads. It opts in to creating the database, which bd refuses
-// otherwise on a server that already carries databases (gt-89d3p). bd's output goes
-// to the terminal; the error names the command and never carries that output.
-func runBdRealInit(dir string, argv []string) error {
-	return bdRealInit(os.Executable, func(cmd *exec.Cmd) error { return cmd.Run() }, dir, argv)
+// pinned to dir/.beads. It is stopped when ctx is done. It opts in to creating the
+// database, which bd refuses otherwise on a server that already carries databases
+// (gt-89d3p). bd's output goes to the terminal; the error names the command and
+// never carries that output.
+func runBdRealInit(ctx context.Context, dir string, argv []string) error {
+	return bdRealInit(ctx, os.Executable, func(cmd *exec.Cmd) error { return cmd.Run() }, dir, argv)
 }
 
 // bdRealInit is runBdRealInit with the locator of the running gt and the runner
-// injected, so its failure paths are tested without starting bd.real.
-func bdRealInit(locate func() (string, error), run func(*exec.Cmd) error, dir string, argv []string) error {
+// injected, so its failure paths are tested without starting bd.real. A ctx that
+// is already done stops it before anything starts.
+func bdRealInit(ctx context.Context, locate func() (string, error), run func(*exec.Cmd) error, dir string, argv []string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("bd.real %s not started: %w", argv[0], err)
+	}
 	exe, err := locate()
 	if err != nil {
 		return fmt.Errorf("finding gt to locate bd.real: %w", err)
@@ -135,7 +142,7 @@ func bdRealInit(locate func() (string, error), run func(*exec.Cmd) error, dir st
 	env := beads.StripEnvKey(os.Environ(), "BEADS_DIR")
 	env = beads.StripEnvKey(env, "BD_ALLOW_NEW_DATABASE")
 	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_ALLOW_NEW_DATABASE=1")
-	ctx, cancel := context.WithTimeout(context.Background(), rigInitBdRealTimeout)
+	ctx, cancel := context.WithTimeout(ctx, rigInitBdRealTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(filepath.Dir(exe), "bd.real"), argv...) //nolint:gosec // bd.real beside this binary, argv is built here
 	cmd.Dir = dir
