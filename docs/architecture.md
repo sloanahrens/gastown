@@ -173,6 +173,8 @@ Each credential is a Kubernetes Secret created from a file named in a manifest (
 - the jev environment, a ledger reader connection string and a Dolt archive key;
 - the read-only cloud auditor key used by the cloud check.
 
+The bd gateway tokens are the exception to "created from a file named in a manifest": the operator creates each token's Secret before the apply, and the render only names it. The dashboard's read-class token is one of them (see [The dashboard](#the-dashboard)).
+
 Model access is concrete. The Claude seats (`sbx-haiku`), the om reviews, the overseer and the birds run on the Claude Pro Max plan's OAuth sign-in. The DeepSeek seat uses the DeepSeek key, held as a Secret. No raw Anthropic API key exists anywhere in the town.
 
 ### Forgejo and its runner
@@ -195,7 +197,7 @@ The workflow files in Forgejo are protected: only a human account may change the
 
 ### The dashboard
 
-The dashboard is a second Deployment of the same image. It serves one read-only page. A single hub polls the town's files on its own clock and pushes the result to every open browser tab, so a second tab costs nothing and a page nobody has open costs nothing. Nothing publishes it. The operator reaches it with a `kubectl port-forward` from the Mac to the dashboard Deployment (local port 8788 to the pod's 8787) and opens the page in a browser tab. The panes include: Attention, Birds, Beads, Cloud (with Deploys), Cost, Events, Forgejo, Landings (with Polecats), Machine, om review, Rigs and Tier sweeps.
+The dashboard is a second Deployment of the same image. It serves one read-only page. A single hub polls the town's files on its own clock and pushes the result to every open browser tab, so a second tab costs nothing and a page nobody has open costs nothing. Nothing publishes it. The operator reaches it with a `kubectl port-forward` from the Mac to the dashboard Deployment (local port 8788 to the pod's 8787) and opens the page in a browser tab. With `--bd-gateway-url` the dashboard's bd forwarder points at the bd gateway, and the dashboard mounts its own read-class token Secret (`bd-gateway-dashboard`) read-only. The Secret holds the read-class token only, and no dashboard manifest mounts the daemon's Secret (`bd-gateway-daemon`). The panes include: Attention, Birds, Beads, Cloud (with Deploys), Cost, Events, Forgejo, Landings (with Polecats), Machine, om review, Rigs and Tier sweeps.
 
 ### The tracker
 

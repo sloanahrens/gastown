@@ -94,6 +94,7 @@ type clusterRenderFlags struct {
 	doltBackupHostPath string
 	dashboard          bool
 	dashboardClaudeDir string
+	bdGatewayURL       string
 	daemonClaudeDir    string
 	tracker            bool
 	trackerDSNSecret   string
@@ -183,6 +184,8 @@ func init() {
 		"also write the dashboard's Service and Deployment beside the daemon's; the secrets manifest must name "+k8sdaemon.ViewerTokenFile+" (a live render only)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardClaudeDir, "dashboard-claude-dir", "",
 		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the dashboard at /root/.claude; it needs --dashboard")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayURL, "bd-gateway-url", "",
+		"the bd gateway's base URL, http or https with a host, for the dashboard's bd forwarder: the dashboard carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE and mounts the "+k8sdaemon.BdGatewayDashboardSecretName+" Secret read-only; the render names the Secret and never creates it; it needs --dashboard")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonClaudeDir, "daemon-claude-dir", "",
 		"the Mac's ~/.claude directory, an absolute path, whose projects directory is mounted read-only in the daemon at /root/.claude-host/projects, beside the pod's own /root/.claude, where the usage scan reads the host's transcripts")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.tracker, "tracker", false,
@@ -246,6 +249,10 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--dashboard-claude-dir is for the dashboard: name --dashboard with it, or drop the flag")
 	case f.dashboardClaudeDir != "" && !filepath.IsAbs(f.dashboardClaudeDir):
 		return fmt.Errorf("--dashboard-claude-dir %q must be an absolute path: the pod names the host directory", f.dashboardClaudeDir)
+	case f.bdGatewayURL != "" && strings.TrimSpace(f.bdGatewayURL) == "":
+		return errors.New("--bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
+	case f.bdGatewayURL != "" && !f.dashboard:
+		return errors.New("--bd-gateway-url is for the dashboard: name --dashboard with it, or drop the flag")
 	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
 		return fmt.Errorf("--daemon-claude-dir %q must be an absolute path: the pod names the host directory", f.daemonClaudeDir)
 	case f.rehearsal && f.tracker:
@@ -378,6 +385,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		HostGatewayIP:           f.hostGateway,
 		Dashboard:               f.dashboard,
 		DashboardClaudeDir:      f.dashboardClaudeDir,
+		BdGatewayURL:            strings.TrimSpace(f.bdGatewayURL),
 		DaemonClaudeDir:         f.daemonClaudeDir,
 		Tracker:                 f.tracker,
 		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),

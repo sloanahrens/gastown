@@ -763,6 +763,13 @@ type Values struct {
 	// nothing. Set, it must be absolute and Dashboard must be set. The mount is the
 	// whole directory, wider than the panes read; a narrower list is a later bead.
 	DashboardClaudeDir string
+	// BdGatewayURL points the dashboard's bd forwarder at the bd gateway: the
+	// dashboard carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE, and mounts its
+	// own read-class token Secret (BdGatewayDashboardSecretName) read-only. The
+	// Secret is named, never created. Empty, the dashboard renders byte-identical to
+	// the render without it. Set, Dashboard must be set, and the URL must be http or
+	// https with a host and no user information (bdgateway.go).
+	BdGatewayURL string
 	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container reads
 	// read-only, as a hostPath of type Directory so a missing directory fails the
 	// pod rather than creating one. Empty mounts nothing. Set, it must be absolute.
@@ -1416,19 +1423,26 @@ func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 // image's entrypoint, which is the daemon's, and no --bind is passed, so the page
 // listens on 127.0.0.1 where a port-forward reaches it. Its environment is the
 // daemon container's, from the same helper, so GT_DAEMON_SUPERVISOR resolves Dolt
-// to the container host here as it does in the daemon.
+// to the container host here as it does in the daemon. Set, Values.BdGatewayURL
+// adds the dashboard's own gateway pair after that list.
 //
 // Its probes are curl on the index. The index is static HTML that reads no Dolt
 // (internal/dashboard/server.go), so a Dolt outage on the Mac does not restart the
 // pod.
 func dashboardContainer(v Values) Container {
+	env := containerEnvironment(v)
+	// The gateway names are the dashboard's own, added after the shared environment,
+	// so with the URL unset the list is the daemon's exactly.
+	if v.BdGatewayURL != "" {
+		env = append(env, bdGatewayEnv(v.BdGatewayURL)...)
+	}
 	return Container{
 		Name:           DashboardName,
 		Image:          v.Image,
 		Command:        []string{"gt"},
 		Args:           []string{"dashboard", "--port", strconv.Itoa(DashboardPort)},
 		WorkingDir:     TownRootPath,
-		Env:            containerEnvironment(v),
+		Env:            env,
 		VolumeMounts:   dashboardMounts(v),
 		ReadinessProbe: dashboardProbe(20, 15, 10, 3),
 		// Liveness is no stricter than readiness: every number is at least the
@@ -1454,8 +1468,9 @@ func dashboardProbe(initialDelay, period, timeout, failures int32) *Probe {
 }
 
 // dashboardMounts are the dashboard's paths: the town state read-only, the viewer
-// token as one read-only file where the page reads it, the /tmp emptyDir, and
-// the claude directory read-only when one is set.
+// token as one read-only file where the page reads it, the /tmp emptyDir, the
+// claude directory read-only when one is set, and the gateway token directory
+// read-only when Values.BdGatewayURL is set.
 func dashboardMounts(v Values) []VolumeMount {
 	m := []VolumeMount{
 		{Name: TownStateClaim, MountPath: TownRootPath, ReadOnly: true},
@@ -1465,12 +1480,16 @@ func dashboardMounts(v Values) []VolumeMount {
 	if v.DashboardClaudeDir != "" {
 		m = append(m, VolumeMount{Name: DashboardClaudeVolume, MountPath: ClaudeHomePath, ReadOnly: true})
 	}
+	if v.BdGatewayURL != "" {
+		m = append(m, bdGatewayMount())
+	}
 	return m
 }
 
 // dashboardVolumes are the dashboard's volumes: the town-state claim, the /tmp
-// emptyDir, the viewer Secret at the entry's manifest mode, and the claude
-// directory as a hostPath of type Directory when one is set.
+// emptyDir, the viewer Secret at the entry's manifest mode, the claude directory
+// as a hostPath of type Directory when one is set, and the gateway's read-class
+// token Secret when Values.BdGatewayURL is set.
 func dashboardVolumes(v Values) ([]Volume, error) {
 	viewer, ok := v.viewerEntry()
 	if !ok {
@@ -1487,6 +1506,9 @@ func dashboardVolumes(v Values) ([]Volume, error) {
 	}
 	if v.DashboardClaudeDir != "" {
 		vols = append(vols, claudeDirVolume(DashboardClaudeVolume, v.DashboardClaudeDir))
+	}
+	if v.BdGatewayURL != "" {
+		vols = append(vols, bdGatewayVolume(BdGatewayDashboardSecretName))
 	}
 	return vols, nil
 }
@@ -2047,6 +2069,9 @@ func (v Values) validate() error {
 		return err
 	}
 	if err := v.validateDashboard(); err != nil {
+		return err
+	}
+	if err := v.validateBdGateway(); err != nil {
 		return err
 	}
 	if err := v.validateTracker(); err != nil {
