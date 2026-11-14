@@ -24,6 +24,9 @@ const (
 	DaemonImage = "gastown-daemon"
 	// PolecatImage is the polecat image's name.
 	PolecatImage = "gastown-polecat"
+	// BdImage is the bd gateway image's name: the container that runs bd
+	// behind the gateway (deploy/bd). Its digest is the optional bd key.
+	BdImage = "gastown-bd"
 	// CommitLabel is the label each image carries for the commit it was built
 	// from.
 	CommitLabel = "org.gastown.gt-commit"
@@ -97,11 +100,20 @@ func (r Registry) Validate() error {
 	return nil
 }
 
-// Values is the image pair recorded for one commit.
+// ErrBdNotDigest is a bd key that is not a digest reference: a tag, or any
+// other text, which a deploy could not pin.
+var ErrBdNotDigest = errors.New("the values file's bd line is not a digest reference")
+
+// Values is the image pair recorded for one commit, and the bd gateway image
+// when one was built for it.
 type Values struct {
 	// Daemon and Polecat are digest references, repo@sha256:<64 lowercase hex>.
 	Daemon  string `yaml:"daemon"`
 	Polecat string `yaml:"polecat"`
+	// Bd is the bd gateway image's digest reference, the same form as Daemon.
+	// Empty means no bd image was recorded: a values file without the key
+	// loads with Bd empty, and the writer omits the line.
+	Bd string `yaml:"bd,omitempty"`
 	// Commit is the full commit both images were built from.
 	Commit string `yaml:"commit"`
 }
@@ -177,7 +189,11 @@ func Write(path string, v Values) error {
 	// digits and '.', '_', ':', '/', '-', '@'; in the commit, lowercase hex.
 	// No value holds a space or starts with a YAML indicator, so each is
 	// written as a plain scalar and needs no quoting.
-	data := fmt.Sprintf("%sdaemon: %s\npolecat: %s\ncommit: %s\n", valuesHeader, v.Daemon, v.Polecat, v.Commit)
+	bd := ""
+	if v.Bd != "" {
+		bd = fmt.Sprintf("bd: %s\n", v.Bd)
+	}
+	data := fmt.Sprintf("%sdaemon: %s\npolecat: %s\n%scommit: %s\n", valuesHeader, v.Daemon, v.Polecat, bd, v.Commit)
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("imagevalues: create %s: %w", dir, err)
@@ -221,6 +237,9 @@ func (v Values) validate() error {
 		if !ValidRef(field.value) {
 			return fmt.Errorf("imagevalues: the values file's %s %q is not repo@sha256:<64 lowercase hex>", field.name, field.value)
 		}
+	}
+	if v.Bd != "" && !ValidRef(v.Bd) {
+		return fmt.Errorf("imagevalues: %w: %q is not repo@sha256:<64 lowercase hex>", ErrBdNotDigest, v.Bd)
 	}
 	if !ValidCommit(v.Commit) {
 		return fmt.Errorf("imagevalues: the values file's commit %q is not a full 40-character lowercase commit", v.Commit)
