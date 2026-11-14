@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -331,6 +332,96 @@ func TestBdgwServerRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBdgwInternalFailureHidesDetail: a failure inside the gateway is a 500 whose
+// body names the failure in fixed words, never the error text the executor or the
+// host wrote, so a caller cannot read host paths or the bd binary from a refusal.
+func TestBdgwInternalFailureHidesDetail(t *testing.T) {
+	t.Parallel()
+	const detail = "no bd binary at /opt/secret/bd"
+	cases := []struct {
+		name   string
+		runner error
+	}{
+		{name: "unknown failure", runner: errors.New("disk on fire: " + detail)},
+		{name: "unconfigured", runner: fmt.Errorf("%w: %s", ErrUnconfigured, detail)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			log, calls := newCapturingCallLog(t)
+			g := newTestGateway(t, mustStore(t), log, &stubRunner{err: tc.runner})
+			rec := httptest.NewRecorder()
+			g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show"}}, ""))
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body %s", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), detail) {
+				t.Errorf("body %q echoes the internal error detail", rec.Body.String())
+			}
+			var payload ErrorPayload
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("body %q is not an error payload: %v", rec.Body.String(), err)
+			}
+			if payload.Code != codeInternal || payload.Message != "the gateway failed the call" {
+				t.Errorf("payload = %+v, want code %q and the fixed message", payload, codeInternal)
+			}
+			// The operator still gets the cause: the call log keeps the full error.
+			entries := calls()
+			if len(entries) != 1 || !strings.Contains(entries[0].Error, detail) || entries[0].ExitCode != ExitRefused {
+				t.Errorf("call log = %+v, want one refused call carrying the detail", entries)
+			}
+		})
+	}
+}
+
+// TestBdgwNoFrameIsLogged: a runner that returns without a frame or an error is a
+// 500 for the caller, and the call log records that cause for the operator.
+func TestBdgwNoFrameIsLogged(t *testing.T) {
+	t.Parallel()
+	log, calls := newCapturingCallLog(t)
+	g := newTestGateway(t, mustStore(t), log, silentRunner{})
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show"}}, ""))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body %s", rec.Code, rec.Body.String())
+	}
+	entries := calls()
+	if len(entries) != 1 || entries[0].Error != noFrameMessage || entries[0].ExitCode != ExitRefused {
+		t.Errorf("call log = %+v, want one refused call with the no-frame cause", entries)
+	}
+}
+
+// newCapturingCallLog is a call log that keeps its lines in memory instead of on
+// disk. The returned func closes the log and returns the entries it stored, so
+// it reads what the writer wrote, never a line still queued.
+func newCapturingCallLog(t *testing.T) (*CallLog, func() []entry) {
+	t.Helper()
+	var lines [][]byte
+	hook := func(line []byte) error {
+		lines = append(lines, append([]byte(nil), line...))
+		return nil
+	}
+	l, err := newCallLog(testOptions(t), hook)
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l, func() []entry {
+		if err := l.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		entries := make([]entry, 0, len(lines))
+		for _, line := range lines {
+			var e entry
+			if err := json.Unmarshal(line, &e); err != nil {
+				t.Fatalf("call log line %q: %v", line, err)
+			}
+			entries = append(entries, e)
+		}
+		return entries
 	}
 }
 

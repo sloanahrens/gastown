@@ -48,6 +48,10 @@ const (
 	// maxFieldBytes bounds the class and caller strings: the caller writes
 	// X-Gt-Caller, so a long one must not grow a line without bound.
 	maxFieldBytes = 64
+	// maxErrorBytes bounds the error a refused call logs. It is longer than a
+	// field because the cause is what the operator reads, and it stays bounded so
+	// a long error cannot grow a line without limit.
+	maxErrorBytes = 512
 	// maxLoggedItems bounds the flags and the bead ids one entry carries.
 	maxLoggedItems = 32
 )
@@ -90,6 +94,9 @@ type CallRecord struct {
 	ExitCode int
 	// Duration is how long the call took.
 	Duration time.Duration
+	// Error is the failure the gateway answered its caller with a fixed message
+	// for. The log keeps the full text for the operator; the caller never sees it.
+	Error string
 }
 
 // Stats is a snapshot of the log's counters, which GET /v1/stats serves.
@@ -109,7 +116,8 @@ type Stats struct {
 }
 
 // entry is one JSONL line. The field set is fixed — ts, class, caller, verb,
-// flags, beads, exit code and duration — so argv data cannot ride along unseen.
+// flags, beads, exit code and duration, plus the error of a refused call — so
+// argv data cannot ride along unseen.
 type entry struct {
 	TS         string   `json:"ts"`
 	Class      string   `json:"class"`
@@ -119,6 +127,7 @@ type entry struct {
 	Beads      []string `json:"beads"`
 	ExitCode   int      `json:"exit_code"`
 	DurationMS int64    `json:"duration_ms"`
+	Error      string   `json:"error,omitempty"`
 }
 
 // CallLog writes one JSONL line per bd call behind a buffered channel, rotates
@@ -240,6 +249,7 @@ func (l *CallLog) Log(rec CallRecord) {
 		Beads:      parsed.beads,
 		ExitCode:   rec.ExitCode,
 		DurationMS: rec.Duration.Milliseconds(),
+		Error:      boundTextTo(rec.Error, maxErrorBytes),
 	}
 	line, marshalErr := json.Marshal(e)
 
@@ -434,12 +444,18 @@ func isBeadID(token string, prefixes map[string]bool) bool {
 // boundText strips control characters and truncates s to maxFieldBytes without
 // splitting a rune.
 func boundText(s string) string {
+	return boundTextTo(s, maxFieldBytes)
+}
+
+// boundTextTo strips control characters and truncates s to limit bytes without
+// splitting a rune.
+func boundTextTo(s string, limit int) string {
 	var b strings.Builder
 	for _, r := range s {
 		if unicode.IsControl(r) {
 			continue
 		}
-		if b.Len()+utf8.RuneLen(r) > maxFieldBytes {
+		if b.Len()+utf8.RuneLen(r) > limit {
 			break
 		}
 		b.WriteRune(r)

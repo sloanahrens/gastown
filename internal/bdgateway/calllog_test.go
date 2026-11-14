@@ -353,6 +353,36 @@ func TestCallLogBoundedFields(t *testing.T) {
 	}
 }
 
+// TestCallLogBoundsErrorText: a refused call's error reaches the line for the
+// operator up to maxErrorBytes, and a longer one is cut there so the line stays
+// bounded.
+func TestCallLogBoundsErrorText(t *testing.T) {
+	t.Parallel()
+	var lines [][]byte
+	hook := func(line []byte) error {
+		lines = append(lines, append([]byte(nil), line...))
+		return nil
+	}
+	l, err := newCallLog(testOptions(t), hook)
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "read", Caller: "c", Argv: []string{"show"}, ExitCode: ExitRefused, Error: strings.Repeat("x", maxErrorBytes+100)})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("wrote %d lines, want 1", len(lines))
+	}
+	var e entry
+	if err := json.Unmarshal(lines[0], &e); err != nil {
+		t.Fatalf("line %q: %v", lines[0], err)
+	}
+	if got := len(e.Error); got != maxErrorBytes {
+		t.Errorf("error is %d bytes, want it cut to %d", got, maxErrorBytes)
+	}
+}
+
 // TestCallLogWriteError checks a failed write is reported by Close, not read as
 // a clean log.
 func TestCallLogWriteError(t *testing.T) {

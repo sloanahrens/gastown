@@ -239,6 +239,18 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 	frames := &httpFrames{w: w}
 	if err := g.runner.Exec(r.Context(), req, stdin, frames); !frames.Started() {
 		status, code, message := execRefusal(err)
+		if status == http.StatusInternalServerError {
+			// The caller reads the fixed message; the operator reads the cause in the
+			// call log, which counts this refusal as the gateway's failed call.
+			g.log.Log(CallRecord{
+				Class:    string(ident.Class),
+				Caller:   r.Header.Get("X-Gt-Caller"),
+				Argv:     req.Argv,
+				ExitCode: ExitRefused,
+				Duration: time.Since(start),
+				Error:    internalDetail(err),
+			})
+		}
 		refuse(w, status, code, message)
 		return
 	}
@@ -250,7 +262,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		// The stream began but no exit frame reached the caller: it stopped
 		// reading, and the executor's ending is the reason. Count it as the
 		// gateway's failed call rather than a status bd chose.
-		status = 125
+		status = ExitRefused
 	}
 	g.log.Log(CallRecord{
 		Class:    string(ident.Class),
@@ -338,6 +350,27 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// ExitRefused is the exit status of a call the gateway refused or could not
+// finish: the HTTP handler records it for a stream that never sent an exit frame,
+// and cmd/bdgw's exec returns it for a call refused before bd started.
+const ExitRefused = 125
+
+// internalFailureMessage is what a caller reads for a failure inside the gateway.
+const internalFailureMessage = "the gateway failed the call"
+
+// noFrameMessage is the detail of a runner that returned without a frame or an
+// error: the caller reads it and the call log keeps it.
+const noFrameMessage = "the call returned without a frame"
+
+// internalDetail is the cause the call log keeps for an internal failure: the
+// error's text, or the no-frame cause when the runner returned no error.
+func internalDetail(err error) string {
+	if err == nil {
+		return noFrameMessage
+	}
+	return err.Error()
+}
+
 // execRefusal maps a refusal the executor made before it started bd to the HTTP
 // status the design lists. An error this function does not know is a 500, never
 // a 200: a run that did not start must not read as one that did.
@@ -347,7 +380,7 @@ func execRefusal(err error) (status int, code, message string) {
 		// Started and returned no error without a frame cannot happen: every
 		// path that starts bd writes an exit frame. A nil here is a runner that
 		// broke that contract, and it is not read as success.
-		return http.StatusInternalServerError, codeInternal, "the call returned without a frame"
+		return http.StatusInternalServerError, codeInternal, noFrameMessage
 	case errors.Is(err, ErrStdinTooLarge):
 		return http.StatusRequestEntityTooLarge, codeStdinTooLarge, err.Error()
 	case errors.Is(err, ErrTooManyCalls):
@@ -358,9 +391,13 @@ func execRefusal(err error) (status int, code, message string) {
 	case errors.Is(err, ErrClientGone):
 		return statusClientClosed, codeUnavailable, err.Error()
 	case errors.Is(err, ErrUnconfigured):
-		return http.StatusInternalServerError, codeInternal, err.Error()
+		// The gateway's own configuration is not the caller's to read: the detail
+		// names host paths and the bd binary, so it stays inside the gateway.
+		return http.StatusInternalServerError, codeInternal, internalFailureMessage
 	default:
-		return http.StatusInternalServerError, codeInternal, err.Error()
+		// An unknown failure may carry anything the executor or the host wrote, so
+		// the caller gets the fixed message and never the error text.
+		return http.StatusInternalServerError, codeInternal, internalFailureMessage
 	}
 }
 

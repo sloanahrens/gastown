@@ -68,6 +68,15 @@ const (
 	CodeSignaled    = "bd-signaled"
 )
 
+// The messages an ending that has an internal cause carries to the caller. They
+// name the failure and nothing of the cause: a process error can hold a path, an
+// errno or a command line. The cause stays in the error Exec returns, which the
+// server logs on the operator's side.
+const (
+	messageStartFailed = "the gateway could not start bd"
+	messageWaitFailed  = "the gateway could not read how bd ended"
+)
+
 // Options is the executor's fixed configuration. Everything the caller may not
 // set, including bd's binary and the computed half of its environment, lives
 // here rather than in the request head.
@@ -240,7 +249,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	defer fw.discard.Store(true)
 	proc, err := e.runner.Start(e.binary, req.Argv, env, dir)
 	if err != nil {
-		writeEnding(fw, CodeStartFailed, 125, err.Error())
+		writeEnding(fw, CodeStartFailed, ExitRefused, messageStartFailed)
 		return fmt.Errorf("bdgateway: starting bd: %w", err)
 	}
 
@@ -412,7 +421,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		case readErr != nil:
 			// A read the gateway could not make is its failure, even though the
 			// cancel it caused is what ended the wait.
-			writeEnding(fw, CodeWaitFailed, 125, readErr.Error())
+			writeEnding(fw, CodeWaitFailed, ExitRefused, messageWaitFailed)
 			return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), killErr)
 		case ctx.Err() != nil:
 			writeEnding(fw, CodeCanceled, 124, "the request ended before bd did")
@@ -425,10 +434,10 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	}
 	switch {
 	case waitErr != nil:
-		writeEnding(fw, CodeWaitFailed, 125, waitErr.Error())
+		writeEnding(fw, CodeWaitFailed, ExitRefused, messageWaitFailed)
 		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), killErr)
 	case status < 0:
-		writeEnding(fw, CodeSignaled, 125, "bd was killed by a signal")
+		writeEnding(fw, CodeSignaled, ExitRefused, "bd was killed by a signal")
 		return withKillErr(ErrSignaled, killErr)
 	}
 	// bd exited with a status of its own, which is the answer when no ending
