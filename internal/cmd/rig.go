@@ -517,6 +517,14 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// With a bd gateway configured, initialize the rig's database through bd.real
+	// in a temporary workspace and push the town copy, so the rig is usable through
+	// the gateway at once. A failure is reported; the rig add stands and the
+	// daemon's reconcile converges a failed push (docs/design/bd-container.md, G8b).
+	if err := processRigAddWorkspace(os.Getenv).run(cmd.Context(), townRoot, name, newRig.Config.Prefix); err != nil {
+		fmt.Printf("  %s Bd gateway: %v\n", style.Warning.Render("!"), err)
+	}
+
 	// Auto-assign a namepool theme that doesn't collide with other rigs (gas-21k).
 	autoAssignNamepoolTheme(os.Stdout, townRoot, name, mgr)
 

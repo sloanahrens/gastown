@@ -1,0 +1,298 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+)
+
+const rigAddInitArgs = "init --prefix gt --database gastown --server --force --skip-agents"
+
+// fakeRigAddWorkspace returns a rigAddWorkspace whose seams record each call in
+// order, so a test asserts what ran and in what order without a bd.real or a
+// gateway. The temp directory is the test's own, so nothing touches the host.
+func fakeRigAddWorkspace(t *testing.T, gatewayURL string) (rigAddWorkspace, *[]string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	var events []string
+	return rigAddWorkspace{
+		gatewayURL: gatewayURL,
+		push: func(_ context.Context, townRoot string) (string, error) {
+			events = append(events, "push "+townRoot)
+			return "manifest-sha", nil
+		},
+		bdReal: func(workDir string, argv []string) error {
+			events = append(events, "init in "+workDir+": "+strings.Join(argv, " "))
+			return nil
+		},
+		serverPort: func(string) int { return 0 },
+		tempDir: func() (string, error) {
+			events = append(events, "tempdir")
+			return dir, nil
+		},
+		removeDir: func(path string) error {
+			events = append(events, "remove "+path)
+			return nil
+		},
+	}, &events, dir
+}
+
+func TestRigAddWorkspaceInitThenPush(t *testing.T) {
+	t.Parallel()
+	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
+
+	if err := w.run(context.Background(), "/town", "gastown", "gt"); err != nil {
+		t.Fatalf("run() error = %v, want nil", err)
+	}
+
+	want := []string{
+		"tempdir",
+		"init in " + dir + ": " + rigAddInitArgs,
+		"push /town",
+		"remove " + dir,
+	}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("events = %q\nwant %q", *events, want)
+	}
+}
+
+func TestRigAddWorkspaceInitPassesTownPort(t *testing.T) {
+	t.Parallel()
+	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
+	w.serverPort = func(townRoot string) int {
+		if townRoot != "/town" {
+			t.Errorf("serverPort(%q), want it asked about the town root", townRoot)
+		}
+		return 3307
+	}
+
+	if err := w.run(context.Background(), "/town", "gastown", "gt"); err != nil {
+		t.Fatalf("run() error = %v, want nil", err)
+	}
+
+	want := []string{
+		"tempdir",
+		"init in " + dir + ": init --prefix gt --database gastown --server --server-port 3307 --force --skip-agents",
+		"push /town",
+		"remove " + dir,
+	}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("events = %q\nwant %q", *events, want)
+	}
+}
+
+func TestRigAddWorkspaceOff(t *testing.T) {
+	t.Parallel()
+	w, events, _ := fakeRigAddWorkspace(t, "")
+
+	if err := w.run(context.Background(), "/town", "gastown", "gt"); err != nil {
+		t.Fatalf("run() error = %v, want nil", err)
+	}
+	if len(*events) != 0 {
+		t.Errorf("with no gateway, run made calls %q; want none (no temp workspace, no bd.real, no push)", *events)
+	}
+}
+
+func TestRigAddWorkspacePushFails(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("gateway answered 503")
+	w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
+	w.push = func(_ context.Context, _ string) (string, error) {
+		*events = append(*events, "push")
+		return "", cause
+	}
+
+	err := w.run(context.Background(), "/town", "gastown", "gt")
+	if err == nil {
+		t.Fatal("run() error = nil, want the push failure reported")
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("run() error = %v, want it to wrap the push cause", err)
+	}
+	for _, want := range []string{"rig gastown", "pushing the workspace to the bd gateway"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("run() error = %q, want it to name %q", err, want)
+		}
+	}
+	want := []string{"tempdir", "init in " + dir + ": " + rigAddInitArgs, "push", "remove " + dir}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("events = %q\nwant %q: the temp workspace is removed even after a failed push", *events, want)
+	}
+}
+
+func TestRigAddWorkspaceRefusals(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("cause")
+	tests := []struct {
+		name       string
+		breakSeam  func(w *rigAddWorkspace)
+		wantErr    string
+		wantEvents func(dir string) []string
+	}{
+		{
+			name: "temp directory cannot be made",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.tempDir = func() (string, error) { return "", cause }
+			},
+			wantErr:    "making the temporary workspace",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "bd.real init fails, so nothing is pushed",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.bdReal = func(string, []string) error { return cause }
+			},
+			wantErr: "bd.real init",
+			wantEvents: func(dir string) []string {
+				return []string{"tempdir", "remove " + dir}
+			},
+		},
+		{
+			name: "temp directory cannot be removed after a good push",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.removeDir = func(string) error { return cause }
+			},
+			wantErr: "removing the temporary workspace",
+			wantEvents: func(dir string) []string {
+				return []string{"tempdir", "init in " + dir + ": " + rigAddInitArgs, "push /town"}
+			},
+		},
+		{
+			name: "no pusher wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.push = nil
+			},
+			wantErr:    "pusher",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no bd.real runner wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.bdReal = nil
+			},
+			wantErr:    "bd.real runner",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no server port source wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.serverPort = nil
+			},
+			wantErr:    "server port",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no temp directory maker wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.tempDir = nil
+			},
+			wantErr:    "temp directory",
+			wantEvents: func(string) []string { return nil },
+		},
+		{
+			name: "no temp directory remover wired while a gateway is set",
+			breakSeam: func(w *rigAddWorkspace) {
+				w.removeDir = nil
+			},
+			wantErr:    "temp directory remover",
+			wantEvents: func(string) []string { return nil },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, events, dir := fakeRigAddWorkspace(t, "http://gateway.test:7440")
+			tt.breakSeam(&w)
+
+			err := w.run(context.Background(), "/town", "gastown", "gt")
+			if err == nil {
+				t.Fatalf("run() error = nil, want an error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("run() error = %q, want it to contain %q", err, tt.wantErr)
+			}
+			if want := tt.wantEvents(dir); !reflect.DeepEqual(*events, want) {
+				t.Errorf("events = %q\nwant %q", *events, want)
+			}
+		})
+	}
+}
+
+func TestBdRealInit(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("cause")
+	gtExe := func() (string, error) { return "/opt/gt/bin/gt", nil }
+	argv := []string{"init", "--database", "gastown"}
+	tests := []struct {
+		name    string
+		locate  func() (string, error)
+		run     func(*exec.Cmd) error
+		wantErr string
+		wantRun bool
+	}{
+		{
+			name:    "gt cannot be located, so bd.real is not started",
+			locate:  func() (string, error) { return "", cause },
+			run:     func(*exec.Cmd) error { return nil },
+			wantErr: "finding gt to locate bd.real",
+		},
+		{
+			name:    "bd.real exits with an error, named by its command",
+			locate:  gtExe,
+			run:     func(*exec.Cmd) error { return cause },
+			wantErr: "bd.real init",
+			wantRun: true,
+		},
+		{
+			name:    "bd.real runs beside gt in the workspace",
+			locate:  gtExe,
+			run:     func(*exec.Cmd) error { return nil },
+			wantRun: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			var started *exec.Cmd
+			err := bdRealInit(tt.locate, func(cmd *exec.Cmd) error {
+				started = cmd
+				return tt.run(cmd)
+			}, dir, argv)
+
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("bdRealInit() error = %v, want nil", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("bdRealInit() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if tt.wantErr == "bd.real init" && !errors.Is(err, cause) {
+				t.Errorf("bdRealInit() error = %v, want it to wrap the bd.real failure", err)
+			}
+			if !tt.wantRun {
+				if started != nil {
+					t.Errorf("bd.real was started, want it not started")
+				}
+				return
+			}
+			if got, want := started.Path, "/opt/gt/bin/bd.real"; got != want {
+				t.Errorf("bd.real path = %q, want %q", got, want)
+			}
+			if !reflect.DeepEqual(started.Args[1:], argv) {
+				t.Errorf("bd.real args = %q, want %q", started.Args[1:], argv)
+			}
+			if started.Dir != dir {
+				t.Errorf("bd.real dir = %q, want the temp workspace %q", started.Dir, dir)
+			}
+			for _, want := range []string{"BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_ALLOW_NEW_DATABASE=1"} {
+				if !slices.Contains(started.Env, want) {
+					t.Errorf("bd.real env lacks %q", want)
+				}
+			}
+		})
+	}
+}
