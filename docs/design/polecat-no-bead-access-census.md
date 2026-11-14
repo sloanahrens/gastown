@@ -2,7 +2,7 @@
 
 Input to the no-bead-access design (approach A: TASK.md in, outbox file out, host applies the outbox at seat end; sandbox seats only). It lists every `bd` and `gt` call a sandbox seat makes, by subcommand, with the code location, the count per normal run, and whether the outbox could replace it.
 
-Verified against checkout `4f9ec2c77` (rebased on origin/main `28b82c038`), 2026-11-14.
+Citations verified at `4f9ec2c77`, 2026-11-14. None of the cited files changed through `78ce6dd70` (origin/main `037ba5a16`), the base this census was rebased onto.
 
 ## Method and limits
 
