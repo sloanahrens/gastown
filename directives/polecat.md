@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-14 gt-6096pf: the town policy section points at mol-polecat-work's push rule for each commit.
 - 2026-11-13 gt-e25lc0: the "Local review round before gt done" section points at the design page's Failure rule instead of restating which findings block a submit; internal/directives pins the pointer.
 - 2026-11-13 gt-k51hb1: the "Local review round before gt done" section points at docs/design/local-round.md for the reply forms instead of copying them, and internal/directives pins the section.
 - 2026-11-13 gt-9xw72b: added the "Local review round before gt done" section, replacing a one-sentence paragraph.
@@ -44,6 +45,8 @@ gt bead note gt-abc 'the retry never resets its counter'
 ```
 
 **Files stay under the worktree.** Scratch files, logs, test data and build output go in `scratch/` (never committed by the checkpoint), not `/tmp`, `/private/tmp`, HOME or a session scratchpad. Any other stray file is committed within minutes: delete it and commit the deletion before `gt done`.
+
+**Push as you go.** Apply the mol-polecat-work formula's rule of that name after every commit; a stopped seat's work continues from the pushed branch.
 
 ## Tests
 

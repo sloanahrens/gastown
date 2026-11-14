@@ -27,6 +27,14 @@ rebasing onto the target branch (pre-verify step), and you submit with plain
 the tests) and pushes; no flag skips that gate. The container suite runs once,
 on the merged tree, when the landing worker lands your branch.
 
+**Push as you go.** A seat pushes its own branch after every commit, so a stop
+at any point costs nothing and the next seat continues from the pushed branch:
+run `git push origin HEAD`. After a commit that replaces one already pushed
+(amend, rebase, squash), run `git push --force-with-lease origin HEAD`. Push
+only the branch your bead's branch line names (it starts `polecat/`), and never
+while `git branch --show-current` prints `main`. A push that fails (no network,
+a rejected ref) is noted and the work continues; `gt done` pushes again.
+
 **You do NOT:**
 - Push directly to main (the landing worker lands your branch)
 - Close your own issue (the landing worker closes it when it lands)
@@ -54,7 +62,7 @@ on the merged tree, when the landing worker lands your branch.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | `gt escalate`, don't guess |"""
 formula = "mol-polecat-work"
-version = 15
+version = 16
 
 [[steps]]
 id = "load-context"
@@ -193,6 +201,8 @@ git fetch origin
 git rebase origin/{{base_branch}}      # Get latest, rebase your branch
 ```
 
+Apply **Push as you go** once the WIP commit and this rebase are done.
+
 If rebase conflicts:
 - Resolve them carefully
 - If stuck, `gt escalate`
@@ -288,6 +298,8 @@ git add <files>
 git commit -m "<type>: <what the change does> ({{issue}})"
 ```
 
+Apply **Push as you go** after each commit.
+
 Commit types: feat, fix, refactor, test, docs, chore
 
 **The subject describes what the commit DOES, and ends with `({{issue}})`.**
@@ -355,6 +367,8 @@ git status
 git add -A && git commit -m "<type>: <what the change does> ({{issue}})"
 ```
 
+Apply **Push as you go** after that commit.
+
 **3. If working tree is already clean, that's fine — but you MUST still have commits (step 4).**
 
 **3b. Read your subjects back before going further:**
@@ -412,6 +426,7 @@ most. The full rules are the directive's "What om rejects" section; the plan you
 wrote in `scratch/plan.md` ("Before you write code") is what you check against.
 Let `D` below stand for `git diff -U0 origin/{{base_branch}}...HEAD`. A hit is a
 question, not a verdict. Fix what you find now; amend or add commits as needed.
+Apply **Push as you go** after each commit.
 
 1. Errors (rule 1): `D -- '*.go' | grep -nE '^[+].*(_ = |, _ :?= )'`, and
    read every added `if err != nil` branch. Each hit returns, wraps or escalates; an unknown or unreadable input denies.
@@ -559,7 +574,7 @@ opt-in via GT_TEST_DOCKER=1 and skip otherwise). Never the whole suite.
 Empty commands mean "not configured" — skip silently.
 
 **3. If a gate fails after rebase:** fix the issue, commit, and re-run from
-step 1.
+step 1. Apply **Push as you go** after that commit and after step 1's rebase.
 
 **4. Submit with plain `gt done` (next step).** It rebases onto
 {{base_branch}} again, runs the local gate and pushes. No flag skips the gate,
