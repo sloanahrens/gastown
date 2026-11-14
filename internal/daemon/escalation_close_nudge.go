@@ -59,20 +59,48 @@ const escalationCloseNudgeTimeout = 30 * time.Second
 // what the nudges may take, since the rest of the tick still has its work.
 const escalationCloseSendBudget = escalationCloseNudgeTimeout
 
+// escalationCloseSendShareFloor is the least time one close nudge is given from
+// a budget that still has that much left. Dividing what is left by the closes
+// still owed would otherwise cut a busy pass's sends below the time a delivery
+// needs, and every one of them would fail. The floor also bounds a pass's
+// attempts while its sends hang: each spends at least the floor, so the budget
+// lasts escalationCloseSendBudget/escalationCloseSendShareFloor hung sends
+// rather than one.
+const escalationCloseSendShareFloor = 5 * time.Second
+
 // escalationSendBudget is the send time one pass may spend on close nudges,
 // shared by every nudge of the pass. Only the sends spend it: the reads between
 // them do not, so a tick slow at reading escalations cannot defer every close
-// for ever.
+// for ever. Each send also takes no more than its share of what is left, so a
+// send that hangs cannot spend the budget and keep every close after it
+// waiting for the next tick.
 type escalationSendBudget struct {
 	now   func() time.Time
 	spent time.Duration
+	// remaining is how many escalations the pass may still nudge. It starts as
+	// the watched set, which holds every close the pass could reach, and is
+	// taken down as each close is judged, so a send's share of what is left
+	// grows as the pass works through them.
+	remaining int
 }
 
-// timeout is how long the next send may take: its per-send timeout, or less
-// once the budget is nearly spent. It is not positive when the budget is spent,
-// and the send waits for the next tick.
+// timeout is how long the next send may take: its share of what the pass has
+// left, never less than the floor, never more than one send's timeout. It is
+// not positive when the budget is spent, and the send waits for the next tick.
 func (b *escalationSendBudget) timeout() time.Duration {
-	return min(escalationCloseNudgeTimeout, escalationCloseSendBudget-b.spent)
+	left := escalationCloseSendBudget - b.spent
+	if left <= 0 {
+		return left
+	}
+	share := left / time.Duration(max(b.remaining, 1))
+	share = max(share, escalationCloseSendShareFloor)
+	return min(share, left, escalationCloseNudgeTimeout)
+}
+
+// judged records that one more close is decided, so what is left of the budget
+// is divided among the ones after it.
+func (b *escalationSendBudget) judged() {
+	b.remaining = max(b.remaining-1, 0)
 }
 
 // spend records how long a send that started at start took.
@@ -113,9 +141,9 @@ type escalationCloseSeams struct {
 	seat func(rig, name string) (escalationSeat, error)
 	// nudge types msg into target's pane, a "rig/name" seat address, using
 	// the default wait-idle delivery rather than the target's file queue. The
-	// send gives up after timeout, which is what is left of the pass's send
+	// send gives up after timeout, its share of what is left of the pass's send
 	// budget, so one hung send cannot hold the tick for its own timeout once
-	// per escalation.
+	// per escalation, nor take the turns of the closes after it.
 	nudge func(target, msg string, timeout time.Duration) error
 	// now reads the clock the pass's send budget runs on.
 	now func() time.Time
@@ -186,12 +214,14 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 // the rigs after it are not judged this tick, and the observations already made
 // are saved, so an escalation seen open before the stop is not forgotten.
 //
-// The nudges share one send budget: a close the pass cannot reach before it is
-// spent stays owed for the next tick, since a slow send must not hold the
-// patrol tick once per escalation (escalationCloseSendBudget).
+// The nudges share one send budget, and each takes a share of what is left of
+// it, so a send that hangs cannot spend the budget on its own and keep every
+// later close waiting: a close the pass cannot reach before the budget is spent
+// stays owed for the next tick, since a slow send must not hold the patrol tick
+// once per escalation (escalationCloseSendBudget).
 func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, rigs []string) escalationCloseState {
 	s.seat = readSeatOncePerPass(s.seat, s.logf)
-	budget := &escalationSendBudget{now: s.now}
+	budget := &escalationSendBudget{now: s.now, remaining: len(st.Watch)}
 	cur, saved := st.clone(), st.clone()
 	listed := map[string]bool{}
 	writeFailed := false
@@ -222,7 +252,9 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 			case slices.Contains(cur.Announced, e.ID):
 				delete(cur.Watch, e.ID)
 			case cur.Watch[e.ID]:
-				if judgeEscalationClose(s, rig, e, budget) == escalationPending {
+				outcome := judgeEscalationClose(s, rig, e, budget)
+				budget.judged()
+				if outcome == escalationPending {
 					continue
 				}
 				cur.announce(e.ID)
@@ -253,8 +285,9 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 // judgeEscalationClose decides what a closed, watched escalation owes its
 // seat. The seat is named by escalated_by; the bead by related_bead. The seat
 // is nudged only when it still holds that bead, has a live session, and sits
-// at its prompt. The nudge is sent with what is left of the pass's send budget,
-// and one that starts after it is spent waits for the next tick.
+// at its prompt. The nudge is sent with its share of what is left of the pass's
+// send budget, and one that starts after the budget is spent waits for the next
+// tick.
 func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escalation, budget *escalationSendBudget) escalationOutcome {
 	name, ok := strings.CutPrefix(strings.TrimSpace(e.EscalatedBy), rig+"/polecats/")
 	if !ok || name == "" || strings.ContainsAny(name, "/ \t\r\n") || strings.TrimSpace(e.RelatedBead) == "" {
