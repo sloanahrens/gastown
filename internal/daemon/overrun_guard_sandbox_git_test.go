@@ -28,6 +28,7 @@ func overrunSandboxGitRecorder(calls *[]overrunSandboxGitCall, out []byte, err e
 // and arguments, and the runner's output and error come back from the Git
 // method.
 func TestOverrunSandboxGitExecForwardsTheCallToTheRunner(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("sandbox is gone")
 	tests := []struct {
 		name    string
@@ -41,6 +42,7 @@ func TestOverrunSandboxGitExecForwardsTheCallToTheRunner(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			var calls []overrunSandboxGitCall
 			g := git.NewGitWithExec(dir, sandboxGitExec(overrunSandboxGitRecorder(&calls, tt.answer, tt.runErr)))
@@ -70,6 +72,7 @@ func TestOverrunSandboxGitExecForwardsTheCallToTheRunner(t *testing.T) {
 // git log first and then feeds its output to git patch-id on stdin, so the
 // runner's one call is the log and the error names stdin.
 func TestOverrunSandboxGitExecRefusesStdinBeforeTheRunner(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	var calls []overrunSandboxGitCall
 	g := git.NewGitWithExec(dir, sandboxGitExec(overrunSandboxGitRecorder(&calls, []byte("a diff\n"), nil)))
