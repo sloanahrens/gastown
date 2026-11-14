@@ -53,8 +53,8 @@ type specStoryPointStepResult struct {
 // specStoryPointRun answers one bead's estimate under the tick's timeout. The
 // estimate runs on its own goroutine, so a timeout returns to the tick without
 // waiting for it. The deferred cancel stops the estimate when this returns, so
-// the timeout branch leaves it to that; an estimate that is canceled still
-// writes its own outcome, and that write can land after the sling has started.
+// the timeout branch leaves it to that; a context error from the canceled
+// estimate is returned unwritten (gt-floskq).
 func specStoryPointRun(env specDispatchEnv, beadID string) specStoryPointAnswer {
 	if env.StoryPointEstimate == nil {
 		return specStoryPointAnswer{err: errNoStoryPointEstimator}

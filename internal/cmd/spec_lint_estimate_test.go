@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 )
 
@@ -162,12 +165,11 @@ func TestSpecLintWithoutEstimateNeverEstimates(t *testing.T) {
 	}
 }
 
-// TestSpecLintHelpNamesEstimateFlag: the help names --estimate and the seconds
-// it costs, so a filer knows the estimate is opt-in and what it buys
-// (gt-5ynb86).
+// TestSpecLintHelpNamesEstimateFlag: the help names --estimate and the run it
+// makes, so a filer knows the estimate is opt-in and what it buys (gt-5ynb86).
 func TestSpecLintHelpNamesEstimateFlag(t *testing.T) {
 	t.Parallel()
-	for _, want := range []string{"--estimate", "3 to 4 seconds"} {
+	for _, want := range []string{"--estimate", "gt spec estimate"} {
 		if !strings.Contains(specLintCmd.Long, want) {
 			t.Errorf("gt spec lint --help does not name %q", want)
 		}
@@ -176,10 +178,202 @@ func TestSpecLintHelpNamesEstimateFlag(t *testing.T) {
 	if flag == nil {
 		t.Fatal("gt spec lint has no --estimate flag")
 	}
-	for _, want := range []string{"estimate", "3 to 4 seconds"} {
+	for _, want := range []string{"estimate", "gt spec estimate"} {
 		if !strings.Contains(flag.Usage, want) {
 			t.Errorf("the --estimate usage %q does not name %q", flag.Usage, want)
 		}
+	}
+	// Both help texts say the run is cut off at the lint's bound and refused
+	// then, taking the bound from the constant so the text cannot drift from
+	// the code (gt-floskq).
+	for _, got := range []struct{ name, text string }{
+		{"gt spec lint --help", specLintCmd.Long},
+		{"the --estimate usage", flag.Usage},
+	} {
+		for _, want := range []string{specLintEstimateWait.String(), "refused as a timeout"} {
+			if !strings.Contains(got.text, want) {
+				t.Errorf("%s does not name %q: %q", got.name, want, got.text)
+			}
+		}
+	}
+	// The help states what the flag does, not how long an estimate took when it
+	// was measured (gt-floskq).
+	for _, got := range []struct{ name, text string }{
+		{"gt spec lint --help", specLintCmd.Long},
+		{"the --estimate usage", flag.Usage},
+	} {
+		if strings.Contains(got.text, "seconds") {
+			t.Errorf("%s still claims the estimate's duration: %q", got.name, got.text)
+		}
+	}
+}
+
+// specEstimateRunnerForContext is an estimate run that observes the deadline of
+// the context it is given, so a test sees what bounded the run.
+func specEstimateRunnerForContext(fn func(context.Context, *beads.Issue) (estimate.Result, error)) specEstimateRunner {
+	return specEstimateRunner{
+		Estimate: func(ctx context.Context, _ estimate.Deps, issue *beads.Issue) (estimate.Result, error) {
+			return fn(ctx, issue)
+		},
+		Deps: func() (estimate.Deps, error) { return estimate.Deps{}, nil },
+	}
+}
+
+// specEstimateWriteCounter is a store that counts the writes it is asked for,
+// so a test can assert a refused run wrote nothing.
+type specEstimateWriteCounter struct {
+	specEstimateStore
+	updates  int
+	comments int
+}
+
+func (c *specEstimateWriteCounter) Update(id string, opts beads.UpdateOptions) error {
+	c.updates++
+	return c.specEstimateStore.Update(id, opts)
+}
+
+func (c *specEstimateWriteCounter) AddComment(id, text string) error {
+	c.comments++
+	return c.specEstimateStore.AddComment(id, text)
+}
+
+// TestSpecLintEstimateRunsUnderTheLintsBound: --estimate's run is bounded by
+// the lint's own wait rather than left under an unbounded context, so the
+// estimator sees a deadline no later than EstimateWait (gt-floskq).
+func TestSpecLintEstimateRunsUnderTheLintsBound(t *testing.T) {
+	t.Parallel()
+	const wait = 2 * time.Second
+	run := specEstimateRunnerForContext(func(ctx context.Context, issue *beads.Issue) (estimate.Result, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > wait {
+			return estimate.Result{}, errors.New("the estimate ran without the lint's bound")
+		}
+		return estimate.Result{Points: 5, Minutes: 6.33, Inputs: []string{"shape"}, Rung: "shape", Hash: estimate.SectionHash(issue)}, nil
+	})
+	opts := specLintOpts{
+		LintOverMinutes: 11,
+		EstimateWait:    wait,
+		Estimate: specLintEstimateRunFor(
+			func(string) specEstimateStore { return specEstimateSeed() },
+			func(string) specEstimateRunner { return run }),
+	}
+	spec := cleanSpec("gt-est", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+	if err != nil {
+		t.Fatalf("lint under the bound = %v, out %q", err, out.String())
+	}
+	if !strings.Contains(out.String(), "spec lint ok") {
+		t.Errorf("verdict %q, want the clean line", out.String())
+	}
+}
+
+// TestSpecLintDefaultEstimateWaitIsABound: the production constructor leaves
+// EstimateWait unset, so the lint's own wait has to bound the run — a zero
+// wait would expire the estimate before it read anything and refuse every
+// bead, so a filer's --estimate must run under a live deadline (gt-floskq).
+func TestSpecLintDefaultEstimateWaitIsABound(t *testing.T) {
+	t.Parallel()
+	opts := specLintOptsFor(nil, t.TempDir(), true, io.Discard)
+	opts.LintOverMinutes = 11
+	opts.Estimate = specLintEstimateRunFor(
+		func(string) specEstimateStore { return specEstimateSeed() },
+		func(string) specEstimateRunner {
+			return specEstimateRunnerForContext(func(ctx context.Context, issue *beads.Issue) (estimate.Result, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					return estimate.Result{}, errors.New("the estimate ran with no deadline")
+				}
+				if time.Until(deadline) > specLintEstimateWait {
+					return estimate.Result{}, errors.New("the estimate ran under a longer wait than the lint's default")
+				}
+				return estimate.Result{Points: 5, Minutes: 6.3, Inputs: []string{"shape"}, Rung: "shape", Hash: estimate.SectionHash(issue)}, nil
+			})
+		})
+	spec := cleanSpec("gt-est", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	if err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts); err != nil {
+		t.Fatalf("lint with the default estimate wait = %v, out %q", err, out.String())
+	}
+	if !strings.Contains(out.String(), "spec lint ok") {
+		t.Errorf("verdict %q, want the clean line", out.String())
+	}
+}
+
+// TestSpecLintEstimateTimeoutIsRefused: an estimate that waits past the lint's
+// bound is refused with the context error and writes nothing — a rung:none note
+// left on a timed-out bead is keyed to the section hash, so later runs would
+// read it as unchanged (gt-floskq).
+func TestSpecLintEstimateTimeoutIsRefused(t *testing.T) {
+	t.Parallel()
+	run := specEstimateRunnerForContext(func(ctx context.Context, _ *beads.Issue) (estimate.Result, error) {
+		<-ctx.Done()
+		return estimate.Result{}, ctx.Err()
+	})
+	db := specEstimateSeed()
+	store := &specEstimateWriteCounter{specEstimateStore: db}
+	opts := specLintOpts{
+		LintOverMinutes: 11,
+		EstimateWait:    20 * time.Millisecond,
+		Estimate: specLintEstimateRunFor(
+			func(string) specEstimateStore { return store },
+			func(string) specEstimateRunner { return run }),
+	}
+	spec := cleanSpec("gt-est", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+	if code, _ := IsSilentExit(err); code != specLintExitRefused {
+		t.Fatalf("exit code = %d, want %d (err %v, out %q)", code, specLintExitRefused, err, out.String())
+	}
+	if !strings.Contains(out.String(), "refused: estimate:") || !strings.Contains(out.String(), "context deadline exceeded") {
+		t.Errorf("verdict %q does not report the expired estimate", out.String())
+	}
+	if strings.Contains(out.String(), "spec lint ok") {
+		t.Errorf("a bead whose estimate timed out was read as clean: %q", out.String())
+	}
+	if store.updates != 0 || store.comments != 0 {
+		t.Errorf("the timed-out estimate wrote %d label updates and %d comments, want 0 each", store.updates, store.comments)
+	}
+	if labels := specEstimateLabelsOn(t, db); len(labels) != 0 {
+		t.Errorf("labels = %v, want none written", labels)
+	}
+	if comments := specEstimateCommentsOn(t, db); len(comments) != 0 {
+		t.Errorf("comments = %q, want none written", comments)
+	}
+}
+
+// TestSpecLintEstimateFailureStillRecordsNone: an estimator that fails on its
+// own — not the lint giving up — keeps gt spec estimate's behaviour and records
+// rung:none and its note, so the lint's refusal is explained on the bead
+// (gt-floskq).
+func TestSpecLintEstimateFailureStillRecordsNone(t *testing.T) {
+	t.Parallel()
+	db := specEstimateSeed()
+	store := &specEstimateWriteCounter{specEstimateStore: db}
+	stub := &specEstimateStub{err: errors.New("jev unreachable")}
+	opts := specLintOpts{
+		LintOverMinutes: 11,
+		Estimate: specLintEstimateRunFor(
+			func(string) specEstimateStore { return store },
+			func(string) specEstimateRunner { return specEstimateRunnerFor(stub) }),
+	}
+	spec := cleanSpec("gt-est", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+	if code, _ := IsSilentExit(err); code != specLintExitRefused {
+		t.Fatalf("exit code = %d, want %d (err %v, out %q)", code, specLintExitRefused, err, out.String())
+	}
+	if !strings.Contains(out.String(), "refused: estimate: no estimate: jev unreachable") {
+		t.Errorf("verdict %q does not report the estimator's failure", out.String())
+	}
+	if store.updates != 1 || store.comments != 1 {
+		t.Errorf("the failed estimate wrote %d label updates and %d comments, want one each", store.updates, store.comments)
+	}
+	if labels := specEstimateLabelsOn(t, db); !slices.Contains(labels, "sp-rung:none") {
+		t.Errorf("labels = %v, want sp-rung:none recorded", labels)
+	}
+	if comments := specEstimateCommentsOn(t, db); !strings.Contains(strings.Join(comments, "\n"), "jev unreachable") {
+		t.Errorf("comments = %q, want the none note naming the failure", comments)
 	}
 }
 
