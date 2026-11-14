@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -426,10 +426,9 @@ func isValidCLITheme(mode string) bool {
 	return false
 }
 
-// detectTerminalBackground returns true if terminal has dark background.
+// detectTerminalBackground returns true if the terminal has a dark background.
 func detectTerminalBackground() bool {
-	// Use termenv for detection
-	return termenv.HasDarkBackground()
+	return ui.HasDarkBackground()
 }
 
 // detectCurrentSession tries to find the tmux session name from env.

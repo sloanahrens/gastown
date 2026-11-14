@@ -2,9 +2,10 @@ package ui
 
 import (
 	"os"
+	"strconv"
 	"strings"
 
-	"github.com/muesli/termenv"
+	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 )
 
@@ -50,8 +51,18 @@ var hasDarkBackground bool
 // InitTheme initializes the theme mode. Call this early in main.
 // configTheme is the value from TownSettings.CLITheme (may be empty).
 func InitTheme(configTheme string) {
-	themeMode = processEnv.resolveThemeMode(configTheme)
-	hasDarkBackground = detectDarkBackground(themeMode)
+	processEnv.initTheme(configTheme)
+}
+
+// initTheme caches the resolved theme and tells lipgloss which background it
+// renders on. The lipgloss call runs even without a terminal, where
+// ApplyThemeMode returns early: until it runs, lipgloss's own renderer queries
+// the terminal the first time an AdaptiveColor renders, and a shell hook then
+// evals that query as a command (gt-xvekee).
+func (e uiEnv) initTheme(configTheme string) {
+	themeMode = e.resolveThemeMode(configTheme)
+	hasDarkBackground = e.detectDarkBackground(themeMode)
+	lipgloss.SetHasDarkBackground(hasDarkBackground)
 }
 
 // GetThemeMode returns the current CLI color scheme mode.
@@ -101,16 +112,31 @@ func (e uiEnv) resolveThemeMode(configTheme string) ThemeMode {
 }
 
 // detectDarkBackground determines if we're on a dark background.
-func detectDarkBackground(mode ThemeMode) bool {
+func (e uiEnv) detectDarkBackground(mode ThemeMode) bool {
 	switch mode {
 	case ThemeModeDark:
 		return true
 	case ThemeModeLight:
 		return false
 	default:
-		// Auto mode - use termenv detection
-		return termenv.HasDarkBackground()
+		return e.colorFGBGIsDark()
 	}
+}
+
+// colorFGBGIsDark reports whether COLORFGBG names a dark background. Its last
+// field is the background's ANSI colour index, and below 7 is dark. An unset,
+// separator-less or unparseable value is dark (gt-xvekee).
+func (e uiEnv) colorFGBGIsDark() bool {
+	v := e.getenv("COLORFGBG")
+	i := strings.LastIndexByte(v, ';')
+	if i < 0 {
+		return true
+	}
+	bg, err := strconv.Atoi(v[i+1:])
+	if err != nil {
+		return true
+	}
+	return bg < 7
 }
 
 // IsTerminal returns true if stdout is connected to a terminal (TTY).
