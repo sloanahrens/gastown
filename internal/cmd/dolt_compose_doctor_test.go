@@ -75,8 +75,8 @@ func TestDataUnitDoctorPsRunsTheComposeUnit(t *testing.T) {
 	if got, _ := lastEnv(calls[0].env, "BD_IMAGE"); got != composeRef("gastown-bd") {
 		t.Errorf("BD_IMAGE = %q, want the values file's bd image", got)
 	}
-	if got, _ := lastEnv(calls[0].env, "GT_BD_TOKEN_DIR"); got != "/tokens" {
-		t.Errorf("GT_BD_TOKEN_DIR = %q, want the inherited environment's value", got)
+	if got, _ := lastEnv(calls[0].env, "GT_BD_TOKEN_DIR"); got != filepath.Join(townRoot, ".runtime", "bd-gateway", "tokens") {
+		t.Errorf("GT_BD_TOKEN_DIR = %q, want the town's token directory over the inherited value", got)
 	}
 }
 

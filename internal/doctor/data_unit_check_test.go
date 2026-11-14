@@ -14,15 +14,14 @@ import (
 const healthyPs = "dolt running healthy\nbd running healthy\n"
 
 // dataUnitFixture is one data unit as the rungs read it. ps is the compose ps
-// output; psErr makes the status call fail. tokens is the token directory's
-// files and their modes; nil means no token directory is configured. readyz is
-// the gateway's /readyz status; 0 means the gateway does not answer.
+// output; psErr makes the status call fail. tokens is the files and their modes
+// in the town's token directory; nil means the directory does not exist. readyz
+// is the gateway's /readyz status; 0 means the gateway does not answer.
 type dataUnitFixture struct {
-	ps         string
-	psErr      bool
-	tokens     map[string]os.FileMode
-	missingDir bool // the token directory is configured but does not exist
-	readyz     int
+	ps     string
+	psErr  bool
+	tokens map[string]os.FileMode
+	readyz int
 }
 
 // healthyDataUnit is a unit whose every rung passes.
@@ -41,19 +40,20 @@ type dataUnitCalls struct {
 	readyz int
 }
 
-// newDataUnitCheck builds the check over fx, named on the command line: the
-// status call answers from the fixture, the token directory is a temp dir with
-// the fixture's modes, and /readyz is answered in process by a handler that
-// accepts only the daemon token.
-func newDataUnitCheck(t *testing.T, fx dataUnitFixture) (*DataUnitCheck, *dataUnitCalls) {
+// newDataUnitCheck builds the check over fx, named on the command line, for a
+// new town. The status call answers from the fixture; the token files are
+// written to the town's DataUnitTokenDir with the fixture's modes; /readyz is
+// answered in process by a handler that accepts only the daemon token. It
+// returns the town the check runs for.
+func newDataUnitCheck(t *testing.T, fx dataUnitFixture) (*DataUnitCheck, *dataUnitCalls, string) {
 	t.Helper()
 	calls := &dataUnitCalls{}
-	dir := ""
-	if fx.missingDir {
-		dir = filepath.Join(t.TempDir(), "absent")
-	}
+	town := t.TempDir()
 	if fx.tokens != nil {
-		dir = t.TempDir()
+		dir := DataUnitTokenDir(town)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 		for name, mode := range fx.tokens {
 			path := filepath.Join(dir, name)
 			if err := os.WriteFile(path, []byte("tok-"+name), 0o600); err != nil {
@@ -71,13 +71,13 @@ func newDataUnitCheck(t *testing.T, fx dataUnitFixture) (*DataUnitCheck, *dataUn
 			return nil, errors.New("docker compose ps for gt-data: docker exited with status 1")
 		}
 		return []byte(fx.ps), nil
-	}, func() string { return dir })
+	})
 	if fx.readyz == 0 {
 		c.http = &http.Client{Transport: failingTransport{}}
 	} else {
 		c.http = &http.Client{Transport: handlerTransport{dataUnitReadyzHandler(fx.readyz, calls)}}
 	}
-	return c, calls
+	return c, calls, town
 }
 
 // dataUnitReadyzHandler answers /readyz with status. It counts the requests, and
@@ -186,7 +186,7 @@ func TestDataUnitDoctor(t *testing.T) {
 			wantRung:   "unit",
 		},
 		{
-			name: "no token directory is configured",
+			name: "the town has no token directory",
 			fx: func() dataUnitFixture {
 				fx := healthyDataUnit()
 				fx.tokens = nil
@@ -214,17 +214,6 @@ func TestDataUnitDoctor(t *testing.T) {
 			},
 			wantStatus: StatusError,
 			wantRung:   "dolt",
-		},
-		{
-			name: "the token directory cannot be read",
-			fx: func() dataUnitFixture {
-				fx := healthyDataUnit()
-				fx.tokens = nil
-				fx.missingDir = true
-				return fx
-			},
-			wantStatus: StatusError,
-			wantRung:   "tokens",
 		},
 		{
 			name: "the token directory holds no token files",
@@ -260,8 +249,8 @@ func TestDataUnitDoctor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, calls := newDataUnitCheck(t, tt.fx())
-			res := c.Run(&CheckContext{TownRoot: t.TempDir()})
+			c, calls, town := newDataUnitCheck(t, tt.fx())
+			res := c.Run(&CheckContext{TownRoot: town})
 			if res.Status != tt.wantStatus {
 				t.Fatalf("status = %v, want %v; message %q", res.Status, tt.wantStatus, res.Message)
 			}
@@ -311,19 +300,31 @@ func TestDataUnitDoctorReadyzBadURL(t *testing.T) {
 	}
 }
 
-// TestDataUnitDoctorTokenDirUnset: with GT_BD_TOKEN_DIR unset the tokens rung
-// fails by name with the reason the compose unit needs the same directory. The
-// unit rung has passed, and /readyz is not asked.
-func TestDataUnitDoctorTokenDirUnset(t *testing.T) {
+// TestDataUnitTokenDir: the token directory is the town's untracked runtime
+// state, the one path gt dolt start sets for the compose unit and the check lists.
+func TestDataUnitTokenDir(t *testing.T) {
+	t.Parallel()
+	const town = "/town"
+	want := filepath.Join(town, ".runtime", "bd-gateway", "tokens")
+	if got := DataUnitTokenDir(town); got != want {
+		t.Errorf("DataUnitTokenDir(%q) = %q, want %q", town, got, want)
+	}
+}
+
+// TestDataUnitDoctorTokenDirMissing: a town with no token directory fails the
+// tokens rung by name, with the path and how to create it. The unit rung has
+// passed, and /readyz is not asked.
+func TestDataUnitDoctorTokenDirMissing(t *testing.T) {
 	t.Parallel()
 	fx := healthyDataUnit()
 	fx.tokens = nil
-	c, calls := newDataUnitCheck(t, fx)
-	res := c.Run(&CheckContext{TownRoot: t.TempDir()})
+	c, calls, town := newDataUnitCheck(t, fx)
+	res := c.Run(&CheckContext{TownRoot: town})
 	if res.Status != StatusError {
 		t.Fatalf("status = %v, want StatusError; message %q", res.Status, res.Message)
 	}
-	const want = "data unit rung tokens failed: GT_BD_TOKEN_DIR is not set: the compose unit needs the same directory (docker-compose.yml)"
+	want := "data unit rung tokens failed: no token directory at " + DataUnitTokenDir(town) +
+		": create it as the design's step 4 says, mode 0700, one <class>.<caller>.token file each at mode 0600"
 	if res.Message != want {
 		t.Errorf("message = %q, want %q", res.Message, want)
 	}
@@ -349,8 +350,8 @@ func TestDataUnitDoctorTokenMode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fx := healthyDataUnit()
 			fx.tokens[tt.file] = tt.mode
-			c, calls := newDataUnitCheck(t, fx)
-			res := c.Run(&CheckContext{TownRoot: t.TempDir()})
+			c, calls, town := newDataUnitCheck(t, fx)
+			res := c.Run(&CheckContext{TownRoot: town})
 			if res.Status != StatusError {
 				t.Fatalf("status = %v, want StatusError; message %q", res.Status, res.Message)
 			}
@@ -405,7 +406,7 @@ func TestDataUnitDoctorSkipped(t *testing.T) {
 					return []byte(healthyPs), nil
 				}
 			}
-			c := NewDataUnitCheck(tt.named, ps, func() string { return t.TempDir() })
+			c := NewDataUnitCheck(tt.named, ps)
 			c.http = &http.Client{Transport: handlerTransport{dataUnitReadyzHandler(http.StatusOK, calls)}}
 			res := c.Run(&CheckContext{TownRoot: t.TempDir()})
 			if res.Status != tt.wantStatus {
@@ -430,7 +431,7 @@ func TestDataUnitDoctorReadsTheRunTown(t *testing.T) {
 	c := NewDataUnitCheck(true, func(townRoot string) ([]byte, error) {
 		got = townRoot
 		return nil, errors.New("docker compose ps for gt-data: docker exited with status 1")
-	}, func() string { return t.TempDir() })
+	})
 	res := c.Run(&CheckContext{TownRoot: town})
 	if got != town {
 		t.Errorf("status reader got town %q, want %q", got, town)

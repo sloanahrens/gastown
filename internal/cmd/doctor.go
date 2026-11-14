@@ -147,10 +147,10 @@ it warns there instead of passing.
 
 Use --check data-unit to check the data compose unit (gt-data): the Dolt and bd
 services healthy in docker compose ps, the gateway's /readyz with the daemon
-token, and every token file in the gateway's token directory (GT_BD_TOKEN_DIR)
-at mode 0600. The unit is read through the same project and file as gt dolt
-start, and the check never starts or repairs anything. Without the flag it
-reports SKIPPED and never fails.`,
+token, and every token file in the town's gateway token directory
+(.runtime/bd-gateway/tokens) at mode 0600. The unit is read through the same
+project and file as gt dolt start, and the check never starts or repairs
+anything. Without the flag it reports SKIPPED and never fails.`,
 	RunE: runDoctor,
 }
 

@@ -20,8 +20,8 @@ const DataUnitCheckName = "data-unit"
 const DataUnitPsFormat = "{{.Service}} {{.State}} {{.Health}}"
 
 // The data compose unit (deploy/data/docker-compose.yml, project gt-data) runs
-// Dolt and the bd gateway. The service names, the port and the token directory
-// variable below are the ones that file fixes; a change to it is a change here.
+// Dolt and the bd gateway. The service names and the port below are the ones
+// that file fixes; a change to it is a change here.
 const (
 	dataUnitDoltService = "dolt"
 	dataUnitBdService   = "bd"
@@ -33,6 +33,13 @@ const (
 	// dataUnitTokenMode is the only mode a gateway token file may hold.
 	dataUnitTokenMode = os.FileMode(0o600)
 )
+
+// DataUnitTokenDir is the gateway's token directory for the town. gt dolt start
+// sets it as GT_BD_TOKEN_DIR for the compose unit, which mounts it read-only, and
+// the check lists it. It is untracked runtime state under the town's .runtime.
+func DataUnitTokenDir(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "bd-gateway", "tokens")
+}
 
 // DataUnitCheck reports whether the data compose unit is healthy. It walks the
 // rungs in order and names the first that fails: the unit's status, the Dolt
@@ -56,28 +63,21 @@ type DataUnitCheck struct {
 	// not pass.
 	ps func(townRoot string) ([]byte, error)
 
-	// tokenDir returns the gateway's token directory, GT_BD_TOKEN_DIR as the
-	// compose unit reads it. Nil is refused when the check is named. An empty
-	// result fails the tokens rung by name.
-	tokenDir func() string
-
 	// http answers /readyz. Nil is a client bounded by readyzTimeout.
 	http *http.Client
 }
 
 // NewDataUnitCheck creates the data compose unit check. named is whether
-// --check named it; ps reads the unit's services; tokenDir returns the token
-// directory.
-func NewDataUnitCheck(named bool, ps func(townRoot string) ([]byte, error), tokenDir func() string) *DataUnitCheck {
+// --check named it; ps reads the unit's services.
+func NewDataUnitCheck(named bool, ps func(townRoot string) ([]byte, error)) *DataUnitCheck {
 	return &DataUnitCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        DataUnitCheckName,
 			CheckDescription: "Check the data compose unit: Dolt and bd services healthy, gateway readyz, token file modes",
 			CheckCategory:    CategoryInfrastructure,
 		},
-		named:    named,
-		ps:       ps,
-		tokenDir: tokenDir,
+		named: named,
+		ps:    ps,
 	}
 }
 
@@ -89,9 +89,9 @@ func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 		res.Message = "not selected: name it with --check data-unit"
 		return res
 	}
-	if c.ps == nil || c.tokenDir == nil {
+	if c.ps == nil {
 		res.Status = StatusError
-		res.Message = "the compose unit's status or token directory is not wired, so the data unit check cannot read them"
+		res.Message = "the compose unit's status is not wired, so the data unit check cannot read it"
 		return res
 	}
 
@@ -119,10 +119,7 @@ func (c *DataUnitCheck) Run(ctx *CheckContext) *CheckResult {
 		passed = append(passed, fmt.Sprintf("service %s is running and healthy", service))
 	}
 
-	dir := c.tokenDir()
-	if dir == "" {
-		return fail("tokens", errors.New("GT_BD_TOKEN_DIR is not set: the compose unit needs the same directory (docker-compose.yml)"))
-	}
+	dir := DataUnitTokenDir(ctx.TownRoot)
 	daemonFile, wide, err := dataUnitTokenFiles(dir)
 	if len(wide) > 0 {
 		return fail("tokens", fmt.Errorf("token files not mode 0600: %s", strings.Join(wide, ", ")))
@@ -185,9 +182,13 @@ func dataUnitServiceHealthy(out []byte, service string) error {
 // dataUnitTokenFiles reads the gateway's token directory. Every entry must be a
 // regular file of mode 0600; the ones that are not are returned by name in wide,
 // and the caller stops there. daemonFile is the first daemon-class token file in
-// name order, the one the readiness rung presents.
+// name order, the one the readiness rung presents. A directory that does not
+// exist is an error that names the path and how to create it.
 func dataUnitTokenFiles(dir string) (daemonFile string, wide []string, err error) {
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil, fmt.Errorf("no token directory at %s: create it as the design's step 4 says, mode 0700, one <class>.<caller>.token file each at mode 0600", dir)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("the token directory %s cannot be read: %w", dir, err)
 	}
