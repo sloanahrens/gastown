@@ -45,7 +45,7 @@ func crewHooksRun(town string) *CheckResult {
 func crewHooksRunWithPodEnv(town, host string) *CheckResult {
 	c := NewMacCrewHooksCheck()
 	c.getenv = func(key string) string {
-		if key == podEnv {
+		if key == "KUBERNETES_SERVICE_HOST" {
 			return host
 		}
 		return ""
@@ -272,6 +272,52 @@ func TestMacCrewHooksInAPodStillReportsAFinding(t *testing.T) {
 	}
 }
 
+// TestMacCrewHooksZeroValueCheckFallsBackInsteadOfPanicking: a check with no getenv
+// injected falls back to the process environment rather than dereferencing nil, and
+// its verdict is the one that environment gives: the pod warning where the marker is
+// set, a pass where it is not. The expected verdict is a direct read of the marker,
+// so the assertion holds in any environment.
+func TestMacCrewHooksZeroValueCheckFallsBackInsteadOfPanicking(t *testing.T) {
+	t.Parallel()
+	config := "[core]\n\thooksPath = .githooks\n"
+	town, clone := crewHooksTown(t, &config)
+	if err := os.MkdirAll(filepath.Join(clone, ".githooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := StatusOK
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		want = StatusWarning
+	}
+
+	res := (&MacCrewHooksCheck{}).Run(&CheckContext{TownRoot: town})
+	if res.Status != want {
+		t.Fatalf("Status = %v, want %v (the process environment's verdict): %+v", res.Status, want, res)
+	}
+	if len(res.Details) != 0 {
+		t.Errorf("Details = %v, want none", res.Details)
+	}
+}
+
+// TestMacCrewHooksProductionDefaultReadsTheProcessMarker: the production default,
+// the check with no getenv injected, reads the pod marker from the process
+// environment. The expected value is a direct read of that one variable, so the
+// assertion holds in any environment and fails if the default is wired to another
+// variable, to a constant or to a stale value. Both ways to build a check without
+// an injected getenv are covered. testpolicy bans setting the environment in a
+// unit test, so this compares with a read instead of setting the marker.
+func TestMacCrewHooksProductionDefaultReadsTheProcessMarker(t *testing.T) {
+	t.Parallel()
+	want := os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+	for name, c := range map[string]*MacCrewHooksCheck{
+		"constructor": NewMacCrewHooksCheck(),
+		"zero value":  {},
+	} {
+		if got := c.inPod(); got != want {
+			t.Errorf("%s: inPod() = %v, want %v (the process environment's pod marker)", name, got, want)
+		}
+	}
+}
+
 // TestMacCrewHooksWithNoCrewDirectoriesWarns: a town with no crew clones gives a
 // WARNING that says to run the check on a native gt. It is not a pass, so a run in
 // the pod cannot report clean.
@@ -300,6 +346,9 @@ func TestMacCrewHooksWithNoCrewDirectoriesWarns(t *testing.T) {
 			}
 			if !strings.Contains(res.Message, "run this check on a native gt on the Mac") {
 				t.Errorf("Message = %q, want the native-gt instruction", res.Message)
+			}
+			if res.FixHint != macCrewHooksNativeHint {
+				t.Errorf("FixHint = %q, want the same hint as the pod warning %q", res.FixHint, macCrewHooksNativeHint)
 			}
 		})
 	}

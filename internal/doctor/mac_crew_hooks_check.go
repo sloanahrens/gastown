@@ -8,14 +8,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
 // MacCrewHooksCheckName is the name 'gt doctor --check' takes for MacCrewHooksCheck.
 const MacCrewHooksCheckName = "mac-crew-hooks"
-
-// podEnv is the variable the kubelet sets in every pod, the same signal
-// internal/cmd's podEnv and internal/sweeprunner's InClusterHost read.
-const podEnv = "KUBERNETES_SERVICE_HOST"
 
 // macCrewHooksNativeHint sends the reader to the run that sees the Mac clones.
 const macCrewHooksNativeHint = "Run 'gt doctor --check mac-crew-hooks' on a native gt on the Mac, where the crew clones live"
@@ -93,7 +91,7 @@ func (c *MacCrewHooksCheck) Run(ctx *CheckContext) *CheckResult {
 	if crewEntries == 0 {
 		return c.result(StatusWarning,
 			"no crew clones are visible here: run this check on a native gt on the Mac",
-			nil, "Run 'gt doctor --check mac-crew-hooks' from a gt built from main on the Mac, where the crew clones live")
+			nil, macCrewHooksNativeHint)
 	}
 
 	sort.Strings(clones)
@@ -124,7 +122,7 @@ func (c *MacCrewHooksCheck) inPod() bool {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	return getenv(podEnv) != ""
+	return sweeprunner.InClusterHost(getenv)
 }
 
 func (c *MacCrewHooksCheck) result(status CheckStatus, msg string, details []string, hint string) *CheckResult {
