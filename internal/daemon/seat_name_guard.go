@@ -47,8 +47,16 @@ type StaleSeatSandbox struct {
 // logs it once per tick, so a name drawn for three beads does not name the same
 // sandbox three times.
 func (f StaleSeatSandbox) Line() string {
-	return fmt.Sprintf("seat sandbox %s is in phase %s: its seat name is not slung to until the sandbox is deleted (openshell sandbox delete %s)",
-		f.Sandbox, f.Phase, f.Sandbox)
+	return fmt.Sprintf("seat sandbox %s is in phase %s: its seat name is not slung to until the sandbox is deleted (%s)",
+		f.Sandbox, f.Phase, seatSandboxDeleteCommand(f.Sandbox))
+}
+
+// seatSandboxDeleteCommand renders the command that deletes the sandbox, with
+// the gateway-supplied name as one quoted shell word: a name holding a space, a
+// quote or a leading hyphen is passed to openshell as that name, never as a
+// second argument or a flag.
+func seatSandboxDeleteCommand(sandboxName string) string {
+	return "openshell sandbox delete '" + strings.ReplaceAll(sandboxName, "'", `'\''`) + "'"
 }
 
 // SeatNameGuard is the dispatcher's answer to which seat names a sling may not
@@ -143,8 +151,8 @@ func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 			Key:      seatSandboxStaleKeyPrefix + f.Sandbox,
 			Kind:     attention.KindSeatSandboxStale,
 			Severity: attention.SeverityHigh,
-			Summary: fmt.Sprintf("seat sandbox %s has been in phase %s for %s; the spec dispatcher slings to no seat name whose sandbox is stale, so the name stays unusable until the sandbox is deleted (openshell sandbox delete %s)",
-				f.Sandbox, f.Phase, parkedAge(age), f.Sandbox),
+			Summary: fmt.Sprintf("seat sandbox %s has been in phase %s for %s; the spec dispatcher slings to no seat name whose sandbox is stale, so the name stays unusable until the sandbox is deleted (%s)",
+				f.Sandbox, f.Phase, parkedAge(age), seatSandboxDeleteCommand(f.Sandbox)),
 		})
 	}
 	return out
@@ -154,12 +162,20 @@ func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 // on its active gateway.
 type seatSandboxList func(ctx context.Context) ([]sandbox.Entry, error)
 
-// gatewaySeatSandboxes is the production listing, bounded by
+// GatewaySandboxListing is the one read of the gateway's sandbox listing the
+// dispatcher's sling and the attention collector share, bounded by timeout so
+// a gateway that hangs costs the caller the one read and no more. cli is the
+// openshell CLI to read, so a test passes one whose Run records the call.
+func GatewaySandboxListing(ctx context.Context, cli *sandbox.CLI, timeout time.Duration) ([]sandbox.Entry, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return cli.List(ctx)
+}
+
+// gatewaySeatSandboxes is the attention collector's listing, bounded by
 // seatSandboxListTimeout.
 func gatewaySeatSandboxes(ctx context.Context) ([]sandbox.Entry, error) {
-	ctx, cancel := context.WithTimeout(ctx, seatSandboxListTimeout)
-	defer cancel()
-	return (&sandbox.CLI{}).List(ctx)
+	return GatewaySandboxListing(ctx, &sandbox.CLI{}, seatSandboxListTimeout)
 }
 
 // collectStaleSeatSandboxes raises the item of every gateway sandbox in a

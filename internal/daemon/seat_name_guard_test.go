@@ -83,6 +83,66 @@ func TestSeatNameGuardRaisesTheStaleSeatItem(t *testing.T) {
 	}
 }
 
+// TestSeatNameGuardQuotesTheSandboxNameDeleteCommand: the sandbox name comes
+// from the gateway's listing, so the suggested delete command carries it as one
+// quoted shell word, never as a second argument or a flag (gt-xrt3pb).
+func TestSeatNameGuardQuotesTheSandboxNameDeleteCommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"gt-dag", "openshell sandbox delete 'gt-dag'"},
+		{"-f", "openshell sandbox delete '-f'"},
+		{"gt dag; rm -rf ~", "openshell sandbox delete 'gt dag; rm -rf ~'"},
+		{"gt-dag'$(id)", `openshell sandbox delete 'gt-dag'\''$(id)'`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			guard := NewSeatNameGuard([]sandbox.Entry{{Name: tc.name, Phase: "Error"}}, seatNameGuardNow)
+			finding, ok := guard.Stale(tc.name)
+			if !ok {
+				t.Fatalf("Stale(%q) = no finding, want the Error sandbox", tc.name)
+			}
+			if line := finding.Line(); !strings.Contains(line, tc.want) {
+				t.Errorf("Line() = %q, should carry %q", line, tc.want)
+			}
+			items := guard.Items(seatNameGuardNow)
+			if len(items) != 1 || !strings.Contains(items[0].Summary, tc.want) {
+				t.Errorf("items = %+v, should carry %q", items, tc.want)
+			}
+		})
+	}
+}
+
+// TestGatewaySandboxListingBoundsTheReadWithTheCallersTimeout: the one listing
+// the attention collector and the sling tick share applies the caller's bound
+// to the gateway call (gt-xrt3pb).
+func TestGatewaySandboxListingBoundsTheReadWithTheCallersTimeout(t *testing.T) {
+	t.Parallel()
+	const timeout = time.Minute
+	var remaining time.Duration
+	var bounded bool
+	cli := &sandbox.CLI{Run: func(ctx context.Context, _ []string, _ []byte, _ []string) ([]byte, []byte, error) {
+		deadline, ok := ctx.Deadline()
+		bounded = ok
+		remaining = time.Until(deadline)
+		return []byte(`{"sandboxes":[{"name":"gt-dag","phase":"Error"}]}`), nil, nil
+	}}
+
+	entries, err := GatewaySandboxListing(context.Background(), cli, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bounded || remaining <= 0 || remaining > timeout {
+		t.Errorf("the gateway call's remaining bound = %s (set %v), want the caller's %s", remaining, bounded, timeout)
+	}
+	if len(entries) != 1 || entries[0].Name != "gt-dag" {
+		t.Errorf("entries = %+v, want the gateway's listing", entries)
+	}
+}
+
 // TestSeatNameGuardLeavesReadyAndAbsentNamesAlone is the third box: a sandbox
 // the gateway reports Ready, a phase it does not leave on its own, and a name
 // with no sandbox at all are unaffected (gt-zapy97).
@@ -149,10 +209,10 @@ func TestSeatNameGuardCollectorCarriesTheAgeAcrossTicks(t *testing.T) {
 	}
 }
 
-// TestSeatNameGuardCollectorKeepsTheItemWhenTheListingFails: a listing that
-// cannot be read raises no item and reports the error, so the queue keeps the
-// previous tick's item rather than clearing it (gt-zapy97).
-func TestSeatNameGuardCollectorKeepsTheItemWhenTheListingFails(t *testing.T) {
+// TestSeatNameGuardCollectorReportsAListingFailure: a listing that cannot be
+// read raises no item and reports the error, so collectAttention keeps the
+// previous tick's items rather than clearing them (gt-zapy97).
+func TestSeatNameGuardCollectorReportsAListingFailure(t *testing.T) {
 	t.Parallel()
 	d := seatNameGuardDaemon(t)
 	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
@@ -165,6 +225,34 @@ func TestSeatNameGuardCollectorKeepsTheItemWhenTheListingFails(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Errorf("items = %+v, want none from an unanswered read", items)
+	}
+}
+
+// TestSeatNameGuardCollectorKeepsTheStaleItemWhenTheListingFails drives the
+// merge the failed collector's report goes through: the previous tick's stale
+// item is kept, and another kind's item is not (gt-zapy97, gt-xrt3pb).
+func TestSeatNameGuardCollectorKeepsTheStaleItemWhenTheListingFails(t *testing.T) {
+	t.Parallel()
+	d := seatNameGuardDaemon(t)
+	src := &attentionSources{d: d, now: seatNameGuardNow, sandboxList: func(context.Context) ([]sandbox.Entry, error) {
+		return nil, errors.New("gateway did not answer")
+	}}
+	stale := attention.Item{
+		Key: seatSandboxStaleKeyPrefix + "gt-dag", Kind: attention.KindSeatSandboxStale,
+		Severity: attention.SeverityHigh, Summary: "seat sandbox gt-dag is stale",
+	}
+	other := attention.Item{
+		Key: "spot:gt-dag", Kind: attention.KindSandboxSeatKept,
+		Severity: attention.SeverityHigh, Summary: "a kept seat",
+	}
+	prev := attention.State{Updated: seatNameGuardNow, Items: []attention.Item{stale, other}}
+	collectors := []attentionCollector{{
+		kind: attention.KindSeatSandboxStale, collect: src.collectStaleSeatSandboxes, owns: seatSandboxStaleItem,
+	}}
+
+	observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+	if len(observed) != 1 || observed[0].Key != stale.Key {
+		t.Fatalf("observed = %+v, want only the previous stale item kept", observed)
 	}
 }
 
