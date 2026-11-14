@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/taskmap"
 )
@@ -167,5 +170,90 @@ func TestHowReturnsWriteError(t *testing.T) {
 
 	if err := runHow(failingHowWriter{}, howFixture(), nil); err == nil {
 		t.Fatal("runHow swallowed the writer's error")
+	}
+}
+
+// howRealMap runs the production call site, runHowCmd, and returns its output.
+// runHowCmd builds howDefault over taskmap.Default(), so these tests exercise
+// the wiring the goldens' fixed map never reaches: a howDefault method that
+// read an empty or wrong registry would still print a clean fixed-map listing.
+func howRealMap(t *testing.T, args ...string) string {
+	t.Helper()
+
+	// The command supplies the writer, so the test uses a fresh one rather than
+	// the global howCmd.
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := runHowCmd(cmd, args); err != nil {
+		t.Fatalf("runHowCmd(%q): %v", args, err)
+	}
+	return out.String()
+}
+
+// TestHowDefaultListsTheRealGroups fails when howDefault.Groups or
+// howDefault.Describe stops reading the package's real group table.
+func TestHowDefaultListsTheRealGroups(t *testing.T) {
+	t.Parallel()
+
+	groups := taskmap.Groups()
+	width := 0
+	for _, g := range groups {
+		if n := len(g); n > width {
+			width = n
+		}
+	}
+	var want strings.Builder
+	for _, g := range groups {
+		fmt.Fprintf(&want, "%-*s  %s\n", width, g, taskmap.Describe(g))
+	}
+
+	if got := howRealMap(t); got != want.String() {
+		t.Errorf("runHowCmd() = %q, want %q", got, want.String())
+	}
+}
+
+// TestHowDefaultListsARealGroupsEntries fails when howDefault.ByGroup stops
+// reading taskmap.Default: the fixed map's orient entries would still list,
+// while the real group would print "no commands in group orient yet".
+func TestHowDefaultListsARealGroupsEntries(t *testing.T) {
+	t.Parallel()
+
+	const group = taskmap.Group("orient")
+	entries := taskmap.ByGroup(group)
+	if len(entries) == 0 {
+		t.Fatalf("taskmap.Default has no %s entries; the real map is not registered", group)
+	}
+	var want strings.Builder
+	for _, e := range entries {
+		fmt.Fprintf(&want, "gt %s  %s\n", e.Path, e.Use)
+		if e.Check != "" {
+			fmt.Fprintf(&want, "check: %s\n", e.Check)
+		}
+	}
+
+	if got := howRealMap(t, string(group)); got != want.String() {
+		t.Errorf("runHowCmd(%q) = %q, want %q", group, got, want.String())
+	}
+}
+
+// TestHowDefaultSearchesTheRealMap fails when howDefault.Search stops reading
+// taskmap.Default: the word would print the no-match line instead of the real
+// entries it matches.
+func TestHowDefaultSearchesTheRealMap(t *testing.T) {
+	t.Parallel()
+
+	const word = "how"
+	entries := taskmap.Search(word)
+	if len(entries) == 0 {
+		t.Fatalf("taskmap.Default has no entries matching %q; the real map is not registered", word)
+	}
+	var want strings.Builder
+	for _, e := range entries {
+		fmt.Fprintf(&want, "gt %s  %s\n", e.Path, e.Use)
+	}
+
+	if got := howRealMap(t, word); got != want.String() {
+		t.Errorf("runHowCmd(%q) = %q, want %q", word, got, want.String())
 	}
 }
