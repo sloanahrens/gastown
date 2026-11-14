@@ -13,7 +13,13 @@ import (
 // gone: no commits remain to push, which is not the same as a push that ran.
 var ErrNothingToPush = errors.New("sandbox already gone: nothing to push")
 
-// The openshell implementation sets these two hooks when it is linked in.
+// ErrNoSandboxGitExec is the refusal a caller gets when no in-sandbox git
+// runner is linked into this binary. A caller must not fall back to the host
+// worktree for a sandbox seat: that worktree is a stub holding none of the
+// seat's work.
+var ErrNoSandboxGitExec = errors.New("no sandbox git runner is linked into this binary")
+
+// The openshell implementation sets these hooks when it is linked in.
 // They are package variables rather than an injected object because the
 // implementation is an optional link-time dependency of this package's
 // callers (the daemon, gt sling, gt polecat), the same way NewOpenShellBackend
@@ -31,7 +37,28 @@ var (
 	// transcript is inside the sandbox). Nil leaves a sandboxed session's
 	// verdict Unknown: the host probe's transcript read would not see it.
 	SandboxLiveness func(townRoot string, rec SandboxRecord, in liveness.Input) liveness.Result
+	// SandboxGitExec builds a runner that executes git inside rec's sandbox,
+	// in the clone directory it is given, and returns what git wrote to
+	// stdout. A sandbox that is already gone returns ErrNothingToPush. Nil
+	// means no runner can save a sandbox seat's work, so SandboxGitRunner
+	// refuses rather than read the host stub.
+	SandboxGitExec func(townRoot string, rec SandboxRecord) func(dir string, args ...string) ([]byte, error)
 )
+
+// SandboxGitRunner is the in-sandbox git runner for rec: through the linked
+// SandboxGitExec, or ErrNoSandboxGitExec when no runner is linked. The runner
+// runs one git command per call in dir inside the sandbox; its refusal rules
+// are the implementation's.
+func SandboxGitRunner(townRoot string, rec SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
+	return sandboxGitRunner(SandboxGitExec, townRoot, rec)
+}
+
+func sandboxGitRunner(linked func(townRoot string, rec SandboxRecord) func(dir string, args ...string) ([]byte, error), townRoot string, rec SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
+	if linked == nil {
+		return nil, ErrNoSandboxGitExec
+	}
+	return linked(townRoot, rec), nil
+}
 
 // CleanupSandboxWith removes what a sandboxed session left: the sandbox
 // itself through deleter, then its registry record and routed client. A
