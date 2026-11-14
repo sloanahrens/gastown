@@ -143,7 +143,14 @@ Use --check mac-crew-hooks to find a crew clone whose core.hooksPath points at
 a missing directory or whose .git/config cannot be read. It reads each main
 clone's .git/config without running git, needs no --pod-town, and never
 repairs. Run it on a native gt on the Mac: a pod town has no crew clones, so
-it warns there instead of passing.`,
+it warns there instead of passing.
+
+Use --check data-unit to check the data compose unit (gt-data): the Dolt and bd
+services healthy in docker compose ps, the gateway's /readyz with the daemon
+token, and every token file in the town's gateway token directory
+(.runtime/bd-gateway/tokens) at mode 0600. The unit is read through the same
+project and file as gt dolt start, and the check never starts or repairs
+anything. Without the flag it reports SKIPPED and never fails.`,
 	RunE: runDoctor,
 }
 
@@ -196,6 +203,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// default run never registers it.
 		d.Register(doctor.NewMacCrewHooksCheck())
 	}
+	registerDataUnitCheck(d, names, doltComposeRealDeps())
 	if err := selectDoctorChecks(d, names); err != nil {
 		return err
 	}

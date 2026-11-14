@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doctor"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -84,6 +86,7 @@ type doltComposeUnit struct {
 	backupDir  string
 	configPath string
 	bdImage    string
+	tokenDir   string
 }
 
 // argv is a docker compose call for this unit: the project, the file, then verb.
@@ -92,14 +95,16 @@ func (u doltComposeUnit) argv(verb ...string) []string {
 }
 
 // env is base with the variables the compose file reads from the environment
-// that starts it. Entries appended last win, so the values file's bd image is
-// the one compose sees even when base names another.
+// that starts it. Entries appended last win, so the values file's bd image and
+// the town's token directory are the ones compose sees even when base names
+// another.
 func (u doltComposeUnit) env(base []string) []string {
 	return append(append([]string{}, base...),
 		"GT_DOLT_DATA="+u.dataDir,
 		"GT_DOLT_BACKUPS="+u.backupDir,
 		"GT_DOLT_CONFIG="+u.configPath,
 		"BD_IMAGE="+u.bdImage,
+		"GT_BD_TOKEN_DIR="+u.tokenDir,
 	)
 }
 
@@ -129,6 +134,7 @@ func doltComposeUnitFor(townRoot string, deps doltComposeDeps) (doltComposeUnit,
 		backupDir:  backup,
 		configPath: filepath.Join(dataDir, "config.yaml"),
 		bdImage:    values.Bd,
+		tokenDir:   doctor.DataUnitTokenDir(townRoot),
 	}, nil
 }
 
@@ -175,7 +181,7 @@ func doltComposeStatus(townRoot string, deps doltComposeDeps, w io.Writer) error
 	if err != nil {
 		return err
 	}
-	out, err := deps.run(u.argv("ps", "--all", "--format", "{{.Service}} {{.State}} {{.Health}}"), u.env(deps.environ()))
+	out, err := deps.run(u.argv("ps", "--all", "--format", doctor.DataUnitPsFormat), u.env(deps.environ()))
 	if err != nil {
 		return fmt.Errorf("docker compose ps for %s: %w", doltComposeProject, err)
 	}
@@ -183,4 +189,28 @@ func doltComposeStatus(townRoot string, deps doltComposeDeps, w io.Writer) error
 		return fmt.Errorf("writing the status: %w", err)
 	}
 	return nil
+}
+
+// doltComposePsFor returns the status reader the data unit check runs: docker
+// compose ps for the unit, with the unit's own argv and environment, so the
+// check reads the project and file that gt dolt start brings up.
+func doltComposePsFor(deps doltComposeDeps) func(townRoot string) ([]byte, error) {
+	return func(townRoot string) ([]byte, error) {
+		u, err := doltComposeUnitFor(townRoot, deps)
+		if err != nil {
+			return nil, err
+		}
+		out, err := deps.run(u.argv("ps", "--all", "--format", doctor.DataUnitPsFormat), u.env(deps.environ()))
+		if err != nil {
+			return nil, fmt.Errorf("docker compose ps for %s: %w", doltComposeProject, err)
+		}
+		return out, nil
+	}
+}
+
+// registerDataUnitCheck registers the data unit check on d, reading the unit with
+// deps. It is opt-in by name, like mac-crew-hooks: named in names, it reads the
+// compose unit through docker; otherwise it reports SKIPPED and calls nothing.
+func registerDataUnitCheck(d *doctor.Doctor, names []string, deps doltComposeDeps) {
+	d.Register(doctor.NewDataUnitCheck(slices.Contains(names, doctor.DataUnitCheckName), doltComposePsFor(deps)))
 }
