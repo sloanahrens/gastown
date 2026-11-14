@@ -35,6 +35,28 @@ type runFunc func(c gitCall) (stdout, stderr string, err error)
 // value.
 type ExecCall = gitCall
 
+// Dir is the directory the call runs in, "" meaning the process cwd.
+func (c gitCall) Dir() string { return c.dir }
+
+// Args is the arguments after "git", with any --git-dir prefix already
+// applied. It is a copy, so a runner that changes it changes only what it
+// holds.
+func (c gitCall) Args() []string { return append([]string(nil), c.args...) }
+
+// Env is the environment the call adds on top of the process's own. It is a
+// copy, for the reason Args is.
+func (c gitCall) Env() []string { return append([]string(nil), c.env...) }
+
+// Unset is the keys the call removes from the process's environment. It is a
+// copy, for the reason Args is.
+func (c gitCall) Unset() []string { return append([]string(nil), c.unset...) }
+
+// Stdin is what the call feeds git on stdin; "" means nothing.
+func (c gitCall) Stdin() string { return c.stdin }
+
+// Timeout is the deadline after which the call is killed; 0 means none.
+func (c gitCall) Timeout() time.Duration { return c.timeout }
+
 // ExecFunc runs one git invocation and returns what it wrote to stdout and
 // stderr. Its error carries a non-zero exit as an ExitCode() int method, as
 // *exec.ExitError does, and a deadline kill as ErrTimedOut, the two shapes the
