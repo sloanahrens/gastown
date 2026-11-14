@@ -321,6 +321,25 @@ func addComposeUnitFlag(c *cobra.Command) {
 	c.Flags().Bool(composeUnitFlag, false, "Operate the compose unit deploy/data/docker-compose.yml (project gt-data) instead of the single Dolt container")
 }
 
+// doltStartRoute runs the compose unit's start when compose is set and reports
+// that it did. Unset, it does nothing and reports false, so the caller runs the
+// single-container path it always ran. The deps are the caller's, so a test
+// routes without a docker engine, a working directory or an environment.
+func doltStartRoute(townRoot string, compose bool, deps doltComposeDeps) (bool, error) {
+	if !compose {
+		return false, nil
+	}
+	return true, doltComposeStart(townRoot, deps)
+}
+
+// doltStopRoute is doltStartRoute for gt dolt stop.
+func doltStopRoute(townRoot string, compose bool, deps doltComposeDeps) (bool, error) {
+	if !compose {
+		return false, nil
+	}
+	return true, doltComposeStop(townRoot, deps)
+}
+
 // composeUnitRequested reports whether c was run with --compose-unit. It reads
 // the flag from the command that ran, not a package variable, so a test sets it
 // on a command of its own. A nil command has no flags set.
@@ -336,16 +355,16 @@ func composeUnitRequested(c *cobra.Command) (bool, error) {
 }
 
 func runDoltStart(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
 	compose, err := composeUnitRequested(cmd)
 	if err != nil {
 		return err
 	}
-	if compose {
-		return doltComposeStart(townRoot, doltComposeRealDeps())
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if handled, err := doltStartRoute(townRoot, compose, doltComposeRealDeps()); handled {
+		return err
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
@@ -453,16 +472,16 @@ func runDoltKillImposters(cmd *cobra.Command, args []string) error {
 }
 
 func runDoltStop(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
 	compose, err := composeUnitRequested(cmd)
 	if err != nil {
 		return err
 	}
-	if compose {
-		return doltComposeStop(townRoot, doltComposeRealDeps())
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if handled, err := doltStopRoute(townRoot, compose, doltComposeRealDeps()); handled {
+		return err
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
@@ -593,6 +612,8 @@ type doltStatusReads struct {
 	strayWarning       func(townRoot string)
 	// composeUnit is set by --compose-unit: the status is the compose unit's.
 	composeUnit bool
+	// composeDeps are the compose unit's docker and path reads, used when composeUnit is set.
+	composeDeps doltComposeDeps
 }
 
 // liveDoltStatusReads is the status command's production reads.
@@ -616,6 +637,7 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 	}
 	reads := liveDoltStatusReads()
 	reads.composeUnit = compose
+	reads.composeDeps = doltComposeRealDeps()
 	return runDoltStatusWith(os.Stdout, reads)
 }
 
@@ -627,7 +649,7 @@ func runDoltStatusWith(w io.Writer, reads doltStatusReads) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 	if reads.composeUnit {
-		return doltComposeStatus(townRoot, doltComposeRealDeps(), w)
+		return doltComposeStatus(townRoot, reads.composeDeps, w)
 	}
 
 	config := doltserver.DefaultConfig(townRoot)

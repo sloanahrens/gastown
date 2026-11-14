@@ -313,20 +313,11 @@ func TestComposeUnitRequestedRefusesUnregisteredFlag(t *testing.T) {
 	}
 }
 
-// TestDoltComposeFlagUnregisteredRefuses: start, stop and status on a command
-// with no --compose-unit flag refuse by name, rather than running the default
-// path as if the flag were unset.
-//
-//testpolicy:allow parallel — the dolt commands resolve the town root from process-wide cwd and GT_TOWN_ROOT
-func TestDoltComposeFlagUnregisteredRefuses(t *testing.T) {
-	townRoot := externalContainerTownRoot(t, "gt-dolt")
-	//testpolicy:allow no-chdir — the dolt commands resolve the town root by walking up from the process cwd
-	t.Chdir(t.TempDir())
-	//testpolicy:allow no-env — GT_TOWN_ROOT is the fallback the commands read when the cwd is outside a town
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	//testpolicy:allow no-env — PATH makes docker unfindable, so a path that reaches docker fails here
-	t.Setenv("PATH", t.TempDir())
-
+// TestDoltFlagUnregisteredRefuses: start, stop and status on a command with no
+// --compose-unit flag refuse by name, before the town is looked up, rather than
+// running the default path as if the flag were unset.
+func TestDoltFlagUnregisteredRefuses(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name string
 		run  func(cmd *cobra.Command) error
@@ -336,11 +327,92 @@ func TestDoltComposeFlagUnregisteredRefuses(t *testing.T) {
 		{"status", func(cmd *cobra.Command) error { return runDoltStatus(cmd, nil) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			err := c.run(&cobra.Command{Use: "dolt " + c.name})
 			if err == nil || !strings.Contains(err.Error(), "--compose-unit") {
 				t.Fatalf("gt dolt %s on a command without --compose-unit: error = %v, want a refusal that names the flag", c.name, err)
 			}
 		})
+	}
+}
+
+// TestComposeUnitRequestedReadsTheFlag: a command that registered the flag says
+// whether it was set; unset is the default path.
+func TestComposeUnitRequestedReadsTheFlag(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"unset", nil, false},
+		{"set", []string{"--compose-unit"}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{Use: "dolt"}
+			addComposeUnitFlag(cmd)
+			if err := cmd.Flags().Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			got, err := composeUnitRequested(cmd)
+			if err != nil || got != tt.want {
+				t.Fatalf("composeUnitRequested(%v) = %v, %v, want %v", tt.args, got, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoltRouteSelectsUnit: start and stop route to the compose unit only when
+// it was asked for. Set, they hand docker compose the unit's call; unset, they
+// report not handled and run no docker call, so the caller takes the
+// single-container path.
+func TestDoltRouteSelectsUnit(t *testing.T) {
+	t.Parallel()
+	routes := []struct {
+		name  string
+		route func(townRoot string, compose bool, deps doltComposeDeps) (bool, error)
+	}{
+		{"start", doltStartRoute},
+		{"stop", doltStopRoute},
+	}
+	for _, r := range routes {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := composeTown(t, composeRef("gastown-bd"))
+
+			var calls []composeCall
+			handled, err := r.route(townRoot, true, fakeComposeDeps(townRoot, &calls, nil, nil))
+			if err != nil || !handled || len(calls) != 1 || !composeArgvHas(calls[0].argv, "gt-data") {
+				t.Fatalf("%s with the compose unit: handled=%v err=%v calls=%v, want handled with one gt-data docker call", r.name, handled, err, calls)
+			}
+
+			calls = nil
+			handled, err = r.route(townRoot, false, fakeComposeDeps(townRoot, &calls, nil, nil))
+			if err != nil || handled || len(calls) != 0 {
+				t.Fatalf("%s without the compose unit: handled=%v err=%v calls=%v, want not handled and no docker call", r.name, handled, err, calls)
+			}
+		})
+	}
+}
+
+// TestDoltStatusRoutesToUnit: with composeUnit set the status is the compose
+// unit's, listing its services through the reads' deps.
+func TestDoltStatusRoutesToUnit(t *testing.T) {
+	t.Parallel()
+	townRoot := composeTown(t, composeRef("gastown-bd"))
+	var calls []composeCall
+	reads := doltStatusReads{
+		townRoot:    func() (string, error) { return townRoot, nil },
+		composeUnit: true,
+		composeDeps: fakeComposeDeps(townRoot, &calls, []byte("dolt running healthy\n"), nil),
+	}
+	var w bytes.Buffer
+	if err := runDoltStatusWith(&w, reads); err != nil {
+		t.Fatalf("runDoltStatusWith: %v", err)
+	}
+	if len(calls) != 1 || !composeArgvHas(calls[0].argv, "gt-data") || !strings.Contains(w.String(), "dolt running healthy") {
+		t.Fatalf("status with the compose unit: calls=%v output=%q, want one gt-data call and its listing", calls, w.String())
 	}
 }
 
@@ -352,62 +424,4 @@ func composeArgvHas(argv []string, arg string) bool {
 		}
 	}
 	return false
-}
-
-// TestDoltDefaultPathUnchanged: without --compose-unit the start runs the
-// single-container path it always ran. Here the town names a container and
-// docker cannot run, so the error is the container start's, not the compose
-// path's values refusal.
-//
-//testpolicy:allow parallel — the dolt commands resolve the town root from process-wide cwd and GT_TOWN_ROOT
-func TestDoltDefaultPathUnchanged(t *testing.T) {
-	townRoot := externalContainerTownRoot(t, "gt-dolt")
-	//testpolicy:allow no-chdir — the dolt commands resolve the town root by walking up from the process cwd
-	t.Chdir(t.TempDir())
-	//testpolicy:allow no-env — GT_TOWN_ROOT is the fallback the commands read when the cwd is outside a town
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	//testpolicy:allow no-env — PATH is the lookup that makes docker unfindable, so the test runs no engine
-	t.Setenv("PATH", t.TempDir())
-
-	err := runDoltStart(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "docker start") {
-		t.Fatalf("gt dolt start without --compose-unit: error = %v, want the container start's docker failure", err)
-	}
-}
-
-// TestDoltComposeFlagSelectsUnit: --compose-unit on gt dolt start and stop
-// selects the compose unit. In a town with no values file the command refuses
-// by name; the default path would start the town's container instead.
-//
-//testpolicy:allow parallel — the dolt commands resolve the town root from process-wide cwd and GT_TOWN_ROOT
-func TestDoltComposeFlagSelectsUnit(t *testing.T) {
-	townRoot := externalContainerTownRoot(t, "gt-dolt")
-	//testpolicy:allow no-chdir — the dolt commands resolve the town root by walking up from the process cwd
-	t.Chdir(t.TempDir())
-	//testpolicy:allow no-env — GT_TOWN_ROOT is the fallback the commands read when the cwd is outside a town
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	//testpolicy:allow no-env — PATH makes docker unfindable, so a path that reaches docker fails here
-	t.Setenv("PATH", t.TempDir())
-
-	for _, c := range []struct {
-		name string
-		run  func(cmd *cobra.Command) error
-	}{
-		{"start", func(cmd *cobra.Command) error { return runDoltStart(cmd, nil) }},
-		{"stop", func(cmd *cobra.Command) error { return runDoltStop(cmd, nil) }},
-		{"status", func(cmd *cobra.Command) error { return runDoltStatus(cmd, nil) }},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			cmd := &cobra.Command{Use: "dolt " + c.name}
-			addComposeUnitFlag(cmd)
-			if err := cmd.Flags().Parse([]string{"--compose-unit"}); err != nil {
-				t.Fatal(err)
-			}
-
-			err := c.run(cmd)
-			if err == nil || !strings.Contains(err.Error(), "images.yaml") {
-				t.Fatalf("gt dolt %s --compose-unit: error = %v, want the compose unit's values refusal", c.name, err)
-			}
-		})
-	}
 }
