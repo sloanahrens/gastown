@@ -38,6 +38,11 @@ const (
 	// writes a proposed file and a report, never the checked-in weights, and is not
 	// part of CommandAll.
 	CommandStoryPointsTrain = "storypoints-train"
+	// CommandStoryPointsAdopt decides the day's proposed story-points weights and,
+	// when they are adopted, writes them as the town's runtime weights, keeping the
+	// weights they replaced as numbered versions. With StoryPointsRevert it
+	// restores the newest version instead of adopting a proposal.
+	CommandStoryPointsAdopt = "storypoints-adopt"
 )
 
 // usageText is Main's answer to an argv that names no command, kept verbatim so
@@ -77,6 +82,13 @@ type Commands struct {
 	// Embedder embeds a bead's section text for the retrain; nil is the ollama
 	// embedder the checked-in weights name, at STORYPOINTS_EMBED_URL.
 	Embedder storypoints.Embedder
+	// StoryPointsRevert asks storypoints-adopt to restore the newest runtime
+	// weights version instead of adopting the day's proposal.
+	StoryPointsRevert bool
+	// storyPointsStore is the filesystem storypoints-adopt lists, writes and
+	// deletes beside the runtime weights. The zero value is the host's; a test
+	// fills the one function it needs to refuse.
+	storyPointsStore storyPointsStore
 }
 
 // withDefaults fills each seam the caller left unset with the host's, so the
@@ -152,13 +164,18 @@ func Run(ctx context.Context, command string, c Commands) error {
 			return fmt.Errorf("storypoints-train: %w", err)
 		}
 	}
+	if command == CommandStoryPointsAdopt {
+		if err := c.runStoryPointsAdopt(ctx, real, env); err != nil {
+			return fmt.Errorf("storypoints-adopt: %w", err)
+		}
+	}
 	return nil
 }
 
 // isCommand reports whether name is one of main's subcommands.
 func isCommand(name string) bool {
 	switch name {
-	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints, CommandStoryPointsTrain:
+	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints, CommandStoryPointsTrain, CommandStoryPointsAdopt:
 		return true
 	}
 	return false

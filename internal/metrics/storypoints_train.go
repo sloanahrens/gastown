@@ -200,7 +200,7 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 	// that base here, naming it.
 	dim := base.EmbeddingDimension()
 	if dim == 0 {
-		return nil, counts, fmt.Errorf("storypoints-train: the base weights %q have no embedding ridge, so no logged embedding can be fitted", base.Version())
+		return nil, counts, fmt.Errorf("the base weights %q have no embedding ridge, so no logged embedding can be fitted", base.Version())
 	}
 	var cands []trainCandidate
 	byDir := map[string][]string{}
@@ -221,7 +221,7 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 		}
 		landed, err := ParseTS(row["landed_at"])
 		if err != nil {
-			return nil, counts, fmt.Errorf("storypoints-train: bead %s: %w", row["bead"], err)
+			return nil, counts, fmt.Errorf("bead %s: %w", row["bead"], err)
 		}
 		dir, ok := reviewDir(town, row["rig"])
 		if !ok {
@@ -237,7 +237,7 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 	// which would fit every bead on text it may have edited.
 	logged, malformed, err := estlog.Read(town)
 	if err != nil {
-		return nil, counts, fmt.Errorf("storypoints-train: %w", err)
+		return nil, counts, err
 	}
 	counts.malformedLog = malformed
 	byBead := map[string][]estlog.Record{}
@@ -249,7 +249,7 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 	for dir, ids := range byDir {
 		found, err := showBeads(ctx, env, dir, ids)
 		if err != nil {
-			return nil, counts, fmt.Errorf("storypoints-train: read beads in %s: %w", dir, err)
+			return nil, counts, fmt.Errorf("read beads in %s: %w", dir, err)
 		}
 		for id, issue := range found {
 			issues[id] = issue
@@ -295,7 +295,7 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 		}
 		vec, err := embedder.Embed(ctx, text)
 		if err != nil {
-			return nil, counts, fmt.Errorf("storypoints-train: embed bead %s: %w", c.bead, err)
+			return nil, counts, fmt.Errorf("embed bead %s: %w", c.bead, err)
 		}
 		fallback.count(&counts)
 		samples = append(samples, storypoints.Sample{

@@ -40,23 +40,31 @@ var townMetricsCommands = []struct{ name, short string }{
 	{metrics.CommandReport, "Write the dated town metrics digest into the docs directory"},
 	{metrics.CommandStoryPoints, "Print the story-points shadow report from today's landings table"},
 	{metrics.CommandStoryPointsTrain, "Fit proposed story-points weights from today's landings table; writes a proposed file and a report, never the checked-in weights"},
+	{metrics.CommandStoryPointsAdopt, "Adopt the day's proposed story-points weights as the town's runtime weights, keeping the file it replaces; --revert restores the previous version"},
 	{metrics.CommandAll, "Run extract, mango, backtest and report in order"},
 }
 
 // newTownMetricsCmd is one town-metrics step as a subcommand; the step itself is
-// run, so the command carries no behavior of its own.
+// run, so the command carries no behavior of its own. storypoints-adopt alone
+// takes --revert, the one step with an option.
 func newTownMetricsCmd(name, short string, run func(context.Context, string, metrics.Commands) error) *cobra.Command {
-	return &cobra.Command{
+	var revert bool
+	cmd := &cobra.Command{
 		Use:   name,
 		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), name, metrics.Commands{
-				Today: time.Now().Format(time.DateOnly),
-				Out:   cmd.OutOrStdout(),
+				Today:             time.Now().Format(time.DateOnly),
+				Out:               cmd.OutOrStdout(),
+				StoryPointsRevert: name == metrics.CommandStoryPointsAdopt && revert,
 			})
 		},
 	}
+	if name == metrics.CommandStoryPointsAdopt {
+		cmd.Flags().BoolVar(&revert, "revert", false, "Restore the previous runtime weights version instead of adopting the day's proposal")
+	}
+	return cmd
 }
 
 var metricsCmd = &cobra.Command{

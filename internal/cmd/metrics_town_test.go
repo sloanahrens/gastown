@@ -19,6 +19,7 @@ func townMetricsSteps() []string {
 		metrics.CommandAll,
 		metrics.CommandStoryPoints,
 		metrics.CommandStoryPointsTrain,
+		metrics.CommandStoryPointsAdopt,
 	}
 }
 
@@ -51,6 +52,32 @@ func TestTownMetricsSubcommandsDispatch(t *testing.T) {
 				t.Errorf("Out = %v, want the command's output", got.Out)
 			}
 		})
+	}
+}
+
+// TestStoryPointsAdoptRevertFlagReachesTheStep: --revert belongs to
+// storypoints-adopt alone, and the step it runs sees it.
+func TestStoryPointsAdoptRevertFlagReachesTheStep(t *testing.T) {
+	t.Parallel()
+	revertSeen := false
+	run := func(_ context.Context, _ string, c metrics.Commands) error {
+		revertSeen = c.StoryPointsRevert
+		return nil
+	}
+	cmd := newTownMetricsCmd(metrics.CommandStoryPointsAdopt, "short", run)
+	cmd.SetOut(&bytes.Buffer{})
+	if err := cmd.Flags().Set("revert", "true"); err != nil {
+		t.Fatalf("set --revert: %v", err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("RunE: %v", err)
+	}
+	if !revertSeen {
+		t.Error("StoryPointsRevert = false, want the flag passed to the step")
+	}
+	other := newTownMetricsCmd(metrics.CommandExtract, "short", run)
+	if other.Flags().Lookup("revert") != nil {
+		t.Error("metrics extract has --revert, want the flag on storypoints-adopt alone")
 	}
 }
 
