@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1387,5 +1388,155 @@ func TestPumpsStalledOnlyInAWrite(t *testing.T) {
 	}
 	if n := fw.writesInProgress(); n != 0 {
 		t.Errorf("a finished write still counts: %d in progress", n)
+	}
+}
+
+// firstWriteBlocks is a client stream whose first Write blocks until released,
+// like a client that stopped reading, and which records every byte written.
+type firstWriteBlocks struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (w *firstWriteBlocks) Write(p []byte) (int, error) {
+	first := false
+	w.once.Do(func() { first = true })
+	if first {
+		w.entered <- struct{}{}
+		<-w.release
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *firstWriteBlocks) written() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.buf.Bytes()...)
+}
+
+// TestEndingFramesWaitForALivePump: the ending frames go through the same writer
+// as the pumps, so a pump still writing when the call ends can never interleave
+// its frame with the ending's: the stream reads stdout, error, exit, in order.
+func TestEndingFramesWaitForALivePump(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	w := &firstWriteBlocks{entered: make(chan struct{}, 1), release: release}
+	fw := &frameWriter{w: w}
+	ctx := waitCtx(t)
+	pumpDone := make(chan error, 1)
+	go func() { pumpDone <- fw.write(FrameStdout, []byte("live")) }()
+	select {
+	case <-w.entered:
+	case <-ctx.Done():
+		t.Fatal("the pump's write never reached the client")
+	}
+	endDone := make(chan struct{})
+	go func() {
+		defer close(endDone)
+		writeEnding(fw, CodeTimeout, 124, "the call ended")
+	}()
+	// The ending is waiting on the pump's lock when both writes are counted;
+	// an ending that bypassed the lock would never raise the count to two.
+	for fw.writesInProgress() < 2 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("the ending did not queue behind the pump's write: it does not share the writer")
+		default:
+			runtime.Gosched()
+		}
+	}
+	close(release)
+	for _, done := range []<-chan struct{}{endDone} {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			t.Fatal("the ending never finished after the pump was released")
+		}
+	}
+	if err := <-pumpDone; err != nil {
+		t.Fatalf("the pump's write: %v", err)
+	}
+	frames := readFrames(t, w.written())
+	if len(frames) != 3 || frames[0].Kind != FrameStdout || frames[1].Kind != FrameError || frames[2].Kind != FrameExit {
+		t.Fatalf("the stream is %+v, want stdout, error, exit in order", frames)
+	}
+}
+
+// TestDiscardedWriterDoesNotTakeTheLock: once the client is declared stalled the
+// writer drops every write without touching the lock a blocked pump holds, so the
+// ending frames cannot hang behind it.
+func TestDiscardedWriterDoesNotTakeTheLock(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	w := &firstWriteBlocks{entered: make(chan struct{}, 1), release: release}
+	fw := &frameWriter{w: w}
+	ctx := waitCtx(t)
+	pumpDone := make(chan error, 1)
+	go func() { pumpDone <- fw.write(FrameStdout, []byte("live")) }()
+	select {
+	case <-w.entered:
+	case <-ctx.Done():
+		t.Fatal("the pump's write never reached the client")
+	}
+	fw.discard.Store(true)
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		writeEnding(fw, CodeTimeout, 124, "the call ended")
+	}()
+	select {
+	case <-ended:
+	case <-ctx.Done():
+		t.Fatal("the ending hung behind a pump blocked in a write although the writer was discarded")
+	}
+	close(release)
+	select {
+	case <-pumpDone:
+	case <-ctx.Done():
+		t.Fatal("the released pump never returned")
+	}
+}
+
+// stubbornReader ignores the executor closing the pipe: it returns only once the
+// test releases it, like a read the close does not reach.
+type stubbornReader struct{ release <-chan struct{} }
+
+func (r stubbornReader) Read([]byte) (int, error) {
+	<-r.release
+	return 0, io.EOF
+}
+
+// TestExecutorGivesUpOnAPumpThatIgnoresTheClose: a pump that is not writing to the
+// client but never ends is waited for a bounded number of grace periods, then
+// given up on with the error recorded, and the ending frames are still written to
+// a client that is not stalled.
+func TestExecutorGivesUpOnAPumpThatIgnoresTheClose(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	proc := newBlockingFake("")
+	proc.stdout = stubbornReader{release: release}
+	e := newTestExecutorGrace(t, testWorkspace(t), &fakeRunner{queue: []Process{proc}}, 10*time.Millisecond)
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown", TimeoutMS: 20}, nil, &out)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Exec returned nil after giving up on a pump")
+		}
+	case <-waitCtx(t).Done():
+		t.Fatal("Exec waited past the bounded grace periods for a pump that ignores the close")
+	}
+	frames := readFrames(t, out.Bytes())
+	if len(frames) != 2 || frames[0].Kind != FrameError || frames[1].Kind != FrameExit {
+		t.Fatalf("frames = %+v, want the error frame and the exit frame written to the client that did not stall", frames)
 	}
 }

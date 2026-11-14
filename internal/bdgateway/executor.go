@@ -230,9 +230,13 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	runCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 
+	// fw is the one writer of this call's stream: the pumps and the ending frames
+	// all go through its lock, so a pump still alive when the call ends can never
+	// interleave its frames with the ending's.
+	fw := &frameWriter{w: frames}
 	proc, err := e.runner.Start(e.binary, req.Argv, env, dir)
 	if err != nil {
-		writeEnding(frames, CodeStartFailed, 125, err.Error())
+		writeEnding(fw, CodeStartFailed, 125, err.Error())
 		return fmt.Errorf("bdgateway: starting bd: %w", err)
 	}
 
@@ -278,7 +282,6 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 		_ = proc.Stdin().Close()
 	}()
 
-	fw := &frameWriter{w: frames}
 	pumpErrs := make(chan error, 2)
 	go func() { pumpErrs <- fw.copy(proc.Stdout(), FrameStdout) }()
 	go func() { pumpErrs <- fw.copy(proc.Stderr(), FrameStderr) }()
@@ -337,7 +340,7 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 					switch {
 					case fw.writesInProgress() > 0 && inWriteBefore:
 						record(fmt.Errorf("%w: the client stopped reading its stream, %d pump(s) still writing %s after the call ended", errFrameWrite, pending, e.killGrace))
-						frames = io.Discard
+						fw.discard.Store(true) // the lock is held by the blocked write, so stop writing without it
 						pending = 0
 					case fw.writesInProgress() > 0:
 						inWriteBefore = true
@@ -392,36 +395,36 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 
 	end, killErr, killed, waited, status, waitErr := out.state()
 	if !waited {
-		return e.killFailed(frames, proc, end, killErr, killed, limit)
+		return e.killFailed(fw, proc, end, killErr, killed, limit)
 	}
 	switch end {
 	case deadlineEnding:
 		// The deadline ended this call, so its status is not bd's answer: a
 		// call killed at its deadline is never a success.
-		writeEnding(frames, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
+		writeEnding(fw, CodeTimeout, 124, fmt.Sprintf("bd did not finish within %s", limit))
 		return withKillErr(fmt.Errorf("%w: %s", ErrTimeout, limit), killErr)
 	case canceledEnding:
 		switch {
 		case readErr != nil:
 			// A read the gateway could not make is its failure, even though the
 			// cancel it caused is what ended the wait.
-			writeEnding(frames, CodeWaitFailed, 125, readErr.Error())
+			writeEnding(fw, CodeWaitFailed, 125, readErr.Error())
 			return withKillErr(fmt.Errorf("bdgateway: reading bd's output: %w", readErr), killErr)
 		case ctx.Err() != nil:
-			writeEnding(frames, CodeCanceled, 124, "the request ended before bd did")
+			writeEnding(fw, CodeCanceled, 124, "the request ended before bd did")
 			return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, ctx.Err()), killErr)
 		}
 		// The gateway stopped the call because the client's stream could not be
 		// written.
-		writeEnding(frames, CodeCanceled, 124, "the client's stream could not be written")
+		writeEnding(fw, CodeCanceled, 124, "the client's stream could not be written")
 		return withKillErr(fmt.Errorf("%w: %v", ErrClientGone, writeErr), killErr)
 	}
 	switch {
 	case waitErr != nil:
-		writeEnding(frames, CodeWaitFailed, 125, waitErr.Error())
+		writeEnding(fw, CodeWaitFailed, 125, waitErr.Error())
 		return withKillErr(fmt.Errorf("bdgateway: waiting for bd: %w", waitErr), killErr)
 	case status < 0:
-		writeEnding(frames, CodeSignaled, 125, "bd was killed by a signal")
+		writeEnding(fw, CodeSignaled, 125, "bd was killed by a signal")
 		return withKillErr(ErrSignaled, killErr)
 	}
 	// bd exited with a status of its own, which is the answer when no ending
@@ -500,7 +503,7 @@ func (o *callOutcome) state() (end callEnding, killErr error, killed, waited boo
 // once with its named ending and ErrKillFailed, and the wait goroutine reaps bd
 // when it ends, so a process that ignores the kill holds neither Exec nor the
 // slot it took.
-func (e *Executor) killFailed(frames io.Writer, proc Process, end callEnding, killErr error, killed bool, limit time.Duration) error {
+func (e *Executor) killFailed(fw *frameWriter, proc Process, end callEnding, killErr error, killed bool, limit time.Duration) error {
 	named := fmt.Errorf("%w: %s", ErrTimeout, limit)
 	code := CodeTimeout
 	message := fmt.Sprintf("bd did not finish within %s and did not end after the kill", limit)
@@ -516,7 +519,7 @@ func (e *Executor) killFailed(frames io.Writer, proc Process, end callEnding, ki
 	if killErr != nil {
 		failed = errors.Join(failed, fmt.Errorf("bdgateway: killing bd's process group: %w", killErr))
 	}
-	writeEnding(frames, code, 124, message)
+	writeEnding(fw, code, 124, message)
 	return errors.Join(named, failed)
 }
 
@@ -693,17 +696,29 @@ type frameWriter struct {
 	// stopped reading is, and that is what the drain after a call's end tells
 	// apart (writesInProgress).
 	writing atomic.Int32
+	// discard, once set, makes every write a no-op that does not touch the lock:
+	// the client stopped reading and a pump blocked in a write holds the lock.
+	discard atomic.Bool
 }
 
 // writesInProgress is how many writes to the client have begun and not ended.
 func (f *frameWriter) writesInProgress() int { return int(f.writing.Load()) }
 
 func (f *frameWriter) write(kind FrameKind, payload []byte) error {
+	return f.send(Frame{Kind: kind, Payload: payload})
+}
+
+// send is the one place a frame reaches the client: it counts the write, honours
+// discard without touching the lock, and writes under the lock.
+func (f *frameWriter) send(fr Frame) error {
+	if f.discard.Load() {
+		return nil
+	}
 	f.writing.Add(1)
 	defer f.writing.Add(-1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return WriteFrame(f.w, Frame{Kind: kind, Payload: payload})
+	return WriteFrame(f.w, fr)
 }
 
 // copy frames r until it ends. A read or write failure stops the copy, so the
@@ -729,9 +744,7 @@ func (f *frameWriter) copy(r io.Reader, kind FrameKind) error {
 }
 
 func (f *frameWriter) exit(status int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return WriteFrame(f.w, ExitFrame(status))
+	return f.send(ExitFrame(status))
 }
 
 // withKillErr adds a failed kill to the refusal that ended a call, so a call
@@ -746,12 +759,11 @@ func withKillErr(err, killErr error) error {
 // writeEnding writes the frame that explains a call the gateway ended, then
 // the exit frame the design pairs with it. A failed write is the client being
 // gone, which the caller already learns from the returned error.
-func writeEnding(out io.Writer, code string, status int, message string) {
+func writeEnding(fw *frameWriter, code string, status int, message string) {
 	payload, err := json.Marshal(ErrorPayload{Code: code, Message: message})
 	if err != nil {
 		return
 	}
-	fw := &frameWriter{w: out}
 	if err := fw.write(FrameError, payload); err != nil {
 		return
 	}
