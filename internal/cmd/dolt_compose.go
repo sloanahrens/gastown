@@ -204,14 +204,11 @@ func doltComposePsFor(deps doltComposeDeps) func(townRoot string) ([]byte, error
 	}
 }
 
-// dataUnitTokenEnv names the gateway's token directory. The compose unit requires
-// it, and the check reads the same variable compose sees.
-const dataUnitTokenEnv = "GT_BD_TOKEN_DIR"
-
-// dataUnitTokenDir returns the gateway's token directory from the environment,
-// for the data unit check. An empty result fails the token rung by name.
+// dataUnitTokenDir returns the gateway's token directory from GT_BD_TOKEN_DIR,
+// the variable the compose unit requires, so the check reads the same one compose
+// sees. An empty result fails the token rung by name.
 func dataUnitTokenDir() string {
-	return os.Getenv(dataUnitTokenEnv)
+	return os.Getenv("GT_BD_TOKEN_DIR")
 }
 
 // registerDataUnitCheck registers the data unit check on d, reading the unit with
