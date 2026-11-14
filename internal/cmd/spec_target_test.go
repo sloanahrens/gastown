@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -29,6 +30,13 @@ func (f fakeTree) TreeFileBlobs(rev string) (map[string]string, error) {
 		blobs[file] = "blob-" + file
 	}
 	return blobs, nil
+}
+
+// ShowFileAtRev holds no file content: the inventory tests read no file out of
+// the tree, so every path is absent, as git answers for one a revision does not
+// have. fakeRiskTree carries the content a risk-list test reads.
+func (fakeTree) ShowFileAtRev(ref, path string) (string, error) {
+	return "", git.ErrNotAtRef
 }
 
 // rigAt is a rig directory holding a shared bare repo, which is what

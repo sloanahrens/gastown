@@ -11,6 +11,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -135,5 +136,65 @@ func TestIntegrationSpecLintTargetReadsTheBeadsRig(t *testing.T) {
 	}
 	if _, ok := target.Files["internal/cmd/spec.go"]; !ok {
 		t.Errorf("Files = %v, want internal/cmd/spec.go", target.Files)
+	}
+}
+
+// specTargetRiskList writes internal/land/riskpaths.txt into repo and commits
+// it on the branch HEAD names.
+func specTargetRiskList(t *testing.T, repo, text string) {
+	t.Helper()
+	path := filepath.Join(repo, "internal", "land", "riskpaths.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, repo, "add", "-A")
+	gitOut(t, repo, "commit", "-m", "risk list")
+}
+
+// The risk list is read with the landing worker's loader from the same ref as
+// the inventory: origin's branch, so a submission cannot unlist its own paths
+// and a lagging local branch does not decide what is warned about (gt-a4yodt).
+func TestIntegrationSpecTargetTreeReadsTheRiskListFromOrigin(t *testing.T) {
+	t.Parallel()
+	work := specTargetWork(t, "internal/cmd/spec.go")
+	specTargetRiskList(t, work, "# the risk list\ninternal/daemon/**\n")
+	rigRoot := t.TempDir()
+	bare := specTargetBare(t, work, filepath.Join(rigRoot, ".repo.git"), "main")
+
+	// origin/main moves ahead of the bare repo's local main with a list that
+	// names different globs, so the assertion says which ref was read.
+	ahead := t.TempDir()
+	gitOut(t, ahead, "clone", bare, ahead)
+	specTargetRiskList(t, ahead, "internal/land/**\nMakefile\n")
+	gitOut(t, bare, "fetch", ahead, "main")
+	gitOut(t, bare, "update-ref", "refs/remotes/origin/main", "FETCH_HEAD")
+
+	target := specTargetTree(rigRoot, openRigTree)
+	if target.Err != "" || target.RiskGlobsErr != "" {
+		t.Fatalf("target = %+v, want the origin inventory and its risk list", target)
+	}
+	want := []string{"internal/land/**", "Makefile"}
+	if !slices.Equal(target.RiskGlobs, want) {
+		t.Errorf("RiskGlobs = %v, want origin's %v", target.RiskGlobs, want)
+	}
+}
+
+// A branch whose risk list does not exist is no globs and no error, as the
+// landing worker's loader answers; the lint does not warn on it (gt-a4yodt).
+func TestIntegrationSpecTargetTreeHasNoRiskListWithoutTheFile(t *testing.T) {
+	t.Parallel()
+	work := specTargetWork(t, "internal/cmd/spec.go")
+	rigRoot := t.TempDir()
+	specTargetBare(t, work, filepath.Join(rigRoot, ".repo.git"), "main")
+
+	target := specTargetTree(rigRoot, openRigTree)
+	if target.Err != "" {
+		t.Fatalf("Err = %q, want the inventory", target.Err)
+	}
+	if len(target.RiskGlobs) != 0 || target.RiskGlobsErr != "" {
+		t.Errorf("RiskGlobs = %v, RiskGlobsErr = %q; want none of each", target.RiskGlobs, target.RiskGlobsErr)
 	}
 }

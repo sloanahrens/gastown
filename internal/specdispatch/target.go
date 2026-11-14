@@ -33,6 +33,14 @@ type TargetTree struct {
 	// git failure. A tree carrying an error is never read as an empty one, so
 	// a bead naming a path is held with the error named.
 	Err string
+	// RiskGlobs are the globs of internal/land/riskpaths.txt at Branch, parsed
+	// by internal/land's loader so the lint and the landing worker read one
+	// list one way. Empty is a branch with no risk list, or an empty one.
+	RiskGlobs []string
+	// RiskGlobsErr is why the risk list could not be read. A tree carrying one
+	// is not a tree whose risk list is empty: the lint warns that the check
+	// did not run.
+	RiskGlobsErr string
 }
 
 // targetPathRe matches a repo-relative file path: at least one directory, and a

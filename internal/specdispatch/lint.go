@@ -268,6 +268,17 @@ type Spec struct {
 	// set the caller did not fill, and no path passes on it. Only a bead with a
 	// Files section reads the set; the cue grammar is unchanged.
 	BlockerCreates []string
+	// RiskPaths are the paths the bead's text names that match the risk list
+	// (internal/land/riskpaths.txt) at the target branch, filled by the caller
+	// with internal/land's matcher like Target: the loader and the matcher live
+	// in land, which imports this package. The lint warns when three or more
+	// are named and never refuses on them (docs/design/rework-program.md,
+	// lever 2). Nil is a bead whose text named no risk path.
+	RiskPaths []string
+	// RiskPathsErr is why the risk list could not be read, filled by the
+	// caller. The lint warns that the check did not run rather than reading an
+	// unread list as one the bead named nothing from.
+	RiskPathsErr string
 	// Rig is the bead's own rig, filled by the caller from its ID prefix. The
 	// other-rig check reads every rig in TownRigs except this one. Empty is a
 	// bead with no rig, so every known rig counts as another (gt-qotsst).
@@ -323,6 +334,11 @@ type LintVerdict struct {
 	// Refusals is every shape failure found, in check order. Empty unless
 	// Route is RouteRefuse; Field and Reason are its first entry.
 	Refusals []Refusal
+	// Warnings are advisory lines that change neither the route nor the exit
+	// code: the risk-path warning, and the note that its read did not run.
+	// A work bead's warnings are populated on every route, so a refused bead
+	// still learns its text names too many risk paths.
+	Warnings []string
 }
 
 // refusal builds a refused verdict from one or more failures. Field and Reason
@@ -736,6 +752,10 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //
 // The bead's type and labels are not a gate: a task or bug with the five
 // sections is as lintable as a feature (gt-mmsr2).
+//
+// The shape decides the route and nothing else: the risk-path warning is
+// computed beside it and changes neither the route nor the exit code
+// (docs/design/rework-program.md, lever 2).
 func Lint(s Spec, t Template) LintVerdict {
 	return lint(s, t, true)
 }
@@ -751,6 +771,19 @@ func LintShape(s Spec, t Template) LintVerdict {
 }
 
 func lint(s Spec, t Template, paths bool) LintVerdict {
+	v := lintShape(s, t, paths)
+	// An epic, a wisp and the other runtime beads are not work one worker
+	// takes, and a container's text names many paths by design: the risk-path
+	// warning is for work beads only.
+	if NotWorkBead(s) == "" {
+		v.Warnings = riskPathWarnings(s)
+	}
+	return v
+}
+
+// lintShape is lint's shape checks: the route, its refusals and its size. The
+// caller adds the warnings that ride beside the route.
+func lintShape(s Spec, t Template, paths bool) LintVerdict {
 	if why := NotWorkBead(s); why != "" {
 		return refusal(Refusal{Field: "not a work bead", Reason: why})
 	}
