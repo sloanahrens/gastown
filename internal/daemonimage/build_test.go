@@ -3,6 +3,7 @@ package daemonimage
 import (
 	"context"
 	"errors"
+	"go/build"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -882,4 +883,24 @@ func withoutLdflags(argv []string) []string {
 		out = append(out, argv[i])
 	}
 	return out
+}
+
+// TestBDShimPackageIsBuildableFromTheCheckout: the package the gateway builds as
+// bdshim is a main package in the rig's own checkout with Go files for
+// linux/arm64. The fake runner never reads the package it is asked to build, so
+// a removed or renamed cmd/bdshim passed every build test. This reads the
+// directory BDShimPackage names. go/build parses the files without compiling
+// them, so a package that does not type-check still passes here.
+func TestBDShimPackageIsBuildableFromTheCheckout(t *testing.T) {
+	t.Parallel()
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = "linux", "arm64", false
+	dir := filepath.Join("..", "..", filepath.FromSlash(strings.TrimPrefix(BDShimPackage, "./")))
+	pkg, err := ctx.ImportDir(dir, 0)
+	if err != nil {
+		t.Fatalf("%s is not a buildable package for linux/arm64 in the checkout: %v", BDShimPackage, err)
+	}
+	if pkg.Name != "main" {
+		t.Errorf("%s is package %q, want a main package the gateway can link into bdshim", BDShimPackage, pkg.Name)
+	}
 }
