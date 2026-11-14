@@ -268,6 +268,98 @@ func TestSubmissionLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestTestsCoverChangeLabel labels the question from the class of the findings
+// the om review recorded: a test that passes without the fix, or one that
+// bypasses the real path, is positive; a review whose findings are of other
+// classes is negative; a review with no finding text, or a later attempt's
+// review, is unlabeled. A missing-test phrase in the rejection block keeps its
+// negative label over the review's positive one.
+func TestTestsCoverChangeLabel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		findings      []land.ReviewFindingText
+		notes         string
+		secondAttempt bool
+		labeled       bool
+		value         bool
+	}{
+		{
+			name:     "a test that passes without the fix is positive",
+			findings: []land.ReviewFindingText{{Title: "The new test passes without the fix", Claim: "revert the guard and the test still passes"}},
+			labeled:  true,
+			value:    true,
+		},
+		{
+			name:     "a finding of another class is negative",
+			findings: []land.ReviewFindingText{{Title: "The commit subject names another file"}},
+			labeled:  true,
+			value:    false,
+		},
+		{
+			name:     "a test that bypasses the real path is positive",
+			findings: []land.ReviewFindingText{{Title: "The new test bypasses the real path", Claim: "it calls the helper directly"}},
+			labeled:  true,
+			value:    true,
+		},
+		{
+			name:     "a bypass named only in the claim is positive",
+			findings: []land.ReviewFindingText{{Title: "The new test is weak", Claim: "it bypasses the production call site"}},
+			labeled:  true,
+			value:    true,
+		},
+		{
+			name:          "a later attempt's review is unlabeled",
+			findings:      []land.ReviewFindingText{{Title: "The new test passes without the fix"}},
+			secondAttempt: true,
+			labeled:       false,
+		},
+		{
+			name:    "a review with no finding text is unlabeled",
+			labeled: false,
+		},
+		{
+			name:     "the rejection block's missing-test phrase keeps its negative label",
+			findings: []land.ReviewFindingText{{Title: "The test passes with the guard reverted"}},
+			notes: land.FormatRejectionNote(land.RejectionNote{
+				Attempt: 1, Kind: string(land.RejectReview), Reason: "refused",
+				Branch: "polecat/x/gt-a+1", Target: "main", MR: "gt-a",
+				Findings: []land.Finding{{ID: "gt-f1", Severity: "high", Path: "a.go", Line: 3, Title: "The new branch is untested"}},
+			}),
+			labeled: true,
+			value:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			attempt := 1
+			if tc.secondAttempt {
+				attempt = 2
+			}
+			rows := []land.ReviewRecord{{
+				BeadID: "gt-a", Rig: submission.RigName, Attempt: attempt, Verdict: land.VerdictRequestChanges,
+				At: submissionAt(10, 30), FindingText: tc.findings,
+			}}
+			a := &submissionAdapter{
+				reviews: &land.ReviewsFile{Path: reviewFile(t, rows...)},
+				notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": tc.notes}},
+			}
+			lab, err := a.Label(context.Background(), submissionItem(t, a, "gt-a", submissionAt(10, 0)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, labeled := lab.Labels[QuestionID(submission.QTestsCoverChange)]
+			if labeled != tc.labeled {
+				t.Fatalf("tests_cover_change labeled = %v (value %v), want labeled %v", labeled, got, tc.labeled)
+			}
+			if tc.labeled && got != tc.value {
+				t.Errorf("tests_cover_change = %v, want %v", got, tc.value)
+			}
+		})
+	}
+}
+
 // TestSubmissionFindingLabelsReadsBothPhraseLists checks every entry of both
 // phrase lists, matched in upper case, and a title that names neither.
 func TestSubmissionFindingLabelsReadsBothPhraseLists(t *testing.T) {

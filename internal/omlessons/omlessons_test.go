@@ -93,7 +93,7 @@ var pinnedKeywords = map[string]struct{ Title, Claim []string }{
 func TestClassTableClaimsItsFindings(t *testing.T) {
 	t.Parallel()
 	for id, f := range lessonFinding {
-		if got := classify(f); got != id {
+		if got := Classify(f); got != id {
 			t.Errorf("finding %q classified %q, want %q", f.Title, got, id)
 		}
 	}
@@ -109,7 +109,7 @@ func TestClassTableClaimsItsFindings(t *testing.T) {
 			t.Errorf("class %q is missing from the table", id)
 		}
 	}
-	if got := classify(land.ReviewFindingText{Title: "a finding from a class not yet seeded", Claim: "nothing the table knows"}); got != Unclassified {
+	if got := Classify(land.ReviewFindingText{Title: "a finding from a class not yet seeded", Claim: "nothing the table knows"}); got != Unclassified {
 		t.Errorf("a finding matching no row classified %q, want %q", got, Unclassified)
 	}
 }
@@ -120,12 +120,12 @@ func TestEveryKeywordClassifiesToItsRow(t *testing.T) {
 	t.Parallel()
 	for _, c := range classes {
 		for _, keyword := range c.Title {
-			if got := classify(land.ReviewFindingText{Title: "om wrote: " + keyword}); got != c.ID {
+			if got := Classify(land.ReviewFindingText{Title: "om wrote: " + keyword}); got != c.ID {
 				t.Errorf("title %q classified %q, want %q", keyword, got, c.ID)
 			}
 		}
 		for _, keyword := range c.Claim {
-			if got := classify(land.ReviewFindingText{Claim: "om wrote: " + keyword}); got != c.ID {
+			if got := Classify(land.ReviewFindingText{Claim: "om wrote: " + keyword}); got != c.ID {
 				t.Errorf("claim %q classified %q, want %q", keyword, got, c.ID)
 			}
 		}
@@ -152,7 +152,7 @@ func TestPinnedKeywordsStayInTheirRow(t *testing.T) {
 			if !slices.Contains(row.Title, keyword) {
 				t.Errorf("class %q: title keyword %q is no longer in its row", id, keyword)
 			}
-			if got := classify(land.ReviewFindingText{Title: "om wrote: " + keyword}); got != id {
+			if got := Classify(land.ReviewFindingText{Title: "om wrote: " + keyword}); got != id {
 				t.Errorf("title %q classified %q, want %q", keyword, got, id)
 			}
 		}
@@ -160,7 +160,7 @@ func TestPinnedKeywordsStayInTheirRow(t *testing.T) {
 			if !slices.Contains(row.Claim, keyword) {
 				t.Errorf("class %q: claim keyword %q is no longer in its row", id, keyword)
 			}
-			if got := classify(land.ReviewFindingText{Claim: "om wrote: " + keyword}); got != id {
+			if got := Classify(land.ReviewFindingText{Claim: "om wrote: " + keyword}); got != id {
 				t.Errorf("claim %q classified %q, want %q", keyword, got, id)
 			}
 		}

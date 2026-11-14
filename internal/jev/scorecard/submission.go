@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/omlessons"
 )
 
 // SubmissionBattery is the submission adapter's name: the --battery value.
@@ -48,13 +49,25 @@ var (
 		"not asked for",
 		"unrequested",
 	}
+	// testBypassPhrases name a test that reaches the code around the production
+	// path, which the class table does not yet give a row. A first-attempt
+	// finding that holds one, in its title or its claim, sets tests_cover_change
+	// true with the no-red-when-removed class (gt-eh24dn).
+	testBypassPhrases = []string{
+		"bypass the real",
+		"bypasses the real",
+		"bypass the production",
+		"bypasses the production",
+	}
 )
 
 // Rules the submission adapter names in the --json report's lines. The first
 // two name the om verdict that set will_pass_review. The rest name the
 // rejection or landing that set the other labels, or, for
 // submission:no-rejection-block, the missing block a request_changes verdict
-// should have left; a line can carry several, space-separated.
+// should have left; ruleSubmissionTestsCoverClass names the om review finding
+// that set tests_cover_change true (gt-eh24dn). A line can carry several,
+// space-separated.
 const (
 	ruleSubmissionApprove              = "submission:om-approve"
 	ruleSubmissionRequestChanges       = "submission:om-request-changes"
@@ -64,11 +77,13 @@ const (
 	ruleSubmissionNoBlock              = "submission:no-rejection-block"
 	ruleSubmissionFirstAttemptRejected = "submission:first-attempt-rejected"
 	ruleSubmissionFirstAttemptApproved = "submission:first-attempt-approved"
+	ruleSubmissionTestsCoverClass      = "submission:tests-cover-class"
 )
 
 var (
 	missingTestRE = phraseRE(missingTestPhrases)
 	beyondGoalRE  = phraseRE(beyondGoalPhrases)
+	testBypassRE  = phraseRE(testBypassPhrases)
 )
 
 // phraseRE compiles phrases into one case-insensitive expression that matches
@@ -235,6 +250,11 @@ func (a *submissionAdapter) labelJoin(bead, head string, submitted time.Time) (L
 	a.joined++
 	a.findings += row.Findings
 
+	if value, ok := testsCoverChangeFromReview(row); ok {
+		labels[QuestionID(submission.QTestsCoverChange)] = value
+		rules = append(rules, ruleSubmissionTestsCoverClass)
+	}
+
 	notes, err := a.notesFor(bead)
 	if err != nil {
 		return Labeling{}, err
@@ -356,6 +376,27 @@ func (a *submissionAdapter) nextSubmission(bead string, after time.Time) (time.T
 		}
 	}
 	return next, found
+}
+
+// testsCoverChangeFromReview labels tests_cover_change from the findings of the
+// row's first attempt, by the class omlessons.Classify gives each. A
+// no-red-when-removed finding, or one that holds a testBypassPhrases entry, names
+// a test in the change that does not reach the production path, so the finding
+// sets the label true (gt-eh24dn). A review that recorded findings but none of
+// those answers false. A later attempt's review, or one that recorded no finding
+// text, stays unlabeled: an approval, or a row written before the log kept finding
+// text, carries no finding to read.
+func testsCoverChangeFromReview(row land.ReviewRecord) (value, labeled bool) {
+	if row.Attempt != 1 || len(row.FindingText) == 0 {
+		return false, false
+	}
+	for _, f := range row.FindingText {
+		if omlessons.Classify(f) == omlessons.ClassNoRedWhenRemoved ||
+			testBypassRE.MatchString(f.Title) || testBypassRE.MatchString(f.Claim) {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // submissionFindingLabels labels tests_cover_change and beyond_goal from the
