@@ -332,6 +332,35 @@ func (s *WorkspaceStore) Manifest() string {
 	return s.manifest
 }
 
+// Loaded reports whether the store holds a workspace tree: a push it accepted
+// or a tree it read at open. A fresh volume is an empty workspace, which is not
+// a loaded one: bd cannot run without the files.
+func (s *WorkspaceStore) Loaded() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.manifest != WorkspaceManifest(nil)
+}
+
+// WorkspacePresent reports whether root holds a workspace tree a gateway would
+// serve, for a health check in another process. It reads the tree the same way
+// OpenWorkspaceStore does and never recovers or swaps it, so it can run while
+// the gateway is pushing: a root briefly absent during the swap reads as no
+// workspace, and no write is made. An absent root is not an error.
+func WorkspacePresent(root string) (bool, error) {
+	if root == "" {
+		return false, fmt.Errorf("%w: empty path", ErrWorkspaceRoot)
+	}
+	s := &WorkspaceStore{root: root, fs: osWorkspaceFS()}
+	files, err := s.readTree()
+	if err != nil {
+		return false, err
+	}
+	return len(files) > 0, nil
+}
+
 // readTree loads and checks the live tree. The checks are the push rules, so a
 // tree the store would not accept from a pusher is not one it serves either.
 func (s *WorkspaceStore) readTree() (map[string]string, error) {

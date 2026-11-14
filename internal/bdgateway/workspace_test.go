@@ -756,6 +756,41 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 	})
 }
 
+// TestWorkspacePresent is the readiness read another process makes: true only
+// for a tree with files, false for one not pushed yet, and an error for a root
+// that cannot be read, never a false that reads as "nothing pushed".
+func TestWorkspacePresent(t *testing.T) {
+	t.Parallel()
+	t.Run("an empty root path", func(t *testing.T) {
+		if _, err := WorkspacePresent(""); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf(`WorkspacePresent("") error = %v, want %v`, err, ErrWorkspaceRoot)
+		}
+	})
+	t.Run("no tree pushed yet", func(t *testing.T) {
+		present, err := WorkspacePresent(filepath.Join(t.TempDir(), "ws"))
+		if err != nil || present {
+			t.Fatalf("WorkspacePresent(missing root) = %v, %v, want false, nil", present, err)
+		}
+	})
+	t.Run("a pushed tree", func(t *testing.T) {
+		s, root := openTestStore(t)
+		pushWorkspace(t, s, testWorkspaceFiles("one"))
+		present, err := WorkspacePresent(root)
+		if err != nil || !present {
+			t.Fatalf("WorkspacePresent = %v, %v, want true, nil", present, err)
+		}
+	})
+	t.Run("a root that cannot be read", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
+			t.Fatalf("writing the root file: %v", err)
+		}
+		if _, err := WorkspacePresent(root); !errors.Is(err, ErrWorkspaceRoot) {
+			t.Fatalf("WorkspacePresent(file) error = %v, want %v", err, ErrWorkspaceRoot)
+		}
+	})
+}
+
 // TestWorkspaceManifestHeader checks the manifest hash's two jobs: it follows
 // the content exactly, and every answer names the live tree's hash.
 func TestWorkspaceManifestHeader(t *testing.T) {
