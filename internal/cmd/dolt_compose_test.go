@@ -94,6 +94,7 @@ func lastEnv(env []string, key string) (string, bool) {
 // docker compose the gt-data project, the compose file, and the host paths and
 // bd image the values file names, and nothing else changes the call.
 func TestDoltComposeStartStop(t *testing.T) {
+	t.Parallel()
 	bd := composeRef("gastown-bd")
 	townRoot := composeTown(t, bd)
 	file := filepath.Join(townRoot, "gastown", "deploy", "data", "docker-compose.yml")
@@ -145,6 +146,7 @@ func TestDoltComposeStartStop(t *testing.T) {
 // TestDoltComposeNeedsBdKey: a town whose values file names no bd image makes the
 // compose start refuse by name, and hands docker nothing.
 func TestDoltComposeNeedsBdKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		setup   func(t *testing.T) string
@@ -190,6 +192,7 @@ func TestDoltComposeNeedsBdKey(t *testing.T) {
 // TestDoltComposeRefusesWithoutConfigFile: compose would bind-mount a missing
 // Dolt config into the container as a directory, so the start refuses first.
 func TestDoltComposeRefusesWithoutConfigFile(t *testing.T) {
+	t.Parallel()
 	townRoot := composeTown(t, composeRef("gastown-bd"))
 	if err := os.Remove(filepath.Join(townRoot, ".dolt-data", "config.yaml")); err != nil {
 		t.Fatal(err)
@@ -207,6 +210,7 @@ func TestDoltComposeRefusesWithoutConfigFile(t *testing.T) {
 // TestDoltComposeRefusesWhilePaused: a Dolt pause marker that holds stops the
 // compose start, as it stops the single-container start.
 func TestDoltComposeRefusesWhilePaused(t *testing.T) {
+	t.Parallel()
 	townRoot := composeTown(t, composeRef("gastown-bd"))
 	now := time.Now()
 	if err := doltpause.Write(townRoot, doltpause.Marker{
@@ -230,6 +234,7 @@ func TestDoltComposeRefusesWhilePaused(t *testing.T) {
 // TestDoltComposeSurfacesDockerFailure: a docker call that fails is the start's
 // error, named by the call, with its exit status.
 func TestDoltComposeSurfacesDockerFailure(t *testing.T) {
+	t.Parallel()
 	townRoot := composeTown(t, composeRef("gastown-bd"))
 	var calls []composeCall
 	dockerErr := errors.New("docker exited with status 1")
@@ -242,6 +247,7 @@ func TestDoltComposeSurfacesDockerFailure(t *testing.T) {
 // TestDoltComposeStatusPrintsServices: status writes the unit's services as
 // docker compose ps reports them.
 func TestDoltComposeStatusPrintsServices(t *testing.T) {
+	t.Parallel()
 	townRoot := composeTown(t, composeRef("gastown-bd"))
 	var calls []composeCall
 	ps := []byte("dolt running healthy\nbd running healthy\n")
