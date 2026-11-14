@@ -136,10 +136,9 @@ checked instead: Goal, Constraints, Out of scope, Gate and Size.
 
 To have the estimate made first, run gt spec lint <bead-id> --estimate: it runs
 the same estimate gt spec estimate makes (writing the sp: labels and the note),
-then checks them. The estimate costs 3 to 4 seconds, which is why the lint does
-not run it unless asked. An estimate that fails, or makes none, is reported as
-a refusal naming its error: a bead the estimate could not judge is not a small
-one.
+then checks them. The lint makes that run only when --estimate asks for it. An
+estimate that fails, or makes none, is reported as a refusal naming its
+error: a bead the estimate could not judge is not a small one.
 
 Shape is a property of every work bead: the lint checks a task, bug or feature
 the same way and never refuses one for its type. The label spec is retired: it
@@ -261,7 +260,7 @@ func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead of one line")
 	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
-	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, "Run the bead's story-point estimate first (3 to 4 seconds, the same run gt spec estimate makes) and check the sp-minutes label it writes; a failing estimate is a refusal naming its error")
+	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, "Run the bead's story-point estimate first (the same run gt spec estimate makes) and check the sp-minutes label it writes; a failing estimate is a refusal naming its error")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1442,7 +1441,16 @@ type specLintOpts struct {
 	// is off. It writes the labels and the note before the check, and the lint
 	// reads the size that run wrote (gt-5ynb86).
 	Estimate func(ctx context.Context, beadID string) (specEstimateOutcome, error)
+	// EstimateWait bounds the lint's wait for Estimate; zero is
+	// specLintEstimateWait, and a test sets it short (gt-floskq).
+	EstimateWait time.Duration
 }
+
+// specLintEstimateWait is the longest the lint waits for --estimate's run: the
+// same specStoryPointTimeout the dispatcher gives the estimate it runs before a
+// sling. The estimate has a longer budget of its own (specEstimateTimeout), so
+// this shorter bound is what the lint answers to (gt-floskq).
+const specLintEstimateWait = specStoryPointTimeout
 
 // specLintOptsFrom is the settings gt spec lint runs with, read from the town's
 // spec_dispatch block: the story-point size gate (gt-mtzx6s). A nil block is
@@ -1453,8 +1461,8 @@ func specLintOptsFrom(sd *config.SpecDispatchConfig) specLintOpts {
 
 // specLintOptsFor is the settings and flags one gt spec lint run reads: the
 // size gate from the town's spec_dispatch block, and --estimate's run when the
-// flag is set (gt-5ynb86). The estimate is attached only when asked for: it
-// costs seconds, and the lint runs thousands of times a week.
+// flag is set (gt-5ynb86). The estimate is attached only when asked for: the
+// lint never makes one by default.
 func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimate bool, errw io.Writer) specLintOpts {
 	opts := specLintOptsFrom(sd)
 	if withEstimate {
@@ -1570,7 +1578,16 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 	// a refusal naming its error: a bead the estimate could not judge has not
 	// been checked, and must not pass as a small one (gt-5ynb86).
 	if opts.Estimate != nil {
-		estimated, estErr := specLintEstimateFirst(context.Background(), beadID, spec, opts.Estimate)
+		// The estimate's run is given a deadline shorter than its own
+		// 2-minute budget, so an estimator still working at the deadline is
+		// refused rather than waited out (gt-floskq).
+		wait := opts.EstimateWait
+		if wait <= 0 {
+			wait = specLintEstimateWait
+		}
+		estCtx, cancel := context.WithTimeout(context.Background(), wait)
+		defer cancel()
+		estimated, estErr := specLintEstimateFirst(estCtx, beadID, spec, opts.Estimate)
 		if estErr != nil {
 			reason := estErr.Error()
 			verdict := specdispatch.LintVerdict{
