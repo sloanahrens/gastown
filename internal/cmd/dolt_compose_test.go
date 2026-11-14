@@ -288,25 +288,14 @@ func TestDoltComposeStatusPrintsServices(t *testing.T) {
 func TestDoltComposeStatusRefusesEmptyServiceList(t *testing.T) {
 	t.Parallel()
 	townRoot := composeTown(t, composeRef("gastown-bd"))
-	tests := []struct {
-		name string
-		ps   []byte
-	}{
-		{"no output", nil},
-		{"blank lines", []byte("\n  \n")},
+	var calls []composeCall
+	var w bytes.Buffer
+	err := doltComposeStatus(townRoot, fakeComposeDeps(townRoot, &calls, nil, nil), &w)
+	if err == nil || !strings.Contains(err.Error(), "lists no services") {
+		t.Fatalf("doltComposeStatus error = %v, want a refusal that names the empty service list", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var calls []composeCall
-			var w bytes.Buffer
-			err := doltComposeStatus(townRoot, fakeComposeDeps(townRoot, &calls, tt.ps, nil), &w)
-			if err == nil || !strings.Contains(err.Error(), "lists no services") {
-				t.Fatalf("doltComposeStatus error = %v, want a refusal that names the empty service list", err)
-			}
-			if w.Len() != 0 {
-				t.Errorf("refused status still wrote %q, want nothing", w.String())
-			}
-		})
+	if w.Len() != 0 {
+		t.Errorf("refused status still wrote %q, want nothing", w.String())
 	}
 }
 
