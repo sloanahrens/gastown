@@ -158,7 +158,7 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 	case containsArg(args, "patch"):
 		var patch podSwapPatchBody
 		if err := json.Unmarshal([]byte(args[len(args)-1]), &patch); err != nil {
-			return "", 0, nil
+			return "", 1, nil
 		}
 		for _, c := range patch.Spec.Template.Spec.Containers {
 			if c.Name == k8sdaemon.Name {
@@ -798,5 +798,20 @@ func TestNewRunFuncForwardsTheRunStdin(t *testing.T) {
 				t.Errorf("output = %q, want the bytes the command read %q", out, row.want)
 			}
 		})
+	}
+}
+
+// TestPodPairKubectlRefusesAnUnparsablePatch holds the fake's answer to a patch
+// whose body does not parse: the patch fails, so a swap that sent a bad body
+// stops at that step instead of reading as a patch that landed.
+func TestPodPairKubectlRefusesAnUnparsablePatch(t *testing.T) {
+	t.Parallel()
+	fake := &podPairKubectl{}
+	_, exit, err := fake.run(context.Background(), "", nil, "kubectl", "patch", "deployment/"+k8sdaemon.Name, "--type=strategic", "-p", "{not json")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exit == 0 {
+		t.Errorf("exit = 0 for an unparsable patch body, want a nonzero exit")
 	}
 }

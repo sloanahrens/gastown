@@ -125,6 +125,14 @@ func TestCodecRoundTrip(t *testing.T) {
 				t.Errorf("ExitStatus of %d = %d, %v; want %d, nil", status, got, err, status)
 			}
 		}
+		for _, tc := range []struct {
+			payload string
+			want    int
+		}{{"007", 7}, {"0255", 255}} {
+			if got, err := (Frame{Kind: FrameExit, Payload: []byte(tc.payload)}).ExitStatus(); err != nil || got != tc.want {
+				t.Errorf("ExitStatus of %q = %d, %v; want %d, nil", tc.payload, got, err, tc.want)
+			}
+		}
 		if _, err := (Frame{Kind: FrameStdout, Payload: []byte("0")}).ExitStatus(); !errors.Is(err, ErrBadExitStatus) {
 			t.Errorf("ExitStatus of a stdout frame = %v, want %v", err, ErrBadExitStatus)
 		}
@@ -204,6 +212,7 @@ func TestCodecMalformed(t *testing.T) {
 			{"exit with a letter", rawFrame(3, []byte("12a")), ErrBadExitStatus},
 			{"exit with a sign", rawFrame(3, []byte("-1")), ErrBadExitStatus},
 			{"exit over 255", rawFrame(3, []byte("256")), ErrBadExitStatus},
+			{"exit over 255 with leading zeros", rawFrame(3, []byte("0256")), ErrBadExitStatus},
 			{"error payload not JSON", rawFrame(4, []byte("nope")), ErrBadErrorPayload},
 			{"error payload not an object", rawFrame(4, []byte("[]")), ErrBadErrorPayload},
 			{"error payload with no code", rawFrame(4, []byte(`{"message":"m"}`)), ErrBadErrorPayload},

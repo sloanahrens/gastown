@@ -161,7 +161,7 @@ The *town-state claim* is a persistent volume that holds the town's files: setti
 
 A call the wrapper's config covers under its `native` key runs on the Mac with that tool's own binary, not in the pod. Before editing which calls run natively, read [Native calls](design/gt-in-container.md#native-calls), which holds the set and why each call is on it.
 
-The same wrapper is the daemon image's `bd`: the image installs it first on `PATH` under that name, with the real binary as `bd.real` beside it. Called as `bd` with no config file and a `bd.real` beside it, the wrapper takes the route `gtwrap.DecideForwarder` names: the bd gateway `BD_GATEWAY_URL` points at, or the local `bd.real` when no URL is set. Before changing the forwarder, read the doc comment on `DecideForwarder` (it holds the rollback) and `docs/design/bd-container.md`, which holds the gateway protocol and the cutover stages.
+The daemon image's `bd` is the real binary with no wrapper in front of it. The bd shim that routes tracker rigs ships only in the bd gateway image (`deploy/bd/Dockerfile.bd`).
 
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 
@@ -207,6 +207,8 @@ The dashboard is a second Deployment of the same image. It serves one read-only 
 The tracker is an issue service the town owns: `trackerd`, a Postgres-backed program rendered beside the daemon and the dashboard when `gt town cluster render --tracker` runs in a live render. The render names the Secret whose `dsn` key holds the connection string and never reads the DSN. `--tracker-backup` adds the nightly dump: a CronJob whose pod runs `trackerbackup` in the postgres image the caller names, writes the dumps into the `tracker-backup` claim, keeps the newest few, and forbids a run that starts while one is still going. It also writes a reader Pod that mounts the claim read-only: the CronJob's pods exit when a run ends, so nothing else holds the claim for a copy. Before relying on a dump, read [Restoring the tracker database from a nightly dump](tracker-restore.md), which copies one out and restores it.
 
 When the tracker is rendered, the daemon container carries `TRACKER_URL`, the trackerd Service's address, so the daemon and every `gt` and `bd` it starts reach the tracker without a per-process file. The render refuses a `Values.Env` entry that sets `TRACKER_URL`, since the pod sets it from `Values.Tracker` itself.
+
+trackerd's requests and limits come from its own pair in `deploy/k8s/daemon/daemon.go` (`trackerResourceRequests` and `trackerResourceLimits`), not from the daemon's `Values.CPU` and `Values.Memory`. Those are sized for the whole town, and a tracker pod that asked for them left the control node too little room for a tier-sweep Job (gt-pau2nv).
 
 ## The data plane
 

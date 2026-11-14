@@ -638,9 +638,6 @@ func TestBackupCatchUpRunsAgainstAnExternalServer(t *testing.T) {
 	if strings.Join(f.backupCalls, ",") != "gt,hq" {
 		t.Errorf("backup calls = %v, want gt,hq listed through the server", f.backupCalls)
 	}
-	if f.serverCalls != 2 {
-		t.Errorf("server listed %d times, want 2: once for the catch-up backup, once for the catch-up gc", f.serverCalls)
-	}
 	if b, ok, err := doltbackup.Newest(f.backupRoot); err != nil || !ok || !b.Has("gt") {
 		t.Errorf("no catch-up night holding gt: %+v (ok %v, err %v)", b, ok, err)
 	}
@@ -699,6 +696,69 @@ func TestCatchUpGCSkipsWithAnExternalServer(t *testing.T) {
 
 	if len(f.gcCalls) != 0 {
 		t.Errorf("gc ran against an external server: %v", f.gcCalls)
+	}
+}
+
+// An external server is asked at most once per catch-up retry gap while it has
+// nothing for the gc: a listing that finds nothing due, finds no database or
+// fails starts the gap. A database that goes stale inside it waits for the gap
+// to pass (gt-05bwxa).
+func TestCatchUpGCExternalListingWaitsOutTheGap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		dbs  []string // what the server serves on the first tick
+		err  error    // the server's answer on the first tick
+	}{
+		{name: "nothing due", dbs: []string{"gt", "hq"}},
+		{name: "no databases", dbs: nil},
+		{name: "server fails", err: errors.New("dolt is not answering")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, f := catchUpGCDaemon(t)
+			f.serverDBs, f.serverErr = tc.dbs, tc.err
+			d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+
+			d.runScheduledMaintenance()
+
+			catchUpGCStale(t, d, "gt")
+			f.serverDBs, f.serverErr = []string{"gt", "hq"}, nil
+			d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
+			d.runScheduledMaintenance()
+			if len(f.gcCalls) != 0 {
+				t.Fatalf("gc ran inside the retry gap: %v", f.gcCalls)
+			}
+
+			d.maint.now = func() time.Time { return catchUpNow.Add(maintenanceCatchUpRetry + time.Minute) }
+			d.runScheduledMaintenance()
+			if got := strings.Join(f.gcCalls, ","); got != "gt" {
+				t.Errorf("gc calls after the gap = %q, want gt", got)
+			}
+		})
+	}
+}
+
+// A due database the busy town defers is not held back by the gap: the server
+// answered with it due, so the next tick, with the town quiet, runs the gc
+// (gt-05bwxa).
+func TestCatchUpGCExternalDeferralRetriesNextTick(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	f.serverDBs = []string{"gt", "hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	catchUpGCStale(t, d, "gt")
+	f.quietUntil = 0 // busy for the check
+
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("gc ran while the town was busy: %v", f.gcCalls)
+	}
+
+	f.quietUntil = -1 // town goes quiet
+	d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
+	d.runScheduledMaintenance()
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("after a deferral the next tick gc'd %q, want gt", got)
 	}
 }
 

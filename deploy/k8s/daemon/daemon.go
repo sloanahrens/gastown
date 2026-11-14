@@ -1578,8 +1578,7 @@ func trackerDeployment(v Values, namespace string) Deployment {
 // trackerContainer runs trackerd on its loopback port. trackerd refuses any other
 // listen, so the relay is the only way another pod reaches it. Its resources are
 // its own small pair (trackerResourceRequests and trackerResourceLimits), not the
-// daemon's Values.CPU and Values.Memory: those are sized for the town, and the
-// tracker pod that asked for them starved the tier sweep's capacity preflight
+// daemon's Values.CPU and Values.Memory, which are sized for the whole town
 // (gt-pau2nv).
 func trackerContainer(v Values) Container {
 	return Container{
