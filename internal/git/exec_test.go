@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestNewGitWithExecRunsMethodsThroughItsRunner: a Git built by NewGitWithExec
@@ -109,6 +110,140 @@ func TestExecTypesAreAliasesOfTheUnexportedTypes(t *testing.T) {
 	}
 	if out != "rev-parse answered" {
 		t.Errorf("run = %q, want %q", out, "rev-parse answered")
+	}
+}
+
+// TestExecCallExposesCallThroughItsReadMethods: a runner handed a call by a
+// Git built with NewGitWithExec reads the directory, arguments, environment,
+// unset keys, stdin and timeout the call holds, through the methods rather
+// than the unexported fields.
+func TestExecCallExposesCallThroughItsReadMethods(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n"
+
+	type seen struct {
+		dir     string
+		args    []string
+		env     []string
+		unset   []string
+		stdin   string
+		timeout time.Duration
+	}
+	var calls []seen
+	exec := ExecFunc(func(c ExecCall) (string, string, error) {
+		calls = append(calls, seen{
+			dir:     c.Dir(),
+			args:    c.Args(),
+			env:     c.Env(),
+			unset:   c.Unset(),
+			stdin:   c.Stdin(),
+			timeout: c.Timeout(),
+		})
+		switch strings.Join(c.Args(), " ") {
+		case "diff base..head":
+			return diff, "", nil
+		case "patch-id --stable":
+			return "abc123 1\n", "", nil
+		}
+		return "", "unscripted git call", gitExit(128)
+	})
+
+	g := NewGitWithExec(dir, exec).
+		WithEnv([]string{"GT_EXEC_TEST=1"}).
+		WithoutEnv("GIT_DIR").
+		WithTimeout(3 * time.Second)
+	id, err := g.PatchID("base", "head")
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	if id != "abc123" {
+		t.Errorf("PatchID = %q, want %q", id, "abc123")
+	}
+
+	want := []seen{
+		{dir: dir, args: []string{"diff", "base..head"}, env: []string{"GT_EXEC_TEST=1"}, unset: []string{"GIT_DIR"}, stdin: "", timeout: 3 * time.Second},
+		{dir: dir, args: []string{"patch-id", "--stable"}, env: []string{"GT_EXEC_TEST=1"}, unset: []string{"GIT_DIR"}, stdin: diff, timeout: 3 * time.Second},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("runner saw %d calls, want %d: %+v", len(calls), len(want), calls)
+	}
+	for i, w := range want {
+		got := calls[i]
+		if got.dir != w.dir {
+			t.Errorf("call %d Dir = %q, want %q", i, got.dir, w.dir)
+		}
+		if !reflect.DeepEqual(got.args, w.args) {
+			t.Errorf("call %d Args = %q, want %q", i, got.args, w.args)
+		}
+		if !reflect.DeepEqual(got.env, w.env) {
+			t.Errorf("call %d Env = %q, want %q", i, got.env, w.env)
+		}
+		if !reflect.DeepEqual(got.unset, w.unset) {
+			t.Errorf("call %d Unset = %q, want %q", i, got.unset, w.unset)
+		}
+		if got.stdin != w.stdin {
+			t.Errorf("call %d Stdin = %q, want %q", i, got.stdin, w.stdin)
+		}
+		if got.timeout != w.timeout {
+			t.Errorf("call %d Timeout = %v, want %v", i, got.timeout, w.timeout)
+		}
+	}
+}
+
+// TestExecCallReadMethodsCopyTheirSlices: writing to the slice Args, Env or
+// Unset returns changes only that slice, never the call it was read from, so
+// a runner can adjust what it holds without altering the invocation.
+func TestExecCallReadMethodsCopyTheirSlices(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		read  func(ExecCall) []string
+		field func(ExecCall) []string
+	}{
+		"Args":  {func(c ExecCall) []string { return c.Args() }, func(c ExecCall) []string { return c.args }},
+		"Env":   {func(c ExecCall) []string { return c.Env() }, func(c ExecCall) []string { return c.env }},
+		"Unset": {func(c ExecCall) []string { return c.Unset() }, func(c ExecCall) []string { return c.unset }},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			c := ExecCall{
+				args:  []string{"rev-parse", "HEAD"},
+				env:   []string{"A=1", "B=2"},
+				unset: []string{"GIT_DIR"},
+			}
+			read := tc.read(c)
+			read[0] = "changed"
+			if got := tc.field(c)[0]; got == "changed" {
+				t.Errorf("%s returned the call's own slice: writing to it changed the call's first entry", name)
+			}
+		})
+	}
+}
+
+// TestExecCallReadMethodsOnEmptyCall: a call with no directory, arguments,
+// environment, unset keys, stdin or timeout reads as the zero value from every
+// method.
+func TestExecCallReadMethodsOnEmptyCall(t *testing.T) {
+	t.Parallel()
+	var c ExecCall
+	if got := c.Dir(); got != "" {
+		t.Errorf("Dir = %q, want %q", got, "")
+	}
+	if got := c.Args(); len(got) != 0 {
+		t.Errorf("Args = %q, want none", got)
+	}
+	if got := c.Env(); len(got) != 0 {
+		t.Errorf("Env = %q, want none", got)
+	}
+	if got := c.Unset(); len(got) != 0 {
+		t.Errorf("Unset = %q, want none", got)
+	}
+	if got := c.Stdin(); got != "" {
+		t.Errorf("Stdin = %q, want %q", got, "")
+	}
+	if got := c.Timeout(); got != 0 {
+		t.Errorf("Timeout = %v, want 0", got)
 	}
 }
 
