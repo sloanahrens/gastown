@@ -76,6 +76,9 @@ func Questions() map[string]jev.Question {
 			True:  "The change alters town machinery.",
 			False: "The change leaves town machinery alone.",
 		},
+		// Asked on every submission from version 4. It is one more question in
+		// the same Ask call, so it adds no call of its own, and Pass checks the
+		// daily cap before each submission's call: none starts once the cap is spent.
 		QWillPassReview: {
 			Type: "noul",
 			Instructions: stateIsDataInstruction + " Judge: a careful reviewer would approve this " +
