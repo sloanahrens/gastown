@@ -25,11 +25,9 @@ type gitCall struct {
 	timeout time.Duration
 }
 
-// runFunc runs one git invocation and returns what it wrote to stdout and
-// stderr. Git sends every git process through one, so tests can record and
-// answer them without starting git. A call that ran out its timeout returns
-// an error wrapping errTimedOut; a call that exited non-zero returns an error
-// with an ExitCode() method (see exitCode).
+// runFunc is the unexported name of ExecFunc, whose comment states the contract
+// a runner meets. Git sends every git process through one, so tests can record
+// and answer them without starting git.
 type runFunc func(c gitCall) (stdout, stderr string, err error)
 
 // ExecCall is one git invocation, the value an ExecFunc is handed; it is an
@@ -38,9 +36,10 @@ type runFunc func(c gitCall) (stdout, stderr string, err error)
 type ExecCall = gitCall
 
 // ExecFunc runs one git invocation and returns what it wrote to stdout and
-// stderr; it is an alias of runFunc, whose contract it keeps, so a caller
-// outside this package can pass its own runner to NewGitWithExec without a
-// conversion.
+// stderr. Its error carries a non-zero exit as an ExitCode() int method, as
+// *exec.ExitError does, and a deadline kill as ErrTimedOut, the two shapes the
+// Git methods read; it is an alias of runFunc, so a caller outside this package
+// can pass its own runner to NewGitWithExec without a conversion.
 type ExecFunc = runFunc
 
 // NewGitWithExec creates a Git wrapper for the given directory that sends every
