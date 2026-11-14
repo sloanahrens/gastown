@@ -1019,8 +1019,8 @@ func specFromPeer(peer sling.Duplicate) specdispatch.Spec {
 // shape the overlap guard asks it in: the knobs come from the town, the peer's
 // children from the database its comparison pool came from, and the working
 // seats' beads from that same pool.
-func specPeerHeldPinned(townRoot, beadsDir string, peer sling.Duplicate, pool []sling.Duplicate) string {
-	return specPeerHeldPinnedTo(specHoldWarn, townRoot, beadsDir, peer, pool)
+func specPeerHeldPinned(stores slingStores, townRoot, beadsDir string, peer sling.Duplicate, pool []sling.Duplicate) string {
+	return specPeerHeldPinnedTo(specHoldWarn, stores, townRoot, beadsDir, peer, pool)
 }
 
 // specHoldWarn is stderr, each distinct warning once: the guard asks the hold
@@ -1049,12 +1049,12 @@ func (o *onceWriter) Write(p []byte) (int, error) {
 }
 
 // specPeerHeldPinnedTo is specPeerHeldPinned with the writer its warnings go to.
-func specPeerHeldPinnedTo(warn io.Writer, townRoot, beadsDir string, peer sling.Duplicate, pool []sling.Duplicate) string {
+func specPeerHeldPinnedTo(warn io.Writer, stores slingStores, townRoot, beadsDir string, peer sling.Duplicate, pool []sling.Duplicate) string {
 	knobs, ok := specHoldKnobsFrom(townRoot, warn)
 	if !ok {
 		return ""
 	}
-	return specPeerHeldFrom(slingStores{}.pinnedAt(beadsDir), knobs, peer, pool)
+	return specPeerHeldFrom(stores.pinnedAt(beadsDir), knobs, peer, pool)
 }
 
 func runSpecLint(cmd *cobra.Command, args []string) error {
@@ -4436,7 +4436,7 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 	// note's total is the sling's own time rather than the sandbox's share of
 	// it (gt-7nctk).
 	params.Steps = trace.Steps()
-	d := realSlingDeps()
+	d := specSlingDeps(trace)
 	if docked != nil {
 		d.rigParked = docked.parkedOrDocked
 	}
@@ -4450,6 +4450,15 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 		return "", errors.New("sling returned no result")
 	}
 	return result.PolecatName, nil
+}
+
+// specSlingDeps is a spec sling's collaborators. Every bd store they open is
+// counted on trace, which is what lets the note line say what each step spent
+// (gt-h3bka5). extra is a caller's own store construction options; production
+// passes none, and a test passes its bd seam so the sling runs without a
+// database.
+func specSlingDeps(trace *session.SandboxTrace, extra ...beads.Option) *slingDeps {
+	return realSlingDepsFor(slingStoresOn(trace, extra...))
 }
 
 // specSlingSpawn is the spawn a spec sling asks for: the tick's trace rides it

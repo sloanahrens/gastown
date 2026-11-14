@@ -258,7 +258,7 @@ func TestHandBackHookWarnsWithoutATownRoot(t *testing.T) {
 		r.Close()
 	})
 
-	handedBack := handBackHook("", "gt-abc", "", "gastown/crew/operator", beadHold{Status: "open"})
+	handedBack := handBackHook(slingStores{}, "", "gt-abc", "", "gastown/crew/operator", beadHold{Status: "open"})
 	w.Close()
 	out, err := io.ReadAll(r)
 	if err != nil {

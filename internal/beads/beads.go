@@ -1015,6 +1015,13 @@ type Beads struct {
 	// caller with its own budget bounds the call rather than waiting out the
 	// subprocess budget (WithCallContext). nil is context.Background().
 	callCtx context.Context
+	// observe, when set, runs once before each bd subprocess the wrapper
+	// starts, so a caller can count the bd calls its own work spends
+	// (WithCallObserver). runner() runs it, so a call bd is asked twice for —
+	// the --flat retry — is counted once per attempt; the --allow-stale
+	// capability probe runs exec directly and is not counted. A nil observer
+	// counts nothing.
+	observe func()
 
 	// plain marks a wrapper built by NewPlain: bd runs in workDir with
 	// exactly plainEnv, and none of the routing policy below applies.
@@ -1118,6 +1125,9 @@ type beadsFields struct {
 	actor      string
 	// callCtx parents every call's deadline; nil is context.Background().
 	callCtx context.Context
+	// observe, when set, runs before each bd subprocess the wrapper starts
+	// (WithCallObserver); nil counts nothing.
+	observe func()
 	// budget replaces every call's subprocess deadline; tests only.
 	budget time.Duration
 }
@@ -1161,6 +1171,22 @@ func WithActor(actor string) Option {
 // answering (SchemaLevel, ErrStoreUnavailable).
 func WithCallContext(ctx context.Context) Option {
 	return func(f *beadsFields) { f.callCtx = ctx }
+}
+
+// WithCallObserver runs observe once before each bd subprocess the wrapper
+// starts. It is how the spec dispatcher counts the bd calls a sling step
+// spends on its trace: every store the step opens carries the same observer,
+// and the observer adds one to the trace of the call in flight. The wrappers
+// derived from b (ActingAs, ForAgentBead, and the per-ID stores) keep it, and
+// so does a plain wrapper's WithTimeout or WithProcessGroup copy. A nil
+// observe counts nothing, which is what every wrapper that is not counting
+// passes. The --allow-stale capability probe is not counted: it asks what the
+// bd binary accepts before a call is built, and a call it enables is.
+func WithCallObserver(observe func()) Option {
+	if observe == nil {
+		return func(*beadsFields) {}
+	}
+	return func(f *beadsFields) { f.observe = observe }
 }
 
 // WithRunner runs every bd call through run instead of starting a bd process.
@@ -1225,6 +1251,7 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
 		actor:      actor,
+		observe:    b.observe,
 		budget:     b.budget,
 	})
 	c.plain, c.plainEnv, c.plainTimeout, c.plainGroup = b.plain, b.plainEnv, b.plainTimeout, b.plainGroup
@@ -1267,6 +1294,7 @@ func newBeads(f beadsFields) *Beads {
 		baseEnv:    f.baseEnv,
 		actor:      f.actor,
 		callCtx:    f.callCtx,
+		observe:    f.observe,
 		budget:     f.budget,
 	}
 }
@@ -1351,6 +1379,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
 		actor:      b.actor,
+		observe:    b.observe,
 	})
 }
 
@@ -1405,6 +1434,7 @@ func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
 		actor:      b.actor,
+		observe:    b.observe,
 	})
 }
 
@@ -1587,6 +1617,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
 		actor:      b.actor,
+		observe:    b.observe,
 	})
 }
 
@@ -4053,6 +4084,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			bin:        b.bin,
 			baseEnv:    b.baseEnv,
 			actor:      b.actor,
+			observe:    b.observe,
 		})
 		return bdForCreate.Create(opts)
 	}
@@ -4146,6 +4178,7 @@ func (b *Beads) createWithID(id string, opts CreateOptions) (*Issue, error) {
 			bin:        b.bin,
 			baseEnv:    b.baseEnv,
 			actor:      b.actor,
+			observe:    b.observe,
 		})
 		return bdForCreate.createWithID(id, opts)
 	}

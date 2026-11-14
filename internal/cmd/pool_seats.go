@@ -377,8 +377,7 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	seat, ok := rb.seats[polecatName]
 	rb.seatMu.Unlock()
 	if ok {
-		bd := beads.New(filepath.Join(b.townRoot, rigName))
-		return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
+		return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, rb.store, seat)
 	}
 	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
 }

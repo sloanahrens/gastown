@@ -119,7 +119,7 @@ type landingSubmissionReader interface {
 }
 
 func (r bdPolecatWorkReleaser) SubmittedForLanding(beadID string) (bool, error) {
-	info, err := getBeadInfoFromTownRoot(r.townRoot, beadID)
+	info, err := getBeadInfoFromTownRoot(r.stores, r.townRoot, beadID)
 	if err != nil {
 		return false, err
 	}
@@ -150,10 +150,11 @@ func releaseHeldBead(r polecatWorkReleaser, agentID, beadID string) workReleaseO
 type bdPolecatWorkReleaser struct {
 	townRoot    string
 	hookWorkDir string // fallback bd dir when the bead prefix has no route
+	stores      slingStores
 }
 
 func (r bdPolecatWorkReleaser) HookState(beadID string) (string, string, error) {
-	info, err := getBeadInfoFromTownRoot(r.townRoot, beadID)
+	info, err := getBeadInfoFromTownRoot(r.stores, r.townRoot, beadID)
 	if err != nil {
 		return "", "", err
 	}
@@ -162,28 +163,28 @@ func (r bdPolecatWorkReleaser) HookState(beadID string) (string, string, error) 
 
 func (r bdPolecatWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (bool, error) {
 	// The same guarded write polecat removal uses (beads.ReleaseIfAssignee).
-	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).ReleaseIfAssignee(beadID, expectedAssignee)
+	return r.stores.open(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).ReleaseIfAssignee(beadID, expectedAssignee)
 }
 
 func (r bdPolecatWorkReleaser) RestoreBead(beadID, expectedAssignee, expectedStatus, status, assignee string) (bool, error) {
-	return beads.TransferIfHeld(beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)), beadID, expectedAssignee, expectedStatus, status, assignee)
+	return beads.TransferIfHeld(r.stores.open(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)), beadID, expectedAssignee, expectedStatus, status, assignee)
 }
 
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {
 	// Same reset a --force reassignment applies to the outgoing polecat
 	// (gt-skwt): hook_bead cleared, agent_state idle. The error is returned so
 	// the caller only reports the slot reset when it really was (gt-34z9v).
-	_, err := clearReassignedPolecatStateE(r.townRoot, agentID)
+	_, err := clearReassignedPolecatStateE(r.stores, r.townRoot, agentID)
 	return err
 }
 
 func (r bdPolecatWorkReleaser) Annotate(beadID, text string) error {
-	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).AddComment(beadID, text)
+	return r.stores.open(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).AddComment(beadID, text)
 }
 
 // newPolecatWorkReleaserFn is a seam for tests.
-var newPolecatWorkReleaserFn = func(townRoot, hookWorkDir string) polecatWorkReleaser {
-	return bdPolecatWorkReleaser{townRoot: townRoot, hookWorkDir: hookWorkDir}
+var newPolecatWorkReleaserFn = func(stores slingStores, townRoot, hookWorkDir string) polecatWorkReleaser {
+	return bdPolecatWorkReleaser{townRoot: townRoot, hookWorkDir: hookWorkDir, stores: stores}
 }
 
 // restoreOriginalHoldIfWorkSurvives is the sling-rollback side of the

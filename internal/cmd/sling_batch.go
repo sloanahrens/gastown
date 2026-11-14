@@ -90,23 +90,27 @@ type batchSling struct {
 func realBatchSling(opts slingOptions) batchSling {
 	verifyBead := opts.verifyBead
 	if verifyBead == nil {
-		verifyBead = verifyBeadExists
+		verifyBead = func(beadID string) error { return verifyBeadExists(slingStores{}, beadID) }
 	}
 	return batchSling{
-		opts:              batchSlingOptionsFrom(opts),
-		out:               os.Stdout,
-		verifyBead:        verifyBead,
-		beadInfo:          getBeadInfo,
-		verifyInTargetRig: verifyBeadExistsInTargetRigDatabase,
-		crossRigGuard:     checkCrossRigGuard,
-		resolveFormula:    resolveFormula,
-		cook:              CookFormula,
-		execute:           executeSling,
-		wakeRig:           wakeRigAgents,
-		sleep:             time.Sleep,
-		identity:          slingProcessIdentity,
-		daemon:            slingDaemonProcess,
-		stdoutIsTTY:       ui.IsTerminal,
+		opts:       batchSlingOptionsFrom(opts),
+		out:        os.Stdout,
+		verifyBead: verifyBead,
+		beadInfo:   func(beadID string) (*beadInfo, error) { return getBeadInfo(slingStores{}, beadID) },
+		verifyInTargetRig: func(beadID, targetRig, townRoot string) error {
+			return verifyBeadExistsInTargetRigDatabase(slingStores{}, beadID, targetRig, townRoot)
+		},
+		crossRigGuard:  checkCrossRigGuard,
+		resolveFormula: resolveFormula,
+		cook: func(formulaName, workDir, townRoot string) error {
+			return CookFormula(slingStores{}, formulaName, workDir, townRoot)
+		},
+		execute:     executeSling,
+		wakeRig:     wakeRigAgents,
+		sleep:       time.Sleep,
+		identity:    slingProcessIdentity,
+		daemon:      slingDaemonProcess,
+		stdoutIsTTY: ui.IsTerminal,
 	}
 }
 
@@ -450,7 +454,7 @@ func openSpawnedPolecatSandbox(townRoot, rigName string) (spawnedPolecatSandbox,
 //     candidate for deletion, and deletePolecatBranch still keeps it when its
 //     tip is not on a remote. A resumed branch is never deleted.
 func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, townRoot, rigName, beadID, hookWorkDir string) {
-	realSlingRollbackIn(townRoot, nil).cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir)
+	realSlingRollbackIn(townRoot, nil, slingStores{}).cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir)
 }
 
 // allBeadIDs returns true if every arg looks like a bead ID (syntactic check).

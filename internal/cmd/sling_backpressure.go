@@ -57,10 +57,11 @@ type dispatchMRLister interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 }
 
-// newDispatchMRLister builds the rig's landing-queue reader. A var so the
-// daemon dispatch tests can substitute a fake lister.
-var newDispatchMRLister = func(rigPath string) dispatchMRLister {
-	return beads.New(rigPath)
+// newDispatchMRLister builds the rig's landing-queue reader from the sling's
+// stores, so the read is counted on its trace. A var so the daemon dispatch
+// tests can substitute a fake lister.
+var newDispatchMRLister = func(stores slingStores, rigPath string) dispatchMRLister {
+	return stores.open(rigPath)
 }
 
 // checkSlingBackpressure refuses a dispatch while the target rig's landing queue
@@ -73,8 +74,11 @@ var newDispatchMRLister = func(rigPath string) dispatchMRLister {
 // deliberately runs before the spawn path does any of its work — including
 // before the pool decision, which spends a tmux round trip and may claim a
 // seat.
-func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) error {
-	return slingBackpressure{lookupBead: poolBeadLookup, lister: newDispatchMRLister}.check(townRoot, rigName, opts)
+func checkSlingBackpressure(stores slingStores, townRoot, rigName string, opts SlingSpawnOptions) error {
+	return slingBackpressure{
+		lookupBead: func(townRoot, beadID string) (poolBead, error) { return poolBeadLookup(stores, townRoot, beadID) },
+		lister:     func(rigPath string) dispatchMRLister { return newDispatchMRLister(stores, rigPath) },
+	}.check(townRoot, rigName, opts)
 }
 
 // slingBackpressure is the backpressure guard's reads beyond the rig's

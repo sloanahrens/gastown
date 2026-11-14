@@ -82,12 +82,23 @@ func newPlainBDCmd(ctx context.Context, c bdCall, stdout, stderr *bytes.Buffer) 
 }
 
 // runner returns the bd seam, falling back to the real bd for a Beads built
-// without one.
+// without one. It is the single point every started subprocess passes through,
+// so the call observer (WithCallObserver) is applied here: each call that
+// reaches the seam is one bd call, and the two run paths — runPlainOut and
+// the policy path's runBdOnce — share it.
 func (b *Beads) runner() bdRunFunc {
-	if b.exec == nil {
-		return runBDProcess
+	run := runBDProcess
+	if b.exec != nil {
+		run = b.exec
 	}
-	return b.exec
+	observe := b.observe
+	if observe == nil {
+		return run
+	}
+	return func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+		observe()
+		return run(ctx, c)
+	}
 }
 
 // allowStaleArgs prepends --allow-stale to args when bd accepts it. The real
@@ -130,7 +141,7 @@ func (b *Beads) WithTimeout(d time.Duration) *Beads {
 	if !b.plain {
 		panic("beads: WithTimeout on a wrapper not built by NewPlain")
 	}
-	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin))
+	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin), WithCallObserver(b.observe))
 	c.exec = b.exec
 	c.plainTimeout = d
 	c.plainGroup = b.plainGroup
@@ -144,7 +155,7 @@ func (b *Beads) WithProcessGroup() *Beads {
 	if !b.plain {
 		panic("beads: WithProcessGroup on a wrapper not built by NewPlain")
 	}
-	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin))
+	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin), WithCallObserver(b.observe))
 	c.exec = b.exec
 	c.plainTimeout = b.plainTimeout
 	c.plainGroup = true

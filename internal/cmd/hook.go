@@ -228,7 +228,7 @@ func runHook(_ *cobra.Command, args []string) error {
 	}
 
 	// Verify the bead exists
-	if err := verifyBeadExists(beadID); err != nil {
+	if err := verifyBeadExists(slingStores{}, beadID); err != nil {
 		return err
 	}
 

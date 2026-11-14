@@ -242,8 +242,8 @@ func poolUnseatableLabel(pool *config.PolecatPool, labels []string) error {
 }
 
 // poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd.
-func poolBeadAgent(townRoot, beadID string) (string, error) {
-	return poolBeadAgentWith(townRoot, beadID, time.Now(), showBead, poolTownSettings)
+func poolBeadAgent(stores slingStores, townRoot, beadID string) (string, error) {
+	return poolBeadAgentWith(townRoot, beadID, time.Now(), stores.show, poolTownSettings)
 }
 
 // poolTownSettings is the town's settings file, which holds its seat pool.
@@ -538,6 +538,11 @@ type poolSeatReads struct {
 	assigned  func(bd assignedIssueLookup, rigName, polecatName string) polecatActiveWorkEvidence
 	show      func(bd beads.Client, id string) (*beads.Issue, error)
 
+	// open opens a beads client for a directory; nil is beads.New. The
+	// spec sling passes its own, so the seat reads it spends are counted on
+	// the step trace (gt-h3bka5).
+	open func(dir string) beads.Client
+
 	// probe measures a seat's worktree; nil means polecat.ProbeLiveGitStateLocal.
 	probe func(worktreePath string) polecat.LiveGitState
 	// sandboxSeat answers the git state of a sandbox seat from the gateway; nil
@@ -556,11 +561,27 @@ type issueReadFunc func(id string) (*beads.Issue, error)
 func (f issueReadFunc) Show(id string) (*beads.Issue, error) { return f(id) }
 
 func poolSeatReadsFor() poolSeatReads {
+	return poolSeatReadsForStores(slingStores{})
+}
+
+// poolSeatReadsForStores is poolSeatReadsFor opening each store from stores, so
+// a sling counts the seat reads it spends on its trace.
+func poolSeatReadsForStores(stores slingStores) poolSeatReads {
 	return poolSeatReads{
 		agentBead: beads.GetAgentBead,
 		assigned:  poolAssignedWorkEvidence,
 		show:      func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) },
+		open:      func(dir string) beads.Client { return stores.open(dir) },
 	}
+}
+
+// openClient is the store for dir the seat read opens: reads.open, or the bd
+// on PATH for a caller that set none.
+func (r poolSeatReads) openClient(dir string) beads.Client {
+	if r.open != nil {
+		return r.open(dir)
+	}
+	return beads.New(dir)
 }
 
 // poolSeatState is one polecat's own seat read for the pool: the canonical
@@ -853,7 +874,7 @@ type poolSeatBeadRead struct {
 func poolReadSeatBeads(townRoot, rigName, polecatName string, reads poolSeatReads) (poolSeatBeadRead, beads.Client, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-	bd := beads.New(filepath.Join(townRoot, rigName))
+	bd := reads.openClient(filepath.Join(townRoot, rigName))
 	_, fields, err := reads.agentBead(bd, agentID)
 	if err != nil {
 		return poolSeatBeadRead{}, bd, err
@@ -898,7 +919,7 @@ func poolReadSeatBeads(townRoot, rigName, polecatName string, reads poolSeatRead
 		if hint == hookBead {
 			hookIssue, hookErr = reads.show(bd, hint)
 		} else {
-			hookIssue, hookErr = reads.show(beads.New(townRoot), hookBead)
+			hookIssue, hookErr = reads.show(reads.openClient(townRoot), hookBead)
 		}
 	}
 	hd := polecat.ClassifyHookBead(hookBead, hookIssue, hookErr)
@@ -1518,8 +1539,8 @@ func lockPoolDecision(townRoot string) (*flock.Flock, error) {
 
 // poolBeadLookup reads the type and labels the sling guards need. A var so
 // tests can drive them without a live database.
-var poolBeadLookup = func(townRoot, beadID string) (poolBead, error) {
-	issue, err := showBead(townRoot, beadID)
+var poolBeadLookup = func(stores slingStores, townRoot, beadID string) (poolBead, error) {
+	issue, err := stores.show(townRoot, beadID)
 	if err != nil {
 		return poolBead{}, err
 	}
@@ -1558,9 +1579,11 @@ type poolRouter struct {
 
 // poolRouterFor wires the pool decision to the town on disk, the tmux server,
 // bd (each polecat's own state, and the work beads a landing seat is confirmed
-// with), and the seat claim of the spawn asking.
-func poolRouterFor(townRoot string, store *poolSeatClaimStore) *poolRouter {
-	return poolRouterForWith(townRoot, store, func(dir string) beads.Client { return beads.New(dir) })
+// with), and the seat claim of the spawn asking. Every store it opens comes
+// from stores, so the sling that spawned counts the seat decision's bd calls on
+// its trace (gt-h3bka5).
+func poolRouterFor(stores slingStores, townRoot string, store *poolSeatClaimStore) *poolRouter {
+	return poolRouterForWith(townRoot, store, func(dir string) beads.Client { return stores.open(dir) })
 }
 
 // poolRouterForWith is poolRouterFor with the store for a directory passed in,
@@ -1587,7 +1610,7 @@ func poolRouterForWith(townRoot string, store *poolSeatClaimStore, storeFor func
 		sessions:    newPoolSessionLister,
 		disposition: batch.disposition,
 		hookHeld:    batch.hookHeld,
-		work:        poolSeatWorkFor(townRoot),
+		work:        func(ids []string) (map[string]*beads.Issue, error) { return storeFor(townRoot).ShowMultiple(ids) },
 		seats:       poolSeatLedgerFor(townRoot, store),
 		now:         time.Now,
 	}
@@ -1599,7 +1622,7 @@ func poolRouterForWith(townRoot string, store *poolSeatClaimStore, storeFor func
 // gets a store nothing else reads, because a preview must leave the pool's
 // state alone.
 func peekPolecatPoolAgent(townRoot, requested string) (agent, reason string, err error) {
-	return poolRouterFor(townRoot, newPoolSeatClaimStore()).route(requested, false)
+	return poolRouterFor(slingStores{}, townRoot, newPoolSeatClaimStore()).route(requested, false)
 }
 
 // errPoolBackpressure identifies a pool refusal so callers and tests can match

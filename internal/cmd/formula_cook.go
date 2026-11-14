@@ -98,11 +98,18 @@ type formulaEngine interface {
 // bdFormulaEngine is the bd on PATH at site: run from site.dir, pinned to
 // its database, with the town's overlay dir and GT_ROOT.
 func bdFormulaEngine(site formulaSite) formulaEngine {
+	return bdFormulaEngineWith(site, nil)
+}
+
+// bdFormulaEngineWith is bdFormulaEngine built with opts as well, so a sling
+// passing its stores' options counts the formula cook and bond on its trace
+// (gt-h3bka5).
+func bdFormulaEngineWith(site formulaSite, opts []beads.Option) formulaEngine {
 	beadsDir := site.beadsDir
 	if beadsDir == "" {
 		beadsDir = beads.ResolveBeadsDir(site.dir)
 	}
-	return beads.NewPinned(beadsDir, beads.WithWorkDir(site.dir), beads.WithEnv(formulaEnv(site.townRoot)))
+	return beads.NewPinned(beadsDir, append([]beads.Option{beads.WithWorkDir(site.dir), beads.WithEnv(formulaEnv(site.townRoot))}, opts...)...)
 }
 
 // formulaEnv is formulaOverlayEnv with GT_ROOT the town, so bd finds the
@@ -116,9 +123,11 @@ func formulaEnv(townRoot string) []string {
 }
 
 // formulaCooker reaches bd's cook. open is the engine at a site; nil is
-// bdFormulaEngine.
+// bdFormulaEngine. opts are the sling's store construction options, so a
+// sling's cook is counted on its trace (gt-h3bka5).
 type formulaCooker struct {
 	open func(formulaSite) formulaEngine
+	opts []beads.Option
 }
 
 // realFormulaCooker cooks with the bd on PATH.
@@ -131,7 +140,7 @@ func (c formulaCooker) engine(site formulaSite) formulaEngine {
 	if c.open != nil {
 		return c.open(site)
 	}
-	return bdFormulaEngine(site)
+	return bdFormulaEngineWith(site, c.opts)
 }
 
 // cookForRender cooks formulaName where prime renders it: in the rig's

@@ -350,7 +350,7 @@ func TestResolveTargetCreateDoesNotSpawnCrewShorthandWhenPaneMissing(t *testing.
 
 func TestTargetRigDatabaseLookupFailsClosedWithoutTownRoot(t *testing.T) {
 	t.Parallel()
-	err := verifyBeadExistsInTargetRigDatabase("gt-r2405", "gastown", "")
+	err := verifyBeadExistsInTargetRigDatabase(slingStores{}, "gt-r2405", "gastown", "")
 	if err == nil {
 		t.Fatal("expected fail-closed error without town root")
 	}

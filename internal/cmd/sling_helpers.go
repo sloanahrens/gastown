@@ -99,7 +99,7 @@ func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
 	if !isRig {
 		return args, nil
 	}
-	info, err := getBeadInfo(args[0])
+	info, err := getBeadInfo(slingStores{}, args[0])
 	if err != nil {
 		return args, nil
 	}
@@ -215,17 +215,17 @@ func appendUniqueMolecules(molecules []string, extras ...string) []string {
 	return molecules
 }
 
-func collectExistingMoleculesForBead(info *beadInfo, beadID, townRoot string) ([]string, error) {
+func collectExistingMoleculesForBead(stores slingStores, info *beadInfo, beadID, townRoot string) ([]string, error) {
 	molecules := collectExistingMolecules(info)
-	deps, err := collectExistingMoleculeDeps(beadID, townRoot)
+	deps, err := collectExistingMoleculeDeps(stores, beadID, townRoot)
 	if err != nil {
 		return molecules, err
 	}
 	return appendUniqueMolecules(molecules, deps...), nil
 }
 
-func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
-	return slingStores{}.moleculeDeps(beadID, townRoot)
+func collectExistingMoleculeDeps(stores slingStores, beadID, townRoot string) ([]string, error) {
+	return stores.moleculeDeps(beadID, townRoot)
 }
 
 // moleculeBondTypes are the relations that bond a molecule to a bead; a
@@ -351,8 +351,8 @@ func bondedMolecules(store slingStore, beadID string) ([]string, error) {
 // Order: force-close descendants → detach from bead → remove dep bonds → force-close roots.
 // Matches nukeCleanupMolecules pattern. Returns an error if detach fails, since
 // proceeding with a stale attached_molecule reference creates harder-to-debug orphans.
-func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
-	return slingStores{}.burnMolecules(molecules, beadID, townRoot)
+func burnExistingMolecules(stores slingStores, molecules []string, beadID, townRoot string) error {
+	return stores.burnMolecules(molecules, beadID, townRoot)
 }
 
 // burnMolecules is burnExistingMolecules in s.
@@ -457,8 +457,8 @@ func dependencyRemovalMissing(err error) bool {
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 // StripBeadsDir prevents inherited BEADS_DIR from overriding the resolved
 // directory, which caused rig-prefixed beads to fail (GH#2126).
-func verifyBeadExists(beadID string) error {
-	if _, err := showBead("", beadID); err != nil {
+func verifyBeadExists(stores slingStores, beadID string) error {
+	if _, err := stores.show("", beadID); err != nil {
 		return fmt.Errorf("bead '%s' not found (bd show failed: %w)", beadID, err)
 	}
 	return nil
@@ -468,8 +468,8 @@ func verifyBeadExists(beadID string) error {
 // directly instead of following prefix routing. This prevents gt sling from
 // spawning polecats or creating molecule/hook side effects for beads that only
 // resolve from HQ or another rig database.
-func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) error {
-	return slingStores{}.verifyInTargetRig(beadID, targetRig, townRoot)
+func verifyBeadExistsInTargetRigDatabase(stores slingStores, beadID, targetRig, townRoot string) error {
+	return stores.verifyInTargetRig(beadID, targetRig, townRoot)
 }
 
 // verifyInTargetRig is verifyBeadExistsInTargetRigDatabase in s.
@@ -508,12 +508,12 @@ func (s slingStores) routedBeadExistsForTargetRig(beadID, targetRig, townRoot st
 
 // getBeadInfo returns status and assignee for a bead.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
-func getBeadInfo(beadID string) (*beadInfo, error) {
-	return slingStores{}.beadInfo("", beadID)
+func getBeadInfo(stores slingStores, beadID string) (*beadInfo, error) {
+	return stores.beadInfo("", beadID)
 }
 
-func getBeadInfoFromTownRoot(townRoot, beadID string) (*beadInfo, error) {
-	return slingStores{}.beadInfo(townRoot, beadID)
+func getBeadInfoFromTownRoot(stores slingStores, townRoot, beadID string) (*beadInfo, error) {
+	return stores.beadInfo(townRoot, beadID)
 }
 
 // beadFieldUpdates holds all the fields that need to be stored in a bead's
@@ -556,12 +556,12 @@ func buildSlingFieldUpdates(
 // storeArgsInBead, storeAttachedMoleculeInBead, and storeNoMergeInBead calls that each
 // independently read-modify-write and could race under concurrent access.
 func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
-	return storeFieldsInBeadFromTownRoot("", beadID, updates)
+	return storeFieldsInBeadFromTownRoot(slingStores{}, "", beadID, updates)
 }
 
-func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpdates) error {
+func storeFieldsInBeadFromTownRoot(stores slingStores, townRoot, beadID string, updates beadFieldUpdates) error {
 	// Read the bead once, so the update is a single read-modify-write.
-	issue, err := showBead(townRoot, beadID)
+	issue, err := stores.show(townRoot, beadID)
 	if err != nil {
 		return fmt.Errorf("fetching bead: %w", err)
 	}
@@ -572,7 +572,7 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	if townRoot != "" {
 		updateDir = resolveBeadDirFromTownRoot(townRoot, beadID)
 	}
-	if err := pinnedBd(updateDir).Update(beadID, beads.UpdateOptions{Description: &newDesc}); err != nil {
+	if err := stores.pinnedAt(updateDir).Update(beadID, beads.UpdateOptions{Description: &newDesc}); err != nil {
 		return fmt.Errorf("updating bead description: %w", err)
 	}
 
@@ -863,25 +863,35 @@ type FormulaOnBeadResult = sling.FormulaResult
 // formulaBD is how formula instantiation reaches bd: open is the formula
 // engine at a site (nil: the bd on PATH), sleep is the pause between
 // contention retries of the bond and between tries of its lock wait, now is
-// the clock that wait is bounded by, and jitter is the random source its
-// backoff draws from. InstantiateFormulaOnBead, CookFormula and
-// bondFormulaDirect are its methods on realFormulaBD. A nil seam takes the
-// real one.
+// the clock that wait is bounded by, jitter is the random source its backoff
+// draws from, and stores are the sling's bead stores, so a spec sling's
+// formula cook and bond are counted on its trace (gt-h3bka5).
+// InstantiateFormulaOnBead, CookFormula and bondFormulaDirect are its methods
+// on realFormulaBD. A nil seam takes the real one.
 type formulaBD struct {
 	open   func(formulaSite) formulaEngine
 	sleep  func(time.Duration)
 	now    func() time.Time
 	jitter func() float64
+	stores slingStores
 }
 
 // realFormulaBD is the bd on PATH with the real retry backoff.
 func realFormulaBD() formulaBD {
-	return formulaBD{sleep: bdContentionSleep, now: time.Now, jitter: rand.Float64}
+	return formulaBDFor(slingStores{})
 }
 
-// engine is the formula engine at site.
+// formulaBDFor is realFormulaBD whose bead stores are built from stores, so a
+// sling passing its trace's stores counts the formula cook and bond on that
+// trace.
+func formulaBDFor(stores slingStores) formulaBD {
+	return formulaBD{sleep: bdContentionSleep, now: time.Now, jitter: rand.Float64, stores: stores}
+}
+
+// engine is the formula engine at site, opened with this formulaBD's store
+// construction options.
 func (f formulaBD) engine(site formulaSite) formulaEngine {
-	return formulaCooker{open: f.open}.engine(site)
+	return formulaCooker{open: f.open, opts: f.stores.opts}.engine(site)
 }
 
 // beadEngine is the engine in formulaWorkDir, writing to the database
@@ -907,8 +917,8 @@ func (f formulaBD) beadEngine(beadID, formulaWorkDir, townRoot string) formulaEn
 //   - extraVars: additional --var values supplied by the user
 //
 // Returns the spawned molecule root ID while leaving the base bead as the hook target.
-func InstantiateFormulaOnBead(_ context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error) {
-	return realFormulaBD().instantiate(formulaName, beadID, title, hookWorkDir, townRoot, extraVars)
+func InstantiateFormulaOnBead(stores slingStores, _ context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error) {
+	return formulaBDFor(stores).instantiate(formulaName, beadID, title, hookWorkDir, townRoot, extraVars)
 }
 
 // instantiate is InstantiateFormulaOnBead with bd reached through f.
@@ -964,8 +974,8 @@ func (f formulaBD) varsForBead(formulaName, beadID, title, formulaWorkDir, townR
 // A bond commits a whole spawned molecule across tables every sling writes, so
 // the attempts take turns on a town-level flock, and a lost attempt waits a
 // jittered backoff before the next (gt-40twy).
-func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
-	return realFormulaBD().bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot, vars)
+func bondFormulaDirect(stores slingStores, bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
+	return formulaBDFor(stores).bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot, vars)
 }
 
 // The bond lock: one flock for the whole town, so a mol bond in flight is the
@@ -1193,8 +1203,8 @@ func backfillFormulaDefaultVars(f *cookedFormula, vars []string) ([]string, erro
 
 // CookFormula cooks a formula once before a batch of pours, so a formula bd
 // cannot cook fails the batch before any bead is touched.
-func CookFormula(formulaName, workDir, townRoot string) error {
-	return realFormulaBD().cook(formulaName, workDir, townRoot)
+func CookFormula(stores slingStores, formulaName, workDir, townRoot string) error {
+	return formulaBDFor(stores).cook(formulaName, workDir, townRoot)
 }
 
 // cook is CookFormula with bd reached through f.
@@ -1364,8 +1374,8 @@ var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown",
 // failure only warns, and a bead carrying none of the labels costs one read
 // and no write. workDir is the hook write's work dir, so an unrouted bead is
 // read from the same database the hook just wrote.
-func clearOrphanEpisodeLabels(townRoot, beadID, workDir string) {
-	slingStores{}.clearOrphanEpisodeLabels(os.Stdout, townRoot, beadID, workDir)
+func clearOrphanEpisodeLabels(stores slingStores, townRoot, beadID, workDir string) {
+	stores.clearOrphanEpisodeLabels(os.Stdout, townRoot, beadID, workDir)
 }
 
 // clearOrphanEpisodeLabels is clearOrphanEpisodeLabels in s's stores, with
@@ -1420,8 +1430,8 @@ func survivingBranchesForBead(townRoot, beadID string) []string {
 // before the write that overwrites the old assignee, or the only surviving copy
 // of the old value is the Dolt events table. Best-effort: a beads failure warns
 // and returns, because a missing audit line must not abort a dispatch.
-func recordReassignment(townRoot, beadID, from, to, requester string) {
-	slingStores{}.recordReassignment(survivingBranchesForBead, os.Stdout, townRoot, beadID, from, to, requester)
+func recordReassignment(stores slingStores, townRoot, beadID, from, to, requester string) {
+	stores.recordReassignment(survivingBranchesForBead, os.Stdout, townRoot, beadID, from, to, requester)
 }
 
 // recordReassignment is recordReassignment in s's stores, with the old
@@ -1477,22 +1487,22 @@ func reassignRequester() string {
 // Fails fast on configuration/initialization errors (gt-2ra).
 // See: https://github.com/steveyegge/gastown/issues/148
 func hookBeadWithRetry(beadID, targetAgent, hookDir string) error {
-	return hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, "", nil)
+	return hookBeadWithRetryWithTownRoot(slingStores{}, beadID, targetAgent, hookDir, "", nil)
 }
 
 // hookVerifyFn builds the read-back verifier hookBeadWithRetryWithTownRoot
 // confirms each landed hook write with. It is a seam: a test driving a stub bd,
 // which does not track hook state, replaces it with one returning nil so the
 // write is not read back.
-var hookVerifyFn = func(townRoot string) func(beadID string) (*beadInfo, error) {
-	return func(id string) (*beadInfo, error) { return getBeadInfoFromTownRoot(townRoot, id) }
+var hookVerifyFn = func(stores slingStores, townRoot string) func(beadID string) (*beadInfo, error) {
+	return func(id string) (*beadInfo, error) { return getBeadInfoFromTownRoot(stores, townRoot, id) }
 }
 
 // hookBeadWithRetryWithTownRoot hooks beadID and, when fields is non-nil,
 // writes those attachment fields in the same bd update, so the hook and the
 // description land as one Dolt commit.
-func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error {
-	return slingStores{}.hookWithRetry(hookVerifyFn(townRoot), beadID, targetAgent, hookDir, fields)
+func hookBeadWithRetryWithTownRoot(stores slingStores, beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error {
+	return stores.hookWithRetry(hookVerifyFn(stores, townRoot), beadID, targetAgent, hookDir, fields)
 }
 
 // hookWriteLandedError marks a hook step that failed after at least one write
@@ -1732,7 +1742,7 @@ func shouldAcceptPermissionWarning(agentName string, preset *config.AgentPresetI
 // updateAgentMode updates the mode field on the agent bead.
 // This is needed so the stuck detector can read the mode from agent fields
 // and apply appropriate thresholds (ralphcats get longer leash).
-func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
+func updateAgentMode(stores slingStores, agentID, mode, workDir, townBeadsDir string) {
 	_ = townBeadsDir // Not used - BEADS_DIR breaks redirect mechanism
 
 	townRoot, err := workspace.FindFromCwd()
@@ -1749,7 +1759,7 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 	}
 
 	agentWorkDir := beads.ResolveHookDir(townRoot, agentBeadID, workDir)
-	bd := beads.New(agentWorkDir)
+	bd := stores.open(agentWorkDir)
 	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{Mode: &mode}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s mode: %v\n", agentBeadID, err)
 	}
@@ -1770,8 +1780,8 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 // outgoing holder its state back rather than leave it blank (gt-u0zq0). It is
 // called at most once and is a no-op afterwards; a holder whose file cannot be
 // read back gets a no-op restore, since there is nothing to put back.
-func clearReassignedPolecatState(townRoot, assignee string) func() {
-	restore, err := clearReassignedPolecatStateE(townRoot, assignee)
+func clearReassignedPolecatState(stores slingStores, townRoot, assignee string) func() {
+	restore, err := clearReassignedPolecatStateE(stores, townRoot, assignee)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 	}
@@ -1782,7 +1792,7 @@ func clearReassignedPolecatState(townRoot, assignee string) func() {
 // clear failures instead of only warning about them, so a caller that must know
 // whether the slot was really reset can check (gt-34z9v). The returned restore
 // closure stays best-effort.
-func clearReassignedPolecatStateE(townRoot, assignee string) (func(), error) {
+func clearReassignedPolecatStateE(stores slingStores, townRoot, assignee string) (func(), error) {
 	if townRoot == "" {
 		return func() {}, nil
 	}
@@ -1790,7 +1800,7 @@ func clearReassignedPolecatStateE(townRoot, assignee string) (func(), error) {
 	if agentBeadID == "" {
 		return func() {}, nil
 	}
-	bd := beads.New(beads.ResolveHookDir(townRoot, agentBeadID, townRoot))
+	bd := stores.open(beads.ResolveHookDir(townRoot, agentBeadID, townRoot))
 	return clearReassignedPolecatStateInE(bd, agentBeadID)
 }
 
@@ -1845,8 +1855,8 @@ func clearReassignedPolecatStateInE(bd beads.Client, agentBeadID string) (func()
 // If found, returns formula variables with the prior branch name so the new
 // polecat can cherry-pick or reference prior work instead of starting from scratch.
 // Returns nil if no prior attempt exists. (GH#gt-zqvj)
-func lookupPriorAttempt(beadsDir, issueID string) []string {
-	bd := beads.New(beadsDir)
+func lookupPriorAttempt(stores slingStores, beadsDir, issueID string) []string {
+	bd := stores.open(beadsDir)
 	mrs, err := beads.FindOpenMRsForIssue(bd, issueID)
 	if err != nil || len(mrs) == 0 {
 		return nil

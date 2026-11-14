@@ -458,7 +458,7 @@ func TestDuplicateGuardDecisionsMatchGoldenThroughTheCache(t *testing.T) {
 	want := readDuplicateGuardGolden(t)
 	for _, tick := range []string{"cold", "warm"} {
 		cache := loadDuplicateDetailCache(path, "daemon-1", 40)
-		pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
+		pools := newDuplicatePools(func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 			return fetchDuplicatePoolWith(listLikeBD{Client: db}, func(dir string, err error) {
 				t.Errorf("%s tick: enrichment of %s failed: %v", tick, dir, err)
 			}, beadsDir, cache)

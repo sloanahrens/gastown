@@ -81,7 +81,7 @@ func duplicateGuardTranscript(t *testing.T, pools *duplicatePools) string {
 	for _, c := range candidates {
 		info := c.info
 		info.Status, info.IssueType, info.Priority, info.CreatedAt = "open", "task", 2, "2026-10-16T09:00:00Z"
-		candidate, matches, err := pools.check(townRoot, c.id, &info)
+		candidate, matches, err := pools.check(slingStores{}, townRoot, c.id, &info)
 		fmt.Fprintf(&out, "== %s\n", c.id)
 		if err != nil {
 			fmt.Fprintf(&out, "error: %v\n", err)
@@ -106,7 +106,7 @@ func duplicateGuardTranscript(t *testing.T, pools *duplicatePools) string {
 // and the pool, as the daemon's tick does, so a peer behind an open blocker or
 // behind a working seat reads as held. The backoff is stubbed to "not
 // resting": the golden pins the questions the pool answers.
-func duplicateGuardHolds() func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string {
+func duplicateGuardHolds() func(_ slingStores, townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string {
 	knobs := specHoldKnobs{
 		MaxPriority: 4,
 		ShapeGate:   specdispatch.ShapeGateOff,
@@ -114,7 +114,7 @@ func duplicateGuardHolds() func(townRoot, beadsDir string, peer duplicateCandida
 		Warn:        io.Discard,
 		Backoff:     func(string) string { return "" },
 	}
-	return func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+	return func(_ slingStores, _, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
 		return specPeerHeldFrom(beadsfake.New(), knobs, peer, pool)
 	}
 }
@@ -133,7 +133,7 @@ func readDuplicateGuardGolden(t *testing.T) string {
 func TestDuplicateGuardDecisionsGolden(t *testing.T) {
 	t.Parallel()
 	db := duplicateGuardFixture(t)
-	pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(_ slingStores, beadsDir string) ([]duplicateCandidate, error) {
 		return fetchDuplicatePoolFrom(listLikeBD{Client: db}, func(dir string, err error) {
 			t.Errorf("enrichment of %s failed: %v", dir, err)
 		}, beadsDir)

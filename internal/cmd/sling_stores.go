@@ -5,6 +5,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -33,6 +34,32 @@ type slingStores struct {
 	// routed opens a store at dir that routes each ID by its prefix; nil is
 	// beads.NewWithBeadsDir.
 	routed func(dir string) slingStore
+	// opts are the construction options every bd store sling opens gets. The
+	// spec sling binds the tick trace's call observer here, so each store it
+	// opens counts its bd calls on the step that spends them (gt-h3bka5). A
+	// fake store (pinned or routed non-nil) answers its calls itself and takes
+	// none of them.
+	opts []beads.Option
+}
+
+// slingStoresOn is the stores one sling's bd calls count on: each store opened
+// from it observes trace. extra are additional construction options a caller
+// needs (a test's bd seam); production passes none. A nil trace counts
+// nothing, so a caller that is not timing a sling passes the zero slingStores
+// instead.
+func slingStoresOn(trace *session.SandboxTrace, extra ...beads.Option) slingStores {
+	return slingStores{opts: append([]beads.Option{beads.WithCallObserver(trace.CountBD)}, extra...)}
+}
+
+// open is the bd store at dir built with this sling's construction options.
+func (s slingStores) open(dir string) *beads.Beads {
+	return beads.New(dir, s.opts...)
+}
+
+// openPinned is the bd store pinned to beadsDir, built with this sling's
+// construction options plus extra (a site's own workdir or environment).
+func (s slingStores) openPinned(beadsDir string, extra ...beads.Option) *beads.Beads {
+	return beads.NewPinned(beadsDir, append(append([]beads.Option(nil), s.opts...), extra...)...)
 }
 
 // pinnedDB is the database in beadsDir alone.
@@ -40,7 +67,7 @@ func (s slingStores) pinnedDB(beadsDir string) slingStore {
 	if s.pinned != nil {
 		return s.pinned(beadsDir)
 	}
-	return beads.NewPinned(beadsDir)
+	return s.openPinned(beadsDir)
 }
 
 // pinnedAt is dir's resolved database alone.
@@ -53,7 +80,7 @@ func (s slingStores) routedFrom(dir string) slingStore {
 	if s.routed != nil {
 		return s.routed(dir)
 	}
-	return beads.NewWithBeadsDir(dir, "")
+	return beads.NewWithBeadsDir(dir, "", s.opts...)
 }
 
 // show reads beadID from its own rig's database, then, when that fails, by
