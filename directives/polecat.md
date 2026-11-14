@@ -1,9 +1,6 @@
 ## Changelog
 
-- 2026-11-13 gt-e25lc0: the "Local review round before gt done" section points at the design page's Failure rule instead of restating which findings block a submit; internal/directives pins the pointer.
-- 2026-11-13 gt-k51hb1: the "Local review round before gt done" section points at docs/design/local-round.md for the reply forms instead of copying them, and internal/directives pins the section.
-- 2026-11-13 gt-9xw72b: added the "Local review round before gt done" section, replacing a one-sentence paragraph.
-- 2026-11-13 gt-2z1219: the "Before gt done" section asks for `gt review-preview` after `make presubmit` and before `gt done`, and a `gt review-preview reply` for each major (docs/design/local-round.md).
+- 2026-11-14 gt-dpl81b: removed the local review round: the operator retired it, so the "Before gt done" checklist no longer asks a polecat to preview its branch or answer findings before submitting.
 - 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
 - 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 points at rule 17 and searches the whole tree for `//go:build integration` files, callers in other packages included.
 - 2026-11-01 gt-2iro9: added rule 16, one workspace per answer (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
@@ -160,13 +157,5 @@ Run these on your added lines, in the order om rejects most. A hit is a question
 9. Scope (9): `git diff --stat origin/main...HEAD` lists only files your Constraints name; go.mod changes carry a Rationale line.
 10. Workspace (16): for each record type the diff reads for one workspace, make the check rule 16 names and grep the diff for its workspace field: `D | grep -nE '^\+.*[Ww]orkspace'`; a read with no check is a question.
 11. Tier (17): apply rule 17 to every integration-tagged file your diff reaches, in any package, not only the one you changed: `grep -rl 'go:build integration' --include='*.go' .` lists them.
-
-## Local review round before gt done
-
-After `make presubmit` and before `gt done`, run `gt review-preview` from your worktree on non-trivial work. It runs the daemon's local om round on your head and appends a LOCAL ROUND block to the work bead's notes.
-
-Before you submit, read `docs/design/local-round.md`, the design page for the local round: its Failure rule is what `gt done` refuses and what it lets through, and its Flow step 4 holds the reply forms and their flags. Answer each finding that rule blocks on after its fix is committed. `gt review-preview --help` lists the other flags.
-
-If the branch names no work bead and none is hooked, `gt done` prints one line starting `local-round gate skipped:` and goes on. Then run `gt done`.
 
 Tick each acceptance box only after its test exists.
