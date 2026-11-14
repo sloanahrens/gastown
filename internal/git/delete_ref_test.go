@@ -20,6 +20,22 @@ func TestDeleteRefDeletesTheFullRefName(t *testing.T) {
 	}
 }
 
+// DeleteRef treats an absent ref as success: git update-ref -d exits 0 with no
+// output when the ref is already gone, and DeleteRef must not check first and
+// turn that into an error (gt-d5ojod).
+func TestDeleteRefAbsentRefIsNotAnError(t *testing.T) {
+	t.Parallel()
+	const ref = "refs/local-round/gt-gone"
+	s := newScripted(nil)
+	g := newTestGit(t, s)
+	s.on("-C "+g.workDir+" rev-parse --show-toplevel", ok(g.workDir+"\n"))
+	s.on("update-ref -d "+ref, ok(""))
+	if err := g.DeleteRef(ref); err != nil {
+		t.Fatalf("DeleteRef on an absent ref: %v; want nil", err)
+	}
+	s.noUnscripted(t)
+}
+
 // DeleteRef reports git's failure; a caller that ignores it would leave the
 // ref behind without a word.
 func TestDeleteRefReturnsAFailure(t *testing.T) {
