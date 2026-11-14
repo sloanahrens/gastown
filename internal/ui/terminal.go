@@ -124,7 +124,7 @@ func (e uiEnv) detectDarkBackground(mode ThemeMode) bool {
 }
 
 // colorFGBGIsDark reports whether COLORFGBG names a dark background. Its last
-// field is the background's ANSI colour index, and below 7 is dark. An unset,
+// field is the background's ANSI color index, and below 7 is dark. An unset,
 // separator-less or unparseable value is dark (gt-xvekee).
 func (e uiEnv) colorFGBGIsDark() bool {
 	v := e.getenv("COLORFGBG")
