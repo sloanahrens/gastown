@@ -17,7 +17,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/storypoints"
-	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 )
 
@@ -217,7 +216,10 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 	for _, c := range cands {
 		issue := issues[c.bead]
 		if lines := byBead[c.bead]; len(lines) > 0 {
-			rec := loggedLine(lines, issue)
+			// The log keeps one line per bead and description hash, so the last
+			// line for a bead is the latest estimate of its text: what the
+			// estimator last predicted for it, whatever the bead says now.
+			rec := lines[len(lines)-1]
 			if rec.Embedding == nil {
 				counts.skips.logNoEmbed++
 				continue
@@ -260,24 +262,6 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 		})
 	}
 	return samples, counts, nil
-}
-
-// loggedLine returns the estimate log line the retrain reads for a bead that
-// has lines: the last line whose description hash is the hash of the bead's
-// text now, so the features are the ones the estimate of the text that landed
-// read; or, when no line matches, the last line the bead has. A bead whose text
-// was edited after its estimate therefore still fits on what the estimator saw.
-// A bead the store does not hold has no current hash, so its last line is read.
-func loggedLine(lines []estlog.Record, issue *beads.Issue) estlog.Record {
-	if issue != nil {
-		hash := estimate.SectionHash(issue)
-		for i := len(lines) - 1; i >= 0; i-- {
-			if lines[i].DescriptionHash == hash {
-				return lines[i]
-			}
-		}
-	}
-	return lines[len(lines)-1]
 }
 
 // loggedShape is the log's copy of the shape features in the package's layout.

@@ -858,27 +858,32 @@ func TestStoryPointsTrainFitsTheLoggedFeatures(t *testing.T) {
 	}
 }
 
-// TestStoryPointsTrainJoinsTheLogOnBeadAndHash: the line a bead is fitted on is
-// the last one whose hash is the hash of its text now, else the last line the
-// bead has, and a line belongs to the bead it names. A bead whose text differs
-// from every logged hash therefore still fits on the logged features, and a bead
-// the store does not hold fits on its last line.
-func TestStoryPointsTrainJoinsTheLogOnBeadAndHash(t *testing.T) {
+// TestStoryPointsTrainReadsTheBeadsLastLogLine: a landed bead is fitted on the
+// last estimate-log line that names it, whatever its text says now. The log
+// keeps one line per bead and description hash, so that line is the latest
+// estimate of the bead's text: a bead whose text differs from the logged hash
+// still fits on what the estimator saw, and a line belongs to the bead it names.
+func TestStoryPointsTrainReadsTheBeadsLastLogLine(t *testing.T) {
 	t.Parallel()
 	beads := trainTestBeads(2, 22, true)
-	issue := trainTestIssue(beads[0])
-	matching := logRecord(beads[0].id, estimate.SectionHash(issue), estlog.Shape{Boxes: 5}, []float32{0.5, 0.5, 0.5})
+	currentHash := estimate.SectionHash(trainTestIssue(beads[0]))
+	matching := logRecord(beads[0].id, currentHash, estlog.Shape{Boxes: 5}, []float32{0.5, 0.5, 0.5})
 	earlier := logRecord(beads[0].id, "an-earlier-text", estlog.Shape{Boxes: 2}, []float32{0.2, 0.2, 0.2})
 	later := logRecord(beads[0].id, "a-later-text", estlog.Shape{Boxes: 9}, []float32{0.9, 0.9, 0.9})
 	other := logRecord(beads[1].id, "another-beads-text", estlog.Shape{Boxes: 7}, []float32{0.7, 0.7, 0.7})
+	// The changed-text case reads a line whose hash is not the bead's text hash,
+	// so the fixture must keep those apart.
+	if earlier.DescriptionHash == currentHash || later.DescriptionHash == currentHash {
+		t.Fatalf("the fixture's logged hashes are the hash of the bead's text now, so the changed-text case is not tested")
+	}
 	cases := []struct {
 		name  string
 		lines []estlog.Record
 		gone  bool // bead 0 is not in the store
 		want  float64
 	}{
-		{"the line for the text the bead carries now wins over a later one", []estlog.Record{earlier, matching, later}, false, 5},
-		{"the last line when the bead's text matches no logged hash", []estlog.Record{earlier, later}, false, 9},
+		{"the latest estimate wins over an earlier one", []estlog.Record{earlier, later}, false, 9},
+		{"a line for the text the bead carries now does not outrank a later one", []estlog.Record{matching, later}, false, 9},
 		{"each bead reads the line that names it", []estlog.Record{earlier, other}, false, 2},
 		{"a bead the store does not hold reads its last line", []estlog.Record{earlier, later}, true, 9},
 	}
