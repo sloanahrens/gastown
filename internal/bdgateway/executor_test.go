@@ -624,6 +624,11 @@ func TestExecutorEndings(t *testing.T) {
 			if status, err := frames[1].ExitStatus(); err != nil || status != 125 {
 				t.Errorf("exit status = %d (%v), want 125", status, err)
 			}
+			// The cause stays on the operator's side: the frame the caller reads
+			// never carries its text, only the failure's name.
+			if strings.Contains(refusal.Message, boom.Error()) {
+				t.Errorf("the caller's error frame %q carries the internal cause %q", refusal.Message, boom.Error())
+			}
 		})
 	}
 }
