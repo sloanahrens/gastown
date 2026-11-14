@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,7 +14,33 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
+
+// benchURL is the gateway address the runs name. The in-process transport answers
+// it, so no socket is opened.
+const benchURL = "http://gateway.test"
+
+// gatewayTransport answers each request by running the fake gateway's handler in
+// process, so the client's real request path runs without a network.
+type gatewayTransport struct{ gw *fakeGateway }
+
+func (tr gatewayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if tr.gw.plan.transportErr {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, errors.New("connection refused")
+	}
+	rec := httptest.NewRecorder()
+	tr.gw.ServeHTTP(rec, req)
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	return rec.Result(), nil
+}
 
 // testToken is the read-class token the fake gateway accepts. The run must never
 // print it, so every case checks the output for it.
@@ -51,6 +78,17 @@ type gatewayPlan struct {
 	refusal bool
 	// truncate ends the answer after bd's output, before any exit frame.
 	truncate bool
+	// rawAnswer, when non-nil, is written in place of the frames: bytes a real
+	// gateway would never send, for the frame decoder's refusals.
+	rawAnswer []byte
+	// transportErr fails the request before it reaches the gateway.
+	transportErr bool
+}
+
+// frame returns the bytes of one response frame: its kind, a four-byte big-endian
+// length and the payload.
+func frame(kind byte, payload string) []byte {
+	return append([]byte{kind, 0, 0, 0, byte(len(payload))}, payload...)
 }
 
 // fakeGateway is an in-process gateway for POST /v1/exec. It checks the bearer
@@ -94,6 +132,10 @@ func (g *fakeGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.clock.Advance(g.plan.latency(k))
+	if g.plan.rawAnswer != nil {
+		_, _ = w.Write(g.plan.rawAnswer)
+		return
+	}
 	if g.plan.refusal {
 		payload, _ := json.Marshal(bdgateway.ErrorPayload{Code: "forbidden", Message: "the verb is not allowed"})
 		_ = bdgateway.WriteFrame(w, bdgateway.Frame{Kind: bdgateway.FrameError, Payload: payload})
@@ -153,10 +195,16 @@ func TestBenchRun(t *testing.T) {
 	refused.refusal = true
 	truncated := steady(40)
 	truncated.truncate = true
+	unknownKind := steady(40)
+	unknownKind.rawAnswer = frame(9, "x")
+	badExit := steady(40)
+	badExit.rawAnswer = frame(byte(bdgateway.FrameExit), "x")
+	unreachable := steady(40)
+	unreachable.transportErr = true
 
 	cases := []struct {
 		name string
-		// args builds the command line; url is the fake gateway's address.
+		// args builds the command line; url is the gateway address.
 		args func(t *testing.T, url string) []string
 		plan gatewayPlan
 		// wantExit is the status run returns.
@@ -312,6 +360,35 @@ func TestBenchRun(t *testing.T) {
 			wantErr:   "ended before an exit status",
 		},
 		{
+			name: "a gateway that does not answer fails the run before it is called",
+			args: func(t *testing.T, url string) []string {
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+			},
+			plan:     unreachable,
+			wantExit: 1,
+			wantErr:  "the gateway did not answer",
+		},
+		{
+			name: "an answer with an unknown frame kind fails the run",
+			args: func(t *testing.T, url string) []string {
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+			},
+			plan:      unknownKind,
+			wantExit:  1,
+			wantShows: 1,
+			wantErr:   "read the answer",
+		},
+		{
+			name: "an exit frame that is not a status fails the run",
+			args: func(t *testing.T, url string) []string {
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+			},
+			plan:      badExit,
+			wantExit:  1,
+			wantShows: 1,
+			wantErr:   "read the answer",
+		},
+		{
 			name: "a bd exit status other than 0 fails the run",
 			args: func(t *testing.T, url string) []string {
 				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
@@ -328,11 +405,10 @@ func TestBenchRun(t *testing.T) {
 			t.Parallel()
 			clock := &fakeClock{t: time.Unix(0, 0)}
 			gw := &fakeGateway{token: testToken, clock: clock, plan: tc.plan}
-			srv := httptest.NewServer(gw)
-			t.Cleanup(srv.Close)
+			client := &http.Client{Transport: gatewayTransport{gw: gw}}
 
 			var stdout, stderr bytes.Buffer
-			got := run(tc.args(t, srv.URL), &stdout, &stderr, clock.Now)
+			got := run(tc.args(t, benchURL), &stdout, &stderr, clock.Now, client)
 
 			if got != tc.wantExit {
 				t.Errorf("exit = %d, want %d; stderr: %q", got, tc.wantExit, stderr.String())

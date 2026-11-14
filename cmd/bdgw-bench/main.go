@@ -43,12 +43,13 @@ const (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, time.Now))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, time.Now, &http.Client{Timeout: clientTimeout}))
 }
 
-// run is main without the process: now is the clock the latencies are read from,
-// so a test can drive the run with a fake one. It returns the exit status.
-func run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+// run is main without the process: now is the clock the latencies are read from
+// and client carries the calls, so a test can drive the run with a fake clock and
+// an in-process gateway. It returns the exit status.
+func run(args []string, stdout, stderr io.Writer, now func() time.Time, client *http.Client) int {
 	fs := flag.NewFlagSet("bdgw-bench", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	gatewayURL := fs.String("url", "", "the gateway's base URL, http or https")
@@ -77,7 +78,6 @@ func run(args []string, stdout, stderr io.Writer, now func() time.Time) int {
 		return exitUsage
 	}
 
-	client := &http.Client{Timeout: clientTimeout}
 	do := func(argv []string) error {
 		return gatewayCall(client, *gatewayURL, token, *rig, argv)
 	}
@@ -122,7 +122,7 @@ func checkFlags(gatewayURL, tokenFile, bead string) error {
 // readToken reads the bearer token from path, without its surrounding space. An
 // empty file is refused: an empty bearer header would fail every call.
 func readToken(path string) (string, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the token file with -token-file
 	if err != nil {
 		return "", fmt.Errorf("read the token file: %w", err)
 	}
@@ -137,18 +137,15 @@ func readToken(path string) (string, error) {
 // names the HTTP status or the gateway's error code and the exit status, never
 // the token or the call's output.
 func gatewayCall(client *http.Client, gatewayURL, token, rig string, argv []string) error {
-	head, err := json.Marshal(bdgateway.Request{
+	// The head is a struct of a string slice, two strings and an int, so it always
+	// encodes; checkFlags parsed the URL and the method is fixed, so the request
+	// always builds. A branch for either error would be dead.
+	head, _ := json.Marshal(bdgateway.Request{
 		Argv:      argv,
 		Rig:       rig,
 		TimeoutMS: callTimeoutMS,
 	})
-	if err != nil {
-		return fmt.Errorf("encode the call: %w", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(gatewayURL, "/")+execPath, bytes.NewReader(append(head, '\n')))
-	if err != nil {
-		return fmt.Errorf("build the request: %w", err)
-	}
+	req, _ := http.NewRequest(http.MethodPost, strings.TrimSuffix(gatewayURL, "/")+execPath, bytes.NewReader(append(head, '\n')))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Gt-Caller", callerName)
@@ -178,16 +175,12 @@ func readAnswer(r io.Reader) error {
 		}
 		switch frame.Kind {
 		case bdgateway.FrameError:
-			payload, err := frame.GatewayError()
-			if err != nil {
-				return errors.New("the gateway refused the call with an unreadable error")
-			}
+			// ReadFrame validated the payload, so decoding it cannot fail.
+			payload, _ := frame.GatewayError()
 			return fmt.Errorf("the gateway refused the call (%s)", payload.Code)
 		case bdgateway.FrameExit:
-			status, err := frame.ExitStatus()
-			if err != nil {
-				return fmt.Errorf("the exit frame is unreadable: %w", err)
-			}
+			// ReadFrame validated the exit frame's payload the same way.
+			status, _ := frame.ExitStatus()
 			if status != 0 {
 				return fmt.Errorf("bd exited %d", status)
 			}
