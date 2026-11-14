@@ -2851,13 +2851,18 @@ of work fail most.
 For each new om finding in the review log, the battery asks Jev one question,
 `omclass.rule_class`: which lesson class of the class table in
 `internal/omlessons` the finding belongs to. The options are the table's class
-ids and `none`. The state Jev reads is the finding's file, title and claim, and
-nothing else. It appends one line per finding to `.runtime/jev/omclass.jsonl`:
-`{ts, at, rig, bead, attempt, finding, keyword, answers, model,
-question_version}`. `keyword` is the class the table's keywords give the finding
-(`none` when no row matches), so the scorecard can compare Jev's pick with it.
-The finding's text is never logged. A finding with no title or claim, or a reply
-with no choice, is skipped, and the cursor moves past it.
+ids and `none`. The state Jev reads is the finding's rig, bead, attempt, file,
+title and claim, and nothing else. It appends one line per finding to
+`.runtime/jev/omclass.jsonl`: `{ts, at, rig, bead, attempt, finding, keyword,
+answers, failure, model, question_version}`. `keyword` is the class the table's
+keywords give the finding (`none` when no row matches), so the scorecard can
+compare Jev's pick with it. The finding's text is never logged. A finding with
+no title or claim, or a reply with no choice, is skipped, and the cursor moves
+past it. An ask that gets no reply (a transport error, a timeout or a non-2xx
+status) stops the pass, and the next pass asks again. After `MaxAskAttempts`
+(3) failed asks the finding is logged with a `failure` that names the kind of
+failure (never the reply text) and no answer, and the cursor moves past it. A
+run stopped by the E-stop or its budget does not count against the finding.
 
 A pass takes at most 300 findings a run, oldest first, and moves its cursor past
 each one before the next. The first pass only sets the cursor, so the findings

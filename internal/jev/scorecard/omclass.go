@@ -68,6 +68,9 @@ func (a *omclassAdapter) Parse(raw []byte) (Item, error) {
 	if !readableQuestionSet(l.QuestionVersion, omclass.Version) {
 		return Item{}, fmt.Errorf("omclass line asked question set %d, the scorecard reads %d or older", l.QuestionVersion, omclass.Version)
 	}
+	if l.Failure != "" {
+		return Item{}, errors.New("omclass line records a failed ask, with no class answer")
+	}
 	ans, ok := l.Answers[omclass.QRuleClass]
 	if !ok || ans.Choice == "" {
 		return Item{}, errors.New("omclass line has no class answer")

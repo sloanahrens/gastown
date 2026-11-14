@@ -90,6 +90,10 @@ func TestOMClassParseRefusesLinesItCannotCompare(t *testing.T) {
 		{"question set unset", func(l *omclass.Line) { l.QuestionVersion = 0 }},
 		{"no class answer", func(l *omclass.Line) { l.Answers = map[string]omclass.Answer{} }},
 		{"class answer with no choice", func(l *omclass.Line) { l.Answers[omclass.QRuleClass] = omclass.Answer{} }},
+		{"failed ask with no answer", func(l *omclass.Line) {
+			l.Answers = map[string]omclass.Answer{}
+			l.Failure = "jev timed out"
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

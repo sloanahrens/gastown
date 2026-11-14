@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -96,6 +97,13 @@ func (a *omclassAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.
 	}}, nil
 }
 
+// omclassFailingAsker fails every ask with no reply.
+type omclassFailingAsker struct{}
+
+func (omclassFailingAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	return nil, errors.New("jev unreachable")
+}
+
 // omclassReviews hands the pass one review's findings.
 type omclassReviews struct{ recs []land.ReviewRecord }
 
@@ -161,6 +169,47 @@ func TestOMClassRunWritesOneLinePerFinding(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "jev_omclass: asked 2 findings") {
 		t.Errorf("log = %q, want the pass's count", logs)
+	}
+}
+
+// A pass whose ask gets no reply stops with that error, and the daemon logs it
+// as the pass's error through the logger it injects, not as a skip.
+func TestOMClassRunLogsAPassFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logs := &bytes.Buffer{}
+	at := time.Date(2026, 11, 14, 11, 0, 0, 0, time.UTC)
+	reviews := omclassReviews{recs: []land.ReviewRecord{{
+		BeadID: "gt-fixture", Rig: "gastown", Attempt: 1, At: at.Add(time.Minute),
+		Verdict:     land.VerdictRequestChanges,
+		FindingText: []land.ReviewFindingText{{File: "a.go", Title: "reads as success on a failed read", Claim: "the error is dropped"}},
+	}}}
+	cursorPath := omclass.CursorPath(town)
+	if err := battery.WriteCursor(cursorPath, battery.Cursor{Time: at}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevOMClass: &JevOMClassConfig{Enabled: true, USDPerBillionTokens: 4}},
+		},
+		jevOMClassOpen: func(string, omclass.Settings, io.Writer) (*omclass.Pass, error) {
+			return &omclass.Pass{
+				Asker:      omclassFailingAsker{},
+				Reviews:    reviews,
+				LogPath:    omclass.LogPath(town),
+				CursorPath: cursorPath,
+				Allows:     func() (bool, error) { return true, nil },
+			}, nil
+		},
+	}
+
+	d.runJevOMClass()
+
+	want := "jev_omclass: error: asking about gt-fixture#1/0000: jev unreachable"
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log = %q, want the pass failure %q", logs, want)
 	}
 }
 

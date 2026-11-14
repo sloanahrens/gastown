@@ -90,7 +90,7 @@ func (d *Daemon) runJevOMClass() {
 	if sum.Capped {
 		d.logger.Printf("jev_omclass: stopped at %d findings this run; the rest wait for the next pass", omclass.MaxFindingsPerRun)
 	}
-	if sum.Asked > 0 || sum.Skipped > 0 || sum.CapReached {
-		d.logger.Printf("jev_omclass: asked %d findings, skipped %d (daily cap reached: %v)", sum.Asked, sum.Skipped, sum.CapReached)
+	if sum.Asked > 0 || sum.Skipped > 0 || sum.Failed > 0 || sum.CapReached {
+		d.logger.Printf("jev_omclass: asked %d findings, skipped %d, gave up on %d (daily cap reached: %v)", sum.Asked, sum.Skipped, sum.Failed, sum.CapReached)
 	}
 }

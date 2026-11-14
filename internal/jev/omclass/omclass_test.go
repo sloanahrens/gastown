@@ -349,3 +349,165 @@ func TestOMClassRunBusyWhenAnotherPassHoldsTheLock(t *testing.T) {
 		t.Errorf("Run = %v, want ErrBusy", err)
 	}
 }
+
+// selectiveAsker answers every finding with choice, except the findings of
+// failFile: their ask fails with err every time. calls counts the asks.
+type selectiveAsker struct {
+	choice   string
+	failFile string
+	err      error
+	calls    int
+}
+
+func (a *selectiveAsker) Ask(_ context.Context, s any, _ map[string]jev.Question) (*jev.Answers, error) {
+	a.calls++
+	if s.(state).File == a.failFile {
+		return nil, a.err
+	}
+	return &jev.Answers{Model: "jev-test", Choice: map[string]jev.ChoiceAnswer{
+		QRuleClass: {Choice: a.choice, Probabilities: map[string]float64{a.choice: 1}},
+	}}, nil
+}
+
+// cancelAsker cancels the pass's context from inside the ask and fails it, as
+// the E-stop does when it stops a pass in flight.
+type cancelAsker struct{ cancel context.CancelFunc }
+
+func (a cancelAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	a.cancel()
+	return nil, errors.New("aborted")
+}
+
+func readCursorState(t *testing.T, path string) cursorState {
+	t.Helper()
+	var st cursorState
+	if _, err := battery.ReadState(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// A finding whose ask gets no reply holds the pass for MaxAskAttempts passes,
+// each pass counting one failed ask. The attempt that reaches the bound logs the
+// finding with a failure and no answer, moves the cursor past it, and the same
+// pass asks about the finding after it.
+func TestOMClassRunGivesUpOnAFindingAfterMaxAskAttempts(t *testing.T) {
+	t.Parallel()
+	bad := land.ReviewFindingText{File: "bad.go", Title: "reads as success on a failed read", Claim: "the error is dropped"}
+	good := land.ReviewFindingText{File: "good.go", Title: "the grid shows blue", Claim: "the color is off"}
+	// The server's body is the kind of text that must not reach the log.
+	asker := &selectiveAsker{choice: NoneLabel, failFile: "bad.go", err: &jev.StatusError{Status: 500, Message: "secret-body"}}
+	p := newPass(t, asker, fakeReviews{recs: []land.ReviewRecord{review("gt-a", 1, t0.Add(time.Minute), bad, good)}}, t0)
+	const id = "gt-a#1/0000"
+
+	for i := 1; i < MaxAskAttempts; i++ {
+		if _, err := p.Run(context.Background()); err == nil {
+			t.Fatalf("pass %d returned no error, want the failed ask", i)
+		}
+		st := readCursorState(t, p.CursorPath)
+		if st.Failing != id || st.Tries != i || !st.Time.Equal(t0) {
+			t.Fatalf("after pass %d the cursor is %+v, want %d failed asks of %s at %v", i, st, i, id, t0)
+		}
+		if got := readLog(t, p.LogPath); len(got) != 0 {
+			t.Fatalf("after pass %d the log has %d lines, want none before the give-up", i, len(got))
+		}
+	}
+
+	sum, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatalf("the bounded pass: %v", err)
+	}
+	if sum.Failed != 1 || sum.Asked != 1 {
+		t.Fatalf("summary = %+v, want the bad finding given up and the good one asked", sum)
+	}
+	if asker.calls != MaxAskAttempts+1 {
+		t.Errorf("Jev was asked %d times, want %d: each failed attempt once, then the good finding", asker.calls, MaxAskAttempts+1)
+	}
+	st := readCursorState(t, p.CursorPath)
+	if st.Failing != "" || st.Tries != 0 || st.ID != "gt-a#1/0001" {
+		t.Errorf("cursor = %+v, want moved past both findings with no failed asks", st)
+	}
+
+	lines := readLog(t, p.LogPath)
+	if len(lines) != 2 {
+		t.Fatalf("log has %d lines, want the failure then the answer", len(lines))
+	}
+	if f := lines[0]; f.Failure != "jev answered status 500" || len(f.Answers) != 0 || f.Keyword != "fail-open" || f.Finding != 0 {
+		t.Errorf("failure line = %+v, want the status kind, no answer and the keyword", f)
+	}
+	if a := lines[1]; a.Failure != "" || a.Answers[QRuleClass].Choice != NoneLabel || a.Finding != 1 {
+		t.Errorf("answer line = %+v, want none for the second finding", a)
+	}
+	raw, err := os.ReadFile(p.LogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret-body") {
+		t.Errorf("the log holds the reply text: %s", raw)
+	}
+}
+
+// A pass the E-stop or its run budget stops while Jev is answering stops with
+// that error, and the finding's failed-ask count is left alone: the stop was the
+// pass's, not the finding's.
+func TestOMClassRunStoppedMidAskIsNotCountedAgainstTheFinding(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := newPass(t, cancelAsker{cancel: cancel}, fakeReviews{recs: []land.ReviewRecord{review("gt-a", 1, t0.Add(time.Minute), failOpen)}}, t0)
+
+	if _, err := p.Run(ctx); err == nil {
+		t.Fatal("Run returned no error for a stopped pass")
+	}
+	st := readCursorState(t, p.CursorPath)
+	if st.Failing != "" || st.Tries != 0 {
+		t.Errorf("cursor = %+v, want no failed asks counted", st)
+	}
+}
+
+// A failure is named by its kind, never by the reply's text.
+func TestOMClassFailureKindNamesTheKindNotTheReply(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"status error", &jev.StatusError{Status: 500, Message: "secret-body"}, "jev answered status 500"},
+		{"wrapped status error", fmt.Errorf("ask: %w", &jev.StatusError{Status: 503}), "jev answered status 503"},
+		{"timeout", jev.ErrTimeout, "jev timed out"},
+		{"other failure", errors.New("secret-body"), "jev call failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := failureKind(c.err)
+			if got != c.want {
+				t.Errorf("failureKind = %q, want %q", got, c.want)
+			}
+			if strings.Contains(got, "secret-body") {
+				t.Errorf("failureKind = %q carries the reply text", got)
+			}
+		})
+	}
+}
+
+// The cursor orders findings by At and then by id, so the pass reads the log in
+// At order: a verdict stamped before the cursor was read by an earlier pass and
+// is not asked again. This pins that assumption; see pending.
+func TestOMClassRunSkipsVerdictsStampedBeforeTheCursor(t *testing.T) {
+	t.Parallel()
+	asker := &fakeAsker{choice: NoneLabel}
+	recs := []land.ReviewRecord{
+		review("gt-old", 1, t0.Add(time.Minute), unclassified),
+		review("gt-new", 1, t0.Add(10*time.Minute), unclassified),
+	}
+	p := newPass(t, asker, fakeReviews{recs: recs}, t0.Add(5*time.Minute))
+	sum, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 1 || len(asker.states) != 1 || asker.states[0].Bead != "gt-new" {
+		t.Errorf("summary = %+v with asks %+v, want only the verdict after the cursor", sum, asker.states)
+	}
+}

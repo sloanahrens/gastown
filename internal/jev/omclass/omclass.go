@@ -39,6 +39,11 @@ const (
 	// findings past it wait for the next pass.
 	MaxFindingsPerRun = 300
 
+	// MaxAskAttempts bounds the asks one finding gets. A finding whose ask fails
+	// this many passes running is logged with a Failure and no answer, and the
+	// cursor moves past it, so one bad finding costs a bounded number of passes.
+	MaxAskAttempts = 3
+
 	// Version identifies the question set. It is written to every log line, so
 	// an answer can be told from one produced by different wording. Bump it
 	// when a question id, its text, its options or a level changes.
@@ -86,6 +91,9 @@ type Summary struct {
 	// title or claim has nothing for Jev to read, and Jev returned no usable
 	// choice for the others. The cursor moves past a skipped finding.
 	Skipped int
+	// Failed is the number of findings the pass gave up on after MaxAskAttempts
+	// failed asks. Each has a line with a Failure and no answer.
+	Failed int
 	// CapReached is true when the pass stopped because the day's cap was spent.
 	CapReached bool
 	// Capped is true when the pass stopped at MaxFindingsPerRun with findings
@@ -117,6 +125,10 @@ type Line struct {
 	Keyword string `json:"keyword"`
 	// Answers maps each question id to its answer.
 	Answers map[string]Answer `json:"answers"`
+	// Failure is set on a line for a finding the pass gave up on after
+	// MaxAskAttempts failed asks. It names the kind of failure, never the reply
+	// text, and such a line has no answer.
+	Failure string `json:"failure,omitempty"`
 	// Model is the versioned Jev model that answered.
 	Model string `json:"model"`
 	// QuestionVersion is Version when the line was logged.
@@ -162,11 +174,30 @@ type item struct {
 	finding land.ReviewFindingText
 }
 
+// cursorState is what a pass saves: the cursor, and how many asks of the finding
+// just past it have failed. Failing names that finding and Tries counts its
+// failed asks. A cursor that moves on drops both.
+type cursorState struct {
+	battery.Cursor
+	Failing string `json:"failing,omitempty"`
+	Tries   int    `json:"tries,omitempty"`
+}
+
+// triesOf returns how many asks of finding id have failed so far.
+func (s cursorState) triesOf(id string) int {
+	if s.Failing != id {
+		return 0
+	}
+	return s.Tries
+}
+
 // Run does one pass. Findings are taken oldest first, and each is logged and the
 // cursor advanced before the next, so a pass stopped partway never asks about a
-// finding twice. A finding whose Ask fails for any reason but an unusable
-// response stops the pass with that error, and the next pass asks about it
-// again. Run returns ErrBusy when another pass holds the run lock.
+// finding twice. A finding whose Ask fails with no reply stops the pass with
+// that error, and the next pass asks about it again, up to MaxAskAttempts; the
+// attempt that reaches the bound logs the finding with a Failure and moves past
+// it. A stopped run does not count against the finding. Run returns ErrBusy when
+// another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -175,32 +206,35 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	}
 	defer release()
 
-	cur, ok, err := battery.ReadCursor(p.CursorPath)
+	var st cursorState
+	ok, err := battery.ReadState(p.CursorPath, &st)
 	if err != nil {
 		return sum, err
 	}
 	if !ok {
 		sum.Started = true
-		return sum, battery.WriteCursor(p.CursorPath, battery.Cursor{Time: p.now()})
+		return sum, p.advance(battery.Cursor{Time: p.now()})
 	}
 
-	all, err := p.Reviews.Since(cur.Time)
+	all, err := p.Reviews.Since(st.Time)
 	if err != nil {
-		return sum, fmt.Errorf("listing the om reviews since %s: %w", cur.Time.Format(time.RFC3339), err)
+		return sum, fmt.Errorf("listing the om reviews since %s: %w", st.Time.Format(time.RFC3339), err)
 	}
-	for _, it := range pending(all, cur) {
+	for _, it := range pending(all, st.Cursor) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
-		if sum.Asked+sum.Skipped >= MaxFindingsPerRun {
+		if sum.Asked+sum.Skipped+sum.Failed >= MaxFindingsPerRun {
 			sum.Capped = true
 			break
 		}
+		next := battery.Cursor{Time: it.at, ID: it.id}
 		if strings.TrimSpace(it.finding.Title) == "" && strings.TrimSpace(it.finding.Claim) == "" {
 			sum.Skipped++
-			if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: it.at, ID: it.id}); err != nil {
+			if err := p.advance(next); err != nil {
 				return sum, err
 			}
+			st = cursorState{Cursor: next}
 			continue
 		}
 		allowed, err := p.Allows()
@@ -215,19 +249,41 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		switch {
 		case errors.Is(err, jev.ErrBadResponse):
 			sum.Skipped++
-		case err != nil:
+		case err != nil && ctx.Err() != nil:
+			// The pass was stopped, by the E-stop or its run budget. That is not
+			// the finding failing, so the count is left alone.
 			return sum, err
+		case err != nil:
+			tries := st.triesOf(it.id) + 1
+			if tries < MaxAskAttempts {
+				// Keep the count on the cursor and stop: the next pass asks again.
+				if serr := battery.WriteState(p.CursorPath, cursorState{Cursor: st.Cursor, Failing: it.id, Tries: tries}); serr != nil {
+					return sum, serr
+				}
+				return sum, fmt.Errorf("asking about %s: %w", it.id, err)
+			}
+			if err := battery.Append(p.LogPath, it.failedLine(p.now(), err)); err != nil {
+				return sum, err
+			}
+			sum.Failed++
 		default:
 			if err := battery.Append(p.LogPath, line); err != nil {
 				return sum, err
 			}
 			sum.Asked++
 		}
-		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: it.at, ID: it.id}); err != nil {
+		if err := p.advance(next); err != nil {
 			return sum, err
 		}
+		st = cursorState{Cursor: next}
 	}
 	return sum, nil
+}
+
+// advance saves the cursor at c, with no failed asks counted against the
+// finding after it.
+func (p *Pass) advance(c battery.Cursor) error {
+	return battery.WriteState(p.CursorPath, cursorState{Cursor: c})
 }
 
 // findingID names one finding: its bead, its attempt and its index in the
@@ -239,6 +295,13 @@ func findingID(rec land.ReviewRecord, index int) string {
 
 // pending keeps the findings after the cursor, oldest first. A queue line is the
 // follow-up feed's record, not a verdict, so the pass skips it.
+//
+// The pass assumes the log is in At order: a verdict whose At falls before the
+// cursor is taken as read. The landing worker stamps At just before it appends,
+// and two landings can interleave between those two steps, so a verdict stamped
+// before the cursor and appended after the pass that moved it is skipped. The
+// window is short but not zero. The cursor has no sequence number to key on,
+// because ReviewRecord carries none.
 func pending(all []land.ReviewRecord, cur battery.Cursor) []item {
 	var out []item
 	for _, rec := range all {
@@ -282,18 +345,47 @@ func (p *Pass) ask(ctx context.Context, it item) (Line, error) {
 	if !ok || ans.Choice == "" {
 		return Line{}, fmt.Errorf("%w: no %s answer", jev.ErrBadResponse, QRuleClass)
 	}
+	l := it.line(p.now())
+	l.Answers = map[string]Answer{QRuleClass: {Choice: ans.Choice, Probabilities: ans.Probabilities}}
+	l.Model = got.Model
+	return l, nil
+}
+
+// line is the log line for it before any answer: the ids and keyword of the
+// finding, and the time the pass wrote it.
+func (it item) line(ts time.Time) Line {
 	return Line{
-		TS:              p.now(),
+		TS:              ts,
 		At:              it.at,
 		Rig:             it.rec.Rig,
 		Bead:            it.rec.BeadID,
 		Attempt:         it.rec.Attempt,
 		Finding:         it.index,
 		Keyword:         Keyword(it.finding),
-		Answers:         map[string]Answer{QRuleClass: {Choice: ans.Choice, Probabilities: ans.Probabilities}},
-		Model:           got.Model,
 		QuestionVersion: Version,
-	}, nil
+	}
+}
+
+// failedLine is the log line for a finding the pass gave up on: the line before
+// any answer, with the kind of failure and no answer.
+func (it item) failedLine(ts time.Time, err error) Line {
+	l := it.line(ts)
+	l.Failure = failureKind(err)
+	return l
+}
+
+// failureKind names why Jev gave no reply, without the reply's own text. A
+// server's error body can quote anything, and the log holds no captured output.
+func failureKind(err error) string {
+	var se *jev.StatusError
+	switch {
+	case errors.As(err, &se):
+		return fmt.Sprintf("jev answered status %d", se.Status)
+	case errors.Is(err, jev.ErrTimeout):
+		return "jev timed out"
+	default:
+		return "jev call failed"
+	}
 }
 
 func (p *Pass) now() time.Time {
