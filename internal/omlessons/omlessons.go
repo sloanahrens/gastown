@@ -287,7 +287,7 @@ func (w *windowTally) add(rec land.ReviewRecord) {
 		return
 	}
 	for _, f := range rec.FindingText {
-		id := classify(f)
+		id := Classify(f)
 		if id == Unclassified {
 			w.unclassified[strings.TrimSpace(f.Title)]++
 			continue
@@ -352,10 +352,7 @@ func (w *windowTally) window(b Bounds) Window {
 }
 
 // Classify returns the id of the first class f matches, or Unclassified.
-func Classify(f land.ReviewFindingText) string { return classify(f) }
-
-// classify returns the id of the first class f matches, or Unclassified.
-func classify(f land.ReviewFindingText) string {
+func Classify(f land.ReviewFindingText) string {
 	title, claim := strings.ToLower(f.Title), strings.ToLower(f.Claim)
 	for _, c := range classes {
 		if matchesAny(c.Title, title) || matchesAny(c.Claim, claim) {

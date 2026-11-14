@@ -49,6 +49,16 @@ var (
 		"not asked for",
 		"unrequested",
 	}
+	// testBypassPhrases name a test that reaches the code around the production
+	// path, which the class table does not yet give a row. A first-attempt
+	// finding that holds one, in its title or its claim, sets tests_cover_change
+	// true with the no-red-when-removed class (gt-eh24dn).
+	testBypassPhrases = []string{
+		"bypass the real",
+		"bypasses the real",
+		"bypass the production",
+		"bypasses the production",
+	}
 )
 
 // Rules the submission adapter names in the --json report's lines. The first
@@ -73,6 +83,7 @@ const (
 var (
 	missingTestRE = phraseRE(missingTestPhrases)
 	beyondGoalRE  = phraseRE(beyondGoalPhrases)
+	testBypassRE  = phraseRE(testBypassPhrases)
 )
 
 // phraseRE compiles phrases into one case-insensitive expression that matches
@@ -239,7 +250,7 @@ func (a *submissionAdapter) labelJoin(bead, head string, submitted time.Time) (L
 	a.joined++
 	a.findings += row.Findings
 
-	if value, ok := testsCoverChangeFromReview(row.FindingText); ok {
+	if value, ok := testsCoverChangeFromReview(row); ok {
 		labels[QuestionID(submission.QTestsCoverChange)] = value
 		rules = append(rules, ruleSubmissionTestsCoverClass)
 	}
@@ -367,20 +378,21 @@ func (a *submissionAdapter) nextSubmission(bead string, after time.Time) (time.T
 	return next, found
 }
 
-// testsCoverChangeFromReview labels tests_cover_change from the findings the om
-// review recorded for the submission, by the class omlessons.Classify gives
-// each. A no-red-when-removed finding is raised against a test the change added
-// that passes with the fix removed: the change touched tests, which is what this
-// question asks (gt-eh24dn). A review that recorded findings but none of that
-// class answers no. A review that recorded none — an approval, or a row written
-// before the log kept finding text — stays unlabeled, because a missing finding
-// is not evidence that no test changed.
-func testsCoverChangeFromReview(findings []land.ReviewFindingText) (value, labeled bool) {
-	if len(findings) == 0 {
+// testsCoverChangeFromReview labels tests_cover_change from the findings of the
+// row's first attempt, by the class omlessons.Classify gives each. A
+// no-red-when-removed finding, or one that holds a testBypassPhrases entry, names
+// a test in the change that does not reach the production path, so the finding
+// sets the label true (gt-eh24dn). A review that recorded findings but none of
+// those answers false. A later attempt's review, or one that recorded no finding
+// text, stays unlabeled: an approval, or a row written before the log kept finding
+// text, carries no finding to read.
+func testsCoverChangeFromReview(row land.ReviewRecord) (value, labeled bool) {
+	if row.Attempt != 1 || len(row.FindingText) == 0 {
 		return false, false
 	}
-	for _, f := range findings {
-		if omlessons.Classify(f) == omlessons.ClassNoRedWhenRemoved {
+	for _, f := range row.FindingText {
+		if omlessons.Classify(f) == omlessons.ClassNoRedWhenRemoved ||
+			testBypassRE.MatchString(f.Title) || testBypassRE.MatchString(f.Claim) {
 			return true, true
 		}
 	}

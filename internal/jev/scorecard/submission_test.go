@@ -269,18 +269,20 @@ func TestSubmissionLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 }
 
 // TestTestsCoverChangeLabel labels the question from the class of the findings
-// the om review recorded: a test that passes without the fix is positive, a
-// review whose findings are of other classes is negative, and a review with no
-// finding text is unlabeled. A missing-test phrase in the rejection block keeps
-// its negative label over the review's positive one.
+// the om review recorded: a test that passes without the fix, or one that
+// bypasses the real path, is positive; a review whose findings are of other
+// classes is negative; a review with no finding text, or a later attempt's
+// review, is unlabeled. A missing-test phrase in the rejection block keeps its
+// negative label over the review's positive one.
 func TestTestsCoverChangeLabel(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name     string
-		findings []land.ReviewFindingText
-		notes    string
-		labeled  bool
-		value    bool
+		name          string
+		findings      []land.ReviewFindingText
+		notes         string
+		secondAttempt bool
+		labeled       bool
+		value         bool
 	}{
 		{
 			name:     "a test that passes without the fix is positive",
@@ -293,6 +295,24 @@ func TestTestsCoverChangeLabel(t *testing.T) {
 			findings: []land.ReviewFindingText{{Title: "The commit subject names another file"}},
 			labeled:  true,
 			value:    false,
+		},
+		{
+			name:     "a test that bypasses the real path is positive",
+			findings: []land.ReviewFindingText{{Title: "The new test bypasses the real path", Claim: "it calls the helper directly"}},
+			labeled:  true,
+			value:    true,
+		},
+		{
+			name:     "a bypass named only in the claim is positive",
+			findings: []land.ReviewFindingText{{Title: "The new test is weak", Claim: "it bypasses the production call site"}},
+			labeled:  true,
+			value:    true,
+		},
+		{
+			name:          "a later attempt's review is unlabeled",
+			findings:      []land.ReviewFindingText{{Title: "The new test passes without the fix"}},
+			secondAttempt: true,
+			labeled:       false,
 		},
 		{
 			name:    "a review with no finding text is unlabeled",
@@ -313,8 +333,12 @@ func TestTestsCoverChangeLabel(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			attempt := 1
+			if tc.secondAttempt {
+				attempt = 2
+			}
 			rows := []land.ReviewRecord{{
-				BeadID: "gt-a", Rig: submission.RigName, Attempt: 1, Verdict: land.VerdictRequestChanges,
+				BeadID: "gt-a", Rig: submission.RigName, Attempt: attempt, Verdict: land.VerdictRequestChanges,
 				At: submissionAt(10, 30), FindingText: tc.findings,
 			}}
 			a := &submissionAdapter{

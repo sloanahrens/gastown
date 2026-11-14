@@ -2239,14 +2239,16 @@ sets `will_pass_review` true (`submission:om-approve`), a `request_changes` row
 sets it false (`submission:om-request-changes`), and a line with no row, or a
 row with any other verdict, is unlabeled.
 
-The joined row's own findings set `tests_cover_change` by the class the lessons
-table gives each (`omlessons.Classify`, the table `gt land om-lessons` counts by):
-a finding in the `no-red-when-removed` class — a test the change added that still
-passes with the fix removed — sets it true (`submission:tests-cover-class`),
-since the change touched tests; a row that carries findings but none of that
-class sets it false. A row that carries no finding text labels nothing, because
-an approval, or a line written before the review log kept finding text, is not
-evidence that no test changed.
+When the joined row is the first attempt, its own findings set `tests_cover_change`
+by the class the lessons table gives each (`omlessons.Classify`, the table
+`gt land om-lessons` counts by). A finding in the `no-red-when-removed` class — a
+test the change added that still passes with the fix removed — sets it true
+(`submission:tests-cover-class`). So does a finding whose title or claim holds a
+`testBypassPhrases` entry (`bypass the real`, `bypasses the production`, and so on),
+a test that bypasses the real path; the class table has no row for that wording.
+A row whose findings are of neither sets it false. A row that carries no finding
+text, or a later attempt's row, labels nothing: an approval, or a line written
+before the review log kept finding text, carries no finding to read.
 
 The joined row's attempt names a `MERGE REJECTION` block in the bead's notes,
 and that block's findings set two more labels, by their titles, matched
@@ -2257,8 +2259,8 @@ case-insensitively at a word start and through its inflection (`no test` matches
   the class rule, so it wins over a class label;
 - a title that holds a scope-beyond-the-bead phrase sets `beyond_goal` true.
 
-The two phrase lists are `missingTestPhrases` and `beyondGoalPhrases` in
-`internal/jev/scorecard/submission.go`, and nowhere else. A question neither the
+The phrase lists are `missingTestPhrases`, `beyondGoalPhrases` and
+`testBypassPhrases` in `internal/jev/scorecard/submission.go`, and nowhere else. A question neither the
 class rule nor a title names stays unlabeled on that line. A `request_changes`
 row whose attempt has no block in the notes adds `submission:no-rejection-block`
 to the line's rule, so a review whose findings could not be read differs from one
