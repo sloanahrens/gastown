@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -8,9 +9,9 @@ import (
 )
 
 // overrunSeatGit is the one seam that picks the git handle the stop's save,
-// dirty check, push and reset run over. A host seat gets its worktree's handle,
-// named by the label the seam also returns; a seat whose worktree cannot be
-// resolved is an error, never a nil handle that would read as nothing to save.
+// dirty check, push and reset run over. A host seat gets its worktree's handle;
+// a seat whose worktree cannot be resolved is errOverrunNoWorktree, never a nil
+// handle that would read as nothing to save.
 func TestOverrunSeatGit_HostSeatGetsItsWorktreeHandle(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
@@ -22,25 +23,21 @@ func TestOverrunSeatGit_HostSeatGetsItsWorktreeHandle(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		seat  overrunSeat
-		want  string
 		fails bool
 	}{
-		{name: "host seat", seat: stopSeat, want: overrunHostWorktreeLabel},
+		{name: "host seat", seat: stopSeat},
 		{name: "unresolvable worktree", seat: overrunSeat{Rig: stopSeat.Rig, Polecat: "ghost", Bead: stopSeat.Bead}, fails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g, label, err := w.d.overrunSeatGit(tc.seat)
+			g, err := w.d.overrunSeatGit(tc.seat)
 			if tc.fails {
-				if err == nil || g != nil || label != "" {
-					t.Fatalf("overrunSeatGit = (%v, %q, %v), want an error and no handle or label", g, label, err)
+				if !errors.Is(err, errOverrunNoWorktree) || g != nil {
+					t.Fatalf("overrunSeatGit = (%v, %v), want %v and no handle", g, err, errOverrunNoWorktree)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("overrunSeatGit = %v, want the host worktree's handle", err)
-			}
-			if label != tc.want {
-				t.Errorf("label = %q, want %q", label, tc.want)
 			}
 			gotDir, err := g.GitDir()
 			if err != nil {
@@ -155,8 +152,8 @@ func TestOverrunSeatGit_IsTheHandleTheStopStepsUse(t *testing.T) {
 				t.Fatalf("%s opened a git handle for %s; want only the handle overrunSeatGit returned", tc.name, dir)
 				return nil
 			}
-			w.d.overrunSeatGitFn = func(seat overrunSeat) (daemonGit, string, error) {
-				return rec, "recording fake", nil
+			w.d.overrunSeatGitFn = func(seat overrunSeat) (daemonGit, error) {
+				return rec, nil
 			}
 			tc.run(t, w, rec)
 		})
@@ -171,16 +168,41 @@ func TestOverrunSeatGit_UnresolvableWorktreeKeepsItsAnswer(t *testing.T) {
 	w := newResetWorld(t)
 	ghost := overrunSeat{Rig: stopSeat.Rig, Polecat: "ghost", Bead: stopSeat.Bead, Branch: stopSeat.Branch}
 
-	if _, err := w.d.overrunSaveWork(ghost); err == nil {
-		t.Errorf("save of a seat with no worktree = nil, want an error")
+	if _, err := w.d.overrunSaveWork(ghost); !errors.Is(err, errOverrunNoWorktree) {
+		t.Errorf("save of a seat with no worktree = %v, want %v", err, errOverrunNoWorktree)
 	}
-	if dirty, err := w.d.overrunWorktreeDirty(ghost); err == nil || dirty {
-		t.Errorf("dirty check of a seat with no worktree = %v, %v; want an error", dirty, err)
+	if dirty, err := w.d.overrunWorktreeDirty(ghost); !errors.Is(err, errOverrunNoWorktree) || dirty {
+		t.Errorf("dirty check of a seat with no worktree = %v, %v; want %v and not dirty", dirty, err, errOverrunNoWorktree)
 	}
 	if err := w.d.overrunPushBranch(ghost); err != nil {
 		t.Errorf("push of a seat with no worktree = %v, want nothing to push", err)
 	}
 	if err := w.d.overrunResetWorktree(ghost); err != nil {
 		t.Errorf("reset of a seat with no worktree = %v, want nothing to reset", err)
+	}
+}
+
+// A seam failure that is not a missing worktree is not read as nothing to do:
+// the push and the reset return it, so the push is retried and the reset is
+// warned of, instead of the seat being treated as empty.
+func TestOverrunSeatGit_OtherFailuresAreNotReadAsNoWorktree(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	boom := errors.New("sandbox runner unavailable")
+	w.d.overrunSeatGitFn = func(seat overrunSeat) (daemonGit, error) {
+		return nil, boom
+	}
+
+	if _, err := w.d.overrunSaveWork(stopSeat); !errors.Is(err, boom) {
+		t.Errorf("save = %v, want the seam's failure", err)
+	}
+	if dirty, err := w.d.overrunWorktreeDirty(stopSeat); !errors.Is(err, boom) || dirty {
+		t.Errorf("dirty check = %v, %v; want the seam's failure and not dirty", dirty, err)
+	}
+	if err := w.d.overrunPushBranch(stopSeat); !errors.Is(err, boom) {
+		t.Errorf("push = %v, want the seam's failure", err)
+	}
+	if err := w.d.overrunResetWorktree(stopSeat); !errors.Is(err, boom) {
+		t.Errorf("reset = %v, want the seam's failure", err)
 	}
 }
