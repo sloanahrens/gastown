@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/steveyegge/gastown/internal/bdgateway"
 )
 
 // The command's exit statuses. exec returns bd's own status instead; these are
@@ -23,7 +25,7 @@ const (
 // exitRefused is the status exec returns when the gateway refused the call
 // before bd started: the status the frame protocol's error frame is paired
 // with.
-const exitRefused = 125
+const exitRefused = bdgateway.ExitRefused
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
