@@ -4,9 +4,16 @@ package taskmap
 // create. Sending goes with nudge in dispatch, and a mail group and a queue
 // claim are both ways of giving work to an agent. Reading mail, a channel and
 // the address directory is orient, as is closing out a handled message, where
-// attention ack and escalate close already sit. Inbox and channel
-// administration that no task group covers, and the hook helper, sit in
-// internal.
+// attention ack and escalate close already sit.
+//
+// Group judgement: mail channel create and mail channel delete administer a
+// channel rather than read it or dispatch through it, and no task group
+// describes channel administration, so they take internal's fallback for
+// plumbing no task group fits (gt-jii0vu). Inbox upkeep that no task group
+// describes (mail clear, mail drain) and the Claude Code hook helper
+// (mail check) sit there for the same reason, while the reads beside them
+// (mail channel, mail channel list, show, subscribe, subscribers,
+// unsubscribe) are orient.
 func init() {
 	Register(
 		Entry{Path: "mail", Group: "dispatch", Use: "Use this when you need to reach another agent by message, or to read what other agents have sent you."},
@@ -23,7 +30,7 @@ func init() {
 		Entry{Path: "mail check", Group: "internal", Use: "Use this in a Claude Code hook to learn whether new mail is waiting without blocking the session.", Check: "the exit code is 0 when mail is waiting and 1 when it is not"},
 		Entry{Path: "mail claim", Group: "dispatch", Use: "Use this when work is waiting in a mail queue and you want the oldest message nobody else has claimed.", Check: "the command prints Claimed message, with the message's id and sender"},
 		Entry{Path: "mail clear", Group: "internal", Use: "Use this when a worker's inbox must be emptied outright, as when resetting the town to quiescence.", Check: "the command prints Cleared and the number of messages"},
-		Entry{Path: "mail delete", Group: "orient", Use: "Use this when a message is answered and should be acknowledged out of your inbox.", Check: "the command prints Message deleted"},
+		Entry{Path: "mail delete", Group: "orient", Use: "Use this when an answered message need not be kept, so it should leave your inbox and the store.", Check: "the command prints Message deleted"},
 		Entry{Path: "mail directory", Group: "orient", Use: "Use this to find the address to write to: agents, groups, queues, channels and the special addresses.", Check: "the printed table lists each address with its type"},
 		Entry{Path: "mail drain", Group: "internal", Use: "Use this when routine protocol messages have piled up in an inbox and can be archived in bulk once stale.", Check: "gt mail drain --dry-run lists no drainable messages"},
 		Entry{Path: "mail group", Group: "dispatch", Use: "Use this to keep named sets of mail recipients so one message can reach all of them."},

@@ -213,3 +213,36 @@ func TestSeatCycleUseNamesTheSituation(t *testing.T) {
 		}
 	}
 }
+
+// TestMailDeleteUseNamesTheSituation applies the same rule to mail delete
+// (gt-jii0vu): "acknowledge" is the help's word for what the command does,
+// so the Use names the situation instead.
+func TestMailDeleteUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("mail delete")
+	if !ok {
+		t.Fatal(`Lookup("mail delete") found no entry`)
+	}
+	if strings.Contains(e.Use, "acknowledge") {
+		t.Errorf("mail delete Use = %q; it names the mechanism the help labels, not the situation that calls for the command", e.Use)
+	}
+}
+
+// TestChannelAdminStaysInternal pins the grouping judgement place_p9a.go
+// records (gt-jii0vu): channel create and delete administer a channel, which
+// no task group describes, so a move needs that judgement revisited.
+func TestChannelAdminStaysInternal(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"mail channel create", "mail channel delete"} {
+		e, ok := Lookup(path)
+		if !ok {
+			t.Errorf("Lookup(%q) found no entry; the command needs a task map entry", path)
+			continue
+		}
+		if e.Group != "internal" {
+			t.Errorf("Lookup(%q).Group = %q, want \"internal\" per the recorded judgement", path, e.Group)
+		}
+	}
+}
