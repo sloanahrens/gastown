@@ -698,7 +698,7 @@ func TestKubectlUpdateJobMapsTheAnswer(t *testing.T) {
 			err := kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, manifest, testRequestTimeout)
 
 			path := filepath.Join(dir, name+".yaml")
-			assert.Equal(t, []string{"create", "-f", path, "--request-timeout=" + testRequestTimeout.String()}, gotArgs)
+			assert.Equal(t, []string{"create", "-f", path}, gotArgs)
 			got, readErr := os.ReadFile(path)
 			require.NoError(t, readErr)
 			assert.Equal(t, manifest, got)
@@ -847,9 +847,10 @@ func TestKubectlUpdateJobRefusesAnUnwritableDirectory(t *testing.T) {
 	}
 }
 
-// TestKubectlUpdateJobRefusesNoRequestTimeout: kubectl reads a zero request
-// timeout as no bound, so a create with none is refused before kubectl runs.
-func TestKubectlUpdateJobRefusesNoRequestTimeout(t *testing.T) {
+// TestUpdateJobCreateRefusesZeroTimeout: kubectl reads a zero request timeout as
+// no bound, so a create with none is refused before kubectl runs or the manifest
+// is written.
+func TestUpdateJobCreateRefusesZeroTimeout(t *testing.T) {
 	t.Parallel()
 	const name = "gt-update-abcdef012345"
 	dir := t.TempDir()
@@ -862,6 +863,44 @@ func TestKubectlUpdateJobRefusesNoRequestTimeout(t *testing.T) {
 	assert.Contains(t, err.Error(), "no request timeout")
 	_, statErr := os.Stat(filepath.Join(dir, name+".yaml"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "the manifest was written for a create that was refused")
+}
+
+// TestUpdateJobCreateSendsNoRequestTimeout: kubectl under --request-timeout loses
+// its in-cluster config in the daemon pod, so the create's args carry no
+// request-timeout at all.
+func TestUpdateJobCreateSendsNoRequestTimeout(t *testing.T) {
+	t.Parallel()
+	const name = "gt-update-abcdef012345"
+	dir := t.TempDir()
+	var gotArgs []string
+	run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+		gotArgs = args
+		return "", 0, nil
+	}
+	require.NoError(t, kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, []byte("kind: Job\n"), testRequestTimeout))
+	path := filepath.Join(dir, name+".yaml")
+	assert.Equal(t, []string{"create", "-f", path}, gotArgs)
+}
+
+// TestUpdateJobCreateBoundedByContext: the bound moved from kubectl's flag to the
+// context handed to kubectl, so kubectl's context carries a deadline of
+// requestTimeout from the call and no later.
+func TestUpdateJobCreateBoundedByContext(t *testing.T) {
+	t.Parallel()
+	const name = "gt-update-abcdef012345"
+	dir := t.TempDir()
+	var deadline time.Time
+	var hasDeadline bool
+	run := func(ctx context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return "", 0, nil
+	}
+	before := time.Now()
+	require.NoError(t, kubectlUpdateJob{dir: dir, run: run}.CreateJob(context.Background(), name, []byte("kind: Job\n"), testRequestTimeout))
+	after := time.Now()
+	require.True(t, hasDeadline, "kubectl ran with no deadline")
+	assert.False(t, deadline.Before(before.Add(testRequestTimeout)), "the deadline is shorter than the request timeout")
+	assert.False(t, deadline.After(after.Add(testRequestTimeout)), "the deadline is later than the request timeout")
 }
 
 // TestLaunchUpdateJobBoundedNeverFindsItsOwnFinishedCreateOutstanding: a create
