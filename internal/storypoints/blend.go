@@ -35,6 +35,9 @@ type Blended struct {
 	Points  int
 	Inputs  []string
 	Rung    string
+	// JevMinutes is the minutes the Jev probability mapped to, the value the
+	// average used; nil when the blend had no Jev input.
+	JevMinutes *float64
 }
 
 // Blend averages the inputs that are present on the log scale with equal
@@ -62,6 +65,7 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 		minutes float64
 	}
 	terms := []term{{"shape", *in.ShapeMinutes}}
+	var jevMinutes *float64
 	if in.EmbedMinutes != nil {
 		terms = append(terms, term{"embed", *in.EmbedMinutes})
 	}
@@ -70,6 +74,7 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 		if err != nil {
 			return Blended{}, fmt.Errorf("storypoints: jev input: %w", err)
 		}
+		jevMinutes = &m
 		terms = append(terms, term{"jev", m})
 	}
 
@@ -89,10 +94,11 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 		return Blended{}, err
 	}
 	return Blended{
-		Minutes: minutes,
-		Points:  points,
-		Inputs:  names,
-		Rung:    rungFor(in.EmbedMinutes != nil, in.JevFits != nil),
+		Minutes:    minutes,
+		Points:     points,
+		Inputs:     names,
+		Rung:       rungFor(in.EmbedMinutes != nil, in.JevFits != nil),
+		JevMinutes: jevMinutes,
 	}, nil
 }
 

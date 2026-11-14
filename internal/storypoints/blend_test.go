@@ -40,6 +40,7 @@ func TestBlendRungs(t *testing.T) {
 		wantMin    float64
 		wantRung   string
 		wantInputs []string
+		wantJev    *float64
 	}{
 		{
 			name:       "all three inputs",
@@ -47,6 +48,7 @@ func TestBlendRungs(t *testing.T) {
 			wantMin:    geoMean(2, 18, 4),
 			wantRung:   "all",
 			wantInputs: []string{"shape", "embed", "jev"},
+			wantJev:    ptr(4),
 		},
 		{
 			name:       "shape and jev",
@@ -54,6 +56,7 @@ func TestBlendRungs(t *testing.T) {
 			wantMin:    geoMean(2, 4),
 			wantRung:   "shape-jev",
 			wantInputs: []string{"shape", "jev"},
+			wantJev:    ptr(4),
 		},
 		{
 			name:       "shape and embedding",
@@ -85,6 +88,14 @@ func TestBlendRungs(t *testing.T) {
 			}
 			if !slices.Equal(got.Inputs, tt.wantInputs) {
 				t.Errorf("Inputs = %q, want %q", got.Inputs, tt.wantInputs)
+			}
+			switch {
+			case tt.wantJev == nil && got.JevMinutes != nil:
+				t.Errorf("JevMinutes = %v, want nil", *got.JevMinutes)
+			case tt.wantJev != nil && got.JevMinutes == nil:
+				t.Errorf("JevMinutes = nil, want %v", *tt.wantJev)
+			case tt.wantJev != nil && *got.JevMinutes != *tt.wantJev:
+				t.Errorf("JevMinutes = %v, want %v", *got.JevMinutes, *tt.wantJev)
 			}
 		})
 	}

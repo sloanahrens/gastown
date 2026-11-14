@@ -132,18 +132,6 @@ func Estimate(ctx context.Context, deps Deps, issue *beads.Issue) (Result, error
 // storypoints.Blend fail; the seam drives the refusal that would otherwise be
 // unreachable.
 func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func(storypoints.Inputs) (storypoints.Blended, error)) (Result, error) {
-	return estimateWithJev(ctx, deps, issue, blend, func(w storypoints.Weights, fits float64) (float64, error) {
-		return w.JevMinutes(fits)
-	})
-}
-
-// estimateWithJev is estimateWith with the step that maps the Jev probability
-// to minutes passed in. A successful blend has already mapped it, so that step
-// cannot fail with the same weights; the seam drives the refusal a successful
-// blend makes unreachable.
-func estimateWithJev(ctx context.Context, deps Deps, issue *beads.Issue,
-	blend func(storypoints.Inputs) (storypoints.Blended, error),
-	jevMinutes func(storypoints.Weights, float64) (float64, error)) (Result, error) {
 	if issue == nil {
 		return Result{}, ErrNoBead
 	}
@@ -184,13 +172,9 @@ func estimateWithJev(ctx context.Context, deps Deps, issue *beads.Issue,
 	if err != nil {
 		return Result{}, fmt.Errorf("storypoints/estimate: %w", err)
 	}
-	if in.JevFits != nil {
-		jevMinutesValue, err := jevMinutes(weights, *in.JevFits)
-		if err != nil {
-			return Result{}, fmt.Errorf("storypoints/estimate: jev input: %w", err)
-		}
-		componentMinutes.Jev = &jevMinutesValue
-	}
+	// The log records the minutes the blend mapped the probability to, so the
+	// line cannot disagree with the number the average used.
+	componentMinutes.Jev = blended.JevMinutes
 
 	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue)
 
