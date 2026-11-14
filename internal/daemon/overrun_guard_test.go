@@ -709,19 +709,76 @@ func TestOverrunNudgeDeliveryBySeatState(t *testing.T) {
 
 // A seat whose prompt state cannot be read is not nudged at all: a seat whose
 // state is unknown is not taken for idle, and a queue write it may never read
-// is the miss this delivery fixes. The failed read is the nudge's failure,
-// retried next tick (gt-mq5x52).
+// is the miss this delivery fixes. Nothing was attempted, so the guard retries
+// at its next tick rather than spending an attempt (gt-mq5x52, gt-tnv41j).
 func TestOverrunNudgeUnreadablePromptIsNotDelivered(t *testing.T) {
 	t.Parallel()
 	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
 	d, rec, tm := newOverrunNudgeDaemon(t, seat, true, true)
 	tm.setIdleErr(session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat),
 		errors.New("cannot capture pane"))
-	if err := d.overrunProdSeams().nudge(seat, overrunNudgeMessage); err == nil {
-		t.Fatal("an unreadable prompt state sent the nudge")
+	err := d.overrunProdSeams().nudge(seat, overrunNudgeMessage)
+	if !errors.Is(err, errOverrunNudgeNotAttempted) {
+		t.Fatalf("err = %v, want the nudge reported not attempted", err)
 	}
 	if calls := rec.Nudges(); len(calls) != 0 {
 		t.Errorf("nudges = %+v, want none when the seat's prompt state is unknown", calls)
+	}
+}
+
+// A seat whose session has gone since the guard listed it gets no nudge: the
+// queue it would take has no reader. The seam reports the nudge not attempted,
+// so no notifier call is made (gt-tnv41j).
+func TestOverrunNudgeGoneSessionIsNotQueued(t *testing.T) {
+	t.Parallel()
+	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
+	d, rec, _ := newOverrunNudgeDaemon(t, seat, false, false)
+	err := d.overrunProdSeams().nudge(seat, overrunNudgeMessage)
+	if !errors.Is(err, errOverrunNudgeNotAttempted) {
+		t.Fatalf("err = %v, want the nudge reported not attempted", err)
+	}
+	if calls := rec.Nudges(); len(calls) != 0 {
+		t.Errorf("nudges = %+v, want none to a seat with no session", calls)
+	}
+}
+
+// A pane the guard cannot read does not spend one of the sling's nudge
+// attempts and starts no backoff: the failed probe is not a refused delivery,
+// so the very next tick delivers once the pane reads (gt-tnv41j).
+func TestOverrunNudgeUnreadablePaneDoesNotSpendAnAttempt(t *testing.T) {
+	t.Parallel()
+	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
+	d, buf := newOverrunDaemon(t, false)
+	tm := newFakeTmux(clockwork.NewFakeClockAt(overrunSlung))
+	rec := notifyfake.New()
+	d.tmux = tm
+	d.notifier = rec
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
+	tm.addSession(sessionName, "", tm.clock.Now())
+	tm.SetIdle(sessionName, true)
+	tm.setIdleErr(sessionName, errors.New("cannot capture pane"))
+
+	f := newOverrunFake(13*time.Minute, seat)
+	s := f.seams()
+	s.nudge = d.overrunProdSeams().nudge
+
+	d.runOverrunGuard(s)
+	if strings.Contains(buf.String(), "failed (attempt") {
+		t.Errorf("an unreadable pane was counted as a nudge attempt:\n%s", buf.String())
+	}
+	if st, err := readOverrunState(d.config.TownRoot, seat.Bead); err != nil || st.NudgeFailures != 0 {
+		t.Errorf("NudgeFailures = %d (err %v) after an unreadable pane, want 0", st.NudgeFailures, err)
+	}
+
+	tm.setIdleErr(sessionName, nil)
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(s)
+	calls := rec.Nudges()
+	if len(calls) != 1 {
+		t.Fatalf("nudges = %+v, want the read retried on the next tick without the backoff", calls)
+	}
+	if calls[0].Nudge.Queue {
+		t.Errorf("the recovered seat was queued, want the idle prompt typed into")
 	}
 }
 
