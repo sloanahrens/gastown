@@ -60,10 +60,21 @@ func runDoneSubmit(t *testing.T, gate land.Gate, branchSetup func(t *testing.T, 
 // flags are reset, for a test that needs a flag such as --target set.
 func runDoneSubmitWithFlags(t *testing.T, gate land.Gate, setFlags func(), branchSetup func(t *testing.T, workDir string)) doneSubmitRun {
 	t.Helper()
+	return runDoneSubmitRecording(t, gate, setFlags, branchSetup, installSubmitSourceBDRecorder)
+}
+
+// submitBDRecorder installs the bd stub a gt done run reads and returns its log
+// path. A test whose work bead must carry particular text supplies its own.
+type submitBDRecorder func(t *testing.T, currentBeadsDir, ownerBeadsDir string) string
+
+// runDoneSubmitRecording is runDoneSubmitWithFlags with the bd stub chosen by
+// the caller.
+func runDoneSubmitRecording(t *testing.T, gate land.Gate, setFlags func(), branchSetup func(t *testing.T, workDir string), record submitBDRecorder) doneSubmitRun {
+	t.Helper()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	setupRoutedSubmitCommandTown(t, workDir)
 	branchSetup(t, workDir)
-	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	logPath := record(t, currentBeadsDir, ownerBeadsDir)
 	resetDoneFlagsForTest(t)
 	useDoneGate(t, gate)
 	townRoot := routedSourceTestTownRoot(workDir)
