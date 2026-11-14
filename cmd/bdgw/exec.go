@@ -116,7 +116,14 @@ func execCall(ctx context.Context, policy *bdgateway.Policy, log *bdgateway.Call
 		fmt.Fprintln(stderr, "bdgw exec:", err)
 		return exitRefused
 	}
-	status := sink.Status()
+	status, seen := sink.Status()
+	if !seen {
+		// The stream began but no exit frame arrived: the executor's ending is
+		// the reason, and a call that could not report bd's status is never a
+		// success. The HTTP handler records the same 125 for this ending.
+		fmt.Fprintln(stderr, "bdgw exec: the call ended without an exit frame")
+		status = exitRefused
+	}
 	log.Log(bdgateway.CallRecord{
 		Class:    string(bdgateway.TokenOperator),
 		Caller:   ec.caller,
@@ -153,6 +160,7 @@ type streamSink struct {
 	stderr  io.Writer
 	started bool
 	status  int
+	exited  bool
 }
 
 func (s *streamSink) Write(p []byte) (int, error) {
@@ -180,7 +188,7 @@ func (s *streamSink) Write(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		s.status = status
+		s.status, s.exited = status, true
 	}
 	return len(p), nil
 }
@@ -188,6 +196,7 @@ func (s *streamSink) Write(p []byte) (int, error) {
 // Started reports whether any frame arrived, which is whether bd started.
 func (s *streamSink) Started() bool { return s.started }
 
-// Status is the status the exit frame carried. The executor always writes one
-// once it has started bd, so a stream that started has a status.
-func (s *streamSink) Status() int { return s.status }
+// Status returns the status the exit frame carried, and whether one arrived.
+// The executor writes one once it has started bd, but a stream the caller
+// stopped reading ends before the frame can be written.
+func (s *streamSink) Status() (int, bool) { return s.status, s.exited }

@@ -15,10 +15,11 @@ import (
 // frameRunner answers a call with the frames it was given, as the executor
 // would after bd ran.
 type frameRunner struct {
-	req    bdgateway.Request
-	frames []bdgateway.Frame
-	err    error
-	calls  int
+	req     bdgateway.Request
+	frames  []bdgateway.Frame
+	err     error
+	tailErr error
+	calls   int
 }
 
 func (r *frameRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.Reader, frames io.Writer) error {
@@ -32,7 +33,7 @@ func (r *frameRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.
 			return err
 		}
 	}
-	return nil
+	return r.tailErr
 }
 
 // newExecFixture builds the policy, call log and config execCall needs.
@@ -174,6 +175,37 @@ func TestBdgwExecRefusals(t *testing.T) {
 				t.Errorf("executor calls = %d, want %d", tc.runner.calls, tc.wantCalls)
 			}
 		})
+	}
+}
+
+// TestBdgwExecLostExitFrame: a call whose stream began but whose exit frame
+// never arrived is not a success. exec exits with the refusal status and the
+// call log records it, as the HTTP handler records 125 for the same ending.
+func TestBdgwExecLostExitFrame(t *testing.T) {
+	t.Parallel()
+	policy, log, ec := newExecFixture(t)
+	runner := &frameRunner{
+		frames:  []bdgateway.Frame{{Kind: bdgateway.FrameStdout, Payload: []byte("out\n")}},
+		tailErr: bdgateway.ErrClientGone,
+	}
+	var stdout, stderr bytes.Buffer
+	status := execCall(context.Background(), policy, log, runner, ec, []string{"show"}, nil,
+		strings.NewReader(""), &stdout, &stderr)
+	if status != exitRefused {
+		t.Errorf("status = %d, want %d: a call with no exit frame is not a success", status, exitRefused)
+	}
+	if !strings.Contains(stderr.String(), "without an exit frame") {
+		t.Errorf("stderr = %q, want it to name the lost exit frame", stderr.String())
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("log.Close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(ec.logDir, bdgateway.DefaultCallLogName))
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	if !strings.Contains(string(data), `"exit_code":125`) {
+		t.Errorf("call log = %s, want exit 125", strings.TrimSpace(string(data)))
 	}
 }
 
