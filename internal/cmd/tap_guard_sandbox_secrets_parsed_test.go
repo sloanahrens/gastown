@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -99,8 +100,9 @@ func TestSandboxSecretsCorpusRows(t *testing.T) {
 // TestSandboxSecretsReadsThroughParsedTokens pins the verdict of commands the
 // guard judges through the production reader, including the ones it hands to
 // shellTokenize: a command the parser cannot read, and a command
-// sandboxSecretsParsedUnsafe names. Each verdict is also asserted equal to the
-// shellTokenize verdict, so the move cannot flip a command toward allowing.
+// sandboxSecretsParsedUnsafe names. Each verdict is also checked against the
+// shellTokenize verdict in one direction: the move may tighten a verdict, never
+// loosen it.
 func TestSandboxSecretsReadsThroughParsedTokens(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -123,9 +125,9 @@ func TestSandboxSecretsReadsThroughParsedTokens(t *testing.T) {
 				t.Errorf("sandboxSecretsReason(%q) blocked=%v (reason %q), want %v", tt.command, got, reason, tt.blocked)
 			}
 			want := sandboxSecretsVerdictWith(tt.command, shellTokenize)
-			if (reason != "") != (want != "") {
-				t.Errorf("reading through sandboxSecretsReadTokens gives %q where shellTokenize gives %q for %q; the move changed a verdict",
-					reason, want, tt.command)
+			if want != "" && reason == "" {
+				t.Errorf("reading through sandboxSecretsReadTokens allows %q where shellTokenize refuses it as %q; the move loosened a verdict",
+					tt.command, want)
 			}
 		})
 	}
@@ -201,11 +203,48 @@ func TestSandboxSecretsSubstitutionReadsPathAsText(t *testing.T) {
 	}
 }
 
-// TestSandboxSecretsParsedVerdictNeverLoosens proves, over every command the
-// parser reads, that the guard's verdict through parsedTokens is never less
-// strict than the shellTokenize verdict. A command whose parsed reading would
-// allow what shellTokenize refuses is routed to shellTokenize by
-// sandboxSecretsParsedUnsafe, so the property holds for it too.
+// TestSandboxSecretsGrammarShapesRouteToText pins the construct rule behind the
+// no-loosening property. Each construct sandboxSecretsParsedUnsafe names gets the
+// shellTokenize verdict wherever it sits in a command, so the rule covers every
+// position a construct can take, not only the commands the property samples.
+func TestSandboxSecretsGrammarShapesRouteToText(t *testing.T) {
+	t.Parallel()
+	shapes := []string{
+		"cat > f <<'EOF'\n/proc/self/environ\nEOF",
+		"[[ -f /proc/self/environ ]]",
+		"for x in /proc/self/environ; do echo $x; done",
+		"case /proc/self/environ in *) echo x;; esac",
+		"select x in /proc/self/environ; do echo $x; done",
+		"echo $(cat /proc/self/environ)",
+		"echo `cat /proc/self/environ`",
+		"cat <(cat /proc/self/environ)",
+		"cat >(cat /proc/self/environ)",
+	}
+	prefixes := []string{"", "ls; ", "ls && ", "ls || ", "ls | ", "ls\n"}
+	for _, shape := range shapes {
+		for _, prefix := range prefixes {
+			command := prefix + shape
+			t.Run(fmt.Sprintf("after %q: %s", prefix, shape), func(t *testing.T) {
+				t.Parallel()
+				want := sandboxSecretsVerdictWith(command, shellTokenize)
+				if want == "" {
+					t.Fatalf("shellTokenize allows %q; the row must name the environ path", command)
+				}
+				if got := sandboxSecretsReason(command); got != want {
+					t.Errorf("sandboxSecretsReason(%q) = %q, want the text reading's %q; the construct is not routed to shellTokenize",
+						command, got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxSecretsParsedVerdictNeverLoosens checks, over the finite command set
+// (the differential's commands and this guard's rows), that the guard's verdict
+// through parsedTokens is never less strict than the shellTokenize verdict. The
+// set samples the property; the grammar holds it for every other command, since
+// sandboxSecretsParsedUnsafe routes each construct the parse drops or keeps raw to
+// shellTokenize (TestSandboxSecretsGrammarShapesRouteToText).
 func TestSandboxSecretsParsedVerdictNeverLoosens(t *testing.T) {
 	t.Parallel()
 	commands := sandboxSecretsCommands(t)
@@ -214,7 +253,8 @@ func TestSandboxSecretsParsedVerdictNeverLoosens(t *testing.T) {
 			t.Errorf("parsed reading allows what shellTokenize refuses: %q", f)
 		}
 	}
-	// Every verdict the move changes, so the closing note can list them.
+	// Every verdict the move changes. The list is pinned here, so a reading change
+	// that flips another command fails by name instead of changing a log line.
 	var changed []string
 	for _, c := range commands {
 		if _, readable := parsedTokens(c); !readable {
@@ -226,9 +266,9 @@ func TestSandboxSecretsParsedVerdictNeverLoosens(t *testing.T) {
 			changed = append(changed, c)
 		}
 	}
-	t.Logf("%d commands checked, %d verdicts changed", len(commands), len(changed))
-	for _, c := range changed {
-		t.Logf("verdict changed: %q", c)
+	wantChanged := []string{`cat /proc/self/env$'\x69ron'`}
+	if !slices.Equal(changed, wantChanged) {
+		t.Errorf("verdicts changed = %q, want %q", changed, wantChanged)
 	}
 
 	t.Run("the property fails without the fallback", func(t *testing.T) {
