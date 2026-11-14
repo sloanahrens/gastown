@@ -12,6 +12,7 @@ package resourcesampler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -302,30 +303,57 @@ func percentOfCore(previous baseline, seen bool, ident string, p Process, interv
 	return float64(p.CPUTime-previous.cpu) / float64(interval) * 100, true
 }
 
-// append writes the rows as one JSON object per line, with the modes the
-// metrics reader expects of the directory and a day file.
+// append writes the tick's rows, one line each, the way AppendRow does.
 func (s *Sampler) append(rows []Row, now time.Time) error {
-	if len(rows) == 0 {
-		return nil
+	for _, row := range rows {
+		if err := AppendRow(s.metricsDir, row, now); err != nil {
+			return err
+		}
 	}
-	dir := filepath.Join(s.metricsDir, rowsSubdir)
+	return nil
+}
+
+// AppendRow appends row to the day's file under <metricsDir>/resources as one
+// whole JSON line, creating the directory and the file when they are missing,
+// with the modes the metrics reader expects. The file is named by now's UTC
+// date, so a caller in another zone files the row under the UTC day the reader
+// asks for. It is the writer a source outside this package uses to add its rows
+// to the same file the host tick writes (gt-6bmp5y).
+//
+// An empty metricsDir is an error rather than an empty first path element,
+// which would write the rows into the caller's working directory.
+func AppendRow(metricsDir string, row Row, now time.Time) error {
+	if metricsDir == "" {
+		return errors.New("resource sampler: metrics directory is empty")
+	}
+	// A float field holding NaN or ±Inf cannot be encoded as JSON, so the row is
+	// encoded before the file is touched: a row that cannot become a line leaves
+	// no empty file behind instead of appending a blank line and reporting it as
+	// written.
+	line, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("resource sampler: encode row: %w", err)
+	}
+	dir := filepath.Join(metricsDir, rowsSubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("resource sampler: rows directory: %w", err)
 	}
-	path := filepath.Join(dir, now.Format(dayLayout)+".jsonl")
+	path := filepath.Join(dir, now.UTC().Format(dayLayout)+".jsonl")
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("resource sampler: rows file: %w", err)
 	}
 	defer file.Close()
-	for _, row := range rows {
-		line, err := json.Marshal(row)
-		if err != nil {
-			return fmt.Errorf("resource sampler: encode row: %w", err)
-		}
-		if _, err := file.Write(append(line, '\n')); err != nil {
-			return fmt.Errorf("resource sampler: append row: %w", err)
-		}
+	return appendLine(append(line, '\n'), file.Write)
+}
+
+// appendLine appends line through write, a day file's Write in production. The
+// write is a parameter so a test can fail it, which no filesystem a unit test
+// can build will do, and so a failed append is returned instead of reported as
+// a line that landed.
+func appendLine(line []byte, write func([]byte) (int, error)) error {
+	if _, err := write(line); err != nil {
+		return fmt.Errorf("resource sampler: append row: %w", err)
 	}
 	return nil
 }
