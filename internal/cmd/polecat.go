@@ -621,7 +621,7 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt polecat"))
+	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt polecat"), nil)
 
 	return mgr, r, nil
 }

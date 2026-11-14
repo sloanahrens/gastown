@@ -281,15 +281,6 @@ func (m *Manager) SetCleanup(fn func(name, reason string) error) {
 	m.cleanupKill = fn
 }
 
-// ObserveGit makes the worktree and repo-base git handles the manager opens
-// call observe once per git process, as git.Git.WithRunObserver does. The sling
-// passes its trace's counter here so reuse and repair are counted on the step
-// that made them (gt-74tzuk). The handle the manager was built with is
-// observed by the caller that built it.
-func (m *Manager) ObserveGit(observe func()) {
-	m.gits.observe = observe
-}
-
 // killSession ends the session of the rig's polecat name through the cleanup
 // hook, or through tmux without one.
 func (m *Manager) killSession(name, reason string) error {
@@ -373,6 +364,17 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRe
 	}
 	m := newManager(r, repo, probe, nil)
 	m.prefixes = prefixes
+	return m
+}
+
+// NewManagerWithObserver is NewManager whose own git handles — the worktrees,
+// the repo base and the rig config reads it opens — call observe once per git
+// process, as git.Git.WithRunObserver does. The sling passes its trace's
+// counter so the calls that reuse, repair and session start make are counted on
+// the step that made them (gt-74tzuk). A nil observe counts nothing.
+func NewManagerWithObserver(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRegistry, observe func()) *Manager {
+	m := NewManager(r, g, t, prefixes)
+	m.gits = m.gits.withObserver(observe)
 	return m
 }
 

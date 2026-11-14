@@ -83,6 +83,15 @@ type gitOpener struct {
 	repoFile func(repoPath string) rig.RepoFileReader
 }
 
+// withObserver returns a copy of the opener whose *git.Git handles call
+// observe once per git process, as git.Git.WithRunObserver does. The receiver
+// is left as it was, as that method leaves its own handle.
+func (o gitOpener) withObserver(observe func()) gitOpener {
+	c := o
+	c.observe = observe
+	return c
+}
+
 // Open is git.NewGit(workDir), or the test's opener.
 func (o gitOpener) Open(workDir string) gitRepo {
 	if o.open == nil {

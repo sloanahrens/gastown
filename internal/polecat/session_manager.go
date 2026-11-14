@@ -158,13 +158,6 @@ func (m *SessionManager) SetHooks(h SessionHooks) {
 	m.hooks = h
 }
 
-// ObserveGit makes the git handles the session manager opens for the polecat's
-// worktree call observe once per git process, as git.Git.WithRunObserver does
-// (gt-74tzuk).
-func (m *SessionManager) ObserveGit(observe func()) {
-	m.gits.observe = observe
-}
-
 // cleanup kills a session Start created and is abandoning.
 func (m *SessionManager) cleanup(polecat, sessionID, reason string) {
 	if m.hooks.Cleanup != nil {
@@ -207,6 +200,15 @@ func NewSessionManager(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistr
 	if t != nil {
 		m.tmux = t
 	}
+	return m
+}
+
+// NewSessionManagerWithObserver is NewSessionManager whose worktree git handle
+// calls observe once per git process, as git.Git.WithRunObserver does (gt-74tzuk).
+// A nil observe counts nothing.
+func NewSessionManagerWithObserver(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistry, observe func()) *SessionManager {
+	m := NewSessionManager(t, r, prefixes)
+	m.gits = m.gits.withObserver(observe)
 	return m
 }
 

@@ -982,8 +982,7 @@ func openSlingRig(townRoot, rigName string, trace *session.SandboxTrace) (*rig.R
 	// cannot be read, or a probe that fails, takes the manager's own probe.
 	polecatGit := git.NewGit(r.Path).WithRunObserver(trace.CountGit)
 	t := tmux.NewTmux()
-	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"))
-	mgr.ObserveGit(trace.CountGit)
+	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"), trace.CountGit)
 	mgr.SetSessionProbes(session.CensusSessionReader{Tmux: t})
 	return r, t, mgr, nil
 }
@@ -1344,8 +1343,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// Cleanup, both through the supervisor (gt-4k3fj.4.1).
 	sup := operatorSupervisor(filepath.Dir(r.Path))
 	actor := operatorActor("gt sling")
-	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
-	polecatSessMgr.ObserveGit(s.trace.CountGit)
+	polecatSessMgr := polecat.NewSessionManagerWithObserver(t, r, townRegistry(), s.trace.CountGit)
 	polecatSessMgr.SetHooks(polecatSessionHooks(sup, townRegistry(), s.RigName, "sling", actor))
 
 	// The seat's session backend: host tmux, or an OpenShell sandbox for an
@@ -1402,8 +1400,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// the grace window with a dead session reads as stalled, the same verdict a
 	// working one gets. gt done writes the terminal state.
 	polecatGit := git.NewGit(r.Path).WithRunObserver(s.trace.CountGit)
-	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
-	polecatMgr.ObserveGit(s.trace.CountGit)
+	polecatMgr := polecat.NewManagerWithObserver(r, polecatGit, t, townRegistry(), s.trace.CountGit)
 
 	// Update issue status from hooked to in_progress.
 	// Also warn-only for the same reason: session is already running.
