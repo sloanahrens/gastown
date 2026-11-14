@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -173,6 +174,71 @@ func TestBdgwExecRefusals(t *testing.T) {
 			}
 			if tc.runner.calls != tc.wantCalls {
 				t.Errorf("executor calls = %d, want %d", tc.runner.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// rawRunner writes bytes that are not a frame, standing in for a runner that
+// broke the frame contract.
+type rawRunner struct{ payload []byte }
+
+func (r rawRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.Reader, frames io.Writer) error {
+	_, err := frames.Write(r.payload)
+	return err
+}
+
+// failingWriter is a stream of the caller's that is gone: every write fails.
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("stream closed") }
+
+// TestBdgwExecStreamFailures: a frame the sink cannot turn into bd's streams,
+// or that is not a frame at all, ends the call as a refusal through the same
+// execCall the command runs, never as a success.
+func TestBdgwExecStreamFailures(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		runner bdgateway.CallRunner
+		stdout io.Writer
+		stderr io.Writer
+	}{
+		{
+			name:   "unreadable frame",
+			runner: rawRunner{payload: []byte("not a frame")},
+		},
+		{
+			name:   "stdout gone",
+			runner: &frameRunner{frames: []bdgateway.Frame{{Kind: bdgateway.FrameStdout, Payload: []byte("out\n")}}},
+			stdout: failingWriter{},
+		},
+		{
+			name:   "stderr gone",
+			runner: &frameRunner{frames: []bdgateway.Frame{{Kind: bdgateway.FrameStderr, Payload: []byte("err\n")}}},
+			stderr: failingWriter{},
+		},
+		{
+			name:   "exit frame without a status",
+			runner: &frameRunner{frames: []bdgateway.Frame{{Kind: bdgateway.FrameExit, Payload: []byte("x")}}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			policy, log, ec := newExecFixture(t)
+			var stdout, stderr bytes.Buffer
+			out := tc.stdout
+			if out == nil {
+				out = &stdout
+			}
+			errOut := tc.stderr
+			if errOut == nil {
+				errOut = &stderr
+			}
+			status := execCall(context.Background(), policy, log, tc.runner, ec, []string{"show"}, nil,
+				strings.NewReader(""), out, errOut)
+			if status != exitRefused {
+				t.Errorf("status = %d, want the refusal %d", status, exitRefused)
 			}
 		})
 	}

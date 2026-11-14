@@ -20,6 +20,10 @@ type serveConfig struct {
 	config
 	addr          string
 	shutdownGrace time.Duration
+	// newGateway builds the gateway from the pieces serve loads. A test
+	// replaces it to drive the refusal of an unwired gateway, which serve's own
+	// pieces cannot produce.
+	newGateway func(bdgateway.GatewayOptions) (*bdgateway.Gateway, error)
 }
 
 func newServeConfig() *serveConfig {
@@ -29,6 +33,7 @@ func newServeConfig() *serveConfig {
 		// Longer than the largest class maximum (120 s), so a call already
 		// running at shutdown finishes rather than being cut by the drain.
 		shutdownGrace: 130 * time.Second,
+		newGateway:    bdgateway.NewGateway,
 	}
 }
 
@@ -87,7 +92,7 @@ func serve(ctx context.Context, sc *serveConfig) error {
 	if err != nil {
 		return err
 	}
-	gateway, err := bdgateway.NewGateway(bdgateway.GatewayOptions{
+	gateway, err := sc.newGateway(bdgateway.GatewayOptions{
 		Auth:       auth,
 		Policy:     policy,
 		Workspaces: workspaces,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -214,6 +215,11 @@ func TestBdgwReadyCheck(t *testing.T) {
 	if err := checkReady(f.tokensDir, filepath.Join(f.verbsPath, "missing"), f.workspaceRoot); err == nil || !strings.Contains(err.Error(), "verbs") {
 		t.Errorf("checkReady with no verbs file = %v, want a verbs refusal", err)
 	}
+	notATree := filepath.Join(t.TempDir(), "file")
+	writeFile(t, notATree, "x", 0o644)
+	if err := checkReady(f.tokensDir, f.verbsPath, notATree); err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Errorf("checkReady with a workspace root that cannot be read = %v, want a workspace refusal", err)
+	}
 }
 
 // blockingRunner holds one call in flight until the test releases it, and
@@ -336,6 +342,16 @@ func TestBdgwServeStartupRefusals(t *testing.T) {
 		{name: "executor", change: func(t *testing.T, sc *serveConfig) {
 			sc.doltHost = ""
 		}, want: "Dolt host"},
+		{name: "workspace store", change: func(t *testing.T, sc *serveConfig) {
+			root := filepath.Join(t.TempDir(), "file")
+			writeFile(t, root, "x", 0o644)
+			sc.workspaceRoot = root
+		}, want: "bad workspace root"},
+		{name: "gateway", change: func(t *testing.T, sc *serveConfig) {
+			sc.newGateway = func(bdgateway.GatewayOptions) (*bdgateway.Gateway, error) {
+				return nil, errors.New("an unwired gateway")
+			}
+		}, want: "an unwired gateway"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,6 +370,23 @@ func TestBdgwServeStartupRefusals(t *testing.T) {
 				t.Fatalf("serve = %v, want a refusal naming %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestBdgwServeListenFailure: a build whose listener cannot bind is a serve
+// failure, so the process exits non-zero rather than reading as a clean stop.
+func TestBdgwServeListenFailure(t *testing.T) {
+	t.Parallel()
+	sc := newServeConfig()
+	sc.addr = "127.0.0.1:99999999"
+	sc.tokensDir = t.TempDir()
+	writeFile(t, filepath.Join(sc.tokensDir, "read.dash.token"), testReadToken, 0o600)
+	sc.verbsPath = filepath.Join(t.TempDir(), "verbs.json")
+	writeFile(t, sc.verbsPath, cmdPolicy, 0o644)
+	sc.logDir = t.TempDir()
+	sc.workspaceRoot = t.TempDir()
+	if err := serve(context.Background(), sc); err == nil {
+		t.Fatal("serve with a listener that cannot bind = nil, want its error")
 	}
 }
 

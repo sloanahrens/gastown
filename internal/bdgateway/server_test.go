@@ -261,19 +261,28 @@ func (s *stubRunner) Exec(ctx context.Context, req Request, stdin io.Reader, fra
 	return WriteFrame(frames, ExitFrame(s.exit))
 }
 
+// silentRunner returns without writing a frame: a runner that broke the frame
+// contract without reporting an error.
+type silentRunner struct{}
+
+func (silentRunner) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
+	return nil
+}
+
 // TestBdgwServerRefusals drives every refusal the handler answers before a
 // stream begins, and every status it maps an executor refusal to. Each row
 // fails if its branch is removed.
 func TestBdgwServerRefusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name   string
-		runner error
-		token  string
-		head   *Request
-		method string
-		path   string
-		want   int
+		name    string
+		runner  error
+		noFrame bool
+		token   string
+		head    *Request
+		method  string
+		path    string
+		want    int
 	}{
 		{name: "no token", token: "", head: &Request{Argv: []string{"show"}}, want: http.StatusUnauthorized},
 		{name: "bad token", token: "wrong", head: &Request{Argv: []string{"show"}}, want: http.StatusUnauthorized},
@@ -288,6 +297,7 @@ func TestBdgwServerRefusals(t *testing.T) {
 		{name: "bad timeout", token: testReadToken, runner: ErrBadTimeout, head: &Request{Argv: []string{"show"}}, want: http.StatusBadRequest},
 		{name: "env not allowed", token: testReadToken, runner: ErrEnvNotAllowed, head: &Request{Argv: []string{"show"}}, want: http.StatusBadRequest},
 		{name: "unconfigured", token: testReadToken, runner: ErrUnconfigured, head: &Request{Argv: []string{"show"}}, want: http.StatusInternalServerError},
+		{name: "runner returned no frame", token: testReadToken, noFrame: true, head: &Request{Argv: []string{"show"}}, want: http.StatusInternalServerError},
 		{name: "client gone", token: testReadToken, runner: ErrClientGone, head: &Request{Argv: []string{"show"}}, want: statusClientClosed},
 		{name: "unknown failure", token: testReadToken, runner: errors.New("disk on fire"), head: &Request{Argv: []string{"show"}}, want: http.StatusInternalServerError},
 		{name: "wrong method", token: testReadToken, method: http.MethodGet, path: execPath, want: http.StatusMethodNotAllowed},
@@ -296,8 +306,11 @@ func TestBdgwServerRefusals(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			stub := &stubRunner{err: tc.runner}
-			g := newTestGateway(t, mustStore(t), newTestCallLog(t), stub)
+			var runner CallRunner = &stubRunner{err: tc.runner}
+			if tc.noFrame {
+				runner = silentRunner{}
+			}
+			g := newTestGateway(t, mustStore(t), newTestCallLog(t), runner)
 			rec := httptest.NewRecorder()
 			if tc.method != "" {
 				req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -371,6 +384,7 @@ func TestBdgwReadyReasons(t *testing.T) {
 		want string
 	}{
 		{name: "no authenticator", g: &Gateway{policy: mustPolicy(t), workspaces: mustStore(t)}, want: "no token loader"},
+		{name: "no token table", g: &Gateway{auth: &Authenticator{}, policy: mustPolicy(t), workspaces: mustStore(t)}, want: "no token table is loaded"},
 		{name: "no verbs file", g: &Gateway{auth: testAuthenticator(t), workspaces: mustStore(t)}, want: "no verbs file"},
 		{name: "no workspace store", g: &Gateway{auth: testAuthenticator(t), policy: mustPolicy(t)}, want: "no workspace is loaded"},
 		{name: "no workspace loaded", g: &Gateway{auth: testAuthenticator(t), policy: mustPolicy(t), workspaces: mustStore(t)}, want: "no workspace is loaded"},
