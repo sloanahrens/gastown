@@ -331,8 +331,8 @@ func TestOpenShellOpsHooksAreWiredToTheRecordBackend(t *testing.T) {
 	t.Parallel()
 	// A nil check passes for a hook pointed at anything, so compare the
 	// installed function with the one this file documents the hook as.
-	if SandboxDeleter == nil || SandboxPusher == nil || SandboxLiveness == nil {
-		t.Fatalf("hooks not installed: deleter nil=%v, pusher nil=%v, liveness nil=%v", SandboxDeleter == nil, SandboxPusher == nil, SandboxLiveness == nil)
+	if SandboxDeleter == nil || SandboxPusher == nil || SandboxLiveness == nil || SandboxGitExec == nil {
+		t.Fatalf("hooks not installed: deleter nil=%v, pusher nil=%v, liveness nil=%v, git nil=%v", SandboxDeleter == nil, SandboxPusher == nil, SandboxLiveness == nil, SandboxGitExec == nil)
 	}
 	if got, want := reflect.ValueOf(SandboxDeleter).Pointer(), reflect.ValueOf(deleteSandboxRecord).Pointer(); got != want {
 		t.Errorf("SandboxDeleter = %#x, want deleteSandboxRecord %#x", got, want)
@@ -342,6 +342,9 @@ func TestOpenShellOpsHooksAreWiredToTheRecordBackend(t *testing.T) {
 	}
 	if got, want := reflect.ValueOf(SandboxLiveness).Pointer(), reflect.ValueOf(sampleSandboxRecord).Pointer(); got != want {
 		t.Errorf("SandboxLiveness = %#x, want sampleSandboxRecord %#x", got, want)
+	}
+	if got, want := reflect.ValueOf(SandboxGitExec).Pointer(), reflect.ValueOf(sandboxGitExecRecord).Pointer(); got != want {
+		t.Errorf("SandboxGitExec = %#x, want sandboxGitExecRecord %#x", got, want)
 	}
 }
 
@@ -471,6 +474,219 @@ func TestOpenShellOpsPushWorkWithoutACloneRefusesWithoutCalling(t *testing.T) {
 	}
 	if calls := fake.Calls(); len(calls) != 0 {
 		t.Fatalf("openshell calls = %v, want none", calls)
+	}
+}
+
+// The in-sandbox runner passes git -C <clone dir> and the arguments to the
+// sandbox client as separate elements, and returns what git wrote (gt-c8rbn5).
+func TestSandboxGitExecPassesGitDashCAndTheArguments(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{Reply: map[string]string{"exec": " M gastown/x.go\n"}}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+	rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+	out, err := b.sandboxGitExec(rec)(rec.WorkDir, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("sandbox git status: %v", err)
+	}
+	if got, want := string(out), " M gastown/x.go\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	calls := fake.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("openshell calls = %v, want one exec", calls)
+	}
+	want := []string{"--", "git", "-C", rec.WorkDir, "status", "--porcelain"}
+	if got := calls[0][len(calls[0])-len(want):]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("exec argv ends %v, want %v", got, want)
+	}
+}
+
+// An argument after the verb is never git's global option, so an attached form
+// of -c or -C reaches the subcommand instead of being refused as the global
+// flag (gt-c8rbn5).
+func TestSandboxGitExecSendsAnAttachedShortOption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "directory short with the value attached", args: []string{"log", "-C/etc"}},
+		{name: "config short with the value attached", args: []string{"status", "-ccore.pager=sh"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{Reply: map[string]string{"exec": "ok"}}
+			b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+			rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+			if _, err := b.sandboxGitExec(rec)(rec.WorkDir, tt.args...); err != nil {
+				t.Fatalf("sandbox git %v: %v", tt.args, err)
+			}
+			calls := fake.Calls()
+			if len(calls) != 1 {
+				t.Fatalf("openshell calls = %v, want one exec for %v", calls, tt.args)
+			}
+			want := append([]string{"--", "git", "-C", rec.WorkDir}, tt.args...)
+			if got := calls[0][len(calls[0])-len(want):]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("exec argv ends %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A sandbox the client reports as gone has no clone left to read, so the
+// runner answers ErrNothingToPush rather than a git failure (gt-c8rbn5).
+func TestSandboxGitExecOfAGoneSandboxIsNothingToPush(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 1")},
+		Stderr: map[string]string{"exec": "Error: sandbox not found: " + openshellTestSession},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+	rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+	if _, err := b.sandboxGitExec(rec)(rec.WorkDir, "status", "--porcelain"); !errors.Is(err, ErrNothingToPush) {
+		t.Fatalf("sandbox git of a gone sandbox = %v, want ErrNothingToPush", err)
+	}
+}
+
+// Any other client failure comes back wrapped with the git verb and the
+// sandbox name, since the caller never saw the command it ran (gt-c8rbn5).
+func TestSandboxGitExecClientErrorNamesTheVerbAndTheSandbox(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 128")},
+		Stderr: map[string]string{"exec": "fatal: not a git repository"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+	rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+	_, err := b.sandboxGitExec(rec)(rec.WorkDir, "status", "--porcelain")
+	if err == nil || !strings.Contains(err.Error(), "git status") || !strings.Contains(err.Error(), openshellTestSession) {
+		t.Fatalf("sandbox git failure = %v, want it to name git status and %s", err, openshellTestSession)
+	}
+}
+
+// With no runner linked a caller is refused, not handed the host worktree: a
+// sandbox seat's stub holds none of its work. This binary links the openshell
+// implementation, which TestOpenShellOpsHooksAreWiredToTheRecordBackend
+// checks; the seam here is what an unlinked binary runs (gt-c8rbn5).
+func TestSandboxGitRunnerRefusesWhenNoRunnerIsLinked(t *testing.T) {
+	t.Parallel()
+	runner, err := sandboxGitRunner(nil, "/town", SandboxRecord{Session: openshellTestSession})
+	if !errors.Is(err, ErrNoSandboxGitExec) {
+		t.Fatalf("unlinked runner = %v, want ErrNoSandboxGitExec", err)
+	}
+	if runner != nil {
+		t.Fatal("unlinked runner is non-nil, want none to fall back from")
+	}
+	// A linked hook that builds no runner is refused the same way, so a caller
+	// gets an error to report rather than a nil func that panics when called.
+	buildsNone := func(string, SandboxRecord) func(string, ...string) ([]byte, error) { return nil }
+	if runner, err := sandboxGitRunner(buildsNone, "/town", SandboxRecord{Session: openshellTestSession}); !errors.Is(err, ErrNoSandboxGitExec) || runner != nil {
+		t.Fatalf("runner from a nil-building hook = (nil=%v, %v), want (nil, ErrNoSandboxGitExec)", runner == nil, err)
+	}
+	if _, err := SandboxGitRunner("/town", SandboxRecord{Session: openshellTestSession}); err != nil {
+		t.Fatalf("SandboxGitRunner of the linked binary = %v, want a runner", err)
+	}
+}
+
+// A clone dir that is empty, relative, or holds ".." or a newline is refused
+// before anything is sent; a valid one reaches the client as separate argv
+// elements (gt-c8rbn5).
+func TestSandboxGitExecRefusesACloneDirBeforeSending(t *testing.T) {
+	t.Parallel()
+	rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+	wantSent := []string{"--", "git", "-C", rec.WorkDir, "status", "--porcelain"}
+	tests := []struct {
+		name     string
+		dir      string
+		wantSent []string
+	}{
+		{name: "empty", dir: ""},
+		{name: "relative", dir: "gastown/polecats/cheedo/gastown"},
+		{name: "holds dot dot", dir: "/sandbox/gt/../host"},
+		{name: "holds a newline", dir: "/sandbox/gt/gastown\npolecats"},
+		{name: "an absolute clone dir", dir: rec.WorkDir, wantSent: wantSent},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{Reply: map[string]string{"exec": "ok"}}
+			b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+
+			out, err := b.sandboxGitExec(rec)(tt.dir, "status", "--porcelain")
+			if tt.wantSent == nil {
+				if err == nil {
+					t.Fatalf("sandbox git in dir %q = %q, want a refusal", tt.dir, out)
+				}
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Fatalf("openshell calls = %v, want none for dir %q", calls, tt.dir)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sandbox git in dir %q: %v", tt.dir, err)
+			}
+			calls := fake.Calls()
+			if len(calls) != 1 {
+				t.Fatalf("openshell calls = %v, want one exec", calls)
+			}
+			if got := calls[0][len(calls[0])-len(tt.wantSent):]; !reflect.DeepEqual(got, tt.wantSent) {
+				t.Fatalf("exec argv ends %v, want %v", got, tt.wantSent)
+			}
+		})
+	}
+}
+
+// A verb outside the allowlist, each option shape that can change what git
+// runs, and an argument holding a newline or NUL are refused before anything
+// is sent to the sandbox (gt-c8rbn5).
+func TestSandboxGitExecRefusesAVerbOrAnOptionBeforeSending(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no verb"},
+		{name: "verb outside the allowlist", args: []string{"checkout", "--", "x"}},
+		{name: "an option is not a verb", args: []string{"--version"}},
+		{name: "config short", args: []string{"status", "-c", "core.pager=sh"}},
+		{name: "directory short", args: []string{"status", "-C", "/etc"}},
+		{name: "git dir", args: []string{"status", "--git-dir=/etc/git"}},
+		{name: "git dir as a separate argument", args: []string{"status", "--git-dir", "/etc/git"}},
+		{name: "work tree", args: []string{"status", "--work-tree=/etc"}},
+		{name: "exec path", args: []string{"log", "--exec-path=/tmp"}},
+		{name: "upload pack", args: []string{"fetch", "--upload-pack=sh"}},
+		{name: "receive pack", args: []string{"push", "--receive-pack=sh", "origin", "b"}},
+		{name: "exec", args: []string{"log", "--exec=sh"}},
+		{name: "config env", args: []string{"status", "--config-env=core.pager=sh"}},
+		{name: "upload pack prefix", args: []string{"fetch", "--upload=sh"}},
+		{name: "upload pack prefix with a value", args: []string{"fetch", "--upload-p=sh"}},
+		{name: "receive pack prefix with a value", args: []string{"push", "--receive=sh", "origin", "b"}},
+		{name: "exec path prefix", args: []string{"log", "--exec-pa=/tmp"}},
+		{name: "git dir prefix", args: []string{"status", "--git-d=/etc/git"}},
+		{name: "work tree prefix", args: []string{"status", "--work=/etc"}},
+		{name: "config env prefix", args: []string{"status", "--config=core.pager=sh"}},
+		{name: "holds a newline", args: []string{"status", "--porcelain\n"}},
+		{name: "holds a NUL", args: []string{"status", "--porcelain\x00x"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{}
+			b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+			rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+			if out, err := b.sandboxGitExec(rec)(rec.WorkDir, tt.args...); err == nil {
+				t.Fatalf("sandbox git %v = %q, want a refusal", tt.args, out)
+			}
+			if calls := fake.Calls(); len(calls) != 0 {
+				t.Fatalf("openshell calls = %v, want none for %v", calls, tt.args)
+			}
+		})
 	}
 }
 

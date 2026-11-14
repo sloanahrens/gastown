@@ -20,6 +20,7 @@ func init() {
 	SandboxDeleter = deleteSandboxRecord
 	SandboxPusher = pushSandboxRecord
 	SandboxLiveness = sampleSandboxRecord
+	SandboxGitExec = sandboxGitExecRecord
 }
 
 // deleteSandboxRecord is SandboxDeleter: the sandbox a registry record names,
@@ -33,6 +34,12 @@ func deleteSandboxRecord(townRoot string, rec SandboxRecord) error {
 // from inside its sandbox.
 func pushSandboxRecord(townRoot string, rec SandboxRecord) error {
 	return recordBackend(townRoot, rec).pushWork(rec)
+}
+
+// sandboxGitExecRecord is SandboxGitExec: git in a record's sandbox clone, run
+// through the backend the record alone describes.
+func sandboxGitExecRecord(townRoot string, rec SandboxRecord) func(dir string, args ...string) ([]byte, error) {
+	return recordBackend(townRoot, rec).sandboxGitExec(rec)
 }
 
 // sandboxPushTimeout bounds the push a stop makes before it deletes a sandbox.
@@ -169,6 +176,104 @@ func (b *openshellBackend) cloneGit(ctx context.Context, rec SandboxRecord, dir 
 		return nil, fmt.Errorf("git %s in sandbox %s: %s", args[0], rec.Session, refusalLine(err.Error()+"\n"+string(out)))
 	}
 	return out, nil
+}
+
+// sandboxGitExec is the in-sandbox git runner for rec: one git command per
+// call in dir, through cloneGit, so the error shape, the not-found mapping and
+// the timeout are the pusher's. The runner cannot tell which argument is a
+// branch, so sandboxGitRefusal checks the verb and the shape before anything is
+// sent to the sandbox.
+func (b *openshellBackend) sandboxGitExec(rec SandboxRecord) func(dir string, args ...string) ([]byte, error) {
+	return func(dir string, args ...string) ([]byte, error) {
+		if err := sandboxGitRefusal(rec, dir, args); err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxPushTimeout)
+		defer cancel()
+		return b.cloneGit(ctx, rec, dir, args...)
+	}
+}
+
+// sandboxGitRefusal is the rule sandboxGitExec applies before it sends anything
+// to the sandbox. It refuses a clone directory that is empty, relative, or
+// holds ".." or a newline, a first argument outside sandboxGitVerbs, and an
+// argument that is an option able to change what git runs or that holds a
+// newline or NUL. A refusal names the sandbox and, when one is known, the git
+// verb.
+func sandboxGitRefusal(rec SandboxRecord, dir string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("sandbox %s: refusing a git call with no verb", rec.Session)
+	}
+	verb := args[0]
+	if !sandboxGitVerbs[verb] {
+		return fmt.Errorf("sandbox %s: refusing git verb %q: not a command the overrun save runs", rec.Session, verb)
+	}
+	switch {
+	case dir == "":
+		return fmt.Errorf("sandbox %s: refusing git %s: clone directory is empty", rec.Session, verb)
+	case !path.IsAbs(dir):
+		return fmt.Errorf("sandbox %s: refusing git %s: clone directory %q is not absolute", rec.Session, verb, dir)
+	case strings.Contains(dir, ".."):
+		return fmt.Errorf("sandbox %s: refusing git %s: clone directory %q holds ..", rec.Session, verb, dir)
+	case strings.Contains(dir, "\n"):
+		return fmt.Errorf("sandbox %s: refusing git %s: clone directory %q holds a newline", rec.Session, verb, dir)
+	}
+	for _, arg := range args[1:] {
+		switch {
+		case strings.ContainsAny(arg, "\n\x00"):
+			return fmt.Errorf("sandbox %s: refusing git %s argument %q: it holds a newline or NUL", rec.Session, verb, arg)
+		case sandboxGitDeniedOption(arg):
+			return fmt.Errorf("sandbox %s: refusing git %s argument %q: it can change what git runs", rec.Session, verb, arg)
+		}
+	}
+	return nil
+}
+
+// sandboxGitVerbs are the git verbs the overrun save runs in a sandbox clone.
+// Anything else is refused: with no way to tell a branch from another command,
+// only the verbs the save uses reach git.
+var sandboxGitVerbs = map[string]bool{
+	"status": true, "add": true, "commit": true, "push": true, "fetch": true,
+	"rev-parse": true, "symbolic-ref": true, "log": true, "diff": true,
+	"reset": true, "ls-remote": true, "cherry": true, "merge-base": true,
+	"cat-file": true,
+}
+
+// sandboxGitDeniedLong are the long options that change what git runs. git
+// accepts any unambiguous prefix of a long option, so a name is refused when it
+// is a prefix of one of these, not only when it matches exactly.
+var sandboxGitDeniedLong = []string{
+	"--git-dir", "--work-tree", "--exec-path", "--upload-pack",
+	"--receive-pack", "--exec", "--config-env",
+}
+
+// sandboxGitDeniedOption reports whether arg is an option that changes what git
+// runs: another config (-c, --config-env), directory (-C, --git-dir,
+// --work-tree), executable (--exec-path, --exec), or remote helper
+// (--upload-pack, --receive-pack). It refuses the exact short flags -c and -C;
+// an argument after the verb is never git's global option, so an attached form
+// such as -Cdir is left to the subcommand. A long option is refused when its
+// name, with or without "=", is a prefix of a denied one, so an abbreviation
+// git would accept is refused too. The denylist covers options that change
+// what git runs, not what it destroys: limiting a push or a reset is the
+// caller's job.
+func sandboxGitDeniedOption(arg string) bool {
+	if arg == "-c" || arg == "-C" {
+		return true
+	}
+	if !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	name, _, _ := strings.Cut(arg, "=")
+	if len(name) <= 2 {
+		return false
+	}
+	for _, opt := range sandboxGitDeniedLong {
+		if strings.HasPrefix(opt, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // cloneDir is the clone rec's sandbox holds: the work dir the record names, else
