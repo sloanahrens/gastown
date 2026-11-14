@@ -4705,7 +4705,10 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// file is written or removed on this path too, so a current metadata.json
 	// still gets it (gt-2r2och).
 	if !changed {
-		return writeDoltPortFile(beadsDir, filePort)
+		if err := writeDoltPortFile(beadsDir, filePort); err != nil {
+			return err
+		}
+		return h.pushWorkspaceAfterWrite(townRoot)
 	}
 
 	// The port file goes first. Once metadata.json no longer carries the key,
@@ -4727,7 +4730,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		return fmt.Errorf("writing metadata.json: %w", err)
 	}
 
-	return nil
+	return h.pushWorkspaceAfterWrite(townRoot)
 }
 
 // writeDoltPortFile writes the decimal port to beadsDir/dolt-server.port, the

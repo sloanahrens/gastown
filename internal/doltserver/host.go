@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/beads"
 	configpkg "github.com/steveyegge/gastown/internal/config"
 )
@@ -86,6 +87,10 @@ type host struct {
 	// a file shared with the Mac must name (config.ResolveDoltEndpointFor with
 	// inContainer false).
 	persistedEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
+	// pushWorkspace sends the town's workspace to the bd gateway after the
+	// files bd reads change; nil is bdgateway.PushWorkspace, which does nothing
+	// until a gateway is installed.
+	pushWorkspace func(ctx context.Context, townRoot string) (string, error)
 }
 
 // std is the real machine.
@@ -122,6 +127,21 @@ func (h *host) resolvePersistedEndpoint(townRoot string) (configpkg.DoltEndpoint
 		return h.persistedEndpoint(townRoot)
 	}
 	return configpkg.ResolveDoltEndpointFor(townRoot, false)
+}
+
+// pushWorkspaceAfterWrite tells the bd gateway its workspace is stale, once a
+// writer has changed the files bd reads. A push failure is returned rather than
+// warned: the container would otherwise keep serving the tree the writer just
+// replaced (docs/design/bd-container.md, "The workspace").
+func (h *host) pushWorkspaceAfterWrite(townRoot string) error {
+	push := h.pushWorkspace
+	if push == nil {
+		push = bdgateway.PushWorkspace
+	}
+	if _, err := push(context.Background(), townRoot); err != nil {
+		return fmt.Errorf("the files are written, but the bd gateway's workspace was not updated: %w", err)
+	}
+	return nil
 }
 
 func (h *host) lookupEnvVar(key string) (string, bool) {

@@ -2,12 +2,14 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
@@ -190,7 +192,27 @@ func WriteRoutes(beadsDir string, routes []Route) error {
 		return fmt.Errorf("closing routes file: %w", err)
 	}
 
-	return os.Rename(tmpPath, routesPath)
+	if err := os.Rename(tmpPath, routesPath); err != nil {
+		return err
+	}
+	return pushWorkspaceAfterRoutesWrite(beadsDir)
+}
+
+// pushWorkspaceFn is how a routes write reaches the bd gateway's workspace. It
+// is a variable so this package's tests drive a fake pusher instead of a
+// network, and it is bdgateway.PushWorkspace, which does nothing until a gateway
+// is installed (docs/design/bd-container.md, "The workspace").
+var pushWorkspaceFn = bdgateway.PushWorkspace
+
+// pushWorkspaceAfterRoutesWrite tells the bd gateway the route table changed. A
+// routes file is the town's own, so its town root is the directory holding
+// .beads. A failed push is returned: the container would otherwise keep routing
+// the prefixes the file no longer names.
+func pushWorkspaceAfterRoutesWrite(beadsDir string) error {
+	if _, err := pushWorkspaceFn(context.Background(), filepath.Dir(beadsDir)); err != nil {
+		return fmt.Errorf("routes.jsonl is written, but the bd gateway's workspace was not updated: %w", err)
+	}
+	return nil
 }
 
 // GetTownBeadsPath returns the path to town-level beads directory.
