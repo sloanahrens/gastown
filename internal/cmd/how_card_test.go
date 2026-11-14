@@ -1,0 +1,115 @@
+package cmd
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestHowCardRulesReadTheFile drives the production loader over the embedded
+// card. A blank line or a line over the limit in overseer-card.md makes this
+// test fail with the validator's error, which names the file and the line.
+func TestHowCardRulesReadTheFile(t *testing.T) {
+	t.Parallel()
+
+	lines, err := overseerCardRules()
+	if err != nil {
+		t.Fatalf("overseerCardRules: %v", err)
+	}
+	if len(lines) == 0 {
+		t.Fatal("overseerCardRules returned no rule lines")
+	}
+}
+
+// TestHowCardRulesRefuseBadLines checks the two shapes the card must never
+// have and the line the error names for each.
+func TestHowCardRulesRefuseBadLines(t *testing.T) {
+	t.Parallel()
+
+	atLimit := strings.Repeat("x", overseerCardMaxLine)
+	overLimit := strings.Repeat("x", overseerCardMaxLine+1)
+
+	tests := []struct {
+		name    string
+		text    string
+		want    []string
+		wantErr []string
+	}{
+		{
+			name: "valid lines",
+			text: "first\nsecond\n",
+			want: []string{"first", "second"},
+		},
+		{
+			name: "the last line needs no newline",
+			text: "first\nsecond",
+			want: []string{"first", "second"},
+		},
+		{
+			name: "a line at the limit is accepted",
+			text: atLimit,
+			want: []string{atLimit},
+		},
+		{
+			name:    "an empty line",
+			text:    "first\n\nthird\n",
+			wantErr: []string{"line 2", "empty line"},
+		},
+		{
+			name:    "a whitespace-only line",
+			text:    "first\n  \nthird\n",
+			wantErr: []string{"line 2", "empty line"},
+		},
+		{
+			name:    "a blank line after the last newline",
+			text:    "first\n\n",
+			wantErr: []string{"line 2", "empty line"},
+		},
+		{
+			name:    "an empty file",
+			text:    "",
+			wantErr: []string{"line 1", "empty line"},
+		},
+		{
+			name:    "a line over the limit",
+			text:    "first\nsecond\n" + overLimit + "\n",
+			wantErr: []string{"line 3", "201 characters, more than 200"},
+		},
+		{
+			name:    "the first bad line is the one named",
+			text:    "first\n\n" + overLimit + "\n",
+			wantErr: []string{"line 2", "empty line"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			lines, err := parseOverseerCard(tc.text)
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatalf("parseOverseerCard accepted the card and returned %q", lines)
+				}
+				for _, want := range tc.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("parseOverseerCard error %q does not name %q", err, want)
+					}
+				}
+				if lines != nil {
+					t.Errorf("parseOverseerCard returned %q beside its error", lines)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseOverseerCard: %v", err)
+			}
+			if len(lines) != len(tc.want) {
+				t.Fatalf("parseOverseerCard returned %d lines, want %d: %q", len(lines), len(tc.want), lines)
+			}
+			for i := range tc.want {
+				if lines[i] != tc.want[i] {
+					t.Errorf("line %d = %q, want %q", i+1, lines[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
