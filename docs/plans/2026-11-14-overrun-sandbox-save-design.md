@@ -1,4 +1,4 @@
-> Status: approved by the operator, 2026-11-14 (approach A, grilling round 1 and the design). Bead: gt-wfulze.
+> Status: historical (2026-11). Merged in: gt-wfulze (the operator approved approach A and the six-bead list on 2026-11-14). Not maintained.
 
 # The overrun stop saves a sandbox seat's work from inside its sandbox
 
@@ -69,13 +69,15 @@ slower stop).
    returns `ErrNothingToPush` from the runner.
 4. The sandbox-gone rule (below) and the log wording.
 
+The in-sandbox runner passes argv to the sandbox client as separate elements, with no shell and no joined string. It refuses a clone directory that is empty, relative, or holds `..` or a newline, and a branch argument that fails `validCloneBranch`, before anything is sent.
+
 ## Sandbox gone
 
 When the stop finds the sandbox gone, it asks origin whether it holds the seat's
-branch. If it does, the stop proceeds as today. If it does not, the stop logs a
+branch. If it does, the stop proceeds as today. If it does not, or if the read of origin itself fails (network, auth, timeout), the stop logs a
 WARNING that names the seat, the branch and what origin holds, raises an
-attention item for the overseer, and still hands the bead back, because nothing
-can be saved and the bead must not stay hooked. It never writes "treating the
+attention item for the overseer, and, when origin answered that it does not hold the branch, still hands the bead back, because nothing
+can be saved and the bead must not stay hooked. When the read itself failed, the answer is unknown, so the bead is NOT released and the stop retries on its next tick; a silent hand-back on an unreadable origin is the incident this design exists to prevent. It never writes "treating the
 push as done" for a case it cannot see.
 
 ## Logs
@@ -87,13 +89,10 @@ hold <branch> at <tip>; worktree left as it is".
 
 ## Testing
 
-Unit tests only, through the guard's existing seams. The fake runs real git on a
-temp repository that stands in for the sandbox clone, so the checkpoint and push
-code under test is the production code. The reproduction is a sandbox seat with a
+Unit tests only, through the guard's existing seams, and in-process: no git binary runs. The sandbox clone is a scripted fake exec (a `git.ExecFunc` that answers each git call from a table and records the calls), so the checkpoint and push code under test is the production code and the test asserts the exact calls it makes. The reproduction is a sandbox seat with a
 dirty clone and a clean host stub: today's code saves nothing and the test fails;
 with the routed handle it commits a WIP commit and pushes it. A failing test
-cannot land, so that test rides with the bead that fixes it and is written first
-in that bead. Mutations: route a sandbox seat back to the stub, and the test
+cannot land, so that test rides with the bead that fixes it: it is written first and seen to fail, and the bead submits one squashed commit, so the red state never reaches the landed tree. Mutations: route a sandbox seat back to the stub, and the test
 fails.
 
 ## Out of scope

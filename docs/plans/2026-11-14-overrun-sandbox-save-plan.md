@@ -1,4 +1,4 @@
-> Status: approved by the operator, 2026-11-14, with the design it implements. Bead: gt-wfulze.
+> Status: historical (2026-11). Merged in: gt-wfulze (the operator approved the design and the plan on 2026-11-14). Not maintained.
 
 # Overrun sandbox save: implementation plan
 
@@ -15,7 +15,7 @@
 - Parallel from the start: T1, T3, T4, T8.
 - T2 after T1. T5 after T2, T3 and T4. T6 and T7 after T5.
 - Every task depends on the docs bead gt-wfulze landing first (the design is on main).
-- A failing test cannot land, so T5's reproduction test is committed red and then fixed inside T5.
+- A failing test cannot land, so T5 writes its reproduction test first, watches it fail, fixes the code, and submits one squashed commit: the red state never reaches the landed tree.
 
 ## Global constraints
 
@@ -83,7 +83,7 @@ Depends on: docs bead only
 internal/git/exec.go runs git through an unexported runFunc, so only code inside the package can swap the runner. Add an exported constructor NewGitWithExec(workDir string, exec ExecFunc) *Git and the exported call and result types it needs (a name for gitCall, and an ExecFunc type), so a caller outside the package can run every Git method through its own runner, for example one that execs inside a sandbox. Design: docs/plans/2026-11-14-overrun-sandbox-save-design.md (Components, item 3).
 
 ### Constraints
-Files: internal/git/exec.go (and a new internal/git/exec_public.go if clearer) and tests only. Existing constructors and the nil-exec default (the real git on PATH) do not change. The exported types carry the same fields the unexported ones do, nothing added. No sleeps, no network, no real remote.
+Files: internal/git/exec.go and its tests only. Existing constructors and the nil-exec default (the real git on PATH) do not change. The exported types carry the same fields the unexported ones do, nothing added. No sleeps, no network, no real remote.
 
 ### Out of scope
 Any sandbox code, any caller outside internal/git.
@@ -109,7 +109,7 @@ Depends on: docs bead only
 internal/session/backend_openshell_ops.go has cloneGit, which runs one git command inside a seat's sandbox. Expose it as a runner for a SandboxRecord: SandboxGitExec(townRoot string, rec SandboxRecord) (func(dir string, args ...string) ([]byte, error)), set through a hook variable beside SandboxPusher in sandbox_hooks.go. A sandbox that is already gone returns ErrNothingToPush. Design: docs/plans/2026-11-14-overrun-sandbox-save-design.md (Components, item 3).
 
 ### Constraints
-Files: internal/session/sandbox_hooks.go, internal/session/backend_openshell_ops.go and their tests only. The runner reuses cloneGit, so the timeout, the error shape and the not-found mapping are the ones the pusher already has. The directory it runs in is the record's clone dir (cloneDir). Tests use the existing fake sandbox client; no network, no sleeps.
+Files: internal/session/sandbox_hooks.go, internal/session/backend_openshell_ops.go and their tests only. The runner reuses cloneGit, so the timeout, the error shape and the not-found mapping are the ones the pusher already has. It passes argv to the sandbox client with no shell and no joined string. The directory it runs in is the record's clone dir (cloneDir); the runner refuses a dir that is empty, relative, or holds .. or a newline, and a branch argument that fails validCloneBranch. Tests use the existing fake sandbox client; no network, no sleeps.
 
 ### Out of scope
 The git package constructor, anything in internal/daemon.
@@ -126,6 +126,7 @@ one worker, one landing
 - [ ] A test shows a sandbox the client reports as gone makes the runner return ErrNothingToPush
 - [ ] A test shows any other client error comes back wrapped with the git verb and the sandbox name
 - [ ] A test shows the hook is nil until the implementation is linked in, and a caller that finds it nil gets a clear error
+- [ ] A table test shows a clone dir that is empty, relative, or holds .. or a newline, and a branch that fails validCloneBranch, are refused before anything is sent, and the argv reaches the client as separate elements
 
 ## T5: overrun guard: a sandbox seat's save, dirty check and push run on its sandbox clone
 
@@ -135,7 +136,7 @@ Depends on: T2, T3, T4
 For a seat with a sandbox record, overrunSeatGit returns a Git built with git.NewGitWithExec over the in-sandbox runner on the record's clone dir, and a label that names the sandbox. The save step then commits a WIP commit of uncommitted sandbox edits and pushes the branch from the sandbox, and the dirty check reads the sandbox clone, so a stop never deletes a sandbox holding uncommitted work. Host seats are unchanged. Design: docs/plans/2026-11-14-overrun-sandbox-save-design.md (Decision, Testing).
 
 ### Constraints
-Files: internal/daemon/overrun_guard_stop.go and a new internal/daemon/overrun_guard_sandbox_test.go only. Write the failing test FIRST and commit it red before the fix, in the same branch: a sandbox seat with a dirty clone and a clean host stub, where the fake runs real git on a temp repository standing in for the clone. A record that does not parse stays the errSandboxRecordCorrupt path. The host stub is not read for a sandbox seat. No sleeps, no network.
+Files: internal/daemon/overrun_guard_stop.go and its tests, and create internal/daemon/overrun_guard_sandbox_test.go, only. Write the failing test FIRST and watch it fail before the fix: a sandbox seat with a dirty clone and a clean host stub, where the clone is a scripted fake exec (a git.ExecFunc that answers each git call from a table and records the calls), never a real git or a temp repository. Submit ONE squashed commit, so the red state never reaches the landed tree. A record that does not parse stays the errSandboxRecordCorrupt path. The host stub is not read for a sandbox seat. No sleeps, no network.
 
 ### Out of scope
 The sandbox-gone rule, log wording on lines this bead does not touch, the host worktree stub.
@@ -159,7 +160,7 @@ one worker, one landing
 Depends on: T5
 
 ### Goal
-When removeSandbox finds the sandbox already gone (session.ErrNothingToPush) the stop reads it as nothing to lose. If origin does not hold the seat's branch, log a WARNING that names the seat, the branch and what origin holds, raise an attention item for the overseer, and still hand the bead back. If origin holds the branch the stop proceeds as today. Never write 'treating the push as done' for a case the guard cannot see. Design: docs/plans/2026-11-14-overrun-sandbox-save-design.md (Sandbox gone).
+When removeSandbox finds the sandbox already gone (session.ErrNothingToPush) the stop reads it as nothing to lose. If origin does not hold the seat's branch, log a WARNING that names the seat, the branch and what origin holds, raise an attention item for the overseer, and still hand the bead back. If the read of origin itself fails, treat it as the alarming case: log the WARNING with the error, raise the attention item, and do NOT release the bead. If origin holds the branch the stop proceeds as today. Never write 'treating the push as done' for a case the guard cannot see. Design: docs/plans/2026-11-14-overrun-sandbox-save-design.md (Sandbox gone).
 
 ### Constraints
 Files: internal/daemon/overrun_guard_stop.go and its tests, plus the one attention-item kind the daemon already has a constructor for (reuse it; no new kind unless none fits). The origin read uses originBranchSHA. The bead is handed back exactly once. No sleeps, no network.
@@ -177,6 +178,7 @@ one worker, one landing
 
 - [ ] A test shows a gone sandbox with the branch absent from origin logs the WARNING with seat, branch and what origin holds, raises the attention item, and hands the bead back once
 - [ ] A test shows a gone sandbox with the branch on origin proceeds as before and raises nothing
+- [ ] A test shows an origin read that returns an error logs the WARNING with the error, raises the attention item, and does not hand the bead back
 - [ ] A test shows the words treating the push as done are not written on the gone-sandbox path
 - [ ] Mutating the stop to treat ErrNothingToPush as success again makes the first test fail
 
