@@ -586,12 +586,12 @@ Gas Town managed Dolt configs should keep `auto_gc_behavior` enabled with
 `doltAutoGCArchiveLevel` in `internal/doltserver` (gt-hs4j3 measured the gc
 peak at each level). Earlier configs used `archive_level: 1` so the sql-server
 does not retain every old chunk index and grow RSS indefinitely. Steady-state
-RSS at level 0 has since been measured: 210 minutes of writes with auto gc on
-stayed under the 8 GiB cap and fell at each gc (the numbers are in Measured
-memory below, gt-2ksdgl). The live container cap stays 8 GiB (operator policy
-2026-11-06), auto gc stays on at `archive_level: 0`, and the lever for memory
-is the size of the gt database and the write churn, not the Dolt settings or
-the cap. The config is regenerated only when the managed Dolt server starts; a
+anon memory (not RSS) at level 0 has since been measured: 210 minutes of writes
+with auto gc on stayed under the 8 GiB cap and fell at each gc (the numbers are
+in Measured memory below, gt-2ksdgl). The live container cap stays 8 GiB
+(operator policy 2026-11-06), auto gc stays on at `archive_level: 0`, and the
+lever for memory is the size of the gt database and the write churn, not the
+Dolt settings or the cap. The config is regenerated only when the managed Dolt server starts; a
 deployed change takes effect on the next Dolt restart.
 Set `operational.dolt.auto_gc` to `off` in `settings/config.json` before that
 restart to emit `enable: false` and `archive_level: 0` as an operational
@@ -605,23 +605,21 @@ reclamation.
 
 **Measured memory (gt-2ksdgl, 2026-11-12)**
 
-Measured on Dolt 2.7.2 in a scratch container capped at 8 GiB, restoring the
-2026-11-12 nightly backup (12 databases, gt 1.0 GiB, 10.5k commits), never the
-live server. `CALL dolt_gc('--full')` on that copy peaked at 543-747 MiB of
-anon memory at either archive level, exited 0 and never OOM'd: level 0 took
-6-8 s and left gt at about 880 MiB, level 1 took 14-16 s and left gt at about
-660 MiB, so level 1 costs about twice the gc time for about 25% less disk.
+Dolt 2.7.2 in a scratch container capped at 8 GiB, restored from the 2026-11-12
+nightly backup (12 databases, gt 1.0 GiB, 10.5k commits), never the live server.
+`CALL dolt_gc('--full')` peaked at 543-747 MiB anon at either level, exit 0, no
+OOM: level 0 took 6-8 s and left gt at about 880 MiB; level 1 took 14-16 s and
+left gt at about 660 MiB (about twice the gc time for about 25% less disk).
 `GOMEMLIMIT` (unset, 6 GiB, 4 GiB) and `--incremental-file-size` (off,
-1000000000) moved the peak by no more than noise, and Dolt 2.3.2 on the same
-copy peaked at 902 MiB, so the Dolt version is not the cause. At steady state
-over 210 minutes and 25.5k commits (about 72 per minute) with auto gc on at
-level 0, anon memory ran min 197, median 702, max 1,103 MiB; it climbed about
-11 MiB per minute while writing and fell to about 450-500 MiB at each gc, a
-forced full gc under load peaked at 1,026 MiB, and the gt directory grew about
-60-70 MiB per hour after gc, with no OOM and no restart. The earlier OOM-kill
-of a level 1 gc at 8 GiB (gt-o4sk8.29, 11-04) was on a gt database of 1.65 GiB
-and 30k commits, so gc peak follows database size and history. Not explained:
-the live server sits at about 2.2 GiB while the scratch copy peaks at 1.1 GiB.
+1000000000) moved the peak by no more than noise; Dolt 2.3.2 on the same copy
+peaked at 902 MiB, so the Dolt version is not the cause.
+Steady state, 210 minutes and 25.5k commits (about 72 per minute), auto gc on at
+level 0: anon memory min 197, median 702, max 1,103 MiB, climbing about 11 MiB
+per minute and falling to about 450-500 MiB at each gc (a forced full gc under
+load peaked at 1,026 MiB); gt grew 60-70 MiB per hour after gc. No OOM, no
+restart. The gt-o4sk8.29 OOM-kill at level 1 (1.65 GiB, 30k commits) means gc
+peak follows database size and history. Not explained: the live server sits at
+about 2.2 GiB while the scratch copy peaks at 1.1 GiB.
 
 ```sql
 -- Manual gc (safe on a running server, no need to stop)
