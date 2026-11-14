@@ -20,8 +20,8 @@ import (
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
 // benchURL is the gateway address the runs name. The in-process transport answers
-// it, so no socket is opened.
-const benchURL = "http://gateway.test"
+// it, so no socket is opened. It is https, so the runs need no -allow-http.
+const benchURL = "https://gateway.test"
 
 // gatewayTransport answers each request by running the fake gateway's handler in
 // process, so the client's real request path runs without a network.
@@ -167,6 +167,37 @@ func writeToken(t *testing.T, content string) string {
 	return path
 }
 
+// inPodBDPath is the in-pod bd binary the runs name. The fake pod refuses any
+// other path, so a run that execs the wrong binary fails.
+const inPodBDPath = "/fake/bd"
+
+// fakePod is the in-pod bd for a run's baseline. It advances the fake clock by
+// each call's latency, so the baseline is measured on the same clock as the
+// gateway, and it can fail its failAt-th call (0 for none).
+type fakePod struct {
+	clock   *fakeClock
+	latency time.Duration
+	failAt  int
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *fakePod) run(bdPath string, _ []string) error {
+	p.mu.Lock()
+	p.calls++
+	k := p.calls
+	p.mu.Unlock()
+	if bdPath != inPodBDPath {
+		return errors.New("the run exec'd the wrong bd binary")
+	}
+	if k == p.failAt {
+		return errors.New("exit status 1")
+	}
+	p.clock.Advance(p.latency)
+	return nil
+}
+
 func TestBenchRun(t *testing.T) {
 	t.Parallel()
 
@@ -211,6 +242,12 @@ func TestBenchRun(t *testing.T) {
 		wantExit int
 		// wantShows and wantLists are the calls the gateway received.
 		wantShows, wantLists int
+		// podLatency is the in-pod bd's latency per call; zero is the design's warm
+		// 40 ms. podFailAt, when non-zero, fails the in-pod bd's call with that number.
+		podLatency time.Duration
+		podFailAt  int
+		// wantPodCalls is the calls the in-pod bd ran for the baseline.
+		wantPodCalls int
 		// wantErr, when set, is a substring stderr must hold; a failed run prints
 		// no report on stdout.
 		wantErr string
@@ -238,7 +275,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "refuses a run with no URL and sends nothing",
 			args: func(t *testing.T, _ string) []string {
-				return []string{"-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:     steady(40),
 			wantExit: 2,
@@ -247,7 +284,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "refuses a URL that is not http",
 			args: func(t *testing.T, _ string) []string {
-				return []string{"-url", "ftp://gateway.example", "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", "ftp://gateway.example", "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:     steady(40),
 			wantExit: 2,
@@ -256,15 +293,17 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "refuses a URL with no host",
 			args: func(t *testing.T, _ string) []string {
-				return []string{"-url", "http://", "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", "http://", "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:     steady(40),
 			wantExit: 2,
 			wantErr:  "-url must be an http or https URL with a host",
 		},
 		{
-			name:     "refuses a run with no token file",
-			args:     func(_ *testing.T, url string) []string { return []string{"-url", url, "-bead", "gt-abc"} },
+			name: "refuses a run with no token file",
+			args: func(_ *testing.T, url string) []string {
+				return []string{"-url", url, "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
+			},
 			plan:     steady(40),
 			wantExit: 2,
 			wantErr:  "-token-file is required",
@@ -272,7 +311,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "refuses a token file that is missing",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", filepath.Join(t.TempDir(), "missing"), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", filepath.Join(t.TempDir(), "missing"), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:     steady(40),
 			wantExit: 2,
@@ -281,7 +320,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "refuses a token file that holds only space",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, " \n\t"), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, " \n\t"), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:     steady(40),
 			wantExit: 2,
@@ -299,40 +338,43 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "passes at the in-pod baseline",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
-			plan:      steady(40),
-			wantExit:  0,
-			wantShows: 200,
-			wantLists: 50,
-			wantOut:   []string{"p50: 40ms", "p95: 40ms", "p99: 40ms", "PASS"},
+			plan:         steady(40),
+			wantExit:     0,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 250,
+			wantOut:      []string{"p50: 40ms", "p95: 40ms", "p99: 40ms", "PASS"},
 		},
 		{
 			name: "is over budget when the p95 overhead passes 40 ms",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
-			plan:      slowEvery10,
-			wantExit:  1,
-			wantShows: 200,
-			wantLists: 50,
-			wantOut:   []string{"p50: 40ms", "p95: 100ms", "OVER BUDGET"},
+			plan:         slowEvery10,
+			wantExit:     1,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 250,
+			wantOut:      []string{"p50: 40ms", "p95: 100ms", "OVER BUDGET"},
 		},
 		{
 			name: "is over budget when one call runs 200 ms past the median",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
-			plan:      oneSlowCall,
-			wantExit:  1,
-			wantShows: 200,
-			wantLists: 50,
-			wantOut:   []string{"p95: 40ms", "max: 300ms", "OVER BUDGET"},
+			plan:         oneSlowCall,
+			wantExit:     1,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 250,
+			wantOut:      []string{"p95: 40ms", "max: 300ms", "OVER BUDGET"},
 		},
 		{
 			name: "a refused HTTP status fails the run with no verdict",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:      gatewayPlan{httpStatus: http.StatusServiceUnavailable},
 			wantExit:  1,
@@ -342,7 +384,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "a gateway error frame fails the run and names its code",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:      refused,
 			wantExit:  1,
@@ -352,7 +394,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "an answer with no exit frame fails the run",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:      truncated,
 			wantExit:  1,
@@ -362,7 +404,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "a gateway that does not answer fails the run before it is called",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:     unreachable,
 			wantExit: 1,
@@ -371,7 +413,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "an answer with an unknown frame kind fails the run",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:      unknownKind,
 			wantExit:  1,
@@ -381,7 +423,7 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "an exit frame that is not a status fails the run",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:      badExit,
 			wantExit:  1,
@@ -391,12 +433,80 @@ func TestBenchRun(t *testing.T) {
 		{
 			name: "a bd exit status other than 0 fails the run",
 			args: func(t *testing.T, url string) []string {
-				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
 			},
 			plan:      exitOneAtSix,
 			wantExit:  1,
 			wantShows: 6,
 			wantErr:   "bd exited 1",
+		},
+		{
+			name: "refuses a run with no in-pod bd and sends nothing",
+			args: func(t *testing.T, url string) []string {
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc"}
+			},
+			plan:     steady(40),
+			wantExit: 2,
+			wantErr:  "-in-pod-bd is required",
+		},
+		{
+			name: "refuses plain http to a host that is not loopback",
+			args: func(t *testing.T, _ string) []string {
+				return []string{"-url", "http://gateway.example", "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
+			},
+			plan:     steady(40),
+			wantExit: 2,
+			wantErr:  "-url must be https for a host that is not loopback",
+		},
+		{
+			name: "passes plain http to a loopback host",
+			args: func(t *testing.T, _ string) []string {
+				return []string{"-url", "http://127.0.0.1:8080", "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
+			},
+			plan:         steady(40),
+			wantExit:     0,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 250,
+			wantOut:      []string{"p50: 40ms", "PASS"},
+		},
+		{
+			name: "passes plain http to a named host when -allow-http is set",
+			args: func(t *testing.T, _ string) []string {
+				return []string{"-url", "http://gateway.example", "-allow-http", "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
+			},
+			plan:         steady(40),
+			wantExit:     0,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 250,
+			wantOut:      []string{"PASS"},
+		},
+		{
+			name: "measures the baseline on the in-pod bd, so a slower in-pod bd passes",
+			args: func(t *testing.T, url string) []string {
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
+			},
+			plan:         steady(100),
+			podLatency:   100 * time.Millisecond,
+			wantExit:     0,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 250,
+			wantOut:      []string{"p50: 100ms", "in-pod baseline: p50 100ms, p95 100ms", "PASS"},
+		},
+		{
+			name: "a failed in-pod call fails the run with no verdict",
+			args: func(t *testing.T, url string) []string {
+				return []string{"-url", url, "-token-file", writeToken(t, testToken), "-bead", "gt-abc", "-in-pod-bd", inPodBDPath}
+			},
+			plan:         steady(40),
+			podFailAt:    3,
+			wantExit:     1,
+			wantShows:    200,
+			wantLists:    50,
+			wantPodCalls: 3,
+			wantErr:      "the in-pod baseline: call 3 (show)",
 		},
 	}
 
@@ -406,9 +516,15 @@ func TestBenchRun(t *testing.T) {
 			clock := &fakeClock{t: time.Unix(0, 0)}
 			gw := &fakeGateway{token: testToken, clock: clock, plan: tc.plan}
 			client := &http.Client{Transport: gatewayTransport{gw: gw}}
+			podLatency := tc.podLatency
+			if podLatency == 0 {
+				// The design's warm in-pod bd call, 35 to 40 ms.
+				podLatency = 40 * time.Millisecond
+			}
+			pod := &fakePod{clock: clock, latency: podLatency, failAt: tc.podFailAt}
 
 			var stdout, stderr bytes.Buffer
-			got := run(tc.args(t, benchURL), &stdout, &stderr, clock.Now, client)
+			got := run(tc.args(t, benchURL), &stdout, &stderr, clock.Now, client, pod.run)
 
 			if got != tc.wantExit {
 				t.Errorf("exit = %d, want %d; stderr: %q", got, tc.wantExit, stderr.String())
@@ -418,6 +534,12 @@ func TestBenchRun(t *testing.T) {
 			gw.mu.Unlock()
 			if shows != tc.wantShows || lists != tc.wantLists {
 				t.Errorf("gateway got %d show and %d list calls, want %d and %d", shows, lists, tc.wantShows, tc.wantLists)
+			}
+			pod.mu.Lock()
+			podCalls := pod.calls
+			pod.mu.Unlock()
+			if podCalls != tc.wantPodCalls {
+				t.Errorf("in-pod bd ran %d calls, want %d", podCalls, tc.wantPodCalls)
 			}
 			if tc.wantErr != "" {
 				if !strings.Contains(stderr.String(), tc.wantErr) {

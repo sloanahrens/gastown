@@ -1,8 +1,9 @@
 // Command bdgw-bench measures the bd gateway's latency for the bd container
 // load test (docs/design/bd-container.md, "Latency budget"). It sends 200 show
 // and 50 list --json calls, one at a time, through the gateway's POST /v1/exec,
-// and prints p50, p95 and p99 with PASS or OVER BUDGET. It needs a running
-// gateway, so it is a measurement, not a test-tier test.
+// then the same calls through the in-pod bd for the baseline, and prints p50,
+// p95 and p99 with PASS or OVER BUDGET. It needs a running gateway, so it is a
+// measurement, not a test-tier test.
 package main
 
 import (
@@ -12,9 +13,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -42,22 +45,27 @@ const (
 	clientTimeout = 60 * time.Second
 )
 
+// inPodCall runs one bd call with the in-pod bd binary at bdPath and returns an
+// error when bd does not exit 0.
+type inPodCall func(bdPath string, argv []string) error
+
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, time.Now, &http.Client{Timeout: clientTimeout}))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, time.Now, &http.Client{Timeout: clientTimeout}, execInPod))
 }
 
-// run is main without the process: now is the clock the latencies are read from
-// and client carries the calls, so a test can drive the run with a fake clock and
-// an in-process gateway. It returns the exit status.
-func run(args []string, stdout, stderr io.Writer, now func() time.Time, client *http.Client) int {
+// run is main without the process: now is the clock the latencies are read from,
+// client carries the gateway calls and inPod runs the baseline calls, so a test
+// can drive the run with a fake clock, an in-process gateway and a fake bd. It
+// returns the exit status.
+func run(args []string, stdout, stderr io.Writer, now func() time.Time, client *http.Client, inPod inPodCall) int {
 	fs := flag.NewFlagSet("bdgw-bench", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	gatewayURL := fs.String("url", "", "the gateway's base URL, http or https")
+	gatewayURL := fs.String("url", "", "the gateway's base URL: https, or http on a loopback host or with -allow-http")
 	tokenFile := fs.String("token-file", "", "the file holding the gateway's read-class bearer token")
 	rig := fs.String("rig", "", "the rig whose bd answers the calls; empty is the town")
 	bead := fs.String("bead", "", "a bead id the show calls read")
-	inPodP50 := fs.Duration("in-pod-p50", 40*time.Millisecond, "the in-pod bd p50 the overhead is measured from")
-	inPodP95 := fs.Duration("in-pod-p95", 40*time.Millisecond, "the in-pod bd p95 the overhead is measured from")
+	inPodBD := fs.String("in-pod-bd", "", "the in-pod bd binary the same calls run through for the baseline; the run's working directory is the one bd sees")
+	allowHTTP := fs.Bool("allow-http", false, "allow a plain http gateway URL on a host that is not loopback; the bearer token then travels unencrypted")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
@@ -68,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer, now func() time.Time, client *
 		fmt.Fprintf(stderr, "bdgw-bench: unexpected argument %q\n", fs.Arg(0))
 		return exitUsage
 	}
-	if err := checkFlags(*gatewayURL, *tokenFile, *bead); err != nil {
+	if err := checkFlags(*gatewayURL, *tokenFile, *bead, *inPodBD, *allowHTTP); err != nil {
 		fmt.Fprintf(stderr, "bdgw-bench: %v\n", err)
 		return exitUsage
 	}
@@ -81,17 +89,32 @@ func run(args []string, stdout, stderr io.Writer, now func() time.Time, client *
 	do := func(argv []string) error {
 		return gatewayCall(client, *gatewayURL, token, *rig, argv)
 	}
-	latencies, err := measure(workload(*bead), do, now)
+	gateway, err := measure(workload(*bead), do, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "bdgw-bench: %v\n", err)
 		return exitFailed
 	}
-	sum, err := Summarize(latencies)
+	sum, err := Summarize(gateway)
 	if err != nil {
 		fmt.Fprintf(stderr, "bdgw-bench: %v\n", err)
 		return exitFailed
 	}
-	base := Baseline{P50: *inPodP50, P95: *inPodP95}
+	// The baseline is measured in this run, from the same calls through the
+	// in-pod bd, so the verdict never rests on an assumed in-pod latency.
+	podDo := func(argv []string) error {
+		return inPod(*inPodBD, argv)
+	}
+	pod, err := measure(workload(*bead), podDo, now)
+	if err != nil {
+		fmt.Fprintf(stderr, "bdgw-bench: the in-pod baseline: %v\n", err)
+		return exitFailed
+	}
+	podSum, err := Summarize(pod)
+	if err != nil {
+		fmt.Fprintf(stderr, "bdgw-bench: the in-pod baseline: %v\n", err)
+		return exitFailed
+	}
+	base := Baseline{P50: podSum.P50, P95: podSum.P95}
 	pass := Verdict(sum, base)
 	report(stdout, sum, base, pass)
 	if !pass {
@@ -100,9 +123,11 @@ func run(args []string, stdout, stderr io.Writer, now func() time.Time, client *
 	return exitOK
 }
 
-// checkFlags refuses a run that names no gateway, no token file or no bead, or
-// a gateway URL that is not an http or https address with a host.
-func checkFlags(gatewayURL, tokenFile, bead string) error {
+// checkFlags refuses a run that names no gateway, no token file, no bead or no
+// in-pod bd, or a gateway URL that is not an http or https address with a host.
+// A plain http URL is refused unless its host is loopback or allowHTTP is set, so
+// the bearer token never travels unencrypted by accident.
+func checkFlags(gatewayURL, tokenFile, bead, inPodBD string, allowHTTP bool) error {
 	if gatewayURL == "" {
 		return errors.New("-url is required")
 	}
@@ -110,13 +135,38 @@ func checkFlags(gatewayURL, tokenFile, bead string) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("-url must be an http or https URL with a host")
 	}
+	if u.Scheme == "http" && !allowHTTP && !isLoopback(u.Hostname()) {
+		return errors.New("-url must be https for a host that is not loopback; pass -allow-http to send the token over plain http")
+	}
 	if tokenFile == "" {
 		return errors.New("-token-file is required")
 	}
 	if bead == "" {
 		return errors.New("-bead is required")
 	}
+	if inPodBD == "" {
+		return errors.New("-in-pod-bd is required")
+	}
 	return nil
+}
+
+// isLoopback reports whether host is localhost or a loopback address, so a plain
+// http URL to it never leaves the machine.
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// execInPod runs one bd call with the in-pod bd binary. Its output is discarded:
+// the bench measures latency, and the error names the exit status, never output.
+func execInPod(bdPath string, argv []string) error {
+	cmd := exec.Command(bdPath, argv...) //nolint:gosec // G204: the operator names the bd binary with -in-pod-bd
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
 }
 
 // readToken reads the bearer token from path, without its surrounding space. An
