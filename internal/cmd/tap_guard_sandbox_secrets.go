@@ -489,6 +489,12 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			tooDeep = true
 			continue
 		}
+		// A payload is a command the shell runs, so its environ path is read the way the
+		// top-level command's is: bash -c 'cat /pro""c/1/environ' and a substitution with
+		// a quote split in the path (gt-kr4tcn) join to the path once the shell reads them.
+		if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(payload, sandboxSecretsReadTokens)) {
+			return "it reads a process's environment block", false
+		}
 		r, deep := sandboxSecretsWalk(payload, depth+1, tainted)
 		if r != "" {
 			return r, false
