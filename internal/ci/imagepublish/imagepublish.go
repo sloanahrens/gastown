@@ -1,6 +1,8 @@
-// Package imagepublish is the images workflow's two registry steps: push both
+// Package imagepublish is the images workflow's two registry steps: push the
 // images at one green commit and publish each registry digest, then read the
-// commit label back from both images (gt-gg9hv.62). The workflow text in
+// commit label back from each of them (gt-gg9hv.62). The bd gateway image is
+// the third, optional one: a commit that built none is reported, not an error.
+// The workflow text in
 // deploy/ci/images.workflow.yml only calls it, so every refusal here is driven
 // by a unit test through the injected runner.
 package imagepublish
@@ -47,6 +49,9 @@ type Options struct {
 	// Registry is the Forgejo host:port, Owner the account that owns the
 	// images, and Daemon and Polecat the two image names.
 	Registry, Owner, Daemon, Polecat string
+	// Bd is the bd gateway image's name. Empty means this commit built no bd
+	// image: Push reports that, and Check has nothing to read for it.
+	Bd string
 	// Tag is the twelve-character commit tag both images carry; SHA is the
 	// full green commit both commit labels must hold.
 	Tag, SHA string
@@ -96,12 +101,17 @@ func (o Options) base(name string) string {
 	return o.Registry + "/" + o.Owner + "/" + name
 }
 
-// images is the two images, in the order the job builds them.
+// images is the images this commit built, in the order the job builds them: the
+// bd image only when the commit built one.
 func (o Options) images() []struct{ kind, name string } {
-	return []struct{ kind, name string }{
+	imgs := []struct{ kind, name string }{
 		{"daemon", o.Daemon},
 		{"polecat", o.Polecat},
 	}
+	if o.Bd != "" {
+		imgs = append(imgs, struct{ kind, name string }{"bd", o.Bd})
+	}
+	return imgs
 }
 
 // docker runs one docker command. A failed command's stderr goes to the
@@ -117,9 +127,9 @@ func (o Options) docker(args ...string) (Result, error) {
 	return res, nil
 }
 
-// Push pushes both images, reads each registry digest back, and prints the
-// IMAGE line the deploy reads, only for an image whose digest the registry
-// answered.
+// Push pushes the commit's images, reads each registry digest back, and prints
+// the IMAGE line the deploy reads, only for an image whose digest the registry
+// answered. A commit with no bd image gets a NOIMAGE line for it instead.
 func Push(o Options) error {
 	if err := o.validate(); err != nil {
 		return err
@@ -134,6 +144,9 @@ func Push(o Options) error {
 			return err
 		}
 		fmt.Fprintf(o.Out, "IMAGE %s %s %s\n", img.kind, o.Tag, digest)
+	}
+	if o.Bd == "" {
+		fmt.Fprintf(o.Out, "NOIMAGE bd %s\n", o.Tag)
 	}
 	return nil
 }
@@ -172,8 +185,8 @@ func digestFrom(base, output string) (string, error) {
 	return found[0], nil
 }
 
-// Check reads the commit label back from both built images and fails when
-// either is not the green commit. It reads both first, so one job reports
+// Check reads the commit label back from every image the commit built and fails
+// when any is not the green commit. It reads them all first, so one job reports
 // every image that is off the commit.
 func Check(o Options) error {
 	if err := o.validate(); err != nil {
@@ -191,7 +204,7 @@ func Check(o Options) error {
 		}
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("imagepublish: not both images are at the green commit %s: %s", o.SHA, strings.Join(problems, "; "))
+		return fmt.Errorf("imagepublish: not every image is at the green commit %s: %s", o.SHA, strings.Join(problems, "; "))
 	}
 	return nil
 }

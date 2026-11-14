@@ -20,15 +20,24 @@ const (
 var (
 	daemonDigest  = "sha256:" + strings.Repeat("1a", 32)
 	polecatDigest = "sha256:" + strings.Repeat("2b", 32)
+	bdDigest      = "sha256:" + strings.Repeat("3c", 32)
 )
+
+// bdName is the bd gateway image's name, passed as Options.Bd on a commit that
+// built one.
+const bdName = "gastown-bd"
 
 // daemonBase and polecatBase are the images' repository names without a tag.
 func daemonBase() string  { return "forgejo:3000/example-owner/gastown-daemon" }
 func polecatBase() string { return "forgejo:3000/example-owner/gastown-polecat" }
+func bdBase() string      { return "forgejo:3000/example-owner/" + bdName }
 
 // daemonRef and polecatRef are the tagged references the job pushes.
 func daemonRef() string  { return daemonBase() + ":" + testTag }
 func polecatRef() string { return polecatBase() + ":" + testTag }
+
+// bdRef is the bd image's tagged reference, pushed after the other two.
+func bdRef() string { return bdBase() + ":" + testTag }
 
 // call is one recorded docker invocation.
 type call struct {
@@ -136,7 +145,8 @@ func TestPushPrintsTheRegistryDigestForEachImage(t *testing.T) {
 		t.Fatalf("Push: %v", err)
 	}
 	want := "IMAGE daemon " + testTag + " " + daemonDigest + "\n" +
-		"IMAGE polecat " + testTag + " " + polecatDigest + "\n"
+		"IMAGE polecat " + testTag + " " + polecatDigest + "\n" +
+		"NOIMAGE bd " + testTag + "\n"
 	if got := out.String(); got != want {
 		t.Errorf("Push printed %q, want %q", got, want)
 	}
@@ -446,6 +456,209 @@ func TestCheckStopsWhenALabelCannotBeRead(t *testing.T) {
 			}
 			if len(rec.calls) != tc.wantCalls {
 				t.Errorf("Check made %d calls, want %d", len(rec.calls), tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestPublishThreeImages holds the three-image commit: the bd image is pushed
+// after the other two, its registry digest is printed as theirs is, and Check
+// reads the commit label back from all three.
+func TestPublishThreeImages(t *testing.T) {
+	t.Parallel()
+	o, rec, out, errs := testOptions(t)
+	o.Bd = bdName
+	rec.reply = digestReply(t, map[string]string{
+		daemonBase():  daemonDigest,
+		polecatBase(): polecatDigest,
+		bdBase():      bdDigest,
+	})
+
+	if err := imagepublish.Push(o); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	want := "IMAGE daemon " + testTag + " " + daemonDigest + "\n" +
+		"IMAGE polecat " + testTag + " " + polecatDigest + "\n" +
+		"IMAGE bd " + testTag + " " + bdDigest + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("Push printed %q, want %q", got, want)
+	}
+	if errs.Len() != 0 {
+		t.Errorf("Push wrote %q to stderr", errs.String())
+	}
+	wantCalls := []string{
+		"push " + daemonRef(),
+		"pull " + daemonRef(),
+		"image " + daemonRef(),
+		"push " + polecatRef(),
+		"pull " + polecatRef(),
+		"image " + polecatRef(),
+		"push " + bdRef(),
+		"pull " + bdRef(),
+		"image " + bdRef(),
+	}
+	var gotCalls []string
+	for _, c := range rec.calls {
+		gotCalls = append(gotCalls, c.args[0]+" "+c.last())
+	}
+	if !slices.Equal(gotCalls, wantCalls) {
+		t.Errorf("the push made the calls %q, want %q", gotCalls, wantCalls)
+	}
+
+	rec.calls = nil
+	rec.reply = labelReply(t, map[string]string{
+		daemonRef():  testSHA,
+		polecatRef(): testSHA,
+		bdRef():      testSHA,
+	})
+	if err := imagepublish.Check(o); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	wantLabels := []string{daemonRef(), polecatRef(), bdRef()}
+	if len(rec.calls) != len(wantLabels) {
+		t.Fatalf("Check made %d label reads, want one per image", len(rec.calls))
+	}
+	for i, want := range wantLabels {
+		if got := rec.calls[i].last(); got != want {
+			t.Errorf("label read %d is of %s, want %s", i, got, want)
+		}
+	}
+}
+
+// TestPublishWithoutBd holds the commit that built no bd image: the two images
+// publish as before, the absence is reported on the output, and no error comes
+// back from Push or Check.
+func TestPublishWithoutBd(t *testing.T) {
+	t.Parallel()
+	o, rec, out, errs := testOptions(t)
+	rec.reply = digestReply(t, map[string]string{
+		daemonBase():  daemonDigest,
+		polecatBase(): polecatDigest,
+	})
+
+	if err := imagepublish.Push(o); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	want := "IMAGE daemon " + testTag + " " + daemonDigest + "\n" +
+		"IMAGE polecat " + testTag + " " + polecatDigest + "\n" +
+		"NOIMAGE bd " + testTag + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("Push printed %q, want %q", got, want)
+	}
+	if errs.Len() != 0 {
+		t.Errorf("Push wrote %q to stderr", errs.String())
+	}
+	for _, c := range rec.calls {
+		if strings.HasPrefix(c.last(), bdBase()+":") {
+			t.Errorf("Push made a %v call for the bd image, which the commit did not build", c.args)
+		}
+	}
+
+	rec.calls = nil
+	rec.reply = labelReply(t, map[string]string{
+		daemonRef():  testSHA,
+		polecatRef(): testSHA,
+	})
+	if err := imagepublish.Check(o); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(rec.calls) != 2 {
+		t.Errorf("Check made %d label reads, want one per built image", len(rec.calls))
+	}
+}
+
+// answerImage answers every image inspect with stdout and every push or pull
+// with nothing, so a test controls only the registry read-back.
+func answerImage(stdout string) func(call) imagepublish.Result {
+	return func(c call) imagepublish.Result {
+		if c.args[0] == "image" {
+			return imagepublish.Result{Stdout: stdout}
+		}
+		return imagepublish.Result{}
+	}
+}
+
+// TestPublishBdImageChecks holds the bd image to the two checks the other images
+// get: its registry read-back must list exactly one sha256 digest, and its commit
+// label must be the green commit. Either failure fails the publish and names the
+// bd image.
+func TestPublishBdImageChecks(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// push selects Push, with bd answering the push's docker calls; otherwise
+		// Check runs with the bd image's commit label set to label.
+		push  bool
+		bd    func(call) imagepublish.Result
+		label string
+		want  []string
+	}{
+		{
+			name: "a registry read-back with no digest",
+			push: true,
+			bd:   answerImage(""),
+			want: []string{bdBase(), "listed 0 digests"},
+		},
+		{
+			name: "a registry read-back with two digests",
+			push: true,
+			bd:   answerImage(bdBase() + "@" + bdDigest + "\n" + bdBase() + "@" + polecatDigest + "\n"),
+			want: []string{bdBase(), "listed 2 digests"},
+		},
+		{
+			name: "a registry read-back that is not sha256 hex",
+			push: true,
+			bd:   answerImage(bdBase() + "@sha256:xyz\n"),
+			want: []string{bdBase(), "is not sha256:<64 lowercase hex>"},
+		},
+		{
+			name:  "a commit label off the green commit",
+			label: otherSHA,
+			want:  []string{bdRef(), otherSHA},
+		},
+		{
+			name:  "a commit label that is empty",
+			label: "",
+			want:  []string{bdRef(), `org.gastown.gt-commit=""`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			o, rec, out, _ := testOptions(t)
+			o.Bd = bdName
+
+			var err error
+			if tc.push {
+				good := digestReply(t, map[string]string{
+					daemonBase():  daemonDigest,
+					polecatBase(): polecatDigest,
+				})
+				rec.reply = func(c call) imagepublish.Result {
+					if strings.HasPrefix(c.last(), bdBase()+":") {
+						return tc.bd(c)
+					}
+					return good(c)
+				}
+				err = imagepublish.Push(o)
+				if strings.Contains(out.String(), "IMAGE bd") {
+					t.Errorf("Push printed a bd IMAGE line for a read-back it refused: %q", out.String())
+				}
+			} else {
+				rec.reply = labelReply(t, map[string]string{
+					daemonRef():  testSHA,
+					polecatRef(): testSHA,
+					bdRef():      tc.label,
+				})
+				err = imagepublish.Check(o)
+			}
+			if err == nil {
+				t.Fatalf("the step passed with %s", tc.name)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
 			}
 		})
 	}
