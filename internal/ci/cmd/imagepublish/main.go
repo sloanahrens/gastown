@@ -23,10 +23,10 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, execRunner))
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer, runner imagepublish.Runner) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "imagepublish: give a subcommand, push or check")
 		return 2
@@ -34,7 +34,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	sub := args[0]
 	fs := flag.NewFlagSet("imagepublish "+sub, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	o := imagepublish.Options{Run: execRunner, Out: stdout, Err: stderr}
+	o := imagepublish.Options{Run: runner, Out: stdout, Err: stderr}
 	fs.StringVar(&o.Registry, "registry", "", "the Forgejo host:port the images are pushed to")
 	fs.StringVar(&o.Owner, "owner", "", "the registry account that owns the images")
 	fs.StringVar(&o.Daemon, "daemon", "", "the daemon image's name")
