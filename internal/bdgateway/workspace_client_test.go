@@ -327,6 +327,39 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			want: "resolves outside the town",
 		},
 		{
+			name: "a rig directory that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				// The link's tree is a working rig: a redirect and the
+				// metadata it names, so only the location can be what refuses.
+				outside := t.TempDir()
+				redirect := filepath.Join(outside, ".beads", "redirect")
+				if err := os.MkdirAll(filepath.Dir(redirect), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(redirect, []byte("mayor/rig/.beads\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				metadata := filepath.Join(outside, "mayor", "rig", ".beads", "metadata.json")
+				if err := os.MkdirAll(filepath.Dir(metadata), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(metadata, []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rigDir := filepath.Join(root, "toolbox")
+				if err := os.RemoveAll(rigDir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, rigDir); err != nil {
+					t.Fatal(err)
+				}
+				// The routes reach the rig first, so the row drops them: the
+				// rig loop is what this row drives.
+				writePath(t, root, ".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+			},
+			want: "resolves outside the town",
+		},
+		{
 			name: "a rig beads directory that is a symlink out of the town",
 			spoil: func(t *testing.T, root string) {
 				outside := writeOutsideBeads(t)

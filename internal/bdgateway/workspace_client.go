@@ -171,6 +171,9 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 		return fmt.Errorf("bdgateway: rig %q is not one path element", shown(rig))
 	}
 	rigDir := filepath.Join(townRoot, rig)
+	if !insideTown(townRoot, rigDir) {
+		return fmt.Errorf("bdgateway: rig %q resolves outside the town", shown(rig))
+	}
 	redirectPath := filepath.Join(rigDir, ".beads", "redirect")
 	data, err := os.ReadFile(redirectPath) //nolint:gosec // G304: path under the town root
 	switch {
