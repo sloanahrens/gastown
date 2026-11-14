@@ -219,28 +219,27 @@ func TestUpdateRollbackRestoresThePair(t *testing.T) {
 		}
 	})
 
-	t.Run("a pair read from the daemon's Deployment is restored with no commit", func(t *testing.T) {
+	t.Run("a pair read from the daemon's Deployment with no commit is not confirmed by a container daemon", func(t *testing.T) {
 		t.Parallel()
 		f := newImageRollbackFixture(t, true)
 		// The record holds the pair an install read from the cluster: both digests,
-		// and no commit, since a Deployment carries no build.
+		// and no commit, since a Deployment carries no build. A container daemon
+		// reads its record as the pair it runs, so the restore has no read that
+		// shows the images running and is escalated, not recorded as running.
 		previous := update.ImagePair{Daemon: f.previous.Daemon, Polecat: f.previous.Polecat}
-		f.record(t, update.ImageRecord{Current: f.running, Previous: previous})
-		out, err := f.runRollback(t)
-		if err != nil {
-			t.Fatalf("gt update rollback: %v", err)
+		recorded := update.ImageRecord{Current: f.running, Previous: previous}
+		f.record(t, recorded)
+		if _, err := f.runRollback(t); err == nil {
+			t.Fatal("gt update rollback = nil error, want the restore to a pair with no commit refused")
 		}
 		if len(f.swap.applied) != 1 || f.swap.applied[0] != previous {
 			t.Fatalf("the daemon was put on %+v, want exactly the recorded previous pair %+v", f.swap.applied, previous)
 		}
-		if got := f.ledgerNow(t); !samePairs(got, update.ImageRecord{Current: previous, Previous: previous}) {
-			t.Errorf("ledger after the rollback = %+v, want the restored pair as both current and previous", got)
+		if got := f.ledgerNow(t); !samePairs(got, recorded) {
+			t.Errorf("ledger after the rollback = %+v, want the record untouched at %+v", got, recorded)
 		}
-		if !strings.Contains(out, previous.Daemon) || !strings.Contains(out, previous.Polecat) {
-			t.Errorf("output %q does not name both restored images", out)
-		}
-		if strings.Contains(out, "at commit") {
-			t.Errorf("output %q names a commit the pair does not have", out)
+		if n := len(f.notes.Escalations()); n != 1 {
+			t.Errorf("escalations = %d, want 1 for the restore that could not be confirmed", n)
 		}
 	})
 

@@ -236,17 +236,34 @@ func (d ImageDeps) wired() error {
 
 // swapTo puts pair in force and reports whether the daemon came back on
 // pair.Commit within the bound. A pair read from a Deployment names no commit,
-// so there is no build to wait for: the swap's own wait for the rollout, which
-// the pod swap makes for both Deployments, is that pair's confirmation. A
-// canceled context is an error.
+// so there is no build to wait for, and the swap's own return is not evidence:
+// that pair is confirmed only when the running pair, read after the swap, names
+// its images. A daemon with no Deployment reads the record, which the swap does
+// not change until the install or rollback writes it, so a commit-less pair is
+// never confirmed there. A commit-less pair is refused before the swap when no
+// read of the running pair is wired. A canceled context is an error.
 func (d ImageDeps) swapTo(ctx context.Context, pair ImagePair) (bool, error) {
+	if pair.Commit == "" && d.Running == nil {
+		return false, errors.New("no read of the pair the daemon runs is wired, so a pair with no commit cannot be confirmed")
+	}
 	if err := d.Swap.Apply(ctx, pair); err != nil {
 		return false, err
 	}
 	if pair.Commit == "" {
-		return true, nil
+		return d.imagesRunning(ctx, pair)
 	}
 	return WaitForRestart(ctx, d.Clock, d.Sleep, d.Verify, pair.Commit, d.Wait, d.Poll)
+}
+
+// imagesRunning reports whether the daemon's Deployment runs pair's images. The
+// read is the Deployment's own, so a swap the cluster did not take is not
+// reported as running. A failed read is an error, never a pair that held.
+func (d ImageDeps) imagesRunning(ctx context.Context, pair ImagePair) (bool, error) {
+	running, err := d.Running.RunningPair(ctx)
+	if err != nil {
+		return false, fmt.Errorf("reading the pair the daemon runs after the swap: %w", err)
+	}
+	return sameImages(running, pair), nil
 }
 
 // restore puts prev back after a swap that did not hold, and records prev as
@@ -261,6 +278,9 @@ func (d ImageDeps) restore(ctx context.Context, prev ImagePair) error {
 		return d.escalateRestore(ctx, fmt.Sprintf("restoring %s failed: %v", prev.Daemon, err))
 	}
 	if !healthy {
+		if prev.Commit == "" {
+			return d.escalateRestore(ctx, fmt.Sprintf("restoring %s: the running pair does not name the restored images, and a pair with no commit has no build to check", prev.Daemon))
+		}
 		return d.escalateRestore(ctx, fmt.Sprintf("restoring %s did not come back on commit %s within the restart bound", prev.Daemon, prev.Commit))
 	}
 	if err := d.Ledger.Write(ImageRecord{Current: prev, Previous: prev}); err != nil {
