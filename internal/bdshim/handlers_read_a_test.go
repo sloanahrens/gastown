@@ -3,6 +3,7 @@ package bdshim
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -58,21 +59,48 @@ func testHandlerRows(t *testing.T, verb string) {
 			if err != nil {
 				t.Fatalf("reading the golden: %v", err)
 			}
-			got, exit, err := runFixtureRow(t, town, fixture, row.argv)
+			got, stderr, exit, err := runFixtureRowWithStderr(t, town, fixture, row.argv)
 			if err != nil {
 				t.Fatalf("%v: %v", row.argv, err)
 			}
 			got = golden.Normalize(got, keep)
 			if !bytes.Equal(got, want) {
-				t.Errorf("%v: stdout differs from bd's answer\n%s", row.argv, lineDiff(want, got))
+				t.Error(rowFailure(row.argv, "stdout differs from bd's answer\n"+lineDiff(want, got), stderr))
 			}
 			if exit != wantExit {
-				t.Errorf("%v: exit code is %d, want bd's %d", row.argv, exit, wantExit)
+				t.Error(rowFailure(row.argv, fmt.Sprintf("exit code is %d, want bd's %d", exit, wantExit), stderr))
 			}
 		})
 	}
 	if rows == 0 {
 		t.Fatalf("no %s golden row to answer", verb)
+	}
+}
+
+// rowFailure is the message of a row that differs from bd's answer: what differs,
+// then what the shim wrote to stderr, which names why a handler exited nonzero.
+// A failure that prints only the answers cannot be diagnosed from a gate log.
+func rowFailure(argv []string, what string, stderr []byte) string {
+	msg := fmt.Sprintf("%v: %s", argv, what)
+	if text := strings.TrimSpace(string(stderr)); text != "" {
+		msg += "\nshim stderr: " + text
+	}
+	return msg
+}
+
+// TestHandlersRowFailureShowsStderr: a failing row's message carries the shim's
+// stderr, and a row with none adds nothing.
+func TestHandlersRowFailureShowsStderr(t *testing.T) {
+	t.Parallel()
+	argv := []string{"defer", "--reason", "x", "fx-1"}
+	got := rowFailure(argv, "exit code is 1, want bd's 0", []byte("bdshim: defer fx-1: store refused\n"))
+	for _, want := range []string{"[defer --reason x fx-1]", "exit code is 1", "shim stderr: bdshim: defer fx-1: store refused"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the failure message lacks %q: %q", want, got)
+		}
+	}
+	if quiet := rowFailure(argv, "exit code is 1, want bd's 0", nil); strings.Contains(quiet, "shim stderr") {
+		t.Errorf("a row with no stderr mentions it: %q", quiet)
 	}
 }
 
