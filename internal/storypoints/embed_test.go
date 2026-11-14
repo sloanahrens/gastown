@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -300,10 +301,12 @@ func TestOllamaEmbedderRefusesABadURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("Embed with an unparseable URL returned nil error; want an error")
 	}
-	// The message tells this refusal, made while the endpoint is built, from a
-	// failure later, when a request is sent.
-	if !strings.Contains(err.Error(), "build embed endpoint") {
-		t.Errorf("error %q does not say the endpoint could not be built", err)
+	// The refusal is the URL parse error from building the endpoint, not a
+	// failure from sending a request. The transport above fails the test if
+	// one is sent.
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Errorf("error %v is not a URL parse error from building the endpoint", err)
 	}
 }
 
