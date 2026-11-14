@@ -288,6 +288,70 @@ func TestSpecDispatchStoryPointsEstimateAheadSkipsACurrentEstimate(t *testing.T)
 	}
 }
 
+// TestSpecEstimateAheadRead: the pass's reader returns the bead and its
+// comments, serves a bead the ledger already holds without a second show, and
+// returns a failed show or comments read unchanged rather than as an empty
+// bead.
+func TestSpecEstimateAheadRead(t *testing.T) {
+	t.Parallel()
+	showErr := errors.New("bd show refused")
+	commentsErr := errors.New("bd comments refused")
+	issue := &beads.Issue{ID: "gt-a", Status: string(beads.StatusOpen)}
+	want := []beads.Comment{{Text: specEstimateNotePrefix + " sp:3 rung:all hash:x"}}
+	cases := []struct {
+		name             string
+		ledgerHas        bool
+		showErr          error
+		commentsErr      error
+		wantIssue        *beads.Issue
+		wantComments     []beads.Comment
+		wantErr          error
+		wantShows        int
+		wantCommentReads int
+	}{
+		{name: "reads the bead and its comments", wantIssue: issue, wantComments: want, wantShows: 1, wantCommentReads: 1},
+		{name: "a bead the ledger holds is not shown again", ledgerHas: true, wantIssue: issue, wantComments: want, wantShows: 0, wantCommentReads: 1},
+		{name: "a failed show is returned", showErr: showErr, wantErr: showErr, wantShows: 1, wantCommentReads: 0},
+		{name: "a failed comments read is returned", commentsErr: commentsErr, wantErr: commentsErr, wantShows: 1, wantCommentReads: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reads := newSpecTickReads()
+			if tc.ledgerHas {
+				reads.shows["gt-a"] = issue
+			}
+			shows, commentReads := 0, 0
+			read := specEstimateAheadRead(reads,
+				func(string) (*beads.Issue, error) {
+					shows++
+					return issue, tc.showErr
+				},
+				func(string) ([]beads.Comment, error) {
+					commentReads++
+					return want, tc.commentsErr
+				})
+			gotIssue, gotComments, err := read("gt-a")
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr != nil {
+				if gotIssue != nil || gotComments != nil {
+					t.Errorf("read returned (%v, %v) with an error, want (nil, nil)", gotIssue, gotComments)
+				}
+			} else if gotIssue != issue || !slices.Equal(gotComments, tc.wantComments) {
+				t.Errorf("read returned (%v, %v), want (%v, %v)", gotIssue, gotComments, issue, tc.wantComments)
+			}
+			if shows != tc.wantShows {
+				t.Errorf("showed %d times, want %d", shows, tc.wantShows)
+			}
+			if commentReads != tc.wantCommentReads {
+				t.Errorf("read comments %d times, want %d", commentReads, tc.wantCommentReads)
+			}
+		})
+	}
+}
+
 // TestSpecEstimateAheadPassRefusals: the pass does nothing in a dry run, says
 // so when no reader is wired, and logs a bead it cannot read rather than
 // reading it as nothing to estimate.

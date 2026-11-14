@@ -549,6 +549,28 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 	return lines
 }
 
+// specEstimateAheadRead returns the read the estimate-ahead pass makes for one
+// candidate: the bead from this tick's ledger, and its comments read fresh. The
+// ledger may already hold the issue from the board read, and that value is the
+// one the pass uses; the comments are a new call, so an estimate the sling hook
+// wrote this tick is the bead's current one. A failed show or comments read is
+// returned unchanged, and the pass logs it as one line rather than reading the
+// bead as nothing to estimate.
+func specEstimateAheadRead(reads *specTickReads, show func(id string) (*beads.Issue, error), comments func(id string) ([]beads.Comment, error)) func(id string) (*beads.Issue, []beads.Comment, error) {
+	return func(id string) (*beads.Issue, []beads.Comment, error) {
+		issue, err := reads.show(id, func() (*beads.Issue, error) { return show(id) })
+		if err != nil {
+			return nil, nil, err
+		}
+		reads.call()
+		cs, err := comments(id)
+		if err != nil {
+			return nil, nil, err
+		}
+		return issue, cs, nil
+	}
+}
+
 // specEstimateAheadLine is the one line a failed or timed-out ahead estimate
 // logs, or "" when the estimate wrote its labels and note.
 func specEstimateAheadLine(beadID string, answer specStoryPointAnswer) string {

@@ -3950,21 +3950,14 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// A blocker the walk reads is served from this tick's ledger when the
 		// candidate's own row already read it (gt-hgt9j.12).
 		BlockerRead: specBlockerRead(reads, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }),
-		// The estimate-ahead pass reads the bead in full and its comments fresh
-		// after the slings, so an estimate the sling hook wrote this tick is the
-		// bead's current one (gt-hzb051).
-		EstimateAheadRead: func(beadID string) (*beads.Issue, []beads.Comment, error) {
-			issue, err := reads.show(beadID, func() (*beads.Issue, error) { return showBead(townRoot, beadID) })
-			if err != nil {
-				return nil, nil, err
-			}
-			reads.call()
-			comments, err := beads.New(resolveBeadDirFromTownRoot(townRoot, beadID)).Comments(beadID)
-			if err != nil {
-				return nil, nil, err
-			}
-			return issue, comments, nil
-		},
+		// The estimate-ahead pass reads the bead through this tick's ledger and
+		// its comments fresh after the slings, so an estimate the sling hook
+		// wrote this tick is the bead's current one (gt-hzb051).
+		EstimateAheadRead: specEstimateAheadRead(reads,
+			func(id string) (*beads.Issue, error) { return showBead(townRoot, id) },
+			func(id string) ([]beads.Comment, error) {
+				return beads.New(resolveBeadDirFromTownRoot(townRoot, id)).Comments(id)
+			}),
 	}
 	specWireStoryPoints(&env, sd, townRoot)
 	report := runSpecDispatchCycle(env)
