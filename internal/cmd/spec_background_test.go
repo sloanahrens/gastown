@@ -110,7 +110,7 @@ func TestBackgroundTickRosterCountsTheRunningSling(t *testing.T) {
 	env := backgroundEnv(f)
 	env.InFlight = []specInFlight{{Bead: "gt-x", Rig: "gastown", Agent: "deepseek-flash"}}
 	r := runSpecDispatchCycle(env)
-	if want := "deepseek-flash 1/2 (0 live + 1 in flight)"; r.Roster != want {
+	if want := "deepseek-flash 1/2 (0 live + 1 in flight (may double count))"; r.Roster != want {
 		t.Fatalf("roster = %q, want %q", r.Roster, want)
 	}
 }
