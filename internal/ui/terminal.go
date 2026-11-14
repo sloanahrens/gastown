@@ -51,18 +51,19 @@ var hasDarkBackground bool
 // InitTheme initializes the theme mode. Call this early in main.
 // configTheme is the value from TownSettings.CLITheme (may be empty).
 func InitTheme(configTheme string) {
-	processEnv.initTheme(configTheme)
+	themeMode, hasDarkBackground = processEnv.applyTheme(configTheme)
 }
 
-// initTheme caches the resolved theme and tells lipgloss which background it
+// applyTheme resolves the theme for e and tells lipgloss which background it
 // renders on. The lipgloss call runs even without a terminal, where
 // ApplyThemeMode returns early: until it runs, lipgloss's own renderer queries
 // the terminal the first time an AdaptiveColor renders, and a shell hook then
 // evals that query as a command (gt-xvekee).
-func (e uiEnv) initTheme(configTheme string) {
-	themeMode = e.resolveThemeMode(configTheme)
-	hasDarkBackground = e.detectDarkBackground(themeMode)
-	lipgloss.SetHasDarkBackground(hasDarkBackground)
+func (e uiEnv) applyTheme(configTheme string) (ThemeMode, bool) {
+	mode := e.resolveThemeMode(configTheme)
+	dark := e.detectDarkBackground(mode)
+	lipgloss.SetHasDarkBackground(dark)
+	return mode, dark
 }
 
 // GetThemeMode returns the current CLI color scheme mode.

@@ -195,19 +195,12 @@ func TestDetectDarkBackground(t *testing.T) {
 	}
 }
 
-// TestInitThemeSetsLipglossBackground: InitTheme must leave lipgloss's default
-// renderer on the resolved background even with no terminal, since that is the
-// case ApplyThemeMode skips and lipgloss would then query the terminal for the
-// answer (gt-xvekee).
-func TestInitThemeSetsLipglossBackground(t *testing.T) {
-	// Not parallel: initTheme writes package state and lipgloss's default
-	// renderer, which this test restores.
-	prevMode, prevDark := themeMode, hasDarkBackground
-	prevLipgloss := lipgloss.HasDarkBackground()
-	t.Cleanup(func() {
-		themeMode, hasDarkBackground = prevMode, prevDark
-		lipgloss.SetHasDarkBackground(prevLipgloss)
-	})
+// TestApplyThemeSetsLipglossBackground: applyTheme must leave lipgloss's
+// default renderer on the resolved background even with no terminal, since
+// that is the case ApplyThemeMode skips and lipgloss would then query the
+// terminal for the answer (gt-xvekee).
+func TestApplyThemeSetsLipglossBackground(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		config string
@@ -219,9 +212,8 @@ func TestInitThemeSetsLipglossBackground(t *testing.T) {
 		{"GT_THEME light over a dark COLORFGBG", "", map[string]string{"GT_THEME": "light", "COLORFGBG": "15;0"}, false},
 	}
 	for _, tc := range cases {
-		fakeEnv(false, tc.env).initTheme(tc.config)
-		if got := HasDarkBackground(); got != tc.want {
-			t.Errorf("%s: HasDarkBackground = %v, want %v", tc.name, got, tc.want)
+		if _, got := fakeEnv(false, tc.env).applyTheme(tc.config); got != tc.want {
+			t.Errorf("%s: applyTheme dark = %v, want %v", tc.name, got, tc.want)
 		}
 		if got := lipgloss.HasDarkBackground(); got != tc.want {
 			t.Errorf("%s: lipgloss.HasDarkBackground = %v, want %v", tc.name, got, tc.want)
