@@ -2,6 +2,7 @@ package bd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -11,12 +12,37 @@ import (
 const (
 	dockerfileName = "Dockerfile.bd"
 	basePinName    = "base-pin"
+
+	// zeroDigest is the all-zero sha256 digest, which is no image's digest.
+	zeroDigest = "0000000000000000000000000000000000000000000000000000000000000000"
+
+	// basePinPlaceholder is the base reference written before the beads base
+	// image is published. The real pin is written by gt update bd-base once the
+	// beads base image is published (operator step O1). Until then this exact
+	// reference is the only all-zero digest basePinError accepts.
+	basePinPlaceholder = "forgejo:3000/bot-registry/beads-bd@sha256:" + zeroDigest
 )
 
 // basePinShape is a base reference pinned by digest: a registry host with an
 // optional port, one or more path segments, and a sha256 digest of 64 lowercase
 // hex characters. A colon may only introduce the port, so a tag is refused.
 var basePinShape = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+@sha256:[0-9a-f]{64}$`)
+
+// basePinError returns nil when ref is a base reference pinned by digest. The
+// placeholder is accepted only as its exact value; any other all-zero digest is
+// refused, and so is any reference that is not a sha256 digest pin.
+func basePinError(ref string) error {
+	if ref == basePinPlaceholder {
+		return nil
+	}
+	if !basePinShape.MatchString(ref) {
+		return fmt.Errorf("reference %q is not pinned by sha256 digest with no tag", ref)
+	}
+	if strings.HasSuffix(ref, "@sha256:"+zeroDigest) {
+		return fmt.Errorf("reference %q has the all-zero digest; only the exact placeholder %q is accepted", ref, basePinPlaceholder)
+	}
+	return nil
+}
 
 // numericNonRootUser is a USER instruction naming a uid, or uid:gid, above zero.
 var numericNonRootUser = regexp.MustCompile(`^USER ([1-9][0-9]*)(:[0-9]+)?$`)
@@ -97,24 +123,25 @@ func TestDockerfileBdShape(t *testing.T) {
 }
 
 // TestBasePinIsDigest: base-pin holds one reference pinned by digest, and a
-// reference with a tag, or no digest at all, is refused.
+// reference with a tag, no digest at all, or an all-zero digest other than the
+// placeholder is refused.
 func TestBasePinIsDigest(t *testing.T) {
 	t.Parallel()
-	pin := readBasePin(t)
-	if !basePinShape.MatchString(pin) {
-		t.Fatalf("%s holds %q, want a reference pinned by sha256 digest with no tag", basePinName, pin)
+	if err := basePinError(readBasePin(t)); err != nil {
+		t.Fatalf("%s: %v", basePinName, err)
 	}
 	for _, tc := range []struct{ name, ref string }{
 		{"a latest tag", "forgejo:3000/bot-registry/beads-bd:latest"},
 		{"a commit tag", "forgejo:3000/bot-registry/beads-bd:b7e5e9c"},
-		{"a tag and a digest", "forgejo:3000/bot-registry/beads-bd:latest@sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+		{"a tag and a digest", "forgejo:3000/bot-registry/beads-bd:latest@sha256:" + zeroDigest},
 		{"a short digest", "forgejo:3000/bot-registry/beads-bd@sha256:abc"},
 		{"an uppercase digest", "forgejo:3000/bot-registry/beads-bd@sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000"},
 		{"no digest", "forgejo:3000/bot-registry/beads-bd"},
+		{"an all-zero digest in another repo", "forgejo:3000/bot-registry/other-bd@sha256:" + zeroDigest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if basePinShape.MatchString(tc.ref) {
+			if err := basePinError(tc.ref); err == nil {
 				t.Errorf("reference %q passed the digest check, want it refused", tc.ref)
 			}
 		})
