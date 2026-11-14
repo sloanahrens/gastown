@@ -120,6 +120,29 @@ func TestStoryPointsEstimateAheadPickSkipsABeadEstimatedForItsHash(t *testing.T)
 			comments: []beads.Comment{specEstimateAheadNote(estimated)},
 			want:     []string{"gt-est"},
 		},
+		{
+			// The estimate writes its labels before its note, so a failed note
+			// write leaves a bead wearing current labels and no note. The pick
+			// cannot tell those labels are current, so it must leave them be.
+			name:  "labels with no estimate note are never chosen",
+			issue: estimated,
+		},
+		{
+			name:     "a note naming no hash does not date the labels",
+			issue:    estimated,
+			comments: []beads.Comment{{Text: specEstimateNotePrefix + " sp:3 rung:shape"}},
+		},
+		{
+			// sp-actual is the landing worker's measurement, not an estimate's
+			// label, so it neither dates an estimate nor blocks one.
+			name: "a bead wearing only the landing worker's sp-actual label is chosen",
+			issue: func() *beads.Issue {
+				i := specEstimateAheadIssue("gt-actual", base)
+				i.Labels = []string{"sp-actual:9"}
+				return i
+			}(),
+			want: []string{"gt-actual"},
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
