@@ -91,8 +91,9 @@ func TestSpecDispatchConsidersTheBeadAgainOnceTheRecordIsGone(t *testing.T) {
 
 // TestSpecDispatchRosterReadsTheLiveSandboxRecords drives the production roster
 // wiring: the records the candidate check reads come from the town's registry,
-// read once with the roster, and a registry that cannot be read fails the
-// roster instead of dispatching on an empty set.
+// read once with the roster. A record deleted after the listing is skipped,
+// while a registry, a record that cannot be read, or an entry naming no sandbox
+// fails the roster instead of dispatching on an empty set.
 func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -112,6 +113,40 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 			want: "polecat/warboy/gt-712i5k+mwgjywwx",
 		},
 		{
+			name: "a record deleted after the listing is skipped",
+			setup: func(t *testing.T, town string) {
+				t.Helper()
+				if err := session.WriteSandboxRecord(town, liveSandboxRecord("gt-712i5k")); err != nil {
+					t.Fatalf("writing the record: %v", err)
+				}
+				// A sandbox deleted between the listing and the by-name read is
+				// listed and then not found. A dangling symlink produces that
+				// pair hermetically (gt-oz7ops).
+				if err := os.Symlink(filepath.Join(town, "gone.json"), filepath.Join(session.SandboxRegistryDir(town), "gt-gone.json")); err != nil {
+					t.Fatalf("linking the deleted record: %v", err)
+				}
+			},
+			want: "polecat/warboy/gt-712i5k+mwgjywwx",
+		},
+		{
+			name: "an entry naming no sandbox fails the roster",
+			setup: func(t *testing.T, town string) {
+				t.Helper()
+				dir := session.SandboxRegistryDir(town)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("creating the registry: %v", err)
+				}
+				// ReadSandboxRecord answers ok=false for a name that cannot
+				// name a sandbox, the same as for a record deleted since the
+				// listing, so the roster checks the shape and refuses this one
+				// (gt-oz7ops).
+				if err := os.WriteFile(filepath.Join(dir, "gt-bad name.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatalf("writing the record: %v", err)
+				}
+			},
+			wantNo: true,
+		},
+		{
 			name: "an unreadable registry fails the roster",
 			setup: func(t *testing.T, town string) {
 				t.Helper()
@@ -122,6 +157,20 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 				// than the empty set a missing directory is.
 				if err := os.WriteFile(filepath.Join(town, ".runtime", "sandboxes"), []byte("x"), 0o644); err != nil {
 					t.Fatalf("writing the registry path: %v", err)
+				}
+			},
+			wantNo: true,
+		},
+		{
+			name: "a record that does not parse fails the roster",
+			setup: func(t *testing.T, town string) {
+				t.Helper()
+				dir := session.SandboxRegistryDir(town)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("creating the registry: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "gt-bad.json"), []byte("{not json"), 0o644); err != nil {
+					t.Fatalf("writing the record: %v", err)
 				}
 			},
 			wantNo: true,
@@ -140,7 +189,7 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 				func(string) beads.Client { return beadsfake.New() }, &snap)()
 			if tc.wantNo {
 				if err == nil {
-					t.Fatal("roster read succeeded, want the unreadable registry to fail it")
+					t.Fatal("roster read succeeded, want it to fail")
 				}
 				return
 			}
@@ -154,10 +203,9 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 	}
 }
 
-// TestSpecDispatchLiveSandboxRecordsRefuseWhatTheyCannotRead pins the read's refusals:
-// a record that does not parse, and one the listing names but the by-name read
-// cannot answer, are errors — an unreadable record may be a live seat's, so it
-// is never the empty set.
+// TestSpecDispatchLiveSandboxRecordsRefuseWhatTheyCannotRead pins the read's
+// refusals: a record that does not parse is an error — an unreadable record may
+// be a live seat's, so it is never the empty set.
 func TestSpecDispatchLiveSandboxRecordsRefuseWhatTheyCannotRead(t *testing.T) {
 	t.Parallel()
 	t.Run("a record that does not parse", func(t *testing.T) {
@@ -172,19 +220,6 @@ func TestSpecDispatchLiveSandboxRecordsRefuseWhatTheyCannotRead(t *testing.T) {
 		}
 		if _, err := specLiveSandboxRecords(town); err == nil {
 			t.Fatal("read succeeded, want the unparseable record to fail it")
-		}
-	})
-	t.Run("a record listed then not readable", func(t *testing.T) {
-		t.Parallel()
-		town := t.TempDir()
-		if err := session.WriteSandboxRecord(town, liveSandboxRecord("gt-712i5k")); err != nil {
-			t.Fatalf("writing the record: %v", err)
-		}
-		read := func(townRoot, name string) (session.SandboxRecord, bool, error) {
-			return session.SandboxRecord{}, false, nil
-		}
-		if _, err := specLiveSandboxRecordsWith(town, read); err == nil {
-			t.Fatal("read succeeded, want a listed record the read cannot answer to fail it")
 		}
 	})
 	t.Run("a missing registry is no record", func(t *testing.T) {

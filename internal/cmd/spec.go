@@ -3370,17 +3370,11 @@ func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSe
 
 // specLiveSandboxRecords reads every sandbox record in townRoot's registry,
 // whose branches may still name a ready bead (gt-712i5k). A record's presence
-// is its liveness: the entry is removed when the sandbox is deleted. A missing
-// registry is no record; any other read failure is an error, never an empty
-// set.
+// is its liveness: the entry is removed when the sandbox is deleted, so one the
+// listing saw and the read no longer finds holds nothing (gt-oz7ops). A missing
+// registry is no record; an entry that names no sandbox, or a record that
+// cannot be read, is an error, never an empty set.
 func specLiveSandboxRecords(townRoot string) ([]session.SandboxRecord, error) {
-	return specLiveSandboxRecordsWith(townRoot, session.ReadSandboxRecord)
-}
-
-// specLiveSandboxRecordsWith is specLiveSandboxRecords with the record read
-// injected, so a test can drive a record that is listed and then cannot be
-// read.
-func specLiveSandboxRecordsWith(townRoot string, read func(town, name string) (session.SandboxRecord, bool, error)) ([]session.SandboxRecord, error) {
 	entries, err := os.ReadDir(session.SandboxRegistryDir(townRoot))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -3394,14 +3388,21 @@ func specLiveSandboxRecordsWith(townRoot string, read func(town, name string) (s
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".json")
-		rec, ok, err := read(townRoot, name)
+		// ReadSandboxRecord answers ok=false both for a record removed since
+		// the listing and for a name that cannot name a sandbox, so the shape
+		// is refused here: a file in the registry that names no sandbox is a
+		// registry the tick cannot interpret, not a record gone (gt-oz7ops).
+		if !session.ValidSandboxSessionName(name) {
+			return nil, fmt.Errorf("sandbox registry entry %s does not name a sandbox", e.Name())
+		}
+		rec, ok, err := session.ReadSandboxRecord(townRoot, name)
 		if err != nil {
 			return nil, fmt.Errorf("reading sandbox record %s: %w", e.Name(), err)
 		}
 		if !ok {
-			// Listed a moment ago, unreadable now: unknown is not absent,
-			// because the record may be a live seat's.
-			return nil, fmt.Errorf("sandbox record %s is listed but cannot be read", e.Name())
+			// The listing is a moment behind the read: a record removed in
+			// between names no sandbox now, so it holds nothing (gt-oz7ops).
+			continue
 		}
 		out = append(out, rec)
 	}
