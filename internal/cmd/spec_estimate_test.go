@@ -869,8 +869,8 @@ func TestSpecEstimateLogsOneLineForEachBeadAndHash(t *testing.T) {
 }
 
 // TestSpecEstimateLogFailureIsOneLineAndKeepsTheEstimate: a log that cannot be
-// written is one reported line; the estimate's labels and note are still on the
-// bead and the run succeeds.
+// written is one reported line; the estimate's labels are on the bead, its
+// note is left for the retry, and the run succeeds.
 func TestSpecEstimateLogFailureIsOneLineAndKeepsTheEstimate(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -891,8 +891,10 @@ func TestSpecEstimateLogFailureIsOneLineAndKeepsTheEstimate(t *testing.T) {
 			t.Errorf("labels = %v, want %s", labels, want)
 		}
 	}
-	if comments := specEstimateCommentsOn(t, db); len(comments) != 1 {
-		t.Fatalf("comments = %d, want the one estimate note", len(comments))
+	// A note naming the hash would record the missed line as appended, so the
+	// bead keeps no note until the retry writes one with the line (gt-l5buel).
+	if comments := specEstimateCommentsOn(t, db); len(comments) != 0 {
+		t.Fatalf("comments = %d, want none: the note waits for the log line", len(comments))
 	}
 	var logLines []string
 	for _, line := range strings.Split(out.String(), "\n") {
@@ -902,6 +904,80 @@ func TestSpecEstimateLogFailureIsOneLineAndKeepsTheEstimate(t *testing.T) {
 	}
 	if len(logLines) != 1 {
 		t.Fatalf("estimate-log lines = %v, want exactly one", logLines)
+	}
+}
+
+// TestSpecEstimateLogFailureIsRetriedOnTheNextRun: a failed append leaves the
+// bead without its note, so the next estimate appends the line it missed and
+// then records the hash. A note written on the failed run would read as
+// unchanged forever (gt-l5buel).
+func TestSpecEstimateLogFailureIsRetriedOnTheNextRun(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	blocked := filepath.Join(town, ".runtime")
+	// A regular file where the log's directory goes makes every append fail.
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", blocked, err)
+	}
+	db := specEstimateSeed()
+	stub := specEstimateOK()
+	run := specEstimateLogRunner(stub, town)
+
+	if err := runSpecEstimateOn(io.Discard, "gt-est", db, specEstimateOpts{}, run); err != nil {
+		t.Fatalf("run with the log blocked: %v", err)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatalf("unblock the log: %v", err)
+	}
+	if err := runSpecEstimateOn(io.Discard, "gt-est", db, specEstimateOpts{}, run); err != nil {
+		t.Fatalf("retry run: %v", err)
+	}
+	if stub.calls != 2 {
+		t.Fatalf("the estimate ran %d time(s), want 2: the retry estimates the bead again", stub.calls)
+	}
+	records, _, err := estlog.Read(town)
+	if err != nil {
+		t.Fatalf("read the estimate log: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want the one line the retry appended", len(records))
+	}
+	if comments := specEstimateCommentsOn(t, db); len(comments) != 1 {
+		t.Fatalf("comments after the retry = %d, want the one estimate note", len(comments))
+	}
+}
+
+// TestSpecEstimateChangedTextAppendsASecondLine: a bead whose sections changed
+// since its note is estimated again and appends a second line, so the log keeps
+// the features of the text the second estimate read.
+func TestSpecEstimateChangedTextAppendsASecondLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	db := specEstimateSeed()
+	stub := specEstimateWithFeatures()
+	run := specEstimateLogRunner(stub, town)
+	if err := runSpecEstimateOn(io.Discard, "gt-est", db, specEstimateOpts{}, run); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	changed := strings.Replace(specEstimateBody, "One worker.", "Two workers.", 1)
+	if err := db.Update("gt-est", beads.UpdateOptions{Description: &changed}); err != nil {
+		t.Fatalf("change the bead's size section: %v", err)
+	}
+	if err := runSpecEstimateOn(io.Discard, "gt-est", db, specEstimateOpts{}, run); err != nil {
+		t.Fatalf("run after the change: %v", err)
+	}
+	records, _, err := estlog.Read(town)
+	if err != nil {
+		t.Fatalf("read the estimate log: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want one line per hash", len(records))
+	}
+	if records[0].DescriptionHash == records[1].DescriptionHash {
+		t.Fatalf("both lines hash %q, want the changed text's own hash", records[0].DescriptionHash)
+	}
+	if want := specEstimateHashOf(t, db); records[1].DescriptionHash != want {
+		t.Errorf("the second line's hash = %q, want the changed text's %q", records[1].DescriptionHash, want)
 	}
 }
 
