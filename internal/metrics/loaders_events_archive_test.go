@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/csv"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,10 +19,17 @@ import (
 // eventsArchiveHeader is the header the export writes, in order.
 var eventsArchiveHeader = []string{"issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at", "id"}
 
-// archiveRow is one archive record with the fields the tests set; comment and
-// id stay empty.
+// archiveRow is one archive record with the fields the tests set; comment stays
+// empty, and the id is derived from the row so every distinct event has its own
+// key, as the export gives each row one. Two identical rows in two files then
+// carry the same id, which is the repeat the loader counts once.
 func archiveRow(issue, kind, actor, oldValue, newValue, createdAt string) []string {
-	return []string{issue, kind, actor, oldValue, newValue, "", createdAt, ""}
+	return []string{issue, kind, actor, oldValue, newValue, "", createdAt, archiveRowID(issue, kind, actor, oldValue, newValue, createdAt)}
+}
+
+// archiveRowID derives a fixture row's event id from its own fields.
+func archiveRowID(issue, kind, actor, oldValue, newValue, createdAt string) string {
+	return strings.Join([]string{issue, kind, actor, oldValue, newValue, createdAt}, "|")
 }
 
 // eventsArchive builds one gzip CSV from rows.
@@ -928,11 +937,12 @@ func TestBeadChangesRefusesADashOnlyDatabaseName(t *testing.T) {
 }
 
 // A dated file's database is the name before its eight-digit date; a name whose
-// last part is not a date is the whole database.
-func TestBeadChangesReadsTheDatabaseOfADatedFile(t *testing.T) {
+// last part is not a date is the whole database. events-hq-20261103.csv.gz is
+// hq's, not a database called hq-20261103.
+func TestLoadBeadChangesArchiveReadsDatedNames(t *testing.T) {
 	t.Parallel()
 	fsys := eventsFS("archive", map[string][]byte{
-		"events-gastown-20261102.csv.gz": eventsArchive(t, [][]string{
+		"events-hq-20261103.csv.gz": eventsArchive(t, [][]string{
 			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
 		}),
 		"events-my-db-20261102.csv.gz": eventsArchive(t, [][]string{
@@ -953,7 +963,7 @@ func TestBeadChangesReadsTheDatabaseOfADatedFile(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("rows = %+v, want one per database", rows)
 	}
-	findBeadChange(t, rows, "gastown", "gt-1")
+	findBeadChange(t, rows, "hq", "gt-1")
 	findBeadChange(t, rows, "my-db", "gt-1")
 	findBeadChange(t, rows, "bar-2026110", "gt-1")
 }
@@ -978,6 +988,184 @@ func TestBeadChangesFailsAFileWithoutAnIDColumn(t *testing.T) {
 	}
 	if len(dropped.Items) == 0 || !strings.Contains(dropped.Items[0].Reason, "columns: id") {
 		t.Errorf("drops = %+v, want the reason to name the missing id column", dropped.Items)
+	}
+}
+
+// A database's day files are one history, not one per day: two dated files for
+// one database roll up to one row per issue id.
+func TestLoadBeadChangesArchiveMergesDays(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-hq-20261102.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-11-01T00:00:00Z"),
+		}),
+		"events-hq-20261103.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("2", "gt-1", "label_added", "alice", "", "bug", "2026-11-02T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want one history for hq/gt-1 across both days", rows)
+	}
+	row := findBeadChange(t, rows, "hq", "gt-1")
+	if row.CreatedAt != "2026-11-01T00:00:00Z" || row.LabelAddedCount != 1 {
+		t.Errorf("row = %+v, want both days' events folded into one history", row)
+	}
+}
+
+// The one-off export and the daemon's dated files hold the same events, so a
+// row is counted once by its id however many files carry it: the rows are the
+// same as the export's alone, and the repeat is reported.
+func TestLoadBeadChangesArchiveDedupesByEventID(t *testing.T) {
+	t.Parallel()
+	events := [][]string{
+		archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		archiveRowWithID("2", "gt-1", "label_added", "alice", "", "bug", "2026-10-02T00:00:00Z"),
+	}
+	alone := eventsFS("archive", map[string][]byte{
+		"events-hq.csv.gz": eventsArchive(t, events),
+	})
+	both := eventsFS("archive", map[string][]byte{
+		"events-hq.csv.gz":          eventsArchive(t, events),
+		"events-hq-20261103.csv.gz": eventsArchive(t, events),
+	})
+	var aloneDropped, bothDropped Dropped
+	aloneRows, err := LoadBeadChangesArchive(alone, "archive", &aloneDropped)
+	if err != nil {
+		t.Fatalf("load export alone: %v", err)
+	}
+	bothRows, err := LoadBeadChangesArchive(both, "archive", &bothDropped)
+	if err != nil {
+		t.Fatalf("load export and day file: %v", err)
+	}
+	if !reflect.DeepEqual(bothRows, aloneRows) {
+		t.Errorf("rows with both files = %+v, want the export's alone %+v", bothRows, aloneRows)
+	}
+	row := findBeadChange(t, bothRows, "hq", "gt-1")
+	if row.LabelAddedCount != 1 {
+		t.Errorf("LabelAddedCount = %d, want 1: the event is in both files", row.LabelAddedCount)
+	}
+	if aloneDropped.Count() != 0 {
+		t.Errorf("dropped loading the export alone = %+v, want none", aloneDropped.Items)
+	}
+	if got := bothDropped.Count(); got != 1 {
+		t.Errorf("dropped = %+v, want one line for the repeated events", bothDropped.Items)
+	}
+}
+
+// A dolt-log file is the archive's commit log, not an events export: it is not
+// read, and it is not a gap in the events either.
+func TestLoadBeadChangesArchiveIgnoresDoltLogFiles(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"dolt-log-hq-20261103.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %+v, want none: a dolt-log file is not an events export", rows)
+	}
+	if dropped.Count() != 0 || len(dropped.Failed) != 0 {
+		t.Fatalf("dropped = %+v, failed = %v; want an ignored file to be no gap", dropped.Items, dropped.Failed)
+	}
+}
+
+// An event's id is its key across files. A row without one can never be matched
+// against a repeat, so it is refused and named with its file and row number,
+// like any other row outside the archive's shape.
+func TestLoadBeadChangesArchiveRefusesEmptyEventID(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-hq-20261103.csv.gz": eventsArchive(t, [][]string{
+			archiveRowWithID("1", "gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			{"gt-1", "label_added", "alice", "", "bug", "", "2026-10-02T00:00:00Z", ""},
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(rows) != 1 || rows[0].LabelAddedCount != 0 {
+		t.Fatalf("rows = %+v, want only the row that has an id", rows)
+	}
+	if dropped.Count() != 1 {
+		t.Fatalf("dropped = %+v, want the id-less row refused", dropped.Items)
+	}
+	got := dropped.Items[0]
+	if got.Source != "archive:archive/events-hq-20261103.csv.gz" {
+		t.Errorf("drop source = %q, want the file that carries the row", got.Source)
+	}
+	if !strings.Contains(got.Reason, "row 3") || !strings.Contains(got.Reason, "empty id") {
+		t.Errorf("drop reason = %q, want the row number and the empty id", got.Reason)
+	}
+}
+
+// The metrics extract names the bead-change archive through one function, and
+// that function reads the daemon's own archive_dir: the town's dolt-archive
+// runtime directory. An unset setting means the archive is off, and a config
+// that cannot be read is an error, never a directory nobody named.
+func TestMetricsArchiveDirIsTheDaemonArchive(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		body    func(town string) string
+		want    func(town string) string
+		wantErr bool
+	}{
+		{
+			name: "the daemon archive",
+			body: func(town string) string {
+				return `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"archive_dir":"` +
+					filepath.Join(town, ".runtime", "dolt-archive") + `"}}}`
+			},
+			want: func(town string) string { return filepath.Join(town, ".runtime", "dolt-archive") },
+		},
+		{
+			name: "unset is off",
+			body: func(string) string {
+				return `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{}}}`
+			},
+			want: func(string) string { return "" },
+		},
+		{
+			name:    "unreadable config",
+			body:    func(string) string { return `{` },
+			want:    func(string) string { return "" },
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := filepath.Join(town, "mayor", "daemon.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.body(town)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := MetricsArchiveDir(town)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("MetricsArchiveDir = %q, nil; want an error for an unreadable config", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want(town) {
+				t.Fatalf("MetricsArchiveDir = %q, %v; want %q", got, err, tc.want(town))
+			}
+		})
 	}
 }
 
