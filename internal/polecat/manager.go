@@ -281,6 +281,15 @@ func (m *Manager) SetCleanup(fn func(name, reason string) error) {
 	m.cleanupKill = fn
 }
 
+// ObserveGit makes the worktree and repo-base git handles the manager opens
+// call observe once per git process, as git.Git.WithRunObserver does. The sling
+// passes its trace's counter here so reuse and repair are counted on the step
+// that made them (gt-74tzuk). The handle the manager was built with is
+// observed by the caller that built it.
+func (m *Manager) ObserveGit(observe func()) {
+	m.gits.observe = observe
+}
+
 // killSession ends the session of the rig's polecat name through the cleanup
 // hook, or through tmux without one.
 func (m *Manager) killSession(name, reason string) error {

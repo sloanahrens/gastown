@@ -114,6 +114,7 @@ type Git struct {
 	gitDir  string        // Optional: explicit git directory (for bare repos)
 	gh      ghFunc        // runs the gh CLI; nil means the real gh on PATH
 	exec    runFunc       // runs git; nil means the real git on PATH
+	observe func()        // called before each git process starts (WithRunObserver); nil counts nothing
 	timeout time.Duration // deadline for every call when set (WithTimeout)
 	env     []string      // added to every call's environment (WithEnv)
 	unset   []string      // removed from every call's environment (WithoutEnv)

@@ -196,7 +196,7 @@ func TestRealIdleReuseEnvSeatReadSharesTheSlingMemo(t *testing.T) {
 	// without asking a gateway.
 	store := livenessSeatStore(t, "deepseek-flash")
 	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), store)
-	env := realIdleReuseEnv(nil, r, filepath.Dir(rigPath), "gastown", func(string) {}, mgr)
+	env := realIdleReuseEnv(nil, r, filepath.Dir(rigPath), "gastown", func(string) {}, mgr, nil)
 
 	end := mgr.ShareAgentBeadReads()
 	defer end()

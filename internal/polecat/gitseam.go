@@ -74,17 +74,19 @@ var _ gitRepo = (*git.Git)(nil)
 // gitOpener opens git on a working directory (open), on a bare repository's
 // git directory (openDir), or as the tracked-file reader a rig config
 // resolution reads (repoFile). Its zero value opens *git.Git; tests set the
-// funcs to a gitfake world's openers.
+// funcs to a gitfake world's openers. observe, when set, is the run observer
+// each *git.Git it opens carries (git.Git.WithRunObserver).
 type gitOpener struct {
 	open     func(workDir string) gitRepo
 	openDir  func(gitDir, workDir string) gitRepo
+	observe  func()
 	repoFile func(repoPath string) rig.RepoFileReader
 }
 
 // Open is git.NewGit(workDir), or the test's opener.
 func (o gitOpener) Open(workDir string) gitRepo {
 	if o.open == nil {
-		return git.NewGit(workDir)
+		return git.NewGit(workDir).WithRunObserver(o.observe)
 	}
 	return o.open(workDir)
 }
@@ -92,7 +94,7 @@ func (o gitOpener) Open(workDir string) gitRepo {
 // OpenDir is git.NewGitWithDir(gitDir, workDir), or the test's opener.
 func (o gitOpener) OpenDir(gitDir, workDir string) gitRepo {
 	if o.openDir == nil {
-		return git.NewGitWithDir(gitDir, workDir)
+		return git.NewGitWithDir(gitDir, workDir).WithRunObserver(o.observe)
 	}
 	return o.openDir(gitDir, workDir)
 }
@@ -103,7 +105,7 @@ func (o gitOpener) OpenDir(gitDir, workDir string) gitRepo {
 // interface every polecat git read is declared through (gt-gfp7a).
 func (o gitOpener) RepoFile(repoPath string) rig.RepoFileReader {
 	if o.repoFile == nil {
-		return git.NewGit(repoPath)
+		return git.NewGit(repoPath).WithRunObserver(o.observe)
 	}
 	return o.repoFile(repoPath)
 }

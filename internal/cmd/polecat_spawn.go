@@ -351,11 +351,11 @@ type idleReuseEnv struct {
 	seatLive liveSeatCounter
 }
 
-func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string), polecatMgr *polecat.Manager) idleReuseEnv {
+func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string), polecatMgr *polecat.Manager, trace *session.SandboxTrace) idleReuseEnv {
 	sessionName := polecat.NewSessionManager(t, r, townRegistry()).SessionName
 	return idleReuseEnv{
 		integrationBranch: func(hookBead string) string {
-			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead)
+			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead, trace)
 		},
 		verifyWorktree: verifyWorktreeExists,
 		sessionName:    sessionName,
@@ -390,13 +390,14 @@ func releaseReusedPolecatWork(townRoot, rigName, polecatName, hookBead string) {
 // hooked bead's parent epic, when the rig has integration branches enabled.
 // It returns "" when none applies or detection fails; a failure is warned on
 // stderr, so a rig that lost its bare repo does not turn detection off silently.
-func detectSpawnIntegrationBranch(townRoot, rigName string, r *rig.Rig, hookBead string) string {
-	return detectSpawnIntegrationBranchTo(os.Stderr, townRoot, rigName, r, hookBead)
+// Its git calls are counted on trace (gt-74tzuk).
+func detectSpawnIntegrationBranch(townRoot, rigName string, r *rig.Rig, hookBead string, trace *session.SandboxTrace) string {
+	return detectSpawnIntegrationBranchTo(os.Stderr, townRoot, rigName, r, hookBead, trace)
 }
 
 // detectSpawnIntegrationBranchTo is detectSpawnIntegrationBranch with its
 // failure warning written to w.
-func detectSpawnIntegrationBranchTo(w io.Writer, townRoot, rigName string, r *rig.Rig, hookBead string) string {
+func detectSpawnIntegrationBranchTo(w io.Writer, townRoot, rigName string, r *rig.Rig, hookBead string, trace *session.SandboxTrace) string {
 	if !polecatIntegrationEnabled(townRoot, rigName) {
 		return ""
 	}
@@ -405,6 +406,7 @@ func detectSpawnIntegrationBranchTo(w io.Writer, townRoot, rigName string, r *ri
 		style.FprintWarning(w, "integration branch not detected for %s: %v", hookBead, repoErr)
 		return ""
 	}
+	repoGit = repoGit.WithRunObserver(trace.CountGit)
 	detected, detectErr := beads.DetectIntegrationBranch(beads.New(r.Path), repoGit, hookBead)
 	if detectErr != nil {
 		style.FprintWarning(w, "integration branch not detected for %s: %v", hookBead, detectErr)
@@ -685,7 +687,7 @@ func namedPolecatMissingRefusal(rigName, name, hookBead string) error {
 // without creating anything (gt-yxc7m). Nothing is admitted, so no seat is
 // claimed. The refusal text is the one the live path builds, hint included.
 func peekNamedPolecatSling(townRoot, rigName string, opts SlingSpawnOptions) error {
-	_, _, polecatMgr, err := openSlingRig(townRoot, rigName)
+	_, _, polecatMgr, err := openSlingRig(townRoot, rigName, opts.trace)
 	if err != nil {
 		// The rig is unreadable. A live sling reports that itself; a preview
 		// says nothing rather than inventing a refusal it cannot know.
@@ -956,15 +958,16 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 // the seat claim on any error.
 // openSlingRig opens a rig and the polecat manager a sling reads it through.
 // The spawn path and the --dry-run peek share it, so a preview inspects
-// exactly the polecats a live spawn would.
-func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Manager, error) {
+// exactly the polecats a live spawn would. The git calls it makes are counted
+// on trace (gt-74tzuk); a nil trace counts nothing.
+func openSlingRig(townRoot, rigName string, trace *session.SandboxTrace) (*rig.Rig, *tmux.Tmux, *polecat.Manager, error) {
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("loading rigs config: %w", err)
 	}
 
-	g := git.NewGit(townRoot)
+	g := git.NewGit(townRoot).WithRunObserver(trace.CountGit)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
 	r, err := rigMgr.GetRig(rigName)
 	if err != nil {
@@ -977,9 +980,10 @@ func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Mana
 	// probes ask each sandboxed seat once. A seat the census answers
 	// ErrSeatNotLive for is not live with no probe; a listing or record that
 	// cannot be read, or a probe that fails, takes the manager's own probe.
-	polecatGit := git.NewGit(r.Path)
+	polecatGit := git.NewGit(r.Path).WithRunObserver(trace.CountGit)
 	t := tmux.NewTmux()
 	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"))
+	mgr.ObserveGit(trace.CountGit)
 	mgr.SetSessionProbes(session.CensusSessionReader{Tmux: t})
 	return r, t, mgr, nil
 }
@@ -996,7 +1000,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 		return nil, err
 	}
 
-	r, t, polecatMgr, err := openSlingRig(townRoot, rigName)
+	r, t, polecatMgr, err := openSlingRig(townRoot, rigName, opts.trace)
 	if err != nil {
 		return nil, err
 	}
@@ -1050,7 +1054,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// one bd read of each agent bead; it is dropped when the reuse step ends.
 	endAgentBeadReads := polecatMgr.ShareAgentBeadReads()
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
-		realIdleReuseEnv(t, r, townRoot, rigName, opts.step, polecatMgr), townRoot, rigName,
+		realIdleReuseEnv(t, r, townRoot, rigName, opts.step, polecatMgr, opts.trace), townRoot, rigName,
 		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
 	endAgentBeadReads()
 	if err != nil {
@@ -1069,7 +1073,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	if opts.ResumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
 			// Auto-detect: check if the hooked bead's parent epic has an integration branch
-			if detected := detectSpawnIntegrationBranch(townRoot, rigName, r, opts.HookBead); detected != "" {
+			if detected := detectSpawnIntegrationBranch(townRoot, rigName, r, opts.HookBead, opts.trace); detected != "" {
 				baseBranch = "origin/" + detected
 				fmt.Printf("  Auto-detected integration branch: %s\n", detected)
 			}
@@ -1302,7 +1306,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 		return "", fmt.Errorf("loading rigs config: %w", err)
 	}
 
-	g := git.NewGit(townRoot)
+	g := git.NewGit(townRoot).WithRunObserver(s.trace.CountGit)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
 	r, err := rigMgr.GetRig(s.RigName)
 	if err != nil {
@@ -1341,6 +1345,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	sup := operatorSupervisor(filepath.Dir(r.Path))
 	actor := operatorActor("gt sling")
 	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
+	polecatSessMgr.ObserveGit(s.trace.CountGit)
 	polecatSessMgr.SetHooks(polecatSessionHooks(sup, townRegistry(), s.RigName, "sling", actor))
 
 	// The seat's session backend: host tmux, or an OpenShell sandbox for an
@@ -1396,8 +1401,9 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// bead and the live session instead (loadFromBeads). A spawning bead past
 	// the grace window with a dead session reads as stalled, the same verdict a
 	// working one gets. gt done writes the terminal state.
-	polecatGit := git.NewGit(r.Path)
+	polecatGit := git.NewGit(r.Path).WithRunObserver(s.trace.CountGit)
 	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
+	polecatMgr.ObserveGit(s.trace.CountGit)
 
 	// Update issue status from hooked to in_progress.
 	// Also warn-only for the same reason: session is already running.
