@@ -134,6 +134,8 @@ func TestDoltComposeStartStop(t *testing.T) {
 				"GT_DOLT_CONFIG":  filepath.Join(dataDir, "config.yaml"),
 				"GT_DOLT_BACKUPS": filepath.Join(townRoot, "backups"),
 				"GT_DOLT_IMAGE":   "dolt@sha256:" + strings.Repeat("b", 64),
+				// The town's token directory, set over the inherited /tokens.
+				"GT_BD_TOKEN_DIR": filepath.Join(townRoot, ".runtime", "bd-gateway", "tokens"),
 			} {
 				if got, ok := lastEnv(calls[0].env, key); !ok || got != want {
 					t.Errorf("%s env %s = %q (set %v), want %q", tt.name, key, got, ok, want)

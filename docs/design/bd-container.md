@@ -380,7 +380,9 @@ Mounts: an anonymous volume at `/var/lib/dolt`, `/Users/sloan/gt-backups/dolt`,
 - `gt dolt start`, `stop` and `status` operate the unit (`docker compose -p
   gt-data`), and `gt doctor` gains a check that both services are healthy, the
   gateway answers `readyz` with the daemon token, and the three token files
-  exist with mode 0600.
+  exist with mode 0600. The token directory is `<town>/.runtime/bd-gateway/tokens`:
+  `gt dolt start` sets it as `GT_BD_TOKEN_DIR`, the unit mounts it read-only, and
+  operator step O2 creates the files there.
 
 ## Migration and rollback
 
