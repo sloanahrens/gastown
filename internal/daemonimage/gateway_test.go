@@ -2,7 +2,6 @@ package daemonimage
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,17 +9,18 @@ import (
 	"testing"
 )
 
-// TestBuildsBdgwAndShim: the gateway image's two binaries are cross-compiled for
-// linux/arm64 from the gt checkout at rev, each in its own clean worktree, and
-// land in the output directory under the names the image copies.
-func TestBuildsBdgwAndShim(t *testing.T) {
+// TestBuildsBdgw: the gateway image's binary is cross-compiled for linux/arm64
+// from the gt checkout at rev, in a clean worktree of it, and lands in the
+// output directory under the name the image copies. It is the only binary the
+// call writes: the image runs the real bd, not a shim (gt-gi5lhe).
+func TestBuildsBdgw(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	paths, err := b.BuildGateway(context.Background(), testRev)
 	if err != nil {
 		t.Fatalf("BuildGateway: %v", err)
 	}
-	want := []string{filepath.Join(b.Out, "bdgw"), filepath.Join(b.Out, "bdshim")}
+	want := []string{filepath.Join(b.Out, "bdgw")}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("BuildGateway paths = %q, want %q", paths, want)
 	}
@@ -29,114 +29,86 @@ func TestBuildsBdgwAndShim(t *testing.T) {
 			t.Errorf("BuildGateway returned %s, which is not written: %v", p, err)
 		}
 	}
-	names := []string{"bdgw", "bdshim"}
-	pkgs := []string{BDGWPackage, BDShimPackage}
-	if len(run.calls) != len(names) {
-		t.Fatalf("recorded %d builds, want %d", len(run.calls), len(names))
+	entries, err := os.ReadDir(b.Out)
+	if err != nil {
+		t.Fatalf("reading the output directory: %v", err)
 	}
-	for i, call := range run.calls {
-		for _, want := range []string{"CGO_ENABLED=0", "GOOS=linux", "GOARCH=arm64", "GOENV=off"} {
-			if !contains(call.env, want) {
-				t.Errorf("%s build env = %q, want %s among them", names[i], call.env, want)
-			}
-		}
-		wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", pkgs[i]}
-		if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
-			t.Errorf("%s build argv = %q, want %q", names[i], call.argv, wantArgv)
+	if len(entries) != 1 || entries[0].Name() != "bdgw" {
+		t.Errorf("the output directory holds %d entries after the build, want bdgw alone", len(entries))
+	}
+	if len(run.calls) != 1 {
+		t.Fatalf("recorded %d builds, want the one bdgw build", len(run.calls))
+	}
+	call := run.calls[0]
+	for _, want := range []string{"CGO_ENABLED=0", "GOOS=linux", "GOARCH=arm64", "GOENV=off"} {
+		if !contains(call.env, want) {
+			t.Errorf("bdgw build env = %q, want %s among them", call.env, want)
 		}
 	}
+	wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", BDGWPackage}
+	if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
+		t.Errorf("bdgw build argv = %q, want %q", call.argv, wantArgv)
+	}
+	wantAdds := []worktreeAdd{{src: b.GTSrc, commit: testRev}}
+	if got := addsOf(run); !reflect.DeepEqual(got, wantAdds) {
+		t.Errorf("worktrees added = %+v, want %+v", got, wantAdds)
+	}
+}
+
+// addsOf is the source and commit of every worktree the fake git added.
+func addsOf(run *fakeRunner) []worktreeAdd {
 	var added []worktreeAdd
 	for _, a := range run.adds {
 		added = append(added, worktreeAdd{src: a.src, commit: a.commit})
 	}
-	wantAdds := []worktreeAdd{{src: b.GTSrc, commit: testRev}, {src: b.GTSrc, commit: testRev}}
-	if !reflect.DeepEqual(added, wantAdds) {
-		t.Errorf("worktrees added = %+v, want each build in a clean worktree of %s at %s", added, b.GTSrc, testRev)
-	}
+	return added
 }
 
 // TestBuildGatewayFailsWithoutLeavingPartialOutput: a build that fails returns
-// its error, lists no paths and leaves the output directory empty, whichever of
-// the two binaries fails.
+// its error, lists no paths and leaves the output directory empty.
 func TestBuildGatewayFailsWithoutLeavingPartialOutput(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, pkg string }{
-		{"bdgw", BDGWPackage},
-		{"bdshim", BDShimPackage},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			b, run := builderFor(t)
-			run.failPkg = tc.pkg
-			paths, err := b.BuildGateway(context.Background(), testRev)
-			if err == nil {
-				t.Fatalf("a failed %s build returned no error (paths %q)", tc.name, paths)
-			}
-			if len(paths) != 0 {
-				t.Errorf("a failed %s build listed %q, want no paths", tc.name, paths)
-			}
-			entries, err := os.ReadDir(b.Out)
-			if err != nil {
-				t.Fatalf("reading the output directory: %v", err)
-			}
-			if len(entries) != 0 {
-				t.Errorf("a failed %s build left %d entries in the output directory, want none", tc.name, len(entries))
-			}
-		})
-	}
-}
-
-// TestBuildGatewayRemovesBdgwWhenBdshimCannotBeMoved: when the second binary
-// cannot be placed, the first one already moved is taken back out, so the call
-// leaves no partial pair. The move and the undo are injected: bdshim's rename is
-// refused, and the removal of bdgw is recorded instead of run on disk.
-func TestBuildGatewayRemovesBdgwWhenBdshimCannotBeMoved(t *testing.T) {
-	t.Parallel()
-	b, _ := builderFor(t)
-	var removed []string
-	b.rename = func(_, newpath string) error {
-		if filepath.Base(newpath) == "bdshim" {
-			return errors.New("rename refused")
-		}
-		return nil
-	}
-	b.remove = func(p string) error {
-		removed = append(removed, p)
-		return nil
-	}
+	b, run := builderFor(t)
+	run.failPkg = BDGWPackage
 	paths, err := b.BuildGateway(context.Background(), testRev)
 	if err == nil {
-		t.Fatalf("BuildGateway returned no error when bdshim could not be moved (paths %q)", paths)
+		t.Fatalf("a failed bdgw build returned no error (paths %q)", paths)
 	}
 	if len(paths) != 0 {
-		t.Errorf("BuildGateway listed %q, want no paths", paths)
+		t.Errorf("a failed bdgw build listed %q, want no paths", paths)
 	}
-	if want := []string{filepath.Join(b.Out, "bdgw")}; !reflect.DeepEqual(removed, want) {
-		t.Errorf("the undo removed %q, want %q", removed, want)
+	entries, err := os.ReadDir(b.Out)
+	if err != nil {
+		t.Fatalf("reading the output directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a failed bdgw build left %d entries in the output directory, want none", len(entries))
 	}
 }
 
-// TestBuildGatewayReportsAFailedUndo: when a move fails and the binary already
-// moved cannot be removed either, the call's error names both failures, so the
-// partial pair is reported rather than hidden.
-func TestBuildGatewayReportsAFailedUndo(t *testing.T) {
+// TestBuildGatewayFailsWhenTheOutputCannotBeMoved: an output that cannot be
+// moved into Out fails the call, and the staging directory is removed, so Out
+// holds nothing but what was already there.
+func TestBuildGatewayFailsWhenTheOutputCannotBeMoved(t *testing.T) {
 	t.Parallel()
 	b, _ := builderFor(t)
-	b.rename = func(oldpath, newpath string) error {
-		if filepath.Base(newpath) == "bdshim" {
-			return errors.New("rename refused")
-		}
-		return os.Rename(oldpath, newpath)
+	// rename(2) cannot put a file over a directory, so bdgw cannot be moved in.
+	if err := os.Mkdir(filepath.Join(b.Out, "bdgw"), 0o755); err != nil {
+		t.Fatalf("making the blocking directory: %v", err)
 	}
-	b.remove = func(string) error { return errors.New("remove refused") }
-	_, err := b.BuildGateway(context.Background(), testRev)
-	if err == nil {
-		t.Fatal("BuildGateway returned no error when its move and its undo both failed")
+	paths, err := b.BuildGateway(context.Background(), testRev)
+	if err == nil || !strings.Contains(err.Error(), "cannot move bdgw") {
+		t.Fatalf("BuildGateway = %q, %v; want an error naming the bdgw move", paths, err)
 	}
-	for _, want := range []string{"rename refused", "remove refused", "bdgw"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the error %q does not name %q", err, want)
-		}
+	if len(paths) != 0 {
+		t.Errorf("a failed move listed %q, want no paths", paths)
+	}
+	entries, err := os.ReadDir(b.Out)
+	if err != nil {
+		t.Fatalf("reading the output directory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "bdgw" {
+		t.Errorf("the output directory holds %d entries after a failed move, want only the blocking bdgw directory", len(entries))
 	}
 }
 
