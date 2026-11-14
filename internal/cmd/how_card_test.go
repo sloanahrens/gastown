@@ -1,8 +1,15 @@
 package cmd
 
 import (
+	"bytes"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/taskmap"
 )
 
 // TestHowCardRulesReadTheFile drives the production loader over the embedded
@@ -147,5 +154,161 @@ func TestHowCardRulesRefuseBadLines(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHowCardContent drives the card over the real map and the embedded rule
+// file: the title line and the lookup rule come first, every group appears with
+// its one-line description, every rule line appears, and the whole card is
+// under the size limit.
+func TestHowCardContent(t *testing.T) {
+	t.Parallel()
+
+	card, err := howCardText(howDefault{taskmap.Default()})
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(card, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("howCardText returned %d lines, want at least the title and the lookup rule", len(lines))
+	}
+	if lines[0] != overseerCardTitle {
+		t.Errorf("the card's first line = %q, want the title %q", lines[0], overseerCardTitle)
+	}
+	if lines[1] != overseerCardLookupRule {
+		t.Errorf("the card's second line = %q, want the lookup rule %q", lines[1], overseerCardLookupRule)
+	}
+
+	have := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		have[line] = true
+	}
+
+	groups := taskmap.Groups()
+	width := 0
+	for _, g := range groups {
+		if n := len(g); n > width {
+			width = n
+		}
+	}
+	for _, g := range groups {
+		want := fmt.Sprintf("%-*s  %s", width, g, taskmap.Describe(g))
+		if !have[want] {
+			t.Errorf("the card does not carry group line %q", want)
+		}
+	}
+
+	rules, err := overseerCardRules()
+	if err != nil {
+		t.Fatalf("overseerCardRules: %v", err)
+	}
+	for i, rule := range rules {
+		if !have[rule] {
+			t.Errorf("the card does not carry rule line %d %q", i+1, rule)
+		}
+	}
+
+	if n := len(card); n >= overseerCardPrintMaxBytes {
+		t.Errorf("the card is %d bytes, not under %d", n, overseerCardPrintMaxBytes)
+	}
+}
+
+// TestHowCardCommandRunsTheCard drives runHowCmd with --card set, so deleting
+// the flag branch in runHowCmd fails here even though runHowCard still builds a
+// card. Not parallel: --card is a package-level flag, and a listing test
+// running beside it would print a card instead of its listing.
+//
+//testpolicy:allow parallel — sets the package-level --card flag, which a listing test running mid-run would read
+func TestHowCardCommandRunsTheCard(t *testing.T) {
+	if err := howCmd.Flags().Set("card", "true"); err != nil {
+		t.Fatalf("set --card: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := howCmd.Flags().Set("card", "false"); err != nil {
+			t.Errorf("reset --card: %v", err)
+		}
+	})
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runHowCmd(cmd, nil); err != nil {
+		t.Fatalf("runHowCmd with --card: %v", err)
+	}
+
+	want, err := howCardText(howDefault{taskmap.Default()})
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+	if out.String() != want {
+		t.Errorf("gt how --card wrote %q, want the card %q", out.String(), want)
+	}
+	if !strings.HasPrefix(out.String(), overseerCardTitle+"\n") {
+		t.Errorf("gt how --card wrote %q, want it to start with the title line", out.String())
+	}
+}
+
+// TestHowCardRefusesAnArgument checks that --card refuses a group or word
+// rather than printing the card as if the argument had chosen part of it.
+func TestHowCardRefusesAnArgument(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	err := runHowCard(&out, howFixture(), []string{"roll"})
+	if err == nil {
+		t.Fatal("runHowCard accepted an argument, want an error")
+	}
+	if !strings.Contains(err.Error(), "roll") {
+		t.Errorf("runHowCard error %q does not name the argument", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardRefusesACardOverTheLimit checks the size bound: a card over
+// overseerCardPrintMaxBytes is an error naming the size, and no partial card
+// reaches the writer.
+func TestHowCardRefusesACardOverTheLimit(t *testing.T) {
+	t.Parallel()
+
+	m := howFixture()
+	m.groups = taskmap.Groups()
+	long := strings.Repeat("x", 250)
+	m.describe = func(taskmap.Group) string { return long }
+
+	var out bytes.Buffer
+	err := runHowCard(&out, m, nil)
+	if err == nil {
+		t.Fatal("runHowCard printed a card over the limit, want an error")
+	}
+	for _, want := range []string{fmt.Sprint(overseerCardPrintMaxBytes), "not under"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("runHowCard error %q does not name %q", err, want)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardIsNotARoleDirective checks the card reaches an agent through gt
+// how --card only: the repo's directives/ directory, which gt directive list
+// scans, carries no card file, and every file it does carry reaches a role. The
+// repo root is scanned because its directives/ directory is the town layer.
+func TestHowCardIsNotARoleDirective(t *testing.T) {
+	t.Parallel()
+
+	files, err := listableDirectiveFiles(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("listableDirectiveFiles: %v", err)
+	}
+	for _, f := range files {
+		if strings.Contains(f.Path, "overseer-card") {
+			t.Errorf("gt directive list reports the card as a directive: %s", f.Path)
+		}
+		if f.Unused() {
+			t.Errorf("gt directive list reports %s as reaching no role", f.Path)
+		}
 	}
 }
