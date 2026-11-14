@@ -64,12 +64,13 @@ const storyPointsEmbedTimeout = 60 * time.Second
 // trainCounts is what the report counts: the fitted beads by where their
 // features came from and, for a bead fitted on its current text, why the log's
 // line was not read; the estimate log's malformed lines; and the landed rows
-// the retrain did not read, by reason. currentText is the sum of the three
+// the retrain did not read, by reason. currentText is the sum of the four
 // fallback reasons: every bead fitted on its current text is counted under one.
 type trainCounts struct {
-	logged       int // fitted on the estimate log's line
+	logged       int // fitted on the estimate log's line for the text the bead carries now
 	currentText  int // fitted on the bead's text as it is now
 	noLine       int // current text because the log has no line for the bead
+	otherText    int // current text because the log's lines for the bead were estimated on other text
 	logNoEmbed   int // current text because the bead's log line carries no embedding
 	logEmbedSize int // current text because the log line's embedding is not the weights' size
 	malformedLog int // log lines that did not decode as a record of a bead
@@ -82,7 +83,7 @@ type trainSkips struct {
 	notPolecat int // the landing did not come through a polecat seat
 	seat       int // seat class is neither haiku nor flash
 	unmeasured int // no polecat time
-	noBead     int // the bead is not in its rig's store, so there is no current text to fall back to
+	noBead     int // the bead is not in its rig's store, so no log line can be checked against its text and there is no current text to fall back to
 	noText     int // the bead has no Constraints or Acceptance section, so there is no current text to fall back to
 	badRig     int // the rig names no directory under the town
 }
@@ -93,6 +94,7 @@ type trainFallback int
 
 const (
 	fallbackNoLine    trainFallback = iota // the log has no line for the bead
+	fallbackOtherText                      // the log's lines for the bead were estimated on other text
 	fallbackNoEmbed                        // the bead's log line carries no embedding
 	fallbackEmbedSize                      // the log line's embedding is not the weights' size
 )
@@ -101,6 +103,8 @@ const (
 func (f trainFallback) count(counts *trainCounts) {
 	counts.currentText++
 	switch f {
+	case fallbackOtherText:
+		counts.otherText++
 	case fallbackNoEmbed:
 		counts.logNoEmbed++
 	case fallbackEmbedSize:
@@ -177,15 +181,16 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 // through a polecat seat, its seat class is haiku or flash, its polecat time is
 // present, and its rig names a directory. A lower-bound time is read at its
 // floor: dropping it would remove the long beads, which are the ones the bound
-// marks. Its features are the estimate log's line for the bead and the text the
-// bead carries now, so the fit sees the text the estimator saw rather than a
-// text edited after the estimate. A bead the log has no readable line for is
-// read from its text as it is now, which needs it in the store with a
-// Constraints or Acceptance section. The others are counted in counts, and so
-// is which source each fitted bead came from. base is the model the new one is
-// fitted from, and it supplies the shape features' is_haiku mean. An embedder
-// error fails the whole step: a bead the embedder could not read is not a bead
-// the fit may leave out without saying so.
+// marks. Its features are the estimate log's line for the text the bead carries
+// now, so the fit sees what the estimator read for a bead whose text has not
+// changed since its estimate. A bead the log holds no such line for — no line at
+// all, a line estimated on other text, or a line the ridges cannot fit — is read
+// from its text as it is now, which needs it in the store with a Constraints or
+// Acceptance section. The others are counted in counts, and so is which source
+// each fitted bead came from. base is the model the new one is fitted from, and
+// it supplies the shape features' is_haiku mean. An embedder error fails the
+// whole step: a bead the embedder could not read is not a bead the fit may
+// leave out without saying so.
 func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder) ([]storypoints.Sample, trainCounts, error) {
 	var counts trainCounts
 	// The size check below reads the embedding ridge's dimension, which is 0
@@ -257,8 +262,9 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 		var fallback trainFallback
 		if lines := byBead[c.bead]; len(lines) == 0 {
 			fallback = fallbackNoLine
+		} else if rec, ok := trainLogLine(lines, issue); !ok {
+			fallback = fallbackOtherText
 		} else {
-			rec := trainLogLine(lines, issue)
 			switch {
 			case rec.Embedding == nil:
 				fallback = fallbackNoEmbed
@@ -302,23 +308,26 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 	return samples, counts, nil
 }
 
-// trainLogLine returns the estimate log line the retrain reads for a bead: the
-// last line whose description hash is the hash of the bead's text as it is now,
-// so the features are the ones the estimate of the text that landed read, even
-// when a later line for other text sits after it. A bead whose text matches no
-// line — edited after its estimate — reads its last line, which is the latest
-// estimate of it. A bead the store does not hold has no current hash, so it
-// reads its last line too. lines is never empty.
-func trainLogLine(lines []estlog.Record, issue *beads.Issue) estlog.Record {
-	if issue != nil {
-		textHash := trainSectionHash(issue)
-		for i := len(lines) - 1; i >= 0; i-- {
-			if lines[i].DescriptionHash == textHash {
-				return lines[i]
-			}
+// trainLogLine returns the last estimate log line the retrain reads for a bead:
+// the last line whose description hash is the hash of the bead's text as it is
+// now, so the features are the ones the estimate of the text that landed read,
+// even when a later line for other text sits after it. ok is false when the log
+// holds no line estimated on that text: the bead's text was edited after every
+// estimate of it, or the store does not hold the bead, so its current hash is
+// unknown. A line estimated on other text is never returned, since its features
+// describe a text the bead does not carry and the fit would read the landing's
+// minutes against another text's shape and embedding.
+func trainLogLine(lines []estlog.Record, issue *beads.Issue) (estlog.Record, bool) {
+	if issue == nil {
+		return estlog.Record{}, false
+	}
+	textHash := trainSectionHash(issue)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i].DescriptionHash == textHash {
+			return lines[i], true
 		}
 	}
-	return lines[len(lines)-1]
+	return estlog.Record{}, false
 }
 
 // trainSectionKeys are the sections trainSectionHash covers, in the order it
@@ -473,8 +482,8 @@ func removeStoryPointsOutputs(dir string, remove func(string) error) error {
 func storyPointsTrainReport(m storypoints.Model, counts trainCounts, name string, score holdoutScore) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "story points retrain: the proposed weights are the fit on the earlier 80%% of landed beads (%s); the holdout scores that same fit, which is not refitted on all rows\n", m.TrainedOn)
-	fmt.Fprintf(&b, "read: from the estimate log %d, from the current text %d (no log line %d, log line without an embedding %d, log line embedding of another size %d; the log skipped %d malformed line(s))\n",
-		counts.logged, counts.currentText, counts.noLine, counts.logNoEmbed, counts.logEmbedSize, counts.malformedLog)
+	fmt.Fprintf(&b, "read: from the estimate log %d, from the current text %d (no log line %d, log line for other text %d, log line without an embedding %d, log line embedding of another size %d; the log skipped %d malformed line(s))\n",
+		counts.logged, counts.currentText, counts.noLine, counts.otherText, counts.logNoEmbed, counts.logEmbedSize, counts.malformedLog)
 	fmt.Fprintf(&b, "not read: not polecat work %d, seat class %d, unmeasured %d, bead not in store %d, no Constraints or Acceptance %d, rig without a directory %d\n",
 		counts.skips.notPolecat, counts.skips.seat, counts.skips.unmeasured, counts.skips.noBead, counts.skips.noText, counts.skips.badRig)
 	fmt.Fprintf(&b, "penalties: shape %g, embedding %g\n", m.ShapeAlpha, m.EmbedAlpha)

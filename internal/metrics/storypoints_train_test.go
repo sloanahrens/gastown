@@ -831,7 +831,8 @@ func sampleLanded(t *testing.T, samples []storypoints.Sample, i int) storypoints
 // one acceptance box, so a fit on it cannot rank the beads, while each bead's
 // log line carries the box count its minutes followed. The proposed file clears
 // the bar only when the step reads the log lines, and the report counts the
-// beads it read them for.
+// beads it read them for. Each line carries the hash of the bead's text, as the
+// estimator logs it, so it is the line the retrain may read.
 func TestStoryPointsTrainFitsTheLoggedFeatures(t *testing.T) {
 	t.Parallel()
 	beads := trainTestBeads(90, 21, true)
@@ -840,7 +841,8 @@ func TestStoryPointsTrainFitsTheLoggedFeatures(t *testing.T) {
 		loggedBoxes := 1 + i%10
 		beads[i].boxes = 1
 		beads[i].minutes = math.Exp(0.25*float64(loggedBoxes) + 1)
-		records = append(records, logRecord(beads[i].id, "an-earlier-text", estlog.Shape{Boxes: float64(loggedBoxes)}, make([]float32, trainTestDim)))
+		hash := estimate.SectionHash(trainTestIssue(beads[i]))
+		records = append(records, logRecord(beads[i].id, hash, estlog.Shape{Boxes: float64(loggedBoxes)}, make([]float32, trainTestDim)))
 	}
 	fix := newTrainTestFixture(t, beads)
 	fix.appendLog(t, records...)
@@ -862,9 +864,11 @@ func TestStoryPointsTrainFitsTheLoggedFeatures(t *testing.T) {
 // on the estimate-log line the log keeps for its id and the hash of the text it
 // carries now, so the features are the ones the estimate of the text that
 // landed read, even when a later line for other text sits after it. A bead
-// whose text matches no line, edited after its estimate, reads its last line; a
-// bead the store does not hold has no hash to match and reads its last line
-// too. The bead's text carries every section and the Acceptance field the
+// whose text matches no line was edited after its last estimate, so no line
+// describes the text it carries: it is fitted on its current text like a bead
+// with no line, and the report counts it under that reason. A bead the store
+// does not hold has no hash to match, so it is not fitted on a line it cannot
+// check. The bead's text carries every section and the Acceptance field the
 // estimator's hash covers, and its line's hash is the estimator's own, so the
 // retrain's copy of the hash must answer what the estimator does for the line
 // to be found.
@@ -882,22 +886,27 @@ func TestStoryPointsTrainJoinsTheLogOnTheBeadAndItsText(t *testing.T) {
 	matching := logRecord(beads[0].id, currentHash, estlog.Shape{Boxes: 5}, []float32{0.5, 0.5, 0.5})
 	earlier := logRecord(beads[0].id, "an-earlier-text", estlog.Shape{Boxes: 2}, []float32{0.2, 0.2, 0.2})
 	later := logRecord(beads[0].id, "a-later-text", estlog.Shape{Boxes: 9}, []float32{0.9, 0.9, 0.9})
-	other := logRecord(beads[1].id, "another-beads-text", estlog.Shape{Boxes: 7}, []float32{0.7, 0.7, 0.7})
+	other := logRecord(beads[1].id, estimate.SectionHash(trainTestIssue(beads[1])), estlog.Shape{Boxes: 7}, []float32{0.7, 0.7, 0.7})
 	// The changed-text case reads a line whose hash is not the bead's text hash,
 	// so the fixture must keep those apart.
 	if earlier.DescriptionHash == currentHash || later.DescriptionHash == currentHash {
 		t.Fatalf("the fixture's logged hashes are the hash of the bead's text now, so the changed-text case is not tested")
 	}
 	cases := []struct {
-		name  string
-		lines []estlog.Record
-		gone  bool // bead 0 is not in the store
-		want  float64
+		name       string
+		lines      []estlog.Record
+		gone       bool // bead 0 is not in the store
+		fromLog    bool // bead 0 is fitted on its logged line
+		wantBoxes  float64
+		wantLogged int
+		wantOther  int
+		wantNoBead int
+		wantFit    int
 	}{
-		{"a line for the text the bead carries now wins over a later line for other text", []estlog.Record{matching, later}, false, 5},
-		{"a bead whose text matches no line reads its last line", []estlog.Record{earlier, later}, false, 9},
-		{"each bead reads the line that names it", []estlog.Record{earlier, other}, false, 2},
-		{"a bead the store does not hold reads its last line", []estlog.Record{earlier, later}, true, 9},
+		{"a line for the text the bead carries now wins over a later line for other text", []estlog.Record{matching, later}, false, true, 5, 2, 0, 0, 2},
+		{"a bead whose text matches no line is fitted on its current text", []estlog.Record{earlier, later}, false, false, 0, 1, 1, 0, 2},
+		{"each bead reads the line that names it", []estlog.Record{matching, other}, false, true, 5, 2, 0, 0, 2},
+		{"a bead the store does not hold is not fitted on a line it cannot check", []estlog.Record{earlier, later}, true, false, 0, 1, 0, 1, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -924,19 +933,35 @@ func TestStoryPointsTrainJoinsTheLogOnTheBeadAndItsText(t *testing.T) {
 			if !tc.gone {
 				store.issues[beads[0].id] = issue
 			}
+			base := trainTestBase(t)
 			env := Env{Town: fit.town, ReadFile: os.ReadFile, Beads: func(context.Context, string) BeadStore { return store }}
-			samples, counts, err := trainingSamples(context.Background(), env, fit.town, rows, trainTestBase(t), trainTestEmbedder{})
+			samples, counts, err := trainingSamples(context.Background(), env, fit.town, rows, base, trainTestEmbedder{})
 			if err != nil {
 				t.Fatalf("trainingSamples: %v", err)
 			}
-			if got := sampleLanded(t, samples, 0).Shape.Boxes; got != tc.want {
-				t.Errorf("bead 0 fitted with %v boxes, want the logged %v", got, tc.want)
+			if len(samples) != tc.wantFit {
+				t.Fatalf("samples = %d, want %d", len(samples), tc.wantFit)
+			}
+			if counts.logged != tc.wantLogged || counts.otherText != tc.wantOther || counts.skips.noBead != tc.wantNoBead {
+				t.Errorf("counts = %+v, want logged %d, other text %d, bead not in store %d", counts, tc.wantLogged, tc.wantOther, tc.wantNoBead)
+			}
+			switch {
+			case tc.fromLog:
+				if got := sampleLanded(t, samples, 0).Shape.Boxes; got != tc.wantBoxes {
+					t.Errorf("bead 0 fitted with %v boxes, want the logged %v", got, tc.wantBoxes)
+				}
+			case !tc.gone:
+				seat := storypoints.SeatHaiku
+				if beads[0].seat == "flash" {
+					seat = storypoints.SeatFlash
+				}
+				want := storypoints.Features(storypoints.EstimateText(issue), "gastown", seat, base)
+				if got := sampleLanded(t, samples, 0).Shape; got != want {
+					t.Errorf("bead 0 fitted with %+v, want its current text's %+v", got, want)
+				}
 			}
 			if got := sampleLanded(t, samples, 1).Shape.Boxes; got != 7 {
 				t.Errorf("bead 1 fitted with %v boxes, want its own line's 7", got)
-			}
-			if counts.logged != 2 {
-				t.Errorf("counts.logged = %d, want the two beads read from the log", counts.logged)
 			}
 		})
 	}
@@ -990,15 +1015,21 @@ func TestStoryPointsTrainFallsBackToTheCurrentText(t *testing.T) {
 	}
 }
 
-// TestStoryPointsTrainCountsTheFallbackInTheReport: a bead with no log line is
-// fitted on its current text, and the report counts the beads fitted on each
-// source.
+// TestStoryPointsTrainCountsTheFallbackInTheReport: a bead with no log line,
+// and a bead whose log lines were estimated on other text, are fitted on their
+// current text; a bead with a line for its current text is fitted on the log.
+// The report counts each source and, among the current-text beads, why the log
+// was not read.
 func TestStoryPointsTrainCountsTheFallbackInTheReport(t *testing.T) {
 	t.Parallel()
 	beads := trainTestBeads(90, 24, true)
 	fix := newTrainTestFixture(t, beads)
 	var records []estlog.Record
 	for i := 0; i < 30; i++ {
+		hash := estimate.SectionHash(trainTestIssue(beads[i]))
+		records = append(records, logRecord(beads[i].id, hash, estlog.Shape{Boxes: float64(beads[i].boxes)}, make([]float32, trainTestDim)))
+	}
+	for i := 30; i < 50; i++ {
 		records = append(records, logRecord(beads[i].id, "an-earlier-text", estlog.Shape{Boxes: float64(beads[i].boxes)}, make([]float32, trainTestDim)))
 	}
 	fix.appendLog(t, records...)
@@ -1007,7 +1038,7 @@ func TestStoryPointsTrainCountsTheFallbackInTheReport(t *testing.T) {
 	if err := Run(context.Background(), CommandStoryPointsTrain, c); err != nil {
 		t.Fatalf("storypoints-train: %v", err)
 	}
-	want := "read: from the estimate log 30, from the current text 60 (no log line 60, log line without an embedding 0, log line embedding of another size 0;"
+	want := "read: from the estimate log 30, from the current text 60 (no log line 40, log line for other text 20, log line without an embedding 0, log line embedding of another size 0;"
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("report does not say %q:\n%s", want, out.String())
 	}
@@ -1023,9 +1054,9 @@ func TestStoryPointsTrainFallsBackWhenTheLogLineCannotBeFitted(t *testing.T) {
 	beads[2].boxes = 9
 	fix := newTrainTestFixture(t, beads)
 	fix.appendLog(t,
-		logRecord(beads[0].id, "no-embedding", estlog.Shape{Boxes: 2}, nil),
-		logRecord(beads[1].id, "another-size", estlog.Shape{Boxes: 3}, make([]float32, trainTestDim+1)),
-		logRecord(beads[2].id, "readable", estlog.Shape{Boxes: 4}, make([]float32, trainTestDim)),
+		logRecord(beads[0].id, estimate.SectionHash(trainTestIssue(beads[0])), estlog.Shape{Boxes: 2}, nil),
+		logRecord(beads[1].id, estimate.SectionHash(trainTestIssue(beads[1])), estlog.Shape{Boxes: 3}, make([]float32, trainTestDim+1)),
+		logRecord(beads[2].id, estimate.SectionHash(trainTestIssue(beads[2])), estlog.Shape{Boxes: 4}, make([]float32, trainTestDim)),
 	)
 	data, err := os.ReadFile(filepath.Join(fix.outDir, landingsName))
 	if err != nil {
@@ -1061,7 +1092,7 @@ func TestStoryPointsTrainFallsBackWhenTheLogLineCannotBeFitted(t *testing.T) {
 		t.Errorf("the bead with no logged embedding fitted with %+v, want its current text's %+v", got, want)
 	}
 	report := storyPointsTrainReport(storypoints.Model{TrainedOn: "fixture"}, counts, storyPointsProposedName, holdoutScore{})
-	wantReport := "from the current text 2 (no log line 0, log line without an embedding 1, log line embedding of another size 1;"
+	wantReport := "from the current text 2 (no log line 0, log line for other text 0, log line without an embedding 1, log line embedding of another size 1;"
 	if !strings.Contains(report, wantReport) {
 		t.Errorf("report does not say %q:\n%s", wantReport, report)
 	}
@@ -1098,7 +1129,7 @@ func TestStoryPointsTrainCountsTheLogsMalformedLines(t *testing.T) {
 	t.Parallel()
 	beads := trainTestBeads(90, 1, true)
 	fix := newTrainTestFixture(t, beads)
-	fix.appendLog(t, logRecord(beads[0].id, "an-earlier-text", estlog.Shape{Boxes: 2}, make([]float32, trainTestDim)))
+	fix.appendLog(t, logRecord(beads[0].id, estimate.SectionHash(trainTestIssue(beads[0])), estlog.Shape{Boxes: 2}, make([]float32, trainTestDim)))
 	f, err := os.OpenFile(estlog.Path(fix.town), os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatalf("open estimate log: %v", err)
