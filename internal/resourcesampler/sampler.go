@@ -326,6 +326,14 @@ func AppendRow(metricsDir string, row Row, now time.Time) error {
 	if metricsDir == "" {
 		return errors.New("resource sampler: metrics directory is empty")
 	}
+	// A float field holding NaN or ±Inf cannot be encoded as JSON, so the row is
+	// encoded before the file is touched: a row that cannot become a line leaves
+	// no empty file behind instead of appending a blank line and reporting it as
+	// written.
+	line, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("resource sampler: encode row: %w", err)
+	}
 	dir := filepath.Join(metricsDir, rowsSubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("resource sampler: rows directory: %w", err)
@@ -336,9 +344,6 @@ func AppendRow(metricsDir string, row Row, now time.Time) error {
 		return fmt.Errorf("resource sampler: rows file: %w", err)
 	}
 	defer file.Close()
-	// A Row holds only numbers, strings and pointers to them, so its JSON cannot
-	// fail to encode (specdispatch.OutcomeLine drops the same impossible error).
-	line, _ := json.Marshal(row)
 	return appendLine(append(line, '\n'), file.Write)
 }
 

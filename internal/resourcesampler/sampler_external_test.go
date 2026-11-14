@@ -5,6 +5,7 @@ package resourcesampler_test
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -136,6 +137,24 @@ func TestAppendRowReportsADayFileItCannotOpen(t *testing.T) {
 
 	if err := resourcesampler.AppendRow(dir, seatRow(), now); err == nil {
 		t.Fatal("a day file that cannot be opened was reported as written")
+	}
+}
+
+func TestAppendRowReportsARowItCannotEncode(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	// JSON has no NaN, so this row cannot become a line: the call must refuse it
+	// rather than append a blank line and report it as written.
+	row := seatRow()
+	notANumber := math.NaN()
+	row.CPUPct = &notANumber
+
+	if err := resourcesampler.AppendRow(dir, row, now); err == nil {
+		t.Fatal("a row that cannot be encoded as JSON was reported as written")
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "resources", "2026-11-14.jsonl")); err == nil {
+		t.Fatalf("a row that cannot be encoded left a day file: %q", data)
 	}
 }
 
