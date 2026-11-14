@@ -184,11 +184,12 @@ func (s *streamSink) Write(p []byte) (int, error) {
 			fmt.Fprintf(s.stderr, "bdgw: %s: %s\n", payload.Code, payload.Message)
 		}
 	case bdgateway.FrameExit:
-		status, err := frame.ExitStatus()
-		if err != nil {
-			return 0, err
+		// An exit frame whose payload is not a status leaves the call without
+		// one, which execCall refuses. The HTTP handler reads a malformed exit
+		// frame the same way.
+		if status, err := frame.ExitStatus(); err == nil {
+			s.status, s.exited = status, true
 		}
-		s.status, s.exited = status, true
 	}
 	return len(p), nil
 }
