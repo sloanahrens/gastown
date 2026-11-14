@@ -58,6 +58,7 @@ Exit statuses:
   COMPLETED      - Work done, branch submitted for landing (default)
   ESCALATED      - Hit blocker, needs human intervention
   DEFERRED       - Work paused; the bead is released open and unassigned
+                   unless it is parked, in landing, or claimed by another
 
 Process exit codes (the work was not submitted; no completion is recorded
 and the session stays up so you can fix it and re-run gt done):
