@@ -271,3 +271,28 @@ func TestNewGitLeavesExecNil(t *testing.T) {
 		}
 	}
 }
+
+// TestNewGitWithRemoteExecDoesNotStatTheWorkDirOnTheHost: a working directory
+// that lives in a sandbox is not on this host, so the call goes to exec and is
+// not refused for a missing local directory; the plain NewGitWithExec still is.
+func TestNewGitWithRemoteExecDoesNotStatTheWorkDirOnTheHost(t *testing.T) {
+	t.Parallel()
+	const dir = "/sandbox/does/not/exist/on/this/host"
+	calls := 0
+	exec := func(c ExecCall) (string, string, error) {
+		calls++
+		return "ok\n", "", nil
+	}
+
+	if _, err := NewGitWithRemoteExec(dir, exec).Rev("HEAD"); err != nil {
+		t.Fatalf("remote Rev: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("remote exec calls = %d, want 1", calls)
+	}
+
+	calls = 0
+	if _, err := NewGitWithExec(dir, exec).Rev("HEAD"); err == nil || calls != 0 {
+		t.Errorf("a host working directory that does not exist must be refused before exec: err=%v calls=%d", err, calls)
+	}
+}

@@ -114,6 +114,7 @@ type Git struct {
 	gitDir  string        // Optional: explicit git directory (for bare repos)
 	gh      ghFunc        // runs the gh CLI; nil means the real gh on PATH
 	exec    runFunc       // runs git; nil means the real git on PATH
+	remote  bool          // workDir lives where exec runs git (a sandbox), not on this host: it is not statted here
 	observe func()        // called before each git process starts (WithRunObserver); nil counts nothing
 	timeout time.Duration // deadline for every call when set (WithTimeout)
 	env     []string      // added to every call's environment (WithEnv)
@@ -229,7 +230,7 @@ func (g *Git) runOutput(args ...string) (string, error) {
 	// is a gone working directory (e.g. a polecat whose worktree was
 	// removed) — check for it up front so the error says what actually
 	// happened.
-	if g.workDir != "" {
+	if g.workDir != "" && !g.remote {
 		if info, statErr := os.Stat(g.workDir); statErr != nil {
 			if os.IsNotExist(statErr) {
 				return "", g.wrapError(fmt.Errorf("working directory does not exist: %s", g.workDir), "", "", args)

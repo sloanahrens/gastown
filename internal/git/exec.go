@@ -71,6 +71,14 @@ func NewGitWithExec(workDir string, exec ExecFunc) *Git {
 	return &Git{workDir: workDir, exec: exec}
 }
 
+// NewGitWithRemoteExec is NewGitWithExec for a working directory that lives
+// where exec runs git, such as a clone inside a sandbox: the directory is not on
+// this host, so no call checks that it exists here (that check would refuse
+// every call), and exec alone answers for it. exec must not be nil.
+func NewGitWithRemoteExec(workDir string, exec ExecFunc) *Git {
+	return &Git{workDir: workDir, exec: exec, remote: true}
+}
+
 // errTimedOut is wrapped by a runFunc's error when a call ran out its
 // timeout and was killed.
 var errTimedOut = errors.New("git timed out")

@@ -974,11 +974,59 @@ func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
 	}
+	if g, sandboxed, err := d.overrunSandboxGit(seat); err != nil || sandboxed {
+		return g, err
+	}
 	workDir, err := d.overrunSeatWorktree(seat)
 	if err != nil {
 		return nil, err
 	}
 	return d.gitAt(workDir), nil
+}
+
+// overrunSandboxGit is the git handle of a seat that runs in a sandbox: a Git
+// over the in-sandbox runner, in the clone directory its record names, so the
+// save, the dirty check, the push and the reset see the sandbox's work and not
+// the host stub, which stays at main. A seat with no sandbox record is not
+// sandboxed and gets false with no error: it keeps its host worktree. The bool is
+// only true with a handle; every error comes back with false, and the caller
+// checks the error first. A record that cannot be
+// read, one that names no clone directory, and a runner that is not linked are
+// errors, never the host stub: the stub would read a clean tree and call the
+// seat's work saved while it dies with the sandbox.
+func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
+	sb, err := d.overrunSandboxSession(seat)
+	if err != nil || sb.Session == "" {
+		return nil, false, err
+	}
+	rec := sb.Record
+	if !sb.Read {
+		read, sandboxed, err := d.readSandboxRecordFor(d.config.TownRoot, sb.Session)
+		if err != nil {
+			return nil, false, overrunRecordReadError(sb.Session, err)
+		}
+		if !sandboxed {
+			return nil, false, nil
+		}
+		rec = read
+	}
+	if rec.WorkDir == "" {
+		return nil, false, fmt.Errorf("sandbox %s: its record names no clone directory, so its work cannot be saved", sb.Session)
+	}
+	runner, err := d.sandboxGitRunnerFor(rec)
+	if err != nil {
+		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
+	}
+	return git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner)), true, nil
+}
+
+// sandboxGitRunnerFor is the in-sandbox git runner for rec: sandboxGitRunnerFn's
+// when a test set one, else session.SandboxGitRunner's.
+func (d *Daemon) sandboxGitRunnerFor(rec session.SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
+	if d.sandboxGitRunnerFn != nil {
+		return d.sandboxGitRunnerFn(d.config.TownRoot, rec)
+	}
+	return session.SandboxGitRunner(d.config.TownRoot, rec)
 }
 
 // overrunWorktreeDirty reports whether the seat's worktree holds uncommitted
