@@ -162,6 +162,7 @@ func TestSandboxSecretsProductionReader(t *testing.T) {
 		{"a command substitution falls back to the text reading", "echo $(cat /proc/self/environ)", shellTokenize},
 		{"a backtick substitution falls back to the text reading", "echo `cat /proc/self/environ`", shellTokenize},
 		{"a process substitution falls back to the text reading", "cat <(cat /proc/self/environ)", shellTokenize},
+		{"an output process substitution falls back to the text reading", "tee >(cat /proc/self/environ)", shellTokenize},
 		{"an ordinary command with no substitution keeps the parsed reading", "echo hi", parsed},
 	}
 	for _, tt := range tests {
@@ -192,6 +193,7 @@ func TestSandboxSecretsSubstitutionReadsPathAsText(t *testing.T) {
 		{"a quoted name in a substitution", "echo $(cat /proc/1/envi''ron)"},
 		{"an escaped name in a substitution", `echo $(cat /proc/1/en\viron)`},
 		{"a quoted directory in a process substitution", "cat <(cat /pro''c/1/environ)"},
+		{"a quoted directory in an output process substitution", "tee >(cat /pro''c/1/environ)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
