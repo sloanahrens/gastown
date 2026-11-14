@@ -258,6 +258,35 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	}
 }
 
+// TestUnreadableCommandsEscalatePerCall pins that the unreadable shape does not
+// merge distinct calls: every unreadable command shares the label "bash
+// unreadable", so the marker must key on the call, or a second unreadable call in
+// the same session is suppressed as a repeat of the first (gt-dmponl). A repeat of
+// the same call is still suppressed.
+func TestUnreadableCommandsEscalatePerCall(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	escalator, sent := fakeParkedPromptEscalator(true)
+	first := payloadInput(t, bashPermissionPayload(`cd /tmp/x && touch "f`))
+	second := payloadInput(t, bashPermissionPayload(`rm -rf /tmp/x/* "`))
+
+	if got, escalated := escalateParkedPromptOnce(first, tmp, escalator); !escalated || strings.Contains(got, "already reported") {
+		t.Fatalf("first unreadable call not escalated: %q", got)
+	}
+	if got, escalated := escalateParkedPromptOnce(second, tmp, escalator); !escalated || strings.Contains(got, "already reported") {
+		t.Errorf("second, distinct unreadable call suppressed as a repeat: %q", got)
+	}
+	if len(*sent) != 2 {
+		t.Fatalf("escalator received %d calls, want 2: %v", len(*sent), *sent)
+	}
+	if got, _ := escalateParkedPromptOnce(first, tmp, escalator); !strings.Contains(got, "already reported") {
+		t.Errorf("repeat of the first unreadable call was not suppressed: %q", got)
+	}
+	if len(*sent) != 2 {
+		t.Errorf("repeat of the first unreadable call reached the escalator: %v", *sent)
+	}
+}
+
 // TestPermissionRequestEscalationFailureMessage pins the failure-message
 // distinction the review asked for: a failed escalation must not read like no
 // escalation was attempted at all (gt-8stz review, finding 4ce05cf3cf09).

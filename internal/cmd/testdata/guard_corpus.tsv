@@ -617,3 +617,7 @@ test_scope	polecat	"bash -c 'cat /pro\"\"c/1/environ'"	allow		gt-kr4tcn	2274bd5f
 container_suite	polecat	"echo \"$(cat /proc/1/envi''ron)\""	allow		gt-kr4tcn	2274bd5f027e524d921ecc0079d1cdb598dc7a342819379d070950034da44a59
 dangerous	polecat	"echo \"$(cat /proc/1/envi''ron)\""	allow		gt-kr4tcn	2274bd5f027e524d921ecc0079d1cdb598dc7a342819379d070950034da44a59
 test_scope	polecat	"echo \"$(cat /proc/1/envi''ron)\""	allow		gt-kr4tcn	2274bd5f027e524d921ecc0079d1cdb598dc7a342819379d070950034da44a59
+# --- gt-dmponl: an unreadable command keys its escalation marker on the call, so a second distinct unreadable call in one session escalates; the freeze stamp moved, one real case per freeze guard carries the new stamp, each with the verdict its guard already gives (no verdict changed) ---
+container_suite	polecat	"rm -rf /tmp/x/* \""	refuse	cannot be read	gt-dmponl	44285d087851de9a1f626efbded60e4c4499bc335fc954bea631521aa4b7f66b
+dangerous	polecat	"rm -rf /tmp/x/* \""	refuse	cannot be read	gt-dmponl	44285d087851de9a1f626efbded60e4c4499bc335fc954bea631521aa4b7f66b
+test_scope	polecat	"rm -rf /tmp/x/* \""	allow		gt-dmponl	44285d087851de9a1f626efbded60e4c4499bc335fc954bea631521aa4b7f66b

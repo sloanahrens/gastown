@@ -525,6 +525,11 @@ func promptEscalationMarker(hook permissionRequestInput, shape, tempDir string) 
 			key = fmt.Sprintf("pid:%d", os.Getpid())
 		}
 	}
+	// Every unreadable command shares the shape label, so the call keys its marker:
+	// distinct unreadable calls are distinct incidents (gt-dmponl).
+	if shape == "bash unreadable" {
+		key += "\x00" + hook.ToolInput.Command
+	}
 	sum := sha256.Sum256([]byte(key + "\x00" + hook.ToolName + "\x00" + shape))
 	return filepath.Join(tempDir, fmt.Sprintf("gt-parked-prompt-%x", sum[:8]))
 }
