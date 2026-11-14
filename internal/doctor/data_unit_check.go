@@ -238,6 +238,8 @@ func dataUnitReadyz(client *http.Client, base, token string) error {
 	if err != nil {
 		return fmt.Errorf("the gateway at %s did not answer /readyz: %w", base, err)
 	}
+	// The status has decided the rung by now, so an error from closing the body
+	// changes nothing the check reports.
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("the gateway answered /readyz with HTTP %d, not ready", resp.StatusCode)
