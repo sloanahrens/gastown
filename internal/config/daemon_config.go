@@ -2782,6 +2782,12 @@ type StoryPointsConfig struct {
 	// inputs is labeled for splitting instead of slung (gt-5d9k2f.18). Zero or
 	// negative is off, the default. The operator sets the value.
 	SplitOverMinutes float64 `json:"split_over_minutes,omitempty"`
+
+	// LintOverMinutes is the size gate's trigger in minutes: gt spec lint
+	// refuses a bead whose sp-minutes label is at or over it when the bead is
+	// filed, not found out at the overrun stop (gt-mtzx6s). Zero or negative,
+	// the default, leaves the gate off (gt-ljb57x).
+	LintOverMinutes float64 `json:"lint_over_minutes,omitempty"`
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
@@ -2812,6 +2818,16 @@ func (c *SpecDispatchConfig) StoryPointsSplitOver() float64 {
 		return 0
 	}
 	return c.StoryPoints.SplitOverMinutes
+}
+
+// StoryPointsLintOver is the size gate's trigger in minutes
+// (story_points.lint_over_minutes). A nil block, or a zero or negative value,
+// is 0, which leaves the gate off.
+func (c *SpecDispatchConfig) StoryPointsLintOver() float64 {
+	if c == nil || c.StoryPoints == nil || c.StoryPoints.LintOverMinutes <= 0 {
+		return 0
+	}
+	return c.StoryPoints.LintOverMinutes
 }
 
 // ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a
