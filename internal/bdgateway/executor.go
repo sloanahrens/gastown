@@ -703,6 +703,8 @@ type frameWriter struct {
 	// discard, once set, makes every write a no-op that does not touch the lock:
 	// the client stopped reading and a pump blocked in a write holds the lock.
 	discard atomic.Bool
+	// holds counts how many times a write took the lock; an ending is one hold.
+	holds atomic.Int32
 }
 
 // writesInProgress is how many writes to the client have begun and not ended.
@@ -715,6 +717,12 @@ func (f *frameWriter) write(kind FrameKind, payload []byte) error {
 // send is the one place a frame reaches the client: it counts the write, honours
 // discard without touching the lock, and writes under the lock.
 func (f *frameWriter) send(fr Frame) error {
+	return f.sendAll(fr)
+}
+
+// sendAll writes frames in order under one hold of the lock, so nothing else
+// writes between them.
+func (f *frameWriter) sendAll(frames ...Frame) error {
 	if f.discard.Load() {
 		return nil
 	}
@@ -722,7 +730,13 @@ func (f *frameWriter) send(fr Frame) error {
 	defer f.writing.Add(-1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return WriteFrame(f.w, fr)
+	f.holds.Add(1)
+	for _, fr := range frames {
+		if err := WriteFrame(f.w, fr); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // copy frames r until it ends. A read or write failure stops the copy, so the
@@ -768,8 +782,7 @@ func writeEnding(fw *frameWriter, code string, status int, message string) {
 	if err != nil {
 		return
 	}
-	if err := fw.write(FrameError, payload); err != nil {
-		return
-	}
-	_ = fw.exit(status)
+	// One lock hold writes both frames, so a pump that is alive but not stalled
+	// can never put a frame between the error frame and its exit frame.
+	_ = fw.sendAll(Frame{Kind: FrameError, Payload: payload}, ExitFrame(status))
 }

@@ -1527,6 +1527,10 @@ func (r stubbornReader) Read(p []byte) (int, error) {
 func TestExecutorGivesUpOnAPumpThatIgnoresTheClose(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePump := func() { releaseOnce.Do(func() { close(release) }) }
+	// A t.Fatal before the explicit release below must not leave the reader blocked.
+	t.Cleanup(releasePump)
 	ended := make(chan struct{})
 	proc := newBlockingFake("")
 	proc.stdout = stubbornReader{release: release, ended: ended, n: new(atomic.Int32)}
@@ -1550,7 +1554,7 @@ func TestExecutorGivesUpOnAPumpThatIgnoresTheClose(t *testing.T) {
 	}
 	// Release the pump Exec gave up on: its late chunk and its end must reach
 	// nothing, so the stream still ends with the exit frame.
-	close(release)
+	releasePump()
 	select {
 	case <-ended:
 	case <-waitCtx(t).Done():
@@ -1558,5 +1562,23 @@ func TestExecutorGivesUpOnAPumpThatIgnoresTheClose(t *testing.T) {
 	}
 	if late := readFrames(t, out.Bytes()); len(late) != 2 {
 		t.Errorf("a pump written after the call ended changed the stream: %+v", late)
+	}
+}
+
+// TestEndingIsOneLockHold: the error frame and the exit frame of an ending are
+// written under one hold of the writer's lock, so a pump that is alive but not
+// stalled cannot put its frame between them. A mutex gives no way to force the
+// gap in a test, so the guard counts the holds: one for the ending, two frames.
+func TestEndingIsOneLockHold(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	fw := &frameWriter{w: &out}
+	writeEnding(fw, CodeTimeout, 124, "the call ended")
+	if n := fw.holds.Load(); n != 1 {
+		t.Errorf("the ending took the writer's lock %d times, want one hold for both frames", n)
+	}
+	frames := readFrames(t, out.Bytes())
+	if len(frames) != 2 || frames[0].Kind != FrameError || frames[1].Kind != FrameExit {
+		t.Errorf("the ending wrote %+v, want the error frame then the exit frame", frames)
 	}
 }
