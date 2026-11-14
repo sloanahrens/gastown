@@ -48,9 +48,8 @@ runs `CALL dolt_gc('--full')` when either holds:
 - **old-gen growth**: `.dolt/noms/oldgen` grew more than 20% since right
   after its last GC.
 
-The old-gen trigger needs the server's data dir on the daemon's host. In the
-pod it is not (gt-dolt's data is on the Mac): the week alone decides, and the
-run records its time without a size (gt-lc16x3).
+In the pod the old-gen trigger does not apply; for when the weekly rule decides
+alone, read [Dolt storage](design/dolt-storage.md), "The one GC actor".
 
 It runs only while no gate slot is held and the daemon has no landing pass,
 scheduled slings cycle or install in flight; a working polecat does not defer
