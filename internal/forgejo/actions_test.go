@@ -83,7 +83,7 @@ func TestRunFilterValues_AlwaysSendsAPage(t *testing.T) {
 		{name: "zero page defaults to 1", filter: RunFilter{}, wantPage: "1"},
 		{name: "negative page defaults to 1", filter: RunFilter{Page: -2}, wantPage: "1"},
 		{name: "explicit page is kept", filter: RunFilter{Page: 3}, wantPage: "3"},
-		{name: "zero limit stays unset", filter: RunFilter{Page: 1}, wantPage: "1"},
+		{name: "zero limit stays unset", filter: RunFilter{Page: 1, Limit: 0}, wantPage: "1"},
 		{name: "limit goes beside the page", filter: RunFilter{Page: 3, Limit: 7}, wantPage: "3", wantLimit: "7"},
 	}
 	for _, tt := range tests {
