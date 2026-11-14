@@ -66,8 +66,9 @@ func historyHitLine(h hmhints.Hit) string {
 }
 
 // writeHowHistory appends the history section for args to b. The text a lookup
-// asks about is the listing's job plus the user's word; a lookup that cannot
-// run or finds nothing says so in one line, and the listing it follows still
+// asks about is the group's description plus the user's word when the word
+// names a group, and the word alone otherwise. A lookup that cannot run or
+// finds nothing says so in one line, and the listing it follows still
 // succeeds.
 func writeHowHistory(ctx context.Context, b *strings.Builder, h historyRunner, m howMap, args []string) {
 	text, ok := howHistoryText(m, args)
