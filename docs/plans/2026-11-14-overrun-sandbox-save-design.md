@@ -69,7 +69,9 @@ slower stop).
    returns `ErrNothingToPush` from the runner.
 4. The sandbox-gone rule (below) and the log wording.
 
-The in-sandbox runner passes argv to the sandbox client as separate elements, with no shell and no joined string. It refuses a clone directory that is empty, relative, or holds `..` or a newline, and a branch argument that fails `validCloneBranch`, before anything is sent.
+The in-sandbox runner passes argv to the sandbox client as separate elements, with no shell and no joined string. It cannot tell which argument is a branch, so it refuses a clone directory that is empty, relative, or holds `..` or a newline, a first argument outside the list of git verbs the overrun save uses, and any argument that is an option able to change what git runs (`-c`, `-C`, `--git-dir`, `--work-tree`, `--exec-path`, `--upload-pack`, `--receive-pack`, `--exec`, `--config-env`) or holds a newline or NUL, before anything is sent. The branch name is checked by the overrun guard with `validCloneBranch` before any `Git` call.
+
+The sandbox handle is injected through a `Daemon` field shaped like `openGitFn`, so tests never steer behavior through a package variable. An `ErrNothingToPush` from the sandbox handle during the save or the dirty check is never read as clean: it becomes `errSandboxGone`, which the stop routes to the sandbox-gone rule below.
 
 ## Sandbox gone
 
@@ -83,7 +85,7 @@ branch. There are three outcomes:
   bead must not stay hooked.
 - The read of origin itself failed (network, auth, timeout): the answer is
   unknown, so the stop logs the WARNING with the error, raises the attention
-  item, and does NOT release the bead. It retries on its next tick. A silent
+  item, and does NOT release the bead. The retry is counted in the stop's persisted state like `SaveFailures` and capped at `overrunSaveMaxAttempts`; at the cap the stop hands the bead back with a note and raises the attention item at high severity. `originBranchSHA` returns an empty string for both an absent branch and a failed read, so the stop uses a new helper, `originBranchRead`, that returns the error separately; `originBranchSHA` stays for its other callers. A silent
   hand-back on an unreadable origin is the incident this design exists to
   prevent.
 
