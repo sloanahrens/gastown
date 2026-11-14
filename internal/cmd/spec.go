@@ -1581,8 +1581,8 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 	// been checked, and must not pass as a small one (gt-5ynb86).
 	if opts.Estimate != nil {
 		// The estimate's run is given a deadline shorter than its own
-		// 2-minute budget, so an estimator still working at the deadline is
-		// refused rather than waited out (gt-floskq).
+		// budget (specEstimateTimeout), so an estimator still working at the
+		// lint's deadline is refused rather than waited out (gt-floskq).
 		wait := opts.EstimateWait
 		if wait <= 0 {
 			wait = specLintEstimateWait
