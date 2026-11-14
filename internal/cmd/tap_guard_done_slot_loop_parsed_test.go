@@ -1,3 +1,9 @@
+// Verdict-change record for the move to parsedTokens (gt-ppuk8j, reviewed at
+// gt-x5gkqj). The guard's production reader and shellTokenize give the same
+// verdict for every command in doneSlotLoopCommands, so the move changed no
+// verdict on that set: no tightening and no loosening. No test asserts the
+// equality over the set; TestDoneSlotLoopParsedVerdictNeverLoosens asserts only
+// that the parsed reading never loosens.
 package cmd
 
 import (
@@ -166,11 +172,14 @@ func TestDoneSlotLoopProductionReader(t *testing.T) {
 	}
 }
 
-// TestDoneSlotLoopParsedVerdictNeverLoosens proves, over every command the
-// parser reads, that the guard's verdict through parsedTokens is never less
-// strict than the shellTokenize verdict. A command whose parsed reading would
-// allow what shellTokenize refuses is routed to shellTokenize by
-// doneSlotLoopParsedUnsafe, so the property holds for it too.
+// TestDoneSlotLoopParsedVerdictNeverLoosens checks, over the commands in
+// doneSlotLoopCommands, that the guard's verdict through parsedTokens is never
+// less strict than the shellTokenize verdict. That set is a sample of the
+// commands the parser reads, so the check is not a proof over every readable
+// command. A command whose parsed reading would allow what shellTokenize refuses
+// is routed to shellTokenize by doneSlotLoopParsedUnsafe; that routing rule is
+// the argument for the commands outside the sample, and the subtests below
+// exercise it only on the sampled set.
 func TestDoneSlotLoopParsedVerdictNeverLoosens(t *testing.T) {
 	t.Parallel()
 	commands := doneSlotLoopCommands(t)
