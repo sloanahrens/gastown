@@ -45,6 +45,9 @@ type fakeBdBase struct {
 	regErr   error
 	credErr  error
 	writeErr error
+	townErr  error
+	// badRegistry makes the registry seam answer a scheme Validate refuses.
+	badRegistry bool
 
 	// pin is the pin file's bytes; pinMissing makes ReadPin report not-exist.
 	pin        []byte
@@ -62,10 +65,18 @@ type fakeBdBase struct {
 // seams returns the fake as the command's seams.
 func (f *fakeBdBase) seams() updateBdBaseSeams {
 	return updateBdBaseSeams{
-		FindTownRoot: func() (string, error) { return "/town", nil },
+		FindTownRoot: func() (string, error) {
+			if f.townErr != nil {
+				return "", f.townErr
+			}
+			return "/town", nil
+		},
 		Registry: func(string) (imagevalues.Registry, error) {
 			if f.regErr != nil {
 				return imagevalues.Registry{}, f.regErr
+			}
+			if f.badRegistry {
+				return imagevalues.Registry{Scheme: "ftp", Host: "forgejo:3000", Owner: "bot-registry"}, nil
 			}
 			return testBdBaseRegistry, nil
 		},
@@ -106,7 +117,14 @@ func (f *fakeBdBase) seams() updateBdBaseSeams {
 // output and error.
 func runBdBase(t *testing.T, f *fakeBdBase, args ...string) (string, error) {
 	t.Helper()
-	cmd := newUpdateBdBaseCmd(f.seams())
+	return runBdBaseSeams(t, f.seams(), args...)
+}
+
+// runBdBaseSeams runs `gt update bd-base` over seams with args and returns its
+// output and error.
+func runBdBaseSeams(t *testing.T, seams updateBdBaseSeams, args ...string) (string, error) {
+	t.Helper()
+	cmd := newUpdateBdBaseCmd(seams)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -207,6 +225,39 @@ func TestUpdateBdBaseReportsAFailedPinWrite(t *testing.T) {
 	}
 }
 
+// TestUpdateBdBaseRefusesUnwiredSeams: a command whose seam is not wired refuses
+// before it reads or writes anything, so it never reports a read it did not make.
+func TestUpdateBdBaseRefusesUnwiredSeams(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		unwire func(*updateBdBaseSeams)
+	}{
+		{name: "town lookup", unwire: func(s *updateBdBaseSeams) { s.FindTownRoot = nil }},
+		{name: "registry", unwire: func(s *updateBdBaseSeams) { s.Registry = nil }},
+		{name: "credential reader", unwire: func(s *updateBdBaseSeams) { s.Credentials = nil }},
+		{name: "tag reader", unwire: func(s *updateBdBaseSeams) { s.TagDigest = nil }},
+		{name: "pin reader", unwire: func(s *updateBdBaseSeams) { s.ReadPin = nil }},
+		{name: "pin writer", unwire: func(s *updateBdBaseSeams) { s.WritePin = nil }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeBdBase{digest: testBdBaseDigest, found: true, pinMissing: true}
+			seams := f.seams()
+			tc.unwire(&seams)
+
+			out, err := runBdBaseSeams(t, seams, "--sha", testBdBaseSHA, "--pin", testBdBasePin)
+			if err == nil || !strings.Contains(err.Error(), "is wired") {
+				t.Fatalf("gt update bd-base with no %s wired: err %v (output %q), want a not-wired refusal", tc.name, err, out)
+			}
+			if f.tagReads != 0 || len(f.pinWrites) != 0 {
+				t.Errorf("an unwired command read the tag %d times and wrote %d pins, want none", f.tagReads, len(f.pinWrites))
+			}
+		})
+	}
+}
+
 // TestUpdateBdBaseRefuses: an answer the command cannot pin is refused, and the
 // pin file is never written or replaced.
 func TestUpdateBdBaseRefuses(t *testing.T) {
@@ -225,6 +276,8 @@ func TestUpdateBdBaseRefuses(t *testing.T) {
 		{name: "registry answers an uppercase digest", f: fakeBdBase{found: true, digest: "sha256:" + strings.Repeat("AB", 32)}},
 		{name: "registry read fails", f: fakeBdBase{found: true, digest: testBdBaseDigest, readErr: errors.New("the registry answered HTTP 500")}},
 		{name: "registry cannot be resolved", f: fakeBdBase{regErr: errors.New("no registry")}},
+		{name: "town root cannot be found", f: fakeBdBase{townErr: errors.New("no town")}},
+		{name: "registry names no usable scheme", f: fakeBdBase{found: true, digest: testBdBaseDigest, badRegistry: true}, want: "scheme"},
 		{name: "viewer credential cannot be read", f: fakeBdBase{found: true, digest: testBdBaseDigest, credErr: errors.New("no token file")}},
 		{name: "existing pin cannot be read", f: fakeBdBase{found: true, digest: testBdBaseDigest, pinReadErr: errors.New("permission denied")}},
 		{name: "short commit", f: fakeBdBase{found: true, digest: testBdBaseDigest}, args: []string{"--sha", "0123456789ab"}},
