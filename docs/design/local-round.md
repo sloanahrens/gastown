@@ -1,3 +1,5 @@
+> Status: historical (2026-11). Abandoned: the local round is retired by operator ruling 2026-11-14 (gt-dpl81b) — it repeated the landing review, and one seat waited eight minutes on it. Not maintained.
+
 # Local round: the polecat's om review before gt done
 
 A polecat can ask the daemon to run the landing reviewer over its branch head

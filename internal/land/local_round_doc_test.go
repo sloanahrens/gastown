@@ -44,6 +44,29 @@ func TestLocalRoundDocStatesTheRules(t *testing.T) {
 	}
 }
 
+// TestLocalRoundDocMarksTheRoundRetired pins gt-dpl81b: the operator retired the
+// local round on 2026-11-14, so the page opens with the Status line that says
+// so. A page whose first line loses the retirement, or the date, fails here.
+func TestLocalRoundDocMarksTheRoundRetired(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "design", "local-round.md"))
+	if err != nil {
+		t.Fatalf("read the local round design page: %v", err)
+	}
+	first := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			first = strings.TrimSpace(line)
+			break
+		}
+	}
+	for _, want := range []string{"Status:", "retired", "2026-11-14"} {
+		if !strings.Contains(first, want) {
+			t.Errorf("the local round design page's first line does not state %q: %q", want, first)
+		}
+	}
+}
+
 // wordForBound is n in words for the page's bound sentence, and fails the test
 // for a bound it has no word for so a raised bound cannot leave the page's
 // number unchecked.

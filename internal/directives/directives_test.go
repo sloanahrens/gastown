@@ -257,54 +257,21 @@ func TestPolecatDirectiveChecklistPointsAtRule17(t *testing.T) {
 	})
 }
 
-// TestPolecatDirectiveLocalRoundSection pins gt-k51hb1 and gt-e25lc0: the
-// "Local review round before gt done" section states when to run the preview
-// and what a skipped gate prints, and it points at docs/design/local-round.md
-// for the reply forms and the failure rule instead of restating syntax or gate
-// semantics that page owns.
-func TestPolecatDirectiveLocalRoundSection(t *testing.T) {
+// TestPolecatDirectiveDropsLocalRound pins gt-dpl81b: the operator retired the
+// local review round on 2026-11-14, so polecat.md no longer asks a polecat to
+// run the preview before submitting or to answer its findings. A restored
+// section, a restored ask, or the skipped-gate line fails here.
+func TestPolecatDirectiveDropsLocalRound(t *testing.T) {
 	t.Parallel()
 	text := readDirective(t, "polecat.md")
-	const heading = "\n## Local review round before gt done\n"
-	start := strings.Index(text, heading)
-	if start < 0 {
-		t.Fatal("polecat.md has no \"Local review round before gt done\" section")
-	}
-	section := text[start+len(heading):]
-	for _, want := range []struct {
-		name   string
-		phrase string
-	}{
-		{"when to run the preview", "After `make presubmit` and before `gt done`, run `gt review-preview`"},
-		{"the failure-rule pointer", "its Failure rule is what `gt done` refuses and what it lets through"},
-		{"the skipped gate", "local-round gate skipped:"},
-		{"the source-of-truth pointer", "docs/design/local-round.md"},
+	for _, ask := range []string{
+		"## Local review round before gt done",
+		"gt review-preview",
+		"LOCAL ROUND",
+		"local-round gate skipped:",
 	} {
-		t.Run(want.name, func(t *testing.T) {
-			t.Parallel()
-			if !strings.Contains(section, want.phrase) {
-				t.Errorf("the local review round section does not state %q (%q)", want.name, want.phrase)
-			}
-		})
+		if strings.Contains(text, ask) {
+			t.Errorf("polecat.md still asks a polecat to run the retired local round: %q", ask)
+		}
 	}
-	t.Run("points at the design page instead of restating the reply syntax", func(t *testing.T) {
-		t.Parallel()
-		for _, copy := range []string{"gt review-preview reply <id>", "--fixed", "--disputed"} {
-			if strings.Contains(section, copy) {
-				t.Errorf("the local review round section restates the reply syntax docs/design/local-round.md owns: %q", copy)
-			}
-		}
-	})
-	t.Run("points at the failure rule instead of restating which findings block", func(t *testing.T) {
-		t.Parallel()
-		for _, copy := range []string{
-			"`gt done` refuses while the last round",
-			"Minor and info findings never block",
-			"no round at all, never blocks",
-		} {
-			if strings.Contains(section, copy) {
-				t.Errorf("the local review round section restates the failure rule docs/design/local-round.md owns: %q", copy)
-			}
-		}
-	})
 }
