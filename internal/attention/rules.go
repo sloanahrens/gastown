@@ -156,6 +156,10 @@ const (
 	// sandbox is deleted (gt-zapy97).
 	RuleSeatSandboxStale = "sandbox.seat_stale"
 
+	// RuleSeatUnreachable is a seat whose session check has failed for five
+	// minutes (gt-q6hafz).
+	RuleSeatUnreachable = "seat.unreachable"
+
 	// RuleStoryPointsDrift is the story point estimator's drift below its bar,
 	// and the measure that could not be read: the estimate no longer ranks
 	// landings the way the measured polecat time does, so dispatch planning
@@ -268,6 +272,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A stale seat sandbox blocks its seat name for every sling: the overseer
 	// is woken to delete the sandbox and free the name (gt-zapy97).
 	RuleSeatSandboxStale: flagsWake,
+	// A seat no check has reached for five minutes may hold its bead with
+	// nothing running on it: the overseer is woken to read the last error and
+	// release or restart the seat (gt-q6hafz).
+	RuleSeatUnreachable: flagsWake,
 	// A drift item and its unreadable twin are the estimator's own calibration
 	// to look at, not a page: the next retrain is the fix, and the queue is
 	// where the overseer reads it (gt-my0o23).
@@ -385,6 +393,7 @@ var kindRules = map[Kind]string{
 	KindHoldStale:                RuleHoldStale,
 	KindSandboxPending:           RuleSandboxPending,
 	KindSeatSandboxStale:         RuleSeatSandboxStale,
+	KindSeatUnreachable:          RuleSeatUnreachable,
 	KindStoryPointsDrift:         RuleStoryPointsDrift,
 }
 

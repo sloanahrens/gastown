@@ -62,7 +62,7 @@ func TestPolecatHealthLogsSlowSeats(t *testing.T) {
 	d, logs, _ := seatTown(t, map[string][]string{"myr": {"amber", "birch", "cedar"}},
 		map[string]time.Duration{"amber": 3 * time.Second, "birch": 100 * time.Millisecond})
 
-	d.checkRigPolecatHealth("myr", &seatTimes{})
+	d.checkRigPolecatHealth("myr", &seatTimes{}, &seatReadSet{})
 
 	got := logs.String()
 	if want := "polecat-health: myr/amber took 3s (tmux 3s in 1 call, bd 0s in 0 calls)"; !strings.Contains(got, want) {
@@ -83,8 +83,8 @@ func TestPolecatHealthSummaryNamesTheSlowestThree(t *testing.T) {
 		map[string]time.Duration{"p1": 4 * time.Second, "p2": time.Second, "p3": 6 * time.Second, "p4": 3 * time.Second, "p5": 9 * time.Second})
 	times := &seatTimes{}
 
-	d.checkRigPolecatHealth("rigA", times)
-	d.checkRigPolecatHealth("rigB", times)
+	d.checkRigPolecatHealth("rigA", times, &seatReadSet{})
+	d.checkRigPolecatHealth("rigB", times, &seatReadSet{})
 
 	want := "polecat-health: 5 seats in 2 rigs; slowest rigB/p5 9s, rigA/p3 6s, rigA/p1 4s"
 	if got := times.summary(); got != want {
@@ -114,7 +114,7 @@ func TestPolecatHealthTimingChangesNothingElse(t *testing.T) {
 	t.Parallel()
 	d, logs, tm := seatTown(t, map[string][]string{"myr": {"amber", "birch", "cedar"}}, nil)
 
-	d.checkRigPolecatHealth("myr", &seatTimes{})
+	d.checkRigPolecatHealth("myr", &seatTimes{}, &seatReadSet{})
 
 	if len(tm.asked) != 3 || !strings.Contains(tm.asked[0], "amber") || !strings.Contains(tm.asked[1], "birch") || !strings.Contains(tm.asked[2], "cedar") {
 		t.Errorf("%s: sessions asked in order %v, want amber, birch, cedar", t.Name(), tm.asked)

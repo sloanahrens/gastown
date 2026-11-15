@@ -294,6 +294,12 @@ type Daemon struct {
 	// only.
 	lastAttention *attentionCache
 
+	// seatUnreachable is the polecat-health pass's outage tracker, and the
+	// items the attention tick's collector reads from it
+	// (seat_unreachable_patrol.go, gt-q6hafz). The pass and the collector run
+	// on different goroutines, so the watch takes its own lock.
+	seatUnreachable seatUnreachableWatch
+
 	// controlNodes holds the control cluster's node names between attention
 	// ticks, for controlNodeNameReuse (see controlNodeNames). Readings are never
 	// held here.
@@ -4068,28 +4074,49 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 // This provides faster recovery than waiting for GUPP timeout or Witness detection.
 func (d *Daemon) checkPolecatSessionHealth() {
 	times := &seatTimes{}
+	reads := &seatReadSet{}
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.checkRigPolecatHealth(rigName, times)
+		d.checkRigPolecatHealth(rigName, times, reads)
 		return nil
 	})
 	if len(times.seats) > 0 {
 		d.logger.Println(times.summary())
 	}
+	// The whole pass's session reads go to the seat-unreachable tracker at
+	// once: it names the seats a run of unreadable checks has kept silent, and
+	// a read of only part of the town would read the unsampled seats as gone
+	// (gt-q6hafz).
+	d.seatUnreachable.observe(d.clk().Now(), reads)
 }
 
-// checkRigPolecatHealth checks polecat session health for a specific rig.
-func (d *Daemon) checkRigPolecatHealth(rigName string, times *seatTimes) {
+// checkRigPolecatHealth checks polecat session health for a specific rig,
+// collecting the seats' session reads into reads for the seat-unreachable
+// watch the pass takes at its end (gt-q6hafz).
+func (d *Daemon) checkRigPolecatHealth(rigName string, times *seatTimes, reads *seatReadSet) {
 	// Get polecat directories for this rig
 	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
 	polecats, err := listPolecatWorktrees(polecatsDir)
 	if err != nil {
-		return // No polecats directory - rig might not have polecats
+		if !errors.Is(err, os.ErrNotExist) {
+			// A list that could not be read says nothing about this rig's
+			// seats; a missing directory says the rig has none.
+			reads.unlisted()
+		}
+		return
 	}
 
 	for _, polecatName := range polecats {
 		tm := &seatTimer{}
 		start := d.clk().Now()
-		d.checkPolecatHealthTimed(rigName, polecatName, tm)
+		read, checked := d.checkPolecatHealthTimed(rigName, polecatName, tm)
+		if checked {
+			reads.add(read)
+		} else {
+			// The seat was listed and left before its session check: the pass
+			// has no read for it, and the tracker must not read that quiet
+			// seat as released (gt-q6hafz).
+			reads.skip(rigName, polecatName)
+		}
 		took := d.clk().Since(start)
 		times.add(rigName, polecatName, took)
 		if took >= slowSeatCheck {
@@ -4153,8 +4180,10 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 }
 
 // checkPolecatHealthTimed is checkPolecatHealth charging its tmux and bd calls
-// to tm (gt-2a5z6).
-func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTimer) {
+// to tm (gt-2a5z6). read and checked are the seat's session read for the
+// seat-unreachable tracker, reported only when the check asked the session
+// (gt-q6hafz).
+func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTimer) (read seatRead, checked bool) {
 	// The seat's intent record says whether it is held and, when a writer
 	// set it, what work it holds. It is read before tmux and never from
 	// Dolt, and an unreadable record is a hold (fail closed). A polecat the
@@ -4223,8 +4252,10 @@ func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTi
 	// Check if tmux session exists
 	var sessionAlive bool
 	d.timeSeatCall(tm, seatTmux, func() { sessionAlive, err = d.tmux.HasSession(sessionName) })
+	read, checked = seatRead{Rig: rigName, Polecat: polecatName}, true
 	if err != nil {
 		d.logger.Printf("Error checking session %s: %v", sessionName, err)
+		read.Bead, read.Err = d.seatHookedBead(rigName, polecatName, rec.WorkBead, tm), err
 		return
 	}
 
@@ -4367,6 +4398,7 @@ func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTi
 		return
 	}
 	d.logger.Printf("Crash of %s/%s not restarted: patrol_scan does not cover rig %s", rigName, polecatName, rigName)
+	return
 }
 
 // seatHeldOnEscalation reports whether a polecat's own record says it stopped

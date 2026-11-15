@@ -164,6 +164,10 @@ const (
 	// failure phase, so its seat name fails every sling drawn for it until the
 	// sandbox is deleted (gt-zapy97).
 	KindSeatSandboxStale Kind = "seat-sandbox-stale"
+	// KindSeatUnreachable: a seat's session has not answered the daemon's
+	// session check for five minutes, so nobody may be running the bead the
+	// seat holds (gt-q6hafz).
+	KindSeatUnreachable Kind = "seat-unreachable"
 	// KindStoryPointsDrift: the story point estimator's estimate no longer ranks
 	// landings the way the measured polecat time does, or the drift measure
 	// cannot be read (gt-my0o23).
@@ -185,8 +189,8 @@ func Kinds() []Kind {
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindUpdateRolledBack,
-		KindStoryPointsDrift,
+		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
+		KindUpdateRolledBack, KindStoryPointsDrift,
 	}
 }
 

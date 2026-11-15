@@ -375,6 +375,10 @@ type attentionSources struct {
 	// storyPointsDrift reads the story point estimator's drift measure over the
 	// newest extract at a tick's time (attention_story_points_drift.go).
 	storyPointsDrift func(now time.Time) (metrics.StoryPointsDriftRead, error)
+	// seatUnreachable is what the polecat-health pass's tracker raised, which
+	// the seat-unreachable collector queues (seat_unreachable_patrol.go,
+	// gt-q6hafz).
+	seatUnreachable func() []attention.Item
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -722,6 +726,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A seat's gateway sandbox left in a failure phase, which blocks the
 		// seat name every sling draws (gt-zapy97).
 		{kind: attention.KindSeatSandboxStale, collect: s.collectStaleSeatSandboxes, owns: seatSandboxStaleItem},
+		// A seat whose session has not answered the polecat-health check for
+		// five minutes, found by the pass before this tick (gt-q6hafz).
+		{kind: attention.KindSeatUnreachable, collect: s.collectSeatUnreachable},
 		// The story point estimator's drift over the newest extract's landings,
 		// and the measure that could not be read (gt-my0o23).
 		{kind: attention.KindStoryPointsDrift, collect: s.collectStoryPointsDrift},
@@ -763,6 +770,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
 	s.pairReady = d.pairReady.observed
+	// A polecat-health pass that is off raises nothing, so its items clear
+	// rather than outliving the patrol that asked for them (gt-q6hafz).
+	if d.isPatrolActive("polecat-health") {
+		s.seatUnreachable = d.seatUnreachable.observed
+	}
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,
