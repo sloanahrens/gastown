@@ -161,6 +161,41 @@ func (g *Git) GitDir() (string, error) {
 	return g.run("rev-parse", "--absolute-git-dir")
 }
 
+// OperationInProgress reports the operation the worktree is in the middle of,
+// "merge in progress" or "rebase in progress", or "" when it is in none.
+//
+// It asks git, never this host's filesystem, so it answers for a working
+// directory that lives where the handle's runner runs, such as a clone inside a
+// sandbox. Each marker is a file git keeps in the worktree's own git directory
+// for the life of the operation: MERGE_HEAD for a merge, rebase-merge/onto for a
+// merge-backed rebase and rebase-apply/onto for an apply-backed one. onto is
+// written when git starts the rebase and kept until it ends, so it names a
+// rebase stopped at any step, a bare break included.
+//
+// `git rev-parse --revs-only <marker>` prints the commit the marker holds, or
+// nothing at all when the marker is absent, and exits 0 either way. Absence is
+// therefore a stdout answer and not an exit status, which is what lets the
+// probe run through a sandbox runner that cannot carry one; a call that fails is
+// an error, never an absent marker, so a check that could not run never reads as
+// a check that passed. A marker file that holds no commit prints nothing as
+// well and reads as absent.
+func (g *Git) OperationInProgress() (string, error) {
+	for _, op := range []struct{ marker, name string }{
+		{"MERGE_HEAD", "merge"},
+		{"rebase-merge/onto", "rebase"},
+		{"rebase-apply/onto", "rebase"},
+	} {
+		marker, err := g.run("rev-parse", "--revs-only", op.marker)
+		if err != nil {
+			return "", fmt.Errorf("read the %s marker %s: %w", op.name, op.marker, err)
+		}
+		if marker != "" {
+			return op.name + " in progress", nil
+		}
+	}
+	return "", nil
+}
+
 // CommonDir returns the absolute path of the git directory workDir's
 // repository shares with all its worktrees: a bare repository itself, or the
 // main checkout's .git. Its info/exclude is the one git reads in every

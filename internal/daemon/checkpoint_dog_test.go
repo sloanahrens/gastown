@@ -609,8 +609,15 @@ func TestCheckpointWorktreeSkipsARebaseInProgress(t *testing.T) {
 			workDir, _, g := checkpointClone(t, d, map[string]string{"a.go": "package a\n"})
 			before := headOf(t, g)
 			writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// half-replayed\n"})
+			// git writes the commit the rebase replays onto into the marker
+			// directory's onto file when the rebase starts and keeps it until the
+			// rebase ends; the probe reads that file.
 			if err := os.MkdirAll(filepath.Join(workDir, ".git", marker), 0o755); err != nil {
 				t.Fatalf("mkdir %s: %v", marker, err)
+			}
+			onto := before + "\n"
+			if err := os.WriteFile(filepath.Join(workDir, ".git", marker, "onto"), []byte(onto), 0o644); err != nil {
+				t.Fatalf("write %s/onto: %v", marker, err)
 			}
 
 			if d.checkpointWorktree(workDir, "rig", "polecat") {

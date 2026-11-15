@@ -2,11 +2,23 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
+
+// hostGitDir reads the git directory of a handle opened on this host, which is
+// how these tests tell one handle from another. The daemon seam does not declare
+// GitDir; every handle the daemon opens still has it.
+func hostGitDir(g daemonGit) (string, error) {
+	reader, ok := g.(interface{ GitDir() (string, error) })
+	if !ok {
+		return "", fmt.Errorf("the daemon handle %T cannot read its git directory", g)
+	}
+	return reader.GitDir()
+}
 
 // overrunSeatGit is the one seam that picks the git handle the stop's save,
 // dirty check, push and reset run over. A host seat gets its worktree's handle;
@@ -15,7 +27,7 @@ import (
 func TestOverrunSeatGit_HostSeatGetsItsWorktreeHandle(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
-	wantDir, err := w.git().GitDir()
+	wantDir, err := hostGitDir(w.git())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +51,7 @@ func TestOverrunSeatGit_HostSeatGetsItsWorktreeHandle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("overrunSeatGit = %v, want the host worktree's handle", err)
 			}
-			gotDir, err := g.GitDir()
+			gotDir, err := hostGitDir(g)
 			if err != nil {
 				t.Fatalf("the returned handle cannot read its git directory: %v", err)
 			}

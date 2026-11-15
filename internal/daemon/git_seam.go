@@ -35,10 +35,11 @@ type daemonGit interface {
 	Commit(message string) error
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
 
-	// GitDir locates the directory that holds a worktree's MERGE_HEAD and
-	// rebase-* markers, so the checkpoint dog can tell a mid-conflict
-	// worktree from a dirty one (gt-kbp1t).
-	GitDir() (string, error)
+	// OperationInProgress names the merge or rebase a worktree is in the middle
+	// of, so the checkpoint dog can tell a mid-conflict worktree from a dirty
+	// one (gt-kbp1t). It asks git through the handle's runner, so it answers for
+	// a sandbox clone as well as a host worktree (gt-m5mwdv).
+	OperationInProgress() (string, error)
 	git.RevertReader
 
 	// The JSONL backup repository.
