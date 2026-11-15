@@ -394,7 +394,7 @@ func TestParseDoltCoresIgnoresTestServers(t *testing.T) {
 	const town = "  40.0 /opt/homebrew/bin/dolt sql-server --config /Users/user/gt/.dolt-data/config.yaml\n"
 	for name, test := range map[string]string{
 		"temporary data dir":            "  95.0 dolt sql-server --data-dir /tmp/TestFoo123/001/data\n",
-		"temporary data dir as =":       "  95.0 dolt sql-server --data-dir=/var/folders/ab/xyz/T/TestFoo/data\n",
+		"temporary data dir as =":       "  95.0 dolt sql-server --data-dir=/private/var/folders/ab/xyz/T/TestFoo/data\n",
 		"temporary config":              "  95.0 /usr/bin/dolt sql-server --config /var/folders/ab/xyz/T/gt-test/config.yaml\n",
 		"explicit port":                 "  95.0 dolt sql-server --port 33307 --data-dir /x\n",
 		"explicit port as =":            "  95.0 dolt sql-server --port=33307\n",

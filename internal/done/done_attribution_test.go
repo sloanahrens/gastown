@@ -34,7 +34,7 @@ func TestStripAttributionLines(t *testing.T) {
 		},
 		{
 			name:        "signed-off-by naming anthropic",
-			message:     "fix: thing\n\nsigned-off-by: Anthropic Bot <bot@example.com>",
+			message:     "fix: thing\n\nsigned-off-by: Anthropic Bot <noreply@anthropic.com>",
 			want:        "fix: thing",
 			wantRemoved: 1,
 		},
