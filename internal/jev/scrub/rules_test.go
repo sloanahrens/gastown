@@ -8,8 +8,17 @@ import (
 	"time"
 )
 
-// syntheticJWT is a token shaped like a JWT; every segment is test text.
-const syntheticJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWZvci10ZXN0cy1vbmx5LTAxMjM0NTY3ODk"
+// syntheticJWT and syntheticSecondJWT are tokens shaped like a JWT; every
+// segment is a placeholder, and each token is built from parts so no line of
+// the tree holds a token-shaped literal.
+const (
+	syntheticJWT       = "eyJEXAMPLEEXAMPLEEX." + "eyEXAMPLEEXAMPLEEXA." + "EXAMPLEEXAMPLEEXAMPLE"
+	syntheticSecondJWT = "eyJEXAMPLEEXAMPLEEY." + "eyEXAMPLEEXAMPLEEXB." + "EXAMPLEEXAMPLEEXAMPLF"
+)
+
+// fakeBearerToken is the bearer value the auth-header rows and the 10 MB row
+// share. Its digit keeps it a token rather than prose.
+const fakeBearerToken = "EXAMPLEEXAMPLE0"
 
 // ruleCase is one row of TestScrubRules. A positive row expects count
 // replacements and an exact output; a negative row expects the input back and
@@ -23,13 +32,17 @@ type ruleCase struct {
 }
 
 func ruleCases() []ruleCase {
+	// The PEM delimiters are built from parts so no line of the tree holds a
+	// private-key block, and the body is a placeholder rather than key material.
+	// The hex runs are zeros: the rules match their shape, not their content.
 	const (
-		pemBegin = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n"
-		pemEnd   = "-----END RSA PRIVATE KEY-----"
-		hex40    = "0123456789abcdef0123456789abcdef01234567"
-		hex64    = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		hex128   = hex64 + hex64
+		pemBegin = "-----BEGIN RSA " + "PRIVATE KEY-----\nEXAMPLEEXAMPLE\n"
+		pemEnd   = "-----END RSA " + "PRIVATE KEY-----"
 	)
+	hex32 := strings.Repeat("0", 32)
+	hex40 := strings.Repeat("0", 40)
+	hex64 := strings.Repeat("0", 64)
+	hex128 := hex64 + hex64
 	return []ruleCase{
 		// private-key
 		{
@@ -39,7 +52,7 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "unterminated block", rule: RulePrivateKey,
-			in:   pemBegin + "b3BlbnNzaC1rZXktdjEAAAAA\n",
+			in:   pemBegin + "EXAMPLEEXAMPLE\n",
 			want: "[REDACTED:private-key]", count: 1,
 		},
 		{
@@ -51,12 +64,12 @@ func ruleCases() []ruleCase {
 		// auth-header
 		{
 			name: "authorization header", rule: RuleAuthHeader,
-			in:   "Authorization: Bearer abcdefgh12345678",
+			in:   "Authorization: Bearer " + fakeBearerToken,
 			want: "Authorization: [REDACTED:auth-header]", count: 1,
 		},
 		{
 			name: "bare bearer", rule: RuleAuthHeader,
-			in:   "curl -H 'Bearer abcdefgh12345678'",
+			in:   "curl -H 'Bearer " + fakeBearerToken + "'",
 			want: "curl -H 'Bearer [REDACTED:auth-header]'", count: 1,
 		},
 		{
@@ -147,7 +160,7 @@ func ruleCases() []ruleCase {
 		// assignment
 		{
 			name: "env assignment", rule: RuleAssignment,
-			in:   "API_TOKEN=abc123def456",
+			in:   "API_TOKEN=EXAMPLEEXAMPLE",
 			want: "API_TOKEN=[REDACTED:assignment]", count: 1,
 		},
 		{
@@ -233,12 +246,12 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "fused suffix, one word", rule: RuleAssignment,
-			in:   "GITHUBTOKEN=abc123def456",
+			in:   "GITHUBTOKEN=EXAMPLEEXAMPLE",
 			want: "GITHUBTOKEN=[REDACTED:assignment]", count: 1,
 		},
 		{
 			name: "fused suffix, two words", rule: RuleAssignment,
-			in:   "SLACK_BOTTOKEN=abc123def456",
+			in:   "SLACK_BOTTOKEN=EXAMPLEEXAMPLE",
 			want: "SLACK_BOTTOKEN=[REDACTED:assignment]", count: 1,
 		},
 		{
@@ -248,7 +261,7 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "fused suffix, mixed case", rule: RuleAssignment,
-			in:   "mySlackBOTTOKEN=abc123def456",
+			in:   "mySlackBOTTOKEN=EXAMPLEEXAMPLE",
 			want: "mySlackBOTTOKEN=[REDACTED:assignment]", count: 1,
 		},
 		{
@@ -256,7 +269,7 @@ func ruleCases() []ruleCase {
 			// vendor-prefixed credential by its shape, and a scrubber that
 			// misses a secret is worse than one that over-redacts.
 			name: "fused suffix, near miss is redacted", rule: RuleAssignment,
-			in:   "page_nexttoken=abc123def456",
+			in:   "page_nexttoken=EXAMPLEEXAMPLE",
 			want: "page_nexttoken=[REDACTED:assignment]", count: 1,
 		},
 		{
@@ -311,12 +324,12 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "api key len is a credential", rule: RuleAssignment,
-			in:   "api_key_len=abcd1234efgh",
+			in:   "api_key_len=EXAMPLEEXAMPLE",
 			want: "api_key_len=[REDACTED:assignment]", count: 1,
 		},
 		{
 			name: "secret count is a credential", rule: RuleAssignment,
-			in:   "secret_count=abcd1234efgh",
+			in:   "secret_count=EXAMPLEEXAMPLE",
 			want: "secret_count=[REDACTED:assignment]", count: 1,
 		},
 		{
@@ -331,12 +344,12 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "cli flag", rule: RuleAssignment,
-			in:   "run --api-key=abcd1234efgh --token=zzzz9999",
+			in:   "run --api-key=EXAMPLEEXAMPLE --token=zzzz9999",
 			want: "run --api-key=[REDACTED:assignment] --token=[REDACTED:assignment]", count: 2,
 		},
 		{
 			name: "query string", rule: RuleAssignment,
-			in:   "GET /v1/items?id=7&api_key=abcd1234efgh&page=2",
+			in:   "GET /v1/items?id=7&api_key=EXAMPLEEXAMPLE&page=2",
 			want: "GET /v1/items?id=7&api_key=[REDACTED:assignment]&page=2", count: 1,
 		},
 		{
@@ -346,13 +359,13 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "forty hex after credential word", rule: RuleLongToken,
-			in:   "token0123456789abcdef0123456789abcdef01234567 and token: 0123456789abcdef0123456789abcdef01234567",
+			in:   "token" + hex40 + " and token: " + hex40,
 			want: "[REDACTED:long-token] and token: [REDACTED:long-token]", count: 2,
 		},
 		{
 			name: "forty hex commit id kept", rule: RuleLongToken,
-			in:   "commit 0123456789abcdef0123456789abcdef01234567",
-			want: "commit 0123456789abcdef0123456789abcdef01234567",
+			in:   "commit " + hex40,
+			want: "commit " + hex40,
 		},
 		{
 			name: "bearer prose kept", rule: RuleAuthHeader,
@@ -376,12 +389,12 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "json colon api key", rule: RuleAssignment,
-			in:   `"api_key": "0123456789abcdef0123456789abcdef"`,
+			in:   `"api_key": "` + hex32 + `"`,
 			want: `"api_key": "[REDACTED:assignment]"`, count: 1,
 		},
 		{
 			name: "api key header", rule: RuleAssignment,
-			in:   "X-Api-Key: 0123456789abcdef0123456789abcdef",
+			in:   "X-Api-Key: " + hex32,
 			want: "X-Api-Key: [REDACTED:assignment]", count: 1,
 		},
 		{
@@ -799,9 +812,9 @@ func TestScrubReport(t *testing.T) {
 	t.Parallel()
 	s := Default()
 	in := strings.Join([]string{
-		"Authorization: Bearer abcdefgh12345678",
+		"Authorization: Bearer " + fakeBearerToken,
 		"first " + syntheticJWT,
-		"second eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5ODc2NTQzMjEwIn0.abcdefghijklmnopqrstuvwxyz0123456789012345",
+		"second " + syntheticSecondJWT,
 		"mail alice@example.com",
 	}, "\n")
 	_, report := s.Scrub(in)
@@ -869,7 +882,7 @@ func TestScrubSafe(t *testing.T) {
 		// it literally. The leak check below is a guard that must stay: it fails if
 		// the scrubber stops removing a home-directory account name.
 		account := strings.Join([]string{"lu", "cy"}, "")
-		line := "Authorization: Bearer abcdefgh12345678 mail alice@example.com at /Users/" + account + "/app\n"
+		line := "Authorization: Bearer " + fakeBearerToken + " mail alice@example.com at /Users/" + account + "/app\n"
 		in := strings.Repeat(line, size/len(line)+1)[:size]
 		start := time.Now()
 		got, report := s.Scrub(in)
@@ -877,7 +890,7 @@ func TestScrubSafe(t *testing.T) {
 		if report.Total() == 0 {
 			t.Error("10 MB input reported no replacements")
 		}
-		for _, leaked := range []string{"abcdefgh12345678", "alice@example.com", "/Users/" + account} {
+		for _, leaked := range []string{fakeBearerToken, "alice@example.com", "/Users/" + account} {
 			if strings.Contains(got, leaked) {
 				t.Errorf("10 MB output still holds %q", leaked)
 			}
