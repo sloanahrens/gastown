@@ -850,6 +850,19 @@ func TestStepDoneJSONStdoutIsOnlyJSON(t *testing.T) {
 // beads, so a seat or an instruction that still names a step finds nothing.
 // The call must print one line and exit 0 rather than fail on work it does not
 // have (gt-i7lsrk).
+// rootOnlyMolecule seeds the store with a molecule bonded root-only: issue type
+// molecule, no step children.
+func rootOnlyMolecule(t *testing.T) (*beadsfake.Fake, *beads.Issue) {
+	t.Helper()
+	fake := beadsfake.New()
+	fake.Seed(beads.Issue{ID: "gt-wisp-abc", Title: "mol-polecat-work", Type: moleculeIssueType})
+	root, err := fake.Show("gt-wisp-abc")
+	if err != nil {
+		t.Fatalf("show seeded molecule: %v", err)
+	}
+	return fake, root
+}
+
 func TestMoleculeStepDoneWithoutPouredSteps(t *testing.T) {
 	t.Parallel()
 
@@ -872,14 +885,10 @@ func TestMoleculeStepDoneWithoutPouredSteps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			fake := beadsfake.New()
-			root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
-			if err != nil {
-				t.Fatalf("create molecule root: %v", err)
-			}
+			fake, root := rootOnlyMolecule(t)
 			var stdout, stderr bytes.Buffer
 
-			err = stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: tt.call(root)}.run()
+			err := stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: tt.call(root)}.run()
 
 			if err != nil {
 				t.Fatalf("gt mol step done %s on a molecule with no steps = %v, want nil", tt.call(root), err)
@@ -891,6 +900,35 @@ func TestMoleculeStepDoneWithoutPouredSteps(t *testing.T) {
 				t.Errorf("stderr = %q, want nothing", stderr.String())
 			}
 		})
+	}
+}
+
+// TestMoleculeStepDoneWithoutPouredStepsJSON: a caller reading --json gets one
+// JSON object on stdout, so a root-only molecule reports action "no_steps"
+// rather than the human line breaking its parse (gt-i7lsrk).
+func TestMoleculeStepDoneWithoutPouredStepsJSON(t *testing.T) {
+	t.Parallel()
+
+	fake, root := rootOnlyMolecule(t)
+	var stdout, stderr bytes.Buffer
+
+	err := stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: root.ID + ".1", asJSON: true}.run()
+	if err != nil {
+		t.Fatalf("gt mol step done --json on a molecule with no steps = %v, want nil", err)
+	}
+
+	var got StepDoneResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout.String())
+	}
+	if got.StepID != root.ID+".1" || got.MoleculeID != root.ID || got.Action != "no_steps" {
+		t.Errorf("result = %+v, want step %s.1 in molecule %s with action no_steps", got, root.ID, root.ID)
+	}
+	if got.StepClosed || got.Complete {
+		t.Errorf("result = %+v, want nothing closed and not complete", got)
+	}
+	if !strings.Contains(stderr.String(), stepsNotTrackedLine) {
+		t.Errorf("stderr = %q, want the not-tracked line", stderr.String())
 	}
 }
 
@@ -943,11 +981,7 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 
 	poured := func(t *testing.T) (*beadsfake.Fake, *beads.Issue) {
 		t.Helper()
-		fake := beadsfake.New()
-		root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
-		if err != nil {
-			t.Fatalf("create molecule root: %v", err)
-		}
+		fake, root := rootOnlyMolecule(t)
 		if _, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: root.ID}); err != nil {
 			t.Fatalf("create step: %v", err)
 		}
@@ -982,6 +1016,24 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 			wantErr: "step not found",
 		},
 		{
+			name: "a plain bead that carries no steps",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake := beadsfake.New()
+				fake.Seed(beads.Issue{ID: "gt-plain", Title: "a task", Type: "task"})
+				return fake, "gt-plain"
+			},
+			wantErr: "cannot extract molecule ID",
+		},
+		{
+			name: "a step number under a plain bead",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake := beadsfake.New()
+				fake.Seed(beads.Issue{ID: "gt-plain", Title: "a task", Type: "task"})
+				return fake, "gt-plain.1"
+			},
+			wantErr: "step not found",
+		},
+		{
 			name: "a molecule root named while its steps are poured",
 			setup: func(t *testing.T) (stepReader, string) {
 				fake, root := poured(t)
@@ -1001,11 +1053,7 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 		{
 			name: "a step read that fails on a childless molecule",
 			setup: func(t *testing.T) (stepReader, string) {
-				fake := beadsfake.New()
-				root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
-				if err != nil {
-					t.Fatalf("create molecule root: %v", err)
-				}
+				fake, root := rootOnlyMolecule(t)
 				return failingStepShow{stepReader: fake, failID: root.ID + ".1", err: errors.New("store unavailable")}, root.ID + ".1"
 			},
 			wantErr: "store unavailable",
@@ -1040,9 +1088,8 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			reader, stepID := tt.setup(t)
-			var stdout bytes.Buffer
 
-			_, noSteps, err := resolveStepForDone(&stdout, reader, stepID)
+			_, noSteps, err := resolveStepForDone(reader, stepID)
 
 			if err == nil {
 				t.Fatalf("resolveStepForDone(%s) = nil error with noSteps %v, want a refusal", stepID, noSteps)
@@ -1053,9 +1100,6 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 			if noSteps {
 				t.Error("noSteps = true on a refusal")
 			}
-			if stdout.Len() != 0 {
-				t.Errorf("output = %q, want nothing", stdout.String())
-			}
 		})
 	}
 }
@@ -1065,15 +1109,11 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 func TestMoleculeStepDoneReportsAFailedLookup(t *testing.T) {
 	t.Parallel()
 
-	fake := beadsfake.New()
-	root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
-	if err != nil {
-		t.Fatalf("create molecule root: %v", err)
-	}
+	fake, root := rootOnlyMolecule(t)
 	fake.FailWith("show", errors.New("store unavailable"))
 	var stdout, stderr bytes.Buffer
 
-	err = stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: root.ID + ".1"}.run()
+	err := stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: root.ID + ".1"}.run()
 
 	if err == nil {
 		t.Fatal("a failed lookup = nil error, want the failure reported")
