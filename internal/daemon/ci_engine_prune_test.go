@@ -878,9 +878,11 @@ func TestCIEnginePruneFailureLineStderrIsBounded(t *testing.T) {
 
 // TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr: kubectl's own errors
 // about the pod, the context or the connection, and its report of the remote
-// command's status, are not the engine's stderr. A failed exec whose stderr is only
-// kubectl's is logged with its exit status alone, and when kubectl's line comes
-// before the program's, the program's line is the one logged.
+// command's status, are not the engine's stderr. The exit report names the status the
+// exec ended with, so a line naming another number, or reached with no status, is a
+// program's own line. A failed exec whose stderr is only kubectl's is logged with its
+// exit status alone, and when kubectl's line comes before the program's, the program's
+// line is the one logged.
 func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) {
 	t.Parallel()
 	const kubectlNotFound = `Error from server (NotFound): pods "runner-1" not found`
@@ -931,6 +933,10 @@ func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) 
 		"build cache prune, kubectl's exit report only": {
 			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlExitReport + "\n"},
 			marker: "the build cache prune", kubectl: kubectlExitReport, want: "",
+		},
+		"another program's line in the exit report's shape": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: "command terminated with exit code 2\nprogram line\n"},
+			marker: "the build cache prune", want: "command terminated with exit code 2",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1149,7 +1155,8 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 // A du that fails, prints nothing or prints a non-number is a failed run that says
 // so, and the removals still ran. A du that exits 1 is a failure whatever its
 // stdout, unless every stderr line is du's own vanishing-file report: a report cut
-// short, and kubectl's exit report with no du line beside it, are both failures.
+// short, kubectl's exit report with no du line beside it, and a line in that shape
+// naming a status other than the exec's (or reached with none), are failures.
 func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 	t.Parallel()
 	listing := engListing(t,
@@ -1198,6 +1205,14 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 		"du exits 1 with a line near kubectl's exit report": {
 			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: " + root + "/volumes/aaa: No such file or directory\ncommand terminated with exit code one\n"}},
 			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or directory)",
+		},
+		"du exits 1 with another program's exit report": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: " + root + "/volumes/aaa: No such file or directory\ncommand terminated with exit code 2\n"}},
+			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or directory)",
+		},
+		"a start failure with a line in the exit report's shape": {
+			engineRemoveAnswers{duReply: &cliReply{startErr: errors.New("exec: executable file not found in $PATH"), stderr: "command terminated with exit code 1\n"}},
+			"du of the data root failed (no exit status, stderr: command terminated with exit code 1)",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

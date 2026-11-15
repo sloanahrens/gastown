@@ -761,9 +761,9 @@ var ciEngineKlogHeader = regexp.MustCompile(`^[IWEF]\d{4} \d{2}:\d{2}:\d{2}\.\d+
 
 // ciEngineKubectlExitReport matches the line kubectl writes to stderr when the remote
 // command exits non-zero: kubectl's own report of the status, the decimal number ending
-// the line. Matching the whole sentence and its number keeps the recognizer off another
-// program's line; du's diagnostics on the same stream carry its "du: " prefix.
-var ciEngineKubectlExitReport = regexp.MustCompile(`^command terminated with exit code \d+$`)
+// the line. The number is the status the exec ended with, and kubectl exits with it, so
+// only that number makes the line kubectl's; another program can print the sentence too.
+var ciEngineKubectlExitReport = regexp.MustCompile(`^command terminated with exit code (\d+)$`)
 
 // ciEngineFailure names how an engine exec ended for the log: its exit status, then,
 // for a failed exec, the first line of its stderr. A nil error is exit status 0 with
@@ -773,19 +773,19 @@ func ciEngineFailure(err error, stderr []byte) string {
 		return "exit status 0"
 	}
 	status := ciEngineExitStatus(err)
-	if line := ciEngineStderrLine(stderr); line != "" {
+	if line := ciEngineStderrLine(err, stderr); line != "" {
 		return status + ", stderr: " + line
 	}
 	return status
 }
 
 // ciEngineStderrLine is the first line of an engine program's stderr, bounded for the
-// log. kubectl's own lines and blank lines are skipped; control and format characters,
-// bidi overrides and isolates among them, become spaces; the line is cut at
-// ciEngineStderrMax characters.
-func ciEngineStderrLine(stderr []byte) string {
+// log. kubectl's own lines, decided with err as ciEngineKubectlLine decides them, and
+// blank lines are skipped; control and format characters, bidi overrides and isolates
+// among them, become spaces; the line is cut at ciEngineStderrMax characters.
+func ciEngineStderrLine(err error, stderr []byte) string {
 	for _, raw := range strings.Split(string(stderr), "\n") {
-		if ciEngineKubectlLine(raw) {
+		if ciEngineKubectlLine(err, raw) {
 			continue
 		}
 		line := strings.TrimSpace(strings.Map(func(r rune) rune {
@@ -805,14 +805,32 @@ func ciEngineStderrLine(stderr []byte) string {
 	return ""
 }
 
-// ciEngineKubectlLine reports whether a stderr line is one kubectl printed itself.
-func ciEngineKubectlLine(line string) bool {
+// ciEngineKubectlLine reports whether a stderr line is one kubectl printed itself. The
+// exec's error decides the exit report: a line naming the status err reports is
+// kubectl's, and one naming any other number, or reached with no status at all, is
+// another program's own line.
+func ciEngineKubectlLine(err error, line string) bool {
 	for _, prefix := range ciEngineKubectlErrorPrefixes {
 		if strings.HasPrefix(line, prefix) {
 			return true
 		}
 	}
-	return ciEngineKlogHeader.MatchString(line) || ciEngineKubectlExitReport.MatchString(line)
+	return ciEngineKlogHeader.MatchString(line) || ciEngineKubectlExitReportLine(err, line)
+}
+
+// ciEngineKubectlExitReportLine reports whether line is kubectl's report of an exec that
+// ended with the status err carries.
+func ciEngineKubectlExitReportLine(err error, line string) bool {
+	m := ciEngineKubectlExitReport.FindStringSubmatch(line)
+	if m == nil {
+		return false
+	}
+	code, convErr := strconv.Atoi(m[1])
+	if convErr != nil {
+		return false
+	}
+	var status interface{ ExitCode() int }
+	return errors.As(err, &status) && status.ExitCode() == code
 }
 
 // ciEngineExec runs one program in the runner's engine container with argv as
@@ -832,7 +850,7 @@ func (d *Daemon) ciEngineExec(ctx context.Context, kubeconfig, kubeContext, pod 
 func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
 	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "du", "-sk", ciEngineRoot)
 	failed := func() error { return fmt.Errorf("du of the data root failed (%s)", ciEngineFailure(err, stderr)) }
-	if err != nil && !ciEngineDuVanished(stderr) {
+	if err != nil && !ciEngineDuVanished(err, stderr) {
 		return 0, failed()
 	}
 	fields := strings.Fields(string(out))
@@ -857,16 +875,16 @@ func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContex
 // any other kind. A report is du's own diagnosis, so it carries du's program prefix
 // and ends in the errno text; another program's line ending the same way is not one,
 // and its exit status stays a failure. kubectl's own lines are skipped, as
-// ciEngineFailure skips them. An empty stderr is not this case, so a bare non-zero
-// status with no diagnosis stays a failure.
-func ciEngineDuVanished(stderr []byte) bool {
+// ciEngineFailure skips them, and err decides which lines those are. An empty stderr is
+// not this case, so a bare non-zero status with no diagnosis stays a failure.
+func ciEngineDuVanished(err error, stderr []byte) bool {
 	const (
 		duPrefix = "du: "
 		vanished = ": No such file or directory"
 	)
 	lines := 0
 	for _, raw := range strings.Split(string(stderr), "\n") {
-		if ciEngineKubectlLine(raw) {
+		if ciEngineKubectlLine(err, raw) {
 			continue
 		}
 		line := strings.TrimSpace(raw)
