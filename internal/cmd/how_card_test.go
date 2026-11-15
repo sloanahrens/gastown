@@ -241,6 +241,27 @@ func TestHowCardCommandRunsTheCard(t *testing.T) {
 	}
 }
 
+// TestHowCardCommandRefusesACommandWithoutTheFlag checks runHowCmd fails closed
+// when the command it is given carries no --card flag: an unreadable flag is an
+// error, not a listing printed as if the card had not been asked for.
+func TestHowCardCommandRefusesACommandWithoutTheFlag(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	err := runHowCmd(cmd, nil)
+	if err == nil {
+		t.Fatal("runHowCmd ran without a --card flag, want an error")
+	}
+	if !strings.Contains(err.Error(), "card") {
+		t.Errorf("runHowCmd error %q does not name the flag", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCmd wrote %q before refusing", out.String())
+	}
+}
+
 // TestHowCardRefusesAnArgument checks that --card refuses a group or word
 // rather than printing the card as if the argument had chosen part of it.
 func TestHowCardRefusesAnArgument(t *testing.T) {
