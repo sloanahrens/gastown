@@ -164,6 +164,13 @@ func writeRunningImages(t *testing.T, town, commit string) {
 // check raises for that read.
 func (r *updateJobRig) pairFor(t *testing.T, green string, daemonPublished, polecatPublished bool) {
 	t.Helper()
+	r.pairForAt(t, green, updateTriggerTestTime, daemonPublished, polecatPublished)
+}
+
+// pairForAt is pairFor at now, so a test can raise a newer pair after the read
+// the check already made at an earlier time.
+func (r *updateJobRig) pairForAt(t *testing.T, green string, now time.Time, daemonPublished, polecatPublished bool) {
+	t.Helper()
 	digests := map[string]string{}
 	if daemonPublished {
 		digests[imagevalues.DaemonImage+"@"+green[:12]] = digestOf([]byte("daemon manifest"))
@@ -176,7 +183,7 @@ func (r *updateJobRig) pairFor(t *testing.T, green string, daemonPublished, pole
 	rigs := func() ([]pairReadyRig, error) {
 		return []pairReadyRig{{Rig: "gastown", Owner: pairOwner, Repo: pairRepo, API: api, Registry: reg, Git: r.git}}, nil
 	}
-	r.d.pairReady.run(context.Background(), r.town, updateTriggerTestTime, rigs, func(string, ...any) {})
+	r.d.pairReady.run(context.Background(), r.town, now, rigs, func(string, ...any) {})
 }
 
 // rollGitStub judges ancestry from a fixed table: the pairs it lists are
@@ -428,6 +435,79 @@ func TestUpdateJobAlreadyExistsIsAlreadyLaunched(t *testing.T) {
 	assert.Contains(t, r.logs.String(), "Job "+name+" is already launched")
 	assert.NotContains(t, r.logs.String(), "launch of the update Job failed")
 	assert.Equal(t, []byte("earlier"), r.cluster.made[name], "the existing Job was replaced")
+}
+
+// TestUpdateJobExistingPairIsNotDueAgain: a partial roll leaves the running values
+// naming the same pair, so the pair's Job is in the cluster but no new roll is due.
+// Past the suppression the launch bought, still inside the window that keeps the
+// roll due, the patrol reports that the roll already ran rather than asking the
+// cluster for the same Job and logging a roll that keeps starting.
+func TestUpdateJobExistingPairIsNotDueAgain(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// heldBefore is a Job in the cluster before the patrol's first cycle; when
+		// false the patrol creates it, and the pair is due again after the roll.
+		heldBefore bool
+	}{
+		{name: "the Job was in the cluster before the patrol", heldBefore: true},
+		{name: "the patrol created the Job", heldBefore: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			green := r.commits[2]
+			name := "gt-update-" + green[:12]
+			if tt.heldBefore {
+				r.cluster.made[name] = []byte("earlier")
+			}
+			r.pairFor(t, green, true, true)
+
+			r.d.triggerUpdate()
+			if tt.heldBefore {
+				// The launch that found the Job records the roll as already run,
+				// rather than leaving the next cycle to report it.
+				require.Contains(t, r.logs.String(), "not due — the roll for "+green[:12]+" already ran")
+			}
+			r.clock.Advance(updateLaunchSuppression + time.Minute)
+			r.d.triggerUpdate()
+
+			assert.Equal(t, []string{name}, r.cluster.calls, "a later cycle asked the cluster for the pair's Job")
+			assert.Equal(t, 1, strings.Count(r.logs.String(), "starting the update Job"), "a later cycle logged the roll as starting")
+			assert.Contains(t, r.logs.String(), "not due — the roll for "+green[:12]+" already ran")
+			assert.Equal(t, 0, *r.launches, "a pod started the detached child")
+		})
+	}
+}
+
+// TestUpdateJobNewerPairLaunchesItsOwnJob: the recorded pair stays quiet only
+// while it is the roll's target. A newer pair-ready commit is a new roll, so its
+// own Job is created.
+func TestUpdateJobNewerPairLaunchesItsOwnJob(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	// Both pair-ready commits are ahead of the running one, so the newest is the
+	// roll's target.
+	writeRunningImages(t, r.town, r.commits[0])
+	older := r.commits[1]
+	olderName := "gt-update-" + older[:12]
+	r.cluster.made[olderName] = []byte("earlier")
+	r.pairFor(t, older, true, true)
+
+	r.d.triggerUpdate()
+	require.Equal(t, []string{olderName}, r.cluster.calls, "the older pair's existing Job was not found first")
+
+	// A pair read past the check's own interval, and a heartbeat past the
+	// suppression the earlier launch bought, both still inside the 03:00 window.
+	later := pairReadyInterval + time.Minute
+	r.pairForAt(t, r.commits[2], updateTriggerTestTime.Add(later), true, true)
+	r.clock.Advance(later)
+	r.d.triggerUpdate()
+
+	newName := "gt-update-" + r.commits[2][:12]
+	assert.Equal(t, []string{olderName, newName}, r.cluster.calls, "a newer pair did not launch its own Job")
+	assert.Contains(t, r.logs.String(), "created Job "+newName)
 }
 
 // TestUpdateJobRefusedLaunchWaitsOutTheBackoff: a cluster that refuses the create

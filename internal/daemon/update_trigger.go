@@ -85,6 +85,11 @@ type updateTriggerState struct {
 	// the backoff after the next failure doubles with it (update_job.go).
 	jobFailedAt time.Time
 	jobFailures int
+	// jobExistsFor is the sha whose update Job this daemon knows the cluster
+	// holds, from a create that succeeded or answered AlreadyExists. The roll for
+	// that pair ran already, so it is reported not due rather than started again
+	// every suppression window (gt-hxicqb).
+	jobExistsFor string
 	// jobBound overrides updateJobCreateTimeout for a test that shortens the
 	// create's deadline; zero is the constant. Set before the heartbeat runs.
 	jobBound time.Duration
