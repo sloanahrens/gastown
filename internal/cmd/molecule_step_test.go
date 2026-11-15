@@ -846,6 +846,237 @@ func TestStepDoneJSONStdoutIsOnlyJSON(t *testing.T) {
 	})
 }
 
+// TestMoleculeStepDoneWithoutPouredSteps: a molecule bonded root-only pours no step
+// beads, so a seat or an instruction that still names a step finds nothing.
+// The call must print one line and exit 0 rather than fail on work it does not
+// have (gt-i7lsrk).
+func TestMoleculeStepDoneWithoutPouredSteps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// call returns the id the seat passes for this molecule.
+		call func(root *beads.Issue) string
+	}{
+		{
+			name: "a step number under the molecule",
+			call: func(root *beads.Issue) string { return root.ID + ".1" },
+		},
+		{
+			name: "the molecule root itself",
+			call: func(root *beads.Issue) string { return root.ID },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := beadsfake.New()
+			root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
+			if err != nil {
+				t.Fatalf("create molecule root: %v", err)
+			}
+			var stdout, stderr bytes.Buffer
+
+			err = stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: tt.call(root)}.run()
+
+			if err != nil {
+				t.Fatalf("gt mol step done %s on a molecule with no steps = %v, want nil", tt.call(root), err)
+			}
+			if got, want := stdout.String(), stepsNotTrackedLine+"\n"; got != want {
+				t.Errorf("stdout = %q, want the one line %q", got, want)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing", stderr.String())
+			}
+		})
+	}
+}
+
+// TestMoleculeStepDoneWithPouredStepsStillCompletes: a molecule that poured its steps
+// keeps the old behaviour, so the command still closes the named step
+// (gt-i7lsrk).
+func TestMoleculeStepDoneWithPouredStepsStillCompletes(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
+	if err != nil {
+		t.Fatalf("create molecule root: %v", err)
+	}
+	step, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: root.ID})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	// --json stops after the step is closed, before the next-step hand-off,
+	// which acts on the session rather than the store.
+	err = stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: step.ID, asJSON: true}.run()
+	if err != nil {
+		t.Fatalf("gt mol step done %s = %v, want nil", step.ID, err)
+	}
+
+	var got StepDoneResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout.String())
+	}
+	if got.StepID != step.ID || !got.StepClosed {
+		t.Errorf("result = %+v, want step %s closed", got, step.ID)
+	}
+	closed, err := fake.Show(step.ID)
+	if err != nil {
+		t.Fatalf("show step after done: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Errorf("step status = %q, want closed", closed.Status)
+	}
+}
+
+// TestMoleculeStepDoneRefusesWhatItCannotComplete: only a molecule that exists and
+// poured no steps reads as "not tracked". A bad id, a missing molecule and an
+// unreadable store stay errors, so a failed call never passes as done
+// (gt-i7lsrk).
+func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
+	t.Parallel()
+
+	poured := func(t *testing.T) (*beadsfake.Fake, *beads.Issue) {
+		t.Helper()
+		fake := beadsfake.New()
+		root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
+		if err != nil {
+			t.Fatalf("create molecule root: %v", err)
+		}
+		if _, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: root.ID}); err != nil {
+			t.Fatalf("create step: %v", err)
+		}
+		return fake, root
+	}
+
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T) (stepReader, string)
+		wantErr string
+	}{
+		{
+			name: "a step number the poured molecule does not have",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake, root := poured(t)
+				return fake, root.ID + ".9"
+			},
+			wantErr: "step not found",
+		},
+		{
+			name: "a molecule that does not exist",
+			setup: func(t *testing.T) (stepReader, string) {
+				return beadsfake.New(), "gt-wisp-gone.1"
+			},
+			wantErr: "step not found",
+		},
+		{
+			name: "an id that names no step and no molecule",
+			setup: func(t *testing.T) (stepReader, string) {
+				return beadsfake.New(), "gt-wisp-gone"
+			},
+			wantErr: "step not found",
+		},
+		{
+			name: "a molecule root named while its steps are poured",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake, root := poured(t)
+				return fake, root.ID
+			},
+			wantErr: "cannot extract molecule ID",
+		},
+		{
+			name: "a store whose answer is unknown",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake, root := poured(t)
+				fake.FailWith("show", errors.New("dolt is down"))
+				return fake, root.ID + ".1"
+			},
+			wantErr: "dolt is down",
+		},
+		{
+			name: "a step read that fails on a childless molecule",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake := beadsfake.New()
+				root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
+				if err != nil {
+					t.Fatalf("create molecule root: %v", err)
+				}
+				return failingStepShow{stepReader: fake, failID: root.ID + ".1", err: errors.New("store unavailable")}, root.ID + ".1"
+			},
+			wantErr: "store unavailable",
+		},
+		{
+			name: "a step listing that cannot be read",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake, root := poured(t)
+				return unreadableStepList{stepReader: fake}, root.ID + ".9"
+			},
+			wantErr: "listing molecule steps",
+		},
+		{
+			name: "a root whose step listing cannot be read",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake, root := poured(t)
+				return unreadableStepList{stepReader: fake}, root.ID
+			},
+			wantErr: "listing molecule steps",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reader, stepID := tt.setup(t)
+			var stdout bytes.Buffer
+
+			_, noSteps, err := resolveStepForDone(&stdout, reader, stepID)
+
+			if err == nil {
+				t.Fatalf("resolveStepForDone(%s) = nil error with noSteps %v, want a refusal", stepID, noSteps)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to mention %q", err, tt.wantErr)
+			}
+			if noSteps {
+				t.Error("noSteps = true on a refusal")
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("output = %q, want nothing", stdout.String())
+			}
+		})
+	}
+}
+
+// unreadableStepList answers Show from the store but fails the step listing, so
+// a done call cannot tell a root-only molecule from a poured one.
+type unreadableStepList struct {
+	stepReader
+}
+
+func (u unreadableStepList) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("listing molecule steps: store unavailable")
+}
+
+// failingStepShow fails Show for one id and answers the rest from the store,
+// standing in for a read that failed while the molecule itself is readable.
+type failingStepShow struct {
+	stepReader
+	failID string
+	err    error
+}
+
+func (f failingStepShow) Show(id string) (*beads.Issue, error) {
+	if id == f.failID {
+		return nil, f.err
+	}
+	return f.stepReader.Show(id)
+}
+
 // TestMoleculeCompleteEmptyAgentLeavesPinnedBeads: a role with no agent
 // identity filtered the pinned list by an empty assignee, which lists every
 // pinned bead, and set the first one open — another agent's handoff bead.
