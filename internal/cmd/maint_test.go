@@ -1119,3 +1119,379 @@ func TestMaintTargetsRefuseWithoutAHome(t *testing.T) {
 		})
 	}
 }
+
+// maintCloudRunner answers the calls the cloud target makes: cat of the two
+// files the plan reads, and the docker reads and removal. It records every call
+// and the environment it was handed, so a test drives the real target with no
+// daemon and no host file.
+type maintCloudRunner struct {
+	files  map[string]string
+	images string
+	catErr error
+	calls  [][]string
+	envs   [][]string
+}
+
+func (f *maintCloudRunner) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, append([]string{name}, args...))
+	f.envs = append(f.envs, env)
+	switch {
+	case name == "cat" && len(args) == 2:
+		if f.catErr != nil {
+			return nil, f.catErr
+		}
+		content, ok := f.files[args[1]]
+		if !ok {
+			return nil, fmt.Errorf("cat %s: no such file", args[1])
+		}
+		return []byte(content), nil
+	case name == "docker" && len(args) >= 2 && args[0] == "image" && args[1] == "ls":
+		return []byte(f.images), nil
+	case name == "docker" && len(args) >= 1 && args[0] == "ps":
+		return nil, nil
+	case name == "docker" && len(args) >= 2 && args[0] == "image" && args[1] == "rm":
+		return nil, nil
+	}
+	return nil, fmt.Errorf("unexpected call: %s %v", name, args)
+}
+
+// maintCloudImageID is the image id of the i-th row maintCloudImageRows makes.
+func maintCloudImageID(i int) string { return fmt.Sprintf("sha256:%064x", i) }
+
+// maintCloudImageRows is n fractals-nextjs tags as docker image ls prints them:
+// t1 the oldest and t<n> the newest, each a gigabyte on an image of its own, so
+// a plan keeping the newest five removes exactly t1's image.
+func maintCloudImageRows(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "{\"Repository\":\"fractals-nextjs\",\"Tag\":\"t%d\",\"ID\":%q,\"Size\":\"1GB\","+
+			"\"CreatedAt\":\"2026-11-%02d 00:00:00 +0000 UTC\"}\n", i, maintCloudImageID(i), i)
+	}
+	return b.String()
+}
+
+// writeMaintCloudTown writes the town config that names a cloud VM, and answers
+// the socket, the runner label list and the deploy workflow the plan reads.
+func writeMaintCloudTown(t *testing.T, dockerHost string) (town, labelsPath, deployPath string) {
+	t.Helper()
+	town = t.TempDir()
+	labelsPath = filepath.Join(town, "runner-labels")
+	deployPath = filepath.Join(town, "deploy.yaml")
+	settings := filepath.Join(town, "settings")
+	if err := os.MkdirAll(settings, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := fmt.Sprintf(`{"daemon":{"env":{%q:%q,%q:%q,%q:%q}}}`,
+		maintCloudDockerHostKey, dockerHost,
+		maintCloudLabelsKey, labelsPath,
+		maintCloudDeployKey, deployPath)
+	if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return town, labelsPath, deployPath
+}
+
+// maintCloudDeps is the deps the command builds from the town's real targets,
+// with the fake runner behind them, so a test drives runMaintIn's whole path
+// with no daemon.
+func maintCloudDeps(run diskmaint.Runner, home string) maintDepsBuilder {
+	return func(ctx context.Context, out io.Writer, town string, _ func(string) string, mode string) (maintDeps, error) {
+		targets, err := maintTargets(ctx, town, polecatimage.Config{}, 5, mode, run, home, out)
+		if err != nil {
+			return maintDeps{}, err
+		}
+		return maintDeps{
+			Targets: func() (map[string]diskmaint.Target, error) { return targets, nil },
+			Keep:    5,
+		}, nil
+	}
+}
+
+// maintSubcommand returns parent's subcommand named name, failing the test when
+// the command does not offer it.
+func maintSubcommand(t *testing.T, parent *cobra.Command, name string) *cobra.Command {
+	t.Helper()
+	for _, cmd := range parent.Commands() {
+		if cmd.Name() == name {
+			return cmd
+		}
+	}
+	t.Fatalf("%s offers no %q subcommand", parent.Name(), name)
+	return nil
+}
+
+// maintReadCloudLedger reads the run's ledger back, newest ten entries.
+func maintReadCloudLedger(t *testing.T, town string) []diskmaint.LedgerEntry {
+	t.Helper()
+	path := filepath.Join(town, ".runtime", "diskmaint", "ledger.jsonl")
+	entries, err := diskmaint.NewLedger(path, 0).Tail(10)
+	if err != nil {
+		t.Fatalf("reading the ledger: %v", err)
+	}
+	return entries
+}
+
+// TestMaintPlanCloudPrintsTheDaemonsDryRunPlan drives `gt maint plan cloud`
+// through the real command path: the town config names the VM's socket and the
+// two files the plan reads, and the fake runner answers the fake daemon. The
+// run prints the plan it would apply and records it as the dry run it was.
+func TestMaintPlanCloudPrintsTheDaemonsDryRunPlan(t *testing.T) {
+	t.Parallel()
+	town, labelsPath, deployPath := writeMaintCloudTown(t, "unix:///cloud/docker.sock")
+	runner := &maintCloudRunner{
+		files: map[string]string{
+			labelsPath: "node:docker://code.forgejo.org/oci/node:lts\n",
+			deployPath: "# the workflow names no image\n",
+		},
+		images: maintCloudImageRows(6),
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	err := maintRunIn(cmd, func() (string, error) { return town, nil }, maintCloudDeps(runner.run, t.TempDir()),
+		func(string) string { return "" }, maintModePlan, []string{maintTargetCloud})
+	if err != nil {
+		t.Fatalf("maintRunIn(plan cloud) error = %v, want none", err)
+	}
+	if !strings.Contains(out.String(), "cloud: 1 action(s), 5 kept") {
+		t.Errorf("plan output = %q, want the cloud plan's counts", out.String())
+	}
+	removed := maintCloudImageID(1)
+	if !strings.Contains(out.String(), "would remove-image "+removed) {
+		t.Errorf("plan output = %q, want the removal of %s", out.String(), removed)
+	}
+	entries := maintReadCloudLedger(t, town)
+	if len(entries) != 1 {
+		t.Fatalf("ledger = %+v, want one entry for the plan run", entries)
+	}
+	if e := entries[0]; e.Target != maintTargetCloud || e.Mode != maintLedgerModeDryRun || e.Planned != 1 || e.Done != 0 || e.Refused != "" {
+		t.Fatalf("ledger entry = %+v, want target cloud, mode dry-run, one planned, none done, no refusal", entries[0])
+	}
+}
+
+// TestMaintApplyCloudRemovesThroughTheDaemon drives `gt maint apply cloud`: the
+// subcommand is registered under maint, the apply removes the planned image by
+// id through the VM's socket, and the run lands as one apply line.
+func TestMaintApplyCloudRemovesThroughTheDaemon(t *testing.T) {
+	t.Parallel()
+	if got := maintSubcommand(t, maintCmd, maintModeApply).Use; got != "apply [target]" {
+		t.Fatalf("maint apply Use = %q, want it to take a target", got)
+	}
+	town, labelsPath, deployPath := writeMaintCloudTown(t, "unix:///cloud/docker.sock")
+	runner := &maintCloudRunner{
+		files: map[string]string{
+			labelsPath: "node:docker://code.forgejo.org/oci/node:lts\n",
+			deployPath: "# the workflow names no image\n",
+		},
+		images: maintCloudImageRows(6),
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+
+	err := maintRunIn(cmd, func() (string, error) { return town, nil }, maintCloudDeps(runner.run, t.TempDir()),
+		func(string) string { return "" }, maintModeApply, []string{maintTargetCloud})
+	if err != nil {
+		t.Fatalf("maintRunIn(apply cloud) error = %v, want none", err)
+	}
+	removed := maintCloudImageID(1)
+	want := []string{"docker", "image", "rm", "--no-prune", "--force", removed}
+	ran := false
+	for _, call := range runner.calls {
+		ran = ran || slices.Equal(call, want)
+	}
+	if !ran {
+		t.Fatalf("docker calls = %v, want %v: an apply removes the planned image by id", runner.calls, want)
+	}
+	entries := maintReadCloudLedger(t, town)
+	if len(entries) != 1 {
+		t.Fatalf("ledger = %+v, want one entry for the apply run", entries)
+	}
+	if e := entries[0]; e.Target != maintTargetCloud || e.Mode != maintModeApply || e.Planned != 1 || e.Done != 1 || e.BytesFreed != 1_000_000_000 {
+		t.Fatalf("ledger entry = %+v, want target cloud, mode apply, one planned and done, a gigabyte freed", entries[0])
+	}
+}
+
+// TestMaintCloudSocketComesFromTheTownConfig pins that the socket is the town
+// config's, not a constant: two towns with two settings read two daemons. A
+// town that names no socket has no cloud VM, so it gets no cloud target.
+func TestMaintCloudSocketComesFromTheTownConfig(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{"unix:///cloud/one.sock", "unix:///cloud/two.sock"} {
+		town, _, _ := writeMaintCloudTown(t, host)
+		runner := &maintCloudRunner{}
+		targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
+		if err != nil {
+			t.Fatalf("maintTargets() error = %v", err)
+		}
+		target, ok := targets[maintTargetCloud]
+		if !ok {
+			t.Fatalf("targets = %v, want %s beside the other targets", maintTargetNames(targets), maintTargetCloud)
+		}
+		if _, err := target.Measure(context.Background()); err != nil {
+			t.Fatalf("Measure() error = %v", err)
+		}
+		if want := "DOCKER_HOST=" + host; !slices.Contains(runner.envs[0], want) {
+			t.Fatalf("docker env = %v, want %q: the socket is the town config's", runner.envs[0], want)
+		}
+	}
+
+	town := t.TempDir()
+	writeMaintRigs(t, town, `{"version":1,"rigs":{"gastown":{"git_url":"u"}}}`)
+	targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	if _, ok := targets[maintTargetCloud]; ok {
+		t.Fatalf("targets = %v, want none: a town that names no cloud socket has no cloud VM", maintTargetNames(targets))
+	}
+}
+
+// TestMaintCloudRefusesSettingsItCannotUse pins the startup refusals: a socket
+// docker would be pointed at another host with, and a file path the plan would
+// read from whatever directory the command ran in.
+func TestMaintCloudRefusesSettingsItCannotUse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		settings string
+		want     string
+	}{
+		{"a socket on another host", `{"daemon":{"env":{"GT_CLOUD_DOCKER_HOST":"tcp://10.0.0.2:2375"}}}`, maintCloudDockerHostKey},
+		{"a socket with a relative path", `{"daemon":{"env":{"GT_CLOUD_DOCKER_HOST":"unix://cloud/docker.sock"}}}`, maintCloudDockerHostKey},
+		{"a relative runner label list", `{"daemon":{"env":{"GT_CLOUD_DOCKER_HOST":"unix:///cloud/docker.sock","GT_CLOUD_RUNNER_LABELS":"runner-labels"}}}`, maintCloudLabelsKey},
+		{"a relative deploy workflow", `{"daemon":{"env":{"GT_CLOUD_DOCKER_HOST":"unix:///cloud/docker.sock","GT_CLOUD_DEPLOY_WORKFLOW":"deploy.yaml"}}}`, maintCloudDeployKey},
+		{"a town config that does not parse", `{"daemon":`, "cloud settings"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			settings := filepath.Join(town, "settings")
+			if err := os.MkdirAll(settings, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(tc.settings), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("maintTargets() = %v, %v; want an error naming %q", maintTargetNames(targets), err, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaintCloudRecordsARefusedPlanOnce pins that a refused plan is one ledger
+// line in either mode and removes nothing: the plan never reaches Apply, so the
+// run's line is the only record of it.
+func TestMaintCloudRecordsARefusedPlanOnce(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, mode, wantMode string
+	}{
+		{"a dry run", maintModePlan, maintLedgerModeDryRun},
+		{"an apply", maintModeApply, maintModeApply},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, labelsPath, deployPath := writeMaintCloudTown(t, "unix:///cloud/docker.sock")
+			runner := &maintCloudRunner{
+				files: map[string]string{
+					labelsPath: "node:docker://code.forgejo.org/oci/node:lts\n",
+					deployPath: "# the workflow names no image\n",
+				},
+				catErr: errors.New("exit status 1"),
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			cmd.SetOut(io.Discard)
+
+			err := maintRunIn(cmd, func() (string, error) { return town, nil }, maintCloudDeps(runner.run, t.TempDir()),
+				func(string) string { return "" }, tc.mode, []string{maintTargetCloud})
+			if err == nil || !strings.Contains(err.Error(), "plan refused") {
+				t.Fatalf("maintRunIn(%s cloud) error = %v, want the refusal", tc.mode, err)
+			}
+			for _, call := range runner.calls {
+				if len(call) > 2 && call[0] == "docker" && call[1] == "image" && call[2] == "rm" {
+					t.Fatalf("a refused plan ran %v, want no removal", call)
+				}
+			}
+			entries := maintReadCloudLedger(t, town)
+			if len(entries) != 1 {
+				t.Fatalf("ledger = %+v, want one entry for the refused run", entries)
+			}
+			if e := entries[0]; e.Target != maintTargetCloud || e.Mode != tc.wantMode || e.Refused == "" {
+				t.Fatalf("ledger entry = %+v, want target cloud, mode %s and the refusal", entries[0], tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestMaintCloudPlanRefusesALedgerDirectoryItCannotMake pins that a plan of a
+// town with a cloud target refuses before it plans when the line it must record
+// could not be written: the run would otherwise leave no record of what it
+// decided.
+func TestMaintCloudPlanRefusesALedgerDirectoryItCannotMake(t *testing.T) {
+	t.Parallel()
+	town, _, _ := writeMaintCloudTown(t, "unix:///cloud/docker.sock")
+	// A regular file where the runtime directory belongs is a ledger directory
+	// that cannot exist, the way a town on a full disk fails.
+	if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&maintCloudRunner{}).run, t.TempDir(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "ledger directory") {
+		t.Fatalf("maintTargets(plan) = %v, %v; want the ledger directory refusal", maintTargetNames(targets), err)
+	}
+}
+
+// TestMaintTargetsRefuseACloudTargetWithoutARunner pins that a cloud VM whose
+// target cannot read its daemon is refused at build, never carried as a target
+// that measures nothing.
+func TestMaintTargetsRefuseACloudTargetWithoutARunner(t *testing.T) {
+	t.Parallel()
+	town, _, _ := writeMaintCloudTown(t, "unix:///cloud/docker.sock")
+	targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, nil, t.TempDir(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "building the cloud target") {
+		t.Fatalf("maintTargets() = %v, %v; want the cloud target build refusal", maintTargetNames(targets), err)
+	}
+}
+
+// TestMaintCloudLedgerLeavesTheTargetsErrorAlone pins the wrapper's contract
+// with the target it wraps: a plan that failed is reported and recorded as
+// nothing, because there is no plan to record.
+func TestMaintCloudLedgerLeavesTheTargetsErrorAlone(t *testing.T) {
+	t.Parallel()
+	planErr := errors.New("the daemon did not answer")
+	ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "ledger.jsonl"), maintLedgerMaxBytes)
+	wrapped := maintCloudLedger{inner: &fakeMaintTarget{name: maintTargetCloud, planErr: planErr}, ledger: ledger}
+
+	_, err := wrapped.Plan(context.Background(), diskmaint.Policy{})
+	if !errors.Is(err, planErr) {
+		t.Fatalf("Plan() error = %v, want the target's own error", err)
+	}
+	if entries, err := ledger.Tail(10); err != nil || len(entries) != 0 {
+		t.Fatalf("ledger = %+v, %v; want no line for a plan that was never built", entries, err)
+	}
+}
+
+// TestMaintCloudLedgerReportsALedgerItCannotWrite pins that a run which cannot
+// record its line fails rather than passing as clean.
+func TestMaintCloudLedgerReportsALedgerItCannotWrite(t *testing.T) {
+	t.Parallel()
+	// A ledger under a directory that does not exist is a write that cannot
+	// land, here without depending on the user the suite runs as.
+	ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "gone", "ledger.jsonl"), maintLedgerMaxBytes)
+	wrapped := maintCloudLedger{inner: &fakeMaintTarget{name: maintTargetCloud}, ledger: ledger}
+
+	_, err := wrapped.Plan(context.Background(), diskmaint.Policy{})
+	if err == nil || !strings.Contains(err.Error(), "record the cloud run") {
+		t.Fatalf("Plan() error = %v, want the ledger write refusal", err)
+	}
+}
