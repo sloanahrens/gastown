@@ -1,6 +1,1 @@
-town state migrate rollback-plan
-town state migrate verify
-town state profile
 town state rewrite
-town state seed
-town state verify
