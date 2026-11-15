@@ -55,8 +55,10 @@ type QueueBead struct {
 	// lint's: the rig is parked, or an assignee already holds the bead.
 	// "skipped" is the dispatcher's own record: the bead lints "ok" but the
 	// last dispatch tick passed it over, and ShapeNote is that tick's reason
-	// (the Skip fields below say for how long). Empty for rows the lint was
-	// not run on.
+	// (the Skip fields below say for how long). One such reason is the split
+	// route's own line, "split: " and the estimate it was held on, which the
+	// page counts apart from ready work rather than reading the trigger again
+	// (gt-bgumb7). Empty for rows the lint was not run on.
 	Shape     string `json:"shape,omitempty"`
 	ShapeNote string `json:"shape_note,omitempty"`
 	// The dispatcher's last verdict on a ready bead, from the town's tick
