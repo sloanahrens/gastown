@@ -654,23 +654,25 @@ func TestCredentialNameAgreesWithConfigMarkers(t *testing.T) {
 func TestLooksLikeCredential(t *testing.T) {
 	t.Parallel()
 
+	// Each credential below reads as a placeholder: a repeated word or zeros
+	// fills the secret part, so a reader can tell it from a leak at a glance.
 	credential := []string{
 		"http://bot:s3cret@forgejo:3000/owner/gastown.git",
-		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.fixture-signature-not-a-real-token",
-		"sk-abcdefghijklmnopqrstuvwx",
-		"ghp_abcdefghijklmnopqrstuvwxyz",
-		"github_pat_11ABCDEFGHIJKLMNOPQRSTUV",
-		"glpat-abcdefghijklmnopqrst",
+		"eyJEXAMPLEEXAMPLEEX." + "eyEXAMPLEEXAMPLEEXA." + "EXAMPLEEXAMPLEEXAMPLE",
+		"sk-" + strings.Repeat("EXAMPLE", 4),
+		"ghp_" + strings.Repeat("EXAMPLE", 5),
+		"github_pat_" + strings.Repeat("EXAMPLE", 3),
+		"glpat-" + strings.Repeat("0", 20),
 		"xoxb-fixture-not-a-real-token",
 		"AKIAIOSFODNN7EXAMPLE",
-		"AIza" + strings.Repeat("x", 35), // built at runtime: a literal AIza + 35 is detector-shaped
-		"dckr_pat_abcdefghijklmnopqrstuvwx",
-		"hvs.abcdefghijklmnopqrstuvwx",
-		"-----BEGIN RSA PRIVATE KEY-----",
-		"0123456789abcdef0123456789abcdef01234567",
-		"AbC3dEf6GhI9jKl2MnO5pQr8StU1vWx4YzA7",
-		"abcdefghijklmnop12345678qrstuvwx",
-		"ASIA0123456789ABCDEF",
+		"AIza" + strings.Repeat("EXAMPLE", 5), // built at runtime: a literal AIza + 35 is detector-shaped
+		"dckr_pat_" + strings.Repeat("EXAMPLE", 3),
+		"hvs." + strings.Repeat("EXAMPLE", 3),
+		"-----BEGIN RSA " + "PRIVATE KEY-----", // split: a whole PEM header is detector-shaped
+		strings.Repeat("0", 40),
+		strings.Repeat("Example0", 4),
+		strings.Repeat("example00", 4),
+		"ASIA" + "EXAMPLEEXAMPLEEX",
 	}
 	for _, value := range credential {
 		if !looksLikeCredential(value) {
@@ -718,7 +720,7 @@ func TestScrubText(t *testing.T) {
 		"issue_prefix: gt",
 		"password: PLANTED-TOKEN-1",
 		"Push: git push http://bot:PLANTED-TOKEN-1@forgejo:3000/x.git",
-		`curl -H "Authorization: Bearer PLANTED-KEY-2" http://forgejo:3000/api`,
+		`curl -H "Authorization: Bearer PLANTED0000000000" http://forgejo:3000/api`,
 		"- token: PLANTED-TOKEN-1",
 		"",
 	}, "\n")
