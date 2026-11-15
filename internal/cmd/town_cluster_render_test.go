@@ -2192,6 +2192,18 @@ func TestTownClusterRenderRefusesTheRecordedFlags(t *testing.T) {
 			cause: "are refused",
 		},
 		{
+			name: "a replay that cannot tell which flags were named",
+			mutate: func(t *testing.T, town string, d *clusterRenderDeps, _ *clusterRenderFlags) {
+				// A record is there, so the refusal is the replay's missing answer to
+				// which flags the command line named, not an absent record.
+				if err := saveRenderFlags(renderFlagsPathIn(town), clusterRenderFixture(t)); err != nil {
+					t.Fatalf("writing the record: %v", err)
+				}
+				d.record = clusterRenderRecordOptions{use: true}
+			},
+			cause: "cannot tell which flags the command line named",
+		},
+		{
 			name: "a record that cannot be written",
 			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps, _ *clusterRenderFlags) {
 				d.record = clusterRenderRecordOptions{record: true}
@@ -2233,6 +2245,54 @@ func TestTownClusterRenderRefusesTheRecordedFlags(t *testing.T) {
 	}
 }
 
+// TestTownClusterRenderFindsTheTownWhereTheRunNeedsIt: a run with neither record
+// flag checks its flags and the image pair before the town, so a broken pair is
+// what it refuses on; a run with either record flag reads the record under the
+// town root, so the town is looked up first.
+func TestTownClusterRenderFindsTheTownWhereTheRunNeedsIt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		record clusterRenderRecordOptions
+		cause  string
+	}{
+		{
+			name:  "no record flag reports the image pair before the town",
+			cause: "holds no image pair",
+		},
+		{
+			name:   "--record-flags needs the town first",
+			record: clusterRenderRecordOptions{record: true},
+			cause:  "not in a Gas Town workspace",
+		},
+		{
+			name:   "--use-recorded needs the town first",
+			record: clusterRenderRecordOptions{use: true},
+			cause:  "not in a Gas Town workspace",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			// A directory with no image pair in it.
+			f.dir = filepath.Join(t.TempDir(), "no-pair")
+			d := clusterRenderTestDeps(t, io.Discard)
+			d.findTown = failing("no town")
+			d.record = tt.record
+			err := runClusterRender(d, f)
+			requireErrorNames(t, err, tt.cause)
+			other := "not in a Gas Town workspace"
+			if tt.cause == other {
+				other = "holds no image pair"
+			}
+			if strings.Contains(err.Error(), other) {
+				t.Fatalf("the refusal %q also names %q: the run checked them in the other order", err, other)
+			}
+		})
+	}
+}
+
 // filledRenderFlagsRecord is a recorded flag set with a value in every field,
 // built from the record's own fields so a field added to it is filled here too.
 func filledRenderFlagsRecord(t *testing.T) renderFlagsRecord {
@@ -2254,12 +2314,33 @@ func filledRenderFlagsRecord(t *testing.T) renderFlagsRecord {
 }
 
 // TestRenderFlagsWithRecordedCoversTheFlagStruct: with nothing named on the
-// command line, every flag of the record is the replay's. A flag added to the
-// struct and not to withRecorded fails here, since a replay would render it empty.
+// command line, every flag of the recorded set is the replay's, including a flag
+// the record file has no field for. A flag added to the struct and not to
+// withRecorded fails here, since a replay would render it empty.
 func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 	t.Parallel()
 	full := filledRenderFlagsRecord(t).flags()
-	got := (clusterRenderFlags{}).withRecorded(full, nil)
+	// The record fill leaves a field zero when the record has no field for it, and
+	// a zero expectation cannot see withRecorded drop it. Each such field is set
+	// here by name, so a field added to the struct and left out of the record fails
+	// here until it has its case.
+	filledValue := reflect.ValueOf(full)
+	for i := 0; i < filledValue.NumField(); i++ {
+		if !filledValue.Field(i).IsZero() {
+			continue
+		}
+		switch name := filledValue.Type().Field(i).Name; name {
+		case "daemonBdGatewayURLSet":
+			// The loader answers it true for a recorded URL (renderFlagsRecord.flags).
+			full.daemonBdGatewayURLSet = true
+		default:
+			t.Fatalf("clusterRenderFlags.%s is zero after the record fill, so the record has no field for it and nothing here would see withRecorded drop it", name)
+		}
+	}
+	got, err := (clusterRenderFlags{}).withRecorded(full, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("withRecorded with nothing named: %v", err)
+	}
 	if got == full {
 		return
 	}
@@ -2287,9 +2368,12 @@ func TestRenderFlagsWithRecordedKeepsWhatWasNamed(t *testing.T) {
 	t.Parallel()
 	recorded := clusterRenderFlags{dir: "/recorded", cpu: "2", memory: "4Gi", rehearsal: true}
 	named := clusterRenderFlags{cpu: "", memory: "8Gi", rehearsal: false}
-	got := named.withRecorded(recorded, func(flag string) bool {
+	got, err := named.withRecorded(recorded, func(flag string) bool {
 		return flag == "cpu" || flag == "memory" || flag == "rehearsal"
 	})
+	if err != nil {
+		t.Fatalf("withRecorded with the named flags answered: %v", err)
+	}
 	if got.cpu != "" {
 		t.Errorf("--cpu named empty = %q, want the empty value kept, not the recorded %q", got.cpu, recorded.cpu)
 	}
