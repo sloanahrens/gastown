@@ -1,7 +1,3 @@
-mol squash
-mol status
-mol step
-mol step await-event
 mol step await-signal
 mol step done
 mol step emit-event
