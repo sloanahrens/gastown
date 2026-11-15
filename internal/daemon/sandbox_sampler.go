@@ -17,15 +17,26 @@ type sandboxSeatSource interface {
 	Tick(ctx context.Context) (resourcesampler.SeatTick, error)
 }
 
+// sandboxVMSource is the one call a tick makes of the VM's proc files: the VM
+// source read through one live seat's exec seam (gt-2qe2m6).
+type sandboxVMSource interface {
+	Tick(ctx context.Context) (resourcesampler.VMTick, error)
+}
+
 // sandboxRowWriter appends one row to the metrics directory, where the seat
 // rows join the host rows in the day file the metrics snapshot reads.
 // resourcesampler.AppendRow is the production writer (gt-6bmp5y).
 type sandboxRowWriter func(metricsDir string, row resourcesampler.Row, now time.Time) error
 
-// defaultSandboxSamplerTimeout bounds one tick at 15 seat reads' own bounds: the
-// whole-tick backstop behind the source's per-seat DefaultSeatTimeout, since one
-// tick pays one exec per seat (gt-psegop).
+// defaultSandboxSamplerTimeout bounds one tick's seat read at 15 seat reads'
+// own bounds: the backstop behind the source's per-seat DefaultSeatTimeout,
+// since one tick pays one exec per seat (gt-psegop). The VM read is bounded
+// separately, after the seat rows are written (gt-2qe2m6).
 const defaultSandboxSamplerTimeout = 15 * resourcesampler.DefaultSeatTimeout
+
+// defaultVMReadTimeout bounds one tick's VM read: one seat's proc read, and a
+// bound of its own so a VM read that hangs costs the VM row only (gt-2qe2m6).
+const defaultVMReadTimeout = resourcesampler.DefaultSeatTimeout
 
 // defaultSandboxSamplerInterval is the period between two seat samples: the
 // seat rows are a 60 s series beside the host's, so the patrol runs a ticker
@@ -60,12 +71,19 @@ func gatewaySeatSource(townRoot string, clock resourcesampler.Clock, timeout tim
 	return resourcesampler.NewSeatSource(townRoot, &sandbox.CLI{}, clock, timeout)
 }
 
-// sandboxSampler turns one tick of the seat source into rows in the town's
-// metrics. The source, the writer, the clock and the logger are seams; the
-// patrol supplies the live ones (gt-7d7jvn).
+// gatewayVMSource is the live VM source, read through the same exec seam and
+// the same live seats the seat source reads.
+func gatewayVMSource(townRoot string, clock resourcesampler.Clock, timeout time.Duration) sandboxVMSource {
+	return resourcesampler.NewVMSource(townRoot, &sandbox.CLI{}, clock, timeout)
+}
+
+// sandboxSampler turns one tick of the seat and VM sources into rows in the
+// town's metrics. Both sources, the writer, the clock and the logger are seams;
+// the patrol supplies the live ones (gt-7d7jvn, gt-2qe2m6).
 type sandboxSampler struct {
 	metricsDir string
 	source     sandboxSeatSource
+	vm         sandboxVMSource
 	clock      resourcesampler.Clock
 	write      sandboxRowWriter
 	logf       func(format string, args ...any)
@@ -75,13 +93,16 @@ type sandboxSampler struct {
 	// those lines from a buffer instead of replacing the process's logger.
 	errLog  *log.Logger
 	timeout time.Duration
+	// vmTimeout bounds the VM read, which starts only after the seat rows are
+	// written, so the two bounds cannot swallow each other.
+	vmTimeout time.Duration
 }
 
 // newSandboxSampler returns the sampler a patrol ticks. A nil clock is the
 // host's, a nil writer is resourcesampler.AppendRow, a nil logf writes to
 // stderr in the standard logger's format, and a zero timeout is
-// defaultSandboxSamplerTimeout.
-func newSandboxSampler(metricsDir string, source sandboxSeatSource, clock resourcesampler.Clock, write sandboxRowWriter, logf func(format string, args ...any), timeout time.Duration) *sandboxSampler {
+// defaultSandboxSamplerTimeout. The VM read's bound is defaultVMReadTimeout.
+func newSandboxSampler(metricsDir string, source sandboxSeatSource, vm sandboxVMSource, clock resourcesampler.Clock, write sandboxRowWriter, logf func(format string, args ...any), timeout time.Duration) *sandboxSampler {
 	if clock == nil {
 		clock = resourcesampler.SystemClock{}
 	}
@@ -92,9 +113,10 @@ func newSandboxSampler(metricsDir string, source sandboxSeatSource, clock resour
 		timeout = defaultSandboxSamplerTimeout
 	}
 	return &sandboxSampler{
-		metricsDir: metricsDir, source: source, clock: clock, write: write, logf: logf,
-		errLog:  log.New(os.Stderr, "", log.LstdFlags),
-		timeout: timeout,
+		metricsDir: metricsDir, source: source, vm: vm, clock: clock, write: write, logf: logf,
+		errLog:    log.New(os.Stderr, "", log.LstdFlags),
+		timeout:   timeout,
+		vmTimeout: defaultVMReadTimeout,
 	}
 }
 
@@ -109,6 +131,10 @@ func newSandboxSampler(metricsDir string, source sandboxSeatSource, clock resour
 // The bound ends the read through the context the source honors, not by
 // outlasting the source: the seat source kills each seat's exec with it
 // (gt-psegop).
+//
+// The VM row is read after the seat rows are written and under a bound of its
+// own: a VM read that fails or ends at its bound logs one line and writes no VM
+// row, and the seat rows are already the tick's (gt-2qe2m6).
 func (s *sandboxSampler) Tick(ctx context.Context) {
 	if s.source == nil {
 		s.log("sandbox_sampler: no seat source")
@@ -144,6 +170,45 @@ func (s *sandboxSampler) Tick(ctx context.Context) {
 			s.log("sandbox_sampler: %v", err)
 			return
 		}
+	}
+	s.tickVM(ctx, now)
+}
+
+// tickVM reads the VM's proc files once and appends its row, after the seat
+// rows are written: a VM read that hangs loses only the VM row, never the seat
+// rows the tick already wrote. A read that fails or ends at its bound logs one
+// line and writes no row; a seat the source skipped logs its reason, and a tick
+// with no live seat logs nothing and writes no row. A VM that could not be read
+// is never a VM of zeros (gt-2qe2m6).
+func (s *sandboxSampler) tickVM(ctx context.Context, now time.Time) {
+	if s.vm == nil {
+		return
+	}
+	vmCtx, cancel := context.WithTimeout(ctx, s.vmTimeout)
+	vm, err := s.vm.Tick(vmCtx)
+	// Read before cancel, as the seat read does, so canceling does not read as
+	// the bound ending the read.
+	ended := vmCtx.Err()
+	cancel()
+	switch {
+	case ctx.Err() != nil:
+		s.log("sandbox_sampler: the caller ended the vm read: %v", ctx.Err())
+		return
+	case ended != nil:
+		s.log("sandbox_sampler: the vm read ends at its %s bound: %v", s.vmTimeout, ended)
+		return
+	case err != nil:
+		s.log("sandbox_sampler: vm read: %v", err)
+		return
+	}
+	for _, skip := range vm.Skipped {
+		s.log("sandbox_sampler: vm read: seat %s skipped: %v", skip.Seat, skip.Err)
+	}
+	if vm.Row == nil {
+		return
+	}
+	if err := s.write(s.metricsDir, *vm.Row, now); err != nil {
+		s.log("sandbox_sampler: vm read: %v", err)
 	}
 }
 
@@ -187,6 +252,7 @@ func (d *Daemon) sandboxSampler() *sandboxSampler {
 		d.sandboxSamplerPatrol = newSandboxSampler(
 			filepath.Join(d.config.TownRoot, ".runtime", "metrics"),
 			build(d.config.TownRoot, clock, resourcesampler.DefaultSeatTimeout),
+			gatewayVMSource(d.config.TownRoot, clock, resourcesampler.DefaultSeatTimeout),
 			clock, nil, d.logger.Printf, 0,
 		)
 	}

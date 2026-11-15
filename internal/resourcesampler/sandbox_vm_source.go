@@ -1,6 +1,7 @@
 package resourcesampler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -123,6 +124,134 @@ func vmCPU(reading VMReading, previous *VMReading) (float64, *float64) {
 	// cores are all busy reports 400.
 	pct := math.Round(busy/total*float64(reading.Cores)*100*100) / 100
 	return interval.Seconds(), &pct
+}
+
+// VMTick is one tick's VM sample: the row of the first live seat whose read
+// produced one, and one skip per seat the read could not be taken through. A
+// tick with no live seat and a registry whose every record is corrupt both
+// carry no row; the skips tell them apart.
+type VMTick struct {
+	Row     *Row
+	Skipped []SeatSkip
+}
+
+// skip records a seat the VM read wrote no row through.
+func (t *VMTick) skip(seat string, err error) {
+	t.Skipped = append(t.Skipped, SeatSkip{Seat: seat, Err: err})
+}
+
+// VMSource reads the five proc files the VM row is built from through one live
+// seat: it tries the live seats in name order until one read produces the row
+// (gt-2qe2m6). It keeps the last reading that wrote a row, so cpu_pct is the
+// delta over the VM's previous sample. Tick is not safe for concurrent use: the
+// patrol ticks it serially.
+type VMSource struct {
+	townRoot string
+	runner   SeatExec
+	clock    Clock
+	timeout  time.Duration
+	// previous is the VM's last reading that wrote a row. A tick whose every
+	// read failed keeps it, so the next row is measured over the whole gap.
+	previous *VMReading
+}
+
+// NewVMSource returns the source the patrol ticks: one live seat's proc files
+// read through runner, each read bounded by timeout, sampled at clock's time.
+func NewVMSource(townRoot string, runner SeatExec, clock Clock, timeout time.Duration) *VMSource {
+	if clock == nil {
+		clock = SystemClock{}
+	}
+	if timeout <= 0 {
+		timeout = DefaultSeatTimeout
+	}
+	return &VMSource{townRoot: townRoot, runner: runner, clock: clock, timeout: timeout}
+}
+
+// Tick reads the VM's proc files through the first live seat that answers and
+// returns its row. A seat whose record cannot be read, whose name an exec must
+// not address, or whose read fails is skipped and the next live seat is tried,
+// so one stale record cannot keep the VM row out of every tick. A tick no seat
+// answers writes no row, and the caller writes no VM row rather than one of
+// zeros.
+//
+// A failure of the whole source — no exec seam, a workspace map or a registry
+// directory that cannot be read — is an error and no row.
+func (s *VMSource) Tick(ctx context.Context) (VMTick, error) {
+	if s.runner == nil {
+		return VMTick{}, errors.New("sandbox vm source: no exec seam")
+	}
+	// The map is read before any seat, so a bad map costs no exec and no row,
+	// the rule the seat source applies.
+	workspaces, err := workspaceid.Load(s.townRoot)
+	if err != nil {
+		return VMTick{}, fmt.Errorf("sandbox vm source: %w", err)
+	}
+	records, err := seatRecords(s.townRoot)
+	if err != nil {
+		return VMTick{}, fmt.Errorf("sandbox vm source: %w", err)
+	}
+	now := s.clock.Now()
+	argv := vmProcReadArgv()
+	var tick VMTick
+	for _, record := range records {
+		if record.err != nil {
+			tick.skip(record.name, record.err)
+			continue
+		}
+		// !found with no error: the record was removed between the listing and
+		// the read, so the seat has ended and another one answers.
+		if !record.found {
+			continue
+		}
+		seat, err := seatFromRecord(record.rec)
+		if err != nil {
+			tick.skip(record.name, err)
+			continue
+		}
+		text, err := s.readProc(ctx, seat.Name, argv)
+		if err != nil {
+			tick.skip(seat.Name, err)
+			continue
+		}
+		row, reading, err := VMRow(text, now, s.previous, workspaces)
+		if err != nil {
+			tick.skip(seat.Name, err)
+			continue
+		}
+		s.previous = &reading
+		tick.Row = &row
+		return tick, nil
+	}
+	return tick, nil
+}
+
+// readProc runs one seat's proc read under the source's per-seat bound, so a
+// wedged gateway call costs the VM row and not the tick. The name has already
+// been validated by seatFromRecord: it reaches the seam as an argument of the
+// exec and nowhere else.
+func (s *VMSource) readProc(ctx context.Context, name string, argv []string) (string, error) {
+	procCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	stdout, _, err := s.runner.Exec(procCtx, name, nil, argv, nil)
+	if err != nil {
+		return "", fmt.Errorf("vm read in seat %s: %w", name, err)
+	}
+	return string(stdout), nil
+}
+
+// vmProcReadArgv is the argv one VM read runs: a shell that prints each of the
+// VM's proc files under the marker line VMRow's parser reads it by, then the
+// end marker. A file the kernel does not publish prints its marker and nothing
+// else, which parses as null where the file is optional and as a refused read
+// where it is the reading itself. The print after each file keeps a text
+// without a trailing newline off the next marker.
+func vmProcReadArgv() []string {
+	var script strings.Builder
+	for _, name := range vmProcFiles {
+		fmt.Fprintf(&script, "printf '@@ %s @@\\n'\ncat /proc/%s 2>/dev/null\nprintf '\\n'\n", name, name)
+	}
+	script.WriteString("printf '@@ end @@\\n'\n")
+	return []string{"sh", "-c", script.String()}
 }
 
 // parseVMProc reads a VM read's text into its readings.
