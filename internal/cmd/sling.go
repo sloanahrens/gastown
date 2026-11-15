@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
@@ -1742,6 +1744,12 @@ func (assigneeLockTimeout) Is(target error) bool { return target == ErrAssigneeL
 // tryAcquireSlingAssigneeLockWith is tryAcquireSlingAssigneeLock with the
 // wait between attempts explicit.
 func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(time.Duration)) (func(), error) {
+	return tryAcquireSlingAssigneeLockUsing(townRoot, targetAgent, sleep, hostHolderProbe())
+}
+
+// tryAcquireSlingAssigneeLockUsing is tryAcquireSlingAssigneeLockWith with the
+// probe that judges a holder record also explicit (see holderProbe).
+func tryAcquireSlingAssigneeLockUsing(townRoot, targetAgent string, sleep func(time.Duration), probe holderProbe) (func(), error) {
 	lockDir := filepath.Join(townRoot, ".runtime", "locks", "sling")
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating sling lock dir: %w", err)
@@ -1781,15 +1789,58 @@ func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(ti
 	return nil, assigneeLockTimeout{
 		agent:   targetAgent,
 		seconds: maxAttempts * retryInterval / 1000,
-		holder:  assigneeLockHolderText(holderPath),
+		holder:  assigneeLockHolderText(holderPath, probe),
 	}
 }
 
 // slingProcessStart is when this process began: the initialisation of this
-// package, which runs before main. A lock holder records it beside its pid so
-// a later reader can tell from `ps` whether the pid still names the sling that
-// took the lock or a newer process that the kernel handed the same pid.
+// package, which runs before main. A lock holder records it beside its pid so a
+// timeout names both, and a person can look the pid up with `ps` and see
+// whether it really is the sling that started then.
 var slingProcessStart = time.Now()
+
+// holderProbe is how a timeout judges the process a holder record names. The
+// record outlives the process that wrote it — the kernel drops a dead holder's
+// flock, while the sidecar stays until the next acquire overwrites it — so a
+// record is the current holder only while the same process still runs.
+type holderProbe struct {
+	// gone reports whether no process with this pid exists on this host, and
+	// answers true only when that is certain.
+	gone func(pid int) bool
+	// startToken reads a live pid's start token; ok is false when the kernel
+	// will not say (procid.StartToken).
+	startToken func(pid int) (string, bool)
+}
+
+// hostHolderProbe is the real probe.
+func hostHolderProbe() holderProbe {
+	return holderProbe{gone: holderGone, startToken: procid.StartToken}
+}
+
+// holderGone reports whether pid has no process. A non-positive pid addresses
+// a process group or every process this one may signal rather than one
+// process, so it is never gone.
+func holderGone(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	// Signal 0 asks the kernel whether the process exists without delivering
+	// anything; naming the process can fail before the probe is sent.
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return holderGoneAfter(err)
+	}
+	return holderGoneAfter(p.Signal(syscall.Signal(0)))
+}
+
+// holderGoneAfter is what holderGone decides from what the probe answered:
+// only "no such process" means gone. EPERM is a process this user may not
+// signal, and an error it does not recognize keeps the process counted as
+// running, because a live holder read as gone would report a record as stale
+// that is not.
+func holderGoneAfter(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
 
 // assigneeLockHolderPath is the holder record beside an assignee flock.
 func assigneeLockHolderPath(lockPath string) string {
@@ -1797,20 +1848,43 @@ func assigneeLockHolderPath(lockPath string) string {
 }
 
 // writeAssigneeLockHolder records who holds the lock, for the timeout a sling
-// that waits on it prints.
+// that waits on it prints. The record is written under a temporary name and
+// renamed into place, so a waiter reading at the wrong moment sees the whole
+// record or the previous one, never a truncated mixture. It carries the
+// kernel's start token for this pid where the kernel will give one, so a reader
+// can tell this sling from a later process the kernel handed the same pid.
 func writeAssigneeLockHolder(path string) error {
-	record := fmt.Sprintf("pid %d started %s\n", os.Getpid(), slingProcessStart.UTC().Format(time.RFC3339))
-	return os.WriteFile(path, []byte(record), 0644)
+	pid := os.Getpid()
+	record := fmt.Sprintf("pid %d started %s\n", pid, slingProcessStart.UTC().Format(time.RFC3339))
+	if token, ok := procid.StartToken(pid); ok {
+		record = fmt.Sprintf("pid %d started %s token %s\n", pid, slingProcessStart.UTC().Format(time.RFC3339), token)
+	}
+	// One fixed temporary name, not a unique one: only the flock holder
+	// writes this record, and a temporary left by a writer that died is
+	// replaced by the next holder's write.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(record), 0644); err != nil {
+		return fmt.Errorf("writing the temporary holder record: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("renaming the holder record into place: %w", err)
+	}
+	return nil
 }
 
 // assigneeLockHolderText answers a timeout's "who holds it" from the holder
 // record at path. It never fails the timeout: a record that is missing, empty
 // or not the shape writeAssigneeLockHolder wrote is described as such, because
 // naming the holder is a clue on the error and not a condition of reporting it.
-// Only parsed fields are re-rendered, never the file's own bytes, so a file
-// some other process wrote cannot put its text in the error or the log line
-// that carries it.
-func assigneeLockHolderText(path string) string {
+// A record whose process probe reports gone, or whose pid now carries another
+// start token, is described as a stale record and never as the holder: the
+// sidecar outlives a sling the kernel killed, and such a leftover is what a
+// waiter reads when the holder wrote no record of its own. A record with no
+// token, or one the kernel will not check, keeps its holder, since nothing in
+// it is disproved. Only parsed fields are re-rendered, never the file's own
+// bytes, so a file some other process wrote cannot put its text in the error
+// or the log line that carries it.
+func assigneeLockHolderText(path string, probe holderProbe) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1819,8 +1893,18 @@ func assigneeLockHolderText(path string) string {
 		return "no holder recorded: the holder sidecar could not be read"
 	}
 	fields := strings.Fields(string(data))
-	if len(fields) != 4 || fields[0] != "pid" || fields[2] != "started" {
+	if len(fields) != 4 && len(fields) != 6 {
 		return "no holder recorded: the holder sidecar is not a holder record"
+	}
+	if fields[0] != "pid" || fields[2] != "started" {
+		return "no holder recorded: the holder sidecar is not a holder record"
+	}
+	token := ""
+	if len(fields) == 6 {
+		if fields[4] != "token" {
+			return "no holder recorded: the holder sidecar is not a holder record"
+		}
+		token = fields[5]
 	}
 	pid, err := strconv.Atoi(fields[1])
 	if err != nil || pid <= 0 {
@@ -1830,7 +1914,16 @@ func assigneeLockHolderText(path string) string {
 	if err != nil {
 		return "no holder recorded: the holder sidecar is not a holder record"
 	}
-	return fmt.Sprintf("held by pid %d started %s", pid, started.UTC().Format(time.RFC3339))
+	at := started.UTC().Format(time.RFC3339)
+	if probe.gone(pid) {
+		return fmt.Sprintf("no current holder recorded: the holder sidecar names pid %d started %s, which is no longer running", pid, at)
+	}
+	if token != "" {
+		if now, ok := probe.startToken(pid); ok && now != token {
+			return fmt.Sprintf("no current holder recorded: the holder sidecar names pid %d started %s, and that pid now names another process", pid, at)
+		}
+	}
+	return fmt.Sprintf("held by pid %d started %s", pid, at)
 }
 
 // resolvePRBranch resolves a GitHub PR number to its head branch name via `gh pr view`.
