@@ -147,6 +147,9 @@ var ruleOwners = map[string]Owner{
 	// A stale seat sandbox is the town's own gateway object to delete before a
 	// person is woken: the overseer frees the seat name it blocks (gt-zapy97).
 	RuleSeatSandboxStale: OwnerOverseer,
+	// An unreadable seat is the town's own seat to look at: the overseer reads
+	// the last error and restarts or releases it (gt-q6hafz).
+	RuleSeatUnreachable: OwnerOverseer,
 	// A drifted estimator is the town's own model to watch: the overseer reads
 	// the reading and starts the retrain, or finds what stopped the extract
 	// (gt-my0o23).
