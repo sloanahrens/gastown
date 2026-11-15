@@ -31,52 +31,77 @@ const (
 // and a description is longer than a title, so they are left out here
 // (gt-y3n4au).
 const (
-	// descriptionTightConfidence is a title exact rule's confidence (0.9) times
-	// the description scale (0.9). A description is a weaker signal than the
-	// title an agent writes first, so every tight rule here carries this
-	// confidence.
-	descriptionTightConfidence = 0.81
+	// descriptionTitleConfidence is the confidence the fix-recurrence design
+	// gives a title classifier's strict rule (gt-e9ur8q). Every rule here is
+	// one of those; the loose rules are not.
+	descriptionTitleConfidence = 0.9
+	// descriptionScale weights a description against the title an agent writes
+	// first: each rule here reports its title confidence times this.
+	descriptionScale = 0.9
 )
 
-// descriptionRule is one tight rule: a pattern built around one cited id, and
-// the relationship it reports. The rules are tried in the order they are built,
-// so a description that carries two signals is read as the first of them.
+// descriptionRule is one tight rule: a pattern built around one cited id, the
+// confidence its title counterpart carries, and the relationship it reports.
+// The rules are tried in the order they are built, so a description that
+// carries two signals is read as the first of them.
 type descriptionRule struct {
-	relationship Relationship
-	pattern      *regexp.Regexp
+	relationship    Relationship
+	titleConfidence float64
+	pattern         *regexp.Regexp
 }
 
-// descriptionRules returns the tight rules for id, in priority order.
+// match reports whether the rule fires for desc. Group 1 of every rule's
+// pattern is the text just before the signal phrase: a negation cue there ("no
+// recurrence", "no longer persists", "not the same class") turns the phrase
+// into its opposite, and the rule does not fire.
+func (r descriptionRule) match(desc string) bool {
+	for _, m := range r.pattern.FindAllStringSubmatch(desc, -1) {
+		if !negationCue.MatchString(m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// negationCue matches a word that negates the signal phrase after it. It is
+// read on the text immediately before the phrase.
+var negationCue = regexp.MustCompile(`(?i)\b(?:no|not|never|without|zero|isn['’]t|wasn['’]t|aren['’]t|doesn['’]t|didn['’]t|don['’]t)\s+(?:\w+\s+){0,1}$`)
+
+// descriptionRules returns the tight rules for id, in priority order. Each
+// pattern captures, as group 1, the text between the id (or the sentence start
+// for a phrase that precedes it) and its signal phrase.
 func descriptionRules(id string) []descriptionRule {
 	return []descriptionRule{
 		// recurrence of <id>
-		{Recurrence, regexp.MustCompile(`(?i)\brecurrence of ` + descriptionIDEnd(id))},
-		// <id> then the signal within 40 characters
-		{Recurrence, regexp.MustCompile(`(?is)` + descriptionIDWhole(id) + `.{0,39}?(?:recurrence|persists|not fixed)`)},
+		{Recurrence, descriptionTitleConfidence, regexp.MustCompile(`(?i)([^.!?\n]{0,20}?)\brecurrence of ` + descriptionIDEnd(id))},
+		// <id> then the signal in the same sentence, or opening the one after
+		// it ("gt-0nk. Not fixed"). The window itself holds no sentence break,
+		// so an unrelated later sentence cannot supply the signal.
+		{Recurrence, descriptionTitleConfidence, regexp.MustCompile(`(?i)` + descriptionIDWhole(id) + `\s*(?:[.!?]\s*)?([^.!?\n]{0,39}?)\b(?:recurrence|persists|not fixed)\b`)},
 		// <id>'s fix incomplete | did not
-		{Recurrence, regexp.MustCompile(`(?is)` + descriptionIDStart(id) + `['’]s fix (?:is )?(?:incomplete|did not)`)},
+		{Recurrence, descriptionTitleConfidence, regexp.MustCompile(`(?i)` + descriptionIDStart(id) + `['’]s fix ([^.!?\n]{0,20}?)(?:incomplete|did not)\b`)},
 		// same class as <id>
-		{SameClass, regexp.MustCompile(`(?i)\bsame (?:bug )?class as ` + descriptionIDEnd(id))},
+		{SameClass, descriptionTitleConfidence, regexp.MustCompile(`(?i)([^.!?\n]{0,20}?)\bsame (?:bug )?class as ` + descriptionIDEnd(id))},
 		// <id> regression | broke | introduced
-		{Regression, regexp.MustCompile(`(?is)` + descriptionIDWhole(id) + `\s*(?:\([0-9a-f]{6,12}\)\s*)?(?:regression|broke|introduced)\b`)},
+		{Regression, descriptionTitleConfidence, regexp.MustCompile(`(?i)` + descriptionIDWhole(id) + `\s*(?:\([0-9a-f]{6,12}\)\s*)?([^.!?\n]{0,12}?)\b(?:regression|broke|introduced)\b`)},
 		// <id> follow-up | hotfix | residual
-		{FollowUp, regexp.MustCompile(`(?is)` + descriptionIDWhole(id) + `\s*(?:follow-up|hotfix|residual)\b`)},
+		{FollowUp, descriptionTitleConfidence, regexp.MustCompile(`(?i)` + descriptionIDWhole(id) + `\s*([^.!?\n]{0,12}?)\b(?:follow-up|hotfix|residual)\b`)},
 		// follow-up to <id>
-		{FollowUp, regexp.MustCompile(`(?i)\bfollow-up to ` + descriptionIDEnd(id))},
+		{FollowUp, descriptionTitleConfidence, regexp.MustCompile(`(?i)([^.!?\n]{0,20}?)\bfollow-up to ` + descriptionIDEnd(id))},
 	}
 }
 
-// descriptionIDStart matches the cited id where no letter or digit runs into it
+// descriptionIDStart matches the cited id where no id character runs into it
 // from the left, and consumes the character before it.
 func descriptionIDStart(id string) string {
-	return `(?:^|[^a-z0-9.])` + regexp.QuoteMeta(strings.ToLower(id))
+	return `(?:^|[^a-z0-9.-])` + regexp.QuoteMeta(strings.ToLower(id))
 }
 
-// descriptionIDWhole matches the cited id as a whole token: no letter or digit
+// descriptionIDWhole matches the cited id as a whole token: no id character
 // runs into it from either side, and a dot continues it only before a digit (a
-// sub-bead id). It consumes the character on each side.
+// sub-bead id). It consumes the boundary it matches after the id.
 func descriptionIDWhole(id string) string {
-	return descriptionIDStart(id) + `(?:[^a-z0-9.]|\.(?:$|[^0-9])|$)`
+	return descriptionIDStart(id) + `(?:[^a-z0-9.-]|\.(?:$|[^0-9])|$)`
 }
 
 // descriptionIDEnd matches the cited id up to its end: the character after it
@@ -84,12 +109,12 @@ func descriptionIDWhole(id string) string {
 // sub-bead id). It is for a rule whose own phrase already ends at a non-id
 // character, which is the boundary the id needs on the left.
 func descriptionIDEnd(id string) string {
-	return regexp.QuoteMeta(strings.ToLower(id)) + `(?:[^a-z0-9.]|\.(?:$|[^0-9])|$)`
+	return regexp.QuoteMeta(strings.ToLower(id)) + `(?:[^a-z0-9.-]|\.(?:$|[^0-9])|$)`
 }
 
 // ClassifyDescription reads a bead's description against id, a closed bead it
 // cites, using the tight rules only. It returns the first rule that matches,
-// with 0.9 times the title rule's confidence, or Reference and 0 when the
+// with that title rule's confidence times 0.9, or Reference and 0 when the
 // description names the id only as background.
 //
 // An empty id classifies nothing: it is a Reference at 0 rather than a pattern
@@ -100,8 +125,8 @@ func ClassifyDescription(desc, id string) (Relationship, float64) {
 		return Reference, 0
 	}
 	for _, r := range descriptionRules(id) {
-		if r.pattern.MatchString(desc) {
-			return r.relationship, descriptionTightConfidence
+		if r.match(desc) {
+			return r.relationship, r.titleConfidence * descriptionScale
 		}
 	}
 	return Reference, 0
