@@ -253,6 +253,70 @@ func TestSeatUnreachableClearsWhenThePatrolIsOff(t *testing.T) {
 	require.Empty(t, seatUnreachableQueue(t, d), "a patrol that is off must not keep raising its items")
 }
 
+// TestSeatUnreachableOneGoodReadClearsTheItem drives the polecat-health pass and
+// the seat-unreachable collector tick by tick: an unreadable session raises the
+// item at five minutes, a pass whose seat list cannot be read leaves the item
+// where it is, and the first session check that answers clears it and starts the
+// five minutes over for the next outage (gt-aqmkcj).
+func TestSeatUnreachableOneGoodReadClearsTheItem(t *testing.T) {
+	t.Parallel()
+	gone := errors.New("sandbox pod myr-mycat is gone")
+	d, tm, clk := unreachableSeatTown(t, hookedWorkBD(t, "gt-p4aqut", time.Hour))
+	tm.addSession("myr-mycat", "bash", clk.Now())
+
+	// The one seat's rig list is a file while unreadable, and comes back as the
+	// seat's directory, so a later tick checks the seat again.
+	polecats := filepath.Join(d.config.TownRoot, "myr", "polecats")
+	broken := false
+	setList := func(unreadable bool) {
+		if unreadable == broken {
+			return
+		}
+		if unreadable {
+			require.NoError(t, os.RemoveAll(polecats))
+			require.NoError(t, os.WriteFile(polecats, []byte("not a directory"), 0o644))
+		} else {
+			require.NoError(t, os.Remove(polecats))
+			require.NoError(t, os.MkdirAll(filepath.Join(polecats, "mycat"), 0o755))
+		}
+		broken = unreadable
+	}
+	t.Cleanup(func() { setList(false) })
+
+	raised := attention.Item{
+		Key:      "seat-unreachable:myr/mycat",
+		Kind:     attention.KindSeatUnreachable,
+		Severity: attention.SeverityHigh,
+		Rig:      "myr",
+		Bead:     "gt-p4aqut",
+		Summary:  "myr/mycat unreadable for 5m, holding gt-p4aqut: " + gone.Error(),
+	}
+	steps := []struct {
+		name           string
+		advance        time.Duration
+		sessionErr     error
+		listUnreadable bool
+		want           []attention.Item
+	}{
+		{"first failed read starts the clock", 0, gone, false, nil},
+		{"five minutes names the seat", 5 * time.Minute, gone, false, []attention.Item{raised}},
+		{"a seat list that cannot be read clears nothing", time.Minute, gone, true, []attention.Item{raised}},
+		{"one good read clears it", time.Minute, nil, false, nil},
+		{"a failure after the good read starts over", time.Minute, gone, false, nil},
+		{"four minutes after it raises nothing", 4 * time.Minute, gone, false, nil},
+		{"five minutes after it names the seat again", time.Minute, gone, false, []attention.Item{raised}},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			clk.Advance(step.advance)
+			setList(step.listUnreadable)
+			tm.hasErr = step.sessionErr
+			d.checkPolecatSessionHealth()
+			require.Equal(t, step.want, seatUnreachableQueue(t, d))
+		})
+	}
+}
+
 // TestSeatUnreachableRaisesWithoutABeadItCouldNotRead: a seat whose work-bead
 // read fails is still named for its unreadable session, with no bead read
 // rather than a guessed one, so a bead read that cannot answer does not silence
