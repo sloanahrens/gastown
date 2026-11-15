@@ -49,8 +49,10 @@ var pinRepoForm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // through cmp, which is not called for a pin already at its tip. ownerOf names
 // the Forgejo owner a {owner} placeholder expands to and is called only when
 // the file holds one; the owner and repository the comparison addresses are
-// read from the expanded pin URL. Any read that fails is an error naming the
-// pin, never a pin reported with a guessed answer.
+// read from the expanded pin URL. A read that fails is an error naming every
+// pin that failed, reported after the other pins are read, and never a pin
+// read with a guessed answer; the pins that did read are not returned, so a
+// caller cannot take a partial list for the whole file.
 func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, error), tipGit PinTipGit, cmp ImagePinCompare) ([]ImagePinRead, error) {
 	if tipGit == nil {
 		return nil, errors.New("image pins read: no git to read each source's origin/main with")
@@ -63,24 +65,38 @@ func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, 
 		return nil, err
 	}
 	reads := make([]ImagePinRead, 0, len(pins))
+	var failed []error
 	for _, pin := range pins {
-		owner, repo, err := pinRepo(pin)
+		read, err := readImagePin(ctx, cmp, tipGit, pin)
 		if err != nil {
-			return nil, err
+			failed = append(failed, err)
+			continue
 		}
-		tip, err := imagePinTip(tipGit, pin)
-		if err != nil {
-			return nil, err
-		}
-		behind := 0
-		if pin.Commit != tip {
-			if behind, err = imagePinBehind(ctx, cmp, pin, owner, repo, tip); err != nil {
-				return nil, err
-			}
-		}
-		reads = append(reads, ImagePinRead{Name: pin.Name, Pin: pin.Commit, Tip: tip, Behind: behind})
+		reads = append(reads, read)
+	}
+	if len(failed) != 0 {
+		return nil, errors.Join(failed...)
 	}
 	return reads, nil
+}
+
+// readImagePin reads one pin: its source's tip, and its lag behind that tip.
+func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pin daemonimage.Pin) (ImagePinRead, error) {
+	owner, repo, err := pinRepo(pin)
+	if err != nil {
+		return ImagePinRead{}, err
+	}
+	tip, err := imagePinTip(tipGit, pin)
+	if err != nil {
+		return ImagePinRead{}, err
+	}
+	behind := 0
+	if pin.Commit != tip {
+		if behind, err = imagePinBehind(ctx, cmp, pin, owner, repo, tip); err != nil {
+			return ImagePinRead{}, err
+		}
+	}
+	return ImagePinRead{Name: pin.Name, Pin: pin.Commit, Tip: tip, Behind: behind}, nil
 }
 
 // parseImagePins expands the file's {owner} placeholder, as `gt daemon image

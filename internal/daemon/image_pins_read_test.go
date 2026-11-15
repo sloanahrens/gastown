@@ -230,6 +230,25 @@ func TestImagePinsReadLeavesTheOwnerResolverUncalled(t *testing.T) {
 	assert.Equal(t, 0, calls, "the file holds no %s placeholder, so the resolver is not asked", config.ForgeOwnerPlaceholder)
 }
 
+// TestImagePinsReadAFailedTipDoesNotStopTheOtherPins: one source's git answer
+// fails, the read reports the error naming that pin, and the other three pins'
+// tips are still read rather than skipped. A failure never becomes a pin read
+// from another pin's answer or from nothing.
+func TestImagePinsReadAFailedTipDoesNotStopTheOtherPins(t *testing.T) {
+	t.Parallel()
+	git, cmp := pinsReadHealthies()
+	git.errs[pinsReadURL("beads")] = errors.New("remote hung up")
+
+	reads, err := ReadImagePinTips(context.Background(), pinsReadFile(pinsReadURL), nil, git.read, cmp)
+	require.ErrorContains(t, err, "bd pin: cannot read refs/heads/main")
+	assert.NotContains(t, err.Error(), "om pin", "the healthy pins' reads are not reported as failures")
+	assert.Nil(t, reads, "the pins that did read are not returned as the whole file")
+	assert.Equal(t, []string{
+		pinsReadURL("beads"), pinsReadURL("organic-mechanic"),
+		pinsReadURL("history-man"), pinsReadURL("devops"),
+	}, git.asked, "every source's tip is read, including the ones after the failed pin")
+}
+
 // TestImagePinsReadRefusals drives every branch that refuses: the read reports
 // no pins and an error naming what failed, never a pin with a guessed answer.
 func TestImagePinsReadRefusals(t *testing.T) {
@@ -279,7 +298,7 @@ func TestImagePinsReadRefusals(t *testing.T) {
 			setup: func(git *fakePinTips, _ *fakePinCompare) {
 				git.errs[pinsReadURL("beads")] = errors.New("remote hung up")
 			},
-			want: "cannot read refs/heads/main",
+			want: "bd pin: cannot read refs/heads/main",
 		},
 		{
 			name:  "a tip answer with no main ref",
