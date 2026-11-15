@@ -621,31 +621,133 @@ func TestPodRunRefusesAMissingImagesFile(t *testing.T) {
 	}
 }
 
-// TestNonPodRunVerifyListsNoPairChecks holds the probes a run without a pod
-// target wires, as realUpdateDeps builds them: the pair extension is absent, so
-// the verify result is the four checks the town's own reads answer.
+// TestNonPodRunVerifyListsNoPairChecks holds the production wiring of a run
+// without a pod target: the probes realUpdateDeps builds carry no pair
+// extension, and the command leaves them as they are, so the verify result is
+// the four checks the town's own reads answer.
 func TestNonPodRunVerifyListsNoPairChecks(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	run := &verifyProbeRun{output: "gt version " + rollbackNewCommit + " (dev: main)\n"}
-	probes := newVerifyProbes(verifyProbeEnv{
-		Exe:          verifyProbeExe,
-		Run:          run.run,
-		DaemonCommit: func() (string, error) { return rollbackNewCommit, nil },
+
+	t.Run("the production factory builds no pair probes", func(t *testing.T) {
+		t.Parallel()
+		deps, err := realUpdateDeps(townWithGtSource(t))
+		if err != nil {
+			t.Fatalf("realUpdateDeps: %v", err)
+		}
+		if _, ok := deps.Verify.(update.PairProbes); ok {
+			t.Fatal("the probes the production factory builds implement the pair extension")
+		}
 	})
 
-	if _, ok := probes.(update.PairProbes); ok {
-		t.Fatal("the probes a run without a pod target wires implement the pair extension")
-	}
-	checks := update.Verify(ctx, probes, rollbackNewCommit)
-	if len(checks) != 4 {
-		t.Fatalf("got %d checks, want the four a non-pod run makes: %+v", len(checks), checks)
-	}
-	for _, name := range []string{"polecat-annotation", "dev-tag"} {
-		for _, check := range checks {
-			if check.Name == name {
-				t.Errorf("a run without a pod target reported %s", name)
+	t.Run("the command leaves the probes it was given", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		townRoot := t.TempDir()
+		run := &verifyProbeRun{output: "gt version " + rollbackNewCommit + " (dev: main)\n"}
+		wired := newVerifyProbes(verifyProbeEnv{
+			Exe:          verifyProbeExe,
+			Run:          run.run,
+			DaemonCommit: func() (string, error) { return rollbackNewCommit, nil },
+		})
+		var got update.Deps
+		seams := updateSeams{
+			FindTownRoot: func() (string, error) { return townRoot, nil },
+			DepsFactory: func(string) (update.Deps, error) {
+				return update.Deps{
+					Store:  &update.Store{Dir: update.Dir(townRoot)},
+					Clock:  updateClock{},
+					Verify: wired,
+				}, nil
+			},
+			Run: func(_ context.Context, deps update.Deps, _ update.Options) (update.State, error) {
+				got = deps
+				return update.State{Outcome: update.OutcomeOK}, nil
+			},
+		}
+
+		if _, err := runPodCommand(t, seams); err != nil {
+			t.Fatalf("gt update without a pod target: %v", err)
+		}
+		if _, ok := got.Verify.(update.PairProbes); ok {
+			t.Fatal("the command added the pair extension to a run without a pod target")
+		}
+		checks := update.Verify(ctx, got.Verify, rollbackNewCommit)
+		if len(checks) != 4 {
+			t.Fatalf("got %d checks, want the four a non-pod run makes: %+v", len(checks), checks)
+		}
+		for _, name := range []string{"polecat-annotation", "dev-tag"} {
+			for _, check := range checks {
+				if check.Name == name {
+					t.Errorf("a run without a pod target reported %s", name)
+				}
 			}
+		}
+	})
+}
+
+// TestPodRunWithoutImagesFailsThePairChecks holds the run's choice for a pod
+// target that names no --images: --only verify is a supported run without a
+// target pair, and its verify reports both pair checks failed against the empty
+// want rather than passing on a pair the run never named. Neither pair record
+// is read to say so.
+func TestPodRunWithoutImagesFailsThePairChecks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	townRoot := t.TempDir()
+	// The Deployment and the daemon pod hold a healthy pair. The run still fails
+	// both checks, since no --images file names the pair they would be compared
+	// with, and neither read is made.
+	kube := &podDaemonKubectl{
+		running: rollbackNewCommit,
+		image:   podSwapDigestRef,
+		polecat: podPairPolecatRef,
+		pods:    podPairHealthy(),
+	}
+	var got update.Deps
+	seams := updateSeams{
+		FindTownRoot: func() (string, error) { return townRoot, nil },
+		DepsFactory: func(string) (update.Deps, error) {
+			return update.Deps{
+				Store: &update.Store{Dir: update.Dir(townRoot)},
+				Clock: updateClock{},
+				Verify: newVerifyProbes(verifyProbeEnv{
+					Exe:          verifyProbeExe,
+					Run:          (&verifyProbeRun{output: "GREEN tick 2m ago\n"}).run,
+					DaemonCommit: func() (string, error) { return rollbackNewCommit, nil },
+				}),
+			}, nil
+		},
+		Run: func(_ context.Context, deps update.Deps, _ update.Options) (update.State, error) {
+			got = deps
+			return update.State{Outcome: update.OutcomeOK}, nil
+		},
+		PodRun: kube.run,
+	}
+
+	if _, err := runPodCommand(t, seams, "--only", "verify",
+		"--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace); err != nil {
+		t.Fatalf("gt update --only verify with the pod flags and no --images: %v", err)
+	}
+	probes, ok := got.Verify.(update.PairProbes)
+	if !ok {
+		t.Fatalf("verify probe = %T, want the pod run's pair probes", got.Verify)
+	}
+	if want := probes.WantPolecat(); want != "" {
+		t.Errorf("WantPolecat = %q, want empty: the run names no pair", want)
+	}
+	checks := update.Verify(ctx, got.Verify, rollbackNewCommit)
+	for _, name := range []string{"polecat-annotation", "dev-tag"} {
+		check := podVerifyCheck(t, checks, name)
+		if check.OK {
+			t.Errorf("%s passed on a run that names no pair: %+v", name, check)
+		}
+		if check.Detail != "the pair named no polecat digest" {
+			t.Errorf("%s detail = %q, want the missing pair named", name, check.Detail)
+		}
+	}
+	for _, call := range kube.calls {
+		if slices.Contains(call, runningPairJSONPath) || slices.Contains(call, "polecat-devtag") {
+			t.Errorf("ran %v, want no pair read: the run names no pair", call)
 		}
 	}
 }

@@ -429,6 +429,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 		// The Job runs in a pod with no docker, so the image label of the target
 		// pair is read from the registry the --images file names, and the pair's
 		// two records are read from the Deployment and the daemon pod.
+		// A run that names no --images names no target pair, so wantPolecat is
+		// empty and both pair checks fail: verify never passes a pair the run
+		// did not name, and it reads neither record to say so.
 		deps.Verify = podImageLabelProbes{
 			VerifyProbes: deps.Verify,
 			label:        podTargetImageLabel(seams.Images, townRoot, req.Images),
