@@ -496,9 +496,9 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 }
 
 // TestTownClusterDriftExits2ForEachInputItCannotRead holds the recorded flags,
-// the values file and a live Deployment to the unreadable exit status: 2, which
-// says the run never compared, rather than 1, which says it compared and found a
-// difference, and never 0.
+// the values file, the render and a live Deployment to the unreadable exit
+// status: 2, which says the run never compared, rather than 1, which says it
+// compared and found a difference, and never 0.
 func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -517,7 +517,7 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 			want: "no live render has recorded its flags",
 		},
 		{
-			name: "the values file is unreadable",
+			name: "the values file is absent",
 			prepare: func(t *testing.T, _ *clusterDriftDeps, town string) {
 				t.Helper()
 				if err := os.Remove(imagevalues.PathIn(driftTestFlags(t, town).dir)); err != nil {
@@ -525,6 +525,32 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 				}
 			},
 			want: "holds no image pair",
+		},
+		{
+			// A directory where the file was: os.ReadFile refuses it with EISDIR
+			// for every user, where a 0o000 mode is no obstacle to root.
+			name: "the values file cannot be read",
+			prepare: func(t *testing.T, _ *clusterDriftDeps, town string) {
+				t.Helper()
+				path := imagevalues.PathIn(driftTestFlags(t, town).dir)
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("removing the values file: %v", err)
+				}
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("making a directory where the values file was: %v", err)
+				}
+			},
+			want: "reading the image values under",
+		},
+		{
+			name: "the render cannot be built",
+			prepare: func(t *testing.T, d *clusterDriftDeps, _ string) {
+				t.Helper()
+				d.render.build = func(k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+					return k8sdaemon.Manifests{}, errors.New("the image values name no digest")
+				}
+			},
+			want: "cannot render the Deployments to compare",
 		},
 		{
 			name: "the live Deployment cannot be read",
