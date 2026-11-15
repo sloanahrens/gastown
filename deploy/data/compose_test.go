@@ -346,7 +346,7 @@ var holes = []struct {
 		path: "volumes.dolt-var",
 		mutate: func(d map[string]any) {
 			d["volumes"].(map[string]any)["dolt-var"] = map[string]any{
-				"driver_opts": map[string]any{"type": "none", "o": "bind", "device": "/Users/sloan/gt"},
+				"driver_opts": map[string]any{"type": "none", "o": "bind", "device": "/home/user/gt"},
 			}
 		},
 	},

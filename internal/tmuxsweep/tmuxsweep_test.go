@@ -27,7 +27,7 @@ func (f *fakeServer) ListSessions() ([]string, error) {
 func (f *fakeServer) GetPanePID(string) (string, error) { return "4242", nil }
 
 func (f *fakeServer) PaneCurrentPath(string) (string, error) {
-	return "/private/var/folders/xy/T", nil
+	return "/work/pane", nil
 }
 
 func (f *fakeServer) KillServer() error {

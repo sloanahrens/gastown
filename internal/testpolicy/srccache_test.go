@@ -111,7 +111,7 @@ func TestCacheableUnderTellsTheCheckoutFromAFixture(t *testing.T) {
 		"temp dir nested inside the checkout":          {"/r", []string{"/r/.tmp"}, "/r/.tmp/TestA/001", false},
 		"temp dir is the checkout root itself":         {"/work/repo", []string{"/work/repo"}, "/work/repo/internal/a", false},
 		"checkout dir with a nested temp dir":          {"/r", []string{"/r/.tmp"}, "/r/internal/a", true},
-		"temp dir spelled two ways":                    {"/work/repo", []string{"/var/f", "/private/var/f"}, "/private/var/f/TestA/001", false},
+		"temp dir spelled two ways":                    {"/work/repo", []string{"/work/repo/tmp", "/work/repo/tmp-link"}, "/work/repo/tmp-link/TestA/001", false},
 		"no checkout root found":                       {"", []string{"/tmp"}, "/work/repo", false},
 		"a sibling that shares the root's prefix":      {"/work/repo", []string{"/tmp"}, "/work/repo2/a", false},
 	} {

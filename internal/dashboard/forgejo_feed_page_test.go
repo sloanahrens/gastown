@@ -56,7 +56,7 @@ func TestForgejoFeedDrawsOneRowPerEventWithItsFields(t *testing.T) {
 	events := []any{
 		feedEvent(now.Add(-3*time.Second), "bot-polecat", "push to main", "gastown"),
 		feedEvent(now.Add(-2*time.Second), "bot-landing", "delete branch land/gt-1", "beads"),
-		feedEvent(now.Add(-time.Second), "sloan", "open issue", "longeye"),
+		feedEvent(now.Add(-time.Second), "alice", "open issue", "longeye"),
 	}
 	dom := newPageDOM(t)
 	dom.call(t, "renderForgejo", map[string]any{"forgejo": map[string]any{
@@ -70,7 +70,7 @@ func TestForgejoFeedDrawsOneRowPerEventWithItsFields(t *testing.T) {
 	want := []struct{ actor, summary, repo string }{
 		{"bot-polecat", "push to main", "gastown"},
 		{"bot-landing", "delete branch land/gt-1", "beads"},
-		{"sloan", "open issue", "longeye"},
+		{"alice", "open issue", "longeye"},
 	}
 	for i, row := range rows {
 		if len(row) != 4 {
