@@ -18,7 +18,7 @@ func init() {
 	Register(
 		Entry{Path: "plugin history", Group: "dispatch", Use: "Use this when you need to know whether a plugin has been running and how its last runs ended, before you trust what it reports or chase a report it never sent."},
 		Entry{Path: "plugin list", Group: "dispatch", Use: "Use this to see which plugins the town and each rig define, and whether a rig has its own copy of one, before you run or edit a plugin."},
-		Entry{Path: "plugin record-run", Group: "dispatch", Use: "Use this when the work a plugin asked for is done, failed or skipped, so its history carries the real result instead of the receipt for printing the instructions.", Check: "the command prints the new bead id and gt plugin history <plugin> shows the run with that result's glyph"},
+		Entry{Path: "plugin record-run", Group: "dispatch", Use: "Use this when the work a plugin asked for succeeded, failed or was skipped, so its history shows that result rather than only the receipt that its instructions were printed.", Check: "the command prints the new bead id and gt plugin history <plugin> shows the run with that result's glyph"},
 		Entry{Path: "plugin run", Group: "dispatch", Use: "Use this when a plugin's work is due but nothing will dispatch it, so you take its instructions and do the work yourself.", Check: "gt plugin history <name> shows the new run with the printed marker, not the success one"},
 		Entry{Path: "plugin show", Group: "dispatch", Use: "Use this when you are about to run a plugin and need its gate and the start of its instructions, or when you need to know why the daemon never runs it."},
 	)

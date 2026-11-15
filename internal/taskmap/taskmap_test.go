@@ -246,6 +246,24 @@ func TestOmStatsUseNamesTheSituation(t *testing.T) {
 	}
 }
 
+// TestPluginRecordRunUseNamesTheSituation applies the rule to plugin
+// record-run (gt-h918sf): the Use names the situation and states the receipt
+// plainly, rather than by the printing it stands in for.
+func TestPluginRecordRunUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("plugin record-run")
+	if !ok {
+		t.Fatal(`Lookup("plugin record-run") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") {
+		t.Errorf("plugin record-run Use = %q; want a line starting \"Use this when\" that names the situation", e.Use)
+	}
+	if strings.Contains(e.Use, "receipt for printing") {
+		t.Errorf("plugin record-run Use = %q; it names the receipt by the printing it stands in for, want the result the command records", e.Use)
+	}
+}
+
 // TestChannelAdminStaysInternal pins the grouping judgement place_p9a.go
 // records (gt-jii0vu): channel create and delete administer a channel, which
 // no task group describes, so a move needs that judgement revisited.
