@@ -388,6 +388,13 @@ type PatrolsConfig struct {
 	// must ask for it.
 	SandboxSampler *PatrolConfig `json:"sandbox_sampler,omitempty"`
 
+	// ImagePins reads the image pins file and each pin's source tip every
+	// interval, and files one refresh bead for the pins that trail their tip
+	// (internal/daemon/image_pins_patrol.go, gt-01lcq2). Off when absent: each
+	// tick reaches git and the town's Forgejo with four tip reads and up to
+	// four compares, so a town turns it on rather than an upgrade.
+	ImagePins *PatrolConfig `json:"image_pins,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.

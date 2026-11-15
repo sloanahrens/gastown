@@ -79,6 +79,7 @@ var daemonSteps = []DaemonStep{
 	{"landing_infra", DaemonStepPatrol, DaemonStepHost, nil, "the landing worker's companion: watches Forgejo and its run queue for a landing worker that runs on the host"},
 	{"resource_sampler", DaemonStepPatrol, DaemonStepSeam, nil, "ps rows for the host's components would describe the container"},
 	{"sandbox_sampler", DaemonStepPatrol, DaemonStepRuns, []string{"openshell"}, "in process, and its one exec per live seat is openshell sandbox exec, which the image carries (deploy/daemon/Dockerfile, gt-7d7jvn)"},
+	{"image_pins", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "in process: it reads the pins file from the gt build checkout, one git ls-remote per pin from the container, and files through bd; git is in the image, as the other git rows say (gt-01lcq2)"},
 
 	{"handler", DaemonStepPatrol, DaemonStepRuns, []string{"bash"}, "dispatches the plugins that run here"},
 	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},

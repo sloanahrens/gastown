@@ -413,6 +413,28 @@ func TestDaemonPatrolConfigDecodesResourceSampler(t *testing.T) {
 	}
 }
 
+// image_pins (gt-01lcq2) decodes with the patrol schema's fields, and a
+// daemon.json without it still decodes (the daemon then runs no tick).
+func TestDaemonPatrolConfigDecodesImagePins(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"image_pins":{"enabled":true,"interval":"30m"}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := cfg.Patrols.ImagePins; got == nil || !got.Enabled || got.Interval != "30m" {
+		t.Errorf("image_pins = %+v, want enabled with interval 30m", got)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"handler":{"enabled":true}}}`), &absent); err != nil {
+		t.Fatalf("decode without image_pins: %v", err)
+	}
+	if absent.Patrols.ImagePins != nil {
+		t.Errorf("absent key decoded as %+v", absent.Patrols.ImagePins)
+	}
+}
+
 // overseer_report (gt-a6fg7) decodes strictly with its own fields, and a
 // config without it leaves the patrol unset, which the daemon reads as off.
 func TestDaemonPatrolConfigDecodesOverseerReport(t *testing.T) {

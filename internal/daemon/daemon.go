@@ -1336,6 +1336,25 @@ type Daemon struct {
 	// cadence and drive Run's tick by hand (gt-23zbmi).
 	newSandboxSamplerTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
 
+	// imagePinsRunning is the image_pins tick's single-flight guard: one tick
+	// makes network reads and files a bead, so it runs on its own goroutine and
+	// a tick that arrives while one runs is skipped (image_pins_patrol.go).
+	imagePinsRunning atomic.Bool
+	// imagePinsCycles joins the tick's goroutine, so a test can wait for a tick
+	// it started rather than time it.
+	imagePinsCycles sync.WaitGroup
+	// newImagePinsTicker is where the image_pins patrol's ticker comes from:
+	// nil is time.NewTicker, and a test sets it to record the cadence.
+	newImagePinsTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
+	// newImagePinsSeams replaces the tick's town seams in tests: nil builds the
+	// town's own (the gt checkout, git and the town's Forgejo, the rig's
+	// database), and a test sets it to hand the tick fakes.
+	newImagePinsSeams func(ctx context.Context) imagePinsTickSeams
+	// imagePinsEnsureFn resolves the gt source checkout the pins file is read
+	// from: nil is buildsrc.Ensure, and a test sets it to name a checkout under
+	// its temporary town.
+	imagePinsEnsureFn func(ctx context.Context, townRoot, rig, rev string) (string, error)
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -2331,6 +2350,14 @@ func (d *Daemon) Run() (err error) {
 		defer stopSandboxSampler()
 	}
 
+	// Start the image pins ticker if enabled (default off, gt-01lcq2): one
+	// tick reads four source tips over the network, so a town turns it on
+	// rather than an upgrade.
+	imagePinsChan, stopImagePins := d.startImagePinsTicker()
+	if stopImagePins != nil {
+		defer stopImagePins()
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2517,6 +2544,14 @@ func (d *Daemon) Run() (err error) {
 			// gateway for the tick's bound (gt-7d7jvn, gt-23zbmi).
 			if !d.isShutdownInProgress() {
 				d.startSandboxSamplerTick()
+			}
+
+		case <-imagePinsChan:
+			// Image pins — reads each pin's source tip and files the refresh
+			// bead the planner says is due, on its own goroutine: the reads
+			// reach git and the town's Forgejo (gt-01lcq2).
+			if !d.isShutdownInProgress() {
+				d.startImagePinsTick()
 			}
 
 		case <-findingsFilerChan:
