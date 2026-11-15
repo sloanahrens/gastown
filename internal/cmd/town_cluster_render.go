@@ -471,91 +471,20 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if err := checkOutDir(f.out); err != nil {
 		return err
 	}
-	pair, ok, err := imagevalues.LoadIn(f.dir)
-	if err != nil {
-		return fmt.Errorf("reading the image values under %s: %w", f.dir, err)
-	}
-	if !ok {
-		return fmt.Errorf("--dir %s holds no image pair at %s, and a render needs the daemon's digest: run gt update images first", f.dir, imagevalues.PathIn(f.dir))
-	}
-	// The pod's environment comes from the town; a run with no record flag finds it
-	// here, after its flags and the image pair are checked.
-	if _, err := findTown(); err != nil {
-		return err
-	}
-	env, err := d.containerEnv(townRoot)
-	if err != nil {
-		return fmt.Errorf("reading the town's daemon.env for the pod's environment: %w", err)
-	}
-	manifestPath := filepath.Join(f.dir, secretsManifestRelPath)
-	data, err := d.readFile(manifestPath)
-	if err != nil {
-		return fmt.Errorf("reading the secrets manifest %s: %w", manifestPath, err)
-	}
-	secrets, err := manifestdata.ParseSecretsManifest(data)
-	if err != nil {
-		return fmt.Errorf("the secrets manifest %s is refused: %w", manifestPath, err)
-	}
-	// The dashboard's token is the viewer entry's Secret. The manifest marks that
-	// entry optional, and a pod that mounts a Secret that does not exist stays in
-	// ContainerCreating, so the render refuses before it writes anything.
-	if f.dashboard && !slices.ContainsFunc(secrets.Files, func(s manifestdata.SecretFile) bool {
-		return s.Name == k8sdaemon.ViewerTokenFile
-	}) {
-		return fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
-	}
-	cloudCheckKey, err := cloudCheckKeyConfigured(f.configDir, d.lstat)
+	v, pair, err := clusterRenderValues(d, f, findTown)
 	if err != nil {
 		return err
 	}
-	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
-	hmConfig := false
-	if !f.rehearsal {
-		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
-			return err
-		}
-		// A pod whose hm mounts no config reads its defaults, which name the pod's
-		// own loopback, so it reaches neither the town's database nor the host's
-		// embedder and reranker. The render refuses rather than write a pod that
-		// cannot work (gt-fg6ami).
-		if !hmConfig {
-			return fmt.Errorf("the derived hm config is absent at %s: without it the pod's hm reads its defaults, which name the pod's own loopback; run gt daemon compose write first, and no file was written", hmConfigPath)
-		}
+	// The function found the town through the memoized lookup, so this call reads
+	// nothing more; the run still needs the root for the Secret lines and the
+	// town's values file.
+	townRoot, err = findTown()
+	if err != nil {
+		return err
 	}
 	namespace := f.namespace
 	if namespace == "" {
 		namespace = k8sdaemon.DefaultNamespace
-	}
-	v := k8sdaemon.Values{
-		Namespace:               f.namespace,
-		Rehearsal:               f.rehearsal,
-		Secrets:                 secrets.Files,
-		CloudCheckKey:           cloudCheckKey,
-		HMConfig:                hmConfig,
-		Image:                   pair.Daemon,
-		ProxyImage:              f.proxyImage,
-		PolecatImage:            f.polecatImage,
-		Env:                     env,
-		CPU:                     f.cpu,
-		Memory:                  f.memory,
-		ConfirmContainerStopped: f.confirmStopped,
-		HostGatewayIP:           f.hostGateway,
-		Dashboard:               f.dashboard,
-		DashboardClaudeDir:      f.dashboardClaudeDir,
-		BdGatewayURL:            strings.TrimSpace(f.bdGatewayURL),
-		DaemonClaudeDir:         f.daemonClaudeDir,
-		Tracker:                 f.tracker,
-		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),
-		TrackerBackup:           f.trackerBackup,
-		TrackerBackupImage:      strings.TrimSpace(f.trackerBackupImage),
-		DaemonBdGatewayURL:      strings.TrimSpace(f.daemonBdGatewayURL),
-	}
-	if !f.rehearsal {
-		// The live pod's arguments equal the live compose command's: the om token
-		// file and the forge host with the landing bot's token (gt-22wubb).
-		v.OMToken = true
-		v.ForgeHost = strings.TrimSpace(f.forgeHost)
-		v.DoltBackupHostPath = f.doltBackupHostPath
 	}
 	m, err := d.build(v)
 	if err != nil {
@@ -660,6 +589,96 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		fmt.Fprintf(d.out, "Took the flags recorded at %s as defaults; a flag given on this command line took precedence\n", recordPath)
 	}
 	return nil
+}
+
+// clusterRenderValues builds the daemon's Values from f and the reads d makes of
+// the host, and returns them with the image pair it loaded. It is the one place
+// the command's flags become Values. findTown is the run's memoized lookup,
+// called where the run would call it: after the flags and the image pair, so a
+// wrong flag or a missing pair is the refusal heard first.
+func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown func() (string, error)) (k8sdaemon.Values, imagevalues.Values, error) {
+	pair, ok, err := imagevalues.LoadIn(f.dir)
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("reading the image values under %s: %w", f.dir, err)
+	}
+	if !ok {
+		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("--dir %s holds no image pair at %s, and a render needs the daemon's digest: run gt update images first", f.dir, imagevalues.PathIn(f.dir))
+	}
+	townRoot, err := findTown()
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, err
+	}
+	env, err := d.containerEnv(townRoot)
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("reading the town's daemon.env for the pod's environment: %w", err)
+	}
+	manifestPath := filepath.Join(f.dir, secretsManifestRelPath)
+	data, err := d.readFile(manifestPath)
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("reading the secrets manifest %s: %w", manifestPath, err)
+	}
+	secrets, err := manifestdata.ParseSecretsManifest(data)
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("the secrets manifest %s is refused: %w", manifestPath, err)
+	}
+	// The dashboard's token is the viewer entry's Secret. The manifest marks that
+	// entry optional, and a pod that mounts a Secret that does not exist stays in
+	// ContainerCreating, so the values are refused before anything is written.
+	if f.dashboard && !slices.ContainsFunc(secrets.Files, func(s manifestdata.SecretFile) bool {
+		return s.Name == k8sdaemon.ViewerTokenFile
+	}) {
+		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
+	}
+	cloudCheckKey, err := cloudCheckKeyConfigured(f.configDir, d.lstat)
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, err
+	}
+	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
+	hmConfig := false
+	if !f.rehearsal {
+		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
+			return k8sdaemon.Values{}, imagevalues.Values{}, err
+		}
+		// A pod whose hm mounts no config reads its defaults, which name the pod's
+		// own loopback, so it reaches neither the town's database nor the host's
+		// embedder and reranker. The values are refused rather than a pod written
+		// that cannot work (gt-fg6ami).
+		if !hmConfig {
+			return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("the derived hm config is absent at %s: without it the pod's hm reads its defaults, which name the pod's own loopback; run gt daemon compose write first, and no file was written", hmConfigPath)
+		}
+	}
+	v := k8sdaemon.Values{
+		Namespace:               f.namespace,
+		Rehearsal:               f.rehearsal,
+		Secrets:                 secrets.Files,
+		CloudCheckKey:           cloudCheckKey,
+		HMConfig:                hmConfig,
+		Image:                   pair.Daemon,
+		ProxyImage:              f.proxyImage,
+		PolecatImage:            f.polecatImage,
+		Env:                     env,
+		CPU:                     f.cpu,
+		Memory:                  f.memory,
+		ConfirmContainerStopped: f.confirmStopped,
+		HostGatewayIP:           f.hostGateway,
+		Dashboard:               f.dashboard,
+		DashboardClaudeDir:      f.dashboardClaudeDir,
+		BdGatewayURL:            strings.TrimSpace(f.bdGatewayURL),
+		DaemonClaudeDir:         f.daemonClaudeDir,
+		Tracker:                 f.tracker,
+		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),
+		TrackerBackup:           f.trackerBackup,
+		TrackerBackupImage:      strings.TrimSpace(f.trackerBackupImage),
+		DaemonBdGatewayURL:      strings.TrimSpace(f.daemonBdGatewayURL),
+	}
+	if !f.rehearsal {
+		// The live pod's arguments equal the live compose command's: the om token
+		// file and the forge host with the landing bot's token (gt-22wubb).
+		v.OMToken = true
+		v.ForgeHost = strings.TrimSpace(f.forgeHost)
+		v.DoltBackupHostPath = f.doltBackupHostPath
+	}
+	return v, pair, nil
 }
 
 // podValuesCopyLine is the one command that copies the town's values file into

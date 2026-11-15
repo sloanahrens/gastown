@@ -16,6 +16,7 @@ import (
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -552,6 +553,166 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 			t.Errorf("HMConfigSource = %q, want the compose write's %q", k8sdaemon.HMConfigSource, templates.ContainerHMConfigRP)
 		}
 	})
+}
+
+// errClusterRenderBuildStopped is what the recording build step of
+// TestClusterRenderValuesBuildsWhatTheRenderBuilds returns, so the render stops
+// after the Values it hands over and before any write.
+var errClusterRenderBuildStopped = errors.New("the test stopped the render at its build step")
+
+// clusterRenderBaseValues is the Values a live render of the fixture builds
+// before any flag this table sets: the fixture's share and forge host, the
+// parsed secrets manifest, the town's empty environment and the derived hm
+// config the test town holds.
+func clusterRenderBaseValues(t *testing.T) k8sdaemon.Values {
+	t.Helper()
+	manifest, err := manifestdata.ParseSecretsManifest([]byte(clusterRenderSecretsManifest))
+	if err != nil {
+		t.Fatalf("parsing the fixture secrets manifest: %v", err)
+	}
+	return k8sdaemon.Values{
+		Secrets:                 manifest.Files,
+		Image:                   clusterRenderDaemonDigest,
+		Env:                     map[string]string{},
+		CPU:                     "2",
+		Memory:                  "4Gi",
+		ConfirmContainerStopped: true,
+		OMToken:                 true,
+		HMConfig:                true,
+		ForgeHost:               "forgejo:3000",
+	}
+}
+
+// TestClusterRenderValuesBuildsWhatTheRenderBuilds holds the Values the render
+// hands its build step to the flag sets that change them: the dashboard, the
+// tracker, the daemon's bd gateway and a rehearsal for the live-only fields.
+// clusterRenderValues returns the same Values and image pair the render passes
+// on, so the two cannot drift while both are built.
+func TestClusterRenderValuesBuildsWhatTheRenderBuilds(t *testing.T) {
+	t.Parallel()
+	trackerImage := "registry.example.test/gastown/tracker-backup@sha256:" + strings.Repeat("2", 64)
+	tests := []struct {
+		name   string
+		mutate func(*clusterRenderFlags)
+		want   func(base k8sdaemon.Values) k8sdaemon.Values
+	}{
+		{
+			name:   "a live render",
+			mutate: func(*clusterRenderFlags) {},
+			want:   func(base k8sdaemon.Values) k8sdaemon.Values { return base },
+		},
+		{
+			name: "the dashboard and its bd gateway",
+			mutate: func(f *clusterRenderFlags) {
+				f.dashboard = true
+				f.dashboardClaudeDir = "/Users/sloan/.claude"
+				f.bdGatewayURL = " https://bd.example.test:8443 "
+			},
+			want: func(base k8sdaemon.Values) k8sdaemon.Values {
+				base.Dashboard = true
+				base.DashboardClaudeDir = "/Users/sloan/.claude"
+				base.BdGatewayURL = "https://bd.example.test:8443"
+				return base
+			},
+		},
+		{
+			name: "the tracker",
+			mutate: func(f *clusterRenderFlags) {
+				f.tracker = true
+				f.trackerDSNSecret = " tracker-dsn-secret "
+				f.proxyImage = clusterRenderDaemonDigest
+			},
+			want: func(base k8sdaemon.Values) k8sdaemon.Values {
+				base.Tracker = true
+				base.TrackerDSNSecret = "tracker-dsn-secret"
+				base.ProxyImage = clusterRenderDaemonDigest
+				return base
+			},
+		},
+		{
+			name: "the tracker's nightly dump",
+			mutate: func(f *clusterRenderFlags) {
+				f.tracker = true
+				f.trackerDSNSecret = "tracker-dsn-secret"
+				f.proxyImage = clusterRenderDaemonDigest
+				f.trackerBackup = true
+				f.trackerBackupImage = " " + trackerImage + " "
+			},
+			want: func(base k8sdaemon.Values) k8sdaemon.Values {
+				base.Tracker = true
+				base.TrackerDSNSecret = "tracker-dsn-secret"
+				base.ProxyImage = clusterRenderDaemonDigest
+				base.TrackerBackup = true
+				base.TrackerBackupImage = trackerImage
+				return base
+			},
+		},
+		{
+			name: "the daemon's bd gateway",
+			mutate: func(f *clusterRenderFlags) {
+				f.daemonBdGatewayURL = " https://bd.example.test:8443 "
+				f.daemonBdGatewayURLSet = true
+			},
+			want: func(base k8sdaemon.Values) k8sdaemon.Values {
+				base.DaemonBdGatewayURL = "https://bd.example.test:8443"
+				return base
+			},
+		},
+		{
+			name: "a rehearsal carries no live-only field",
+			mutate: func(f *clusterRenderFlags) {
+				f.rehearsal = true
+				f.forgeHost = ""
+				f.confirmStopped = false
+				f.namespace = "gt-rehearsal"
+			},
+			want: func(base k8sdaemon.Values) k8sdaemon.Values {
+				base.Rehearsal = true
+				base.Namespace = "gt-rehearsal"
+				base.ConfirmContainerStopped = false
+				base.OMToken = false
+				base.HMConfig = false
+				base.ForgeHost = ""
+				return base
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			tt.mutate(&f)
+			town := clusterRenderTestTown(t)
+			d := clusterRenderDepsAt(t, town, io.Discard)
+			var built k8sdaemon.Values
+			d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				built = v
+				return k8sdaemon.Manifests{}, errClusterRenderBuildStopped
+			}
+			if err := runClusterRender(d, f); !errors.Is(err, errClusterRenderBuildStopped) {
+				t.Fatalf("render = %v, want it to reach the build step and stop there", err)
+			}
+			want := tt.want(clusterRenderBaseValues(t))
+			if !reflect.DeepEqual(built, want) {
+				t.Fatalf("the render built %+v, want %+v", built, want)
+			}
+			got, pair, err := clusterRenderValues(d, f, func() (string, error) { return town, nil })
+			if err != nil {
+				t.Fatalf("clusterRenderValues: %v", err)
+			}
+			if !reflect.DeepEqual(got, built) {
+				t.Errorf("clusterRenderValues returned %+v, but the render built %+v for the same flags", got, built)
+			}
+			wantPair := imagevalues.Values{
+				Daemon:  clusterRenderDaemonDigest,
+				Polecat: clusterRenderDaemonDigest,
+				Commit:  strings.Repeat("a", 40),
+			}
+			if !reflect.DeepEqual(pair, wantPair) {
+				t.Errorf("clusterRenderValues returned the pair %+v, want %+v", pair, wantPair)
+			}
+		})
+	}
 }
 
 func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {
