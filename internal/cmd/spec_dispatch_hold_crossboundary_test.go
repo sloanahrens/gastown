@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/holdclaim"
@@ -22,10 +23,10 @@ import (
 // the writer into a claim directory on disk, then run one tick over that
 // directory, so a hold the writer sets must stop the tick on the next tick.
 
-// crossPodMount is the path the daemon pod mounts its town-state claim at. It
-// mirrors holdclaim's podMount, which this package cannot import. A drift makes
-// every pod call here fail, not pass.
-const crossPodMount = "/Users/sloan/gt"
+// crossPodMount is the path the daemon pod mounts its town-state claim at: the
+// manifest's town root, which holdclaim's unexported podMount carries too. A
+// drift between the two makes every pod call here miss the writer's file.
+const crossPodMount = k8sdaemon.TownRootPath
 
 // crossOther is the second rig. A rig ESTOP on gastown leaves it open.
 const crossOther = "otherrig"

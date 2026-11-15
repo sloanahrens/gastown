@@ -94,7 +94,7 @@ func driftRendered() map[string]any {
 						"image": driftDigest("daemon"),
 						"args":  []any{"--om-token-file", "/run/secrets/om-token"},
 						"env": []any{
-							map[string]any{"name": "GT_TOWN_ROOT", "value": "/Users/sloan/gt"},
+							map[string]any{"name": "GT_TOWN_ROOT", "value": k8sdaemon.TownRootPath},
 							map[string]any{"name": "TZ", "value": "America/Chicago"},
 						},
 						"resources": map[string]any{
@@ -103,7 +103,7 @@ func driftRendered() map[string]any {
 						},
 						"ports": []any{map[string]any{"containerPort": 8080}},
 						"volumeMounts": []any{
-							map[string]any{"name": "town-state", "mountPath": "/Users/sloan/gt"},
+							map[string]any{"name": "town-state", "mountPath": k8sdaemon.TownRootPath},
 							map[string]any{
 								"name":      "daemon-promote-om-key",
 								"mountPath": "/run/gt/xdg/gt/promote-om.key",
