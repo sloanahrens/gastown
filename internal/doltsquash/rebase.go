@@ -99,8 +99,24 @@ func (s *designStep) column(ctx context.Context, statement string) ([]string, er
 }
 
 // RecordBefore reads and returns design step 3's BEFORE record of main.
+//
+// The row counts and table hashes are read from the session's working set, so
+// the session is put on main and checked there first: on any other branch the
+// record would describe that branch while its tip named main (gt-1w9790).
 func RecordBefore(ctx context.Context, ex Exec) (Before, error) {
 	s := &designStep{ex: ex}
+	if _, err := s.exec(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		return Before{}, err
+	}
+	branch, err := s.scalar(ctx, "SELECT active_branch()")
+	if err != nil {
+		return Before{}, err
+	}
+	if branch != "main" {
+		return Before{}, fmt.Errorf(
+			"doltsquash: statement %d (SELECT active_branch()) answered %q, want main: the BEFORE record must be read on main",
+			s.n, branch)
+	}
 	tip, err := s.scalar(ctx, "SELECT dolt_hashof('main')")
 	if err != nil {
 		return Before{}, err
@@ -153,8 +169,10 @@ func RecordBefore(ctx context.Context, ex Exec) (Before, error) {
 // RebaseHistory runs design step 4: compact-base at main's initial commit,
 // compact-work at before.Tip, the interactive rebase, squash marked on every
 // plan row after the first whose commit main held at or before cut, and the
-// continue. On error the branches and any open rebase session are left for the
-// caller's recovery by state.
+// continue. The filter reads dolt_log('main') by name, because inside a rebase
+// session an unqualified log answers only the base (gt-1w9790). On error the
+// branches and any open rebase session are left for the caller's recovery by
+// state.
 func RebaseHistory(ctx context.Context, ex Exec, before Before, cut time.Time) (RebaseResult, error) {
 	if err := checkCommitHash("the recorded main tip", before.Tip); err != nil {
 		return RebaseResult{}, err
@@ -184,26 +202,29 @@ func RebaseHistory(ctx context.Context, ex Exec, before Before, cut time.Time) (
 	if len(plan) == 0 {
 		return RebaseResult{}, fmt.Errorf("doltsquash: the rebase plan on compact-work is empty, so there is nothing to squash")
 	}
-	old, err := oldCommits(ctx, s, cut)
+	first := plan[0].order
+	marked, err := s.number(ctx, countStatement(first, cut))
 	if err != nil {
 		return RebaseResult{}, err
 	}
-	marks := marksSquash(plan, old)
-	if len(marks) == 0 {
+	if marked == 0 {
 		return RebaseResult{}, fmt.Errorf(
 			"doltsquash: none of the %d plan rows is on main at or before %s, so the cut squashes nothing",
 			len(plan), formatCut(cut))
 	}
-	if _, err := s.exec(ctx, markStatement(plan[0].order, marks)); err != nil {
+	if _, err := s.exec(ctx, markStatement(first, cut)); err != nil {
 		return RebaseResult{}, err
 	}
 	if _, err := s.exec(ctx, "CALL DOLT_REBASE('--continue')"); err != nil {
 		return RebaseResult{}, err
 	}
-	return RebaseResult{Marked: len(marks)}, nil
+	return RebaseResult{Marked: int(marked)}, nil
 }
 
 // planRow is one row of the interactive rebase plan Dolt holds in dolt_rebase.
+// commit is validated as a hash when the plan is read: a row that names no
+// commit means the session is not holding the plan this step asked for, so the
+// run stops rather than marking rows it cannot trust.
 type planRow struct {
 	order  int64
 	commit string
@@ -235,55 +256,27 @@ func readPlan(ctx context.Context, s *designStep) ([]planRow, error) {
 	return plan, nil
 }
 
-// oldCommits returns the commits main holds dated at or before cut. The log is
-// read by branch name: inside a rebase session dolt_log answers only the base,
-// so a log read without the name selects nothing (gt-1w9790).
-func oldCommits(ctx context.Context, s *designStep, cut time.Time) ([]string, error) {
-	statement := fmt.Sprintf(
-		"SELECT commit_hash FROM dolt_log('main') WHERE date <= %s", quoteLiteral(formatCut(cut)))
-	hashes, err := s.column(ctx, statement)
-	if err != nil {
-		return nil, err
-	}
-	for i, hash := range hashes {
-		if err := checkCommitHash(fmt.Sprintf("main log record %d", i), hash); err != nil {
-			return nil, err
-		}
-	}
-	return hashes, nil
-}
-
-// marksSquash returns the plan rows the update marks squash: every row after
-// the first whose commit main held at or before the cut. The first row stays a
-// pick because a squash folds into the row before it.
-func marksSquash(plan []planRow, old []string) []planRow {
-	if len(plan) < 2 {
-		return nil
-	}
-	oldSet := make(map[string]struct{}, len(old))
-	for _, hash := range old {
-		oldSet[hash] = struct{}{}
-	}
-	var marks []planRow
-	for _, row := range plan[1:] {
-		if _, ok := oldSet[row.commit]; ok {
-			marks = append(marks, row)
-		}
-	}
-	return marks
-}
-
-// markStatement renders the update that marks marks squash. first is the order
-// of the plan's first row, which the bound keeps a pick whatever the hash list
-// holds.
-func markStatement(first int64, marks []planRow) string {
-	quoted := make([]string, len(marks))
-	for i, row := range marks {
-		quoted[i] = quoteLiteral(row.commit)
-	}
+// squashPredicate is design step 4's filter: every plan row after the first
+// whose commit main held at or before cut. The first row stays a pick because a
+// squash folds into the row before it. The log is read by branch name, because
+// inside a rebase session dolt_log answers only the base, so a filter that names
+// no branch selects nothing (gt-1w9790).
+func squashPredicate(first int64, cut time.Time) string {
 	return fmt.Sprintf(
-		"UPDATE dolt_rebase SET action = 'squash' WHERE rebase_order > %d AND commit_hash IN (%s)",
-		first, strings.Join(quoted, ", "))
+		"rebase_order > %d AND commit_hash IN (SELECT commit_hash FROM dolt_log('main') WHERE date <= %s)",
+		first, quoteLiteral(formatCut(cut)))
+}
+
+// countStatement returns the count of plan rows the marking update will mark:
+// it shares the update's predicate, so the number returned is the number of
+// rows the update touches.
+func countStatement(first int64, cut time.Time) string {
+	return "SELECT COUNT(*) FROM dolt_rebase WHERE " + squashPredicate(first, cut)
+}
+
+// markStatement renders the update that marks the predicate's rows squash.
+func markStatement(first int64, cut time.Time) string {
+	return "UPDATE dolt_rebase SET action = 'squash' WHERE " + squashPredicate(first, cut)
 }
 
 // formatCut renders cut the way Dolt's DATETIME comparison reads it: UTC, and

@@ -22,16 +22,6 @@ func single(column, value string) Rows {
 	return Rows{Columns: []string{column}, Data: [][]string{{value}}}
 }
 
-// values returns the first value of every record, the shape a test needs to
-// read rows it fetched itself.
-func values(rows Rows) []string {
-	out := make([]string, 0, len(rows.Data))
-	for _, record := range rows.Data {
-		out = append(out, record[0])
-	}
-	return out
-}
-
 // cutOf returns a cut seven days before the package's fixed epoch, the
 // keep window of docs/plans/2026-11-15-dolt-squash-design.md.
 func cutOf() time.Time {
@@ -41,6 +31,8 @@ func cutOf() time.Time {
 // The statements the BEFORE record's happy script answers, keyed so a test can
 // replace one answer and keep the rest.
 const (
+	sqlCheckoutMain   = "CALL DOLT_CHECKOUT('main')"
+	sqlActiveBranch   = "SELECT active_branch()"
 	sqlMainTip        = "SELECT dolt_hashof('main')"
 	sqlMainCommits    = "SELECT COUNT(*) FROM dolt_log('main')"
 	sqlShowTables     = "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'"
@@ -53,9 +45,10 @@ const (
 	sqlHashIssues     = "SELECT dolt_hashof_table('issues')"
 )
 
-// recordFake answers the BEFORE record's reads for a three-table database
-// whose events table is dolt_ignored, replacing the answers changes names, so
-// the failure a test expects is the one it injected.
+// recordFake answers the BEFORE record's reads for a four-table catalog whose
+// events table is dolt_ignored and whose dolt_ignore system table is skipped,
+// replacing the answers changes names, so the failure a test expects is the one
+// it injected.
 func recordFake(changes map[string]Rows) *FakeExec {
 	f := NewFakeExec()
 	answer := func(statement string, rows Rows) {
@@ -64,11 +57,13 @@ func recordFake(changes map[string]Rows) *FakeExec {
 		}
 		f.Respond(statement, rows)
 	}
+	answer(sqlCheckoutMain, Rows{})
+	answer(sqlActiveBranch, single("branch", "main"))
 	answer(sqlMainTip, single("dolt_hashof('main')", hash(1)))
 	answer(sqlMainCommits, single("n", "12002"))
 	answer(sqlShowTables, Rows{
 		Columns: []string{"Tables_in_gt"},
-		Data:    [][]string{{"comments"}, {"events"}, {"issues"}},
+		Data:    [][]string{{"comments"}, {"dolt_ignore"}, {"events"}, {"issues"}},
 	})
 	answer(sqlIgnoreComments, single("n", "0"))
 	answer(sqlIgnoreEvents, single("n", "1"))
@@ -80,7 +75,8 @@ func recordFake(changes map[string]Rows) *FakeExec {
 	return f
 }
 
-// The statements design step 4's happy script answers.
+// The statements design step 4's happy script answers. The filter's cut is
+// cutOf(), 2026-11-08 20:00:00, and the fixture's first plan row is order 1.
 const (
 	sqlInitialCommit = "SELECT commit_hash FROM dolt_log('main') ORDER BY date ASC LIMIT 1"
 	sqlBranchBase    = "CALL DOLT_BRANCH('compact-base', "
@@ -88,18 +84,22 @@ const (
 	sqlCheckoutWork  = "CALL DOLT_CHECKOUT('compact-work')"
 	sqlRebaseStart   = "CALL DOLT_REBASE('--interactive', 'compact-base')"
 	sqlPlan          = "SELECT rebase_order, commit_hash FROM dolt_rebase"
-	sqlMainLogOld    = "SELECT commit_hash FROM dolt_log('main') WHERE date <= "
-	sqlMarkSquash    = "UPDATE dolt_rebase SET action = 'squash'"
+	sqlSquashFilter  = "rebase_order > 1 AND commit_hash IN (SELECT commit_hash FROM dolt_log('main') WHERE date <= '2026-11-08 20:00:00')"
+	sqlMarkCount     = "SELECT COUNT(*) FROM dolt_rebase WHERE " + sqlSquashFilter
+	sqlMarkSquash    = "UPDATE dolt_rebase SET action = 'squash' WHERE " + sqlSquashFilter
 	sqlRebaseResume  = "CALL DOLT_REBASE('--continue')"
+	// sqlSessionLogCount is the same filter with the log left unqualified, the
+	// way the 11-01 design read it inside the rebase session.
+	sqlSessionLogCount = "SELECT COUNT(*) FROM dolt_rebase WHERE rebase_order > 1 AND commit_hash IN (SELECT commit_hash FROM dolt_log WHERE date <= "
 )
 
 // rebaseFixture is the database design step 4's tests script: main's initial
-// commit, the tip the BEFORE record holds, four plan rows of which the first
-// three main held before the cut, and one newer than it.
+// commit, the tip the BEFORE record holds, a four-row plan whose first row
+// stays a pick, and the count of rows the cut marks.
 type rebaseFixture struct {
 	initial, tip string
 	plan         []planRow
-	old          []string
+	marked       int
 }
 
 func newRebaseFixture() rebaseFixture {
@@ -112,7 +112,7 @@ func newRebaseFixture() rebaseFixture {
 			{3, hash(0x13)},
 			{4, hash(0x14)},
 		},
-		old: []string{hash(0x10), hash(0x11), hash(0x12), hash(0x13)},
+		marked: 2,
 	}
 }
 
@@ -129,17 +129,13 @@ func (fx rebaseFixture) fake(changes map[string]Rows) *FakeExec {
 	for _, row := range fx.plan {
 		plan.Data = append(plan.Data, []string{fmt.Sprint(row.order), row.commit})
 	}
-	old := Rows{Columns: []string{"commit_hash"}}
-	for _, commit := range fx.old {
-		old.Data = append(old.Data, []string{commit})
-	}
 	answer(sqlInitialCommit, single("commit_hash", fx.initial))
 	answer(sqlBranchBase, Rows{})
 	answer(sqlBranchWork, Rows{})
 	answer(sqlCheckoutWork, Rows{})
 	answer(sqlRebaseStart, Rows{})
 	answer(sqlPlan, plan)
-	answer(sqlMainLogOld, old)
+	answer(sqlMarkCount, single("n", fmt.Sprint(fx.marked)))
 	answer(sqlMarkSquash, Rows{})
 	answer(sqlRebaseResume, Rows{})
 	return f
@@ -164,6 +160,12 @@ func TestRecordBeforeHoldsTipCommitsAndEachVersionedTable(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("RecordBefore returned %+v, want %+v", got, want)
 	}
+	// The counts and hashes come from the session's working set, so the session
+	// is put on main and checked there before any of them is read.
+	opens := []string{sqlCheckoutMain, sqlActiveBranch, sqlMainTip}
+	if sent := f.Statements(); len(sent) < len(opens) || !slices.Equal(sent[:len(opens)], opens) {
+		t.Errorf("the record opened with %q, want checkout main, the branch check, then main's tip", f.Statements())
+	}
 	for _, statement := range f.Statements() {
 		if strings.Contains(statement, "FROM `events`") || strings.Contains(statement, "dolt_hashof_table('events')") {
 			t.Errorf("a dolt_ignored table was read: %q", statement)
@@ -171,10 +173,57 @@ func TestRecordBeforeHoldsTipCommitsAndEachVersionedTable(t *testing.T) {
 	}
 }
 
+// TestRecordBeforeSkipsDoltSystemTables drives the catalog branch that skips a
+// dolt_-prefixed name: dolt_ignore is listed as a base table, but it is neither
+// counted nor hashed, because its state is not part of the history a later
+// comparison could hold it to.
+func TestRecordBeforeSkipsDoltSystemTables(t *testing.T) {
+	t.Parallel()
+	f := recordFake(nil)
+
+	got, err := RecordBefore(context.Background(), f)
+	if err != nil {
+		t.Fatalf("RecordBefore: %v", err)
+	}
+	for _, table := range got.Tables {
+		if strings.HasPrefix(table.Table, "dolt_") {
+			t.Errorf("the record holds the system table %q", table.Table)
+		}
+	}
+	for _, statement := range f.Statements() {
+		if strings.Contains(statement, "`dolt_") || strings.Contains(statement, "'dolt_") {
+			t.Errorf("the record read a system table: %q", statement)
+		}
+	}
+}
+
+// TestRecordBeforeRefusesASessionNotOnMain drives the branch check: the record
+// must be refused, with the branch check's position, before any count or hash
+// is read from the session's working set.
+func TestRecordBeforeRefusesASessionNotOnMain(t *testing.T) {
+	t.Parallel()
+	f := recordFake(map[string]Rows{sqlActiveBranch: single("branch", "compact-work")})
+
+	_, err := RecordBefore(context.Background(), f)
+	if err == nil {
+		t.Fatal("RecordBefore returned no error on a session that is not on main")
+	}
+	for _, want := range []string{"statement 2 (SELECT active_branch())", `"compact-work"`, "want main"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not hold %q", err, want)
+		}
+	}
+	if got := len(f.Statements()); got != 2 {
+		t.Errorf("the refused record sent %d statements, want 2: nothing is read before the branch is checked", got)
+	}
+}
+
 func TestRecordBeforeQuotesCatalogNames(t *testing.T) {
 	t.Parallel()
 	const name = "we`ird'name\\x"
 	f := NewFakeExec()
+	f.Respond(sqlCheckoutMain, Rows{})
+	f.Respond(sqlActiveBranch, single("branch", "main"))
 	f.Respond(sqlMainTip, single("dolt_hashof('main')", hash(1)))
 	f.Respond(sqlMainCommits, single("n", "1"))
 	f.Respond(sqlShowTables, Rows{Columns: []string{"Tables_in_gt"}, Data: [][]string{{name}}})
@@ -187,6 +236,8 @@ func TestRecordBeforeQuotesCatalogNames(t *testing.T) {
 		t.Fatalf("RecordBefore: %v", err)
 	}
 	want := []string{
+		sqlCheckoutMain,
+		sqlActiveBranch,
 		sqlMainTip,
 		sqlMainCommits,
 		sqlShowTables,
@@ -202,7 +253,7 @@ func TestRecordBeforeQuotesCatalogNames(t *testing.T) {
 	}
 }
 
-func TestRebaseHistoryMarksEveryOldRowAfterTheFirst(t *testing.T) {
+func TestRebaseHistoryMarksAfterTheFirstAndReturnsTheCount(t *testing.T) {
 	t.Parallel()
 	fx := newRebaseFixture()
 	f := fx.fake(nil)
@@ -211,8 +262,8 @@ func TestRebaseHistoryMarksEveryOldRowAfterTheFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RebaseHistory: %v", err)
 	}
-	if got.Marked != 2 {
-		t.Errorf("RebaseHistory marked %d rows, want 2: the first plan row stays a pick and the fourth is newer than the cut", got.Marked)
+	if got.Marked != fx.marked {
+		t.Errorf("RebaseHistory marked %d rows, want %d, the count its filter answered", got.Marked, fx.marked)
 	}
 	want := []string{
 		sqlInitialCommit,
@@ -221,9 +272,8 @@ func TestRebaseHistoryMarksEveryOldRowAfterTheFirst(t *testing.T) {
 		sqlCheckoutWork,
 		sqlRebaseStart,
 		sqlPlan + " ORDER BY rebase_order",
-		"SELECT commit_hash FROM dolt_log('main') WHERE date <= '2026-11-08 20:00:00'",
-		"UPDATE dolt_rebase SET action = 'squash' WHERE rebase_order > 1 AND commit_hash IN ('" +
-			hash(0x12) + "', '" + hash(0x13) + "')",
+		sqlMarkCount,
+		sqlMarkSquash,
 		sqlRebaseResume,
 	}
 	if sent := f.Statements(); !slices.Equal(sent, want) {
@@ -231,45 +281,44 @@ func TestRebaseHistoryMarksEveryOldRowAfterTheFirst(t *testing.T) {
 	}
 }
 
-// TestOldSessionLogSelectsNothingAndMainLogSelectsEveryOldCommit pins the
-// defect the v2 design replaces: a log read inside a rebase session answers
-// only the base, so the 11-01 filter matches no plan row; the same filter read
-// from main matches every commit older than the cut.
-func TestOldSessionLogSelectsNothingAndMainLogSelectsEveryOldCommit(t *testing.T) {
+// TestRebaseFilterReadsTheLogByBranchName keeps the case the 11-01 design got
+// wrong: inside a rebase session an unqualified dolt_log sees only the base, so
+// commit_hash IN (SELECT commit_hash FROM dolt_log WHERE date <= cut) counts no
+// plan row, while the same filter read from dolt_log('main') counts every old
+// row after the first. The fake answers the unqualified count with zero and the
+// qualified one with the marked rows, so an engine that drops the branch name
+// is refused before it marks anything. This pins the statement text the engine
+// sends, not Dolt's behaviour; that behaviour is pinned by the lab integration
+// bead (D11).
+func TestRebaseFilterReadsTheLogByBranchName(t *testing.T) {
 	t.Parallel()
-	base, c1, c2, c3 := hash(0x20), hash(0x21), hash(0x22), hash(0x23)
-	f := NewFakeExec()
-	// A rebase session's log holds the base and nothing the plan replays.
-	f.Respond("SELECT commit_hash FROM dolt_log WHERE date <= ",
-		Rows{Columns: []string{"commit_hash"}, Data: [][]string{{base}}})
-	// main's log holds the base and every commit on top of it.
-	f.Respond(sqlMainLogOld,
-		Rows{Columns: []string{"commit_hash"}, Data: [][]string{{base}, {c1}, {c2}, {c3}}})
-	plan := []planRow{{1, c1}, {2, c2}, {3, c3}}
+	fx := newRebaseFixture()
+	f := fx.fake(nil)
+	f.Respond(sqlSessionLogCount, single("n", "0"))
 
-	oldStatement := fmt.Sprintf("SELECT commit_hash FROM dolt_log WHERE date <= %s", quoteLiteral(formatCut(cutOf())))
-	rows, err := f.Exec(context.Background(), oldStatement)
+	got, err := RebaseHistory(context.Background(), f, Before{Tip: fx.tip}, cutOf())
 	if err != nil {
-		t.Fatalf("the 11-01 statement: %v", err)
+		t.Fatalf("RebaseHistory refused the branch-qualified filter: %v", err)
 	}
-	if got := values(rows); !slices.Equal(got, []string{base}) {
-		t.Fatalf("the session log answered %q, want only the base", got)
+	if got.Marked != fx.marked {
+		t.Errorf("RebaseHistory marked %d rows, want %d", got.Marked, fx.marked)
 	}
-	if got := marksSquash(plan, values(rows)); len(got) != 0 {
-		t.Errorf("the 11-01 filter marked %d rows, want 0: the plan holds no base commit", len(got))
+	counted := false
+	for _, statement := range f.Statements() {
+		switch {
+		case strings.HasPrefix(statement, "SELECT COUNT(*) FROM dolt_rebase"):
+			counted = true
+			if !strings.Contains(statement, "dolt_log('main')") {
+				t.Errorf("the count reads the log without the branch name: %q", statement)
+			}
+		case strings.HasPrefix(statement, "UPDATE dolt_rebase"):
+			if !strings.Contains(statement, "dolt_log('main')") {
+				t.Errorf("the update reads the log without the branch name: %q", statement)
+			}
+		}
 	}
-
-	old, err := oldCommits(context.Background(), &designStep{ex: f}, cutOf())
-	if err != nil {
-		t.Fatalf("oldCommits: %v", err)
-	}
-	if want := []string{base, c1, c2, c3}; !slices.Equal(old, want) {
-		t.Errorf("the filter read from main selected %q, want every old commit %q", old, want)
-	}
-	// Every plan row is old, so every row after the first is marked and the
-	// first stays a pick.
-	if got := marksSquash(plan, old); len(got) != 2 {
-		t.Errorf("the v2 filter marked %d rows, want 2: every old plan row after the first", len(got))
+	if !counted {
+		t.Error("the run sent no count statement, so the rows marked were never counted")
 	}
 }
 
@@ -337,6 +386,11 @@ func TestRecordBeforeRefusals(t *testing.T) {
 		changes map[string]Rows
 		want    string
 	}{
+		{
+			name:    "the branch check answers no record",
+			changes: map[string]Rows{sqlActiveBranch: {}},
+			want:    "returned 0 records, want one",
+		},
 		{
 			name:    "the tip read answers no record",
 			changes: map[string]Rows{sqlMainTip: {}},
@@ -449,28 +503,16 @@ func TestRebaseHistoryRefusals(t *testing.T) {
 			want: "want a 32-character hex commit hash",
 		},
 		{
-			name:   "a main log record is not a commit hash",
-			before: Before{Tip: fx.tip},
-			changes: map[string]Rows{sqlMainLogOld: {
-				Columns: []string{"commit_hash"},
-				Data:    [][]string{{"the-root"}},
-			}},
-			want: "want a 32-character hex commit hash",
+			name:    "the mark count is not a number",
+			before:  Before{Tip: fx.tip},
+			changes: map[string]Rows{sqlMarkCount: single("n", "some")},
+			want:    "want a count",
 		},
 		{
-			name:   "the cut reaches no plan row",
-			before: Before{Tip: fx.tip},
-			changes: map[string]Rows{
-				sqlPlan: {
-					Columns: []string{"rebase_order", "commit_hash"},
-					Data:    [][]string{{"1", hash(0x11)}, {"2", hash(0x14)}},
-				},
-				sqlMainLogOld: {
-					Columns: []string{"commit_hash"},
-					Data:    [][]string{{hash(0x10)}},
-				},
-			},
-			want: "the cut squashes nothing",
+			name:    "the cut reaches no plan row",
+			before:  Before{Tip: fx.tip},
+			changes: map[string]Rows{sqlMarkCount: single("n", "0")},
+			want:    "the cut squashes nothing",
 		},
 	}
 	for _, tc := range tests {
