@@ -1,7 +1,6 @@
 package polecat
 
 import (
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -48,24 +47,17 @@ func taskInputFromBead(f beadTaskFields) taskfile.Input {
 }
 
 // parseAcceptanceBoxes returns the checkbox items of an acceptance field, in
-// order. Items come from beads.AcceptanceItems, the same matcher the host's
-// ticker uses, and each box's text is trimmed as that ticker trims it: were
-// the two to read different text, a seat's tick would name a box the host
-// cannot find. A line that is not a list item opening with a "[ ]" or "[x]"
-// box is skipped.
+// order. Items and their box text come from beads.AcceptanceItems, the matcher
+// behind the host's TickAcceptanceBox: a tick naming text read differently here
+// would name no box the host can find. A list item with no checkbox is
+// skipped.
 func parseAcceptanceBoxes(text string) []taskfile.Box {
 	var boxes []taskfile.Box
 	for _, item := range beads.AcceptanceItems(text) {
 		if !item.Boxed {
 			continue
 		}
-		// A list item's box is the line's first "[": the item's marker holds
-		// none, so the box opens the text AcceptanceItems checked.
-		at := strings.IndexByte(item.Line, '[')
-		boxes = append(boxes, taskfile.Box{
-			Text:   strings.TrimSpace(item.Line[at+3:]),
-			Ticked: item.Checked,
-		})
+		boxes = append(boxes, taskfile.Box{Text: item.Box, Ticked: item.Checked})
 	}
 	return boxes
 }

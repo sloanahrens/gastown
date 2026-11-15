@@ -5,17 +5,17 @@ import (
 	"testing"
 )
 
-// TestAcceptanceItemsDescribeEachItem: each item reports whether it is nested
-// and whether it carries a checkbox, and a checkbox is checked only for "x" or
-// "X".
+// TestAcceptanceItemsDescribeEachItem: each item reports whether it is nested,
+// whether it carries a checkbox, and the trimmed text after that checkbox, and
+// a checkbox is checked only for "x" or "X".
 func TestAcceptanceItemsDescribeEachItem(t *testing.T) {
 	t.Parallel()
 	got := AcceptanceItems("- [x] a\n  - [ ] b\n1. c\n* [X] d\nprose line")
 	want := []AcceptanceItem{
-		{Line: "- [x] a", Boxed: true, Checked: true},
-		{Line: "- [ ] b", Nested: true, Boxed: true},
+		{Line: "- [x] a", Boxed: true, Checked: true, Box: "a"},
+		{Line: "- [ ] b", Nested: true, Boxed: true, Box: "b"},
 		{Line: "1. c"},
-		{Line: "* [X] d", Boxed: true, Checked: true},
+		{Line: "* [X] d", Boxed: true, Checked: true, Box: "d"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("AcceptanceItems = %+v, want %+v", got, want)
