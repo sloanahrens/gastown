@@ -606,7 +606,7 @@ func TestDoltArchiveNowReadsRefuseFailures(t *testing.T) {
 			want: "not in a Gas Town workspace",
 		},
 		{
-			name: "an unreadable request path after a failed write",
+			name: "a failed write whose pending request check is unreadable reports the write failure",
 			set: func(_ *testing.T, reads *doltArchiveNowReads) {
 				reads.stat = func(string) error { return boom }
 				reads.request = func(string) archiveNowRequester {
