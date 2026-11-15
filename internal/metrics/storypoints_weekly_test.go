@@ -215,10 +215,11 @@ func TestStoryPointsWeeklySpendsTheWeekOnAFailureNoHourCanMeetDifferently(t *tes
 
 // previousExtractDir is the fixture's metrics root joined to the day before its
 // extract's day.
-func previousExtractDir(fix trainTestFixture) string {
+func previousExtractDir(t *testing.T, fix trainTestFixture) string {
+	t.Helper()
 	today, err := time.Parse(time.DateOnly, commandToday)
 	if err != nil {
-		panic("commandToday is not a date: " + err.Error())
+		t.Fatalf("commandToday %q is not a date: %v", commandToday, err)
 	}
 	return filepath.Join(filepath.Dir(fix.outDir), today.AddDate(0, 0, -1).Format(time.DateOnly))
 }
@@ -228,7 +229,7 @@ func previousExtractDir(fix trainTestFixture) string {
 // today's table is merely not due yet. Only the table's presence is read.
 func layOutPreviousExtract(t *testing.T, fix trainTestFixture) {
 	t.Helper()
-	writeAt(t, filepath.Join(previousExtractDir(fix), landingsName),
+	writeAt(t, filepath.Join(previousExtractDir(t, fix), landingsName),
 		strings.Join(landingColumns, ",")+"\n")
 }
 
@@ -306,7 +307,7 @@ func TestStoryPointsWeeklyFailsWhenThePreviousDayCannotBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A directory where the table goes reads as an error, not as an absent table.
-	if err := os.MkdirAll(filepath.Join(previousExtractDir(fix), landingsName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(previousExtractDir(t, fix), landingsName), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	var out strings.Builder
