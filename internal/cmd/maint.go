@@ -99,20 +99,19 @@ var maintCmd = &cobra.Command{
 	Long: `Plan or apply the maintenance the town's disks need.
 
 plan is a dry run: it prints every action it would take and removes nothing.
-apply runs the plan it just printed. The cloud target records one ledger line
-per run, a plan included; the other targets record only what they apply. A
-registry apply runs under the polecat-image lock, so a delete never races an
-image push; one that finds the lock held defers and says to retry. The other
-targets keep no lock: the local ones touch only the worktrees, backups and
-directories this machine owns, and the docker ones only the images and volumes
-their daemons list.
+apply runs the plan it just printed. A registry apply runs under the
+polecat-image lock, so a delete never races an image push; one that finds the
+lock held defers and says to retry. The other targets keep no lock: the local
+ones touch only the worktrees, backups and directories this machine owns, and
+the docker ones only the images and volumes their daemons list. The cloud
+target records one ledger line per run, a plan included.
 
 A target names what to maintain: baks, cloud, colima, nodes, registry and
-registry-collect (the last two only when the town configures a registry), sizes
-or worktree. registry-collect runs the registry's garbage collect without
-deleting anything, so a night's collect can reclaim what an earlier run's
-deletes freed. cloud prunes the gt-cloud VM's images over the socket the town
-config names, and a town that names none is not offered it.
+registry-collect (both only when the town configures a registry), sizes or
+worktree. registry-collect runs the registry's garbage collect without deleting
+anything, so a night's collect can reclaim what an earlier run's deletes freed.
+cloud prunes the gt-cloud VM's images over the socket the town config names,
+and a town that names none is not offered it.
 The known targets are listed when a name is unknown, and naming none runs every
 target in name order.
 A plan that could not read its inputs refuses instead of guessing, and both
@@ -362,9 +361,9 @@ func maintKeep(get func(string) string) (int, error) {
 // maintTargets builds every target the town configures: the local targets and
 // the docker targets, which every town has, and the registry and cloud targets,
 // which only a town that names one has. A target whose settings cannot be read
-// refuses that target alone (see maintLocalTargets), so the registry still plans
-// for a town whose rig registry is damaged, exactly as it did before the local
-// targets existed.
+// refuses that target alone (see maintLocalTargets and maintCloudTargets), so
+// the registry still plans for a town whose rig registry is damaged, exactly as
+// it did before the local targets existed.
 //
 // The ledger directory is made for an apply, whose deletes must not run
 // unrecorded, and for a plan of a town with a cloud target, whose run records
@@ -531,13 +530,22 @@ func maintColimaHost(home string) string {
 // the VM's daemon over the socket that config names and recording into the
 // run's ledger. A town whose config names no socket has no cloud VM for this
 // command to prune and gets no target, the way a town with no registry gets no
-// registry target. The runner label list and the deploy workflow come from the
-// same block; one left unset is the target's own refusal, since a keep list
-// this command invented could remove an image a runner still starts in.
+// registry target. Settings that cannot be read refuse the cloud target alone,
+// as a damaged rig registry refuses the worktree target alone: the run cannot
+// tell a town with no VM from one whose config it could not read, and the other
+// targets still have work to do. The runner label list and the deploy workflow
+// come from the same block; one left unset is the target's own refusal, since a
+// keep list this command invented could remove an image a runner still starts
+// in.
 func maintCloudTargets(town string, run diskmaint.Runner, ledger *diskmaint.Ledger) (map[string]diskmaint.Target, error) {
 	vm, err := maintCloudSettings(town)
 	if err != nil {
-		return nil, err
+		return map[string]diskmaint.Target{
+			maintTargetCloud: maintCloudLedger{
+				inner:  maintRefusedTarget{name: maintTargetCloud, reason: err},
+				ledger: ledger,
+			},
+		}, nil
 	}
 	if vm.dockerHost == "" {
 		return nil, nil
@@ -566,7 +574,8 @@ type maintCloudConfig struct {
 // settings/config.json. A town that never wrote the file names none of them and
 // gets no cloud target; a file that exists and cannot be read is an error,
 // because a run cannot tell "no cloud VM" from "a config it could not read" and
-// must not plan nothing as if the town had asked for nothing.
+// must not plan nothing as if the town had asked for nothing. The error becomes
+// the cloud target's refusal, so the other targets still run.
 func maintCloudSettings(town string) (maintCloudConfig, error) {
 	settings, err := config.LoadTownSettings(config.TownSettingsPath(town))
 	if err != nil {
