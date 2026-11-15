@@ -367,3 +367,24 @@ func TestTownStateSeedUseNamesTheSituation(t *testing.T) {
 		}
 	}
 }
+
+// TestPolecatStopCheckUseNamesTheSituation pins the line place_p10bd.go gives
+// tap polecat-stop-check (gt-05hlvr): the Use names the situation that fires
+// the check, so the Stop hook and the gt done call it carries out are no part
+// of the entry.
+func TestPolecatStopCheckUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("tap polecat-stop-check")
+	if !ok {
+		t.Fatal(`Lookup("tap polecat-stop-check") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") {
+		t.Errorf("tap polecat-stop-check Use = %q; want a line starting \"Use this when\" that names the situation", e.Use)
+	}
+	for _, mechanism := range []string{"Stop hook", "gt done"} {
+		if strings.Contains(e.Use, mechanism) {
+			t.Errorf("tap polecat-stop-check Use = %q; it names the mechanism %q, not the situation that calls for the command", e.Use, mechanism)
+		}
+	}
+}
