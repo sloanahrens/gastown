@@ -87,6 +87,8 @@ spec:
               value: us-east-1
             - name: GT_DOLT_BACKUP_ROOT
               value: /Users/sloan/gt-backups/dolt
+            - name: STORYPOINTS_EMBED_URL
+              value: http://host.docker.internal:11434
           resources:
             requests:
               cpu: "2"

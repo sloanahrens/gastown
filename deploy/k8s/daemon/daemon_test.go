@@ -496,16 +496,29 @@ func TestDashboardCommandAndProbe(t *testing.T) {
 }
 
 // TestDashboardEnvEqualsTheDaemonEnv holds the dashboard's environment to the
-// daemon's: both come from the one environment helper, so every name and value
-// agrees, and both carry the container mode that resolves Dolt to the container
-// host.
+// daemon's but for the story-points embedder endpoint: both come from the shared
+// environment helper, so every other name and value agrees, and both carry the
+// container mode that resolves Dolt to the container host. The weekly retrain is
+// the daemon's alone, so the dashboard carries no STORYPOINTS_EMBED_URL (gt-mu7e87).
 func TestDashboardEnvEqualsTheDaemonEnv(t *testing.T) {
 	t.Parallel()
 	m := mustBuild(t, dashboardValues(t))
 	daemon := m.Deployment.Spec.Template.Spec.Containers[0]
 	dash := m.DashboardDeployment.Spec.Template.Spec.Containers[0]
-	if !slices.Equal(daemon.Env, dash.Env) {
-		t.Errorf("the dashboard environment = %+v, want the daemon's %+v", dash.Env, daemon.Env)
+	if got := envValuesNamed(daemon, storypointsEmbedURLEnv); len(got) != 1 || got[0] != StorypointsEmbedURL {
+		t.Errorf("the daemon carries %s = %q, want one value %q", storypointsEmbedURLEnv, got, StorypointsEmbedURL)
+	}
+	if got := envValuesNamed(dash, storypointsEmbedURLEnv); len(got) != 0 {
+		t.Errorf("the dashboard carries %s = %q, want none: it runs no retrain", storypointsEmbedURLEnv, got)
+	}
+	var daemonEnv []EnvVar
+	for _, e := range daemon.Env {
+		if e.Name != storypointsEmbedURLEnv {
+			daemonEnv = append(daemonEnv, e)
+		}
+	}
+	if !slices.Equal(daemonEnv, dash.Env) {
+		t.Errorf("the dashboard environment = %+v, want the daemon's less %s: %+v", dash.Env, storypointsEmbedURLEnv, daemonEnv)
 	}
 	for _, name := range []string{ContainerModeEnv, doltServerHostEnv, doltServerPortEnv} {
 		if got := envValuesNamed(dash, name); len(got) != 1 {
@@ -2569,6 +2582,35 @@ func TestForgejoAPIURLFollowsTheForgeHost(t *testing.T) {
 	}
 }
 
+// TestStorypointsEmbedURLCarriesTheHostsOllama holds the weekly story-points
+// retrain's embedder endpoint: the live pod names the host's Ollama, while a
+// rehearsal names none, since host.docker.internal resolves there only through
+// the gateway alias the live pod carries, and the dashboard names none, since it
+// runs no retrain (gt-mu7e87).
+func TestStorypointsEmbedURLCarriesTheHostsOllama(t *testing.T) {
+	t.Parallel()
+
+	// The Goal's URL: the address the pod was checked to reach the host's Ollama at.
+	if got, want := StorypointsEmbedURL, "http://host.docker.internal:11434"; got != want {
+		t.Fatalf("StorypointsEmbedURL = %q, want the host's Ollama %q", got, want)
+	}
+
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0]
+	if got, want := envValuesNamed(pod, storypointsEmbedURLEnv), []string{StorypointsEmbedURL}; !slices.Equal(got, want) {
+		t.Errorf("the live pod's %s = %q, want exactly %q", storypointsEmbedURLEnv, got, want)
+	}
+
+	rehearsal := mustBuild(t, rehearsalValues(t)).Deployment.Spec.Template.Spec.Containers[0]
+	if got := envValuesNamed(rehearsal, storypointsEmbedURLEnv); len(got) != 0 {
+		t.Errorf("a rehearsal pod carries %s = %q, want none: its pod has no gateway alias, so the name would resolve to nothing", storypointsEmbedURLEnv, got)
+	}
+
+	dashboard := mustBuild(t, dashboardValues(t)).DashboardDeployment.Spec.Template.Spec.Containers[0]
+	if got := envValuesNamed(dashboard, storypointsEmbedURLEnv); len(got) != 0 {
+		t.Errorf("the dashboard pod carries %s = %q, want none: only the daemon's retrain reads it", storypointsEmbedURLEnv, got)
+	}
+}
+
 // TestPodEnvDecisions holds the decision table to the live name set: every name
 // the compose writer or daemon.env carries has exactly one decision, the golden
 // records the decided pod environment, and a name with no decision is refused
@@ -2676,6 +2718,14 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 		t.Errorf("the pod's %s = %q, want %q: the forge-reading children read the host the git credential helper reads", forgejoAPIURLEnv, got, want)
 	}
 	delete(podEnv, forgejoAPIURLEnv)
+
+	// The embedder endpoint is a value the render sets itself, and the compose
+	// file carries no such name (the compose renderer is out of scope, gt-mu7e87).
+	// The pod's value is checked, then removed as one more difference.
+	if got, want := podEnv[storypointsEmbedURLEnv], StorypointsEmbedURL; got != want {
+		t.Errorf("the pod's %s = %q, want %q: the retrain reads the host's Ollama", storypointsEmbedURLEnv, got, want)
+	}
+	delete(podEnv, storypointsEmbedURLEnv)
 
 	switch got := composeFileEnv[ContainerNameEnv]; got {
 	case "":

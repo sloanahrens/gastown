@@ -454,6 +454,11 @@ const (
 	// compose file carries no such name, so validateEnv refuses a caller's entry
 	// for it the way it refuses a name the pod sets (gt-s0homy).
 	forgejoAPIURLEnv = "FORGEJO_API_URL"
+	// storypointsEmbedURLEnv is the Ollama endpoint the weekly story-points retrain
+	// embeds with (internal/metrics/storypoints_train.go). The render sets it from
+	// StorypointsEmbedURL, and the compose file names no such variable, so
+	// validateEnv refuses a caller's entry for it (gt-mu7e87).
+	storypointsEmbedURLEnv = "STORYPOINTS_EMBED_URL"
 )
 
 const (
@@ -465,6 +470,11 @@ const (
 	// name the settings' BEADS_DOLT_SERVER_HOST carries. The live pod's
 	// hostAliases maps it to the host gateway, so the pod keeps the compose value.
 	DoltHostName = "host.docker.internal"
+	// StorypointsEmbedURL is where the pod's weekly story-points retrain embeds: the
+	// host's Ollama, at the name the pod reaches the host by. The retrain's own
+	// default is its process loopback, which in the pod is the pod itself, so the
+	// render names the host instead (gt-mu7e87).
+	StorypointsEmbedURL = "http://" + DoltHostName + ":11434"
 	// RegistryProxyContainer and GatewayProxyContainer name the two socat
 	// sidecars that stand in for the compose override's relays, and
 	// RegistryProxyPort and GatewayProxyPort are the ports the sandbox sling
@@ -1241,7 +1251,7 @@ func daemonContainer(v Values) Container {
 		Image:      v.Image,
 		Args:       daemonArgs(v),
 		WorkingDir: TownRootPath,
-		Env:        containerEnvironment(v),
+		Env:        daemonEnvironment(v),
 		Resources: &ContainerResources{
 			Requests: resourceList(v),
 			Limits:   resourceList(v),
@@ -1292,6 +1302,21 @@ func daemonArgs(v Values) []string {
 		args = append(args, "--forge-host", v.ForgeHost, "--forge-token-file", manifestdata.LiveForgeTokenPath)
 	}
 	return args
+}
+
+// daemonEnvironment is the daemon container's environment: the shared pod
+// environment plus the Ollama endpoint its weekly story-points retrain embeds
+// with. The dashboard runs no retrain, so its container takes containerEnvironment
+// alone (gt-mu7e87).
+//
+// A rehearsal pod carries none: the name resolves only through the gateway alias
+// a live pod has, and a rehearsal runs no retrain to read it.
+func daemonEnvironment(v Values) []EnvVar {
+	env := containerEnvironment(v)
+	if v.Rehearsal {
+		return env
+	}
+	return append(env, EnvVar{Name: storypointsEmbedURLEnv, Value: StorypointsEmbedURL})
 }
 
 // containerEnvironment is the pod's environment: the render-owned names at the
@@ -1431,8 +1456,9 @@ func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 // dashboardContainer runs `gt dashboard` on loopback: the command replaces the
 // image's entrypoint, which is the daemon's, and no --bind is passed, so the page
 // listens on 127.0.0.1 where a port-forward reaches it. Its environment is the
-// daemon container's, from the same helper, so GT_DAEMON_SUPERVISOR resolves Dolt
-// to the container host here as it does in the daemon. Set, Values.BdGatewayURL
+// shared pod environment, so GT_DAEMON_SUPERVISOR resolves Dolt to the container
+// host here as it does in the daemon; it carries no STORYPOINTS_EMBED_URL, which
+// only the daemon's retrain reads (daemonEnvironment). Set, Values.BdGatewayURL
 // adds the dashboard's own gateway pair after that list.
 //
 // Its probes are curl on the index. The index is static HTML that reads no Dolt

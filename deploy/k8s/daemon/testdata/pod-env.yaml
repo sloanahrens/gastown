@@ -20,3 +20,5 @@
   value: "3307"
 - name: GT_DOLT_BACKUP_ROOT
   value: /Users/sloan/gt-backups/dolt
+- name: STORYPOINTS_EMBED_URL
+  value: http://host.docker.internal:11434
