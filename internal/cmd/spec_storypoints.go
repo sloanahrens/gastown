@@ -82,6 +82,13 @@ func specStoryPointRun(env specDispatchEnv, beadID string) specStoryPointAnswer 
 // that read it. It writes nothing when both settings are off.
 func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.Spec) specStoryPointStepResult {
 	var res specStoryPointStepResult
+	// A bead sent back for rework already has its work on a branch, and the
+	// findings a rejection appends can raise its estimate over the trigger the
+	// first pass stayed under: splitting it would lose that branch, so the
+	// route neither judges nor holds it (gt-bj22wp).
+	if latest.HasLabel(reworkLabel) {
+		return res
+	}
 	splitOver := env.StoryPointSplitOver
 	if splitOver > 0 && latest.HasLabel(specdispatch.SplitLabel) {
 		// The ready board reads a split bead apart from the candidates, so this
