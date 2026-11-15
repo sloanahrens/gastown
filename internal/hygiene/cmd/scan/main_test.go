@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	"github.com/steveyegge/gastown/internal/hygiene"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
@@ -18,10 +17,6 @@ import (
 func TestMain(m *testing.M) {
 	os.Exit(unittier.Main(m))
 }
-
-// fixtureTop is the work tree top the fake git names. The files come from an
-// in-memory tree, so the path never has to exist.
-const fixtureTop = "/tree"
 
 // shape joins the pieces of a fixture line so no source line of this file has
 // a shape the scanner reports. The fixture names no person.
@@ -38,6 +33,10 @@ func fixtureBlocked() (map[string]struct{}, error) {
 // fakeGit answers git for a fixed tracked set without starting a process. A
 // command it does not model is an error, never an empty answer.
 type fakeGit struct {
+	// top is the work tree top rev-parse prints and the directory git runs
+	// in. It is the fixture tree's own directory, so a command that opened
+	// any other root reads no fixture file.
+	top     string
 	paths   []string
 	remotes []string // the names git remote lists
 	origin  string   // the URL git remote get-url origin prints
@@ -56,10 +55,10 @@ func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
 		if dir != "." {
 			return nil, fmt.Errorf("fake git: rev-parse ran in %q, want the command's directory", dir)
 		}
-		return []byte(fixtureTop + "\n"), nil
+		return []byte(g.top + "\n"), nil
 	case "ls-files -z":
-		if dir != fixtureTop {
-			return nil, fmt.Errorf("fake git: ls-files ran in %q, want the work tree top %q", dir, fixtureTop)
+		if dir != g.top {
+			return nil, fmt.Errorf("fake git: ls-files ran in %q, want the work tree top %q", dir, g.top)
 		}
 		var out strings.Builder
 		for _, path := range g.paths {
@@ -68,8 +67,8 @@ func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
 		}
 		return []byte(out.String()), nil
 	case "remote":
-		if dir != fixtureTop {
-			return nil, fmt.Errorf("fake git: remote ran in %q, want the work tree top %q", dir, fixtureTop)
+		if dir != g.top {
+			return nil, fmt.Errorf("fake git: remote ran in %q, want the work tree top %q", dir, g.top)
 		}
 		var out strings.Builder
 		for _, name := range g.remotes {
@@ -78,8 +77,8 @@ func (g fakeGit) run(dir string, args ...string) ([]byte, error) {
 		}
 		return []byte(out.String()), nil
 	case "remote get-url origin":
-		if dir != fixtureTop {
-			return nil, fmt.Errorf("fake git: remote get-url ran in %q, want the work tree top %q", dir, fixtureTop)
+		if dir != g.top {
+			return nil, fmt.Errorf("fake git: remote get-url ran in %q, want the work tree top %q", dir, g.top)
 		}
 		// git answers only for a remote it lists, so a fake that answered
 		// anyway would pass a run that read a URL from a remote git does not
@@ -105,19 +104,34 @@ func (g fakeGit) lists(name string) bool {
 	return false
 }
 
-// fixedFS returns the in-memory tree whatever top git names: the command reads
-// from the walk's top, and the fixture stands in for it.
-func fixedFS(fsys fs.FS) workTreeFS {
-	return func(string) fs.FS { return fsys }
+// workTree writes a fixture work tree into a fresh temporary directory and
+// returns its path: the top git names and the root the command opens. The
+// command reads it with os.DirFS, as production does, so a run that opened any
+// other root would find none of these files.
+func workTree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	top := t.TempDir()
+	for name, body := range files {
+		path := filepath.Join(top, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create the directory for %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return top
 }
 
-// treeWith builds an in-memory work tree holding the allow list and files.
-func treeWith(allowJSON string, files map[string]string) fstest.MapFS {
-	fsys := fstest.MapFS{allowPath: &fstest.MapFile{Data: []byte(allowJSON)}}
+// treeWith writes a fixture work tree holding the allow list and the files and
+// returns its top.
+func treeWith(t *testing.T, allowJSON string, files map[string]string) string {
+	t.Helper()
+	tree := map[string]string{allowPath: allowJSON}
 	for name, body := range files {
-		fsys[name] = &fstest.MapFile{Data: []byte(body)}
+		tree[name] = body
 	}
-	return fsys
+	return workTree(t, tree)
 }
 
 // result is one run's outcome.
@@ -130,24 +144,26 @@ type result struct {
 // noTown is the town finder of a command run outside any town.
 func noTown() (string, error) { return "", nil }
 
-// runFixture runs the command over an in-memory tree and the fake git.
-func runFixture(t *testing.T, fsys fs.FS, paths, args []string, blocked blockedLoader) result {
+// runFixture runs the command over the fixture work tree at top and the fake
+// git.
+func runFixture(t *testing.T, top string, paths, args []string, blocked blockedLoader) result {
 	t.Helper()
-	return runFixtureWith(t, fsys, paths, args, blocked, noTown)
+	return runFixtureWith(t, top, paths, args, blocked, noTown)
 }
 
 // runFixtureWith runs the command with the town finder the case needs.
-func runFixtureWith(t *testing.T, fsys fs.FS, paths, args []string, blocked blockedLoader, findTown townRootFinder) result {
+func runFixtureWith(t *testing.T, top string, paths, args []string, blocked blockedLoader, findTown townRootFinder) result {
 	t.Helper()
-	return runFixtureGit(t, fsys, fakeGit{paths: paths}, args, blocked, findTown)
+	return runFixtureGit(t, top, fakeGit{top: top, paths: paths}, args, blocked, findTown)
 }
 
 // runFixtureGit runs the command with the git answers and the town finder the
-// case needs.
-func runFixtureGit(t *testing.T, fsys fs.FS, git fakeGit, args []string, blocked blockedLoader, findTown townRootFinder) result {
+// case needs. The command opens the tree with os.DirFS, the way main does, so
+// the run reads the work tree at the top git names and nowhere else.
+func runFixtureGit(t *testing.T, top string, git fakeGit, args []string, blocked blockedLoader, findTown townRootFinder) result {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	code := run(args, &stdout, &stderr, git.run, fixedFS(fsys), blocked, findTown)
+	code := run(args, &stdout, &stderr, git.run, os.DirFS, blocked, findTown)
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
@@ -188,8 +204,8 @@ var billingLine = shape("charge ", "A1B2C3-", "D4E5F6-", "A1B2C3", " recorded")
 // text, and exit 1.
 func TestRunPrintsEachFindingAsALocationAndNeverItsText(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{"docs/notes.md": "first line\n" + billingLine + "\n"})
-	got := runFixture(t, fsys, []string{"docs/notes.md", allowPath}, nil, fixtureBlocked)
+	top := treeWith(t, "[]", map[string]string{"docs/notes.md": "first line\n" + billingLine + "\n"})
+	got := runFixture(t, top, []string{"docs/notes.md", allowPath}, nil, fixtureBlocked)
 	if got.code != exitFindings {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitFindings, got.stderr)
 	}
@@ -210,8 +226,8 @@ func TestRunPrintsEachFindingAsALocationAndNeverItsText(t *testing.T) {
 // output and exit 0.
 func TestRunPrintsNothingAndExitsZeroForACleanTree(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{"docs/notes.md": "nothing to report here\n"})
-	got := runFixture(t, fsys, []string{"docs/notes.md", allowPath}, nil, fixtureBlocked)
+	top := treeWith(t, "[]", map[string]string{"docs/notes.md": "nothing to report here\n"})
+	got := runFixture(t, top, []string{"docs/notes.md", allowPath}, nil, fixtureBlocked)
 	if got.code != exitClean || got.stdout != "" || got.stderr != "" {
 		t.Fatalf("got exit %d, stdout %q, stderr %q; want exit 0 and no output", got.code, got.stdout, got.stderr)
 	}
@@ -223,8 +239,8 @@ func TestRunPrintsNothingAndExitsZeroForACleanTree(t *testing.T) {
 func TestRunPrintsAPathFindingWithoutALine(t *testing.T) {
 	t.Parallel()
 	forbidden := ".beads/" + "keep.json"
-	fsys := treeWith("[]", map[string]string{forbidden: "{}\n"})
-	got := runFixture(t, fsys, []string{forbidden, allowPath}, nil, fixtureBlocked)
+	top := treeWith(t, "[]", map[string]string{forbidden: "{}\n"})
+	got := runFixture(t, top, []string{forbidden, allowPath}, nil, fixtureBlocked)
 	if want := forbidden + " " + hygiene.RuleForbiddenDir + "\n"; got.code != exitFindings || got.stdout != want {
 		t.Fatalf("got exit %d, stdout %q; want exit 1 and %q", got.code, got.stdout, want)
 	}
@@ -235,13 +251,13 @@ func TestRunPrintsAPathFindingWithoutALine(t *testing.T) {
 // never a sibling whose name only starts with the same letters.
 func TestRunKeepsOnlyFindingsUnderEachDirPrefix(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{
+	top := treeWith(t, "[]", map[string]string{
 		"docs/c.md":             billingLine + "\n",
 		"internal/daemon/a.go":  billingLine + "\n",
 		"internal/daemonx/b.go": billingLine + "\n",
 	})
 	paths := []string{"docs/c.md", "internal/daemon/a.go", "internal/daemonx/b.go", allowPath}
-	got := runFixture(t, fsys, paths, []string{"-dir", "internal/daemon", "-dir", "docs/"}, fixtureBlocked)
+	got := runFixture(t, top, paths, []string{"-dir", "internal/daemon", "-dir", "docs/"}, fixtureBlocked)
 	want := "docs/c.md:1 " + hygiene.RuleBillingID + "\n" +
 		"internal/daemon/a.go:1 " + hygiene.RuleBillingID + "\n"
 	if got.code != exitFindings || got.stdout != want {
@@ -253,8 +269,8 @@ func TestRunKeepsOnlyFindingsUnderEachDirPrefix(t *testing.T) {
 // filter that keeps nothing fails the run instead of reporting a clean tree.
 func TestRunRefusesADirPrefixNoTrackedPathSitsUnder(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{"docs/notes.md": "clean\n"})
-	got := runFixture(t, fsys, []string{"docs/notes.md", allowPath}, []string{"-dir", "internal/nope"}, fixtureBlocked)
+	top := treeWith(t, "[]", map[string]string{"docs/notes.md": "clean\n"})
+	got := runFixture(t, top, []string{"docs/notes.md", allowPath}, []string{"-dir", "internal/nope"}, fixtureBlocked)
 	if got.code != exitError {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 	}
@@ -273,25 +289,25 @@ func TestRunExitsTwoWhenAReadFails(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
-		fsys  fs.FS
+		top   string
 		paths []string
 		want  string // a word the stderr must hold
 	}{
 		{
 			name:  "a tracked file the tree cannot read",
-			fsys:  treeWith("[]", nil),
+			top:   treeWith(t, "[]", nil),
 			paths: []string{"docs/missing.md", allowPath},
 			want:  "docs/missing.md",
 		},
 		{
 			name:  "a missing allow list",
-			fsys:  fstest.MapFS{"docs/notes.md": &fstest.MapFile{Data: []byte("clean\n")}},
+			top:   workTree(t, map[string]string{"docs/notes.md": "clean\n"}),
 			paths: []string{"docs/notes.md"},
 			want:  allowPath,
 		},
 		{
 			name:  "an allow list that is not a list of rows",
-			fsys:  treeWith(`{"path":"docs/notes.md"}`, map[string]string{"docs/notes.md": "clean\n"}),
+			top:   treeWith(t, `{"path":"docs/notes.md"}`, map[string]string{"docs/notes.md": "clean\n"}),
 			paths: []string{"docs/notes.md", allowPath},
 			want:  "allow rows",
 		},
@@ -299,7 +315,7 @@ func TestRunExitsTwoWhenAReadFails(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := runFixture(t, tc.fsys, tc.paths, nil, fixtureBlocked)
+			got := runFixture(t, tc.top, tc.paths, nil, fixtureBlocked)
 			if got.code != exitError {
 				t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 			}
@@ -318,22 +334,22 @@ func TestRunExitsTwoWhenAReadFails(t *testing.T) {
 // file. Each exits 2 rather than reporting a clean tree.
 func TestRunRefusesGitAnswersItCannotUse(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{"docs/notes.md": "clean\n"})
+	top := treeWith(t, "[]", map[string]string{"docs/notes.md": "clean\n"})
 	cases := []struct {
 		name string
 		git  gitRunner
 	}{
-		{"rev-parse fails", fakeGit{fail: map[string]error{"rev-parse": errors.New("git failed")}}.run},
-		{"ls-files fails", fakeGit{paths: []string{"docs/notes.md"}, fail: map[string]error{"ls-files": errors.New("git failed")}}.run},
+		{"rev-parse fails", fakeGit{top: top, fail: map[string]error{"rev-parse": errors.New("git failed")}}.run},
+		{"ls-files fails", fakeGit{top: top, paths: []string{"docs/notes.md"}, fail: map[string]error{"ls-files": errors.New("git failed")}}.run},
 		{"rev-parse names no top", func(string, ...string) ([]byte, error) { return []byte("\n"), nil }},
-		{"ls-files lists no file", fakeGit{}.run},
-		{"remote fails", fakeGit{paths: []string{"docs/notes.md"}, fail: map[string]error{"remote": errors.New("git failed")}}.run},
+		{"ls-files lists no file", fakeGit{top: top}.run},
+		{"remote fails", fakeGit{top: top, paths: []string{"docs/notes.md"}, fail: map[string]error{"remote": errors.New("git failed")}}.run},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			code := run(nil, &stdout, &stderr, tc.git, fixedFS(fsys), fixtureBlocked, noTown)
+			code := run(nil, &stdout, &stderr, tc.git, os.DirFS, fixtureBlocked, noTown)
 			if code != exitError {
 				t.Fatalf("exit code = %d, want %d; stderr: %s", code, exitError, stderr.String())
 			}
@@ -351,9 +367,9 @@ func TestRunRefusesGitAnswersItCannotUse(t *testing.T) {
 // load: the run exits 2 rather than scanning with nothing to apply.
 func TestRunRefusesAnUnreadableBlocklist(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{"docs/notes.md": "clean\n"})
+	top := treeWith(t, "[]", map[string]string{"docs/notes.md": "clean\n"})
 	load := func() (map[string]struct{}, error) { return nil, errors.New("blocklist unreadable") }
-	got := runFixture(t, fsys, []string{"docs/notes.md", allowPath}, nil, load)
+	got := runFixture(t, top, []string{"docs/notes.md", allowPath}, nil, load)
 	if got.code != exitError || !strings.Contains(got.stderr, "blocklist") {
 		t.Fatalf("got exit %d, stderr %q; want exit 2 naming the blocklist", got.code, got.stderr)
 	}
@@ -374,8 +390,9 @@ func TestRunRefusesBadFlags(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			top := treeWith(t, "[]", nil)
 			var stdout, stderr strings.Builder
-			code := run(tc.args, &stdout, &stderr, fakeGit{}.run, fixedFS(treeWith("[]", nil)), fixtureBlocked, noTown)
+			code := run(tc.args, &stdout, &stderr, fakeGit{top: top}.run, os.DirFS, fixtureBlocked, noTown)
 			if code != exitError {
 				t.Fatalf("exit code = %d, want %d", code, exitError)
 			}
@@ -392,8 +409,9 @@ func TestRunRefusesBadFlags(t *testing.T) {
 // TestRunHelpExitsZero covers -h: usage is not a failed run.
 func TestRunHelpExitsZero(t *testing.T) {
 	t.Parallel()
+	top := treeWith(t, "[]", nil)
 	var stdout, stderr strings.Builder
-	code := run([]string{"-h"}, &stdout, &stderr, fakeGit{}.run, fixedFS(treeWith("[]", nil)), fixtureBlocked, noTown)
+	code := run([]string{"-h"}, &stdout, &stderr, fakeGit{top: top}.run, os.DirFS, fixtureBlocked, noTown)
 	if code != exitClean {
 		t.Fatalf("exit code = %d, want %d", code, exitClean)
 	}
@@ -408,9 +426,9 @@ func (errWriter) Write([]byte) (int, error) { return 0, errors.New("write failed
 // exits 2 rather than 1, which would claim the list was printed.
 func TestRunExitsTwoWhenTheFindingsCannotBeWritten(t *testing.T) {
 	t.Parallel()
-	fsys := treeWith("[]", map[string]string{"docs/notes.md": billingLine + "\n"})
+	top := treeWith(t, "[]", map[string]string{"docs/notes.md": billingLine + "\n"})
 	var stderr strings.Builder
-	code := run(nil, errWriter{}, &stderr, fakeGit{paths: []string{"docs/notes.md", allowPath}}.run, fixedFS(fsys), fixtureBlocked, noTown)
+	code := run(nil, errWriter{}, &stderr, fakeGit{top: top, paths: []string{"docs/notes.md", allowPath}}.run, os.DirFS, fixtureBlocked, noTown)
 	if code != exitError || !strings.Contains(stderr.String(), "write") {
 		t.Fatalf("got exit %d, stderr %q; want exit 2 naming the write failure", code, stderr.String())
 	}
@@ -432,8 +450,8 @@ func TestRunAppliesTheAllowListItReadsFromTheTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal allow rows: %v", err)
 	}
-	fsys := treeWith(string(data), map[string]string{"docs/notes.md": line})
-	got := runFixture(t, fsys, []string{"docs/notes.md", allowPath}, nil, fixtureBlocked)
+	top := treeWith(t, string(data), map[string]string{"docs/notes.md": line})
+	got := runFixture(t, top, []string{"docs/notes.md", allowPath}, nil, fixtureBlocked)
 	if got.code != exitClean || got.stdout != "" {
 		t.Fatalf("got exit %d, stdout %q; want exit 0 and nothing printed", got.code, got.stdout)
 	}
@@ -498,10 +516,10 @@ func TestRunExemptsTheIdentitiesTheFlagsName(t *testing.T) {
 				}
 				return blocked, nil
 			}
-			fsys := treeWith("[]", map[string]string{tc.file: tc.body})
+			top := treeWith(t, "[]", map[string]string{tc.file: tc.body})
 			paths := []string{tc.file, allowPath}
 			sort.Strings(paths)
-			got := runFixture(t, fsys, paths, tc.args, load)
+			got := runFixture(t, top, paths, tc.args, load)
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -541,9 +559,9 @@ func TestRunDerivesTheForgeOwnerFromTheOriginURL(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			git := fakeGit{paths: fixturePaths(file), remotes: tc.remotes, origin: tc.origin}
-			fsys := treeWith("[]", map[string]string{file: forgeURLLine(account)})
-			got := runFixtureGit(t, fsys, git, nil, blockedWith(account), noTown)
+			top := treeWith(t, "[]", map[string]string{file: forgeURLLine(account)})
+			git := fakeGit{top: top, paths: fixturePaths(file), remotes: tc.remotes, origin: tc.origin}
+			got := runFixtureGit(t, top, git, nil, blockedWith(account), noTown)
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -575,8 +593,8 @@ func TestRunDerivesTheTownRoot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fsys := treeWith("[]", map[string]string{file: townRootLine(root)})
-			got := runFixtureWith(t, fsys, fixturePaths(file), nil, fixtureBlocked, tc.findTown)
+			top := treeWith(t, "[]", map[string]string{file: townRootLine(root)})
+			got := runFixtureWith(t, top, fixturePaths(file), nil, fixtureBlocked, tc.findTown)
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -614,13 +632,14 @@ func TestRunForgeOwnerFlagOverridesTheDerivedValue(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			top := treeWith(t, "[]", map[string]string{file: forgeURLLine(tc.account)})
 			git := fakeGit{
+				top:     top,
 				paths:   fixturePaths(file),
 				remotes: []string{"origin"},
 				origin:  shape("https://forge.invalid:3000/", derived, "/gastown.git"),
 			}
-			fsys := treeWith("[]", map[string]string{file: forgeURLLine(tc.account)})
-			got := runFixtureGit(t, fsys, git, []string{"-forge-owner", flagOwner}, blockedWith(derived, flagOwner), noTown)
+			got := runFixtureGit(t, top, git, []string{"-forge-owner", flagOwner}, blockedWith(derived, flagOwner), noTown)
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -653,8 +672,8 @@ func TestRunTownRootFlagOverridesTheDerivedValue(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fsys := treeWith("[]", map[string]string{file: townRootLine(tc.root)})
-			got := runFixtureWith(t, fsys, fixturePaths(file), []string{"-town-root", flagRoot}, fixtureBlocked, townAt(derived))
+			top := treeWith(t, "[]", map[string]string{file: townRootLine(tc.root)})
+			got := runFixtureWith(t, top, fixturePaths(file), []string{"-town-root", flagRoot}, fixtureBlocked, townAt(derived))
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -670,14 +689,15 @@ func TestRunFlagsNeedNoDerivation(t *testing.T) {
 	account := shape("fixture", "account")
 	root := shape("/", "srv/", "fixturetown")
 	file := "config/clone.yaml"
+	top := treeWith(t, "[]", map[string]string{file: forgeURLLine(account)})
 	git := fakeGit{
+		top:   top,
 		paths: fixturePaths(file),
 		fail:  map[string]error{"remote": errors.New("git failed")},
 	}
 	findTown := func() (string, error) { return "", errors.New("finder failed") }
-	fsys := treeWith("[]", map[string]string{file: forgeURLLine(account)})
 	args := []string{"-forge-owner", account, "-town-root", root}
-	got := runFixtureGit(t, fsys, git, args, blockedWith(account), findTown)
+	got := runFixtureGit(t, top, git, args, blockedWith(account), findTown)
 	if got.code != exitClean || got.stdout != "" || got.stderr != "" {
 		t.Fatalf("got exit %d, stdout %q, stderr %q; want exit 0 and no output", got.code, got.stdout, got.stderr)
 	}
@@ -689,9 +709,9 @@ func TestRunFlagsNeedNoDerivation(t *testing.T) {
 func TestRunRefusesAnOriginURLItCannotRead(t *testing.T) {
 	t.Parallel()
 	file := "config/clone.yaml"
-	git := fakeGit{paths: fixturePaths(file), remotes: []string{"origin"}, originErr: errors.New("git failed")}
-	fsys := treeWith("[]", map[string]string{file: forgeURLLine(shape("te", "am"))})
-	got := runFixtureGit(t, fsys, git, nil, fixtureBlocked, noTown)
+	top := treeWith(t, "[]", map[string]string{file: forgeURLLine(shape("te", "am"))})
+	git := fakeGit{top: top, paths: fixturePaths(file), remotes: []string{"origin"}, originErr: errors.New("git failed")}
+	got := runFixtureGit(t, top, git, nil, fixtureBlocked, noTown)
 	if got.code != exitError {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 	}
@@ -721,9 +741,9 @@ func TestRunRefusesAnAccountThatIsNotAUsableName(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			git := fakeGit{paths: fixturePaths(file), remotes: []string{"origin"}, origin: tc.origin}
-			fsys := treeWith("[]", map[string]string{file: "clean\n"})
-			got := runFixtureGit(t, fsys, git, tc.args, fixtureBlocked, noTown)
+			top := treeWith(t, "[]", map[string]string{file: "clean\n"})
+			git := fakeGit{top: top, paths: fixturePaths(file), remotes: []string{"origin"}, origin: tc.origin}
+			got := runFixtureGit(t, top, git, tc.args, fixtureBlocked, noTown)
 			if got.code != exitError {
 				t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 			}
@@ -743,8 +763,8 @@ func TestRunRefusesAFailedTownLookup(t *testing.T) {
 	t.Parallel()
 	file := "config/mount.yaml"
 	findTown := func() (string, error) { return "", errors.New("getting current directory") }
-	fsys := treeWith("[]", map[string]string{file: "clean\n"})
-	got := runFixtureWith(t, fsys, fixturePaths(file), nil, fixtureBlocked, findTown)
+	top := treeWith(t, "[]", map[string]string{file: "clean\n"})
+	got := runFixtureWith(t, top, fixturePaths(file), nil, fixtureBlocked, findTown)
 	if got.code != exitError {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 	}
