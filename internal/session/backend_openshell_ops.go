@@ -318,7 +318,7 @@ const transcriptTimeout = 30 * time.Second
 // transcriptScript prints "<mtime epoch> <size> <path>" for the newest Claude
 // transcript under the sandbox's projects directory, and nothing when there
 // is none (so "no transcript yet" is not an exec failure).
-const transcriptScript = `f=$(ls -t ` + sandboxHome + `/.claude/projects/*/*.jsonl 2>/dev/null | head -1); if [ -n "$f" ]; then stat -c '%Y %s %n' "$f"; fi`
+const transcriptScript = `f=$(ls -t ` + sandboxProjectsDir + `/*/*.jsonl 2>/dev/null | head -1); if [ -n "$f" ]; then stat -c '%Y %s %n' "$f"; fi`
 
 // recordBackend is the backend for the sandbox rec describes, built from the
 // registry alone: the daemon and cleanup have no Prepare to carry state over.

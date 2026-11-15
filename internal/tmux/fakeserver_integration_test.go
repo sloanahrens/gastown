@@ -12,7 +12,7 @@ import (
 
 // errClass reduces tmux's stderr to its message family, dropping the target
 // and socket path: "can't find pane: nope" -> "can't find pane",
-// "error connecting to /private/tmp/..." -> "error connecting to".
+// "error connecting to /tmp/..." -> "error connecting to".
 func errClass(stderr string) string {
 	s := strings.TrimSpace(stderr)
 	if i := strings.Index(s, " /"); i >= 0 {

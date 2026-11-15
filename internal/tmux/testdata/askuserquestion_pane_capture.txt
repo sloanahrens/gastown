@@ -1,7 +1,7 @@
 
  ▐▛███▛█   Claude Code v2.1.283
 ▝▜██████▀  Sonnet 5 · Claude Max
- ▝▝   ▝▝   /private/tmp/gt-dialog-probe
+ ▝▝   ▝▝   /tmp/gt-dialog-probe
 
 
 ❯ Call the AskUserQuestion tool exactly once, with question set to the literal text n/a, header n/a, and options labelled 'a' and 'b'. Do

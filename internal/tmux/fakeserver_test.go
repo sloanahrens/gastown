@@ -370,7 +370,7 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		// tmux 3.7c with no server and no socket file (KillServer unlinks it);
 		// a leftover socket file reads "no server running on <path>" instead.
 		// wrapError maps both to ErrNoServer.
-		return fail("error connecting to /private/tmp/tmux-501/" + c.socket + " (No such file or directory)")
+		return fail("error connecting to /tmp/tmux-501/" + c.socket + " (No such file or directory)")
 	}
 	a := c.args
 	target := flagValue(a, "-t")

@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	rewriteOldRoot  = "/Users/sloan/gt"
+	rewriteOldRoot  = "/home/user/gt"
 	rewriteNewRoot  = "/town"
-	rewriteOldOwner = "sloan"
+	rewriteOldOwner = "alice"
 	rewriteNewOwner = "gastown"
 )
 
@@ -74,8 +74,8 @@ func rewriteClassTown() []rewriteTownFile {
 	old := rewriteOldRoot
 	return []rewriteTownFile{
 		// The listed classes.
-		{"settings/config.json", `{"town_root":"` + old + `","landing":"` + old + `/landing","url":"http://forgejo:3000/sloan/gastown.git","repo":"sloan/gt-landing","email":"sloan.ahrens@gmail.com","near":"sloanx/gt","host":"forgejo:3000/sloanx/gt"}`},
-		{"mayor/town.json", `{"registry":{"rigs":{"gastown":{"git_url":"http://forgejo:3000/sloan/gastown.git"}}}}`},
+		{"settings/config.json", `{"town_root":"` + old + `","landing":"` + old + `/landing","url":"http://forgejo:3000/alice/gastown.git","repo":"alice/gt-landing","email":"user@example.com","near":"alicex/gt","host":"forgejo:3000/alicex/gt"}`},
+		{"mayor/town.json", `{"registry":{"rigs":{"gastown":{"git_url":"http://forgejo:3000/alice/gastown.git"}}}}`},
 		{"daemon/config.yaml", "town_root: " + old + "\n"},
 		{"gastown/settings/config.json", `{"dir":"` + old + `/gastown"}`},
 		{"gastown/config.json", `{"dir":"` + old + `"}`},
@@ -134,7 +134,7 @@ func TestRewriteReplacesRootAndOwnerOnlyInTheListedClasses(t *testing.T) {
 	}
 
 	for rel, want := range map[string]string{
-		"settings/config.json":                     `{"town_root":"` + rewriteNewRoot + `","landing":"` + rewriteNewRoot + `/landing","url":"http://forgejo:3000/gastown/gastown.git","repo":"gastown/gt-landing","email":"sloan.ahrens@gmail.com","near":"sloanx/gt","host":"forgejo:3000/sloanx/gt"}`,
+		"settings/config.json":                     `{"town_root":"` + rewriteNewRoot + `","landing":"` + rewriteNewRoot + `/landing","url":"http://forgejo:3000/gastown/gastown.git","repo":"gastown/gt-landing","email":"user@example.com","near":"alicex/gt","host":"forgejo:3000/alicex/gt"}`,
 		"mayor/town.json":                          `{"registry":{"rigs":{"gastown":{"git_url":"http://forgejo:3000/gastown/gastown.git"}}}}`,
 		"daemon/config.yaml":                       "town_root: " + rewriteNewRoot + "\n",
 		"gastown/settings/config.json":             `{"dir":"` + rewriteNewRoot + `/gastown"}`,
@@ -158,7 +158,7 @@ func TestRewriteReplacesRootAndOwnerOnlyInTheListedClasses(t *testing.T) {
 
 	// The owner is only replaced in its two repository forms.
 	settings := readRewriteFile(t, root, "settings/config.json")
-	for _, left := range []string{"sloan.ahrens@gmail.com", `"sloanx/gt"`, "forgejo:3000/sloanx/gt"} {
+	for _, left := range []string{"user@example.com", `"alicex/gt"`, "forgejo:3000/alicex/gt"} {
 		if !strings.Contains(settings, left) {
 			t.Errorf("the settings lost a value that is not one of the owner forms: %s", left)
 		}
@@ -416,14 +416,14 @@ func TestRewriteOwnerMatchesOnlyAWholeAccountName(t *testing.T) {
 		want string
 		n    int
 	}{
-		{name: "forgejo form", in: `forgejo:3000/sloan/gt`, want: `forgejo:3000/gastown/gt`, n: 1},
-		{name: "ssh form", in: `git@forgejo:3000/sloan/gt.git`, want: `git@forgejo:3000/gastown/gt.git`, n: 1},
-		{name: "quoted form", in: `"sloan/gt"`, want: `"gastown/gt"`, n: 1},
-		{name: "longer name after the forgejo form", in: `forgejo:3000/sloanx/gt`, want: `forgejo:3000/sloanx/gt`},
-		{name: "name ending in the owner", in: `forgejo:3000/xsloan/gt`, want: `forgejo:3000/xsloan/gt`},
-		{name: "longer name in the quoted form", in: `"sloanx/gt`, want: `"sloanx/gt`},
-		{name: "name ending in the owner before a quote", in: `x"sloan/gt`, want: `x"sloan/gt`},
-		{name: "host ending in the forgejo form", in: `myforgejo:3000/sloan/gt`, want: `myforgejo:3000/sloan/gt`},
+		{name: "forgejo form", in: `forgejo:3000/alice/gt`, want: `forgejo:3000/gastown/gt`, n: 1},
+		{name: "ssh form", in: `git@forgejo:3000/alice/gt.git`, want: `git@forgejo:3000/gastown/gt.git`, n: 1},
+		{name: "quoted form", in: `"alice/gt"`, want: `"gastown/gt"`, n: 1},
+		{name: "longer name after the forgejo form", in: `forgejo:3000/alicex/gt`, want: `forgejo:3000/alicex/gt`},
+		{name: "name ending in the owner", in: `forgejo:3000/xalice/gt`, want: `forgejo:3000/xalice/gt`},
+		{name: "longer name in the quoted form", in: `"alicex/gt`, want: `"alicex/gt`},
+		{name: "name ending in the owner before a quote", in: `x"alice/gt`, want: `x"alice/gt`},
+		{name: "host ending in the forgejo form", in: `myforgejo:3000/alice/gt`, want: `myforgejo:3000/alice/gt`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -639,12 +639,12 @@ func TestRewriteRootMatchesOnlyAWholePath(t *testing.T) {
 		want string
 		n    int
 	}{
-		{name: "quoted", in: `"/Users/sloan/gt"`, want: `"/town"`, n: 1},
-		{name: "after an equals sign", in: `dir=/Users/sloan/gt`, want: `dir=/town`, n: 1},
-		{name: "at the end of the text", in: `/Users/sloan/gt`, want: `/town`, n: 1},
-		{name: "with a path under it", in: `/Users/sloan/gt/landing`, want: `/town/landing`, n: 1},
-		{name: "longer name after it", in: `/Users/sloan/gtx`, want: `/Users/sloan/gtx`},
-		{name: "name before it", in: `x/Users/sloan/gt`, want: `x/Users/sloan/gt`},
+		{name: "quoted", in: `"/home/user/gt"`, want: `"/town"`, n: 1},
+		{name: "after an equals sign", in: `dir=/home/user/gt`, want: `dir=/town`, n: 1},
+		{name: "at the end of the text", in: `/home/user/gt`, want: `/town`, n: 1},
+		{name: "with a path under it", in: `/home/user/gt/landing`, want: `/town/landing`, n: 1},
+		{name: "longer name after it", in: `/home/user/gtx`, want: `/home/user/gtx`},
+		{name: "name before it", in: `x/home/user/gt`, want: `x/home/user/gt`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -947,7 +947,7 @@ func TestRewriteQueryValidate(t *testing.T) {
 		{name: "relative from-root", edit: func(q *RewriteQuery) { q.FromRoot = "gt" }, want: "is not an absolute path"},
 		{name: "slash on to-root", edit: func(q *RewriteQuery) { q.ToRoot = "/town/" }, want: "ends with a slash"},
 		{name: "one owner", edit: func(q *RewriteQuery) { q.ToOwner = "" }, want: "given together"},
-		{name: "owner shape", edit: func(q *RewriteQuery) { q.FromOwner = "Sloan" }, want: "not one lowercase account name"},
+		{name: "owner shape", edit: func(q *RewriteQuery) { q.FromOwner = "Alice" }, want: "not one lowercase account name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

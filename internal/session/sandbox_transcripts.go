@@ -23,7 +23,7 @@ import (
 // them for its usage record.
 
 // sandboxProjectsDir is the Claude projects directory inside a sandbox.
-const sandboxProjectsDir = "/sandbox/.claude/projects"
+const sandboxProjectsDir = sandboxHome + "/.claude/projects"
 
 // sandboxDownloadTimeout bounds the copy a delete makes of a sandbox's transcripts.
 const sandboxDownloadTimeout = 2 * time.Minute

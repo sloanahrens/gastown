@@ -54,10 +54,10 @@ func TestIsolatedSocketStillCreatesSession(t *testing.T) {
 func TestSocketFromTMUX(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"":                                   "",
-		"/private/tmp/tmux-501/gt-x,99999,0": "gt-x",
-		"/tmp/tmux-501/default,1,2":          "default",
-		",1,2":                               "",
+		"":                           "",
+		"/tmp/tmux-501/gt-x,99999,0": "gt-x",
+		"/tmp/tmux-501/default,1,2":  "default",
+		",1,2":                       "",
 	} {
 		if got := socketFromTMUX(in); got != want {
 			t.Errorf("socketFromTMUX(%q) = %q, want %q", in, got, want)
