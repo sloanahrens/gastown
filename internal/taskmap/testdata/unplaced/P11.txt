@@ -1,7 +1,3 @@
-crew pristine
-crew refresh
-crew remove
-crew rename
 crew restart
 crew stale
 crew start
