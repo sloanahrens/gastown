@@ -12,7 +12,7 @@ func init() {
 		Entry{Path: "crew", Group: "seats", Use: "Use this when you are not sure which crew verb fits the job of setting up or looking after a person's workspace in a rig."},
 		Entry{Path: "crew add", Group: "seats", Use: "Use this when a person needs a workspace of their own in a rig, before there is any session to attach to.", Check: "gt crew list shows the new workspace"},
 		Entry{Path: "crew at", Group: "seats", Use: "Use this when you need to work in a crew member's terminal session, whether or not it is already running.", Check: "gt crew list shows the session running"},
-		Entry{Path: "crew fresh", Group: "seats", Use: "Use this in your own crew clone when its main may be behind origin and you want it fast-forwarded where that is safe.", Check: "the printed line says the clone moved, not what blocked it"},
+		Entry{Path: "crew fresh", Group: "seats", Use: "Use this when your own crew clone's main may be behind origin and you want it brought up to date where that is safe.", Check: `the printed line ends "and moved"`},
 		Entry{Path: "crew list", Group: "seats", Use: "Use this to see which crew workspaces a rig has and whether each one's session is running."},
 	)
 }
