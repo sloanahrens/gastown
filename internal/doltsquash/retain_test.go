@@ -282,6 +282,72 @@ func TestRetainKeepsBothBranchesOnATableOnlyOneSideHolds(t *testing.T) {
 	}
 }
 
+func TestRetainRefusesToPairAnIdentityHeldByMoreThanOneCommit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		onMain int
+		onPre  int
+	}{
+		{name: "a second commit on main holds the identity", onMain: 2, onPre: 1},
+		{name: "a second commit on main-pre-squash holds the identity", onMain: 1, onPre: 2},
+		{name: "a second commit on each branch holds the identity", onMain: 2, onPre: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newRetainFixture()
+			fx.drop = false
+			for i := 1; i < tc.onMain; i++ {
+				fx.mainLog = append(fx.mainLog, historyCommit{hash: hash(20 + i), identity: retainNewest})
+			}
+			for i := 1; i < tc.onPre; i++ {
+				fx.preLog = append(fx.preLog, historyCommit{hash: hash(24 + i), identity: retainNewest})
+			}
+			f := fx.fake()
+
+			_, err := Retain(context.Background(), f, afterSwap(RetainPeriod), testEpoch())
+			if err == nil {
+				t.Fatal("Retain paired an identity more than one commit holds")
+			}
+			want := fmt.Sprintf("the identity %s is held by %d commits on main and %d on main-pre-squash",
+				retainNewest, tc.onMain, tc.onPre)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not hold %q", err, want)
+			}
+			if !strings.Contains(err.Error(), "keeps both branches") {
+				t.Errorf("error %q does not say the branches are kept", err)
+			}
+			wantSent := []string{sqlRetainDatabase, sqlRetainMainLog, sqlRetainPreLog}
+			if sent := f.Statements(); !slices.Equal(sent, wantSent) {
+				t.Errorf("statements sent:\n%s\nwant only the three reads:\n%s",
+					strings.Join(sent, "\n"), strings.Join(wantSent, "\n"))
+			}
+		})
+	}
+}
+
+func TestRetainPairsOnlyTheCommitsBothBranchesHold(t *testing.T) {
+	t.Parallel()
+	fx := newRetainFixture()
+	// Two commits on main share an identity that main-pre-squash does not
+	// hold: neither is a pair, so they neither compare nor refuse the drop.
+	onlyMain := commitIdentity{AuthorDate: "2026-11-15 21:30:00.000", Message: "fix: only main"}
+	fx.mainLog = append(fx.mainLog,
+		historyCommit{hash: hash(20), identity: onlyMain},
+		historyCommit{hash: hash(21), identity: onlyMain},
+	)
+	f := fx.fake()
+
+	got, err := Retain(context.Background(), f, afterSwap(RetainPeriod), testEpoch())
+	if err != nil {
+		t.Fatalf("Retain: %v", err)
+	}
+	if !got.Dropped || got.Compared != len(fx.compare) {
+		t.Errorf("Dropped = %v, Compared = %d, want a drop after the %d pairs both branches hold",
+			got.Dropped, got.Compared, len(fx.compare))
+	}
+}
+
 func TestRetainHoldsUntilThePeriodHasElapsed(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -477,10 +543,11 @@ func TestRetainSkipsDoltSystemTables(t *testing.T) {
 		f.Respond("USE "+quoteIdent("gt/"+commit), Rows{})
 		f.Respond(sqlRetainCatalog, Rows{
 			Columns: []string{"Tables_in_gt/" + commit},
-			Data:    [][]string{{"dolt_ignore"}, {"issues"}},
+			// Dolt reserves the prefix ignoring case, as CREATE TABLE does.
+			Data: [][]string{{"dolt_ignore"}, {"DOLT_IGNORE"}, {"issues"}},
 		})
-		// No answer is scripted for dolt_ignore: a run that reads it fails,
-		// where a system table is Dolt's own and not the database's data.
+		// No answer is scripted for either system table: a run that reads one
+		// fails, where a system table is Dolt's own and not the database's data.
 		f.Respond("SELECT dolt_hashof_table('issues')", single("hash", hash(9)))
 		f.Respond("USE "+quoteIdent("gt"), Rows{})
 	}
@@ -495,9 +562,36 @@ func TestRetainSkipsDoltSystemTables(t *testing.T) {
 		t.Errorf("Dropped = %v, Compared = %d, want a drop after one matching pair", got.Dropped, got.Compared)
 	}
 	for _, statement := range f.Statements() {
-		if strings.Contains(statement, "dolt_ignore") {
+		if strings.Contains(strings.ToLower(statement), "dolt_ignore") {
 			t.Errorf("the run read a Dolt system table: %q", statement)
 		}
+	}
+}
+
+func TestRetainReadsADoltPrefixedTableThatIsNotADoltSystemTable(t *testing.T) {
+	t.Parallel()
+	fx := newRetainFixture()
+	fx.drop = false
+	fx.compare[0].mainAt = tables(map[string]string{"dolt_probe": hash(17), "issues": hash(11)})
+	fx.compare[0].retainedAt = tables(map[string]string{"dolt_probe": hash(18), "issues": hash(11)})
+	f := fx.fake()
+
+	got, err := Retain(context.Background(), f, afterSwap(RetainPeriod), testEpoch())
+	if err != nil {
+		t.Fatalf("Retain: %v", err)
+	}
+	if got.Dropped {
+		t.Error("a difference at a dolt_-prefixed table the system set does not name dropped the branches")
+	}
+	want := RetentionMismatch{Commit: retainNewest.String(), Table: "dolt_probe", Main: hash(17), Retained: hash(18)}
+	if got.Mismatch == nil || *got.Mismatch != want {
+		t.Errorf("Mismatch = %v, want %+v", got.Mismatch, want)
+	}
+	if got.Compared != 1 {
+		t.Errorf("Compared = %d, want 1: the difference at the first pair stops the comparison", got.Compared)
+	}
+	if sent, want := f.Statements(), fx.expected(fx.compare[:1]); !slices.Equal(sent, want) {
+		t.Errorf("statements sent:\n%s\nwant:\n%s", strings.Join(sent, "\n"), strings.Join(want, "\n"))
 	}
 }
 
