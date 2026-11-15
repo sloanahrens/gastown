@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"log"
+	"os"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/resourcesampler"
@@ -32,12 +34,18 @@ type sandboxSampler struct {
 	clock      resourcesampler.Clock
 	write      sandboxRowWriter
 	logf       func(format string, args ...any)
-	timeout    time.Duration
+	// errLog takes the lines a nil logf would otherwise drop, writing them to
+	// stderr in the standard logger's format, so a tick that could not read the
+	// cluster is never invisible. It is the sampler's own logger so a test reads
+	// those lines from a buffer instead of replacing the process's logger.
+	errLog  *log.Logger
+	timeout time.Duration
 }
 
 // newSandboxSampler returns the sampler a patrol ticks. A nil clock is the
-// host's, a nil writer is resourcesampler.AppendRow, a nil logf logs nothing,
-// and a zero timeout is defaultSandboxSamplerTimeout.
+// host's, a nil writer is resourcesampler.AppendRow, a nil logf writes to
+// stderr in the standard logger's format, and a zero timeout is
+// defaultSandboxSamplerTimeout.
 func newSandboxSampler(metricsDir string, source sandboxSeatSource, clock resourcesampler.Clock, write sandboxRowWriter, logf func(format string, args ...any), timeout time.Duration) *sandboxSampler {
 	if clock == nil {
 		clock = resourcesampler.SystemClock{}
@@ -48,7 +56,11 @@ func newSandboxSampler(metricsDir string, source sandboxSeatSource, clock resour
 	if timeout <= 0 {
 		timeout = defaultSandboxSamplerTimeout
 	}
-	return &sandboxSampler{metricsDir: metricsDir, source: source, clock: clock, write: write, logf: logf, timeout: timeout}
+	return &sandboxSampler{
+		metricsDir: metricsDir, source: source, clock: clock, write: write, logf: logf,
+		errLog:  log.New(os.Stderr, "", log.LstdFlags),
+		timeout: timeout,
+	}
 }
 
 // Tick reads the live seats once and appends the rows that read to the metrics
@@ -100,9 +112,13 @@ func (s *sandboxSampler) Tick(ctx context.Context) {
 	}
 }
 
-// log writes one line through the sampler's logger; a nil logger logs nothing.
+// log writes one line through the sampler's logger, or through errLog when the
+// patrol wired none: a line a nil logger dropped would make a failed tick look
+// like a cluster with no seat.
 func (s *sandboxSampler) log(format string, args ...any) {
 	if s.logf != nil {
 		s.logf(format, args...)
+		return
 	}
+	s.errLog.Printf(format, args...)
 }
