@@ -11,8 +11,10 @@ import (
 )
 
 // renderFlagsFixture is a live render's flags with a distinct value in every
-// field, so a record that swaps, drops or duplicates two fields fails the round
-// trip rather than matching by accident.
+// string field and a mixture of true and false booleans, so a record that
+// swaps, drops or duplicates two fields fails the round trip rather than
+// matching by accident. The six booleans cannot all differ in one fixture, so
+// TestRenderFlagsBooleansRoundTripDistinctly gives each its own run.
 func renderFlagsFixture() clusterRenderFlags {
 	return clusterRenderFlags{
 		dir:                   "/repo/gastown",
@@ -61,6 +63,104 @@ func TestRenderFlagsSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("loaded flags = %+v, want the saved %+v", got, want)
+	}
+}
+
+// renderFlagBool is one boolean flag of the render: its field name and the
+// accessors a test drives it by. The flag struct's fields are unexported, so a
+// reflection loop cannot set them.
+type renderFlagBool struct {
+	name string
+	get  func(clusterRenderFlags) bool
+	set  func(*clusterRenderFlags, bool)
+}
+
+// renderFlagBooleans lists every boolean flag of the render, each with the
+// accessors that name it. TestRenderFlagsBooleansNamingIsComplete fails until a
+// newly added boolean has a row here.
+func renderFlagBooleans() []renderFlagBool {
+	return []renderFlagBool{
+		{"rehearsal", func(f clusterRenderFlags) bool { return f.rehearsal }, func(f *clusterRenderFlags, v bool) { f.rehearsal = v }},
+		{"confirmStopped", func(f clusterRenderFlags) bool { return f.confirmStopped }, func(f *clusterRenderFlags, v bool) { f.confirmStopped = v }},
+		{"withHelper", func(f clusterRenderFlags) bool { return f.withHelper }, func(f *clusterRenderFlags, v bool) { f.withHelper = v }},
+		{"dashboard", func(f clusterRenderFlags) bool { return f.dashboard }, func(f *clusterRenderFlags, v bool) { f.dashboard = v }},
+		{"tracker", func(f clusterRenderFlags) bool { return f.tracker }, func(f *clusterRenderFlags, v bool) { f.tracker = v }},
+		{"trackerBackup", func(f clusterRenderFlags) bool { return f.trackerBackup }, func(f *clusterRenderFlags, v bool) { f.trackerBackup = v }},
+	}
+}
+
+// TestRenderFlagsBooleansNamingIsComplete: the rows above name every boolean
+// flag the record holds and nothing else, so the distinctness test cannot leave
+// a newly added boolean covered only by the shared fixture.
+// daemonBdGatewayURLSet has no row: it is derived on load from the recorded
+// URL, which the table already carries, rather than held by the file.
+func TestRenderFlagsBooleansNamingIsComplete(t *testing.T) {
+	t.Parallel()
+	flagType := reflect.TypeOf(clusterRenderFlags{})
+	recordType := reflect.TypeOf(renderFlagsRecord{})
+	// want is the boolean flags the record holds, so the ones the file carries
+	// and a round trip can distinguish.
+	want := make(map[string]bool)
+	for flagName, recName := range renderFlagRecordNames {
+		flag, ok := flagType.FieldByName(flagName)
+		if !ok || flag.Type.Kind() != reflect.Bool {
+			continue
+		}
+		if rec, ok := recordType.FieldByName(recName); ok && rec.Type.Kind() == reflect.Bool {
+			want[flagName] = true
+		}
+	}
+	rows := renderFlagBooleans()
+	named := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		if named[b.name] {
+			t.Errorf("renderFlagBooleans lists %s twice", b.name)
+		}
+		named[b.name] = true
+		if !want[b.name] {
+			t.Errorf("renderFlagBooleans names %s, which is not a boolean flag the record holds", b.name)
+		}
+	}
+	for name := range want {
+		if !named[name] {
+			t.Errorf("clusterRenderFlags.%s is a recorded boolean with no row in renderFlagBooleans", name)
+		}
+	}
+}
+
+// TestRenderFlagsBooleansRoundTripDistinctly gives each boolean flag its own
+// run: that flag true and every other boolean false. The shared fixture holds
+// six booleans with two values, so a record that confuses two of them compares
+// equal there; here a boolean that is dropped, read from another flag's field
+// or written to another flag's field loads with the wrong value and fails.
+func TestRenderFlagsBooleansRoundTripDistinctly(t *testing.T) {
+	t.Parallel()
+	bools := renderFlagBooleans()
+	for _, b := range bools {
+		t.Run(b.name, func(t *testing.T) {
+			t.Parallel()
+			f := renderFlagsFixture()
+			for _, other := range bools {
+				other.set(&f, false)
+			}
+			b.set(&f, true)
+			path := filepath.Join(t.TempDir(), "render-flags.json")
+			if err := saveRenderFlags(path, f); err != nil {
+				t.Fatalf("saveRenderFlags: %v", err)
+			}
+			got, _, err := loadRenderFlags(path)
+			if err != nil {
+				t.Fatalf("loadRenderFlags: %v", err)
+			}
+			if !b.get(got) {
+				t.Errorf("%s loaded false, want the true it was saved with", b.name)
+			}
+			for _, other := range bools {
+				if other.name != b.name && other.get(got) {
+					t.Errorf("%s loaded true when only %s was recorded, so the record confuses the two", other.name, b.name)
+				}
+			}
+		})
 	}
 }
 

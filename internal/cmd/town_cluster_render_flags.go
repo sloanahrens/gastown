@@ -129,10 +129,8 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 // file names. The file is the whole flag set: a failed write leaves the flags
 // of the previous render in place rather than a partial one.
 func saveRenderFlags(path string, f clusterRenderFlags) error {
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create the directory for the recorded render flags %s: %w", path, err)
-		}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create the directory for the recorded render flags %s: %w", path, err)
 	}
 	if err := atomicfile.WriteJSON(path, f.record()); err != nil {
 		return fmt.Errorf("write the recorded render flags %s: %w", path, err)
