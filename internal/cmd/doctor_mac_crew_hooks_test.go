@@ -35,7 +35,7 @@ func TestDoctorCheckMacCrewHooks(t *testing.T) {
 		{
 			name: "dangling crew clone fails the run",
 			setup: func(t *testing.T, town string) {
-				clone := filepath.Join(town, "gastown", "crew", "sloan")
+				clone := filepath.Join(town, "gastown", "crew", "alice")
 				if err := os.MkdirAll(filepath.Join(clone, ".git"), 0o755); err != nil {
 					t.Fatal(err)
 				}

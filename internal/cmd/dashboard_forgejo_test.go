@@ -75,8 +75,8 @@ func TestDashboardForgejoBaseFromRigRemote(t *testing.T) {
 		remote string
 		want   string
 	}{
-		{"cluster service host", "http://forgejo:3000/sloan/x.git", "http://forgejo:3000/api/v1"},
-		{"loopback remote", "http://127.0.0.1:3000/sloan/x.git", "http://127.0.0.1:3000/api/v1"},
+		{"cluster service host", "http://forgejo:3000/alice/x.git", "http://forgejo:3000/api/v1"},
+		{"loopback remote", "http://127.0.0.1:3000/alice/x.git", "http://127.0.0.1:3000/api/v1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

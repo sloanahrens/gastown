@@ -838,10 +838,10 @@ func TestTownStateSeedRefusesAnUnusableTarget(t *testing.T) {
 	cases := []struct {
 		name, namespace, pod, town, want string
 	}{
-		{name: "a namespace that reads as a flag", namespace: "--rm", pod: seedPod, town: "/Users/sloan/gt", want: "--namespace"},
-		{name: "an upper-case namespace", namespace: "Rehearsal", pod: seedPod, town: "/Users/sloan/gt", want: "--namespace"},
-		{name: "an empty pod name", namespace: seedNamespace, pod: "", town: "/Users/sloan/gt", want: "--pod"},
-		{name: "a pod name with a slash", namespace: seedNamespace, pod: "a/b", town: "/Users/sloan/gt", want: "--pod"},
+		{name: "a namespace that reads as a flag", namespace: "--rm", pod: seedPod, town: "/Users/user/gt", want: "--namespace"},
+		{name: "an upper-case namespace", namespace: "Rehearsal", pod: seedPod, town: "/Users/user/gt", want: "--namespace"},
+		{name: "an empty pod name", namespace: seedNamespace, pod: "", town: "/Users/user/gt", want: "--pod"},
+		{name: "a pod name with a slash", namespace: seedNamespace, pod: "a/b", town: "/Users/user/gt", want: "--pod"},
 		{name: "a relative town root", namespace: seedNamespace, pod: seedPod, town: "gt", want: "absolute path"},
 	}
 	for _, tc := range cases {

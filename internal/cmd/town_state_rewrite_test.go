@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	rewriteCmdOldRoot = "/Users/sloan/gt"
+	rewriteCmdOldRoot = "/home/user/gt"
 	rewriteCmdNewRoot = "/town"
 )
 
@@ -234,12 +234,12 @@ func TestTownStateRewriteCommandRefuses(t *testing.T) {
 		{name: "equal roots", edit: func(e *townStateRewriteEnv) { e.toRoot = e.fromRoot }, want: "are the same"},
 		{name: "new root under the old one", edit: func(e *townStateRewriteEnv) { e.toRoot = rewriteCmdOldRoot + "/town" }, want: "is under --from-root"},
 		{name: "relative to-root", edit: func(e *townStateRewriteEnv) { e.toRoot = "town" }, want: "is not an absolute path"},
-		{name: "relative from-root", edit: func(e *townStateRewriteEnv) { e.fromRoot = "Users/sloan/gt" }, want: "is not an absolute path"},
+		{name: "relative from-root", edit: func(e *townStateRewriteEnv) { e.fromRoot = "Users/user/gt" }, want: "is not an absolute path"},
 		{name: "trailing slash", edit: func(e *townStateRewriteEnv) { e.fromRoot = rewriteCmdOldRoot + "/" }, want: "ends with a slash"},
 		{name: "missing from-root", edit: func(e *townStateRewriteEnv) { e.fromRoot = "" }, want: "--from-root is required"},
 		{name: "missing to-root", edit: func(e *townStateRewriteEnv) { e.toRoot = "" }, want: "--to-root is required"},
-		{name: "one owner", edit: func(e *townStateRewriteEnv) { e.fromOwner = "sloan" }, want: "given together"},
-		{name: "owner shape", edit: func(e *townStateRewriteEnv) { e.fromOwner, e.toOwner = "Sloan", "gastown" }, want: "not one lowercase account name"},
+		{name: "one owner", edit: func(e *townStateRewriteEnv) { e.fromOwner = "alice" }, want: "given together"},
+		{name: "owner shape", edit: func(e *townStateRewriteEnv) { e.fromOwner, e.toOwner = "Alice", "gastown" }, want: "not one lowercase account name"},
 		{name: "missing town", edit: func(e *townStateRewriteEnv) { e.town = filepath.Join(root, "absent") }, want: "reading the town root"},
 		{name: "relative town", edit: func(e *townStateRewriteEnv) { e.town = "gt" }, want: "--town"},
 		{name: "town is a file", edit: func(e *townStateRewriteEnv) { e.town = notADir }, want: "is not a directory"},
@@ -277,7 +277,7 @@ func TestTownStateRewriteUndoTakesNoRootOrOwnerFlags(t *testing.T) {
 	}{
 		{name: "from-root", edit: func(e *townStateRewriteEnv) { e.fromRoot = rewriteCmdOldRoot }},
 		{name: "to-root", edit: func(e *townStateRewriteEnv) { e.toRoot = rewriteCmdNewRoot }},
-		{name: "from-owner", edit: func(e *townStateRewriteEnv) { e.fromOwner = "sloan" }},
+		{name: "from-owner", edit: func(e *townStateRewriteEnv) { e.fromOwner = "alice" }},
 		{name: "to-owner", edit: func(e *townStateRewriteEnv) { e.toOwner = "gastown" }},
 	}
 	for _, tc := range cases {

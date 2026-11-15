@@ -94,7 +94,7 @@ func clusterRenderTestTown(t *testing.T) string {
 	if err := os.MkdirAll(filepath.Dir(derived), 0o755); err != nil {
 		t.Fatalf("making the derived hm config directory: %v", err)
 	}
-	if err := os.WriteFile(derived, []byte(`{"database_url": "postgres://hm:x@host.docker.internal:5433/hm"}`), 0o600); err != nil {
+	if err := os.WriteFile(derived, []byte(`{"database_url": "postgres://host.docker.internal:5433/hm"}`), 0o600); err != nil {
 		t.Fatalf("writing the derived hm config: %v", err)
 	}
 	return town
@@ -450,7 +450,7 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(derivedPath(town)), 0o755); err != nil {
 			t.Fatalf("making the derived config directory: %v", err)
 		}
-		if err := os.WriteFile(derivedPath(town), []byte(`{"database_url": "postgres://hm:x@host.docker.internal:5433/hm"}`), 0o600); err != nil {
+		if err := os.WriteFile(derivedPath(town), []byte(`{"database_url": "postgres://host.docker.internal:5433/hm"}`), 0o600); err != nil {
 			t.Fatalf("writing the derived config: %v", err)
 		}
 	}
@@ -606,12 +606,12 @@ func TestTownClusterRenderValuesMatchWhatTheRenderBuilds(t *testing.T) {
 			name: "the dashboard and its bd gateway",
 			mutate: func(f *clusterRenderFlags) {
 				f.dashboard = true
-				f.dashboardClaudeDir = "/Users/sloan/.claude"
+				f.dashboardClaudeDir = "/Users/user/.claude"
 				f.bdGatewayURL = " https://bd.example.test:8443 "
 			},
 			want: func(base k8sdaemon.Values) k8sdaemon.Values {
 				base.Dashboard = true
-				base.DashboardClaudeDir = "/Users/sloan/.claude"
+				base.DashboardClaudeDir = "/Users/user/.claude"
 				base.BdGatewayURL = "https://bd.example.test:8443"
 				return base
 			},
@@ -1510,7 +1510,7 @@ func TestTownClusterRenderRefusesTheDoltBackupHostPath(t *testing.T) {
 			f.doltBackupHostPath = k8sdaemon.DoltBackupPath
 		}},
 		{"a relative path", func(f *clusterRenderFlags) { f.doltBackupHostPath = "gt-backups/dolt" }},
-		{"another directory", func(f *clusterRenderFlags) { f.doltBackupHostPath = "/Users/sloan/elsewhere" }},
+		{"another directory", func(f *clusterRenderFlags) { f.doltBackupHostPath = "/Users/user/elsewhere" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1723,7 +1723,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 	t.Run("a relative claude directory refuses before a write", func(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.dashboard = true
-		f.dashboardClaudeDir = "Users/sloan/.claude"
+		f.dashboardClaudeDir = "Users/user/.claude"
 		var out bytes.Buffer
 		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--dashboard-claude-dir", "absolute")
@@ -1734,7 +1734,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 
 	t.Run("the claude directory without the dashboard refuses before a write", func(t *testing.T) {
 		f := clusterRenderFixture(t)
-		f.dashboardClaudeDir = "/Users/sloan/.claude"
+		f.dashboardClaudeDir = "/Users/user/.claude"
 		var out bytes.Buffer
 		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--dashboard-claude-dir", "--dashboard")
@@ -1746,12 +1746,12 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 	t.Run("the claude directory is the dashboard's only host path", func(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.dashboard = true
-		f.dashboardClaudeDir = "/Users/sloan/.claude"
+		f.dashboardClaudeDir = "/Users/user/.claude"
 		var out bytes.Buffer
 		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render: %v", err)
 		}
-		if got, want := renderedHostPaths(t, f.out, "-deployment-dashboard.yaml"), []string{"/Users/sloan/.claude Directory"}; !slices.Equal(got, want) {
+		if got, want := renderedHostPaths(t, f.out, "-deployment-dashboard.yaml"), []string{"/Users/user/.claude Directory"}; !slices.Equal(got, want) {
 			t.Errorf("the dashboard's host paths = %q, want %q", got, want)
 		}
 		if got := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"); len(got) != 0 {
@@ -1768,7 +1768,7 @@ func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
 
 	t.Run("the flag sets Values.DaemonClaudeDir", func(t *testing.T) {
 		f := clusterRenderFixture(t)
-		f.daemonClaudeDir = "/Users/sloan/.claude"
+		f.daemonClaudeDir = "/Users/user/.claude"
 		var out bytes.Buffer
 		deps := clusterRenderTestDeps(t, &out)
 		var seen k8sdaemon.Values
@@ -1782,7 +1782,7 @@ func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
 		if seen.DaemonClaudeDir != f.daemonClaudeDir {
 			t.Errorf("Values.DaemonClaudeDir = %q, want %q", seen.DaemonClaudeDir, f.daemonClaudeDir)
 		}
-		if got, want := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"), []string{"/Users/sloan/.claude Directory"}; !slices.Equal(got, want) {
+		if got, want := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"), []string{"/Users/user/.claude Directory"}; !slices.Equal(got, want) {
 			t.Errorf("the daemon's host paths = %q, want %q", got, want)
 		}
 	})
@@ -1815,7 +1815,7 @@ func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
 
 	t.Run("a relative claude directory refuses before a write", func(t *testing.T) {
 		f := clusterRenderFixture(t)
-		f.daemonClaudeDir = "Users/sloan/.claude"
+		f.daemonClaudeDir = "Users/user/.claude"
 		var out bytes.Buffer
 		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--daemon-claude-dir", "absolute")
