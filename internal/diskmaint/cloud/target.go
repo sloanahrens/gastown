@@ -45,10 +45,14 @@ type Config struct {
 	// Ledger records every apply; a target without one is not built.
 	Ledger *diskmaint.Ledger
 	// LabelsFile is the file holding the cloud VM's runner labels, one per line
-	// as forgejo-runner register was given them ("<name>:docker://<repo>:<tag>").
+	// as forgejo-runner register was given them ("<name>:docker://<ref>").
 	// Plan reads it through Run and keeps the images the labels name; empty names
 	// no list, and Plan refuses rather than keeping a list of its own.
 	LabelsFile string
+	// DeployFile is the app's deploy workflow. Plan reads it through Run and
+	// keeps every fractals-nextjs image the workflow names; empty names no
+	// workflow, and Plan refuses rather than assuming the workflow names none.
+	DeployFile string
 }
 
 // Target is the cloud VM's docker daemon as a diskmaint target.
