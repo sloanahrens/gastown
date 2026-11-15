@@ -81,6 +81,7 @@ type Settings struct {
 	// KeepDays is how many days of history stay unsquashed. Decide refuses a
 	// value below 1: a zero window would put the cut at the check's clock and
 	// a negative one after it, so every commit would be squashed.
+	// A window longer than a time.Duration holds is refused too.
 	KeepDays int
 }
 
@@ -88,6 +89,11 @@ type Settings struct {
 // not due even when a threshold trips (design step 1, "no run in the last 24
 // hours").
 const RunInterval = 24 * time.Hour
+
+// maxKeepDays is the longest keep window a time.Duration holds. Above it the
+// window wraps, and the wrapped cut can land after now, where every commit is
+// older than the cut.
+const maxKeepDays = int(time.Duration(1<<63-1) / (24 * time.Hour))
 
 // Decision is a daily check's answer for one database.
 type Decision struct {
@@ -111,9 +117,14 @@ type Decision struct {
 // clock and holds nothing back, so a clock set back costs one extra run rather
 // than a schedule that never comes due. A KeepDays below 1 is an error, not a
 // decision.
+// A KeepDays above maxKeepDays is an error too: the window would wrap and the
+// cut would no longer be then minus the window.
 func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
 	if cfg.KeepDays < 1 {
 		return Decision{}, fmt.Errorf("doltsquash: keep_days %d is below 1, so the cut would leave no history", cfg.KeepDays)
+	}
+	if cfg.KeepDays > maxKeepDays {
+		return Decision{}, fmt.Errorf("doltsquash: keep_days %d is above %d, the longest window the cut can reach", cfg.KeepDays, maxKeepDays)
 	}
 	v := Evaluate(in, cfg.Thresholds)
 	d := Decision{

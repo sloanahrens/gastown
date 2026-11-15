@@ -227,6 +227,13 @@ func TestCutInstant(t *testing.T) {
 			if !got.Cut.Equal(tc.want) {
 				t.Errorf("Cut = %s, want %s", got.Cut, tc.want)
 			}
+			// Equal compares instants only, so a cut moved into another zone
+			// of the same instant still passes it.
+			gotZone, gotOffset := got.Cut.Zone()
+			wantZone, wantOffset := tc.want.Zone()
+			if gotZone != wantZone || gotOffset != wantOffset {
+				t.Errorf("Cut zone = %s (%ds), want %s (%ds)", gotZone, gotOffset, wantZone, wantOffset)
+			}
 		})
 	}
 }
@@ -349,5 +356,36 @@ func TestCutRefusesNonPositiveKeepDays(t *testing.T) {
 				t.Errorf("Due = true beside an error, want false")
 			}
 		})
+	}
+}
+
+func TestCutRefusesKeepDaysPastTheDurationRange(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	cfg := designSettings()
+	cfg.KeepDays = maxKeepDays + 1
+	got, err := Decide(now, time.Time{}, backupBytesTrips(), cfg)
+	if err == nil {
+		t.Fatalf("Decide accepted keep_days %d, want an error", cfg.KeepDays)
+	}
+	if !strings.Contains(err.Error(), "keep_days") {
+		t.Errorf("error %q does not name keep_days", err)
+	}
+	if got.Due {
+		t.Errorf("Due = true beside an error, want false")
+	}
+}
+
+func TestCutAcceptsTheLongestKeepWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	cfg := designSettings()
+	cfg.KeepDays = maxKeepDays
+	got, err := Decide(now, time.Time{}, backupBytesTrips(), cfg)
+	if err != nil {
+		t.Fatalf("Decide refused keep_days %d: %v", cfg.KeepDays, err)
+	}
+	if !got.Cut.Before(now) {
+		t.Errorf("Cut = %s, want before now %s", got.Cut, now)
 	}
 }
