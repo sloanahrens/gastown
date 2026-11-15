@@ -43,19 +43,50 @@ func TestPlanImagePins(t *testing.T) {
 			wantFile: []string{"bd"},
 		},
 		{
-			name:     "exactly the pins at or over the threshold",
-			pins:     []ImagePinState{state("bd", 19), state("om", 20), state("hm", 34), state("devops", 3)},
-			wantFile: []string{"om", "hm"},
+			name:      "exactly the pins at or over the threshold",
+			pins:      []ImagePinState{state("bd", 19), state("om", 20), state("hm", 34), state("devops", 3)},
+			wantFile:  []string{"om", "hm"},
+			wantItems: []string{imagePinsStaleKey},
 		},
 		{
-			name:     "a failed read is never filed",
-			pins:     []ImagePinState{state("bd", 34), failed},
-			wantFile: []string{"bd"},
+			name:      "one commit short of the stale bound",
+			pins:      []ImagePinState{state("bd", 29)},
+			wantFile:  []string{"bd"},
+			wantItems: nil,
+		},
+		{
+			name:      "at the stale bound",
+			pins:      []ImagePinState{state("bd", 30)},
+			wantFile:  []string{"bd"},
+			wantItems: []string{imagePinsStaleKey},
+		},
+		{
+			name:      "a failed read is never filed",
+			pins:      []ImagePinState{state("bd", 34), failed},
+			wantFile:  []string{"bd"},
+			wantItems: []string{imagePinsStaleKey, imagePinsUnreadableKey},
+		},
+		{
+			name:      "a failed read with nothing behind raises unreadable",
+			pins:      []ImagePinState{{Name: "om", Pin: "pin-om", Behind: 0, Err: errors.New("ls-remote exited 128")}},
+			wantItems: []string{imagePinsUnreadableKey},
 		},
 		{
 			name: "an open bead blocks a second",
 			pins: []ImagePinState{state("bd", 25)},
 			open: &ImagePinRefreshBead{ID: "gt-refresh7", OpenedAt: at.Add(-time.Hour)},
+		},
+		{
+			name:      "a stale pin under an open bead still raises stale",
+			pins:      []ImagePinState{state("bd", 30)},
+			open:      &ImagePinRefreshBead{ID: "gt-refresh7", OpenedAt: at.Add(-time.Hour)},
+			wantItems: []string{imagePinsStaleKey},
+		},
+		{
+			name:      "a stale pin under an open bead past the stuck bound",
+			pins:      []ImagePinState{state("bd", 30)},
+			open:      &ImagePinRefreshBead{ID: "gt-refresh7", OpenedAt: at.Add(-4 * time.Hour)},
+			wantItems: []string{imagePinsStaleKey, imagePinsRefreshStuckKey},
 		},
 		{
 			name: "an open bead at the stuck bound",
@@ -102,9 +133,8 @@ func TestPlanImagePins(t *testing.T) {
 	}
 }
 
-// TestPlanImagePinsNamesAPinWhoseReadFailed: a failed read files nothing and
-// raises no item yet, but the plan names the pin, so it is not the output of an
-// all-fresh tick. The image-pins-unreadable item arrives with gt-3ycfvf.
+// TestPlanImagePinsNamesAPinWhoseReadFailed: a failed read files nothing, and
+// the plan names the pin, so it is not the output of an all-fresh tick.
 func TestPlanImagePinsNamesAPinWhoseReadFailed(t *testing.T) {
 	t.Parallel()
 	// Behind is over the file threshold so a planner that ignored Err would
@@ -175,5 +205,33 @@ func TestPlanImagePinsStuckItemNamesTheBeadAndAge(t *testing.T) {
 	}
 	if len(got.Items) != 1 || got.Items[0] != want {
 		t.Fatalf("Items = %+v, want exactly %+v", got.Items, want)
+	}
+}
+
+// TestPlanImagePinsStaleAndUnreadableItemsNameTheirPin: each per-pin item names
+// the pin it is about, so the patrol can raise and clear each one on its own.
+func TestPlanImagePinsStaleAndUnreadableItemsNameTheirPin(t *testing.T) {
+	t.Parallel()
+	stale := ImagePinState{Name: "hm", Pin: "pin-hm", Behind: 30}
+	failed := ImagePinState{Name: "om", Pin: "pin-om", Err: errors.New("ls-remote exited 128")}
+
+	got := PlanImagePins([]ImagePinState{stale, failed}, nil, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+
+	want := []ImagePinItem{
+		{
+			Key:      imagePinsStaleKey,
+			Pin:      "hm",
+			Severity: attention.SeverityMedium,
+			Summary:  "image pin hm is 30 commits behind its source's origin/main, at or over the 30-commit stale bound",
+		},
+		{
+			Key:      imagePinsUnreadableKey,
+			Pin:      "om",
+			Severity: attention.SeverityMedium,
+			Summary:  "image pin om cannot be read: it is not counted as fresh, and no refresh bead is filed for it",
+		},
+	}
+	if !slices.Equal(got.Items, want) {
+		t.Fatalf("Items = %+v, want %+v", got.Items, want)
 	}
 }

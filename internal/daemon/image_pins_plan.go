@@ -22,6 +22,15 @@ const (
 	// imagePinsRefreshStuckKey is the one item this half of the planner
 	// raises. There is one open refresh bead at a time, so one key holds it.
 	imagePinsRefreshStuckKey = "image-pins-refresh-stuck"
+	// imagePinsStaleBehind is how many commits behind its tip a pin must be
+	// before the planner raises image-pins-stale for it. The operator approved
+	// file at 20 and stale at 30 on 2026-11-14 (gt-wmoa0d); the drift guard's
+	// 40-commit bound is the one that stops a roll.
+	imagePinsStaleBehind = 30
+	// imagePinsStaleKey and imagePinsUnreadableKey are the per-pin items this
+	// planner raises. Each names its pin in ImagePinItem.Pin.
+	imagePinsStaleKey      = "image-pins-stale"
+	imagePinsUnreadableKey = "image-pins-unreadable"
 )
 
 // ImagePinState is one image pin as the planner sees it: the pin file's name
@@ -45,9 +54,12 @@ type ImagePinRefreshBead struct {
 }
 
 // ImagePinItem is one attention item the planner raises. The patrol publishes
-// it as an attention item with the kind and rule that belong to its key.
+// it as an attention item with the kind and rule that belong to its key. Pin
+// names the pin a per-pin item is about; it is empty for the refresh-stuck item,
+// which is about the open bead.
 type ImagePinItem struct {
 	Key      string
+	Pin      string
 	Severity attention.Severity
 	Summary  string
 }
@@ -59,8 +71,8 @@ type ImagePinPlan struct {
 	// threshold, or a refresh bead is already open.
 	File []ImagePinState
 	// Unreadable names the pins whose read failed this tick, in the order the
-	// states arrived, so a failed read is told apart from a fresh pin. The
-	// image-pins-unreadable item for each comes with the next bead (gt-3ycfvf).
+	// states arrived, so a failed read is told apart from a fresh pin. Each has
+	// an image-pins-unreadable item in Items.
 	Unreadable []string
 	// Items are the conditions this tick raises.
 	Items []ImagePinItem
@@ -69,8 +81,11 @@ type ImagePinPlan struct {
 // PlanImagePins decides whether the daemon files a refresh bead and which pins
 // it names, and raises the items the states show now. A pin files at
 // daemonimage.PinRefreshBehind commits behind its source tip, the same trigger
-// `gt daemon image pins` uses; a pin whose read failed never files and is named in
-// Unreadable, with no item until the next bead; an open refresh bead blocks a second file and raises
+// `gt daemon image pins` uses. A pin whose read failed never files and is named
+// in Unreadable, and raises image-pins-unreadable: its distance is unknown, so
+// it is never treated as fresh. A pin imagePinsStaleBehind commits behind or
+// more raises image-pins-stale. These pin items are raised whether or not a
+// refresh bead is open. An open refresh bead blocks a second file and raises
 // image-pins-refresh-stuck once it is older than imagePinsRefreshStuck. A bead
 // with no OpenedAt raises that item too: an age that cannot be shown to be
 // under the bound is not fresh.
@@ -79,10 +94,23 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 	for _, pin := range pins {
 		if pin.Err != nil {
 			// Behind is not trusted with a failed read: the pin's distance is
-			// unknown, and the image-pins-unreadable item for it comes with the
-			// stale item (gt-3ycfvf). Naming it here keeps it apart from a fresh pin.
+			// unknown, so the Behind check below must not see this pin at all.
 			plan.Unreadable = append(plan.Unreadable, pin.Name)
+			plan.Items = append(plan.Items, ImagePinItem{
+				Key:      imagePinsUnreadableKey,
+				Pin:      pin.Name,
+				Severity: attention.SeverityMedium,
+				Summary:  fmt.Sprintf("image pin %s cannot be read: it is not counted as fresh, and no refresh bead is filed for it", pin.Name),
+			})
 			continue
+		}
+		if pin.Behind >= imagePinsStaleBehind {
+			plan.Items = append(plan.Items, ImagePinItem{
+				Key:      imagePinsStaleKey,
+				Pin:      pin.Name,
+				Severity: attention.SeverityMedium,
+				Summary:  fmt.Sprintf("image pin %s is %d commits behind its source's origin/main, at or over the %d-commit stale bound", pin.Name, pin.Behind, imagePinsStaleBehind),
+			})
 		}
 		if pin.Behind < daemonimage.PinRefreshBehind {
 			continue
@@ -95,25 +123,35 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 	// One refresh bead at a time: the pins it names are the ones a second bead
 	// would race it for, so the file decision waits for it to land.
 	plan.File = nil
+	if item, raised := refreshStuckItem(open, now); raised {
+		plan.Items = append(plan.Items, item)
+	}
+	return plan
+}
+
+// refreshStuckItem is the image-pins-refresh-stuck item for an open refresh
+// bead, and whether this tick raises it: an open bead that is past
+// imagePinsRefreshStuck, or whose age is not recorded.
+func refreshStuckItem(open *ImagePinRefreshBead, now time.Time) (ImagePinItem, bool) {
 	if open.OpenedAt.IsZero() {
 		// An age nobody recorded cannot be shown to be under the bound, and a
 		// duration measured from the zero time would print as a saturated
 		// number, so the summary says the age is unknown.
-		plan.Items = append(plan.Items, ImagePinItem{
+		return ImagePinItem{
 			Key:      imagePinsRefreshStuckKey,
 			Severity: attention.SeverityMedium,
 			Summary:  fmt.Sprintf("refresh bead %s is open and its age is unknown: the image pins wait for it to land", open.ID),
-		})
-		return plan
+		}, true
 	}
-	if age := now.Sub(open.OpenedAt); age > imagePinsRefreshStuck {
-		// Medium: only the drift guard's 40-commit bound stops a roll, so this
-		// asks the overseer to look before a pin gets there.
-		plan.Items = append(plan.Items, ImagePinItem{
-			Key:      imagePinsRefreshStuckKey,
-			Severity: attention.SeverityMedium,
-			Summary:  fmt.Sprintf("refresh bead %s open %s: the image pins wait for it to land", open.ID, townhealth.Short(age)),
-		})
+	age := now.Sub(open.OpenedAt)
+	if age <= imagePinsRefreshStuck {
+		return ImagePinItem{}, false
 	}
-	return plan
+	// Medium: only the drift guard's 40-commit bound stops a roll, so this
+	// asks the overseer to look before a pin gets there.
+	return ImagePinItem{
+		Key:      imagePinsRefreshStuckKey,
+		Severity: attention.SeverityMedium,
+		Summary:  fmt.Sprintf("refresh bead %s open %s: the image pins wait for it to land", open.ID, townhealth.Short(age)),
+	}, true
 }
