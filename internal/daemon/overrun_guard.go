@@ -411,11 +411,6 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	// read is the same failure for every seat it reaches this cycle.
 	escalationReadFailed := false
 
-	seats, err := s.workingSeats()
-	if err != nil {
-		d.logger.Printf("overrun_guard: cannot list working seats: %v", err)
-		return
-	}
 	now := s.now()
 
 	// Stops that began on an earlier tick and did not finish go first. Their
@@ -424,6 +419,19 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	var resumed map[string]bool
 	if !dry {
 		resumed = d.resumeOverrunStops(s)
+	}
+	// A seat whose session has answered nothing for seatUnreachableReleaseAfter
+	// never reaches the seat list below: it is built from the seats whose
+	// sessions answer, and this one's does not — and that list's read can fail
+	// for a reason of its own. The stop path is taken for these seats here,
+	// before the list is read, without a nudge: there is no session that could
+	// read one (gt-wgim24).
+	d.releaseUnreachableSeats(d.stopSeamsForUnreachableSeats(s), now, dry)
+
+	seats, err := s.workingSeats()
+	if err != nil {
+		d.logger.Printf("overrun_guard: cannot list working seats: %v", err)
+		return
 	}
 
 	for _, seat := range seats {
