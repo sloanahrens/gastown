@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 const (
@@ -355,4 +357,295 @@ func TestImageLabelPodRefusals(t *testing.T) {
 			t.Errorf("asked %v with no registry wired, want no request", asked)
 		}
 	})
+}
+
+// podVerifyCheck is the check update.Verify reported under name.
+func podVerifyCheck(t *testing.T, checks []update.Check, name string) update.Check {
+	t.Helper()
+	for _, check := range checks {
+		if check.Name == name {
+			return check
+		}
+	}
+	t.Fatalf("verify reported no %s check: %+v", name, checks)
+	return update.Check{}
+}
+
+// TestPodImageLabelProbeRefusesAnUnwiredRead: a probe with no registry read
+// wired fails its image-label check instead of passing or crashing.
+func TestPodImageLabelProbeRefusesAnUnwiredRead(t *testing.T) {
+	t.Parallel()
+	probes := podImageLabelProbes{}
+
+	if _, err := probes.ImageLabel(context.Background()); err == nil {
+		t.Fatal("an unwired image label read reported no error")
+	}
+}
+
+// TestPodPairProbesReportThePair holds the pair probes to their readers: the
+// wanted polecat digest is the run's, and each check reports the digest its
+// reader answers without asking for it another way.
+func TestPodPairProbesReportThePair(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	want := testDigestOf(podPairManifest)
+	probes := podImageLabelProbes{
+		VerifyProbes: newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: (&verifyProbeRun{}).run}),
+		wantPolecat:  want,
+		annotation:   func(context.Context) (string, error) { return want, nil },
+		devTag:       func(context.Context) (string, error) { return want, nil },
+	}
+
+	if got := probes.WantPolecat(); got != want {
+		t.Errorf("WantPolecat = %q, want %q", got, want)
+	}
+	if got, err := probes.PolecatAnnotation(ctx); err != nil || got != want {
+		t.Errorf("PolecatAnnotation = %q, %v; want the reader's digest %q", got, err, want)
+	}
+	if got, err := probes.DevTagDigest(ctx); err != nil || got != want {
+		t.Errorf("DevTagDigest = %q, %v; want the reader's digest %q", got, err, want)
+	}
+	checks := update.Verify(ctx, probes, rollbackNewCommit)
+	for _, name := range []string{"polecat-annotation", "dev-tag"} {
+		if check := podVerifyCheck(t, checks, name); !check.OK || check.Detail != want {
+			t.Errorf("%s = %+v, want ok with the digest %q", name, check, want)
+		}
+	}
+}
+
+// TestPodPairProbesFailOnAFailedRead drives each way one of the pair checks can
+// fail: the check that read the failed answer fails, and the other is judged on
+// its own read.
+func TestPodPairProbesFailOnAFailedRead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	want := testDigestOf(podPairManifest)
+	boom := errors.New("the read failed")
+	good := func(context.Context) (string, error) { return want, nil }
+	fail := func(context.Context) (string, error) { return "", boom }
+
+	tests := []struct {
+		name   string
+		probes podImageLabelProbes
+		failed string
+		detail string
+	}{
+		{
+			name:   "the annotation read fails",
+			probes: podImageLabelProbes{annotation: fail, devTag: good},
+			failed: "polecat-annotation",
+			detail: boom.Error(),
+		},
+		{
+			name:   "the dev-tag read fails",
+			probes: podImageLabelProbes{annotation: good, devTag: fail},
+			failed: "dev-tag",
+			detail: boom.Error(),
+		},
+		{
+			name:   "no annotation reader is wired",
+			probes: podImageLabelProbes{devTag: good},
+			failed: "polecat-annotation",
+			detail: "the run has no Deployment annotation reader",
+		},
+		{
+			name:   "no dev-tag reader is wired",
+			probes: podImageLabelProbes{annotation: good},
+			failed: "dev-tag",
+			detail: "the run has no dev tag reader",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := tt.probes
+			probes.VerifyProbes = newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: (&verifyProbeRun{}).run})
+			probes.wantPolecat = want
+
+			checks := update.Verify(ctx, probes, rollbackNewCommit)
+
+			failed := podVerifyCheck(t, checks, tt.failed)
+			if failed.OK {
+				t.Fatalf("%s passed on a failed read: %+v", tt.failed, failed)
+			}
+			if failed.Detail != tt.detail {
+				t.Errorf("%s detail = %q, want %q", tt.failed, failed.Detail, tt.detail)
+			}
+			other := "dev-tag"
+			if tt.failed == other {
+				other = "polecat-annotation"
+			}
+			if check := podVerifyCheck(t, checks, other); !check.OK {
+				t.Errorf("%s failed when only %s did: %+v", other, tt.failed, check)
+			}
+		})
+	}
+}
+
+// TestPodTargetPairReaders holds the two readers to the reads they reuse: the
+// annotation comes from the swap's running pair command, and the dev tag from
+// the command the pair check runs in the daemon pod.
+func TestPodTargetPairReaders(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	want := testDigestOf(podPairManifest)
+
+	t.Run("the annotation digest is the Deployment's polecat image", func(t *testing.T) {
+		t.Parallel()
+		kube := &podPairKubectl{image: podSwapDigestRef, polecat: podPairPolecatRef}
+
+		got, err := podTargetAnnotation(podPairTarget(), kube.run)(ctx)
+		if err != nil {
+			t.Fatalf("annotation digest: %v", err)
+		}
+		if got != want {
+			t.Errorf("annotation digest = %q, want the annotation's digest %q", got, want)
+		}
+		read := `jsonpath=` + runningPairJSONPath
+		if !slices.ContainsFunc(kube.calls, func(c podPairCall) bool { return slices.Contains(c.args, read) }) {
+			t.Errorf("ran %+v, want the swap's running pair read", kube.calls)
+		}
+	})
+
+	t.Run("a Deployment with no polecat annotation is an error", func(t *testing.T) {
+		t.Parallel()
+		kube := &podPairKubectl{image: podSwapDigestRef}
+
+		if _, err := podTargetAnnotation(podPairTarget(), kube.run)(ctx); err == nil {
+			t.Fatal("a Deployment with no polecat annotation reported no error")
+		}
+	})
+
+	t.Run("a failed pair read is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("kubectl refused")
+		kube := &podPairKubectl{runErr: boom}
+
+		if _, err := podTargetAnnotation(podPairTarget(), kube.run)(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the run error", err)
+		}
+	})
+
+	t.Run("the dev-tag digest is what the daemon pod reads", func(t *testing.T) {
+		t.Parallel()
+		kube := &podPairKubectl{}
+
+		got, err := podTargetDevTag(podPairTarget(), kube.run)(ctx)
+		if err != nil {
+			t.Fatalf("dev-tag digest: %v", err)
+		}
+		if got != want {
+			t.Errorf("dev-tag digest = %q, want the tag's digest %q", got, want)
+		}
+		if !slices.ContainsFunc(kube.calls, func(c podPairCall) bool { return slices.Contains(c.args, "polecat-devtag") }) {
+			t.Errorf("ran %+v, want the daemon's polecat-devtag read", kube.calls)
+		}
+	})
+
+	t.Run("an absent dev tag is an error", func(t *testing.T) {
+		t.Parallel()
+		kube := &podPairKubectl{devTag: podPairDevTagJSON(false, "")}
+
+		if _, err := podTargetDevTag(podPairTarget(), kube.run)(ctx); err == nil {
+			t.Fatal("an absent dev tag reported no error")
+		}
+	})
+
+	t.Run("a failed dev-tag read is an error carrying no output", func(t *testing.T) {
+		t.Parallel()
+		kube := &podPairKubectl{devTagExit: 1}
+
+		_, err := podTargetDevTag(podPairTarget(), kube.run)(ctx)
+		if err == nil {
+			t.Fatal("a failed dev-tag read reported no error")
+		}
+		if strings.Contains(err.Error(), podSwapOutput) {
+			t.Errorf("error %q carries the command's output", err)
+		}
+	})
+}
+
+// TestPodRunVerifyListsThePairChecks drives the probes the command wires for a
+// pod target: a pod run's verify result lists the pair's two checks, and they
+// pass against the pair the install rolled, read through the fake Deployment and
+// daemon pod.
+func TestPodRunVerifyListsThePairChecks(t *testing.T) {
+	t.Parallel()
+	got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+	// The run's Run seam is stubbed, so no patch moved the fake Deployment: put it
+	// on the pair the values file names, the state a verify after the install reads.
+	got.kube.polecat = podPairPolecatRef
+
+	probes, ok := got.deps.Verify.(podImageLabelProbes)
+	if !ok {
+		t.Fatalf("verify probe = %T, want the pod runs' probes", got.deps.Verify)
+	}
+	want := testDigestOf(podPairManifest)
+	if digest := probes.WantPolecat(); digest != want {
+		t.Errorf("WantPolecat = %q, want the --images file's polecat digest %q", digest, want)
+	}
+	checks := update.Verify(context.Background(), got.deps.Verify, rollbackNewCommit)
+	for _, name := range []string{"polecat-annotation", "dev-tag"} {
+		if check := podVerifyCheck(t, checks, name); !check.OK {
+			t.Errorf("%s failed for the pair the install rolled: %+v", name, check)
+		}
+	}
+}
+
+// TestPodRunRefusesAMissingImagesFile: a pod target's values file that does not
+// read stops the run before any step, so the pair probes never read a pair the
+// file does not name.
+func TestPodRunRefusesAMissingImagesFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	ran := false
+	seams := updateSeams{
+		FindTownRoot: func() (string, error) { return townRoot, nil },
+		DepsFactory: func(string) (update.Deps, error) {
+			return update.Deps{Store: &update.Store{Dir: update.Dir(townRoot)}, Clock: updateClock{}}, nil
+		},
+		Run: func(context.Context, update.Deps, update.Options) (update.State, error) {
+			ran = true
+			return update.State{Outcome: update.OutcomeOK}, nil
+		},
+		PodRun: (&podDaemonKubectl{}).run,
+	}
+
+	_, err := runPodCommand(t, seams, "--images", filepath.Join(townRoot, "missing.yaml"),
+		"--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+	if err == nil || !strings.Contains(err.Error(), "the --images values file") {
+		t.Fatalf("gt update --images error = %v, want the values file refusal", err)
+	}
+	if ran {
+		t.Error("the run started, want the values file refusal before any step")
+	}
+}
+
+// TestNonPodRunVerifyListsNoPairChecks holds the probes a run without a pod
+// target wires, as realUpdateDeps builds them: the pair extension is absent, so
+// the verify result is the four checks the town's own reads answer.
+func TestNonPodRunVerifyListsNoPairChecks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	run := &verifyProbeRun{output: "gt version " + rollbackNewCommit + " (dev: main)\n"}
+	probes := newVerifyProbes(verifyProbeEnv{
+		Exe:          verifyProbeExe,
+		Run:          run.run,
+		DaemonCommit: func() (string, error) { return rollbackNewCommit, nil },
+	})
+
+	if _, ok := probes.(update.PairProbes); ok {
+		t.Fatal("the probes a run without a pod target wires implement the pair extension")
+	}
+	checks := update.Verify(ctx, probes, rollbackNewCommit)
+	if len(checks) != 4 {
+		t.Fatalf("got %d checks, want the four a non-pod run makes: %+v", len(checks), checks)
+	}
+	for _, name := range []string{"polecat-annotation", "dev-tag"} {
+		for _, check := range checks {
+			if check.Name == name {
+				t.Errorf("a run without a pod target reported %s", name)
+			}
+		}
+	}
 }
