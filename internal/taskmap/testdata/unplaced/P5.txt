@@ -1,5 +1,0 @@
-session list
-session restart
-session start
-session status
-session stop
