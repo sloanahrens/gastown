@@ -414,17 +414,17 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	// rest from it. Every other run reaches the town below, after the flags and the
 	// image pair are checked, so a wrong flag or a missing pair is the refusal an
 	// operator hears about rather than a workspace error that hides it.
-	var townRoot string
+	var memoRoot string
 	var haveTown bool
 	findTown := func() (string, error) {
 		if haveTown {
-			return townRoot, nil
+			return memoRoot, nil
 		}
 		root, err := d.findTown()
 		if err != nil {
 			return "", fmt.Errorf("not in a Gas Town workspace, so the pod's environment cannot be read: %w", err)
 		}
-		townRoot, haveTown = root, true
+		memoRoot, haveTown = root, true
 		return root, nil
 	}
 	var recordPath string
@@ -471,14 +471,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if err := checkOutDir(f.out); err != nil {
 		return err
 	}
-	v, pair, err := clusterRenderValues(d, f, findTown)
-	if err != nil {
-		return err
-	}
-	// The function found the town through the memoized lookup, so this call reads
-	// nothing more; the run still needs the root for the Secret lines and the
-	// town's values file.
-	townRoot, err = findTown()
+	v, pair, townRoot, err := clusterRenderValues(d, f, findTown)
 	if err != nil {
 		return err
 	}
@@ -592,34 +585,36 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 }
 
 // clusterRenderValues builds the daemon's Values from f and the reads d makes of
-// the host, and returns them with the image pair it loaded. It is the one place
-// the command's flags become Values. findTown is the run's memoized lookup,
-// called where the run would call it: after the flags and the image pair, so a
-// wrong flag or a missing pair is the refusal heard first.
-func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown func() (string, error)) (k8sdaemon.Values, imagevalues.Values, error) {
+// the host, and returns them with the image pair it loaded and the town root it
+// read them against. It is the one place the command's flags become Values.
+// findTown is the run's memoized lookup, called where the run would call it:
+// after the flags and the image pair, so a wrong flag or a missing pair is the
+// refusal heard first. The caller takes the root from the return, so the render
+// never looks the town up a second time.
+func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown func() (string, error)) (k8sdaemon.Values, imagevalues.Values, string, error) {
 	pair, ok, err := imagevalues.LoadIn(f.dir)
 	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("reading the image values under %s: %w", f.dir, err)
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("reading the image values under %s: %w", f.dir, err)
 	}
 	if !ok {
-		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("--dir %s holds no image pair at %s, and a render needs the daemon's digest: run gt update images first", f.dir, imagevalues.PathIn(f.dir))
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("--dir %s holds no image pair at %s, and a render needs the daemon's digest: run gt update images first", f.dir, imagevalues.PathIn(f.dir))
 	}
 	townRoot, err := findTown()
 	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, err
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 	}
 	env, err := d.containerEnv(townRoot)
 	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("reading the town's daemon.env for the pod's environment: %w", err)
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("reading the town's daemon.env for the pod's environment: %w", err)
 	}
 	manifestPath := filepath.Join(f.dir, secretsManifestRelPath)
 	data, err := d.readFile(manifestPath)
 	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("reading the secrets manifest %s: %w", manifestPath, err)
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("reading the secrets manifest %s: %w", manifestPath, err)
 	}
 	secrets, err := manifestdata.ParseSecretsManifest(data)
 	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("the secrets manifest %s is refused: %w", manifestPath, err)
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("the secrets manifest %s is refused: %w", manifestPath, err)
 	}
 	// The dashboard's token is the viewer entry's Secret. The manifest marks that
 	// entry optional, and a pod that mounts a Secret that does not exist stays in
@@ -627,24 +622,24 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 	if f.dashboard && !slices.ContainsFunc(secrets.Files, func(s manifestdata.SecretFile) bool {
 		return s.Name == k8sdaemon.ViewerTokenFile
 	}) {
-		return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
 	}
 	cloudCheckKey, err := cloudCheckKeyConfigured(f.configDir, d.lstat)
 	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, err
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 	}
 	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
 	hmConfig := false
 	if !f.rehearsal {
 		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
-			return k8sdaemon.Values{}, imagevalues.Values{}, err
+			return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 		}
 		// A pod whose hm mounts no config reads its defaults, which name the pod's
 		// own loopback, so it reaches neither the town's database nor the host's
 		// embedder and reranker. The values are refused rather than a pod written
 		// that cannot work (gt-fg6ami).
 		if !hmConfig {
-			return k8sdaemon.Values{}, imagevalues.Values{}, fmt.Errorf("the derived hm config is absent at %s: without it the pod's hm reads its defaults, which name the pod's own loopback; run gt daemon compose write first, and no file was written", hmConfigPath)
+			return k8sdaemon.Values{}, imagevalues.Values{}, "", fmt.Errorf("the derived hm config is absent at %s: without it the pod's hm reads its defaults, which name the pod's own loopback; run gt daemon compose write first, and no file was written", hmConfigPath)
 		}
 	}
 	v := k8sdaemon.Values{
@@ -678,7 +673,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.ForgeHost = strings.TrimSpace(f.forgeHost)
 		v.DoltBackupHostPath = f.doltBackupHostPath
 	}
-	return v, pair, nil
+	return v, pair, townRoot, nil
 }
 
 // podValuesCopyLine is the one command that copies the town's values file into
