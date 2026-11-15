@@ -1,6 +1,7 @@
 package trackerclient
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -22,6 +23,18 @@ func (c *Client) Version() (beads.VersionInfo, error) {
 // that needs one hears that rather than a false "offered".
 func (c *Client) UpdateOffersFlag(flag string) (bool, error) {
 	return false, fmt.Errorf("the tracker client runs no bd, so it cannot offer bd update %s", flag)
+}
+
+// WriteCostSample refuses: the tracker client runs no bd, so it has no
+// samples table to append to, and no request is sent.
+func (c *Client) WriteCostSample(context.Context, beads.Sample) error {
+	return fmt.Errorf("WriteCostSample: the tracker client runs no bd, so it cannot write a cost sample row")
+}
+
+// ReadCostSamples refuses: the tracker client runs no bd, so it has no
+// samples table to read, and no request is sent.
+func (c *Client) ReadCostSamples(context.Context, string, time.Time, int) ([]beads.Sample, error) {
+	return nil, fmt.Errorf("ReadCostSamples: the tracker client runs no bd, so it cannot read cost sample rows")
 }
 
 // SchemaLevel refuses: the tracker knows the wire schema this client speaks,

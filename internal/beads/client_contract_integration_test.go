@@ -3,6 +3,7 @@
 package beads_test
 
 import (
+	"os/exec"
 	"strconv"
 	"testing"
 
@@ -108,4 +109,30 @@ func TestIntegrationClientContract(t *testing.T) {
 		t.Parallel()
 		beadsfake.RunVersionContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t, t.TempDir()) })
 	})
+	t.Run("cost samples", func(t *testing.T) {
+		t.Parallel()
+		offers, err := bdOffersSampleVerb()
+		if err != nil {
+			t.Fatalf("bd --help: %v", err)
+		}
+		if !offers {
+			// Skip in place with the blocker named (docs/testing.md): the bd at
+			// the deploy pin (b7e5e9c, 1.2.2) predates the sample verb, and
+			// WriteCostSample refuses that bd by name, so the suite cannot run
+			// until an image pair ships be-1qqu. The fake still runs it.
+			t.Skip("the bd on PATH predates the sample verb (beads be-1qqu, gt-qlz5eg): WriteCostSample refuses it by name")
+		}
+		beadsfake.RunCostSamplesContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
+	})
+}
+
+// bdOffersSampleVerb reports whether the bd the isolated stores run offers the
+// sample verb, read from its --help. An error is a probe that could not run,
+// which is not the same answer as "not offered".
+func bdOffersSampleVerb() (bool, error) {
+	out, err := exec.Command("bd", "--help").Output()
+	if err != nil {
+		return false, err
+	}
+	return beads.HelpOffersVerb(out, "sample"), nil
 }

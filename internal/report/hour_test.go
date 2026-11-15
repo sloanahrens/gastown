@@ -127,6 +127,11 @@ func (s reportNoWriteStore) TransferIfAssignee(string, string, string, string) (
 	return false, nil
 }
 
+func (s reportNoWriteStore) WriteCostSample(context.Context, beads.Sample) error {
+	s.fail("WriteCostSample")
+	return nil
+}
+
 // reportReadOnlyClientMethods are the beads.Client methods gt report may
 // call: the query surface. Everything else on Client is a write, and
 // reportNoWriteStore has to override it.
@@ -135,8 +140,8 @@ var reportReadOnlyClientMethods = map[string]bool{
 	"GetAssignedIssue": true, "ListIssueStatuses": true,
 	"ListAssignedIssueStatuses": true, "Ready": true, "ReadyAll": true, "ReadyFiltered": true,
 	"Children": true, "ChildrenOf": true, "Comments": true, "DepList": true,
-	"DepListUp": true,
-	"ShowText":  true,
+	"DepListUp": true, "ReadCostSamples": true,
+	"ShowText": true,
 }
 
 // TestReportNoWriteGuardCoversClient pins that the no-write guard still
