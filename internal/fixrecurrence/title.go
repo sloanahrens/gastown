@@ -1,6 +1,6 @@
-// Package fixrecurrence classifies the prose a bead's title already carries
-// about an earlier fix, so the fix-recurrence signal reads what agents wrote
-// instead of asking a model (gt-e9ur8q).
+// Package fixrecurrence classifies the prose a bead's title or description
+// already carries about an earlier fix, so the fix-recurrence signal reads what
+// agents wrote instead of asking a model (gt-e9ur8q, gt-y3n4au).
 package fixrecurrence
 
 import (
@@ -91,8 +91,9 @@ var (
 	recurrenceBeforeRe = regexp.MustCompile(`(?i)\b(recurrence|recurs|resurfac\w*|back after)\b\s+(of\s+|to\s+)?$`)
 
 	// The id comes first and the return word follows within 40 characters:
-	// "gt-abc persists", "gt-abc is not fixed", "gt-abc will reopen".
-	recurrenceAfterRe = regexp.MustCompile(`(?is)^.{0,40}\b(recurrence|persists|not fixed|reopen)\b`)
+	// "gt-abc persists", "gt-abc is not fixed", "gt-abc will reopen". A word
+	// family counts, so "persisted" and "reopened" are the same claim.
+	recurrenceAfterRe = regexp.MustCompile(`(?is)^.{0,40}\b(recurrence|persist\w*|not fixed|reopen\w*)\b`)
 
 	// "neither gt-abc" and "nor gt-abc" name the id as one of the beads the
 	// claim covers, which is how a title says both are still failing.
@@ -134,7 +135,7 @@ func matchesRecurrenceBefore(title string, occ idOccurrence) bool {
 }
 
 func matchesRecurrenceAfter(title string, occ idOccurrence) bool {
-	return recurrenceAfterRe.MatchString(title[occ.end:])
+	return recurrenceAfterRe.MatchString(clauseAfter(title[occ.end:]))
 }
 
 func matchesNeitherNor(title string, occ idOccurrence) bool {
@@ -146,8 +147,8 @@ func matchesFixIncomplete(title string, occ idOccurrence) bool {
 }
 
 func matchesSameClass(title string, occ idOccurrence) bool {
-	return sameClassBeforeRe.MatchString(title[:occ.start]) ||
-		sameClassAfterRe.MatchString(title[occ.end:])
+	return sameClassBeforeRe.MatchString(clauseBefore(title[:occ.start])) ||
+		sameClassAfterRe.MatchString(clauseAfter(title[occ.end:]))
 }
 
 func matchesRegression(title string, occ idOccurrence) bool {
@@ -161,7 +162,30 @@ func matchesFollowUp(title string, occ idOccurrence) bool {
 }
 
 func matchesWeakRecurrence(title string, occ idOccurrence) bool {
-	return weakRecurrenceRe.MatchString(title[occ.end:])
+	return weakRecurrenceRe.MatchString(clauseAfter(title[occ.end:]))
+}
+
+// clauseEnders are the characters that end a clause. A signal word past one
+// belongs to a different claim: "gt-abc is fine; still the guard skips" names
+// gt-abc as fine, so the "still" is not its recurrence.
+const clauseEnders = ".!?;\n"
+
+// clauseAfter is the part of text a rule may read after the cited id: it stops
+// at the first clause end.
+func clauseAfter(text string) string {
+	if i := strings.IndexAny(text, clauseEnders); i >= 0 {
+		return text[:i]
+	}
+	return text
+}
+
+// clauseBefore is the part of text a rule may read before the cited id: it
+// starts after the last clause end, for the same reason.
+func clauseBefore(text string) string {
+	if i := strings.LastIndexAny(text, clauseEnders); i >= 0 {
+		return text[i+1:]
+	}
+	return text
 }
 
 // idOccurrence is one place title names id: the byte offsets of the token.

@@ -1,15 +1,6 @@
 package fixrecurrence
 
-import (
-	"os"
-	"testing"
-
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
-)
-
-func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
-}
+import "testing"
 
 const (
 	// wantTitleStrict is the confidence the fix-recurrence design gives a
