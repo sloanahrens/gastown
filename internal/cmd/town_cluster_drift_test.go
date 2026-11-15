@@ -422,8 +422,8 @@ func TestTownClusterDriftRefusesARenderItCannotRead(t *testing.T) {
 }
 
 // TestTownClusterDriftRefusesAnUnreadableLiveDeployment holds the command to a
-// failed, a nonzero or an unreadable kubectl answer being an error, never a
-// cluster in step.
+// failed, a nonzero or an unreadable kubectl answer being the unreadable exit
+// status, never a cluster in step.
 func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -437,7 +437,7 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			answer: func(context.Context, string, []string, string, ...string) (string, int, error) {
 				return "", -1, errors.New("exec: kubectl: not found")
 			},
-			wantExit: 1,
+			wantExit: driftExitUnreadable,
 			want:     "reading the live deployment/daemon",
 		},
 		{
@@ -445,7 +445,7 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			answer: func(context.Context, string, []string, string, ...string) (string, int, error) {
 				return "", 1, nil
 			},
-			wantExit: 1,
+			wantExit: driftExitUnreadable,
 			want:     "kubectl exited 1",
 		},
 		{
@@ -453,7 +453,7 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			answer: func(context.Context, string, []string, string, ...string) (string, int, error) {
 				return "<html>", 0, nil
 			},
-			wantExit: 1,
+			wantExit: driftExitUnreadable,
 			want:     "not a JSON object",
 		},
 		{
@@ -461,7 +461,7 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			answer: func(context.Context, string, []string, string, ...string) (string, int, error) {
 				return "[]", 0, nil
 			},
-			wantExit: 1,
+			wantExit: driftExitUnreadable,
 			want:     "not a JSON object",
 		},
 		{
@@ -469,7 +469,7 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			answer: func(context.Context, string, []string, string, ...string) (string, int, error) {
 				return "{}", 0, nil
 			},
-			wantExit: 1,
+			wantExit: driftExitUnreadable,
 			want:     "the live Deployment has no fields",
 		},
 	}
@@ -484,6 +484,68 @@ func TestTownClusterDriftRefusesAnUnreadableLiveDeployment(t *testing.T) {
 			}
 			if got := driftExit(err); got != tc.wantExit {
 				t.Errorf("exit = %d, want %d (err: %v)", got, tc.wantExit, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not hold %q", err, tc.want)
+			}
+			if got := driftLines(out); got != nil {
+				t.Errorf("printed %q beside the refusal, want nothing", got)
+			}
+		})
+	}
+}
+
+// TestTownClusterDriftExits2ForEachInputItCannotRead holds the recorded flags,
+// the values file and a live Deployment to the unreadable exit status: 2, which
+// says the run never compared, rather than 1, which says it compared and found a
+// difference, and never 0.
+func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, d *clusterDriftDeps, town string)
+		want    string
+	}{
+		{
+			name: "the recorded flags are absent",
+			prepare: func(t *testing.T, _ *clusterDriftDeps, town string) {
+				t.Helper()
+				if err := os.Remove(renderFlagsPathIn(town)); err != nil {
+					t.Fatalf("removing the record: %v", err)
+				}
+			},
+			want: "no live render has recorded its flags",
+		},
+		{
+			name: "the values file is unreadable",
+			prepare: func(t *testing.T, _ *clusterDriftDeps, town string) {
+				t.Helper()
+				if err := os.Remove(imagevalues.PathIn(driftTestFlags(t, town).dir)); err != nil {
+					t.Fatalf("removing the values file: %v", err)
+				}
+			},
+			want: "holds no image pair",
+		},
+		{
+			name: "the live Deployment cannot be read",
+			prepare: func(t *testing.T, d *clusterDriftDeps, _ string) {
+				t.Helper()
+				d.kubectl = func(context.Context, string, []string, string, ...string) (string, int, error) {
+					return "", 1, nil
+				}
+			},
+			want: "kubectl exited 1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, out, town := driftTestSeams(t, nil)
+			d.kubectl = driftNoRead(t)
+			tc.prepare(t, &d, town)
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != driftExitUnreadable {
+				t.Fatalf("exit = %d, want %d (err: %v); printed:\n%s", got, driftExitUnreadable, err, out.String())
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q does not hold %q", err, tc.want)
