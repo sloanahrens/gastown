@@ -1319,6 +1319,17 @@ type Daemon struct {
 	sandboxSamplerMu     sync.Mutex
 	newSandboxSeatSource newSandboxSeatSourceFn
 
+	// sandboxSamplerRunning / sandboxSamplerCycles are the sandbox_sampler
+	// tick's single-flight guard and cycle count (gt-23zbmi): one tick reads
+	// the seats off the main select loop, so a read that waits on the gateway
+	// holds its own goroutine rather than the loop.
+	sandboxSamplerRunning atomic.Bool
+	sandboxSamplerCycles  sync.WaitGroup
+	// newSandboxSamplerTicker is where the sandbox_sampler patrol's ticker
+	// comes from: nil is time.NewTicker, and a test sets it to record the
+	// cadence and drive Run's tick by hand (gt-23zbmi).
+	newSandboxSamplerTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -1803,16 +1814,44 @@ func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.D
 }
 
 // startSandboxSamplerTicker starts the sandbox_sampler patrol's own ticker
-// when the patrol is active, and returns nil when it is not: the seat rows are
-// a 60 s series and the heartbeat is minutes apart (gt-7d7jvn).
-func (d *Daemon) startSandboxSamplerTicker() *time.Ticker {
+// when the patrol is active, and returns a nil channel and stop func when it is
+// not: the seat rows are a 60 s series and the heartbeat is minutes apart
+// (gt-7d7jvn). A town that names no key asks for the 60 s default, and the
+// channel it returns is what Run's loop reads (gt-23zbmi).
+func (d *Daemon) startSandboxSamplerTicker() (<-chan time.Time, func()) {
 	if !d.isPatrolActive("sandbox_sampler") {
-		return nil
+		return nil, nil
 	}
 	interval := sandboxSamplerInterval(d.patrol())
-	ticker := time.NewTicker(interval)
+	newTicker := d.newSandboxSamplerTicker
+	if newTicker == nil {
+		newTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+			ticker := time.NewTicker(interval)
+			return ticker.C, ticker.Stop
+		}
+	}
+	ticks, stop := newTicker(interval)
 	d.logger.Printf("Sandbox sampler ticker started (interval %v)", interval)
-	return ticker
+	return ticks, stop
+}
+
+// startSandboxSamplerTick runs one seat sample on its own goroutine: a read
+// that waits on the gateway holds that goroutine for the tick's bound, not the
+// main select loop, which carries the heartbeat and every other patrol
+// (gt-23zbmi). A tick that arrives while the previous one is still reading is
+// skipped and logged, since one interval's seats are one sample and two reads
+// at once would pay the gateway twice.
+func (d *Daemon) startSandboxSamplerTick() {
+	if !d.sandboxSamplerRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("sandbox_sampler: previous tick still reading the seats, skipping")
+		return
+	}
+	d.sandboxSamplerCycles.Add(1)
+	go func() {
+		defer d.sandboxSamplerCycles.Done()
+		defer d.sandboxSamplerRunning.Store(false)
+		d.triggerSandboxSampler()
+	}()
 }
 
 // Run starts the daemon main loop.
@@ -2281,11 +2320,9 @@ func (d *Daemon) Run() (err error) {
 	// Start the sandbox sampler ticker if enabled (default off, gt-7d7jvn):
 	// it pays one exec per live seat through the gateway, so a town turns it
 	// on rather than an upgrade.
-	sandboxSamplerTicker := d.startSandboxSamplerTicker()
-	var sandboxSamplerChan <-chan time.Time
-	if sandboxSamplerTicker != nil {
-		sandboxSamplerChan = sandboxSamplerTicker.C
-		defer sandboxSamplerTicker.Stop()
+	sandboxSamplerChan, stopSandboxSampler := d.startSandboxSamplerTicker()
+	if stopSandboxSampler != nil {
+		defer stopSandboxSampler()
 	}
 
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
@@ -2470,9 +2507,10 @@ func (d *Daemon) Run() (err error) {
 
 		case <-sandboxSamplerChan:
 			// Sandbox sampler — appends one row per live sandbox seat for the
-			// metrics snapshot (gt-7d7jvn).
+			// metrics snapshot, on its own goroutine: the read can wait on the
+			// gateway for the tick's bound (gt-7d7jvn, gt-23zbmi).
 			if !d.isShutdownInProgress() {
-				d.triggerSandboxSampler()
+				d.startSandboxSamplerTick()
 			}
 
 		case <-findingsFilerChan:
