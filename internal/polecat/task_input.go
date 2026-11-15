@@ -47,10 +47,10 @@ func taskInputFromBead(f beadTaskFields) taskfile.Input {
 	return in
 }
 
-// noteLines splits a bead's notes field into the entries bd joined there.
-// AppendNotes puts each note on its own line, so a line boundary is the one
-// separator the store records; a blank line carries no text and is dropped, so
-// an empty notes field yields no notes at all.
+// noteLines splits a bead's notes text into one note per non-blank line: the
+// notes field is a block of text, and a line is the one entry this read can
+// tell apart. A blank line carries no text and is dropped, so an empty notes
+// field yields no notes at all.
 func noteLines(notes string) []string {
 	var lines []string
 	for _, line := range strings.Split(notes, "\n") {

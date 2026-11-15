@@ -16,8 +16,8 @@ import (
 
 // steeringBeads is the spawn's bead reader as a test steers it: a real fake
 // store, with one Show call or every comments read failing on demand. Show
-// calls are counted from 1, so a test can fail the read validateIssue makes or
-// the one the task file makes.
+// calls are counted from 1; the launch makes exactly one, validateIssue's,
+// which the task file also reads from.
 type steeringBeads struct {
 	beads.Client
 	shows       int
@@ -197,30 +197,47 @@ func TestSessionManagerTaskFileCarriesTheBeadsFields(t *testing.T) {
 	}
 }
 
-// A bead that cannot be read leaves the task file empty and warns once, naming
-// the bead: the spawn still reaches Prepare.
-func TestSessionManagerTaskFileSurvivesAnUnreadableBead(t *testing.T) {
+// The launch reads the work bead once, and the task file is built from that
+// read: validateIssue keeps the issue it read and the spawn hands it on rather
+// than reading the bead again (gt-8w5v21).
+func TestSessionManagerTaskFileReadsTheWorkBeadOnce(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
 	issue := slungBead(t, db, spawnBead())
-	// The first Show is validateIssue's; the second is the task file's.
-	reader := &steeringBeads{Client: db, failShowAt: 2, showErr: errors.New("dolt is unavailable")}
+	reader := &steeringBeads{Client: db}
 	out := launchForTaskFile(t, reader, issue.ID)
 	if out.err == nil || !strings.Contains(out.err.Error(), "stop after prepare") {
 		t.Fatalf("launch = %v, want the backend's stop error after Prepare", out.err)
 	}
 	spec := preparedSpawnSpec(t, out)
-	if len(spec.TaskFile) != 0 {
-		t.Errorf("SpawnSpec.TaskFile = %q, want it empty", spec.TaskFile)
+	if !strings.Contains(string(spec.TaskFile), issue.Title) {
+		t.Errorf("SpawnSpec.TaskFile = %q, want the bead's title %q", spec.TaskFile, issue.Title)
 	}
-	if got := len(out.warnings); got != 1 {
-		t.Fatalf("warnings = %q, want exactly one", out.warnings)
+	if reader.shows != 1 {
+		t.Errorf("Show calls = %d, want 1: the launch reads the work bead once", reader.shows)
 	}
-	if !strings.Contains(out.warnings[0], issue.ID) {
-		t.Errorf("warning = %q, want it to name the bead %s", out.warnings[0], issue.ID)
+}
+
+// A bead that cannot be read refuses the launch before any session exists: the
+// validation read is the only one the launch makes, so there is no second read
+// whose failure could have left the task file empty instead.
+func TestSessionManagerTaskFileRefusesAnUnreadableWorkBead(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	issue := slungBead(t, db, spawnBead())
+	reader := &steeringBeads{Client: db, failShowAt: 1, showErr: errors.New("dolt is unavailable")}
+	out := launchForTaskFile(t, reader, issue.ID)
+	if !errors.Is(out.err, ErrIssueInvalid) {
+		t.Fatalf("launch = %v, want ErrIssueInvalid", out.err)
 	}
-	if reader.shows != 2 {
-		t.Errorf("Show calls = %d, want 2 (validateIssue's, then the task file's)", reader.shows)
+	if out.backend.got != nil {
+		t.Errorf("Prepare was called for a bead the launch could not read: %+v", out.backend.got)
+	}
+	if reader.shows != 1 {
+		t.Errorf("Show calls = %d, want 1", reader.shows)
+	}
+	if got := len(out.warnings); got != 0 {
+		t.Errorf("warnings = %q, want none: the refusal is the launch's error", out.warnings)
 	}
 }
 
