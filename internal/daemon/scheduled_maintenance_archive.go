@@ -362,11 +362,12 @@ func archiveRunFailure(databases []string, err error) (map[string]bool, map[stri
 // archive that wrote nothing; the gc of every other database still runs after
 // a single database's export fails.
 //
-// The step reads beside a live town, but it still asks the gc's quiet-window
-// guard: a busy window is a deferral (the next tick retries, as the gc's own
-// deferrals do), not a failure, and the backup and gc behind it wait with it.
-// A misconfigured directory, batch bound or budget is a failure: it does not
-// stop the backup, and it skips the gc of every database.
+// The step reads beside a live town and asks the town nothing: every read is a
+// SELECT through the server and every write is an archive file, so a landing
+// pass or a held gate slot is no conflict, and waiting for a quiet moment left
+// the archive unrun for days (gt-3b4iou). A misconfigured directory, batch
+// bound or budget is a failure: it does not stop the backup, and it skips the
+// gc of every database.
 func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, map[string]bool, map[string]archiveDatabaseOutcome) {
 	dir, err := d.maintenanceArchiveDir()
 	if err != nil {
@@ -415,11 +416,6 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 		unarchived, outcomes := archiveRunFailure(databases, err)
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
 	}
-	if quiet, why := d.maintenance().quiet(d); !quiet {
-		d.logger.Printf("scheduled_maintenance: archive held: %s", why)
-		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "archive: " + why}, nil, nil
-	}
-
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
 		// Without the state file no watermark can be trusted, and rewriting it

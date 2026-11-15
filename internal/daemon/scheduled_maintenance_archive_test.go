@@ -1510,40 +1510,36 @@ func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 	}
 }
 
-// TestMaintenanceArchiveDefersWhileTheTownIsBusy: the step asks the gc's
-// quiet-window guard and defers the whole cycle when the town is busy, so the
-// backup and gc wait for the retry instead of running ahead of an unarchived
-// database (gt-7nxj4).
-func TestMaintenanceArchiveDefersWhileTheTownIsBusy(t *testing.T) {
+// TestMaintenanceArchiveRunsWhileALandingPassIsInFlight: the step only reads,
+// so a landing pass in flight does not defer it — waiting for a quiet moment
+// left the archive unrun for days (gt-3b4iou). The gc behind it still waits for
+// the landing pass, as the write side always has.
+func TestMaintenanceArchiveRunsWhileALandingPassIsInFlight(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
-	f.quietUntil = 0 // busy on the first probe
 	d.patrolConfig = archiveConfig(t.TempDir())
+	d.maint.quiet = (*Daemon).maintenanceQuiet
+	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
+	d.landingStates.setBead("gastown", "gt-a", gcTestNow)
+	ran := false
 	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
-		t.Error("the commit read ran while the town was busy")
+		ran = true
 		return nil, nil
 	}
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
-		t.Error("the events read ran while the town was busy")
-		return archiveEvents{}, nil
-	}
+	withEventsFake(d, nil, nil, nil)
 
 	d.runScheduledMaintenance()
 
-	if !strings.Contains(logs.String(), "archive held") {
-		t.Errorf("log does not say the archive was held:\n%s", logs.String())
+	if !ran {
+		t.Fatalf("the commit read did not run while a landing pass was in flight:\n%s", logs.String())
 	}
-	if len(f.backupCalls) != 0 || len(f.gcCalls) != 0 {
-		t.Errorf("backup calls = %v, gc calls = %v; want neither while the archive is deferred", f.backupCalls, f.gcCalls)
+	if strings.Contains(logs.String(), "archive held") {
+		t.Errorf("the archive deferred behind the landing pass:\n%s", logs.String())
 	}
-	st, err := loadMaintenanceGCState(d.config.TownRoot)
-	if err != nil {
-		t.Fatalf("loading state: %v", err)
-	}
-	if st.PendingDeferral == nil || !strings.HasPrefix(st.PendingDeferral.Reason, "archive: ") {
-		t.Errorf("pending deferral = %+v, want the archive's quiet-guard reason", st.PendingDeferral)
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v, want none: the gc still waits for a landing pass", f.gcCalls)
 	}
 }
 

@@ -62,12 +62,15 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 		d.logger.Printf("scheduled_maintenance: backup deferred: %s", m.Message())
 		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "backup: " + m.Message()}
 	}
-	// Exclusive against the daemon's own Dolt tasks, as the gc is.
-	if !d.doltMaintMu.TryLock() {
-		d.logger.Printf("scheduled_maintenance: backup deferred: daemon Dolt task in flight")
-		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "backup: daemon Dolt task in flight"}
+	// Exclusive against a gc, which takes the write side: the copy must not run
+	// beside a dolt_gc. The backup is a read through the running server, so it
+	// holds the read side as the daemon's other Dolt tasks do and waits only for
+	// a gc, never for them (gt-3b4iou).
+	if !d.doltMaintMu.TryRLock() {
+		d.logger.Printf("scheduled_maintenance: backup deferred: a gc is in flight")
+		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "backup: a gc is in flight"}
 	}
-	defer d.doltMaintMu.Unlock()
+	defer d.doltMaintMu.RUnlock()
 
 	partial := doltbackup.PartialDir(root, started)
 	// A partial left by a daemon that died mid-backup is restarted from empty:

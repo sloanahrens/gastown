@@ -209,7 +209,10 @@ func TestMaintenanceBackupDefersToAnotherActorsPause(t *testing.T) {
 	}
 }
 
-func TestMaintenanceBackupDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
+// The backup is a read through the running server, so it holds the read side of
+// doltMaintMu like the daemon's other Dolt tasks and waits for none of them;
+// only a gc, which takes the write side, defers it (gt-3b4iou).
+func TestMaintenanceBackupRunsBesideADaemonDoltTask(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
@@ -219,11 +222,29 @@ func TestMaintenanceBackupDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 	}
 	defer release()
 
-	if res := d.maintenanceBackup([]string{"hq"}); res.outcome != gcOutcomeDeferred {
-		t.Errorf("outcome = %v, want deferred", res.outcome)
+	if res := d.maintenanceBackup([]string{"hq"}); res.outcome != gcOutcomeCompleted {
+		t.Errorf("outcome = %v (%s), want completed", res.outcome, res.reason)
+	}
+	if len(f.backupCalls) != 1 {
+		t.Errorf("backup calls = %v, want hq: a read-side task deferred the backup", f.backupCalls)
+	}
+}
+
+// A gc holds the write side while it runs dolt_gc, so the backup waits for it
+// and retries on the next tick (gt-3b4iou).
+func TestMaintenanceBackupDefersWhileAGCHoldsTheWriteSide(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	d.doltMaintMu.Lock() // a gc in flight
+	defer d.doltMaintMu.Unlock()
+
+	res := d.maintenanceBackup([]string{"hq"})
+	if res.outcome != gcOutcomeDeferred || !strings.Contains(res.reason, "a gc is in flight") {
+		t.Errorf("outcome = %v (%s), want deferred naming the gc", res.outcome, res.reason)
 	}
 	if len(f.backupCalls) != 0 {
-		t.Errorf("backup ran while a daemon Dolt task held the lock: %v", f.backupCalls)
+		t.Errorf("backup ran while a gc held the write side: %v", f.backupCalls)
 	}
 }
 
