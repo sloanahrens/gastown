@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/daemon"
-	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -37,7 +35,7 @@ const (
 const doltArchiveNowPoll = 15 * time.Second
 
 // doltArchiveNowReads is where archive-now reads the town and the archive: the
-// town root, whether the hold and request files exist, the database list, the
+// town root, whether a request file is pending, the database list, the
 // archive-behind readings, the request protocol, and the wait's own pieces.
 // Production passes the real calls; a test passes fakes, so no command in a
 // test touches the live town, a Dolt server, a real sleep or the live archive.
@@ -151,30 +149,15 @@ func runDoltArchiveNowCmd(cmd *cobra.Command, ctx context.Context, reads doltArc
 // runDoltArchiveNowWith asks the daemon for the history archive pass and
 // reports, per database, how far behind the archive it was before and after.
 //
-// It refuses without the overseer's dispatch hold and while another archive
-// request is pending (exit 3), reports the daemon's failed answer (exit 1) and
-// reports anything not done and verified caught up (exit 2). Zero is only for
-// a completed answer with every database reading 0 behind afterwards, because
-// the pass is run before a flatten, where a partial answer reads as history
-// that is safe to discard.
+// It refuses while another archive request is pending (exit 3), reports the
+// daemon's failed answer (exit 1) and reports anything not done and verified
+// caught up (exit 2). Zero is only for a completed answer with every database
+// reading 0 behind afterwards, because the pass is run before a flatten, where
+// a partial answer reads as history that is safe to discard.
 func runDoltArchiveNowWith(ctx context.Context, w io.Writer, reads doltArchiveNowReads) error {
 	townRoot, err := reads.townRoot()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	holdPath := dispatch.HoldFilePath(townRoot)
-	switch err := reads.stat(holdPath); {
-	case err == nil:
-		// The hold exists: the overseer has authorized the pass.
-	case errors.Is(err, fs.ErrNotExist):
-		fmt.Fprintf(w, "refusing to run archive-now: no dispatch hold at %s\n", holdPath)
-		fmt.Fprintln(w, "The overseer creates and lifts that hold, never the operator or a bird. Ask the overseer for the hold, then run this again.")
-		return NewSilentExit(3)
-	default:
-		// An unreadable hold is not an absent one: refuse rather than run a
-		// pass whose authorization could not be checked.
-		return fmt.Errorf("checking the dispatch hold %s: %w", holdPath, err)
 	}
 
 	databases, err := reads.databases(townRoot)

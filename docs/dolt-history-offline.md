@@ -216,8 +216,8 @@ back to this runbook once the overseer's restart has run and the check passes.
    pass: 1 is a failed pass: the daemon answered failed and printed why, so the
    archive is not caught up. Fix the cause that reason names before you run it
    again. 2 is still pending, so run `gt dolt archive-now` again.
-   3 is a refusal, either for want of the dispatch hold or because an
-   archive request is already pending. Then read `gt dolt status` again until
+   3 is a refusal: an archive request is already pending.
+   Then read `gt dolt status` again until
    every database's commit line and events line read `0 commits behind` and
    `0 events behind`.
 
