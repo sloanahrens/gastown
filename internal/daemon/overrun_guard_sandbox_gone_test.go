@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -378,6 +380,9 @@ func TestOverrunOriginReadRetryAtTheCapHandsBackWithANoteAndRaisesTheItem(t *tes
 		}
 	}
 
+	// The cap's own tick is the one whose log matters below, so the retries
+	// above are dropped first.
+	buf.Reset()
 	pushTick(d, f) // the tick that reaches the cap
 
 	if len(f.handedBack) != 1 {
@@ -433,6 +438,11 @@ func TestOverrunOriginReadRetryAtTheCapHandsBackWithANoteAndRaisesTheItem(t *tes
 	if !strings.Contains(buf.String(), "giving up") {
 		t.Errorf("the log does not say the stop gave up on the origin read:\n%s", buf.String())
 	}
+	// At the cap no later tick is owed a retry, so the tick that reaches it
+	// must not promise one (gt-7xp2jh).
+	if strings.Contains(buf.String(), "retrying next tick") {
+		t.Errorf("the log promises a retry on the tick that gives up at the cap:\n%s", buf.String())
+	}
 }
 
 // A raise that cannot reach the town must not release the bead without its
@@ -478,6 +488,93 @@ func TestOverrunOriginReadRetryCapHoldsWhenTheItemCannotBeRaised(t *testing.T) {
 	}
 	if !st.StoppedAt.IsZero() {
 		t.Error("the stop finished though the item was never raised")
+	}
+}
+
+// A count left by a failed read does not outlive the sandbox step that would
+// retry it. A stop that gave up on its save never runs the step again, so the
+// count an earlier tick saved is cleared from the state the stop finishes with
+// rather than kept as a read nothing is trying (gt-7xp2jh).
+func TestOverrunOriginReadRetryClearsTheCountWhenTheSandboxStepIsSkipped(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error {
+		t.Error("the sandbox step ran for a stop that had already given up on its save")
+		return nil
+	}
+	if err := writeOverrunState(d.config.TownRoot, overrunState{
+		Bead: stopSeat.Bead, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat, Branch: stopSeat.Branch,
+		Elapsed: 20 * time.Minute, SlingAt: overrunSlung,
+		StopBeganAt: overrunSlung.Add(20 * time.Minute), SessionStoppedAt: overrunSlung.Add(20 * time.Minute),
+		SaveGaveUp: true, SaveFailure: "the worktree could not be read",
+		OriginReadFailures: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pushTick(d, f)
+
+	if len(f.handedBack) != 1 {
+		t.Fatalf("hand-backs = %q, want the resumed stop to finish and hand the bead back", f.handedBack)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.StoppedAt.IsZero() {
+		t.Fatal("the stop did not finish, so this tick proves nothing about the cleared count")
+	}
+	if st.OriginReadFailures != 0 {
+		t.Errorf("OriginReadFailures = %d, want 0: the skipped step leaves no read for the count to be about", st.OriginReadFailures)
+	}
+}
+
+// A count is a read the stop is still retrying, so a step that answers without
+// reading origin clears it: a sandbox record that stops parsing on the tick
+// after a failed read leaves nothing pending, and the count must not stay in
+// the state the stop finishes with (gt-7xp2jh).
+func TestOverrunOriginReadRetryClearsTheCountWhenTheRecordStopsAnswering(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: errors.New("could not resolve host: origin")} }
+	d.notifier = notifyfake.New()
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.OriginReadFailures != 1 {
+		t.Fatalf("OriginReadFailures = %d after one failed read, want 1, so the clear below proves something", st.OriginReadFailures)
+	}
+
+	// The record no longer parses, so the next tick's step answers without
+	// asking origin: there is no read left to retry.
+	recPath := filepath.Join(session.SandboxRegistryDir(d.config.TownRoot), overrunStopSessionName+".json")
+	if err := os.WriteFile(recPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pushTick(d, f)
+
+	if len(f.handedBack) != 1 {
+		t.Fatalf("hand-backs = %q, want the stop to hand the bead back on the unreadable record", f.handedBack)
+	}
+	st, err = readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.StoppedAt.IsZero() {
+		t.Fatal("the stop did not finish, so this tick proves nothing about the cleared count")
+	}
+	if st.OriginReadFailures != 0 {
+		t.Errorf("OriginReadFailures = %d, want 0: the step answered without a read, so no read is pending", st.OriginReadFailures)
 	}
 }
 

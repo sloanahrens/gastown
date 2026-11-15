@@ -317,11 +317,12 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// sandbox gone would otherwise delete the commits only it holds. A gone
 	// sandbox whose origin read cannot be made counts the failure in
 	// OriginReadFailures: short of overrunOriginReadMaxAttempts the stop holds
-	// the bead and retries on the next tick, and a read that later succeeds
-	// clears the count; at the cap it gives up, because a sustained outage would
-	// otherwise hold the bead forever — it keeps the sandbox's record, raises
-	// the item at high severity, and hands the bead back with a note, the seat
-	// left paused (originReadGaveUp).
+	// the bead and retries on the next tick, and a tick that leaves no read
+	// pending — one that does not run this step, or whose step answered with no
+	// read left to retry — clears the count; at the cap it gives up, because a
+	// sustained outage would otherwise hold the bead forever — it keeps the
+	// sandbox's record, raises the item at high severity, and hands the bead
+	// back with a note, the seat left paused (originReadGaveUp).
 	saveKept := st.SaveGaveUp
 	// originReadGaveUp is the reason the stop gave up on the origin read at the
 	// cap, for the hand-back note. It is set on every tick that reaches the cap:
@@ -392,15 +393,8 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		var diverged *session.BranchDivergedError
 		switch {
 		case err == nil:
-			// The sandbox step needed no read, or made one that answered: the
-			// failures an earlier tick counted are resolved, so the count is
-			// cleared from the saved state.
-			if st.OriginReadFailures != 0 {
-				st.OriginReadFailures = 0
-				if !save() {
-					return
-				}
-			}
+			// The sandbox step needed no read, or made one that answered: no
+			// read is pending, and the count is cleared below.
 		case errors.Is(err, errOriginReadUnknown):
 			// Origin may hold the gone sandbox's work, and only it can say
 			// whether it does: short of the cap the stop keeps the sandbox's
@@ -457,6 +451,21 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			}
 		default:
 			d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
+			return
+		}
+	}
+
+	// The count is a read the stop is still retrying, so it is cleared on every
+	// tick that leaves none pending: the step did not run at all (no sandbox
+	// step, a save that gave up, a sandbox kept for good), or it left no read
+	// to retry (origin answered, the record did not parse, the push diverged).
+	// A count left by an earlier tick would otherwise outlive the read it was
+	// counting (gt-7xp2jh). The give-up at the cap is the one exception: its
+	// hand-back note names how many attempts the stop made, so the count stays
+	// in the state it finishes with.
+	if originReadGaveUp == "" && st.OriginReadFailures != 0 {
+		st.OriginReadFailures = 0
+		if !save() {
 			return
 		}
 	}
