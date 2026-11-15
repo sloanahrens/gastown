@@ -192,6 +192,9 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 		// fewRows gives the town fewer measured landings than a retrain fits, so
 		// the case reaches the run's own recording of the week.
 		fewRows bool
+		// adopts says the case gets as far as writing the runtime weights, which a
+		// case that refuses before its steps must leave alone.
+		adopts bool
 		// layOut prepares the town and returns the run.
 		layOut func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands
 		want   string
@@ -222,6 +225,17 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 			want: "Commands.Town is unset",
 		},
 		{
+			name: "the town cannot be wired",
+			layOut: func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands {
+				c := weeklyCommands(t, fix, out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+				c.Wire = func(context.Context) (RealTown, error) {
+					return RealTown{}, errors.New("no workspace root")
+				}
+				return c
+			},
+			want: "story points weekly: no workspace root",
+		},
+		{
 			name: "the wire named no town",
 			layOut: func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands {
 				c := weeklyCommands(t, fix, out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
@@ -242,6 +256,36 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 			},
 			want: "record the last run in",
 		},
+		{
+			name:   "the adoption cannot be recorded",
+			adopts: true,
+			layOut: func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands {
+				c := weeklyCommands(t, fix, out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+				// The weights land and the week does not: a full disk that took the
+				// proposal is still a disk that cannot take the stamp.
+				c.storyPointsStore.Write = func(dir, name string, write func(io.Writer) error) error {
+					if name == storyPointsWeeklyStampName {
+						return errors.New("the disk is full")
+					}
+					return writeAtomic(dir, name, write)
+				}
+				return c
+			},
+			want: "record the last run in",
+		},
+		{
+			name:    "the last run has nowhere to be recorded",
+			fewRows: true,
+			layOut: func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands {
+				// A dangling link where the story-points directory goes: the stamp reads
+				// as no run yet, and the directory cannot be made to write one.
+				if err := os.Symlink(filepath.Join(fix.town, "missing"), filepath.Join(fix.town, ".runtime", "storypoints")); err != nil {
+					t.Fatalf("lay out a dangling story-points directory: %v", err)
+				}
+				return weeklyCommands(t, fix, out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+			},
+			want: "create",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,7 +303,9 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 			if out.Len() != 0 {
 				t.Errorf("out = %q, want no line from a run that refused", out.String())
 			}
-			requireNoWeeklyWeights(t, fix.town)
+			if !tc.adopts {
+				requireNoWeeklyWeights(t, fix.town)
+			}
 		})
 	}
 }
