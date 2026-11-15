@@ -3,7 +3,7 @@
 // names, so the measure is the daemon's view of what fills the VM's disk and
 // never the Mac volume the VM's disk image lives on.
 //
-// The keep rules and the plan are in plan.go; the apply follows (gt-367d34).
+// The keep rules and the plan are in plan.go; the apply is in apply.go.
 package cloud
 
 import (
@@ -50,8 +50,9 @@ type Config struct {
 	// no list, and Plan refuses rather than keeping a list of its own.
 	LabelsFile string
 	// DeployFile is the app's deploy workflow. Plan reads it through Run and
-	// keeps every fractals-nextjs image the workflow names; empty names no
-	// workflow, and Plan refuses rather than assuming the workflow names none.
+	// keeps every fractals-nextjs or deploy-base image the workflow names; empty
+	// names no workflow, and Plan refuses rather than assuming the workflow
+	// names none.
 	DeployFile string
 }
 
