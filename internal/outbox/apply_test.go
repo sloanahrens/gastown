@@ -18,6 +18,7 @@ type storeCall struct {
 	beadID string
 	author string
 	text   string
+	status string
 }
 
 // fakeStore records every call Apply makes, in order, and fails the calls fail
@@ -47,6 +48,10 @@ func (f *fakeStore) AddComment(beadID, author, text string) error {
 	return f.record(storeCall{op: "AddComment", beadID: beadID, author: author, text: text})
 }
 
+func (f *fakeStore) SetStatus(beadID, status string) error {
+	return f.record(storeCall{op: "SetStatus", beadID: beadID, status: status})
+}
+
 // acceptance is the bead's acceptance text the ticks index into. Its second box
 // is already ticked.
 const acceptance = `## Acceptance
@@ -70,6 +75,7 @@ func TestApply(t *testing.T) {
 			name:       "notes, ticks and findings are every call, in order",
 			acceptance: acceptance,
 			result: Result{
+				Status:   StatusDone,
 				Notes:    "Ticked the first and third box and ran the gate.\n",
 				Ticked:   []int{0, 2},
 				Findings: []string{"the retry never resets its counter", "the gate names a package the branch does not change"},
@@ -82,9 +88,37 @@ func TestApply(t *testing.T) {
 			},
 		},
 		{
+			name:       "a deferred result writes the status deferred once after its other writes",
+			acceptance: acceptance,
+			result: Result{
+				Status:   StatusDeferred,
+				Notes:    "The third criterion needs a decision.\n",
+				Findings: []string{"the retry never resets its counter"},
+			},
+			want: []storeCall{
+				{op: "AppendNotes", beadID: testBead, text: "The third criterion needs a decision.\n"},
+				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
+				{op: "SetStatus", beadID: testBead, status: "deferred"},
+			},
+		},
+		{
+			name:       "a deferred result with no other write writes only the status",
+			acceptance: acceptance,
+			result:     Result{Status: StatusDeferred},
+			want: []storeCall{
+				{op: "SetStatus", beadID: testBead, status: "deferred"},
+			},
+		},
+		{
+			name:       "a done result writes no status",
+			acceptance: acceptance,
+			result:     Result{Status: StatusDone},
+			want:       nil,
+		},
+		{
 			name:       "an empty notes text writes no note",
 			acceptance: acceptance,
-			result:     Result{Findings: []string{"the retry never resets its counter"}},
+			result:     Result{Status: StatusDone, Findings: []string{"the retry never resets its counter"}},
 			want: []storeCall{
 				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
 			},
@@ -92,19 +126,13 @@ func TestApply(t *testing.T) {
 		{
 			name:       "a tick of a box already ticked writes no acceptance",
 			acceptance: acceptance,
-			result:     Result{Ticked: []int{1}},
-			want:       nil,
-		},
-		{
-			name:       "an empty result writes nothing",
-			acceptance: acceptance,
-			result:     Result{},
+			result:     Result{Status: StatusDone, Ticked: []int{1}},
 			want:       nil,
 		},
 		{
 			name:       "a tick skips a fenced copy of a later box that AcceptanceItems does not read",
 			acceptance: "- [ ] the first criterion\n```\n- [ ] the second criterion\n```\n- [ ] the second criterion",
-			result:     Result{Ticked: []int{1}},
+			result:     Result{Status: StatusDone, Ticked: []int{1}},
 			want: []storeCall{
 				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n```\n- [ ] the second criterion\n```\n- [x] the second criterion"},
 			},
@@ -112,7 +140,7 @@ func TestApply(t *testing.T) {
 		{
 			name:       "a nested box is a checkbox line, as AcceptanceItems reads it",
 			acceptance: "- [ ] the first criterion\n  - [ ] its nested criterion",
-			result:     Result{Ticked: []int{1}},
+			result:     Result{Status: StatusDone, Ticked: []int{1}},
 			want: []storeCall{
 				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n  - [x] its nested criterion"},
 			},
@@ -120,7 +148,7 @@ func TestApply(t *testing.T) {
 		{
 			name:       "a fence that never closes hides no box, as AcceptanceItems reads it",
 			acceptance: "- [ ] the first criterion\n```\n- [ ] the second criterion",
-			result:     Result{Ticked: []int{1}},
+			result:     Result{Status: StatusDone, Ticked: []int{1}},
 			want: []storeCall{
 				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n```\n- [x] the second criterion"},
 			},
@@ -128,7 +156,7 @@ func TestApply(t *testing.T) {
 		{
 			name:       "an unboxed item between boxes shifts no tick index",
 			acceptance: "- [ ] the first criterion\n- the middle criterion, with no box\n- [ ] the third criterion",
-			result:     Result{Ticked: []int{1}},
+			result:     Result{Status: StatusDone, Ticked: []int{1}},
 			want: []storeCall{
 				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n- the middle criterion, with no box\n- [x] the third criterion"},
 			},
@@ -185,7 +213,7 @@ func TestApplyRefusedTick(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			r := Result{Notes: "a note", Ticked: tt.ticked, Findings: []string{"a finding"}}
+			r := Result{Status: StatusDone, Notes: "a note", Ticked: tt.ticked, Findings: []string{"a finding"}}
 			err := Apply(store, testBead, testActor, tt.acceptance, r)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
@@ -209,37 +237,100 @@ func TestApplyRefusedTick(t *testing.T) {
 func TestApplyFailedWriteDoesNotStopTheRest(t *testing.T) {
 	t.Parallel()
 	notesErr := errors.New("the notes store is locked")
+	acceptanceErr := errors.New("the acceptance store is read-only")
 	findingErr := errors.New("the comment store refused the finding")
+	statusErr := errors.New("the bead is already closed")
 	store := &fakeStore{fail: func(call storeCall) error {
 		switch {
 		case call.op == "AppendNotes":
 			return notesErr
+		case call.op == "SetAcceptance":
+			return acceptanceErr
 		case call.op == "AddComment" && call.text == "the second finding":
 			return findingErr
+		case call.op == "SetStatus":
+			return statusErr
 		}
 		return nil
 	}}
 	r := Result{
+		Status:   StatusDeferred,
 		Notes:    "a note that fails",
 		Ticked:   []int{0},
 		Findings: []string{"the first finding", "the second finding"},
 	}
 	err := Apply(store, testBead, testActor, acceptance, r)
 	if err == nil {
-		t.Fatal("Apply() = nil with two failed writes, want both failures")
+		t.Fatal("Apply() = nil with four failed writes, want every failure")
 	}
-	for _, want := range []string{notesErr.Error(), findingErr.Error(), "append notes", "add finding 1"} {
+	for _, want := range []string{
+		notesErr.Error(), "append notes",
+		acceptanceErr.Error(), "set acceptance",
+		findingErr.Error(), "add finding 1",
+		statusErr.Error(), "set status",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Apply() error = %q, want it to name %q", err, want)
 		}
 	}
+	// The status write is attempted after the failed finding, and the finding
+	// after the failed one is still written.
 	want := []storeCall{
 		{op: "AppendNotes", beadID: testBead, text: "a note that fails"},
 		{op: "SetAcceptance", beadID: testBead, text: "## Acceptance\n- [x] the first criterion\n- [x] the second criterion\n- [ ] the third criterion"},
 		{op: "AddComment", beadID: testBead, author: testActor, text: "the first finding"},
 		{op: "AddComment", beadID: testBead, author: testActor, text: "the second finding"},
+		{op: "SetStatus", beadID: testBead, status: "deferred"},
 	}
 	if !reflect.DeepEqual(store.calls, want) {
 		t.Errorf("Apply() calls = %#v, want %#v", store.calls, want)
+	}
+}
+
+func TestApplyRefusedStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		result    Result
+		wantErr   string
+		wantCalls []storeCall
+	}{
+		{
+			// A zero-value Result is what a host that skipped Validate hands
+			// Apply; it must not read as a clean run with nothing written.
+			name:    "the zero-value Result",
+			result:  Result{},
+			wantErr: `result status "" is neither "done" nor "deferred"`,
+		},
+		{
+			name:    "a status the decoder never returns",
+			result:  Result{Status: Status("closed")},
+			wantErr: `result status "closed" is neither "done" nor "deferred"`,
+		},
+		{
+			name:    "an unset status with other writes",
+			result:  Result{Notes: "a note", Findings: []string{"a finding"}},
+			wantErr: `result status "" is neither "done" nor "deferred"`,
+			wantCalls: []storeCall{
+				{op: "AppendNotes", beadID: testBead, text: "a note"},
+				{op: "AddComment", beadID: testBead, author: testActor, text: "a finding"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{}
+			err := Apply(store, testBead, testActor, acceptance, tt.result)
+			if err == nil {
+				t.Fatalf("Apply() = nil, want an error naming %s", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Apply() error = %q, want it to name %s", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(store.calls, tt.wantCalls) {
+				t.Errorf("Apply() calls = %#v, want %#v", store.calls, tt.wantCalls)
+			}
+		})
 	}
 }
