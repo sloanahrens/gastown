@@ -80,8 +80,8 @@ func findingOutcome(t *testing.T, prev Outcome, class Classification, comments [
 
 // TestDecisionAuthorsFromSettings: the openers select a comment only for an
 // author the town settings name as the operator's, the canonical OPERATOR
-// DECISION and the legacy spelling alike, and the same text by an unlisted name
-// is not a decision (gt-ywuip).
+// DECISION and the legacy opener an earlier release wrote alike, and the same
+// text by an unlisted name is not a decision (gt-ywuip).
 func TestDecisionAuthorsFromSettings(t *testing.T) {
 	t.Parallel()
 	const at = "2026-10-26T20:00:00Z"

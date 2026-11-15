@@ -67,9 +67,9 @@ func TestPatrolScanRestartReportsTheChildsErrorLine(t *testing.T) {
 func TestPatrolScanRestartJoinsEveryLineOfTheChildsError(t *testing.T) {
 	t.Parallel()
 	const output = `Starting session for gastown/toast...
-Error: preparing openshell session for toast: pushing polecat/toast/gt-3lvcjz.4 to forgejo: git push: To http://forgejo:3000/sloan/gastown.git
+Error: preparing openshell session for toast: pushing polecat/toast/gt-3lvcjz.4 to forgejo: git push: To http://forgejo:3000/alice/gastown.git
  ! [rejected]        polecat/toast/gt-3lvcjz.4 -> polecat/toast/gt-3lvcjz.4 (non-fast-forward)
-error: failed to push some refs to 'http://forgejo:3000/sloan/gastown.git'
+error: failed to push some refs to 'http://forgejo:3000/alice/gastown.git'
 Usage:
   gt session restart <rig>/<polecat> [flags]
 `
@@ -91,9 +91,9 @@ Usage:
 		t.Fatal("restart of a gt that exited non-zero = success, want its error")
 	}
 	const want = "preparing openshell session for toast: pushing polecat/toast/gt-3lvcjz.4 to forgejo: git push: " +
-		"To http://forgejo:3000/sloan/gastown.git | " +
+		"To http://forgejo:3000/alice/gastown.git | " +
 		"! [rejected]        polecat/toast/gt-3lvcjz.4 -> polecat/toast/gt-3lvcjz.4 (non-fast-forward) | " +
-		"error: failed to push some refs to 'http://forgejo:3000/sloan/gastown.git'"
+		"error: failed to push some refs to 'http://forgejo:3000/alice/gastown.git'"
 	if !strings.HasSuffix(err.Error(), want) {
 		t.Errorf("restart error = %q, want it to end %q", err.Error(), want)
 	}
