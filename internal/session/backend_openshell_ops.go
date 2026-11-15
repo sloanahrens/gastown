@@ -65,7 +65,7 @@ func (b *openshellBackend) pushWork(rec SandboxRecord) error {
 		}
 		branch = strings.TrimSpace(string(out))
 	}
-	if !validCloneBranch(branch) {
+	if !ValidCloneBranch(branch) {
 		return fmt.Errorf("sandbox %s: clone branch %q is not a branch name, so nothing is pushed", rec.Session, branch)
 	}
 	if _, err := b.cloneGit(ctx, rec, dir, "push", "origin", branch); err != nil {
@@ -297,8 +297,12 @@ func plainPathName(name string) bool {
 // refspec: it starts with a letter or digit and holds only name characters.
 var cloneBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
 
-// validCloneBranch reports whether name is safe to pass to git push as a branch.
-func validCloneBranch(name string) bool {
+// ValidCloneBranch reports whether name is safe to pass to git push as a
+// branch.
+//
+// It is exported because the overrun stop's save hands a branch to the same
+// in-sandbox runner, and the rule must not exist twice (gt-r1s10f).
+func ValidCloneBranch(name string) bool {
 	return cloneBranch.MatchString(name) && !strings.Contains(name, "..")
 }
 
