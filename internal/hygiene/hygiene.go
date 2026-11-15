@@ -19,6 +19,9 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // Rule names. An allow row names the rule it excuses, so these are part of the
@@ -117,6 +120,60 @@ var nonPersonalHomeNames = map[string]struct{}{
 	"go": {}, "bin": {}, "bob": {}, "ann": {},
 	// The town's service account and the macOS shared directory.
 	"gt": {}, "Shared": {},
+}
+
+// The two infrastructure identities. Each is read from the one setting that
+// names it, so a change of the value reaches the scanner with its setting.
+const (
+	// forgeOwnerIdentity is the Forgejo account a repository URL names: an
+	// infrastructure identity, not a person, which gt-ipp4uy renames.
+	forgeOwnerIdentity = config.DefaultForgeOwner
+	// podTownRootIdentity is the town root inside the daemon pod: an
+	// infrastructure identity, not a home directory, which gt-ipp4uy renames.
+	podTownRootIdentity = manifestdata.PodTownRoot
+)
+
+// townRootPlaceholder stands in for the pod town root while a line is checked.
+// It names no account, so the rest of the line is what the rules report.
+const townRootPlaceholder = "{town}"
+
+// exemptIdentities returns line with each infrastructure identity replaced by a
+// placeholder in the one position where it names the town rather than a person:
+// the Forgejo owner as the owner segment of a repository URL, and the pod town
+// root as a whole path. A rule then checks the rest of the line as written, so
+// the same name in prose, in another URL's owner segment or in a longer path is
+// still a finding.
+func exemptIdentities(line string) string {
+	line = strings.ReplaceAll(line,
+		"forgejo:3000/"+forgeOwnerIdentity+"/",
+		"forgejo:3000/"+config.ForgeOwnerPlaceholder+"/")
+	return replaceWholePath(line, podTownRootIdentity, townRootPlaceholder)
+}
+
+// replaceWholePath replaces each occurrence of path in line with placeholder
+// unless a name byte follows it. A name byte continues the last segment, so the
+// sibling path .../gt-backups and the longer name .../gt2 are different paths,
+// not the configured one. An empty path replaces nothing.
+func replaceWholePath(line, path, placeholder string) string {
+	if path == "" {
+		return line
+	}
+	var out strings.Builder
+	for {
+		at := strings.Index(line, path)
+		if at < 0 {
+			out.WriteString(line)
+			return out.String()
+		}
+		out.WriteString(line[:at])
+		end := at + len(path)
+		if end < len(line) && isNameByte(line[end]) {
+			out.WriteString(path)
+		} else {
+			out.WriteString(placeholder)
+		}
+		line = line[end:]
+	}
 }
 
 // DefaultRules returns the shape rules, in reporting order.
@@ -337,13 +394,16 @@ func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}
 	}
 	for i, line := range strings.Split(string(data), "\n") {
 		hash := HashLine(line)
+		// The town's own identities are not a person's name or home path, so
+		// the line is checked with each replaced in its own position.
+		checked := exemptIdentities(line)
 		for _, rule := range rules {
-			if !rule.Match(line) || excused(allow, path, rule.Name, hash) {
+			if !rule.Match(checked) || excused(allow, path, rule.Name, hash) {
 				continue
 			}
 			findings = append(findings, Finding{Path: path, Rule: rule.Name, Line: i + 1, LineHash: hash})
 		}
-		if hasBlockedWord(line, blocked) && !excused(allow, path, RuleBlockedWord, hash) {
+		if hasBlockedWord(checked, blocked) && !excused(allow, path, RuleBlockedWord, hash) {
 			findings = append(findings, Finding{Path: path, Rule: RuleBlockedWord, Line: i + 1, LineHash: hash})
 		}
 	}
