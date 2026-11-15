@@ -232,8 +232,8 @@ func TestApplyRefusesBadActionsBeforeAnyCommand(t *testing.T) {
 	)
 
 	result, err := target.Apply(context.Background(), plan)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
+	if !errors.Is(err, errNothingRemoved) {
+		t.Fatalf("Apply error = %v, want errNothingRemoved: no action was usable", err)
 	}
 	if n := len(f.dockerCalls()); n != 0 {
 		t.Errorf("bad actions led to %d docker calls, want none", n)
@@ -330,5 +330,31 @@ func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
 	}
 	if len(result.Done) != 1 {
 		t.Errorf("Done = %+v, want the removal it could not record", result.Done)
+	}
+}
+
+// TestApplyReturnsAnErrorWhenEveryRemovalFailed holds the third review's major
+// (gt-367d34): a run in which no image was removed is an error as well as a ledger
+// line, while one failure among successes (the test above) is not.
+func TestApplyReturnsAnErrorWhenEveryRemovalFailed(t *testing.T) {
+	t.Parallel()
+	a1, a2 := imgID('1'), imgID('2')
+	f := &fakeDaemon{rmErr: map[string]error{a1: errors.New("denied"), a2: errors.New("denied")}}
+	target, l := newApplyTarget(t, f)
+	plan := applying(
+		diskmaint.Action{Kind: actionRemove, Ref: a1, Bytes: 100},
+		diskmaint.Action{Kind: actionRemove, Ref: a2, Bytes: 250},
+	)
+
+	result, err := target.Apply(context.Background(), plan)
+	if !errors.Is(err, errNothingRemoved) {
+		t.Fatalf("Apply error = %v, want errNothingRemoved", err)
+	}
+	if len(result.Done) != 0 || len(result.Failed) != 2 || result.BytesFreed != 0 {
+		t.Errorf("result = %+v, want nothing done and both failures listed", result)
+	}
+	entry := lastEntry(t, l)
+	if entry.Mode != modeApply || entry.Planned != 2 || entry.Done != 0 || len(entry.Errors) == 0 {
+		t.Errorf("ledger entry = %+v, want an apply line, 2 planned, 0 done and the errors", entry)
 	}
 }

@@ -26,6 +26,11 @@ var (
 	// the refusal is an error as well as a ledger line, so a direct caller does
 	// not read a run that decided nothing as success.
 	errPlanRefused = errors.New("cloud apply: the plan is refused; nothing was removed")
+	// errNothingRemoved reports an apply whose every removal failed. A run that
+	// removed no image it meant to is not a success a caller may read from a nil
+	// error; Result.Failed says which images stayed. One failure among successes
+	// is not this error: the run went on, and Failed carries it.
+	errNothingRemoved = errors.New("cloud apply: every removal failed; nothing was removed")
 )
 
 // removeFailed is the Failure reason for a removal that did not succeed. The
@@ -67,6 +72,9 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 		errs = append(errs, err.Error())
 	default:
 		errs = t.removePlanned(ctx, plan.Actions, &result)
+		if len(result.Done) == 0 && len(result.Failed) > 0 {
+			err = errNothingRemoved
+		}
 	}
 	if recErr := t.record(plan, mode, result, errs); recErr != nil {
 		err = errors.Join(err, recErr)
