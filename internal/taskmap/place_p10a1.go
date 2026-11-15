@@ -1,13 +1,7 @@
 package taskmap
 
-// Placements for batch P10, half A1 (gt-j669b4.14): gt config and its agent
-// subcommands. These read and change the town's settings, so they sit in host
-// beside rig config and the daemon commands, which also inspect or change what
-// the town runs with (place_p2.go). Group judgement: config agent list and
-// config agent get only read, but what they read is the town's agent
-// configuration rather than a live session, so they stay in host and not in
-// seats, where gt agents list sits with the running sessions; config agent
-// remove writes town settings, as the rest of the file does.
+// Placements for batch P10, half A1 (gt-j669b4.14): the gt config commands,
+// all in host because what they read and change are the town's settings.
 func init() {
 	Register(
 		Entry{Path: "config", Group: "host", Use: "Use this when a town setting must be read or changed, from which agents it can run to how the daemon behaves."},
