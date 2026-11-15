@@ -33,27 +33,42 @@ const cleanDeploy = "name: deploy\n" +
 	"    steps:\n" +
 	"      - run: make deploy\n"
 
-// fakeDaemon answers the plan's reads: docker's image list and image inspect,
-// the runner label file and the deploy workflow, the files named as "cat <path>".
+// fakeDaemon answers the plan's reads: docker's image list, container set and
+// image inspect, the runner label file and the deploy workflow, the files named
+// as "cat <path>".
 type fakeDaemon struct {
-	images     string
-	imagesErr  error
-	digests    map[string][]string
-	digestsErr error
-	digestsRaw string
-	labels     string
-	labelsErr  error
-	deploy     string
-	deployErr  error
-	reads      []call
+	images        string
+	imagesErr     error
+	digests       map[string][]string
+	digestsErr    error
+	digestsRaw    string
+	containers    []container
+	containersErr error
+	containersRaw string
+	rmErr         map[string]error
+	tags          map[string][]string
+	parentOf      map[string]string
+	labels        string
+	labelsErr     error
+	deploy        string
+	deployErr     error
+	reads         []call
+	docker        *fakeDocker
 }
 
 func (f *fakeDaemon) run(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
 	if name != "cat" {
-		return (&fakeDocker{
-			images: f.images, imagesErr: f.imagesErr,
-			digests: f.digests, digestsErr: f.digestsErr, digestsRaw: f.digestsRaw,
-		}).run(ctx, env, name, args...)
+		// One docker fake for the whole run, so a test reads back every call the
+		// plan or apply made.
+		if f.docker == nil {
+			f.docker = &fakeDocker{
+				images: f.images, imagesErr: f.imagesErr,
+				digests: f.digests, digestsErr: f.digestsErr, digestsRaw: f.digestsRaw,
+				containers: f.containers, containersErr: f.containersErr, containersRaw: f.containersRaw,
+				rmErr: f.rmErr, tags: f.tags, parentOf: f.parentOf,
+			}
+		}
+		return f.docker.run(ctx, env, name, args...)
 	}
 	f.reads = append(f.reads, call{env: slices.Clone(env), args: slices.Clone(args)})
 	switch {
@@ -63,6 +78,14 @@ func (f *fakeDaemon) run(ctx context.Context, env []string, name string, args ..
 		return []byte(f.deploy), f.deployErr
 	}
 	return nil, errors.New("unexpected file read")
+}
+
+// dockerCalls is every docker command the fake answered, in call order.
+func (f *fakeDaemon) dockerCalls() []call {
+	if f.docker == nil {
+		return nil
+	}
+	return f.docker.calls
 }
 
 // registryDigest is the registry digest a fixture tag's image carries: a hash of
@@ -632,8 +655,8 @@ func TestPlanKeepsEveryImageItDoesNotRemove(t *testing.T) {
 	}
 	got := rules(plan)
 	for ref, want := range map[string]string{
-		"gt-cloud:latest":            "not a fractals-nextjs tag; this plan removes none",
-		noneField + "@" + imgID('8'): "not a fractals-nextjs tag; this plan removes none",
+		"gt-cloud:latest":            "not a fractals-nextjs or deploy-base tag; this plan removes none",
+		noneField + "@" + imgID('8'): "not a fractals-nextjs or deploy-base tag; this plan removes none",
 		fractalsRepo + ":old":        "shares an image a rule keeps",
 		fractalsRepo + ":t1":         "among the newest 5 fractals-nextjs tags",
 	} {
@@ -694,8 +717,8 @@ func TestParseDeployReadsRefsGluedToPunctuation(t *testing.T) {
 			if why != "" {
 				t.Fatalf("parseDeploy refused: %s", why)
 			}
-			if !got.tags[tc.tag] {
-				t.Errorf("tags = %v, want %q kept", got.tags, tc.tag)
+			if !got.tags[tagKey(fractalsRepo, tc.tag)] {
+				t.Errorf("tags = %v, want %q kept", got.tags, tagKey(fractalsRepo, tc.tag))
 			}
 		})
 	}
@@ -726,5 +749,309 @@ func TestParseLabelsRefusesWhatItCannotUse(t *testing.T) {
 				t.Errorf("parseLabels refusal = %q, want %q", why, tc.want)
 			}
 		})
+	}
+}
+
+// base is one deploy-base tag, listed on day with id c and size.
+func base(tag string, c byte, day int, size string) dockerimg.Image {
+	return dockerimg.Image{Repository: deployBaseRepo, Tag: tag, ID: imgID(c), Size: size, CreatedAt: at(day)}
+}
+
+// TestPlanKeepsTheNewestDeployBaseAsTheRollback holds the rollback rule: of the
+// base tags, the newest one that is not in use is kept, and the older ones are
+// planned for removal.
+func TestPlanKeepsTheNewestDeployBaseAsTheRollback(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		deploy  string
+		kept    map[string]string
+		removed []string
+	}{
+		{
+			// b3 is the base the deploy builds from, so the rollback is the
+			// newest beside it, b2, and only b1 goes.
+			name: "the newest besides the base in use",
+			deploy: "name: deploy\n" +
+				"env:\n" +
+				"  BASE_IMAGE: registry.example:5000/team/deploy-base:b3\n",
+			kept:    map[string]string{"b3": ruleLabel, "b2": ruleRollback},
+			removed: []string{imgID('a')},
+		},
+		{
+			// Nothing names a base, so no base is in use as far as the plan can
+			// tell and the newest is the one a deploy starts from: it is kept,
+			// and the two older ones go.
+			name:    "the newest when no base is in use",
+			deploy:  cleanDeploy,
+			kept:    map[string]string{"b3": ruleRollback},
+			removed: []string{imgID('b'), imgID('a')},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			images, digests := daemon(t,
+				fractals("t1", '1', 1, "10MB"),
+				base("b1", 'a', 1, "500MB"),
+				base("b2", 'b', 2, "500MB"),
+				base("b3", 'c', 3, "500MB"),
+			)
+			f := &fakeDaemon{
+				images:  images,
+				digests: digests,
+				labels:  "node:docker://code.forgejo.org/oci/node:lts\n",
+				deploy:  tc.deploy,
+			}
+			plan := planOf(t, f, diskmaint.Policy{})
+
+			got := rules(plan)
+			for tag, want := range tc.kept {
+				ref := deployBaseRepo + ":" + tag
+				if got[ref] != want {
+					t.Errorf("Kept[%s] = %q, want %q", ref, got[ref], want)
+				}
+			}
+			if !slices.Equal(removed(plan), tc.removed) {
+				t.Errorf("removals = %v, want %v", removed(plan), tc.removed)
+			}
+			// The removal names every tag it drops, so a dry run shows which
+			// base leaves.
+			for _, a := range plan.Actions {
+				if !strings.Contains(a.Why, deployBaseRepo+":") {
+					t.Errorf("the removal of %s says %q, want it to name the base tag it drops", a.Ref, a.Why)
+				}
+			}
+		})
+	}
+}
+
+// TestPlanKeepsTheImageOfADeployBaseItKeeps holds the shared-id rule: a
+// fractals-nextjs tag whose image a kept deploy-base tag also names is kept,
+// because a removal names the image id and docker drops every tag of it. The
+// base is kept as the rollback in one case and named by the workflow in the
+// other, so both ways of keeping a base protect its image.
+func TestPlanKeepsTheImageOfADeployBaseItKeeps(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		deploy  string
+		base    string // the base tag whose image fractals:t1 shares
+		bases   []dockerimg.Image
+		removed []string
+	}{
+		{
+			// The only base is the newest, so it is the rollback, and the image
+			// it shares with fractals:t1 cannot go.
+			name:    "the rollback shares the image",
+			deploy:  cleanDeploy,
+			base:    "b1",
+			bases:   []dockerimg.Image{base("b1", '1', 1, "500MB")},
+			removed: []string{imgID('3'), imgID('2')},
+		},
+		{
+			// The workflow names b1, so the rollback is the newer b2, and b1's
+			// image is spared by the label rule instead.
+			name:    "a base the workflow names shares the image",
+			deploy:  "name: deploy\nenv:\n  BASE_IMAGE: deploy-base:b1\n",
+			base:    "b1",
+			bases:   []dockerimg.Image{base("b1", '1', 1, "500MB"), base("b2", 'c', 2, "500MB")},
+			removed: []string{imgID('3'), imgID('2')},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			images, digests := daemon(t, append([]dockerimg.Image{
+				fractals("t8", '8', 8, "80MB"), fractals("t7", '7', 7, "70MB"),
+				fractals("t6", '6', 6, "60MB"), fractals("t5", '5', 5, "50MB"),
+				fractals("t4", '4', 4, "40MB"),
+				// Outside the newest five, and its image is the base's too.
+				fractals("t3", '3', 3, "30MB"),
+				fractals("t2", '2', 2, "20MB"),
+				fractals("t1", '1', 1, "10MB"),
+			}, tc.bases...)...)
+			f := &fakeDaemon{
+				images:  images,
+				digests: digests,
+				labels:  "node:docker://code.forgejo.org/oci/node:lts\n",
+				deploy:  tc.deploy,
+			}
+			plan := planOf(t, f, diskmaint.Policy{})
+
+			got := rules(plan)
+			if got[deployBaseRepo+":"+tc.base] == "" {
+				t.Errorf("Kept[%s:%s] = none, want a rule: the base is kept", deployBaseRepo, tc.base)
+			}
+			if want := ruleKeptImage; got[fractalsRepo+":t1"] != want {
+				t.Errorf("Kept[%s:t1] = %q, want %q: %s shares the kept base's image", fractalsRepo, got[fractalsRepo+":t1"], want, fractalsRepo+":t1")
+			}
+			if !slices.Equal(removed(plan), tc.removed) {
+				t.Errorf("removals = %v, want %v", removed(plan), tc.removed)
+			}
+		})
+	}
+}
+
+// TestPlanRollbackSkipsABaseAContainerReferences holds the in-use half of the
+// rollback rule: the rollback is the newest base that is not in use, and a
+// container of any state makes its base in use. Without the skip, the rollback
+// is b3 and the real previous base, b2, is planned for removal.
+func TestPlanRollbackSkipsABaseAContainerReferences(t *testing.T) {
+	t.Parallel()
+	images, digests := daemon(t,
+		fractals("t1", '1', 1, "10MB"),
+		base("b1", 'a', 1, "500MB"),
+		base("b2", 'b', 2, "500MB"),
+		base("b3", 'c', 3, "500MB"),
+	)
+	f := &fakeDaemon{
+		images:  images,
+		digests: digests,
+		// A stopped container still references its image: docker ps -a is what
+		// lists it, and it makes b3 in use.
+		containers: []container{{id: "aaaaaaaaaaaa", image: imgID('c'), state: stateStopped}},
+		labels:     "node:docker://code.forgejo.org/oci/node:lts\n",
+		deploy:     cleanDeploy,
+	}
+	plan := planOf(t, f, diskmaint.Policy{})
+
+	got := rules(plan)
+	if want := ruleInUse; got[deployBaseRepo+":b3"] != want {
+		t.Errorf("Kept[%s:b3] = %q, want %q", deployBaseRepo, got[deployBaseRepo+":b3"], want)
+	}
+	if want := ruleRollback; got[deployBaseRepo+":b2"] != want {
+		t.Errorf("Kept[%s:b2] = %q, want %q: the rollback is the newest base not in use", deployBaseRepo, got[deployBaseRepo+":b2"], want)
+	}
+	if want := []string{imgID('a')}; !slices.Equal(removed(plan), want) {
+		t.Errorf("removals = %v, want %v", removed(plan), want)
+	}
+}
+
+// TestPlanKeepsImagesAContainerReferences holds the in-use rule: docker ps -a
+// lists a running, created and stopped container, and the image of every one is
+// kept. The fake answers a ps without -a with the running container alone, so a
+// plan that read only running containers removes the other two.
+func TestPlanKeepsImagesAContainerReferences(t *testing.T) {
+	t.Parallel()
+	images, digests := eightTags(t)
+	f := &fakeDaemon{
+		images:  images,
+		digests: digests,
+		// t3, t2 and t1 sit outside the newest five.
+		containers: []container{
+			{id: "aaaaaaaaaaaa", image: imgID('3'), state: stateRunning},
+			{id: "bbbbbbbbbbbb", image: imgID('2'), state: stateCreated},
+			{id: "cccccccccccc", image: imgID('1'), state: stateStopped},
+		},
+		labels: "node:docker://code.forgejo.org/oci/node:lts\n",
+		deploy: cleanDeploy,
+	}
+	plan := planOf(t, f, diskmaint.Policy{})
+
+	if got := removed(plan); len(got) != 0 {
+		t.Errorf("removals = %v, want none: a container of some state references each image", got)
+	}
+	got := rules(plan)
+	for _, tag := range []string{"t3", "t2", "t1"} {
+		ref := fractalsRepo + ":" + tag
+		if got[ref] != ruleInUse {
+			t.Errorf("Kept[%s] = %q, want %q", ref, got[ref], ruleInUse)
+		}
+	}
+	var ps []string
+	for _, c := range f.dockerCalls() {
+		if len(c.args) > 0 && c.args[0] == "ps" {
+			ps = append(ps, c.args...)
+		}
+	}
+	if !slices.Contains(ps, "-a") {
+		t.Errorf("docker ps args = %v, want -a: a stopped or created container's image still blocks a removal", ps)
+	}
+}
+
+// TestPlanRefusesAnUnreadableInUseSet holds the refusal: a container set the
+// plan cannot read is not a set of images it knows are unused.
+func TestPlanRefusesAnUnreadableInUseSet(t *testing.T) {
+	t.Parallel()
+	images, digests := daemon(t, fractals("t1", '1', 1, "10MB"))
+	const nodeLabels = "node:docker://code.forgejo.org/oci/node:lts\n"
+	cases := []struct {
+		name string
+		f    fakeDaemon
+		want string
+	}{
+		{
+			name: "unreadable container list",
+			f:    fakeDaemon{images: images, digests: digests, containersErr: errors.New("SECRET stderr")},
+			want: dockerimg.ErrListContainers.Error(),
+		},
+		{
+			name: "container id that does not parse",
+			f: fakeDaemon{images: images, digests: digests,
+				containers: []container{{id: "not an id", image: imgID('1'), state: stateRunning}}},
+			want: dockerimg.ErrParse.Error(),
+		},
+		{
+			name: "container inspect answering a non-digest",
+			f: fakeDaemon{images: images, digests: digests,
+				containers:    []container{{id: "aaaaaaaaaaaa", image: imgID('1'), state: stateRunning}},
+				containersRaw: "not-a-digest\n"},
+			want: dockerimg.ErrParse.Error(),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := tc.f
+			f.labels, f.deploy = nodeLabels, cleanDeploy
+			plan, err := newPlanTarget(t, &f, labelsPath, deployPath).Plan(context.Background(), diskmaint.Policy{})
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if plan.Refused != tc.want {
+				t.Fatalf("Refused = %q, want %q", plan.Refused, tc.want)
+			}
+			if len(plan.Actions) != 0 || len(plan.Kept) != 0 {
+				t.Errorf("plan = %+v, want no actions and no kept list", plan)
+			}
+			if strings.Contains(plan.Refused, "SECRET") {
+				t.Errorf("refusal echoes command output: %s", plan.Refused)
+			}
+		})
+	}
+}
+
+// TestPlanKeepsTheTagOfTheRepositoryTheFilesName pins the tag key: a deploy
+// workflow naming deploy-base:t1 keeps the base image of that tag and not a
+// fractals-nextjs tag that happens to share its name.
+func TestPlanKeepsTheTagOfTheRepositoryTheFilesName(t *testing.T) {
+	t.Parallel()
+	_, digests := eightTags(t)
+	rows := imageLines(t,
+		fractals("t8", '8', 8, "80MB"), fractals("t7", '7', 7, "70MB"),
+		fractals("t6", '6', 6, "60MB"), fractals("t5", '5', 5, "50MB"),
+		fractals("t4", '4', 4, "40MB"), fractals("t3", '3', 3, "30MB"),
+		fractals("t2", '2', 2, "20MB"), fractals("t1", '1', 1, "10MB"),
+		base("t1", 'e', 4, "500MB"),
+	)
+	f := &fakeDaemon{
+		images:  rows,
+		digests: digests,
+		labels:  "node:docker://code.forgejo.org/oci/node:lts\n",
+		deploy:  "name: deploy\nenv:\n  BASE_IMAGE: deploy-base:t1\n",
+	}
+	plan := planOf(t, f, diskmaint.Policy{})
+
+	if got := rules(plan)[deployBaseRepo+":t1"]; got != ruleLabel {
+		t.Errorf("Kept[%s:t1] = %q, want %q", deployBaseRepo, got, ruleLabel)
+	}
+	// The base the workflow names is the one in use, so no base is the
+	// rollback, and the fractals tag of the same name is not named by it.
+	if got := rules(plan)[fractalsRepo+":t1"]; got != "" {
+		t.Errorf("Kept[%s:t1] = %q, want none: the workflow names the base tag, not this one", fractalsRepo, got)
+	}
+	if want := []string{imgID('3'), imgID('2'), imgID('1')}; !slices.Equal(removed(plan), want) {
+		t.Errorf("removals = %v, want %v (the three fractals tags outside the window)", removed(plan), want)
 	}
 }

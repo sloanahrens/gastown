@@ -18,6 +18,10 @@ const (
 	// fractalsRepo is the repository whose per-commit tags the newest rule
 	// ranks.
 	fractalsRepo = "fractals-nextjs"
+	// deployBaseRepo is the repository of the base images the deploy builds
+	// from, one tag per commit the base was built at. Its tags are candidates
+	// too: the rollback rule keeps one of them and the rest are removable.
+	deployBaseRepo = "deploy-base"
 	// keepNewest is how many of the repository's newest tags a plan always
 	// keeps. It is a constant so the kept list cannot follow a caller's
 	// setting, and its value is what the kept rule names.
@@ -56,9 +60,16 @@ const (
 	// ruleKeptImage keeps a tag whose image another rule or another tag keeps:
 	// a removal names the image id, and docker drops every tag of it.
 	ruleKeptImage = "shares an image a rule keeps"
+	// ruleInUse keeps a tag whose image a container references, in any state: a
+	// stopped container is one `docker start` away from needing it, and docker
+	// refuses to remove an image a container of any state names.
+	ruleInUse = "a container references the image"
+	// ruleRollback keeps the newest deploy-base tag other than the one in use,
+	// so a deploy that fails can go back one base.
+	ruleRollback = "the newest deploy-base tag besides the one in use: the rollback"
 	// ruleOther keeps a tag this plan never removes: another repository's, a
 	// repository or tag docker printed as absent, or a dangling image.
-	ruleOther = "not a fractals-nextjs tag; this plan removes none"
+	ruleOther = "not a fractals-nextjs or deploy-base tag; this plan removes none"
 )
 
 // ruleNewest names the newest rule with the count it keeps, so a dry run says
@@ -73,23 +84,23 @@ const (
 	refuseEmptyLabels = "the runner label list names no label; the plan is refused"
 	refuseLabelRead   = "the runner label list is unreadable; the plan is refused"
 	refuseLabelShort  = "the runner label list does not end in a newline, so the read is cut short; the plan is refused"
-	refuseLabelLine   = "a runner label names a fractals-nextjs image with no tag; the plan is refused"
+	refuseLabelLine   = "a runner label names a fractals-nextjs or deploy-base image with no tag; the plan is refused"
 	refuseLabelName   = "a runner label names a tag or digest docker cannot have; the plan is refused"
 	refuseLabelRef    = "a runner label names an image ref docker cannot read: %s; the plan is refused"
 	refuseNoDeploy    = "no deploy workflow is configured; the plan is refused"
 	refuseEmptyDeploy = "the deploy workflow is empty; the plan is refused"
 	refuseDeployRead  = "the deploy workflow is unreadable; the plan is refused"
-	refuseDeployName  = "a deploy workflow names a fractals-nextjs image with a tag or digest docker cannot have; the plan is refused"
+	refuseDeployName  = "a deploy workflow names a fractals-nextjs or deploy-base image with a tag or digest docker cannot have; the plan is refused"
 	refuseDeployRef   = "a deploy workflow names an image ref docker cannot read: %s; the plan is refused"
 	refuseDigestRead  = "the registry digests the daemon carries are unreadable; the plan is refused"
 	refuseUnpinned    = "a runner label or deploy workflow pins an image digest no listed image carries: %s; the plan is refused"
-	refuseUndated     = "a fractals-nextjs tag has no readable created time; the plan is refused"
+	refuseUndated     = "a fractals-nextjs or deploy-base tag has no readable created time; the plan is refused"
 )
 
 // refusals is how one source words the refs it cannot use: an image ref docker
 // cannot read (named, so the line is found), a tag or digest docker cannot have,
-// a ref of this repository that names no tag, and the tag such a ref names where
-// the source allows one.
+// a ref of one of the plan's repositories that names no tag, and the tag such a
+// ref names where the source allows one.
 type refusals struct {
 	unreadable, badName, untagged, latest string
 }
@@ -99,12 +110,14 @@ var (
 	deployRefusals = refusals{unreadable: refuseDeployRef, badName: refuseDeployName, latest: latestTag}
 )
 
-// Plan lists the fractals-nextjs images the two keep rules leave for removal.
-// It keeps the repository's newest keepNewest tags and every tag, digest or
-// image id a runner label or the deploy workflow names, reading both lists
-// through Run from cfg.LabelsFile and cfg.DeployFile so the set is never a
-// constant; each kept image carries the rule that spared it. A read the plan
-// cannot make, or a value it cannot read, refuses the plan with no actions.
+// Plan lists the fractals-nextjs and deploy-base images the keep rules leave
+// for removal. It keeps the fractals repository's newest keepNewest tags, the
+// newest deploy-base tag besides the one in use as the rollback, every image a
+// container references, and every tag, digest or image id a runner label or the
+// deploy workflow names, reading both lists through Run from cfg.LabelsFile and
+// cfg.DeployFile so the set is never a constant; each kept image carries the
+// rule that spared it. A read the plan cannot make, or a value it cannot read,
+// refuses the plan with no actions.
 func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
 	plan := diskmaint.Plan{Target: planTarget, Policy: p}
 	named, why := t.namedRefs(ctx)
@@ -117,9 +130,22 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		plan.Refused = err.Error()
 		return plan, nil
 	}
-	ranked, why := byAge(images)
+	ranked, why := byAge(images, fractalsRepo)
 	if why != "" {
 		plan.Refused = why
+		return plan, nil
+	}
+	bases, why := byAge(images, deployBaseRepo)
+	if why != "" {
+		plan.Refused = why
+		return plan, nil
+	}
+	// Every container's image is read, whatever the container's state: docker
+	// refuses to remove an image a stopped container names, and a stopped
+	// container is one start away from needing it.
+	inUse, err := t.client().InUse(ctx)
+	if err != nil {
+		plan.Refused = err.Error()
 		return plan, nil
 	}
 	pinned, why := t.pinnedImages(ctx, images, named.digests)
@@ -127,14 +153,23 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		plan.Refused = why
 		return plan, nil
 	}
-	plan.Kept, plan.Actions = decide(images, ranked, named, pinned)
+	plan.Kept, plan.Actions = decide(planInput{
+		images: images,
+		ranked: ranked,
+		bases:  bases,
+		named:  named,
+		pinned: pinned,
+		inUse:  inUse,
+	})
 	return plan, nil
 }
 
-// named is what the runner labels and the deploy workflow name: tags of the
-// repository, registry digests they pin, and image ids they name outright. The
-// three stay apart because a digest and an image id are different values, and a
-// ref that names a tag and a digest puts one in each.
+// named is what the runner labels and the deploy workflow name: tags of the two
+// candidate repositories, registry digests they pin, and image ids they name
+// outright. The three stay apart because a digest and an image id are different
+// values, and a ref that names a tag and a digest puts one in each. A tag is
+// held as its repository and tag together (see tagKey), so one repository's tag
+// never keeps the other repository's image of the same name.
 type named struct {
 	tags, digests, ids map[string]bool
 }
@@ -203,11 +238,12 @@ func (t *Target) deployRefs(ctx context.Context) (named, string) {
 // parseLabels returns the refs a runner label list names. Each line is one
 // label, "<name>:docker://<ref>", where the ref is the image a job started by
 // that label runs in. A line naming no image is a label of another kind and is
-// skipped; a ref of this repository the plan cannot read, or one that names no
-// tag, refuses the plan, since the image it names is then unknown. A file with
-// no label line, or one whose last line has no newline after it, refuses the
-// plan too: a short read cannot be told from a file that names fewer labels, and
-// reading one as a smaller keep list would free images a label still uses.
+// skipped; a ref of one of the plan's repositories that it cannot read, or one
+// that names no tag, refuses the plan, since the image it names is then unknown.
+// A file with no label line, or one whose last line has no newline after it,
+// refuses the plan too: a short read cannot be told from a file that names fewer
+// labels, and reading one as a smaller keep list would free images a label still
+// uses.
 func parseLabels(text string) (named, string) {
 	if strings.TrimSpace(text) == "" {
 		return named{}, refuseEmptyLabels
@@ -279,10 +315,10 @@ func isFieldBreak(r rune) bool {
 
 // place adds one ref to the sets, or returns the refusal for a ref this plan
 // cannot use. A ref of another repository names no image this plan removes and
-// is skipped. A ref of this repository that docker cannot read refuses the plan
-// naming it: the file says it names our image and which image is unknown. A ref
-// that names a tag and a digest puts both in the sets, so the images either one
-// matches are kept.
+// is skipped. A ref of one of the plan's repositories that docker cannot read
+// refuses the plan naming it: the file says it names an image the plan decides
+// about and which image is unknown. A ref that names a tag and a digest puts
+// both in the sets, so the images either one matches are kept.
 func (n *named) place(raw string, r refusals) string {
 	ref, ok := parseImageRef(raw)
 	if ref.id != "" {
@@ -312,13 +348,13 @@ func (n *named) place(raw string, r refusals) string {
 		if !registry.ValidTag(ref.tag) {
 			return r.badName
 		}
-		n.tags[ref.tag] = true
+		n.tags[tagKey(ref.repo, ref.tag)] = true
 	case ref.digest != "":
 		// The digest names the image and needs no tag.
 	case r.latest == "":
 		return r.untagged
 	default:
-		n.tags[r.latest] = true
+		n.tags[tagKey(ref.repo, r.latest)] = true
 	}
 	return ""
 }
@@ -368,15 +404,25 @@ func splitTag(name string) (repo, tag string, tagged bool) {
 	return name, "", false
 }
 
-// ours reports whether a ref names this repository: its last path element, read
-// up to a colon, so the tail of a malformed ref still reads as ours.
+// ours reports whether a ref names one of the two candidate repositories: its
+// last path element, read up to a colon, so the tail of a malformed ref still
+// reads as ours.
 func ours(repo string) bool {
 	base := repoBase(repo)
 	if i := strings.Index(base, ":"); i >= 0 {
 		base = base[:i]
 	}
-	return base == fractalsRepo
+	return base == fractalsRepo || base == deployBaseRepo
 }
+
+// tagKey is how a tag is held in the named sets and compared in a plan: the
+// repository's base name and the tag together, so a fractals-nextjs tag and a
+// deploy-base tag of one name stay apart, and a registry-prefixed ref matches
+// the row docker lists under the bare name.
+func tagKey(repo, tag string) string { return repoBase(repo) + ":" + tag }
+
+// imageKey is a listed row's tag in the same form as tagKey.
+func imageKey(im dockerimg.Image) string { return tagKey(im.Repository, im.Tag) }
 
 // repoBase is a repository's last path element, so a label naming
 // registry.example/team/fractals-nextjs matches the repository docker lists as
@@ -494,20 +540,20 @@ func digestOf(ref string) string {
 	return ""
 }
 
-// aged is one fractals-nextjs tag and its image's creation time.
+// aged is one candidate tag and its image's creation time.
 type aged struct {
 	im      dockerimg.Image
 	created time.Time
 }
 
-// byAge returns the repository's tags newest first, the tag name breaking a tie
+// byAge returns one repository's tags newest first, the tag name breaking a tie
 // so the order is stable. A tag whose created time does not parse refuses the
 // plan: age is what ranks it, and the zero time would sort it last and plan its
 // removal.
-func byAge(images []dockerimg.Image) ([]aged, string) {
+func byAge(images []dockerimg.Image, repo string) ([]aged, string) {
 	var rows []aged
 	for _, im := range images {
-		if !isFractalsTag(im) {
+		if !isTagOf(im, repo) {
 			continue
 		}
 		created, err := time.Parse(imageTimeLayout, im.CreatedAt)
@@ -525,53 +571,86 @@ func byAge(images []dockerimg.Image) ([]aged, string) {
 	return rows, ""
 }
 
-// isFractalsTag reports whether an image row is one tag of the repository.
-func isFractalsTag(im dockerimg.Image) bool {
-	return im.Repository == fractalsRepo && im.Tag != noneField && im.Tag != ""
+// isTagOf reports whether an image row is one tag of repo.
+func isTagOf(im dockerimg.Image, repo string) bool {
+	return im.Repository == repo && im.Tag != noneField && im.Tag != ""
+}
+
+// isCandidate reports whether an image row is one tag this plan may remove: a
+// fractals-nextjs or deploy-base tag.
+func isCandidate(im dockerimg.Image) bool {
+	return isTagOf(im, fractalsRepo) || isTagOf(im, deployBaseRepo)
+}
+
+// planInput is what decide splits: every listed image, each candidate
+// repository's tags newest first, the refs the two files name, the ids a digest
+// pin resolved to, and the ids a container references.
+type planInput struct {
+	images []dockerimg.Image
+	ranked []aged // fractals-nextjs tags, newest first
+	bases  []aged // deploy-base tags, newest first
+	named  named
+	pinned map[string]bool
+	inUse  map[string]bool
 }
 
 // decide splits every listed image into the kept list and the removals. An
-// image id is removed only when no tag of it is kept and no tag of it sits
-// outside this repository's candidates, because a removal names the id and
-// docker drops every tag that points at it. n holds the refs a runner label or
-// the deploy workflow names, pinned the image ids a digest pin resolved to.
-func decide(images []dockerimg.Image, ranked []aged, n named, pinned map[string]bool) ([]diskmaint.Kept, []diskmaint.Action) {
+// image id is removed only when no tag of it is kept, no container references
+// it, and no tag of it sits outside this plan's candidates, because a removal
+// names the id and docker drops every tag that points at it.
+func decide(in planInput) ([]diskmaint.Kept, []diskmaint.Action) {
+	rollback := rollbackTag(in.bases, in.named, in.pinned, in.inUse)
+	// keptImage is every image id a rule keeps. A kept tag keeps its image too,
+	// whichever repository the tag is in: a removal names the image id, so a
+	// removal planned from another tag of that id would drop the kept tag with
+	// it. The base tags are read here as well as in the split below, because a
+	// fractals-nextjs tag sharing a base's image is spared by that rule only
+	// once the base's id is known to be kept.
 	keptImage := map[string]bool{}
-	for _, im := range images {
-		if !isFractalsTag(im) {
+	for _, im := range in.images {
+		if !isCandidate(im) {
 			keptImage[im.ID] = true
 		}
 	}
-	for i, r := range ranked {
-		if i < keepNewest || n.tags[r.im.Tag] {
+	for i, r := range in.ranked {
+		if i < keepNewest || in.named.tags[imageKey(r.im)] {
 			keptImage[r.im.ID] = true
 		}
 	}
-	for id := range pinned {
+	for _, r := range in.bases {
+		if in.named.tags[imageKey(r.im)] || imageKey(r.im) == rollback {
+			keptImage[r.im.ID] = true
+		}
+	}
+	for id := range in.pinned {
 		keptImage[id] = true
 	}
-	for id := range n.ids {
+	for id := range in.named.ids {
+		keptImage[id] = true
+	}
+	for id := range in.inUse {
 		keptImage[id] = true
 	}
 
-	// tagsOf is every tag of each image, so a removal can name the rows that
-	// leave with the image it names.
-	tagsOf := make(map[string][]string, len(ranked))
-	for _, r := range ranked {
-		tagsOf[r.im.ID] = append(tagsOf[r.im.ID], r.im.Tag)
+	// tagsOf is every candidate tag of each image, so a removal can name the
+	// rows that leave with the image it names.
+	tagsOf := make(map[string][]string, len(in.ranked)+len(in.bases))
+	for _, r := range in.ranked {
+		tagsOf[r.im.ID] = append(tagsOf[r.im.ID], tagRef(r.im))
+	}
+	for _, r := range in.bases {
+		tagsOf[r.im.ID] = append(tagsOf[r.im.ID], tagRef(r.im))
 	}
 
 	var kept []diskmaint.Kept
 	var actions []diskmaint.Action
 	planned := map[string]bool{}
-	for i, r := range ranked {
+	// add places one candidate tag: in the kept list with the rule that spares
+	// it, or in the removals when no rule does.
+	add := func(r aged, rule string) {
 		switch {
-		case i < keepNewest:
-			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: ruleNewest})
-		case n.tags[r.im.Tag], pinned[r.im.ID], n.ids[r.im.ID]:
-			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: ruleLabel})
-		case keptImage[r.im.ID]:
-			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: ruleKeptImage})
+		case rule != "":
+			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: rule})
 		case planned[r.im.ID]:
 			// One action per image id: another tag of it already names it, and
 			// the action names every tag it drops.
@@ -585,23 +664,62 @@ func decide(images []dockerimg.Image, ranked []aged, n named, pinned map[string]
 			})
 		}
 	}
-	for _, im := range images {
-		if !isFractalsTag(im) {
+	for i, r := range in.ranked {
+		if i < keepNewest {
+			// The window is named as such even for a tag a file also names: the
+			// window is what keeps it, and the rule says why nothing in it goes.
+			add(r, ruleNewest)
+			continue
+		}
+		add(r, in.spared(r, rollback, keptImage))
+	}
+	for _, r := range in.bases {
+		add(r, in.spared(r, rollback, keptImage))
+	}
+	for _, im := range in.images {
+		if !isCandidate(im) {
 			kept = append(kept, diskmaint.Kept{Ref: refOf(im), Rule: ruleOther})
 		}
 	}
 	return kept, actions
 }
 
+// spared is the rule that spares one candidate tag, or "" when no rule does.
+func (in planInput) spared(r aged, rollback string, keptImage map[string]bool) string {
+	switch {
+	case in.named.tags[imageKey(r.im)], in.pinned[r.im.ID], in.named.ids[r.im.ID]:
+		return ruleLabel
+	case in.inUse[r.im.ID]:
+		return ruleInUse
+	case imageKey(r.im) == rollback:
+		return ruleRollback
+	case keptImage[r.im.ID]:
+		return ruleKeptImage
+	}
+	return ""
+}
+
+// rollbackTag is the newest deploy-base tag besides the ones in use, which a
+// deploy rolls back to, or "" when there is no base tag at all. A base is in use
+// when a runner label, the deploy workflow, a digest pin or an image id names
+// it, or when a container of any state references its image: none of those is
+// the base a rollback should go to while it is still needed. When no base is in
+// use as far as the plan can tell, the newest tag is the one a deploy would
+// start from, and it is kept.
+func rollbackTag(bases []aged, n named, pinned, inUse map[string]bool) string {
+	for _, r := range bases {
+		if n.tags[imageKey(r.im)] || pinned[r.im.ID] || n.ids[r.im.ID] || inUse[r.im.ID] {
+			continue
+		}
+		return imageKey(r.im)
+	}
+	return ""
+}
+
 // removeWhy explains a removal and names every tag it drops, so a dry run shows
 // the rows that leave with the image.
-func removeWhy(tags []string) string {
-	refs := make([]string, len(tags))
-	for i, tag := range tags {
-		refs[i] = fractalsRepo + ":" + tag
-	}
-	return fmt.Sprintf("older than the newest %d %s tags and no runner label or deploy workflow names it; the removal drops %s",
-		keepNewest, fractalsRepo, strings.Join(refs, ", "))
+func removeWhy(refs []string) string {
+	return fmt.Sprintf("no keep rule spares it and no container references it; the removal drops %s", strings.Join(refs, ", "))
 }
 
 // tagRef names a tag the plan decided not to remove.

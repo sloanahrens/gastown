@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
+	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 )
 
 // dockerHost is a placeholder socket, not the VM's own path; the host test runs
@@ -27,6 +28,20 @@ type call struct {
 	args []string
 }
 
+// container is one container the fake daemon holds: its id, the image it
+// references and its state.
+type container struct {
+	id, image, state string
+}
+
+// The container states a test drives. docker ps lists a stopped or created
+// container only with -a, and docker refuses to remove an image either names.
+const (
+	stateRunning = "running"
+	stateCreated = "created"
+	stateStopped = "stopped"
+)
+
 // fakeDocker answers the docker commands the target runs from canned output and
 // records every one, so a test asserts what was asked for and never reaches a
 // real daemon.
@@ -39,20 +54,129 @@ type fakeDocker struct {
 	// digestsRaw, when set, is the inspect output as given, so a test can drive
 	// a read that answers for fewer images than it was asked about.
 	digestsRaw string
+	// containers is every container the daemon holds, whatever its state.
+	containers    []container
+	containersErr error
+	// containersRaw, when set, is the container inspect output as given.
+	containersRaw string
+	// rmErr is the error a removal of one image id returns.
+	rmErr map[string]error
+	// tags is every tag the daemon holds for an image id. Docker refuses to
+	// delete an id several tags name unless the removal is forced.
+	tags map[string][]string
+	// parentOf maps an image id to the id it was built from, so a removal that
+	// prunes takes an untagged parent with it while --no-prune keeps it.
+	parentOf map[string]string
+	// gone is every image id the daemon no longer holds, and removed is the ids
+	// a removal took, in call order.
+	gone    map[string]bool
+	removed []string
 }
 
 func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, call{env: slices.Clone(env), args: slices.Clone(args)})
-	if name != "docker" || len(args) < 2 || args[0] != "image" {
+	if name != "docker" || len(args) == 0 {
 		return nil, errors.New("unexpected command")
 	}
-	switch args[1] {
-	case "ls":
-		return []byte(f.images), f.imagesErr
+	switch args[0] {
+	case "image":
+		if len(args) < 2 {
+			return nil, errors.New("unexpected command")
+		}
+		switch args[1] {
+		case "ls":
+			return []byte(f.images), f.imagesErr
+		case "inspect":
+			return f.inspect(args[2:])
+		case "rm":
+			return f.remove(args[2:])
+		}
+	case "ps":
+		return f.ps(args[1:])
 	case "inspect":
-		return f.inspect(args[2:])
+		return f.containerImages(args[1:])
 	}
 	return nil, errors.New("unexpected command")
+}
+
+// ps answers docker ps: every container when the list is all (-a), and the
+// running ones alone otherwise, as docker does.
+func (f *fakeDocker) ps(args []string) ([]byte, error) {
+	if f.containersErr != nil {
+		return nil, f.containersErr
+	}
+	if !slices.Contains(args, "-q") {
+		return nil, errors.New("unexpected docker ps")
+	}
+	all := slices.Contains(args, "-a")
+	var b strings.Builder
+	for _, c := range f.containers {
+		if !all && c.state != stateRunning {
+			continue
+		}
+		b.WriteString(c.id)
+		b.WriteByte('\n')
+	}
+	return []byte(b.String()), nil
+}
+
+// containerImages answers docker inspect --format {{.Image}} for the container
+// ids it was given, so the in-use set is built from what the fake holds.
+func (f *fakeDocker) containerImages(args []string) ([]byte, error) {
+	if f.containersRaw != "" {
+		return []byte(f.containersRaw), nil
+	}
+	if len(args) < 3 || args[0] != "--format" || args[1] != "{{.Image}}" {
+		return nil, errors.New("unexpected container inspect")
+	}
+	byID := make(map[string]string, len(f.containers))
+	for _, c := range f.containers {
+		byID[c.id] = c.image
+	}
+	var b strings.Builder
+	for _, id := range args[2:] {
+		b.WriteString(byID[id])
+		b.WriteByte('\n')
+	}
+	return []byte(b.String()), nil
+}
+
+// remove answers docker image rm the way docker does: the argument is an image
+// id and never a tag, an id several tags name needs a forced removal, and a
+// removal prunes an untagged parent unless --no-prune is given.
+func (f *fakeDocker) remove(args []string) ([]byte, error) {
+	force, noPrune, id := false, false, ""
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			force = true
+		case "--no-prune":
+			noPrune = true
+		default:
+			if id != "" || !registry.ValidDigest(a) {
+				return nil, errors.New("unexpected image rm")
+			}
+			id = a
+		}
+	}
+	if id == "" {
+		return nil, errors.New("unexpected image rm")
+	}
+	if err := f.rmErr[id]; err != nil {
+		return nil, err
+	}
+	if len(f.tags[id]) > 1 && !force {
+		return nil, errors.New("conflict: image is referenced in multiple repositories")
+	}
+	if f.gone == nil {
+		f.gone = make(map[string]bool)
+	}
+	f.gone[id] = true
+	f.removed = append(f.removed, id)
+	if parent := f.parentOf[id]; parent != "" && !noPrune && len(f.tags[parent]) == 0 {
+		f.gone[parent] = true
+	}
+	return nil, nil
 }
 
 // inspect answers docker image inspect for the ids of the given argv: every
