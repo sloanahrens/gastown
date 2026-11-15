@@ -35,6 +35,11 @@ var fixRecurrenceListArgs = []string{"bd", "list", "--all", "--limit", "0", "--j
 // test replaces, so the package's unit tier starts no process.
 type fixRecurrenceRun func(dir string, argv []string) ([]byte, error)
 
+// fixRecurrenceBD runs bd in dir with the arguments after "bd" and returns its
+// stdout. It is the seam the scan's read and its bd writes go through, so a
+// test drives a failed bd call without starting bd.
+type fixRecurrenceBD func(dir string, args []string) ([]byte, error)
+
 // fixRecurrenceDeps is what the scan takes from the host: the rig directory the
 // programs run in, the runner, and the clock --since counts back from.
 type fixRecurrenceDeps struct {
@@ -50,27 +55,37 @@ type fixRecurrenceDeps struct {
 func realFixRecurrenceDeps() fixRecurrenceDeps {
 	return fixRecurrenceDeps{
 		workDir: callercwd.Require,
-		run:     fixRecurrenceRunProgram(runFixRecurrenceGT),
+		run:     fixRecurrenceRunProgram(runFixRecurrenceBD, runFixRecurrenceGT),
 		now:     time.Now,
 	}
 }
 
-// fixRecurrenceRunProgram is the production runner. A bd write goes through
-// beads.NewPlain, so bd resolves the rig's store from dir the way the scan's
-// read does; a gt write goes through exec, which runs one gt program. A program
-// the plan never names is refused rather than guessed.
-func fixRecurrenceRunProgram(exec fixRecurrenceRun) fixRecurrenceRun {
+// runFixRecurrenceBD is bd on this host: beads.NewPlain runs it in dir with the
+// process environment, leaving bd's own .beads resolution to pick the rig's
+// store from the directory.
+func runFixRecurrenceBD(dir string, args []string) ([]byte, error) {
+	return beads.NewPlain(dir, nil).Run(args...)
+}
+
+// fixRecurrenceRunProgram is the production runner. A program the plan never
+// names is refused rather than guessed, and a failed program is reported
+// without its captured output.
+func fixRecurrenceRunProgram(runBD fixRecurrenceBD, runGT fixRecurrenceRun) fixRecurrenceRun {
 	return func(dir string, argv []string) ([]byte, error) {
 		if len(argv) == 0 {
 			return nil, errors.New("no program to run")
 		}
 		switch argv[0] {
 		case "bd":
-			return beads.NewPlain(dir, nil).Run(argv[1:]...)
-		case "gt":
-			out, err := exec(dir, argv[1:])
+			out, err := runBD(dir, argv[1:])
 			if err != nil {
-				return nil, fmt.Errorf("running gt: %w", err)
+				return nil, fixRecurrenceWithheld("bd", argv[1:], err)
+			}
+			return out, nil
+		case "gt":
+			out, err := runGT(dir, argv[1:])
+			if err != nil {
+				return nil, fixRecurrenceWithheld("gt", argv[1:], err)
 			}
 			return out, nil
 		}
@@ -78,22 +93,34 @@ func fixRecurrenceRunProgram(exec fixRecurrenceRun) fixRecurrenceRun {
 	}
 }
 
+// fixRecurrenceWithheld is a failed program's error cut down to what cannot
+// hold a credential: the program, its arguments and the exit status. bd's
+// captured stderr, which beads.CLIError carries in its message, is dropped.
+func fixRecurrenceWithheld(program string, args []string, err error) error {
+	line := program + " " + strings.Join(args, " ")
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) {
+		return fmt.Errorf("%s: exit status %d", line, exit.ExitCode())
+	}
+	return fmt.Errorf("%s: failed with no exit status", line)
+}
+
 // runFixRecurrenceGT runs the gt subcommand argv in dir with this binary, so an
-// escalation reaches the town from the same gt that planned it. The failure is
-// the exit status alone: captured output can hold a credential.
+// escalation reaches the town from the same gt that planned it.
 func runFixRecurrenceGT(dir string, argv []string) ([]byte, error) {
-	cmd := exec.Command(fixRecurrenceGTBinary(), argv...)
+	cmd := exec.Command(fixRecurrenceGTBinary(os.Executable, exec.LookPath), argv...)
 	cmd.Dir = dir
 	return cmd.Output()
 }
 
-// fixRecurrenceGTBinary is this binary, or gt from PATH when its own path
-// cannot be read.
-func fixRecurrenceGTBinary() string {
-	if exe, err := os.Executable(); err == nil {
+// fixRecurrenceGTBinary is the binary a gt write runs: this binary when
+// executable can name it, else gt from PATH when lookPath finds it, else the
+// PATH name, which leaves the run to report what failed.
+func fixRecurrenceGTBinary(executable func() (string, error), lookPath func(string) (string, error)) string {
+	if exe, err := executable(); err == nil {
 		return exe
 	}
-	if path, err := exec.LookPath("gt"); err == nil {
+	if path, err := lookPath("gt"); err == nil {
 		return path
 	}
 	return "gt"

@@ -2,11 +2,16 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/fixrecurrence"
 )
 
@@ -108,6 +113,19 @@ gt-newreg -> gt-oldb  regression 0.90 (title)
 	}
 }
 
+// fixRecurrenceListJSON renders the bd list payload from rows as the read
+// parses them, so a fixture states the beads and never spells bd's list
+// members by hand. The shape a real read returns is pinned separately by
+// testdata/fix_recurrence_bd_list.json.
+func fixRecurrenceListJSON(t *testing.T, rows ...fixRecurrenceRow) string {
+	t.Helper()
+	raw, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshalling a bead fixture: %v", err)
+	}
+	return string(raw)
+}
+
 // TestFixRecurrenceScanSuppressesAPairWithAnEdgeEitherWay pins that a relation
 // bd prints on one row suppresses the pair whichever end it appears on: the
 // reverse relation exists only in the other bead's dependencies array, so the
@@ -116,27 +134,29 @@ func TestFixRecurrenceScanSuppressesAPairWithAnEdgeEitherWay(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		out  string
+		rows []fixRecurrenceRow
 	}{
 		{
 			name: "citing bead carries the edge",
-			out: `[
-  {"id":"gt-newe1","title":"recurrence of gt-olde1","status":"open","created_at":"2026-11-01T00:00:00Z","dependencies":[{"depends_on_id":"gt-olde1"}]},
-  {"id":"gt-olde1","title":"fix","status":"closed","created_at":"2026-10-01T00:00:00Z","closed_at":"2026-10-02T00:00:00Z"}
-]`,
+			rows: []fixRecurrenceRow{
+				{ID: "gt-newe1", Title: "recurrence of gt-olde1", Status: "open", CreatedAt: "2026-11-01T00:00:00Z",
+					Dependencies: []fixRecurrenceDepRow{{DependsOnID: "gt-olde1"}}},
+				{ID: "gt-olde1", Title: "fix", Status: "closed", CreatedAt: "2026-10-01T00:00:00Z", ClosedAt: "2026-10-02T00:00:00Z"},
+			},
 		},
 		{
 			name: "cited bead carries the edge",
-			out: `[
-  {"id":"gt-newe1","title":"recurrence of gt-olde1","status":"open","created_at":"2026-11-01T00:00:00Z"},
-  {"id":"gt-olde1","title":"fix","status":"closed","created_at":"2026-10-01T00:00:00Z","closed_at":"2026-10-02T00:00:00Z","dependencies":[{"depends_on_id":"gt-newe1"}]}
-]`,
+			rows: []fixRecurrenceRow{
+				{ID: "gt-newe1", Title: "recurrence of gt-olde1", Status: "open", CreatedAt: "2026-11-01T00:00:00Z"},
+				{ID: "gt-olde1", Title: "fix", Status: "closed", CreatedAt: "2026-10-01T00:00:00Z", ClosedAt: "2026-10-02T00:00:00Z",
+					Dependencies: []fixRecurrenceDepRow{{DependsOnID: "gt-newe1"}}},
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			bd := &fixRecurrenceFakeBD{out: tt.out}
+			bd := &fixRecurrenceFakeBD{out: fixRecurrenceListJSON(t, tt.rows...)}
 			var out bytes.Buffer
 			if err := runFixRecurrenceScan(&out, fixRecurrenceTestDeps(bd), "", true, false); err != nil {
 				t.Fatal(err)
@@ -329,12 +349,17 @@ func fixRecurrenceCheckCalls(t *testing.T, f *fixRecurrenceFakeBD, want []string
 // fixRecurrenceChronicProposals lists a closed fix two beads already claim and
 // one bead that newly cites it: the new recurrence earns the edge and its
 // labels, and the third claim makes the fix chronic.
-const fixRecurrenceChronicProposals = `[
-  {"id":"gt-newa","title":"recurrence of gt-olda","status":"open","created_at":"2026-11-01T00:00:00Z"},
-  {"id":"gt-newb","title":"first claim","status":"open","created_at":"2026-11-02T00:00:00Z","dependencies":[{"depends_on_id":"gt-olda","type":"related"}]},
-  {"id":"gt-newc","title":"second claim","status":"open","created_at":"2026-11-03T00:00:00Z","dependencies":[{"depends_on_id":"gt-olda","type":"related"}]},
-  {"id":"gt-olda","title":"fix one","status":"closed","created_at":"2026-10-01T00:00:00Z","closed_at":"2026-10-02T00:00:00Z"}
-]`
+func fixRecurrenceChronicProposals(t *testing.T) string {
+	t.Helper()
+	return fixRecurrenceListJSON(t,
+		fixRecurrenceRow{ID: "gt-newa", Title: "recurrence of gt-olda", Status: "open", CreatedAt: "2026-11-01T00:00:00Z"},
+		fixRecurrenceRow{ID: "gt-newb", Title: "first claim", Status: "open", CreatedAt: "2026-11-02T00:00:00Z",
+			Dependencies: []fixRecurrenceDepRow{{DependsOnID: "gt-olda", Type: "related"}}},
+		fixRecurrenceRow{ID: "gt-newc", Title: "second claim", Status: "open", CreatedAt: "2026-11-03T00:00:00Z",
+			Dependencies: []fixRecurrenceDepRow{{DependsOnID: "gt-olda", Type: "related"}}},
+		fixRecurrenceRow{ID: "gt-olda", Title: "fix one", Status: "closed", CreatedAt: "2026-10-01T00:00:00Z", ClosedAt: "2026-10-02T00:00:00Z"},
+	)
+}
 
 // fixRecurrenceChronicCalls is the plan fixRecurrenceChronicProposals earns, as
 // the runner receives it: the read, then each write once in plan order.
@@ -349,7 +374,7 @@ var fixRecurrenceChronicCalls = []string{
 
 func TestFixRecurrenceScanApplyRunsEachPlannedActionOnceInPlanOrder(t *testing.T) {
 	t.Parallel()
-	bd := &fixRecurrenceFakeBD{out: fixRecurrenceChronicProposals}
+	bd := &fixRecurrenceFakeBD{out: fixRecurrenceChronicProposals(t)}
 	var out bytes.Buffer
 	if err := runFixRecurrenceScan(&out, fixRecurrenceTestDeps(bd), "", false, true); err != nil {
 		t.Fatal(err)
@@ -428,12 +453,14 @@ func TestFixRecurrenceScanApplyCountsClaimsByDependencyType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			bd := &fixRecurrenceFakeBD{out: `[
-  {"id":"gt-newa","title":"recurrence of gt-olda","status":"open","created_at":"2026-11-01T00:00:00Z"},
-  {"id":"gt-newb","title":"first claim","status":"open","created_at":"2026-11-02T00:00:00Z","dependencies":[{"depends_on_id":"gt-olda","type":"` + tt.depType + `"}]},
-  {"id":"gt-newc","title":"second claim","status":"open","created_at":"2026-11-03T00:00:00Z","dependencies":[{"depends_on_id":"gt-olda","type":"` + tt.depType + `"}]},
-  {"id":"gt-olda","title":"fix one","status":"closed","created_at":"2026-10-01T00:00:00Z","closed_at":"2026-10-02T00:00:00Z"}
-]`}
+			bd := &fixRecurrenceFakeBD{out: fixRecurrenceListJSON(t,
+				fixRecurrenceRow{ID: "gt-newa", Title: "recurrence of gt-olda", Status: "open", CreatedAt: "2026-11-01T00:00:00Z"},
+				fixRecurrenceRow{ID: "gt-newb", Title: "first claim", Status: "open", CreatedAt: "2026-11-02T00:00:00Z",
+					Dependencies: []fixRecurrenceDepRow{{DependsOnID: "gt-olda", Type: tt.depType}}},
+				fixRecurrenceRow{ID: "gt-newc", Title: "second claim", Status: "open", CreatedAt: "2026-11-03T00:00:00Z",
+					Dependencies: []fixRecurrenceDepRow{{DependsOnID: "gt-olda", Type: tt.depType}}},
+				fixRecurrenceRow{ID: "gt-olda", Title: "fix one", Status: "closed", CreatedAt: "2026-10-01T00:00:00Z", ClosedAt: "2026-10-02T00:00:00Z"},
+			)}
 			var out bytes.Buffer
 			if err := runFixRecurrenceScan(&out, fixRecurrenceTestDeps(bd), "", false, true); err != nil {
 				t.Fatal(err)
@@ -449,6 +476,33 @@ func TestFixRecurrenceScanApplyCountsClaimsByDependencyType(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFixRecurrenceScanReadsBDsRecordedListShape drives the scan over a bd list
+// payload in the shape a read receives (testdata/fix_recurrence_bd_list.json:
+// bd's list rows, whose dependency links carry issue_id, depends_on_id, type,
+// created_at, created_by and metadata). The two links a stored "related" edge
+// joins are read from depends_on_id, which keeps them out of the proposals, and
+// the same type counts the two claims that make the third citation chronic.
+func TestFixRecurrenceScanReadsBDsRecordedListShape(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("testdata", "fix_recurrence_bd_list.json"))
+	if err != nil {
+		t.Fatalf("reading the recorded bd list: %v", err)
+	}
+	bd := &fixRecurrenceFakeBD{out: string(raw)}
+	var out bytes.Buffer
+	if err := runFixRecurrenceScan(&out, fixRecurrenceTestDeps(bd), "", false, true); err != nil {
+		t.Fatal(err)
+	}
+	fixRecurrenceCheckCalls(t, bd, []string{
+		"bd list --all --limit 0 --json --include-infra",
+		"bd dep add --type=related -- zz-cites zz-oldfix",
+		"bd update --add-label=recurrence-of:zz-oldfix -- zz-cites",
+		"bd update --add-label=recurred -- zz-oldfix",
+		"bd update --add-label=chronic -- zz-oldfix",
+		"gt escalate chronic fix zz-oldfix: 3 beads report it did not hold --severity medium --fingerprint fix-recurrence:zz-oldfix",
+	})
 }
 
 func TestFixRecurrenceApplyRefusesAnUndocumentedKind(t *testing.T) {
@@ -482,7 +536,7 @@ func TestFixRecurrenceApplyReportWriteErrorIsReturned(t *testing.T) {
 // types is what turns the plan on.
 func TestFixRecurrenceScanApplyFlagReachesTheRunner(t *testing.T) {
 	t.Parallel()
-	bd := &fixRecurrenceFakeBD{out: fixRecurrenceChronicProposals}
+	bd := &fixRecurrenceFakeBD{out: fixRecurrenceChronicProposals(t)}
 	cmd := newFixRecurrenceScanCmd(fixRecurrenceTestDeps(bd))
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -493,9 +547,28 @@ func TestFixRecurrenceScanApplyFlagReachesTheRunner(t *testing.T) {
 	fixRecurrenceCheckCalls(t, bd, fixRecurrenceChronicCalls)
 }
 
+// fixRecurrenceUnusedBD is the bd seam for a case about a program the plan
+// never runs: a reach into bd fails the test it belongs to.
+func fixRecurrenceUnusedBD(t *testing.T) fixRecurrenceBD {
+	t.Helper()
+	return func(string, []string) ([]byte, error) {
+		t.Error("ran bd for a case about another program")
+		return nil, errors.New("bd should not run")
+	}
+}
+
+// fixRecurrenceUnusedGT is the gt seam for a case about a program the plan
+// never runs.
+func fixRecurrenceUnusedGT(t *testing.T) fixRecurrenceRun {
+	t.Helper()
+	return func(string, []string) ([]byte, error) {
+		t.Error("ran gt for a case about another program")
+		return nil, errors.New("gt should not run")
+	}
+}
+
 func TestFixRecurrenceRunProgramRefusesWhatThePlanNeverNames(t *testing.T) {
 	t.Parallel()
-	exec := func(string, []string) ([]byte, error) { return nil, errors.New("ran a gt program") }
 	tests := []struct {
 		name string
 		argv []string
@@ -507,11 +580,29 @@ func TestFixRecurrenceRunProgramRefusesWhatThePlanNeverNames(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := fixRecurrenceRunProgram(exec)("/town/gastown", tt.argv)
+			run := fixRecurrenceRunProgram(fixRecurrenceUnusedBD(t), fixRecurrenceUnusedGT(t))
+			_, err := run("/town/gastown", tt.argv)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestFixRecurrenceRunProgramGivesBDToItsSeam(t *testing.T) {
+	t.Parallel()
+	var dir string
+	var args []string
+	runBD := func(d string, a []string) ([]byte, error) {
+		dir, args = d, a
+		return []byte("written"), nil
+	}
+	out, err := fixRecurrenceRunProgram(runBD, fixRecurrenceUnusedGT(t))("/town/gastown", []string{"bd", "dep", "add", "--", "gt-newa", "gt-olda"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "written" || dir != "/town/gastown" || strings.Join(args, " ") != "dep add -- gt-newa gt-olda" {
+		t.Errorf("bd program ran as out=%q dir=%q args=%v", out, dir, args)
 	}
 }
 
@@ -523,7 +614,7 @@ func TestFixRecurrenceRunProgramGivesGTToItsExec(t *testing.T) {
 		dir, argv = d, a
 		return []byte("raised"), nil
 	}
-	out, err := fixRecurrenceRunProgram(exec)("/town/gastown", []string{"gt", "escalate", "chronic fix gt-olda"})
+	out, err := fixRecurrenceRunProgram(fixRecurrenceUnusedBD(t), exec)("/town/gastown", []string{"gt", "escalate", "chronic fix gt-olda"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,11 +623,120 @@ func TestFixRecurrenceRunProgramGivesGTToItsExec(t *testing.T) {
 	}
 }
 
+// fixRecurrenceExitStatus is a failed program's exit status without captured
+// output, as exec.ExitError carries it.
+type fixRecurrenceExitStatus int
+
+func (e fixRecurrenceExitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+func (e fixRecurrenceExitStatus) ExitCode() int { return int(e) }
+
+// TestFixRecurrenceRunProgramWithholdsBdOutput pins that a failed bd call is
+// reported by its command and exit status: CLIError puts bd's stderr in its
+// message, and captured output can hold a credential, so none of it may reach
+// the error.
+func TestFixRecurrenceRunProgramWithholdsBdOutput(t *testing.T) {
+	t.Parallel()
+	const captured = "Error: a captured stderr line"
+	runBD := func(string, []string) ([]byte, error) {
+		return nil, &beads.CLIError{
+			Args:   []string{"dep", "add"},
+			Stderr: []byte(captured + "\n"),
+			Err:    fixRecurrenceExitStatus(1),
+		}
+	}
+	_, err := fixRecurrenceRunProgram(runBD, fixRecurrenceUnusedGT(t))("/town/gastown", []string{"bd", "dep", "add", "--", "gt-newa", "gt-olda"})
+	if err == nil {
+		t.Fatal("a failed bd write returned nil")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "bd dep add -- gt-newa gt-olda") || !strings.Contains(msg, "exit status 1") {
+		t.Errorf("error %q does not name the command and its exit status", msg)
+	}
+	if strings.Contains(err.Error(), captured) {
+		t.Error("the error carries bd's captured stderr")
+	}
+}
+
+// TestFixRecurrenceRunProgramReportsAFailureWithNoExitStatus pins the other
+// refusal: an error that carries no status is still named by its command, and
+// its text is withheld the same way.
+func TestFixRecurrenceRunProgramReportsAFailureWithNoExitStatus(t *testing.T) {
+	t.Parallel()
+	const captured = "Error: a captured stderr line"
+	runBD := func(string, []string) ([]byte, error) { return nil, errors.New(captured) }
+	_, err := fixRecurrenceRunProgram(runBD, fixRecurrenceUnusedGT(t))("/town/gastown", []string{"bd", "list", "--json"})
+	if err == nil {
+		t.Fatal("a failed bd read returned nil")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "bd list --json") || !strings.Contains(msg, "failed with no exit status") {
+		t.Errorf("error %q does not name the command and its missing status", msg)
+	}
+	if strings.Contains(err.Error(), captured) {
+		t.Error("the error carries the failed call's captured text")
+	}
+}
+
 func TestFixRecurrenceRunProgramReturnsAFailedGT(t *testing.T) {
 	t.Parallel()
-	exec := func(string, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
-	_, err := fixRecurrenceRunProgram(exec)("/town/gastown", []string{"gt", "escalate"})
-	if err == nil || !strings.Contains(err.Error(), "running gt") || !strings.Contains(err.Error(), "exit status 1") {
+	exec := func(string, []string) ([]byte, error) { return nil, fixRecurrenceExitStatus(1) }
+	_, err := fixRecurrenceRunProgram(fixRecurrenceUnusedBD(t), exec)("/town/gastown", []string{"gt", "escalate"})
+	if err == nil || !strings.Contains(err.Error(), "gt escalate") || !strings.Contains(err.Error(), "exit status 1") {
 		t.Fatalf("error = %v, want the failed gt named", err)
+	}
+}
+
+// TestFixRecurrenceGTBinaryFallsBack pins the order a gt write resolves its
+// binary in: this program first, then gt from PATH, then the PATH name itself
+// so the exec reports what it could not find.
+func TestFixRecurrenceGTBinaryFallsBack(t *testing.T) {
+	t.Parallel()
+	executableErr := errors.New("no executable path")
+	lookPathErr := errors.New("gt not on PATH")
+	tests := []struct {
+		name string
+		// executableErr, when set, is what naming this binary returns.
+		executableErr error
+		// found, when set, is what the PATH lookup returns.
+		found   string
+		findErr error
+		want    string
+		// lookedUp is whether the PATH lookup must run at all.
+		lookedUp bool
+	}{
+		{name: "this binary", want: "/opt/gt/bin/gt"},
+		{
+			name:          "gt from PATH when this binary cannot be named",
+			executableErr: executableErr, found: "/usr/local/bin/gt", want: "/usr/local/bin/gt", lookedUp: true,
+		},
+		{
+			name:          "the PATH name when neither lookup answers",
+			executableErr: executableErr, findErr: lookPathErr, want: "gt", lookedUp: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var looked []string
+			executable := func() (string, error) {
+				if tt.executableErr != nil {
+					return "", tt.executableErr
+				}
+				return "/opt/gt/bin/gt", nil
+			}
+			lookPath := func(name string) (string, error) {
+				looked = append(looked, name)
+				return tt.found, tt.findErr
+			}
+			if got := fixRecurrenceGTBinary(executable, lookPath); got != tt.want {
+				t.Errorf("binary = %q, want %q", got, tt.want)
+			}
+			if tt.lookedUp {
+				if len(looked) != 1 || looked[0] != "gt" {
+					t.Errorf("PATH lookups = %v, want one for gt", looked)
+				}
+			} else if len(looked) != 0 {
+				t.Errorf("PATH lookups = %v, want none with this binary available", looked)
+			}
+		})
 	}
 }
