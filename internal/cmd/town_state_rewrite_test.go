@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	rewriteCmdOldRoot = "/Users/user/gt"
+	rewriteCmdOldRoot = "/home/user/gt"
 	rewriteCmdNewRoot = "/town"
 )
 

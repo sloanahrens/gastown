@@ -23,9 +23,10 @@ import (
 // the writer into a claim directory on disk, then run one tick over that
 // directory, so a hold the writer sets must stop the tick on the next tick.
 
-// crossPodMount is the path the daemon pod mounts its town-state claim at: the
-// manifest's town root, which holdclaim's unexported podMount carries too. A
-// drift between the two makes every pod call here miss the writer's file.
+// crossPodMount is the pod's town root: the path the daemon mounts its
+// town-state claim at, from the manifest's one spelling. The claim fake refuses
+// any other path on the writer's probe, so a writer whose mount drifts from the
+// pod's fails here instead of landing sentinels where the tick never reads.
 const crossPodMount = k8sdaemon.TownRootPath
 
 // crossOther is the second rig. A rig ESTOP on gastown leaves it open.
@@ -46,6 +47,12 @@ func (c *crossClaim) Exec(_ context.Context, argv []string, stdin []byte) ([]byt
 	command, args := argv[sep+1], argv[sep+2:]
 	switch {
 	case command == "test" && len(args) == 2 && args[0] == "-d":
+		// The writer probes the claim with test -d at its pod mount, so the
+		// path it sends is holdclaim's podMount. Any other path means the writer
+		// would map the sentinels away from where the tick reads them.
+		if args[1] != crossPodMount {
+			return nil, fmt.Errorf("crossClaim: the writer reached the claim at %q, want the pod's town root %q", args[1], crossPodMount)
+		}
 		_, err := os.Stat(c.local(args[1]))
 		return nil, err
 	case command == "tee" && len(args) == 1:
