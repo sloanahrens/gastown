@@ -80,6 +80,12 @@ const (
 	// tick, before it parks the seat with the refusal as the reason. A save is a
 	// checkpoint and a push, so it takes the checkpoint's bound.
 	overrunSaveMaxAttempts = overrunCheckpointMaxAttempts
+	// overrunOriginReadMaxAttempts is the cap on the failed origin reads a stop
+	// counts in overrunState.OriginReadFailures, one per tick: a read of origin
+	// that fails, a sandbox record naming no branch, and a worktree that does
+	// not resolve. The count stops at the cap. A stop short of it holds the bead
+	// and retries on the next tick.
+	overrunOriginReadMaxAttempts = 5
 	// overrunCommentMaxAttempts is how many failed bead comments a scheduled
 	// stop tolerates, one per tick, before it ends without one.
 	overrunCommentMaxAttempts = 5
@@ -365,6 +371,15 @@ type overrunState struct {
 	SaveFailures   int       `json:"save_failures,omitempty"`
 	SaveFailedLate bool      `json:"save_failed_late,omitempty"`
 	SaveGaveUp     bool      `json:"save_gave_up,omitempty"`
+
+	// OriginReadFailures counts the failed reads of origin in the sandbox-gone
+	// path of this stop (overrunStop, step 2b): a read that returned an error,
+	// a record naming no branch, and a worktree that did not resolve. It is
+	// capped at overrunOriginReadMaxAttempts and cleared when a later read of
+	// origin succeeds (or is no longer needed), so a stop that cannot learn
+	// whether the gone sandbox's work reached origin keeps the bead with a
+	// record of how long it has tried.
+	OriginReadFailures int `json:"origin_read_failures,omitempty"`
 
 	// SandboxDiverged is set when the sandbox's push was refused because its
 	// branch diverged from origin (overrunStop, step 2b). It holds the hand-back
