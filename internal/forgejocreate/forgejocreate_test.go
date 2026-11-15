@@ -21,7 +21,7 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 // The repository, author and token every test uses. The token is distinctive so a test can
 // look for it in an error.
 const (
-	testOwner  = "sloan"
+	testOwner  = "alice"
 	testName   = "notes"
 	testAuthor = "Ada Lovelace"
 	testToken  = "tok-admin-value"
@@ -82,13 +82,13 @@ func TestValidateRepo(t *testing.T) {
 		wantName  string
 		wantErr   bool
 	}{
-		{"owner and name", "sloan/notes", "sloan", "notes", false},
-		{"dots and dashes", "sloan/my.repo-2", "sloan", "my.repo-2", false},
-		{"no slash", "sloan", "", "", true},
-		{"extra slash", "sloan/notes/extra", "", "", true},
+		{"owner and name", "alice/notes", "alice", "notes", false},
+		{"dots and dashes", "alice/my.repo-2", "alice", "my.repo-2", false},
+		{"no slash", "alice", "", "", true},
+		{"extra slash", "alice/notes/extra", "", "", true},
 		{"empty owner", "/notes", "", "", true},
-		{"traversal name", "sloan/../notes", "", "", true},
-		{"space in name", "sloan/no tes", "", "", true},
+		{"traversal name", "alice/../notes", "", "", true},
+		{"space in name", "alice/no tes", "", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,11 +254,11 @@ func TestCreateRepoSendsPrivateEmptyMainRepository(t *testing.T) {
 	if len(reqs) != 2 {
 		t.Fatalf("CreateRepo sent %d requests, want a read then a create: %+v", len(reqs), reqs)
 	}
-	if reqs[0].Method != http.MethodGet || reqs[0].Path != "/api/v1/repos/sloan/notes" {
+	if reqs[0].Method != http.MethodGet || reqs[0].Path != "/api/v1/repos/alice/notes" {
 		t.Errorf("first request = %s %s, want the read of the repository", reqs[0].Method, reqs[0].Path)
 	}
 	create := reqs[1]
-	if create.Method != http.MethodPost || create.Path != "/api/v1/admin/users/sloan/repos" {
+	if create.Method != http.MethodPost || create.Path != "/api/v1/admin/users/alice/repos" {
 		t.Fatalf("second request = %s %s, want POST to the admin create route", create.Method, create.Path)
 	}
 	var body map[string]any
@@ -324,7 +324,7 @@ func TestSeedSendsEveryFileInOneCommit(t *testing.T) {
 		t.Errorf("Seed returned %q, want the commit SHA abc123", sha)
 	}
 	w := f.Writes()
-	if len(w) != 1 || w[0].Path != "/api/v1/repos/sloan/notes/contents" {
+	if len(w) != 1 || w[0].Path != "/api/v1/repos/alice/notes/contents" {
 		t.Fatalf("Seed sent writes %+v, want one POST to the contents route", w)
 	}
 	var body struct {
@@ -341,8 +341,8 @@ func TestSeedSendsEveryFileInOneCommit(t *testing.T) {
 	if err := json.Unmarshal(w[0].Body, &body); err != nil {
 		t.Fatalf("contents body is not JSON: %v", err)
 	}
-	if body.Branch != "main" || body.Message != "Seed sloan/notes" {
-		t.Errorf("branch=%q message=%q, want main and Seed sloan/notes", body.Branch, body.Message)
+	if body.Branch != "main" || body.Message != "Seed alice/notes" {
+		t.Errorf("branch=%q message=%q, want main and Seed alice/notes", body.Branch, body.Message)
 	}
 	if body.Author["name"] != testAuthor || body.Committer["name"] != testAuthor {
 		t.Errorf("author=%v committer=%v, want %q on both", body.Author, body.Committer, testAuthor)

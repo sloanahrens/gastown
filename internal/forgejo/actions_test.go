@@ -107,7 +107,7 @@ func TestListRunsSendsPageOneForAZeroPageFilter(t *testing.T) {
 	rec := &recorder{body: []byte(`{"total_count": 0, "workflow_runs": []}`)}
 	c := newTestClient(t, rec)
 
-	_, err := c.ListRuns(context.Background(), "sloan", "gastown", RunFilter{Status: []string{"waiting"}})
+	_, err := c.ListRuns(context.Background(), "alice", "gastown", RunFilter{Status: []string{"waiting"}})
 	require.NoError(t, err)
 	q := rec.req.URL.Query()
 	assert.True(t, q.Has("page"), "the request must carry a page parameter")
@@ -122,9 +122,9 @@ func TestDeleteRunSendsDeleteToTheRunPath(t *testing.T) {
 	rec := &recorder{status: http.StatusNoContent}
 	c := newTestClient(t, rec)
 
-	require.NoError(t, c.DeleteRun(context.Background(), "sloan", "gastown", 4217))
+	require.NoError(t, c.DeleteRun(context.Background(), "alice", "gastown", 4217))
 	assert.Equal(t, http.MethodDelete, rec.req.Method)
-	assert.Equal(t, "/api/v1/repos/sloan/gastown/actions/runs/4217", rec.req.URL.Path)
+	assert.Equal(t, "/api/v1/repos/alice/gastown/actions/runs/4217", rec.req.URL.Path)
 	assert.Equal(t, "token test-token", rec.req.Header.Get("Authorization"))
 }
 
@@ -135,7 +135,7 @@ func TestDeleteRunReturnsTheRefusalAsAnAPIError(t *testing.T) {
 	rec := &recorder{status: http.StatusConflict, body: []byte(`{"message":"conflict"}`)}
 	c := newTestClient(t, rec)
 
-	err := c.DeleteRun(context.Background(), "sloan", "gastown", 4217)
+	err := c.DeleteRun(context.Background(), "alice", "gastown", 4217)
 	var apiErr *APIError
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusConflict, apiErr.StatusCode)
