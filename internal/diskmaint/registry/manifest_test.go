@@ -341,13 +341,13 @@ func TestGetManifestRejectsBadRefBeforeRequest(t *testing.T) {
 	}
 }
 
-func TestGetManifestMissingCreatedIsError(t *testing.T) {
+func TestGetManifestMissingCreatedIsUndated(t *testing.T) {
 	t.Parallel()
 	manifestDigest, configDigest := digestOf('a'), digestOf('c')
 	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/gastown-polecat/manifests/dev":
-			served(w, manifestDigest, imageBody(configDigest, 1))
+			served(w, manifestDigest, imageBody(configDigest, 1000, 24))
 		case "/v2/gastown-polecat/blobs/" + configDigest:
 			_, _ = w.Write([]byte(blobBody("")))
 		default:
@@ -356,11 +356,78 @@ func TestGetManifestMissingCreatedIsError(t *testing.T) {
 	})
 
 	m, err := c.GetManifest(context.Background(), "gastown-polecat", "dev")
-	if err == nil {
-		t.Fatalf("GetManifest with no created returned %+v, want an error", m)
+	if err != nil {
+		t.Fatalf("GetManifest with no created: %v, want an undated manifest", err)
+	}
+	if !m.Undated {
+		t.Errorf("Undated = false, want true: the config blob carries no created time")
 	}
 	if !m.Created.IsZero() {
-		t.Errorf("Created = %v on error, want the zero time", m.Created)
+		t.Errorf("Created = %v, want the zero time for an undated manifest", m.Created)
+	}
+	if m.Digest != manifestDigest {
+		t.Errorf("Digest = %q, want %q", m.Digest, manifestDigest)
+	}
+	if want := int64(1000 + 24); m.Bytes != want {
+		t.Errorf("Bytes = %d, want %d: an undated manifest is still measured", m.Bytes, want)
+	}
+}
+
+func TestGetManifestIndexUndatedChildren(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		created []string // one entry per child: "" is no created field
+		want    time.Time
+		undated bool
+	}{
+		{name: "every child undated", created: []string{"", ""}, undated: true},
+		{name: "one dated child dates the index", created: []string{"", "2026-10-27T10:00:00Z"}, want: time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)},
+		{name: "the undated child never wins", created: []string{"2026-10-20T09:00:00Z", ""}, want: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			indexDigest := digestOf('d')
+			children := make([]string, len(tc.created))
+			configs := make([]string, len(tc.created))
+			blobs := map[string]string{}
+			for i := range tc.created {
+				children[i] = "sha256:" + repeatByte(byte('1'+i), 64)
+				configs[i] = "sha256:" + repeatByte(byte('4'+i), 64)
+				blobs[configs[i]] = blobBody(tc.created[i])
+			}
+			c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v2/gastown-polecat/manifests/"+indexDigest {
+					served(w, indexDigest, indexBody(children...))
+					return
+				}
+				for i, child := range children {
+					if r.URL.Path == "/v2/gastown-polecat/manifests/"+child {
+						served(w, child, imageBody(configs[i], 10))
+						return
+					}
+				}
+				for config, body := range blobs {
+					if r.URL.Path == "/v2/gastown-polecat/blobs/"+config {
+						_, _ = w.Write([]byte(body))
+						return
+					}
+				}
+				http.NotFound(w, r)
+			})
+
+			m, err := c.GetManifest(context.Background(), "gastown-polecat", indexDigest)
+			if err != nil {
+				t.Fatalf("GetManifest: %v", err)
+			}
+			if m.Undated != tc.undated {
+				t.Errorf("Undated = %v, want %v", m.Undated, tc.undated)
+			}
+			if !m.Created.Equal(tc.want) {
+				t.Errorf("Created = %v, want %v", m.Created, tc.want)
+			}
+		})
 	}
 }
 

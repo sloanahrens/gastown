@@ -25,6 +25,12 @@ func mkTag(tag, digest string, created int64) TagInfo {
 	return TagInfo{Repo: RepoMain, Tag: tag, Digest: digest, Created: time.Unix(created, 0).UTC()}
 }
 
+// undatedTag is a tag whose manifest carries no created time, so Created is the
+// zero time and Undated is set.
+func undatedTag(repo, tag, digest string) TagInfo {
+	return TagInfo{Repo: repo, Tag: tag, Digest: digest, Undated: true}
+}
+
 // input is a readable main repo with an installed commit that matches no tag in
 // it, so a test opts into the installed-commit keep by setting InstalledCommit.
 func input(tags []TagInfo) PlanInput {
@@ -108,6 +114,52 @@ func TestPlanDeletesOldCandidatesBeyondKeep(t *testing.T) {
 	}
 	if kept := len(p.Kept); kept != 6 {
 		t.Errorf("kept %d refs, want 5 newest candidates plus dev: %v", kept, p.Kept)
+	}
+}
+
+func TestPlanKeepsUndatedManifest(t *testing.T) {
+	t.Parallel()
+	in := input([]TagInfo{
+		mkTag(candidateTag(1), dg("dead0001"), 1),
+		undatedTag(RepoMain, candidateTag(2), dg("dead0002")),
+		mkTag(TagDev, dg("defaced"), 3),
+	})
+	in.Keep = 0
+
+	p := BuildPlan(in)
+
+	want := []string{mainRef(dg("dead0001"))}
+	if got := actionRefs(p); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want only the dated manifest %v: an undated one is never deleted", got, want)
+	}
+	if rule := keptRule(p, RepoMain+":"+candidateTag(2)); rule != ruleUndated {
+		t.Fatalf("undated tag kept by %q, want %q: %v", rule, ruleUndated, p.Kept)
+	}
+}
+
+// TestPlanKeepsUndatedManifestBeyondKeep pins that the Keep window still ranks
+// the dated manifests as before, and the undated one is kept besides them.
+func TestPlanKeepsUndatedManifestBeyondKeep(t *testing.T) {
+	t.Parallel()
+	in := input([]TagInfo{
+		mkTag(candidateTag(1), dg("dead0001"), 1),
+		mkTag(candidateTag(2), dg("dead0002"), 2),
+		undatedTag(RepoMain, candidateTag(3), dg("dead0003")),
+		mkTag(TagDev, dg("defaced"), 3),
+	})
+	in.Keep = 1
+
+	p := BuildPlan(in)
+
+	want := []string{mainRef(dg("dead0001"))}
+	if got := actionRefs(p); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want only the dated manifest past keep 1 %v", got, want)
+	}
+	if rule := keptRule(p, RepoMain+":"+candidateTag(2)); rule != ruleNewest {
+		t.Fatalf("newest dated tag kept by %q, want %q: %v", rule, ruleNewest, p.Kept)
+	}
+	if rule := keptRule(p, RepoMain+":"+candidateTag(3)); rule != ruleUndated {
+		t.Fatalf("undated tag kept by %q, want %q: %v", rule, ruleUndated, p.Kept)
 	}
 }
 
