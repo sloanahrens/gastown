@@ -28,50 +28,62 @@ func TestTriggerEvaluation(t *testing.T) {
 		want []Trigger
 	}{
 		{
-			name: "no reading trips nothing",
-			in:   Inputs{},
+			name: "readings read as zero trip nothing",
+			in: Inputs{
+				BackupBytes:    Read[int64](0),
+				BackupDuration: Read(time.Duration(0)),
+				QueryP95:       Read(time.Duration(0)),
+			},
 		},
 		{
 			name: "each reading at its limit does not trip",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 200 * time.Millisecond},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
+			},
+		},
+		{
+			name: "each reading below its limit does not trip",
+			in: Inputs{
+				BackupBytes:    Read[int64](4 << 30),
+				BackupDuration: Read(4 * time.Minute),
+				QueryP95:       Read(150 * time.Millisecond),
 			},
 		},
 		{
 			name: "backup size over its limit trips it alone",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5<<30 + 1},
-				BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 200 * time.Millisecond},
+				BackupBytes:    Read[int64](5<<30 + 1),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
 			},
 			want: []Trigger{TriggerBackupBytes},
 		},
 		{
 			name: "backup duration over its limit trips it alone",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 5*time.Minute + time.Second},
-				QueryP95:       Reading[time.Duration]{Value: 200 * time.Millisecond},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5*time.Minute + time.Second),
+				QueryP95:       Read(200 * time.Millisecond),
 			},
 			want: []Trigger{TriggerBackupDuration},
 		},
 		{
 			name: "query p95 over its limit trips it alone",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 200*time.Millisecond + time.Microsecond},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200*time.Millisecond + time.Microsecond),
 			},
 			want: []Trigger{TriggerQueryP95},
 		},
 		{
 			name: "every reading over its limit names all three in check order",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 6 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 6 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 300 * time.Millisecond},
+				BackupBytes:    Read[int64](6 << 30),
+				BackupDuration: Read(6 * time.Minute),
+				QueryP95:       Read(300 * time.Millisecond),
 			},
 			want: []Trigger{TriggerBackupBytes, TriggerBackupDuration, TriggerQueryP95},
 		},
@@ -96,6 +108,13 @@ func TestTriggerEvaluation(t *testing.T) {
 func TestTriggerUnreadable(t *testing.T) {
 	t.Parallel()
 	errRead := errors.New("read failed")
+	// readWithErr returns a Reading Read built that the caller then marked
+	// failed.
+	readWithErr := func(v int64) Reading[int64] {
+		r := Read(v)
+		r.Err = errRead
+		return r
+	}
 	tests := []struct {
 		name       string
 		in         Inputs
@@ -103,47 +122,79 @@ func TestTriggerUnreadable(t *testing.T) {
 		wantUnread []Trigger
 	}{
 		{
-			name: "an unreadable backup size trips nothing even with a value over its limit",
+			name:       "no input read names all three and trips nothing",
+			in:         Inputs{},
+			wantUnread: []Trigger{TriggerBackupBytes, TriggerBackupDuration, TriggerQueryP95},
+		},
+		{
+			name: "an unread backup size trips nothing even with a value over its limit",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 9 << 30, Err: errRead},
-				BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 200 * time.Millisecond},
+				BackupBytes:    Reading[int64]{Value: 9 << 30},
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
 			},
 			wantUnread: []Trigger{TriggerBackupBytes},
 		},
 		{
-			name: "an unreadable backup duration trips nothing even with a value over its limit",
+			name: "an unread backup duration trips nothing even with a value over its limit",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 9 * time.Minute, Err: errRead},
-				QueryP95:       Reading[time.Duration]{Value: 200 * time.Millisecond},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Reading[time.Duration]{Value: 9 * time.Minute},
+				QueryP95:       Read(200 * time.Millisecond),
 			},
 			wantUnread: []Trigger{TriggerBackupDuration},
 		},
 		{
-			name: "an unreadable query p95 trips nothing even with a value over its limit",
+			name: "an unread query p95 trips nothing even with a value over its limit",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 900 * time.Millisecond, Err: errRead},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Reading[time.Duration]{Value: 900 * time.Millisecond},
 			},
 			wantUnread: []Trigger{TriggerQueryP95},
 		},
 		{
-			name: "every input unreadable trips nothing and names all three",
+			name: "every input unread with a value over its limit names all three",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 9 << 30, Err: errRead},
-				BackupDuration: Reading[time.Duration]{Value: 9 * time.Minute, Err: errRead},
-				QueryP95:       Reading[time.Duration]{Value: 900 * time.Millisecond, Err: errRead},
+				BackupBytes:    Reading[int64]{Value: 9 << 30},
+				BackupDuration: Reading[time.Duration]{Value: 9 * time.Minute},
+				QueryP95:       Reading[time.Duration]{Value: 900 * time.Millisecond},
 			},
 			wantUnread: []Trigger{TriggerBackupBytes, TriggerBackupDuration, TriggerQueryP95},
 		},
 		{
+			name: "a failed read is unreadable",
+			in: Inputs{
+				BackupBytes:    Failed[int64](errRead),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
+			},
+			wantUnread: []Trigger{TriggerBackupBytes},
+		},
+		{
+			name: "a read value marked failed is unreadable even over its limit",
+			in: Inputs{
+				BackupBytes:    readWithErr(9 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
+			},
+			wantUnread: []Trigger{TriggerBackupBytes},
+		},
+		{
+			name: "a failed read with a stale value over its limit trips nothing",
+			in: Inputs{
+				BackupBytes:    Reading[int64]{Value: 9 << 30, Err: errRead},
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
+			},
+			wantUnread: []Trigger{TriggerBackupBytes},
+		},
+		{
 			name: "a trip beside an unreadable input is still reported",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 6 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Value: 900 * time.Millisecond, Err: errRead},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(6 * time.Minute),
+				QueryP95:       Failed[time.Duration](errRead),
 			},
 			wantTrips:  []Trigger{TriggerBackupDuration},
 			wantUnread: []Trigger{TriggerQueryP95},
@@ -170,9 +221,9 @@ func TestTriggerUnreadable(t *testing.T) {
 // over its limit.
 func backupBytesTrips() Inputs {
 	return Inputs{
-		BackupBytes:    Reading[int64]{Value: 6 << 30},
-		BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-		QueryP95:       Reading[time.Duration]{Value: 200 * time.Millisecond},
+		BackupBytes:    Read[int64](6 << 30),
+		BackupDuration: Read(5 * time.Minute),
+		QueryP95:       Read(200 * time.Millisecond),
 	}
 }
 
@@ -243,7 +294,7 @@ func TestCutNotDueWithin24Hours(t *testing.T) {
 	now := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
 	errRead := errors.New("read failed")
 	trippedAndUnreadable := backupBytesTrips()
-	trippedAndUnreadable.QueryP95 = Reading[time.Duration]{Err: errRead}
+	trippedAndUnreadable.QueryP95 = Failed[time.Duration](errRead)
 	tests := []struct {
 		name       string
 		in         Inputs
@@ -293,12 +344,22 @@ func TestCutNotDueWithin24Hours(t *testing.T) {
 			wantReason: "due: backup bytes over the limit",
 		},
 		{
-			name:       "nothing tripped and never run is not due",
+			name: "nothing tripped and never run is not due",
+			in: Inputs{
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
+			},
 			wantDue:    false,
 			wantReason: "no threshold tripped",
 		},
 		{
-			name:       "nothing tripped with a run an hour ago names no threshold",
+			name: "nothing tripped with a run an hour ago names no threshold",
+			in: Inputs{
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Read(200 * time.Millisecond),
+			},
 			lastRun:    now.Add(-time.Hour),
 			wantDue:    false,
 			wantReason: "no threshold tripped",
@@ -306,9 +367,9 @@ func TestCutNotDueWithin24Hours(t *testing.T) {
 		{
 			name: "an unreadable input is reported with no trip",
 			in: Inputs{
-				BackupBytes:    Reading[int64]{Value: 5 << 30},
-				BackupDuration: Reading[time.Duration]{Value: 5 * time.Minute},
-				QueryP95:       Reading[time.Duration]{Err: errRead},
+				BackupBytes:    Read[int64](5 << 30),
+				BackupDuration: Read(5 * time.Minute),
+				QueryP95:       Failed[time.Duration](errRead),
 			},
 			wantDue:    false,
 			wantReason: "no threshold tripped; unreadable: query p95",
