@@ -315,3 +315,35 @@ func TestConfigDaemonSetCheckPointsAtBackupName(t *testing.T) {
 		t.Error(`Lookup("config daemon") found no entry; the set Check points at it and needs it to exist`)
 	}
 }
+
+// TestSessionInjectUseOpensWhenPhrase pins the opening place_p5e.go gives
+// session inject (gt-z96kdl): the Use names the situation and opens with the
+// required phrase, "Use this when".
+func TestSessionInjectUseOpensWhenPhrase(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("session inject")
+	if !ok {
+		t.Fatal(`Lookup("session inject") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") {
+		t.Errorf("session inject Use = %q; want a line starting \"Use this when\" that names the situation", e.Use)
+	}
+}
+
+// TestSessionInjectUseAddsNoRuleTheHelpLacks pins that the session inject Use
+// (gt-z96kdl) states only what the command's help states: inject is for file
+// or raw send-keys input and gt nudge sends messages. It adds no length rule.
+func TestSessionInjectUseAddsNoRuleTheHelpLacks(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("session inject")
+	if !ok {
+		t.Fatal(`Lookup("session inject") found no entry`)
+	}
+	for _, rule := range []string{"too long", "short"} {
+		if strings.Contains(e.Use, rule) {
+			t.Errorf("session inject Use = %q; it states the rule %q the help does not state", e.Use, rule)
+		}
+	}
+}

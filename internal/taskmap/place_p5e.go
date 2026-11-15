@@ -18,6 +18,6 @@ func init() {
 		Entry{Path: "session", Group: "seats", Use: "Use this when you need to start, stop, attach to, read or list a polecat's tmux session and have not yet chosen which session subcommand to run."},
 		Entry{Path: "session at", Group: "seats", Use: "Use this when you need to watch a polecat work live, or step in by hand, in its running session without stopping it.", Check: "the terminal shows the polecat's session, and Ctrl-B D detaches and leaves it running"},
 		Entry{Path: "session capture", Group: "seats", Use: "Use this when you want to see how far a polecat has got without disturbing its session, before you decide to nudge it or stop it.", Check: "the last 100 lines of the polecat's terminal output print, or the count you pass"},
-		Entry{Path: "session inject", Group: "seats", Use: "Use this only when a prompt is too long to send as a message or lives in a file that must be typed into a polecat's session; for a short message, use gt nudge instead.", Check: "gt session capture <rig>/<polecat> shows the injected text"},
+		Entry{Path: "session inject", Group: "seats", Use: "Use this when you need to type a file's contents, or raw tmux send-keys input, into a polecat's session; to send a message, use gt nudge instead.", Check: "gt session capture <rig>/<polecat> shows the injected text"},
 	)
 }
