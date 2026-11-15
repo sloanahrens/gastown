@@ -164,6 +164,10 @@ const (
 	// failure phase, so its seat name fails every sling drawn for it until the
 	// sandbox is deleted (gt-zapy97).
 	KindSeatSandboxStale Kind = "seat-sandbox-stale"
+	// KindStoryPointsDrift: the story point estimator's estimate no longer ranks
+	// landings the way the measured polecat time does, or the drift measure
+	// cannot be read (gt-my0o23).
+	KindStoryPointsDrift Kind = "storypoints-drift"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -182,6 +186,7 @@ func Kinds() []Kind {
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindUpdateRolledBack,
+		KindStoryPointsDrift,
 	}
 }
 

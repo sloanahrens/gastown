@@ -155,6 +155,12 @@ const (
 	// failure phase: every sling to the seat name it names fails until the
 	// sandbox is deleted (gt-zapy97).
 	RuleSeatSandboxStale = "sandbox.seat_stale"
+
+	// RuleStoryPointsDrift is the story point estimator's drift below its bar,
+	// and the measure that could not be read: the estimate no longer ranks
+	// landings the way the measured polecat time does, so dispatch planning
+	// reads a model that has moved (gt-my0o23).
+	RuleStoryPointsDrift = "storypoints.drift"
 )
 
 var (
@@ -262,6 +268,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A stale seat sandbox blocks its seat name for every sling: the overseer
 	// is woken to delete the sandbox and free the name (gt-zapy97).
 	RuleSeatSandboxStale: flagsWake,
+	// A drift item and its unreadable twin are the estimator's own calibration
+	// to look at, not a page: the next retrain is the fix, and the queue is
+	// where the overseer reads it (gt-my0o23).
+	RuleStoryPointsDrift: flagsAsk,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -375,6 +385,7 @@ var kindRules = map[Kind]string{
 	KindHoldStale:                RuleHoldStale,
 	KindSandboxPending:           RuleSandboxPending,
 	KindSeatSandboxStale:         RuleSeatSandboxStale,
+	KindStoryPointsDrift:         RuleStoryPointsDrift,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule
