@@ -475,6 +475,21 @@ func TestSwapRefusesToRecoverFromAConflictItCannotRead(t *testing.T) {
 			},
 			want: "a landed commit would be missed",
 		},
+		{
+			name: "the new main's tip is not a hash",
+			after: func(f *FakeExec) {
+				f.Respond(sqlMainTip, single("dolt_hashof('main')", "HEAD"))
+			},
+			want: "the new main's tip",
+		},
+		{
+			name: "a landed commit is not a hash",
+			after: func(f *FakeExec) {
+				f.Respond(sqlMainTip, single("dolt_hashof('main')", moved))
+				f.Respond(tailStatement(swapped, moved), tailRows("HEAD"))
+			},
+			want: "a commit in the new main's log",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -496,6 +511,38 @@ func TestSwapRefusesToRecoverFromAConflictItCannotRead(t *testing.T) {
 				t.Errorf("renames = %q, want %q: a read the run cannot trust never renames back", got, want)
 			}
 		})
+	}
+}
+
+// TestSwapStopsWhenTheRenameBackFails drives a rename-back statement that Dolt
+// refuses: the run stops with that error and reports no recovery it did not
+// complete, so the caller's item describes the branches as they actually are.
+func TestSwapStopsWhenTheRenameBackFails(t *testing.T) {
+	t.Parallel()
+	verified, swapped, oldTip := hash(verifiedCommit), hash(swappedCommit), hash(oldTipCommit)
+	c1 := hash(tailFirst)
+	refused := errors.New("the connection was closed")
+	sleep := &testSleeper{clk: newTestClock()}
+	f := swapFake(swapped, oldTip)
+	f.Respond(tailStatement(verified, oldTip), tailRows(c1))
+	f.Respond(pickStatement(c1), pickedWithConflicts())
+	f.Respond(sqlMainTip, single("dolt_hashof('main')", swapped))
+	// The conflict is the eighth statement, the tip read is the ninth, and the
+	// first rename back is the tenth.
+	f.FailAt(10, refused)
+
+	got, err := Swap(context.Background(), f, verified, sleep)
+	if !errors.Is(err, refused) {
+		t.Fatalf("Swap returned %v, want the injected error", err)
+	}
+	if want := "statement 10 (CALL DOLT_BRANCH('-m', '--force', 'main', 'compact-work'))"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not hold %q", err, want)
+	}
+	if got.RenamedBack {
+		t.Error("Swap reports a rename back it did not complete")
+	}
+	if got, want := branchStatements(f), append(slices.Clone(swapRenames), swapRenameBack[0]); !slices.Equal(got, want) {
+		t.Errorf("renames = %q, want %q: the run stopped at the first rename back", got, want)
 	}
 }
 
