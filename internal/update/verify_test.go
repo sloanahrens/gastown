@@ -3,19 +3,22 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
 
 const (
-	verifyTestWant    = "0123456789abcdef0123456789abcdef01234567" // a 40-character main sha
-	verifyTestShort   = "012345678"                                // the 9 characters gt version prints
-	verifyTestOld     = "fedcba987"                                // a build that is not the target
-	verifyTestImage   = "0123456"
-	verifyTestGreen   = "GREEN tick 2m ago"
-	verifyTestStart   = "2026-11-03T12:00:00Z"
-	verifyTestPoll    = 15 * time.Second
-	verifyTestTimeout = time.Minute
+	verifyTestWant         = "0123456789abcdef0123456789abcdef01234567" // a 40-character main sha
+	verifyTestShort        = "012345678"                                // the 9 characters gt version prints
+	verifyTestOld          = "fedcba987"                                // a build that is not the target
+	verifyTestImage        = "0123456"
+	verifyTestPolecat      = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	verifyTestOtherPolecat = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	verifyTestGreen        = "GREEN tick 2m ago"
+	verifyTestStart        = "2026-11-03T12:00:00Z"
+	verifyTestPoll         = 15 * time.Second
+	verifyTestTimeout      = time.Minute
 )
 
 // verifyAnswer is one DaemonVersion result.
@@ -66,6 +69,35 @@ func greenProbes() *fakeVerifyProbes {
 		image:  verifyTestShort,
 		health: verifyTestGreen,
 		daemon: []verifyAnswer{{version: verifyTestWant}},
+	}
+}
+
+// fakePairProbes is fakeVerifyProbes with the pair extension: the wanted
+// polecat digest and the two records the pair checks read.
+type fakePairProbes struct {
+	*fakeVerifyProbes
+	wantPolecat              string
+	annotation, devTag       string
+	errAnnotation, errDevTag error
+}
+
+func (p *fakePairProbes) WantPolecat() string { return p.wantPolecat }
+
+func (p *fakePairProbes) PolecatAnnotation(context.Context) (string, error) {
+	return p.annotation, p.errAnnotation
+}
+
+func (p *fakePairProbes) DevTagDigest(context.Context) (string, error) {
+	return p.devTag, p.errDevTag
+}
+
+// pairGreenProbes is every probe matching want and the pair on its digest.
+func pairGreenProbes() *fakePairProbes {
+	return &fakePairProbes{
+		fakeVerifyProbes: greenProbes(),
+		wantPolecat:      verifyTestPolecat,
+		annotation:       verifyTestPolecat,
+		devTag:           verifyTestPolecat,
 	}
 }
 
@@ -290,6 +322,105 @@ func TestVerifyProbeErrorIsAFailedCheck(t *testing.T) {
 	}
 }
 
+// verifyFourNames are the checks every probe set gets.
+var verifyFourNames = []string{checkGTVersion, checkDaemonVersion, checkImageLabel, checkHealth}
+
+// verifyPairNames are the checks a pair probe set gets, in order.
+var verifyPairNames = []string{
+	checkGTVersion, checkDaemonVersion, checkImageLabel, checkHealth,
+	checkPolecatAnnotation, checkDevTag,
+}
+
+func TestVerifyPairProbesAddsTwoChecks(t *testing.T) {
+	t.Parallel()
+	probes := pairGreenProbes()
+
+	checks := Verify(context.Background(), probes, verifyTestWant)
+
+	assertCheckNames(t, checks, verifyPairNames)
+	assertFailedChecks(t, checks)
+	for _, name := range []string{checkPolecatAnnotation, checkDevTag} {
+		if detail := findCheck(t, checks, name).Detail; detail != verifyTestPolecat {
+			t.Errorf("check %q detail = %q, want the polecat digest %q", name, detail, verifyTestPolecat)
+		}
+	}
+}
+
+func TestVerifyPairProbeFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*fakePairProbes)
+		failed []string
+		detail string
+	}{
+		{
+			name:   "annotation mismatch",
+			mutate: func(p *fakePairProbes) { p.annotation = verifyTestOtherPolecat },
+			failed: []string{checkPolecatAnnotation},
+			detail: fmt.Sprintf("got %q, want %q", verifyTestOtherPolecat, verifyTestPolecat),
+		},
+		{
+			name:   "dev tag mismatch",
+			mutate: func(p *fakePairProbes) { p.devTag = verifyTestOtherPolecat },
+			failed: []string{checkDevTag},
+			detail: fmt.Sprintf("got %q, want %q", verifyTestOtherPolecat, verifyTestPolecat),
+		},
+		{
+			name:   "annotation probe error",
+			mutate: func(p *fakePairProbes) { p.errAnnotation = errors.New("no polecat-image annotation") },
+			failed: []string{checkPolecatAnnotation},
+			detail: "no polecat-image annotation",
+		},
+		{
+			name:   "dev tag probe error",
+			mutate: func(p *fakePairProbes) { p.errDevTag = errors.New("the dev tag names no digest") },
+			failed: []string{checkDevTag},
+			detail: "the dev tag names no digest",
+		},
+		{
+			name:   "annotation is a prefix of the digest",
+			mutate: func(p *fakePairProbes) { p.annotation = verifyTestPolecat[:20] },
+			failed: []string{checkPolecatAnnotation},
+			detail: fmt.Sprintf("got %q, want %q", verifyTestPolecat[:20], verifyTestPolecat),
+		},
+		{
+			name:   "no wanted digest",
+			mutate: func(p *fakePairProbes) { p.wantPolecat = " " },
+			failed: []string{checkPolecatAnnotation, checkDevTag},
+			detail: "the pair named no polecat digest",
+		},
+		{
+			name:   "annotation carries a trailing newline",
+			mutate: func(p *fakePairProbes) { p.annotation = verifyTestPolecat + "\n" },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := pairGreenProbes()
+			tt.mutate(probes)
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertCheckNames(t, checks, verifyPairNames)
+			assertFailedChecks(t, checks, tt.failed...)
+			for _, name := range tt.failed {
+				if detail := findCheck(t, checks, name).Detail; detail != tt.detail {
+					t.Errorf("check %q detail = %q, want %q", name, detail, tt.detail)
+				}
+			}
+		})
+	}
+}
+
+func TestVerifyWithoutPairProbesChecksFour(t *testing.T) {
+	t.Parallel()
+	checks := Verify(context.Background(), greenProbes(), verifyTestWant)
+
+	assertCheckNames(t, checks, verifyFourNames)
+}
+
 func TestSameCommit(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -329,6 +460,35 @@ func assertOnlyFailed(t *testing.T, checks []Check, failed string) {
 	for _, check := range checks {
 		if wantOK := check.Name != failed; check.OK != wantOK {
 			t.Errorf("check %q OK = %v, want %v (detail: %s)", check.Name, check.OK, wantOK, check.Detail)
+		}
+	}
+}
+
+// assertCheckNames requires checks to name exactly want, in order.
+func assertCheckNames(t *testing.T, checks []Check, want []string) {
+	t.Helper()
+	if len(checks) != len(want) {
+		t.Fatalf("got %d checks, want %d", len(checks), len(want))
+	}
+	for i, name := range want {
+		if checks[i].Name != name {
+			t.Errorf("check %d is %q, want %q", i, checks[i].Name, name)
+		}
+	}
+}
+
+// assertFailedChecks requires exactly the named checks to fail and every other
+// check to pass.
+func assertFailedChecks(t *testing.T, checks []Check, failed ...string) {
+	t.Helper()
+	wantFail := make(map[string]bool, len(failed))
+	for _, name := range failed {
+		wantFail[name] = true
+		findCheck(t, checks, name)
+	}
+	for _, check := range checks {
+		if check.OK == wantFail[check.Name] {
+			t.Errorf("check %q OK = %v, want %v (detail: %s)", check.Name, check.OK, !wantFail[check.Name], check.Detail)
 		}
 	}
 }
