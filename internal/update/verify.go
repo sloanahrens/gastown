@@ -137,7 +137,10 @@ func digestCheck(ctx context.Context, name string, probe func(context.Context) (
 // the oldest open escalation is (escalation=oldest_2h, its value as
 // internal/townhealth renders it). The key list and the values are the ones the
 // town writes — the three person labels of internal/townhealth's personFields
-// and its escalation field — and a reason outside them fails.
+// and its escalation field — and a reason outside them fails. The escalation
+// key is the singular townhealth.FieldEscalation, which is what the town
+// renders (escalation=oldest_2h); a plural spelling is not a key the town
+// writes and is refused (gt-dp3bbv).
 var queueReasons = map[string]func(string) bool{
 	"needs-overseer": isCount,
 	"needs-operator": isCount,

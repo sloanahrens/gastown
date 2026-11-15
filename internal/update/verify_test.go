@@ -407,6 +407,26 @@ func TestVerifyHealthPassesTheLineTheTownRenders(t *testing.T) {
 			},
 			reason: "needs-operator=2",
 		},
+		{
+			name: "bead waiting on the overseer",
+			field: townhealth.Field{
+				Name:    townhealth.FieldNeedsOverseer,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "1",
+			},
+			reason: "needs-overseer=1",
+		},
+		{
+			name: "bead waiting on a human",
+			field: townhealth.Field{
+				Name:    townhealth.FieldNeedsHuman,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "3",
+			},
+			reason: "needs-human=3",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
