@@ -233,6 +233,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 		".runtime/wren/reports/index.html": "<html></html>\n",
 		"gastown/witness/state.json":       `{"w":"1"}`,
 		"gastown/refinery/state.json":      `{"r":"1"}`,
+		// A retired rig clone the town has not removed yet: the manifest carries no
+		// row for it (gt-3lvcjz.26), so it is neither exported nor imported.
+		"gastown/mayor/rig/README.md": "a retired clone\n",
 	}
 	for rel, content := range untouched {
 		writeStateFile(t, town, rel, content, 0o644)
@@ -257,7 +260,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 			t.Errorf("summary does not name %q:\n%s", want, printed)
 		}
 	}
-	for _, name := range []string{"settings/config.json", "gastown/crew/eagle/notes.md", ".runtime/wren/notes.txt", "gastown/.git/HEAD", ".beads/.dolt-data/config.yaml", "logs/pipe", "logs/daemon.sock", "daemon/state.lock"} {
+	for _, name := range []string{"settings/config.json", "gastown/crew/eagle/notes.md", ".runtime/wren/notes.txt", "gastown/.git/HEAD", ".beads/.dolt-data/config.yaml", "logs/pipe", "logs/daemon.sock", "daemon/state.lock", "gastown/mayor/rig/README.md"} {
 		for _, got := range archiveNames(t, stream.Bytes()) {
 			if got == name || strings.HasPrefix(got, name+"/") {
 				t.Errorf("the archive carries %q, which the export must leave out", got)
