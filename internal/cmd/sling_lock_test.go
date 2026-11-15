@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -168,14 +170,22 @@ func TestTryAcquireSlingAssigneeLock_WritesAndRemovesTheHolderRecord(t *testing.
 		t.Fatalf("reading the holder record: %v", err)
 	}
 	fields := strings.Fields(string(data))
-	if len(fields) != 4 || fields[0] != "pid" || fields[2] != "started" {
-		t.Fatalf("holder record = %q, want \"pid <pid> started <RFC3339>\"", data)
+	if (len(fields) != 4 && len(fields) != 6) || fields[0] != "pid" || fields[2] != "started" {
+		t.Fatalf("holder record = %q, want \"pid <pid> started <RFC3339>\" and, where the kernel gives one, \" token <token>\"", data)
 	}
 	if fields[1] != strconv.Itoa(os.Getpid()) {
 		t.Errorf("holder record = %q, want this process's pid %d", data, os.Getpid())
 	}
 	if _, err := time.Parse(time.RFC3339, fields[3]); err != nil {
 		t.Errorf("holder record = %q, want its start time to be RFC3339: %v", data, err)
+	}
+	token, tokenOK := procid.StartToken(os.Getpid())
+	if tokenOK {
+		if len(fields) != 6 || fields[4] != "token" || fields[5] != token {
+			t.Errorf("holder record = %q, want \"token %s\" from the kernel", data, token)
+		}
+	} else if len(fields) != 4 {
+		t.Errorf("holder record = %q, want no token: this kernel will not give one", data)
 	}
 
 	release()
@@ -229,7 +239,8 @@ func TestTryAcquireSlingAssigneeLock_TimeoutNamesTheHolder(t *testing.T) {
 // A holder record the timeout cannot use is described on the timeout, never
 // fatal to it and never echoed: the file is written by another process, so its
 // bytes are not trusted enough to print. A record naming another holder is read
-// as written.
+// as written, and a record naming a process that is gone is described as stale
+// rather than reported as the holder.
 func TestTryAcquireSlingAssigneeLock_TimeoutDescribesAnUnusableHolderRecord(t *testing.T) {
 	t.Parallel()
 
@@ -239,7 +250,13 @@ func TestTryAcquireSlingAssigneeLock_TimeoutDescribesAnUnusableHolderRecord(t *t
 		name string
 		// write replaces the holder's record before the waiter asks for it.
 		write func(t *testing.T, recordPath string)
-		want  string
+		// gone is the probe's answer for a pid's existence; nil means no pid
+		// is gone.
+		gone func(pid int) bool
+		// startToken is the probe's answer for a pid's start token; nil means
+		// the kernel will not say.
+		startToken func(pid int) (string, bool)
+		want       string
 		// notWant is text the recorded file holds and the error must not echo.
 		notWant string
 	}{
@@ -249,6 +266,46 @@ func TestTryAcquireSlingAssigneeLock_TimeoutDescribesAnUnusableHolderRecord(t *t
 				writeHolderRecord(t, p, "pid 4242 started 2026-11-15T11:05:03Z\n")
 			},
 			want: "held by pid 4242 started 2026-11-15T11:05:03Z",
+		},
+		{
+			name: "a killed sling's record",
+			write: func(t *testing.T, p string) {
+				writeHolderRecord(t, p, "pid 4242 started 2026-11-15T11:05:03Z\n")
+			},
+			gone:    func(pid int) bool { return pid == 4242 },
+			want:    "no current holder recorded: the holder sidecar names pid 4242 started 2026-11-15T11:05:03Z, which is no longer running",
+			notWant: "held by pid 4242",
+		},
+		{
+			name: "a record whose pid the kernel has reused",
+			write: func(t *testing.T, p string) {
+				writeHolderRecord(t, p, "pid 4242 started 2026-11-15T11:05:03Z token 777\n")
+			},
+			startToken: func(pid int) (string, bool) { return "888", true },
+			want:       "no current holder recorded: the holder sidecar names pid 4242 started 2026-11-15T11:05:03Z, and that pid now names another process",
+			notWant:    "held by pid 4242",
+		},
+		{
+			name: "a record whose start token still matches",
+			write: func(t *testing.T, p string) {
+				writeHolderRecord(t, p, "pid 4242 started 2026-11-15T11:05:03Z token 777\n")
+			},
+			startToken: func(pid int) (string, bool) { return "777", true },
+			want:       "held by pid 4242 started 2026-11-15T11:05:03Z",
+		},
+		{
+			name: "a token this kernel will not check",
+			write: func(t *testing.T, p string) {
+				writeHolderRecord(t, p, "pid 4242 started 2026-11-15T11:05:03Z token 777\n")
+			},
+			want: "held by pid 4242 started 2026-11-15T11:05:03Z",
+		},
+		{
+			name: "a six-field record with no token",
+			write: func(t *testing.T, p string) {
+				writeHolderRecord(t, p, "pid 4242 started 2026-11-15T11:05:03Z holds 777\n")
+			},
+			want: "no holder recorded: the holder sidecar is not a holder record",
 		},
 		{
 			name: "missing",
@@ -293,7 +350,16 @@ func TestTryAcquireSlingAssigneeLock_TimeoutDescribesAnUnusableHolderRecord(t *t
 			defer holder()
 			tt.write(t, filepath.Join(townRoot, ".runtime", "locks", "sling", recordName))
 
-			_, err = tryAcquireSlingAssigneeLockWith(townRoot, agent, func(time.Duration) {})
+			gone := tt.gone
+			if gone == nil {
+				gone = func(int) bool { return false }
+			}
+			startToken := tt.startToken
+			if startToken == nil {
+				startToken = func(int) (string, bool) { return "", false }
+			}
+			probe := holderProbe{gone: gone, startToken: startToken}
+			_, err = tryAcquireSlingAssigneeLockUsing(townRoot, agent, func(time.Duration) {}, probe)
 			if err == nil {
 				t.Fatal("a lock held throughout must not be acquired")
 			}
@@ -304,9 +370,93 @@ func TestTryAcquireSlingAssigneeLock_TimeoutDescribesAnUnusableHolderRecord(t *t
 				t.Errorf("error = %v, want it to say %q", err, tt.want)
 			}
 			if tt.notWant != "" && strings.Contains(err.Error(), tt.notWant) {
-				t.Errorf("error = %v echoes the record's own text; a record the reader cannot parse must be described, not printed", err)
+				t.Errorf("error = %v must not say %q: the record is described from its parsed fields, never echoed or reported as the holder", err, tt.notWant)
 			}
 		})
+	}
+}
+
+// holderGone answers from a signal-0 probe, so only "no such process" reads as
+// gone: a live process this user may not signal, or an answer the probe does
+// not recognize, must never make a current holder look stale.
+func TestHolderGoneAfter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"process exists", nil, false},
+		{"no such process", syscall.ESRCH, true},
+		{"no such process, wrapped", fmt.Errorf("probe: %w", syscall.ESRCH), true},
+		{"the process already ended", os.ErrProcessDone, true},
+		{"exists under another uid", syscall.EPERM, false},
+		{"an error the probe does not recognize", syscall.EINVAL, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := holderGoneAfter(tt.err); got != tt.want {
+				t.Errorf("holderGoneAfter(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// The real probe is pinned against processes it can see: this one, and pid 1,
+// which is alive and owned by root (EPERM for an ordinary user). A non-positive
+// pid names no one process, so it is never gone.
+func TestHolderGone(t *testing.T) {
+	t.Parallel()
+
+	if holderGone(os.Getpid()) {
+		t.Error("holderGone(self) = true")
+	}
+	if holderGone(1) {
+		t.Error("holderGone(1) = true: a process this user cannot signal is not gone")
+	}
+	if holderGone(0) || holderGone(-1) {
+		t.Error("holderGone of a non-positive pid = true")
+	}
+}
+
+// The record is replaced by a rename, so a write that cannot land leaves the
+// record that was there: a waiter never reads a half-written record, and never
+// loses the last holder's clue either.
+func TestWriteAssigneeLockHolder_KeepsThePreviousRecordWhenTheWriteFails(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "assignee_gastown_polecats_atomic.holder")
+	const previous = "pid 4242 started 2026-11-15T11:05:03Z\n"
+	writeHolderRecord(t, path, previous)
+
+	// A directory where the temporary record goes: nothing can be written.
+	if err := os.Mkdir(path+".tmp", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAssigneeLockHolder(path); err == nil {
+		t.Fatal("writeAssigneeLockHolder succeeded, want the un-writable temporary name to fail it")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the record after the failed write: %v", err)
+	}
+	if string(data) != previous {
+		t.Errorf("record = %q after a failed write, want the previous record intact", data)
+	}
+
+	if err := os.Remove(path + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAssigneeLockHolder(path); err != nil {
+		t.Fatalf("writing the record: %v", err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("the write left its temporary record behind (stat err %v)", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), "pid "+strconv.Itoa(os.Getpid())) {
+		t.Errorf("record = %q (err %v), want it to name this process", data, err)
 	}
 }
 
@@ -389,8 +539,9 @@ func TestAssigneeLockHolderRecordGoesWhenTheSlingFails(t *testing.T) {
 
 // The dispatcher's deferral line carries the holder text: the line prints the
 // sling's error, so the holder the timeout names is what an operator reading
-// the tick's output sees.
-func TestSpecDeferralLineCarriesTheLockHolder(t *testing.T) {
+// the tick's output sees. The name keeps the assignee lock's token, so a gate
+// run filtered on -run 'AssigneeLock|SlingLock' selects it (gt-7wb572).
+func TestSpecDeferralLineCarriesTheAssigneeLockHolder(t *testing.T) {
 	t.Parallel()
 
 	const agent = "gastown/polecats/sbx-flash-1"
@@ -495,8 +646,10 @@ func TestSlingLocks_ReleaseRemovesSentinelFile(t *testing.T) {
 // goes while the flock is still held, so a waiter that opened the file before
 // the unlink finds the name gone and reopens (gt-xtfnq; the reopen itself is
 // pinned in internal/lock). Unlocking first would let a waiter lock the old
-// inode and then lose its name to this unlink.
-func TestUnlinkThenUnlock_RemovesTheNameBeforeTheLockDrops(t *testing.T) {
+// inode and then lose its name to this unlink. The name keeps the sling lock's
+// token, so a gate run filtered on -run 'AssigneeLock|SlingLock' selects it
+// (gt-7wb572).
+func TestSlingLockUnlinkThenUnlock_RemovesTheNameBeforeTheLockDrops(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "gt-race-unlink.flock")
