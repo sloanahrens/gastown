@@ -112,7 +112,7 @@ func TestOverrunSandboxGoneErrorStopKeepsTheSandboxAndHoldsTheBead(t *testing.T)
 
 // TestOverrunSandboxGoneErrorBranchNotABranchNameIsRefusedFirst: the in-sandbox
 // runner cannot tell a branch from another argument, so a branch that fails the
-// rule session.validCloneBranch applies is refused before any git call reaches
+// rule session.ValidCloneBranch applies is refused before any git call reaches
 // the sandbox.
 func TestOverrunSandboxGoneErrorBranchNotABranchNameIsRefusedFirst(t *testing.T) {
 	t.Parallel()

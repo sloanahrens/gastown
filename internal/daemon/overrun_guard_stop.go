@@ -8,7 +8,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -1182,7 +1181,7 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 	// branch name it would be handed is refused here, before any git call runs
 	// in the sandbox. An empty branch is not refused: the save reads it from
 	// the clone itself, which answers a name git made.
-	if seat.Branch != "" && !overrunCloneBranchValid(seat.Branch) {
+	if seat.Branch != "" && !session.ValidCloneBranch(seat.Branch) {
 		return nil, false, fmt.Errorf("sandbox %s: branch %q is not a branch name, so the seat's work cannot be pushed", sb.Session, seat.Branch)
 	}
 	rec := sb.Record
@@ -1204,19 +1203,6 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
 	}
 	return labelOverrunSandboxGit(git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath())), true, nil
-}
-
-// overrunCloneBranch is a branch name the in-sandbox runner can be handed: a
-// letter or digit first, then only name characters.
-var overrunCloneBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
-
-// overrunCloneBranchValid reports whether name may be handed to the in-sandbox
-// runner as a branch. It is the rule session.validCloneBranch applies to the
-// branch its own push uses, which the session package keeps unexported; the
-// guard applies it because the runner has no way to tell a branch from another
-// argument.
-func overrunCloneBranchValid(name string) bool {
-	return overrunCloneBranch.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // validSandboxCloneDir reports whether dir can be handed to the in-sandbox
