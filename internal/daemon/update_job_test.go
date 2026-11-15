@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -49,6 +50,10 @@ type fakeUpdateJob struct {
 	// when set, is what a list returns instead.
 	active  []string
 	listErr error
+	// existsCalls records the Job names the daemon asked the cluster about; jobGetErr,
+	// when set, is what every existence read returns instead.
+	existsCalls []string
+	jobGetErr   error
 }
 
 func (f *fakeUpdateJob) ActiveJobs(context.Context) ([]string, error) {
@@ -56,6 +61,15 @@ func (f *fakeUpdateJob) ActiveJobs(context.Context) ([]string, error) {
 		return nil, f.listErr
 	}
 	return f.active, nil
+}
+
+func (f *fakeUpdateJob) JobExists(_ context.Context, name string) (bool, error) {
+	f.existsCalls = append(f.existsCalls, name)
+	if f.jobGetErr != nil {
+		return false, f.jobGetErr
+	}
+	_, ok := f.made[name]
+	return ok, nil
 }
 
 func (f *fakeUpdateJob) CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error {
@@ -481,6 +495,69 @@ func TestUpdateJobExistingPairIsNotDueAgain(t *testing.T) {
 	}
 }
 
+// TestUpdateJobRemovedFromTheClusterIsDueAgain: the record that a pair's Job
+// exists is checked against the cluster, since the roll's Job carries a TTL after
+// it finishes and an operator can delete it. A pair whose Job has left the
+// cluster is due again: no Job in the cluster is no evidence the roll ran.
+func TestUpdateJobRemovedFromTheClusterIsDueAgain(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	green := r.commits[2]
+	name := "gt-update-" + green[:12]
+	r.pairFor(t, green, true, true)
+
+	r.d.triggerUpdate()
+	require.Equal(t, []string{name}, r.cluster.calls, "the patrol did not create the pair's Job")
+	require.NotContains(t, r.logs.String(), "already ran", "a created Job was reported not due")
+
+	// The cluster drops the Job: the sweep after ttlSecondsAfterFinished, or an
+	// operator's delete.
+	delete(r.cluster.made, name)
+	r.clock.Advance(updateLaunchSuppression + time.Minute)
+	r.d.triggerUpdate()
+
+	assert.Equal(t, []string{name, name}, r.cluster.calls, "a pair whose Job left the cluster was held not due")
+	assert.Equal(t, []string{name}, r.cluster.existsCalls, "the recorded Job was not read from the cluster")
+	assert.Equal(t, 2, strings.Count(r.logs.String(), "created Job "+name), "the removed Job was not created again")
+}
+
+// TestUpdateJobJobReadFailureHoldsTheRoll: a recorded Job the cluster cannot be
+// asked about is not taken as gone. The cycle holds with a reason naming the
+// read, and the pair is not launched.
+func TestUpdateJobJobReadFailureHoldsTheRoll(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	green := r.commits[2]
+	name := "gt-update-" + green[:12]
+	r.pairFor(t, green, true, true)
+
+	r.d.triggerUpdate()
+	require.Equal(t, []string{name}, r.cluster.calls, "the patrol did not create the pair's Job")
+
+	r.cluster.jobGetErr = errors.New("kubectl cannot get jobs")
+	r.clock.Advance(updateLaunchSuppression + time.Minute)
+	r.d.triggerUpdate()
+
+	assert.Equal(t, []string{name}, r.cluster.calls, "a pair was launched without the recorded Job's read")
+	assert.Contains(t, r.logs.String(),
+		"not due — the update Job for "+green[:12]+" cannot be read: kubectl cannot get jobs; not starting a roll")
+}
+
+// TestUpdateJobPresentRefusesNoClient: the existence read refuses a daemon with
+// no cluster client instead of calling into a nil one. The roll hold refuses the
+// same daemon before this read runs, so the guard is exercised here directly.
+func TestUpdateJobPresentRefusesNoClient(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.d.updateJob = nil
+
+	held, err := r.d.updateJobPresent(r.commits[2])
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no cluster client is wired into this daemon")
+	assert.False(t, held)
+}
+
 // TestUpdateJobNewerPairLaunchesItsOwnJob: the recorded pair stays quiet only
 // while it is the roll's target. A newer pair-ready commit is a new roll, so its
 // own Job is created.
@@ -786,6 +863,48 @@ func TestKubectlUpdateJobMapsTheAnswer(t *testing.T) {
 				assert.ErrorIs(t, err, tt.wantErr)
 				return
 			}
+			if tt.wantMsg == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMsg)
+			assert.NotContains(t, err.Error(), "secret-token", "kubectl's output reached the error")
+		})
+	}
+}
+
+// TestKubectlUpdateJobJobExists: the named Job is read from the update
+// namespace. kubectl's NotFound answer is the Job being gone; any other refusal is
+// an error naming the exit, and no refusal echoes kubectl's output.
+func TestKubectlUpdateJobJobExists(t *testing.T) {
+	t.Parallel()
+	const name = "gt-update-abcdef012345"
+	tests := []struct {
+		name    string
+		out     string
+		exit    int
+		runErr  error
+		want    bool
+		wantMsg string
+	}{
+		{name: "the Job is in the cluster", out: "job.batch/" + name, exit: 0, want: true},
+		{name: "the Job is gone", out: `Error from server (NotFound): jobs.batch "` + name + `" not found`, exit: 1},
+		{name: "a refusal", out: "boom secret-token", exit: 1, wantMsg: "kubectl get job " + name + " exited 1"},
+		{name: "a read that cannot run", runErr: errors.New("no kubectl"), wantMsg: "running kubectl get job " + name},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var gotArgs []string
+			run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				gotArgs = args
+				return tt.out, tt.exit, tt.runErr
+			}
+			got, err := kubectlUpdateJob{dir: t.TempDir(), run: run}.JobExists(context.Background(), name)
+
+			assert.Equal(t, []string{"get", "job", name, "-n", updatejob.DefaultNamespace}, gotArgs)
+			assert.Equal(t, tt.want, got)
 			if tt.wantMsg == "" {
 				assert.NoError(t, err)
 				return

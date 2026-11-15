@@ -63,6 +63,10 @@ type updateJobClient interface {
 	CreateJob(ctx context.Context, name string, manifest []byte, requestTimeout time.Duration) error
 	// ActiveJobs names the update Jobs the cluster has not yet seen finish.
 	ActiveJobs(ctx context.Context) ([]string, error)
+	// JobExists reports whether the cluster still holds the Job name. The Job a
+	// finished roll leaves carries ttlSecondsAfterFinished, so a recorded Job can
+	// be gone; a create would then succeed again.
+	JobExists(ctx context.Context, name string) (bool, error)
 }
 
 // updateJobEncoder writes a rendered object as YAML. Production is
@@ -176,6 +180,26 @@ func (k kubectlUpdateJob) ActiveJobs(ctx context.Context) ([]string, error) {
 		active = append(active, j.Metadata.Name)
 	}
 	return active, nil
+}
+
+// JobExists reports whether the cluster still holds the Job name. kubectl's
+// NotFound answer is the Job being gone, which is not an error: the sweep after
+// ttlSecondsAfterFinished removes a finished Job, and an operator may delete one.
+// Any other nonzero exit, or a run that cannot start, is an error, so a read the
+// daemon cannot make never passes as gone. kubectl's answer is read by its shape
+// only; its output is not echoed.
+func (k kubectlUpdateJob) JobExists(ctx context.Context, name string) (bool, error) {
+	out, exit, err := k.run(ctx, "", nil, "kubectl", "get", "job", name, "-n", updatejob.DefaultNamespace)
+	if err != nil {
+		return false, fmt.Errorf("running kubectl get job %s: %w", name, err)
+	}
+	if exit == 0 {
+		return true, nil
+	}
+	if strings.Contains(out, "NotFound") {
+		return false, nil
+	}
+	return false, fmt.Errorf("kubectl get job %s exited %d", name, exit)
 }
 
 // updateJobName is the Job name for the green commit sha.
@@ -375,10 +399,21 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 	}
 	// The Job outlives the roll it ran: a partial roll leaves the running values
 	// naming the same pair, so without this every window asks for a Job the
-	// cluster already holds and logs a roll that keeps starting.
+	// cluster already holds and logs a roll that keeps starting. The record is
+	// checked against the cluster first: the sweep after ttlSecondsAfterFinished
+	// (or an operator's delete) can take the Job away, and a Job that is gone is
+	// no evidence the roll ran, so the pair is due again.
 	if d.updateJobKnownExists(sha) {
-		d.noteUpdateNotDue(updateJobAlreadyRan(sha))
-		return
+		held, err := d.updateJobPresent(sha)
+		if err != nil {
+			d.noteUpdateNotDue(fmt.Sprintf("the update Job for %s cannot be read: %v; not starting a roll", greenRefShortSHA(sha), err))
+			return
+		}
+		if held {
+			d.noteUpdateNotDue(updateJobAlreadyRan(sha))
+			return
+		}
+		d.forgetUpdateJobExists(sha)
 	}
 	d.clearUpdateNotDue()
 	if d.updateJobBackingOff(now) {
@@ -592,4 +627,28 @@ func (d *Daemon) noteUpdateJobExists(sha string) {
 	d.updateTrigger.mu.Lock()
 	d.updateTrigger.jobExistsFor = sha
 	d.updateTrigger.mu.Unlock()
+}
+
+// forgetUpdateJobExists drops the record for sha once the cluster no longer holds
+// its Job, so the pair is due again. A record for another sha is left alone, since
+// this read says nothing about it.
+func (d *Daemon) forgetUpdateJobExists(sha string) {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	if d.updateTrigger.jobExistsFor == sha {
+		d.updateTrigger.jobExistsFor = ""
+	}
+}
+
+// updateJobPresent reports whether the cluster still holds the Job for sha, under
+// the same bound as a create. A read that fails is an error, so a recorded Job is
+// dropped only when the cluster says it is gone: a cluster the daemon cannot ask
+// holds the pair rather than passing as absent.
+func (d *Daemon) updateJobPresent(sha string) (bool, error) {
+	if d.updateJob == nil {
+		return false, errors.New("no cluster client is wired into this daemon")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d.updateJobBound())
+	defer cancel()
+	return d.updateJob.JobExists(ctx, updateJobName(sha))
 }
