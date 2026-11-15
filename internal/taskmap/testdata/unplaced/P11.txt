@@ -1,8 +1,3 @@
-crew restart
-crew stale
-crew start
-crew status
-crew stop
 crew worktree
 dolt
 dolt archive-now
