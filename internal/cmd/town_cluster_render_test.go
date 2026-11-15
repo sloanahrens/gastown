@@ -556,7 +556,7 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 }
 
 // errClusterRenderBuildStopped is what the recording build step of
-// TestClusterRenderValuesBuildsWhatTheRenderBuilds returns, so the render stops
+// TestTownClusterRenderValuesMatchWhatTheRenderBuilds returns, so the render stops
 // after the Values it hands over and before any write.
 var errClusterRenderBuildStopped = errors.New("the test stopped the render at its build step")
 
@@ -583,12 +583,13 @@ func clusterRenderBaseValues(t *testing.T) k8sdaemon.Values {
 	}
 }
 
-// TestClusterRenderValuesBuildsWhatTheRenderBuilds holds the Values the render
+// TestTownClusterRenderValuesMatchWhatTheRenderBuilds holds the Values the render
 // hands its build step to the flag sets that change them: the dashboard, the
 // tracker, the daemon's bd gateway and a rehearsal for the live-only fields.
 // clusterRenderValues returns the same Values and image pair the render passes
-// on, so the two cannot drift while both are built.
-func TestClusterRenderValuesBuildsWhatTheRenderBuilds(t *testing.T) {
+// on, and the town root the render's Secret lines and values file are built
+// against, so the two cannot drift while both are built.
+func TestTownClusterRenderValuesMatchWhatTheRenderBuilds(t *testing.T) {
 	t.Parallel()
 	trackerImage := "registry.example.test/gastown/tracker-backup@sha256:" + strings.Repeat("2", 64)
 	tests := []struct {
@@ -696,12 +697,15 @@ func TestClusterRenderValuesBuildsWhatTheRenderBuilds(t *testing.T) {
 			if !reflect.DeepEqual(built, want) {
 				t.Fatalf("the render built %+v, want %+v", built, want)
 			}
-			got, pair, err := clusterRenderValues(d, f, func() (string, error) { return town, nil })
+			got, pair, gotTown, err := clusterRenderValues(d, f, func() (string, error) { return town, nil })
 			if err != nil {
 				t.Fatalf("clusterRenderValues: %v", err)
 			}
 			if !reflect.DeepEqual(got, built) {
 				t.Errorf("clusterRenderValues returned %+v, but the render built %+v for the same flags", got, built)
+			}
+			if gotTown != town {
+				t.Errorf("clusterRenderValues returned the town root %q, want the %q it read", gotTown, town)
 			}
 			wantPair := imagevalues.Values{
 				Daemon:  clusterRenderDaemonDigest,
@@ -710,6 +714,138 @@ func TestClusterRenderValuesBuildsWhatTheRenderBuilds(t *testing.T) {
 			}
 			if !reflect.DeepEqual(pair, wantPair) {
 				t.Errorf("clusterRenderValues returned the pair %+v, want %+v", pair, wantPair)
+			}
+		})
+	}
+}
+
+// TestTownClusterRenderValuesRefuseAnUnreadableInput drives each refusal
+// clusterRenderValues makes on its own: an image pair, town, environment or
+// manifest it cannot read, a manifest it refuses, a dashboard without its
+// viewer entry, and a cloud-check key or hm config whose presence it cannot
+// answer. Each returns the error and no Values, no pair and no town root.
+func TestTownClusterRenderValuesRefuseAnUnreadableInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		dashboard bool
+		mutate    func(t *testing.T, f *clusterRenderFlags, d *clusterRenderDeps, town string)
+		cause     string
+	}{
+		{
+			name: "the image values do not parse",
+			mutate: func(t *testing.T, f *clusterRenderFlags, _ *clusterRenderDeps, _ string) {
+				if err := os.WriteFile(imagevalues.PathIn(f.dir), []byte("daemon: [\n"), 0o600); err != nil {
+					t.Fatalf("writing a corrupt values file: %v", err)
+				}
+			},
+			cause: "reading the image values",
+		},
+		{
+			name: "the repo holds no image pair",
+			mutate: func(t *testing.T, f *clusterRenderFlags, _ *clusterRenderDeps, _ string) {
+				if err := os.Remove(imagevalues.PathIn(f.dir)); err != nil {
+					t.Fatalf("removing the values file: %v", err)
+				}
+			},
+			cause: "holds no image pair",
+		},
+		{
+			name: "the town cannot be found",
+			mutate: func(_ *testing.T, _ *clusterRenderFlags, d *clusterRenderDeps, _ string) {
+				d.findTown = failing("no town")
+			},
+			cause: "no town",
+		},
+		{
+			name: "the town's daemon.env cannot be read",
+			mutate: func(_ *testing.T, _ *clusterRenderFlags, d *clusterRenderDeps, _ string) {
+				d.containerEnv = func(string) (map[string]string, error) { return nil, errors.New("unreadable") }
+			},
+			cause: "reading the town's daemon.env",
+		},
+		{
+			name: "the secrets manifest cannot be read",
+			mutate: func(_ *testing.T, f *clusterRenderFlags, d *clusterRenderDeps, _ string) {
+				manifest := filepath.Join(f.dir, secretsManifestRelPath)
+				d.readFile = func(path string) ([]byte, error) {
+					if path == manifest {
+						return nil, errors.New("unreadable")
+					}
+					return os.ReadFile(path)
+				}
+			},
+			cause: "reading the secrets manifest",
+		},
+		{
+			name: "the secrets manifest is refused",
+			mutate: func(t *testing.T, f *clusterRenderFlags, _ *clusterRenderDeps, _ string) {
+				writeClusterRenderManifest(t, f.dir, "files:\n  - name: forgejo-landing.env\n    consumer: \"x\"\n    mode: \"0644\"\n    required: true\n")
+			},
+			cause: "is refused",
+		},
+		{
+			name:      "the dashboard has no viewer token entry",
+			dashboard: true,
+			mutate: func(t *testing.T, f *clusterRenderFlags, _ *clusterRenderDeps, _ string) {
+				writeClusterRenderManifest(t, f.dir, "files:\n  - name: om-daemon-token\n    consumer: \"x\"\n    mode: \"0600\"\n    required: true\n")
+			},
+			cause: "needs the forgejo-viewer.env entry",
+		},
+		{
+			name: "the cloud check's key file cannot be read",
+			mutate: func(_ *testing.T, f *clusterRenderFlags, d *clusterRenderDeps, _ string) {
+				key := filepath.Join(f.configDir, k8sdaemon.CloudCheckKeyFile)
+				d.lstat = func(path string) (fs.FileInfo, error) {
+					if path == key {
+						return nil, errors.New("permission denied")
+					}
+					return os.Lstat(path)
+				}
+			},
+			cause: "the cloud check's key file",
+		},
+		{
+			name: "the derived hm config cannot be read",
+			mutate: func(_ *testing.T, _ *clusterRenderFlags, d *clusterRenderDeps, town string) {
+				derived := filepath.Join(town, filepath.FromSlash(k8sdaemon.HMConfigSource))
+				d.lstat = func(path string) (fs.FileInfo, error) {
+					if path == derived {
+						return nil, errors.New("permission denied")
+					}
+					return os.Lstat(path)
+				}
+			},
+			cause: "the derived hm config",
+		},
+		{
+			name: "the derived hm config is absent",
+			mutate: func(t *testing.T, _ *clusterRenderFlags, _ *clusterRenderDeps, town string) {
+				derived := filepath.Join(town, filepath.FromSlash(k8sdaemon.HMConfigSource))
+				if err := os.Remove(derived); err != nil {
+					t.Fatalf("removing the derived hm config: %v", err)
+				}
+			},
+			cause: "is absent at",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			f.dashboard = tt.dashboard
+			town := clusterRenderTestTown(t)
+			d := clusterRenderDepsAt(t, town, io.Discard)
+			tt.mutate(t, &f, &d, town)
+			v, pair, root, err := clusterRenderValues(d, f, d.findTown)
+			if err == nil {
+				t.Fatalf("clusterRenderValues succeeded, want a refusal naming %q", tt.cause)
+			}
+			if !strings.Contains(err.Error(), tt.cause) {
+				t.Fatalf("refusal = %q, want it to name %q", err, tt.cause)
+			}
+			if !reflect.DeepEqual(v, k8sdaemon.Values{}) || !reflect.DeepEqual(pair, imagevalues.Values{}) || root != "" {
+				t.Errorf("a refused read returned Values %+v, pair %+v and root %q, want none", v, pair, root)
 			}
 		})
 	}
