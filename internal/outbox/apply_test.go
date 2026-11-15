@@ -117,6 +117,22 @@ func TestApply(t *testing.T) {
 				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n  - [x] its nested criterion"},
 			},
 		},
+		{
+			name:       "a fence that never closes hides no box, as AcceptanceItems reads it",
+			acceptance: "- [ ] the first criterion\n```\n- [ ] the second criterion",
+			result:     Result{Ticked: []int{1}},
+			want: []storeCall{
+				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n```\n- [x] the second criterion"},
+			},
+		},
+		{
+			name:       "an unboxed item between boxes shifts no tick index",
+			acceptance: "- [ ] the first criterion\n- the middle criterion, with no box\n- [ ] the third criterion",
+			result:     Result{Ticked: []int{1}},
+			want: []storeCall{
+				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first criterion\n- the middle criterion, with no box\n- [x] the third criterion"},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

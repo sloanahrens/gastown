@@ -36,6 +36,29 @@ func AcceptanceItems(text string) []AcceptanceItem {
 	return items
 }
 
+// AcceptanceBox is one checkbox line of an acceptance text: Line is the
+// zero-based index of its line in strings.Split(text, "\n"), At is the byte
+// offset in that line of the "[" that opens the box, and Checked reports
+// whether the box is already ticked.
+type AcceptanceBox struct {
+	Line    int
+	At      int
+	Checked bool
+}
+
+// AcceptanceBoxes returns the boxed items of text in AcceptanceItems order,
+// each with where it sits, so a caller that rewrites a box finds its line
+// without a second walk of the fence rule.
+func AcceptanceBoxes(text string) []AcceptanceBox {
+	var boxes []AcceptanceBox
+	for _, at := range acceptanceItemsAt(text) {
+		if at.Boxed {
+			boxes = append(boxes, AcceptanceBox{Line: at.line, At: at.boxAt, Checked: at.Checked})
+		}
+	}
+	return boxes
+}
+
 // acceptanceItemAt is an item with where it sits in its text: line is the
 // index of its line in strings.Split(text, "\n") and boxAt is the byte offset
 // of the "[" that opens its checkbox in that line. boxAt is set only when the
