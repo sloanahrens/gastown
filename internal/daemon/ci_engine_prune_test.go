@@ -342,10 +342,13 @@ type engineRemoveAnswers struct {
 	short     bool
 	garbage   bool
 	noInspect bool
-	// duOut replaces du's reply when duSet; duFail makes du exit 1.
-	duOut  string
-	duSet  bool
-	duFail bool
+	// duOut replaces du's reply when duSet; duFail makes du exit 1; duReply, when
+	// set, is du's answer in full, a total on stdout with a non-zero status and the
+	// stderr that explains it.
+	duOut   string
+	duSet   bool
+	duFail  bool
+	duReply *cliReply
 }
 
 // engineDockerIDs returns the ids a docker removal exec was given: the argv after
@@ -385,6 +388,9 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engine
 		case strings.Contains(verb, "ci-engine-list"):
 			return cliReply{stdout: string(listing)}
 		case strings.Contains(verb, "-- du -sk"):
+			if remove.duReply != nil {
+				return *remove.duReply
+			}
 			if remove.duFail {
 				return cliReply{code: 1, stderr: "du: cannot read"}
 			}
@@ -1131,11 +1137,13 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 
 // TestCIEngineSizeAfterIsReadFromDu: the size after a removal is du's first field.
 // A du that fails, prints nothing or prints a non-number is a failed run that says
-// so, and the removals still ran.
+// so, and the removals still ran. A du that exits 1 is a failure whatever its
+// stdout, unless every stderr line is the vanishing-file report.
 func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 	t.Parallel()
 	listing := engListing(t,
 		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)}, nil, nil)
+	const root = ciEngineRoot
 	for name, tc := range map[string]struct {
 		remove  engineRemoveAnswers
 		wantLog string
@@ -1144,6 +1152,22 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 		"du prints nothing":   {engineRemoveAnswers{duSet: true, duOut: "\n"}, "du printed no figure"},
 		"du prints a non-KiB": {engineRemoveAnswers{duSet: true, duOut: "lots\t/var/lib/docker\n"}, `du printed "lots", not a KiB figure`},
 		"du prints negative":  {engineRemoveAnswers{duSet: true, duOut: "-4\t/var/lib/docker\n"}, `du printed "-4", not a KiB figure`},
+		"du exits 1 with a total and other stderr": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: " + root + "/volumes/aaa: Permission denied\n"}},
+			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: Permission denied)",
+		},
+		"du exits 1 with a total and no stderr": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n"}},
+			"du of the data root failed (exit status 1)",
+		},
+		"du exits 1 with vanished files and no figure": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stderr: "du: " + root + "/volumes/aaa: No such file or directory\n"}},
+			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or directory)",
+		},
+		"du exits 1 with vanished files and a non-KiB": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "lots\n", stderr: "du: " + root + "/volumes/aaa: No such file or directory\n"}},
+			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or directory)",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -1159,6 +1183,42 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 			}
 			if len(engineDockerExecs(f, "rm")) != 1 {
 				t.Errorf("the container removal did not run before du")
+			}
+		})
+	}
+}
+
+// TestCIEngineSizeAfterAcceptsAVanishedFile: a CI job's volume can be removed while
+// du walks the data root, so du prints its total and exits 1 over the vanished
+// paths. That figure is the size after, and the run reaches a verdict. kubectl's
+// own lines are not du's report, so they do not veto it.
+func TestCIEngineSizeAfterAcceptsAVanishedFile(t *testing.T) {
+	t.Parallel()
+	const root = ciEngineRoot
+	listing := engListing(t,
+		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)}, nil, nil)
+	for name, stderr := range map[string]string{
+		"two vanished volumes": "du: " + root + "/volumes/aaa: No such file or directory\n" +
+			"du: " + root + "/volumes/bbb: No such file or directory\n",
+		"a kubectl warning alongside": "Warning: a transient kubectl line\n" +
+			"du: " + root + "/volumes/aaa: No such file or directory\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{
+				duReply: &cliReply{code: 1, stdout: "8388608\t" + root + "\n", stderr: stderr},
+			})
+			f.tick()
+			f.drain()
+			logs := f.logs.String()
+			if strings.Contains(logs, "the data root's size after could not be read") {
+				t.Errorf("a vanished file made the size unreadable:\n%s", logs)
+			}
+			if !strings.Contains(logs, "40.0GB to 8.0GB") {
+				t.Errorf("the verdict does not report du's total as the size after:\n%s", logs)
+			}
+			if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+				t.Errorf("the vanished-file run reached no verdict:\n%s", logs)
 			}
 		})
 	}
