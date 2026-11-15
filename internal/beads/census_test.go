@@ -181,7 +181,7 @@ func TestCensusCallerFromFrames(t *testing.T) {
 		{
 			name: "skips the seam",
 			frames: append(
-				seam("censusRecord", "(*Beads).runBdOnce.func1", "(*Beads).runBdOnce", "(*Beads).runWithStdin.func2"),
+				seam("censusRecord", "(*Beads).runBdOnce.func1", "(*Beads).runBdOnce", "(*Beads).runWithStdinCtx.func2"),
 				"github.com/steveyegge/gastown/internal/daemon.(*patrolScanHost).AssignedWork",
 			),
 			want: "daemon.(*patrolScanHost).AssignedWork",

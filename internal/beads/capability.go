@@ -1,6 +1,9 @@
 package beads
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // UpdateOffersFlag reports whether the bd serving this store offers flag on
 // bd update, read from its --help, and reads no database. A test that needs a
@@ -14,6 +17,46 @@ func (b *Beads) UpdateOffersFlag(flag string) (bool, error) {
 		return false, err
 	}
 	return HelpOffersFlag(help, flag), nil
+}
+
+// sampleOffersVerb reports whether the bd serving this store offers the sample
+// verb, read from its --help under ctx, and reads no database. A bd built
+// before the verb (be-1qqu) must be refused by name, not by its
+// unknown-command exit.
+func (b *Beads) sampleOffersVerb(ctx context.Context) (bool, error) {
+	help, err := b.runWithStdinCtx(ctx, nil, "--help")
+	if err != nil {
+		return false, err
+	}
+	return HelpOffersVerb(help, "sample"), nil
+}
+
+// HelpOffersVerb reports whether a bd --help text lists verb as a command in
+// its "Available Commands:" table. A verb named only in prose, an example line
+// under another section, and a longer verb that starts with the same letters
+// are not offered.
+func HelpOffersVerb(help []byte, verb string) bool {
+	inCommands := false
+	for _, line := range strings.Split(string(help), "\n") {
+		if strings.TrimSpace(line) == "" {
+			inCommands = false
+			continue
+		}
+		// A command row is indented under the table's heading; an unindented
+		// line is prose or the next section, which ends the table.
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inCommands = strings.HasPrefix(line, "Available Commands:")
+			continue
+		}
+		if !inCommands {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == verb {
+			return true
+		}
+	}
+	return false
 }
 
 // HelpOffersFlag reports whether a bd --help text offers flag: the flag opens a
