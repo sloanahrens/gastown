@@ -1,8 +1,3 @@
-commit
-compact
-compact report
-done
-formula
 formula create
 formula list
 formula overlay
