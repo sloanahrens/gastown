@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // TestIntegrationKubernetesTargetReachesTheDaemonPod drives the kubernetes target
@@ -20,8 +22,11 @@ func TestIntegrationKubernetesTargetReachesTheDaemonPod(t *testing.T) {
 		t.Skip("GT_TEST_K8S is not 1, so the control cluster is not reached")
 	}
 	var note bytes.Buffer
+	// The live target runs from the town root on this Mac, which the Deployment
+	// mounts at the same path inside the pod, so the wrapper rewrites nothing.
+	town := manifestdata.PodTownRoot
 	k := Kubectl{
-		Town:       kubeTown,
+		Town:       town,
 		Context:    kubeContext,
 		Namespace:  kubeNamespace,
 		Deployment: kubeDeploy,
@@ -40,12 +45,12 @@ func TestIntegrationKubernetesTargetReachesTheDaemonPod(t *testing.T) {
 	}
 	// A directory the pod lacks runs in the nearest existing ancestor, the town
 	// root, and the tool is told the caller's Mac directory there.
-	missing := filepath.Join(kubeTown, "gt-wrap-integration-missing")
+	missing := filepath.Join(town, "gt-wrap-integration-missing")
 	exit, err := k.Launch(Call{Argv: []string{"sh", "-c", `test "$GT_CALLER_CWD" = "$1"`, "sh", missing}, Dir: missing})
 	if err != nil || exit != 0 {
 		t.Fatalf("a call from a missing directory = %d, %v; want 0, nil with GT_CALLER_CWD naming it", exit, err)
 	}
-	exit, err = k.Launch(Call{Argv: []string{"gt", "status", "--line"}, Dir: kubeTown})
+	exit, err = k.Launch(Call{Argv: []string{"gt", "status", "--line"}, Dir: town})
 	if err != nil || exit != 0 {
 		t.Fatalf("gt status --line through the kubernetes target = %d, %v; want 0, nil", exit, err)
 	}
@@ -101,8 +106,8 @@ func TestIntegrationPodWalkUpScriptRun(t *testing.T) {
 	}{
 		{
 			name: "a missing directory walks to its nearest ancestor", root: root,
-			target: gastown + "/crew/x", caller: "/Users/sloan/gt/gastown/crew/x", path: hostPath, tool: report,
-			wantExit: 0, wantOut: gastown + "\n/Users/sloan/gt/gastown/crew/x\n",
+			target: gastown + "/crew/x", caller: "/Users/user/gt/gastown/crew/x", path: hostPath, tool: report,
+			wantExit: 0, wantOut: gastown + "\n/Users/user/gt/gastown/crew/x\n",
 		},
 		{
 			name: "a directory that maps to itself keeps the environment", root: root,
@@ -116,32 +121,32 @@ func TestIntegrationPodWalkUpScriptRun(t *testing.T) {
 		},
 		{
 			name: "a target outside the root is refused", root: root,
-			target: filepath.Dir(root) + "/elsewhere", caller: "/Users/sloan/Documents/scratch", path: hostPath, tool: report,
+			target: filepath.Dir(root) + "/elsewhere", caller: "/Users/user/Documents/scratch", path: hostPath, tool: report,
 			wantExit: 125, wantErr: "is not under the pod town root", oneLine: true,
 		},
 		{
 			name: "a relative target is refused", root: root,
-			target: "gastown/crew/x", caller: "/Users/sloan/Documents/scratch", path: hostPath, tool: report,
+			target: "gastown/crew/x", caller: "/Users/user/Documents/scratch", path: hostPath, tool: report,
 			wantExit: 125, wantErr: "is not under the pod town root", oneLine: true,
 		},
 		{
 			name: "an empty target is refused", root: root,
-			target: "", caller: "/Users/sloan/Documents/scratch", path: hostPath, tool: report,
+			target: "", caller: "/Users/user/Documents/scratch", path: hostPath, tool: report,
 			wantExit: 125, wantErr: "is not under the pod town root", oneLine: true,
 		},
 		{
 			name: "a target with a .. step is refused", root: root,
-			target: gastown + "/../gastown/crew/x", caller: "/Users/sloan/Documents/scratch", path: hostPath, tool: report,
+			target: gastown + "/../gastown/crew/x", caller: "/Users/user/Documents/scratch", path: hostPath, tool: report,
 			wantExit: 125, wantErr: "has a .. step", oneLine: true,
 		},
 		{
 			name: "an absent town root is refused and names it", root: absent,
-			target: absent + "/gastown/crew/x", caller: "/Users/sloan/Documents/scratch", path: hostPath, tool: report,
+			target: absent + "/gastown/crew/x", caller: "/Users/user/Documents/scratch", path: hostPath, tool: report,
 			wantExit: 125, wantErr: "the pod town root " + absent + " is not a directory", oneLine: true,
 		},
 		{
 			name: "a missing dirname ends the walk instead of looping", root: root,
-			target: gastown + "/crew/x", caller: "/Users/sloan/Documents/scratch", path: t.TempDir(), tool: report,
+			target: gastown + "/crew/x", caller: "/Users/user/Documents/scratch", path: t.TempDir(), tool: report,
 			wantExit: 125, wantErr: "no directory at or above " + gastown + "/crew/x is in the pod",
 		},
 		{

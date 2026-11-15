@@ -18,10 +18,20 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 const (
-	kubeTown      = "/Users/sloan/gt"
+	// kubeTown is the town root the fixture's Mac runs from. A neutral path
+	// stands in for the deployed town, whose own path is not kept in this
+	// repository. testKubectl gives the target the same path as its pod root, as
+	// the Deployment mounts the town-state claim, so the target rewrites nothing;
+	// TestPodLaunchMapsOntoAConfiguredPodRoot covers the two differing.
+	kubeTown = "/Users/user/gt"
+	// kubePodRoot is the root the fixture target maps onto: the town's own path,
+	// as the Deployment mounts the town-state claim.
+	kubePodRoot   = kubeTown
 	kubeContext   = "colima-gt-control"
 	kubeNamespace = "gt"
 	kubeDeploy    = "daemon"
@@ -121,7 +131,10 @@ func (f *fakeKube) Capture(_ context.Context, argv []string) (string, int, error
 // note writer the test reads.
 func testKubectl(shell Shell, note *bytes.Buffer) Kubectl {
 	return Kubectl{
-		Town:       kubeTown,
+		Town: kubeTown,
+		// The pod root is the town's own path, as the Deployment mounts it. A test
+		// that pins the compiled-in default clears this field.
+		PodRoot:    kubeTown,
 		Context:    kubeContext,
 		Namespace:  kubeNamespace,
 		Deployment: kubeDeploy,
@@ -142,7 +155,7 @@ func kubeCall(t *testing.T, dir string, tty bool) Call {
 		"TERM=xterm-256color",
 		// The caller's Dolt host is replaced, so this value must not reach the pod.
 		"BEADS_DOLT_SERVER_HOST=127.0.0.1",
-		"HOME=/Users/sloan",
+		"HOME=/Users/user",
 		"CLAUDE_CODE_OAUTH_TOKEN=placeholder",
 	}
 	call, err := Plan("gt", []string{"status", "--line"}, env, dir, tty)
@@ -179,7 +192,7 @@ func TestKubectlExecArgvUnderTheTown(t *testing.T) {
 			want := append(execPrefix(tty),
 				"env", "GT_ROLE=polecat", "TERM=xterm-256color", testDolt,
 				"sh", "-c", podWalkUpScript, "sh",
-				"/Users/sloan/gt/rig/polecats", podTownRoot, "/Users/sloan/gt/rig/polecats",
+				kubeTown+"/rig/polecats", kubePodRoot, kubeTown+"/rig/polecats",
 				"gt", "status", "--line")
 			if !slices.Equal(f.attached[0], want) {
 				t.Fatalf("attached argv\n got %q\nwant %q", f.attached[0], want)
@@ -195,22 +208,22 @@ func TestKubectlExecArgvOutsideTheTown(t *testing.T) {
 	t.Parallel()
 	f := healthyKube()
 	var note bytes.Buffer
-	outside := "/Users/sloan/Documents/scratch"
+	outside := "/Users/user/Documents/scratch"
 	exit, err := testKubectl(f, &note).Launch(kubeCall(t, outside, false))
 	if err != nil || exit != 0 {
 		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
 	}
 	// The walk-up's three parameters precede the tool and its arguments, and a
-	// directory outside the town maps onto the pod town root.
+	// directory outside the town maps onto the pod root.
 	argv := f.attached[0]
-	if got := argv[len(argv)-6]; got != podTownRoot {
-		t.Fatalf("the mapped directory argument is %q, want the pod town root %q", got, podTownRoot)
+	if got := argv[len(argv)-6]; got != kubePodRoot {
+		t.Fatalf("the mapped directory argument is %q, want the pod root %q", got, kubePodRoot)
 	}
 	if got := argv[len(argv)-4]; got != outside {
 		t.Fatalf("the caller's directory argument is %q, want %q", got, outside)
 	}
-	if !strings.Contains(note.String(), outside) || !strings.Contains(note.String(), podTownRoot) {
-		t.Fatalf("note %q does not name the caller's directory and the pod town root", note.String())
+	if !strings.Contains(note.String(), outside) || !strings.Contains(note.String(), kubePodRoot) {
+		t.Fatalf("note %q does not name the caller's directory and the pod root", note.String())
 	}
 }
 
@@ -472,8 +485,8 @@ func envMap(env expand.Environ) map[string]string {
 func TestPodLaunchWalksToNearestExistingAncestor(t *testing.T) {
 	t.Parallel()
 	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{
-		podTownRoot:              true,
-		podTownRoot + "/gastown": true,
+		kubePodRoot:              true,
+		kubePodRoot + "/gastown": true,
 	}}
 	var note bytes.Buffer
 	exit, err := testKubectl(pod, &note).Launch(kubeCall(t, kubeTown+"/gastown/crew/x", false))
@@ -483,7 +496,7 @@ func TestPodLaunchWalksToNearestExistingAncestor(t *testing.T) {
 	if len(pod.runs) != 1 {
 		t.Fatalf("the tool ran %d times, want once; stderr: %q", len(pod.runs), pod.stderr.String())
 	}
-	if got, want := pod.runs[0].dir, podTownRoot+"/gastown"; got != want {
+	if got, want := pod.runs[0].dir, kubePodRoot+"/gastown"; got != want {
 		t.Fatalf("the tool ran in %q, want the nearest existing ancestor %q", got, want)
 	}
 	for _, argv := range pod.captured {
@@ -507,19 +520,19 @@ func TestPodLaunchSetsCallerCwdOnlyWhenWalked(t *testing.T) {
 		{
 			name:    "walked to an ancestor",
 			dir:     kubeTown + "/gastown/crew/x",
-			dirs:    map[string]bool{podTownRoot: true, podTownRoot + "/gastown": true},
+			dirs:    map[string]bool{kubePodRoot: true, kubePodRoot + "/gastown": true},
 			wantSet: true,
 		},
 		{
 			name:    "the directory maps to itself",
 			dir:     kubeTown + "/gastown/crew/x",
-			dirs:    map[string]bool{podTownRoot: true, podTownRoot + "/gastown/crew/x": true},
+			dirs:    map[string]bool{kubePodRoot: true, kubePodRoot + "/gastown/crew/x": true},
 			wantSet: false,
 		},
 		{
 			name:    "outside the town",
-			dir:     "/Users/sloan/Documents/scratch",
-			dirs:    map[string]bool{podTownRoot: true},
+			dir:     "/Users/user/Documents/scratch",
+			dirs:    map[string]bool{kubePodRoot: true},
 			wantSet: false,
 		},
 	}
@@ -546,8 +559,8 @@ func TestPodLaunchSetsCallerCwdOnlyWhenWalked(t *testing.T) {
 	}
 }
 
-// TestPodLaunchRefusesWhenTownRootAbsent: when even the pod town root is absent,
-// the wrapper refuses in one line naming it, exits 125, and the tool does not start.
+// TestPodLaunchRefusesWhenTownRootAbsent: when even the pod root is absent, the
+// wrapper refuses in one line naming it, exits 125, and the tool does not start.
 func TestPodLaunchRefusesWhenTownRootAbsent(t *testing.T) {
 	t.Parallel()
 	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{}}
@@ -566,8 +579,8 @@ func TestPodLaunchRefusesWhenTownRootAbsent(t *testing.T) {
 	if strings.Contains(line, "\n") {
 		t.Fatalf("the refusal is more than one line: %q", line)
 	}
-	if !strings.Contains(line, podTownRoot) {
-		t.Fatalf("the refusal %q does not name the pod town root %q", line, podTownRoot)
+	if !strings.Contains(line, kubePodRoot) {
+		t.Fatalf("the refusal %q does not name the pod root %q", line, kubePodRoot)
 	}
 }
 
@@ -582,7 +595,7 @@ func TestPodDirMapsTheTownOntoThePodTownRoot(t *testing.T) {
 		{name: "the town itself", dir: kubeTown, want: podTownRoot, mapped: true},
 		{name: "a directory under the town", dir: kubeTown + "/rig/polecats/cheedo", want: podTownRoot + "/rig/polecats/cheedo", mapped: true},
 		{name: "a sibling sharing the town's prefix", dir: kubeTown + "-old/rig", want: podTownRoot, mapped: false},
-		{name: "the parent of the town", dir: "/Users/sloan", want: podTownRoot, mapped: false},
+		{name: "the parent of the town", dir: path.Dir(kubeTown), want: podTownRoot, mapped: false},
 		{name: "a directory elsewhere", dir: "/tmp/work", want: podTownRoot, mapped: false},
 	}
 	for _, tt := range tests {
@@ -932,17 +945,21 @@ func TestValidateRefusesARootPodRoot(t *testing.T) {
 	}
 }
 
-// TestPodTownRootIsTheSharedConstant: the pod mounts the town-state claim at the
-// Mac town root's own path, so with no pod_town_root configured the wrapper's
-// compiled-in root and the Deployment's TownRootPath must both spell the file's
-// kubeTown fixture. The expected value comes from that fixture rather than the
-// constant, so a change to the constant fails this test (gt-gxl0hx).
+// TestPodTownRootIsTheSharedConstant: with no pod_town_root configured the
+// wrapper's compiled-in root and the Deployment's TownRootPath are one spelling,
+// manifestdata.PodTownRoot, so the two cannot drift apart (gt-gxl0hx). The fixture
+// town stands at another path, which is the case that rewrites the tool's output.
 func TestPodTownRootIsTheSharedConstant(t *testing.T) {
 	t.Parallel()
-	const wantPodTownRoot = kubeTown
+	wantPodTownRoot := manifestdata.PodTownRoot
 	f := healthyKube()
 	var note bytes.Buffer
-	if exit, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig", false)); err != nil || exit != 0 {
+	k := testKubectl(f, &note)
+	// The compiled-in root, not the fixture's: the roots differ, so the call
+	// rewrites the tool's output and needs the wrapper's streams wired.
+	k.PodRoot = ""
+	k.Stdout, k.Stderr = io.Discard, io.Discard
+	if exit, err := k.Launch(kubeCall(t, kubeTown+"/rig", false)); err != nil || exit != 0 {
 		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
 	}
 	argv := f.attached[0]

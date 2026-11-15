@@ -55,9 +55,9 @@ func testAuthenticator(t *testing.T) *Authenticator {
 	t.Helper()
 	dir := t.TempDir()
 	for name, token := range map[string]string{
-		"read.dash.token":          testReadToken,
-		"daemon.dipper.token":      testDaemonToken,
-		"operator.mac-sloan.token": testOperatorToken,
+		"read.dash.token":     testReadToken,
+		"daemon.dipper.token": testDaemonToken,
+		"operator.mac.token":  testOperatorToken,
 	} {
 		writeToken(t, dir, name, token)
 	}
