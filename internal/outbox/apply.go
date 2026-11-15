@@ -19,17 +19,22 @@ type Store interface {
 	AddComment(beadID, author, text string) error
 	// SetStatus sets beadID's status to status.
 	SetStatus(beadID, status string) error
+	// Escalate raises an escalation on beadID from actor with text as its
+	// request.
+	Escalate(beadID, actor, text string) error
 }
 
 // Apply writes the parts of r that change the bead through store: the seat's
-// notes, the acceptance boxes it ticked, its findings and a deferred status.
-// actor is the seat's name, the author every finding is commented under.
+// notes, the acceptance boxes it ticked, its findings, a deferred status and
+// its escalation request. actor is the seat's name, the author every finding is
+// commented under and the one the escalation is raised from.
 //
 // A deferred result sets the bead's status to deferred, after the other writes.
 // A done result sets no status: the landing path owns the status of a task it
 // lands.
 //
-// The writes run in that order. Every one is attempted even after an earlier
+// The writes run in that order, and an escalation that r carries is raised
+// last, after the status write. Every one is attempted even after an earlier
 // one failed, so one failed write neither hides the writes after it nor reads
 // as success: Apply returns all the failures joined, and nil only when every
 // write it made succeeded. A status other than StatusDone or StatusDeferred,
@@ -41,8 +46,6 @@ type Store interface {
 // in order by beads.AcceptanceBoxes: an index outside that list is an error and
 // no acceptance text is written for it. The acceptance is written only when
 // ticking changed it, and a note only when r.Notes is not empty.
-//
-// The escalation request is not applied here.
 func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 	var errs []error
 	if r.Notes != "" {
@@ -74,6 +77,11 @@ func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("outbox: set status of %s: result status %q is neither %q nor %q", beadID, r.Status, StatusDone, StatusDeferred))
+	}
+	if r.Escalation != nil {
+		if err := store.Escalate(beadID, actor, r.Escalation.Text); err != nil {
+			errs = append(errs, fmt.Errorf("outbox: escalate on %s: %w", beadID, err))
+		}
 	}
 	return errors.Join(errs...)
 }

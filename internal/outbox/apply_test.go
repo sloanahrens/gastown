@@ -52,6 +52,10 @@ func (f *fakeStore) SetStatus(beadID, status string) error {
 	return f.record(storeCall{op: "SetStatus", beadID: beadID, status: status})
 }
 
+func (f *fakeStore) Escalate(beadID, actor, text string) error {
+	return f.record(storeCall{op: "Escalate", beadID: beadID, author: actor, text: text})
+}
+
 // acceptance is the bead's acceptance text the ticks index into. Its second box
 // is already ticked.
 const acceptance = `## Acceptance
@@ -114,6 +118,44 @@ func TestApply(t *testing.T) {
 			acceptance: acceptance,
 			result:     Result{Status: StatusDone},
 			want:       nil,
+		},
+		{
+			name:       "a done result raises its escalation once under the seat's actor",
+			acceptance: acceptance,
+			result: Result{
+				Status:     StatusDone,
+				Escalation: &Escalation{Text: "HELP: the acceptance list names a missing file"},
+			},
+			want: []storeCall{
+				{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the acceptance list names a missing file"},
+			},
+		},
+		{
+			name:       "an escalation is raised last, after the deferred status",
+			acceptance: acceptance,
+			result: Result{
+				Status:     StatusDeferred,
+				Notes:      "The third criterion needs a decision.\n",
+				Escalation: &Escalation{Text: "HELP: the third criterion needs a decision"},
+			},
+			want: []storeCall{
+				{op: "AppendNotes", beadID: testBead, text: "The third criterion needs a decision.\n"},
+				{op: "SetStatus", beadID: testBead, status: "deferred"},
+				{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the third criterion needs a decision"},
+			},
+		},
+		{
+			name:       "a result without an escalation raises none",
+			acceptance: acceptance,
+			result: Result{
+				Status:   StatusDone,
+				Notes:    "Ran the gate.\n",
+				Findings: []string{"the retry never resets its counter"},
+			},
+			want: []storeCall{
+				{op: "AppendNotes", beadID: testBead, text: "Ran the gate.\n"},
+				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
+			},
 		},
 		{
 			name:       "an empty notes text writes no note",
@@ -287,6 +329,45 @@ func TestApplyFailedWriteDoesNotStopTheRest(t *testing.T) {
 	}
 }
 
+func TestApplyFailedEscalationIsJoinedWithEarlierErrors(t *testing.T) {
+	t.Parallel()
+	notesErr := errors.New("the notes store is locked")
+	escalateErr := errors.New("the escalation store is read-only")
+	store := &fakeStore{fail: func(call storeCall) error {
+		switch call.op {
+		case "AppendNotes":
+			return notesErr
+		case "Escalate":
+			return escalateErr
+		}
+		return nil
+	}}
+	r := Result{
+		Status:     StatusDeferred,
+		Notes:      "a note that fails",
+		Escalation: &Escalation{Text: "HELP: the third criterion needs a decision"},
+	}
+	err := Apply(store, testBead, testActor, acceptance, r)
+	if err == nil {
+		t.Fatal("Apply() = nil with the note and the escalation failed, want both failures")
+	}
+	for _, want := range []string{notesErr.Error(), "append notes", escalateErr.Error(), "escalate on"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Apply() error = %q, want it to name %q", err, want)
+		}
+	}
+	// The status write between the two failures is still made, and the
+	// escalation is raised after it.
+	want := []storeCall{
+		{op: "AppendNotes", beadID: testBead, text: "a note that fails"},
+		{op: "SetStatus", beadID: testBead, status: "deferred"},
+		{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the third criterion needs a decision"},
+	}
+	if !reflect.DeepEqual(store.calls, want) {
+		t.Errorf("Apply() calls = %#v, want %#v", store.calls, want)
+	}
+}
+
 func TestApplyRefusedStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -314,6 +395,14 @@ func TestApplyRefusedStatus(t *testing.T) {
 			wantCalls: []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "a note"},
 				{op: "AddComment", beadID: testBead, author: testActor, text: "a finding"},
+			},
+		},
+		{
+			name:    "an unset status still raises the escalation, after it",
+			result:  Result{Escalation: &Escalation{Text: "HELP: no status was set"}},
+			wantErr: `result status "" is neither "done" nor "deferred"`,
+			wantCalls: []storeCall{
+				{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: no status was set"},
 			},
 		},
 	}
