@@ -315,7 +315,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// of the cap holds the stop before the sandbox is touched. A push refused as
 	// diverged is not held: the stop records it (SandboxDiverged), keeps the
 	// sandbox, and hands the bead back once, because a later read that finds the
-	// sandbox gone would otherwise delete the commits only it holds.
+	// sandbox gone would otherwise delete the commits only it holds. A gone
+	// sandbox whose origin read cannot be made holds the stop and counts the
+	// failure in OriginReadFailures, up to overrunOriginReadMaxAttempts; a read
+	// that later succeeds clears the count.
 	saveKept := st.SaveGaveUp
 	// A sandbox whose push origin refused as diverged is kept for good: the
 	// stop never asks it again, because a later read that finds it gone would
@@ -381,6 +384,29 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		var diverged *session.BranchDivergedError
 		switch {
 		case err == nil:
+			// The sandbox step needed no read, or made one that answered: the
+			// failures an earlier tick counted are resolved, so the count is
+			// cleared from the saved state.
+			if st.OriginReadFailures != 0 {
+				st.OriginReadFailures = 0
+				if !save() {
+					return
+				}
+			}
+		case errors.Is(err, errOriginReadUnknown):
+			// Origin may hold the gone sandbox's work, and only it can say
+			// whether it does: the stop keeps the sandbox's record and holds
+			// the bead, counting the failure so the persisted state shows how
+			// long it has tried (gt-u4i5jg). The count stops at the cap.
+			if st.OriginReadFailures < overrunOriginReadMaxAttempts {
+				st.OriginReadFailures++
+			}
+			if !save() {
+				return
+			}
+			d.logger.Printf("overrun_guard: stop %s on %s waits: origin could not be read for the seat's branch after its sandbox was found gone, retrying next tick (%d of %d), sandbox record kept: %v",
+				who, st.Bead, st.OriginReadFailures, overrunOriginReadMaxAttempts, err)
+			return
 		case errors.Is(err, errSandboxRecordCorrupt):
 			sandboxKept = true
 			d.logger.Printf("overrun_guard: WARNING: stop %s on %s: sandbox record unreadable, sandbox kept; handing the bead back with a note: %v", who, st.Bead, err)
@@ -975,6 +1001,13 @@ var errOverrunNoWorktree = errors.New("worktree cannot be resolved")
 // vanished sandbox is never read as a clean tree or as nothing to save: the
 // work may have gone with it.
 var errSandboxGone = errors.New("sandbox is gone")
+
+// errOriginReadUnknown is the answer overrunGoneSandboxOrigin gives when it
+// cannot ask origin what it holds for the seat's branch: the read failed, the
+// sandbox record named no branch, or the seat's worktree did not resolve. The
+// stop counts it in overrunState.OriginReadFailures and holds the bead, because
+// the sandbox is gone and only origin can say whether its work got out.
+var errOriginReadUnknown = errors.New("origin could not be read")
 
 // overrunSandboxGone maps the sandbox runner's "already gone" answer to
 // errSandboxGone, keeping the runner's own error matchable. Any other error
@@ -1652,10 +1685,10 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 // A read that fails is different: the answer is unknown, the seat's commits may
 // be nowhere, and a hand-back would lose them without a trace. So the stop logs
 // the WARNING with a bounded one-line reason, raises the same kind of
-// escalation, and returns an error naming the unknown answer, which keeps the
-// sandbox's record and holds the stop for the next tick (gt-lahjz4). A record
-// naming no branch and a worktree that cannot be resolved are the same unknown
-// answer.
+// escalation, and returns errOriginReadUnknown, which keeps the sandbox's record
+// and holds the stop for the next tick (gt-lahjz4), counting the failure in the
+// stop's persisted state (gt-u4i5jg). A record naming no branch and a worktree
+// that cannot be resolved are the same unknown answer.
 func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, rec session.SandboxRecord) error {
 	who := seat.Rig + "/" + seat.Polecat
 	branch := seat.Branch
@@ -1687,7 +1720,7 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 		if err := d.escalateAlertSeverity("MEDIUM", "overrun-sandbox-gone:"+who+":"+seat.Bead, overrunActor, message); err != nil {
 			d.logger.Printf("overrun_guard: WARNING: %s: the sandbox-gone item for %s was not raised: %s", who, seat.Bead, oneLineReason(err))
 		}
-		return fmt.Errorf("sandbox %s is gone and origin could not be read for branch %s: %s", sessionName, branch, reason)
+		return fmt.Errorf("sandbox %s is gone and %w for branch %s: %s", sessionName, errOriginReadUnknown, branch, reason)
 	}
 	if originSHA != "" {
 		return nil

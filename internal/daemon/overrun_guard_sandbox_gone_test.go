@@ -249,6 +249,92 @@ func TestOverrunSandboxGoneOriginReadFailureKeepsTheBead(t *testing.T) {
 	}
 }
 
+// A failed origin read in the sandbox-gone path is counted in the stop's
+// persisted state, one per tick, and short of the cap the stop holds the bead
+// instead of handing it back on an answer it never got (gt-u4i5jg).
+func TestOverrunOriginReadRetryCountsFailedReadsAndHoldsBelowTheCap(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: errors.New("could not resolve host: origin")} }
+	d.notifier = notifyfake.New()
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+	for tick := 2; tick < overrunOriginReadMaxAttempts; tick++ {
+		pushTick(d, f)
+		if len(f.handedBack) != 0 {
+			t.Fatalf("tick %d: handed back below the cap: %q", tick, f.handedBack)
+		}
+	}
+
+	if deleted != 0 {
+		t.Errorf("the sandbox record was removed %d times though origin could not be read", deleted)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.OriginReadFailures != overrunOriginReadMaxAttempts-1 {
+		t.Errorf("OriginReadFailures = %d, want %d, one per failed tick", st.OriginReadFailures, overrunOriginReadMaxAttempts-1)
+	}
+	if !st.StoppedAt.IsZero() {
+		t.Error("the stop finished though origin could not be read; the bead was handed back")
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok || err != nil {
+		t.Errorf("the sandbox record is gone (ok %v, err %v); the stop needs it to retry", ok, err)
+	}
+}
+
+// A read that fails and one that answers later in the same stop part ways in
+// the persisted count: the failure is cleared when origin answers, so the stop
+// can hand the bead back on the answer it now has (gt-u4i5jg).
+func TestOverrunOriginReadRetryClearsCountWhenALaterReadSucceeds(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: errors.New("could not resolve host: origin")} }
+	d.notifier = notifyfake.New()
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.OriginReadFailures == 0 {
+		t.Fatal("the failed origin read was not counted, so the clear below proves nothing")
+	}
+
+	// The next tick's read answers, and origin holds the branch.
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + stopSeat.Branch, Hash: "aaa111"}}}
+	}
+	pushTick(d, f)
+
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q, want the bead handed back once the read answered", f.handedBack)
+	}
+	if deleted != 1 {
+		t.Errorf("the sandbox record was removed %d times, want once: origin holds the branch", deleted)
+	}
+	st, err = readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.OriginReadFailures != 0 {
+		t.Errorf("OriginReadFailures = %d after a successful read, want 0", st.OriginReadFailures)
+	}
+}
+
 // A gone sandbox whose branch origin holds is nothing to alarm about: the stop
 // removes the sandbox's record and hands the bead back exactly as it did before
 // the origin read existed (gt-lahjz4).
