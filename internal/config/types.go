@@ -1850,6 +1850,10 @@ type SandboxProfile struct {
 	// PVC. Validate refuses it on a docker profile (the Docker cache path is
 	// closed).
 	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
+	// BeadAccess is where the seat's task lives: SandboxBeadAccessDolt (the
+	// default) or SandboxBeadAccessFiles. Read it through BeadAccessMode;
+	// nothing reads the value yet (gt-1m0kb).
+	BeadAccess string `json:"bead_access,omitempty"`
 	// KubernetesNamespace names the namespace the gateway places this profile's
 	// sandbox pods in; "" means defaultSandboxKubernetesNamespace (see
 	// PodNamespace). The daemon reads that namespace's pods to raise a
@@ -1896,6 +1900,14 @@ const (
 	SandboxDriverKubernetes = "kubernetes"
 )
 
+// The places a seat's task may live, the values SandboxProfile.BeadAccess
+// accepts: dolt (the default) keeps the task in the bead store, files reads it
+// from a task file in the sandbox (gt-1m0kb).
+const (
+	SandboxBeadAccessDolt  = "dolt"
+	SandboxBeadAccessFiles = "files"
+)
+
 // defaultSandboxKubernetesNamespace is the namespace the OpenShell chart creates
 // sandbox pods in, used when a kubernetes profile names no KubernetesNamespace.
 // Sandbox pods are named default--<seat> and live in namespace openshell: the
@@ -1927,15 +1939,25 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 	return p
 }
 
+// BeadAccessMode returns where the seat's task lives: BeadAccess when set, else
+// SandboxBeadAccessDolt.
+func (p SandboxProfile) BeadAccessMode() string {
+	if p.BeadAccess == "" {
+		return SandboxBeadAccessDolt
+	}
+	return p.BeadAccess
+}
+
 // Validate reports the first field of p that is unset or malformed, naming the
 // profile by its key name in TownSettings.Sandboxes. Image, Policy and Gateway
 // are required; Policy must stay inside the rig repo root (relative, no ".."
 // escape); each provider must be named; CPU and Memory, when set, must be k8s
-// quantities; ForgejoHost, when set, must be a bare host name; Driver, when
-// set, is docker or kubernetes, and a kubernetes profile sets no CacheVolume (a
-// Docker volume does not exist there; a k8s cache is a separate design), and a
-// kubernetes profile may name a KubernetesCacheClaim that is a DNS-1123 name,
-// which a docker profile may not (gt-jofne). The kubernetes scheduling fields
+// quantities; ForgejoHost, when set, must be a bare host name; BeadAccess, when
+// set, is dolt or files; Driver, when set, is docker or kubernetes, and a
+// kubernetes profile sets no CacheVolume (a Docker volume does not exist there;
+// a k8s cache is a separate design), and a kubernetes profile may name a
+// KubernetesCacheClaim that is a DNS-1123 name, which a docker profile may not
+// (gt-jofne). The kubernetes scheduling fields
 // are refused on a docker profile and checked for the pod and resources the
 // gateway accepts.
 func (p SandboxProfile) Validate(name string) error {
@@ -1964,6 +1986,11 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	if p.ForgejoHost != "" && !ValidSandboxForgejoHost(p.ForgejoHost) {
 		return fmt.Errorf("sandboxes.%s.forgejo_host %q: want a bare host name: letters, digits, dots and hyphens, with no port, IPv6 literal or URL", name, p.ForgejoHost)
+	}
+	switch p.BeadAccess {
+	case "", SandboxBeadAccessDolt, SandboxBeadAccessFiles:
+	default:
+		return fmt.Errorf("sandboxes.%s.bead_access %q: want dolt or files", name, p.BeadAccess)
 	}
 	switch p.Driver {
 	case "", SandboxDriverDocker:

@@ -109,3 +109,46 @@ func TestSessionBackendForAgentCarriesTheCacheClaim(t *testing.T) {
 		t.Fatalf("KubernetesCacheClaim = %q handed to the resolver, want the profile's claim", got.KubernetesCacheClaim)
 	}
 }
+
+// The profile's bead_access reaches the session profile the resolver is handed,
+// and an unset value arrives as the dolt default (gt-1m0kb call site).
+func TestSessionBackendForAgentCarriesBeadAccess(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  string
+		want string
+	}{
+		{"unset arrives as the dolt default", "", config.SandboxBeadAccessDolt},
+		{"dolt is carried", config.SandboxBeadAccessDolt, config.SandboxBeadAccessDolt},
+		{"files is carried", config.SandboxBeadAccessFiles, config.SandboxBeadAccessFiles},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			host := tmux.NewTmuxWithSocket("gt-test")
+			ts := config.NewTownSettings()
+			ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{
+				"deepseek-flash-sandbox": {Cap: 1, Backend: config.BackendOpenShell, Sandbox: "polecat-default"},
+			}}
+			ts.Sandboxes = map[string]config.SandboxProfile{"polecat-default": {
+				Image:      "gastown-polecat:dev",
+				Policy:     "deploy/polecat/policy.yaml",
+				BeadAccess: tc.set,
+			}}
+			var got session.Profile
+			resolve := func(seat, backend string, p session.Profile, townRoot string, host *tmux.Tmux) (session.Backend, error) {
+				return session.ResolveWith(func(_ string, p session.Profile) (session.Backend, error) {
+					got = p
+					return session.NewTmuxBackend(host), nil
+				}, seat, backend, p, townRoot, host)
+			}
+			if _, err := sessionBackendForAgentWith(resolve, ts, t.TempDir(), "deepseek-flash-sandbox", host); err != nil {
+				t.Fatal(err)
+			}
+			if got.BeadAccess != tc.want {
+				t.Fatalf("BeadAccess = %q handed to the resolver, want %q", got.BeadAccess, tc.want)
+			}
+		})
+	}
+}
