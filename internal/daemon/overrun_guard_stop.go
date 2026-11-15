@@ -854,8 +854,8 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 			// releasing the seat loses no work; a tip that does add one keeps the
 			// seat paused (gt-ao7zh).
 			if overrunTipAddsNothing(g, sha, originSHA) {
-				d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as non-fast-forward, but its tip %s adds nothing origin lacks; treating the push as done",
-					seat.Rig, seat.Polecat, branch, sha)
+				d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as non-fast-forward, but its tip %s adds nothing origin lacks; treating the push as done (in the %s)",
+					seat.Rig, seat.Polecat, branch, sha, overrunWorktreeLabel(g))
 				return nil
 			}
 			return &overrunPushDivergedError{Branch: branch, OriginSHA: originSHA, Err: err}
@@ -965,15 +965,51 @@ func (d *Daemon) overrunSeatWorktree(seat overrunSeat) (string, error) {
 	return workDir, nil
 }
 
+// The labels a log line uses for the worktree a seat's git handle runs on, so a
+// line that reports what the handle saw says which worktree it examined.
+const (
+	// overrunHostWorktreeLabel names the host worktree a host seat's handle runs
+	// on.
+	overrunHostWorktreeLabel = "host worktree"
+	// overrunSandboxCloneLabel names the sandbox clone a sandbox seat's handle
+	// runs on.
+	overrunSandboxCloneLabel = "sandbox clone"
+)
+
+// labeledDaemonGit is a seat's git handle carrying the label of the worktree
+// it runs on. overrunSandboxGit wraps the in-sandbox handle in one at the
+// moment it builds it, so the label comes from the same decision that picked
+// the handle and cannot disagree with it. The host handle is not wrapped: a
+// handle with no label is the host worktree.
+type labeledDaemonGit struct {
+	daemonGit
+	label string
+}
+
+// worktreeLabel is the kind of worktree the handle runs on.
+func (g labeledDaemonGit) worktreeLabel() string { return g.label }
+
+// overrunWorktreeLabel names the worktree the seat's git handle g runs on, as
+// the label overrunSeatGit's handle carries: the sandbox clone for a sandbox
+// seat, the host worktree for every other seat.
+func overrunWorktreeLabel(g daemonGit) string {
+	if labeled, ok := g.(interface{ worktreeLabel() string }); ok {
+		return labeled.worktreeLabel()
+	}
+	return overrunHostWorktreeLabel
+}
+
 // overrunSeatGit is the one seam that picks the git handle the overrun stop's
 // save, dirty check, push and reset run over. A seat with a sandbox record gets
 // the in-sandbox handle on its clone directory, so the same save, push and
 // reset code runs inside the sandbox; every other seat gets its host worktree's
-// handle. A host worktree that cannot be resolved is errOverrunNoWorktree,
-// never a nil handle: the caller cannot save work it cannot see. A sandbox
-// seat's sandbox that cannot be seen, from an unreadable record to a runner
-// that is not linked, is an error too, never its host stub, which reads a clean
-// tree and would call the work saved.
+// handle. The handle carries the label of the worktree it runs on (see
+// overrunWorktreeLabel), so a log line can name the one it examined. A host
+// worktree that cannot be resolved is errOverrunNoWorktree, never a nil handle:
+// the caller cannot save work it cannot see. A sandbox seat's sandbox that
+// cannot be seen, from an unreadable record to a runner that is not linked, is
+// an error too, never its host stub, which reads a clean tree and would call
+// the work saved.
 func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
@@ -991,7 +1027,9 @@ func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 // overrunSandboxGit is the git handle of a seat that runs in a sandbox: a Git
 // over the in-sandbox runner, in the clone directory its record names, so the
 // save, the dirty check, the push and the reset see the sandbox's work and not
-// the host stub, which stays at main.
+// the host stub, which stays at main. The handle comes back labeled
+// overrunSandboxCloneLabel, so a log line naming the worktree says which one
+// this is.
 //
 // A seat with no sandbox record is a host seat: false and no error, and it keeps
 // its host worktree. The bool is true only with a handle; every error comes back
@@ -1022,7 +1060,10 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
 	}
-	return git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath()), true, nil
+	return labeledDaemonGit{
+		daemonGit: git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath()),
+		label:     overrunSandboxCloneLabel,
+	}, true, nil
 }
 
 // validSandboxCloneDir reports whether dir can be handed to the in-sandbox
@@ -1146,15 +1187,15 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 		return nil
 	}
 	if head, err := g.Rev("HEAD"); err != nil || head != tip {
-		d.logger.Printf("overrun_guard: %s: HEAD is not on branch %s; worktree left as it is", who, branch)
+		d.logger.Printf("overrun_guard: %s: HEAD is not on branch %s; worktree left as it is (in the %s)", who, branch, overrunWorktreeLabel(g))
 		return nil
 	}
 	if origin := originBranchSHA(g, branch); origin != tip {
-		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s; worktree left as it is", who, branch, tip)
+		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s; worktree left as it is (in the %s)", who, branch, tip, overrunWorktreeLabel(g))
 		return nil
 	}
 	if status := overrunCleanupStatus(g); status != string(polecat.CleanupClean) {
-		d.logger.Printf("overrun_guard: %s: worktree is %s; left as it is", who, status)
+		d.logger.Printf("overrun_guard: %s: worktree is %s; left as it is (in the %s)", who, status, overrunWorktreeLabel(g))
 		return nil
 	}
 	base := g.CleanDefaultBranchBaseRef("origin", g.RemoteDefaultBranch())
@@ -1164,7 +1205,7 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	if err := g.DeleteBranch(branch, true); err != nil {
 		return fmt.Errorf("delete branch %s: %w", branch, err)
 	}
-	d.logger.Printf("overrun_guard: %s: worktree reset to %s, branch %s dropped (origin holds %s)", who, base, branch, tip)
+	d.logger.Printf("overrun_guard: %s: worktree reset to %s, branch %s dropped (origin holds %s, in the %s)", who, base, branch, tip, overrunWorktreeLabel(g))
 	return nil
 }
 
