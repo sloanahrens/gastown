@@ -123,9 +123,9 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeExplain, "explain", false,
 		"Show why each section was included")
 	primeCmd.Flags().IntVar(&primeStep, "step", 0,
-		"Print the title and full body of step N (1-based) of the hooked molecule, or of --formula, and exit")
+		"Print the title and full body of step N (1-based) of the hooked bead's attached formula, or of --formula, and exit")
 	primeCmd.Flags().StringVar(&primeFormula, "formula", "",
-		"Formula name for --step (default: the hooked bead's poured molecule)")
+		"Formula name for --step (default: the hooked bead's attached formula)")
 	primeCmd.Flags().StringVar(&primeExplainMemoryBead, "explain-memory", "",
 		"Print how the rig's memories score for this bead, read-only, and exit")
 	rootCmd.AddCommand(primeCmd)
@@ -342,7 +342,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 }
 
 // runPrimeStep implements `gt prime --step N [--formula NAME]`: print one
-// step in full. It reads the hook (to find the poured molecule) but
+// step in full. It reads the hook (to find the attached formula) but
 // performs none of the session side effects of a normal prime.
 func runPrimeStep(ctx RoleContext) error {
 	hookedBead, _ := findAgentWorkWithAttempts(ctx, 1)
@@ -358,14 +358,13 @@ func runPrimeStep(ctx RoleContext) error {
 	return nil
 }
 
-// primeStepChecklist is the checklist `gt prime --step` reads: the hooked
-// bead's poured molecule when --formula is absent or names it (or its
-// formula), else the named formula cooked.
+// primeStepChecklist is the checklist `gt prime --step` reads: the attached
+// formula when --formula is absent or names it, else the named formula cooked.
 func (r RoleInfo) primeStepChecklist(hookedBead *beads.Issue, explicit string) (primeChecklist, error) {
 	if hookedBead != nil {
 		att := beads.ParseAttachmentFields(hookedBead)
-		if att != nil && att.AttachedMolecule != "" &&
-			(explicit == "" || explicit == att.AttachedFormula || explicit == att.AttachedMolecule) {
+		if att != nil && att.AttachedFormula != "" &&
+			(explicit == "" || explicit == att.AttachedFormula) {
 			return r.attachmentChecklist(att)
 		}
 	}
@@ -1340,7 +1339,7 @@ func renderDependencyMergeStatus(w io.Writer, statuses []beads.DependencyMergeSt
 	}
 }
 
-// outputMoleculeWorkflow displays attached molecule context with current step.
+// outputMoleculeWorkflow displays the attached formula and its cooked checklist.
 func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.AttachmentFields) error {
 	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🧬 ATTACHED FORMULA (WORKFLOW CHECKLIST)"))
 	if attachment.AttachedFormula != "" {
@@ -1366,28 +1365,24 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 		return outputRalphLoopDirective(w, ctx, attachment)
 	}
 
-	// The poured molecule's steps are the checklist; a formula with no
-	// molecule is cooked.
-	if attachment.AttachedFormula != "" {
-		if _, isForkRig, _ := roleRigContext(ctx); isForkRig && ctx.Role == RolePolecat {
-			fmt.Fprintf(w, "%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
-			fmt.Fprintf(w, "Formula %q is attached, but its embedded polecat checklist is not rendered because it contains landing-worker completion steps.\n", attachment.AttachedFormula)
-			fmt.Fprintln(w, "Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
-			return nil
-		}
-		ctx.showChecklist(w, attachment)
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
-		fmt.Fprintln(w, "The base bead is your assignment. The formula steps define your workflow.")
-		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit your branch for landing. Do NOT stop after implementation — the formula has submit steps you must follow."))
+	// The checklist is the attached formula as bd cooks it. A poured molecule
+	// is bookkeeping and is never read, so a seat sees the same steps whether
+	// or not one exists (the step wisp removal, gt-ojbfny).
+	if attachment.AttachedFormula == "" {
+		fmt.Fprintf(w, "%s\n", style.Bold.Render("No formula is attached, so there is no checklist to render. Work the hooked bead from its own description."))
 		return nil
 	}
-
-	// No formula name stored: the molecule alone is the checklist.
+	if _, isForkRig, _ := roleRigContext(ctx); isForkRig && ctx.Role == RolePolecat {
+		fmt.Fprintf(w, "%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
+		fmt.Fprintf(w, "Formula %q is attached, but its embedded polecat checklist is not rendered because it contains landing-worker completion steps.\n", attachment.AttachedFormula)
+		fmt.Fprintln(w, "Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
+		return nil
+	}
 	ctx.showChecklist(w, attachment)
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "%s\n", style.Bold.Render("Follow the molecule steps above, NOT the base bead."))
-	fmt.Fprintln(w, "The base bead is just a container. The molecule steps define your workflow.")
+	fmt.Fprintf(w, "%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
+	fmt.Fprintln(w, "The base bead is your assignment. The formula steps define your workflow.")
+	fmt.Fprintf(w, "\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit your branch for landing. Do NOT stop after implementation — the formula has submit steps you must follow."))
 	return nil
 }
 
