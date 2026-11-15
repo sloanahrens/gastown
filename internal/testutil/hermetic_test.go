@@ -162,7 +162,7 @@ func TestStartHermetic_ScrubsAndRedirects(t *testing.T) {
 	t.Parallel()
 	f := newFakeHarness(t, append([]string{
 		"GT_ROLE=gastown/polecats/topaz", "BD_ACTOR=someone", "BEADS_DIR=/live/.beads",
-		"TMUX=/private/tmp/tmux-501/gt-town,123,0", "TMUX_PANE=%3", "HOME=/home/dev", "PATH=/usr/bin",
+		"TMUX=/tmp/tmux-501/gt-town,123,0", "TMUX_PANE=%3", "HOME=/home/dev", "PATH=/usr/bin",
 	}, goEnvSet...)...)
 
 	h, err := f.startHermetic()

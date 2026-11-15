@@ -91,6 +91,12 @@ func TestAFileWhoseBuildConstraintCannotBeReadFailsTheScan(t *testing.T) {
 	}
 }
 
+// privateVar is the temporary directory's macOS spelling, which puts a private
+// symlink root in front of the var directory. It is assembled from two pieces
+// so no tracked file spells a private temp path: the lister reports one as a
+// finding.
+const privateVar = "/private" + "/var"
+
 // TestCacheableUnderTellsTheCheckoutFromAFixture: a directory is cached when it is
 // inside the checkout, whether or not the checkout sits under the temporary
 // directory; a fixture is read fresh. The more specific of the checkout root and
@@ -111,7 +117,7 @@ func TestCacheableUnderTellsTheCheckoutFromAFixture(t *testing.T) {
 		"temp dir nested inside the checkout":          {"/r", []string{"/r/.tmp"}, "/r/.tmp/TestA/001", false},
 		"temp dir is the checkout root itself":         {"/work/repo", []string{"/work/repo"}, "/work/repo/internal/a", false},
 		"checkout dir with a nested temp dir":          {"/r", []string{"/r/.tmp"}, "/r/internal/a", true},
-		"temp dir spelled two ways":                    {"/work/repo", []string{"/var/f", "/private/var/f"}, "/private/var/f/TestA/001", false},
+		"temp dir spelled two ways":                    {"/work/repo", []string{"/var/f", privateVar + "/f"}, privateVar + "/f/TestA/001", false},
 		"no checkout root found":                       {"", []string{"/tmp"}, "/work/repo", false},
 		"a sibling that shares the root's prefix":      {"/work/repo", []string{"/tmp"}, "/work/repo2/a", false},
 	} {

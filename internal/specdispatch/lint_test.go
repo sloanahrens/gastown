@@ -758,7 +758,7 @@ func TestOtherRigRefusesPathInAnotherRig(t *testing.T) {
 	cases := []struct{ name, path string }{
 		{"town checkout", "~/gt/om/internal/cli/cli.go"},
 		{"sandbox checkout", "/sandbox/gt/om/"},
-		{"macOS checkout", "/Users/alice/gt/om/internal/cli/cli.go"},
+		{"macOS checkout", "/Users/user/gt/om/internal/cli/cli.go"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -779,7 +779,7 @@ func TestOtherRigRefusesPathInAnotherRig(t *testing.T) {
 // refusal, in the same forms the other-rig refusal reads.
 func TestOtherRigPassesOwnRig(t *testing.T) {
 	t.Parallel()
-	for _, path := range []string{"~/gt/gastown/internal/cli/cli.go", "/sandbox/gt/gastown/", "/Users/alice/gt/gastown/internal/cli/cli.go"} {
+	for _, path := range []string{"~/gt/gastown/internal/cli/cli.go", "/sandbox/gt/gastown/", "/Users/user/gt/gastown/internal/cli/cli.go"} {
 		s := otherRigSpec("Change "+path+" to read the flag.", "gastown", "om", "beads")
 		if v := Lint(s, defaultTemplate()); !v.Clean() {
 			t.Errorf("own-rig path %s refused: %s", path, v.Line("gt-good"))

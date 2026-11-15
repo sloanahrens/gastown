@@ -23,8 +23,8 @@ func (e exitCodeErr) ExitCode() int { return e.code }
 func TestClassifyTmuxProbeNoServerIsNotAFailure(t *testing.T) {
 	t.Parallel()
 	for _, out := range []string{
-		"no server running on /private/tmp/tmux-501/default\n",
-		"error connecting to /private/tmp/tmux-501/default (No such file or directory)\n",
+		"no server running on /tmp/tmux-501/default\n",
+		"error connecting to /tmp/tmux-501/default (No such file or directory)\n",
 	} {
 		err := classifyTmuxProbe([]byte(out), exitCodeErr{1})
 		if !errors.Is(err, ErrTmuxNoServer) {
