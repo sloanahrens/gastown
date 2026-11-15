@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/taskfile"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -866,6 +867,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			RepoURL:     repoURL,
 			HostWorkDir: workDir,
 			WorkBeadID:  opts.Issue,
+			TaskFile:    m.taskFileFor(opts.Issue, workDir),
 			Env:         envVars,
 			Trace:       opts.Trace,
 		})
@@ -1424,6 +1426,54 @@ func (m *SessionManager) warnSandbox(format string, args ...any) {
 		return
 	}
 	style.PrintWarning(format, args...)
+}
+
+// warnTaskFile reports a work bead whose task file could not be built; nil is
+// style.PrintWarning.
+func (m *SessionManager) warnTaskFile(format string, args ...any) {
+	if m.warn != nil {
+		m.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
+}
+
+// taskFileFor renders the TASK.md text a sandboxed seat reads its assignment
+// from, or nil when there is nothing to put in it. issueID is read through
+// beadsFor, the client validateIssue already read it with; the comments come
+// from a second call because bd show --json leaves their bodies out.
+//
+// The read is a second one, after validateIssue's, and a failure here is not a
+// failed spawn: the bead was readable a moment ago, the seat keeps its Dolt
+// access today, and an assignment file the start cannot build must not cost the
+// start. The seat gets no file and one warning naming the bead instead, so the
+// daemon's log is where a seat left without its TASK.md shows up. A comments
+// read that fails leaves the file empty rather than half-written: a seat must
+// not read a file that silently omits what the bead says.
+func (m *SessionManager) taskFileFor(issueID, workDir string) []byte {
+	if issueID == "" {
+		return nil
+	}
+	db := m.beadsFor(issueID, workDir)
+	issue, err := db.Show(issueID)
+	if err != nil {
+		m.warnTaskFile("starting %s: cannot read the work bead for its task file, leaving the task file empty: %v", issueID, err)
+		return nil
+	}
+	comments, err := db.Comments(issueID)
+	if err != nil {
+		m.warnTaskFile("starting %s: cannot read the work bead's comments for its task file, leaving the task file empty: %v", issueID, err)
+		return nil
+	}
+	fields := beadTaskFields{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Description: issue.Description,
+		Acceptance:  beads.AcceptanceText(issue),
+		Notes:       noteLines(issue.Notes),
+		Comments:    taskComments(comments),
+	}
+	return []byte(taskfile.Assemble(taskInputFromBead(fields)))
 }
 
 // removeSandbox pushes the work a stopped sandboxed session committed, then

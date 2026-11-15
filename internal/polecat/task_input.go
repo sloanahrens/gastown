@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -44,6 +45,44 @@ func taskInputFromBead(f beadTaskFields) taskfile.Input {
 		in.Comments = append(in.Comments, taskfile.Comment{Author: c.Author, Time: c.Time, Text: c.Text})
 	}
 	return in
+}
+
+// noteLines splits a bead's notes field into the entries bd joined there.
+// AppendNotes puts each note on its own line, so a line boundary is the one
+// separator the store records; a blank line carries no text and is dropped, so
+// an empty notes field yields no notes at all.
+func noteLines(notes string) []string {
+	var lines []string
+	for _, line := range strings.Split(notes, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// taskComments maps the bead's comments onto TASK.md's, in the order the client
+// returns them. A created_at that does not parse leaves the time out of that
+// comment's line rather than emptying the file: the author and the text, which
+// is what the seat reads, are still carried.
+func taskComments(comments []beads.Comment) []beadTaskComment {
+	out := make([]beadTaskComment, 0, len(comments))
+	for _, c := range comments {
+		out = append(out, beadTaskComment{Author: c.Author, Time: commentTimeOrZero(c.CreatedAt), Text: c.Text})
+	}
+	return out
+}
+
+// commentTimeOrZero is a comment's created_at, which bd writes in RFC 3339. A
+// value the layout rejects is the zero time, and taskfile writes no time for a
+// zero one, so the comment keeps its author and text.
+func commentTimeOrZero(created string) time.Time {
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(created))
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }
 
 // parseAcceptanceBoxes returns the checkbox items of an acceptance field, in
