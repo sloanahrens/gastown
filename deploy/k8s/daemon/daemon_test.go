@@ -1045,6 +1045,7 @@ func TestRenderRefusesBadValues(t *testing.T) {
 			v.Env[TrackerURLEnv] = "http://elsewhere:7433"
 		}, `Values.Env["TRACKER_URL"]`, "from Values.Tracker"},
 		{"the tracker URL with the tracker off", func(v *Values) { v.Env[TrackerURLEnv] = "http://elsewhere:7433" }, `Values.Env["TRACKER_URL"]`, "from Values.Tracker"},
+		{"the story-points embedder endpoint", func(v *Values) { v.Env[storypointsEmbedURLEnv] = "http://elsewhere:11434" }, `Values.Env["STORYPOINTS_EMBED_URL"]`, "sets this variable itself"},
 		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
 		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
 		{"an env value that looks like a secret", func(v *Values) { v.Env[awsRegionEnv] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["AWS_REGION"]`, ""},
@@ -2582,33 +2583,53 @@ func TestForgejoAPIURLFollowsTheForgeHost(t *testing.T) {
 	}
 }
 
-// TestStorypointsEmbedURLCarriesTheHostsOllama holds the weekly story-points
-// retrain's embedder endpoint: the live pod names the host's Ollama, while a
-// rehearsal names none, since host.docker.internal resolves there only through
-// the gateway alias the live pod carries, and the dashboard names none, since it
-// runs no retrain (gt-mu7e87).
-func TestStorypointsEmbedURLCarriesTheHostsOllama(t *testing.T) {
+// TestStorypointsEmbedURLNamesTheHostsOllama holds the render value the daemon
+// container's STORYPOINTS_EMBED_URL carries to the Goal's address: the gateway
+// name the live pod's hostAliases maps, on Ollama's default port (gt-mu7e87).
+func TestStorypointsEmbedURLNamesTheHostsOllama(t *testing.T) {
 	t.Parallel()
 
-	// The Goal's URL: the address the pod was checked to reach the host's Ollama at.
-	if got, want := StorypointsEmbedURL, "http://host.docker.internal:11434"; got != want {
-		t.Fatalf("StorypointsEmbedURL = %q, want the host's Ollama %q", got, want)
+	if got, want := StorypointsEmbedURL, "http://"+DoltHostName+":11434"; got != want {
+		t.Errorf("StorypointsEmbedURL = %q, want the host's Ollama %q", got, want)
 	}
+}
+
+// TestStorypointsEmbedURLCarriesTheHostsOllama holds the endpoint to the pods
+// that can reach it: the live pod, whose hostAliases maps the name, carries the
+// render value once, while a rehearsal carries none and a live render with no
+// gateway address carries none, since neither pod can look the name up
+// (gt-mu7e87).
+func TestStorypointsEmbedURLCarriesTheHostsOllama(t *testing.T) {
+	t.Parallel()
 
 	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0]
 	if got, want := envValuesNamed(pod, storypointsEmbedURLEnv), []string{StorypointsEmbedURL}; !slices.Equal(got, want) {
 		t.Errorf("the live pod's %s = %q, want exactly %q", storypointsEmbedURLEnv, got, want)
 	}
 
-	rehearsal := mustBuild(t, rehearsalValues(t)).Deployment.Spec.Template.Spec.Containers[0]
-	if got := envValuesNamed(rehearsal, storypointsEmbedURLEnv); len(got) != 0 {
-		t.Errorf("a rehearsal pod carries %s = %q, want none: its pod has no gateway alias, so the name would resolve to nothing", storypointsEmbedURLEnv, got)
+	for _, mode := range []struct {
+		name   string
+		values func(*testing.T) Values
+	}{
+		{"a rehearsal", rehearsalValues},
+		{"a live render with no gateway address", liveValuesWithoutGateway},
+	} {
+		pod := mustBuild(t, mode.values(t)).Deployment.Spec.Template.Spec.Containers[0]
+		if got := envValuesNamed(pod, storypointsEmbedURLEnv); len(got) != 0 {
+			t.Errorf("%s carries %s = %q, want none: no hostAlias maps the name there, so the pod cannot look it up", mode.name, storypointsEmbedURLEnv, got)
+		}
 	}
+}
 
-	dashboard := mustBuild(t, dashboardValues(t)).DashboardDeployment.Spec.Template.Spec.Containers[0]
-	if got := envValuesNamed(dashboard, storypointsEmbedURLEnv); len(got) != 0 {
-		t.Errorf("the dashboard pod carries %s = %q, want none: only the daemon's retrain reads it", storypointsEmbedURLEnv, got)
-	}
+// liveValuesWithoutGateway is a live render whose pod carries no hostAlias, so
+// DoltHostName names nothing in it: it has no gateway address, and no proxy
+// relays, which a render refuses without one (TestProxySidecars).
+func liveValuesWithoutGateway(t *testing.T) Values {
+	t.Helper()
+	v := goldenValues(t)
+	v.HostGatewayIP = ""
+	v.ProxyImage = ""
+	return v
 }
 
 // TestPodEnvDecisions holds the decision table to the live name set: every name

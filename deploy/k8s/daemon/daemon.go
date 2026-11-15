@@ -456,8 +456,8 @@ const (
 	forgejoAPIURLEnv = "FORGEJO_API_URL"
 	// storypointsEmbedURLEnv is the Ollama endpoint the weekly story-points retrain
 	// embeds with (internal/metrics/storypoints_train.go). The render sets it from
-	// StorypointsEmbedURL, and the compose file names no such variable, so
-	// validateEnv refuses a caller's entry for it (gt-mu7e87).
+	// StorypointsEmbedURL, so validateEnv refuses a caller's entry for it as a name
+	// the pod sets itself (gt-mu7e87).
 	storypointsEmbedURLEnv = "STORYPOINTS_EMBED_URL"
 )
 
@@ -1309,11 +1309,12 @@ func daemonArgs(v Values) []string {
 // with. The dashboard runs no retrain, so its container takes containerEnvironment
 // alone (gt-mu7e87).
 //
-// A rehearsal pod carries none: the name resolves only through the gateway alias
-// a live pod has, and a rehearsal runs no retrain to read it.
+// A pod with no gateway alias carries no endpoint: DoltHostName resolves in the
+// pod only through that alias, so a rehearsal, or a live render with no gateway
+// address, would point the retrain at a name it cannot look up.
 func daemonEnvironment(v Values) []EnvVar {
 	env := containerEnvironment(v)
-	if v.Rehearsal {
+	if len(hostAliases(v)) == 0 {
 		return env
 	}
 	return append(env, EnvVar{Name: storypointsEmbedURLEnv, Value: StorypointsEmbedURL})
@@ -2458,6 +2459,8 @@ func (v Values) validateEnv() error {
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.Tracker when the tracker is rendered, so a caller's value would be dropped", name)
 		case name == BdGatewayURLEnv || name == BdGatewayTokenFileEnv:
 			return fmt.Errorf("Values.Env[%q]: the pod names this variable itself from Values.DaemonBdGatewayURL, so a caller's value is refused, not mixed with it", name)
+		case name == storypointsEmbedURLEnv:
+			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, to the host's Ollama, so a caller's value would be dropped", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
 		case decision.drop != "":
