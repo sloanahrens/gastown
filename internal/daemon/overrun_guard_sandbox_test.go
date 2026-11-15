@@ -536,7 +536,7 @@ func TestOverrunSandboxClonePushGoesThroughTheSandboxRunner(t *testing.T) {
 	}
 }
 
-// TestOverrunSandboxCloneResetGoesThroughTheSandboxRunner is this bead's repro
+// TestOverrunSandboxCloneResetGoesThroughTheSandboxRunner is gt-t4m9cm's repro
 // of the reset after a confirmed push: origin holds the clone's branch tip, the
 // clone is clean and on that branch, so the reset puts it back to origin's main
 // and drops the kept branch. Every call the reset makes must reach the
