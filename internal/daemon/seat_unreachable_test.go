@@ -184,3 +184,24 @@ func TestTrackSeatUnreachableRestartsAFirstFailureTimeFromTheFuture(t *testing.T
 		t.Errorf("alerts five minutes after the restart = %q, want %q", got, want)
 	}
 }
+
+// TestTrackSeatUnreachableDropsEverySeatWhenTheListWasReadAndIsEmpty: a seat
+// list that was read and holds no seat means every seat was released, so the
+// running outages end. It is the answer that differs from a list that could not
+// be read, which keeps them.
+func TestTrackSeatUnreachableDropsEverySeatWhenTheListWasReadAndIsEmpty(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
+	gone := errors.New("sandbox pod is gone")
+	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: gone}
+	prev, _ := trackSeatUnreachable(nil, base, []seatRead{dag}, true)
+
+	prev, alerts := trackSeatUnreachable(prev, base.Add(5*time.Minute), []seatRead{}, true)
+	if len(alerts) != 0 {
+		t.Errorf("alerts for an empty list that was read = %q, want none", seatAlertLines(alerts))
+	}
+	_, alerts = trackSeatUnreachable(prev, base.Add(6*time.Minute), []seatRead{dag}, true)
+	if len(alerts) != 0 {
+		t.Errorf("alerts when the seat fails again after the empty list = %q, want none: its outage ended", seatAlertLines(alerts))
+	}
+}

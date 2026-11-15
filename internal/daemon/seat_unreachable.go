@@ -51,7 +51,9 @@ type seatKey struct{ rig, polecat string }
 // listed is false when the caller could not read the list of hooked seats at
 // all: the tick then says nothing about any seat, prev is carried over as it
 // is and nothing is named, so a failed or empty list read cannot clear alarms
-// that are running.
+// that are running. A list that was read and is empty is a real answer: no
+// seat is hooked, every seat was released, so every outage is dropped.
+// Reads that name one seat twice take the last read of it.
 // A first-failure time later than now is a clock that stepped back, and the
 // read restarts it at now rather than suppressing the alert until the wall
 // clock catches up. prev is left unchanged.
