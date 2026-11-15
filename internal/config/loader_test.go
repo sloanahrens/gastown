@@ -640,7 +640,7 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 	t.Run("registry owner carries through and a set override wins", func(t *testing.T) {
 		t.Parallel()
 		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
-			RemoteURL:     "https://forgejo.example/sloan/gastown",
+			RemoteURL:     "https://forgejo.example/alice/gastown",
 			RegistryOwner: "bot-registry",
 		}}
 		local := &MergeQueueConfig{Forgejo: &ForgejoConfig{GateWorkflow: "gate"}}

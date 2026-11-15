@@ -683,10 +683,10 @@ func pathWithin(root, path string) bool {
 // p (or a suffix of it) doesn't exist yet — e.g. a rig directory that hasn't
 // been created. It walks up to the nearest existing ancestor, resolves that,
 // and rejoins the non-existent suffix unchanged. Without this, comparing a
-// resolved existing root (e.g. "/private/var/...") against an unresolved
-// nonexistent path (e.g. "/var/...") would spuriously report the path as
-// outside the root any time the platform's temp dir is itself a symlink
-// (as on macOS), even though the two denote the same location.
+// resolved existing root against an unresolved nonexistent path would
+// spuriously report the path as outside the root any time the platform's temp
+// dir is itself a symlink (as on macOS), even though the two denote the same
+// location.
 func resolveSymlinksBestEffort(p string) string {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved

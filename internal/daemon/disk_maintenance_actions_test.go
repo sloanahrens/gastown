@@ -28,8 +28,8 @@ import (
 
 const (
 	// actionsTestRunsBase is the run listing and delete path of the repository
-	// the fake serves, sloan/gastown, under the API root the client is given.
-	actionsTestRunsBase = "/api/v1/repos/sloan/gastown/actions/runs"
+	// the fake serves, alice/gastown, under the API root the client is given.
+	actionsTestRunsBase = "/api/v1/repos/alice/gastown/actions/runs"
 
 	// actionsTestCommit is the commit the installed pair names. Its green ref is
 	// actionsTestGreenRef, and a run on that branch is never deleted.
@@ -203,7 +203,7 @@ func actionsTestDaemon(t *testing.T, ret *DiskMaintenanceActionsRetention, mode 
 	cfg.Patrols.DiskMaintenance.ActionsRetention = ret
 	d.patrolConfig = cfg
 	d.diskMaint.actionsRepos = func() ([]actionsRetentionRepo, error) {
-		return []actionsRetentionRepo{{Rig: "gastown", Owner: "sloan", Repo: "gastown", API: api}}, nil
+		return []actionsRetentionRepo{{Rig: "gastown", Owner: "alice", Repo: "gastown", API: api}}, nil
 	}
 	writeActionsPair(t, d.config.TownRoot)
 	return d, buf
@@ -443,7 +443,7 @@ func TestListActionRunsRefusesAListingPastItsPageCap(t *testing.T) {
 				runs = append(runs, forgejo.ActionRun{ID: id})
 			}
 			api := newActionsServer(t, newFakeActionsForgejo(runs))
-			got, err := listActionRunsPaged(context.Background(), api, "sloan", "gastown", tc.maxPages)
+			got, err := listActionRunsPaged(context.Background(), api, "alice", "gastown", tc.maxPages)
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "ran past 2 pages")

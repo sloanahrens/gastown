@@ -504,7 +504,8 @@ func TestCreateAgentBead_CreatesRigLocalBead(t *testing.T) {
 	}
 
 	// Resolve symlinks so path assertions match shell pwd output.
-	// On macOS, t.TempDir() returns /var/... but pwd resolves to /private/var/...
+	// On macOS, t.TempDir() returns a path under a symlinked temp root, and
+	// pwd reports the fully resolved one.
 	townRoot, _ := filepath.EvalSymlinks(t.TempDir())
 	rigDir := filepath.Join(townRoot, "imported", "mayor", "rig")
 	for _, dir := range []string{

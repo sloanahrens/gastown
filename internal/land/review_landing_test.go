@@ -50,7 +50,7 @@ func TestLandOMExecutionErrorLandsWithErrorVerdict(t *testing.T) {
 // no verdict last. omError wraps it the way OMReviewer reports an execution
 // error.
 func omStderr() string {
-	return `om: warning: config: "backend" in /private/var/folders/dx/ccj87p8d14l8cs64cnp691pm0000gn/T/gt-landing-501/gastown/wt/.om.json is ignored — the reviewer backend is operator-config only` +
+	return `om: warning: config: "backend" in /tmp/gt-landing-501/gastown/wt/.om.json is ignored — the reviewer backend is operator-config only` +
 		"\nthe reviewer backend claude-deepseek-flash exited 1 in 0 seconds"
 }
 
