@@ -27,6 +27,11 @@ import (
 // runtime weights, so a bad adoption can be undone.
 const storyPointsVersionKeep = 8
 
+// storyPointsAdoptReceipt is the prefix of every line this step prints. The
+// weekly run reads the outcome it reports from the line it captures, so the two
+// steps share the one constant rather than one spelling the other's line.
+const storyPointsAdoptReceipt = "storypoints-adopt: "
+
 // storyPointsAdoptHoldoutShare is the share of the samples, the latest in
 // landing order, the adoption rule reads. It is storypoints.holdoutShare, which
 // Retrain does not export; a change to the retrain's split must change this.
@@ -116,7 +121,7 @@ func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) 
 	}
 	decision := storypoints.Adopt(holdout)
 	if !decision.Adopted {
-		return c.receipt("storypoints-adopt: %s", decision.Reason)
+		return c.receipt("%s%s", storyPointsAdoptReceipt, decision.Reason)
 	}
 
 	runtimeDir := filepath.Dir(currentPath)
@@ -142,10 +147,10 @@ func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) 
 		return fmt.Errorf("wrote %s but could not trim old versions: %w", currentPath, err)
 	}
 	if kept != "" {
-		return c.receipt("storypoints-adopt: %s; wrote %s and kept the weights it replaced as %s",
-			decision.Reason, currentPath, kept)
+		return c.receipt("%s%s; wrote %s and kept the weights it replaced as %s",
+			storyPointsAdoptReceipt, decision.Reason, currentPath, kept)
 	}
-	return c.receipt("storypoints-adopt: %s; wrote %s", decision.Reason, currentPath)
+	return c.receipt("%s%s; wrote %s", storyPointsAdoptReceipt, decision.Reason, currentPath)
 }
 
 // storyPointsProposedFile reads the proposed weights the retrain left beside the
@@ -397,5 +402,5 @@ func (c Commands) revertStoryPoints(real RealTown, env Env) error {
 	if err := os.Rename(versionPath, path); err != nil {
 		return fmt.Errorf("restore %s from %s: %w", path, versionPath, err)
 	}
-	return c.receipt("storypoints-adopt: restored %s from %s", path, name)
+	return c.receipt("%srestored %s from %s", storyPointsAdoptReceipt, path, name)
 }

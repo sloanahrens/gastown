@@ -14,6 +14,11 @@ import (
 // and the time-ordered folds and the holdout are too small to read.
 const MinRetrainSamples = 60
 
+// ErrTooFewSamples reports a retrain given fewer samples than it fits. It is the
+// one refusal a schedule reports as a skip rather than a failure: the history is
+// simply not long enough yet, and the next run reads more of it.
+var ErrTooFewSamples = errors.New("storypoints: too few samples to retrain")
+
 // holdoutShare is the share of the samples, the latest in landing order, that the
 // holdout keeps and the fit does not see.
 const holdoutShare = 0.2
@@ -229,7 +234,7 @@ func retrain(base Weights, samples []Sample, shapeLearn, embedLearn learner) (Mo
 		return Model{}, ErrNoWeights
 	}
 	if len(samples) < MinRetrainSamples {
-		return Model{}, fmt.Errorf("storypoints: retrain has %d samples, want at least %d", len(samples), MinRetrainSamples)
+		return Model{}, fmt.Errorf("%w: has %d, want at least %d", ErrTooFewSamples, len(samples), MinRetrainSamples)
 	}
 	dim := base.EmbeddingDimension()
 	for i, s := range samples {

@@ -85,6 +85,9 @@ type Commands struct {
 	// StoryPointsRevert asks storypoints-adopt to restore the newest runtime
 	// weights version instead of adopting the day's proposal.
 	StoryPointsRevert bool
+	// Now is the clock the weekly retrain reads its last run and stamps its own;
+	// nil is the wall clock.
+	Now func() time.Time
 	// storyPointsStore is the filesystem storypoints-adopt lists, writes and
 	// deletes beside the runtime weights. The zero value is the host's; a test
 	// fills the one function it needs to refuse.
@@ -324,6 +327,146 @@ func extractDays(entries []DirEntry) []string {
 // it names the root searched and the step that writes one.
 func noExtractError(root string) error {
 	return fmt.Errorf("no %s under %s (run %s first)", landingsName, root, CommandExtract)
+}
+
+// StoryPointsWeeklyEvery is how often the hour retrains the story-point weights
+// and adopts them: a week. The stamp the week is counted from is the last run
+// that reached a decision, not the last run that tried.
+const StoryPointsWeeklyEvery = 7 * 24 * time.Hour
+
+// storyPointsWeeklyStampName is the file beside the runtime weights that holds
+// the time the weekly retrain and adoption last reached a decision.
+const storyPointsWeeklyStampName = "weekly.stamp"
+
+// RunStoryPointsWeekly is the hour's weekly story-points job: when a week has
+// passed since the last retrain reached a decision it runs the retrain and then
+// the adoption, and it writes one line to Out naming the outcome. A run inside
+// the week writes the line saying so and reads nothing else.
+//
+// The week is kept in Commands.Town, which must be named: the guard is read
+// before the town is wired, because wiring runs git over every rig and an hour
+// that is not due must not pay for it. The steps that run once the week is due
+// take the town the Wire returns.
+//
+// A decision — the proposal adopted, the rule's rejection with its reason, or a
+// retrain that has too few rows to fit — is stored as the week's last run, so
+// the week is spent however it was decided. A step that failed is written on the
+// line and leaves the week unspent, so the next hour tries again: an extract
+// that has not run for the day yet, or an embedder that is unreachable, is worth
+// another look rather than a week of stale weights.
+//
+// What the run cannot read fails it: a last-run stamp that cannot be read or
+// does not hold a time, a town that was not named or wired, and a decision that
+// cannot be recorded. The first two are a guard whose input is unknown, which is
+// not a reason to retrain; the third would be taken again by the next hour.
+func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
+	c = c.withDefaults()
+	if c.Town == "" {
+		return errors.New("story points weekly: Commands.Town is unset, so there is no last-run stamp to read")
+	}
+	stampPath := storyPointsWeeklyStampPath(c.Town)
+	guard := c.Env
+	if guard.ReadFile == nil {
+		guard = OSEnv(c.Town)
+	}
+	last, err := storyPointsWeeklyLastRun(guard, stampPath)
+	if err != nil {
+		return err
+	}
+	now := c.now().UTC()
+	if !Due(last, now, StoryPointsWeeklyEvery) {
+		return c.receipt("story points weekly: not due, the last run is under %s old", StoryPointsWeeklyEvery)
+	}
+	real, env, err := c.wire(ctx)
+	if err != nil {
+		return fmt.Errorf("story points weekly: %w", err)
+	}
+	if real.Town == "" {
+		return errors.New("story points weekly: the wired town is empty, so there is nowhere to record the last run")
+	}
+	// The stamp is recorded beside the runtime weights, so it follows the town the
+	// steps write, which is the one the Wire returned.
+	stampPath = storyPointsWeeklyStampPath(real.Town)
+	// The retrain's report goes to the day's directory; Out carries the hour's one
+	// line and not the report beside it.
+	train := c
+	train.Out = io.Discard
+	if err := train.runStoryPointsTrain(ctx, real, env); err != nil {
+		if !errors.Is(err, storypoints.ErrTooFewSamples) {
+			return c.receipt("story points weekly: failed: %v; the next hour tries again", err)
+		}
+		if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
+			return err
+		}
+		return c.receipt("story points weekly: skipped: %v", err)
+	}
+	// The adoption step's own line is the decision, reason and file; the week's
+	// line is that decision under the weekly run's name.
+	var decision bytes.Buffer
+	adopt := c
+	adopt.Out = &decision
+	if err := adopt.runStoryPointsAdopt(ctx, real, env); err != nil {
+		return c.receipt("story points weekly: failed: %v; the next hour tries again", err)
+	}
+	if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
+		return err
+	}
+	return c.receipt("story points weekly: %s",
+		strings.TrimPrefix(strings.TrimSpace(decision.String()), storyPointsAdoptReceipt))
+}
+
+// now is the clock the weekly run reads: Now when the caller set one, the wall
+// clock otherwise.
+func (c Commands) now() time.Time {
+	if c.Now != nil {
+		return c.Now()
+	}
+	return time.Now()
+}
+
+// storyPointsWeeklyStampPath is the file recording the week's last decision. It
+// sits beside the runtime weights, which is the story-points state the town
+// keeps, so a revert and the retrain that follows it are read in one place. The
+// town must be named: a relative stamp would land in the process's directory.
+func storyPointsWeeklyStampPath(town string) string {
+	return filepath.Join(filepath.Dir(storypoints.RuntimeWeightsPath(town)), storyPointsWeeklyStampName)
+}
+
+// storyPointsWeeklyLastRun reads the time the weekly run last reached a decision.
+// No file is no run yet, which is due. A file that cannot be read, or that does
+// not hold one RFC3339 time, is an error: the run refuses rather than retraining
+// on a guess about when it last ran. The file's content is not quoted back, only
+// its name, since nothing but this run writes it.
+func storyPointsWeeklyLastRun(env Env, path string) (time.Time, error) {
+	data, err := env.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("story points weekly: read the last run %s: %w", path, err)
+	}
+	last, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("story points weekly: the last run %s does not hold an RFC3339 time", path)
+	}
+	return last, nil
+}
+
+// recordStoryPointsWeeklyRun stores now as the week's last decision. A decision
+// the run cannot record fails it: the next hour would otherwise retrain and
+// adopt the same proposal again, adding a version each hour it could not write.
+func (c Commands) recordStoryPointsWeeklyRun(stampPath string, now time.Time) error {
+	dir := filepath.Dir(stampPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("story points weekly: create %s: %w", dir, err)
+	}
+	if err := c.storyPointsStore.withHost().Write(dir, filepath.Base(stampPath), func(w io.Writer) error {
+		_, err := io.WriteString(w, now.Format(time.RFC3339)+"\n")
+		return err
+	}); err != nil {
+		return fmt.Errorf("story points weekly: record the last run in %s: %w", stampPath, err)
+	}
+	return nil
 }
 
 // runReport is main's report step: the digest rebuilt from the day's extract,

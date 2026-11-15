@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/metrics"
@@ -63,6 +64,10 @@ type metricsHourSteps struct {
 	// dataset refreshes every enabled battery's Jev dataset and returns how many
 	// it wrote and each failure.
 	dataset func(ctx context.Context, town string) (int, []error)
+	// weekly runs the story-points retrain and then its adoption when a week has
+	// passed. It runs after the analysis, whose extract writes the landings table
+	// the retrain reads.
+	weekly func(ctx context.Context, out io.Writer, town string) error
 }
 
 // hostMetricsHourSteps are the hour's jobs over the town it runs in.
@@ -78,6 +83,13 @@ func hostMetricsHourSteps() metricsHourSteps {
 			return runMetricsAnalyse(ctx, out, metrics.OSEnv(town), opts)
 		},
 		dataset: jevDatasetHour,
+		weekly: func(ctx context.Context, out io.Writer, town string) error {
+			return metrics.Commands{
+				Today: time.Now().Format(time.DateOnly),
+				Town:  town,
+				Out:   out,
+			}.RunStoryPointsWeekly(ctx)
+		},
 	}
 }
 
@@ -93,8 +105,12 @@ func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
 // analysis's own stamp check, and before the analysis's first step. It writes a
 // stamp naming the due period, so the other hours of that period skip it while a
 // failing analysis retries. A dataset failure is logged one line each and never
-// stops the analysis or fails the hour.
+// stops the analysis or fails the hour. The weekly story-points job runs last,
+// on the extract the analysis just wrote, whatever the analysis decided.
 func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps metricsHourSteps) error {
+	if steps.weekly == nil {
+		return errors.New("metrics hour: the steps have no weekly job, so the story-point weights would never be retrained")
+	}
 	lockPath := filepath.Join(town, ".runtime", "town-metrics.lock")
 	lock, err := metrics.AcquireTownLock(lockPath)
 	if errors.Is(err, metrics.ErrLockHeld) {
@@ -117,13 +133,17 @@ func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps m
 	snapshotErr := steps.snapshot(ctx, out, town)
 	regimeErr := steps.regime(out, town)
 	analyseErr := steps.analyse(ctx, out, town, refresh)
+	weeklyErr := steps.weekly(ctx, out, town)
 	if snapshotErr != nil {
 		return snapshotErr
 	}
 	if regimeErr != nil {
 		return regimeErr
 	}
-	return analyseErr
+	if analyseErr != nil {
+		return analyseErr
+	}
+	return weeklyErr
 }
 
 // refreshDatasets refreshes the Jev datasets for period unless the stamp beside

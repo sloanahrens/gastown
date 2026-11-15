@@ -42,23 +42,25 @@ func TestMetricsRunSkipsAnHourWhenAnotherRunHoldsTheLock(t *testing.T) {
 	}
 }
 
-// The hour runs the snapshot, the regime step and the analysis in that order,
-// every step runs even when an earlier one fails, and the snapshot's error is
-// the one reported when several fail.
+// The hour runs the snapshot, the regime step, the analysis and the weekly
+// story-points job in that order, every step runs even when an earlier one
+// fails, and the snapshot's error is the one reported when several fail.
 func TestMetricsHourRunsEveryStepAndReportsTheFirstFailure(t *testing.T) {
 	t.Parallel()
 	errSnapshot := errors.New("snapshot failed")
 	errRegime := errors.New("regime failed")
 	errAnalyse := errors.New("analyse failed")
+	errWeekly := errors.New("weekly failed")
 	tests := []struct {
-		name                               string
-		snapshotErr, regimeErr, analyseErr error
-		want                               error
+		name                                          string
+		snapshotErr, regimeErr, analyseErr, weeklyErr error
+		want                                          error
 	}{
 		{name: "all succeed", want: nil},
 		{name: "the snapshot fails", snapshotErr: errSnapshot, want: errSnapshot},
 		{name: "the regime step fails", regimeErr: errRegime, want: errRegime},
 		{name: "the analysis fails", analyseErr: errAnalyse, want: errAnalyse},
+		{name: "the weekly job fails", weeklyErr: errWeekly, want: errWeekly},
 		{name: "the snapshot and the regime step fail", snapshotErr: errSnapshot, regimeErr: errRegime, want: errSnapshot},
 	}
 	for _, tc := range tests {
@@ -78,15 +80,37 @@ func TestMetricsHourRunsEveryStepAndReportsTheFirstFailure(t *testing.T) {
 					calls = append(calls, "analyse")
 					return tc.analyseErr
 				},
+				weekly: func(context.Context, io.Writer, string) error {
+					calls = append(calls, "weekly")
+					return tc.weeklyErr
+				},
 			}
 			err := runMetricsHourWith(context.Background(), io.Discard, t.TempDir(), steps)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
-			if got := strings.Join(calls, ","); got != "snapshot,regime,analyse" {
+			if got := strings.Join(calls, ","); got != "snapshot,regime,analyse,weekly" {
 				t.Fatalf("steps ran %s, want every step in order", got)
 			}
 		})
+	}
+}
+
+// The weekly job is the hour's way of retraining the story-point weights, so an
+// hour wired without one is refused before it takes the lock rather than running
+// for ever with no retrain.
+func TestMetricsHourRefusesStepsWithNoWeeklyJob(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var calls []string
+	steps := fakeHourSteps(&calls, true, nil)
+	steps.weekly = nil
+	err := runMetricsHourWith(context.Background(), io.Discard, town, steps)
+	if err == nil || !strings.Contains(err.Error(), "weekly") {
+		t.Fatalf("err = %v, want a refusal naming the weekly job", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("steps ran %v, want none before the refusal", calls)
 	}
 }
 
@@ -199,6 +223,10 @@ func fakeHourSteps(calls *[]string, due bool, failures []error) metricsHourSteps
 			*calls = append(*calls, "analyse")
 			return nil
 		},
+		weekly: func(context.Context, io.Writer, string) error {
+			*calls = append(*calls, "weekly")
+			return nil
+		},
 	}
 }
 
@@ -212,7 +240,7 @@ func TestMetricsHourRefreshesDatasetBeforeAnalysisWhenDue(t *testing.T) {
 	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, true, nil)); err != nil {
 		t.Fatalf("runMetricsHourWith: %v", err)
 	}
-	want := []string{"snapshot", "regime", "dataset", "analyse"}
+	want := []string{"snapshot", "regime", "dataset", "analyse", "weekly"}
 	if !slices.Equal(calls, want) {
 		t.Errorf("steps ran %v, want %v", calls, want)
 	}
@@ -231,7 +259,7 @@ func TestMetricsHourSkipsDatasetOnANotDueHour(t *testing.T) {
 	if err := runMetricsHourWith(context.Background(), &out, town, fakeHourSteps(&calls, false, nil)); err != nil {
 		t.Fatalf("runMetricsHourWith: %v", err)
 	}
-	want := []string{"snapshot", "regime", "analyse"}
+	want := []string{"snapshot", "regime", "analyse", "weekly"}
 	if !slices.Equal(calls, want) {
 		t.Errorf("steps ran %v, want %v", calls, want)
 	}
@@ -345,6 +373,7 @@ func TestMetricsHourRefreshesDatasetOnceADuePeriod(t *testing.T) {
 	steps := metricsHourSteps{
 		snapshot: func(context.Context, io.Writer, string) error { return nil },
 		regime:   func(io.Writer, string) error { return nil },
+		weekly:   func(context.Context, io.Writer, string) error { return nil },
 		dataset: func(context.Context, string) (int, []error) {
 			exports++
 			return 1, nil
