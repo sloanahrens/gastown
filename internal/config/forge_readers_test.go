@@ -31,6 +31,7 @@ var knownOwnerDataFileNamers = map[string]string{
 	"internal/cmd/daemon_image_pins.go":           "reader: readImagePinsFile expands image-pins, and the refresh writes back the unexpanded text",
 	"internal/daemonimage/build.go":               "comment: the pins file Plan names",
 	"internal/daemonimage/pins.go":                "reader: ParsePins, and PinsPath",
+	"internal/daemon/image_pins_plan.go":          "attention key name only (image-pins-refresh-stuck); it reads no data file",
 	"internal/polecat/imagectx/imagectx.go":       "reader: ParseSeedURLs expands and refuses the placeholder",
 	"internal/polecat/imagectx/cmd/build/main.go": "reader: readFile expands image-pins and seed-urls",
 	"plugins/app-promote/main.go":                 "reader: promoteAll expands rigs.conf",
