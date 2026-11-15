@@ -350,8 +350,11 @@ func TestSpecDispatchSplitRouteAlreadyLabeledNotTouched(t *testing.T) {
 // on a branch, and the findings a rejection appends raise its estimate over the
 // trigger the first pass stayed under (gt-bj22wp). The exemption reads the
 // label before the estimate, so the route spends no estimate on the bead, and
-// a bead without the label is still judged and held.
-func TestSpecDispatchSplitRouteNeverHoldsAReworkBead(t *testing.T) {
+// a bead without the label is still judged and held. Its SpecStoryPointStep
+// prefix, like its sibling's, is what the gate line's -run
+// StoryPointStep|SpecStoryPoint filter selects; a rename that drops the prefix
+// hides both tests from that filter (gt-g9gpv0).
+func TestSpecStoryPointStepNeverHoldsAReworkBead(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
@@ -416,7 +419,7 @@ func TestSpecDispatchSplitRouteNeverHoldsAReworkBead(t *testing.T) {
 // whose work is on a branch, so it writes nothing and runs no estimate
 // (gt-bj22wp). The ready query filters a split bead before the candidate loop,
 // so the guard this pins is the one for a label that lands mid-tick.
-func TestSpecDispatchSplitRouteReworkExemptionCoversTheSplitHold(t *testing.T) {
+func TestSpecStoryPointStepReworkExemptionCoversTheSplitHold(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown()
 	env := f.env()
