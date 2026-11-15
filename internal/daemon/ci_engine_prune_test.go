@@ -877,9 +877,10 @@ func TestCIEnginePruneFailureLineStderrIsBounded(t *testing.T) {
 }
 
 // TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr: kubectl's own errors
-// about the pod, the context or the connection are not the engine's stderr. A failed
-// exec whose stderr is only kubectl's is logged with its exit status alone, and when
-// kubectl's line comes before the program's, the program's line is the one logged.
+// about the pod, the context or the connection, and its report of the remote
+// command's status, are not the engine's stderr. A failed exec whose stderr is only
+// kubectl's is logged with its exit status alone, and when kubectl's line comes
+// before the program's, the program's line is the one logged.
 func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) {
 	t.Parallel()
 	const kubectlNotFound = `Error from server (NotFound): pods "runner-1" not found`
@@ -887,6 +888,7 @@ func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) 
 	const kubectlKlog = "E1103 10:00:00.000000    1234 memcache.go:265] couldn't get current server API group list"
 	const kubectlKlogWarning = "W1103 10:00:00.000000    1234 warnings.go:70] deprecated API"
 	const kubectlWarning = "Warning: deprecated API version"
+	const kubectlExitReport = "command terminated with exit code 1"
 	for name, tc := range map[string]struct {
 		match   string
 		reply   cliReply
@@ -921,6 +923,14 @@ func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) 
 		"the engine's own Error line is kept": {
 			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: "Error: No such object: x\n"},
 			marker: "the build cache prune", want: "Error: No such object: x",
+		},
+		"the exit report kubectl adds, before the program's": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlExitReport + "\nprogram line\n"},
+			marker: "the build cache prune", kubectl: kubectlExitReport, want: "program line",
+		},
+		"build cache prune, kubectl's exit report only": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlExitReport + "\n"},
+			marker: "the build cache prune", kubectl: kubectlExitReport, want: "",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1138,7 +1148,8 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 // TestCIEngineSizeAfterIsReadFromDu: the size after a removal is du's first field.
 // A du that fails, prints nothing or prints a non-number is a failed run that says
 // so, and the removals still ran. A du that exits 1 is a failure whatever its
-// stdout, unless every stderr line is du's own vanishing-file report.
+// stdout, unless every stderr line is du's own vanishing-file report: a report cut
+// short, and kubectl's exit report with no du line beside it, are both failures.
 func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 	t.Parallel()
 	listing := engListing(t,
@@ -1176,6 +1187,18 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: cannot access '" + root + "/volumes/aaa': No such file or directory\ncp: cannot stat '" + root + "/volumes/bbb': No such file or directory\n"}},
 			"du of the data root failed (exit status 1, stderr: du: cannot access '" + root + "/volumes/aaa': No such file or directory)",
 		},
+		"du exits 1 with a first line cut short": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: " + root + "/volumes/aaa: No such file or direc"}},
+			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or direc)",
+		},
+		"du exits 1 with only kubectl's exit report": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "command terminated with exit code 1\n"}},
+			"du of the data root failed (exit status 1)",
+		},
+		"du exits 1 with a line near kubectl's exit report": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: " + root + "/volumes/aaa: No such file or directory\ncommand terminated with exit code one\n"}},
+			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or directory)",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -1197,9 +1220,10 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 }
 
 // TestCIEngineSizeAfterAcceptsAVanishedFile: a CI job's volume can be removed while
-// du walks the data root, so du prints its total and exits 1 over the vanished
-// paths. That figure is the size after, and the run reaches a verdict. kubectl's
-// own lines are not du's report, so they do not veto it.
+// du walks the data root, so du prints its total to stdout and exits 1 over the
+// vanished paths, and kubectl adds its own report of that status to the same stderr.
+// That figure is the size after, and the run reaches a verdict; kubectl's lines are
+// not du's report, so none of them vetoes it.
 func TestCIEngineSizeAfterAcceptsAVanishedFile(t *testing.T) {
 	t.Parallel()
 	const root = ciEngineRoot
@@ -1211,6 +1235,14 @@ func TestCIEngineSizeAfterAcceptsAVanishedFile(t *testing.T) {
 		"du's own report wording": "du: cannot access '" + root + "/volumes/aaa': No such file or directory\n" +
 			"du: cannot read directory '" + root + "/volumes/bbb': No such file or directory\n",
 		"a kubectl warning alongside": "Warning: a transient kubectl line\n" +
+			"du: " + root + "/volumes/aaa: No such file or directory\n",
+		"many vanished volumes": strings.Repeat("du: "+root+"/volumes/aaa: No such file or directory\n", 40),
+		"the exit report kubectl adds": "du: " + root + "/volumes/aaa: No such file or directory\n" +
+			"du: " + root + "/volumes/bbb: No such file or directory\n" +
+			"command terminated with exit code 1\n",
+		"many vanished volumes and the exit report": strings.Repeat("du: "+root+"/volumes/aaa: No such file or directory\n", 40) +
+			"command terminated with exit code 1\n",
+		"kubectl's exit report ahead of du's": "command terminated with exit code 1\n" +
 			"du: " + root + "/volumes/aaa: No such file or directory\n",
 	} {
 		t.Run(name, func(t *testing.T) {

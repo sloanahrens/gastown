@@ -745,7 +745,8 @@ const ciEngineStderrMax = 200
 // ciEngineKubectlErrorPrefixes are the lines kubectl prints for its own failures
 // about the pod, the context or the connection, and its warnings. kubectl relays the
 // engine's stderr on the same stream, so these are skipped to reach the program's own
-// line. The lines klog writes for kubectl are matched by ciEngineKlogHeader instead.
+// line. The lines klog writes for kubectl are matched by ciEngineKlogHeader instead,
+// and its report of the remote command's status by ciEngineKubectlExitReport.
 var ciEngineKubectlErrorPrefixes = []string{
 	"error: ",
 	"Error from server",
@@ -757,6 +758,12 @@ var ciEngineKubectlErrorPrefixes = []string{
 // ciEngineKlogHeader matches the header klog writes before each line it logs: a
 // severity letter, the date as MMDD, then the time with its fraction.
 var ciEngineKlogHeader = regexp.MustCompile(`^[IWEF]\d{4} \d{2}:\d{2}:\d{2}\.\d+ `)
+
+// ciEngineKubectlExitReport matches the line kubectl writes to stderr when the remote
+// command exits non-zero: kubectl's own report of the status, the decimal number ending
+// the line. Matching the whole sentence and its number keeps the recognizer off another
+// program's line; du's diagnostics on the same stream carry its "du: " prefix.
+var ciEngineKubectlExitReport = regexp.MustCompile(`^command terminated with exit code \d+$`)
 
 // ciEngineFailure names how an engine exec ended for the log: its exit status, then,
 // for a failed exec, the first line of its stderr. A nil error is exit status 0 with
@@ -805,7 +812,7 @@ func ciEngineKubectlLine(line string) bool {
 			return true
 		}
 	}
-	return ciEngineKlogHeader.MatchString(line)
+	return ciEngineKlogHeader.MatchString(line) || ciEngineKubectlExitReport.MatchString(line)
 }
 
 // ciEngineExec runs one program in the runner's engine container with argv as
