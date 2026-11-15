@@ -974,13 +974,17 @@ const (
 	// overrunSandboxCloneLabel names the sandbox clone a sandbox seat's handle
 	// runs on.
 	overrunSandboxCloneLabel = "sandbox clone"
+	// overrunUnlabeledWorktreeLabel names a handle that carries no label. It is
+	// not the host worktree: a handle nobody labeled may be any worktree, so the
+	// line says so instead of naming one.
+	overrunUnlabeledWorktreeLabel = "unlabeled worktree"
 )
 
 // labeledDaemonGit is a seat's git handle carrying the label of the worktree
-// it runs on. overrunSandboxGit wraps the in-sandbox handle in one at the
-// moment it builds it, so the label comes from the same decision that picked
-// the handle and cannot disagree with it. The host handle is not wrapped: a
-// handle with no label is the host worktree.
+// it runs on. labelOverrunHostGit and labelOverrunSandboxGit wrap the handle in
+// one at the moment overrunSeatGit and overrunSandboxGit build it, so the label
+// comes from the same decision that picked the handle and cannot disagree with
+// it.
 type labeledDaemonGit struct {
 	daemonGit
 	label string
@@ -989,14 +993,37 @@ type labeledDaemonGit struct {
 // worktreeLabel is the kind of worktree the handle runs on.
 func (g labeledDaemonGit) worktreeLabel() string { return g.label }
 
+// GitDir is the git directory of the worktree the handle runs on, so a labeled
+// handle answers the question its unlabeled handle would. A handle that cannot
+// answer it is an error, never an empty directory.
+func (g labeledDaemonGit) GitDir() (string, error) {
+	reader, ok := g.daemonGit.(interface{ GitDir() (string, error) })
+	if !ok {
+		return "", fmt.Errorf("the %s handle cannot read its git directory", g.label)
+	}
+	return reader.GitDir()
+}
+
+// labelOverrunHostGit labels a host seat's handle as the host worktree.
+func labelOverrunHostGit(g daemonGit) daemonGit {
+	return labeledDaemonGit{daemonGit: g, label: overrunHostWorktreeLabel}
+}
+
+// labelOverrunSandboxGit labels a sandbox seat's in-sandbox handle as the
+// sandbox clone.
+func labelOverrunSandboxGit(g daemonGit) daemonGit {
+	return labeledDaemonGit{daemonGit: g, label: overrunSandboxCloneLabel}
+}
+
 // overrunWorktreeLabel names the worktree the seat's git handle g runs on, as
 // the label overrunSeatGit's handle carries: the sandbox clone for a sandbox
-// seat, the host worktree for every other seat.
+// seat, the host worktree for a host seat. A handle with no label is
+// overrunUnlabeledWorktreeLabel, never the host worktree.
 func overrunWorktreeLabel(g daemonGit) string {
 	if labeled, ok := g.(interface{ worktreeLabel() string }); ok {
 		return labeled.worktreeLabel()
 	}
-	return overrunHostWorktreeLabel
+	return overrunUnlabeledWorktreeLabel
 }
 
 // overrunSeatGit is the one seam that picks the git handle the overrun stop's
@@ -1020,7 +1047,7 @@ func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if err != nil {
 		return nil, err
 	}
-	return d.gitAt(workDir), nil
+	return labelOverrunHostGit(d.gitAt(workDir)), nil
 }
 
 // overrunSandboxGit is the git handle of a seat that runs in a sandbox: a Git
@@ -1059,10 +1086,7 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
 	}
-	return labeledDaemonGit{
-		daemonGit: git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath()),
-		label:     overrunSandboxCloneLabel,
-	}, true, nil
+	return labelOverrunSandboxGit(git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath())), true, nil
 }
 
 // validSandboxCloneDir reports whether dir can be handed to the in-sandbox
