@@ -19,7 +19,7 @@ type SwapConflict struct {
 	Unpicked []string
 	// Landed holds the commits that reached the new main from a writer since
 	// the swap, oldest first. A non-empty Landed is why the branches were kept:
-	// renaming back would drop those commits.
+	// renaming back would move those commits off main onto compact-work.
 	Landed []string
 }
 
@@ -70,10 +70,13 @@ type SwapResult struct {
 //
 // A pick that leaves conflicts ends the replay. With no commit landed on the
 // new main since the swap, the two branches are renamed back and RenamedBack
-// reports it; with one landed, both branches stay as the swap left them and
-// Conflict names the commits, because renaming back would drop that commit.
-// Both outcomes return a nil error: the caller raises the item and the
-// recovery table takes over from the state the result describes.
+// reports it. With one landed, both branches stay as the swap left them and
+// Conflict names the commits, because renaming back would move that commit off
+// main onto compact-work. A commit that lands between the check and the renames
+// is caught by reading back the tip the renames moved: the renames are undone
+// and both branches stay as the swap left them, with that commit named. Both
+// outcomes return a nil error: the caller raises the item and the recovery
+// table takes over from the state the result describes.
 func Swap(ctx context.Context, ex Exec, verifiedTip string, sleep Sleeper) (SwapResult, error) {
 	if err := checkCommitHash("the verified tip", verifiedTip); err != nil {
 		return SwapResult{}, err
@@ -94,7 +97,16 @@ func Swap(ctx context.Context, ex Exec, verifiedTip string, sleep Sleeper) (Swap
 	if err := checkCommitHash("compact-work's tip", swappedTip); err != nil {
 		return SwapResult{}, err
 	}
-	for _, rename := range [][2]string{{"main", "main-pre-squash"}, {"compact-work", "main"}} {
+	occupied, err := s.number(ctx, mainPreSquashCount)
+	if err != nil {
+		return SwapResult{}, err
+	}
+	if occupied != 0 {
+		return SwapResult{}, fmt.Errorf(
+			"doltsquash: statement %d (%s) counted %d branches named main-pre-squash, want none: the swap's forced rename would overwrite it",
+			s.n, shortStatement(mainPreSquashCount), occupied)
+	}
+	for _, rename := range swapOrder {
 		if _, err := s.exec(ctx, renameStatement(rename[0], rename[1])); err != nil {
 			return SwapResult{}, err
 		}
@@ -173,12 +185,16 @@ func (s *designStep) onBranch(ctx context.Context, want, why string) error {
 // resolveConflict answers a pick that left conflicts. It renames the two
 // branches back only when no commit has reached the new main from a writer
 // since the swap: the replay's own picks do not count, and renaming back keeps
-// them as compact-work without dropping anything. A landed commit would be
-// dropped, so the branches stay and the caller raises the item. A read it
-// cannot trust stops the run and leaves the branches as the swap left them,
-// which recovery by state resolves: a refusal is not a recovery.
+// them as compact-work. A landed commit would move off main onto compact-work
+// with the new history, so the branches stay and the caller raises the item.
+// The check and the renames are separate statements, so a commit can land in
+// between: the tip the renames moved is read back, and a tip that moved undoes
+// the renames and names that commit, leaving both branches as the swap left
+// them. A read it cannot trust stops the run: one before the renames leaves the
+// branches as the swap left them for recovery by state, and one after them says
+// the branches are renamed back, because a refusal is not a recovery.
 func (s *designStep) resolveConflict(ctx context.Context, result *SwapResult, unpicked []string, ours map[string]bool) error {
-	landed, err := s.landedSince(ctx, result.SwappedTip, ours)
+	landed, checkedTip, err := s.landedSince(ctx, result.SwappedTip, ours)
 	if err != nil {
 		return err
 	}
@@ -191,58 +207,111 @@ func (s *designStep) resolveConflict(ctx context.Context, result *SwapResult, un
 		result.Reason = "kept both branches: " + result.Conflict.String()
 		return nil
 	}
-	for _, rename := range [][2]string{{"main", "compact-work"}, {"main-pre-squash", "main"}} {
+	for _, rename := range renameBackOrder {
 		if _, err := s.exec(ctx, renameStatement(rename[0], rename[1])); err != nil {
 			return err
 		}
 	}
-	result.RenamedBack = true
-	result.Reason = "renamed the two back: " + result.Conflict.String()
+	// The renames carry whatever main held, so this tip is the one the check
+	// read unless a commit landed in the window between them.
+	movedTip, err := s.scalar(ctx, "SELECT dolt_hashof('compact-work')")
+	if err != nil {
+		return fmt.Errorf("doltsquash: the two branches are renamed back but the tip they moved could not be read, so a commit that landed between the check and the renames is not ruled out: %w", err)
+	}
+	if err := checkCommitHash("the tip the rename back moved", movedTip); err != nil {
+		return fmt.Errorf("doltsquash: the two branches are renamed back but the tip they moved cannot be trusted, so a commit that landed between the check and the renames is not ruled out: %w", err)
+	}
+	if movedTip == checkedTip {
+		result.RenamedBack = true
+		result.Reason = "renamed the two back: " + result.Conflict.String()
+		return nil
+	}
+	// A commit landed before the renames and now sits on compact-work. Rename
+	// forth again so both branches sit as the swap left them, then name it.
+	for _, rename := range swapOrder {
+		if _, err := s.exec(ctx, renameStatement(rename[0], rename[1])); err != nil {
+			return err
+		}
+	}
+	statement := tailStatement(checkedTip, movedTip)
+	commits, err := s.column(ctx, statement)
+	if err != nil {
+		return err
+	}
+	if len(commits) == 0 {
+		return fmt.Errorf(
+			"doltsquash: statement %d (%s) listed no commit though compact-work's tip %s is not %s, the tip the check read: a landed commit would be missed",
+			s.n, shortStatement(statement), movedTip, checkedTip)
+	}
+	landed = make([]string, 0, len(commits))
+	for _, commit := range commits {
+		if err := checkCommitHash("a commit that landed between the check and the renames", commit); err != nil {
+			return err
+		}
+		landed = append(landed, commit)
+	}
+	result.Conflict.Landed = landed
+	result.Reason = "kept both branches: " + result.Conflict.String()
 	return nil
 }
 
 // landedSince returns the commits on the new main that the replay did not make,
 // oldest first: what is left when the log from the tip the swap gave it to its
 // tip now drops every hash the replay's picks returned. A tip equal to the
-// swapped tip means nothing has landed. A log that lists nothing while the tip
-// moved is refused rather than read as empty, because renaming back against a
-// commit it could not name would drop that commit.
-func (s *designStep) landedSince(ctx context.Context, swappedTip string, ours map[string]bool) ([]string, error) {
+// swapped tip means nothing has landed. The tip it read is returned too, so the
+// caller can tell the tip the rename back moved from one a commit moved. A log
+// that lists nothing while the tip moved is refused rather than read as empty,
+// because renaming back against a commit it could not name would move that
+// commit off main unseen.
+func (s *designStep) landedSince(ctx context.Context, swappedTip string, ours map[string]bool) ([]string, string, error) {
 	tip, err := s.scalar(ctx, "SELECT dolt_hashof('main')")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := checkCommitHash("the new main's tip", tip); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if tip == swappedTip {
-		return nil, nil
+		return nil, tip, nil
 	}
 	statement := tailStatement(swappedTip, tip)
 	commits, err := s.column(ctx, statement)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(commits) == 0 {
-		return nil, fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"doltsquash: statement %d (%s) listed no commit though the new main's tip %s is not %s, the tip the swap gave it: a landed commit would be missed",
 			s.n, shortStatement(statement), tip, swappedTip)
 	}
 	var landed []string
 	for _, commit := range commits {
 		if err := checkCommitHash("a commit in the new main's log", commit); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if !ours[commit] {
 			landed = append(landed, commit)
 		}
 	}
-	return landed, nil
+	return landed, tip, nil
 }
+
+// mainPreSquashCount counts the branches named main-pre-squash. The swap's
+// first rename is forced, so it would overwrite a branch that already holds
+// that name; the count must be zero before the renames.
+const mainPreSquashCount = "SELECT COUNT(*) FROM dolt_branches WHERE name = 'main-pre-squash'"
+
+// swapOrder is the swap's renames in order; renameBackOrder is their reverse,
+// which a conflict sends when nothing landed on the new main.
+var (
+	swapOrder       = [][2]string{{"main", "main-pre-squash"}, {"compact-work", "main"}}
+	renameBackOrder = [][2]string{{"main", "compact-work"}, {"main-pre-squash", "main"}}
+)
 
 // renameStatement renders one of the swap's branch renames. --force is what
 // lets the rename through while another session is on the branch, which Dolt
-// refuses without it.
+// refuses without it, and it also lets the rename overwrite a branch that
+// already holds the target name.
 func renameStatement(from, to string) string {
 	return fmt.Sprintf("CALL DOLT_BRANCH('-m', '--force', %s, %s)", quoteLiteral(from), quoteLiteral(to))
 }
