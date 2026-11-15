@@ -39,9 +39,11 @@ const removeFailed = "docker image rm failed; the image is still present"
 // Policy.Apply false is the dry run and is the default, and Apply then runs no
 // docker command at all and records the run as mode dry-run. Every removal names
 // one image id — docker's prune is never run, and removing by id is what drops
-// every tag of the image the plan decided about. --no-prune keeps a removal to
-// that image alone: without it docker also deletes an untagged parent image,
-// and every row this plan does not name as a removal is one it keeps.
+// every tag of the image the plan decided about. The removal is forced because
+// docker refuses to delete an id that several tags name without it, and no keep
+// rule spared a tag of the id. --no-prune keeps a removal to that image alone:
+// without it docker also deletes an untagged parent image, and every row this
+// plan does not name as a removal is one it keeps.
 //
 // One failed removal does not stop the others: it becomes a Failure, the run
 // continues, and the ledger line counts what was done. A refused plan removes
@@ -86,7 +88,7 @@ func (t *Target) removePlanned(ctx context.Context, actions []diskmaint.Action, 
 			errs = append(errs, fmt.Sprintf("action %d: %v", i+1, err))
 			continue
 		}
-		if _, err := t.client().Docker(ctx, "image", "rm", "--no-prune", id); err != nil {
+		if _, err := t.client().Docker(ctx, "image", "rm", "--no-prune", "--force", id); err != nil {
 			result.Failed = append(result.Failed, diskmaint.Failure{Action: a, Err: removeFailed})
 			errs = append(errs, fmt.Sprintf("remove %s: %s", id, removeFailed))
 			continue

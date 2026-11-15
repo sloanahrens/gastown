@@ -61,6 +61,16 @@ type fakeDocker struct {
 	containersRaw string
 	// rmErr is the error a removal of one image id returns.
 	rmErr map[string]error
+	// tags is every tag the daemon holds for an image id. Docker refuses to
+	// delete an id several tags name unless the removal is forced.
+	tags map[string][]string
+	// parentOf maps an image id to the id it was built from, so a removal that
+	// prunes takes an untagged parent with it while --no-prune keeps it.
+	parentOf map[string]string
+	// gone is every image id the daemon no longer holds, and removed is the ids
+	// a removal took, in call order.
+	gone    map[string]bool
+	removed []string
 }
 
 func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
@@ -131,13 +141,42 @@ func (f *fakeDocker) containerImages(args []string) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// remove answers docker image rm: the argv is spelled out here, so a removal
-// that names a tag, drops -no-prune or removes several ids at once fails.
+// remove answers docker image rm the way docker does: the argument is an image
+// id and never a tag, an id several tags name needs a forced removal, and a
+// removal prunes an untagged parent unless --no-prune is given.
 func (f *fakeDocker) remove(args []string) ([]byte, error) {
-	if len(args) != 2 || args[0] != "--no-prune" || !registry.ValidDigest(args[1]) {
+	force, noPrune, id := false, false, ""
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			force = true
+		case "--no-prune":
+			noPrune = true
+		default:
+			if id != "" || !registry.ValidDigest(a) {
+				return nil, errors.New("unexpected image rm")
+			}
+			id = a
+		}
+	}
+	if id == "" {
 		return nil, errors.New("unexpected image rm")
 	}
-	return nil, f.rmErr[args[1]]
+	if err := f.rmErr[id]; err != nil {
+		return nil, err
+	}
+	if len(f.tags[id]) > 1 && !force {
+		return nil, errors.New("conflict: image is referenced in multiple repositories")
+	}
+	if f.gone == nil {
+		f.gone = make(map[string]bool)
+	}
+	f.gone[id] = true
+	f.removed = append(f.removed, id)
+	if parent := f.parentOf[id]; parent != "" && !noPrune && len(f.tags[parent]) == 0 {
+		f.gone[parent] = true
+	}
+	return nil, nil
 }
 
 // inspect answers docker image inspect for the ids of the given argv: every

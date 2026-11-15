@@ -46,6 +46,8 @@ type fakeDaemon struct {
 	containersErr error
 	containersRaw string
 	rmErr         map[string]error
+	tags          map[string][]string
+	parentOf      map[string]string
 	labels        string
 	labelsErr     error
 	deploy        string
@@ -63,7 +65,7 @@ func (f *fakeDaemon) run(ctx context.Context, env []string, name string, args ..
 				images: f.images, imagesErr: f.imagesErr,
 				digests: f.digests, digestsErr: f.digestsErr, digestsRaw: f.digestsRaw,
 				containers: f.containers, containersErr: f.containersErr, containersRaw: f.containersRaw,
-				rmErr: f.rmErr,
+				rmErr: f.rmErr, tags: f.tags, parentOf: f.parentOf,
 			}
 		}
 		return f.docker.run(ctx, env, name, args...)

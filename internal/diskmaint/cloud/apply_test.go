@@ -36,15 +36,17 @@ func lastEntry(t *testing.T, l *diskmaint.Ledger) diskmaint.LedgerEntry {
 	return entries[0]
 }
 
-// removeCalls is the image removals a run made, in call order.
-func removeCalls(f *fakeDaemon) []call {
-	var out []call
-	for _, c := range f.dockerCalls() {
-		if len(c.args) > 1 && c.args[0] == "image" && c.args[1] == "rm" {
-			out = append(out, c)
-		}
+// removedIDs is every image id the fake daemon's removals took, in call order.
+func removedIDs(f *fakeDaemon) []string {
+	if f.docker == nil {
+		return nil
 	}
-	return out
+	return f.docker.removed
+}
+
+// held reports whether the fake daemon still holds an image id.
+func (f *fakeDaemon) held(id string) bool {
+	return f.docker == nil || !f.docker.gone[id]
 }
 
 // applying is a plan whose policy asks for an apply.
@@ -53,7 +55,7 @@ func applying(actions ...diskmaint.Action) diskmaint.Plan {
 }
 
 // TestApplyRemovesTheImagesThePlanNames runs the target's own plan and then its
-// apply, so the ids docker is asked to remove are the ids the plan decided on.
+// apply, so the ids the daemon loses are the ids the plan decided on.
 func TestApplyRemovesTheImagesThePlanNames(t *testing.T) {
 	t.Parallel()
 	images, digests := eightTags(t)
@@ -77,20 +79,12 @@ func TestApplyRemovesTheImagesThePlanNames(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	calls := removeCalls(f)
-	if len(calls) != len(plan.Actions) {
-		t.Fatalf("removals ran %d times, want once per planned image", len(calls))
+	if got, want := removedIDs(f), removed(plan); !slices.Equal(got, want) {
+		t.Errorf("the daemon removed %v, want the plan's ids in order %v", got, want)
 	}
-	for i, a := range plan.Actions {
-		// The id alone, never the tag: docker drops every tag that points at
-		// the id the plan decided about. --no-prune keeps the removal to that
-		// image, so an untagged parent the plan keeps survives.
-		want := []string{"image", "rm", "--no-prune", a.Ref}
-		if !slices.Equal(calls[i].args, want) {
-			t.Errorf("removal %d args = %v, want %v", i, calls[i].args, want)
-		}
-		if !slices.Equal(calls[i].env, []string{"DOCKER_HOST=" + dockerHost}) {
-			t.Errorf("removal %d env = %v, want DOCKER_HOST=%s", i, calls[i].env, dockerHost)
+	for _, a := range plan.Actions {
+		if f.held(a.Ref) {
+			t.Errorf("the daemon still holds %s, want it removed", a.Ref)
 		}
 	}
 	if len(result.Done) != 3 || result.Done[0].Ref != plan.Actions[0].Ref {
@@ -109,6 +103,49 @@ func TestApplyRemovesTheImagesThePlanNames(t *testing.T) {
 	}
 }
 
+// TestApplyRemovesAnImageSeveralTagsName drives an id that two candidate tags
+// name: docker refuses that removal unless it is forced, and the plan decided
+// every one of those tags leaves with the id.
+func TestApplyRemovesAnImageSeveralTagsName(t *testing.T) {
+	t.Parallel()
+	id := imgID('1')
+	f := &fakeDaemon{tags: map[string][]string{id: {fractalsRepo + ":t1", fractalsRepo + ":t2"}}}
+	target, _ := newApplyTarget(t, f)
+	plan := applying(diskmaint.Action{Kind: actionRemove, Ref: id, Bytes: 10})
+
+	result, err := target.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(result.Done) != 1 || len(result.Failed) != 0 {
+		t.Errorf("Done=%+v Failed=%+v, want the image removed", result.Done, result.Failed)
+	}
+	if f.held(id) {
+		t.Errorf("the daemon still holds %s, want it removed", id)
+	}
+}
+
+// TestApplyKeepsAnUntaggedParentImage drives --no-prune: a removal without it
+// would take the untagged parent, which this plan keeps, since every row it does
+// not name as a removal is one it keeps.
+func TestApplyKeepsAnUntaggedParentImage(t *testing.T) {
+	t.Parallel()
+	child, parent := imgID('1'), imgID('2')
+	f := &fakeDaemon{
+		tags:     map[string][]string{child: {fractalsRepo + ":t1"}},
+		parentOf: map[string]string{child: parent},
+	}
+	target, _ := newApplyTarget(t, f)
+	plan := applying(diskmaint.Action{Kind: actionRemove, Ref: child, Bytes: 10})
+
+	if _, err := target.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !f.held(parent) {
+		t.Errorf("the daemon dropped the parent %s, want the untagged parent kept", parent)
+	}
+}
+
 // TestApplyIsADryRunWithoutThePolicyFlag is the dry-run default: a plan whose
 // policy does not ask for an apply removes nothing and runs no docker command.
 func TestApplyIsADryRunWithoutThePolicyFlag(t *testing.T) {
@@ -124,14 +161,16 @@ func TestApplyIsADryRunWithoutThePolicyFlag(t *testing.T) {
 	if len(plan.Actions) == 0 {
 		t.Fatal("plan names no removal, so this test would prove nothing")
 	}
+	// The plan itself reads the daemon; only Apply's own commands are counted.
+	before := len(f.dockerCalls())
 	target, l := newApplyTarget(t, f)
 
 	result, err := target.Apply(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if calls := removeCalls(f); len(calls) != 0 {
-		t.Errorf("a dry run ran %d removals, want none", len(calls))
+	if n := len(f.dockerCalls()) - before; n != 0 {
+		t.Errorf("a dry run ran %d docker commands, want none", n)
 	}
 	if len(result.Done) != 0 || result.BytesFreed != 0 {
 		t.Errorf("Result = %+v, want nothing done and nothing freed", result)
@@ -157,8 +196,11 @@ func TestApplyRemovesEachImageAndKeepsGoingAfterAFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if n := len(removeCalls(f)); n != 3 {
-		t.Fatalf("removals ran %d times, want once per id", n)
+	if got, want := removedIDs(f), []string{a1, a3}; !slices.Equal(got, want) {
+		t.Errorf("the daemon removed %v, want %v: one failure does not stop the rest", got, want)
+	}
+	if !f.held(a2) {
+		t.Errorf("the daemon dropped %s, whose removal failed", a2)
 	}
 	if len(result.Done) != 2 || result.Done[0].Ref != a1 || result.Done[1].Ref != a3 {
 		t.Errorf("Done = %+v, want the first and third images", result.Done)

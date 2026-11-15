@@ -240,10 +240,10 @@ func (t *Target) deployRefs(ctx context.Context) (named, string) {
 // that label runs in. A line naming no image is a label of another kind and is
 // skipped; a ref of one of the plan's repositories that it cannot read, or one
 // that names no tag, refuses the plan, since the image it names is then unknown.
-// A file with
-// no label line, or one whose last line has no newline after it, refuses the
-// plan too: a short read cannot be told from a file that names fewer labels, and
-// reading one as a smaller keep list would free images a label still uses.
+// A file with no label line, or one whose last line has no newline after it,
+// refuses the plan too: a short read cannot be told from a file that names fewer
+// labels, and reading one as a smaller keep list would free images a label still
+// uses.
 func parseLabels(text string) (named, string) {
 	if strings.TrimSpace(text) == "" {
 		return named{}, refuseEmptyLabels
