@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -217,32 +219,52 @@ func TestUpdateTownValuesFailedWriteExitsNonZero(t *testing.T) {
 	}
 }
 
-// TestUpdateTownValuesUnwiredSeamWritesThroughTheDefault: a command built
-// without the writer still writes the town's copy, so a missing seam cannot
-// quietly skip it.
-func TestUpdateTownValuesUnwiredSeamWritesThroughTheDefault(t *testing.T) {
+// TestUpdateTownValuesUnwiredSeamIsRefused: a command built without the writer
+// fails the run and writes nothing, so a missing seam cannot stand in for the
+// town's copy or reach a writer the caller did not wire.
+func TestUpdateTownValuesUnwiredSeamIsRefused(t *testing.T) {
 	t.Parallel()
 	c := newTownValuesCommand(t, okUpdateRun)
 	c.seams.WriteTownValues = nil
 
 	code, _, stderr := runUpdateCommand(t, context.Background(), c.seams, c.podRunArgs()...)
+	if code != 1 {
+		t.Fatalf("exit = %d for an unwired writer, want 1; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "no town values writer is wired") {
+		t.Errorf("stderr does not name the unwired writer:\n%s", stderr)
+	}
+	if _, err := os.Stat(c.townValuesPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the town's values file exists after a refused write: %v", err)
+	}
+}
+
+// TestUpdateTownValuesProductionWriterWritesTheTownCopy: the production seams'
+// writer, under the command's own run, leaves the town's copy at the pair the
+// --images file names. Every real-world seam but the writer is faked, so a
+// production command that stops wiring the writer fails here.
+func TestUpdateTownValuesProductionWriterWritesTheTownCopy(t *testing.T) {
+	t.Parallel()
+	c := newTownValuesCommand(t, okUpdateRun)
+	seams := productionUpdateSeams()
+	seams.FindTownRoot = c.seams.FindTownRoot
+	seams.DepsFactory = c.seams.DepsFactory
+	seams.Run = c.seams.Run
+	seams.Images = c.seams.Images
+	seams.ImageSwap = c.seams.ImageSwap
+	seams.PodRun = c.seams.PodRun
+	seams.Notifier = c.seams.Notifier
+	seams.InPod = func() bool { return false }
+
+	code, _, stderr := runUpdateCommand(t, context.Background(), seams, c.podRunArgs()...)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 	}
 	got, err := imagevalues.Load(c.townValuesPath())
 	if err != nil {
-		t.Fatalf("the town's values file was not written: %v", err)
+		t.Fatalf("the production writer left no file the town can read: %v", err)
 	}
 	if want := townValuesPair(); got != want {
 		t.Errorf("town values = %+v, want %+v", got, want)
-	}
-}
-
-// TestUpdateTownValuesProductionWiresTheWriter: the production command writes
-// the town's copy through imagevalues.Write.
-func TestUpdateTownValuesProductionWiresTheWriter(t *testing.T) {
-	t.Parallel()
-	if productionUpdateSeams().WriteTownValues == nil {
-		t.Error("production update seams wire no town values writer")
 	}
 }

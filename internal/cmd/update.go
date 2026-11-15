@@ -272,8 +272,9 @@ type updateSeams struct {
 	// requires. Nil reports false, so an in-cluster run with no seam is refused.
 	InPod func() bool
 	// WriteTownValues writes the town's own values file after an ok pod roll, the
-	// copy the render and the pair-ready check read. A nil seam writes through
-	// imagevalues.Write rather than skip the write.
+	// copy the render and the pair-ready check read. A run that needs the write
+	// with no seam wired is refused, as podDaemonDeps refuses a nil PodRun: a
+	// skipped write leaves the town's copy stale, which rolls the daemon back.
 	WriteTownValues func(path string, v imagevalues.Values) error
 }
 
@@ -520,11 +521,11 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 }
 
 // writeTownValues writes v to path through write, the seam a test fakes. An
-// unwired seam writes through imagevalues.Write: every production command has
-// the writer, so a missing seam must not skip the town's copy.
+// unwired seam is refused rather than skipped: a run that cannot write the town's
+// copy has not done its job, and the production command always wires the writer.
 func writeTownValues(write func(path string, v imagevalues.Values) error, path string, v imagevalues.Values) error {
 	if write == nil {
-		write = imagevalues.Write
+		return errors.New("no town values writer is wired")
 	}
 	if err := write(path, v); err != nil {
 		return fmt.Errorf("writing the town's images file %s: %w", path, err)
