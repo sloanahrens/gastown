@@ -320,9 +320,14 @@ func (f clusterRenderFlags) validate() error {
 // flags a live render recorded: the record is a default, and the command line
 // wins over it. A flag the operator named keeps the value given, so `--cpu ""` is
 // refused as empty rather than filled in from the file.
-func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag string) bool) clusterRenderFlags {
+//
+// named is the only source that says which flags the command line gave, so it is
+// required: a caller that cannot answer would have every flag replaced by the
+// record, silently discarding what the operator gave, and that is refused rather
+// than read as "nothing was named".
+func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag string) bool) (clusterRenderFlags, error) {
 	if named == nil {
-		named = func(string) bool { return false }
+		return f, errors.New("--use-recorded cannot tell which flags the command line named, so the record cannot be replayed as defaults without replacing every flag given")
 	}
 	texts := []struct {
 		flag string
@@ -370,12 +375,14 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 			*p.dst = p.src
 		}
 	}
-	// A recorded URL answers that the flag was named by holding one, so a replay
-	// keeps the refusal of an empty value that the live render's command line had.
+	// The flag's "was named" bit has no field in the record file: a live render
+	// refuses an empty URL, so a recorded URL is one the operator gave, and the
+	// loader answers the bit true for it. Carrying the bit over with the URL keeps
+	// that answer beside the value it describes.
 	if !named("daemon-bd-gateway-url") {
 		f.daemonBdGatewayURLSet = r.daemonBdGatewayURLSet
 	}
-	return f
+	return f, nil
 }
 
 // checkOutDir refuses an --out that holds anything, so the render never mixes
@@ -396,15 +403,37 @@ func checkOutDir(path string) error {
 // runClusterRender writes the manifests for f into f.out and prints the
 // Secret-creating commands. Every refusal happens before the first write.
 func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
-	townRoot, err := d.findTown()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace, so the pod's environment cannot be read: %w", err)
-	}
-	recordPath := renderFlagsPathIn(townRoot)
 	// The record describes the live pair that is running, so a rehearsal refuses to
-	// write one: its flags would be replayed into a live render as a rehearsal.
+	// write one: its flags would be replayed into a live render as a rehearsal. The
+	// flags answer this alone, so it is refused before the town is looked up.
 	if d.record.record && f.rehearsal {
 		return errors.New("--record-flags is for a live render: the recorded flags describe the pair that is running, so drop --rehearsal, or drop --record-flags")
+	}
+	// A run with either record flag needs the town before its flags resolve: the
+	// record is under the town root, and --use-recorded fills --dir, --out and the
+	// rest from it. Every other run reaches the town below, after the flags and the
+	// image pair are checked, so a wrong flag or a missing pair is the refusal an
+	// operator hears about rather than a workspace error that hides it.
+	var townRoot string
+	var haveTown bool
+	findTown := func() (string, error) {
+		if haveTown {
+			return townRoot, nil
+		}
+		root, err := d.findTown()
+		if err != nil {
+			return "", fmt.Errorf("not in a Gas Town workspace, so the pod's environment cannot be read: %w", err)
+		}
+		townRoot, haveTown = root, true
+		return root, nil
+	}
+	var recordPath string
+	if d.record.record || d.record.use {
+		root, err := findTown()
+		if err != nil {
+			return err
+		}
+		recordPath = renderFlagsPathIn(root)
 	}
 	if d.record.use {
 		// The recorded flags are this run's defaults, and the replay takes them
@@ -417,7 +446,10 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		if !ok {
 			return fmt.Errorf("--use-recorded: no render has recorded its flags at %s, so there are no defaults to take; run a live render with --record-flags first, or drop the flag, and no file was written", recordPath)
 		}
-		f = f.withRecorded(rec, d.record.named)
+		f, err = f.withRecorded(rec, d.record.named)
+		if err != nil {
+			return err
+		}
 	}
 	if f.configDir == "" {
 		dir, err := xdgConfigSubdir("gt", d.getenv, d.userHome)
@@ -445,6 +477,11 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	}
 	if !ok {
 		return fmt.Errorf("--dir %s holds no image pair at %s, and a render needs the daemon's digest: run gt update images first", f.dir, imagevalues.PathIn(f.dir))
+	}
+	// The pod's environment comes from the town; a run with no record flag finds it
+	// here, after its flags and the image pair are checked.
+	if _, err := findTown(); err != nil {
+		return err
 	}
 	env, err := d.containerEnv(townRoot)
 	if err != nil {
