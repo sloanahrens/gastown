@@ -58,5 +58,5 @@ internal/rig/manager.go	5	pending-retirement	rig manager: the mayor/rig clone, i
 internal/rig/retire_mayor.go	3	pending-retirement	rename step (retire-mayor): the RigMayorPath call and the DirMayor/DirRig names that build the directory it renames and the route suffix it matches
 internal/sandbox/skeleton.go	1	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
 internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the constants.DirMayor path to the rigs registry
-internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names in its path table
+internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names townDirs returns, which the manifest's clone row and verify's clone probe both build from
 internal/townstatus/townstatus.go	1	pending-retirement	townstatus: the rig's mayor/rig checkout path it reports

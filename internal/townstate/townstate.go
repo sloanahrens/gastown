@@ -36,14 +36,21 @@ type Entry = manifestdata.Entry
 // Manifest is the ordered list of split rows.
 type Manifest manifestdata.Manifest
 
-// Default returns the town root's split as this town defines it, with the rig
-// rows spelled from the town's directory names.
-func Default() *Manifest {
-	return (*Manifest)(manifestdata.Default(manifestdata.DirNames{
+// townDirs are the town's directory names, the one place they are read from
+// constants: the manifest's rig rows are spelled from them, and verify probes a
+// rig's canonical clone at the Mayor and Rig names.
+func townDirs() manifestdata.DirNames {
+	return manifestdata.DirNames{
 		RepoGit: constants.DirRepoGit,
 		Mayor:   constants.DirMayor,
 		Rig:     constants.DirRig,
-	}))
+	}
+}
+
+// Default returns the town root's split as this town defines it, with the rig
+// rows spelled from the town's directory names.
+func Default() *Manifest {
+	return (*Manifest)(manifestdata.Default(townDirs()))
 }
 
 // DaemonRuntimeNames returns the daemon-owned .runtime directory names, sorted.
