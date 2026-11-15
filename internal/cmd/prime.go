@@ -1345,9 +1345,6 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 	if attachment.AttachedFormula != "" {
 		fmt.Fprintf(w, "Formula: %s\n", attachment.AttachedFormula)
 	}
-	if attachment.AttachedMolecule != "" {
-		fmt.Fprintf(w, "Molecule ID: %s\n", attachment.AttachedMolecule)
-	}
 	if len(attachment.AttachedVars) > 0 {
 		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("🧩 VARS (instantiated formula inputs):"))
 		for _, variable := range attachment.AttachedVars {
