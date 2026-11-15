@@ -551,9 +551,16 @@ func (b *openshellBackend) deleteSeatSandbox(rec SandboxRecord, d seatSandboxDel
 	// The peak row is read last, as close to the delete as the sequence allows:
 	// memory.peak is a high-water mark and cpu.stat a running total, so the
 	// later the read the more of the seat's life it covers (gt-wi50nw).
-	b.recordSeatPeak(rec)
+	lostPeak := b.recordSeatPeak(rec)
 	if err := b.deleteSandbox(rec.Session); err != nil {
 		return &sandboxDeleteFailed{err}
+	}
+	// A lost row is reported only by an end that completes: a failed delete
+	// keeps the record and its sandbox, so the next attempt reads the peak
+	// again, and warning here logged a peak warning on every seat delete whose
+	// gateway was not live (gt-b3yb24).
+	if lostPeak != "" {
+		b.warn("sandbox %s: %s", rec.Session, lostPeak)
 	}
 	if d.revoke {
 		b.revokeSeat(rec)
