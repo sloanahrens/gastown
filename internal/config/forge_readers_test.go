@@ -29,6 +29,7 @@ var knownOwnerDataFileNamers = map[string]string{
 	"internal/ci/preflight/preflight.go":          "comment: the pins' host",
 	"internal/cmd/daemon_image.go":                "reader: readImagePins expands image-pins",
 	"internal/cmd/daemon_image_pins.go":           "reader: readImagePinsFile expands image-pins, and the refresh writes back the unexpanded text",
+	"internal/daemon/image_pins_read.go":          "reader: parseImagePins expands image-pins through config.ExpandForgeOwner",
 	"internal/daemonimage/build.go":               "comment: the pins file Plan names",
 	"internal/daemonimage/pins.go":                "reader: ParsePins, and PinsPath",
 	"internal/polecat/imagectx/imagectx.go":       "reader: ParseSeedURLs expands and refuses the placeholder",
