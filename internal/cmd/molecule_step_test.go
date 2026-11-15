@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -929,6 +930,30 @@ func TestMoleculeStepDoneWithoutPouredStepsJSON(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), stepsNotTrackedLine) {
 		t.Errorf("stderr = %q, want the not-tracked line", stderr.String())
+	}
+}
+
+// TestMoleculeStepDoneNoStepsJSONWriteFails: a --json caller whose stdout
+// cannot take the result gets the write failure, not a silent exit 0
+// (gt-i7lsrk). failingWriter stands in for a stdout the caller went away from.
+func TestMoleculeStepDoneNoStepsJSONWriteFails(t *testing.T) {
+	t.Parallel()
+
+	fake, root := rootOnlyMolecule(t)
+
+	err := stepDoneRun{
+		out:    failingWriter{},
+		errOut: io.Discard,
+		client: fake,
+		stepID: root.ID + ".1",
+		asJSON: true,
+	}.run()
+
+	if err == nil {
+		t.Fatal("a JSON result that cannot be written = nil error, want the write failure reported")
+	}
+	if !strings.Contains(err.Error(), "writing step result") {
+		t.Errorf("error = %q, want it to mention writing step result", err)
 	}
 }
 
