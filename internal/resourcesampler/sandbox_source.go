@@ -1,15 +1,18 @@
 package resourcesampler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
@@ -138,6 +141,197 @@ func seatCPU(reading SeatReading, previous *SeatReading) (float64, *float64) {
 	seconds := float64(reading.UsageUsec-previous.UsageUsec) / 1e6
 	pct := math.Round(seconds/interval.Seconds()*100*100) / 100
 	return interval.Seconds(), &pct
+}
+
+// DefaultSeatTimeout bounds one seat's read. A cgroup read prints a handful of
+// small files, so a seat that takes longer is a wedged gateway call, and the
+// bound leaves the patrol's own minute (B3) room for a cluster of them
+// (gt-a24bcc).
+const DefaultSeatTimeout = 2 * time.Second
+
+// seatCgroupRoot is where a sandbox's own cgroup is mounted: the v2 unified
+// hierarchy, whose files seatCgroupFiles names.
+const seatCgroupRoot = "/sys/fs/cgroup"
+
+// SeatExec runs one command inside a sandbox, the method set of *sandbox.CLI's
+// Exec, which the daemon fills this seam with (B3).
+type SeatExec interface {
+	Exec(ctx context.Context, name string, env map[string]string, argv []string, stdin []byte) (stdout, stderr []byte, err error)
+}
+
+// SeatSkip is a live seat the tick wrote no row for, and why: its record could
+// not be read, its name is not one an exec may address, or its read failed.
+type SeatSkip struct {
+	Seat string
+	Err  error
+}
+
+// SeatTick is one tick's outcome: the rows of the seats that read and one skip
+// per seat that did not, each in seat name order.
+type SeatTick struct {
+	Rows    []Row
+	Skipped []SeatSkip
+}
+
+// SeatSource reads each live seat's cgroup files into one row per seat, the
+// seats being the sandbox records under the town (gt-a24bcc).
+type SeatSource struct {
+	townRoot string
+	runner   SeatExec
+	clock    Clock
+	timeout  time.Duration
+}
+
+// NewSeatSource returns the source a patrol ticks: each seat read through
+// runner, at most timeout after it starts, sampled at clock's time.
+func NewSeatSource(townRoot string, runner SeatExec, clock Clock, timeout time.Duration) *SeatSource {
+	if clock == nil {
+		clock = SystemClock{}
+	}
+	if timeout <= 0 {
+		timeout = DefaultSeatTimeout
+	}
+	return &SeatSource{townRoot: townRoot, runner: runner, clock: clock, timeout: timeout}
+}
+
+// Tick reads every live seat once and returns the rows of those that read.
+//
+// A failure of the whole source — no town root, no exec seam, a workspace map or
+// a registry directory that cannot be read — is an error and no rows. One seat's
+// failure is not the tick's: it is reported in Skipped and the other seats still
+// write, since one wedged sandbox says nothing about the rest.
+func (s *SeatSource) Tick(ctx context.Context) (SeatTick, error) {
+	if s.runner == nil {
+		return SeatTick{}, errors.New("sandbox source: no exec seam")
+	}
+	// The map is read before any seat, so a bad map costs no exec and no row:
+	// a row stamped with an id the operator did not ask for cannot be told from
+	// a real one (gt-3mrzx). It is also what refuses an empty town root.
+	workspaces, err := workspaceid.Load(s.townRoot)
+	if err != nil {
+		return SeatTick{}, fmt.Errorf("sandbox source: %w", err)
+	}
+	records, err := seatRecords(s.townRoot)
+	if err != nil {
+		return SeatTick{}, fmt.Errorf("sandbox source: %w", err)
+	}
+	now := s.clock.Now()
+	argv := seatReadArgv()
+	var tick SeatTick
+	for _, record := range records {
+		if record.err != nil {
+			tick.skip(record.name, record.err)
+			continue
+		}
+		if !record.found {
+			continue
+		}
+		seat, err := seatFromRecord(record.rec)
+		if err != nil {
+			tick.skip(record.name, err)
+			continue
+		}
+		text, err := s.readSeat(ctx, seat.Name, argv)
+		if err != nil {
+			tick.skip(seat.Name, err)
+			continue
+		}
+		// previous is nil and the reading SeatRow returns is unused: the delta
+		// against a seat's own previous sample is the next bead's (gt-bru6l7),
+		// so this tick reports the first-sample row.
+		row, _, err := SeatRow(seat, text, now, nil, workspaces)
+		if err != nil {
+			tick.skip(seat.Name, err)
+			continue
+		}
+		tick.Rows = append(tick.Rows, row)
+	}
+	return tick, nil
+}
+
+// skip records a seat the tick wrote no row for.
+func (t *SeatTick) skip(seat string, err error) {
+	t.Skipped = append(t.Skipped, SeatSkip{Seat: seat, Err: err})
+}
+
+// readSeat runs one seat's cgroup read under the source's per-seat timeout, so
+// a wedged gateway call costs its own seat and not the tick. The name has
+// already been validated by seatFromRecord: it reaches the seam as an argument
+// of the exec and nowhere else.
+func (s *SeatSource) readSeat(ctx context.Context, name string, argv []string) (string, error) {
+	seatCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	stdout, _, err := s.runner.Exec(seatCtx, name, nil, argv, nil)
+	if err != nil {
+		return "", fmt.Errorf("seat %s: %w", name, err)
+	}
+	return string(stdout), nil
+}
+
+// seatReadArgv is the argv one seat read runs: a shell that prints each of the
+// seat's cgroup files under the marker line SeatRow's parser reads it by, then
+// the end marker. A file the kernel does not publish prints its marker and
+// nothing else, which parses as null where the file is optional and as a
+// refused read where it is the reading itself; the shell runs every file even
+// when an earlier one is missing, and the print after each file keeps a text
+// without a trailing newline off the next marker.
+func seatReadArgv() []string {
+	var script strings.Builder
+	for _, name := range seatCgroupFiles {
+		fmt.Fprintf(&script, "printf '@@ %s @@\\n'\ncat %s/%s 2>/dev/null\nprintf '\\n'\n", name, seatCgroupRoot, name)
+	}
+	script.WriteString("printf '@@ end @@\\n'\n")
+	return []string{"sh", "-c", script.String()}
+}
+
+// seatRecord is one file under the sandbox registry: the session its name
+// gives, the record it holds (found), and the error that kept it from being
+// read.
+type seatRecord struct {
+	name  string
+	rec   session.SandboxRecord
+	found bool
+	err   error
+}
+
+// seatRecords lists the town's sandbox records in file name order. A registry
+// directory that is missing is a town that never ran a sandbox: no records and
+// no error. One that cannot be listed is an error, since a tick that cannot
+// look must not report the same empty answer as a cluster with no seat.
+func seatRecords(townRoot string) ([]seatRecord, error) {
+	dir := session.SandboxRegistryDir(townRoot)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing the sandbox records in %s: %w", dir, err)
+	}
+	var records []seatRecord
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".json")
+		rec, found, err := session.ReadSandboxRecord(townRoot, name)
+		// !found with no error: another process removed the record between the
+		// listing and the read, so the seat has ended and writes no row.
+		records = append(records, seatRecord{name: name, rec: rec, found: found, err: err})
+	}
+	return records, nil
+}
+
+// seatFromRecord is the identity a record's row carries. It refuses a name the
+// exec must not address, which is the check that keeps a bad name out of the
+// seam: SeatRow's own name check runs after the seat has been read.
+func seatFromRecord(rec session.SandboxRecord) (Seat, error) {
+	if rec.Session == "" {
+		return Seat{}, errors.New("the record names no seat")
+	}
+	if !validSeatName(rec.Session) {
+		return Seat{}, fmt.Errorf("seat name %s is not a sandbox name", shorten(rec.Session))
+	}
+	return Seat{Name: rec.Session, Rig: rec.Rig, Polecat: rec.Polecat, Bead: rec.WorkBead}, nil
 }
 
 // parseSeatCgroup reads a seat's cgroup text into its readings. cpu.stat and
