@@ -29,18 +29,24 @@ func defaultUsageSampleDeps() usageSampleDeps {
 // openClaudePlanStore opens the town's cost_samples table, where the status-line
 // hook appends its claude_plan rows.
 func openClaudePlanStore() (usage.Store, error) {
-	return openClaudePlanStoreFrom(workspace.FindFromCwdOrError)
+	return openClaudePlanStoreFrom(workspace.FindFromCwdOrError, func(townRoot string) beads.Client {
+		return beads.New(townRoot)
+	})
 }
 
-// openClaudePlanStoreFrom builds the store over the beads client of the town
-// findRoot names. A town root that cannot be found is an error, never a store
-// over some other database.
-func openClaudePlanStoreFrom(findRoot func() (string, error)) (usage.Store, error) {
+// openClaudePlanStoreFrom builds the store over the client newClient builds for
+// the town findRoot names. A town root that cannot be found, or a client the
+// factory does not build, is an error, never a store over some other database.
+func openClaudePlanStoreFrom(findRoot func() (string, error), newClient func(townRoot string) beads.Client) (usage.Store, error) {
 	townRoot, err := findRoot()
 	if err != nil {
 		return nil, fmt.Errorf("the cost_samples table lives in the town: %w", err)
 	}
-	return clientClaudePlanStore{client: beads.New(townRoot)}, nil
+	client := newClient(townRoot)
+	if client == nil {
+		return nil, fmt.Errorf("no beads client for the town at %s", townRoot)
+	}
+	return clientClaudePlanStore{client: client}, nil
 }
 
 // clientClaudePlanStore is the usage.Store over the beads client's
@@ -49,31 +55,44 @@ type clientClaudePlanStore struct {
 	client beads.Client
 }
 
-// NewestClaudePlan returns the newest claude_plan row, or nil when the table
-// holds none. A row missing one of the four readings is an error: it is not a
-// reading, and a nil field read as zero would invent a plan the status line
-// never reported.
+// newestRowScan bounds how many claude_plan rows NewestClaudePlan reads looking
+// for the newest reading. It is the whole window a store over bd can inspect:
+// ReadCostSamples has no offset to page past it.
+const newestRowScan = 32
+
+// NewestClaudePlan returns the newest claude_plan row that carries a reading,
+// or nil when the table holds no reading. A row missing one of the four
+// readings is not a reading, so it is skipped rather than read as zero or as an
+// error: one partial row another writer left must not wedge every later write,
+// which are the writes that would put a complete row on top. When the scan
+// finds no reading at all the store refuses, because an older reading may sit
+// past the window and nil would claim there is none.
 func (s clientClaudePlanStore) NewestClaudePlan(ctx context.Context) (*usage.ClaudePlan, error) {
-	rows, err := s.client.ReadCostSamples(ctx, beads.SampleKindClaudePlan, time.Time{}, 1)
+	rows, err := s.client.ReadCostSamples(ctx, beads.SampleKindClaudePlan, time.Time{}, newestRowScan)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
-		return nil, nil
+	for _, row := range rows {
+		p, err := claudePlanOfSample(row)
+		if err != nil {
+			continue
+		}
+		return &p, nil
 	}
-	p, err := claudePlanOfSample(rows[0])
-	if err != nil {
-		return nil, err
+	if len(rows) == newestRowScan {
+		return nil, fmt.Errorf("the newest %d claude_plan rows carry no reading", newestRowScan)
 	}
-	return &p, nil
+	return nil, nil
 }
 
-// WriteClaudePlanAfter re-reads the newest claude_plan row and appends p only
-// while that row still matches prev. bd's samples table takes appends only and
-// has no conditional add, so the compare and the append are two steps: a row
-// another writer appends between this read and the write is not seen. The
+// WriteClaudePlanAfter re-reads the newest claude_plan reading and appends p
+// only while that reading still matches prev. bd's samples table takes appends
+// only and has no conditional add, so the compare and the append are two steps:
+// a row another writer appends between this read and the write is not seen. The
 // re-read is as close to the append as this store can put it, and two writers
-// racing over one town cost one duplicate heartbeat row at worst.
+// racing over one town cost one duplicate heartbeat row at worst. A partial row
+// another writer appends over the reading is skipped by the re-read, so it does
+// not read as a changed newest row.
 func (s clientClaudePlanStore) WriteClaudePlanAfter(ctx context.Context, p usage.ClaudePlan, prev *usage.ClaudePlan) error {
 	newest, err := s.NewestClaudePlan(ctx)
 	if err != nil {
