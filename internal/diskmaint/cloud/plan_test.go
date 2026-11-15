@@ -33,9 +33,9 @@ const cleanDeploy = "name: deploy\n" +
 	"    steps:\n" +
 	"      - run: make deploy\n"
 
-// fakeDaemon answers the plan's reads: docker's image list, container set and
-// image inspect, the runner label file and the deploy workflow, the files named
-// as "cat <path>".
+// fakeDaemon answers the plan's reads — docker's image list, container set and
+// image inspect, and the files named as "cat <path>" — and the apply's docker
+// commands, through the fakeDocker it builds on the first one.
 type fakeDaemon struct {
 	images        string
 	imagesErr     error
@@ -48,6 +48,8 @@ type fakeDaemon struct {
 	rmErr         map[string]error
 	tags          map[string][]string
 	parentOf      map[string]string
+	builderOut    string
+	builderErr    error
 	labels        string
 	labelsErr     error
 	deploy        string
@@ -66,6 +68,7 @@ func (f *fakeDaemon) run(ctx context.Context, env []string, name string, args ..
 				digests: f.digests, digestsErr: f.digestsErr, digestsRaw: f.digestsRaw,
 				containers: f.containers, containersErr: f.containersErr, containersRaw: f.containersRaw,
 				rmErr: f.rmErr, tags: f.tags, parentOf: f.parentOf,
+				builderOut: f.builderOut, builderErr: f.builderErr,
 			}
 		}
 		return f.docker.run(ctx, env, name, args...)
