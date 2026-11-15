@@ -102,23 +102,45 @@ func TestPlanImagePins(t *testing.T) {
 	}
 }
 
-// TestPlanImagePinsFailedReadRaisesNothingYet pins both halves of a failed
-// read's decision: the pin files nothing and raises no item. The
-// image-pins-unreadable:<name> item arrives with the stale item (gt-3ycfvf),
-// and that landing rewrites this test to expect it.
-func TestPlanImagePinsFailedReadRaisesNothingYet(t *testing.T) {
+// TestPlanImagePinsNamesAPinWhoseReadFailed: a failed read files nothing and
+// raises no item yet, but the plan names the pin, so it is not the output of an
+// all-fresh tick. The image-pins-unreadable item arrives with gt-3ycfvf.
+func TestPlanImagePinsNamesAPinWhoseReadFailed(t *testing.T) {
 	t.Parallel()
 	// Behind is over the file threshold so a planner that ignored Err would
 	// file this pin.
-	pin := ImagePinState{Name: "om", Pin: "pin-om", Behind: 34, Err: errors.New("ls-remote exited 128")}
+	failed := ImagePinState{Name: "om", Pin: "pin-om", Behind: 34, Err: errors.New("ls-remote exited 128")}
+	fresh := ImagePinState{Name: "hm", Pin: "pin-hm", Behind: 0}
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 
-	got := PlanImagePins([]ImagePinState{pin}, nil, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+	got := PlanImagePins([]ImagePinState{failed, fresh}, nil, now)
+	allFresh := PlanImagePins([]ImagePinState{fresh}, nil, now)
 
 	if len(got.File) != 0 {
 		t.Errorf("File = %+v, want no pin filed on a failed read", got.File)
 	}
-	if len(got.Items) != 0 {
-		t.Errorf("Items = %+v, want none: the unreadable item is not raised yet", got.Items)
+	if len(got.Unreadable) != 1 || got.Unreadable[0] != "om" {
+		t.Errorf("Unreadable = %q, want [om]", got.Unreadable)
+	}
+	if len(allFresh.Unreadable) != 0 {
+		t.Errorf("Unreadable = %q for a fresh pin, want none", allFresh.Unreadable)
+	}
+}
+
+// TestPlanImagePinsOpenBeadWithoutAnAgeSaysItsAgeIsUnknown: a bead with no
+// recorded open time raises the stuck item with a summary that names no
+// duration, not one measured from the zero time.
+func TestPlanImagePinsOpenBeadWithoutAnAgeSaysItsAgeIsUnknown(t *testing.T) {
+	t.Parallel()
+	open := &ImagePinRefreshBead{ID: "gt-refresh7"}
+
+	got := PlanImagePins(nil, open, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+
+	if len(got.Items) != 1 || got.Items[0].Key != imagePinsRefreshStuckKey {
+		t.Fatalf("Items = %+v, want the one stuck item", got.Items)
+	}
+	if want := "refresh bead gt-refresh7 is open and its age is unknown: the image pins wait for it to land"; got.Items[0].Summary != want {
+		t.Errorf("Summary = %q, want %q", got.Items[0].Summary, want)
 	}
 }
 
