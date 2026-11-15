@@ -1889,9 +1889,47 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 }
 
 // runWithStdinCtx is runWithStdin with a per-call context: a non-nil ctx
-// parents the subprocess deadline, so a caller's own budget bounds the call
-// instead of the wrapper's (WithCallContext) or the subprocess budget.
+// bounds the subprocess deadline alongside the wrapper's (WithCallContext)
+// budget, and the earlier of the two ends the call.
 func (b *Beads) runWithStdinCtx(ctx context.Context, stdinData []byte, args ...string) ([]byte, error) {
+	args, runEnv := b.pinnedArgsAndEnv(args)
+
+	out, err := b.runBdWithRetry(ctx, stdinData, runEnv, args)
+	if err != nil {
+		return out, err
+	}
+	// buildRunEnv carries BD_MACHINE=1, so bd answered in the envelope; every
+	// caller of run parses the payload it printed before machine mode. A
+	// machine-exempt verb (bd sql) answers in the plain wrapper instead, which
+	// LegacyPayload reads too.
+	return LegacyPayload(args, out), nil
+}
+
+// runOnceCtx is runWithStdinCtx for a call that must not be retried: outside
+// the retry loop, a transient failure is the answer. Only a non-idempotent
+// write belongs here — a retry after a connection lost mid-command can apply
+// the write a second time, so an ambiguous failure is reported instead,
+// leaving the caller to decide whether to write again.
+func (b *Beads) runOnceCtx(ctx context.Context, stdinData []byte, args ...string) ([]byte, error) {
+	args, runEnv := b.pinnedArgsAndEnv(args)
+
+	var out []byte
+	var err error
+	if b.plain {
+		out, err = b.runPlain(ctx, stdinData, args)
+	} else {
+		out, err = b.runBdOnce(ctx, stdinData, runEnv, args)
+	}
+	if err != nil {
+		return out, b.explainPause(err)
+	}
+	return LegacyPayload(args, out), nil
+}
+
+// pinnedArgsAndEnv returns args with the injections every pinned call gets and
+// the environment it runs under, one place so the retried, once-only and
+// per-call-context paths cannot drift.
+func (b *Beads) pinnedArgsAndEnv(args []string) ([]string, []string) {
 	// bd v0.59+ requires --flat for --json to produce JSON output on "list" commands.
 	// Without --flat, bd list --json silently returns human-readable tree format,
 	// causing all JSON parsing to fail. Inject --flat before --allow-stale prepend
@@ -1908,16 +1946,7 @@ func (b *Beads) runWithStdinCtx(ctx context.Context, stdinData []byte, args ...s
 	}
 	runEnv = b.applyAccessMode(runEnv, args)
 	runEnv = applyNewDatabaseOptIn(runEnv, args)
-
-	out, err := b.runBdWithRetry(ctx, stdinData, runEnv, args)
-	if err != nil {
-		return out, err
-	}
-	// buildRunEnv carries BD_MACHINE=1, so bd answered in the envelope; every
-	// caller of run parses the payload it printed before machine mode. A
-	// machine-exempt verb (bd sql) answers in the plain wrapper instead, which
-	// LegacyPayload reads too.
-	return LegacyPayload(args, out), nil
+	return args, runEnv
 }
 
 // applyAccessMode forces the Dolt auto-commit and read-only env a pinned
@@ -1987,6 +2016,41 @@ func (b *Beads) runReadyCLI(args ...string) ([]byte, error) {
 	return b.runBdWithRetry(nil, nil, runEnv, args)
 }
 
+// callParent returns the context that bounds one bd call when a per-call ctx
+// (the ctx a method took) and the wrapper's own budget (WithCallContext) are
+// both set. The call ends when either does: the deadline is the earlier of the
+// two, so the timeout an error names is the budget that really ran out, and a
+// cancellation on the later one still cancels the call.
+//
+// One nil argument is the other budget as it is, and both nil is
+// context.Background(). The returned stop must be called when the call ends.
+func callParent(callCtx, wrapperCtx context.Context) (context.Context, context.CancelFunc) {
+	switch {
+	case callCtx == nil && wrapperCtx == nil:
+		return context.Background(), func() {}
+	case callCtx == nil:
+		return wrapperCtx, func() {}
+	case wrapperCtx == nil:
+		return callCtx, func() {}
+	}
+	parent, other := callCtx, wrapperCtx
+	parentDeadline, parentBounded := parent.Deadline()
+	if otherDeadline, otherBounded := other.Deadline(); otherBounded && (!parentBounded || otherDeadline.Before(parentDeadline)) {
+		parent, other = other, parent
+	}
+	ctx, cancel := context.WithCancel(parent)
+	// An ended budget ends the call before bd starts. AfterFunc alone cancels
+	// from its own goroutine, which can land after the subprocess was launched.
+	if other.Err() != nil {
+		cancel()
+	}
+	stopOther := context.AfterFunc(other, cancel)
+	return ctx, func() {
+		stopOther()
+		cancel()
+	}
+}
+
 // runBdOnce executes exactly one bd subprocess and is where every pinned and
 // routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
 // attempt here keeps the --flat handling per invocation.
@@ -1999,17 +2063,11 @@ func (b *Beads) runBdOnce(callCtx context.Context, stdinData []byte, runEnv []st
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
-	// The context covers both the initial attempt and the --flat retry. A
-	// caller with its own budget (WithCallContext, or the ctx a method takes)
-	// parents the deadline, so its budget ends the call instead of the
-	// subprocess budget. A per-call ctx is the more specific of the two.
-	parent := callCtx
-	if parent == nil {
-		parent = b.callCtx
-	}
-	if parent == nil {
-		parent = context.Background()
-	}
+	// The context covers both the initial attempt and the --flat retry. Both
+	// budgets a caller can set — the ctx a method takes and the wrapper's
+	// WithCallContext — end the call, so neither replaces the other.
+	parent, stopParent := callParent(callCtx, b.callCtx)
+	defer stopParent()
 	timeout := b.subprocessTimeout(args)
 	// Name the budget that actually ends the call: a caller's deadline closer
 	// than the subprocess budget is the one a killed bd ran out of.

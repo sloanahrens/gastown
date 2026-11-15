@@ -306,13 +306,8 @@ func (b *Beads) runPlain(ctx context.Context, stdin []byte, args []string) ([]by
 // whose answer bd writes there: machine mode keeps stdout for the JSON
 // envelope.
 func (b *Beads) runPlainOut(callCtx context.Context, stdin []byte, args []string) (stdout, stderr []byte, err error) {
-	ctx := callCtx
-	if ctx == nil {
-		ctx = b.callCtx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, stopParent := callParent(callCtx, b.callCtx)
+	defer stopParent()
 	if b.plainTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, b.plainTimeout)

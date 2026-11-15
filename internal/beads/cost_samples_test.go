@@ -405,3 +405,141 @@ func TestCostSampleReadRefusesUnreadableRows(t *testing.T) {
 		})
 	}
 }
+
+// TestCostSampleCallRespectsBothBudgets: a sample call runs under the earlier
+// of the caller's ctx deadline and the wrapper's WithCallContext deadline, and
+// a wrapper budget that ends ends the bd call too.
+func TestCostSampleCallRespectsBothBudgets(t *testing.T) {
+	t.Parallel()
+	const seamBudget = 10 * time.Minute
+	base := time.Now()
+	for _, tc := range []struct {
+		name     string
+		wrapper  time.Duration
+		caller   time.Duration
+		canceled bool
+		want     time.Duration
+	}{
+		{name: "the wrapper budget ends first", wrapper: 2 * time.Minute, caller: 5 * time.Minute, want: 2 * time.Minute},
+		{name: "the caller budget ends first", wrapper: 5 * time.Minute, caller: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "an ended wrapper budget ends the call", caller: 5 * time.Minute, canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var wrapperCtx context.Context
+			var stopWrapper context.CancelFunc
+			if tc.canceled {
+				wrapperCtx, stopWrapper = context.WithCancel(context.Background())
+				stopWrapper()
+			} else {
+				wrapperCtx, stopWrapper = context.WithDeadline(context.Background(), base.Add(tc.wrapper))
+			}
+			defer stopWrapper()
+			callerCtx, stopCaller := context.WithDeadline(context.Background(), base.Add(tc.caller))
+			defer stopCaller()
+
+			// The seam's state is read inside the call: the run path cancels
+			// its own child on return, so a ctx read afterwards says nothing.
+			var seamErr error
+			var seamDeadline time.Time
+			var seamBounded bool
+			b := newBeads(beadsFields{
+				workDir:  t.TempDir(),
+				isolated: true,
+				noRoute:  true,
+				callCtx:  wrapperCtx,
+				budget:   seamBudget,
+				exec: func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+					if !strings.HasPrefix(strings.Join(c.args, " "), "sample list ") {
+						return nil, nil, fmt.Errorf("unexpected bd call %v", c.args)
+					}
+					seamErr = ctx.Err()
+					seamDeadline, seamBounded = ctx.Deadline()
+					return []byte("[]"), nil, nil
+				},
+			})
+			if _, err := b.ReadCostSamples(callerCtx, SampleKindClaudePlan, time.Time{}, 1); err != nil {
+				t.Fatalf("ReadCostSamples: %v", err)
+			}
+			if tc.canceled {
+				if !errors.Is(seamErr, context.Canceled) {
+					t.Fatalf("the bd call ran under a context the wrapper's cancel did not reach: %v", seamErr)
+				}
+				return
+			}
+			if !seamBounded {
+				t.Fatal("the bd call ran with no deadline")
+			}
+			if want := base.Add(tc.want); !seamDeadline.Equal(want) {
+				t.Errorf("the bd call's deadline is %s, want the %s budget's %s", seamDeadline, tc.want, want)
+			}
+		})
+	}
+}
+
+// TestCostSampleProbeHonorsTheCallersContext: the sample verb probe runs under
+// the caller's ctx, so a caller whose budget already ended ends the probe
+// before any sample add.
+func TestCostSampleProbeHonorsTheCallersContext(t *testing.T) {
+	t.Parallel()
+	var probeErr error
+	var calls []string
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b := newBeads(beadsFields{
+		workDir:  t.TempDir(),
+		isolated: true,
+		noRoute:  true,
+		exec: func(callCtx context.Context, c bdCall) ([]byte, []byte, error) {
+			argv := strings.Join(c.args, " ")
+			if argv == "--allow-stale version" {
+				return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+			}
+			calls = append(calls, argv)
+			if argv != "--help" {
+				return nil, nil, fmt.Errorf("unexpected bd call %v", c.args)
+			}
+			probeErr = callCtx.Err()
+			return nil, nil, probeErr
+		},
+	})
+
+	err := b.WriteCostSample(ctx, Sample{Kind: SampleKindClaudePlan, At: time.Date(2026, 11, 15, 22, 0, 0, 0, time.UTC)})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteCostSample = %v, want the caller's context.Canceled from the probe", err)
+	}
+	if probeErr == nil {
+		t.Error("the --help probe ran under a context the caller's cancel did not reach")
+	}
+	if len(calls) != 1 || calls[0] != "--help" {
+		t.Errorf("bd calls = %v, want only the --help probe", calls)
+	}
+}
+
+// TestCostSampleWriteIsNotRetried: a sample add is an append, so a failure the
+// container retry loop would re-run for a read leaves one attempt: a second
+// attempt after a connection lost mid-command can store the row twice.
+func TestCostSampleWriteIsNotRetried(t *testing.T) {
+	t.Parallel()
+	adds := 0
+	r := newRecorder(func(args []string) reply {
+		switch argv := strings.Join(args, " "); {
+		case argv == "--help":
+			return reply{stdout: bdHelpWithSampleVerb}
+		case strings.HasPrefix(argv, "sample add "):
+			adds++
+			return reply{stderr: "Error: failed to open database: invalid connection", err: exitError{code: 1}}
+		}
+		return reply{err: fmt.Errorf("unexpected bd call %v", args)}
+	})
+	// A test-container wrapper is one the retry loop retries.
+	b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, serverPort: 3306, noRoute: true, exec: r.exec})
+
+	err := b.WriteCostSample(context.Background(), Sample{Kind: SampleKindClaudePlan, At: time.Date(2026, 11, 15, 22, 0, 0, 0, time.UTC)})
+	if err == nil {
+		t.Fatal("WriteCostSample = nil, want the sample add failure returned")
+	}
+	if adds != 1 {
+		t.Errorf("sample add attempts = %d, want 1: a retried append can store the row twice", adds)
+	}
+}

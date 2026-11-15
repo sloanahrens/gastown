@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -67,6 +68,9 @@ func TestHelpOffersVerb(t *testing.T) {
 		{"verb absent", bdHelpWithoutSampleVerb, "sample", false},
 		{"longer verb with the prefix", bdHelpWithSampleVerb, "samp", false},
 		{"verb named only in prose", "Usage:\n  bd [command]\n\nSee bd sample add for cost rows.\n", "sample", false},
+		{"prose line starting with the verb", "Available Commands:\n  show             Show issue details\n\nsample rows live in Dolt.\n", "sample", false},
+		{"example line under another section", "Available Commands:\n  show             Show issue details\n\nExamples:\n  sample add --kind claude_plan\n", "sample", false},
+		{"verb after the table ended", "Available Commands:\n  show             Show issue details\nsample           Cost and usage samples\n", "sample", false},
 	} {
 		if got := HelpOffersVerb([]byte(tc.help), tc.verb); got != tc.want {
 			t.Errorf("%s: HelpOffersVerb(%q) = %v, want %v", tc.name, tc.verb, got, tc.want)
@@ -101,7 +105,7 @@ func TestSampleVerbProbeAsksBdHelp(t *testing.T) {
 				return reply{err: fmt.Errorf("unexpected bd call %v", args)}
 			})
 			b := newRecordedBeads(t.TempDir(), r)
-			got, err := b.sampleOffersVerb()
+			got, err := b.sampleOffersVerb(context.Background())
 			if tc.fail {
 				if err == nil {
 					t.Fatalf("sampleOffersVerb = %v, nil; want the bd failure returned", got)

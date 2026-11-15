@@ -56,7 +56,7 @@ func (b *Beads) WriteCostSample(ctx context.Context, s Sample) error {
 	if err != nil {
 		return fmt.Errorf("bd sample add: %w", err)
 	}
-	offers, err := b.sampleOffersVerb()
+	offers, err := b.sampleOffersVerb(ctx)
 	if err != nil {
 		return fmt.Errorf("bd sample add: %w", err)
 	}
@@ -64,7 +64,9 @@ func (b *Beads) WriteCostSample(ctx context.Context, s Sample) error {
 		return fmt.Errorf("bd sample add: the bd on PATH does not offer the sample verb (beads be-1qqu); refusing to write a %s row", kind)
 	}
 	args := []string{"sample", "add", "--kind", kind, "--at", at, "--json", "-"}
-	if _, err := b.runWithStdinCtx(ctx, payload, args...); err != nil {
+	// No retry loop (runOnceCtx): a row is an append, so a retry after a
+	// connection lost mid-command could store the sample twice.
+	if _, err := b.runOnceCtx(ctx, payload, args...); err != nil {
 		return fmt.Errorf("bd sample add: %w", err)
 	}
 	return nil
