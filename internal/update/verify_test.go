@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -297,6 +298,116 @@ func TestVerifyReportsEachFailure(t *testing.T) {
 
 		assertOnlyFailed(t, Verify(context.Background(), probes, verifyTestWant), checkHealth)
 	})
+}
+
+// TestVerifyHealthIsAQueueStateNotAFailedRoll drives Verify: a town whose line
+// is DEGRADED only for a queue a person works through is not a failed roll, so
+// the health check passes and names the reasons it ignored; every other line
+// fails and the detail is the line as it was read.
+func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		// ignored are the queue reasons a passing check must name in its detail.
+		ignored []string
+	}{
+		{
+			name: "green",
+			line: "GREEN tick 2m ago, 3 landed/24h",
+		},
+		{
+			name: "green without a landing count",
+			line: "GREEN tick 2m ago",
+		},
+		{
+			name:    "degraded for one waiting bead",
+			line:    "DEGRADED tick 28s ago: needs-overseer=1",
+			ignored: []string{"needs-overseer=1"},
+		},
+		{
+			name:    "degraded for every queue, comma separated as the bead writes it",
+			line:    "DEGRADED tick 5s ago: needs-overseer=1, needs-human=2, escalations=1",
+			ignored: []string{"needs-overseer=1", "needs-human=2", "escalations=1"},
+		},
+		{
+			name:    "degraded for an open escalation, plural and singular",
+			line:    "DEGRADED tick 5s ago: escalation=oldest_2h escalations=1",
+			ignored: []string{"escalation=oldest_2h", "escalations=1"},
+		},
+		{
+			name:    "degraded for a queue, space separated as the line renders it",
+			line:    "DEGRADED tick 4ms ago: escalation=oldest_2h needs-human=1",
+			ignored: []string{"escalation=oldest_2h", "needs-human=1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := greenProbes()
+			probes.health = tt.line
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertFailedChecks(t, checks)
+			detail := findCheck(t, checks, checkHealth).Detail
+			if !strings.Contains(detail, tt.line) {
+				t.Errorf("health detail %q does not carry the line as read %q", detail, tt.line)
+			}
+			for _, reason := range tt.ignored {
+				if !strings.Contains(detail, reason) {
+					t.Errorf("health detail %q does not name the ignored reason %q", detail, reason)
+				}
+			}
+			if len(tt.ignored) > 0 && !strings.Contains(detail, "ignored "+strings.Join(tt.ignored, ", ")) {
+				t.Errorf("health detail %q does not say it ignored the queue reasons %v", detail, tt.ignored)
+			}
+		})
+	}
+}
+
+// TestVerifyHealthRefusesEveryOtherLine drives the refusal branches of the
+// health check: any verdict other than GREEN or DEGRADED, a DEGRADED line with
+// a reason that is not a queue state or with none at all, and a line whose
+// shape is not the one the town writes each fail, carrying the line as read.
+func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
+	t.Parallel()
+	lines := []struct {
+		name string
+		line string
+	}{
+		{"red for a landing fault", "RED tick 1m ago: landing=stuck"},
+		{"red even for a queue state", "RED tick 1m ago: needs-overseer=1"},
+		{"red without the tick head", "RED: drain in progress"},
+		{"unknown for a stale report", "UNKNOWN tick 3d ago (stale; last GREEN)"},
+		{"unknown even for a queue state", "UNKNOWN tick 3d ago: needs-human=1"},
+		{"degraded for a promote lag", "DEGRADED tick 1m ago: promote/gastown=3_behind[R]"},
+		{"degraded for a queue and a fault", "DEGRADED tick 2m ago: needs-overseer=1, main=behind"},
+		{"degraded for an unknown queue field", "DEGRADED tick 2m ago: needs-overseer[?]"},
+		{"degraded with no reason", "DEGRADED tick 2m ago"},
+		{"degraded with an empty reason list", "DEGRADED tick 2m ago:"},
+		{"degraded beside a landing pause, a shape verify does not read", "DEGRADED tick 1m ago (landings paused: 2d): needs-overseer=1"},
+		{"degraded without the tick head", "DEGRADED: needs-overseer=1"},
+		{"degraded with no age", "DEGRADED tick  ago: needs-overseer=1"},
+		{"degraded without an age token", "DEGRADED tick ago: needs-overseer=1"},
+		{"verdict and nothing else", "GREEN"},
+		{"not a health line", "not a health line"},
+		{"empty", ""},
+	}
+	for _, tt := range lines {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := greenProbes()
+			probes.health = tt.line
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertOnlyFailed(t, checks, checkHealth)
+			if detail := findCheck(t, checks, checkHealth).Detail; detail != tt.line {
+				t.Errorf("health detail = %q, want the line as read %q", detail, tt.line)
+			}
+		})
+	}
 }
 
 func TestVerifyProbeErrorIsAFailedCheck(t *testing.T) {

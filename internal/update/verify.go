@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -128,16 +129,87 @@ func digestCheck(ctx context.Context, name string, probe func(context.Context) (
 	return Check{Name: name, OK: true, Detail: got}
 }
 
-// healthCheck passes when the town reports itself green.
+// queueReasons are the health line's reasons that name a queue a person has to
+// work through, not a fault: beads waiting for the overseer or a human, and an
+// open escalation. The line renders the escalation field as "escalation"; its
+// plural is accepted as the same reason.
+var queueReasons = map[string]bool{
+	"needs-overseer": true,
+	"needs-human":    true,
+	"escalation":     true,
+	"escalations":    true,
+}
+
+// healthCheck verifies the install, not the town's queue: it passes on a GREEN
+// line and on a DEGRADED line whose only reasons are queue states, naming the
+// reasons it ignored. Any other verdict, a DEGRADED line with any other reason
+// or with no reason, and a line that does not read
+// "<VERDICT> tick <age> ago" fails, and the detail carries the line as read. A
+// probe error fails the check with the probe's message.
 func healthCheck(ctx context.Context, p VerifyProbes) Check {
 	line, err := p.Health(ctx)
 	if err != nil {
 		return Check{Name: checkHealth, Detail: err.Error()}
 	}
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "green") {
+	queue, ok := queueOnlyHealthLine(line)
+	if !ok {
 		return Check{Name: checkHealth, Detail: line}
 	}
-	return Check{Name: checkHealth, OK: true, Detail: line}
+	if len(queue) == 0 {
+		return Check{Name: checkHealth, OK: true, Detail: line}
+	}
+	return Check{Name: checkHealth, OK: true,
+		Detail: fmt.Sprintf("%s (queue states, not a failed roll; ignored %s)", line, strings.Join(queue, ", "))}
+}
+
+// queueOnlyHealthLine reports whether line is a health line a roll may pass on,
+// and the queue reasons it ignored. A GREEN verdict passes whatever it lists;
+// a DEGRADED one passes only when every reason it lists is a queue state. The
+// reasons are the tokens after the colon, separated by commas or by spaces, so
+// both the comma-separated form and the space-separated line the town renders
+// read. Anything else — a RED or UNKNOWN verdict, a DEGRADED line with no
+// reason, a line without the "<VERDICT> tick <age> ago" head — is not ok, so a
+// shape this does not know fails rather than passes.
+func queueOnlyHealthLine(line string) (queue []string, ok bool) {
+	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
+	if !found {
+		return nil, false
+	}
+	degraded := false
+	switch strings.ToUpper(verdict) {
+	case "GREEN":
+	case "DEGRADED":
+		degraded = true
+	default:
+		return nil, false
+	}
+	rest, found = strings.CutPrefix(rest, "tick ")
+	if !found {
+		return nil, false
+	}
+	age, tail, found := strings.Cut(rest, " ago")
+	if !found || age == "" {
+		return nil, false
+	}
+	if !degraded {
+		return nil, true
+	}
+	reasons, found := strings.CutPrefix(tail, ":")
+	if !found {
+		return nil, false
+	}
+	tokens := strings.FieldsFunc(reasons, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	if len(tokens) == 0 {
+		return nil, false
+	}
+	for _, reason := range tokens {
+		key, _, found := strings.Cut(reason, "=")
+		if !found || !queueReasons[strings.ToLower(key)] {
+			return nil, false
+		}
+		queue = append(queue, reason)
+	}
+	return queue, true
 }
 
 // sameCommit reports whether two commit strings name the same build, allowing
