@@ -339,21 +339,16 @@ func TestSeatUnreachableRaisesWithoutABeadItCouldNotRead(t *testing.T) {
 }
 
 // TestSeatUnreachableRaisesNothingWithoutAHookedBead drives the polecat-health
-// pass over a seat that holds no hooked bead through ten minutes of ticks, with
-// its session answering alive, dead, and with an error: nothing rests on that
-// seat's session, so no answer names it (gt-b0y45y).
+// pass over a seat that holds no hooked bead through ten minutes of failing
+// session checks: a failing read for such a seat is no read at all, so nothing
+// rests on it and no answer names it (gt-b0y45y). Only a failing check reaches
+// that unhooked release; an alive or dead answer releases the seat on its own
+// path, which TestSeatUnreachableClearsItsItemWhenTheSeatIsEmptied drives.
 func TestSeatUnreachableRaisesNothingWithoutAHookedBead(t *testing.T) {
 	t.Parallel()
-	gone := errors.New("sandbox pod myr-mycat is gone")
-	answers := []struct {
-		name       string
-		session    bool
-		sessionErr error
-	}{
-		{"a session that answers alive", true, nil},
-		{"a session that answers dead", false, nil},
-		{"a session check that fails", false, gone},
-	}
+	d, tm, clk := unreachableSeatTown(t, newWorkBD(t))
+	tm.hasErr = errors.New("sandbox pod myr-mycat is gone")
+
 	ticks := []struct {
 		name    string
 		advance time.Duration
@@ -362,49 +357,59 @@ func TestSeatUnreachableRaisesNothingWithoutAHookedBead(t *testing.T) {
 		{"five minutes of unreadable checks", 5 * time.Minute},
 		{"ten minutes of unreadable checks", 5 * time.Minute},
 	}
-	for _, answer := range answers {
-		t.Run(answer.name, func(t *testing.T) {
-			t.Parallel()
-			d, tm, clk := unreachableSeatTown(t, newWorkBD(t))
-			if answer.session {
-				tm.addSession("myr-mycat", "bash", clk.Now())
-			}
-			tm.hasErr = answer.sessionErr
-
-			for _, tick := range ticks {
-				t.Run(tick.name, func(t *testing.T) {
-					clk.Advance(tick.advance)
-					d.checkPolecatSessionHealth()
-					require.Empty(t, seatUnreachableQueue(t, d), "a seat with no hooked bead was named")
-				})
-			}
+	for _, tick := range ticks {
+		t.Run(tick.name, func(t *testing.T) {
+			clk.Advance(tick.advance)
+			d.checkPolecatSessionHealth()
+			require.Empty(t, seatUnreachableQueue(t, d), "a seat with no hooked bead was named")
 		})
 	}
 }
 
-// TestSeatUnreachableClearsItsItemWhenTheSeatIsReleasedWhileUnreadable: a seat
-// that held a bead and went unreadable is named at five minutes; once that bead
-// is released the same unreadable session is no news, and the item clears on
-// the next tick (gt-b0y45y).
-func TestSeatUnreachableClearsItsItemWhenTheSeatIsReleasedWhileUnreadable(t *testing.T) {
+// TestSeatUnreachableClearsItsItemWhenTheSeatIsEmptied: a seat that held a bead
+// and went unreadable is named at five minutes; once that bead is released the
+// seat's next answer releases it from the tracker, so the item clears on that
+// tick (gt-b0y45y). The answers reach that release by different paths: only a
+// check that keeps failing reaches the unhooked branch, while an alive or dead
+// answer releases the seat on its own path and names no bead.
+func TestSeatUnreachableClearsItsItemWhenTheSeatIsEmptied(t *testing.T) {
 	t.Parallel()
-	bd := hookedWorkBD(t, "gt-p4aqut", time.Hour)
-	d, tm, clk := unreachableSeatTown(t, bd)
-	tm.hasErr = errors.New("sandbox pod myr-mycat is gone")
+	gone := errors.New("sandbox pod myr-mycat is gone")
+	answers := []struct {
+		name       string
+		session    bool
+		sessionErr error
+	}{
+		{"the check keeps failing", false, gone},
+		{"the session answers alive", true, nil},
+		{"the session answers dead", false, nil},
+	}
+	for _, answer := range answers {
+		t.Run(answer.name, func(t *testing.T) {
+			t.Parallel()
+			bd := hookedWorkBD(t, "gt-p4aqut", time.Hour)
+			d, tm, clk := unreachableSeatTown(t, bd)
+			tm.hasErr = gone
 
-	d.checkPolecatSessionHealth()
-	clk.Advance(5 * time.Minute)
-	d.checkPolecatSessionHealth()
-	require.Len(t, seatUnreachableQueue(t, d), 1, "the seat must be named after five minutes")
+			d.checkPolecatSessionHealth()
+			clk.Advance(5 * time.Minute)
+			d.checkPolecatSessionHealth()
+			require.Len(t, seatUnreachableQueue(t, d), 1, "the seat must be named after five minutes")
 
-	// The seat's work is released while its session stays unreadable: the bead
-	// closes, so the store no longer assigns the seat a hooked or in-progress
-	// bead.
-	bd.seed("gt-p4aqut", "closed", clk.Now())
-	clk.Advance(time.Minute)
-	d.checkPolecatSessionHealth()
+			// The seat's work is released while its session stays unreadable:
+			// the bead closes, so the store no longer assigns the seat a hooked
+			// or in-progress bead. The seat then answers, in this row's way.
+			bd.seed("gt-p4aqut", "closed", clk.Now())
+			if answer.session {
+				tm.addSession("myr-mycat", "bash", clk.Now())
+			}
+			tm.hasErr = answer.sessionErr
+			clk.Advance(time.Minute)
+			d.checkPolecatSessionHealth()
 
-	require.Empty(t, seatUnreachableQueue(t, d), "a seat released while unreadable must stop being named")
+			require.Empty(t, seatUnreachableQueue(t, d), "an emptied seat that answered must stop being named")
+		})
+	}
 }
 
 // TestSeatUnreachableNamesASeatWhoseRecordHoldsItsWorkBead: the intent
