@@ -1,8 +1,3 @@
-polecat identity remove
-polecat identity rename
-polecat identity show
-polecat list
-polecat nuke
 polecat pool-init
 polecat prune
 polecat remove
