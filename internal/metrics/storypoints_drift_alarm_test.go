@@ -2,8 +2,9 @@ package metrics
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"math"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,30 +18,70 @@ var driftAlarmColumns = []string{
 	"polecat_lower_bound", "sp_estimated_at", "dispatched_at",
 }
 
-// driftAlarmEnv is a fixture town whose reads go to the filesystem under its
-// temp directory.
-func driftAlarmEnv(t *testing.T) (string, Env) {
-	t.Helper()
-	town := t.TempDir()
-	return town, Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir}
+// driftTown is the town root the fixture reads under. Nothing is written under
+// it: the fake filesystem holds the files.
+const driftTown = "/town"
+
+// driftFS is an in-memory filesystem behind Env.ReadFile and Env.ReadDir. files
+// holds what a path reads as, dirs what a directory lists, and errs the error a
+// path answers with instead.
+type driftFS struct {
+	files map[string][]byte
+	dirs  map[string][]DirEntry
+	errs  map[string]error
 }
 
-// writeDriftExtract writes rows as one day's landings table under town and
-// returns the day's directory.
-func writeDriftExtract(t *testing.T, town, day string, rows []Row) string {
-	t.Helper()
-	dir := filepath.Join(town, ".runtime", "metrics", day)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
+func newDriftFS() *driftFS {
+	return &driftFS{files: map[string][]byte{}, dirs: map[string][]DirEntry{}, errs: map[string]error{}}
+}
+
+// ReadFile answers the path's error, then its contents, then a missing file.
+func (f *driftFS) ReadFile(path string) ([]byte, error) {
+	if err, ok := f.errs[path]; ok {
+		return nil, err
 	}
+	data, ok := f.files[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return data, nil
+}
+
+// ReadDir lists the directory, or reports it missing.
+func (f *driftFS) ReadDir(path string) ([]DirEntry, error) {
+	entries, ok := f.dirs[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return entries, nil
+}
+
+// driftAlarmEnv is the fixture town and the Env whose file reads go to the fake
+// filesystem.
+func driftAlarmEnv(t *testing.T) (*driftFS, Env) {
+	t.Helper()
+	fsys := newDriftFS()
+	return fsys, Env{Town: driftTown, ReadFile: fsys.ReadFile, ReadDir: fsys.ReadDir}
+}
+
+// writeDriftExtract writes rows as one day's landings table under the town and
+// returns the day's directory.
+func writeDriftExtract(t *testing.T, fsys *driftFS, day string, rows []Row) string {
+	t.Helper()
+	root := filepath.Join(driftTown, ".runtime", "metrics")
+	dir := filepath.Join(root, day)
+	fsys.dirs[root] = append(fsys.dirs[root], DirEntry{Name: day, IsDir: true})
 	var buf bytes.Buffer
 	if err := WriteLandings(&buf, driftAlarmColumns, rows); err != nil {
 		t.Fatalf("WriteLandings: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, landingsName), buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("write landings: %v", err)
-	}
+	fsys.files[filepath.Join(dir, landingsName)] = buf.Bytes()
 	return dir
+}
+
+// writeWeightsFile writes data as the runtime weights file at path.
+func writeWeightsFile(fsys *driftFS, path, data string) {
+	fsys.files[path] = []byte(data)
 }
 
 // TestStoryPointsDriftReadReadsTheNewestExtract holds the read to the extract
@@ -82,15 +123,15 @@ func TestStoryPointsDriftReadReadsTheNewestExtract(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			town, env := driftAlarmEnv(t)
+			fsys, env := driftAlarmEnv(t)
 			for day, rows := range tc.days {
-				writeDriftExtract(t, town, day, rows)
+				writeDriftExtract(t, fsys, day, rows)
 			}
 			read, err := ReadStoryPointsDrift(env, tc.now)
 			if err != nil {
 				t.Fatalf("ReadStoryPointsDrift: %v", err)
 			}
-			if want := filepath.Join(town, ".runtime", "metrics", tc.wantDay); read.Dir != want {
+			if want := filepath.Join(driftTown, ".runtime", "metrics", tc.wantDay); read.Dir != want {
 				t.Errorf("Dir = %q, want %q", read.Dir, want)
 			}
 			if !read.Drift.Current.Measurable || math.Abs(read.Drift.Current.Rho-tc.wantRho) > 1e-12 {
@@ -113,9 +154,11 @@ func TestStoryPointsDriftReadRefusesAnUnreadableTable(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	base := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	todayTable := filepath.Join(driftTown, ".runtime", "metrics", "2026-09-20", landingsName)
+	weightsPath := filepath.Join(driftTown, ".runtime", "storypoints", "weights.json")
 	tests := []struct {
 		name      string
-		setup     func(t *testing.T, town string)
+		setup     func(t *testing.T, fsys *driftFS)
 		env       func(Env) Env
 		zeroClock bool
 		substr    []string
@@ -126,20 +169,16 @@ func TestStoryPointsDriftReadRefusesAnUnreadableTable(t *testing.T) {
 		},
 		{
 			name: "an unreadable table",
-			setup: func(t *testing.T, town string) {
-				// A directory where the table should be makes the read fail
-				// with the platform's own error, which the notice carries.
-				dir := filepath.Join(town, ".runtime", "metrics", "2026-09-20", landingsName)
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
+			setup: func(t *testing.T, fsys *driftFS) {
+				// A read that fails with a platform error names the table.
+				fsys.errs[todayTable] = errors.New("read: is a directory")
 			},
 			substr: []string{filepath.Join("2026-09-20", landingsName)},
 		},
 		{
 			name: "a cell that does not parse",
-			setup: func(t *testing.T, town string) {
-				writeDriftExtract(t, town, "2026-09-20", []Row{
+			setup: func(t *testing.T, fsys *driftFS) {
+				writeDriftExtract(t, fsys, "2026-09-20", []Row{
 					rowWith("sp_estimated_at", "not a time")(driftRow("gt-a", base, 5, 300)),
 				})
 			},
@@ -147,25 +186,18 @@ func TestStoryPointsDriftReadRefusesAnUnreadableTable(t *testing.T) {
 		},
 		{
 			name: "a readable table beside a weights file the estimator refuses",
-			setup: func(t *testing.T, town string) {
-				writeDriftExtract(t, town, "2026-09-20", driftLandings(30, base, func(i int) float64 {
+			setup: func(t *testing.T, fsys *driftFS) {
+				writeDriftExtract(t, fsys, "2026-09-20", driftLandings(30, base, func(i int) float64 {
 					return float64(i + 1)
 				}))
-				writeWeightsFile(t, filepath.Join(town, ".runtime", "storypoints", "weights.json"), "{not json")
+				writeWeightsFile(fsys, weightsPath, "{not json")
 			},
 			substr: []string{filepath.Join(".runtime", "storypoints", "weights.json")},
 		},
 		{
 			name: "a ragged table",
-			setup: func(t *testing.T, town string) {
-				dir := filepath.Join(town, ".runtime", "metrics", "2026-09-20")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				ragged := "bead,landed_at\n" + "gt-a,2026-09-19T10:00:00Z,extra\n"
-				if err := os.WriteFile(filepath.Join(dir, landingsName), []byte(ragged), 0o644); err != nil {
-					t.Fatal(err)
-				}
+			setup: func(t *testing.T, fsys *driftFS) {
+				fsys.files[todayTable] = []byte("bead,landed_at\n" + "gt-a,2026-09-19T10:00:00Z,extra\n")
 			},
 			substr: []string{filepath.Join("2026-09-20", landingsName)},
 		},
@@ -188,12 +220,12 @@ func TestStoryPointsDriftReadRefusesAnUnreadableTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			town, env := driftAlarmEnv(t)
+			fsys, env := driftAlarmEnv(t)
 			if tc.env != nil {
 				env = tc.env(env)
 			}
 			if tc.setup != nil {
-				tc.setup(t, town)
+				tc.setup(t, fsys)
 			}
 			at := now
 			if tc.zeroClock {
@@ -217,10 +249,10 @@ func TestStoryPointsDriftReadRefusesAnUnreadableTable(t *testing.T) {
 // name for a model the town is not running.
 func TestStoryPointsDriftWeightsVersionTable(t *testing.T) {
 	t.Parallel()
-	const versionPath = ".runtime/storypoints/weights.json"
+	versionPath := filepath.Join(driftTown, ".runtime", "storypoints", "weights.json")
 	tests := []struct {
 		name   string
-		setup  func(t *testing.T, town string)
+		setup  func(t *testing.T, fsys *driftFS)
 		env    func(Env) Env
 		want   string
 		substr string
@@ -231,31 +263,29 @@ func TestStoryPointsDriftWeightsVersionTable(t *testing.T) {
 		},
 		{
 			name: "the runtime file's version",
-			setup: func(t *testing.T, town string) {
-				writeWeightsFile(t, filepath.Join(town, versionPath), trainTestBaseJSON)
+			setup: func(t *testing.T, fsys *driftFS) {
+				writeWeightsFile(fsys, versionPath, trainTestBaseJSON)
 			},
 			want: "v1",
 		},
 		{
 			name: "an unreadable runtime file",
-			setup: func(t *testing.T, town string) {
-				if err := os.MkdirAll(filepath.Join(town, versionPath), 0o755); err != nil {
-					t.Fatal(err)
-				}
+			setup: func(t *testing.T, fsys *driftFS) {
+				fsys.errs[versionPath] = errors.New("permission denied")
 			},
 			substr: versionPath,
 		},
 		{
 			name: "a runtime file that is not JSON",
-			setup: func(t *testing.T, town string) {
-				writeWeightsFile(t, filepath.Join(town, versionPath), "{not json")
+			setup: func(t *testing.T, fsys *driftFS) {
+				writeWeightsFile(fsys, versionPath, "{not json")
 			},
 			substr: versionPath,
 		},
 		{
 			name: "a runtime file of another version",
-			setup: func(t *testing.T, town string) {
-				writeWeightsFile(t, filepath.Join(town, versionPath), `{"version":2}`)
+			setup: func(t *testing.T, fsys *driftFS) {
+				writeWeightsFile(fsys, versionPath, `{"version":2}`)
 			},
 			substr: "version 2",
 		},
@@ -273,12 +303,12 @@ func TestStoryPointsDriftWeightsVersionTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			town, env := driftAlarmEnv(t)
+			fsys, env := driftAlarmEnv(t)
 			if tc.env != nil {
 				env = tc.env(env)
 			}
 			if tc.setup != nil {
-				tc.setup(t, town)
+				tc.setup(t, fsys)
 			}
 			got, err := StoryPointsWeightsVersion(env)
 			if tc.substr != "" {
@@ -297,16 +327,5 @@ func TestStoryPointsDriftWeightsVersionTable(t *testing.T) {
 				t.Errorf("StoryPointsWeightsVersion = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-// writeWeightsFile writes data at path, creating its directory.
-func writeWeightsFile(t *testing.T, path, data string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
 	}
 }

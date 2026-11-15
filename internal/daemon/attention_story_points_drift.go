@@ -27,35 +27,34 @@ const storyPointsDriftUnreadableKey = "storypoints-drift:unreadable"
 
 // collectStoryPointsDrift raises the drift item when the newest extract's
 // landings rank below storyPointsDriftBar, and the unreadable item when no
-// measure could be taken. A reading at or above the bar raises nothing, and
-// neither does one nobody could measure: a measurement not taken says nothing
-// about whether an open drift stands, so a held item stays until a number clears
-// it.
+// measure could be taken. A reading at or above the bar raises nothing. A
+// reading nobody could measure raises nothing either, and it keeps a drift item
+// already held, since a measurement not taken says nothing about whether the
+// drift stands. A failed read keeps it too, beside the unreadable item.
 func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention.Item, error) {
-	// The production sources always carry the read (attentionSources); a
-	// hand-built sources value without it raises nothing, as the other
-	// collectors whose tests build one do.
+	// The production sources always carry the read (attentionSources, pinned by
+	// TestStoryPointsDriftAttentionIsWiredAndRegistered). A hand-built sources
+	// value without it raises nothing: the shared test fixture has no drift
+	// read, and an item raised for it would change every tick test built on
+	// that fixture.
 	if s.storyPointsDrift == nil {
-		return nil, nil
+		return s.keepHeldDrift(), nil
 	}
 	read, err := s.storyPointsDrift(s.now)
 	if err != nil {
-		return []attention.Item{storyPointsDriftUnreadableItem(err.Error())}, nil
+		return s.keepHeldDrift(storyPointsDriftUnreadableItem(err.Error())), nil
 	}
 	reading := read.Drift.Current
 	// StoryPointsDriftOver reports a reading nobody could measure as NaN and
 	// Measurable false, so a measurable one that is not a number is a fault in
 	// the read and not a value to compare with the bar.
 	if reading.Measurable && (math.IsNaN(reading.Rho) || math.IsInf(reading.Rho, 0)) {
-		return []attention.Item{
+		return s.keepHeldDrift(
 			storyPointsDriftUnreadableItem(fmt.Sprintf("the measurable reading %v is not a number", reading.Rho)),
-		}, nil
+		), nil
 	}
 	if !reading.Measurable {
-		if held, ok := attention.Find(s.prev, storyPointsDriftKey); ok {
-			return []attention.Item{held}, nil
-		}
-		return nil, nil
+		return s.keepHeldDrift(), nil
 	}
 	if reading.Rho >= storyPointsDriftBar {
 		return nil, nil
@@ -68,6 +67,15 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 			"story points estimate drift: rank correlation %.2f over the last %d landings of the %s extract is below %.2f; weights %s",
 			reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
 	}}, nil
+}
+
+// keepHeldDrift is items plus the drift item the previous tick raised, when one
+// is held. The unreadable item has its own key, so both can be queued at once.
+func (s *attentionSources) keepHeldDrift(items ...attention.Item) []attention.Item {
+	if held, ok := attention.Find(s.prev, storyPointsDriftKey); ok {
+		items = append(items, held)
+	}
+	return items
 }
 
 // storyPointsDriftUnreadableItem is the item a measure that could not be taken

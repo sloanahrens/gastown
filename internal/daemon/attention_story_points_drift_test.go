@@ -276,6 +276,81 @@ func TestStoryPointsDriftAttentionIsWiredAndRegistered(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftAttentionReadErrorAndUnmeasurableReadingDiffer names the
+// difference the queue shows: a read that cannot answer raises the unreadable
+// item, and a reading nobody could measure raises none.
+func TestStoryPointsDriftAttentionReadErrorAndUnmeasurableReadingDiffer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		read func(time.Time) (metrics.StoryPointsDriftRead, error)
+		want []string
+	}{
+		{
+			name: "a read that errors",
+			read: func(time.Time) (metrics.StoryPointsDriftRead, error) {
+				return metrics.StoryPointsDriftRead{}, errors.New("no landings.csv under /town/.runtime/metrics")
+			},
+			want: []string{storyPointsDriftUnreadableKey},
+		},
+		{
+			name: "a reading nobody could measure",
+			read: func(time.Time) (metrics.StoryPointsDriftRead, error) {
+				return driftReading(math.NaN(), false, "v1"), nil
+			},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := driftRig(t, tc.read)
+			items := f.collect(t, f.src.collectStoryPointsDrift)
+			if len(items) != len(tc.want) {
+				t.Fatalf("items = %+v, want keys %v", items, tc.want)
+			}
+			for i, key := range tc.want {
+				if items[i].Key != key {
+					t.Errorf("item %d key = %q, want %q", i, items[i].Key, key)
+				}
+			}
+		})
+	}
+}
+
+// TestStoryPointsDriftAttentionKeepsAHeldDriftWhenTheReadFails: a read that
+// cannot answer raises the unreadable item beside the drift item already held.
+// The two have distinct keys, so the unreadable one does not displace the drift.
+func TestStoryPointsDriftAttentionKeepsAHeldDriftWhenTheReadFails(t *testing.T) {
+	t.Parallel()
+	fail := false
+	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+		if fail {
+			return metrics.StoryPointsDriftRead{}, errors.New("read landings.csv: permission denied")
+		}
+		return driftReading(0.42, true, "v1"), nil
+	})
+	first := f.tick(t, driftTick)
+	itemByKey(t, first, storyPointsDriftKey)
+
+	fail = true
+	second := f.tickFrom(t, first, driftTick.Add(time.Minute))
+	itemByKey(t, second, storyPointsDriftUnreadableKey)
+	itemByKey(t, second, storyPointsDriftKey)
+}
+
+// TestStoryPointsDriftAttentionNilReadSeamRaisesNothing: a hand-built sources
+// value with no drift read raises nothing, as the shared fixture does, because
+// the production sources always carry the read. Raising the unreadable item
+// here would change every tick test built on that fixture (gt-my0o23).
+func TestStoryPointsDriftAttentionNilReadSeamRaisesNothing(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, driftTick)
+	if items := f.collect(t, f.src.collectStoryPointsDrift); len(items) != 0 {
+		t.Errorf("items = %+v, want nothing with no drift read", items)
+	}
+}
+
 // countKind is the items of one kind.
 func countKind(items []attention.Item, kind attention.Kind) int {
 	n := 0
