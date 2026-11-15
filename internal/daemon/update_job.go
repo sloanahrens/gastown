@@ -355,7 +355,8 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 // triggerPodUpdate is the due decision for a daemon that runs as a pod. The roll
 // starts only when a pair-ready green commit is ahead of the running one, and it
 // starts as the Job the cluster runs, never as a child this process would lose
-// when the roll replaces it.
+// when the roll replaces it. A pair whose Job the daemon has seen in the cluster
+// is not due: its roll ran, and only a newer pair starts one.
 func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string, facts UpdateFacts) {
 	running, err := pairReadyRunningCommit(d.config.TownRoot)
 	if err != nil {
@@ -372,6 +373,13 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 		d.noteUpdateNotDue(hold)
 		return
 	}
+	// The Job outlives the roll it ran: a partial roll leaves the running values
+	// naming the same pair, so without this every window asks for a Job the
+	// cluster already holds and logs a roll that keeps starting.
+	if d.updateJobKnownExists(sha) {
+		d.noteUpdateNotDue(updateJobAlreadyRan(sha))
+		return
+	}
 	d.clearUpdateNotDue()
 	if d.updateJobBackingOff(now) {
 		return
@@ -384,6 +392,8 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 		// suppression as for a launch, rather than create it again.
 		d.noteUpdateJobSuccess()
 		d.noteUpdateLaunch(now)
+		d.noteUpdateJobExists(sha)
+		d.noteUpdateNotDue(updateJobAlreadyRan(sha))
 		d.logger.Printf("update: Job %s is already launched", updateJobName(sha))
 	case errors.Is(err, errUpdateJobNoAnswer):
 		wait := d.noteUpdateJobFailure(now)
@@ -398,6 +408,7 @@ func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings,
 	default:
 		d.noteUpdateJobSuccess()
 		d.noteUpdateLaunch(now)
+		d.noteUpdateJobExists(sha)
 		d.logger.Printf("update: created Job %s", updateJobName(sha))
 	}
 }
@@ -559,4 +570,26 @@ func (d *Daemon) noteUpdateJobSuccess() {
 	defer d.updateTrigger.mu.Unlock()
 	d.updateTrigger.jobFailures = 0
 	d.updateTrigger.jobFailedAt = time.Time{}
+}
+
+// updateJobAlreadyRan is the not-due reason for a pair whose Job the cluster
+// already holds: a launch of it would find the same Job.
+func updateJobAlreadyRan(sha string) string {
+	return fmt.Sprintf("the roll for %s already ran", greenRefShortSHA(sha))
+}
+
+// updateJobKnownExists reports whether this daemon knows the cluster holds the
+// Job for sha: a create of it succeeded or answered AlreadyExists.
+func (d *Daemon) updateJobKnownExists(sha string) bool {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	return d.updateTrigger.jobExistsFor == sha
+}
+
+// noteUpdateJobExists records that the cluster holds the Job for sha, so that
+// pair starts no new roll until a newer one is ready.
+func (d *Daemon) noteUpdateJobExists(sha string) {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.jobExistsFor = sha
+	d.updateTrigger.mu.Unlock()
 }
