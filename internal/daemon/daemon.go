@@ -4108,14 +4108,19 @@ func (d *Daemon) checkRigPolecatHealth(rigName string, times *seatTimes, reads *
 	for _, polecatName := range polecats {
 		tm := &seatTimer{}
 		start := d.clk().Now()
-		read, checked := d.checkPolecatHealthTimed(rigName, polecatName, tm)
-		if checked {
+		read, state := d.checkPolecatHealthTimed(rigName, polecatName, tm)
+		switch state {
+		case seatChecked:
 			reads.add(read)
-		} else {
+		case seatSkipped:
 			// The seat was listed and left before its session check: the pass
 			// has no read for it, and the tracker must not read that quiet
 			// seat as released (gt-q6hafz).
 			reads.skip(rigName, polecatName)
+		case seatUnhooked:
+			// The seat holds no hooked bead: nothing rests on its session, so
+			// the pass tells the tracker nothing and any outage kept for it
+			// ends (gt-b0y45y).
 		}
 		took := d.clk().Since(start)
 		times.add(rigName, polecatName, took)
@@ -4180,10 +4185,12 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 }
 
 // checkPolecatHealthTimed is checkPolecatHealth charging its tmux and bd calls
-// to tm (gt-2a5z6). read and checked are the seat's session read for the
-// seat-unreachable tracker, reported only when the check asked the session
-// (gt-q6hafz).
-func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTimer) (read seatRead, checked bool) {
+// to tm (gt-2a5z6). read and state say what the seat-unreachable tracker is
+// told for this seat: its session read when the check asked the session, a
+// skip when the pass left the seat first, and nothing at all for a seat that
+// holds no hooked bead — a failing session read for such a seat is no read,
+// since nothing rests on it (gt-q6hafz, gt-b0y45y).
+func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTimer) (read seatRead, state seatCheck) {
 	// The seat's intent record says whether it is held and, when a writer
 	// set it, what work it holds. It is read before tmux and never from
 	// Dolt, and an unreadable record is a hold (fail closed). A polecat the
@@ -4204,6 +4211,7 @@ func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTi
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
 	if err != nil || rec.Held() {
 		skipped = true
+		state = seatSkipped
 		// The pool releases a stale park's seat only when its session is gone
 		// (parkedStale in internal/cmd), so this says released only there; an
 		// unanswered tmux read is no proof, and the park itself stays until an
@@ -4243,6 +4251,7 @@ func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTi
 		d.timeSeatCall(tm, seatBD, func() { still, known = d.workBeadStillSubmitted(rigName, rec.WorkBead) })
 		if !known || still {
 			skipped = true
+			state = seatSkipped
 			d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s is submitted for landing",
 				rigName, polecatName, rec.WorkBead)
 			return
@@ -4252,11 +4261,20 @@ func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTi
 	// Check if tmux session exists
 	var sessionAlive bool
 	d.timeSeatCall(tm, seatTmux, func() { sessionAlive, err = d.tmux.HasSession(sessionName) })
-	read, checked = seatRead{Rig: rigName, Polecat: polecatName}, true
+	read, state = seatRead{Rig: rigName, Polecat: polecatName}, seatChecked
 	if err != nil {
 		d.logger.Printf("Error checking session %s: %v", sessionName, err)
-		read.Bead, read.Err = d.seatHookedBead(rigName, polecatName, rec.WorkBead, tm), err
-		return
+		read.Err = err
+		bead, known := d.seatHookedBead(rigName, polecatName, rec.WorkBead, tm)
+		read.Bead = bead
+		if known && bead == "" {
+			// The seat holds no hooked bead: nothing rests on its session, so
+			// it is not named and any outage kept for it ends. A bead read
+			// that could not answer is not this — it keeps the seat, named
+			// without a bead (gt-b0y45y, gt-q6hafz).
+			return read, seatUnhooked
+		}
+		return read, seatChecked
 	}
 
 	if sessionAlive {

@@ -19,6 +19,23 @@ type seatRead struct {
 	Err     error
 }
 
+// seatCheck is what one seat's polecat-health check gives the seat-unreachable
+// tracker.
+type seatCheck int
+
+const (
+	// seatChecked: the check asked the session, and the read it returned is
+	// the answer.
+	seatChecked seatCheck = iota
+	// seatSkipped: the check left the seat before asking its session, so it
+	// has no read; the tracker keeps whatever it already held for the seat.
+	seatSkipped
+	// seatUnhooked: the seat holds no hooked bead. Nothing rests on its
+	// session, so the tracker is told nothing about it and any outage kept for
+	// the seat ends (gt-b0y45y).
+	seatUnhooked
+)
+
 // seatUnreachable names a seat whose session has answered nothing since Since,
 // the bead it holds and the last error its check returned.
 type seatUnreachable struct {

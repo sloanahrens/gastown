@@ -13,10 +13,12 @@ import (
 // rig pool's goroutines, so adds are locked; the pass hands the set to the
 // tracker once every rig has walked (gt-q6hafz).
 //
-// Every seat the pass listed is in it exactly once: either a read (the session
+// Every seat the pass listed is in it at most once: either a read (the session
 // check ran) or a skip (the seat was left before the check, so no read
 // answered). The two are kept apart because they mean different things to the
-// tracker, which reads a seat it is not told about as released.
+// tracker, which reads a seat it is not told about as released. A seat with no
+// hooked bead is in it neither way: its check reports no read and no skip, so
+// the tracker releases it (gt-b0y45y).
 type seatReadSet struct {
 	mu         sync.Mutex
 	reads      []seatRead
@@ -160,19 +162,21 @@ func seatUnreachableItem(alert seatUnreachable, now time.Time) attention.Item {
 
 // seatHookedBead is the bead a seat holds, for a seat-unreachable item to name:
 // the intent record's work bead when a writer set one, otherwise the work bead
-// assigned to the seat with status hooked or in_progress. A read that fails
-// leaves it "" and is logged: the seat is still named for its unreadable
+// assigned to the seat with status hooked or in_progress. A read that fails is
+// logged and reports known false: the seat is still named for its unreadable
 // session, without a bead the daemon could not read guessed at (gt-q6hafz).
-func (d *Daemon) seatHookedBead(rigName, polecatName, recorded string, tm *seatTimer) string {
+// known is what tells a seat that holds nothing from a bead read that could
+// not answer, which must not end the seat's outage (gt-b0y45y).
+func (d *Daemon) seatHookedBead(rigName, polecatName, recorded string, tm *seatTimer) (bead string, known bool) {
 	if recorded != "" {
-		return recorded
+		return recorded, true
 	}
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-	var bead string
 	var err error
 	d.timeSeatCall(tm, seatBD, func() { bead, err = d.assignedActiveWorkBead(rigName, assignee) })
 	if err != nil {
 		d.logger.Printf("Error reading the work bead of %s/%s: %v", rigName, polecatName, err)
+		return bead, false
 	}
-	return bead
+	return bead, true
 }
