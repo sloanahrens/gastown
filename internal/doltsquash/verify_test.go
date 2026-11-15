@@ -20,9 +20,9 @@ const (
 	verifyBase = "9" + verifyTail // hash(9), compact-base at main's initial commit
 )
 
-// The queries design step 6's run makes, as the prefixes the fake answers: the
-// fake matches the longest scripted prefix, so a filter or an ordering term the
-// run adds does not have to appear here.
+// The queries the run makes, as the prefixes the fake answers: the fake matches
+// the longest scripted prefix, so a filter or an ordering term the run adds does
+// not have to appear here.
 const (
 	sqlVerifyCheckout      = "CALL DOLT_CHECKOUT('compact-work')"
 	sqlVerifyBranch        = "SELECT active_branch()"
@@ -42,9 +42,9 @@ func verifyHashSQL(table string) string {
 	return "SELECT dolt_hashof_table(" + quoteLiteral(table) + ")"
 }
 
-// verifyFixture is the database design step 6's tests script: a BEFORE record
-// of two tables, a compact-work catalog that matches it, one rebased commit at
-// or before the cut, and two commits newer than the cut on both branches.
+// verifyFixture is the database the verify tests script: a BEFORE record of two
+// tables, a compact-work catalog that matches it, one rebased commit at or
+// before the cut, and two commits newer than the cut on both branches.
 type verifyFixture struct {
 	before  Before
 	base    string
@@ -75,17 +75,18 @@ func newVerifyFixture() verifyFixture {
 	}
 }
 
-// fake answers the whole of design step 6, replacing the answers changes name.
+// fake answers the whole run, replacing the answers changes name.
 //
 // A table's count and hash are scripted only when the run's catalog holds that
 // table, so a run that reads a table the catalog does not list finds no answer
 // and fails.
 //
-// Beside the newer-commit answer there is a trap: a filter on the commit date
-// matches it, and it holds the squashed commit too. A rebase rewrites the
-// commit date to the moment it runs, so a run that reads the newer commits by
-// date sees the squashed commit as an extra one on compact-work, and every test
-// that expects a verified run fails.
+// Each cut rule has a trap: an answer for the same read filtered on the commit
+// date instead of the author date. A rebase rewrites the commit date to the
+// moment it runs and keeps the author date, so the old count sees no commit at
+// or before the cut and both newer reads see the squashed commit as newer.
+// Every test that expects a verified run fails if any of the three filters on
+// date.
 func (fx verifyFixture) fake(changes map[string]Rows) *FakeExec {
 	f := NewFakeExec()
 	answer := func(statement string, rows Rows) {
@@ -116,12 +117,16 @@ func (fx verifyFixture) fake(changes map[string]Rows) *FakeExec {
 		answer(verifyHashSQL(state.Table), single("h", state.Hash))
 	}
 	answer(sqlVerifyOldCommits, single("n", strconv.FormatInt(fx.old, 10)))
+	f.Respond(sqlVerifyOldCommits+" WHERE date <=", single("n", "0"))
 	answer(sqlVerifyWorkNewer, identitiesRows(fx.newer))
-	f.Respond(sqlVerifyWorkNewer+" WHERE date >", identitiesRows(append(slices.Clone(fx.newer), commitIdentity{
+	squashed := commitIdentity{
 		AuthorDate: "2026-11-08 19:00:00.000",
 		Message:    "squash: the old history",
-	})))
+	}
+	f.Respond(sqlVerifyWorkNewer+" WHERE date >", identitiesRows(append(slices.Clone(fx.newer), squashed)))
 	answer(sqlVerifyMainNewer, identitiesRows(fx.newer))
+	f.Respond(sqlVerifyMainNewer+" "+quoteLiteral(fx.before.Tip)+" WHERE date >",
+		identitiesRows(append(slices.Clone(fx.newer), squashed)))
 	return f
 }
 
@@ -410,7 +415,7 @@ func TestVerifyChecksTheSessionIsOnCompactWork(t *testing.T) {
 	if err == nil {
 		t.Fatal("Verify returned no error on a session that is not on compact-work")
 	}
-	for _, want := range []string{"statement 2", `"main"`, "want compact-work"} {
+	for _, want := range []string{"statement 2 (SELECT active_branch())", `"main"`, "want compact-work"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not hold %q", err, want)
 		}
