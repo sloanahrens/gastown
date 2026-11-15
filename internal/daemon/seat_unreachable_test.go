@@ -18,25 +18,6 @@ func seatAlertLines(alerts []seatUnreachable) []string {
 	return lines
 }
 
-// checkSeatOutages compares the tracked first-failure times with the wanted
-// ones.
-func checkSeatOutages(t *testing.T, got map[seatKey]seatOutage, want map[seatKey]time.Time) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("tracked seats = %d, want %d", len(got), len(want))
-	}
-	for key, since := range want {
-		outage, ok := got[key]
-		if !ok {
-			t.Errorf("%s/%s is not tracked, want its first-failure time kept", key.rig, key.polecat)
-			continue
-		}
-		if !outage.since.Equal(since) {
-			t.Errorf("%s/%s first-failure time = %v, want %v", key.rig, key.polecat, outage.since, since)
-		}
-	}
-}
-
 // TestTrackSeatUnreachableRaisesAtFiveMinutes drives one unreadable seat tick by
 // tick: under five minutes it raises nothing, and at exactly five it names the
 // seat with the bead it holds, the first-failure time and the last error.
@@ -45,32 +26,28 @@ func TestTrackSeatUnreachableRaisesAtFiveMinutes(t *testing.T) {
 	base := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
 	gone := errors.New("sandbox pod gastown-dag is gone")
 	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: gone}
-	key := seatKey{rig: "gastown", polecat: "dag"}
-	failing := map[seatKey]time.Time{key: base}
 	atFive := fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", base.Format(time.RFC3339), gone)
 
 	steps := []struct {
-		name      string
-		at        time.Duration
-		reads     []seatRead
-		want      []string
-		wantSince map[seatKey]time.Time
+		name  string
+		at    time.Duration
+		reads []seatRead
+		want  []string
 	}{
-		{"first failed read starts the clock", 0, []seatRead{dag}, nil, failing},
-		{"four minutes raises nothing", 4 * time.Minute, []seatRead{dag}, nil, failing},
-		{"one second short raises nothing", 5*time.Minute - time.Second, []seatRead{dag}, nil, failing},
-		{"five minutes names the seat and its bead", 5 * time.Minute, []seatRead{dag}, []string{atFive}, failing},
-		{"a later tick names it from the same first failure", 6 * time.Minute, []seatRead{dag}, []string{atFive}, failing},
+		{"first failed read starts the clock", 0, []seatRead{dag}, nil},
+		{"four minutes raises nothing", 4 * time.Minute, []seatRead{dag}, nil},
+		{"one second short raises nothing", 5*time.Minute - time.Second, []seatRead{dag}, nil},
+		{"five minutes names the seat and its bead", 5 * time.Minute, []seatRead{dag}, []string{atFive}},
+		{"a later tick names it from the same first failure", 6 * time.Minute, []seatRead{dag}, []string{atFive}},
 	}
 	var prev map[seatKey]seatOutage
 	var alerts []seatUnreachable
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
-			prev, alerts = trackSeatUnreachable(prev, base.Add(step.at), step.reads)
+			prev, alerts = trackSeatUnreachable(prev, base.Add(step.at), step.reads, true)
 			if got := seatAlertLines(alerts); !slices.Equal(got, step.want) {
 				t.Errorf("alerts = %q, want %q", got, step.want)
 			}
-			checkSeatOutages(t, prev, step.wantSince)
 		})
 	}
 }
@@ -83,35 +60,32 @@ func TestTrackSeatUnreachableStartsOverAfterAGoodRead(t *testing.T) {
 	base := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
 	gone := errors.New("session read timed out")
 	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: gone}
-	key := seatKey{rig: "gastown", polecat: "dag"}
 	answered := dag
 	answered.Err = nil
 	atFive := fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", base.Format(time.RFC3339), gone)
 	restarted := base.Add(7 * time.Minute)
 
 	steps := []struct {
-		name      string
-		at        time.Duration
-		read      seatRead
-		want      []string
-		wantSince map[seatKey]time.Time
+		name string
+		at   time.Duration
+		read seatRead
+		want []string
 	}{
-		{"first failed read starts the clock", 0, dag, nil, map[seatKey]time.Time{key: base}},
-		{"five minutes names the seat", 5 * time.Minute, dag, []string{atFive}, map[seatKey]time.Time{key: base}},
-		{"one good read clears it and names nothing", 6 * time.Minute, answered, nil, map[seatKey]time.Time{}},
-		{"a failure after the good read starts over", 7 * time.Minute, dag, nil, map[seatKey]time.Time{key: restarted}},
-		{"four minutes after it raises nothing", 11 * time.Minute, dag, nil, map[seatKey]time.Time{key: restarted}},
-		{"five minutes after it names the seat again", 12 * time.Minute, dag, []string{fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", restarted.Format(time.RFC3339), gone)}, map[seatKey]time.Time{key: restarted}},
+		{"first failed read starts the clock", 0, dag, nil},
+		{"five minutes names the seat", 5 * time.Minute, dag, []string{atFive}},
+		{"one good read clears it and names nothing", 6 * time.Minute, answered, nil},
+		{"a failure after the good read starts over", 7 * time.Minute, dag, nil},
+		{"four minutes after it raises nothing", 11 * time.Minute, dag, nil},
+		{"five minutes after it names the seat again", 12 * time.Minute, dag, []string{fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", restarted.Format(time.RFC3339), gone)}},
 	}
 	var prev map[seatKey]seatOutage
 	var alerts []seatUnreachable
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
-			prev, alerts = trackSeatUnreachable(prev, base.Add(step.at), []seatRead{step.read})
+			prev, alerts = trackSeatUnreachable(prev, base.Add(step.at), []seatRead{step.read}, true)
 			if got := seatAlertLines(alerts); !slices.Equal(got, step.want) {
 				t.Errorf("alerts = %q, want %q", got, step.want)
 			}
-			checkSeatOutages(t, prev, step.wantSince)
 		})
 	}
 }
@@ -126,11 +100,11 @@ func TestTrackSeatUnreachableClearsOnlyTheSeatThatAnswered(t *testing.T) {
 	slit := seatRead{Rig: "gastown", Polecat: "slit", Bead: "gt-q6hafz", Err: gone}
 	reads := []seatRead{dag, slit}
 
-	prev, alerts := trackSeatUnreachable(nil, base, reads)
+	prev, alerts := trackSeatUnreachable(nil, base, reads, true)
 	if len(alerts) != 0 {
 		t.Fatalf("alerts on the first failed read = %q, want none", seatAlertLines(alerts))
 	}
-	prev, alerts = trackSeatUnreachable(prev, base.Add(5*time.Minute), reads)
+	prev, alerts = trackSeatUnreachable(prev, base.Add(5*time.Minute), reads, true)
 	want := []string{
 		fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", base.Format(time.RFC3339), gone),
 		fmt.Sprintf("gastown/slit gt-q6hafz since %s: %v", base.Format(time.RFC3339), gone),
@@ -140,29 +114,52 @@ func TestTrackSeatUnreachableClearsOnlyTheSeatThatAnswered(t *testing.T) {
 	}
 
 	reads[0].Err = nil
-	prev, alerts = trackSeatUnreachable(prev, base.Add(6*time.Minute), reads)
+	prev, alerts = trackSeatUnreachable(prev, base.Add(6*time.Minute), reads, true)
 	want = []string{fmt.Sprintf("gastown/slit gt-q6hafz since %s: %v", base.Format(time.RFC3339), gone)}
 	if got := seatAlertLines(alerts); !slices.Equal(got, want) {
 		t.Errorf("alerts after dag answered = %q, want only slit", got)
 	}
-	checkSeatOutages(t, prev, map[seatKey]time.Time{{rig: "gastown", polecat: "slit"}: base})
 }
 
 // TestTrackSeatUnreachableDropsASeatItNoLongerReads: the seat list is passed in
 // full every tick, so a seat that left it, as a released seat does, is dropped
-// instead of being named from a first-failure time that would outlive it.
+// instead of being named from a first-failure time that would outlive it. If
+// the seat comes back failing it waits out the five minutes again.
 func TestTrackSeatUnreachableDropsASeatItNoLongerReads(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
-	key := seatKey{rig: "gastown", polecat: "dag"}
-	prev := map[seatKey]seatOutage{key: {bead: "gt-p4aqut", since: base, err: errors.New("gone")}}
-	tracked, alerts := trackSeatUnreachable(prev, base.Add(5*time.Minute), nil)
+	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: errors.New("gone")}
+	prev, _ := trackSeatUnreachable(nil, base, []seatRead{dag}, true)
+
+	prev, alerts := trackSeatUnreachable(prev, base.Add(5*time.Minute), nil, true)
 	if len(alerts) != 0 {
 		t.Errorf("alerts for a seat the reads no longer list = %q, want none", seatAlertLines(alerts))
 	}
-	checkSeatOutages(t, tracked, map[seatKey]time.Time{})
-	if len(prev) != 1 {
-		t.Errorf("the previous tick's map changed to %d entries, want it left alone", len(prev))
+	_, alerts = trackSeatUnreachable(prev, base.Add(6*time.Minute), []seatRead{dag}, true)
+	if len(alerts) != 0 {
+		t.Errorf("alerts for a seat that failed again one minute after it was dropped = %q, want none", seatAlertLines(alerts))
+	}
+}
+
+// TestTrackSeatUnreachableKeepsRunningAlarmsWhenTheListCouldNotBeRead: a tick
+// whose seat list was not read, failed or empty, says nothing about any seat. A
+// seat already unreadable keeps its first-failure time, so it is named on the
+// next tick whose list is read, at the time it would have been.
+func TestTrackSeatUnreachableKeepsRunningAlarmsWhenTheListCouldNotBeRead(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
+	gone := errors.New("sandbox pod is gone")
+	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: gone}
+	prev, _ := trackSeatUnreachable(nil, base, []seatRead{dag}, true)
+
+	prev, alerts := trackSeatUnreachable(prev, base.Add(5*time.Minute), nil, false)
+	if len(alerts) != 0 {
+		t.Errorf("alerts from a tick whose list was not read = %q, want none", seatAlertLines(alerts))
+	}
+	_, alerts = trackSeatUnreachable(prev, base.Add(6*time.Minute), []seatRead{dag}, true)
+	want := []string{fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", base.Format(time.RFC3339), gone)}
+	if got := seatAlertLines(alerts); !slices.Equal(got, want) {
+		t.Errorf("alerts after the list read again = %q, want %q: the unread tick must not have cleared the seat", got, want)
 	}
 }
 
@@ -173,13 +170,17 @@ func TestTrackSeatUnreachableDropsASeatItNoLongerReads(t *testing.T) {
 func TestTrackSeatUnreachableRestartsAFirstFailureTimeFromTheFuture(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
-	key := seatKey{rig: "gastown", polecat: "dag"}
-	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: errors.New("gone")}
-	prev := map[seatKey]seatOutage{key: {bead: "gt-p4aqut", since: base.Add(10 * time.Minute), err: errors.New("gone")}}
+	gone := errors.New("gone")
+	dag := seatRead{Rig: "gastown", Polecat: "dag", Bead: "gt-p4aqut", Err: gone}
+	ahead, _ := trackSeatUnreachable(nil, base.Add(10*time.Minute), []seatRead{dag}, true)
 
-	tracked, alerts := trackSeatUnreachable(prev, base, []seatRead{dag})
+	prev, alerts := trackSeatUnreachable(ahead, base, []seatRead{dag}, true)
 	if len(alerts) != 0 {
 		t.Errorf("alerts from a restarted clock = %q, want none", seatAlertLines(alerts))
 	}
-	checkSeatOutages(t, tracked, map[seatKey]time.Time{key: base})
+	_, alerts = trackSeatUnreachable(prev, base.Add(5*time.Minute), []seatRead{dag}, true)
+	want := []string{fmt.Sprintf("gastown/dag gt-p4aqut since %s: %v", base.Format(time.RFC3339), gone)}
+	if got := seatAlertLines(alerts); !slices.Equal(got, want) {
+		t.Errorf("alerts five minutes after the restart = %q, want %q", got, want)
+	}
 }

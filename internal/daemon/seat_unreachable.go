@@ -1,10 +1,12 @@
 package daemon
 
-import "time"
+import (
+	"maps"
+	"time"
+)
 
 // seatUnreachableAfter is how long a hooked seat's session may stay unreadable
-// before it is named; the incident seat was unreadable for two hours while
-// every read failed silently (gt-l37xdn).
+// before it is named (gt-l37xdn).
 const seatUnreachableAfter = 5 * time.Minute
 
 // seatRead is one hooked seat's session-check result for one patrol tick: the
@@ -46,10 +48,17 @@ type seatKey struct{ rig, polecat string }
 // name. One good read drops the seat, so a later failure waits out the five
 // minutes again. The caller passes every hooked seat on every tick: a seat
 // missing from reads is dropped, which is how a released seat stops alarming.
+// listed is false when the caller could not read the list of hooked seats at
+// all: the tick then says nothing about any seat, prev is carried over as it
+// is and nothing is named, so a failed or empty list read cannot clear alarms
+// that are running.
 // A first-failure time later than now is a clock that stepped back, and the
 // read restarts it at now rather than suppressing the alert until the wall
 // clock catches up. prev is left unchanged.
-func trackSeatUnreachable(prev map[seatKey]seatOutage, now time.Time, reads []seatRead) (map[seatKey]seatOutage, []seatUnreachable) {
+func trackSeatUnreachable(prev map[seatKey]seatOutage, now time.Time, reads []seatRead, listed bool) (map[seatKey]seatOutage, []seatUnreachable) {
+	if !listed {
+		return maps.Clone(prev), nil
+	}
 	next := make(map[seatKey]seatOutage, len(reads))
 	order := make([]seatKey, 0, len(reads))
 	seen := make(map[seatKey]bool, len(reads))
