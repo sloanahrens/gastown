@@ -1446,29 +1446,36 @@ func isNonFastForwardPush(err error) bool {
 // originBranchSHA is the commit origin holds for branch, or "" when origin
 // cannot be asked or does not have it.
 func originBranchSHA(g daemonGit, branch string) string {
-	sha, err := originBranchRead(g, branch)
+	sha, _, err := originBranchRead(g, branch)
 	if err != nil {
 		return ""
 	}
 	return sha
 }
 
-// originBranchRead is the commit origin holds for branch: ("", nil) when origin
-// answered that it has no such branch, and the error when origin could not be
-// asked. The stop reads the error where an unknown answer must not pass for an
-// absent branch (gt-lahjz4).
-func originBranchRead(g daemonGit, branch string) (string, error) {
+// originBranchRead is origin's answer for branch. held reports whether origin
+// listed the branch, and is decided by the listing naming the ref, never by its
+// hash's text: a listing that names the ref with no hash is an answer too
+// malformed to read as held or absent, so it is the error (gt-p0jiud). Origin
+// may answer that it has no such branch (held false, no error), and a read that
+// fails is the error. The stop reads the error where an unknown answer must not
+// pass for an absent branch (gt-lahjz4).
+func originBranchRead(g daemonGit, branch string) (sha string, held bool, err error) {
 	ref := "refs/heads/" + branch
 	refs, err := g.ListRemoteRefsWithHashes("origin", ref)
 	if err != nil {
-		return "", fmt.Errorf("read origin's %s: %w", ref, err)
+		return "", false, fmt.Errorf("read origin's %s: %w", ref, err)
 	}
 	for _, r := range refs {
-		if r.Name == ref {
-			return r.Hash, nil
+		if r.Name != ref {
+			continue
 		}
+		if r.Hash == "" {
+			return "", false, fmt.Errorf("read origin's %s: the listing names the branch with no commit hash", ref)
+		}
+		return r.Hash, true, nil
 	}
-	return "", nil
+	return "", false, nil
 }
 
 // pushFailureReason is why a push failed, on one line and bounded, for the
@@ -1716,8 +1723,9 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 // the WARNING with a bounded one-line reason, raises the same kind of
 // escalation, and returns errOriginReadUnknown, which keeps the sandbox's record
 // and holds the stop for the next tick (gt-lahjz4), counting the failure in the
-// stop's persisted state (gt-u4i5jg). A record naming no branch and a worktree
-// that cannot be resolved are the same unknown answer.
+// stop's persisted state (gt-u4i5jg). A record naming no branch, a worktree
+// that cannot be resolved and a listing that names the branch with no commit
+// hash are the same unknown answer.
 func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, rec session.SandboxRecord) error {
 	who := seat.Rig + "/" + seat.Polecat
 	branch := seat.Branch
@@ -1725,7 +1733,7 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 		branch = rec.Branch
 	}
 	var readErr error
-	var originSHA string
+	var held bool
 	switch {
 	case branch == "" || branch == "(unknown)":
 		readErr = fmt.Errorf("the sandbox %s record names no branch to ask origin about", sessionName)
@@ -1733,7 +1741,7 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 		workDir, err := d.overrunSeatWorktree(seat)
 		if err != nil {
 			readErr = err
-		} else if originSHA, err = originBranchRead(d.gitAt(workDir), branch); err != nil {
+		} else if _, held, err = originBranchRead(d.gitAt(workDir), branch); err != nil {
 			readErr = err
 		}
 	}
@@ -1751,7 +1759,7 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 		}
 		return fmt.Errorf("sandbox %s is gone and %w for branch %s: %s", sessionName, errOriginReadUnknown, branch, reason)
 	}
-	if originSHA != "" {
+	if held {
 		return nil
 	}
 	// Origin answered and holds no such branch: the sandbox is gone and origin
