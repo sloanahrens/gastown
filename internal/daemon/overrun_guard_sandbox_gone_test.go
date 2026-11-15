@@ -147,22 +147,25 @@ func TestOverrunSandboxGoneErrorBranchNotABranchNameIsRefusedFirst(t *testing.T)
 	}
 }
 
-// The three answers an origin read can give part ways in originBranchRead, and
-// originBranchSHA keeps reading the unanswerable one as an absent branch for the
-// callers that only ask what origin holds (gt-lahjz4).
-func TestOverrunSandboxGoneOriginBranchReadSplitsTheThreeAnswers(t *testing.T) {
+// The four answers an origin read can give part ways in originBranchRead, and
+// originBranchSHA keeps reading the unanswerable ones as an absent branch for the
+// callers that only ask what origin holds (gt-lahjz4, gt-p0jiud).
+func TestOverrunSandboxGoneOriginBranchReadSplitsTheAnswers(t *testing.T) {
 	t.Parallel()
 	ref := "refs/heads/" + stopSeat.Branch
 	readErr := errors.New("could not resolve host: origin")
 	tests := []struct {
-		name    string
-		refs    []git.RemoteRef
-		err     error
-		wantSHA string
-		wantErr error
+		name            string
+		refs            []git.RemoteRef
+		err             error
+		wantSHA         string
+		wantHeld        bool
+		wantErr         error
+		wantErrContains string
 	}{
-		{name: "origin_holds_the_branch", refs: []git.RemoteRef{{Name: ref, Hash: "aaa111"}}, wantSHA: "aaa111"},
+		{name: "origin_holds_the_branch", refs: []git.RemoteRef{{Name: ref, Hash: "aaa111"}}, wantSHA: "aaa111", wantHeld: true},
 		{name: "origin_has_no_such_branch", refs: []git.RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}}},
+		{name: "origin_names_the_branch_with_no_hash", refs: []git.RemoteRef{{Name: ref}}, wantErrContains: "no commit hash"},
 		{name: "origin_cannot_be_asked", err: readErr, wantErr: readErr},
 	}
 	for _, tt := range tests {
@@ -170,13 +173,25 @@ func TestOverrunSandboxGoneOriginBranchReadSplitsTheThreeAnswers(t *testing.T) {
 			t.Parallel()
 			g := &pushStubGit{originRefs: tt.refs, originErr: tt.err}
 
-			sha, err := originBranchRead(g, stopSeat.Branch)
+			sha, held, err := originBranchRead(g, stopSeat.Branch)
 
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("originBranchRead error = %v, want %v", err, tt.wantErr)
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("originBranchRead error = %v, want %v", err, tt.wantErr)
+				}
+			case tt.wantErrContains != "":
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Fatalf("originBranchRead error = %v, want one naming %q", err, tt.wantErrContains)
+				}
+			case err != nil:
+				t.Fatalf("originBranchRead error = %v, want nil", err)
 			}
 			if sha != tt.wantSHA {
-				t.Errorf("originBranchRead = %q, want %q", sha, tt.wantSHA)
+				t.Errorf("originBranchRead sha = %q, want %q", sha, tt.wantSHA)
+			}
+			if held != tt.wantHeld {
+				t.Errorf("originBranchRead held = %v, want %v", held, tt.wantHeld)
 			}
 			// originBranchSHA answers the callers that cannot act on the error:
 			// a read that failed is an empty answer there, as before.
@@ -552,6 +567,105 @@ func TestOverrunSandboxGoneOriginBranchAbsentWarnsRaisesAndHandsBackOnce(t *test
 	if !strings.Contains(reason, stopSeat.Bead) || !strings.Contains(reason, stopSeat.Branch) {
 		t.Errorf("escalation reason %q does not name the bead %s and its branch %s",
 			reason, stopSeat.Bead, stopSeat.Branch)
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); ok || err != nil {
+		t.Errorf("the sandbox record survived the stop (ok %v, err %v); the bead was handed back", ok, err)
+	}
+}
+
+// A listing that names the seat's branch but carries no commit hash is not
+// origin answering that it has no such branch. The stop cannot tell whether the
+// work got out, so it holds the bead with the record kept, as for a read that
+// fails, rather than handing it back on an answer inferred from the hash's
+// absence (gt-p0jiud).
+func TestOverrunSandboxGoneOriginBranchListedWithNoHashKeepsTheBead(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + stopSeat.Branch}}}
+	}
+	notified := notifyfake.New()
+	d.notifier = notified
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+
+	if deleted != 0 {
+		t.Errorf("the sandbox record was removed for a listing that named the branch")
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("the bead was handed back on a listing that named the branch: %q", f.handedBack)
+	}
+	log := buf.String()
+	if !strings.Contains(log, "origin could not be read for branch "+stopSeat.Branch) {
+		t.Errorf("the log does not read the hashless listing as an unreadable answer:\n%s", log)
+	}
+	if strings.Contains(log, "origin holds no branch") {
+		t.Errorf("the log says origin holds no branch about a listing that names it:\n%s", log)
+	}
+	if raised := notified.Escalations(); len(raised) != 1 {
+		t.Errorf("escalations = %+v, want one for the unknown answer", raised)
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok || err != nil {
+		t.Errorf("the sandbox record is gone (ok %v, err %v); the stop needs it to retry", ok, err)
+	}
+}
+
+// An absent branch is answered by the stop whether or not its item can be
+// raised: a failed raise is logged and the stop still removes the record and
+// hands the bead back once, because that hand-back does not depend on the item
+// (gt-p0jiud).
+func TestOverrunSandboxGoneOriginBranchAbsentHandsBackWhenTheItemCannotBeRaised(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	// A failed raise backs off on the daemon's clock (1s, then 2s), so the
+	// retries are driven rather than waited out.
+	clk := newFixedClock()
+	d.clock = clk
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}}}
+	}
+	notified := notifyfake.New()
+	notified.Fail(notifyfake.KindEscalate, errors.New("the escalation store is down"))
+	d.notifier = notified
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	runOnClock(t, clk, time.Second, func() { d.runOverrunGuard(f.seams()) })
+
+	if deleted != 1 {
+		t.Errorf("the sandbox record was removed %d times, want once: the absent-branch answer stands without its item", deleted)
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q, want the bead handed back once", f.handedBack)
+	}
+	log := buf.String()
+	for _, want := range []string{
+		"origin holds no branch " + stopSeat.Branch,
+		"was not raised",
+		stopSeat.Bead,
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("the log does not carry %q:\n%s", want, log)
+		}
+	}
+	raised := notified.Escalations()
+	if len(raised) == 0 {
+		t.Fatal("no escalation was attempted, so the failed-raise branch proves nothing")
+	}
+	for i, call := range raised {
+		if call.Err == nil {
+			t.Errorf("escalation %d was sent through a notifier scripted to fail every send", i)
+		}
 	}
 	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); ok || err != nil {
 		t.Errorf("the sandbox record survived the stop (ok %v, err %v); the bead was handed back", ok, err)
