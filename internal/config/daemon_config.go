@@ -670,10 +670,10 @@ func (c *UpdateConfig) Settings() (UpdateSettings, error) {
 	}
 	s.WindowHour, s.WindowMinute = hour, minute
 
-	if s.MinInterval, err = parseUpdateDuration(UpdateMinIntervalKey, cfg.MinInterval, DefaultUpdateMinInterval, MinUpdateMinInterval, MaxUpdateMinInterval); err != nil {
+	if s.MinInterval, err = parseBoundedDuration(UpdateMinIntervalKey, cfg.MinInterval, DefaultUpdateMinInterval, MinUpdateMinInterval, MaxUpdateMinInterval); err != nil {
 		return UpdateSettings{}, err
 	}
-	if s.MaxRuntime, err = parseUpdateDuration(UpdateMaxRuntimeKey, cfg.MaxRuntime, DefaultUpdateMaxRuntime, MinUpdateMaxRuntime, MaxUpdateMaxRuntime); err != nil {
+	if s.MaxRuntime, err = parseBoundedDuration(UpdateMaxRuntimeKey, cfg.MaxRuntime, DefaultUpdateMaxRuntime, MinUpdateMaxRuntime, MaxUpdateMaxRuntime); err != nil {
 		return UpdateSettings{}, err
 	}
 	return s, nil
@@ -702,9 +702,10 @@ func twoDigits(s string) bool {
 	return len(s) == 2 && s[0] >= '0' && s[0] <= '9' && s[1] >= '0' && s[1] <= '9'
 }
 
-// parseUpdateDuration reads one duration setting, keeping def when it is
-// empty, and refusing one outside lo to hi rather than clamping it.
-func parseUpdateDuration(key, setting string, def, lo, hi time.Duration) (time.Duration, error) {
+// parseBoundedDuration reads one duration setting, keeping def when it is
+// empty, and refusing one outside lo to hi rather than clamping it. A clamped
+// value would run with a bound the operator did not write.
+func parseBoundedDuration(key, setting string, def, lo, hi time.Duration) (time.Duration, error) {
 	setting = strings.TrimSpace(setting)
 	if setting == "" {
 		return def, nil
@@ -1124,6 +1125,12 @@ type ScheduledMaintenanceConfig struct {
 	// one above MaxArchiveBudget, and one it cannot parse.
 	ArchiveBudget string `json:"archive_budget,omitempty"`
 
+	// Squash is the rolling history squash's settings: which databases it may
+	// squash and when a trigger makes a run due. Absent or disabled means the
+	// daemon builds no squash step; read it through ParseSquash, which returns
+	// its defaults and refuses a value out of bounds (gt-f1or4z).
+	Squash *SquashConfig `json:"squash,omitempty"`
+
 	// Deprecated: have no effect. They configured the retired monitor,
 	// flatten and size-triggered gc modes. They are still parsed so a live
 	// daemon.json that carries them decodes strictly, and the daemon logs
@@ -1178,6 +1185,72 @@ const (
 // MaxArchiveLimit caps either batch bound so a mis-typed value cannot make one
 // maintenance run hold a whole table in memory (gt-s6srv).
 const MaxArchiveLimit = 1_000_000
+
+// The squash block's settings as they appear in daemon.json, the paths the
+// daemon's logs and escalations tell an operator to fix (gt-f1or4z).
+const (
+	SquashEnabledKey               = "patrols.scheduled_maintenance.squash.enabled"
+	SquashDatabasesKey             = "patrols.scheduled_maintenance.squash.databases"
+	SquashKeepDaysKey              = "patrols.scheduled_maintenance.squash.keep_days"
+	SquashTriggerBackupBytesKey    = "patrols.scheduled_maintenance.squash.trigger_backup_bytes"
+	SquashTriggerBackupDurationKey = "patrols.scheduled_maintenance.squash.trigger_backup_duration"
+	SquashTriggerQueryP95Key       = "patrols.scheduled_maintenance.squash.trigger_query_p95"
+	SquashRetainKey                = "patrols.scheduled_maintenance.squash.retain"
+	SquashMaxRuntimeKey            = "patrols.scheduled_maintenance.squash.max_runtime"
+)
+
+// DefaultSquashKeepDays is the history window a squash keeps: commits older
+// than this many days are squashed into the initial commit (gt-f1or4z).
+const DefaultSquashKeepDays = 7
+
+// The three triggers' defaults: a run is due when the last nightly backup is
+// larger than this many bytes, takes longer than this, or the bd-style query
+// p95 is above this (gt-f1or4z).
+const (
+	DefaultSquashTriggerBackupBytes    int64 = 5 << 30
+	DefaultSquashTriggerBackupDuration       = 5 * time.Minute
+	DefaultSquashTriggerQueryP95             = 200 * time.Millisecond
+)
+
+// DefaultSquashRetain is how long main-pre-squash is kept before the second
+// verification may drop it, and DefaultSquashMaxRuntime how long one run may
+// last before the next daily check recovers it by state (gt-f1or4z).
+const (
+	DefaultSquashRetain     = 48 * time.Hour
+	DefaultSquashMaxRuntime = 30 * time.Minute
+)
+
+// The squash block's bounds. keep_days below a day would squash history the
+// archive cannot have reached yet, and above a year is a unit mistake that
+// would archive a decade before the cut (gt-f1or4z).
+const (
+	MinSquashKeepDays = 1
+	MaxSquashKeepDays = 365
+)
+
+// A trigger below the bound would have tripped on the previous run too, so it
+// would squash every day; one above the ceiling is a threshold the daily check
+// cannot reach. Neither does what the operator wrote, so both are refused; the
+// bytes ceiling also catches a value written in the wrong unit (gt-f1or4z).
+const (
+	MinSquashTriggerBackupBytes int64 = 1
+	MaxSquashTriggerBackupBytes int64 = 1 << 40
+	MinSquashTriggerDuration          = time.Millisecond
+	MaxSquashTriggerDuration          = 24 * time.Hour
+)
+
+// MinSquashRetain keeps the safety window long enough to notice a bad swap
+// before the old history is dropped; MaxSquashRetain is the longest anyone
+// needs it, since the space a squash frees is the point of the run. A
+// max_runtime below the bound cannot finish one rebase, and above it the run
+// is stuck rather than slow (gt-f1or4z).
+const (
+	MinSquashRetain = time.Hour
+	MaxSquashRetain = 7 * 24 * time.Hour
+
+	MinSquashMaxRuntime = 5 * time.Minute
+	MaxSquashMaxRuntime = 2 * time.Hour
+)
 
 // ParseArchiveDir returns the history archive's directory: empty (with no
 // error) means archiving is off. A set entry that is not an absolute path is
@@ -1253,6 +1326,142 @@ func parseArchiveLimit(key string, v *int, def int) (int, error) {
 		return 0, fmt.Errorf("%s = %d: want 0 (the default) or a value from 1 to %d", key, *v, MaxArchiveLimit)
 	}
 	return *v, nil
+}
+
+// SquashConfig is the daemon.patrols.scheduled_maintenance.squash block: the
+// databases the rolling history squash may run on and the numbers that decide
+// when a run is due. The run it configures is designed in
+// docs/plans/2026-11-15-dolt-squash-design.md; read that before changing a
+// default (gt-f1or4z).
+type SquashConfig struct {
+	// Enabled turns the squash on. Absent means off, and the daemon then
+	// builds no squash step.
+	Enabled bool `json:"enabled"`
+
+	// Databases names the databases a run may squash, one entry each. It is
+	// required when Enabled is set: a step with no database would construct
+	// and squash nothing.
+	Databases []string `json:"databases,omitempty"`
+
+	// KeepDays is the history window the squash keeps, in days. Nil or zero
+	// means DefaultSquashKeepDays; read it through ParseSquash, which refuses
+	// a value outside MinSquashKeepDays to MaxSquashKeepDays.
+	KeepDays *int `json:"keep_days,omitempty"`
+
+	// TriggerBackupBytes is the last nightly backup's size above which a run
+	// is due. Nil or zero means DefaultSquashTriggerBackupBytes; read it
+	// through ParseSquash, which refuses a value outside
+	// MinSquashTriggerBackupBytes to MaxSquashTriggerBackupBytes.
+	TriggerBackupBytes *int64 `json:"trigger_backup_bytes,omitempty"`
+
+	// TriggerBackupDuration is the last nightly backup's duration above which
+	// a run is due, as a Go duration. Empty means
+	// DefaultSquashTriggerBackupDuration; read it through ParseSquash, which
+	// refuses one that does not parse or falls outside its bounds.
+	TriggerBackupDuration string `json:"trigger_backup_duration,omitempty"`
+
+	// TriggerQueryP95 is the daemon's bd-style query p95 above which a run is
+	// due, as a Go duration. Empty means DefaultSquashTriggerQueryP95; read it
+	// through ParseSquash, which refuses one that does not parse or falls
+	// outside its bounds.
+	TriggerQueryP95 string `json:"trigger_query_p95,omitempty"`
+
+	// Retain is how long main-pre-squash is kept before the second
+	// verification may drop it, as a Go duration. Empty means
+	// DefaultSquashRetain; read it through ParseSquash, which refuses one
+	// outside its bounds.
+	Retain string `json:"retain,omitempty"`
+
+	// MaxRuntime is how long one run may last before it is abandoned and the
+	// next daily check recovers it by state, as a Go duration. Empty means
+	// DefaultSquashMaxRuntime; read it through ParseSquash, which refuses one
+	// outside its bounds.
+	MaxRuntime string `json:"max_runtime,omitempty"`
+}
+
+// SquashSettings is SquashConfig parsed into the values a run reads.
+type SquashSettings struct {
+	Databases             []string
+	KeepDays              int
+	TriggerBackupBytes    int64
+	TriggerBackupDuration time.Duration
+	TriggerQueryP95       time.Duration
+	Retain                time.Duration
+	MaxRuntime            time.Duration
+}
+
+// ParseSquash returns the squash settings with the defaults applied. A nil
+// receiver, an absent block, or Enabled false returns nil with no error: the
+// daemon builds no squash step, and a value left in a block that is off is
+// first read on the load that turns it on. Otherwise a value that does not
+// parse or falls outside its bounds is refused rather than clamped, and the
+// error names the daemon.json key, so an operator who mistypes an entry is
+// told which one instead of getting a run with a bound they did not write
+// (gt-f1or4z).
+func (c *ScheduledMaintenanceConfig) ParseSquash() (*SquashSettings, error) {
+	if c == nil || c.Squash == nil || !c.Squash.Enabled {
+		return nil, nil
+	}
+	cfg := c.Squash
+	s := &SquashSettings{
+		KeepDays:           DefaultSquashKeepDays,
+		TriggerBackupBytes: DefaultSquashTriggerBackupBytes,
+	}
+
+	// An enabled block with no database would construct a step that squashes
+	// nothing, which reads as a clean run and is not one.
+	dbs := make([]string, 0, len(cfg.Databases))
+	seen := make(map[string]struct{}, len(cfg.Databases))
+	for _, name := range cfg.Databases {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("%s holds an empty entry: want a database name such as \"gt\"", SquashDatabasesKey)
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("%s names %q twice: want one entry per database", SquashDatabasesKey, name)
+		}
+		seen[name] = struct{}{}
+		dbs = append(dbs, name)
+	}
+	if len(dbs) == 0 {
+		return nil, fmt.Errorf("%s is empty: want the name of at least one database to squash", SquashDatabasesKey)
+	}
+	s.Databases = dbs
+
+	if cfg.KeepDays != nil && *cfg.KeepDays != 0 {
+		if *cfg.KeepDays < MinSquashKeepDays || *cfg.KeepDays > MaxSquashKeepDays {
+			return nil, fmt.Errorf("%s = %d: want 0 (the %d-day default) or a value from %d to %d",
+				SquashKeepDaysKey, *cfg.KeepDays, DefaultSquashKeepDays, MinSquashKeepDays, MaxSquashKeepDays)
+		}
+		s.KeepDays = *cfg.KeepDays
+	}
+	if cfg.TriggerBackupBytes != nil && *cfg.TriggerBackupBytes != 0 {
+		if *cfg.TriggerBackupBytes < MinSquashTriggerBackupBytes || *cfg.TriggerBackupBytes > MaxSquashTriggerBackupBytes {
+			return nil, fmt.Errorf("%s = %d: want 0 (the %d-byte default) or a value from %d to %d",
+				SquashTriggerBackupBytesKey, *cfg.TriggerBackupBytes, DefaultSquashTriggerBackupBytes,
+				MinSquashTriggerBackupBytes, MaxSquashTriggerBackupBytes)
+		}
+		s.TriggerBackupBytes = *cfg.TriggerBackupBytes
+	}
+
+	var err error
+	if s.TriggerBackupDuration, err = parseBoundedDuration(SquashTriggerBackupDurationKey, cfg.TriggerBackupDuration,
+		DefaultSquashTriggerBackupDuration, MinSquashTriggerDuration, MaxSquashTriggerDuration); err != nil {
+		return nil, err
+	}
+	if s.TriggerQueryP95, err = parseBoundedDuration(SquashTriggerQueryP95Key, cfg.TriggerQueryP95,
+		DefaultSquashTriggerQueryP95, MinSquashTriggerDuration, MaxSquashTriggerDuration); err != nil {
+		return nil, err
+	}
+	if s.Retain, err = parseBoundedDuration(SquashRetainKey, cfg.Retain,
+		DefaultSquashRetain, MinSquashRetain, MaxSquashRetain); err != nil {
+		return nil, err
+	}
+	if s.MaxRuntime, err = parseBoundedDuration(SquashMaxRuntimeKey, cfg.MaxRuntime,
+		DefaultSquashMaxRuntime, MinSquashMaxRuntime, MaxSquashMaxRuntime); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // DiskMaintenanceConfig configures the disk_maintenance patrol: the daily
