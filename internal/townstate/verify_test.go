@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -330,9 +331,15 @@ func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
 // beside it is still a failure; nothing inside the clone is a finding of its
 // own. A directory a rig marker names is a rig, whose clone row covers the
 // clone instead. A file where the clone would be is no clone, so that
-// directory keeps the no-entry failure.
+// directory keeps the no-entry failure; so is a file where the mayor directory
+// would be, which the kernel reports as ENOTDIR rather than an absent path.
 func TestVerifyLeavesALeftoverCloneAsInfo(t *testing.T) {
 	t.Parallel()
+	// The kernel, not a map, answers the clone probe here: a regular file named
+	// mayor makes the stat below it fail with ENOTDIR, as on a host tree.
+	fileShadowedMayor := t.TempDir()
+	writeStateFile(t, fileShadowedMayor, "mayor/town.json", "{}", 0o644)
+	writeStateFile(t, fileShadowedMayor, "tango/mayor", "not a directory", 0o644)
 	noEntry := func(p string) Problem {
 		return Problem{Path: p, Reason: "no manifest entry; classify it daemon, session or shared"}
 	}
@@ -410,6 +417,11 @@ func TestVerifyLeavesALeftoverCloneAsInfo(t *testing.T) {
 				"mayor/town.json": {Data: []byte("{}")},
 				"tango/mayor/rig": {Data: []byte("x")},
 			},
+			want: []Problem{noEntry("tango")},
+		},
+		{
+			name: "a file where the mayor directory would be is no clone",
+			fsys: os.DirFS(fileShadowedMayor),
 			want: []Problem{noEntry("tango")},
 		},
 	}

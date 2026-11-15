@@ -9,6 +9,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -68,11 +69,10 @@ func Failures(problems []Problem) int {
 // under a session entry, below a name the manifest gives a daemon subsystem
 // (.runtime/<bird>/usage), is information too: metadata cannot say who wrote a
 // file, and a live session's own work changes files all day, so recency is
-// never grounds for failing. Who
-// writes a path is held by the guard tests (internal/daemon and
-// internal/townstate), which read the code. .dolt-data* and .git trees are
-// skipped at any depth, and so is anything more than maxSessionDepth below a
-// session entry.
+// never grounds for failing. Who writes a path is held by the guard tests
+// (internal/daemon and internal/townstate), which read the code. .dolt-data*
+// and .git trees are skipped at any depth, and so is anything more than
+// maxSessionDepth below a session entry.
 func Verify(fsys fs.FS, m *Manifest, now time.Time) ([]Problem, error) {
 	if m == nil {
 		return nil, errors.New("townstate: nil manifest")
@@ -345,7 +345,7 @@ func leftoverClones(fsys fs.FS, tops []fs.DirEntry) (map[string]bool, error) {
 		if !d.IsDir() || skipped(d.Name()) {
 			continue
 		}
-		clone := constants.RigMayorPath(d.Name())
+		clone := clonePath(d.Name())
 		isDir, err := dirExists(fsys, clone)
 		if err != nil {
 			return nil, err
@@ -355,6 +355,14 @@ func leftoverClones(fsys fs.FS, tops []fs.DirEntry) (map[string]bool, error) {
 		}
 	}
 	return clones, nil
+}
+
+// clonePath is the path of a rig's canonical clone under top: the town's Mayor
+// and Rig directory names, the same ones the manifest's clone row is built
+// from, so verify names no path of its own.
+func clonePath(top string) string {
+	dirs := townDirs()
+	return path.Join(top, dirs.Mayor, dirs.Rig)
 }
 
 // holdsClone reports whether a retired clone lies below p.
@@ -367,14 +375,17 @@ func holdsClone(clones map[string]bool, p string) bool {
 	return false
 }
 
-// dirExists reports whether p is a directory. An absence is not an error; any
-// other read failure is, so an unreadable probe never passes as "no clone".
+// dirExists reports whether p is a directory. An absent path is no directory,
+// and neither is a path that runs through a regular file (ENOTDIR): a file
+// named like a directory component masks what lies below it, so it holds no
+// clone. Any other read failure is an error, so an unreadable probe never
+// passes as "no clone".
 func dirExists(fsys fs.FS, p string) (bool, error) {
 	info, err := fs.Stat(fsys, p)
 	switch {
 	case err == nil:
 		return info.IsDir(), nil
-	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
 		return false, nil
 	default:
 		return false, fmt.Errorf("stat %s: %w", p, err)
