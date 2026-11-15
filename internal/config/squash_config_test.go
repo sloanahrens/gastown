@@ -140,6 +140,12 @@ func TestSquashRefusesAValueOutOfBounds(t *testing.T) {
 		{"absent databases", `{"enabled":true}`, SquashDatabasesKey},
 		{"blank database", `{"enabled":true,"databases":["gt"," "]}`, SquashDatabasesKey},
 		{"duplicate database", `{"enabled":true,"databases":["gt","gt"]}`, SquashDatabasesKey},
+		{"database with a path separator", `{"enabled":true,"databases":["gt/main"]}`, SquashDatabasesKey},
+		{"database with a space", `{"enabled":true,"databases":["gt main"]}`, SquashDatabasesKey},
+		{"database named ..", `{"enabled":true,"databases":[".."]}`, SquashDatabasesKey},
+		{"database with a single quote", `{"enabled":true,"databases":["gt'x"]}`, SquashDatabasesKey},
+		{"database with a backtick", "{\"enabled\":true,\"databases\":[\"gt`x\"]}", SquashDatabasesKey},
+		{"database with a semicolon", `{"enabled":true,"databases":["gt;drop"]}`, SquashDatabasesKey},
 		{"keep_days below", `{"enabled":true,"databases":["gt"],"keep_days":-1}`, SquashKeepDaysKey},
 		{"keep_days above", `{"enabled":true,"databases":["gt"],"keep_days":366}`, SquashKeepDaysKey},
 		{"trigger_backup_bytes negative", `{"enabled":true,"databases":["gt"],"trigger_backup_bytes":-1}`, SquashTriggerBackupBytesKey},
@@ -170,6 +176,18 @@ func TestSquashRefusesAValueOutOfBounds(t *testing.T) {
 				t.Errorf("ParseSquash returned %+v beside the error, want nil", s)
 			}
 		})
+	}
+}
+
+// TestSquashAcceptsDatabaseNameOfTheIdentifierShape: letters, digits, underscore
+// and hyphen are the identifier shape internal/beadsql accepts, so the guard
+// refuses a separator or a quote without refusing the names databases are
+// given (gt-u53z9u).
+func TestSquashAcceptsDatabaseNameOfTheIdentifierShape(t *testing.T) {
+	t.Parallel()
+	s := parseSquashBlock(t, `{"enabled":true,"databases":["gt","my-rig","gt_2"]}`)
+	if got, want := strings.Join(s.Databases, ","), "gt,my-rig,gt_2"; got != want {
+		t.Errorf("databases = %q, want %q", got, want)
 	}
 }
 

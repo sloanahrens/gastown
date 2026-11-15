@@ -704,7 +704,10 @@ func twoDigits(s string) bool {
 
 // parseBoundedDuration reads one duration setting, keeping def when it is
 // empty, and refusing one outside lo to hi rather than clamping it. A clamped
-// value would run with a bound the operator did not write.
+// value would run with a bound the operator did not write. The update settings
+// and the squash block both read their durations through it, so the name
+// describes the bound it enforces, not the block it was first written for
+// (gt-u53z9u).
 func parseBoundedDuration(key, setting string, def, lo, hi time.Duration) (time.Duration, error) {
 	setting = strings.TrimSpace(setting)
 	if setting == "" {
@@ -1330,9 +1333,10 @@ func parseArchiveLimit(key string, v *int, def int) (int, error) {
 
 // SquashConfig is the daemon.patrols.scheduled_maintenance.squash block: the
 // databases the rolling history squash may run on and the numbers that decide
-// when a run is due. The run it configures is designed in
-// docs/plans/2026-11-15-dolt-squash-design.md; read that before changing a
-// default (gt-f1or4z).
+// when a run is due. A key left unset reads the DefaultSquash constant in this
+// file and a key set out of bounds is refused against the Min/Max constants
+// beside it, so changing one here changes what every town defaults to or
+// accepts (gt-f1or4z).
 type SquashConfig struct {
 	// Enabled turns the squash on. Absent means off, and the daemon then
 	// builds no squash step.
@@ -1340,7 +1344,8 @@ type SquashConfig struct {
 
 	// Databases names the databases a run may squash, one entry each. It is
 	// required when Enabled is set: a step with no database would construct
-	// and squash nothing.
+	// and squash nothing. Read it through ParseSquash, which refuses an entry
+	// that is empty, repeated, or outside the identifier shape.
 	Databases []string `json:"databases,omitempty"`
 
 	// KeepDays is the history window the squash keeps, in days. Nil or zero
@@ -1379,6 +1384,14 @@ type SquashConfig struct {
 	MaxRuntime string `json:"max_runtime,omitempty"`
 }
 
+// squashDatabaseNameShape is the shape a databases entry must have: the
+// letters, digits, underscore and hyphen internal/beadsql accepts for a
+// database identifier before it splices one into SQL
+// (internal/beadsql/statements.go). An entry carrying a quote, a backtick, a
+// space or a path separator is refused here, before a run is built from it
+// (gt-u53z9u).
+var squashDatabaseNameShape = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 // SquashSettings is SquashConfig parsed into the values a run reads.
 type SquashSettings struct {
 	Databases             []string
@@ -1416,6 +1429,10 @@ func (c *ScheduledMaintenanceConfig) ParseSquash() (*SquashSettings, error) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return nil, fmt.Errorf("%s holds an empty entry: want a database name such as \"gt\"", SquashDatabasesKey)
+		}
+		if !squashDatabaseNameShape.MatchString(name) {
+			return nil, fmt.Errorf("%s names %q: want a database name of letters, digits, underscore and hyphen, such as \"gt\"",
+				SquashDatabasesKey, name)
 		}
 		if _, dup := seen[name]; dup {
 			return nil, fmt.Errorf("%s names %q twice: want one entry per database", SquashDatabasesKey, name)
