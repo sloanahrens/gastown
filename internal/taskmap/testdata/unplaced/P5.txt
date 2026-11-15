@@ -1,8 +1,3 @@
-polecat
-polecat add
-polecat check-recovery
-polecat check-recovery-batch
-polecat gc
 polecat git-state
 polecat identity
 polecat identity add
