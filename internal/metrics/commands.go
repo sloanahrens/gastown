@@ -326,7 +326,47 @@ func extractDays(entries []DirEntry) []string {
 // noExtractError is storypoints' answer to no extract holding a landings table:
 // it names the root searched and the step that writes one.
 func noExtractError(root string) error {
-	return fmt.Errorf("no %s under %s (run %s first)", landingsName, root, CommandExtract)
+	return errNoExtract{msg: fmt.Sprintf("no %s under %s (run %s first)", landingsName, root, CommandExtract)}
+}
+
+// errNoExtract is the no-extract failure's type: the weekly run tells it from any
+// other failure, because the extract writes the day's landings table later in the
+// day and the next hour can find it.
+type errNoExtract struct {
+	msg string
+	err error
+}
+
+func (e errNoExtract) Error() string { return e.msg }
+func (e errNoExtract) Unwrap() error { return e.err }
+
+// weeklyEmbedderError is a failure the embedder returned. The weekly run tells it
+// from any other failure because an embedder that was unreachable may answer the
+// next hour.
+type weeklyEmbedderError struct{ err error }
+
+func (e weeklyEmbedderError) Error() string { return e.err.Error() }
+func (e weeklyEmbedderError) Unwrap() error { return e.err }
+
+// weeklyEmbedder marks every failure its inner embedder returns as the embedder's.
+type weeklyEmbedder struct{ inner storypoints.Embedder }
+
+func (e weeklyEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	v, err := e.inner.Embed(ctx, text)
+	if err != nil {
+		return nil, weeklyEmbedderError{err: err}
+	}
+	return v, nil
+}
+
+// weeklyRetryable says whether the next hour can meet err differently: the day's
+// landings table the extract has not written yet, or an embedder that did not
+// answer. Any other failure fails the same way on the same files, so it spends
+// the week instead of wiring the town every hour of it.
+func weeklyRetryable(err error) bool {
+	var noExtract errNoExtract
+	var embedder weeklyEmbedderError
+	return errors.As(err, &noExtract) || errors.As(err, &embedder)
 }
 
 // StoryPointsWeeklyEvery is how often the hour retrains the story-point weights
@@ -351,10 +391,12 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // A decision — the proposal adopted, the rule's rejection with its reason, or a
 // retrain that has too few rows to fit — is stored as the week's last run, so
 // the week is spent however it was decided. A step that failed is written on the
-// line, returned as the run's error so the hour exits non-zero, and leaves the
-// week unspent, so the next hour tries again: an extract that has not run for
-// the day yet, or an embedder that is unreachable, is worth another look rather
-// than a week of stale weights.
+// line and returned as the run's error so the hour exits non-zero. Two failures
+// leave the week unspent, so the next hour tries again: an extract that has not
+// run for the day yet, and an embedder that is unreachable. Any other failure
+// spends the week, with its error on the line: the same files and the same code
+// fail the same way, and a retry every hour of the week wires the town each time
+// for nothing.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
@@ -389,13 +431,25 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	// The stamp is recorded beside the runtime weights, so it follows the town the
 	// steps write, which is the one the Wire returned.
 	stampPath = storyPointsWeeklyStampPath(real.Town)
+	// The embedder both steps read is the caller's, else the default the base
+	// weights name, marked so a failure it returns is known to be the embedder's.
+	base := storypoints.Default()
+	if c.StoryPointsBase != nil {
+		base = *c.StoryPointsBase
+	}
+	embedder := c.Embedder
+	if embedder == nil {
+		embedder = storyPointsEmbedder(base, os.Getenv)
+	}
+	embedder = weeklyEmbedder{inner: embedder}
 	// The retrain's report goes to the day's directory; Out carries the hour's one
 	// line and not the report beside it.
 	train := c
 	train.Out = io.Discard
+	train.Embedder = embedder
 	if err := train.runStoryPointsTrain(ctx, real, env); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
-			return c.weeklyFailure(err)
+			return c.weeklyFailure(stampPath, now, err)
 		}
 		if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 			return err
@@ -407,8 +461,9 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	var decision bytes.Buffer
 	adopt := c
 	adopt.Out = &decision
+	adopt.Embedder = embedder
 	if err := adopt.runStoryPointsAdopt(ctx, real, env); err != nil {
-		return c.weeklyFailure(err)
+		return c.weeklyFailure(stampPath, now, err)
 	}
 	if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 		return err
@@ -418,13 +473,24 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 }
 
 // weeklyFailure is the weekly run's line and error for a retrain or adoption that
-// failed. The line names the failure and that the week is not spent; the error
-// carries the same failure to the hour, so the plugin exits non-zero rather than
-// recording a run that retrained nothing as a success. A line that cannot be
-// written is joined to the error, so neither is lost.
-func (c Commands) weeklyFailure(err error) error {
+// failed. The error carries the failure to the hour, so the plugin exits non-zero
+// rather than recording a run that retrained nothing as a success. A failure the
+// next hour can meet differently (weeklyRetryable) leaves the week unspent and the
+// line says the next hour tries again. Any other failure spends the week: it is
+// recorded as the week's last run, and the line names the failure and says the
+// week is spent. A week that cannot be recorded stays open, so the next hour
+// tries again, and the error says so. A line that cannot be written is joined to
+// the error, so neither is lost.
+func (c Commands) weeklyFailure(stampPath string, now time.Time, err error) error {
 	failure := fmt.Errorf("story points weekly: failed: %w", err)
-	return errors.Join(failure, c.receipt("%v; the next hour tries again", failure))
+	if weeklyRetryable(err) {
+		return errors.Join(failure, c.receipt("%v; the next hour tries again", failure))
+	}
+	if rerr := c.recordStoryPointsWeeklyRun(stampPath, now); rerr != nil {
+		return errors.Join(failure, fmt.Errorf("the week could not be spent: %w", rerr),
+			c.receipt("%v; the week could not be recorded, so the next hour tries again", failure))
+	}
+	return errors.Join(failure, c.receipt("%v; the week is spent, the next run is in %s", failure, StoryPointsWeeklyEvery))
 }
 
 // now is the clock the weekly run reads: Now when the caller set one, the wall

@@ -184,6 +184,85 @@ func TestStoryPointsWeeklyReportsAFailedRetrainAndLeavesTheWeek(t *testing.T) {
 	}
 }
 
+// TestStoryPointsWeeklySpendsTheWeekOnAFailureNoHourCanMeetDifferently: a failure
+// that is neither a missing extract nor the embedder (here a landing time that
+// does not parse) is on the line with its error, is returned so the hour exits
+// non-zero, and spends the week: the stamp is recorded, so the next hour's guard
+// answers without wiring the town.
+func TestStoryPointsWeeklySpendsTheWeekOnAFailureNoHourCanMeetDifferently(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, badTimeBeads())
+	var out strings.Builder
+	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err == nil {
+		t.Fatal("RunStoryPointsWeekly err = nil, want the failure returned so the hour exits non-zero")
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, "story points weekly: failed: ") || !strings.Contains(got, "last tuesday") {
+		t.Errorf("out = %q, want the failure and its cause (the landing time that did not parse)", got)
+	}
+	if !strings.Contains(got, "the week is spent") {
+		t.Errorf("out = %q, want it to say the week is spent", got)
+	}
+	if want := weeklyNow.UTC().Format(time.RFC3339); weeklyLastRun(t, fix.town) != want {
+		t.Errorf("stamp = %q, want the run recorded as the week's last, %q", weeklyLastRun(t, fix.town), want)
+	}
+	requireNoWeeklyWeights(t, fix.town)
+}
+
+// TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet: no landings table for
+// the day yet is the extract's lateness, not the week's verdict: the failure is
+// returned and the week is left unspent for the next hour.
+func TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	if err := os.RemoveAll(fix.outDir); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err == nil {
+		t.Fatal("RunStoryPointsWeekly err = nil, want the missing extract returned")
+	}
+	if !strings.Contains(out.String(), "the next hour tries again") {
+		t.Errorf("out = %q, want it to say the next hour tries again", out.String())
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing extract spent the week (stat err = %v)", err)
+	}
+}
+
+// TestStoryPointsWeeklyRetriesAnEmbedderTheNextHourAnswers: the first hour's
+// embedder is unreachable and leaves the week open; the next hour, with the
+// embedder answering, reaches a decision and spends the week.
+func TestStoryPointsWeeklyRetriesAnEmbedderTheNextHourAnswers(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	var first strings.Builder
+	down := weeklyCommands(t, fix, &first, weeklyNow, weeklyBase(t), trainTestEmbedder{fail: true})
+	if err := down.RunStoryPointsWeekly(context.Background()); err == nil {
+		t.Fatal("first hour err = nil, want the unreachable embedder returned")
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the failed first hour spent the week (stat err = %v)", err)
+	}
+
+	var second strings.Builder
+	up := weeklyCommands(t, fix, &second, weeklyNow.Add(time.Hour), weeklyBase(t), trainTestEmbedder{})
+	if err := up.RunStoryPointsWeekly(context.Background()); err != nil {
+		t.Fatalf("second hour err = %v, want the retry to decide", err)
+	}
+	if want := weeklyNow.Add(time.Hour).UTC().Format(time.RFC3339); weeklyLastRun(t, fix.town) != want {
+		t.Errorf("stamp = %q, want the second hour recorded, %q", weeklyLastRun(t, fix.town), want)
+	}
+}
+
 // TestStoryPointsWeeklyRefusals: a run that cannot read the guard, cannot reach
 // its town, or cannot record its decision fails instead of retraining on a guess
 // or adopting the same proposal again.
