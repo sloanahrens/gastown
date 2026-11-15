@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/metrics"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -371,6 +372,9 @@ type attentionSources struct {
 	// sandboxList is the gateway listing the stale-seat-sandbox collector
 	// reads (seat_name_guard.go); nil is the openshell CLI.
 	sandboxList seatSandboxList
+	// storyPointsDrift reads the story point estimator's drift measure over the
+	// newest extract at a tick's time (attention_story_points_drift.go).
+	storyPointsDrift func(now time.Time) (metrics.StoryPointsDriftRead, error)
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -718,6 +722,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A seat's gateway sandbox left in a failure phase, which blocks the
 		// seat name every sling draws (gt-zapy97).
 		{kind: attention.KindSeatSandboxStale, collect: s.collectStaleSeatSandboxes, owns: seatSandboxStaleItem},
+		// The story point estimator's drift over the newest extract's landings,
+		// and the measure that could not be read (gt-my0o23).
+		{kind: attention.KindStoryPointsDrift, collect: s.collectStoryPointsDrift},
 	}, s.questionCollectors()...)
 }
 
@@ -855,6 +862,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		return d.rigWorkBeads(rig).Show(id)
 	}
 	s.riskIssues = d.attentionRiskIssues
+	// The measure reads the town's own extract under .runtime/metrics, the
+	// file the metrics step writes, through the metrics package's file seams.
+	s.storyPointsDrift = func(now time.Time) (metrics.StoryPointsDriftRead, error) {
+		return metrics.ReadStoryPointsDrift(metrics.OSEnv(d.config.TownRoot), now)
+	}
 	d.productionRiskAudit(s)
 	return s
 }
