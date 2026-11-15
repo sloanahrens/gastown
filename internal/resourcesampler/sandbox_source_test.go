@@ -1,8 +1,12 @@
 package resourcesampler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +14,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspaceid"
@@ -25,6 +33,14 @@ func seatFiles() map[string]string {
 		"cpu.pressure":    "some avg10=3.50 avg60=1.00 avg300=0.50 total=1234\n",
 		"memory.pressure": "some avg10=4.50 avg60=1.50 avg300=0.75 total=4321\nfull avg10=0.50 avg60=0.25 avg300=0.10 total=1234\n",
 	}
+}
+
+// seatFilesWithout is seatFiles with one file a kernel does not publish left
+// out: a seat read prints that file's marker and no text.
+func seatFilesWithout(name string) map[string]string {
+	files := seatFiles()
+	delete(files, name)
+	return files
 }
 
 // seatRead renders the text one seat read prints: each file under a marker
@@ -409,28 +425,141 @@ func TestSandboxSourceTick(t *testing.T) {
 	}
 }
 
-// TestSandboxSourceReadArgv covers the command one seat read runs: it names
-// every cgroup file the parser requires, under the marker line it reads the
-// file by, and closes with the end marker (gt-a24bcc).
+// TestSandboxSourceReadArgv runs the command one seat read runs through a shell
+// and hands what it printed to the parser: every file the seat publishes reaches
+// its row, a file the kernel does not publish prints its marker and no text, and
+// the reading itself missing is a refused read rather than a row of zeros
+// (gt-a24bcc, gt-h44fwh).
 func TestSandboxSourceReadArgv(t *testing.T) {
 	t.Parallel()
 	argv := seatReadArgv()
 	if len(argv) != 3 || argv[0] != "sh" || argv[1] != "-c" {
 		t.Fatalf("argv = %v, want sh -c <script>", argv)
 	}
-	script := argv[2]
-	for _, name := range seatCgroupFiles {
-		if !strings.Contains(script, "@@ "+name+" @@") {
-			t.Errorf("the read prints no %s marker", name)
-		}
-		if !strings.Contains(script, "cat "+seatCgroupRoot+"/"+name+" ") {
-			t.Errorf("the read does not print %s/%s", seatCgroupRoot, name)
-		}
-	}
-	if !strings.HasSuffix(script, "printf '@@ end @@\\n'\n") {
-		t.Errorf("the read does not close with the end marker: %q", script)
+	for _, test := range []struct {
+		name  string
+		files map[string]string
+		check func(t *testing.T, row Row, err error)
+	}{
+		{
+			name:  "every file the seat publishes",
+			files: seatFiles(),
+			check: func(t *testing.T, row Row, err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("the read's text: %v", err)
+				}
+				if row.MemBytes != 1<<30 || row.MemLimitBytes == nil || *row.MemLimitBytes != 2<<30 {
+					t.Errorf("memory = %d of %v bytes, want 1GiB of 2GiB", row.MemBytes, row.MemLimitBytes)
+				}
+				if row.PressureCPUSomePct == nil || *row.PressureCPUSomePct != 3.5 {
+					t.Errorf("cpu pressure some = %s, want 3.5", floatText(row.PressureCPUSomePct))
+				}
+				if row.PressureMemFullPct == nil || *row.PressureMemFullPct != 0.5 {
+					t.Errorf("memory pressure full = %s, want 0.5", floatText(row.PressureMemFullPct))
+				}
+			},
+		},
+		{
+			name:  "a file the kernel does not publish",
+			files: seatFilesWithout("memory.pressure"),
+			check: func(t *testing.T, row Row, err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("the read's text: %v", err)
+				}
+				if row.PressureMemSomePct != nil || row.PressureMemFullPct != nil {
+					t.Errorf("memory pressure = %s/%s, want null for a file the kernel does not publish",
+						floatText(row.PressureMemSomePct), floatText(row.PressureMemFullPct))
+				}
+				if row.PressureCPUSomePct == nil {
+					t.Error("cpu pressure is null, want the value of the file the seat does publish")
+				}
+			},
+		},
+		{
+			name:  "the reading itself not published",
+			files: seatFilesWithout("cpu.stat"),
+			check: func(t *testing.T, _ Row, err error) {
+				t.Helper()
+				if err == nil {
+					t.Fatal("the read of a seat with no cpu.stat wrote a row, want a refused read")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			text, err := seatShell(t, argv, test.files)
+			if err != nil {
+				t.Fatalf("run the seat read: %v", err)
+			}
+			row, _, err := SeatRow(seatIdentity(), text, seatTickNow(), nil, seatWorkspaces(t))
+			test.check(t, row, err)
+		})
 	}
 }
+
+// seatShell runs the argv one seat read runs through an in-process POSIX shell
+// whose only command is cat: each file in files is served at its path under the
+// seat's cgroup root, and a file the map does not hold is absent, as the kernel
+// leaves one it does not publish. It returns what the read printed.
+func seatShell(t *testing.T, argv []string, files map[string]string) (string, error) {
+	t.Helper()
+	var stdout bytes.Buffer
+	runner, err := interp.New(
+		interp.Env(expand.ListEnviron()),
+		interp.Dir("/"),
+		interp.ExecHandler(func(ctx context.Context, args []string) error {
+			hc := interp.HandlerCtx(ctx)
+			if args[0] != "cat" {
+				return fmt.Errorf("the seat read runs %s; the shell here scripts only cat", args[0])
+			}
+			for _, name := range args[1:] {
+				file, under := strings.CutPrefix(name, seatCgroupRoot+"/")
+				body, held := files[file]
+				if !under || strings.Contains(file, "/") || !held {
+					fmt.Fprintf(hc.Stderr, "cat: %s: No such file or directory\n", name)
+					return interp.NewExitStatus(1)
+				}
+				io.WriteString(hc.Stdout, body)
+			}
+			return nil
+		}),
+		// The read sends a missing file's error to /dev/null, which is served
+		// here too, so the shell touches no path on the host.
+		interp.OpenHandler(func(_ context.Context, name string, _ int, _ os.FileMode) (io.ReadWriteCloser, error) {
+			if name == "/dev/null" {
+				return nullFile{}, nil
+			}
+			return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+		}),
+		interp.StdIO(nil, &stdout, io.Discard),
+	)
+	if err != nil {
+		return "", err
+	}
+	node, err := syntax.NewParser().Parse(strings.NewReader(argv[2]), "")
+	if err != nil {
+		return "", err
+	}
+	if err := runner.Run(context.Background(), node); err != nil {
+		var status interp.ExitStatus
+		if errors.As(err, &status) {
+			return stdout.String(), fmt.Errorf("the seat read exited %d", int(status))
+		}
+		return stdout.String(), err
+	}
+	return stdout.String(), nil
+}
+
+// nullFile is /dev/null in the shell seatShell runs: writes are dropped and a
+// read is empty.
+type nullFile struct{}
+
+func (nullFile) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nullFile) Write(p []byte) (int, error) { return len(p), nil }
+func (nullFile) Close() error                { return nil }
 
 // TestSandboxSourceTickSeatFailures is the bead's acceptance: a seat whose read
 // fails writes no row while the other seats still do (gt-a24bcc).
