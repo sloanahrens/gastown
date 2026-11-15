@@ -13,9 +13,11 @@ import (
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
-// The VM row's schema values (design row table): the sandbox cluster's source
-// and class, the vm component, and the one name both the row and its cluster
-// carry. rig, polecat and bead are null on a VM row, and so is mem_limit_bytes.
+// The VM row's schema values, as the sampling design's row table gives them
+// (docs/plans/2026-11-14-sandbox-resource-sampling-design.md): the sandbox
+// cluster's source and class, the vm component, and the one name both the row
+// and its cluster carry. rig, polecat and bead are null on a VM row, and so is
+// mem_limit_bytes.
 const (
 	vmSource    = seatSource
 	vmClass     = seatClass
@@ -46,7 +48,10 @@ type VMReading struct {
 // returns the reading to pass as previous on the next sample (gt-9y0kii).
 // previous is nil for the first sample, whose cpu_pct is null: /proc/stat
 // carries a counter, not a share, so the first reading is a baseline and not a
-// measurement.
+// measurement. The returned reading is the baseline only when the error is nil:
+// a refused read returns the zero reading, which the caller does not store, so
+// the next row is measured over the whole gap rather than from a baseline of
+// zero.
 //
 // The text is what one read of the VM's proc files prints, by the same marker
 // convention the seat read uses: for each file in vmProcFiles, a line naming it
@@ -427,8 +432,9 @@ func isCPULine(name string) bool {
 // reports as the memory in use: the total minus what is available. Both are the
 // reading itself, so a missing or unreadable one is an error that drops the
 // row: mem_bytes cannot be null, so a missing one would read as an empty VM. A
-// count that is not in kB, or an available greater than the total, is a damaged
-// reading and is refused rather than reported as a negative use.
+// count that is not in kB, an available greater than the total, or a line
+// printed twice is a damaged reading and is refused rather than reported as a
+// negative use or read as whichever line came last.
 func parseVMMeminfo(text string) (int64, error) {
 	values := make(map[string]uint64, 2)
 	for _, raw := range strings.Split(text, "\n") {
@@ -446,6 +452,9 @@ func parseVMMeminfo(text string) (int64, error) {
 		value, err := strconv.ParseUint(fields[1], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("meminfo's %s %s is not a kB count", key, shorten(fields[1]))
+		}
+		if _, duplicate := values[key]; duplicate {
+			return 0, fmt.Errorf("meminfo prints %s twice", key)
 		}
 		values[key] = value
 	}
