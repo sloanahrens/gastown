@@ -31,9 +31,10 @@ var (
 	// can be asked for the VM's filesystem, and a disk the daemon cannot show is
 	// not a quiet disk.
 	errNoContainers = errors.New("the cloud daemon runs no container; the VM's disk cannot be read")
-	// errDiskRead reports a df that did not run. The runner's error carries the
-	// command's stderr, so it is dropped in favor of this fixed reason.
-	errDiskRead = errors.New("read the VM's disk in a container failed; the disk cannot be read")
+	// errNoReader reports running containers none of which could run df. A
+	// container without df says nothing about the disk, so it is skipped; a disk
+	// none of the daemon's containers can show is still not a quiet disk.
+	errNoReader = errors.New("no running container on the cloud daemon could read the VM's disk")
 	// errParseDF reports df output with no usable capacity share. The parser's
 	// message quotes the field it could not read, which is container output, so
 	// the fixed reason replaces it.
@@ -63,9 +64,11 @@ func (t *Target) Reading(ctx context.Context) disks.Reading {
 
 // diskShare reads the VM's used share as the worst one any container the daemon
 // runs reports: a container's root filesystem is the VM's disk, and df there is
-// the reading the Mac volume cannot give. One unreadable container refuses the
-// whole reading, as the patrol's cluster read does, so a partial view cannot
-// miss the full disk.
+// the reading the Mac volume cannot give. A container whose df fails cannot be
+// asked and is skipped, because one without df says nothing about the disk and
+// would otherwise hold the unreadable alert open forever; any container that
+// answers reads the same VM disk, so no view is lost. Only a pass where no
+// container answers refuses, so a daemon that shows no disk is never quiet.
 func (t *Target) diskShare(ctx context.Context) (float64, error) {
 	out, err := t.client().Docker(ctx, "ps", "-q")
 	if err != nil {
@@ -77,6 +80,7 @@ func (t *Target) diskShare(ctx context.Context) (float64, error) {
 	}
 	var (
 		worst    float64
+		readers  int
 		failures []error
 	)
 	for i, id := range ids {
@@ -88,7 +92,9 @@ func (t *Target) diskShare(ctx context.Context) (float64, error) {
 		}
 		out, err := t.client().Docker(ctx, append([]string{"exec", id}, dfArgs...)...)
 		if err != nil {
-			failures = append(failures, fmt.Errorf("container %s: %w", id, errDiskRead))
+			// This container will not answer: its image has no df, or it exited
+			// between the list and the exec. Its silence says nothing about the
+			// disk, so skip it and let another container be the reader.
 			continue
 		}
 		pct, err := disks.ParseDF(string(out))
@@ -96,12 +102,16 @@ func (t *Target) diskShare(ctx context.Context) (float64, error) {
 			failures = append(failures, fmt.Errorf("container %s: %w", id, errParseDF))
 			continue
 		}
+		readers++
 		if pct > worst {
 			worst = pct
 		}
 	}
 	if len(failures) > 0 {
 		return 0, errors.Join(failures...)
+	}
+	if readers == 0 {
+		return 0, errNoReader
 	}
 	return worst, nil
 }

@@ -218,17 +218,66 @@ func TestReadingAsksTheDaemonsContainersAndTakesTheWorst(t *testing.T) {
 	}
 }
 
-// TestReadingRefusesAWholeContainerItCannotRead: a disk the daemon shows only
-// partly may be the full one, so one failed container refuses the reading.
-func TestReadingRefusesAWholeContainerItCannotRead(t *testing.T) {
+// TestReadingSkipsAContainerItCannotAsk: a running container without df says
+// nothing about the disk, so the container that answers is the reading and the
+// disk is not unreadable.
+func TestReadingSkipsAContainerItCannotAsk(t *testing.T) {
 	t.Parallel()
-	roomy, broken := containerID('a'), containerID('b')
+	readable, bare := containerID('a'), containerID('b')
 	f := &diskDocker{
-		ps:    roomy + "\n" + broken + "\n",
-		df:    map[string]string{roomy: dfAnswer(40)},
-		dfErr: map[string]error{broken: errors.New("no df")},
+		ps:    bare + "\n" + readable + "\n",
+		df:    map[string]string{readable: dfAnswer(40)},
+		dfErr: map[string]error{bare: errors.New("exec: df: not found")},
 	}
-	if reading := diskTarget(t, f.run).Reading(context.Background()); reading.Err == nil {
-		t.Fatalf("Reading = %+v, want an error for the unreadable container", reading)
+	reading := diskTarget(t, f.run).Reading(context.Background())
+	if reading.Err != nil {
+		t.Fatalf("Reading = %v, want the share the readable container gave", reading.Err)
+	}
+	if reading.UsedPct != 40 {
+		t.Fatalf("Reading = %+v, want 40%% from the container that answered", reading)
+	}
+	want := [][]string{
+		{"ps", "-q"},
+		{"exec", bare, "df", "-P", "/"},
+		{"exec", readable, "df", "-P", "/"},
+	}
+	if !slices.EqualFunc(f.calls, want, slices.Equal[[]string]) {
+		t.Fatalf("calls = %v, want %v", f.calls, want)
+	}
+}
+
+// TestReadingRefusesWhenNoContainerAnswers: containers that all fail to answer
+// leave the disk unreadable, so a daemon showing no disk is never quiet.
+func TestReadingRefusesWhenNoContainerAnswers(t *testing.T) {
+	t.Parallel()
+	first, second := containerID('a'), containerID('b')
+	f := &diskDocker{
+		ps:    first + "\n" + second + "\n",
+		dfErr: map[string]error{first: errors.New("no df"), second: errors.New("no df")},
+	}
+	reading := diskTarget(t, f.run).Reading(context.Background())
+	if reading.Err == nil || !errors.Is(reading.Err, errNoReader) {
+		t.Fatalf("Reading = %+v, want the no-reader refusal", reading)
+	}
+}
+
+// TestDiskAlertsUnreadableClearsWhenTheDiskReadsAgain drives the clear through
+// the target: an open unreadable alert clears on the first pass a container can
+// answer, even while a container without df is still running.
+func TestDiskAlertsUnreadableClearsWhenTheDiskReadsAgain(t *testing.T) {
+	t.Parallel()
+	readable, bare := containerID('a'), containerID('b')
+	f := &diskDocker{
+		ps:    bare + "\n" + readable + "\n",
+		df:    map[string]string{readable: dfAnswer(55)},
+		dfErr: map[string]error{bare: errors.New("exec: df: not found")},
+	}
+	alerts := diskTarget(t, f.run).DiskAlerts(context.Background(), map[string]bool{unreadableKey: true})
+	got := onlyAlert(t, alerts)
+	if got.Key != unreadableKey || !got.Clear || got.Raise || !got.Unreadable {
+		t.Fatalf("alert = %+v, want a clear of %q", got, unreadableKey)
+	}
+	if got.Name != readingName {
+		t.Fatalf("alert names the disk %q, want %q", got.Name, readingName)
 	}
 }
