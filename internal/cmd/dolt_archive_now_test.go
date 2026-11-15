@@ -8,13 +8,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/daemon"
-	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -99,37 +99,37 @@ func archiveNowBehindScripted(t *testing.T, readings ...map[string]archiveNowRea
 	}, &calls
 }
 
-// A town without the overseer's dispatch hold is refused before the command
-// reads a database or writes a request: the pass is the step that makes a
-// flatten safe, and only the overseer authorizes it (gt-xr2byt).
-func TestDoltArchiveNowRefusesWithoutTheHold(t *testing.T) {
+// The command files its request with no dispatch hold present: the archive
+// pass only reads the Dolt log and writes files, so it waits on no one
+// (gt-7ffx1z). The stat seam is left unscripted, so the command failing this
+// test reads a file path before it files the request.
+func TestDoltArchiveNowFilesItsRequestWithoutTheHold(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	holdPath := dispatch.HoldFilePath(townRoot)
-	fake := &archiveNowFakeRequest{}
+	fake := &archiveNowFakeRequest{result: update.MaintenanceResult{Outcome: archiveOutcomeCompleted}}
 	reads := newArchiveNowTestReads(t, townRoot)
-	reads.stat = archiveNowFakeStat()
+	behind, _ := archiveNowBehindScripted(t,
+		map[string]archiveNowReading{"gt": {commits: 2, events: 0}, "hq": {commits: 0, events: 0}},
+		map[string]archiveNowReading{"gt": {commits: 0, events: 0}, "hq": {commits: 0, events: 0}},
+	)
+	reads.behind = behind
 	reads.request = func(string) archiveNowRequester { return fake }
 
 	var out bytes.Buffer
-	err := runDoltArchiveNowWith(context.Background(), &out, reads)
+	if err := runDoltArchiveNowWith(context.Background(), &out, reads); err != nil {
+		t.Fatalf("archive-now with no hold: %v\n%s", err, out.String())
+	}
 
-	if code, ok := IsSilentExit(err); !ok || code != 3 {
-		t.Fatalf("exit = (%v, %v), want silent exit 3", code, ok)
+	if want := []string{"run-1"}; !slices.Equal(fake.requested, want) {
+		t.Errorf("requested = %v, want the command's own run %v filed", fake.requested, want)
 	}
-	if len(fake.requested) != 0 {
-		t.Errorf("the request protocol was used without the hold: %v", fake.requested)
+	if want := []string{"run-1"}; !slices.Equal(fake.waited, want) {
+		t.Errorf("waited = %v, want the wait for the command's own run %v", fake.waited, want)
 	}
-	requestPath := filepath.Join(update.Dir(townRoot), update.ArchiveRequestFileName)
-	if _, statErr := os.Stat(requestPath); !errors.Is(statErr, fs.ErrNotExist) {
-		t.Errorf("a request file was written without the hold: stat %s = %v", requestPath, statErr)
-	}
-	message := out.String()
-	if !strings.Contains(message, holdPath) {
-		t.Errorf("refusal = %q, want it to name the hold path %s", message, holdPath)
-	}
-	if !strings.Contains(message, "overseer creates") {
-		t.Errorf("refusal = %q, want it to say the overseer creates the hold", message)
+	for _, unwanted := range []string{"refusing", "dispatch hold", "overseer"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("output = %q, want no %q", out.String(), unwanted)
+		}
 	}
 }
 
@@ -143,7 +143,7 @@ func TestDoltArchiveNowPrintsBeforeAndAfterPerDatabase(t *testing.T) {
 	run := func(t *testing.T, before, after map[string]archiveNowReading) (string, error) {
 		t.Helper()
 		reads := newArchiveNowTestReads(t, townRoot)
-		reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+		reads.stat = archiveNowFakeStat() // no request pending
 		behind, calls := archiveNowBehindScripted(t, before, after)
 		reads.behind = behind
 		reads.request = func(string) archiveNowRequester {
@@ -284,12 +284,11 @@ func TestDoltArchiveNowExitCodes(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			reads := newArchiveNowTestReads(t, townRoot)
-			holdPath := dispatch.HoldFilePath(townRoot)
 			requestPath := filepath.Join(update.Dir(townRoot), update.ArchiveRequestFileName)
 			if tc.requestOpen {
-				reads.stat = archiveNowFakeStat(holdPath, requestPath)
+				reads.stat = archiveNowFakeStat(requestPath)
 			} else {
-				reads.stat = archiveNowFakeStat(holdPath)
+				reads.stat = archiveNowFakeStat()
 			}
 			if tc.databases != nil {
 				reads.databases = func(string) ([]string, error) { return tc.databases, nil }
@@ -362,7 +361,7 @@ func TestDoltArchiveNowReportsATimedOutWaitStillPending(t *testing.T) {
 	files := newArchiveNowRecordingFiles()
 	clock := &archiveNowTickingClock{now: time.Date(2026, 11, 5, 21, 0, 0, 0, time.UTC), step: 20 * time.Second}
 	reads := newArchiveNowTestReads(t, townRoot)
-	reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+	reads.stat = archiveNowFakeStat() // no request pending
 	behind, _ := archiveNowBehindScripted(t,
 		map[string]archiveNowReading{"gt": {commits: 1, events: 0}, "hq": {commits: 0, events: 0}},
 		map[string]archiveNowReading{"gt": {commits: 1, events: 0}, "hq": {commits: 0, events: 0}},
@@ -414,7 +413,7 @@ func TestDoltArchiveNowReportsAnInterruptedWaitStillPending(t *testing.T) {
 	t.Cleanup(cancel)
 
 	reads := newArchiveNowTestReads(t, townRoot)
-	reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+	reads.stat = archiveNowFakeStat() // no request pending
 	behind, calls := archiveNowBehindScripted(t,
 		map[string]archiveNowReading{"gt": {commits: 1, events: 0}, "hq": {commits: 0, events: 0}},
 	)
@@ -474,8 +473,9 @@ func archiveNowHelpExitCodes(t *testing.T, help string) map[byte]string {
 }
 
 // The help's exit codes name every branch that returns them: the default
-// branch reports an outcome the command does not understand as 1, and every
-// not-done answer is 2 (gt-ngqk20).
+// branch reports an outcome the command does not understand as 1, every
+// not-done answer is 2 (gt-ngqk20), and the only refusal left is a request
+// another job holds (gt-7ffx1z).
 func TestDoltArchiveNowHelpMatchesTheOutcomeBranches(t *testing.T) {
 	t.Parallel()
 	exit := archiveNowHelpExitCodes(t, doltArchiveNowCmd.Long)
@@ -486,6 +486,7 @@ func TestDoltArchiveNowHelpMatchesTheOutcomeBranches(t *testing.T) {
 	}{
 		{code: '1', want: []string{"does not understand"}},
 		{code: '2', want: []string{"timed out", "interrupted", "deferred", "partial", "reads history behind"}},
+		{code: '3', want: []string{"archive request is already pending"}},
 	}
 	for _, tc := range cases {
 		text, ok := exit[tc.code]
@@ -497,6 +498,14 @@ func TestDoltArchiveNowHelpMatchesTheOutcomeBranches(t *testing.T) {
 			if !strings.Contains(text, want) {
 				t.Errorf("exit %c help = %q, want it to name %q", tc.code, text, want)
 			}
+		}
+	}
+
+	// The archive pass needs no dispatch hold, so the help must not send the
+	// operator looking for one.
+	for _, unwanted := range []string{"dispatch hold", "seat-refill", "overseer"} {
+		if strings.Contains(doltArchiveNowCmd.Long, unwanted) {
+			t.Errorf("help = %q, want no mention of %q", doltArchiveNowCmd.Long, unwanted)
 		}
 	}
 }
@@ -577,8 +586,8 @@ func TestDoltArchiveNowBehindRefusesAnUnreadableReading(t *testing.T) {
 }
 
 // Every read the command needs, failing, is an error (exit 1), never a pass
-// with nothing checked: the town root, the hold, the database list, the
-// before and after readings, the request write and the wait (gt-xr2byt).
+// with nothing checked: the town root, the database list, the before and after
+// readings, the request write and the wait (gt-xr2byt).
 func TestDoltArchiveNowReadsRefuseFailures(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
@@ -597,11 +606,14 @@ func TestDoltArchiveNowReadsRefuseFailures(t *testing.T) {
 			want: "not in a Gas Town workspace",
 		},
 		{
-			name: "an unreadable hold",
+			name: "an unreadable request path after a failed write",
 			set: func(_ *testing.T, reads *doltArchiveNowReads) {
 				reads.stat = func(string) error { return boom }
+				reads.request = func(string) archiveNowRequester {
+					return &archiveNowFakeRequest{requestErr: boom}
+				}
 			},
-			want: "checking the dispatch hold",
+			want: "writing the archive request",
 		},
 		{
 			name: "a database listing that fails",
@@ -658,7 +670,7 @@ func TestDoltArchiveNowReadsRefuseFailures(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			reads := newArchiveNowTestReads(t, townRoot)
-			reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+			reads.stat = archiveNowFakeStat() // no request pending
 			reads.behind = func(context.Context, string, []string) (map[string]archiveNowReading, error) {
 				return zeros, nil
 			}
@@ -690,10 +702,17 @@ func TestDoltArchiveNowCmdSilencesCodedExits(t *testing.T) {
 
 	t.Run("a coded exit is the answer", func(t *testing.T) {
 		t.Parallel()
+		townRoot := t.TempDir()
 		cmd := &cobra.Command{}
 		cmd.SetOut(&bytes.Buffer{})
-		reads := newArchiveNowTestReads(t, t.TempDir())
-		reads.stat = archiveNowFakeStat() // the hold is absent: a refusal
+		reads := newArchiveNowTestReads(t, townRoot)
+		requestPath := filepath.Join(update.Dir(townRoot), update.ArchiveRequestFileName)
+		reads.stat = archiveNowFakeStat(requestPath) // another job's request is pending
+		behind, _ := archiveNowBehindScripted(t, map[string]archiveNowReading{"gt": {}, "hq": {}})
+		reads.behind = behind
+		reads.request = func(string) archiveNowRequester {
+			return &archiveNowFakeRequest{requestErr: errors.New("another run holds the request")}
+		}
 
 		err := runDoltArchiveNowCmd(cmd, context.Background(), reads)
 
@@ -776,7 +795,7 @@ func TestDoltArchiveNowWritesOnlyTheArchiveRequest(t *testing.T) {
 	files := newArchiveNowRecordingFiles()
 	clock := archiveNowFakeClock{now: time.Date(2026, 11, 5, 21, 0, 0, 0, time.UTC)}
 	reads := newArchiveNowTestReads(t, townRoot)
-	reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+	reads.stat = archiveNowFakeStat() // no request pending
 	behind, _ := archiveNowBehindScripted(t,
 		map[string]archiveNowReading{"gt": {commits: 2, events: 1}, "hq": {commits: 0, events: 0}},
 		map[string]archiveNowReading{"gt": {commits: 0, events: 0}, "hq": {commits: 0, events: 0}},
@@ -824,5 +843,66 @@ func TestDoltArchiveNowWritesOnlyTheArchiveRequest(t *testing.T) {
 	}
 	if !strings.Contains(string(files.entries[resultPath]), `"run_id":"run-1"`) {
 		t.Errorf("the daemon's answer was not for this run: %s", files.entries[resultPath])
+	}
+}
+
+// With no dispatch hold present, the command files the archive request itself:
+// one file, under the archive request's own name, carrying this run's id and
+// the time it was written, and nothing else for the daemon to interpret
+// (gt-7ffx1z).
+func TestDoltArchiveNowFilesTheRequestShape(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	requestPath := filepath.Join(update.Dir(townRoot), update.ArchiveRequestFileName)
+	stamp := time.Date(2026, 11, 5, 21, 0, 0, 0, time.UTC)
+
+	files := newArchiveNowRecordingFiles()
+	reads := newArchiveNowTestReads(t, townRoot)
+	reads.stat = archiveNowFakeStat() // no request pending and no hold file
+	behind, _ := archiveNowBehindScripted(t,
+		map[string]archiveNowReading{"gt": {}, "hq": {}},
+	)
+	reads.behind = behind
+	reads.request = func(string) archiveNowRequester {
+		return &update.ArchiveRequest{Dir: update.Dir(townRoot), Files: files, Clock: archiveNowFakeClock{now: stamp}}
+	}
+	// The wait is interrupted on its first tick, so the request file stays for
+	// this test to read.
+	reads.sleep = func(context.Context, time.Duration) error { return context.Canceled }
+
+	var out bytes.Buffer
+	err := runDoltArchiveNowWith(context.Background(), &out, reads)
+	if code, ok := IsSilentExit(err); !ok || code != 2 {
+		t.Fatalf("exit = (%v, %v), want silent exit 2 for the interrupted wait", code, ok)
+	}
+
+	if want := []string{requestPath}; !slices.Equal(files.created, want) {
+		t.Fatalf("created %v, want only the archive request %v", files.created, want)
+	}
+	data, ok := files.entries[requestPath]
+	if !ok {
+		t.Fatalf("no request was filed at %s", requestPath)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(data, &shape); err != nil {
+		t.Fatalf("the request is not JSON: %v (%s)", err, data)
+	}
+	keys := make([]string, 0, len(shape))
+	for key := range shape {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	if want := []string{"at", "run_id"}; !slices.Equal(keys, want) {
+		t.Errorf("request fields = %v, want exactly %v", keys, want)
+	}
+	var req update.RequestFile
+	if err := json.Unmarshal(data, &req); err != nil {
+		t.Fatalf("the request does not decode as the daemon's request file: %v (%s)", err, data)
+	}
+	if req.RunID != "run-1" {
+		t.Errorf("request run id = %q, want the command's own run %q", req.RunID, "run-1")
+	}
+	if !req.At.Equal(stamp) {
+		t.Errorf("request time = %s, want the command's clock %s", req.At, stamp)
 	}
 }

@@ -136,9 +136,8 @@ archive, so a flatten afterwards discards only history the archive holds. This
 command only writes the archive request: it runs no gc, no backup and no
 flatten.
 
-It refuses unless the overseer's dispatch hold exists at the town root, and
-while another archive request is still pending. Under the hold it prints one
-line per database with the commits and events behind the archive before and
+It refuses while another archive request is still pending. Otherwise it prints
+one line per database with the commits and events behind the archive before and
 after the pass.
 
 Exit codes:
@@ -148,7 +147,7 @@ Exit codes:
   2  not done: the wait timed out or was interrupted, the daemon deferred the
      pass, the pass stopped partial, or a database still reads history behind
      the archive
-  3  refused: no dispatch hold, or an archive request is already pending`,
+  3  refused: an archive request is already pending`,
 	Args: cobra.NoArgs,
 	RunE: runDoltArchiveNow,
 }

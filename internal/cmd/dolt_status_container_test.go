@@ -596,7 +596,8 @@ func TestDoltHistoryDocBackupNamesTheStoppedServer(t *testing.T) {
 // TestDoltHistoryDocArchiveNowExitCodes: the runbook says to stop on each of
 // archive-now's non-zero exits and reads each one as what happened, so an
 // operator who stops does not read a pending or refused pass as a done one
-// (gt-xr2byt.3).
+// (gt-xr2byt.3). Exit 3 is only a request another job holds, because the pass
+// needs no dispatch hold (gt-7ffx1z).
 func TestDoltHistoryDocArchiveNowExitCodes(t *testing.T) {
 	t.Parallel()
 	section := historyDocSection(t, "## Before any rewrite")
@@ -606,12 +607,14 @@ func TestDoltHistoryDocArchiveNowExitCodes(t *testing.T) {
 		"1 is a failed pass",
 		"2 is still pending, so run `gt dolt archive-now`",
 		"3 is a refusal",
-		"for want of the dispatch hold",
 		"archive request is already pending",
 	} {
 		if !strings.Contains(section, want) {
 			t.Errorf("\"Before any rewrite\" does not carry %q:\n%s", want, section)
 		}
+	}
+	if strings.Contains(section, "for want of the dispatch hold") {
+		t.Errorf("\"Before any rewrite\" still reads exit 3 as wanting the dispatch hold, which archive-now no longer checks:\n%s", section)
 	}
 }
 
