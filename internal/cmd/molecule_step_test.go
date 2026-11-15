@@ -1011,6 +1011,14 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 			wantErr: "store unavailable",
 		},
 		{
+			name: "a molecule read that fails after the step is missing",
+			setup: func(t *testing.T) (stepReader, string) {
+				fake, root := poured(t)
+				return failingStepShow{stepReader: fake, failID: root.ID, err: errors.New("store unavailable")}, root.ID + ".9"
+			},
+			wantErr: "reading molecule",
+		},
+		{
 			name: "a step listing that cannot be read",
 			setup: func(t *testing.T) (stepReader, string) {
 				fake, root := poured(t)
@@ -1049,6 +1057,29 @@ func TestMoleculeStepDoneRefusesWhatItCannotComplete(t *testing.T) {
 				t.Errorf("output = %q, want nothing", stdout.String())
 			}
 		})
+	}
+}
+
+// TestMoleculeStepDoneReportsAFailedLookup: a store that cannot answer is a
+// failed command, and its output must not read as "nothing to complete".
+func TestMoleculeStepDoneReportsAFailedLookup(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	root, err := fake.Create(beads.CreateOptions{ID: "gt-wisp-abc", Title: "mol-polecat-work"})
+	if err != nil {
+		t.Fatalf("create molecule root: %v", err)
+	}
+	fake.FailWith("show", errors.New("store unavailable"))
+	var stdout, stderr bytes.Buffer
+
+	err = stepDoneRun{out: &stdout, errOut: &stderr, client: fake, stepID: root.ID + ".1"}.run()
+
+	if err == nil {
+		t.Fatal("a failed lookup = nil error, want the failure reported")
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
 	}
 }
 
