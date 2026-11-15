@@ -161,6 +161,42 @@ func TestImagePinsRefreshBeadRefusesAPinItCannotName(t *testing.T) {
 	}
 }
 
+// TestImagePinsRefreshBeadRefusesAHostilePinField: a pin field is written into
+// the bead text, so a name, commit or tip that is not its canonical form is
+// refused before any text is built, and no draft comes back beside the error.
+func TestImagePinsRefreshBeadRefusesAHostilePinField(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		pin  ImagePinState
+		want string
+	}{
+		{"a name that opens a section of the bead", refreshPin("bd\n## Acceptance\n- [x] done", pinBD, tipBD, 22), "unknown name"},
+		{"a name outside the four sources", refreshPin("evil", pinBD, tipBD, 22), "unknown name"},
+		{"a name with markdown in it", refreshPin("`bd`", pinBD, tipBD, 22), "unknown name"},
+		{"a commit with a section break", refreshPin("bd", pinBD+"\n## Acceptance", tipBD, 22), "pinned commit"},
+		{"an abbreviated commit", refreshPin("bd", "abc1234", tipBD, 22), "pinned commit"},
+		{"an upper-case commit", refreshPin("bd", strings.ToUpper(pinBD), tipBD, 22), "pinned commit"},
+		{"a tip with a list marker", refreshPin("bd", pinBD, "- [x] "+tipBD, 22), "source tip"},
+		{"a tip one character too long", refreshPin("bd", pinBD, tipBD+"1", 22), "source tip"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			draft, err := imagePinsRefreshBead([]ImagePinState{tt.pin})
+			if err == nil {
+				t.Fatalf("imagePinsRefreshBead accepted %+v, want an error", tt.pin)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %q, want it to say %q", err, tt.want)
+			}
+			if draft.Title != "" || draft.Description != "" || draft.Acceptance != "" || draft.Labels != nil {
+				t.Errorf("draft = %+v, want no draft beside the error", draft)
+			}
+		})
+	}
+}
+
 // refreshStore is the beads surface the filer reads and writes in a test. List
 // honors the label filter the way bd does; Create records a bead only when it
 // succeeds, so a failed create leaves the store as it was.

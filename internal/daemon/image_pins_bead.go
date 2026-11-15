@@ -3,16 +3,22 @@ package daemon
 // The shape of the refresh bead the image pin patrol files (gt-wmoa0d). The
 // spec dispatcher holds a bead it cannot shape (gt-1lzy1), so the whole text is
 // built here from the pins the planner named, and one polecat lands the two pins
-// files. The bead lookup and the bead creation that carry a draft are injected
-// seams (gt-6bav5t).
+// files.
 
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 )
+
+// pinSHAForm is the form a pin's commit and its source tip take: a full
+// lowercase sha, as git prints it and daemonimage.ParsePins accepts it.
+var pinSHAForm = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 const (
 	// imagePinsRefreshLabel marks a filed refresh bead: the lookup the filer
@@ -83,7 +89,9 @@ func imagePinsRefreshBead(pins []ImagePinState) (imagePinsRefreshDraft, error) {
 }
 
 // checkImagePinState refuses a pin the bead cannot name: the state comes from a
-// read, so one of its three fields is blank only when that read did not run.
+// read, so one of its three fields is blank only when that read did not run. The
+// fields are written into the bead text, so each takes its canonical form too: a
+// name or sha with a line break or markdown would open a section of the bead.
 func checkImagePinState(pin ImagePinState) error {
 	for _, field := range []struct{ name, value string }{
 		{"name", pin.Name},
@@ -93,6 +101,15 @@ func checkImagePinState(pin ImagePinState) error {
 		if field.value == "" {
 			return fmt.Errorf("image pins refresh bead: a pin the planner named has no %s (name %q, pinned commit %q, source tip %q): the bead names what the read returned", field.name, pin.Name, pin.Pin, pin.Tip)
 		}
+	}
+	if !slices.Contains(daemonimage.PinNames, pin.Name) {
+		return fmt.Errorf("image pins refresh bead: a pin the planner named has an unknown name %q: the four sources are %s", pin.Name, strings.Join(daemonimage.PinNames, ", "))
+	}
+	if !pinSHAForm.MatchString(pin.Pin) {
+		return fmt.Errorf("image pins refresh bead: %s pinned commit %q is not a full 40-character lowercase hex sha", pin.Name, pin.Pin)
+	}
+	if !pinSHAForm.MatchString(pin.Tip) {
+		return fmt.Errorf("image pins refresh bead: %s source tip %q is not a full 40-character lowercase hex sha", pin.Name, pin.Tip)
 	}
 	return nil
 }
