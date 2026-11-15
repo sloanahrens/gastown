@@ -1,8 +1,3 @@
-hooks scan
-hooks sync
-init
-install
-plugin
 plugin sync
 ring
 ring forge
