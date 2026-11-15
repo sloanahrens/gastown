@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,19 @@ func newOverrunSeatGitFixture(t *testing.T, record *session.SandboxRecord, runne
 		return nil
 	}
 	return overrunSeatGitFixture{d: d, calls: &calls, hostDir: &hostDirs}
+}
+
+// seedHostWorktreeStub makes the seat's host worktree resolvable, the stub a
+// sandbox seat leaves behind: only the .git entry the resolver stats is
+// created, so the fixture's opener stays the handle. Without it a fallback to
+// the host handle fails on an unresolvable path instead of reaching the opener,
+// and the "never the host handle" checks never fire.
+func seedHostWorktreeStub(t *testing.T, d *Daemon) {
+	t.Helper()
+	dir := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("seed the host worktree stub: %v", err)
+	}
 }
 
 func overrunStopSandboxRecord(workDir string) *session.SandboxRecord {
@@ -127,16 +141,25 @@ func TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox(t *testing.T) {
 }
 
 // TestOverrunSeatGitRefusesAnUnreadableSandboxRecord: a record that cannot be
-// read is an error, never the host stub.
+// read is that read's error, never the host stub. The seat's host worktree stub
+// is there, so a fallback to the host handle reaches the fixture's opener and
+// fails the test, and the error must name the unreadable record: another
+// refusal is not this seat's record going unread.
 func TestOverrunSeatGitRefusesAnUnreadableSandboxRecord(t *testing.T) {
 	t.Parallel()
 	f := newOverrunSeatGitFixture(t, overrunStopSandboxRecord("/sandbox/x"), nil, "")
+	seedHostWorktreeStub(t, f.d)
 	f.d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
 		return session.SandboxRecord{}, false, errors.New("registry unreadable")
 	}
 
-	if g, err := f.d.overrunSeatGit(stopSeat); err == nil {
+	g, err := f.d.overrunSeatGit(stopSeat)
+
+	if err == nil {
 		t.Fatalf("overrunSeatGit = %v, nil error; want a refusal", g)
+	}
+	if !strings.Contains(err.Error(), "registry unreadable") {
+		t.Errorf("error %q does not name the record that could not be read", err)
 	}
 	if len(*f.hostDir) != 0 {
 		t.Errorf("the host worktree was opened: %v", *f.hostDir)
@@ -146,7 +169,8 @@ func TestOverrunSeatGitRefusesAnUnreadableSandboxRecord(t *testing.T) {
 // TestOverrunSeatGitRefusesWhatCannotSeeASandboxSeatsWork: a sandbox seat whose
 // runner is not linked, or whose record names no clone directory, is an error
 // and never the host stub, which would read a clean tree and call the work
-// saved.
+// saved. The host worktree stub is there for every case, so a fallback to the
+// host handle reaches the fixture's opener and fails the test.
 func TestOverrunSeatGitRefusesWhatCannotSeeASandboxSeatsWork(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -165,6 +189,7 @@ func TestOverrunSeatGitRefusesWhatCannotSeeASandboxSeatsWork(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newOverrunSeatGitFixture(t, tc.record, tc.runnerErr, "")
+			seedHostWorktreeStub(t, f.d)
 
 			g, err := f.d.overrunSeatGit(stopSeat)
 
