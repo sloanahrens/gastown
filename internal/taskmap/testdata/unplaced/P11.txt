@@ -1,8 +1,3 @@
-crew worktree
-dolt
-dolt archive-now
-dolt cleanup
-dolt compare
 dolt init-rig
 dolt kill-imposters
 dolt latency
