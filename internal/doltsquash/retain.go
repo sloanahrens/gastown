@@ -97,7 +97,10 @@ func Retain(ctx context.Context, ex Exec, now, swappedAt time.Time) (RetainResul
 	if err != nil {
 		return RetainResult{}, err
 	}
-	pairs := commonCommits(main, retained)
+	pairs, err := commonCommits(main, retained)
+	if err != nil {
+		return RetainResult{}, err
+	}
 	if len(pairs) == 0 {
 		return RetainResult{}, fmt.Errorf(
 			"doltsquash: no commit is present on both main and main-pre-squash, so the second verification has nothing to compare and keeps both branches")
@@ -183,21 +186,26 @@ type commitPair struct {
 }
 
 // commonCommits pairs the commits both branches hold by identity, newest
-// first, and keeps at most RetainCommits of them. Commits that share an
-// identity are paired in log order.
-func commonCommits(main, retained []historyCommit) []commitPair {
-	queued := make(map[commitIdentity][]historyCommit, len(retained))
+// first, and keeps at most RetainCommits of them. A pair is only as good as
+// its identity: when more than one commit on either branch holds it, the
+// second verification cannot tell which commit the other side's is, so it
+// refuses the run rather than pair unrelated commits.
+func commonCommits(main, retained []historyCommit) ([]commitPair, error) {
+	retainedByIdentity := make(map[commitIdentity][]historyCommit, len(retained))
 	for _, c := range retained {
-		queued[c.identity] = append(queued[c.identity], c)
+		retainedByIdentity[c.identity] = append(retainedByIdentity[c.identity], c)
+	}
+	mainCounts := make(map[commitIdentity]int, len(main))
+	for _, c := range main {
+		mainCounts[c.identity]++
 	}
 	var pairs []commitPair
 	for _, m := range main {
-		held := queued[m.identity]
+		held := retainedByIdentity[m.identity]
 		if len(held) == 0 {
 			continue
 		}
 		pairs = append(pairs, commitPair{main: m, retained: held[0]})
-		queued[m.identity] = held[1:]
 	}
 	slices.SortStableFunc(pairs, func(a, b commitPair) int {
 		return cmp.Compare(b.main.identity.AuthorDate, a.main.identity.AuthorDate)
@@ -205,7 +213,41 @@ func commonCommits(main, retained []historyCommit) []commitPair {
 	if len(pairs) > RetainCommits {
 		pairs = pairs[:RetainCommits]
 	}
-	return pairs
+	for _, pair := range pairs {
+		identity := pair.main.identity
+		if mainCounts[identity] == 1 && len(retainedByIdentity[identity]) == 1 {
+			continue
+		}
+		return nil, fmt.Errorf(
+			"doltsquash: the identity %s is held by %d commits on main and %d on main-pre-squash, so the second verification cannot pair them and keeps both branches",
+			identity, mainCounts[identity], len(retainedByIdentity[identity]))
+	}
+	return pairs, nil
+}
+
+// doltSystemTables are Dolt's own tables: metadata rather than the database's
+// data, and their rows are not versioned the way a data table's are, so their
+// hash across two commits proves nothing. Dolt reserves the dolt_ prefix for
+// them and refuses a CREATE TABLE whose name starts with it, so a catalog name
+// in this set is Dolt's.
+//
+// The set is by name, not by prefix: a catalog name this set does not know is
+// read and compared like a data table, so no table is left out of a
+// verification on the strength of its name alone (gt-hizbpr).
+var doltSystemTables = map[string]bool{
+	"dolt_conflicts":             true,
+	"dolt_constraint_violations": true,
+	"dolt_docs":                  true,
+	"dolt_ignore":                true,
+	"dolt_procedures":            true,
+	"dolt_query_catalog":         true,
+	"dolt_schemas":               true,
+}
+
+// doltSystemTable reports whether name is one of Dolt's own tables. Dolt's
+// reservation of the prefix ignores case, so the lookup does too.
+func doltSystemTable(name string) bool {
+	return doltSystemTables[strings.ToLower(name)]
 }
 
 // revisionTables is one commit's versioned tables and their hashes, in
@@ -234,9 +276,7 @@ func (s *designStep) tablesAt(ctx context.Context, db, commit string) (revisionT
 	}
 	tables := revisionTables{hashes: make(map[string]string, len(catalog))}
 	for _, name := range catalog {
-		if strings.HasPrefix(name, "dolt_") {
-			// Dolt's own tables are not the database's data, and their rows
-			// are not versioned the way a data table's are.
+		if doltSystemTable(name) {
 			continue
 		}
 		hash, err := s.scalar(ctx, fmt.Sprintf("SELECT dolt_hashof_table(%s)", quoteLiteral(name)))
