@@ -120,22 +120,18 @@ func TestBackupCatchUpSkipsWhenABackupIsRecent(t *testing.T) {
 	}
 }
 
-// A held container-gate slot (a landing gate, a polecat suite) defers the
-// catch-up; the next quiet check takes it.
-func TestBackupCatchUpWaitsForAQuietTown(t *testing.T) {
+// A held container-gate slot (a landing gate, a polecat suite) does not defer
+// the catch-up: the copy is a server-side read, and waiting for the town to be
+// quiet kept a day-old backup waiting (gt-y6ovz, gt-3b4iou).
+func TestBackupCatchUpRunsBesideAHeldGateSlot(t *testing.T) {
 	t.Parallel()
 	d, f := catchUpDaemon(t)
 	d.maint.slotHolders = func(string) ([]string, error) { return []string{"gastown/landing"}, nil }
 
 	d.runScheduledMaintenance()
-	if len(f.backupCalls) != 0 {
-		t.Fatalf("catch-up ran while a slot was held: %v", f.backupCalls)
-	}
 
-	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
-	d.runScheduledMaintenance()
 	if len(f.backupCalls) != 2 {
-		t.Errorf("catch-up not taken once the town went quiet: %v", f.backupCalls)
+		t.Errorf("backup calls = %v, want gt and hq: a held slot deferred a day-old catch-up", f.backupCalls)
 	}
 }
 
@@ -196,22 +192,23 @@ func TestBackupCatchUpRunsBesideTicksScansAndDogCycles(t *testing.T) {
 	}
 }
 
-// The hard work still defers the catch-up: a backup never runs beside a
-// landing pass, a slings dispatch mid-entry or a binary mid-replacement.
-func TestBackupCatchUpStillWaitsForHardWork(t *testing.T) {
+// The hard holds defer the gc, not the backup: a landing pass owns the
+// merged-tree gate, a slings cycle can be cut half-done and an install replaces
+// the binary, but the backup reads through the server and touches none of them
+// (gt-y6ovz, gt-3b4iou).
+func TestBackupCatchUpRunsBesideHardWork(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		hold string
 		set  func(t *testing.T, d *Daemon)
 	}{
-		{"landing pass", "landing pass gt-a", func(_ *testing.T, d *Daemon) {
+		{"landing pass", func(_ *testing.T, d *Daemon) {
 			d.landingStates.setBead("gastown", "gt-a", catchUpNow)
 		}},
-		{"scheduled slings cycle", "a scheduled slings cycle", func(_ *testing.T, d *Daemon) {
+		{"scheduled slings cycle", func(_ *testing.T, d *Daemon) {
 			d.scheduledSlingsRunning.Store(true)
 		}},
-		{"install lock", "the install lock (an install is replacing the binary)", func(t *testing.T, d *Daemon) {
+		{"install lock", func(t *testing.T, d *Daemon) {
 			holdInstallLock(t, writeInstallLock(t, d))
 		}},
 	}
@@ -225,32 +222,14 @@ func TestBackupCatchUpStillWaitsForHardWork(t *testing.T) {
 
 			d.runScheduledMaintenance()
 
-			if len(f.backupCalls) != 0 {
-				t.Fatalf("catch-up ran while %s held the daemon: %v", tc.name, f.backupCalls)
+			if len(f.backupCalls) != 2 {
+				t.Fatalf("backup calls = %v, want gt and hq: %s deferred a day-old catch-up", f.backupCalls, tc.name)
 			}
-			if want := "catch-up backup deferred: daemon has work in flight (" + tc.hold + ")"; !strings.Contains(buf.String(), want) {
-				t.Errorf("deferred line = %q, want it to carry %q", buf.String(), want)
+			// A backup never logs the work-in-flight deferral (gt-3b4iou).
+			if strings.Contains(buf.String(), "daemon has work in flight") {
+				t.Errorf("log still carries the work-in-flight deferral:\n%s", buf.String())
 			}
 		})
-	}
-}
-
-// The deferred line names the hold: "work in flight" alone left an operator
-// to guess the holder from the log timeline (gt-y6ovz).
-func TestBackupCatchUpDeferralNamesTheHold(t *testing.T) {
-	t.Parallel()
-	d, f := catchUpDaemon(t)
-	var buf bytes.Buffer
-	d.logger = log.New(&buf, "", 0)
-	d.landingStates.setBead("gastown", "gt-a", catchUpNow)
-
-	d.runScheduledMaintenance()
-
-	if len(f.backupCalls) != 0 {
-		t.Fatalf("catch-up ran while a landing pass held the gate: %v", f.backupCalls)
-	}
-	if want := "catch-up backup deferred: daemon has work in flight (landing pass gt-a)"; !strings.Contains(buf.String(), want) {
-		t.Errorf("deferred line = %q, want it to carry %q", buf.String(), want)
 	}
 }
 
@@ -799,17 +778,23 @@ func TestCatchUpGCInterruptedByShutdownIsNotThrottled(t *testing.T) {
 	}
 }
 
-// A backup the town held off (a daemon Dolt task owns doltMaintMu) was not
-// tried, so the next tick retries it instead of waiting out the retry gap.
+// A gc in flight (it owns the write side of doltMaintMu) held the backup off,
+// so the next tick retries it instead of waiting out the retry gap, and the
+// deferred line names the gc.
 func TestBackupCatchUpDeferredBackupRetriesNextTick(t *testing.T) {
 	t.Parallel()
 	d, f := catchUpDaemon(t)
+	var buf bytes.Buffer
+	d.logger = log.New(&buf, "", 0)
 
-	d.doltMaintMu.RLock() // a daemon Dolt task in flight
+	d.doltMaintMu.Lock() // a gc in flight
 	d.runScheduledMaintenance()
-	d.doltMaintMu.RUnlock()
+	d.doltMaintMu.Unlock()
 	if len(f.backupCalls) != 0 {
-		t.Fatalf("backup ran while a Dolt task held the lock: %v", f.backupCalls)
+		t.Fatalf("backup ran while a gc held the write side: %v", f.backupCalls)
+	}
+	if want := "catch-up backup deferred: backup: a gc is in flight"; !strings.Contains(buf.String(), want) {
+		t.Errorf("deferred line = %q, want it to carry %q", buf.String(), want)
 	}
 
 	d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
@@ -832,7 +817,7 @@ func TestBackupCatchUpDeferralLogIsThrottled(t *testing.T) {
 		d.runScheduledMaintenance()
 	}
 
-	d.doltMaintMu.RLock() // a daemon Dolt task in flight
+	d.doltMaintMu.Lock() // a gc in flight
 	for _, after := range []time.Duration{0, 5 * time.Minute, 10 * time.Minute} {
 		tick(after)
 	}
@@ -843,16 +828,16 @@ func TestBackupCatchUpDeferralLogIsThrottled(t *testing.T) {
 	if n := deferrals(); n != 2 {
 		t.Errorf("%d deferral lines after the retry gap, want 2:\n%s", n, buf.String())
 	}
-	d.doltMaintMu.RUnlock()
+	d.doltMaintMu.Unlock()
 	if len(f.backupCalls) != 0 {
-		t.Fatalf("backup ran while a Dolt task held the lock: %v", f.backupCalls)
+		t.Fatalf("backup ran while a gc held the write side: %v", f.backupCalls)
 	}
 
-	// The held lock lifts: the backup runs and the next hold is logged on its
+	// The gc finishes: the backup runs and the next hold is logged on its
 	// first tick, not after the previous reason's gap.
 	tick(maintenanceCatchUpRetry + 5*time.Minute)
 	if len(f.backupCalls) != 2 {
-		t.Fatalf("backup calls = %v, want gt and hq once the lock lifted", f.backupCalls)
+		t.Fatalf("backup calls = %v, want gt and hq once the gc finished", f.backupCalls)
 	}
 	if why := d.catchUpDeferWhy; why != "" {
 		t.Errorf("deferral %q still remembered after the backup ran", why)

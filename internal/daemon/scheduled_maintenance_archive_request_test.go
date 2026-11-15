@@ -142,26 +142,25 @@ func TestArchiveRequestRunsArchiveOnlyAndAnswers(t *testing.T) {
 	mustNotExist(t, resultPath(update.Dir(d.config.TownRoot)), "a maintenance result")
 }
 
-// A busy town leaves the request for the next tick; a standby answers deferred
-// at once, naming the hold, and runs nothing.
-func TestArchiveRequestLeavesBusyAndAnswersStandby(t *testing.T) {
+// A busy town does not hold the archive request: the pass only reads, so it
+// answers on the tick that serves it (gt-3b4iou). A standby answers deferred at
+// once, naming the hold, and runs nothing.
+func TestArchiveRequestRunsBusyAndAnswersStandby(t *testing.T) {
 	t.Parallel()
 
-	t.Run("busy leaves the request", func(t *testing.T) {
+	t.Run("busy still runs the archive", func(t *testing.T) {
 		t.Parallel()
 		d, f, _ := archiveRequestDaemon(t, outsideRequestNow, "hq")
-		f.quietUntil = 0 // the first quiet probe finds the town busy
+		f.quietUntil = 0 // the town is busy
 		requestFile := writeArchiveRequestFile(t, d, "run-busy", outsideRequestNow)
 
 		d.runScheduledMaintenance()
 
-		if files := archiveFiles(t, d); len(files) != 0 {
-			t.Errorf("archived %v while the town was busy", files)
+		res := readArchiveAnswer(t, d)
+		if res.RunID != "run-busy" || res.Outcome != "completed" {
+			t.Errorf("result = %+v, want run-busy completed", res)
 		}
-		if _, err := os.Stat(requestFile); err != nil {
-			t.Errorf("the request is gone after a busy pass: %v", err)
-		}
-		mustNotExist(t, archiveResultPath(update.Dir(d.config.TownRoot)), "an archive result for a busy pass")
+		mustNotExist(t, requestFile, "the answered archive request")
 		if len(f.gcCalls)+len(f.backupCalls) != 0 {
 			t.Errorf("gc/backup calls = %v/%v: an archive request runs neither", f.gcCalls, f.backupCalls)
 		}

@@ -434,11 +434,10 @@ func maintenanceSlotHolders(townRoot string) ([]string, error) {
 // A --full gc is the one step that has correlated with a Dolt panic (design
 // doc, Problem), so it waits for what a restart would also wait for, and for
 // nothing else:
-//   - no hard daemon work in flight — the same hard-hold test the catch-up
-//     backup uses (catchUpWorkHold): a landing pass owns the merged-tree gate
-//     of the bead it is landing, a scheduled slings cycle is a dispatcher a cut
-//     can leave half-done, and the install lock means the binary is
-//     mid-replacement,
+//   - no hard daemon work in flight — the hard-hold test in catchUpWorkHold: a
+//     landing pass owns the merged-tree gate of the bead it is landing, a
+//     scheduled slings cycle is a dispatcher a cut can leave half-done, and the
+//     install lock means the binary is mid-replacement,
 //   - no container-gate slot or in-flight marker held by anyone (refinery gate,
 //     batch gate, polecat verification suite, review).
 //
@@ -865,18 +864,12 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 			d.recordGCDeferral(windowEnd, reason, pending)
 		}
 		// Archive first (scheduled_maintenance_archive.go): dolt_log is copied to
-		// the history archive before the gc it has to survive. A busy window
-		// defers the whole cycle, as the gc's own quiet guard does, so the backup
-		// and gc wait for the retry rather than running ahead of an unarchived
-		// database.
-		// The per-database outcomes are the archive request path's; the cycle's
-		// gc decisions need only the unarchived set.
-		archiveRes, unarchived, _ := d.maintenanceArchive(databases)
-		if archiveRes.outcome == gcOutcomeDeferred {
-			d.logger.Printf("scheduled_maintenance: cycle %s", archiveRes.outcome)
-			recordDeferral(archiveRes.reason, archiveRes.pending)
-			return
-		}
+		// the history archive before the gc it has to survive. The archive only
+		// reads, so nothing the town is doing defers it (gt-3b4iou); the gc's
+		// own quiet guard still holds for the write. The per-database
+		// outcomes are the archive request path's; the cycle's gc decisions need
+		// only the unarchived set.
+		unarchived, _ := d.maintenanceArchive(databases)
 		// Backup next (maintenance_backup.go); the gc only runs once the
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)

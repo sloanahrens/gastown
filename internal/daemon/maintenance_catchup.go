@@ -32,12 +32,13 @@ const maintenanceCatchUpRetry = 6 * time.Hour
 const maintenanceCatchUpGCAge = 8 * 24 * time.Hour
 
 // maybeCatchUpBackup takes a missed nightly backup outside the window, against a
-// local or an external Dolt server. It waits for a moment when no hard daemon
-// work is in flight and no container-gate slot is held, so it never runs beside
-// a landing gate; a working polecat — or a soft hold the next tick reruns — does
-// not block it, or a town busy with its own ticks would never catch up. It runs
-// on the gc cycle's goroutine and flag, so it cannot overlap a window run.
-// external is the tick's one gcExternal answer.
+// local or an external Dolt server. No daemon work defers it: the copy is a
+// server-side read, so a landing pass, a gate slot or a plugin run is no
+// conflict, and waiting for a quiet moment left a day-old backup waiting for
+// over a day (gt-3b4iou). maintenanceBackup itself still defers while a gc holds
+// doltMaintMu or another actor has paused Dolt. It runs on the gc cycle's
+// goroutine and flag, so it cannot overlap a window run. external is the tick's
+// one gcExternal answer.
 func (d *Daemon) maybeCatchUpBackup(now time.Time, external bool) {
 	if d.maintenanceGCRunning.Load() {
 		return
@@ -57,10 +58,6 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time, external bool) {
 		return
 	}
 	if ok && newest.Age(now) < maintenanceCatchUpAge {
-		return
-	}
-	if quiet, why := d.catchUpQuiet(); !quiet {
-		d.logCatchUpDeferral(now, why)
 		return
 	}
 	// The backup runs whether the server is local or external: the server writes
@@ -310,28 +307,4 @@ func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 		}
 		d.catchUpGCAttemptAt.Store(d.maintenance().now().UnixNano())
 	})
-}
-
-// catchUpQuiet is the catch-up's guard: no hard daemon work in flight (a
-// landing pass, a scheduled slings cycle, an install) and no
-// container-gate slot held. It names the hold it found: the deferred line is
-// the only record of why a day-old backup waited, and a bare "work in flight"
-// left the holder to be guessed from the log timeline (gt-y6ovz).
-//
-// Soft work is not a hold (gt-2m8sj): see catchUpWorkHold. The window gc's own
-// guard (maintenanceQuiet) asks this same question with the same predicate — a
-// polecat working or soft work in flight does not defer a gc of seconds either
-// (gt-mdejo) — and the two lines differ only in the wording each caller logs.
-func (d *Daemon) catchUpQuiet() (bool, string) {
-	if hold := d.catchUpWorkHold(); hold != nil {
-		return false, "daemon has work in flight (" + hold.name + ")"
-	}
-	holders, err := d.maintenance().slotHolders(d.config.TownRoot)
-	if err != nil {
-		return false, fmt.Sprintf("cannot read slot status: %v", err)
-	}
-	if len(holders) > 0 {
-		return false, "container-gate slot held by " + strings.Join(holders, ", ")
-	}
-	return true, ""
 }

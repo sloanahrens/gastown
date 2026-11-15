@@ -1510,40 +1510,36 @@ func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 	}
 }
 
-// TestMaintenanceArchiveDefersWhileTheTownIsBusy: the step asks the gc's
-// quiet-window guard and defers the whole cycle when the town is busy, so the
-// backup and gc wait for the retry instead of running ahead of an unarchived
-// database (gt-7nxj4).
-func TestMaintenanceArchiveDefersWhileTheTownIsBusy(t *testing.T) {
+// TestMaintenanceArchiveRunsWhileALandingPassIsInFlight: the step only reads,
+// so a landing pass in flight does not defer it — waiting for a quiet moment
+// left the archive unrun for days (gt-3b4iou). The gc behind it still waits for
+// the landing pass, as the write side always has.
+func TestMaintenanceArchiveRunsWhileALandingPassIsInFlight(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
-	f.quietUntil = 0 // busy on the first probe
 	d.patrolConfig = archiveConfig(t.TempDir())
+	d.maint.quiet = (*Daemon).maintenanceQuiet
+	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
+	d.landingStates.setBead("gastown", "gt-a", gcTestNow)
+	ran := false
 	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
-		t.Error("the commit read ran while the town was busy")
+		ran = true
 		return nil, nil
 	}
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
-		t.Error("the events read ran while the town was busy")
-		return archiveEvents{}, nil
-	}
+	withEventsFake(d, nil, nil, nil)
 
 	d.runScheduledMaintenance()
 
-	if !strings.Contains(logs.String(), "archive held") {
-		t.Errorf("log does not say the archive was held:\n%s", logs.String())
+	if !ran {
+		t.Fatalf("the commit read did not run while a landing pass was in flight:\n%s", logs.String())
 	}
-	if len(f.backupCalls) != 0 || len(f.gcCalls) != 0 {
-		t.Errorf("backup calls = %v, gc calls = %v; want neither while the archive is deferred", f.backupCalls, f.gcCalls)
+	if strings.Contains(logs.String(), "archive held") {
+		t.Errorf("the archive deferred behind the landing pass:\n%s", logs.String())
 	}
-	st, err := loadMaintenanceGCState(d.config.TownRoot)
-	if err != nil {
-		t.Fatalf("loading state: %v", err)
-	}
-	if st.PendingDeferral == nil || !strings.HasPrefix(st.PendingDeferral.Reason, "archive: ") {
-		t.Errorf("pending deferral = %+v, want the archive's quiet-guard reason", st.PendingDeferral)
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v, want none: the gc still waits for a landing pass", f.gcCalls)
 	}
 }
 
@@ -2400,10 +2396,10 @@ func TestArchiveLoopTakesSeveralBatchesInOneCycle(t *testing.T) {
 		return open(dsn)
 	}
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	if len(unarchived) != 0 {
+		t.Fatalf("unarchived = %v; want none", unarchived)
 	}
 	if reads != 3 {
 		t.Errorf("dolt_log read %d time(s), want 3 batches (5, 5 and the short 2)", reads)
@@ -2456,10 +2452,10 @@ func TestArchiveEventsLoopTakesSeveralBatchesInOneCycle(t *testing.T) {
 		return open(dsn)
 	}
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	if len(unarchived) != 0 {
+		t.Fatalf("unarchived = %v; want none", unarchived)
 	}
 	if reads != 3 {
 		t.Errorf("events read %d time(s), want 3 batches (5, 5 and the short 2)", reads)
@@ -2529,10 +2525,10 @@ func TestArchiveEventsLoopKeepsGoingPastTheLookbackReRead(t *testing.T) {
 		return page, nil
 	}
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	if len(unarchived) != 0 {
+		t.Fatalf("unarchived = %v; want none", unarchived)
 	}
 	if reads != 5 {
 		t.Errorf("events read %d time(s), want 5: a full page of mostly archived rows keeps the loop going", reads)
@@ -2613,10 +2609,10 @@ func TestArchiveEventsFullPageOfArchivedRowsAdvances(t *testing.T) {
 		return page, nil
 	}
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	if len(unarchived) != 0 {
+		t.Fatalf("unarchived = %v; want none", unarchived)
 	}
 	if reads < 4 {
 		t.Errorf("events read %d time(s), want at least 4: the archived pages must be read past", reads)
@@ -2680,7 +2676,7 @@ func TestArchiveEventsOneTimestampFillingAPageFailsVisibly(t *testing.T) {
 		return archiveEvents{Columns: columns, Rows: rows[:limit]}, nil // the same full page every time
 	}
 
-	_, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if !strings.Contains(logs.String(), "fill more than one page") || !strings.Contains(logs.String(), "archive_events_limit") {
 		t.Errorf("log does not name the same-timestamp page and the setting to raise:\n%s", logs.String())
@@ -2780,10 +2776,10 @@ func TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch(t *testing.T) {
 	}
 	d.maint.archiveOpenDB = open
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt", "hq"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt", "hq"})
 
-	if out.outcome != gcOutcomeCompleted || !unarchived["gt"] || !unarchived["hq"] || len(unarchived) != 2 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with both databases marked: both stopped behind", out, unarchived)
+	if !unarchived["gt"] || !unarchived["hq"] || len(unarchived) != 2 {
+		t.Fatalf("unarchived = %v; want both databases marked: both stopped behind", unarchived)
 	}
 	if reads["gt"] != 2 {
 		t.Errorf("gt read %d time(s), want 2: the deadline ends its loop after the second batch", reads["gt"])
@@ -2821,8 +2817,8 @@ func TestArchiveLoopStopsWhenNothingIsBehindOrThereIsNoProgress(t *testing.T) {
 		d.patrolConfig = archiveConfig(dir)
 		fake := withArchiveFakes(d, f, nil, nil)
 
-		if out, unarchived, _ := d.maintenanceArchive([]string{"gt"}); out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-			t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+		if unarchived, _ := d.maintenanceArchive([]string{"gt"}); len(unarchived) != 0 {
+			t.Fatalf("unarchived = %v; want none", unarchived)
 		}
 		if fake.reads != 1 {
 			t.Errorf("dolt_log read %d time(s), want 1: a short batch ends the loop", fake.reads)
@@ -2857,8 +2853,8 @@ func TestArchiveLoopStopsWhenNothingIsBehindOrThereIsNoProgress(t *testing.T) {
 			return []archiveCommit{{Hash: "h0", Committer: "c", Date: gcTestNow.Add(-time.Second), Message: "stale"}}, nil
 		}
 
-		if out, unarchived, _ := d.maintenanceArchive([]string{"gt"}); out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-			t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+		if unarchived, _ := d.maintenanceArchive([]string{"gt"}); len(unarchived) != 0 {
+			t.Fatalf("unarchived = %v; want none", unarchived)
 		}
 		if reads != 1 {
 			t.Errorf("dolt_log read %d time(s), want 1: a batch that records no progress ends the loop", reads)
@@ -2894,11 +2890,8 @@ func TestArchiveLoopStopsWhenABatchFailsMidLoop(t *testing.T) {
 		return nil, errors.New("the server went away")
 	}
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted {
-		t.Fatalf("maintenanceArchive = %v, want completed", out)
-	}
 	if reads != 2 {
 		t.Errorf("dolt_log read %d time(s), want 2: the failing batch ends the loop", reads)
 	}
@@ -2951,10 +2944,10 @@ func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 		}}, nil
 	}
 
-	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+	unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted || !unarchived["gt"] || len(unarchived) != 1 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with gt marked: it stopped behind", out, unarchived)
+	if !unarchived["gt"] || len(unarchived) != 1 {
+		t.Fatalf("unarchived = %v; want gt marked: it stopped behind", unarchived)
 	}
 	if reads != archiveTestMaxBatches {
 		t.Errorf("dolt_log read %d time(s), want the %d-batch per-cycle bound", reads, archiveTestMaxBatches)
@@ -3200,13 +3193,10 @@ func TestMaintenanceArchiveNoProgressStopLeavesDatabaseUnmarked(t *testing.T) {
 		t.Parallel()
 		d, _, _ := setup(t)
 
-		out, unarchived, outcomes := d.maintenanceArchive([]string{"gt"})
+		unarchived, outcomes := d.maintenanceArchive([]string{"gt"})
 
 		if got := outcomes["gt"].commits.stop; got != archiveStopNoProgress {
 			t.Fatalf("commit stop = %v, want the no-progress stop: the fixture must be a full batch that cannot advance", got)
-		}
-		if out.outcome != gcOutcomeCompleted {
-			t.Errorf("outcome = %v, want completed: a no-progress stop is not a failure", out.outcome)
 		}
 		if len(unarchived) != 0 {
 			t.Errorf("unarchived = %v, want none: a no-progress stop leaves nothing known behind", unarchived)
@@ -3268,11 +3258,8 @@ func TestMaintenanceArchiveStopRaisesNoAttentionItem(t *testing.T) {
 			return commits, nil
 		}
 
-		out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+		unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-		if out.outcome != gcOutcomeCompleted {
-			t.Errorf("outcome = %v, want completed: a stop is not a failure", out.outcome)
-		}
 		if !unarchived["gt"] {
 			t.Errorf("unarchived = %v, want gt marked: it stopped behind", unarchived)
 		}
@@ -3296,11 +3283,8 @@ func TestMaintenanceArchiveStopRaisesNoAttentionItem(t *testing.T) {
 			return nil, errors.New("the server went away")
 		}
 
-		out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+		unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-		if out.outcome != gcOutcomeCompleted {
-			t.Errorf("outcome = %v, want completed: an export failure does not turn the cycle failed", out.outcome)
-		}
 		if !unarchived["gt"] {
 			t.Errorf("unarchived = %v, want gt marked: its export failed", unarchived)
 		}
