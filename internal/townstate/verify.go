@@ -163,11 +163,13 @@ const (
 )
 
 // rigMarkers are the paths whose presence marks a top-level directory as a
-// rig: its registry record, its bare repository and its canonical clone.
+// rig: its own config.json and its bare repository. The registry names a rig
+// too, before these are consulted. A mayor/rig clone marks nothing: it is the
+// landing worker's checkout inside a rig, and a directory holding only one is
+// no rig.
 var rigMarkers = []string{
 	"config.json",
 	constants.DirRepoGit,
-	constants.DirMayor + "/" + constants.DirRig,
 }
 
 // townInputs names the rigs and birds the town has, from the rig registry and

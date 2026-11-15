@@ -51,8 +51,8 @@ func registryTown() fstest.MapFS {
 }
 
 // rigTreeWithMarker is a rig the registry does not name, with no config.json.
-// Its bare repository and its canonical clone mark it, and its crew and
-// polecats are covered by the rig's own rows.
+// Its bare repository marks it, its canonical clone is covered by the rig's own
+// row, and its crew and polecats are covered by the rig's rows too.
 func rigTreeWithMarker() fstest.MapFS {
 	return fstest.MapFS{
 		"mayor/town.json":        {Data: []byte("{}")},
@@ -189,18 +189,6 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 			want: "stat tango/.repo.git",
 		},
 		{
-			name: "rig marker canonical clone unreadable",
-			fsys: failingFS{
-				FS: fstest.MapFS{
-					"mayor/town.json":        {Data: []byte("{}")},
-					"tango/mayor/rig/go.mod": {Data: []byte("x")},
-				},
-				statErr: map[string]error{"tango/mayor/rig": boom},
-			},
-			m:    Default(),
-			want: "stat tango/mayor/rig",
-		},
-		{
 			name: "machine file is null",
 			fsys: fstest.MapFS{"mayor/town.json": {Data: []byte("null")}},
 			m:    Default(),
@@ -230,9 +218,11 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
-// TestVerifyNamesEveryRig drives a rig the town has but no config.json marks:
-// one the registry names, and one a bare repository marks. Their manifest rows
-// expand and their trees are classified, so verify reports nothing for them.
+// TestVerifyNamesEveryRig drives the ways a rig is named: the registry (on
+// either layout) needs no marker, and a directory the registry does not name is
+// a rig only when its own config.json or its bare repository marks it. Their
+// manifest rows expand and their trees are classified, so verify reports
+// nothing for them.
 func TestVerifyNamesEveryRig(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -241,6 +231,12 @@ func TestVerifyNamesEveryRig(t *testing.T) {
 	}{
 		{name: "rig named by the registry, no config.json", fsys: registryTown()},
 		{name: "rig marked by a bare repository, not in the registry", fsys: rigTreeWithMarker()},
+		{name: "rig marked by its config.json, not in the registry", fsys: fstest.MapFS{
+			"mayor/town.json":        {Data: []byte("{}")},
+			"tango/config.json":      {Data: []byte("{}")},
+			"tango/crew/echo/a.md":   {Data: []byte("x")},
+			"tango/polecats/bo/b.go": {Data: []byte("x")},
+		}},
 		{name: "rig named only by mayor/rigs.json on the five-file layout", fsys: fstest.MapFS{
 			"mayor/town.json":              {Data: []byte("{}")},
 			"mayor/rigs.json":              {Data: []byte(`{"version":1,"rigs":{"hm":{"git_url":"file:///srv/hm"}}}`)},
@@ -263,9 +259,9 @@ func TestVerifyNamesEveryRig(t *testing.T) {
 }
 
 // TestVerifyNamesARigByItsOnlyMarker drives a rig that one marker alone makes a
-// rig: a bare repository, or a canonical clone. Neither has a config.json or a
-// registry record, so the marker is the only thing that names the rig, and its
-// crew and polecats trees fall under the rig's own rows.
+// rig: its bare repository, or its config.json. Neither has a registry record,
+// so the marker is the only thing that names the rig, and its crew and polecats
+// trees fall under the rig's own rows.
 func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -278,9 +274,9 @@ func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
 			"tango/crew/echo/a.md":   {Data: []byte("x")},
 			"tango/polecats/bo/b.go": {Data: []byte("x")},
 		}},
-		{name: "mayor/rig only", fsys: fstest.MapFS{
+		{name: "config.json only", fsys: fstest.MapFS{
 			"mayor/town.json":        {Data: []byte("{}")},
-			"tango/mayor/rig/go.mod": {Data: []byte("x")},
+			"tango/config.json":      {Data: []byte("{}")},
 			"tango/crew/echo/a.md":   {Data: []byte("x")},
 			"tango/polecats/bo/b.go": {Data: []byte("x")},
 		}},
@@ -294,6 +290,77 @@ func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
 			}
 			if len(problems) != 0 {
 				t.Errorf("Verify reported a rig named by its only marker: %v", problems)
+			}
+		})
+	}
+}
+
+// TestVerifyDoesNotNameALeftoverCloneAsARig holds the marker set to the two
+// markers that name a rig on their own: config.json and the bare repository. A
+// top-level directory holding only a mayor/rig clone is no rig, so no rig row
+// expands for it and its tree is reported as one unclassified directory. A stat
+// failure on the clone is never met in that case, since the clone is not a
+// marker and verify never stats it.
+func TestVerifyDoesNotNameALeftoverCloneAsARig(t *testing.T) {
+	t.Parallel()
+	noEntry := []Problem{{
+		Path:   "tango",
+		Reason: "no manifest entry; classify it daemon, session or shared",
+	}}
+	cases := []struct {
+		name string
+		fsys fs.FS
+		want []Problem
+	}{
+		{
+			name: "a mayor/rig clone alone is not a rig",
+			fsys: fstest.MapFS{
+				"mayor/town.json":        {Data: []byte("{}")},
+				"tango/mayor/rig/go.mod": {Data: []byte("x")},
+				"tango/crew/echo/a.md":   {Data: []byte("x")},
+				"tango/polecats/bo/b.go": {Data: []byte("x")},
+			},
+			want: noEntry,
+		},
+		{
+			name: "a clone verify cannot stat is still no rig marker",
+			fsys: failingFS{
+				FS: fstest.MapFS{
+					"mayor/town.json":        {Data: []byte("{}")},
+					"tango/mayor/rig/go.mod": {Data: []byte("x")},
+				},
+				statErr: map[string]error{"tango/mayor/rig": errors.New("boom")},
+			},
+			want: noEntry,
+		},
+		{
+			name: "a config.json alone is a rig",
+			fsys: fstest.MapFS{
+				"mayor/town.json":        {Data: []byte("{}")},
+				"tango/config.json":      {Data: []byte("{}")},
+				"tango/crew/echo/a.md":   {Data: []byte("x")},
+				"tango/polecats/bo/b.go": {Data: []byte("x")},
+			},
+		},
+		{
+			name: "a bare repository alone is a rig",
+			fsys: fstest.MapFS{
+				"mayor/town.json":        {Data: []byte("{}")},
+				"tango/.repo.git/HEAD":   {Data: []byte("ref: refs/heads/main\n")},
+				"tango/crew/echo/a.md":   {Data: []byte("x")},
+				"tango/polecats/bo/b.go": {Data: []byte("x")},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			problems, err := Verify(tc.fsys, Default(), time.Now())
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if !slices.Equal(problems, tc.want) {
+				t.Errorf("Verify reported %v, want exactly %v", problems, tc.want)
 			}
 		})
 	}
