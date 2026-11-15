@@ -679,3 +679,132 @@ func TestSandboxSourceTickNoSeats(t *testing.T) {
 		t.Errorf("the seam was called for %v, want no exec", runner.calls)
 	}
 }
+
+// seatReadsUsage is an exec answer for a seat whose cgroup has used usec
+// microseconds of CPU.
+func seatReadsUsage(usec int64) func(context.Context, string) (string, error) {
+	return func(context.Context, string) (string, error) {
+		return seatRead(seatCPUText(usec)), nil
+	}
+}
+
+// seatTickOneRow runs one tick and returns its only row, failing the test when
+// the tick wrote no row or skipped a seat.
+func seatTickOneRow(t *testing.T, source *SeatSource) Row {
+	t.Helper()
+	tick, err := source.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(tick.Skipped) != 0 {
+		t.Fatalf("skipped %+v, want no skip", tick.Skipped)
+	}
+	if len(tick.Rows) != 1 {
+		t.Fatalf("%d rows, want one: %+v", len(tick.Rows), tick.Rows)
+	}
+	return tick.Rows[0]
+}
+
+// TestSandboxSourceTickCPUDelta is the bead's acceptance: a seat's first tick
+// reports null cpu_pct, and its second, a minute on, reports the percent of one
+// core its usage_usec grew by, measured against the first tick's reading
+// (gt-bru6l7).
+func TestSandboxSourceTickCPUDelta(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast"})
+	runner := &fakeSeatExec{read: seatReadsUsage(1000000)}
+	clock := &fakeClock{now: seatTickNow()}
+	source := NewSeatSource(townRoot, runner, clock, time.Second)
+
+	first := seatTickOneRow(t, source)
+	if first.CPUPct != nil || first.IntervalS != 0 {
+		t.Errorf("the first tick: cpu_pct %s, interval_s %v, want null and 0", floatText(first.CPUPct), first.IntervalS)
+	}
+
+	clock.advance(60 * time.Second)
+	runner.read = seatReadsUsage(1750000)
+	second := seatTickOneRow(t, source)
+	if second.CPUPct == nil || *second.CPUPct != 1.25 {
+		t.Errorf("the second tick: cpu_pct %s, want 1.25", floatText(second.CPUPct))
+	}
+	if second.IntervalS != 60 {
+		t.Errorf("the second tick: interval_s %v, want 60", second.IntervalS)
+	}
+}
+
+// TestSandboxSourceTickCPUKeepsBaseline shows a seat that fails to read keeps
+// the reading its next row is measured from: a failed exec and a read that does
+// not parse both skip the seat, and the next good row's percent covers the
+// whole gap since the last row that wrote (gt-bru6l7).
+func TestSandboxSourceTickCPUKeepsBaseline(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast"})
+	runner := &fakeSeatExec{read: seatReadsUsage(1000000)}
+	clock := &fakeClock{now: seatTickNow()}
+	source := NewSeatSource(townRoot, runner, clock, time.Second)
+	seatTickOneRow(t, source)
+
+	for _, read := range []struct {
+		name string
+		read func(context.Context, string) (string, error)
+	}{
+		{"an exec that fails", func(context.Context, string) (string, error) { return "", errors.New("exec refused") }},
+		{"a read that does not parse", func(context.Context, string) (string, error) { return "not a cgroup read", nil }},
+	} {
+		clock.advance(60 * time.Second)
+		runner.read = read.read
+		tick, err := source.Tick(context.Background())
+		if err != nil {
+			t.Fatalf("%s: tick: %v", read.name, err)
+		}
+		if len(tick.Rows) != 0 || len(tick.Skipped) != 1 {
+			t.Errorf("%s: tick = %+v, want one skip and no row", read.name, tick)
+		}
+	}
+
+	clock.advance(60 * time.Second)
+	runner.read = seatReadsUsage(1600000)
+	row := seatTickOneRow(t, source)
+	if row.IntervalS != 180 {
+		t.Errorf("interval_s = %v, want 180: measured from the first tick", row.IntervalS)
+	}
+	if row.CPUPct == nil || *row.CPUPct != 0.33 {
+		t.Errorf("cpu_pct = %s, want 0.33: 0.6 s of CPU over 180 s", floatText(row.CPUPct))
+	}
+}
+
+// TestSandboxSourceTickCPUSeatGone shows a seat whose record is gone loses its
+// reading, so a seat that comes back under the same name starts from a first
+// sample instead of from the old cgroup's counter (gt-bru6l7).
+func TestSandboxSourceTickCPUSeatGone(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast"})
+	runner := &fakeSeatExec{read: seatReadsUsage(1000000)}
+	clock := &fakeClock{now: seatTickNow()}
+	source := NewSeatSource(townRoot, runner, clock, time.Second)
+	seatTickOneRow(t, source)
+
+	record := filepath.Join(session.SandboxRegistryDir(townRoot), "mango-toast.json")
+	if err := os.Remove(record); err != nil {
+		t.Fatalf("removing the seat's record: %v", err)
+	}
+	clock.advance(60 * time.Second)
+	tick, err := source.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick without the seat: %v", err)
+	}
+	if len(tick.Rows) != 0 {
+		t.Fatalf("rows %+v for a seat with no record, want none", tick.Rows)
+	}
+
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast"})
+	clock.advance(60 * time.Second)
+	runner.read = seatReadsUsage(2000000)
+	row := seatTickOneRow(t, source)
+	if row.CPUPct != nil || row.IntervalS != 0 {
+		t.Errorf("the returning seat: cpu_pct %s, interval_s %v, want a first sample: null and 0", floatText(row.CPUPct), row.IntervalS)
+	}
+}
