@@ -79,7 +79,7 @@ func scriptedStopBackend(t *testing.T, replies map[string][]gitReply) (*openshel
 // carries a line of the remote's own, so a test sees both streams.
 var refusedPushReply = gitReply{
 	stdout: "remote: hook says the branch is behind",
-	stderr: "To http://control-plane.openshell.svc.cluster.local:3000/sloan/gastown.git\n ! [rejected]        b -> b (non-fast-forward)\nerror: failed to push some refs",
+	stderr: "To http://control-plane.openshell.svc.cluster.local:3000/gastown/gastown.git\n ! [rejected]        b -> b (non-fast-forward)\nerror: failed to push some refs",
 	err:    errors.New("exit status 1"),
 }
 

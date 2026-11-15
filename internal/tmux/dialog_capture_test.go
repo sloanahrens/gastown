@@ -10,7 +10,8 @@ import (
 // pane captured from a real Claude Code session parked on its own
 // AskUserQuestion dialog (gt-163k8).
 //
-// The fixture is the verbatim output of:
+// The fixture is the verbatim output of the capture below, with the session's
+// temporary directory in the footer replaced by a neutral one:
 //
 //	tmux capture-pane -p -t <session> -S -45
 //

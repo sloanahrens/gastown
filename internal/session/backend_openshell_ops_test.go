@@ -120,7 +120,7 @@ func TestOpenShellOpsSessionExistsMatrix(t *testing.T) {
 
 func TestOpenShellOpsProgressSampleReadsTheTranscriptThroughExec(t *testing.T) {
 	t.Parallel()
-	const path = "/sandbox/.claude/projects/-sandbox-gt-gastown/9f2.jsonl"
+	const path = sandboxProjectsDir + "/-sandbox-gt-gastown/9f2.jsonl"
 	// The sample reads the transcript. The gateway is not asked for the phase
 	// too: this sandbox's tmux answered, which is proof enough that it runs
 	// (gt-tj446, om f9ae48011e3e).
@@ -210,8 +210,8 @@ func TestOpenShellOpsParseTranscriptStat(t *testing.T) {
 		wantSize int64
 		wantErr  bool
 	}{
-		{name: "one line", out: "1760000123 40960 /sandbox/.claude/projects/p/a.jsonl\n", wantPath: "/sandbox/.claude/projects/p/a.jsonl", wantTime: time.Unix(1760000123, 0), wantSize: 40960},
-		{name: "path with a space", out: "5 6 /sandbox/.claude/projects/my proj/a.jsonl", wantPath: "/sandbox/.claude/projects/my proj/a.jsonl", wantTime: time.Unix(5, 0), wantSize: 6},
+		{name: "one line", out: "1760000123 40960 " + sandboxProjectsDir + "/p/a.jsonl\n", wantPath: sandboxProjectsDir + "/p/a.jsonl", wantTime: time.Unix(1760000123, 0), wantSize: 40960},
+		{name: "path with a space", out: "5 6 " + sandboxProjectsDir + "/my proj/a.jsonl", wantPath: sandboxProjectsDir + "/my proj/a.jsonl", wantTime: time.Unix(5, 0), wantSize: 6},
 		{name: "empty means none", out: ""},
 		{name: "blank means none", out: " \n"},
 		{name: "missing path", out: "5 6", wantErr: true},

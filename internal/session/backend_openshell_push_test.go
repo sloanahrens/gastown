@@ -115,7 +115,7 @@ func (f *fakePushGit) Cherry(upstream, head string) (string, error) {
 func TestPushOrAcceptRemoteAhead(t *testing.T) {
 	t.Parallel()
 	// git's refusal for a non-fast-forward push, over the lines git prints.
-	rejected := errors.New("To http://forgejo:3000/sloan/gastown.git\n ! [rejected]        b -> b (non-fast-forward)\nerror: failed to push some refs\nhint: Updates were rejected because the tip of your current branch is behind")
+	rejected := errors.New("To http://forgejo:3000/gastown/gastown.git\n ! [rejected]        b -> b (non-fast-forward)\nerror: failed to push some refs\nhint: Updates were rejected because the tip of your current branch is behind")
 	retryRefused := errors.New(" ! [rejected]        b -> b (fetch first)")
 	unreachable := errors.New("fatal: unable to access remote: Could not resolve host")
 	revs := map[string]string{"refs/heads/b": "aaa", "refs/remotes/origin/b": "bbb"}
