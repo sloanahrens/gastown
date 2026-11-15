@@ -13,9 +13,11 @@ import (
 )
 
 // seatGitForLogTest gives d the git handle a seat of the named kind gets: a host
-// seat's handle is opened for its host worktree, and a sandbox seat's handle is
-// a labeledDaemonGit carrying the label overrunSandboxGit puts on the handle it
-// builds (the routing test below proves the real sandbox seat gets that label).
+// seat's stub is opened for its host worktree and labeled by overrunSeatGit, and
+// a sandbox seat's stub is labeled by labelOverrunSandboxGit, the same wrapper
+// overrunSandboxGit puts on the in-sandbox handle (the routing test
+// TestOverrunGuardLogSeatGitLabelNamesTheWorktreeItPicked proves the real
+// sandbox seat gets that label).
 func seatGitForLogTest(t *testing.T, d *Daemon, sandbox bool, stub *pushStubGit) {
 	t.Helper()
 	if !sandbox {
@@ -24,7 +26,7 @@ func seatGitForLogTest(t *testing.T, d *Daemon, sandbox bool, stub *pushStubGit)
 		return
 	}
 	d.overrunSeatGitFn = func(overrunSeat) (daemonGit, error) {
-		return labeledDaemonGit{daemonGit: stub, label: overrunSandboxCloneLabel}, nil
+		return labelOverrunSandboxGit(stub), nil
 	}
 }
 
@@ -99,11 +101,45 @@ func TestOverrunGuardLog_OriginDoesNotHoldNamesTheWorktreeExamined(t *testing.T)
 	}
 }
 
-// TestOverrunSeatGit_LabelNamesTheWorktreeItPicked pins where the label comes
-// from: the same seam that picks the handle. A sandbox seat's handle is the
-// in-sandbox one and is labeled the sandbox clone; a host seat's handle is the
-// host worktree (gt-1mrhlg).
-func TestOverrunSeatGit_LabelNamesTheWorktreeItPicked(t *testing.T) {
+// TestOverrunGuardLogUnlabeledHandleIsNotTheHostWorktree: a handle that carries
+// no label is named as unlabeled, never as the host worktree it may not be
+// (gt-0bt513).
+func TestOverrunGuardLogUnlabeledHandleIsNotTheHostWorktree(t *testing.T) {
+	t.Parallel()
+	const want = "unlabeled worktree"
+	if got := overrunWorktreeLabel(&pushStubGit{}); got != want {
+		t.Errorf("label of an unlabeled handle = %q, want %q", got, want)
+	}
+}
+
+// TestOverrunGuardLogLabeledHandleRefusesAGitDirItCannotRead: a labeled handle
+// over a handle that cannot read its git directory refuses with an error, never
+// an empty directory a caller would act on (gt-0bt513).
+func TestOverrunGuardLogLabeledHandleRefusesAGitDirItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		label func(daemonGit) daemonGit
+	}{
+		{name: "host handle", label: labelOverrunHostGit},
+		{name: "sandbox handle", label: labelOverrunSandboxGit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, err := hostGitDir(tc.label(&pushStubGit{}))
+			if err == nil {
+				t.Errorf("git directory = %q, want an error for a handle that cannot read its git directory", dir)
+			}
+		})
+	}
+}
+
+// TestOverrunGuardLogSeatGitLabelNamesTheWorktreeItPicked pins where the label
+// comes from: the same seam that picks the handle. A sandbox seat's handle is
+// the in-sandbox one and is labeled the sandbox clone; a host seat's handle is
+// the host worktree (gt-1mrhlg). The name carries OverrunGuardLog so the stated
+// gate (-run OverrunGuardLog) selects it (gt-0bt513).
+func TestOverrunGuardLogSeatGitLabelNamesTheWorktreeItPicked(t *testing.T) {
 	t.Parallel()
 	t.Run("host seat", func(t *testing.T) {
 		t.Parallel()
@@ -164,10 +200,11 @@ func TestOverrunGuardLog_LinesNamingATipOrWorktreeNameTheWorktree(t *testing.T) 
 	}
 }
 
-// TestOverrunLogLineScannerFlagsAnUnlabeledLine pins the scanner on a planted
+// TestOverrunGuardLogScannerFlagsAnUnlabeledLine pins the scanner on a planted
 // file: a line naming a tip or a worktree without the label is a violation, and
-// a labeled one, a line naming neither, and an exempt one are not.
-func TestOverrunLogLineScannerFlagsAnUnlabeledLine(t *testing.T) {
+// a labeled one, a line naming neither, and an exempt one are not. The name
+// carries OverrunGuardLog so the stated gate selects it (gt-0bt513).
+func TestOverrunGuardLogScannerFlagsAnUnlabeledLine(t *testing.T) {
 	t.Parallel()
 	const src = `package daemon
 
