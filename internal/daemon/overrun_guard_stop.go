@@ -722,7 +722,13 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	}
 	s.stopSession = d.overrunStopSession
 	s.saveWork = d.overrunSaveWork
-	s.removeSandbox = func(seat overrunSeat) error { return d.overrunRemoveSandbox(seat, nil, nil) }
+	// The linked hooks are passed in rather than left nil: the sandbox step runs
+	// the push itself so it can read what the push answered (gt-lahjz4), and a
+	// step with no pusher refuses, so nil would leave every sandbox seat's stop
+	// held.
+	s.removeSandbox = func(seat overrunSeat) error {
+		return d.overrunRemoveSandbox(seat, session.SandboxPusher, session.SandboxDeleter)
+	}
 	s.submittedNow = d.overrunSubmittedNow
 	s.checkpoint = func(seat overrunSeat) error {
 		polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
@@ -1410,6 +1416,14 @@ func pushFailureReason(err error) string {
 	if errors.As(err, &diverged) {
 		return diverged.reason()
 	}
+	return oneLineReason(err)
+}
+
+// oneLineReason is an error's text as one bounded line, for a log line, an
+// escalation or a saved note. A git error carries the command's captured
+// output, which can run to many lines, so the text is collapsed to one line and
+// cut at a length a reader can take in.
+func oneLineReason(err error) string {
 	const maxLen = 300
 	msg := strings.Join(strings.Fields(err.Error()), " ")
 	if len(msg) > maxLen {
@@ -1570,12 +1584,15 @@ func overrunSandboxDivergedNote(diverged *session.BranchDivergedError, who strin
 var errSandboxRecordCorrupt = errors.New("sandbox record is corrupt")
 
 // overrunRemoveSandbox removes the sandbox a stopped seat ran in, pushing its
-// commits first (polecat.RemoveStoppedSandbox). pusher and deleter nil are the
-// linked openshell hooks. No record found means nothing to remove and the stop
-// proceeds: a host seat has no record. A record that cannot be read holds the
-// stop, as a refused push does, and so does a lookup that cannot tell which
-// record is the seat's. A refused step names the sandbox in its error, which the
-// stop logs.
+// commits first (polecat.RemoveStoppedSandbox). The pusher is the caller's: the
+// production seam passes the linked openshell hook, because this step runs the
+// push itself to read its answer (below). A nil pusher is refused with the
+// sandbox kept, since the answer would be unknown. A nil deleter is the linked
+// hook, as the removal resolves it. No record found means nothing to remove and
+// the stop proceeds: a host seat has no record. A record that cannot be read
+// holds the stop, as a refused push does, and so does a lookup that cannot tell
+// which record is the seat's. A refused step names the sandbox in its error,
+// which the stop logs.
 //
 // The seat's record is read once and passed down, so the push and the delete
 // act on the record the stop classified rather than one read again after it.
@@ -1601,18 +1618,13 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 		}
 		sb.Record = rec
 	}
-	push := pusher
-	if push == nil {
-		push = session.SandboxPusher
+	// A step with no pusher cannot read what the push answered, and the removal
+	// would resolve the nil into a push nothing here sees, so it refuses instead.
+	if pusher == nil {
+		return fmt.Errorf("sandbox %s: no sandbox pusher was given, so whether its commits reached origin is unknown; keeping its sandbox", sb.Session)
 	}
-	// A nil push stays nil: the removal refuses it as before, so no origin read
-	// is made for a sandbox whose commits nothing in this binary can push.
-	var pushErr error
-	var replay func(townRoot string, rec session.SandboxRecord) error
-	if push != nil {
-		pushErr = push(d.config.TownRoot, sb.Record)
-		replay = func(string, session.SandboxRecord) error { return pushErr }
-	}
+	pushErr := pusher(d.config.TownRoot, sb.Record)
+	replay := func(string, session.SandboxRecord) error { return pushErr }
 	if errors.Is(pushErr, session.ErrNothingToPush) {
 		if err := d.overrunGoneSandboxOrigin(seat, sb.Session, sb.Record); err != nil {
 			return fmt.Errorf("sandbox %s: %w", sb.Session, err)
@@ -1633,11 +1645,12 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 // stop proceed as it did before this rule (the absent branch's warning is
 // gt-mp9zrg). A read that fails is different: the answer is unknown, the seat's
 // commits may be nowhere, and a hand-back would lose them without a trace. So
-// the stop logs the WARNING with the error, raises the escalation the attention
-// queue already raises for the overseer (no new item kind), and returns the
-// error, which keeps the sandbox's record and holds the stop for the next tick
-// (gt-lahjz4). A record naming no branch and a worktree that cannot be resolved
-// are the same unknown answer.
+// the stop logs the WARNING with a bounded one-line reason, raises the
+// escalation the attention queue already raises for the overseer (no new item
+// kind), and returns an error naming the unknown answer, which keeps the
+// sandbox's record and holds the stop for the next tick (gt-lahjz4). A record
+// naming no branch and a worktree that cannot be resolved are the same unknown
+// answer.
 func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, rec session.SandboxRecord) error {
 	who := seat.Rig + "/" + seat.Polecat
 	branch := seat.Branch
@@ -1659,14 +1672,18 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 	if readErr == nil {
 		return nil
 	}
-	d.logger.Printf("overrun_guard: WARNING: %s: sandbox %s is gone and origin could not be read for branch %s, so its work may be nowhere: %v; the bead stays with the seat and the stop retries",
-		who, sessionName, branch, readErr)
-	message := fmt.Sprintf("the overrun stop of %s on %s found its sandbox %s gone and could not read origin for branch %s: %v. The seat's commits may have gone with the sandbox; the bead is not handed back, and the stop retries.",
-		who, seat.Bead, sessionName, branch, readErr)
+	// The error's text is a git error's, which carries the command's output:
+	// the log line, the escalation and the error the stop logs again each get
+	// one bounded line of it, never the whole capture.
+	reason := oneLineReason(readErr)
+	d.logger.Printf("overrun_guard: WARNING: %s: sandbox %s is gone and origin could not be read for branch %s, so its work may be nowhere: %s; the bead stays with the seat and the stop retries",
+		who, sessionName, branch, reason)
+	message := fmt.Sprintf("the overrun stop of %s on %s found its sandbox %s gone and could not read origin for branch %s: %s. The seat's commits may have gone with the sandbox; the bead is not handed back, and the stop retries.",
+		who, seat.Bead, sessionName, branch, reason)
 	if err := d.escalateAlertSeverity("MEDIUM", "overrun-sandbox-gone:"+who+":"+seat.Bead, overrunActor, message); err != nil {
-		d.logger.Printf("overrun_guard: WARNING: %s: the sandbox-gone item for %s was not raised: %v", who, seat.Bead, err)
+		d.logger.Printf("overrun_guard: WARNING: %s: the sandbox-gone item for %s was not raised: %s", who, seat.Bead, oneLineReason(err))
 	}
-	return fmt.Errorf("sandbox %s is gone and origin could not be read for branch %s: %w", sessionName, branch, readErr)
+	return fmt.Errorf("sandbox %s is gone and origin could not be read for branch %s: %s", sessionName, branch, reason)
 }
 
 // overrunSandbox is the sandbox of a seat as the stop's lookup finds it.

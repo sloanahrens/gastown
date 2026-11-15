@@ -801,6 +801,34 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 	}
 }
 
+// A sandbox step with no pusher refuses and keeps the sandbox: whether its
+// commits reached origin is then unknown, and the removal's own resolution of a
+// nil pusher would make a push whose answer this step never reads (gt-lahjz4).
+func TestOverrunSandboxGoneNoPusherRefusesAndKeepsTheSandbox(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	d.openGitFn = func(dir string) daemonGit {
+		t.Errorf("the stop read origin at %q for a sandbox it could not push", dir)
+		return &pushStubGit{}
+	}
+	deleted := 0
+	err := d.overrunRemoveSandbox(stopSeat, nil, func(string, session.SandboxRecord) error {
+		deleted++
+		return nil
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "no sandbox pusher") {
+		t.Fatalf("overrunRemoveSandbox = %v, want a refusal naming the missing pusher", err)
+	}
+	if deleted != 0 {
+		t.Error("the sandbox was deleted with no pusher to tell whether its commits reached origin")
+	}
+	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok {
+		t.Error("the sandbox record was removed by a step that refused")
+	}
+}
+
 // The stop reads the sandbox record once, and the push and the delete act on
 // the record it read: a second read would see the record on disk, which the
 // counting reader below does not return.

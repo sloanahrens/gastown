@@ -12,8 +12,8 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
-// The test names in this file carry OverrunSandboxGoneError so the bead's
-// stated gate (-run OverrunSandboxGoneError) selects them.
+// The bead's stated gate is -run OverrunSandboxGone, and a test named for this
+// rule carries that string so the gate selects it.
 
 // overrunGoneClone is the clone directory the sandbox-gone fixture's record
 // names: absolute, with no "..", so only the sandbox's answer can refuse it.
@@ -321,5 +321,84 @@ func TestOverrunSandboxGoneOriginReadWithNoBranchKeepsTheBead(t *testing.T) {
 	}
 	if raised := notified.Escalations(); len(raised) != 1 {
 		t.Errorf("escalations = %+v, want one for the unknown answer", raised)
+	}
+}
+
+// A seat whose worktree does not resolve leaves the stop with nowhere to ask
+// origin from, which is the same unknown answer as a read that fails: the stop
+// warns, raises the item and keeps the record instead of reading silence as an
+// absent branch (gt-lahjz4).
+func TestOverrunSandboxGoneOriginUnresolvedWorktreeKeepsTheBead(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	// No host worktree is seeded under the town root, so the seat's worktree
+	// does not resolve and the stop has no directory to read origin from.
+	d.openGitFn = func(dir string) daemonGit {
+		t.Errorf("the stop read origin from %q for a seat whose worktree did not resolve", dir)
+		return &pushStubGit{}
+	}
+	notified := notifyfake.New()
+	d.notifier = notified
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+
+	if deleted != 0 {
+		t.Errorf("the sandbox record was removed for a seat the stop could not place")
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("the bead was handed back with no origin read: %q", f.handedBack)
+	}
+	if !strings.Contains(buf.String(), "could not be read for branch "+stopSeat.Branch) {
+		t.Errorf("the log does not name the branch the stop could not read origin for:\n%s", buf.String())
+	}
+	if raised := notified.Escalations(); len(raised) != 1 {
+		t.Errorf("escalations = %+v, want one for the unknown answer", raised)
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok || err != nil {
+		t.Errorf("the sandbox record is gone (ok %v, err %v); the stop needs it to retry", ok, err)
+	}
+}
+
+// The origin read's error is a git error, which carries the command's captured
+// output. The stop's WARNING, its escalation and the error it returns each get
+// one bounded line of it, never the whole capture (gt-lahjz4).
+func TestOverrunSandboxGoneOriginReadErrorIsBounded(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	const tail = "captured-output-tail"
+	readErr := errors.New("git ls-remote failed\n" + strings.Repeat("x", 400) + "\n" + tail)
+	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: readErr} }
+	notified := notifyfake.New()
+	d.notifier = notified
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+
+	if !strings.Contains(buf.String(), "git ls-remote failed") {
+		t.Errorf("the log does not name the read that failed:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), tail) {
+		t.Errorf("the log carries the whole capture; the reason must be bounded:\n%s", buf.String())
+	}
+	raised := notified.Escalations()
+	if len(raised) != 1 {
+		t.Fatalf("escalations = %+v, want one for the unknown answer", raised)
+	}
+	reason := raised[0].Escalation.Reason
+	if !strings.Contains(reason, "git ls-remote failed") {
+		t.Errorf("escalation reason %q does not name the read that failed", reason)
+	}
+	if strings.Contains(reason, tail) {
+		t.Errorf("escalation reason carries the whole capture; it must be bounded: %q", reason)
 	}
 }
