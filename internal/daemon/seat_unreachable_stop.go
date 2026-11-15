@@ -51,6 +51,13 @@ type seatUnreachableStopSeams struct {
 	// and names that branch. Required: a release that cannot tell where the work
 	// is must not delete the seat's sandbox.
 	originHolds func(seat overrunSeat) (branch string, held bool, err error)
+	// sandboxOnOrigin reports whether every commit the seat's sandbox clone holds
+	// is on origin's tip of the branch, read from inside the sandbox. Required: a
+	// branch of that name on origin says nothing about the commits beyond its tip,
+	// so a sandbox is deleted only on this proof. A seat with no sandbox has
+	// nothing to lose and answers true; a sandbox that cannot be read, or whose
+	// clone is ahead of origin, answers false (gt-35ihg5).
+	sandboxOnOrigin func(seat overrunSeat, branch string) (bool, error)
 	// releaseSandbox deletes the gateway sandbox the seat ran in and drops its
 	// record in one step. Required: an object nobody deleted keeps the seat name
 	// out of the dispatcher's draw until a person removes it.
@@ -93,7 +100,8 @@ func (d *Daemon) stopSeamsForUnreachableSeats(s overrunSeams) seatUnreachableSto
 			return agentpause.Pause(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat,
 				seatUnreachablePauseReason, seatUnreachableActor, "")
 		},
-		originHolds: d.seatUnreachableOriginHolds,
+		originHolds:     d.seatUnreachableOriginHolds,
+		sandboxOnOrigin: d.seatUnreachableSandboxOnOrigin,
 		releaseSandbox: func(seat overrunSeat) error {
 			return d.seatUnreachableReleaseSandbox(seat, session.SandboxDeleter)
 		},
@@ -182,6 +190,46 @@ func (d *Daemon) seatUnreachableOriginHolds(seat overrunSeat) (string, bool, err
 		return branch, false, err
 	}
 	return branch, held, nil
+}
+
+// seatUnreachableSandboxOnOrigin proves, from inside the sandbox, that origin's
+// tip of branch holds every commit the seat's clone does: it fetches the branch
+// there and asks whether the clone's HEAD is an ancestor of what it fetched. A
+// seat with no sandbox record has nothing to lose and answers true. Any failure
+// to run either call, including a clone that is ahead (merge-base exits 1), is
+// an unproven answer, never a proof: the caller keeps the sandbox (gt-35ihg5).
+func (d *Daemon) seatUnreachableSandboxOnOrigin(seat overrunSeat, branch string) (bool, error) {
+	sb, err := d.overrunSandboxSession(seat)
+	if err != nil {
+		return false, err
+	}
+	if sb.Session == "" {
+		return true, nil
+	}
+	rec, sandboxed := sb.Record, sb.Read
+	if !sb.Read {
+		rec, sandboxed, err = d.readSandboxRecordFor(d.config.TownRoot, sb.Session)
+		if err != nil {
+			return false, overrunRecordReadError(sb.Session, err)
+		}
+	}
+	if !sandboxed {
+		return true, nil
+	}
+	if !seatUnreachableNamesBranch(branch) || rec.WorkDir == "" {
+		return false, fmt.Errorf("sandbox %s names no clone or branch to compare with origin", sb.Session)
+	}
+	run, err := d.sandboxGitRunnerFor(rec)
+	if err != nil {
+		return false, fmt.Errorf("sandbox %s: no in-sandbox git runner: %w", sb.Session, err)
+	}
+	if _, err := run(rec.WorkDir, "fetch", "--quiet", "origin", branch); err != nil {
+		return false, fmt.Errorf("sandbox %s: fetch of origin's %s failed: %w", sb.Session, branch, err)
+	}
+	if _, err := run(rec.WorkDir, "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // seatUnreachableReleaseSandbox deletes the gateway sandbox the seat ran in and
@@ -360,6 +408,27 @@ func (d *Daemon) raiseSeatUnreachableBranchAbsent(alert seatUnreachable, branch 
 	}
 }
 
+// raiseSeatUnreachableSandboxAhead raises the item for a branch origin holds
+// whose tip is not shown to hold the sandbox clone's commits: the clone is ahead
+// of origin, or could not be read, so its sandbox and record are kept. cause is
+// the read's error, nil when the clone answered and was ahead. The next tick
+// raises the same item under the same key (gt-35ihg5).
+func (d *Daemon) raiseSeatUnreachableSandboxAhead(alert seatUnreachable, branch string, cause error) {
+	who := alert.Rig + "/" + alert.Polecat
+	why := "its clone holds commits origin's tip does not"
+	if cause != nil {
+		why = "its clone could not be compared with origin (" + oneLineReason(cause) + ")"
+	}
+	d.logger.Printf("seat_unreachable: WARNING: %s: origin holds %s but %s; keeping its sandbox and record, and handing %s back once",
+		who, branch, why, alert.Bead)
+	message := fmt.Sprintf("the seat-unreachable release of %s on %s found origin holds %s, but %s. Its sandbox and record are kept so those commits can be recovered.",
+		who, alert.Bead, branch, why)
+	if err := d.escalateAlertSeverity("MEDIUM", "seat-unreachable-sandbox-ahead:"+who+":"+alert.Bead, seatUnreachableActor, message); err != nil {
+		d.logger.Printf("seat_unreachable: WARNING: %s: the sandbox-ahead item for %s was not raised: %s",
+			who, alert.Bead, oneLineReason(err))
+	}
+}
+
 // raiseSeatUnreachableReleaseFailure raises the item a failed release leaves
 // behind. The seat is still owed its release — nothing marked the outage
 // released, so the next tick runs every step again — and the item says so,
@@ -457,15 +526,15 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 		d.crashSkipLog.logf(d.logger.Printf, "seat-unreachable:"+who, format, args...)
 		return nil
 	}
-	if s.pause == nil || s.originHolds == nil || s.releaseSandbox == nil ||
+	if s.pause == nil || s.originHolds == nil || s.sandboxOnOrigin == nil || s.releaseSandbox == nil ||
 		s.beadStillHeld == nil || s.handBack == nil {
 		// One half of a release is no release: the seat would end up parked
 		// with its bead, or its bead handed back with the seat still holding
 		// it, or a bead handed back with nothing having read whose it is, or its
 		// sandbox deleted with nothing having asked where the work is. An
 		// unwired seam refuses instead of acting on the other steps.
-		return fmt.Errorf("release seams incomplete (pause %t, origin read %t, sandbox release %t, bead read %t, hand-back %t): refusing to release %s",
-			s.pause != nil, s.originHolds != nil, s.releaseSandbox != nil,
+		return fmt.Errorf("release seams incomplete (pause %t, origin read %t, sandbox proof %t, sandbox release %t, bead read %t, hand-back %t): refusing to release %s",
+			s.pause != nil, s.originHolds != nil, s.sandboxOnOrigin != nil, s.releaseSandbox != nil,
 			s.beadStillHeld != nil, s.handBack != nil, alert.Bead)
 	}
 	if alert.Bead == "" {
@@ -541,12 +610,23 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 	if err != nil {
 		return fmt.Errorf("origin not read for the seat's branch, %s unreadable: %w", parkedAge(now.Sub(alert.Since)), err)
 	}
+	releasable := onOrigin
 	if !onOrigin {
 		d.raiseSeatUnreachableBranchAbsent(alert, branch)
-	} else if err := s.releaseSandbox(seat); err != nil {
-		// A sandbox that cannot be released stops the release here, with the
-		// bead still the seat's, so the next tick retries it.
-		return fmt.Errorf("sandbox of %s not released: %w", who, err)
+	} else if contained, perr := s.sandboxOnOrigin(seat, branch); perr != nil || !contained {
+		// origin holds a branch of that name, but nothing shows its tip holds
+		// every commit the sandbox's clone does: the clone is ahead of it, or
+		// cannot be read. The sandbox may be the only copy of those commits, so
+		// it and its record are kept for a person, as for an absent branch.
+		releasable = false
+		d.raiseSeatUnreachableSandboxAhead(alert, branch, perr)
+	}
+	if releasable {
+		if err := s.releaseSandbox(seat); err != nil {
+			// A sandbox that cannot be released stops the release here, with the
+			// bead still the seat's, so the next tick retries it.
+			return fmt.Errorf("sandbox of %s not released: %w", who, err)
+		}
 	}
 	if err := s.handBack(seat, elapsed, seatUnreachableNote(alert, now)); err != nil {
 		return fmt.Errorf("handing %s back: %w", alert.Bead, err)

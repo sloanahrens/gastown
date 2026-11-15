@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +61,11 @@ type releaseFake struct {
 	originBranch string
 	originErr    error
 
+	// sandboxAhead makes the sandbox proof answer that the clone holds commits
+	// origin's tip does not, and sandboxProofErr makes it fail.
+	sandboxAhead    bool
+	sandboxProofErr error
+
 	// deleted is the session of each record the sandbox release handed to the
 	// deleter, deleteErr fails that delete, and nilDeleter stands in for a
 	// binary with no record deleter linked.
@@ -101,6 +108,9 @@ func (f *releaseFake) seams() seatUnreachableStopSeams {
 				return branch, false, f.originErr
 			}
 			return branch, !f.originAbsent, nil
+		},
+		sandboxOnOrigin: func(overrunSeat, string) (bool, error) {
+			return !f.sandboxAhead, f.sandboxProofErr
 		},
 		releaseSandbox: func(seat overrunSeat) error { return f.step("sandbox-release", seat) },
 		beadStillHeld: func(overrunSeat) (bool, error) {
@@ -1265,4 +1275,155 @@ func TestSeatUnreachableReleaseRefusesHalfWiredSeams(t *testing.T) {
 			require.Contains(t, logs.String(), "release seams incomplete", "the missing seam must be logged")
 		})
 	}
+}
+
+// sandboxGitScript is an in-sandbox git runner that answers by subcommand, so a
+// proof test says what the clone does without counting calls: fetchErr fails the
+// fetch, aheadErr makes merge-base report the clone ahead of what was fetched.
+type sandboxGitScript struct {
+	fetchErr error
+	aheadErr error
+	calls    []string
+}
+
+func (g *sandboxGitScript) run(_ string, args ...string) ([]byte, error) {
+	g.calls = append(g.calls, strings.Join(args, " "))
+	switch args[0] {
+	case "fetch":
+		return nil, g.fetchErr
+	case "merge-base":
+		return nil, g.aheadErr
+	}
+	return nil, fmt.Errorf("unexpected in-sandbox git call %v", args)
+}
+
+// proofTown is a release town whose sandbox record names a clone, whose origin
+// holds the seat's branch, and whose in-sandbox runner is script.
+func proofTown(t *testing.T, script *sandboxGitScript) *Daemon {
+	t.Helper()
+	d, _ := unreachableReleaseTown(t)
+	rec := releaseSandboxRecord()
+	rec.WorkDir = "/sandbox/gt/gastown/polecats/capable/gastown"
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", releaseSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+	seedHostWorktreeStub(t, d)
+	d.sandboxGitRunnerFn = func(string, session.SandboxRecord) (func(string, ...string) ([]byte, error), error) {
+		return script.run, nil
+	}
+	origin := &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	d.openGitFn = func(string) daemonGit { return origin }
+	return d
+}
+
+// TestSeatUnreachableSandboxOnOriginNeedsProofFromTheClone: origin holding a
+// branch of the seat's name says nothing about the commits beyond its tip, so
+// the proof is the clone's own: HEAD an ancestor of what origin's tip fetches.
+// A clone that is ahead, and a fetch that fails, are both unproven, and so is a
+// record that names no clone; only an ancestor HEAD, or no sandbox at all, is
+// proof (gt-35ihg5).
+func TestSeatUnreachableSandboxOnOriginNeedsProofFromTheClone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		script  sandboxGitScript
+		want    bool
+		wantErr bool
+	}{
+		{name: "the clone's head is on origin's tip", want: true},
+		{name: "the clone is ahead of origin's tip", script: sandboxGitScript{aheadErr: errors.New("exit status 1")}},
+		{name: "the fetch fails", script: sandboxGitScript{fetchErr: errors.New("sandbox unreachable")}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			script := tc.script
+			d := proofTown(t, &script)
+
+			got, err := d.seatUnreachableSandboxOnOrigin(releaseSeat, releaseBranch)
+
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			require.Equal(t, "fetch --quiet origin "+releaseBranch, script.calls[0],
+				"the clone fetches the seat's branch before it compares")
+		})
+	}
+	t.Run("a record naming no clone is unproven", func(t *testing.T) {
+		t.Parallel()
+		d, _ := unreachableReleaseTown(t)
+		seedReleaseSandbox(t, d)
+		got, err := d.seatUnreachableSandboxOnOrigin(releaseSeat, releaseBranch)
+		require.False(t, got)
+		require.Error(t, err)
+	})
+}
+
+// TestSeatUnreachableReleaseKeepsASandboxAheadOfOrigin: origin holds a branch of
+// the seat's name, but the clone holds commits beyond its tip. The release keeps
+// the sandbox and its record, hands the bead back once and raises the
+// sandbox-ahead item; and a clone origin does cover is released as before
+// (gt-35ihg5).
+func TestSeatUnreachableReleaseKeepsASandboxAheadOfOrigin(t *testing.T) {
+	t.Parallel()
+	t.Run("the clone is ahead", func(t *testing.T) {
+		t.Parallel()
+		script := &sandboxGitScript{aheadErr: errors.New("exit status 1")}
+		d := proofTown(t, script)
+		watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod is gone"))
+		f := &releaseFake{}
+		seams := f.seams()
+		seams.originHolds = d.seatUnreachableOriginHolds
+		seams.sandboxOnOrigin = d.seatUnreachableSandboxOnOrigin
+		seams.releaseSandbox = func(seat overrunSeat) error {
+			return d.seatUnreachableReleaseSandbox(seat, f.deleter)
+		}
+
+		d.releaseUnreachableSeats(seams, releaseStart.Add(16*time.Minute), false)
+
+		require.Empty(t, f.deleted, "a sandbox ahead of origin must not be deleted")
+		require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json")
+		require.Len(t, f.handBacks, 1, "the bead still goes back once")
+		raised := raisedItems(d)
+		require.Len(t, raised, 1)
+		require.Equal(t, "seat-unreachable-sandbox-ahead:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+		require.Contains(t, raised[0].Escalation.Description, "holds commits origin's tip does not")
+	})
+	t.Run("the clone cannot be read", func(t *testing.T) {
+		t.Parallel()
+		script := &sandboxGitScript{fetchErr: errors.New("sandbox unreachable")}
+		d := proofTown(t, script)
+		watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod is gone"))
+		f := &releaseFake{}
+		seams := f.seams()
+		seams.originHolds = d.seatUnreachableOriginHolds
+		seams.sandboxOnOrigin = d.seatUnreachableSandboxOnOrigin
+		seams.releaseSandbox = func(seat overrunSeat) error {
+			return d.seatUnreachableReleaseSandbox(seat, f.deleter)
+		}
+
+		d.releaseUnreachableSeats(seams, releaseStart.Add(16*time.Minute), false)
+
+		require.Empty(t, f.deleted)
+		raised := raisedItems(d)
+		require.Len(t, raised, 1)
+		require.Contains(t, raised[0].Escalation.Description, "could not be compared with origin")
+	})
+	t.Run("the clone is on origin", func(t *testing.T) {
+		t.Parallel()
+		d := proofTown(t, &sandboxGitScript{})
+		watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod is gone"))
+		f := &releaseFake{}
+		seams := f.seams()
+		seams.originHolds = d.seatUnreachableOriginHolds
+		seams.sandboxOnOrigin = d.seatUnreachableSandboxOnOrigin
+		seams.releaseSandbox = func(seat overrunSeat) error {
+			return d.seatUnreachableReleaseSandbox(seat, f.deleter)
+		}
+
+		d.releaseUnreachableSeats(seams, releaseStart.Add(16*time.Minute), false)
+
+		require.Equal(t, []string{releaseSession}, f.deleted)
+		require.Empty(t, raisedItems(d))
+	})
 }
