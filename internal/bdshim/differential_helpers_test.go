@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -315,7 +316,11 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 	ts := httptest.NewServer(server.New(server.Config{
 		Store: &fixtureStore{Fake: st, config: map[string]string{}}, Auth: st, Health: fixtureHealth{}, SchemaLevel: api.SchemaLevel,
 	}).Handler())
-	t.Cleanup(func() { closeFixtureServer(ts) })
+	t.Cleanup(func() {
+		if err := closeFixtureServer(ts, fixtureDrainTimeout); err != nil {
+			t.Errorf("draining the fixture's tracker server: %v", err)
+		}
+	})
 
 	getenv := func(name string) string {
 		switch name {
@@ -347,14 +352,22 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 	return env, stdout, stderr, st
 }
 
+// fixtureDrainTimeout bounds a fixture server's shutdown. A handler that never
+// returns fails the row that started it instead of hanging the package.
+const fixtureDrainTimeout = 5 * time.Second
+
 // closeFixtureServer stops a fixture's tracker server without
 // httptest.Server.Close: that Close calls http.DefaultTransport's
 // CloseIdleConnections, so one parallel row finishing closes the pooled
-// connection another row's request is on (gt-2wuzbs). The listener and the
-// http.Server it names are this fixture's alone.
-func closeFixtureServer(ts *httptest.Server) {
-	ts.Listener.Close()
-	ts.Config.Close()
+// connection another row's request is on (gt-2wuzbs). Shutdown closes this
+// fixture's listener and idle connections and then waits for the handler in
+// flight to finish, as httptest.Server.Close does; http.Server.Close would
+// instead close the connection under that handler (gt-rzgkrw). Only this
+// server's connections are closed; the default transport's pool is left alone.
+func closeFixtureServer(ts *httptest.Server, drain time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), drain)
+	defer cancel()
+	return ts.Config.Shutdown(ctx)
 }
 
 // TestAFinishedFixturesCleanupLeavesThePoolsIdleConnection: the fixture servers
@@ -408,6 +421,63 @@ func TestAFinishedFixturesCleanupLeavesThePoolsIdleConnection(t *testing.T) {
 	})
 	if !reused {
 		t.Error("the probe after a sibling fixture's cleanup opened a new connection: the cleanup closed the pooled one")
+	}
+}
+
+// TestAFixtureServersShutdownWaitsForTheHandlerInFlight: httptest.Server.Close
+// blocks until the requests in flight on that server have completed, and a
+// fixture's cleanup owes the same drain. A shutdown that closed the http.Server
+// instead would return with the handler still running and cut its response off
+// (gt-rzgkrw). The drain is bounded, so the wait reports its bound rather than
+// returning as if the server were quiescent.
+func TestAFixtureServersShutdownWaitsForTheHandlerInFlight(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var released sync.Once
+	releaseHandler := func() { released.Do(func() { close(release) }) }
+
+	//testpolicy:allow no-network — the fixture server is in-process and dialed on loopback; nothing leaves the test
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	// The cleanup never calls httptest.Server.Close, whose
+	// CloseIdleConnections would reach the default transport of every other
+	// row in the package (gt-2wuzbs).
+	t.Cleanup(func() {
+		releaseHandler()
+		if err := ts.Config.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("closing the fixture server's http.Server: %v", err)
+		}
+	})
+
+	answered := make(chan error, 1)
+	go func() {
+		resp, err := http.Get(ts.URL)
+		if err != nil {
+			answered <- err
+			return
+		}
+		_, err = io.Copy(io.Discard, resp.Body)
+		if closeErr := resp.Body.Close(); err == nil {
+			err = closeErr
+		}
+		answered <- err
+	}()
+	<-entered
+
+	// An already expired bound: the handler is still in flight, so a shutdown
+	// that drains reports the bound instead of returning at once.
+	if err := closeFixtureServer(ts, time.Nanosecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutting the fixture server down with a handler in flight = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	// The bound ends the wait, not the request: the handler still answers.
+	releaseHandler()
+	if err := <-answered; err != nil {
+		t.Fatalf("the request in flight when the fixture shut down: %v", err)
 	}
 }
 
