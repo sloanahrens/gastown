@@ -1,7 +1,3 @@
-ring renew
-ring status
-slot
-slot reap
 slot run
 slot status
 theme
