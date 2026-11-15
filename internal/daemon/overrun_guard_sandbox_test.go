@@ -23,22 +23,67 @@ type overrunSandboxSaveAnswer struct {
 // call it saw, so the test reads the calls the save really made. A call the
 // table does not hold is named as a failure, never answered with an empty
 // success the save could read as done.
+//
+// The clone's head is not in the table: the script models it, so a rev-parse
+// answers what the clone held when the save made that call. The commit call
+// moves the head, which is what tells a save that resolved the branch after
+// committing from one that resolved it before and would push the stale tip.
 type overrunSandboxSaveScript struct {
-	answers map[string]overrunSandboxSaveAnswer
-	calls   []overrunSandboxGitCall
+	clone overrunSandboxSaveClone
+	// commitKey is the WIP commit call; serving it moves the clone's head.
+	commitKey string
+	answers   map[string]overrunSandboxSaveAnswer
+	calls     []overrunSandboxGitCall
 }
+
+// preCommitSHA is the clone's head before the save's WIP commit; the head moves
+// to wipSHA when the script serves that commit.
+const (
+	preCommitSHA = "b7e2d4c6a8f01b3d5e7f9a2c4b6d8e0f1a3c5e7b"
+	wipSHA       = "5f3a1c2b9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a"
+)
 
 // run is the runner handed to the daemon as its in-sandbox git runner.
 func (s *overrunSandboxSaveScript) run(t *testing.T, dir string, args ...string) ([]byte, error) {
 	t.Helper()
 	s.calls = append(s.calls, overrunSandboxGitCall{dir: dir, args: append([]string(nil), args...)})
 	key := strings.Join(args, " ")
+	if sha, ok := s.clone.headFor(args); ok {
+		return []byte(sha + "\n"), nil
+	}
 	answer, ok := s.answers[key]
 	if !ok {
 		t.Errorf("the save ran an unscripted in-sandbox git call %q in %q", key, dir)
 		return nil, errors.New("unscripted in-sandbox git call: " + key)
 	}
+	// The WIP commit moves the clone's head. A refused commit does not, and the
+	// save returns on that refusal before it reads the head again.
+	if key == s.commitKey {
+		s.clone.head = s.clone.wipCommit
+	}
 	return []byte(answer.out), answer.err
+}
+
+// overrunSandboxSaveClone is the clone the script answers as git would: one
+// branch at one head. The head starts at the pre-commit SHA and the commit call
+// moves it, so the calls before the commit read one SHA and the calls after it
+// read the WIP SHA.
+type overrunSandboxSaveClone struct {
+	branch    string
+	head      string
+	wipCommit string
+}
+
+// headFor returns the head a rev-parse of HEAD or the clone's branch is
+// answered with; ok is false for any other call, which comes from the table.
+func (c overrunSandboxSaveClone) headFor(args []string) (string, bool) {
+	if len(args) != 2 || args[0] != "rev-parse" {
+		return "", false
+	}
+	if args[1] != "HEAD" && args[1] != "refs/heads/"+c.branch {
+		return "", false
+	}
+	return c.head, true
 }
 
 // TestOverrunSandboxGitSaveCommitsAndPushesTheDirtyClone is the repro of the
@@ -52,31 +97,31 @@ func TestOverrunSandboxGitSaveCommitsAndPushesTheDirtyClone(t *testing.T) {
 	const (
 		clone      = "/sandbox/gt/gastown/polecats/capable/gastown"
 		stagedFile = "internal/foo.go"
-		// The commit the WIP commit leaves HEAD on. The script answers the
-		// rev-parse calls made after the commit with it, so the push's refspec
-		// shows the WIP commit reaching the branch.
-		wipSHA = "5f3a1c2b9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a"
 	)
-	script := &overrunSandboxSaveScript{answers: map[string]overrunSandboxSaveAnswer{
-		// The clone holds one staged modification: the seat ran git add and was
-		// stopped before it committed.
-		"status --porcelain -uall":                    {out: "M  " + stagedFile + "\n"},
-		"ls-files -v -z":                              {out: ""},
-		"rev-parse --absolute-git-dir":                {out: clone + "/.git\n"},
-		"diff --cached --name-status --no-renames -z": {out: "M\x00" + stagedFile + "\x00"},
-		"add -A": {},
-		// These are the revert guard's reads. The clone never fetched origin's
-		// main, so the guard has no merged baseline to compare against and
-		// passes, the behavior checkpointRevertGuard documents.
-		"remote get-url origin":                                    {out: "git@github.com:steveyegge/gastown.git\n"},
-		"remote get-url upstream":                                  {err: errors.New("fatal: No such remote 'upstream'")},
-		"rev-parse origin/main":                                    {err: errors.New("fatal: ambiguous argument 'origin/main': unknown revision")},
-		"commit -m " + overrunSaveMessage(stopSeat.Bead):           {},
-		"rev-parse refs/heads/" + stopSeat.Branch:                  {out: wipSHA + "\n"},
-		"rev-parse HEAD":                                           {out: wipSHA + "\n"},
-		"symbolic-ref refs/remotes/origin/HEAD":                    {out: "refs/remotes/origin/main\n"},
-		"push origin " + wipSHA + ":refs/heads/" + stopSeat.Branch: {},
-	}}
+	script := &overrunSandboxSaveScript{
+		// The clone is on the seat's branch at the pre-commit SHA; the commit
+		// call moves it to wipSHA, so the rev-parse calls after the commit answer
+		// the WIP commit and the push's refspec shows it reaching the branch.
+		clone:     overrunSandboxSaveClone{branch: stopSeat.Branch, head: preCommitSHA, wipCommit: wipSHA},
+		commitKey: "commit -m " + overrunSaveMessage(stopSeat.Bead),
+		answers: map[string]overrunSandboxSaveAnswer{
+			// The clone holds one staged modification: the seat ran git add and was
+			// stopped before it committed.
+			"status --porcelain -uall":                    {out: "M  " + stagedFile + "\n"},
+			"ls-files -v -z":                              {out: ""},
+			"rev-parse --absolute-git-dir":                {out: clone + "/.git\n"},
+			"diff --cached --name-status --no-renames -z": {out: "M\x00" + stagedFile + "\x00"},
+			"add -A": {},
+			// These are the revert guard's reads. The clone never fetched origin's
+			// main, so the guard has no merged baseline to compare against and
+			// passes, the behavior checkpointRevertGuard documents.
+			"remote get-url origin":                                    {out: "git@github.com:steveyegge/gastown.git\n"},
+			"remote get-url upstream":                                  {err: errors.New("fatal: No such remote 'upstream'")},
+			"rev-parse origin/main":                                    {err: errors.New("fatal: ambiguous argument 'origin/main': unknown revision")},
+			"commit -m " + overrunSaveMessage(stopSeat.Bead):           {},
+			"symbolic-ref refs/remotes/origin/HEAD":                    {out: "refs/remotes/origin/main\n"},
+			"push origin " + wipSHA + ":refs/heads/" + stopSeat.Branch: {},
+		}}
 
 	d, _ := newOverrunDaemon(t, false)
 	reg := session.NewPrefixRegistry()
