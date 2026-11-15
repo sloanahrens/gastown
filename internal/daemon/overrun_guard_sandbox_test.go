@@ -496,3 +496,42 @@ func TestOverrunSandboxCloneMidRebaseKeepsTheSandbox(t *testing.T) {
 		t.Errorf("log lacks the checkpoint guard's rebase skip for the clone:\n%s", buf.String())
 	}
 }
+
+// TestOverrunSandboxClonePushGoesThroughTheSandboxRunner is this bead's repro
+// of the push step: the stop pushes a sandbox seat's kept branch from the clone,
+// so the push must reach origin through the in-sandbox runner in the clone
+// directory. The host stub is a clean checkout, so a push that read this host
+// would send the host's tip or none. Every call the push makes is scripted; an
+// unscripted call, or a host handle opened for the seat, fails the test.
+func TestOverrunSandboxClonePushGoesThroughTheSandboxRunner(t *testing.T) {
+	t.Parallel()
+	script := &overrunSandboxSaveScript{
+		clone: overrunSandboxSaveClone{branch: stopSeat.Branch, head: preCommitSHA},
+		answers: map[string]overrunSandboxSaveAnswer{
+			"symbolic-ref refs/remotes/origin/HEAD":                          {out: "refs/remotes/origin/main\n"},
+			"push origin " + preCommitSHA + ":refs/heads/" + stopSeat.Branch: {},
+		},
+	}
+	d, _ := newOverrunDaemon(t, false)
+	overrunSandboxSeat(t, d, script)
+	stub := overrunSandboxHostStubFor(t, d)
+
+	if err := d.overrunPushBranch(stopSeat); err != nil {
+		t.Fatalf("push = %v, want the clone's branch tip pushed through the sandbox runner", err)
+	}
+	pushAt := overrunSandboxCallAt(script.calls, "push", "origin", preCommitSHA+":refs/heads/"+stopSeat.Branch)
+	if pushAt < 0 {
+		t.Fatalf("the in-sandbox runner saw no push of %s to %s: %v", preCommitSHA, stopSeat.Branch, script.calls)
+	}
+	if got := script.calls[pushAt].dir; got != overrunMidRebaseClone {
+		t.Errorf("the push ran in %q, want the record's clone %q", got, overrunMidRebaseClone)
+	}
+	for _, c := range script.calls {
+		if c.dir != overrunMidRebaseClone {
+			t.Errorf("in-sandbox call %v ran in %q, want the record's clone %q", c.args, c.dir, overrunMidRebaseClone)
+		}
+	}
+	if len(stub.opens) != 0 {
+		t.Errorf("the push opened the host worktree for a sandbox seat: %v", stub.opens)
+	}
+}
