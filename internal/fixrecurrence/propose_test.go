@@ -1,17 +1,25 @@
 package fixrecurrence
 
 import (
-	"slices"
+	"math"
 	"testing"
 )
 
 const (
-	// wantTitleConfidence is the confidence a title rule carries, stated here
-	// rather than read from the implementation.
+	// wantTitleConfidence is the confidence an exact title rule carries, stated
+	// here rather than read from the implementation.
 	wantTitleConfidence = 0.9
+	// wantLooseConfidence is the weak title rule's confidence, carried through
+	// the proposal unchanged.
+	wantLooseConfidence = 0.7
 	// wantDescriptionConfidence is a description's weight against the title
 	// rule it reuses: the title's confidence times 0.9.
 	wantDescriptionConfidence = 0.81
+	// confidenceTolerance is how far a proposal's Confidence may sit from the
+	// weight its row states: the description classifier multiplies its title
+	// weight by a scale, and a product of two weights can spell a weight in a
+	// float64 the row's one literal does not.
+	confidenceTolerance = 1e-9
 )
 
 func TestPropose(t *testing.T) {
@@ -28,7 +36,17 @@ func TestPropose(t *testing.T) {
 				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "recurrence of gt-0nk: the check fails open"},
 			},
 			want: []Proposal{
-				{New: "gt-me9t", Old: "gt-0nk", Rel: Recurrence, Confidence: wantTitleConfidence, Source: "title"},
+				{New: "gt-me9t", Old: "gt-0nk", Rel: Recurrence, Confidence: wantTitleConfidence, Source: SourceTitle},
+			},
+		},
+		{
+			name: "the weak title rule carries its own confidence through",
+			beads: []Bead{
+				{ID: "gt-0nk", Status: "closed", CreatedAt: at(1), ClosedAt: at(2)},
+				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "gt-0nk still drops the flag"},
+			},
+			want: []Proposal{
+				{New: "gt-me9t", Old: "gt-0nk", Rel: Recurrence, Confidence: wantLooseConfidence, Source: SourceTitle},
 			},
 		},
 		{
@@ -40,7 +58,7 @@ func TestPropose(t *testing.T) {
 					Description: "same class as gt-prk: another flag"},
 			},
 			want: []Proposal{
-				{New: "gt-me9t", Old: "gt-prk", Rel: Regression, Confidence: wantTitleConfidence, Source: "title"},
+				{New: "gt-me9t", Old: "gt-prk", Rel: Regression, Confidence: wantTitleConfidence, Source: SourceTitle},
 			},
 		},
 		{
@@ -52,7 +70,7 @@ func TestPropose(t *testing.T) {
 					Description: "This is a recurrence of gt-0nk: the check fails open"},
 			},
 			want: []Proposal{
-				{New: "gt-me9t", Old: "gt-0nk", Rel: Recurrence, Confidence: wantDescriptionConfidence, Source: "description"},
+				{New: "gt-me9t", Old: "gt-0nk", Rel: Recurrence, Confidence: wantDescriptionConfidence, Source: SourceDescription},
 			},
 		},
 		{
@@ -64,7 +82,7 @@ func TestPropose(t *testing.T) {
 					Description: "the parser drops the flag at the end of a line"},
 			},
 			want: []Proposal{
-				{New: "gt-me9t", Old: "gt-0nk", Rel: Reference, Source: "ambiguous", Ambiguous: true},
+				{New: "gt-me9t", Old: "gt-0nk", Rel: Reference, Source: SourceAmbiguous, Ambiguous: true},
 			},
 		},
 		{
@@ -74,7 +92,7 @@ func TestPropose(t *testing.T) {
 				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "See GT-0NK in the log"},
 			},
 			want: []Proposal{
-				{New: "gt-me9t", Old: "gt-0nk", Rel: Reference, Source: "ambiguous", Ambiguous: true},
+				{New: "gt-me9t", Old: "gt-0nk", Rel: Reference, Source: SourceAmbiguous, Ambiguous: true},
 			},
 		},
 		{
@@ -86,9 +104,9 @@ func TestPropose(t *testing.T) {
 				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "recurrence of gt-0nk, gt-4mnd and gt-prk"},
 			},
 			want: []Proposal{
-				{New: "gt-me9t", Old: "gt-0nk", Rel: Reference, Source: "ambiguous", Ambiguous: true},
-				{New: "gt-me9t", Old: "gt-4mnd", Rel: Reference, Source: "ambiguous", Ambiguous: true},
-				{New: "gt-me9t", Old: "gt-prk", Rel: Reference, Source: "ambiguous", Ambiguous: true},
+				{New: "gt-me9t", Old: "gt-0nk", Rel: Reference, Source: SourceAmbiguous, Ambiguous: true},
+				{New: "gt-me9t", Old: "gt-4mnd", Rel: Reference, Source: SourceAmbiguous, Ambiguous: true},
+				{New: "gt-me9t", Old: "gt-prk", Rel: Reference, Source: SourceAmbiguous, Ambiguous: true},
 			},
 		},
 		{
@@ -120,9 +138,9 @@ func TestPropose(t *testing.T) {
 				{ID: "gt-new3", Status: "open", CreatedAt: at(10), Title: "recurrence of gt-aaa"},
 			},
 			want: []Proposal{
-				{New: "gt-new", Old: "gt-ccc", Rel: Recurrence, Confidence: wantTitleConfidence, Source: "title"},
-				{New: "gt-new2", Old: "gt-bbb", Rel: FollowUp, Confidence: wantTitleConfidence, Source: "title"},
-				{New: "gt-new3", Old: "gt-aaa", Rel: Recurrence, Confidence: wantTitleConfidence, Source: "title"},
+				{New: "gt-new", Old: "gt-ccc", Rel: Recurrence, Confidence: wantTitleConfidence, Source: SourceTitle},
+				{New: "gt-new2", Old: "gt-bbb", Rel: FollowUp, Confidence: wantTitleConfidence, Source: SourceTitle},
+				{New: "gt-new3", Old: "gt-aaa", Rel: Recurrence, Confidence: wantTitleConfidence, Source: SourceTitle},
 			},
 		},
 		{
@@ -132,9 +150,36 @@ func TestPropose(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Propose(tt.beads); !slices.Equal(got, tt.want) {
-				t.Errorf("Propose() = %v, want %v", got, tt.want)
+			got := Propose(tt.beads)
+			if len(got) != len(tt.want) {
+				t.Fatalf("Propose() = %v, want %v", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if d := proposalDiff(got[i], want); d != "" {
+					t.Errorf("proposal %d %s: got %v, want %v", i, d, got[i], want)
+				}
 			}
 		})
 	}
+}
+
+// proposalDiff names the field where got differs from want, or "" when they
+// agree. Confidence is compared within confidenceTolerance; every other field
+// exactly.
+func proposalDiff(got, want Proposal) string {
+	switch {
+	case got.New != want.New:
+		return "New"
+	case got.Old != want.Old:
+		return "Old"
+	case got.Rel != want.Rel:
+		return "Rel"
+	case got.Source != want.Source:
+		return "Source"
+	case got.Ambiguous != want.Ambiguous:
+		return "Ambiguous"
+	case math.Abs(got.Confidence-want.Confidence) > confidenceTolerance:
+		return "Confidence"
+	}
+	return ""
 }

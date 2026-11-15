@@ -31,18 +31,19 @@ type Proposal struct {
 	// Confidence is the classifier's confidence in Rel, and 0 for an
 	// ambiguous proposal.
 	Confidence float64
-	// Source is the field that supplied Rel: SourceTitle, SourceDescription,
-	// or SourceAmbiguous.
+	// Source is where Rel came from: SourceTitle or SourceDescription names the
+	// classifier that decided it, and SourceAmbiguous marks a proposal no
+	// classifier named.
 	Source string
 	// Ambiguous reports that the title cites Old but no rule matched, so Rel
 	// and Confidence carry no claim.
 	Ambiguous bool
 }
 
-// Propose returns one Proposal for each citation pair Pairs finds that a
-// classifier can name, sorted by New then Old: the title's relationship first,
-// then the description's, and an ambiguous reference when the title cites the
-// closed bead and no rule matched.
+// Propose returns one Proposal per citation pair Pairs finds, sorted by New
+// then Old: the title classifier's when it names a relationship, else the
+// description classifier's, and where neither names one but the title cites the
+// closed bead, an ambiguous proposal that no classifier decided.
 func Propose(beads []Bead) []Proposal {
 	byID := make(map[string]*Bead, len(beads))
 	for i := range beads {
