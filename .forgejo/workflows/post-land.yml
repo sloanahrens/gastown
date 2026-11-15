@@ -9,12 +9,12 @@
 # TestPostLandWorkflowContextIsTheRigSetting holds both halves to the context it
 # must name (gt-gg9hv.7.1).
 #
-# The checkout takes the full history and the tags. Under GITHUB_ACTIONS
-# post-land-shell.sh skips its first-parent window (gt-phsp89), but the shell
-# tier still stamps versions with git describe, and scripts/makefile-gate_test.sh
-# fails without the history and the tags: removing them turned every post-land
-# check on main red from 7ae99ed7 (gt-b14yam). TestPostLandWorkflowKeepsHistoryAndTags
-# pins both.
+# The checkout takes the full history; the step below fetches the tags. Under
+# GITHUB_ACTIONS post-land-shell.sh skips its first-parent window (gt-phsp89),
+# but the shell tier still stamps versions with git describe, and
+# scripts/makefile-gate_test.sh fails without the history and the tags: removing
+# them turned every post-land check on main red from 7ae99ed7 (gt-b14yam).
+# TestPostLandWorkflowKeepsHistoryAndTags pins both.
 #
 # No concurrency block on purpose: a cancelled or replaced run would leave a
 # failure or no status on a commit that did nothing wrong.
