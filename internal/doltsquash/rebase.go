@@ -215,6 +215,9 @@ func RebaseHistory(ctx context.Context, ex Exec, before Before, cut time.Time) (
 	if _, err := s.exec(ctx, markStatement(first, cut)); err != nil {
 		return RebaseResult{}, err
 	}
+	// A fresh interactive plan holds only pick rows, so after the update the
+	// squash rows are exactly the rows the update marked: the readback is the
+	// count the plan will act on, not the filter's count before the update.
 	marked, err := s.number(ctx, squashRowsStatement)
 	if err != nil {
 		return RebaseResult{}, err
