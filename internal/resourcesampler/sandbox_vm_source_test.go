@@ -198,9 +198,9 @@ func TestSandboxVMProcUnpublished(t *testing.T) {
 	}
 }
 
-// TestSandboxVMProcRefusals covers every text a VM read must refuse: each case
-// writes no row rather than one of zeros (gt-9y0kii). Each row is one reason to
-// fail.
+// TestSandboxVMProcRefusals drives every refusal VMRow makes to its error: one
+// table case per refusal, each asserting an error and neither a row nor a
+// reading, never a row of zeros (gt-9y0kii).
 func TestSandboxVMProcRefusals(t *testing.T) {
 	t.Parallel()
 	workspaces := seatWorkspaces(t)
@@ -251,6 +251,8 @@ func TestSandboxVMProcRefusals(t *testing.T) {
 		{name: "a MemTotal in another unit", text: with("meminfo", "MemTotal: 16384000 MB\nMemAvailable: 8192000 kB\n")},
 		{name: "a MemTotal that is not a number", text: with("meminfo", "MemTotal: lots kB\nMemAvailable: 8192000 kB\n")},
 		{name: "a MemAvailable larger than the MemTotal", text: with("meminfo", "MemTotal: 1000 kB\nMemAvailable: 2000 kB\n")},
+		{name: "a MemTotal printed twice", text: with("meminfo", "MemTotal: 16384000 kB\nMemTotal: 8192000 kB\nMemAvailable: 8192000 kB\n")},
+		{name: "a MemAvailable printed twice", text: with("meminfo", "MemTotal: 16384000 kB\nMemAvailable: 8192000 kB\nMemAvailable: 1000 kB\n")},
 		{name: "no workspace map", text: healthy, noMap: true},
 	} {
 		var workspaceMap *workspaceid.Map
@@ -385,6 +387,65 @@ func TestSandboxVMSourceTickCPU(t *testing.T) {
 	}
 	if second.Row.CPUPct == nil || *second.Row.CPUPct != 60 {
 		t.Errorf("the second row's cpu_pct = %s, want 60", floatText(second.Row.CPUPct))
+	}
+}
+
+// TestSandboxVMSourceTickKeepsBaselineAfterRefusal is VMRow's caller contract: a
+// refused read writes no row, and the next row is measured from the last reading
+// that wrote one, over the whole gap (gt-qoi45p).
+func TestSandboxVMSourceTickKeepsBaselineAfterRefusal(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown"})
+	clock := &fakeClock{now: seatTickNow()}
+	reads := 0
+	runner := &fakeSeatExec{read: func(context.Context, string) (string, error) {
+		reads++
+		switch reads {
+		case 1:
+			return vmProcText(vmProcFilesHealthy()), nil
+		case 2:
+			// Cut off before its end marker: VMRow refuses this text.
+			return "@@ loadavg @@\n0.52 0.58 0.59 1/1234 56789\n", nil
+		}
+		// Two minutes on: 1500 more busy ticks of 10000 more on four cores is
+		// 60 percent of one core.
+		files := vmProcFilesHealthy()
+		files["stat"] = vmStatText(4, 3000, 17000)
+		return vmProcText(files), nil
+	}}
+	source := NewVMSource(townRoot, runner, clock, time.Second)
+
+	first, err := source.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("the first tick: %v", err)
+	}
+	if first.Row == nil {
+		t.Fatal("the first tick wrote no row")
+	}
+
+	clock.now = clock.now.Add(60 * time.Second)
+	refused, err := source.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("the refused tick: %v", err)
+	}
+	if refused.Row != nil {
+		t.Errorf("the refused tick's row = %+v, want none", *refused.Row)
+	}
+
+	clock.now = clock.now.Add(60 * time.Second)
+	third, err := source.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("the third tick: %v", err)
+	}
+	if third.Row == nil {
+		t.Fatal("the third tick wrote no row")
+	}
+	if third.Row.IntervalS != 120 {
+		t.Errorf("the third row's interval_s = %v, want 120 measured from the first reading", third.Row.IntervalS)
+	}
+	if third.Row.CPUPct == nil || *third.Row.CPUPct != 60 {
+		t.Errorf("the third row's cpu_pct = %s, want 60", floatText(third.Row.CPUPct))
 	}
 }
 
