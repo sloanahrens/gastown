@@ -663,6 +663,81 @@ func TestImagePinsFailedTickRaisesUnreadable(t *testing.T) {
 	}
 }
 
+// TestImagePinsItemsClearOnTheNextTickThatFindsThemGone is the acceptance test
+// for gt-9oap8n: the tick that finds a pin stale, a pin unreadable and the
+// refresh bead stuck raises each item, and the next tick that finds none of
+// those conditions raises nothing, so the queue clears an item rather than it
+// outliving its cause. The whole tick's own failure is
+// TestImagePinsFailedTickRaisesUnreadable's.
+func TestImagePinsItemsClearOnTheNextTickThatFindsThemGone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		kind  attention.Kind
+		key   string
+		first func(*Daemon) imagePinsTickSeams
+	}{
+		{
+			name: "a pin at the stale bound",
+			kind: attention.KindImagePinsStale,
+			key:  imagePinsStaleKey + ":bd",
+			first: func(d *Daemon) imagePinsTickSeams {
+				return tickSeams(&tickCounts{}, d.clk().Now(),
+					[]ImagePinState{refreshPin("bd", pinBD, tipBD, imagePinsStaleBehind)}, nil, &refreshStore{})
+			},
+		},
+		{
+			// Behind is set with the error so a tick that trusted a failed
+			// read's distance would raise stale instead of unreadable.
+			name: "a pin whose read failed",
+			kind: attention.KindImagePinsUnreadable,
+			key:  imagePinsUnreadableKey + ":bd",
+			first: func(d *Daemon) imagePinsTickSeams {
+				failed := ImagePinState{Name: "bd", Pin: pinBD, Tip: tipBD, Behind: imagePinsStaleBehind, Err: errors.New("ls-remote exited 128")}
+				return tickSeams(&tickCounts{}, d.clk().Now(),
+					[]ImagePinState{failed}, nil, &refreshStore{})
+			},
+		},
+		{
+			name: "a refresh bead stuck unlanded",
+			kind: attention.KindImagePinsRefreshStuck,
+			key:  imagePinsRefreshStuckKey,
+			first: func(d *Daemon) imagePinsTickSeams {
+				open := &ImagePinRefreshBead{ID: "gt-refresh4", OpenedAt: d.clk().Now().Add(-imagePinsRefreshStuck - time.Hour)}
+				return tickSeams(&tickCounts{}, d.clk().Now(),
+					[]ImagePinState{refreshPin("bd", pinBD, tipBD, 0)}, open, &refreshStore{})
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logged bytes.Buffer
+			d := imagePinsTestDaemon(t, &logged)
+			d.newImagePinsSeams = func(context.Context) imagePinsTickSeams { return tt.first(d) }
+
+			d.triggerImagePins()
+
+			raised := imagePinsCollected(t, d, tt.kind)
+			if len(raised) != 1 || raised[0].Key != tt.key {
+				t.Fatalf("the tick that found %s raised %+v, want the one item keyed %q", tt.name, raised, tt.key)
+			}
+
+			// The next tick reads the pin at its source tip with no refresh
+			// bead open: both conditions are gone, so their items go with them.
+			d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+				return tickSeams(&tickCounts{}, d.clk().Now(),
+					[]ImagePinState{refreshPin("bd", pinBD, tipBD, 0)}, nil, &refreshStore{})
+			}
+			d.triggerImagePins()
+
+			if items := imagePinsCollected(t, d, tt.kind); len(items) != 0 {
+				t.Errorf("the tick that found the condition gone left %+v, want %s cleared", items, tt.kind)
+			}
+		})
+	}
+}
+
 // TestImagePinsPlannerItemsReachTheirCollectors: each planner item reaches the
 // collector for its own kind, keyed by its pin, and raises nothing under
 // another kind (gt-01lcq2).
