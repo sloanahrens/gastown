@@ -19,9 +19,6 @@ import (
 	"sort"
 	"strings"
 	"unicode"
-
-	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // Rule names. An allow row names the rule it excuses, so these are part of the
@@ -122,38 +119,64 @@ var nonPersonalHomeNames = map[string]struct{}{
 	"gt": {}, "Shared": {},
 }
 
-// The two infrastructure identities. Each is read from the one setting that
-// names it, so a change of the value reaches the scanner with its setting.
-const (
-	// forgeOwnerIdentity is the Forgejo account a repository URL names: an
+// scanPolicy is what a scan exempts beyond its inputs: the two infrastructure
+// identities of the town it guards, as the caller names them. The zero policy
+// exempts nothing, so a scan whose caller names no identity reports those lines
+// instead of excusing them.
+type scanPolicy struct {
+	// forgeOwner is the Forgejo account a repository URL names: an
 	// infrastructure identity, not a person, which gt-ipp4uy renames.
-	forgeOwnerIdentity = config.DefaultForgeOwner
-	// podTownRootIdentity is the town root inside the daemon pod: an
-	// infrastructure identity, not a home directory, which gt-ipp4uy renames.
-	podTownRootIdentity = manifestdata.PodTownRoot
+	forgeOwner string
+	// townRoot is the town root inside the daemon pod: an infrastructure
+	// identity, not a home directory, which gt-ipp4uy renames.
+	townRoot string
+}
+
+// ScanOption adjusts what a scan exempts. A scan with no option runs with the
+// zero policy and exempts no identity.
+type ScanOption func(*scanPolicy)
+
+// ExemptIdentities exempts the town's two infrastructure identities in the one
+// position where each names the town rather than a person: forgeOwner as the
+// owner segment of a forgejo:3000/<owner>/ repository URL, and townRoot as a
+// whole path. The rest of the line is checked as written, so the same name in
+// prose, in another URL's owner segment or in a longer path is still a finding.
+// An empty value exempts nothing, so a lost setting reports the line rather
+// than excusing it. Read each value from the setting that names it, so a change
+// of the value reaches the scan with its setting.
+func ExemptIdentities(forgeOwner, townRoot string) ScanOption {
+	return func(policy *scanPolicy) {
+		policy.forgeOwner = forgeOwner
+		policy.townRoot = townRoot
+	}
+}
+
+// The placeholders stand in for the identities while a line is checked. Each
+// names no account or path of its own, so the rest of the line is what the
+// rules report.
+const (
+	forgeOwnerPlaceholder = "{forge-owner}"
+	townRootPlaceholder   = "{town}"
 )
 
-// townRootPlaceholder stands in for the pod town root while a line is checked.
-// It names no account, so the rest of the line is what the rules report.
-const townRootPlaceholder = "{town}"
-
-// exemptIdentities returns line with each infrastructure identity replaced by a
-// placeholder in the one position where it names the town rather than a person:
-// the Forgejo owner as the owner segment of a repository URL, and the pod town
-// root as a whole path. A rule then checks the rest of the line as written, so
-// the same name in prose, in another URL's owner segment or in a longer path is
-// still a finding.
-func exemptIdentities(line string) string {
+// exemptIdentities returns line with each identity the policy names replaced by
+// its placeholder in that one position. An identity the policy leaves empty is
+// not in the line and is not replaced, so the line stays a finding: an empty
+// owner makes the URL pattern two adjacent slashes, which no owner segment the
+// town writes matches.
+func exemptIdentities(line string, policy scanPolicy) string {
 	line = strings.ReplaceAll(line,
-		"forgejo:3000/"+forgeOwnerIdentity+"/",
-		"forgejo:3000/"+config.ForgeOwnerPlaceholder+"/")
-	return replaceWholePath(line, podTownRootIdentity, townRootPlaceholder)
+		"forgejo:3000/"+policy.forgeOwner+"/",
+		"forgejo:3000/"+forgeOwnerPlaceholder+"/")
+	return replaceWholePath(line, policy.townRoot, townRootPlaceholder)
 }
 
 // replaceWholePath replaces each occurrence of path in line with placeholder
 // unless a name byte follows it. A name byte continues the last segment, so the
 // sibling path .../gt-backups and the longer name .../gt2 are different paths,
-// not the configured one. An empty path replaces nothing.
+// not the configured one. An empty path replaces nothing: it is the empty
+// identity's answer, and it also bounds the loop, since an empty path makes
+// strings.Index match at every offset.
 func replaceWholePath(line, path, placeholder string) string {
 	if path == "" {
 		return line
@@ -318,14 +341,20 @@ func SaveAllow(w io.Writer, rows []Allow) error {
 // An allow row that excuses a forbidden-directory file's path finding is
 // returned in excused: the file's contents are not scanned, so that record is
 // how a report still names the file and the reason it is allowed.
-func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, []ExcusedForbiddenPath, error) {
+// Options adjust what the scan exempts; with no option it exempts no identity,
+// and ExemptIdentities names the town's infrastructure identities.
+func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow, opts ...ScanOption) ([]Finding, []ExcusedForbiddenPath, error) {
 	if err := validateScanInputs(rules, blocked); err != nil {
 		return nil, nil, err
+	}
+	var policy scanPolicy
+	for _, opt := range opts {
+		opt(&policy)
 	}
 	var findings []Finding
 	var excused []ExcusedForbiddenPath
 	for _, path := range paths {
-		pathFindings, excusedPath, _, err := scanPath(fsys, path, rules, blocked, allow)
+		pathFindings, excusedPath, _, err := scanPath(fsys, path, rules, blocked, allow, policy)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -357,7 +386,7 @@ func validateScanInputs(rules []Rule, blocked map[string]struct{}) error {
 
 // scanPath reports the findings in one file and returns the bytes it read, plus
 // the forbidden-path record when an allow row excuses that path's finding.
-func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, *ExcusedForbiddenPath, []byte, error) {
+func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow, policy scanPolicy) ([]Finding, *ExcusedForbiddenPath, []byte, error) {
 	if !fs.ValidPath(path) {
 		return nil, nil, nil, fmt.Errorf("hygiene: invalid path %q", path)
 	}
@@ -394,9 +423,10 @@ func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}
 	}
 	for i, line := range strings.Split(string(data), "\n") {
 		hash := HashLine(line)
-		// The town's own identities are not a person's name or home path, so
-		// the line is checked with each replaced in its own position.
-		checked := exemptIdentities(line)
+		// An infrastructure identity the caller exempts is not a person's name
+		// or home path, so the line is checked with each replaced in its own
+		// position.
+		checked := exemptIdentities(line, policy)
 		for _, rule := range rules {
 			if !rule.Match(checked) || excused(allow, path, rule.Name, hash) {
 				continue
@@ -412,9 +442,15 @@ func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}
 
 // ValidateAllow refuses a row that names no path or reason, a row for an
 // untracked path, and a row whose rule no longer fires where it says it does.
-func ValidateAllow(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow) error {
+// Pass the same options the scan runs with, so a row written for a line that
+// scan exempts is refused here: it would excuse nothing.
+func ValidateAllow(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow, opts ...ScanOption) error {
 	if err := validateScanInputs(rules, blocked); err != nil {
 		return err
+	}
+	var policy scanPolicy
+	for _, opt := range opts {
+		opt(&policy)
 	}
 	tracked := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
@@ -433,7 +469,7 @@ func ValidateAllow(fsys fs.FS, paths []string, rules []Rule, blocked map[string]
 		if _, ok := tracked[row.Path]; !ok {
 			return fmt.Errorf("hygiene: allow row for %s: path is not tracked", row.Path)
 		}
-		findings, _, data, err := scanPath(fsys, row.Path, rules, blocked, nil)
+		findings, _, data, err := scanPath(fsys, row.Path, rules, blocked, nil, policy)
 		if err != nil {
 			return err
 		}
