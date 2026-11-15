@@ -30,7 +30,7 @@ func init() {
 		Entry{Path: "metrics questions", Group: "orient", Use: "Use this to see where the town stands on the ten questions about how it behaves, from its own files."},
 		Entry{Path: "metrics repeats", Group: "review", Use: "Use this to find om findings that restate a finding from an earlier review round."},
 		Entry{Path: "metrics report", Group: "orient", Use: "Use this when you need the dated town metrics digest written into the docs directory."},
-		Entry{Path: "metrics run", Group: "host", Use: "Use this to run one town-metrics hour by hand, from snapshot through analysis, and the weekly story-point retrain and adoption with it."},
+		Entry{Path: "metrics run", Group: "host", Use: "Use this to run one town-metrics hour by hand, from snapshot through analysis."},
 		Entry{Path: "metrics shape-outcome", Group: "review", Use: "Use this to see whether a bead's first-filed shape predicts its review rounds and whether it is approved."},
 		Entry{Path: "metrics snapshot", Group: "host", Use: "Use this to add one town snapshot to the metrics log now."},
 		Entry{Path: "metrics storypoints", Group: "orient", Use: "Use this to read today's story-points shadow report from the landings table."},
