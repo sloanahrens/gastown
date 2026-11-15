@@ -133,6 +133,11 @@ func runPodCommand(t *testing.T, seams updateSeams, args ...string) (string, err
 	return out.String(), err
 }
 
+// noTownValuesWrite is the town values writer a pod test that does not read the
+// town's copy wires: the run's write succeeds and touches no file, so the run's
+// only effects are the fakes the test set.
+func noTownValuesWrite(string, imagevalues.Values) error { return nil }
+
 // wiredInstall is what a run's Run seam received when a digest install was
 // asked for: the deps the run was built with.
 type wiredInstall struct {
@@ -206,6 +211,9 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		Notifier:  func(string) notify.Notifier { return notifyfake.New() },
 		PodRun:    got.kube.run,
 		Images:    podPairImages(podPairManifest),
+		// The town's copy is not what this fixture reads: it records the write
+		// rather than leaving the run to a writer the test did not wire.
+		WriteTownValues: noTownValuesWrite,
 	}
 	args := append([]string{"--images", values}, extra...)
 	if _, err := runPodCommand(t, seams, args...); err != nil {
@@ -376,6 +384,9 @@ func runCountedPodCommand(t *testing.T, withImages bool, args ...string) (podRun
 		PodRun:    got.kube.run,
 		Images:    podPairImages(podPairManifest),
 		InPod:     func() bool { return true },
+		// The town's copy is not what this fixture reads: an ok run with --images
+		// writes through this and touches no file.
+		WriteTownValues: noTownValuesWrite,
 	}
 	if withImages {
 		values := filepath.Join(townRoot, "images.yaml")
