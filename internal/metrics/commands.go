@@ -376,11 +376,9 @@ func weeklyRetryable(err error) bool {
 // of its own and cannot name a different day than the one the steps read. A table
 // that is not there is false; a day directory that is not named for a date, and a
 // table that cannot be read, are errors: neither is counted as a day the extract
-// did not run.
+// did not run. The reader is the env's, which wire fills, as the steps' own reads
+// use it.
 func extractRanYesterday(env Env, outDir string) (bool, error) {
-	if env.ReadFile == nil {
-		return false, errors.New("story points weekly: Env.ReadFile is unset, so the previous day's extract cannot be read")
-	}
 	day, err := time.Parse(time.DateOnly, filepath.Base(outDir))
 	if err != nil {
 		return false, fmt.Errorf("story points weekly: %s is not named for a day, so the previous day's extract cannot be found", outDir)
