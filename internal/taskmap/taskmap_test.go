@@ -264,6 +264,22 @@ func TestPluginRecordRunUseNamesTheSituation(t *testing.T) {
 	}
 }
 
+// TestFormulaSyncUseNamesTheSituation pins the opening place_p6c.go gives
+// formula sync (gt-z6tm6a): the Use names the situation that sends a reader to
+// the command, so it opens "Use this when" or "Use this to", not
+// "Use this after".
+func TestFormulaSyncUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("formula sync")
+	if !ok {
+		t.Fatal(`Lookup("formula sync") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") && !strings.HasPrefix(e.Use, "Use this to") {
+		t.Errorf("formula sync Use = %q; want a line starting \"Use this when\" or \"Use this to\" that names the situation", e.Use)
+	}
+}
+
 // TestChannelAdminStaysInternal pins the grouping judgement place_p9a.go
 // records (gt-jii0vu): channel create and delete administer a channel, which
 // no task group describes, so a move needs that judgement revisited.
