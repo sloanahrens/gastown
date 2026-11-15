@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"sync"
@@ -312,7 +315,7 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 	ts := httptest.NewServer(server.New(server.Config{
 		Store: &fixtureStore{Fake: st, config: map[string]string{}}, Auth: st, Health: fixtureHealth{}, SchemaLevel: api.SchemaLevel,
 	}).Handler())
-	t.Cleanup(ts.Close)
+	t.Cleanup(func() { closeFixtureServer(ts) })
 
 	getenv := func(name string) string {
 		switch name {
@@ -342,6 +345,70 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 	env, stdout, stderr := differentialEnv(argv, getenv, town)
 	env.Handlers = handlers
 	return env, stdout, stderr, st
+}
+
+// closeFixtureServer stops a fixture's tracker server without
+// httptest.Server.Close: that Close calls http.DefaultTransport's
+// CloseIdleConnections, so one parallel row finishing closes the pooled
+// connection another row's request is on (gt-2wuzbs). The listener and the
+// http.Server it names are this fixture's alone.
+func closeFixtureServer(ts *httptest.Server) {
+	ts.Listener.Close()
+	ts.Config.Close()
+}
+
+// TestAFinishedFixturesCleanupLeavesThePoolsIdleConnection: the fixture servers
+// of parallel rows pool their connections in http.DefaultTransport, so a
+// fixture's cleanup must close its own server and nothing shared. A connection
+// pooled to a live fixture server is still reused after a sibling fixture's
+// cleanup has run.
+func TestAFinishedFixturesCleanupLeavesThePoolsIdleConnection(t *testing.T) {
+	t.Parallel()
+	env, _, _, _ := fixtureEnvWithStore(t, newTown(t, routeFixture), nil, []string{"list"})
+	url := env.Getenv("TRACKER_URL")
+
+	// healthz carries no token, so the probe measures the connection rather
+	// than the fixture store.
+	probe := func(t *testing.T, trace *httptrace.ClientTrace) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, url+"/healthz", nil)
+		if err != nil {
+			t.Fatalf("building the probe request: %v", err)
+		}
+		if trace != nil {
+			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+		}
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("the probe request to %s: %v", url, err)
+		}
+		// Drained to EOF and closed, so the transport returns the connection to
+		// the idle pool the next probe draws from.
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatalf("draining the probe response: %v", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("closing the probe response: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("the probe request to %s = %d, want 200", url, resp.StatusCode)
+		}
+	}
+	probe(t, nil)
+
+	// A sibling fixture finishes in its own scope, running exactly the cleanup
+	// fixtureEnvWithStore registers.
+	t.Run("a sibling fixture finishes", func(t *testing.T) {
+		fixtureEnvWithStore(t, newTown(t, routeFixture), nil, []string{"list"})
+	})
+
+	var reused bool
+	probe(t, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+	})
+	if !reused {
+		t.Error("the probe after a sibling fixture's cleanup opened a new connection: the cleanup closed the pooled one")
+	}
 }
 
 // TestFixtureEnvNamesTheActorOnlyOnAConfigRow: the recorder pinned BD_ACTOR for
