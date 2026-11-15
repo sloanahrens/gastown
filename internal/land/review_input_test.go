@@ -82,12 +82,11 @@ func TestBuildReviewInput(t *testing.T) {
 }
 
 // TestReviewInputGuard is gt-8af9s7's structural guard: the landing worker
-// assembles a review's inputs through BuildReviewInput, and the local round
-// that will join it calls the same function, so neither can drift into judging
-// a bead against material the other never gathered. A construction in any
-// non-test file of the package outside BuildReviewInput and the legacy
-// OMReviewer.Review is a second assembly with nothing keeping it in step,
-// which is exactly the state this bead removes.
+// assembles a review's inputs through BuildReviewInput, so a review cannot
+// drift into judging a bead against material the assembly never gathered. A
+// construction in any non-test file of the package outside BuildReviewInput
+// and the legacy OMReviewer.Review is a second assembly with nothing keeping
+// it in step, which is exactly the state this bead removes.
 func TestReviewInputGuard(t *testing.T) {
 	t.Parallel()
 
@@ -115,7 +114,7 @@ func TestReviewInputGuard(t *testing.T) {
 			}
 			scanned++
 			for _, hit := range hits {
-				t.Errorf("%s:%d builds a ReviewInput (%s); call BuildReviewInput instead so the landing review and the local round read one assembly", hit.file, hit.line, hit.what)
+				t.Errorf("%s:%d builds a ReviewInput (%s); call BuildReviewInput instead so every review reads one assembly", hit.file, hit.line, hit.what)
 			}
 		}
 		if scanned == 0 {

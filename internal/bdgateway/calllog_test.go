@@ -95,7 +95,7 @@ func TestCallLogRedaction(t *testing.T) {
 	const secretTitle = "sk-live-abcdef123456"
 	l.Log(CallRecord{
 		Class:    "daemon",
-		Caller:   "daemon.listLocalRoundRequests",
+		Caller:   "daemon.showRigBead",
 		Argv:     []string{"update", "gt-itjuwu", "--status=open", "--reason", secretReason, "--title", secretTitle},
 		ExitCode: 0,
 		Duration: 35 * time.Millisecond,
@@ -131,7 +131,7 @@ func TestCallLogRedaction(t *testing.T) {
 	}{
 		{"ts", "2026-11-13T12:00:00Z"},
 		{"class", "daemon"},
-		{"caller", "daemon.listLocalRoundRequests"},
+		{"caller", "daemon.showRigBead"},
 		{"verb", "update"},
 		{"exit_code", float64(0)},
 		{"duration_ms", float64(35)},

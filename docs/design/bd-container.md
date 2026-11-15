@@ -49,7 +49,7 @@ approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
 - Volume (pod daemon log, 2026-11-13 11:36 to 14:56 CST): the spec dispatch tick
   runs about once a minute with a median of 27 bd calls (min 21, max 228);
   daemon-wide 60 s windows have median 23 and maximum 90; about 50 to 60 calls a
-  minute overall. `daemon.listLocalRoundRequests` alone is 10 a minute.
+  minute overall.
 - Latency today: in the pod bd show and list take 35 to 40 ms warm and 866 ms
   on the first call of a process; the Mac wrapper takes 304 ms per `bd show`.
   The "225 ms" figure from the program bead appears in no record I could find;
@@ -207,7 +207,7 @@ quoted, in task G2, from three sources that exist on main:
    undefer unclaim comments label kv dep config events stats`, with `cook` and
    `formula` passed through to bd.real;
 2. the daemon's call sites from the bd census lines in `daemon.log` (the top
-   callers are `daemon.listLocalRoundRequests`, `landworker.landReady`,
+   callers are `landworker.landReady`,
    `landworker.sweepBeadDone`, `daemon.showRigBead`, `rules.rigDones.Done`,
    `land.openDescendants`, `schedulerrun.listAllSlingContextRecords`,
    `rig.getBeadLabel`, `submission.rigBeads.Since`, the plugin Recorder's
