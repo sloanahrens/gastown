@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/baks"
+	"github.com/steveyegge/gastown/internal/diskmaint/cloud"
 	"github.com/steveyegge/gastown/internal/diskmaint/colima"
 	"github.com/steveyegge/gastown/internal/diskmaint/nodes"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
@@ -47,6 +48,23 @@ const (
 	// answer to: the sandbox cluster's kind nodes and the colima daemon's images.
 	maintTargetNodes  = "nodes"
 	maintTargetColima = "colima"
+
+	// maintTargetCloud is the cloud VM's docker daemon: the gt-cloud Colima
+	// profile's images, read over the socket the town config names.
+	maintTargetCloud = "cloud"
+
+	// The cloud VM's settings, keys of the town config's daemon.env: the socket
+	// its daemon listens on, the runner label list and the deploy workflow the
+	// plan keeps images by. A town that names no socket has no cloud VM to
+	// prune and gets no cloud target.
+	maintCloudDockerHostKey = "GT_CLOUD_DOCKER_HOST"
+	maintCloudLabelsKey     = "GT_CLOUD_RUNNER_LABELS"
+	maintCloudDeployKey     = "GT_CLOUD_DEPLOY_WORKFLOW"
+
+	// maintLedgerModeDryRun is the mode a plan run's ledger line carries. The
+	// ledger holds the dry run and the apply, so a plan reads as the dry run
+	// it was rather than as the command's "plan" spelling.
+	maintLedgerModeDryRun = "dry-run"
 
 	// maintTargetRegistryCollect is the registry's garbage collect on its own:
 	// the Mac's registry-collect job applies it whether or not a delete ran,
@@ -80,17 +98,21 @@ var maintCmd = &cobra.Command{
 	Short:   "Plan or apply disk maintenance",
 	Long: `Plan or apply the maintenance the town's disks need.
 
-plan is a dry run: it prints every action it would take and changes nothing.
-apply runs the plan it just printed. A registry apply runs under the
-polecat-image lock, so a delete never races an image push; one that finds the
-lock held defers and says to retry. The other targets keep no lock: the local
-ones touch only the worktrees, backups and directories this machine owns, and
-the docker ones only the images and volumes their daemons list.
+plan is a dry run: it prints every action it would take and removes nothing.
+apply runs the plan it just printed. The cloud target records one ledger line
+per run, a plan included; the other targets record only what they apply. A
+registry apply runs under the polecat-image lock, so a delete never races an
+image push; one that finds the lock held defers and says to retry. The other
+targets keep no lock: the local ones touch only the worktrees, backups and
+directories this machine owns, and the docker ones only the images and volumes
+their daemons list.
 
-A target names what to maintain: baks, colima, nodes, registry and
-registry-collect (both only when the town configures a registry), sizes or
-worktree. registry-collect runs the registry's garbage collect without deleting
-anything, so a night's collect can reclaim what an earlier run's deletes freed.
+A target names what to maintain: baks, cloud, colima, nodes, registry and
+registry-collect (the last two only when the town configures a registry), sizes
+or worktree. registry-collect runs the registry's garbage collect without
+deleting anything, so a night's collect can reclaim what an earlier run's
+deletes freed. cloud prunes the gt-cloud VM's images over the socket the town
+config names, and a town that names none is not offered it.
 The known targets are listed when a name is unknown, and naming none runs every
 target in name order.
 A plan that could not read its inputs refuses instead of guessing, and both
@@ -338,16 +360,17 @@ func maintKeep(get func(string) string) (int, error) {
 }
 
 // maintTargets builds every target the town configures: the local targets and
-// the docker targets, which every town has, and the registry target, which only
-// a town that names a registry has. A target whose settings cannot be read
+// the docker targets, which every town has, and the registry and cloud targets,
+// which only a town that names one has. A target whose settings cannot be read
 // refuses that target alone (see maintLocalTargets), so the registry still plans
 // for a town whose rig registry is damaged, exactly as it did before the local
 // targets existed.
 //
-// The ledger directory is made in apply mode alone: a plan is a dry run, so it
-// must not leave a directory behind that was not there before. An apply whose
-// directory cannot be made fails here, before it deletes anything it could not
-// record. Every target shares the one ledger, so each apply lands in one record.
+// The ledger directory is made for an apply, whose deletes must not run
+// unrecorded, and for a plan of a town with a cloud target, whose run records
+// the dry-run line that target's contract asks for. A plan of any other town is
+// a dry run that leaves the disk as it found it. Every target shares the one
+// ledger, so each run lands in one record.
 func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, mode string, run diskmaint.Runner, home string, out io.Writer) (map[string]diskmaint.Target, error) {
 	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
 	ledger := diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), maintLedgerMaxBytes)
@@ -368,11 +391,26 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
 		}
 	}
+	cloudTargets, err := maintCloudTargets(town, run, ledger)
+	if err != nil {
+		return nil, err
+	}
+	// A plan of a town with a cloud target records the target's dry-run line,
+	// so its ledger directory is made too; a plan of any other town leaves the
+	// disk as it found it.
+	if !apply && len(cloudTargets) > 0 {
+		if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
+		}
+	}
 	targets := maintLocalTargets(town, home, run, ledger, apply)
 	for name, target := range maintDockerTargets(home, run, ledger) {
 		targets[name] = target
 	}
 	for name, target := range registryTargets {
+		targets[name] = target
+	}
+	for name, target := range cloudTargets {
 		targets[name] = target
 	}
 	return targets, nil
@@ -487,6 +525,155 @@ func maintDockerTargets(home string, run diskmaint.Runner, ledger *diskmaint.Led
 // registry target and the colima target both prune.
 func maintColimaHost(home string) string {
 	return "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock")
+}
+
+// maintCloudTargets builds the cloud VM's target from the town config, reading
+// the VM's daemon over the socket that config names and recording into the
+// run's ledger. A town whose config names no socket has no cloud VM for this
+// command to prune and gets no target, the way a town with no registry gets no
+// registry target. The runner label list and the deploy workflow come from the
+// same block; one left unset is the target's own refusal, since a keep list
+// this command invented could remove an image a runner still starts in.
+func maintCloudTargets(town string, run diskmaint.Runner, ledger *diskmaint.Ledger) (map[string]diskmaint.Target, error) {
+	vm, err := maintCloudSettings(town)
+	if err != nil {
+		return nil, err
+	}
+	if vm.dockerHost == "" {
+		return nil, nil
+	}
+	target, err := cloud.NewTarget(cloud.Config{
+		DockerHost: vm.dockerHost,
+		Run:        run,
+		Ledger:     ledger,
+		LabelsFile: vm.labelsFile,
+		DeployFile: vm.deployFile,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("building the cloud target: %w", err)
+	}
+	return map[string]diskmaint.Target{
+		maintTargetCloud: maintCloudLedger{inner: target, ledger: ledger},
+	}, nil
+}
+
+// maintCloudConfig is the cloud VM's settings, as the town config names them.
+type maintCloudConfig struct {
+	dockerHost, labelsFile, deployFile string
+}
+
+// maintCloudSettings reads the cloud VM's settings from the town's
+// settings/config.json. A town that never wrote the file names none of them and
+// gets no cloud target; a file that exists and cannot be read is an error,
+// because a run cannot tell "no cloud VM" from "a config it could not read" and
+// must not plan nothing as if the town had asked for nothing.
+func maintCloudSettings(town string) (maintCloudConfig, error) {
+	settings, err := config.LoadTownSettings(config.TownSettingsPath(town))
+	if err != nil {
+		return maintCloudConfig{}, fmt.Errorf("reading the town's cloud settings: %w", err)
+	}
+	if settings == nil || settings.Daemon == nil {
+		return maintCloudConfig{}, nil
+	}
+	env := settings.Daemon.Env
+	dockerHost, err := maintCloudDockerHost(env[maintCloudDockerHostKey])
+	if err != nil {
+		return maintCloudConfig{}, err
+	}
+	labelsFile, err := maintCloudFile(env, maintCloudLabelsKey)
+	if err != nil {
+		return maintCloudConfig{}, err
+	}
+	deployFile, err := maintCloudFile(env, maintCloudDeployKey)
+	if err != nil {
+		return maintCloudConfig{}, err
+	}
+	return maintCloudConfig{dockerHost: dockerHost, labelsFile: labelsFile, deployFile: deployFile}, nil
+}
+
+// maintCloudDockerHost checks the cloud VM's socket. Docker is pointed at
+// whatever this names, so only a unix socket on an absolute path is accepted: a
+// tcp:// value would send the plan's reads and the apply's removes to another
+// machine. A blank value names no VM, which builds no target.
+func maintCloudDockerHost(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	path, isUnix := strings.CutPrefix(raw, "unix://")
+	if !isUnix || !filepath.IsAbs(path) {
+		return "", fmt.Errorf("%s = %q: want the daemon's socket as unix://<absolute path>", maintCloudDockerHostKey, raw)
+	}
+	return raw, nil
+}
+
+// maintCloudFile checks one of the two files the cloud plan reads. A relative
+// path would be read from whatever directory gt maint happened to run in, which
+// is not the file the operator named.
+func maintCloudFile(env map[string]string, key string) (string, error) {
+	path := env[key]
+	if path == "" || filepath.IsAbs(path) {
+		return path, nil
+	}
+	return "", fmt.Errorf("%s = %q: want an absolute path to a file the plan reads", key, path)
+}
+
+// maintCloudLedger makes a cloud run leave exactly one ledger line. The cloud
+// target records its own line in Apply, and a plan run never reaches Apply, so
+// the wrapper records the plan's line itself; a refused plan is applied in
+// neither mode, so it records that one too. The line names the target and the
+// run's mode, which is what makes a dry run and an apply read apart.
+type maintCloudLedger struct {
+	inner  diskmaint.Target
+	ledger *diskmaint.Ledger
+}
+
+// Compile-time check that the wrapper is a target the run can carry.
+var _ diskmaint.Target = maintCloudLedger{}
+
+func (t maintCloudLedger) Name() string { return t.inner.Name() }
+
+func (t maintCloudLedger) Measure(ctx context.Context) (diskmaint.Measurement, error) {
+	return t.inner.Measure(ctx)
+}
+
+func (t maintCloudLedger) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
+	plan, err := t.inner.Plan(ctx, p)
+	if err != nil {
+		return plan, err
+	}
+	if p.Apply && plan.Refused == "" {
+		// An apply of a plan that was built records its own line in Apply,
+		// with what it removed and what it freed.
+		return plan, nil
+	}
+	if err := t.record(plan, p); err != nil {
+		return plan, err
+	}
+	return plan, nil
+}
+
+func (t maintCloudLedger) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
+	return t.inner.Apply(ctx, plan)
+}
+
+// record appends the line of a run that never reaches an apply: the plan of a
+// dry run, and a refused plan in either mode.
+func (t maintCloudLedger) record(plan diskmaint.Plan, p diskmaint.Policy) error {
+	mode := maintLedgerModeDryRun
+	if p.Apply {
+		mode = maintModeApply
+	}
+	err := t.ledger.Append(diskmaint.LedgerEntry{
+		TS:      time.Now().UTC(),
+		Target:  t.inner.Name(),
+		Mode:    mode,
+		Planned: len(plan.Actions),
+		Refused: plan.Refused,
+	})
+	if err != nil {
+		return fmt.Errorf("record the cloud run: %w", err)
+	}
+	return nil
 }
 
 // maintRefusedTarget stands in for a target the town's settings would not let
