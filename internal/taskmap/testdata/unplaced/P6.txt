@@ -1,7 +1,3 @@
-mol step await-signal
-mol step done
-mol step emit-event
-promote
 update
 update images
 update rollback
