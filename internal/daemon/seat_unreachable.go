@@ -38,11 +38,15 @@ const (
 
 // seatUnreachable names a seat whose session has answered nothing since Since,
 // the bead it holds and the last error its check returned. Released marks an
-// outage the daemon has already released the seat for (gt-wgim24).
+// outage the daemon has already released the seat for (gt-wgim24). Branch is the
+// branch the release read for the seat's work when it last asked its worktree, so
+// a release retried after the sandbox release dropped the record can still name
+// the branch origin is asked about (gt-35ihg5).
 type seatUnreachable struct {
 	Rig      string
 	Polecat  string
 	Bead     string
+	Branch   string
 	Since    time.Time
 	Err      error
 	Released bool
@@ -58,6 +62,10 @@ type seatOutage struct {
 	since    time.Time
 	err      error
 	released bool
+	// branch is the branch the release read for the seat's work, kept with the
+	// outage so every tick of a retried release names the same one after the
+	// sandbox release has dropped the record that named it (gt-35ihg5).
+	branch string
 }
 
 // seatKey names the seat a first-failure time belongs to.
@@ -70,11 +78,12 @@ type seatKey struct{ rig, polecat string }
 // A failed read keeps the seat's first-failure time, starting it at now for a
 // seat absent from prev, and takes this read's bead and error as the ones to
 // name; it keeps too the record that this outage was already released, so a
-// released seat is not released again on every tick. One good read drops the
-// seat, and with it that record, so a later failure waits out the five minutes
-// again and is released afresh. The caller passes every hooked seat on every
-// tick: a seat missing from reads is dropped, which is how a released seat stops
-// alarming.
+// released seat is not released again on every tick, and the branch the release
+// read, so a retried release still names it once the seat's worktree and record
+// no longer answer (gt-35ihg5). One good read drops the seat, and with it that
+// record, so a later failure waits out the five minutes again and is released
+// afresh. The caller passes every hooked seat on every tick: a seat missing from
+// reads is dropped, which is how a released seat stops alarming.
 // listed is false when the caller could not read the list of hooked seats at
 // all: the tick then says nothing about any seat, prev is carried over as it
 // is and nothing is named, so a failed or empty list read cannot clear alarms
@@ -99,14 +108,17 @@ func trackSeatUnreachable(prev map[seatKey]seatOutage, now time.Time, reads []se
 		}
 		since := now
 		released := false
+		branch := ""
 		if old, ok := prev[key]; ok && !old.since.After(now) {
 			// The same outage: it keeps its start and, with it, the record that
-			// it has already been released. A new outage (the seat read good in
-			// between, then failed again) starts here and is released afresh.
+			// it has already been released and the branch its release read. A new
+			// outage (the seat read good in between, then failed again) starts
+			// here and is released afresh.
 			since = old.since
 			released = old.released
+			branch = old.branch
 		}
-		next[key] = seatOutage{bead: read.Bead, since: since, err: read.Err, released: released}
+		next[key] = seatOutage{bead: read.Bead, since: since, err: read.Err, released: released, branch: branch}
 		if !seen[key] {
 			seen[key] = true
 			order = append(order, key)
@@ -122,6 +134,7 @@ func trackSeatUnreachable(prev map[seatKey]seatOutage, now time.Time, reads []se
 			Rig:     key.rig,
 			Polecat: key.polecat,
 			Bead:    outage.bead,
+			Branch:  outage.branch,
 			Since:   outage.since,
 			Err:     outage.err,
 		})

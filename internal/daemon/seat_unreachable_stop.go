@@ -127,12 +127,20 @@ func (d *Daemon) seatUnreachableBranch(seat overrunSeat) string {
 	return branch
 }
 
+// seatUnreachableNamesBranch reports whether branch names a branch to ask origin
+// about: a seat whose worktree and record both name none reads as "", and a stop
+// that ran with none prints "(unknown)".
+func seatUnreachableNamesBranch(branch string) bool {
+	return branch != "" && branch != "(unknown)"
+}
+
 // seatUnreachableOriginHolds reads origin for the branch the seat's work ran,
 // from the town's own copy of the seat's worktree: the sandbox is often the
 // thing that stopped answering, which is why the seat is being released, so it is
-// never asked. The branch is the seat's own, or the sandbox record's when the
-// seat names none, and branch is returned for the warning a branch origin does
-// not hold carries.
+// never asked. The branch is the seat's own — the one its release read, kept on
+// the outage for a retried release — or the sandbox record's when the seat names
+// none, and branch is returned for the warning a branch origin does not hold
+// carries.
 //
 // Origin is asked for every seat, whether or not it still has a sandbox record:
 // a record an earlier tick already dropped is a retried release, and answering
@@ -155,11 +163,11 @@ func (d *Daemon) seatUnreachableOriginHolds(seat overrunSeat) (string, bool, err
 				return "", false, overrunRecordReadError(sb.Session, err)
 			}
 		}
-		if sandboxed && (branch == "" || branch == "(unknown)") {
+		if sandboxed && !seatUnreachableNamesBranch(branch) {
 			branch = rec.Branch
 		}
 	}
-	if branch == "" || branch == "(unknown)" {
+	if !seatUnreachableNamesBranch(branch) {
 		if sb.Session == "" {
 			return "", false, fmt.Errorf("%s/%s names no branch to ask origin about", seat.Rig, seat.Polecat)
 		}
@@ -186,6 +194,10 @@ func (d *Daemon) seatUnreachableOriginHolds(seat overrunSeat) (string, bool, err
 // commits the sandbox's clone may still hold are on origin; commits beyond
 // origin's tip are the one loss it cannot rule out, and the transcripts are
 // copied out before the delete (gt-jhoi1).
+//
+// This deliberately does not go through the overrun stop's own sandbox removal,
+// which pushes the seat's branch from inside the sandbox and so asks the one
+// thing a seat unreachable for fifteen minutes usually cannot answer (gt-35ihg5).
 //
 // A deleter that is not linked refuses the step rather than dropping the record
 // alone: a nil one leaves the sandbox and takes away the only handle on it. A
@@ -255,7 +267,7 @@ func (w *seatUnreachableWatch) outagesAt() []seatUnreachable {
 	out := make([]seatUnreachable, 0, len(w.outages))
 	for key, outage := range w.outages {
 		out = append(out, seatUnreachable{Rig: key.rig, Polecat: key.polecat, Bead: outage.bead,
-			Since: outage.since, Err: outage.err, Released: outage.released})
+			Branch: outage.branch, Since: outage.since, Err: outage.err, Released: outage.released})
 	}
 	w.mu.Unlock()
 	slices.SortFunc(out, func(a, b seatUnreachable) int {
@@ -277,6 +289,27 @@ func (w *seatUnreachableWatch) markReleased(key seatKey, since time.Time) {
 		return
 	}
 	outage.released = true
+	w.outages[key] = outage
+}
+
+// markBranch records the branch the release read for the seat's work on the
+// seat's outage, so a release retried after its sandbox step dropped the record
+// still names the branch origin is asked about: the record is where a
+// branch-less seat's branch came from, and a retry that cannot name one leaves
+// the bead held for good. It is keyed by the seat and the outage's first-failure
+// time, so a branch read for one outage does not leak into the next; a tick whose
+// pass has already moved the seat on leaves it unmarked (gt-35ihg5).
+func (w *seatUnreachableWatch) markBranch(key seatKey, since time.Time, branch string) {
+	if branch == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	outage, ok := w.outages[key]
+	if !ok || !outage.since.Equal(since) {
+		return
+	}
+	outage.branch = branch
 	w.outages[key] = outage
 }
 
@@ -390,6 +423,10 @@ func (d *Daemon) releaseUnreachableSeats(s seatUnreachableStopSeams, now time.Ti
 // release — no bead it could read, a record that is held or submitted — is left
 // alone and logged once.
 //
+// The branch is read once and kept on the outage (markBranch), so a release the
+// next tick retries after the sandbox step dropped the record still asks origin
+// about the same branch rather than naming none and staying stuck.
+//
 // The seat's sandbox is never asked and never has to answer: a seat unreachable
 // for fifteen minutes usually has a sandbox the gateway cannot speak for any
 // more (its pod gone, its phase Error), and a step that waits on it strands the
@@ -450,6 +487,17 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 	seat := overrunSeat{Rig: alert.Rig, Polecat: alert.Polecat, Bead: alert.Bead}
 	if s.branch != nil {
 		seat.Branch = s.branch(seat)
+	}
+	// The branch is remembered on the outage, and read from it when the seat no
+	// longer answers one: the sandbox release drops the record a branch-less seat
+	// takes its branch from, so a release that finished that step and then failed
+	// at a later one would name nothing for origin to answer about on every tick
+	// after, and stay stuck. A branch read afresh wins over the remembered one
+	// (gt-35ihg5).
+	if seatUnreachableNamesBranch(seat.Branch) {
+		d.seatUnreachable.markBranch(seatKey{rig: alert.Rig, polecat: alert.Polecat}, alert.Since, seat.Branch)
+	} else {
+		seat.Branch = alert.Branch
 	}
 	if s.submittedNow != nil && s.submittedNow(seat) {
 		return skip("seat_unreachable: %s submitted %s while unreadable; the landing worker holds it", who, alert.Bead)
