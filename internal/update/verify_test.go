@@ -342,6 +342,11 @@ func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
 			line:    "DEGRADED tick 4ms ago: escalation=oldest_2h needs-human=1",
 			ignored: []string{"escalation=oldest_2h", "needs-human=1"},
 		},
+		{
+			name:    "degraded for a bead waiting on the operator, the third person label the town writes",
+			line:    "DEGRADED tick 28s ago: needs-operator=2",
+			ignored: []string{"needs-operator=2"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -368,36 +373,64 @@ func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
 	}
 }
 
-// TestVerifyHealthPassesTheLineTheTownRenders drives Verify on the line the
-// producer writes: a report whose only non-green field is an open escalation,
+// TestVerifyHealthPassesTheLineTheTownRenders drives Verify on the lines the
+// producer writes: a report whose only non-green field is a queue state,
 // rendered by internal/townhealth.Line. The parser's fixtures are copies of
-// that shape, so this ties them to the producer rather than to themselves.
+// those shapes, so this ties them to the producer rather than to themselves,
+// and the table covers every key the producer renders as a queue state — each
+// person label and the escalation field.
 func TestVerifyHealthPassesTheLineTheTownRenders(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
-	report := townhealth.Report{
-		At:      now.Add(-2 * time.Minute),
-		Verdict: townhealth.Degraded,
-		Fields: []townhealth.Field{{
-			Name:    townhealth.FieldEscalation,
-			Tag:     townhealth.Live,
-			Verdict: townhealth.Degraded,
-			Value:   "oldest " + townhealth.Short(2*time.Hour),
-		}},
+	tests := []struct {
+		name   string
+		field  townhealth.Field
+		reason string
+	}{
+		{
+			name: "open escalation",
+			field: townhealth.Field{
+				Name:    townhealth.FieldEscalation,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "oldest " + townhealth.Short(2*time.Hour),
+			},
+			reason: "escalation=oldest_2h",
+		},
+		{
+			name: "bead waiting on the operator",
+			field: townhealth.Field{
+				Name:    townhealth.FieldNeedsOperator,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "2",
+			},
+			reason: "needs-operator=2",
+		},
 	}
-	line := townhealth.Line(report, now, 5*time.Minute)
-	if !strings.Contains(line, "escalation=oldest_2h") {
-		t.Fatalf("producer line %q does not carry the escalation reason this test pins", line)
-	}
-	probes := greenProbes()
-	probes.health = line
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			report := townhealth.Report{
+				At:      now.Add(-2 * time.Minute),
+				Verdict: townhealth.Degraded,
+				Fields:  []townhealth.Field{tt.field},
+			}
+			line := townhealth.Line(report, now, 5*time.Minute)
+			if !strings.Contains(line, tt.reason) {
+				t.Fatalf("producer line %q does not carry the reason this test pins", line)
+			}
+			probes := greenProbes()
+			probes.health = line
 
-	checks := Verify(context.Background(), probes, verifyTestWant)
+			checks := Verify(context.Background(), probes, verifyTestWant)
 
-	assertFailedChecks(t, checks)
-	detail := findCheck(t, checks, checkHealth).Detail
-	if !strings.Contains(detail, "ignored escalation=oldest_2h") {
-		t.Errorf("health detail %q does not say it ignored the producer's escalation reason", detail)
+			assertFailedChecks(t, checks)
+			detail := findCheck(t, checks, checkHealth).Detail
+			if !strings.Contains(detail, "ignored "+tt.reason) {
+				t.Errorf("health detail %q does not say it ignored the producer's %s reason", detail, tt.name)
+			}
+		})
 	}
 }
 
@@ -421,6 +454,7 @@ func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 		{"degraded for a queue and a fault", "DEGRADED tick 2m ago: needs-overseer=1, main=behind"},
 		{"degraded for an unknown queue field", "DEGRADED tick 2m ago: needs-overseer[?]"},
 		{"degraded for a queue value that is not a count", "DEGRADED tick 2m ago: needs-overseer=lots"},
+		{"degraded for an operator wait that is not a count", "DEGRADED tick 2m ago: needs-operator=soon"},
 		{"degraded for a queue with an empty value", "DEGRADED tick 2m ago: needs-overseer="},
 		{"degraded for a queue with a signed count", "DEGRADED tick 2m ago: needs-overseer=-1"},
 		{"degraded for a queue carrying a tag marker", "DEGRADED tick 2m ago: needs-overseer=1[R]"},

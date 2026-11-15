@@ -130,15 +130,17 @@ func digestCheck(ctx context.Context, name string, probe func(context.Context) (
 }
 
 // queueReasons are the health line's reasons that name a queue a person has to
-// work through, not a fault: beads waiting for the overseer or a human, and an
-// open escalation. Each maps to the check its value must pass, because the key
-// alone does not make a reason a queue state: a person wait carries a count
-// (needs-overseer=2) and the escalation field carries how old the oldest open
-// escalation is (escalation=oldest_2h, its value as internal/townhealth
-// renders it). The key list and the values are the ones the town writes; a
-// reason outside them fails.
+// work through, not a fault: beads waiting for the overseer, the operator or a
+// human, and an open escalation. Each maps to the check its value must pass,
+// because the key alone does not make a reason a queue state: a person wait
+// carries a count (needs-overseer=2) and the escalation field carries how old
+// the oldest open escalation is (escalation=oldest_2h, its value as
+// internal/townhealth renders it). The key list and the values are the ones the
+// town writes — the three person labels of internal/townhealth's personFields
+// and its escalation field — and a reason outside them fails.
 var queueReasons = map[string]func(string) bool{
 	"needs-overseer": isCount,
+	"needs-operator": isCount,
 	"needs-human":    isCount,
 	"escalation":     isOldestAge,
 }
