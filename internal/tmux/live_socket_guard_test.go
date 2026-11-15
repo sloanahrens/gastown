@@ -58,6 +58,11 @@ func TestSocketFromTMUX(t *testing.T) {
 		"/tmp/tmux-501/gt-x,99999,0": "gt-x",
 		"/tmp/tmux-501/default,1,2":  "default",
 		",1,2":                       "",
+
+		// macOS reports the real path behind its /tmp symlink, so the
+		// socket sits under /private/tmp; the extra leading component must
+		// not change the name read out of $TMUX.
+		"/private/tmp/tmux-501/gt-town,501,0": "gt-town",
 	} {
 		if got := socketFromTMUX(in); got != want {
 			t.Errorf("socketFromTMUX(%q) = %q, want %q", in, got, want)
