@@ -607,5 +607,65 @@
     "rule": "private temp path",
     "line": "8330410dc8cf60db",
     "reason": "test fixture: the macOS socket path the guard must read a town name out of"
+  },
+  {
+    "path": "docs/design/bd-container.md",
+    "rule": "home directory path",
+    "line": "34b83e871dad0ed1",
+    "reason": "documented example: the sample mounts line shows the host directory a volume is backed by, an illustration of the mount shape and not a directory this repository has"
+  },
+  {
+    "path": "docs/design/bd-container.md",
+    "rule": "blocked word",
+    "line": "34b83e871dad0ed1",
+    "reason": "documented example: the sample mounts line names the account that owns the volume's backup directory, a design illustration and not a person's identity"
+  },
+  {
+    "path": "internal/cmdtree/bd-command-tree.json",
+    "rule": "blocked word",
+    "line": "36ad7e938b394eb1",
+    "reason": "public repository path: the recorded upstream source, repository and commit, that the command tree was generated from"
+  },
+  {
+    "path": "internal/config/forge.go",
+    "rule": "blocked word",
+    "line": "d53151c58feed5a2",
+    "reason": "the forge owner default: the account every repository URL under a fresh town is written with, a configuration value and not a person's name in prose"
+  },
+  {
+    "path": "internal/daemon/rebuild_hm.go",
+    "rule": "blocked word",
+    "line": "e085a483a57dcc16",
+    "reason": "public module path: the import path of the version variable the rebuild step stamps with -ldflags, in the upstream history-man module"
+  },
+  {
+    "path": "internal/daemon/rebuild_hm_test.go",
+    "rule": "blocked word",
+    "line": "65aa8d0b3070703d",
+    "reason": "test fixture: the public module path the rebuild test's expected -ldflags value must carry"
+  },
+  {
+    "path": "internal/land/beadbrief.go",
+    "rule": "blocked word",
+    "line": "19134574d15f5a31",
+    "reason": "legacy decision opener: the string an earlier release wrote into bead comments, kept so the brief parser still counts a decision recorded under it"
+  },
+  {
+    "path": "internal/land/operator_settings_test.go",
+    "rule": "blocked word",
+    "line": "20cb676513dc2172",
+    "reason": "test fixture: the retired decision opener an old bead comment carries, the input the parser must still accept"
+  },
+  {
+    "path": "internal/metrics/backtest.go",
+    "rule": "blocked word",
+    "line": "114d6beb4336aa6f",
+    "reason": "recorded input: the name of the operator's hand-written answers file the backtest reads, fixed by that record, and renaming it would silently stop the backtest reading the answers"
+  },
+  {
+    "path": "scripts/refresh-bd-command-tree.sh",
+    "rule": "blocked word",
+    "line": "27df8d1c5536152b",
+    "reason": "public repository path: the upstream repository the refresh script reads the command tree from by default"
   }
 ]
