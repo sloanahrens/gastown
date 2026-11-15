@@ -496,16 +496,29 @@ func TestDashboardCommandAndProbe(t *testing.T) {
 }
 
 // TestDashboardEnvEqualsTheDaemonEnv holds the dashboard's environment to the
-// daemon's: both come from the one environment helper, so every name and value
-// agrees, and both carry the container mode that resolves Dolt to the container
-// host.
+// daemon's but for the story-points embedder endpoint: both come from the shared
+// environment helper, so every other name and value agrees, and both carry the
+// container mode that resolves Dolt to the container host. The weekly retrain is
+// the daemon's alone, so the dashboard carries no STORYPOINTS_EMBED_URL (gt-mu7e87).
 func TestDashboardEnvEqualsTheDaemonEnv(t *testing.T) {
 	t.Parallel()
 	m := mustBuild(t, dashboardValues(t))
 	daemon := m.Deployment.Spec.Template.Spec.Containers[0]
 	dash := m.DashboardDeployment.Spec.Template.Spec.Containers[0]
-	if !slices.Equal(daemon.Env, dash.Env) {
-		t.Errorf("the dashboard environment = %+v, want the daemon's %+v", dash.Env, daemon.Env)
+	if got := envValuesNamed(daemon, storypointsEmbedURLEnv); len(got) != 1 || got[0] != StorypointsEmbedURL {
+		t.Errorf("the daemon carries %s = %q, want one value %q", storypointsEmbedURLEnv, got, StorypointsEmbedURL)
+	}
+	if got := envValuesNamed(dash, storypointsEmbedURLEnv); len(got) != 0 {
+		t.Errorf("the dashboard carries %s = %q, want none: it runs no retrain", storypointsEmbedURLEnv, got)
+	}
+	var daemonEnv []EnvVar
+	for _, e := range daemon.Env {
+		if e.Name != storypointsEmbedURLEnv {
+			daemonEnv = append(daemonEnv, e)
+		}
+	}
+	if !slices.Equal(daemonEnv, dash.Env) {
+		t.Errorf("the dashboard environment = %+v, want the daemon's less %s: %+v", dash.Env, storypointsEmbedURLEnv, daemonEnv)
 	}
 	for _, name := range []string{ContainerModeEnv, doltServerHostEnv, doltServerPortEnv} {
 		if got := envValuesNamed(dash, name); len(got) != 1 {
@@ -1032,6 +1045,7 @@ func TestRenderRefusesBadValues(t *testing.T) {
 			v.Env[TrackerURLEnv] = "http://elsewhere:7433"
 		}, `Values.Env["TRACKER_URL"]`, "from Values.Tracker"},
 		{"the tracker URL with the tracker off", func(v *Values) { v.Env[TrackerURLEnv] = "http://elsewhere:7433" }, `Values.Env["TRACKER_URL"]`, "from Values.Tracker"},
+		{"the story-points embedder endpoint", func(v *Values) { v.Env[storypointsEmbedURLEnv] = "http://elsewhere:11434" }, `Values.Env["STORYPOINTS_EMBED_URL"]`, "sets this variable itself"},
 		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
 		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
 		{"an env value that looks like a secret", func(v *Values) { v.Env[awsRegionEnv] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["AWS_REGION"]`, ""},
@@ -2569,6 +2583,55 @@ func TestForgejoAPIURLFollowsTheForgeHost(t *testing.T) {
 	}
 }
 
+// TestStorypointsEmbedURLNamesTheHostsOllama holds the render value the daemon
+// container's STORYPOINTS_EMBED_URL carries to the Goal's address: the gateway
+// name the live pod's hostAliases maps, on Ollama's default port (gt-mu7e87).
+func TestStorypointsEmbedURLNamesTheHostsOllama(t *testing.T) {
+	t.Parallel()
+
+	if got, want := StorypointsEmbedURL, "http://"+DoltHostName+":11434"; got != want {
+		t.Errorf("StorypointsEmbedURL = %q, want the host's Ollama %q", got, want)
+	}
+}
+
+// TestStorypointsEmbedURLCarriesTheHostsOllama holds the endpoint to the pods
+// that can reach it: the live pod, whose hostAliases maps the name, carries the
+// render value once, while a rehearsal carries none and a live render with no
+// gateway address carries none, since neither pod can look the name up
+// (gt-mu7e87).
+func TestStorypointsEmbedURLCarriesTheHostsOllama(t *testing.T) {
+	t.Parallel()
+
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0]
+	if got, want := envValuesNamed(pod, storypointsEmbedURLEnv), []string{StorypointsEmbedURL}; !slices.Equal(got, want) {
+		t.Errorf("the live pod's %s = %q, want exactly %q", storypointsEmbedURLEnv, got, want)
+	}
+
+	for _, mode := range []struct {
+		name   string
+		values func(*testing.T) Values
+	}{
+		{"a rehearsal", rehearsalValues},
+		{"a live render with no gateway address", liveValuesWithoutGateway},
+	} {
+		pod := mustBuild(t, mode.values(t)).Deployment.Spec.Template.Spec.Containers[0]
+		if got := envValuesNamed(pod, storypointsEmbedURLEnv); len(got) != 0 {
+			t.Errorf("%s carries %s = %q, want none: no hostAlias maps the name there, so the pod cannot look it up", mode.name, storypointsEmbedURLEnv, got)
+		}
+	}
+}
+
+// liveValuesWithoutGateway is a live render whose pod carries no hostAlias, so
+// DoltHostName names nothing in it: it has no gateway address, and no proxy
+// relays, which a render refuses without one (TestProxySidecars).
+func liveValuesWithoutGateway(t *testing.T) Values {
+	t.Helper()
+	v := goldenValues(t)
+	v.HostGatewayIP = ""
+	v.ProxyImage = ""
+	return v
+}
+
 // TestPodEnvDecisions holds the decision table to the live name set: every name
 // the compose writer or daemon.env carries has exactly one decision, the golden
 // records the decided pod environment, and a name with no decision is refused
@@ -2676,6 +2739,14 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 		t.Errorf("the pod's %s = %q, want %q: the forge-reading children read the host the git credential helper reads", forgejoAPIURLEnv, got, want)
 	}
 	delete(podEnv, forgejoAPIURLEnv)
+
+	// The embedder endpoint is a value the render sets itself, and the compose
+	// file carries no such name (the compose renderer is out of scope, gt-mu7e87).
+	// The pod's value is checked, then removed as one more difference.
+	if got, want := podEnv[storypointsEmbedURLEnv], StorypointsEmbedURL; got != want {
+		t.Errorf("the pod's %s = %q, want %q: the retrain reads the host's Ollama", storypointsEmbedURLEnv, got, want)
+	}
+	delete(podEnv, storypointsEmbedURLEnv)
 
 	switch got := composeFileEnv[ContainerNameEnv]; got {
 	case "":

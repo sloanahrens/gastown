@@ -454,6 +454,11 @@ const (
 	// compose file carries no such name, so validateEnv refuses a caller's entry
 	// for it the way it refuses a name the pod sets (gt-s0homy).
 	forgejoAPIURLEnv = "FORGEJO_API_URL"
+	// storypointsEmbedURLEnv is the Ollama endpoint the weekly story-points retrain
+	// embeds with (internal/metrics/storypoints_train.go). The render sets it from
+	// StorypointsEmbedURL, so validateEnv refuses a caller's entry for it as a name
+	// the pod sets itself (gt-mu7e87).
+	storypointsEmbedURLEnv = "STORYPOINTS_EMBED_URL"
 )
 
 const (
@@ -465,6 +470,11 @@ const (
 	// name the settings' BEADS_DOLT_SERVER_HOST carries. The live pod's
 	// hostAliases maps it to the host gateway, so the pod keeps the compose value.
 	DoltHostName = "host.docker.internal"
+	// StorypointsEmbedURL is where the pod's weekly story-points retrain embeds: the
+	// host's Ollama, at the name the pod reaches the host by. The retrain's own
+	// default is its process loopback, which in the pod is the pod itself, so the
+	// render names the host instead (gt-mu7e87).
+	StorypointsEmbedURL = "http://" + DoltHostName + ":11434"
 	// RegistryProxyContainer and GatewayProxyContainer name the two socat
 	// sidecars that stand in for the compose override's relays, and
 	// RegistryProxyPort and GatewayProxyPort are the ports the sandbox sling
@@ -1241,7 +1251,7 @@ func daemonContainer(v Values) Container {
 		Image:      v.Image,
 		Args:       daemonArgs(v),
 		WorkingDir: TownRootPath,
-		Env:        containerEnvironment(v),
+		Env:        daemonEnvironment(v),
 		Resources: &ContainerResources{
 			Requests: resourceList(v),
 			Limits:   resourceList(v),
@@ -1292,6 +1302,22 @@ func daemonArgs(v Values) []string {
 		args = append(args, "--forge-host", v.ForgeHost, "--forge-token-file", manifestdata.LiveForgeTokenPath)
 	}
 	return args
+}
+
+// daemonEnvironment is the daemon container's environment: the shared pod
+// environment plus the Ollama endpoint its weekly story-points retrain embeds
+// with. The dashboard runs no retrain, so its container takes containerEnvironment
+// alone (gt-mu7e87).
+//
+// A pod with no gateway alias carries no endpoint: DoltHostName resolves in the
+// pod only through that alias, so a rehearsal, or a live render with no gateway
+// address, would point the retrain at a name it cannot look up.
+func daemonEnvironment(v Values) []EnvVar {
+	env := containerEnvironment(v)
+	if len(hostAliases(v)) == 0 {
+		return env
+	}
+	return append(env, EnvVar{Name: storypointsEmbedURLEnv, Value: StorypointsEmbedURL})
 }
 
 // containerEnvironment is the pod's environment: the render-owned names at the
@@ -1431,8 +1457,9 @@ func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 // dashboardContainer runs `gt dashboard` on loopback: the command replaces the
 // image's entrypoint, which is the daemon's, and no --bind is passed, so the page
 // listens on 127.0.0.1 where a port-forward reaches it. Its environment is the
-// daemon container's, from the same helper, so GT_DAEMON_SUPERVISOR resolves Dolt
-// to the container host here as it does in the daemon. Set, Values.BdGatewayURL
+// shared pod environment, so GT_DAEMON_SUPERVISOR resolves Dolt to the container
+// host here as it does in the daemon; it carries no STORYPOINTS_EMBED_URL, which
+// only the daemon's retrain reads (daemonEnvironment). Set, Values.BdGatewayURL
 // adds the dashboard's own gateway pair after that list.
 //
 // Its probes are curl on the index. The index is static HTML that reads no Dolt
@@ -2432,6 +2459,8 @@ func (v Values) validateEnv() error {
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.Tracker when the tracker is rendered, so a caller's value would be dropped", name)
 		case name == BdGatewayURLEnv || name == BdGatewayTokenFileEnv:
 			return fmt.Errorf("Values.Env[%q]: the pod names this variable itself from Values.DaemonBdGatewayURL, so a caller's value is refused, not mixed with it", name)
+		case name == storypointsEmbedURLEnv:
+			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, to the host's Ollama, so a caller's value would be dropped", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
 		case decision.drop != "":
