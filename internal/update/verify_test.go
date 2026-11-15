@@ -331,14 +331,14 @@ func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
 			ignored: []string{"needs-overseer=1", "needs-human=2", "escalations=1"},
 		},
 		{
-			name:    "degraded for an open escalation, plural and singular",
-			line:    "DEGRADED tick 5s ago: escalation=oldest_2h escalations=1",
-			ignored: []string{"escalation=oldest_2h", "escalations=1"},
+			name:    "degraded for an open escalation",
+			line:    "DEGRADED tick 5s ago: escalations=1",
+			ignored: []string{"escalations=1"},
 		},
 		{
 			name:    "degraded for a queue, space separated as the line renders it",
-			line:    "DEGRADED tick 4ms ago: escalation=oldest_2h needs-human=1",
-			ignored: []string{"escalation=oldest_2h", "needs-human=1"},
+			line:    "DEGRADED tick 4ms ago: needs-overseer=2 needs-human=1",
+			ignored: []string{"needs-overseer=2", "needs-human=1"},
 		},
 	}
 	for _, tt := range tests {
@@ -368,8 +368,9 @@ func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
 
 // TestVerifyHealthRefusesEveryOtherLine drives the refusal branches of the
 // health check: any verdict other than GREEN or DEGRADED, a DEGRADED line with
-// a reason that is not a queue state or with none at all, and a line whose
-// shape is not the one the town writes each fail, carrying the line as read.
+// a reason that is not a queue state (a key outside queueReasons, a value that
+// is not a count) or with none at all, and a line whose shape is not the one
+// the town writes each fail, carrying the line as read.
 func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 	t.Parallel()
 	lines := []struct {
@@ -384,6 +385,11 @@ func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 		{"degraded for a promote lag", "DEGRADED tick 1m ago: promote/gastown=3_behind[R]"},
 		{"degraded for a queue and a fault", "DEGRADED tick 2m ago: needs-overseer=1, main=behind"},
 		{"degraded for an unknown queue field", "DEGRADED tick 2m ago: needs-overseer[?]"},
+		{"degraded for the singular escalation key outside the bead's list", "DEGRADED tick 2m ago: escalation=1"},
+		{"degraded for a queue value that is not a count", "DEGRADED tick 2m ago: needs-overseer=lots"},
+		{"degraded for a queue with an empty value", "DEGRADED tick 2m ago: needs-overseer="},
+		{"degraded for a queue with a signed count", "DEGRADED tick 2m ago: needs-overseer=-1"},
+		{"degraded for a queue carrying a tag marker", "DEGRADED tick 2m ago: needs-overseer=1[R]"},
 		{"degraded with no reason", "DEGRADED tick 2m ago"},
 		{"degraded with an empty reason list", "DEGRADED tick 2m ago:"},
 		{"degraded beside a landing pause, a shape verify does not read", "DEGRADED tick 1m ago (landings paused: 2d): needs-overseer=1"},

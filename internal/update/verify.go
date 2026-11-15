@@ -130,13 +130,12 @@ func digestCheck(ctx context.Context, name string, probe func(context.Context) (
 }
 
 // queueReasons are the health line's reasons that name a queue a person has to
-// work through, not a fault: beads waiting for the overseer or a human, and an
-// open escalation. The line renders the escalation field as "escalation"; its
-// plural is accepted as the same reason.
+// work through, not a fault: beads waiting for the overseer or a human, and
+// open escalations. A reason is a key here carrying a count; the key alone does
+// not make it a queue state (see isCount).
 var queueReasons = map[string]bool{
 	"needs-overseer": true,
 	"needs-human":    true,
-	"escalation":     true,
 	"escalations":    true,
 }
 
@@ -164,12 +163,13 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 
 // queueOnlyHealthLine reports whether line is a health line a roll may pass on,
 // and the queue reasons it ignored. A GREEN verdict passes whatever it lists;
-// a DEGRADED one passes only when every reason it lists is a queue state. The
-// reasons are the tokens after the colon, separated by commas or by spaces, so
-// both the comma-separated form and the space-separated line the town renders
-// read. Anything else — a RED or UNKNOWN verdict, a DEGRADED line with no
-// reason, a line without the "<VERDICT> tick <age> ago" head — is not ok, so a
-// shape this does not know fails rather than passes.
+// a DEGRADED one passes only when every reason it lists is a queue state, a
+// queueReasons key carrying a count. The reasons are the tokens after the
+// colon, separated by commas or by spaces, so both the comma-separated form and
+// the space-separated line the town renders read. Anything else — a RED or
+// UNKNOWN verdict, a key outside queueReasons, a value that is not a count, a
+// DEGRADED line with no reason, a line without the "<VERDICT> tick <age> ago"
+// head — is not ok, so a shape this does not know fails rather than passes.
 func queueOnlyHealthLine(line string) (queue []string, ok bool) {
 	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
 	if !found {
@@ -203,13 +203,28 @@ func queueOnlyHealthLine(line string) (queue []string, ok bool) {
 		return nil, false
 	}
 	for _, reason := range tokens {
-		key, _, found := strings.Cut(reason, "=")
-		if !found || !queueReasons[strings.ToLower(key)] {
+		key, count, found := strings.Cut(reason, "=")
+		if !found || !queueReasons[strings.ToLower(key)] || !isCount(count) {
 			return nil, false
 		}
 		queue = append(queue, reason)
 	}
 	return queue, true
+}
+
+// isCount reports whether s is a whole-number count: one or more decimal
+// digits, with no sign, space or tag marker. An empty value is not a count, so
+// a queue reason without one fails rather than passes.
+func isCount(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // sameCommit reports whether two commit strings name the same build, allowing
