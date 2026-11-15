@@ -67,6 +67,11 @@ type fakeDocker struct {
 	// parentOf maps an image id to the id it was built from, so a removal that
 	// prunes takes an untagged parent with it while --no-prune keeps it.
 	parentOf map[string]string
+	// builderOut is what docker builder prune prints; empty prints docker's own
+	// summary of a prune that reclaimed nothing. builderErr, when set, is the
+	// error a prune returns.
+	builderOut string
+	builderErr error
 	// gone is every image id the daemon no longer holds, and removed is the ids
 	// a removal took, in call order.
 	gone    map[string]bool
@@ -91,12 +96,64 @@ func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...s
 		case "rm":
 			return f.remove(args[2:])
 		}
+	case "builder":
+		return f.builderPrune(args[1:])
 	case "ps":
 		return f.ps(args[1:])
 	case "inspect":
 		return f.containerImages(args[1:])
 	}
 	return nil, errors.New("unexpected command")
+}
+
+// builderPrune answers docker builder prune the way the target may ask: prune,
+// --keep-storage with the size to keep, and --force so nothing waits for a
+// prompt. A prune naming --all, or one naming no keep size or no force, is not
+// the prune the target is meant to run, and the fake refuses it so such a call
+// cannot pass as a trimmed cache.
+func (f *fakeDocker) builderPrune(args []string) ([]byte, error) {
+	keep, force := "", false
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; a {
+		case "prune":
+			if i != 0 {
+				return nil, errors.New("unexpected builder prune")
+			}
+		case "--all", "-a":
+			return nil, errors.New("unexpected full build cache prune")
+		case "--force", "-f":
+			force = true
+		case "--keep-storage":
+			if i+1 >= len(args) {
+				return nil, errors.New("unexpected builder prune")
+			}
+			i++
+			keep = args[i]
+		default:
+			return nil, errors.New("unexpected builder command")
+		}
+	}
+	if keep == "" || !force {
+		return nil, errors.New("unexpected build cache prune without --keep-storage and --force")
+	}
+	if f.builderErr != nil {
+		return nil, f.builderErr
+	}
+	if f.builderOut != "" {
+		return []byte(f.builderOut), nil
+	}
+	return []byte("Total reclaimed space: 0B\n"), nil
+}
+
+// builderCalls is every builder command the target ran, in call order.
+func (f *fakeDocker) builderCalls() []call {
+	var out []call
+	for _, c := range f.calls {
+		if len(c.args) > 0 && c.args[0] == "builder" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // ps answers docker ps: every container when the list is all (-a), and the
