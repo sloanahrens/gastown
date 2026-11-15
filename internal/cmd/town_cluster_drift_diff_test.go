@@ -1,6 +1,11 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"math"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +17,36 @@ import (
 func driftDigest(name string) string {
 	return "registry.example.test/" + name + "@sha256:" + strings.Repeat("0", 64)
 }
+
+// driftFingerprintOf computes the fingerprint a drift line must carry for value,
+// on its own rather than through the code under test: the first 12 hex digits of
+// the SHA-256 of encoding/json's encoding.
+func driftFingerprintOf(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encoding %#v for its fingerprint: %v", value, err)
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])[:12]
+}
+
+// driftWantDifference is the line the compare must report for a field the two
+// sides carry differently: its path and a fingerprint of each side.
+func driftWantDifference(t *testing.T, path string, rendered, live any) string {
+	t.Helper()
+	return path + ": rendered " + driftFingerprintOf(t, rendered) + ", observed " + driftFingerprintOf(t, live)
+}
+
+// driftWantAbsent is the line for a field or list entry the live object lacks.
+func driftWantAbsent(t *testing.T, path string, rendered any) string {
+	t.Helper()
+	return path + ": rendered " + driftFingerprintOf(t, rendered) + ", observed absent"
+}
+
+// driftLineShape is everything a drift line may be: a JSON path and a fingerprint
+// of each side, never a value (gt-wi4885).
+var driftLineShape = regexp.MustCompile(`^.+: rendered (sha256:[0-9a-f]{12}|absent), observed (sha256:[0-9a-f]{12}|absent)$`)
 
 // driftRendered is a rendered daemon Deployment decoded from the render's own
 // YAML: numbers are ints and the object carries only the fields the render
@@ -228,14 +263,14 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				driftEnvOf(t, driftContainer(t, live, "daemon"), "TZ")["value"] = "UTC"
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].env[name=TZ].value: rendered "America/Chicago", live "UTC"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].env[name=TZ].value", "America/Chicago", "UTC")},
 		},
 		{
 			name: "an argument",
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["args"].([]any)[1] = "/run/secrets/other-token"
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].args[1]: rendered "/run/secrets/om-token", live "/run/secrets/other-token"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].args[1]", "/run/secrets/om-token", "/run/secrets/other-token")},
 		},
 		{
 			name: "a command",
@@ -243,7 +278,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				command := driftInitContainer(t, live, "registry-proxy")["command"].([]any)
 				command[2] = "exit 1"
 			},
-			want: []string{`spec.template.spec.initContainers[name=registry-proxy].command[2]: rendered "sleep infinity", live "exit 1"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.initContainers[name=registry-proxy].command[2]", "sleep infinity", "exit 1")},
 		},
 		{
 			name: "a positional list the live object made longer",
@@ -251,7 +286,8 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				initContainer := driftInitContainer(t, live, "registry-proxy")
 				initContainer["command"] = append(initContainer["command"].([]any), "--extra")
 			},
-			want: []string{`spec.template.spec.initContainers[name=registry-proxy].command: rendered ["/bin/sh","-c","sleep infinity"], live ["/bin/sh","-c","sleep infinity","--extra"]`},
+			want: []string{driftWantDifference(t, "spec.template.spec.initContainers[name=registry-proxy].command",
+				[]any{"/bin/sh", "-c", "sleep infinity"}, []any{"/bin/sh", "-c", "sleep infinity", "--extra"})},
 		},
 		{
 			name: "a positional list the live object made shorter",
@@ -259,14 +295,15 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				initContainer := driftInitContainer(t, live, "registry-proxy")
 				initContainer["command"] = initContainer["command"].([]any)[:2]
 			},
-			want: []string{`spec.template.spec.initContainers[name=registry-proxy].command: rendered ["/bin/sh","-c","sleep infinity"], live ["/bin/sh","-c"]`},
+			want: []string{driftWantDifference(t, "spec.template.spec.initContainers[name=registry-proxy].command",
+				[]any{"/bin/sh", "-c", "sleep infinity"}, []any{"/bin/sh", "-c"})},
 		},
 		{
 			name: "a probe",
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["readinessProbe"].(map[string]any)["periodSeconds"] = 15
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].readinessProbe.periodSeconds: rendered 10, live 15`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].readinessProbe.periodSeconds", 10, 15)},
 		},
 		{
 			name: "a mount",
@@ -274,7 +311,8 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				mounts := driftContainer(t, live, "daemon")["volumeMounts"].([]any)
 				mounts[1].(map[string]any)["subPath"] = "promote-om.key.old"
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].volumeMounts[mountPath=/run/gt/xdg/gt/promote-om.key].subPath: rendered "promote-om.key", live "promote-om.key.old"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].volumeMounts[mountPath=/run/gt/xdg/gt/promote-om.key].subPath",
+				"promote-om.key", "promote-om.key.old")},
 		},
 		{
 			name: "a resource limit",
@@ -282,7 +320,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				resources := driftContainer(t, live, "daemon")["resources"].(map[string]any)
 				resources["limits"].(map[string]any)["memory"] = "2Gi"
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].resources.limits.memory: rendered "1024Mi", live "2Gi"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].resources.limits.memory", "1024Mi", "2Gi")},
 		},
 		{
 			name: "a quantity exponent beyond anything a quantity fits",
@@ -294,7 +332,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				resources := driftContainer(t, live, "daemon")["resources"].(map[string]any)
 				resources["requests"].(map[string]any)["cpu"] = "1"
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].resources.requests.cpu: rendered "1e999999999999", live "1"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].resources.requests.cpu", "1e999999999999", "1")},
 		},
 		{
 			name: "a volume",
@@ -302,7 +340,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				volumes := driftPodSpec(live)["volumes"].([]any)
 				volumes[0].(map[string]any)["persistentVolumeClaim"].(map[string]any)["claimName"] = "other"
 			},
-			want: []string{`spec.template.spec.volumes[name=town-state].persistentVolumeClaim.claimName: rendered "town-state", live "other"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.volumes[name=town-state].persistentVolumeClaim.claimName", "town-state", "other")},
 		},
 		{
 			name: "a host alias",
@@ -310,35 +348,36 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				alias := driftPodSpec(live)["hostAliases"].([]any)[0].(map[string]any)
 				alias["hostnames"].([]any)[0] = "host.docker.internal.old"
 			},
-			want: []string{`spec.template.spec.hostAliases[ip=192.168.5.2].hostnames[0]: rendered "host.docker.internal", live "host.docker.internal.old"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.hostAliases[ip=192.168.5.2].hostnames[0]",
+				"host.docker.internal", "host.docker.internal.old")},
 		},
 		{
 			name: "the strategy",
 			live: func(t *testing.T, live map[string]any) {
 				live["spec"].(map[string]any)["strategy"].(map[string]any)["type"] = "RollingUpdate"
 			},
-			want: []string{`spec.strategy.type: rendered "Recreate", live "RollingUpdate"`},
+			want: []string{driftWantDifference(t, "spec.strategy.type", "Recreate", "RollingUpdate")},
 		},
 		{
 			name: "the replicas",
 			live: func(t *testing.T, live map[string]any) {
 				live["spec"].(map[string]any)["replicas"] = 2
 			},
-			want: []string{`spec.replicas: rendered 1, live 2`},
+			want: []string{driftWantDifference(t, "spec.replicas", 1, 2)},
 		},
 		{
 			name: "a label",
 			live: func(t *testing.T, live map[string]any) {
 				live["metadata"].(map[string]any)["labels"].(map[string]any)["app.kubernetes.io/name"] = "other"
 			},
-			want: []string{`metadata.labels.app.kubernetes.io/name: rendered "daemon", live "other"`},
+			want: []string{driftWantDifference(t, "metadata.labels.app.kubernetes.io/name", "daemon", "other")},
 		},
 		{
 			name: "a pod-template annotation",
 			live: func(t *testing.T, live map[string]any) {
 				driftTemplateMeta(live)["annotations"].(map[string]any)["gastown.dev/pod-template"] = "v2"
 			},
-			want: []string{`spec.template.metadata.annotations.gastown.dev/pod-template: rendered "v1", live "v2"`},
+			want: []string{driftWantDifference(t, "spec.template.metadata.annotations.gastown.dev/pod-template", "v1", "v2")},
 		},
 		{
 			name: "an annotation that is named image",
@@ -348,7 +387,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				live["metadata"].(map[string]any)["annotations"].(map[string]any)["image"] = "other"
 			},
-			want: []string{`metadata.annotations.image: rendered "daemon", live "other"`},
+			want: []string{driftWantDifference(t, "metadata.annotations.image", "daemon", "other")},
 		},
 		{
 			name: "a label named like a server-set key",
@@ -358,7 +397,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				live["metadata"].(map[string]any)["labels"].(map[string]any)["uid"] = "b"
 			},
-			want: []string{`metadata.labels.uid: rendered "a", live "b"`},
+			want: []string{driftWantDifference(t, "metadata.labels.uid", "a", "b")},
 		},
 		{
 			name: "a quantity exponent past the bound, spelled as digits",
@@ -368,7 +407,8 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "100000000000000000000"
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].resources.requests.cpu: rendered "1e20", live "100000000000000000000"`},
+			want: []string{driftWantDifference(t, "spec.template.spec.containers[name=daemon].resources.requests.cpu",
+				"1e20", "100000000000000000000")},
 		},
 		{
 			name: "a port the live object does not carry",
@@ -376,7 +416,8 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				ports := driftContainer(t, live, "daemon")["ports"].([]any)
 				ports[0].(map[string]any)["containerPort"] = 9090
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].ports[containerPort=8080]: rendered {"containerPort":8080}, live has no such entry`},
+			want: []string{driftWantAbsent(t, "spec.template.spec.containers[name=daemon].ports[containerPort=8080]",
+				map[string]any{"containerPort": 8080})},
 		},
 		{
 			name: "an env var the live object lacks",
@@ -384,14 +425,15 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				container := driftContainer(t, live, "daemon")
 				container["env"] = []any{driftEnvOf(t, container, "GT_TOWN_ROOT")}
 			},
-			want: []string{`spec.template.spec.containers[name=daemon].env[name=TZ]: rendered {"name":"TZ","value":"America/Chicago"}, live has no such entry`},
+			want: []string{driftWantAbsent(t, "spec.template.spec.containers[name=daemon].env[name=TZ]",
+				map[string]any{"name": "TZ", "value": "America/Chicago"})},
 		},
 		{
 			name: "a field the live object lacks",
 			live: func(t *testing.T, live map[string]any) {
 				delete(driftPodSpec(live), "serviceAccountName")
 			},
-			want: []string{`spec.template.spec.serviceAccountName: rendered "daemon", live has no such field`},
+			want: []string{driftWantAbsent(t, "spec.template.spec.serviceAccountName", "daemon")},
 		},
 	}
 
@@ -413,7 +455,43 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("drift =\n%q\nwant\n%q", got, tc.want)
 			}
+			for _, line := range got {
+				if !driftLineShape.MatchString(line) {
+					t.Errorf("drift line %q carries more than its path and a fingerprint of each side", line)
+				}
+			}
 		})
+	}
+}
+
+// TestDeploymentDriftNeverPrintsAValue holds every drift line to naming where the
+// two sides differ and never what they hold: a live env var and an argument that
+// carry a token are as invisible in the line as any other field (gt-wi4885).
+func TestDeploymentDriftNeverPrintsAValue(t *testing.T) {
+	t.Parallel()
+	const token = "0f3c9a1e5b7d-token-of-the-town"
+	rendered := driftRendered()
+	live := driftLive(rendered)
+	container := driftContainer(t, live, "daemon")
+	driftEnvOf(t, container, "TZ")["value"] = token
+	container["args"].([]any)[1] = token
+	got, err := deploymentDrift(rendered, live)
+	if err != nil {
+		t.Fatalf("deploymentDrift: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("drift = %q, want the env var and the argument", got)
+	}
+	for _, line := range got {
+		if strings.Contains(line, token) {
+			t.Errorf("drift line %q carries the live value", line)
+		}
+		if strings.Contains(line, "America/Chicago") || strings.Contains(line, "/run/secrets/om-token") {
+			t.Errorf("drift line %q carries the rendered value", line)
+		}
+		if !driftLineShape.MatchString(line) {
+			t.Errorf("drift line %q is not its path and a fingerprint of each side", line)
+		}
 	}
 }
 
@@ -553,6 +631,51 @@ func TestDeploymentDriftRefusesAnUnreadableSide(t *testing.T) {
 			}
 			if got != nil {
 				t.Errorf("got %q beside the error, want no differences", got)
+			}
+		})
+	}
+}
+
+// TestDeploymentDriftRefusesAValueItCannotFingerprint holds a side with no
+// canonical JSON to a failed run: a line cannot stand in for a value it could not
+// fingerprint, since the stand-in would be the value (gt-wi4885).
+func TestDeploymentDriftRefusesAValueItCannotFingerprint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		rendered func(rendered, live map[string]any)
+	}{
+		{
+			name: "the rendered side",
+			rendered: func(rendered, _ map[string]any) {
+				driftEnvOf(t, driftContainer(t, rendered, "daemon"), "TZ")["value"] = math.NaN()
+			},
+		},
+		{
+			name: "the live side",
+			rendered: func(_, live map[string]any) {
+				driftEnvOf(t, driftContainer(t, live, "daemon"), "TZ")["value"] = math.NaN()
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rendered := driftRendered()
+			live := driftLive(rendered)
+			tc.rendered(rendered, live)
+			got, err := deploymentDrift(rendered, live)
+			if err == nil {
+				t.Fatalf("drift = %q with no error, want the value refused", got)
+			}
+			if got != nil {
+				t.Errorf("got %q beside the error, want no differences", got)
+			}
+			if want := "no canonical JSON"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not hold %q", err, want)
+			}
+			if want := "env[name=TZ].value"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name the path %s", err, want)
 			}
 		})
 	}

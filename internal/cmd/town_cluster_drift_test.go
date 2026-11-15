@@ -229,7 +229,7 @@ func TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll(t *testing.
 			},
 			wantExit: 1,
 			wantLines: []string{
-				`deployment/daemon: spec.template.spec.containers[name=daemon].env[name=TZ].value: rendered "America/Chicago", live "UTC"`,
+				"deployment/daemon: " + driftWantDifference(t, "spec.template.spec.containers[name=daemon].env[name=TZ].value", "America/Chicago", "UTC"),
 			},
 		},
 		{
@@ -243,7 +243,7 @@ func TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll(t *testing.
 			},
 			wantExit: 1,
 			wantLines: []string{
-				`deployment/dashboard: spec.template.spec.containers[name=dashboard].env[name=TZ].value: rendered "America/Chicago", live "UTC"`,
+				"deployment/dashboard: " + driftWantDifference(t, "spec.template.spec.containers[name=dashboard].env[name=TZ].value", "America/Chicago", "UTC"),
 			},
 		},
 	}

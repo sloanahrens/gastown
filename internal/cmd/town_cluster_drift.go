@@ -27,7 +27,8 @@ names and the live object carries differently.
 An image roll is not a difference: the container images, the polecat-image and
 restartedAt annotations, and the fields the API server fills in are skipped, so a
 cluster in step prints nothing and exits 0. Each difference prints one line naming
-its JSON path and both values, and the command exits 1.
+its JSON path and a fingerprint of each side, never either value, since a
+Deployment's spec can hold a secret, and the command exits 1.
 
 Nothing is applied and no file is written; the only cluster calls are the reads.
 The flags come from the recorded file, so a live render must have run with

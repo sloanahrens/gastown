@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,8 +39,9 @@ var serverSetRootKeys = map[string]bool{
 }
 
 // deploymentDrift lists every rendered Deployment field the live one lacks or
-// carries differently, one sorted line per field naming its JSON path and both
-// values, and refuses either side that decoded to nothing (gt-jqfk62).
+// carries differently, one sorted line per field naming its JSON path and a
+// fingerprint of each side, never either value, and refuses either side that
+// decoded to nothing (gt-jqfk62, gt-wi4885).
 func deploymentDrift(rendered, live map[string]any) ([]string, error) {
 	if len(rendered) == 0 {
 		return nil, errors.New("deployment drift: the rendered Deployment has no fields, so it was not read; an unreadable render is not a cluster in step")
@@ -48,13 +51,18 @@ func deploymentDrift(rendered, live map[string]any) ([]string, error) {
 	}
 	w := &driftWalk{}
 	w.object("", rendered, live)
+	if w.err != nil {
+		return nil, w.err
+	}
 	slices.Sort(w.drift)
 	return w.drift, nil
 }
 
-// driftWalk collects the differences a nested comparison finds.
+// driftWalk collects the differences a nested comparison finds, and the first
+// value it could not fingerprint.
 type driftWalk struct {
 	drift []string
+	err   error
 }
 
 // object compares the rendered object at path against the live object and walks
@@ -68,7 +76,7 @@ func (w *driftWalk) object(path string, rendered, live map[string]any) {
 		childPath := joinPath(path, key)
 		liveValue, ok := live[key]
 		if !ok {
-			w.missingField(childPath, rendered[key])
+			w.absent(childPath, rendered[key])
 			continue
 		}
 		if key == "requests" || key == "limits" {
@@ -114,7 +122,7 @@ func (w *driftWalk) quantityMap(path string, rendered, live map[string]any) {
 		childPath := joinPath(path, key)
 		liveValue, ok := live[key]
 		if !ok {
-			w.missingField(childPath, rendered[key])
+			w.absent(childPath, rendered[key])
 			continue
 		}
 		renderedText, renderedOK := rendered[key].(string)
@@ -167,7 +175,7 @@ func (w *driftWalk) keyedList(path, keyField string, rendered, live []any) bool 
 		entryPath := path + "[" + keyField + "=" + renderedKeys[i] + "]"
 		liveEntry, ok := liveByKey[renderedKeys[i]]
 		if !ok {
-			w.missingEntry(entryPath, entry)
+			w.absent(entryPath, entry)
 			continue
 		}
 		w.value(entryPath, entry, liveEntry)
@@ -177,17 +185,44 @@ func (w *driftWalk) keyedList(path, keyField string, rendered, live []any) bool 
 
 // difference records a field the two decodings carry differently.
 func (w *driftWalk) difference(path string, rendered, live any) {
-	w.drift = append(w.drift, path+": rendered "+driftText(rendered)+", live "+driftText(live))
+	renderedText, ok := w.fingerprint(path, rendered)
+	if !ok {
+		return
+	}
+	liveText, ok := w.fingerprint(path, live)
+	if !ok {
+		return
+	}
+	w.record(path, renderedText, liveText)
 }
 
-// missingField records a field the render names and the live object lacks.
-func (w *driftWalk) missingField(path string, rendered any) {
-	w.drift = append(w.drift, path+": rendered "+driftText(rendered)+", live has no such field")
+// absent records a field or list entry the render names and the live object
+// lacks. The path says which it is: a keyed list's entry path carries the key.
+func (w *driftWalk) absent(path string, rendered any) {
+	renderedText, ok := w.fingerprint(path, rendered)
+	if !ok {
+		return
+	}
+	w.record(path, renderedText, "absent")
 }
 
-// missingEntry records a list entry the render names and the live list lacks.
-func (w *driftWalk) missingEntry(path string, rendered any) {
-	w.drift = append(w.drift, path+": rendered "+driftText(rendered)+", live has no such entry")
+// fingerprint is one side's text for a drift line, or false when the value has
+// none, which fails the run: a line cannot stand in for a value it could not
+// fingerprint, since the stand-in would be the value (gt-wi4885).
+func (w *driftWalk) fingerprint(path string, value any) (string, bool) {
+	text, err := driftFingerprint(value)
+	if err != nil {
+		w.err = fmt.Errorf("%s: %w", path, err)
+		return "", false
+	}
+	return text, true
+}
+
+// record adds one line: the path and a fingerprint of each side. It never
+// carries a value, since a Deployment's spec can hold a secret and the line
+// reaches a terminal and a log (gt-wi4885).
+func (w *driftWalk) record(path, renderedText, observed string) {
+	w.drift = append(w.drift, path+": rendered "+renderedText+", observed "+observed)
 }
 
 // driftIgnoresKey reports whether the compare skips key in the object at
@@ -253,14 +288,24 @@ func driftNumber(value any) (float64, bool) {
 	return 0, false
 }
 
-// driftText renders a decoded value for a drift line: JSON quotes a string and
-// keeps a list or object on one line.
-func driftText(value any) string {
+// driftFingerprintHexLen is how many hex digits of the hash a drift line carries:
+// enough to tell two values apart, and all a reader needs to see that two sides
+// differ.
+const driftFingerprintHexLen = 12
+
+// driftFingerprint is what a drift line carries for one side of a difference: the
+// first driftFingerprintHexLen hex digits of the SHA-256 of the value's canonical
+// JSON, never the value itself, since a Deployment's spec can hold a secret
+// (gt-wi4885). Canonical is encoding/json's encoding: it sorts a map's keys, so
+// the order a decoder read them in does not change the fingerprint, and the
+// render's int 2 and the live float64 2 encode alike.
+func driftFingerprint(value any) (string, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Sprintf("%v", value)
+		return "", fmt.Errorf("the value has no canonical JSON to fingerprint, so it cannot be reported: %w", err)
 	}
-	return string(encoded)
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])[:driftFingerprintHexLen], nil
 }
 
 // joinPath appends key to path as a JSON object path.
