@@ -20,6 +20,6 @@ func init() {
 		Entry{Path: "theme cli", Group: "host", Use: "Use this when gt's output is hard to read against your terminal's background, to force dark or light colors or return to auto-detection.", Check: "gt theme cli with no mode prints CLI Theme: and an Effective: line naming the mode in force"},
 		Entry{Path: "tracker", Group: "dolt", Use: "Use this when the town's issues are served by the tracker rather than Dolt, to reach the commands that read its health and replay its writes."},
 		Entry{Path: "tracker replay", Group: "dolt", Use: "Use this when a rig has flipped back to Dolt after a soak on the tracker, to apply the writes the tracker took since the flip so none are lost.", Check: "a --dry-run prints the bd calls and ends dry run: N bd calls, none run; would apply through seq N"},
-		Entry{Path: "tracker status", Group: "dolt", Use: "Use this when the tracker is suspected of being down or slow, to see its URL, readiness, per-rig issue counts and slowest route on one screen.", Check: "the screen prints a Ready: line and the command exits 0 when the tracker answers ready"},
+		Entry{Path: "tracker status", Group: "dolt", Use: "Use this when the tracker is suspected of being down or slow, to see its URL, readiness, per-rig issue counts and slowest route on one screen.", Check: "the screen prints a Ready line and the command exits 0 when the tracker answers ready"},
 	)
 }
