@@ -1,6 +1,9 @@
 package beads
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ReadyOptions is the filter ReadyFiltered sends, so a caller's exclusions run
 // against the store's own board instead of a page filtered in Go afterwards.
@@ -19,7 +22,8 @@ type ReadyOptions struct {
 
 // Client is the issue-store surface that code outside this package uses
 // most: reading, listing, creating, updating and closing issues, their
-// comments and dependencies, the ready queue, and claim release. *Beads
+// comments and dependencies, the ready queue, claim release, and the
+// cost-sample rows. *Beads
 // implements it against bd; internal/beads/beadsfake implements it in memory
 // for unit tests, and beadsfake.RunClientContract pins the two to the same
 // behavior.
@@ -137,16 +141,28 @@ type Client interface {
 	// while expected still holds it; the guard replaces bd's claim fence.
 	// transferred=false with a nil error means nothing was written.
 	TransferIfAssignee(id, expected, status, assignee string) (transferred bool, err error)
+
+	// WriteCostSample appends one cost sample row. A kind this package does
+	// not type, a zero At, and a reading the store's row format cannot carry
+	// are each an error with no row written.
+	WriteCostSample(ctx context.Context, s Sample) error
+	// ReadCostSamples returns the rows of kind, newest first; a non-zero
+	// since keeps the rows from that instant on and a positive limit caps the
+	// count, zero leaves the store's own default. An unknown kind, a negative
+	// limit, or a row that does not read back is an error, never an empty
+	// series.
+	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]Sample, error)
 }
 
 var _ Client = (*Beads)(nil)
 
 // Admin is the maintenance surface beadsfake models: config keys, the
 // key-value store, counts, stats, the wisp list, gc's dry-run candidates, the
-// events journal, and the version handshake's two reads. beadsfake.RunAdminContract
-// pins the fake to *Beads on the shared cases, and RunVersionContract on the
-// version pair. (SQLCSV and InitDatabase are on *Beads too, but a fake can
-// only script or record them.)
+// events journal, the cost-sample rows, and the version handshake's two reads.
+// beadsfake.RunAdminContract pins the fake to *Beads on the shared cases,
+// RunVersionContract on the version pair, and RunCostSamplesContract on the
+// cost-sample pair. (SQLCSV and InitDatabase are on *Beads too, but a fake
+// can only script or record them.)
 type Admin interface {
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
@@ -174,6 +190,11 @@ type Admin interface {
 	// EventsTail reads the events journal after since, at most limit
 	// records (0 = all); a pruned-past since is *EventsTruncatedError.
 	EventsTail(since int64, limit int) (*EventsPage, error)
+	// WriteCostSample appends one cost sample row; the behavior is Client's.
+	WriteCostSample(ctx context.Context, s Sample) error
+	// ReadCostSamples returns a kind's cost sample rows; the behavior is
+	// Client's.
+	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]Sample, error)
 }
 
 var _ Admin = (*Beads)(nil)

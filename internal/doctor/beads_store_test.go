@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -227,6 +229,12 @@ func (noBeadsDB) CreateRigBead(string, *beads.RigFields) (*beads.Issue, error) {
 }
 func (noBeadsDB) DemoteToWisp(string) error     { return errNoDatabase }
 func (noBeadsDB) ReopenUnassigned(string) error { return errNoDatabase }
+func (noBeadsDB) WriteCostSample(context.Context, beads.Sample) error {
+	return errNoDatabase
+}
+func (noBeadsDB) ReadCostSamples(context.Context, string, time.Time, int) ([]beads.Sample, error) {
+	return nil, errNoDatabase
+}
 
 var (
 	_ doctorBeads = doctorDB{}

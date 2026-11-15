@@ -1,8 +1,11 @@
 package beadsfake
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +79,116 @@ func RunVersionContract(t *testing.T, newImpl func(t *testing.T) AdminClient) {
 			t.Errorf("UpdateOffersFlag(--if-status) = false; want the bd behind the store to offer it")
 		}
 	})
+}
+
+// RunCostSamplesContract checks the cost-sample pair, WriteCostSample and
+// ReadCostSamples, that every store with a samples table must share: a row
+// read back carries the values it was written with, each kind is its own
+// series, since and limit narrow the read newest first, and a write with no
+// time or an unencodable reading, an unknown kind and a negative limit are
+// each refused — the refused writes leaving no row behind.
+//
+// It is separate from RunAdminContract because the bd on PATH predates the
+// samples table (beads be-1qqu): a store backed by that bd refuses the write by
+// name and cannot answer the case, so only a store whose bd offers the verb
+// runs it. beadsfake's Fake runs it in the unit tier.
+func RunCostSamplesContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+	t.Helper()
+	t.Run("cost samples", func(t *testing.T) {
+		t.Parallel()
+		contractCostSamples(t, newScope(t, newClient(t)))
+	})
+}
+
+// contractCostSamples pins the cost-sample pair; see RunCostSamplesContract.
+// The database may be shared with other cases, so each read passes a since
+// just before base, the time this case writes at.
+func contractCostSamples(t *testing.T, s *scope) {
+	ctx := context.Background()
+	base := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	floor := base.Add(-time.Second)
+	deepseek := beads.Sample{
+		Kind: beads.SampleKindDeepSeekBalance, At: base,
+		Total: ptr(18.25), Granted: ptr(5.0), ToppedUp: ptr(13.25), Note: "topped up",
+	}
+	first := beads.Sample{
+		Kind: beads.SampleKindClaudePlan, At: base.Add(time.Minute),
+		FiveHourPct: ptr(41.0), FiveHourResetsAt: ptr(base.Add(3 * time.Hour)),
+		SevenDayPct: ptr(23.5), SevenDayResetsAt: ptr(base.Add(48 * time.Hour)),
+		Note: "first reading",
+	}
+	second := beads.Sample{
+		Kind: beads.SampleKindClaudePlan, At: base.Add(5 * time.Minute),
+		FiveHourPct: ptr(47.0), FiveHourResetsAt: ptr(base.Add(3 * time.Hour)),
+		SevenDayPct: ptr(24.5), SevenDayResetsAt: ptr(base.Add(48 * time.Hour)),
+		Note: "second reading",
+	}
+	for _, w := range []struct {
+		what   string
+		sample beads.Sample
+	}{
+		{"deepseek_balance", deepseek},
+		{"first claude_plan", first},
+		{"second claude_plan", second},
+	} {
+		mustDo(t, "WriteCostSample("+w.what+")", s.WriteCostSample(ctx, w.sample))
+	}
+
+	// Each kind is its own series, the newest row listed first.
+	claude, err := s.ReadCostSamples(ctx, beads.SampleKindClaudePlan, floor, 0)
+	if err != nil {
+		t.Fatalf("ReadCostSamples(claude_plan): %v", err)
+	}
+	if len(claude) != 2 {
+		t.Fatalf("ReadCostSamples(claude_plan) = %v, want the two rows written here", claude)
+	}
+	if !claude[0].At.Equal(second.At) || !claude[1].At.Equal(first.At) {
+		t.Errorf("claude_plan rows = %v, want newest first (%v then %v)", claude, second.At, first.At)
+	}
+	if !reflect.DeepEqual(claude[0], second) {
+		t.Errorf("second claude_plan row = %+v, want the sample written: %+v", claude[0], second)
+	}
+	if !reflect.DeepEqual(claude[1], first) {
+		t.Errorf("first claude_plan row = %+v, want the sample written: %+v", claude[1], first)
+	}
+	balance, err := s.ReadCostSamples(ctx, beads.SampleKindDeepSeekBalance, floor, 0)
+	if err != nil || len(balance) != 1 || !reflect.DeepEqual(balance[0], deepseek) {
+		t.Fatalf("ReadCostSamples(deepseek_balance) = %v, %v; want the one balance row written: %+v", balance, err, deepseek)
+	}
+
+	// A since between the two claude_plan rows keeps only the newer one, and
+	// a limit caps the answer after the filter, not the series.
+	between := first.At.Add(30 * time.Second)
+	recent, err := s.ReadCostSamples(ctx, beads.SampleKindClaudePlan, between, 0)
+	if err != nil || len(recent) != 1 || !recent[0].At.Equal(second.At) {
+		t.Errorf("ReadCostSamples(claude_plan, since %v) = %v, %v; want only the newer row", between, recent, err)
+	}
+	newest, err := s.ReadCostSamples(ctx, beads.SampleKindClaudePlan, floor, 1)
+	if err != nil || len(newest) != 1 || !newest[0].At.Equal(second.At) {
+		t.Errorf("ReadCostSamples(claude_plan, limit 1) = %v, %v; want the newest row", newest, err)
+	}
+
+	// A refused write must not leave a row behind.
+	if err := s.WriteCostSample(ctx, beads.Sample{Kind: "usage_record", At: base}); err == nil {
+		t.Error("WriteCostSample(unknown kind) succeeded, want it refused")
+	}
+	if err := s.WriteCostSample(ctx, beads.Sample{Kind: beads.SampleKindClaudePlan}); err == nil {
+		t.Error("WriteCostSample(no time) succeeded, want it refused")
+	}
+	nan := math.NaN()
+	if err := s.WriteCostSample(ctx, beads.Sample{Kind: beads.SampleKindClaudePlan, At: base, FiveHourPct: &nan}); err == nil {
+		t.Error("WriteCostSample(NaN reading) succeeded, want it refused: the payload cannot carry one")
+	}
+	if _, err := s.ReadCostSamples(ctx, "usage_record", base, 1); err == nil {
+		t.Error("ReadCostSamples(unknown kind) succeeded, want it refused rather than an empty series")
+	}
+	if _, err := s.ReadCostSamples(ctx, beads.SampleKindClaudePlan, base, -1); err == nil {
+		t.Error("ReadCostSamples(limit -1) succeeded, want it refused")
+	}
+	after, err := s.ReadCostSamples(ctx, beads.SampleKindClaudePlan, floor, 0)
+	if err != nil || len(after) != 2 {
+		t.Errorf("claude_plan rows after the refused writes = %v, %v; want the same two rows", after, err)
+	}
 }
 
 var adminCases = []struct {
