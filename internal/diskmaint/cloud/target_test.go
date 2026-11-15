@@ -13,9 +13,8 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
 )
 
-// dockerHost is a placeholder daemon socket; every test checks it reaches
-// docker. No constant in the package names it, so a target that ignored its
-// config could not pass by accident.
+// dockerHost is a placeholder socket, not the VM's own path; the host test runs
+// a second, different one, so a target that ignored its config cannot pass it.
 const dockerHost = "unix:///placeholder/.colima/cloud/docker.sock"
 
 // imgID is an image id: a sha256 digest, the shape registry.ValidDigest accepts.
@@ -208,6 +207,11 @@ func TestMeasureRefusesAnUnreadableDisk(t *testing.T) {
 	}{
 		{name: "failed image list", f: fakeDocker{imagesErr: errors.New("SECRET stderr")}, want: dockerimg.ErrListImages},
 		{name: "image line that does not parse", f: fakeDocker{images: "not json\n"}, want: dockerimg.ErrParse},
+		{
+			name: "image size that does not parse",
+			f:    fakeDocker{images: imageLines(t, dockerimg.Image{Repository: "<none>", Tag: "<none>", ID: imgID('1'), Size: "12XB"})},
+			want: dockerimg.ErrSize,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

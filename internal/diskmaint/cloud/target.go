@@ -4,7 +4,7 @@
 // never the Mac volume the VM's disk image lives on.
 //
 // The measure is all this slice carries; the keep rules, the plan and the apply
-// follow (gt-o5lk4h).
+// follow (gt-p427gz).
 package cloud
 
 import (
@@ -71,7 +71,7 @@ func NewTarget(cfg Config) (*Target, error) {
 func (t *Target) Name() string { return planTarget }
 
 // Measure reports the bytes the daemon's images hold as the daemon lists them;
-// an unreadable image list is an error, never a zero.
+// an unreadable image list or size is an error, never a zero.
 func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 	images, err := t.client().Images(ctx)
 	if err != nil {
@@ -86,7 +86,13 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 			continue
 		}
 		seen[im.ID] = true
-		used += im.Bytes()
+		// An image whose size does not parse refuses the whole reading: a
+		// partial sum undercounts and reads as a fact.
+		n, err := dockerimg.ParseSize(im.Size)
+		if err != nil {
+			return diskmaint.Measurement{}, fmt.Errorf("measure image %s: %w", im.ID, err)
+		}
+		used += n
 	}
 	return diskmaint.Measurement{
 		Used:   used,
