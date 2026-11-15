@@ -3,9 +3,13 @@ package cmd
 import (
 	_ "embed"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
+
+// how_card.go holds the overseer card: the rule file and its loader
+// (gt-j669b4.8), and the --card flag that prints it (gt-4n47gt).
 
 // overseerCardFile holds the overseer card's rule lines, one per line and no
 // headings: what a just-compacted overseer reads before it acts (gt-j669b4.8).
@@ -33,12 +37,25 @@ const (
 	// check stops the card growing past what a compacted session will read
 	// (gt-0rix8g).
 	overseerCardMaxBytes = 2500
+	// overseerCardTitle is the printed card's first line.
+	overseerCardTitle = "Overseer card"
+	// overseerCardLookupRule is the printed card's second line: how a task is
+	// looked up before an operator step.
+	overseerCardLookupRule = "before a roll, a resize, a release, a hand sling or any operator step: gt how <task> --history"
+	// overseerCardPrintMaxBytes is the most the printed card may weigh. The
+	// rule file has its own budget (overseerCardMaxBytes); this one bounds what
+	// gt how --card writes, title, lookup rule and group lines included,
+	// because that text is what reaches an agent's context.
+	overseerCardPrintMaxBytes = 2500
 )
 
-// overseerCardRules returns the card's rule lines, in file order. It has no
-// caller in this tree yet: gt how --card (gt-4n47gt) is the next bead and reads
-// the card through this function. A card that does not validate is an error,
-// never an empty list.
+func init() {
+	howCmd.Flags().Bool("card", false, "print the overseer card: the lookup rule, the task groups and the rule lines")
+}
+
+// overseerCardRules returns the card's rule lines, in file order. howCardText,
+// which gt how --card prints, reads the card through it. A card that does not
+// validate is an error, never an empty list.
 func overseerCardRules() ([]string, error) {
 	return parseOverseerCard(overseerCardFile)
 }
@@ -63,4 +80,47 @@ func parseOverseerCard(text string) ([]string, error) {
 		return nil, fmt.Errorf("%s: %d bytes, more than the %d-byte card budget", overseerCardPath, n, overseerCardMaxBytes)
 	}
 	return lines, nil
+}
+
+// runHowCard writes the overseer card to out. It refuses an argument: the card
+// is one fixed text, and a group or word after --card would read as if it chose
+// part of the card.
+func runHowCard(out io.Writer, m howMap, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("gt how --card takes no group or word, got %q", strings.Join(args, " "))
+	}
+	card, err := howCardText(m, overseerCardRules)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(out, card)
+	return err
+}
+
+// howCardText builds the card in one string: the title line, the lookup rule,
+// every task group with its one-line description, then the rule lines. loadRules
+// supplies the rule lines, so the command passes overseerCardRules and a test
+// can pass a loader that fails. A group with no description (writeHowGroups), a
+// failed loader, or a card over overseerCardPrintMaxBytes is an error: a card
+// that cannot be printed whole is not printed at all, so a failure writes
+// nothing to out.
+func howCardText(m howMap, loadRules func() ([]string, error)) (string, error) {
+	rules, err := loadRules()
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n%s\n\n", overseerCardTitle, overseerCardLookupRule)
+	if err := writeHowGroups(&b, m); err != nil {
+		return "", err
+	}
+	b.WriteString("\n")
+	for _, line := range rules {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if n := b.Len(); n >= overseerCardPrintMaxBytes {
+		return "", fmt.Errorf("the overseer card is %d bytes, not under %d: trim the rule file or a group description", n, overseerCardPrintMaxBytes)
+	}
+	return b.String(), nil
 }

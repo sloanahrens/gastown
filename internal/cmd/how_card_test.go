@@ -1,8 +1,16 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/taskmap"
 )
 
 // TestHowCardRulesReadTheFile drives the production loader over the embedded
@@ -147,5 +155,287 @@ func TestHowCardRulesRefuseBadLines(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHowCardContent drives the card over the real map and the embedded rule
+// file: the title line and the lookup rule come first, every group appears with
+// its one-line description, every rule line appears, and the whole card is
+// under the size limit.
+func TestHowCardContent(t *testing.T) {
+	t.Parallel()
+
+	card, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(card, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("howCardText returned %d lines, want at least the title and the lookup rule", len(lines))
+	}
+	if lines[0] != overseerCardTitle {
+		t.Errorf("the card's first line = %q, want the title %q", lines[0], overseerCardTitle)
+	}
+	if lines[1] != overseerCardLookupRule {
+		t.Errorf("the card's second line = %q, want the lookup rule %q", lines[1], overseerCardLookupRule)
+	}
+
+	have := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		have[line] = true
+	}
+
+	var groupLines strings.Builder
+	if err := writeHowGroups(&groupLines, howDefault{taskmap.Default()}); err != nil {
+		t.Fatalf("writeHowGroups: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(groupLines.String(), "\n"), "\n") {
+		if !have[line] {
+			t.Errorf("the card does not carry group line %q", line)
+		}
+	}
+
+	rules, err := overseerCardRules()
+	if err != nil {
+		t.Fatalf("overseerCardRules: %v", err)
+	}
+	for i, rule := range rules {
+		if !have[rule] {
+			t.Errorf("the card does not carry rule line %d %q", i+1, rule)
+		}
+	}
+
+	if n := len(card); n >= overseerCardPrintMaxBytes {
+		t.Errorf("the card is %d bytes, not under %d", n, overseerCardPrintMaxBytes)
+	}
+}
+
+// TestHowCardCommandRunsTheCard drives runHowCmd with --card set on the
+// command it reads, so deleting the flag branch in runHowCmd fails here even
+// though runHowCard still builds a card. The test command carries its own flag
+// set, so it runs beside the listing tests without touching howCmd's flag.
+func TestHowCardCommandRunsTheCard(t *testing.T) {
+	t.Parallel()
+
+	if howCmd.Flags().Lookup("card") == nil {
+		t.Fatal("gt how registers no --card flag")
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("card", true, "")
+	cmd.SetOut(&out)
+	if err := runHowCmd(cmd, nil); err != nil {
+		t.Fatalf("runHowCmd with --card: %v", err)
+	}
+
+	want, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+	if out.String() != want {
+		t.Errorf("gt how --card wrote %q, want the card %q", out.String(), want)
+	}
+	if !strings.HasPrefix(out.String(), overseerCardTitle+"\n") {
+		t.Errorf("gt how --card wrote %q, want it to start with the title line", out.String())
+	}
+}
+
+// TestHowCardCommandRefusesACommandWithoutTheFlag checks runHowCmd fails closed
+// when the command it is given carries no --card flag: an unreadable flag is an
+// error, not a listing printed as if the card had not been asked for.
+func TestHowCardCommandRefusesACommandWithoutTheFlag(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	err := runHowCmd(cmd, nil)
+	if err == nil {
+		t.Fatal("runHowCmd ran without a --card flag, want an error")
+	}
+	if !strings.Contains(err.Error(), "card") {
+		t.Errorf("runHowCmd error %q does not name the flag", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCmd wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardRefusesAnArgument checks that --card refuses a group or word
+// rather than printing the card as if the argument had chosen part of it.
+func TestHowCardRefusesAnArgument(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	err := runHowCard(&out, howFixture(), []string{"roll"})
+	if err == nil {
+		t.Fatal("runHowCard accepted an argument, want an error")
+	}
+	if !strings.Contains(err.Error(), "roll") {
+		t.Errorf("runHowCard error %q does not name the argument", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardRefusesACardOverTheLimit checks the size bound: a card over
+// overseerCardPrintMaxBytes is an error naming the size, and no partial card
+// reaches the writer.
+func TestHowCardRefusesACardOverTheLimit(t *testing.T) {
+	t.Parallel()
+
+	m := howFixture()
+	m.groups = taskmap.Groups()
+	long := strings.Repeat("x", 250)
+	m.describe = func(taskmap.Group) string { return long }
+
+	var out bytes.Buffer
+	err := runHowCard(&out, m, nil)
+	if err == nil {
+		t.Fatal("runHowCard printed a card over the limit, want an error")
+	}
+	for _, want := range []string{fmt.Sprint(overseerCardPrintMaxBytes), "not under"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("runHowCard error %q does not name %q", err, want)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardRefusesACardAtTheLimit pins the bound's edge: a card of exactly
+// overseerCardPrintMaxBytes is refused, and one byte under it is printed and
+// measured, so "under" keeps its strict meaning.
+func TestHowCardRefusesACardAtTheLimit(t *testing.T) {
+	t.Parallel()
+
+	rules, err := overseerCardRules()
+	if err != nil {
+		t.Fatalf("overseerCardRules: %v", err)
+	}
+	// base is the card's size with a one-character group description: the title
+	// and lookup rule lines, a blank line, the one group's line, a blank line,
+	// then every rule line.
+	const group, placeholder = "g", "x"
+	base := len(overseerCardTitle) + 1 + len(overseerCardLookupRule) + 1 + 1 +
+		len(group) + 2 + len(placeholder) + 1 + 1
+	for _, rule := range rules {
+		base += len(rule) + 1
+	}
+
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "one byte under the limit is printed", size: overseerCardPrintMaxBytes - 1},
+		{name: "exactly at the limit is refused", size: overseerCardPrintMaxBytes, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := howFixture()
+			m.groups = []taskmap.Group{group}
+			desc := strings.Repeat("y", tc.size-base+1)
+			m.describe = func(taskmap.Group) string { return desc }
+
+			var out bytes.Buffer
+			err := runHowCard(&out, m, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("runHowCard printed a %d-byte card, want an error", tc.size)
+				}
+				if out.Len() != 0 {
+					t.Errorf("runHowCard wrote %q before refusing", out.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runHowCard refused a %d-byte card: %v", tc.size, err)
+			}
+			if got := out.Len(); got != tc.size {
+				t.Errorf("the card is %d bytes, want %d", got, tc.size)
+			}
+		})
+	}
+}
+
+// TestHowCardRefusesAGroupWithNoDescription checks the card refuses a group
+// description of "" (writeHowGroups' error) rather than print a group line with
+// nothing after the name, and that no partial card reaches the writer.
+func TestHowCardRefusesAGroupWithNoDescription(t *testing.T) {
+	t.Parallel()
+
+	m := howFixture()
+	m.describe = func(taskmap.Group) string { return "" }
+
+	var out bytes.Buffer
+	err := runHowCard(&out, m, nil)
+	if err == nil {
+		t.Fatal("runHowCard printed a card for a group with no description, want an error")
+	}
+	if !strings.Contains(err.Error(), "no description") {
+		t.Errorf("runHowCard error %q does not name the missing description", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCard wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardReturnsALoaderError checks the card refuses to print when the rule
+// loader fails, and returns the loader's error rather than an empty card.
+func TestHowCardReturnsALoaderError(t *testing.T) {
+	t.Parallel()
+
+	loadErr := errors.New("the rule file could not be read")
+	card, err := howCardText(howFixture(), func() ([]string, error) {
+		return nil, loadErr
+	})
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("howCardText error = %v, want the loader's %v", err, loadErr)
+	}
+	if card != "" {
+		t.Errorf("howCardText returned %q with the loader's error, want no card", card)
+	}
+}
+
+// TestHowCardIsNotARoleDirective checks the card reaches an agent through gt
+// how --card only: gt directive list, run here over a town root the test
+// builds, reports a directives/overseer-card.md as UNUSED, because "overseer-card"
+// is no role name, while a role-named file lists as ok. The card itself is
+// embedded from howdata, not installed from directives/.
+func TestHowCardIsNotARoleDirective(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	writeDirective(t, filepath.Join(townRoot, "directives", "polecat.md"), "polecat policy")
+	writeDirective(t, filepath.Join(townRoot, "directives", "overseer-card.md"), "a card dropped into directives")
+
+	files, err := listableDirectiveFiles(townRoot)
+	if err != nil {
+		t.Fatalf("listableDirectiveFiles: %v", err)
+	}
+	var out bytes.Buffer
+	renderDirectiveList(&out, files)
+
+	rowFor := func(name string) string {
+		suffix := filepath.Join("directives", name+".md")
+		for _, line := range strings.Split(out.String(), "\n") {
+			if strings.HasSuffix(strings.TrimSpace(line), suffix) {
+				return line
+			}
+		}
+		t.Fatalf("gt directive list has no row for %s:\n%s", suffix, out.String())
+		return ""
+	}
+	if row := rowFor("overseer-card"); !strings.Contains(row, "UNUSED") {
+		t.Errorf("gt directive list does not report the card as reaching no role: %q", row)
+	}
+	if row := rowFor("polecat"); strings.Contains(row, "UNUSED") {
+		t.Errorf("gt directive list flags a role directive as unused: %q", row)
 	}
 }

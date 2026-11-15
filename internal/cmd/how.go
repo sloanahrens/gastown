@@ -14,9 +14,9 @@ import (
 // how.go is `gt how`: the task groups an agent looks a job up by, one group's
 // commands with their use lines (gt-j669b4.6), or the commands a word matches
 // (gt-j669b4.24); how_history.go adds the history-man section --history asks
-// for (gt-j669b4.7). The map is read through howMap, so the tests drive the
-// command from a fixed map and a placement file landing later cannot change a
-// golden.
+// for (gt-j669b4.7), and how_card.go the card --card prints (gt-4n47gt). The
+// map is read through howMap, so the tests drive the command from a fixed map
+// and a placement file landing later cannot change a golden.
 
 // howMap is what a listing reads. howDefault supplies the real one.
 type howMap interface {
@@ -63,11 +63,16 @@ history-man hits for the word, searched together with its group's description
 when it names one, in hm's order. When there is nothing to look up, or hm is
 missing or the query fails, one line says so and the command still succeeds.
 
+With --card, print the overseer card instead of the listing: its title, the
+lookup rule, every task group with its one-line description, then the card's
+rule lines. It takes no group or word.
+
 Examples:
   gt how
   gt how roll
   gt how install
-  gt how roll --history`,
+  gt how roll --history
+  gt how --card`,
 	Args:         cobra.MaximumNArgs(1),
 	RunE:         runHowCmd,
 	SilenceUsage: true,
@@ -79,6 +84,13 @@ func init() {
 
 func runHowCmd(cmd *cobra.Command, args []string) error {
 	m := howDefault{taskmap.Default()}
+	card, err := cmd.Flags().GetBool("card")
+	if err != nil {
+		return fmt.Errorf("read --card: %w", err)
+	}
+	if card {
+		return runHowCard(cmd.OutOrStdout(), m, args)
+	}
 	if !howHistoryFlag {
 		return runHow(cmd.OutOrStdout(), m, args)
 	}
