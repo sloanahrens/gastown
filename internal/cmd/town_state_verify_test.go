@@ -367,7 +367,9 @@ func sortTownStateEntries(entries []fs.DirEntry) {
 // TestTownStateVerifyReadsNoContents proves verify looks at metadata only and
 // never descends into .dolt-data* or a .git tree. The one file it reads is the
 // rig registry, for the rig names; the registry paths are the only ones it may
-// open as a regular file.
+// open as a regular file. A top-level directory holding only a mayor/rig clone
+// is no rig, so the walk reaches it as one unclassified directory and reports
+// it without reading anything inside it.
 func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -377,6 +379,7 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 		"mayor", "settings", "gastown", "gastown/crew", "gastown/crew/eagle",
 		"gastown/mayor", "gastown/mayor/rig", ".runtime", ".runtime/jev",
 		".dolt-data", ".dolt-data/gt", "gastown/.git",
+		"stale", "stale/mayor", "stale/mayor/rig",
 	} {
 		f.addDir(dir, old)
 	}
@@ -387,13 +390,20 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	f.addFile("gastown/crew/eagle/notes.md", old)
 	f.addFile(".dolt-data/gt/stray.bin", now)
 	f.addFile("gastown/.git/config", now)
+	f.addFile("stale/mayor/rig/go.mod", old)
 	// A Dolt data directory nested under a daemon subsystem is skipped too.
 	f.addDir(".runtime/jev/.dolt-data", old)
 	f.addFile(".runtime/jev/.dolt-data/stray.bin", now)
 
 	var out bytes.Buffer
-	if err := verifyTownState(&out, f, townstate.Default(), now); err != nil {
-		t.Fatalf("verifyTownState error = %v\n%s", err, out.String())
+	err := verifyTownState(&out, f, townstate.Default(), now)
+	var exit *ExitCodeError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("verifyTownState error = %v, want an ExitCodeError with code 1\n%s", err, out.String())
+	}
+	printed := strings.TrimSpace(out.String())
+	if lines := strings.Split(printed, "\n"); len(lines) != 1 || !strings.HasPrefix(lines[0], "stale: ") {
+		t.Errorf("verify printed %q, want exactly the stale no-manifest-entry line", printed)
 	}
 	registry := map[string]bool{"mayor/town.json": true, "mayor/rigs.json": true}
 	for _, name := range f.opened {
