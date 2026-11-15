@@ -28,8 +28,8 @@ type Before struct {
 
 // RebaseResult is what design step 4's rebase did.
 type RebaseResult struct {
-	// Marked is the number of plan rows the update marked squash; the first
-	// plan row stays a pick.
+	// Marked is the number of dolt_rebase rows whose action is squash, read
+	// back after the marking update; the first plan row stays a pick.
 	Marked int
 }
 
@@ -203,16 +203,20 @@ func RebaseHistory(ctx context.Context, ex Exec, before Before, cut time.Time) (
 		return RebaseResult{}, fmt.Errorf("doltsquash: the rebase plan on compact-work is empty, so there is nothing to squash")
 	}
 	first := plan[0].order
-	marked, err := s.number(ctx, countStatement(first, cut))
+	matched, err := s.number(ctx, countStatement(first, cut))
 	if err != nil {
 		return RebaseResult{}, err
 	}
-	if marked == 0 {
+	if matched == 0 {
 		return RebaseResult{}, fmt.Errorf(
 			"doltsquash: none of the %d plan rows is on main at or before %s, so the cut squashes nothing",
 			len(plan), formatCut(cut))
 	}
 	if _, err := s.exec(ctx, markStatement(first, cut)); err != nil {
+		return RebaseResult{}, err
+	}
+	marked, err := s.number(ctx, squashRowsStatement)
+	if err != nil {
 		return RebaseResult{}, err
 	}
 	if _, err := s.exec(ctx, "CALL DOLT_REBASE('--continue')"); err != nil {
@@ -279,22 +283,28 @@ func markStatement(first int64, cut time.Time) string {
 	return "UPDATE dolt_rebase SET action = 'squash' WHERE " + squashPredicate(first, cut)
 }
 
+// squashRowsStatement reads back what the update marked, so the run returns the
+// rows the plan holds after the update rather than the count the filter gave
+// before it.
+const squashRowsStatement = "SELECT COUNT(*) FROM dolt_rebase WHERE action = 'squash'"
+
 // formatCut renders cut the way Dolt's DATETIME comparison reads it: UTC, and
 // without a sub-second part, so the window is never wider than the clock's cut.
 func formatCut(cut time.Time) string {
 	return cut.UTC().Format("2006-01-02 15:04:05")
 }
 
-// checkCommitHash refuses a value that is not a Dolt commit hash. Every hash
-// reaches a SQL literal, so a value that is not one is a read the run cannot
-// trust.
+// checkCommitHash refuses a value that is not a Dolt commit hash. Dolt encodes
+// a commit hash as 32 characters of the base32 alphabet 0-9a-v, so a hex-only
+// check would refuse a real tip (gt-1w9790). Every hash reaches a SQL literal,
+// so a value that is not one is a read the run cannot trust.
 func checkCommitHash(what, value string) error {
 	valid := len(value) == 32
 	for _, c := range value {
-		valid = valid && (c >= '0' && c <= '9' || c >= 'a' && c <= 'f')
+		valid = valid && (c >= '0' && c <= '9' || c >= 'a' && c <= 'v')
 	}
 	if !valid {
-		return fmt.Errorf("doltsquash: %s is %q, want a 32-character hex commit hash", what, value)
+		return fmt.Errorf("doltsquash: %s is %q, want a 32-character Dolt commit hash over the alphabet 0-9a-v", what, value)
 	}
 	return nil
 }

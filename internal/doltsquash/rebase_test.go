@@ -11,10 +11,14 @@ import (
 	"time"
 )
 
-// hash returns a 32-character hex commit hash that differs per n, so a value
-// that is not a hash cannot pass for one by accident.
+// hash returns a Dolt-shaped commit hash that differs per n: 32 characters of
+// the base32 alphabet 0-9a-v. The tail holds letters past f, so a validator
+// that accepts only hex would refuse every fixture and the tests would catch
+// it (gt-1w9790).
 func hash(n int) string {
-	return fmt.Sprintf("%032x", 0xc000+n)
+	const alphabet = "0123456789abcdefghijklmnopqrstuv"
+	const tail = "jlup0pifvs02kgdldm3n3s548m9qtum"
+	return string(alphabet[n%len(alphabet)]) + tail
 }
 
 // single returns the one-value answer a scalar or count read expects.
@@ -87,6 +91,7 @@ const (
 	sqlSquashFilter  = "rebase_order > 1 AND commit_hash IN (SELECT commit_hash FROM dolt_log('main') WHERE date <= '2026-11-08 20:00:00')"
 	sqlMarkCount     = "SELECT COUNT(*) FROM dolt_rebase WHERE " + sqlSquashFilter
 	sqlMarkSquash    = "UPDATE dolt_rebase SET action = 'squash' WHERE " + sqlSquashFilter
+	sqlSquashCount   = "SELECT COUNT(*) FROM dolt_rebase WHERE action = 'squash'"
 	sqlRebaseResume  = "CALL DOLT_REBASE('--continue')"
 	// sqlSessionLogCount is the same filter with the log left unqualified, the
 	// way the 11-01 design read it inside the rebase session.
@@ -137,6 +142,7 @@ func (fx rebaseFixture) fake(changes map[string]Rows) *FakeExec {
 	answer(sqlPlan, plan)
 	answer(sqlMarkCount, single("n", fmt.Sprint(fx.marked)))
 	answer(sqlMarkSquash, Rows{})
+	answer(sqlSquashCount, single("n", fmt.Sprint(fx.marked)))
 	answer(sqlRebaseResume, Rows{})
 	return f
 }
@@ -274,6 +280,7 @@ func TestRebaseHistoryMarksAfterTheFirstAndReturnsTheCount(t *testing.T) {
 		sqlPlan + " ORDER BY rebase_order",
 		sqlMarkCount,
 		sqlMarkSquash,
+		sqlSquashCount,
 		sqlRebaseResume,
 	}
 	if sent := f.Statements(); !slices.Equal(sent, want) {
@@ -281,15 +288,34 @@ func TestRebaseHistoryMarksAfterTheFirstAndReturnsTheCount(t *testing.T) {
 	}
 }
 
-// TestRebaseFilterReadsTheLogByBranchName keeps the case the 11-01 design got
-// wrong: inside a rebase session an unqualified dolt_log sees only the base, so
-// commit_hash IN (SELECT commit_hash FROM dolt_log WHERE date <= cut) counts no
-// plan row, while the same filter read from dolt_log('main') counts every old
-// row after the first. The fake answers the unqualified count with zero and the
-// qualified one with the marked rows, so an engine that drops the branch name
-// is refused before it marks anything. This pins the statement text the engine
-// sends, not Dolt's behaviour; that behaviour is pinned by the lab integration
-// bead (D11).
+// TestRebaseHistoryReturnsTheRowsTheUpdateMarked drives the readback: the count
+// the filter gives before the update and the count of squash rows after it are
+// different answers, and the run must return the second, because that is what
+// the plan holds once it is marked.
+func TestRebaseHistoryReturnsTheRowsTheUpdateMarked(t *testing.T) {
+	t.Parallel()
+	fx := newRebaseFixture()
+	f := fx.fake(map[string]Rows{sqlSquashCount: single("n", "3")})
+
+	got, err := RebaseHistory(context.Background(), f, Before{Tip: fx.tip}, cutOf())
+	if err != nil {
+		t.Fatalf("RebaseHistory: %v", err)
+	}
+	if got.Marked != 3 {
+		t.Errorf("RebaseHistory marked %d rows, want 3, the count read back after the update, not the filter's %d",
+			got.Marked, fx.marked)
+	}
+}
+
+// TestRebaseFilterReadsTheLogByBranchName pins the statement text the engine
+// sends for the case the 11-01 design got wrong: inside a rebase session an
+// unqualified dolt_log sees only the base, so commit_hash IN (SELECT commit_hash
+// FROM dolt_log WHERE date <= cut) counts no plan row, while the same filter
+// read from dolt_log('main') counts every old row after the first. The fake
+// answers the unqualified count with zero and the qualified one with the marked
+// rows, so an engine that drops the branch name is refused before it marks
+// anything. This pins the statement, not Dolt's behaviour; the behaviour is
+// pinned by the lab integration bead (D11).
 func TestRebaseFilterReadsTheLogByBranchName(t *testing.T) {
 	t.Parallel()
 	fx := newRebaseFixture()
@@ -306,7 +332,7 @@ func TestRebaseFilterReadsTheLogByBranchName(t *testing.T) {
 	counted := false
 	for _, statement := range f.Statements() {
 		switch {
-		case strings.HasPrefix(statement, "SELECT COUNT(*) FROM dolt_rebase"):
+		case strings.HasPrefix(statement, sqlMarkCount):
 			counted = true
 			if !strings.Contains(statement, "dolt_log('main')") {
 				t.Errorf("the count reads the log without the branch name: %q", statement)
@@ -399,7 +425,22 @@ func TestRecordBeforeRefusals(t *testing.T) {
 		{
 			name:    "the tip is not a commit hash",
 			changes: map[string]Rows{sqlMainTip: single("h", "HEAD-of-main")},
-			want:    "want a 32-character hex commit hash",
+			want:    "want a 32-character Dolt commit hash",
+		},
+		{
+			name:    "the tip holds a character outside the base32 alphabet",
+			changes: map[string]Rows{sqlMainTip: single("h", "chub53jlup0pifvs02kgdldm3n3s548w")},
+			want:    "want a 32-character Dolt commit hash",
+		},
+		{
+			name:    "the tip is a character short",
+			changes: map[string]Rows{sqlMainTip: single("h", "chub53jlup0pifvs02kgdldm3n3s548")},
+			want:    "want a 32-character Dolt commit hash",
+		},
+		{
+			name:    "the tip is a character long",
+			changes: map[string]Rows{sqlMainTip: single("h", "chub53jlup0pifvs02kgdldm3n3s548mm")},
+			want:    "want a 32-character Dolt commit hash",
 		},
 		{
 			name: "the tip read answers a record of several values",
@@ -455,7 +496,7 @@ func TestRebaseHistoryRefusals(t *testing.T) {
 		{
 			name:   "the recorded tip is not a commit hash",
 			before: Before{Tip: "main"},
-			want:   "want a 32-character hex commit hash",
+			want:   "want a 32-character Dolt commit hash",
 		},
 		{
 			name:    "main's log answers no initial commit",
@@ -467,7 +508,7 @@ func TestRebaseHistoryRefusals(t *testing.T) {
 			name:    "main's initial commit is not a commit hash",
 			before:  Before{Tip: fx.tip},
 			changes: map[string]Rows{sqlInitialCommit: single("commit_hash", "the-root")},
-			want:    "want a 32-character hex commit hash",
+			want:    "want a 32-character Dolt commit hash",
 		},
 		{
 			name:    "the plan is empty",
@@ -500,7 +541,7 @@ func TestRebaseHistoryRefusals(t *testing.T) {
 				Columns: []string{"rebase_order", "commit_hash"},
 				Data:    [][]string{{"1", "c1"}},
 			}},
-			want: "want a 32-character hex commit hash",
+			want: "want a 32-character Dolt commit hash",
 		},
 		{
 			name:    "the mark count is not a number",
