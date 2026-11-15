@@ -862,6 +862,62 @@ func TestSandboxSourceTickCPUDelta(t *testing.T) {
 	}
 }
 
+// TestSandboxSourceTickCPUReset shows a usage_usec that went backwards at the
+// tick level: the tick reports its interval with null cpu_pct, and its reading
+// becomes the baseline the next tick measures from, so the seat's CPU is
+// measured again from the reset counter rather than hidden until it climbs past
+// the old one (gt-jw9m75).
+func TestSandboxSourceTickCPUReset(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast"})
+	runner := &fakeSeatExec{read: seatReadsUsage(1000000)}
+	clock := &fakeClock{now: seatTickNow()}
+	source := NewSeatSource(townRoot, runner, clock, time.Second)
+	seatTickOneRow(t, source)
+
+	clock.advance(60 * time.Second)
+	runner.read = seatReadsUsage(900000)
+	reset := seatTickOneRow(t, source)
+	if reset.CPUPct != nil || reset.IntervalS != 60 {
+		t.Errorf("the reset tick: cpu_pct %s, interval_s %v, want null and 60", floatText(reset.CPUPct), reset.IntervalS)
+	}
+
+	clock.advance(60 * time.Second)
+	runner.read = seatReadsUsage(960000)
+	row := seatTickOneRow(t, source)
+	if row.CPUPct == nil || *row.CPUPct != 0.1 {
+		t.Errorf("the tick after the reset: cpu_pct %s, want 0.1: 0.06 s of CPU over 60 s", floatText(row.CPUPct))
+	}
+}
+
+// TestSandboxSourceTickCPUClockStalled shows a tick whose clock did not advance
+// since the seat's stored reading: it reports interval_s 0 and null cpu_pct
+// rather than a percentage divided by a zero interval, and its reading becomes
+// the baseline the next tick measures from (gt-jw9m75).
+func TestSandboxSourceTickCPUClockStalled(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast"})
+	runner := &fakeSeatExec{read: seatReadsUsage(1000000)}
+	clock := &fakeClock{now: seatTickNow()}
+	source := NewSeatSource(townRoot, runner, clock, time.Second)
+	seatTickOneRow(t, source)
+
+	runner.read = seatReadsUsage(1100000)
+	stalled := seatTickOneRow(t, source)
+	if stalled.CPUPct != nil || stalled.IntervalS != 0 {
+		t.Errorf("the stalled tick: cpu_pct %s, interval_s %v, want null and 0", floatText(stalled.CPUPct), stalled.IntervalS)
+	}
+
+	clock.advance(60 * time.Second)
+	runner.read = seatReadsUsage(1400000)
+	row := seatTickOneRow(t, source)
+	if row.CPUPct == nil || *row.CPUPct != 0.5 {
+		t.Errorf("the tick after the stall: cpu_pct %s, want 0.5: 0.3 s of CPU over 60 s", floatText(row.CPUPct))
+	}
+}
+
 // TestSandboxSourceTickCPUKeepsBaseline shows a seat that fails to read keeps
 // the reading its next row is measured from: a failed exec and a read that does
 // not parse both skip the seat, and the next good row's percent covers the
