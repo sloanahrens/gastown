@@ -3,11 +3,6 @@ config get
 config migrate
 config secrets
 config secrets migrate
-config set
-config validate
-tap
-tap guard
-tap guard bd-close-invariant
 tap guard bd-create-store
 tap guard bd-init
 tap guard container-suite
