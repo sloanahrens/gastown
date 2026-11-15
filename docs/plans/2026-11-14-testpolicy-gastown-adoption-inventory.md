@@ -4,7 +4,7 @@
 
 **Goal:** the evidence slice 7 of the shared testpolicy module needs: every file
 of gastown's `internal/testpolicy` classed against the module
-`gt.local/testpolicy` (the `testpolicymod/` directory of `sloan/devops`), each
+`gt.local/testpolicy` (the `testpolicymod/` directory of `<owner>/devops`), each
 class cited by file and function name, and every exported name with the callers
 it has outside the package.
 
@@ -21,7 +21,7 @@ Two trees, both at their `origin/main`:
 | Tree | Commit | How it was read |
 |---|---|---|
 | gastown `internal/testpolicy` | `627c878ee0f37fc9a933385d19aec52b2398e154` | the checkout's own `origin` remote |
-| `sloan/devops` `testpolicymod/` | `9bfd72568d951d0b352de93d96f99e15cbb101cb` | read-only clone, sparse checkout of `testpolicymod/` only |
+| `<owner>/devops` `testpolicymod/` | `9bfd72568d951d0b352de93d96f99e15cbb101cb` | read-only clone, sparse checkout of `testpolicymod/` only |
 
 Commands run, from the gastown checkout:
 
@@ -31,7 +31,7 @@ git log -1 origin/main                         # the land commit, so the id is c
 git ls-tree -r --name-only origin/main internal/testpolicy      # 139 files
 
 # module side: no checkout of the rest of devops, nothing built or run
-git clone --depth 1 --filter=blob:none --no-checkout <forgejo>/sloan/devops.git scratch/devops-read
+git clone --depth 1 --filter=blob:none --no-checkout <forgejo>/<owner>/devops.git scratch/devops-read
 git -C scratch/devops-read sparse-checkout set testpolicymod
 git -C scratch/devops-read rev-parse origin/main                # 9bfd72568d95...
 
@@ -41,7 +41,7 @@ diff -u scratch/devops-read/testpolicymod/<file> <gastown internal/testpolicy>/<
 
 Only files under `testpolicymod/` were read from that clone, and nothing from it
 was built or executed. The bead authorises the read
-(`sloan/devops`, read only); the earlier draft of this document declined it
+(`<owner>/devops`, read only); the earlier draft of this document declined it
 under the rule that a polecat reads only its own rig (gt-690mog), and that
 decline is what this version replaces.
 
@@ -118,7 +118,7 @@ The module's fixtures are `allow_noreason`, `allow_ok`, `clean` (2 files),
 **What the module does not carry at this commit.** Slice 1a and 1b (scanner,
 allow machinery, Rule seam, six shared rules), slice 2 (lists, split, tier
 walls) and the CPU check of slice 3a (`cpu.go`, `cpuexempt.go`) are in the
-module. `sloan/devops`'s own `internal/testpolicy/` additionally holds
+module. `<owner>/devops`'s own `internal/testpolicy/` additionally holds
 `budget.go`, `slow.go`, `scripts.go`, `scripttree.go`, `presubmit.go`,
 `changed.go`, `triggers.go`, `nameguard.go`, `identityguard.go`,
 `violating.go`, `unconvertedtests.go` and a `cmd/` subtree — slices 3b to 6 —
@@ -339,12 +339,12 @@ about those files needs the devops copy read, which is slice 3b-6's own bead.
 
 **Not determined: when the module is published.** Every adoption bead below
 needs a `gt.local/testpolicy` version to require. No repository named
-`sloan/testpolicy`, `sloan/testpolicymod` or `sloan/gt-testpolicy` exists on the
+`<owner>/testpolicy`, `<owner>/testpolicymod` or `<owner>/gt-testpolicy` exists on the
 Forgejo host at the time of writing (three `git ls-remote` calls, each
-`Repository not found`), and the module still lives inside `sloan/devops` at
+`Repository not found`), and the module still lives inside `<owner>/devops` at
 `testpolicymod/`. A publish under another name would not have shown up in that
 check. Re-checked for this half, with the same answer for all three, and
-`sloan/devops` itself carries only the tags `v0.1.0` to `v0.1.7` — its own
+`<owner>/devops` itself carries only the tags `v0.1.0` to `v0.1.7` — its own
 module's releases, none of them for `gt.local/testpolicy`.
 
 ## Gastown's nine extra rules, and how each registers through the Rule seam
@@ -597,8 +597,8 @@ published version — S7.7's exit criterion requires none to remain. Four steps:
    serves, with `testpolicymod/`'s contents at its root (`go.mod` included) and
    the registry's mapping from `gt.local/testpolicy` to it — the mapping
    `gt.local/devops` already has. At this bead's read no such repository existed:
-   `sloan/testpolicy`, `sloan/testpolicymod` and `sloan/gt-testpolicy` each
-   answered `Repository not found`, and `sloan/devops` carries only its own
+   `<owner>/testpolicy`, `<owner>/testpolicymod` and `<owner>/gt-testpolicy` each
+   answered `Repository not found`, and `<owner>/devops` carries only its own
    `v0.1.0`–`v0.1.7` tags. Whether the module's source moves there or is copied
    from `devops` each release is the operator's choice; slices 1 to 6 keep
    devops green either way.

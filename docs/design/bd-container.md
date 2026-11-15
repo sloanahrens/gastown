@@ -117,7 +117,7 @@ One endpoint does the work; two more are for health and the workspace.
 POST /v1/exec
   Authorization: Bearer <token>
   Content-Type:  application/vnd.gt.bdexec+json   (the request head) 
-  X-Gt-Caller:   <free text, logged: "daemon.spec-tick", "mac.sloan-shell">
+  X-Gt-Caller:   <free text, logged: "daemon.spec-tick", "mac.operator-shell">
   body:          one JSON head line, a newline, then the caller's stdin bytes
 ```
 
