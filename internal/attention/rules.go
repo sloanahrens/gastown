@@ -165,6 +165,20 @@ const (
 	// landings the way the measured polecat time does, so dispatch planning
 	// reads a model that has moved (gt-my0o23).
 	RuleStoryPointsDrift = "storypoints.drift"
+
+	// RuleImagePinsStale is an image pin at or past the stale bound: the
+	// patrol files a refresh bead well before this, so the pin is still behind
+	// because that refresh has not landed (gt-01lcq2).
+	RuleImagePinsStale = "image_pins.stale"
+
+	// RuleImagePinsUnreadable is a pin's read that failed, or a whole tick
+	// that did: the patrol cannot say whether any pin trails its tip
+	// (gt-01lcq2).
+	RuleImagePinsUnreadable = "image_pins.unreadable"
+
+	// RuleImagePinsRefreshStuck is the refresh bead the patrol filed, sitting
+	// unlanded past its bound, so the pins wait for it (gt-01lcq2).
+	RuleImagePinsRefreshStuck = "image_pins.refresh_stuck"
 )
 
 var (
@@ -311,6 +325,18 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostProbe:        flagsInfo,
 	// The overrun guard stopped the polecat and handed the bead back itself.
 	RuleOverrunStopped: flagsSelf,
+	// A stale pin is the patrol's own reading: it asks the overseer to look at
+	// why the refresh has not landed, while a landing that stalls already
+	// wakes under landing.queue_stuck (gt-01lcq2).
+	RuleImagePinsStale: flagsAsk,
+	// A read the patrol could not make is a measurement that stopped, not a
+	// failure: the next tick retries it, and it is queued for the overseer's
+	// next look (gt-01lcq2).
+	RuleImagePinsUnreadable: flagsAsk,
+	// A refresh bead nobody lands is the landing queue's to move, which
+	// landing.queue_stuck wakes for; this item names the bead the pins wait
+	// on (gt-01lcq2).
+	RuleImagePinsRefreshStuck: flagsAsk,
 }
 
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
@@ -395,6 +421,9 @@ var kindRules = map[Kind]string{
 	KindSeatSandboxStale:         RuleSeatSandboxStale,
 	KindSeatUnreachable:          RuleSeatUnreachable,
 	KindStoryPointsDrift:         RuleStoryPointsDrift,
+	KindImagePinsStale:           RuleImagePinsStale,
+	KindImagePinsUnreadable:      RuleImagePinsUnreadable,
+	KindImagePinsRefreshStuck:    RuleImagePinsRefreshStuck,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

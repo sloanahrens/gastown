@@ -600,9 +600,8 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.SandboxSampler.Enabled
 	}
-	// image_pins defaults OFF: each tick reaches git and the town's Forgejo
-	// with four tip reads and up to four compares, and a town opts in rather
-	// than an upgrade (gt-01lcq2).
+	// image_pins defaults OFF, and its key absent means off (gt-01lcq2; the
+	// PatrolsConfig.ImagePins field says why).
 	if patrol == "image_pins" {
 		if config == nil || config.Patrols == nil || config.Patrols.ImagePins == nil {
 			return false

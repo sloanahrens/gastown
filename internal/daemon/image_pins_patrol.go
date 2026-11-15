@@ -7,9 +7,9 @@ package daemon
 // unit test drives every branch with no file, network or git.
 //
 // This file also registers the patrol (gt-01lcq2): the ticker the daemon starts
-// it on, the interval its config entry names, and the town's own seams the
-// trigger hands the tick. The patrol raises none of the planner's items itself;
-// the next bead publishes them (gt-9oap8n).
+// it on, the interval its config entry names, the town's own seams the trigger
+// hands the tick, and the attention collector that publishes what the tick
+// found.
 
 import (
 	"context"
@@ -20,8 +20,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
@@ -49,6 +51,13 @@ const (
 	imagePinsGitTimeout  = 2 * time.Minute
 	imagePinsHTTPTimeout = 30 * time.Second
 	imagePinsBdTimeout   = 30 * time.Second
+
+	// imagePinsJoinWait bounds how long Run waits for a tick still running
+	// after the ticker stopped: longer than the attention tick's shutdown
+	// bound, since a pins tick is often mid-network-read. A tick left running
+	// past it only finishes its own reads and the one bead it files, and the
+	// next start needs neither.
+	imagePinsJoinWait = 10 * time.Second
 )
 
 // imagePinsInterval is the period between two ticks: the configured
@@ -84,6 +93,109 @@ func (d *Daemon) startImagePinsTicker() (<-chan time.Time, func()) {
 	return ticks, stop
 }
 
+// imagePinsAttention is the image pins patrol's last tick as the attention
+// collectors read it: the items the planner raised and the error that ended the
+// tick, if any. The tick writes it on its own goroutine and the attention
+// heartbeat reads it, so a mutex guards it. It is memory only: the next tick
+// re-derives it after a restart, and the collectors read it only while the
+// patrol is active.
+type imagePinsAttention struct {
+	mu      sync.Mutex
+	items   []ImagePinItem
+	failure error
+}
+
+// record stores one tick's outcome, replacing the previous one: each tick
+// reports what it found rather than accumulating, so an item clears at the
+// first tick that does not raise it.
+func (s *imagePinsAttention) record(items []ImagePinItem, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = append([]ImagePinItem(nil), items...)
+	s.failure = err
+}
+
+// observed renders the last tick as attention items: one per planner item,
+// keyed by its key and its pin, and the tick's error as image-pins-unreadable,
+// so a tick that read nothing is an alarm rather than silence. A planner key
+// with no kind is an error, never an item dropped: a reading the collectors
+// cannot name is one no queue would show.
+func (s *imagePinsAttention) observed() ([]attention.Item, error) {
+	s.mu.Lock()
+	items, failure := append([]ImagePinItem(nil), s.items...), s.failure
+	s.mu.Unlock()
+
+	out := make([]attention.Item, 0, len(items)+1)
+	for _, it := range items {
+		kind, ok := imagePinKind(it.Key)
+		if !ok {
+			return nil, fmt.Errorf("image pins patrol: the planner returned the item key %q, which has no attention kind, so no queue can show it", it.Key)
+		}
+		out = append(out, attention.Item{
+			Key:      imagePinItemKey(it),
+			Kind:     kind,
+			Severity: it.Severity,
+			Summary:  it.Summary,
+		})
+	}
+	if failure != nil {
+		out = append(out, attention.Item{
+			Key:      imagePinsUnreadableKey,
+			Kind:     attention.KindImagePinsUnreadable,
+			Severity: attention.SeverityMedium,
+			Summary:  fmt.Sprintf("the image pins patrol's tick failed, so no pin was read: %v", failure),
+		})
+	}
+	return out, nil
+}
+
+// imagePinItemKey is one planner item's attention key: the item's key and, for
+// a per-pin item, its pin, so two pins behind by the stale bound are two items.
+func imagePinItemKey(it ImagePinItem) string {
+	if it.Pin == "" {
+		return it.Key
+	}
+	return it.Key + ":" + it.Pin
+}
+
+// imagePinKind is the attention kind of the planner item a key names. The
+// planner's three keys are the patrol's three conditions; any other key has no
+// kind, and observed refuses it rather than publishing an item nobody owns.
+func imagePinKind(key string) (attention.Kind, bool) {
+	switch key {
+	case imagePinsStaleKey:
+		return attention.KindImagePinsStale, true
+	case imagePinsUnreadableKey:
+		return attention.KindImagePinsUnreadable, true
+	case imagePinsRefreshStuckKey:
+		return attention.KindImagePinsRefreshStuck, true
+	}
+	return "", false
+}
+
+// collectImagePins returns the patrol's items of one kind from its last tick.
+// One collector per kind keeps a kind's items its own, as collectors() requires;
+// a daemon whose patrol is off carries no read, so the collector returns
+// nothing and the queue clears what a switched-on patrol raised.
+func (s *attentionSources) collectImagePins(kind attention.Kind) func(context.Context) ([]attention.Item, error) {
+	return func(context.Context) ([]attention.Item, error) {
+		if s.imagePins == nil {
+			return nil, nil
+		}
+		items, err := s.imagePins()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]attention.Item, 0, len(items))
+		for _, it := range items {
+			if it.Kind == kind {
+				out = append(out, it)
+			}
+		}
+		return out, nil
+	}
+}
+
 // startImagePinsTick runs one tick on its own goroutine: a tick syncs the gt
 // checkout and makes up to eight network reads, which must not hold the main
 // select loop. A tick that arrives while the previous one still runs is skipped
@@ -103,9 +215,9 @@ func (d *Daemon) startImagePinsTick() {
 }
 
 // triggerImagePins runs one tick over the town's own seams. A failed tick is
-// logged and never taken for a town with nothing due: the planner's items and
-// the failure belong to the attention collector the next bead adds (gt-9oap8n),
-// so here every error ends the tick in the log.
+// logged and raised, never taken for a town with nothing due: it raises
+// image-pins-unreadable through the attention collector, and the items the
+// planner raised before the failure are published with it.
 func (d *Daemon) triggerImagePins() {
 	if d.config == nil || !d.isPatrolActive("image_pins") {
 		return
@@ -121,6 +233,9 @@ func (d *Daemon) triggerImagePins() {
 		build = d.newImagePinsSeams
 	}
 	id, items, err := runImagePinsTick(ctx, build(ctx))
+	// The collector publishes the tick's outcome, failure included: the items
+	// the planner raised before it, and the error that ended it.
+	d.imagePinsAttention.record(items, err)
 	if err != nil {
 		d.logger.Printf("image_pins: %v", err)
 		return
@@ -130,6 +245,33 @@ func (d *Daemon) triggerImagePins() {
 	}
 	if len(items) != 0 {
 		d.logger.Printf("image_pins: the planner raised %d attention item(s)", len(items))
+	}
+}
+
+// stopImagePinsPatrol stops the patrol's ticker and joins the tick it may have
+// running, bounded, so Run's return leaves no tick reading the town after the
+// daemon is gone. A tick still running at the bound is logged and left: its
+// reads are bounded by imagePinsTickTimeout, and a shutdown does not wait for
+// one.
+func (d *Daemon) stopImagePinsPatrol(stop func()) {
+	if stop != nil {
+		stop()
+	}
+	done := make(chan struct{})
+	go func() {
+		d.imagePinsCycles.Wait()
+		close(done)
+	}()
+	bound := d.imagePinsJoinWait
+	if bound <= 0 {
+		bound = imagePinsJoinWait
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		d.logger.Printf("image_pins: a tick is still running %s after the ticker stopped; Run leaves without it", bound)
 	}
 }
 

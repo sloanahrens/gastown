@@ -1341,8 +1341,13 @@ type Daemon struct {
 	// a tick that arrives while one runs is skipped (image_pins_patrol.go).
 	imagePinsRunning atomic.Bool
 	// imagePinsCycles joins the tick's goroutine, so a test can wait for a tick
-	// it started rather than time it.
+	// it started rather than time it, and Run's return waits for one it left.
 	imagePinsCycles sync.WaitGroup
+	// imagePinsJoinWait overrides imagePinsJoinWait in tests: the bound Run
+	// waits for a tick still running at its return.
+	imagePinsJoinWait time.Duration
+	// imagePinsAttention is the patrol's last tick (image_pins_patrol.go).
+	imagePinsAttention imagePinsAttention
 	// newImagePinsTicker is where the image_pins patrol's ticker comes from:
 	// nil is time.NewTicker, and a test sets it to record the cadence.
 	newImagePinsTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
@@ -2354,12 +2359,12 @@ func (d *Daemon) Run() (err error) {
 		defer stopSandboxSampler()
 	}
 
-	// Start the image pins ticker if enabled (default off, gt-01lcq2): one
-	// tick reads four source tips over the network, so a town turns it on
-	// rather than an upgrade.
+	// Start the image pins ticker if enabled (default off, gt-01lcq2; the
+	// config field says why). The defer stops the ticker and joins a tick it
+	// left running.
 	imagePinsChan, stopImagePins := d.startImagePinsTicker()
 	if stopImagePins != nil {
-		defer stopImagePins()
+		defer d.stopImagePinsPatrol(stopImagePins)
 	}
 
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
