@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/hygiene"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -141,29 +142,20 @@ type result struct {
 	stderr string
 }
 
-// noTown is the town finder of a command run outside any town.
-func noTown() (string, error) { return "", nil }
-
 // runFixture runs the command over the fixture work tree at top and the fake
 // git.
 func runFixture(t *testing.T, top string, paths, args []string, blocked blockedLoader) result {
 	t.Helper()
-	return runFixtureWith(t, top, paths, args, blocked, noTown)
+	return runFixtureGit(t, top, fakeGit{top: top, paths: paths}, args, blocked)
 }
 
-// runFixtureWith runs the command with the town finder the case needs.
-func runFixtureWith(t *testing.T, top string, paths, args []string, blocked blockedLoader, findTown townRootFinder) result {
-	t.Helper()
-	return runFixtureGit(t, top, fakeGit{top: top, paths: paths}, args, blocked, findTown)
-}
-
-// runFixtureGit runs the command with the git answers and the town finder the
-// case needs. The command opens the tree with os.DirFS, the way main does, so
-// the run reads the work tree at the top git names and nowhere else.
-func runFixtureGit(t *testing.T, top string, git fakeGit, args []string, blocked blockedLoader, findTown townRootFinder) result {
+// runFixtureGit runs the command with the git answers the case needs. The
+// command opens the tree with os.DirFS, the way main does, so the run reads the
+// work tree at the top git names and nowhere else.
+func runFixtureGit(t *testing.T, top string, git fakeGit, args []string, blocked blockedLoader) result {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	code := run(args, &stdout, &stderr, git.run, os.DirFS, blocked, findTown)
+	code := run(args, &stdout, &stderr, git.run, os.DirFS, blocked)
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
@@ -349,7 +341,7 @@ func TestRunRefusesGitAnswersItCannotUse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			code := run(nil, &stdout, &stderr, tc.git, os.DirFS, fixtureBlocked, noTown)
+			code := run(nil, &stdout, &stderr, tc.git, os.DirFS, fixtureBlocked)
 			if code != exitError {
 				t.Fatalf("exit code = %d, want %d; stderr: %s", code, exitError, stderr.String())
 			}
@@ -392,7 +384,7 @@ func TestRunRefusesBadFlags(t *testing.T) {
 			t.Parallel()
 			top := treeWith(t, "[]", nil)
 			var stdout, stderr strings.Builder
-			code := run(tc.args, &stdout, &stderr, fakeGit{top: top}.run, os.DirFS, fixtureBlocked, noTown)
+			code := run(tc.args, &stdout, &stderr, fakeGit{top: top}.run, os.DirFS, fixtureBlocked)
 			if code != exitError {
 				t.Fatalf("exit code = %d, want %d", code, exitError)
 			}
@@ -411,7 +403,7 @@ func TestRunHelpExitsZero(t *testing.T) {
 	t.Parallel()
 	top := treeWith(t, "[]", nil)
 	var stdout, stderr strings.Builder
-	code := run([]string{"-h"}, &stdout, &stderr, fakeGit{top: top}.run, os.DirFS, fixtureBlocked, noTown)
+	code := run([]string{"-h"}, &stdout, &stderr, fakeGit{top: top}.run, os.DirFS, fixtureBlocked)
 	if code != exitClean {
 		t.Fatalf("exit code = %d, want %d", code, exitClean)
 	}
@@ -428,7 +420,7 @@ func TestRunExitsTwoWhenTheFindingsCannotBeWritten(t *testing.T) {
 	t.Parallel()
 	top := treeWith(t, "[]", map[string]string{"docs/notes.md": billingLine + "\n"})
 	var stderr strings.Builder
-	code := run(nil, errWriter{}, &stderr, fakeGit{top: top, paths: []string{"docs/notes.md", allowPath}}.run, os.DirFS, fixtureBlocked, noTown)
+	code := run(nil, errWriter{}, &stderr, fakeGit{top: top, paths: []string{"docs/notes.md", allowPath}}.run, os.DirFS, fixtureBlocked)
 	if code != exitError || !strings.Contains(stderr.String(), "write") {
 		t.Fatalf("got exit %d, stderr %q; want exit 2 naming the write failure", code, stderr.String())
 	}
@@ -561,7 +553,7 @@ func TestRunDerivesTheForgeOwnerFromTheOriginURL(t *testing.T) {
 			t.Parallel()
 			top := treeWith(t, "[]", map[string]string{file: forgeURLLine(account)})
 			git := fakeGit{top: top, paths: fixturePaths(file), remotes: tc.remotes, origin: tc.origin}
-			got := runFixtureGit(t, top, git, nil, blockedWith(account), noTown)
+			got := runFixtureGit(t, top, git, nil, blockedWith(account))
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -569,23 +561,23 @@ func TestRunDerivesTheForgeOwnerFromTheOriginURL(t *testing.T) {
 	}
 }
 
-// TestRunDerivesTheTownRoot covers the default run's other identity: the town
-// root the workspace finder reports is exempted, and a command run outside a
-// town exempts no path while still reporting what it finds.
-func TestRunDerivesTheTownRoot(t *testing.T) {
+// TestRunDefaultsTownRootToThePodRoot covers the default run's other identity:
+// with no -town-root flag the path the daemon pod mounts the town claim at is
+// exempted, while a different operator-style path is still a finding.
+func TestRunDefaultsTownRootToThePodRoot(t *testing.T) {
 	t.Parallel()
-	root := shape("/", "Users/", "fixtureaccount/gt")
+	other := shape("/", "Users/", "fixtureaccount/gt")
 	file := "config/mount.yaml"
 	cases := []struct {
 		name     string
-		findTown townRootFinder
+		root     string
 		wantCode int
 		wantOut  string
 	}{
-		{name: "the town the finder reports is exempted", findTown: townAt(root), wantCode: exitClean},
+		{name: "the pod town root is exempted", root: manifestdata.PodTownRoot, wantCode: exitClean},
 		{
-			name:     "outside a town no root is exempted",
-			findTown: noTown,
+			name:     "another operator path is a finding",
+			root:     other,
 			wantCode: exitFindings,
 			wantOut:  file + ":1 " + hygiene.RuleHomePath + "\n",
 		},
@@ -593,18 +585,13 @@ func TestRunDerivesTheTownRoot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			top := treeWith(t, "[]", map[string]string{file: townRootLine(root)})
-			got := runFixtureWith(t, top, fixturePaths(file), nil, fixtureBlocked, tc.findTown)
+			top := treeWith(t, "[]", map[string]string{file: townRootLine(tc.root)})
+			got := runFixture(t, top, fixturePaths(file), nil, fixtureBlocked)
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
 		})
 	}
-}
-
-// townAt is a workspace finder reporting root.
-func townAt(root string) townRootFinder {
-	return func() (string, error) { return root, nil }
 }
 
 // TestRunForgeOwnerFlagOverridesTheDerivedValue covers the acceptance: the
@@ -639,7 +626,7 @@ func TestRunForgeOwnerFlagOverridesTheDerivedValue(t *testing.T) {
 				remotes: []string{"origin"},
 				origin:  shape("https://forge.invalid:3000/", derived, "/gastown.git"),
 			}
-			got := runFixtureGit(t, top, git, []string{"-forge-owner", flagOwner}, blockedWith(derived, flagOwner), noTown)
+			got := runFixtureGit(t, top, git, []string{"-forge-owner", flagOwner}, blockedWith(derived, flagOwner))
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -647,12 +634,11 @@ func TestRunForgeOwnerFlagOverridesTheDerivedValue(t *testing.T) {
 	}
 }
 
-// TestRunTownRootFlagOverridesTheDerivedValue covers the acceptance's other
-// flag: the path -town-root names is the one exempted, and the path the
-// workspace finder reports is not.
-func TestRunTownRootFlagOverridesTheDerivedValue(t *testing.T) {
+// TestRunTownRootFlagOverridesThePodRoot covers the acceptance's other flag: the
+// path -town-root names is the one exempted, and the pod root the default
+// exempts is not.
+func TestRunTownRootFlagOverridesThePodRoot(t *testing.T) {
 	t.Parallel()
-	derived := shape("/", "Users/", "fixtureaccount/gt")
 	flagRoot := shape("/", "srv/", "fixturetown")
 	file := "config/mount.yaml"
 	cases := []struct {
@@ -663,8 +649,8 @@ func TestRunTownRootFlagOverridesTheDerivedValue(t *testing.T) {
 	}{
 		{name: "the flag's root is exempted", root: flagRoot, wantCode: exitClean},
 		{
-			name:     "the derived root is not exempted",
-			root:     derived,
+			name:     "the pod root is not exempted",
+			root:     manifestdata.PodTownRoot,
 			wantCode: exitFindings,
 			wantOut:  file + ":1 " + hygiene.RuleHomePath + "\n",
 		},
@@ -673,7 +659,7 @@ func TestRunTownRootFlagOverridesTheDerivedValue(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			top := treeWith(t, "[]", map[string]string{file: townRootLine(tc.root)})
-			got := runFixtureWith(t, top, fixturePaths(file), []string{"-town-root", flagRoot}, fixtureBlocked, townAt(derived))
+			got := runFixture(t, top, fixturePaths(file), []string{"-town-root", flagRoot}, fixtureBlocked)
 			if got.code != tc.wantCode || got.stdout != tc.wantOut {
 				t.Fatalf("got exit %d, stdout %q; want exit %d and %q (stderr: %s)", got.code, got.stdout, tc.wantCode, tc.wantOut, got.stderr)
 			}
@@ -681,13 +667,12 @@ func TestRunTownRootFlagOverridesTheDerivedValue(t *testing.T) {
 	}
 }
 
-// TestRunFlagsNeedNoDerivation covers the override's other half: with both
-// flags given the run asks git for no origin and the finder for no town, so a
-// git and a finder that would fail cannot fail the run.
+// TestRunFlagsNeedNoDerivation covers the override's other half: with
+// -forge-owner given the run asks git for no origin, so a git that would fail
+// cannot fail the run.
 func TestRunFlagsNeedNoDerivation(t *testing.T) {
 	t.Parallel()
 	account := shape("fixture", "account")
-	root := shape("/", "srv/", "fixturetown")
 	file := "config/clone.yaml"
 	top := treeWith(t, "[]", map[string]string{file: forgeURLLine(account)})
 	git := fakeGit{
@@ -695,9 +680,7 @@ func TestRunFlagsNeedNoDerivation(t *testing.T) {
 		paths: fixturePaths(file),
 		fail:  map[string]error{"remote": errors.New("git failed")},
 	}
-	findTown := func() (string, error) { return "", errors.New("finder failed") }
-	args := []string{"-forge-owner", account, "-town-root", root}
-	got := runFixtureGit(t, top, git, args, blockedWith(account), findTown)
+	got := runFixtureGit(t, top, git, []string{"-forge-owner", account}, blockedWith(account))
 	if got.code != exitClean || got.stdout != "" || got.stderr != "" {
 		t.Fatalf("got exit %d, stdout %q, stderr %q; want exit 0 and no output", got.code, got.stdout, got.stderr)
 	}
@@ -711,7 +694,7 @@ func TestRunRefusesAnOriginURLItCannotRead(t *testing.T) {
 	file := "config/clone.yaml"
 	top := treeWith(t, "[]", map[string]string{file: forgeURLLine(shape("te", "am"))})
 	git := fakeGit{top: top, paths: fixturePaths(file), remotes: []string{"origin"}, originErr: errors.New("git failed")}
-	got := runFixtureGit(t, top, git, nil, fixtureBlocked, noTown)
+	got := runFixtureGit(t, top, git, nil, fixtureBlocked)
 	if got.code != exitError {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 	}
@@ -743,7 +726,7 @@ func TestRunRefusesAnAccountThatIsNotAUsableName(t *testing.T) {
 			t.Parallel()
 			top := treeWith(t, "[]", map[string]string{file: "clean\n"})
 			git := fakeGit{top: top, paths: fixturePaths(file), remotes: []string{"origin"}, origin: tc.origin}
-			got := runFixtureGit(t, top, git, tc.args, fixtureBlocked, noTown)
+			got := runFixtureGit(t, top, git, tc.args, fixtureBlocked)
 			if got.code != exitError {
 				t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
 			}
@@ -754,24 +737,5 @@ func TestRunRefusesAnAccountThatIsNotAUsableName(t *testing.T) {
 				t.Errorf("stdout = %q, want nothing", got.stdout)
 			}
 		})
-	}
-}
-
-// TestRunRefusesAFailedTownLookup covers a workspace finder that cannot report
-// the town: the run exits 2 rather than scanning as if it ran outside a town.
-func TestRunRefusesAFailedTownLookup(t *testing.T) {
-	t.Parallel()
-	file := "config/mount.yaml"
-	findTown := func() (string, error) { return "", errors.New("getting current directory") }
-	top := treeWith(t, "[]", map[string]string{file: "clean\n"})
-	got := runFixtureWith(t, top, fixturePaths(file), nil, fixtureBlocked, findTown)
-	if got.code != exitError {
-		t.Fatalf("exit code = %d, want %d; stderr: %s", got.code, exitError, got.stderr)
-	}
-	if !strings.Contains(got.stderr, "town root") {
-		t.Errorf("stderr = %q, want it to name the town root", got.stderr)
-	}
-	if got.stdout != "" {
-		t.Errorf("stdout = %q, want nothing", got.stdout)
 	}
 }

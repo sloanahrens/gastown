@@ -9,15 +9,15 @@
 //
 // The scan exempts the two identities the town writes in its own tree: the
 // forge account its repository URLs name, and its town root. A default run
-// derives both, the account from the origin remote URL and the town root from
-// the directory the command runs in; -forge-owner and -town-root name either
-// one instead.
+// derives the account from the origin remote URL and exempts the daemon pod's
+// town root, manifestdata.PodTownRoot, the path the deployment mounts the town
+// claim at; -forge-owner and -town-root name either one instead.
 //
 // The exit code is 1 when a finding prints, 0 when none does, and 2 when the
 // scan could not look: a git answer it could not use, a tracked file or allow
-// list it could not read, a -dir prefix no tracked path sits under, an origin
-// remote whose account is not a usable name, or a town root the workspace
-// finder failed to report. A run that could not look never exits 0.
+// list it could not read, a -dir prefix no tracked path sits under, or an
+// origin remote whose account is not a usable name. A run that could not look
+// never exits 0.
 package main
 
 import (
@@ -34,7 +34,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hygiene"
-	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // Exit codes. A finding is what the command exists to report, so it exits 1; a
@@ -62,22 +62,17 @@ type workTreeFS func(top string) fs.FS
 // shipped one, hygiene.BlockedWords.
 type blockedLoader func() (map[string]struct{}, error)
 
-// townRootFinder returns the town root the command runs in, or "" when it runs
-// outside a town. main passes workspace.FindFromCwd, the finder gt's commands
-// use; a unit test passes a fake, since the unit tier reads no live town tree.
-type townRootFinder func() (string, error)
-
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, runGit, os.DirFS, hygiene.BlockedWords, workspace.FindFromCwd))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, runGit, os.DirFS, hygiene.BlockedWords))
 }
 
 // run scans the tracked files and prints each finding's location. See the
 // package comment for the exit codes.
-func run(args []string, stdout, stderr io.Writer, git gitRunner, openFS workTreeFS, loadBlocked blockedLoader, findTown townRootFinder) int {
+func run(args []string, stdout, stderr io.Writer, git gitRunner, openFS workTreeFS, loadBlocked blockedLoader) int {
 	flags := flag.NewFlagSet("scan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	forgeOwner := flags.String("forge-owner", "", "the forge account whose repository URLs name the town rather than a person; its owner segment is exempted; derived from the origin remote URL when unset")
-	townRoot := flags.String("town-root", "", "the town root path to exempt, matched as a whole path; derived from the working directory when unset")
+	townRoot := flags.String("town-root", manifestdata.PodTownRoot, "the town root path to exempt, matched as a whole path; the daemon pod's town root when unset")
 	var dirs prefixList
 	flags.Var(&dirs, "dir", "keep only findings under this tracked path prefix, relative to the work tree top; repeat for more")
 	if err := flags.Parse(args); err != nil {
@@ -106,18 +101,15 @@ func run(args []string, stdout, stderr io.Writer, git gitRunner, openFS workTree
 		paths = keepUnder(paths, dirs)
 	}
 
-	// The identities the scan exempts are the town's, so a default run derives
-	// them rather than requiring the caller to name them. The account is read
-	// from the origin remote of the work tree at top, which is why both are
-	// settled only once the top is known.
+	// The identities the scan exempts are the town's, so a default run names
+	// them without the caller: the account from the origin remote of the work
+	// tree at top, which is why it is settled only once the top is known, and
+	// the root from the flag's pod-town-root default.
 	owner, err := resolveForgeOwner(git, top, *forgeOwner)
 	if err != nil {
 		return fail(stderr, "scan: %v", err)
 	}
-	root, err := resolveTownRoot(findTown, *townRoot)
-	if err != nil {
-		return fail(stderr, "scan: %v", err)
-	}
+	root := *townRoot
 
 	blocked, err := loadBlocked()
 	if err != nil {
@@ -266,21 +258,6 @@ func remoteOwner(remote string) string {
 		path = path[:separator]
 	}
 	return path
-}
-
-// resolveTownRoot answers the path the scan exempts: the -town-root flag, or
-// else the town root the workspace finder reports for the directory the command
-// runs in. Running outside a town names no root, which like an absent origin
-// only adds findings to the list, so it is not a failed look.
-func resolveTownRoot(find townRootFinder, flagRoot string) (string, error) {
-	if flagRoot != "" {
-		return flagRoot, nil
-	}
-	root, err := find()
-	if err != nil {
-		return "", fmt.Errorf("find the town root: %w", err)
-	}
-	return root, nil
 }
 
 // location renders one finding as its path and line and its rule, or as its
