@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -974,11 +975,75 @@ func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
 	}
+	if g, sandboxed, err := d.overrunSandboxGit(seat); err != nil || sandboxed {
+		return g, err
+	}
 	workDir, err := d.overrunSeatWorktree(seat)
 	if err != nil {
 		return nil, err
 	}
 	return d.gitAt(workDir), nil
+}
+
+// overrunSandboxGit is the git handle of a seat that runs in a sandbox: a Git
+// over the in-sandbox runner, in the clone directory its record names, so the
+// save, the dirty check, the push and the reset see the sandbox's work and not
+// the host stub, which stays at main.
+//
+// A seat with no sandbox record is a host seat: false and no error, and it keeps
+// its host worktree. The bool is true only with a handle; every error comes back
+// with false, so the caller checks the error first. A record that cannot be
+// read, a record that names no clone directory and a runner that is not linked
+// are errors, never the host stub: the stub reads a clean tree and the seat's
+// work would be called saved while it dies with the sandbox.
+func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
+	sb, err := d.overrunSandboxSession(seat)
+	if err != nil || sb.Session == "" {
+		return nil, false, err
+	}
+	rec := sb.Record
+	if !sb.Read {
+		read, sandboxed, err := d.readSandboxRecordFor(d.config.TownRoot, sb.Session)
+		if err != nil {
+			return nil, false, overrunRecordReadError(sb.Session, err)
+		}
+		if !sandboxed {
+			return nil, false, nil
+		}
+		rec = read
+	}
+	if !validSandboxCloneDir(rec.WorkDir) {
+		return nil, false, fmt.Errorf("sandbox %s: its record names no usable clone directory (%q), so its work cannot be saved", sb.Session, rec.WorkDir)
+	}
+	runner, err := d.sandboxGitRunnerFor(rec)
+	if err != nil {
+		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
+	}
+	return git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath()), true, nil
+}
+
+// validSandboxCloneDir reports whether dir can be handed to the in-sandbox
+// runner as a clone directory: absolute, with no ".." element and no newline or
+// NUL, so a record cannot steer a git call out of the sandbox's own tree.
+func validSandboxCloneDir(dir string) bool {
+	if dir == "" || !path.IsAbs(dir) || strings.ContainsAny(dir, "\n\x00") {
+		return false
+	}
+	for _, elem := range strings.Split(dir, "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// sandboxGitRunnerFor is the in-sandbox git runner for rec: sandboxGitRunnerFn's
+// when a test set one, else session.SandboxGitRunner's.
+func (d *Daemon) sandboxGitRunnerFor(rec session.SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
+	if d.sandboxGitRunnerFn != nil {
+		return d.sandboxGitRunnerFn(d.config.TownRoot, rec)
+	}
+	return session.SandboxGitRunner(d.config.TownRoot, rec)
 }
 
 // overrunWorktreeDirty reports whether the seat's worktree holds uncommitted

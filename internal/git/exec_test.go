@@ -271,3 +271,83 @@ func TestNewGitLeavesExecNil(t *testing.T) {
 		}
 	}
 }
+
+// TestNewGitWithRemoteExecDoesNotStatTheWorkDirOnTheHost: a working directory
+// that lives in a sandbox is not on this host, so the call goes to exec and is
+// not refused for a missing local directory; the plain NewGitWithExec still is.
+func TestNewGitWithRemoteExecDoesNotStatTheWorkDirOnTheHost(t *testing.T) {
+	t.Parallel()
+	const dir = "/sandbox/does/not/exist/on/this/host"
+	calls := 0
+	exec := func(c ExecCall) (string, string, error) {
+		calls++
+		return "ok\n", "", nil
+	}
+
+	if _, err := NewGitWithRemoteExec(dir, exec).Rev("HEAD"); err != nil {
+		t.Fatalf("remote Rev: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("remote exec calls = %d, want 1", calls)
+	}
+
+	calls = 0
+	if _, err := NewGitWithExec(dir, exec).Rev("HEAD"); err == nil || calls != 0 {
+		t.Errorf("a host working directory that does not exist must be refused before exec: err=%v calls=%d", err, calls)
+	}
+}
+
+// TestNewGitWithRemoteExecRefusesANilExec: a remote Git with no exec would run
+// git on this host in a directory that is not here, so the constructor refuses.
+func TestNewGitWithRemoteExecRefusesANilExec(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("NewGitWithRemoteExec with a nil exec did not panic")
+		}
+	}()
+	NewGitWithRemoteExec("/sandbox/x", nil)
+}
+
+// TestRemoteGitRefusesAMutationInTheRemoteTownRoot: for a working directory in a
+// sandbox the guard asks the remote's git for the repository top level and
+// refuses a mutation that resolves to a town root the caller named; a clone
+// below it, a read, and a Git with no town root named are allowed. The host's
+// own filesystem is never consulted.
+func TestRemoteGitRefusesAMutationInTheRemoteTownRoot(t *testing.T) {
+	t.Parallel()
+	const townRoot = "/sandbox/gt"
+	tests := []struct {
+		name     string
+		topLevel string
+		roots    []string
+		call     func(*Git) error
+		wantErr  bool
+	}{
+		{"mutation resolving to the town root", townRoot, []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, true},
+		{"mutation in a clone below it", "/sandbox/gt/rig/polecats/x/rig", []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, false},
+		{"a read resolving to the town root", townRoot, []string{townRoot}, func(g *Git) error { _, err := g.Rev("HEAD"); return err }, false},
+		{"top level the remote cannot report", "", []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, true},
+		{"no town root named", townRoot, nil, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			exec := func(c ExecCall) (string, string, error) {
+				for _, a := range c.Args() {
+					if a == "--show-toplevel" {
+						return tc.topLevel + "\n", "", nil
+					}
+				}
+				return "", "", nil
+			}
+			err := tc.call(NewGitWithRemoteExec("/sandbox/gt/rig/polecats/x/rig", exec, tc.roots...))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, ErrUnsafeTownRootGitMutation) {
+				t.Errorf("err = %v, want ErrUnsafeTownRootGitMutation", err)
+			}
+		})
+	}
+}

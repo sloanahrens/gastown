@@ -270,6 +270,11 @@ type Daemon struct {
 	// inject a counting reader so a step that reads the record twice fails.
 	readSandboxRecord func(townRoot, session string) (session.SandboxRecord, bool, error)
 
+	// sandboxGitRunnerFn builds the in-sandbox git runner the overrun stop saves
+	// a sandbox seat's work through (see sandboxGitRunnerFor); nil is
+	// session.SandboxGitRunner. Tests hand it a scripted runner.
+	sandboxGitRunnerFn func(townRoot string, rec session.SandboxRecord) (func(dir string, args ...string) ([]byte, error), error)
+
 	// sandboxExists asks a gateway whether it has a sandbox of that name (see
 	// patrolScanHost.sandboxStillExists); nil asks the real gateway. Tests
 	// answer from a stub.

@@ -110,14 +110,16 @@ func moveDir(src, dest string) error {
 
 // Git wraps git operations for a working directory.
 type Git struct {
-	workDir string
-	gitDir  string        // Optional: explicit git directory (for bare repos)
-	gh      ghFunc        // runs the gh CLI; nil means the real gh on PATH
-	exec    runFunc       // runs git; nil means the real git on PATH
-	observe func()        // called before each git process starts (WithRunObserver); nil counts nothing
-	timeout time.Duration // deadline for every call when set (WithTimeout)
-	env     []string      // added to every call's environment (WithEnv)
-	unset   []string      // removed from every call's environment (WithoutEnv)
+	workDir         string
+	gitDir          string        // Optional: explicit git directory (for bare repos)
+	gh              ghFunc        // runs the gh CLI; nil means the real gh on PATH
+	exec            runFunc       // runs git; nil means the real git on PATH
+	remote          bool          // workDir lives where exec runs git (a sandbox), not on this host: it is not statted here
+	remoteTownRoots []string      // town roots, in the remote's own paths, a mutation must not resolve to (NewGitWithRemoteExec)
+	observe         func()        // called before each git process starts (WithRunObserver); nil counts nothing
+	timeout         time.Duration // deadline for every call when set (WithTimeout)
+	env             []string      // added to every call's environment (WithEnv)
+	unset           []string      // removed from every call's environment (WithoutEnv)
 
 	configRetry bool                           // retry once when git cannot read its config files (WithConfigReadRetry)
 	retryWait   func(time.Duration)            // the wait before that retry; nil means time.Sleep
@@ -229,7 +231,7 @@ func (g *Git) runOutput(args ...string) (string, error) {
 	// is a gone working directory (e.g. a polecat whose worktree was
 	// removed) — check for it up front so the error says what actually
 	// happened.
-	if g.workDir != "" {
+	if g.workDir != "" && !g.remote {
 		if info, statErr := os.Stat(g.workDir); statErr != nil {
 			if os.IsNotExist(statErr) {
 				return "", g.wrapError(fmt.Errorf("working directory does not exist: %s", g.workDir), "", "", args)
@@ -402,7 +404,44 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout), nil
 }
 
+// guardRemoteTownRootMutation is the town-root guard for a Git whose working
+// directory is in a sandbox. A mutating call is refused when the remote's
+// repository top level for the call's effective directory is one of the town
+// roots named at construction; a read, a Git with no town root named, and a top
+// level the remote cannot report is refused (the remote guard fails closed).
+func (g *Git) guardRemoteTownRootMutation(args []string) error {
+	cmd, rest := gitSubcommand(args)
+	if cmd == "" || len(g.remoteTownRoots) == 0 || !gitSubcommandMutatesWorktree(cmd, rest) {
+		return nil
+	}
+	effective := gitEffectiveWorkDir(args, g.workDir)
+	if effective == "" {
+		return nil
+	}
+	top, ok := gitTopLevel(g.runner(), effective)
+	if !ok {
+		// Unlike the host guard, the remote guard fails closed: a sandbox seat's
+		// mutation that cannot be placed relative to the town root is refused, not
+		// passed as if it had been checked.
+		return fmt.Errorf("%w: could not read the repository top level of %s, so the mutation cannot be checked: git %s", ErrUnsafeTownRootGitMutation, effective, strings.Join(args, " "))
+	}
+	for _, root := range g.remoteTownRoots {
+		if top == filepath.Clean(root) {
+			return fmt.Errorf("%w: %s resolves to town root git worktree %s: git %s", ErrUnsafeTownRootGitMutation, effective, top, strings.Join(args, " "))
+		}
+	}
+	return nil
+}
+
 func (g *Git) guardUnsafeTownRootMutation(args []string) error {
+	// A remote working directory lives where exec runs git, not on this host: the
+	// host's isTownRoot would stat the sandbox's path here and answer "not the
+	// town root" for any path. The remote guard asks the remote's own git for the
+	// repository top level and compares it with the town roots the caller named,
+	// in the remote's own paths (NewGitWithRemoteExec).
+	if g.remote {
+		return g.guardRemoteTownRootMutation(args)
+	}
 	cmd, rest := gitSubcommand(args)
 	if cmd == "" {
 		return nil
