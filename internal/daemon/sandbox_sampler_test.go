@@ -794,3 +794,21 @@ func TestSandboxSamplerRegistersTheVMSource(t *testing.T) {
 		t.Errorf("the VM row writes %q, want the seat rows' directory %q", sampler.metricsDir, filepath.Join(d.config.TownRoot, ".runtime", "metrics"))
 	}
 }
+
+// TestVMReadBudgetLeavesRoomForTheNextSeat pins the production shape the
+// next-seat fallback depends on: the VM read's whole bound covers more than one
+// seat's own bound, so a first seat that hangs for all of its bound does not use
+// up the budget before the fallback tries the next seat (gt-2qe2m6).
+func TestVMReadBudgetLeavesRoomForTheNextSeat(t *testing.T) {
+	t.Parallel()
+	if vmSeatAttempts < 2 {
+		t.Fatalf("vmSeatAttempts = %d, want at least 2 so a fallback can run", vmSeatAttempts)
+	}
+	if defaultVMReadTimeout < 2*resourcesampler.DefaultSeatTimeout {
+		t.Errorf("the VM read budget %v is under two per-seat bounds (%v): a hung first seat would exhaust it",
+			defaultVMReadTimeout, resourcesampler.DefaultSeatTimeout)
+	}
+	if want := vmSeatAttempts * resourcesampler.DefaultSeatTimeout; defaultVMReadTimeout != want {
+		t.Errorf("the VM read budget is %v, want %d per-seat bounds = %v", defaultVMReadTimeout, vmSeatAttempts, want)
+	}
+}

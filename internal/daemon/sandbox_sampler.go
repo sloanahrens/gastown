@@ -34,9 +34,17 @@ type sandboxRowWriter func(metricsDir string, row resourcesampler.Row, now time.
 // separately, after the seat rows are written (gt-2qe2m6).
 const defaultSandboxSamplerTimeout = 15 * resourcesampler.DefaultSeatTimeout
 
-// defaultVMReadTimeout bounds one tick's VM read: one seat's proc read, and a
-// bound of its own so a VM read that hangs costs the VM row only (gt-2qe2m6).
-const defaultVMReadTimeout = resourcesampler.DefaultSeatTimeout
+// vmSeatAttempts is how many live seats the VM read may try in one tick: each
+// attempt is bounded by the source's per-seat DefaultSeatTimeout, so a seat that
+// hangs for all of its bound still leaves budget for the next seat (gt-2qe2m6).
+const vmSeatAttempts = 3
+
+// defaultVMReadTimeout bounds one tick's whole VM read at vmSeatAttempts per-seat
+// bounds, and is a bound of its own so a VM read that hangs costs the VM row only
+// (gt-2qe2m6). It is longer than one seat's bound on purpose: with equal bounds a
+// hung first seat would use up the whole budget and the next-seat fallback would
+// never run.
+const defaultVMReadTimeout = vmSeatAttempts * resourcesampler.DefaultSeatTimeout
 
 // defaultSandboxSamplerInterval is the period between two seat samples: the
 // seat rows are a 60 s series beside the host's, so the patrol runs a ticker
