@@ -1,7 +1,3 @@
-slot run
-slot status
-theme
-theme apply
 theme cli
 tracker
 tracker replay
