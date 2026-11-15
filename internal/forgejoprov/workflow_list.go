@@ -9,19 +9,10 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// giteaHome is the Gitea service account's home inside its container, so the
-// hooks the service runs sit under it. It is the service's home, not a person's,
-// but the hygiene scan's home-path rule reads a /home/<name>/ segment as
-// somebody's home and reports the hooks directory below it (gt-1vq1kd). That
-// bead may change neither the scanner nor its allow list, so the list path is
-// built from this constant instead: the value is unchanged and the file spells
-// the service's home once.
-const giteaHome = "/data/gitea/home"
-
 // DefaultWorkflowList is the pre-receive list the workflow-file hook reads: the
 // repositories it protects. A repository provisioned here is appended to it, so the
 // hook covers a new rig with no operator step.
-const DefaultWorkflowList = giteaHome + "/hooks/pre-receive.d/gt-protected-workflow-repos"
+const DefaultWorkflowList = "/data/gitea/home/hooks/pre-receive.d/gt-protected-workflow-repos"
 
 // EnsureWorkflowProtected leaves repo named in the workflow-file hook list at listPath.
 // A repository the list already names on a whole line, in any case, is not written
