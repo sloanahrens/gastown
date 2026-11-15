@@ -571,5 +571,41 @@
     "rule": "home directory path",
     "line": "3d95c5d948268378",
     "reason": "service-account path: the container's gitea account home holds the workflow-file hook list the provisioner appends to, and is no person's directory"
+  },
+  {
+    "path": "gt-model-eval/package-lock.json",
+    "rule": "email address",
+    "line": "1f1dde5aa7d102f2",
+    "reason": "npm registry deprecation notice for old glob: the address is the package maintainer's, and the entries on lines 8551 and 12510 pin old glob with identical text, so their one line hash and this one row excuse both"
+  },
+  {
+    "path": "internal/beads/testdata/census-recorded-20261101.txt",
+    "rule": "email address",
+    "line": "35f7c42a98f8433c",
+    "reason": "recorded census output: the at sign is in a counted function name, not an address"
+  },
+  {
+    "path": "internal/beads/testdata/census-recorded-20261101.txt",
+    "rule": "email address",
+    "line": "e7e0e8ec0d65e0ad",
+    "reason": "recorded census output: the at sign is in a counted function name, not an address"
+  },
+  {
+    "path": "internal/hoststat/hoststat.go",
+    "rule": "private temp path",
+    "line": "fde84a6a51adc258",
+    "reason": "code that classifies a test server by its temporary data directory: a literal prefix in the classifier's table, not a home directory"
+  },
+  {
+    "path": "internal/hoststat/hoststat_test.go",
+    "rule": "private temp path",
+    "line": "7d2868d7fb0edfe1",
+    "reason": "test fixture: an argv line with a temporary data directory, the input the classifier must recognise"
+  },
+  {
+    "path": "internal/tmux/live_socket_guard_test.go",
+    "rule": "private temp path",
+    "line": "8330410dc8cf60db",
+    "reason": "test fixture: the macOS socket path the guard must read a town name out of"
   }
 ]
