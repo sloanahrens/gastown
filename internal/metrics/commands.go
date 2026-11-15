@@ -391,9 +391,10 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // A decision — the proposal adopted, the rule's rejection with its reason, or a
 // retrain that has too few rows to fit — is stored as the week's last run, so
 // the week is spent however it was decided. A step that failed is written on the
-// line and returned as the run's error so the hour exits non-zero. Two failures
-// leave the week unspent, so the next hour tries again: an extract that has not
-// run for the day yet, and an embedder that is unreachable. Any other failure
+// line and returned as the run's error so the hour exits non-zero, except for the
+// two failures that leave the week unspent for the next hour: an extract that has
+// not run for the day yet is an expected wait, so its line is written and the run
+// succeeds; an unreachable embedder is returned as the error. Any other failure
 // spends the week, with its error on the line: the same files and the same code
 // fail the same way, and a retry every hour of the week wires the town each time
 // for nothing.
@@ -473,17 +474,23 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 }
 
 // weeklyFailure is the weekly run's line and error for a retrain or adoption that
-// failed. The error carries the failure to the hour, so the plugin exits non-zero
-// rather than recording a run that retrained nothing as a success. A failure the
-// next hour can meet differently (weeklyRetryable) leaves the week unspent and the
-// line says the next hour tries again. Any other failure spends the week: it is
-// recorded as the week's last run, and the line names the failure and says the
-// week is spent. A week that cannot be recorded stays open, so the next hour
-// tries again, and the error says so. A line that cannot be written is joined to
-// the error, so neither is lost.
+// failed. Both failures the next hour can meet differently (weeklyRetryable)
+// leave the week unspent, and the line says the next hour tries again. A day's
+// extract that has not run yet is the expected wait for it: its line is written
+// and the failure is not returned, so the hour exits 0. An unreachable embedder
+// is returned, so the hour exits non-zero rather than recording a run that
+// retrained nothing as a success. Any other failure spends the week: it is
+// recorded as the week's last run, returned to the hour, and the line names the
+// failure and says the week is spent. A week that cannot be recorded stays open,
+// so the next hour tries again, and the error says so. A line that cannot be
+// written is returned, or joined to the error, so neither is lost.
 func (c Commands) weeklyFailure(stampPath string, now time.Time, err error) error {
 	failure := fmt.Errorf("story points weekly: failed: %w", err)
 	if weeklyRetryable(err) {
+		var noExtract errNoExtract
+		if errors.As(err, &noExtract) {
+			return c.receipt("%v; the next hour tries again", failure)
+		}
 		return errors.Join(failure, c.receipt("%v; the next hour tries again", failure))
 	}
 	if rerr := c.recordStoryPointsWeeklyRun(stampPath, now); rerr != nil {

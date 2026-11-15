@@ -213,10 +213,10 @@ func TestStoryPointsWeeklySpendsTheWeekOnAFailureNoHourCanMeetDifferently(t *tes
 	requireNoWeeklyWeights(t, fix.town)
 }
 
-// TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet: no landings table for
-// the day yet is the extract's lateness, not the week's verdict: the failure is
-// returned and the week is left unspent for the next hour.
-func TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet(t *testing.T) {
+// TestStoryPointsWeeklyWaitsForTheDaysExtract: no landings table for the day yet
+// is the extract's lateness, not a fault: the run writes its line saying the next
+// hour tries again, leaves the week unspent, and returns nil so the hour exits 0.
+func TestStoryPointsWeeklyWaitsForTheDaysExtract(t *testing.T) {
 	t.Parallel()
 	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
 	if err := os.RemoveAll(fix.outDir); err != nil {
@@ -227,11 +227,40 @@ func TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet(t *testing.T) {
 
 	err := c.RunStoryPointsWeekly(context.Background())
 
-	if err == nil {
-		t.Fatal("RunStoryPointsWeekly err = nil, want the missing extract returned")
+	if err != nil {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want nil: a missing extract is the wait for it", err)
 	}
-	if !strings.Contains(out.String(), "the next hour tries again") {
-		t.Errorf("out = %q, want it to say the next hour tries again", out.String())
+	got := out.String()
+	if !strings.HasPrefix(got, "story points weekly: failed: ") || !strings.Contains(got, "run extract first") {
+		t.Errorf("out = %q, want the failure and the step that writes the table", got)
+	}
+	if !strings.Contains(got, "the next hour tries again") {
+		t.Errorf("out = %q, want it to say the next hour tries again", got)
+	}
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Errorf("out holds %d lines, want the run's one line", n)
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing extract spent the week (stat err = %v)", err)
+	}
+}
+
+// TestStoryPointsWeeklyFailsWhenTheWaitLineIsNotWritten: the wait's line is all
+// the hour reports, so a line that cannot be written fails the run rather than
+// exiting 0 over a wait nobody was told about.
+func TestStoryPointsWeeklyFailsWhenTheWaitLineIsNotWritten(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	if err := os.RemoveAll(fix.outDir); err != nil {
+		t.Fatal(err)
+	}
+	c := weeklyCommands(t, fix, &strings.Builder{}, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+	c.Out = failingWriter{}
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want the failed line returned", err)
 	}
 	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a missing extract spent the week (stat err = %v)", err)
