@@ -668,6 +668,15 @@ func TestSwapRefusesToFinishARenameBackItCannotVerify(t *testing.T) {
 			renames: 4,
 		},
 		{
+			name: "the moved log read fails",
+			after: func(f *FakeExec) {
+				f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
+				f.FailAt(16, refused)
+			},
+			want:    "statement 16 (",
+			renames: 6,
+		},
+		{
 			name: "the moved log lists nothing",
 			after: func(f *FakeExec) {
 				f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
