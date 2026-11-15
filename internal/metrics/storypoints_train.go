@@ -137,6 +137,11 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	path := filepath.Join(real.Extract.OutDir, landingsName)
 	data, err := env.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The day's table the extract has not written yet: the weekly run
+			// leaves its week open for the next hour (errNoExtract).
+			return errNoExtract{msg: fmt.Sprintf("read %s (run %s first): %v", path, CommandExtract, err), err: err}
+		}
 		return fmt.Errorf("read %s (run %s first): %w", path, CommandExtract, err)
 	}
 	header, rows, err := ReadLandings(bytes.NewReader(data))
