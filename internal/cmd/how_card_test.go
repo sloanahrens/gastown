@@ -450,7 +450,7 @@ func howHookEnv(env map[string]string) func(string) string {
 
 // TestHowCardHookJSON drives the context decision: the overseer, named by either
 // identity value, reads the card and the re-read line, while a bird, a polecat
-// and a session with no identity read today's restore text.
+// and a session with no identity read the re-read line alone.
 func TestHowCardHookJSON(t *testing.T) {
 	t.Parallel()
 
@@ -494,18 +494,18 @@ func TestHowCardHookJSON(t *testing.T) {
 			wantCard: true,
 		},
 		{
-			name:      "a bird reads today's text",
+			name:      "a bird reads the re-read line alone",
 			actor:     "town/crew/eagle",
 			agentName: "eagle",
 			want:      otherText,
 		},
 		{
-			name:  "a polecat reads today's text",
+			name:  "a polecat reads the re-read line alone",
 			actor: "gastown/polecats/valkyrie",
 			want:  otherText,
 		},
 		{
-			name: "no identity reads today's text",
+			name: "no identity reads the re-read line alone",
 			want: otherText,
 		},
 	}
@@ -684,11 +684,32 @@ func TestHowCardHookJSONWritesTheSessionStartOutput(t *testing.T) {
 	}
 }
 
-// TestHowCardHookJSONCommandRunsTheHookJSON drives runHowCmd with --hook-json on
-// the command it reads, so deleting the flag branch fails here even though
-// runHowHookJSON still writes the JSON. The process environment decides the
-// branch, so both texts are accepted; the listing a deleted branch would print
-// does not parse as JSON.
+// TestHowCardHookJSONRestoreLineIsTheRepositorysOwn pins the exact line a
+// session that is not the overseer reads at a session start: the re-read and
+// hand-off instruction, with no claim that the context was compacted, because
+// the same hook answers startup, resume and clear as well as compact. The line
+// lives in this repository, so a change to it fails here and is reviewed as a
+// diff (gt-y1juz1).
+func TestHowCardHookJSONRestoreLineIsTheRepositorysOwn(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	if err := runHowHookJSON(&out, howFixture(), howHookEnv(nil), overseerCardRules, nil); err != nil {
+		t.Fatalf("runHowHookJSON: %v", err)
+	}
+	var got howHookJSONOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("runHowHookJSON wrote %q, want one JSON document: %v", out.String(), err)
+	}
+	if want := "Re-read /gastown, then /handoff gt-overseer.\n"; got.HookSpecificOutput.AdditionalContext != want {
+		t.Errorf("additionalContext = %q, want %q", got.HookSpecificOutput.AdditionalContext, want)
+	}
+}
+
+// TestHowCardHookJSONCommandRunsTheHookJSON drives the command's flag branch
+// with an environment of the test's own, so each row decides the branch itself
+// and asserts the exact text: deleting the --hook-json branch fails here
+// because the card listing it would print is not one JSON document (gt-y1juz1).
 func TestHowCardHookJSONCommandRunsTheHookJSON(t *testing.T) {
 	t.Parallel()
 
@@ -696,31 +717,60 @@ func TestHowCardHookJSONCommandRunsTheHookJSON(t *testing.T) {
 		t.Fatal("gt how registers no --hook-json flag")
 	}
 
-	var out bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("card", true, "")
-	cmd.Flags().Bool("hook-json", true, "")
-	cmd.SetOut(&out)
-	if err := runHowCmd(cmd, nil); err != nil {
-		t.Fatalf("runHowCmd with --hook-json: %v", err)
-	}
-
-	var got howHookJSONOutput
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("gt how --hook-json wrote %q, want one JSON document: %v", out.String(), err)
-	}
-	if got.HookSpecificOutput.HookEventName != howHookJSONEventName {
-		t.Errorf("hookEventName = %q, want %q", got.HookSpecificOutput.HookEventName, howHookJSONEventName)
-	}
-
 	card, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
 	if err != nil {
 		t.Fatalf("howCardText: %v", err)
 	}
-	overseerText := card + howHookJSONRestoreText + "\n"
-	otherText := howHookJSONRestoreText + "\n"
-	if context := got.HookSpecificOutput.AdditionalContext; context != overseerText && context != otherText {
-		t.Errorf("additionalContext = %q, want the overseer's card and re-read line or today's text", context)
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "the overseer's actor",
+			env:  map[string]string{"BEADS_ACTOR": overseerActor},
+			want: card + howHookJSONRestoreText + "\n",
+		},
+		{
+			name: "the overseer's agent name",
+			env:  map[string]string{"CLAUDE_AGENT_NAME": overseerAgentName},
+			want: card + howHookJSONRestoreText + "\n",
+		},
+		{
+			name: "a bird",
+			env:  map[string]string{"BEADS_ACTOR": "town/crew/eagle", "CLAUDE_AGENT_NAME": "eagle"},
+			want: howHookJSONRestoreText + "\n",
+		},
+		{
+			name: "a polecat",
+			env:  map[string]string{"BEADS_ACTOR": "gastown/polecats/valkyrie"},
+			want: howHookJSONRestoreText + "\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("card", true, "")
+			cmd.Flags().Bool("hook-json", true, "")
+			cmd.SetOut(&out)
+			if err := runHowCmdWithEnv(cmd, nil, howHookEnv(tc.env)); err != nil {
+				t.Fatalf("gt how --hook-json: %v", err)
+			}
+
+			var got howHookJSONOutput
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatalf("gt how --hook-json wrote %q, want one JSON document: %v", out.String(), err)
+			}
+			if got.HookSpecificOutput.HookEventName != howHookJSONEventName {
+				t.Errorf("hookEventName = %q, want %q", got.HookSpecificOutput.HookEventName, howHookJSONEventName)
+			}
+			if got.HookSpecificOutput.AdditionalContext != tc.want {
+				t.Errorf("additionalContext = %q, want %q", got.HookSpecificOutput.AdditionalContext, tc.want)
+			}
+		})
 	}
 }
 
