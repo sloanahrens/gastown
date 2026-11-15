@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -53,15 +56,25 @@ func sandboxSeatRow(name string) resourcesampler.Row {
 	}
 }
 
-// sandboxSamplerDayRows decodes the day file the tick appends to. A tick that
-// wrote nothing leaves no file, which reads as no rows.
+// sandboxSamplerDayRows decodes the rows the tick appended to the day file the
+// production writer names. The layout is resourcesampler.AppendRow's alone: the
+// helper has it file a probe row into a fresh directory and reads the one file
+// it leaves there, so a change to the layout moves this read with it. A metrics
+// directory holding no file is a tick that wrote no row, which reads as no rows.
 func sandboxSamplerDayRows(t *testing.T, metricsDir string, now time.Time) []resourcesampler.Row {
 	t.Helper()
-	path := filepath.Join(metricsDir, "resources", now.Format("2006-01-02")+".jsonl")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	want := sandboxSamplerDayFile(t, now)
+	files, err := sandboxSamplerFiles(metricsDir)
+	if err != nil {
+		t.Fatalf("list the metrics directory: %v", err)
+	}
+	if len(files) == 0 {
 		return nil
 	}
+	if len(files) != 1 || files[0] != want {
+		t.Fatalf("the tick wrote %v, want only the day file %s", files, want)
+	}
+	data, err := os.ReadFile(filepath.Join(metricsDir, want))
 	if err != nil {
 		t.Fatalf("read the day file: %v", err)
 	}
@@ -75,6 +88,51 @@ func sandboxSamplerDayRows(t *testing.T, metricsDir string, now time.Time) []res
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// sandboxSamplerDayFile is where the production writer files the day of now,
+// relative to the metrics directory, as the writer itself names it.
+func sandboxSamplerDayFile(t *testing.T, now time.Time) string {
+	t.Helper()
+	probe := t.TempDir()
+	if err := resourcesampler.AppendRow(probe, sandboxSeatRow("probe"), now); err != nil {
+		t.Fatalf("file a probe row through the production writer: %v", err)
+	}
+	files, err := sandboxSamplerFiles(probe)
+	if err != nil {
+		t.Fatalf("list the probe directory: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("the production writer left %v under the probe directory, want one file", files)
+	}
+	return files[0]
+}
+
+// sandboxSamplerFiles lists every file under dir, relative to it, in walk order.
+// A directory that does not exist holds no file.
+func sandboxSamplerFiles(dir string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // TestSandboxSamplerDefaultsToTheRowWriter builds the sampler with no writer
@@ -220,6 +278,31 @@ func TestSandboxSamplerTick(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSandboxSamplerNilLoggerIsNotSilent is the nil-logger finding's acceptance
+// (cea0ceaa8e9b): a tick built with no logf still records a failed read, on the
+// sampler's own logger over stderr, so an unset seam cannot turn a failure into
+// a cluster with no seat. The test buffers that logger's output rather than
+// replacing the process's standard logger.
+func TestSandboxSamplerNilLoggerIsNotSilent(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	metricsDir := t.TempDir()
+	sampler := newSandboxSampler(metricsDir,
+		&fakeSeatSource{err: errors.New("the sandbox records cannot be listed")},
+		fixedClock{now: now}, nil, nil, 0)
+	var buf bytes.Buffer
+	sampler.errLog = log.New(&buf, "", 0)
+
+	sampler.Tick(context.Background())
+
+	if !strings.Contains(buf.String(), "the sandbox records cannot be listed") {
+		t.Errorf("a tick with no logger wrote %q to the standard logger, want it to name the source's failure", buf.String())
+	}
+	if got := sandboxSamplerDayRows(t, metricsDir, now); got != nil {
+		t.Errorf("the failed tick wrote\n%+v\nwant no rows", got)
 	}
 }
 
