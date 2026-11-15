@@ -368,8 +368,8 @@ func sortTownStateEntries(entries []fs.DirEntry) {
 // never descends into .dolt-data* or a .git tree. The one file it reads is the
 // rig registry, for the rig names; the registry paths are the only ones it may
 // open as a regular file. A top-level directory holding only a mayor/rig clone
-// is no rig, so the walk reaches it as one unclassified directory and reports
-// it without reading anything inside it.
+// is no rig: the walk reports its clone as information, without reading
+// anything inside it, and the town passes.
 func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -396,14 +396,13 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	f.addFile(".runtime/jev/.dolt-data/stray.bin", now)
 
 	var out bytes.Buffer
-	err := verifyTownState(&out, f, townstate.Default(), now)
-	var exit *ExitCodeError
-	if !errors.As(err, &exit) || exit.Code != 1 {
-		t.Fatalf("verifyTownState error = %v, want an ExitCodeError with code 1\n%s", err, out.String())
+	if err := verifyTownState(&out, f, townstate.Default(), now); err != nil {
+		t.Fatalf("verifyTownState error = %v, want a passing town\n%s", err, out.String())
 	}
 	printed := strings.TrimSpace(out.String())
-	if lines := strings.Split(printed, "\n"); len(lines) != 1 || !strings.HasPrefix(lines[0], "stale: ") {
-		t.Errorf("verify printed %q, want exactly the stale no-manifest-entry line", printed)
+	lines := strings.Split(printed, "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "info: stale/mayor/rig: ") || lines[1] != "town state: ok" {
+		t.Errorf("verify printed %q, want exactly the stale clone's info line and the ok line", printed)
 	}
 	registry := map[string]bool{"mayor/town.json": true, "mayor/rigs.json": true}
 	for _, name := range f.opened {

@@ -45,8 +45,9 @@ bird names come from are written there, once).
 A failure is a path no manifest entry covers, or two entries that overlap with
 different owners. A line starting "info:" is not a failure: file metadata cannot
 say who wrote a file, so a recent change under a session entry is only reported.
-The command exits 1 when there is a failure, and prints "town state: ok" and
-exits 0 otherwise. Only metadata is read, never file contents.
+A rig's leftover retired clone is information too, since removing it is a host
+step. The command exits 1 when there is a failure, and prints "town state: ok"
+and exits 0 otherwise. Only metadata is read, never file contents.
 
 Examples:
   gt town state verify`,

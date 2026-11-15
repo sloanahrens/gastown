@@ -11,13 +11,26 @@ import (
 	"time"
 )
 
-// failingFS is a town root whose metadata read fails at named paths.
+// failingFS is a town root whose metadata read fails at named paths, or reports
+// a path statDir names as a directory the map holds as a file.
 type failingFS struct {
 	fs.FS
 	readDirErr map[string]error
 	statErr    map[string]error
 	openErr    map[string]error
+	statDir    map[string]bool
 }
+
+// changedTreeInfo is the metadata of a directory the walk then meets as a file:
+// the tree changed between verify's clone probe and its walk.
+type changedTreeInfo struct{}
+
+func (changedTreeInfo) Name() string       { return "" }
+func (changedTreeInfo) Size() int64        { return 0 }
+func (changedTreeInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
+func (changedTreeInfo) ModTime() time.Time { return time.Time{} }
+func (changedTreeInfo) IsDir() bool        { return true }
+func (changedTreeInfo) Sys() any           { return nil }
 
 func (f failingFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if err, ok := f.readDirErr[name]; ok {
@@ -29,6 +42,9 @@ func (f failingFS) ReadDir(name string) ([]fs.DirEntry, error) {
 func (f failingFS) Stat(name string) (fs.FileInfo, error) {
 	if err, ok := f.statErr[name]; ok {
 		return nil, err
+	}
+	if f.statDir[name] {
+		return changedTreeInfo{}, nil
 	}
 	return fs.Stat(f.FS, name)
 }
@@ -95,8 +111,8 @@ func withUsageUnderBird() fstest.MapFS {
 
 // TestVerifyRefusesWhatItCannotRead drives every read failure verify can meet:
 // an unreadable root, an unreadable .runtime, a walk that fails inside a
-// directory, a stat that fails on a session path, and a manifest it cannot
-// validate.
+// directory, a stat that fails on a session path, a stat that fails while
+// probing for a leftover clone, and a manifest it cannot validate.
 func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -187,6 +203,18 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 			fsys: failingFS{FS: rigTreeWithMarker(), statErr: map[string]error{"tango/.repo.git": boom}},
 			m:    Default(),
 			want: "stat tango/.repo.git",
+		},
+		{
+			name: "leftover clone probe unreadable",
+			fsys: failingFS{
+				FS: fstest.MapFS{
+					"mayor/town.json":        {Data: []byte("{}")},
+					"tango/mayor/rig/go.mod": {Data: []byte("x")},
+				},
+				statErr: map[string]error{"tango/mayor/rig": boom},
+			},
+			m:    Default(),
+			want: "stat tango/mayor/rig",
 		},
 		{
 			name: "machine file is null",
@@ -295,74 +323,168 @@ func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
 	}
 }
 
-// TestVerifyDoesNotNameALeftoverCloneAsARig holds the marker set to the two
-// markers that name a rig on their own: config.json and the bare repository. A
-// top-level directory holding only a mayor/rig clone is no rig, so no rig row
-// expands for it and its tree is reported as one unclassified directory. A stat
-// failure on the clone is never met in that case, since the clone is not a
-// marker and verify never stats it.
-func TestVerifyDoesNotNameALeftoverCloneAsARig(t *testing.T) {
+// TestVerifyLeavesALeftoverCloneAsInfo: a rig's mayor/rig clone is its retired
+// canonical checkout, so a directory no entry covers that holds one gets one
+// information line at the clone's own path, and verify still passes. The
+// directory that holds the clone is walked, so any other unclassified path
+// beside it is still a failure; nothing inside the clone is a finding of its
+// own. A directory a rig marker names is a rig, whose clone row covers the
+// clone instead. A file where the clone would be is no clone, so that
+// directory keeps the no-entry failure.
+func TestVerifyLeavesALeftoverCloneAsInfo(t *testing.T) {
 	t.Parallel()
-	noEntry := []Problem{{
-		Path:   "tango",
-		Reason: "no manifest entry; classify it daemon, session or shared",
+	noEntry := func(p string) Problem {
+		return Problem{Path: p, Reason: "no manifest entry; classify it daemon, session or shared"}
+	}
+	cloneInfo := Problem{Path: "tango/mayor/rig", Info: true, Reason: leftoverCloneReason}
+	// A registered rig whose clone row is gone: the rig's own rows still cover
+	// its trees, and only the clone is left without an entry.
+	registeredNoCloneRow := &Manifest{Entries: []Entry{
+		{Path: "mayor", Owner: OwnerDaemon, Why: "town config"},
+		{Path: "tango/config.json", Owner: OwnerDaemon, Why: "the rig's registry record"},
+		{Path: "tango/crew", Owner: OwnerSession, Why: "crew workspaces"},
 	}}
 	cases := []struct {
 		name string
 		fsys fs.FS
+		m    *Manifest
 		want []Problem
 	}{
 		{
-			name: "a mayor/rig clone alone is not a rig",
+			name: "a directory holding only a clone",
+			fsys: fstest.MapFS{
+				"mayor/town.json":        {Data: []byte("{}")},
+				"tango/mayor/rig/go.mod": {Data: []byte("x")},
+			},
+			want: []Problem{cloneInfo},
+		},
+		{
+			name: "the clone beside unclassified content",
 			fsys: fstest.MapFS{
 				"mayor/town.json":        {Data: []byte("{}")},
 				"tango/mayor/rig/go.mod": {Data: []byte("x")},
 				"tango/crew/echo/a.md":   {Data: []byte("x")},
 				"tango/polecats/bo/b.go": {Data: []byte("x")},
 			},
-			want: noEntry,
+			want: []Problem{noEntry("tango/crew"), cloneInfo, noEntry("tango/polecats")},
 		},
 		{
-			name: "a clone verify cannot stat is still no rig marker",
-			fsys: failingFS{
-				FS: fstest.MapFS{
-					"mayor/town.json":        {Data: []byte("{}")},
-					"tango/mayor/rig/go.mod": {Data: []byte("x")},
-				},
-				statErr: map[string]error{"tango/mayor/rig": errors.New("boom")},
+			name: "content inside the clone belongs to the clone",
+			fsys: fstest.MapFS{
+				"mayor/town.json":                 {Data: []byte("{}")},
+				"tango/mayor/rig/go.mod":          {Data: []byte("x")},
+				"tango/mayor/rig/internal/a/x.go": {Data: []byte("x")},
 			},
-			want: noEntry,
+			want: []Problem{cloneInfo},
 		},
 		{
-			name: "a config.json alone is a rig",
+			name: "a registered rig whose clone row is gone",
+			fsys: fstest.MapFS{
+				"mayor/town.json":        {Data: []byte(`{"registry":{"version":1,"rigs":{"tango":{"git_url":"file:///srv/tango"}}}}`)},
+				"tango/mayor/rig/go.mod": {Data: []byte("x")},
+				"tango/crew/echo/a.md":   {Data: []byte("x")},
+			},
+			m:    registeredNoCloneRow,
+			want: []Problem{cloneInfo},
+		},
+		{
+			name: "the pod, which keeps no clone",
+			fsys: fstest.MapFS{
+				"mayor/town.json":      {Data: []byte(`{"registry":{"version":1,"rigs":{"tango":{"git_url":"file:///srv/tango"}}}}`)},
+				"tango/crew/echo/a.md": {Data: []byte("x")},
+			},
+			m: registeredNoCloneRow,
+		},
+		{
+			name: "a marked rig's clone row covers the clone",
 			fsys: fstest.MapFS{
 				"mayor/town.json":        {Data: []byte("{}")},
 				"tango/config.json":      {Data: []byte("{}")},
+				"tango/mayor/rig/go.mod": {Data: []byte("x")},
 				"tango/crew/echo/a.md":   {Data: []byte("x")},
-				"tango/polecats/bo/b.go": {Data: []byte("x")},
 			},
 		},
 		{
-			name: "a bare repository alone is a rig",
+			name: "a file where the clone would be is no clone",
 			fsys: fstest.MapFS{
-				"mayor/town.json":        {Data: []byte("{}")},
-				"tango/.repo.git/HEAD":   {Data: []byte("ref: refs/heads/main\n")},
-				"tango/crew/echo/a.md":   {Data: []byte("x")},
-				"tango/polecats/bo/b.go": {Data: []byte("x")},
+				"mayor/town.json": {Data: []byte("{}")},
+				"tango/mayor/rig": {Data: []byte("x")},
 			},
+			want: []Problem{noEntry("tango")},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			problems, err := Verify(tc.fsys, Default(), time.Now())
+			m := tc.m
+			if m == nil {
+				m = Default()
+			}
+			problems, err := Verify(tc.fsys, m, time.Now())
 			if err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
 			if !slices.Equal(problems, tc.want) {
 				t.Errorf("Verify reported %v, want exactly %v", problems, tc.want)
 			}
+			wantFailures := 0
+			for _, p := range tc.want {
+				if !p.Info {
+					wantFailures++
+				}
+			}
+			if n := Failures(problems); n != wantFailures {
+				t.Errorf("Verify failed on %d problem(s), want %d", n, wantFailures)
+			}
 		})
+	}
+}
+
+// TestVerifyNeverProbesASkippedTree: verify reads no Dolt data tree, so it never
+// probes one for a clone. Were the probe made, this town would fail on a path
+// verify must not touch.
+func TestVerifyNeverProbesASkippedTree(t *testing.T) {
+	t.Parallel()
+	fsys := failingFS{
+		FS: fstest.MapFS{
+			"mayor/town.json":         {Data: []byte("{}")},
+			".dolt-data/gt/state.bin": {Data: []byte("x")},
+		},
+		statErr: map[string]error{".dolt-data/mayor/rig": errors.New("boom")},
+	}
+	problems, err := Verify(fsys, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify read a skipped tree: %v", err)
+	}
+	if len(problems) != 0 {
+		t.Errorf("Verify reported %v, want nothing", problems)
+	}
+}
+
+// TestVerifyReportsAFileWhereTheCloneProbeReadADirectory: the tree changed
+// between the clone probe and the walk, so the walk meets a file where the probe
+// read a directory. The file is reported as unclassified like any other path,
+// and the walk still reports the file's siblings.
+func TestVerifyReportsAFileWhereTheCloneProbeReadADirectory(t *testing.T) {
+	t.Parallel()
+	fsys := failingFS{
+		FS: fstest.MapFS{
+			"mayor/town.json":          {Data: []byte("{}")},
+			"tango/mayor/rig":          {Data: []byte("x")},
+			"tango/mayor/zz-stray.txt": {Data: []byte("x")},
+		},
+		statDir: map[string]bool{"tango/mayor/rig": true},
+	}
+	problems, err := Verify(fsys, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	want := []Problem{
+		{Path: "tango/mayor/rig", Reason: "no manifest entry; classify it daemon, session or shared"},
+		{Path: "tango/mayor/zz-stray.txt", Reason: "no manifest entry; classify it daemon, session or shared"},
+	}
+	if !slices.Equal(problems, want) {
+		t.Errorf("Verify reported %v, want exactly %v", problems, want)
 	}
 }
 

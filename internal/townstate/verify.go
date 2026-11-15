@@ -61,10 +61,14 @@ func Failures(problems []Problem) int {
 //
 // A path FAILS when no entry covers it, or when two entries overlap with
 // different owners; both are facts about the manifest and the tree, not about
-// who wrote what. A recent change under a session entry, below a name the
-// manifest gives a daemon subsystem (.runtime/<bird>/usage), is reported as
-// INFO only: metadata cannot say who wrote a file, and a live session's own
-// work changes files all day, so recency is never grounds for failing. Who
+// who wrote what. Two findings are INFO only. A rig's leftover retired clone
+// is reported at its own path, and the directory that holds it is walked
+// rather than reported, so any other unclassified path beside the clone still
+// fails: removing the clone is a host step, the rest is not. A recent change
+// under a session entry, below a name the manifest gives a daemon subsystem
+// (.runtime/<bird>/usage), is information too: metadata cannot say who wrote a
+// file, and a live session's own work changes files all day, so recency is
+// never grounds for failing. Who
 // writes a path is held by the guard tests (internal/daemon and
 // internal/townstate), which read the code. .dolt-data* and .git trees are
 // skipped at any depth, and so is anything more than maxSessionDepth below a
@@ -76,11 +80,15 @@ func Verify(fsys fs.FS, m *Manifest, now time.Time) ([]Problem, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
-	rigs, birds, err := townInputs(fsys, m)
+	rigs, birds, tops, err := townInputs(fsys, m)
 	if err != nil {
 		return nil, err
 	}
 	entries := m.Expand(rigs, birds)
+	clones, err := leftoverClones(fsys, tops)
+	if err != nil {
+		return nil, err
+	}
 	daemonNames := manifestdata.DaemonSubsystemNames(entries)
 	problems := overlaps(entries)
 	err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, walkErr error) error {
@@ -98,7 +106,19 @@ func Verify(fsys fs.FS, m *Manifest, now time.Time) ([]Problem, error) {
 		}
 		entry, ok := Lookup(entries, p)
 		if !ok {
+			if clones[p] && d.IsDir() {
+				// A retired clone is one finding, at its own path; the walk does
+				// not enter it, so its contents are not reported one by one.
+				problems = append(problems, Problem{Path: p, Info: true, Reason: leftoverCloneReason})
+				return fs.SkipDir
+			}
 			if IsContainer(entries, p) {
+				return nil
+			}
+			if d.IsDir() && holdsClone(clones, p) {
+				// The clone lies further down: descend, so it is reported at
+				// its own path and any unclassified path beside it is still
+				// reported rather than hidden behind the clone.
 				return nil
 			}
 			problems = append(problems, Problem{
@@ -164,28 +184,30 @@ const (
 
 // rigMarkers are the paths whose presence marks a top-level directory as a
 // rig: its own config.json and its bare repository. The registry names a rig
-// too, before these are consulted. A mayor/rig clone marks nothing: it is the
-// landing worker's checkout inside a rig, and a directory holding only one is
-// no rig.
+// too, before these are consulted. A mayor/rig clone marks nothing: it is a
+// rig's canonical checkout, a path inside a rig rather than a name for one, so
+// a directory holding only a clone is no rig; leftoverClones reports the clone
+// itself as information.
 var rigMarkers = []string{
 	"config.json",
 	constants.DirRepoGit,
 }
 
 // townInputs names the rigs and birds the town has, from the rig registry and
-// directory metadata. A rig is a top-level directory the registry names, or one
-// that holds a rig marker; a name the manifest gives itself is never a rig,
-// since a town-level directory such as settings/ can carry a config.json too.
-// A registry or marker that cannot be read is an error, never an empty rig
-// list: that would classify every rig's tree as unclassified.
-func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
+// directory metadata, and returns the top-level entries it read. A rig is a
+// top-level directory the registry names, or one that holds a rig marker; a name
+// the manifest gives itself is never a rig, since a town-level directory such as
+// settings/ can carry a config.json too. A registry or marker that cannot be
+// read is an error, never an empty rig list: that would classify every rig's
+// tree as unclassified.
+func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, tops []fs.DirEntry, err error) {
 	registered, err := registryRigs(fsys)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	tops, err := fs.ReadDir(fsys, ".")
+	tops, err = fs.ReadDir(fsys, ".")
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading the town root: %w", err)
+		return nil, nil, nil, fmt.Errorf("reading the town root: %w", err)
 	}
 	for _, d := range tops {
 		if !d.IsDir() || m.names(d.Name()) {
@@ -197,7 +219,7 @@ func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
 		}
 		marked, err := hasRigMarker(fsys, d.Name())
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if marked {
 			rigs = append(rigs, d.Name())
@@ -206,7 +228,7 @@ func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
 	birds = BirdRuntimeNames()
 	runtimeDirs, err := fs.ReadDir(fsys, ".runtime")
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, fmt.Errorf("reading .runtime: %w", err)
+		return nil, nil, nil, fmt.Errorf("reading .runtime: %w", err)
 	}
 	for _, d := range runtimeDirs {
 		if !d.IsDir() || slices.Contains(birds, d.Name()) {
@@ -216,7 +238,7 @@ func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
 			birds = append(birds, d.Name())
 		}
 	}
-	return rigs, birds, nil
+	return rigs, birds, tops, nil
 }
 
 // registryRigs returns the rig names the town's registry holds, read the way
@@ -304,6 +326,59 @@ func hasRigMarker(fsys fs.FS, top string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// leftoverCloneReason is what verify says about a rig's leftover retired clone.
+// Its removal is a host step (gt rig retire-mayor renames it, the operator
+// deletes it), so the path is information, never a failure.
+const leftoverCloneReason = "a rig's retired canonical clone; gt rig retire-mayor renames it and the operator deletes it"
+
+// leftoverClones returns the paths of the retired clones the town root holds,
+// probing the top-level entries tops: a top-level directory that has a
+// mayor/rig directory holds one, at that path. They are found before the walk so
+// the walk can report a clone at its own path and keep walking around it. A
+// probe that fails for a reason other than absence is an error, never a missing
+// clone.
+func leftoverClones(fsys fs.FS, tops []fs.DirEntry) (map[string]bool, error) {
+	clones := make(map[string]bool)
+	for _, d := range tops {
+		if !d.IsDir() || skipped(d.Name()) {
+			continue
+		}
+		clone := constants.RigMayorPath(d.Name())
+		isDir, err := dirExists(fsys, clone)
+		if err != nil {
+			return nil, err
+		}
+		if isDir {
+			clones[clone] = true
+		}
+	}
+	return clones, nil
+}
+
+// holdsClone reports whether a retired clone lies below p.
+func holdsClone(clones map[string]bool, p string) bool {
+	for clone := range clones {
+		if strings.HasPrefix(clone, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// dirExists reports whether p is a directory. An absence is not an error; any
+// other read failure is, so an unreadable probe never passes as "no clone".
+func dirExists(fsys fs.FS, p string) (bool, error) {
+	info, err := fs.Stat(fsys, p)
+	switch {
+	case err == nil:
+		return info.IsDir(), nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("stat %s: %w", p, err)
+	}
 }
 
 // skipped reports whether p is a subtree verify never reads: a Dolt data
