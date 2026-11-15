@@ -434,7 +434,7 @@ func maintenanceSlotHolders(townRoot string) ([]string, error) {
 // A --full gc is the one step that has correlated with a Dolt panic (design
 // doc, Problem), so it waits for what a restart would also wait for, and for
 // nothing else:
-//   - no hard daemon work in flight — the hard-hold test in catchUpWorkHold: a
+//   - no hard daemon work in flight — the hard-hold test in gcQuietWorkHold: a
 //     landing pass owns the merged-tree gate of the bead it is landing, a
 //     scheduled slings cycle is a dispatcher a cut can leave half-done, and the
 //     install lock means the binary is mid-replacement,
@@ -450,7 +450,7 @@ func maintenanceSlotHolders(townRoot string) ([]string, error) {
 //
 // A probe that cannot answer counts as busy.
 func (d *Daemon) maintenanceQuiet() (bool, string) {
-	if hold := d.catchUpWorkHold(); hold != nil {
+	if hold := d.gcQuietWorkHold(); hold != nil {
 		return false, "daemon has work in flight (" + hold.name + ")"
 	}
 	holders, err := d.maintenance().slotHolders(d.config.TownRoot)

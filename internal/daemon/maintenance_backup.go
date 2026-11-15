@@ -62,10 +62,11 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 		d.logger.Printf("scheduled_maintenance: backup deferred: %s", m.Message())
 		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "backup: " + m.Message()}
 	}
-	// Exclusive against a gc, which takes the write side: the copy must not run
-	// beside a dolt_gc. The backup is a read through the running server, so it
-	// holds the read side as the daemon's other Dolt tasks do and waits only for
-	// a gc, never for them (gt-3b4iou).
+	// The copy takes doltMaintMu's read side, so it may run beside the daemon's
+	// other Dolt tasks; the backup is the server's consistent snapshot, so that
+	// overlap cannot tear it (docs/design/dolt-storage.md, History Compaction
+	// Operations). Only a gc, which takes the write side, excludes it: the copy
+	// must not run beside a dolt_gc (gt-3b4iou).
 	if !d.doltMaintMu.TryRLock() {
 		d.logger.Printf("scheduled_maintenance: backup deferred: a gc is in flight")
 		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "backup: a gc is in flight"}

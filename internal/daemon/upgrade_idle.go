@@ -40,7 +40,7 @@ func (d *Daemon) isIdleForUpgrade() bool {
 // asks accounts for the cycle separately (upgradeHold waits it out at
 // maintenanceGCRestartCap), so this reads only what else is in flight. The gc's
 // own quiet guard needs no such flag — it asks the hard holds alone
-// (maintenanceQuiet, through catchUpWorkHold).
+// (maintenanceQuiet, through gcQuietWorkHold).
 func (d *Daemon) daemonWorkIdle() bool {
 	return d.daemonWorkHold() == nil
 }
@@ -93,14 +93,15 @@ func (d *Daemon) daemonWorkHold() *daemonWork {
 	return holds[0]
 }
 
-// catchUpWorkHold reports the hard daemon work in flight, else nil: the only
-// hold the maintenance gc's quiet guard waits for (maintenanceQuiet).
+// gcQuietWorkHold reports the hard daemon work in flight, else nil: the one
+// daemon-work check the maintenance gc's quiet guard makes (maintenanceQuiet).
+// The guard's container-gate slot check is its own, not this list's.
 //
-// The backup and the history archive read and ask the town nothing (gt-3b4iou),
-// and soft work — a plugin run, a dog cycle, a dispatch tick, a scan — must not
-// defer a gc of seconds either: counting it starved the gc for 17 days
-// (gt-2m8sj, gt-mdejo). The hard holds and a held container-gate slot still do.
-func (d *Daemon) catchUpWorkHold() *daemonWork {
+// Soft work — a plugin run, a dog cycle, a dispatch tick, a scan — must not
+// defer a gc of seconds: counting it starved the gc for 17 days (gt-2m8sj,
+// gt-mdejo). The backup and the history archive read and ask the town nothing,
+// so they are not holds at all (gt-3b4iou).
+func (d *Daemon) gcQuietWorkHold() *daemonWork {
 	for _, hold := range d.daemonWorkHolds() {
 		if hold.hard {
 			return hold
@@ -111,12 +112,12 @@ func (d *Daemon) catchUpWorkHold() *daemonWork {
 
 // daemonWorkHolds lists the daemon work in flight, in the order the wait line
 // names it when none of it is hard. It is the one list behind daemonWorkIdle,
-// the upgrade restart's wait line and the gc's quiet guard (catchUpWorkHold);
+// the upgrade restart's wait line and the gc's quiet guard (gcQuietWorkHold);
 // daemonWorkHold picks the hard-first entry from it.
 //
 // The install-lock probe is last and only runs when nothing else, or only soft
 // work, is in flight. It is the one check that touches the filesystem
-// (daemonWorkHold is called on every upgrade heartbeat, catchUpWorkHold on
+// (daemonWorkHold is called on every upgrade heartbeat, gcQuietWorkHold on
 // every gc quiet check), and a hard hold already in hand decides
 // daemonWorkHold's answer whatever the probe would say.
 func (d *Daemon) daemonWorkHolds() []*daemonWork {
