@@ -98,7 +98,7 @@ func TestLiteralOwnerHitsReadsEachForm(t *testing.T) {
 		{"a forge URL", "bd http://forgejo:3000/" + DefaultForgeOwner + "/beads.git " + "0123456789abcdef0123456789abcdef01234567", true},
 		{"a repository owner", "fractals " + DefaultForgeOwner + "/fractals-nextjs", true},
 		{"a Go string literal", `const owner = "` + DefaultForgeOwner + `"`, true},
-		{"a longer name", "fork " + DefaultForgeOwner + "ahrens/beads", false},
+		{"a longer name", "fork " + DefaultForgeOwner + "labs/beads", false},
 		{"a hyphenated longer name", DefaultForgeOwner + "-answers", false},
 		{"the placeholder", "bd http://forgejo:3000/" + ForgeOwnerPlaceholder + "/beads.git", false},
 		{"the setting's name", "forge.owner", false},

@@ -464,14 +464,15 @@ func TestLandingUsageRealLayout(t *testing.T) {
 // TestLandingUsagePodOMLayout: in the daemon pod om's claude child runs with
 // CLAUDE_CONFIG_DIR unset (internal/land/review.go omUnsetEnv, applied at the
 // review run) and HOME the container's (/root), so its transcript is written
-// under $HOME/.claude/projects/<hash of the review directory> (Claude Code's
-// project naming). The test drives that shape: the lister resolves its config
-// dir through the production resolution with CLAUDE_CONFIG_DIR unset and HOME
-// injected, and the transcript sits at the literal $HOME/.claude/projects path
-// rather than at the resolver's answer, so a resolver that errors or is removed
-// leaves the transcript unreached. A review whose transcript sits exactly there
-// writes its usage record; a review with no transcript writes nothing and keeps
-// the one reason line (gt-xxhzf6).
+// under the Claude config dir's projects subdirectory, whose name Claude Code
+// derives from the review directory (Claude Code's project naming). The test
+// drives that shape: the lister resolves its config dir through the production
+// resolution with CLAUDE_CONFIG_DIR unset and HOME injected, and the transcript
+// sits at the literal projects path under HOME rather than at the resolver's
+// answer, so a resolver that errors or is removed leaves the transcript
+// unreached. A review whose transcript sits exactly there writes its usage
+// record; a review with no transcript writes nothing and keeps the one reason
+// line (gt-xxhzf6).
 func TestLandingUsagePodOMLayout(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
