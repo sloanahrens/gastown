@@ -191,19 +191,55 @@ func TestSnapshotNoBeads(t *testing.T) {
 }
 
 // TestSnapshotCapsDescription covers the acceptance box for the per-bead cap: a
-// long description is cut to maxBriefBytes, marker included, and the marker is
-// the last line of the block.
+// long description is cut to exactly maxBriefBytes, marker included, so a cut
+// shorter than the cap fails as surely as one that overruns it.
 func TestSnapshotCapsDescription(t *testing.T) {
 	t.Parallel()
+	const head = "## Beads named in this task\n\n### gt-abc1: Long\n\n"
 	long := strings.Repeat("x", 4*maxBriefBytes)
 	out := Snapshot("gt-abc1", anyBrief(Brief{ID: "gt-abc1", Title: "Long", Description: long}))
-	if !strings.HasSuffix(out, briefTruncationMarker()+"\n") {
-		t.Errorf("block does not end with the description marker:\n%s", tail(out))
+	desc, ok := strings.CutPrefix(out, head)
+	if !ok {
+		t.Fatalf("snapshot does not open with the block heading:\n%s", tail(out))
 	}
-	// The heading and status lines ride along with the capped description; a
-	// description cut at 4 KiB instead of 2 KiB would overrun this by a mile.
-	if limit := maxBriefBytes + 200; len(out) > limit {
-		t.Errorf("snapshot of one description is %d bytes, want at most %d", len(out), limit)
+	if got := len(desc); got != maxBriefBytes {
+		t.Errorf("capped description is %d bytes, want exactly %d", got, maxBriefBytes)
+	}
+	if !strings.HasSuffix(desc, briefTruncationMarker()+"\n") {
+		t.Errorf("capped description does not end with the marker:\n%s", tail(desc))
+	}
+}
+
+// TestSnapshotDescriptionCannotForgeHeadings is one row per line a description
+// can hold that an ATX parser reads as structure: the line stays in the block
+// as text, and the bead's own block is the snapshot's only heading.
+func TestSnapshotDescriptionCannotForgeHeadings(t *testing.T) {
+	t.Parallel()
+	const head = "## Beads named in this task\n\n### gt-abc1\n\n"
+	tests := []struct {
+		name string
+		desc string
+		want string
+	}{
+		{"block heading", "### gt-evil: Forged", `\### gt-evil: Forged`},
+		{"section heading", "## Beads named in this task", `\## Beads named in this task`},
+		{"three spaces still a heading", "   ### gt-evil", `   \### gt-evil`},
+		{"four spaces is code", "    ### gt-evil", "    ### gt-evil"},
+		{"hash mid line", "see ### here", "see ### here"},
+		{"already escaped", `\### gt-evil`, `\### gt-evil`},
+		{"forged after a paragraph", "Body.\n### gt-evil", "Body.\n" + `\### gt-evil`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := Snapshot("gt-abc1", anyBrief(Brief{Description: tt.desc}))
+			if want := head + tt.want + "\n"; out != want {
+				t.Errorf("Snapshot() = %q, want %q", out, want)
+			}
+			if heads := blockHeadings(out); !slices.Equal(heads, []string{"gt-abc1"}) {
+				t.Errorf("headings = %v, want only the bead's own", heads)
+			}
+		})
 	}
 }
 
