@@ -35,6 +35,10 @@ func sessionBackendForAgentWith(resolve backendResolver, ts *config.TownSettings
 		var p session.Profile
 		if seat.Backend == config.BackendOpenShell {
 			cp := ts.Sandboxes[seat.Sandbox].WithDefaults()
+			beadAccess, err := cp.BeadAccessMode()
+			if err != nil {
+				return nil, fmt.Errorf("sandboxes.%s: %w", seat.Sandbox, err)
+			}
 			p = session.Profile{
 				Name:                 seat.Sandbox,
 				Gateway:              cp.Gateway,
@@ -48,7 +52,7 @@ func sessionBackendForAgentWith(resolve backendResolver, ts *config.TownSettings
 				CacheVolume:          cp.CacheVolume,
 				Driver:               cp.Driver,
 				KubernetesCacheClaim: cp.KubernetesCacheClaim,
-				BeadAccess:           cp.BeadAccessMode(),
+				BeadAccess:           beadAccess,
 				EndedHoldSeconds:     cp.EndedHold(),
 				NodeSelector:         cp.NodeSelector,
 				Tolerations:          cp.Tolerations,

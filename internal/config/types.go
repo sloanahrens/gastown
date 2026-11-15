@@ -1851,8 +1851,8 @@ type SandboxProfile struct {
 	// closed).
 	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
 	// BeadAccess is where the seat's task lives: SandboxBeadAccessDolt (the
-	// default) or SandboxBeadAccessFiles. Read it through BeadAccessMode;
-	// nothing reads the value yet (gt-1m0kb).
+	// default) or SandboxBeadAccessFiles. Read it through BeadAccessMode, which
+	// refuses any other value; nothing reads the value yet (gt-1m0kb).
 	BeadAccess string `json:"bead_access,omitempty"`
 	// KubernetesNamespace names the namespace the gateway places this profile's
 	// sandbox pods in; "" means defaultSandboxKubernetesNamespace (see
@@ -1940,12 +1940,17 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 }
 
 // BeadAccessMode returns where the seat's task lives: BeadAccess when set, else
-// SandboxBeadAccessDolt.
-func (p SandboxProfile) BeadAccessMode() string {
-	if p.BeadAccess == "" {
-		return SandboxBeadAccessDolt
+// SandboxBeadAccessDolt. It refuses a value Validate refuses rather than read it
+// as the default, so a typo cannot leave a seat the store access it was meant to
+// give up.
+func (p SandboxProfile) BeadAccessMode() (string, error) {
+	switch p.BeadAccess {
+	case "":
+		return SandboxBeadAccessDolt, nil
+	case SandboxBeadAccessDolt, SandboxBeadAccessFiles:
+		return p.BeadAccess, nil
 	}
-	return p.BeadAccess
+	return "", fmt.Errorf("bead_access %q: want dolt or files", p.BeadAccess)
 }
 
 // Validate reports the first field of p that is unset or malformed, naming the
@@ -1957,9 +1962,8 @@ func (p SandboxProfile) BeadAccessMode() string {
 // kubernetes profile sets no CacheVolume (a Docker volume does not exist there;
 // a k8s cache is a separate design), and a kubernetes profile may name a
 // KubernetesCacheClaim that is a DNS-1123 name, which a docker profile may not
-// (gt-jofne). The kubernetes scheduling fields
-// are refused on a docker profile and checked for the pod and resources the
-// gateway accepts.
+// (gt-jofne). The kubernetes scheduling fields are refused on a docker profile
+// and checked for the pod and resources the gateway accepts.
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
 		return fmt.Errorf("sandboxes.%s.image: required", name)
