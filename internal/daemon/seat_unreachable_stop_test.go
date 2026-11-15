@@ -953,6 +953,44 @@ func TestSeatUnreachableReleaseStopsWhenTheSandboxCannotBeReleased(t *testing.T)
 	}
 }
 
+// TestSeatUnreachableReleaseStopsWhenTheSandboxLookupFails: the sandbox release
+// looks the seat's sandbox up again, and a lookup that cannot read the seat's
+// record stops the release with the bead still the seat's, so the next tick
+// retries it rather than the record going on a guess (gt-35ihg5).
+func TestSeatUnreachableReleaseStopsWhenTheSandboxLookupFails(t *testing.T) {
+	t.Parallel()
+	d, logs := unreachableReleaseTown(t)
+	rec := releaseSandboxRecord()
+	require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+	seedHostWorktreeStub(t, d)
+	// The origin read's lookup is the first read, and it answers; the sandbox
+	// release's lookup is the second, and it cannot be read.
+	reads := 0
+	d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		reads++
+		if reads > 1 {
+			return session.SandboxRecord{}, false, errors.New("records listing unreadable")
+		}
+		return rec, true, nil
+	}
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	}
+	watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod gastown-capable is gone"))
+	f := &releaseFake{}
+
+	require.Equal(t, []string{"pause gastown/capable", "origin gastown/capable", "sandbox-release gastown/capable"},
+		releaseProductionSandbox(t, d, f), "a lookup that cannot read the record must stop the release there")
+	require.Empty(t, f.handBacks, "nothing may be handed back")
+	require.Empty(t, f.deleted, "no delete may run on a record the lookup could not read")
+	require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json",
+		"the record must stay for the next tick")
+	raised := raisedItems(d)
+	require.Len(t, raised, 1, "a failed release must raise one item")
+	require.Equal(t, "seat-unreachable-release:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+	require.Contains(t, logs.String(), "records listing unreadable")
+}
+
 // TestSeatUnreachableReleaseRunsWhenTheSeatListFails: the unreachable seats come
 // from the tracker, not from the working-seat list, so a tick whose list read
 // fails must still release a seat due for it and log why the rest of the tick
