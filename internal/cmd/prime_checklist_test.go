@@ -76,6 +76,59 @@ func TestShowChecklist_NoFormulaRendersNothing(t *testing.T) {
 	}
 }
 
+// An attachment that names no formula renders no checklist, and the failing
+// branch says why on the warning writer.
+func TestShowChecklist_NoFormulaWarns(t *testing.T) {
+	t.Parallel()
+	var buf, warn bytes.Buffer
+	RoleContext{TownRoot: t.TempDir(), warnOut: &warn}.showChecklist(&buf, &beads.AttachmentFields{AttachedMolecule: "gt-wisp-live"})
+	if buf.Len() != 0 {
+		t.Fatalf("no-formula attachment rendered %q", buf.String())
+	}
+	if !strings.Contains(warn.String(), "no formula to cook") {
+		t.Fatalf("no warning observed on the failing branch, got %q", warn.String())
+	}
+}
+
+// The autonomous directive points at the checklist prime prints below it, so
+// the pointer and the section it names are read from one render: a directive
+// naming a section prime no longer emits fails here.
+func TestAutonomousDirectivePointsAtTheChecklistItRenders(t *testing.T) {
+	t.Parallel()
+	cook := &fakeCook{out: cookTree(cookedPolecatTree)}
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: t.TempDir(), Polecat: "scout", formulaOpen: cook.open}
+	att := &beads.AttachmentFields{AttachedFormula: "mol-polecat-work", AttachedMolecule: "gt-wisp-live"}
+
+	var buf bytes.Buffer
+	outputAutonomousDirective(&buf, ctx, &beads.Issue{ID: "gt-test", Title: "test"}, true)
+	if err := outputMoleculeWorkflow(&buf, ctx, att); err != nil {
+		t.Fatalf("outputMoleculeWorkflow: %v", err)
+	}
+	out := buf.String()
+
+	pointerAt := -1
+	offset := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "molecule steps in order") {
+			pointerAt = offset
+			if !strings.Contains(line, "formula checklist") {
+				t.Fatalf("directive points at a section prime does not print: %q", line)
+			}
+			break
+		}
+		offset += len(line) + 1
+	}
+	if pointerAt < 0 {
+		t.Fatalf("directive has no molecule-steps line:\n%s", out)
+	}
+	below := out[pointerAt:]
+	for _, want := range []string{"ATTACHED FORMULA (WORKFLOW CHECKLIST)", "Formula Checklist** (2 steps from mol-polecat-work)", "### Step 1: COOKED Load"} {
+		if !strings.Contains(below, want) {
+			t.Errorf("nothing below the pointer renders %q:\n%s", want, out)
+		}
+	}
+}
+
 // renderWorkflowSection renders the workflow section prime gives a seat, with
 // bd's cook answered in memory.
 func renderWorkflowSection(t *testing.T, att *beads.AttachmentFields) string {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
@@ -46,7 +47,11 @@ func (r RoleInfo) attachmentChecklist(attachment *beads.AttachmentFields) (prime
 func (r RoleInfo) showChecklist(w io.Writer, attachment *beads.AttachmentFields) {
 	c, err := r.attachmentChecklist(attachment)
 	if err != nil {
-		style.PrintWarning("%v", err)
+		warn := r.warnOut
+		if warn == nil {
+			warn = os.Stderr
+		}
+		style.FprintWarning(warn, "%v", err)
 		return
 	}
 	_, _ = fmt.Fprint(w, renderFormulaChecklist(c.name, c.steps, 1))

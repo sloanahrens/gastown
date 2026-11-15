@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,11 @@ type RoleInfo struct {
 	// formulaOpen is the formula engine prime cooks with; nil is the bd on
 	// PATH. Tests set it so prime never starts bd.
 	formulaOpen func(formulaSite) formulaEngine
+
+	// warnOut is where prime writes a warning about a section it could not
+	// render; nil is stderr. Tests set it so the warning can be read without
+	// replacing a process stream.
+	warnOut io.Writer
 }
 
 // formulaCooker is the bd cook this role's prime renders formulas with.
