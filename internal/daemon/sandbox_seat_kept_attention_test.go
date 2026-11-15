@@ -224,11 +224,12 @@ func TestKeptSeatAttentionNamesAnUnrecordedBead(t *testing.T) {
 }
 
 // A seat kept with the retired-record reason whose polecat now hooks a
-// different bead that is still open or hooked raises no item: the seat was
-// slung new work, not left waiting for the overseer (gt-jw437c).
+// different bead that is still live work — open, hooked or in progress — raises
+// no item: the seat was slung new work, not left waiting for the overseer
+// (gt-jw437c, gt-b87gmu).
 func TestKeptSeatAttentionSkipsAReSlungSeat(t *testing.T) {
 	t.Parallel()
-	for _, status := range []string{string(beads.StatusOpen), beads.StatusHooked} {
+	for _, status := range []string{string(beads.StatusOpen), beads.StatusHooked, string(beads.StatusInProgress)} {
 		t.Run(status, func(t *testing.T) {
 			t.Parallel()
 			f := newAttentionFixture(t, keptSeatAttentionNow)
@@ -248,9 +249,10 @@ func TestKeptSeatAttentionSkipsAReSlungSeat(t *testing.T) {
 }
 
 // A seat still raises its item when any one of the three does not hold: the
-// hook names the record's own bead, there is no hook, the hooked bead is under
-// way, the reason is another one, or the hook cannot be read — never a skip
-// (gt-jw437c). A gateway alarm raises whatever the hook says.
+// hook names the record's own bead, there is no hook, the hooked bead is no
+// longer live work, the reason is another one, or the hook cannot be read —
+// never a skip (gt-jw437c, gt-b87gmu). A gateway alarm raises whatever the hook
+// says.
 func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -278,10 +280,10 @@ func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
 			want: retiredRecordKeepReason,
 		},
 		{
-			name: "the hooked bead is under way",
+			name: "the hooked bead is no longer live work",
 			setup: func(t *testing.T, f *attentionFixture) {
 				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
-				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusInProgress))
+				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusClosed))
 			},
 			want: retiredRecordKeepReason,
 		},
@@ -380,8 +382,9 @@ func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
 }
 
 // The retired-record reason this collector skips on is the one the seat end
-// gives a record that does not say stop: the two texts must not drift
-// (gt-jw437c).
+// gives a record that does not say stop: the seat end returns this constant,
+// and the test pins that its keepReason still answers with it (gt-jw437c,
+// gt-b87gmu).
 func TestKeptSeatAttentionRetiredReasonMatchesTheSeatEnd(t *testing.T) {
 	t.Parallel()
 	const branch = "polecat/nux/gt-old1+x1"

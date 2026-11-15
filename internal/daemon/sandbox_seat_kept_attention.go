@@ -18,10 +18,11 @@ import (
 const keptSeatAttentionAfter = 30 * time.Minute
 
 // retiredRecordKeepReason is the keep reason a seat whose intent record does not
-// say stop carries: sandbox_seat_end.go's keepReason case for !Retired. A seat
-// slung new work keeps this reason, because its record is the new run's and
-// nothing has asked the new run to stop, so the reason alone is not a seat to
-// wake anyone for (gt-jw437c).
+// say stop carries: the text sandbox_seat_end.go's keepReason returns for
+// !Retired. A seat slung new work keeps this reason, because its record is the
+// new run's and nothing has asked the new run to stop, so the reason alone is
+// not a seat to wake anyone for (gt-jw437c). The seat end returns this constant
+// rather than its own copy of the text, so the two cannot drift (gt-b87gmu).
 const retiredRecordKeepReason = "the seat's record does not say stop: something still wants it"
 
 // collectKeptSandboxSeats raises one high item per kept sandbox seat whose
@@ -32,8 +33,9 @@ const retiredRecordKeepReason = "the seat's record does not say stop: something 
 // kept, and the item clears when the record is gone.
 //
 // A seat that carries the retired-record reason while its polecat hooks a
-// different bead that is still open or hooked is not raised: that is a seat
-// slung new work, not one waiting for the overseer (gt-jw437c).
+// different bead that is still live work (open, hooked or in progress) is not
+// raised: that is a seat slung new work, not one waiting for the overseer
+// (gt-jw437c, gt-b87gmu).
 //
 // A seat whose gateway count cannot be kept in its record (the tally's alarm) is
 // raised at once, naming the alarm, whatever the record says: a record that
@@ -109,11 +111,11 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 }
 
 // keptSeatReSlung reports whether the polecat's agent bead now hooks a bead
-// other than the one the seat's record names, and that bead is still open or
-// hooked: the shape of a seat slung new work after its record was written. The
-// hook is read the way the patrol scan reads a polecat's hook
-// (patrolScanHost.AgentRecord), and the bead it names the way the scan reads a
-// work bead.
+// other than the one the seat's record names, and that bead is still live work —
+// open, hooked or in progress: the shape of a seat slung new work after its
+// record was written. The hook is read the way the patrol scan reads a polecat's
+// hook (patrolScanHost.AgentRecord), and the bead it names the way the scan
+// reads a work bead.
 //
 // Every failed read is the error, never "no re-sling": a hook this cannot read
 // leaves the seat raising as it did before, because a re-sling is the one
@@ -135,8 +137,15 @@ func (s *attentionSources) keptSeatReSlung(seat KeptSandboxSeat) (bool, error) {
 	if issue == nil {
 		return false, fmt.Errorf("the hooked bead %s reads as no bead", hook)
 	}
-	status := beads.IssueStatus(issue.Status)
-	return status == beads.StatusOpen || status == beads.IssueStatusHooked, nil
+	// Open, hooked and in progress are live work: the bead a seat was re-slung
+	// to is open or hooked, and the worker's first claim moves it on to
+	// in_progress. A bead no longer under way (closed, deferred, blocked) is
+	// not, and its seat raises (gt-b87gmu).
+	switch beads.IssueStatus(issue.Status) {
+	case beads.StatusOpen, beads.IssueStatusHooked, beads.StatusInProgress:
+		return true, nil
+	}
+	return false, nil
 }
 
 // keptSeatItem is the kept-seat item of one seat, carrying reason verbatim.
