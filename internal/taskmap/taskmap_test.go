@@ -171,6 +171,7 @@ func TestHandRunMetricsCommandsSitWithMetrics(t *testing.T) {
 		"metrics import-versions",
 		"metrics run",
 		"metrics snapshot",
+		"metrics storypoints-adopt",
 		"metrics storypoints-train",
 	} {
 		e, ok := Lookup(path)
