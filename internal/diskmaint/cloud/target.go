@@ -3,8 +3,7 @@
 // names, so the measure is the daemon's view of what fills the VM's disk and
 // never the Mac volume the VM's disk image lives on.
 //
-// The measure is all this slice carries; the keep rules, the plan and the apply
-// follow (gt-p427gz).
+// The keep rules and the plan are in plan.go; the apply follows (gt-367d34).
 package cloud
 
 import (
@@ -45,6 +44,11 @@ type Config struct {
 	Run diskmaint.Runner
 	// Ledger records every apply; a target without one is not built.
 	Ledger *diskmaint.Ledger
+	// LabelsFile is the file holding the cloud VM's runner labels, one per line
+	// as forgejo-runner register was given them ("<name>:docker://<repo>:<tag>").
+	// Plan reads it through Run and keeps the images the labels name; empty names
+	// no list, and Plan refuses rather than keeping a list of its own.
+	LabelsFile string
 }
 
 // Target is the cloud VM's docker daemon as a diskmaint target.

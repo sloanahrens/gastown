@@ -53,6 +53,9 @@ type Image struct {
 	Tag        string `json:"Tag"`
 	ID         string `json:"ID"`
 	Size       string `json:"Size"`
+	// CreatedAt is the image's creation time as docker prints it, e.g.
+	// "2026-11-14 22:16:03 +0000 UTC", for a caller that ranks images by age.
+	CreatedAt string `json:"CreatedAt"`
 }
 
 // Bytes is the image's listed size, or 0 when docker printed one that does not

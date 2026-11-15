@@ -98,6 +98,22 @@ func TestImagesReadsTheDaemonListing(t *testing.T) {
 	}
 }
 
+func TestImagesReadsTheCreationTime(t *testing.T) {
+	t.Parallel()
+	// The listing as docker prints it, so the key this reads is docker's own: the
+	// cloud plan ranks tags by it.
+	f := &fakeDocker{images: `{"Repository":"fractals-nextjs","Tag":"abc1234","ID":"` + imgID('1') +
+		`","Size":"200MB","CreatedAt":"2026-11-14 22:16:03 +0000 UTC"}` + "\n"}
+
+	got, err := f.client().Images(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "2026-11-14 22:16:03 +0000 UTC"; len(got) != 1 || got[0].CreatedAt != want {
+		t.Errorf("Images = %+v, want the listing's created time %q", got, want)
+	}
+}
+
 func TestInUseIsTheImagesOfEveryContainer(t *testing.T) {
 	t.Parallel()
 	used, other := imgID('1'), imgID('2')
