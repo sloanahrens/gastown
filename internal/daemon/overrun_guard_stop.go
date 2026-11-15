@@ -862,14 +862,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		// The same read the hand-back makes before it writes, so the run's end
 		// and the hand-back agree on whose bead it is: a closed bead, or one
 		// another polecat holds now, is that holder's (gt-tzbtf).
-		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
-		defer cancel()
-		var store overrunHandBackStore = beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
-			beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
-		if d.openOverrunBeads != nil {
-			store = d.openOverrunBeads()
-		}
-		status, assignee, err := polecat.NewBeadWriter(store, overrunActor).State(ctx, seat.Bead)
+		status, assignee, err := d.overrunBeadState(seat)
 		if err != nil {
 			return false, fmt.Errorf("read bead %s: %w", seat.Bead, err)
 		}
@@ -877,6 +870,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		// handing back, and it is finished like one the seat still holds.
 		return overrunSeatOwnsBead(seat, status, assignee), nil
 	}
+	s.beadStillHeld = d.seatUnreachableBeadStillHeld
 	s.endRun = func(seat overrunSeat, at time.Time) error {
 		// The town's event log is the clock both the guard and the dashboard
 		// read (events.DispatchStart), so the run's end is recorded there and
@@ -904,6 +898,20 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 // overrunSeatAssignee is the assignee bd stores for a bead the seat holds.
 func overrunSeatAssignee(seat overrunSeat) string {
 	return seat.Rig + "/polecats/" + seat.Polecat
+}
+
+// overrunBeadState reads a bead's status and assignee, through the store the
+// stop's own ownership re-check reads. The stop reads it just before it ends the
+// run; the seat-unreachable release reads it just before its hand-back.
+func (d *Daemon) overrunBeadState(seat overrunSeat) (status, assignee string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
+	defer cancel()
+	var store overrunHandBackStore = beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
+		beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
+	if d.openOverrunBeads != nil {
+		store = d.openOverrunBeads()
+	}
+	return polecat.NewBeadWriter(store, overrunActor).State(ctx, seat.Bead)
 }
 
 // overrunSeatOwnsBead reports whether a bead in this status and assignee is

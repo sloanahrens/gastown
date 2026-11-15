@@ -153,6 +153,11 @@ type overrunFake struct {
 	// an error; notOurs says the bead is no longer the stopped seat's.
 	notOurs      bool
 	stillOursErr error
+	// beadHeld says the release's bead re-read finds the bead still hooked to
+	// its seat; beadReadErr, when set, is what the read answers instead. The
+	// fake is built held, so only the tests about the re-read set them.
+	beadHeld    bool
+	beadReadErr error
 	// handBackNotes lists the note each handBack call carried, in the same order.
 	handBackNotes []string
 	// spanEnd, when set, is the stop's span close; spanEnds records the
@@ -275,6 +280,12 @@ func (f *overrunFake) baseSeams() overrunSeams {
 			}
 			return !f.notOurs, nil
 		},
+		beadStillHeld: func(overrunSeat) (bool, error) {
+			if f.beadReadErr != nil {
+				return false, f.beadReadErr
+			}
+			return f.beadHeld, nil
+		},
 		endRun: func(seat overrunSeat, at time.Time) error {
 			if f.endRunErr != nil {
 				return f.endRunErr
@@ -310,7 +321,7 @@ func (f *overrunFake) baseSeams() overrunSeams {
 var overrunSlung = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 
 func newOverrunFake(elapsed time.Duration, seats ...overrunSeat) *overrunFake {
-	f := &overrunFake{now: overrunSlung.Add(elapsed), slung: map[string]time.Time{}}
+	f := &overrunFake{now: overrunSlung.Add(elapsed), slung: map[string]time.Time{}, beadHeld: true}
 	for _, s := range seats {
 		f.slung[s.Bead] = overrunSlung
 	}
