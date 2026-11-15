@@ -24,8 +24,8 @@ const (
 	// SkipDoltData is a Dolt data directory; Dolt has its own backup path and
 	// is not part of the town-state copy.
 	SkipDoltData SkipClass = "Dolt data"
-	// SkipGitTree is a .git directory; the import's follow-up step re-fetches
-	// the rig clones from Forgejo.
+	// SkipGitTree is a .git directory: the archive carries the files a git
+	// checkout holds beside its history, never the history itself.
 	SkipGitTree SkipClass = "git trees"
 	// SkipSocket is a unix socket, which a copy cannot recreate.
 	SkipSocket SkipClass = "sockets"
@@ -104,9 +104,6 @@ func (s ExportSummary) String() string {
 			continue
 		}
 		fmt.Fprintf(&b, " %d %s", s.Skipped[class], class)
-		if class == SkipGitTree {
-			b.WriteString(" (the rig clones are re-fetched from Forgejo after the import)")
-		}
 		printed = true
 	}
 	if !printed {

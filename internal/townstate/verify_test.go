@@ -68,13 +68,12 @@ func registryTown() fstest.MapFS {
 }
 
 // rigTreeWithMarker is a rig the registry does not name, with no config.json.
-// Its bare repository marks it, its canonical clone is covered by the rig's own
-// row, and its crew and polecats are covered by the rig's rows too.
+// Its bare repository marks it, and its crew and polecats are covered by the
+// rig's own rows.
 func rigTreeWithMarker() fstest.MapFS {
 	return fstest.MapFS{
 		"mayor/town.json":        {Data: []byte("{}")},
 		"tango/.repo.git/HEAD":   {Data: []byte("ref: refs/heads/main\n")},
-		"tango/mayor/rig/go.mod": {Data: []byte("x")},
 		"tango/crew/echo/a.md":   {Data: []byte("x")},
 		"tango/polecats/bo/b.go": {Data: []byte("x")},
 	}
@@ -329,10 +328,11 @@ func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
 // information line at the clone's own path, and verify still passes. The
 // directory that holds the clone is walked, so any other unclassified path
 // beside it is still a failure; nothing inside the clone is a finding of its
-// own. A directory a rig marker names is a rig, whose clone row covers the
-// clone instead. A file where the clone would be is no clone, so that
-// directory keeps the no-entry failure; so is a file where the mayor directory
-// would be, which the kernel reports as ENOTDIR rather than an absent path.
+// own. A clone under a directory a rig marker names is information too: the
+// manifest carries no clone row (gt-3lvcjz.26). A file where the clone would be
+// is no clone, so that directory keeps the no-entry failure; so is a file where
+// the mayor directory would be, which the kernel reports as ENOTDIR rather than
+// an absent path.
 func TestVerifyLeavesALeftoverCloneAsInfo(t *testing.T) {
 	t.Parallel()
 	// The kernel, not a map, answers the clone probe here: a regular file named
@@ -403,13 +403,14 @@ func TestVerifyLeavesALeftoverCloneAsInfo(t *testing.T) {
 			m: registeredNoCloneRow,
 		},
 		{
-			name: "a marked rig's clone row covers the clone",
+			name: "a marked rig's leftover clone is information",
 			fsys: fstest.MapFS{
 				"mayor/town.json":        {Data: []byte("{}")},
 				"tango/config.json":      {Data: []byte("{}")},
 				"tango/mayor/rig/go.mod": {Data: []byte("x")},
 				"tango/crew/echo/a.md":   {Data: []byte("x")},
 			},
+			want: []Problem{cloneInfo},
 		},
 		{
 			name: "a file where the clone would be is no clone",

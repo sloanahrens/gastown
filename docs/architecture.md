@@ -173,6 +173,8 @@ The daemon image's `bd` is the real binary with no wrapper in front of it, and s
 
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 
+The claim carries each rig's bare repository (`<rig>/.repo.git`), not a canonical clone: `<rig>/mayor/rig` is retired, so the manifest has no row for it, the seed and export carry none, and `gt town state verify` reports a clone a tree still holds as information until the operator removes it (`gt rig retire-mayor`).
+
 ### Secrets
 
 Each credential is a Kubernetes Secret created from a file named in a manifest (`deploy/daemon/secrets.yaml`). The kinds of credential are:

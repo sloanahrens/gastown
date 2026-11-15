@@ -367,9 +367,10 @@ func sortTownStateEntries(entries []fs.DirEntry) {
 // TestTownStateVerifyReadsNoContents proves verify looks at metadata only and
 // never descends into .dolt-data* or a .git tree. The one file it reads is the
 // rig registry, for the rig names; the registry paths are the only ones it may
-// open as a regular file. A top-level directory holding only a mayor/rig clone
-// is no rig: the walk reports its clone as information, without reading
-// anything inside it, and the town passes.
+// open as a regular file. A mayor/rig clone is retired (gt-3lvcjz.26), so the
+// walk reports every clone as information, without reading anything inside it,
+// and the town passes, whether the clone lies under a classified rig or under a
+// top-level directory holding nothing else.
 func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -401,8 +402,9 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	}
 	printed := strings.TrimSpace(out.String())
 	lines := strings.Split(printed, "\n")
-	if len(lines) != 2 || !strings.HasPrefix(lines[0], "info: stale/mayor/rig: ") || lines[1] != "town state: ok" {
-		t.Errorf("verify printed %q, want exactly the stale clone's info line and the ok line", printed)
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "info: gastown/mayor/rig: ") ||
+		!strings.HasPrefix(lines[1], "info: stale/mayor/rig: ") || lines[2] != "town state: ok" {
+		t.Errorf("verify printed %q, want the two clone info lines in path order and the ok line", printed)
 	}
 	registry := map[string]bool{"mayor/town.json": true, "mayor/rigs.json": true}
 	for _, name := range f.opened {

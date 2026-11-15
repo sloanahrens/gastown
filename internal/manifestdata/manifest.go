@@ -58,15 +58,18 @@ type Manifest struct {
 	Entries []Entry `yaml:"entries"`
 }
 
-// DirNames are the town directory names the manifest's rig rows are built
-// from. They are a parameter so this package reads no other package for them;
-// the caller passes the names its town builds paths from, and each is required.
+// DirNames are the town directory names its rig paths are built from. They are
+// a parameter so this package reads no other package for them; the caller
+// passes the names its town builds paths from. The manifest spells its rig
+// repository row with RepoGit. Mayor and Rig no longer name a manifest row (the
+// canonical clone is retired, gt-3lvcjz.26); the caller keeps them for the
+// probe that reports a leftover clone.
 type DirNames struct {
 	// RepoGit is the rig's shared bare repository directory name.
 	RepoGit string
 	// Mayor is the directory holding mayor configuration and state.
 	Mayor string
-	// Rig is the subdirectory holding the canonical clone.
+	// Rig is the subdirectory holding the retired canonical clone.
 	Rig string
 }
 
@@ -108,7 +111,6 @@ func Default(dirs DirNames) *Manifest {
 		// Rig repositories the landing worker and promoter run git in.
 		{Path: "<rig>/config.json", Owner: OwnerDaemon, Why: "the rig's registry record the daemon and landing worker read"},
 		{Path: "<rig>/" + dirs.RepoGit, Owner: OwnerDaemon, Why: "the rig's bare repository the landing worker fetches and merges into; the name is constants.DirRepoGit, which internal/rig and the daemon build the path from"},
-		{Path: "<rig>/" + dirs.Mayor + "/" + dirs.Rig, Owner: OwnerDaemon, Why: "the rig's canonical clone the landing worker and promoter land on; the name is constants.DirMayor and constants.DirRig, which rig.RepoPath resolves (all nine rigs of this town have it, read 2026-11-06)"},
 		{Path: "<rig>/.beads", Owner: OwnerDaemon, Why: "the rig's beads workspace internal/rig/manager.go InitBeads creates and bd writes, as the town-level .beads row"},
 		{Path: "<rig>/plugins", Owner: OwnerDaemon, Why: "the plugins the daemon's scanner loads from each rig (internal/plugin/scanner.go DiscoverAll); internal/cmd/daemon_rehearse_plugins.go reads it"},
 		{Path: "<rig>/settings", Owner: OwnerShared, Why: "the rig's behavioral settings gt config writes (internal/config/loader.go SaveRigSettings) and the daemon's landing worker reads (internal/daemon/landing_worker.go rigPostLandCommand), as the town-level settings row"},

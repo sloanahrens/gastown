@@ -37,8 +37,8 @@ type Entry = manifestdata.Entry
 type Manifest manifestdata.Manifest
 
 // townDirs are the town's directory names, the one place they are read from
-// constants: the manifest's rig rows are spelled from them, and verify probes a
-// rig's canonical clone at the Mayor and Rig names.
+// constants: the manifest's rig repository row is spelled from them, and verify
+// probes a rig's retired canonical clone at the Mayor and Rig names.
 func townDirs() manifestdata.DirNames {
 	return manifestdata.DirNames{
 		RepoGit: constants.DirRepoGit,

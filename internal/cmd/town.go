@@ -65,9 +65,9 @@ error: counts, bytes and the classes of entry left out (Dolt data, git trees,
 sockets, lock files, special files, symlinks leaving the town root), never the
 names of files below a top-level entry.
 
-The walk never follows a symlink. The rig clones' .git directories are left
-out and re-fetched from Forgejo after the import. Dolt data has its own backup
-path and never crosses this stream. With --rollback only the rows tagged
+The walk never follows a symlink. A .git tree under a daemon-owned entry is
+left out: the archive carries no checkout's history. Dolt data has its own
+backup path and never crosses this stream. With --rollback only the rows tagged
 rollback: true are written: the one-way state a rollback replays onto the Mac
 tree, which with --since is the bounded replay. --rollback also writes the
 town's settings/config.json and each registered rig's <rig>/settings/config.json,
