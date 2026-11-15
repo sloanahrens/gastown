@@ -236,10 +236,12 @@ func listsRemote(out []byte, name string) bool {
 	return false
 }
 
-// remoteOwner returns the first path element of a git remote URL, for the forms
-// git accepts: scheme://host/path and user@host:path read their path, and a
-// local path reads as itself. A URL that does not parse names no account, which
-// exempts nothing and so prints every finding rather than hiding one.
+// remoteOwner returns the first path element a git remote URL names, for the
+// forms git accepts: scheme://host/path and user@host:path read the path after
+// the host, and a local path reads whole, so its first element is taken the
+// same way. A URL that does not parse, or whose path element is empty, names no
+// account, which exempts nothing and so prints every finding rather than
+// hiding one.
 func remoteOwner(remote string) string {
 	path := remote
 	if strings.Contains(remote, "://") {
