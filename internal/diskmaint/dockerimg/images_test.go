@@ -9,11 +9,13 @@ import (
 	"testing"
 )
 
-// The client's other refusals and the size parse are covered by the colima
-// target's tests (internal/diskmaint/colima/target_test.go), so this package does
-// not pin them a second time. The container-id refusal stays here: the colima
-// row refuses on its empty inspect answer whether or not the id is checked, so
-// only this test shows the id refused before it reaches the inspect command line.
+// The client's other refusals and the byte values of a size docker prints are
+// covered by the colima target's tests (internal/diskmaint/colima/target_test.go),
+// so this package does not pin them a second time. Two refusals stay here. The
+// container-id refusal: the colima row refuses on its empty inspect answer
+// whether or not the id is checked, so only this test shows the id refused
+// before it reaches the inspect command line. The size refusal: Bytes reports
+// an unreadable size as 0, so a caller of Bytes never takes it.
 
 // dockerHost is a placeholder daemon socket; every test checks it reaches docker.
 const dockerHost = "unix:///placeholder/.colima/gt-sbx/docker.sock"
@@ -154,5 +156,23 @@ func TestInUseIsEmptyWithoutContainers(t *testing.T) {
 	}
 	if len(f.calls) != 1 {
 		t.Errorf("made %d calls, want only the container list", len(f.calls))
+	}
+}
+
+func TestParseSizeRefusesASizeItCannotRead(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"no digits":              "",
+		"no leading number":      "garbage",
+		"two points":             "1.2.3MB",
+		"unit docker cannot use": "12XB",
+	}
+	for name, size := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if n, err := ParseSize(size); !errors.Is(err, ErrSize) {
+				t.Errorf("ParseSize(%q) = %d, %v, want 0, %v", size, n, err, ErrSize)
+			}
+		})
 	}
 }

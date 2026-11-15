@@ -32,6 +32,9 @@ var (
 	// ErrParse reports a line of docker output that does not parse, so the
 	// listing is refused rather than read partly.
 	ErrParse = errors.New("docker output line does not parse; the listing is refused")
+	// ErrSize reports an image size ParseSize cannot read. A measurement that
+	// needs every byte refuses on it rather than counting it as zero.
+	ErrSize = errors.New("image size does not parse; the reading is refused")
 )
 
 var (
@@ -55,16 +58,26 @@ type Image struct {
 // Bytes is the image's listed size, or 0 when docker printed one that does not
 // parse: a size is best-effort and never a reason to refuse.
 func (im Image) Bytes() int64 {
-	i := strings.IndexFunc(im.Size, func(r rune) bool { return !(r >= '0' && r <= '9' || r == '.') })
+	n, err := ParseSize(im.Size)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// ParseSize reads a size as docker prints it ("1.5GB", "0B") and returns
+// ErrSize for one it cannot read.
+func ParseSize(size string) (int64, error) {
+	i := strings.IndexFunc(size, func(r rune) bool { return !(r >= '0' && r <= '9' || r == '.') })
 	if i <= 0 {
-		return 0
+		return 0, ErrSize
 	}
-	n, err := strconv.ParseFloat(im.Size[:i], 64)
-	mult, ok := sizeUnits[im.Size[i:]]
+	n, err := strconv.ParseFloat(size[:i], 64)
+	mult, ok := sizeUnits[size[i:]]
 	if err != nil || !ok || n < 0 {
-		return 0
+		return 0, ErrSize
 	}
-	return int64(math.Round(n * mult))
+	return int64(math.Round(n * mult)), nil
 }
 
 // Client reads the daemon Host names, running every call through Run.
