@@ -2318,6 +2318,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// The read's own skips are the board-carried refusals: the tick and the
 	// dry run print them beside the ones the tick finds itself (gt-k1g3e).
 	report.Skipped = append(report.Skipped, read.Skipped...)
+	// A bead the split route holds never reaches the candidate loop — the ready
+	// query filters its label — so it is reported here, with the route's own
+	// reason: the ledger entry is what the dashboard's ready row reads to say
+	// why no seat takes it (gt-4yq0js).
+	for _, c := range read.SplitHeld {
+		report.Skipped = append(report.Skipped, specDispatchEntry{Bead: c.Spec.ID, Rig: c.Rig, Line: specSplitHeldLine(c.Spec.ID, c.Spec.Labels, env.StoryPointSplitOver)})
+	}
 	// The tick slings at most perTick candidates. The config ceiling wins when
 	// set; otherwise the bound is the free seats the roster shows, so a tick
 	// fills the pool instead of three seats of nine (2026-10-21: max_per_tick
@@ -4364,6 +4371,11 @@ type specBoardRead struct {
 	// a reason the operator has to read, reported instead of dropped unseen
 	// (gt-k1g3e). The tick appends them to its own skip lines.
 	Skipped []specDispatchEntry
+	// SplitHeld are the ready beads wearing the split label, which the ready
+	// query filters out of the board and specReadyBoard reads apart. The tick
+	// reports each one as skipped with the split route's reason, so the ledger
+	// and the dashboard row for it say why no seat takes it (gt-4yq0js).
+	SplitHeld []specCandidate
 	// Retried names the beads whose failure label the read cleared so they could
 	// be slung again (specTimedOutRetries). The tick logs them as notices.
 	Retried []string
@@ -4471,6 +4483,17 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 				// the label; the bead's store no longer carries it.
 				s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.DispatchFailedLabel })
 				read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s for a retry of a sling killed at its bound", s.ID, specdispatch.DispatchFailedLabel))
+			}
+			// The split route's record is reported as the route's own hold
+			// rather than as one more excluded label: its reason names the
+			// estimate and the trigger, which is what the dashboard's row for
+			// the bead shows. It is read before Eligible because Eligible
+			// refuses the label and names neither, and only for the beads the
+			// ready board carries: an epic or a bookkeeping record wears the
+			// label without ever having been the dispatcher's work (gt-4yq0js).
+			if s.HasLabel(specdispatch.SplitLabel) && specdispatch.NotWorkBead(s) == "" {
+				read.SplitHeld = append(read.SplitHeld, specCandidate{Spec: s, Rig: name, UpdatedAt: issue.UpdatedAt, DepCount: issue.DependencyCount})
+				continue
 			}
 			// The ready board is a snapshot: the full bead is re-read before
 			// any decision. A refusal is dropped here, and a refusal of a
@@ -4723,13 +4746,50 @@ func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
 // specReadyBoardFrom is specReadyBoard's answer for a given store. A board bd
 // reports as cut is read as a partial board: the tick acts on what it got, and
 // the sentinel says only that there may be more rows.
+//
+// The answer carries the rig's open beads wearing the split label as well. The
+// ready query filters that label server-side (gt-q6zoo), so without this read
+// the tick never sees a bead the split route holds and writes no skip line for
+// it: the dashboard's ready row for it keeps the shape the lint gave it, with
+// no reason anywhere saying why no seat takes it (gt-4yq0js). A read that
+// fails is the rig's error, never a rig that holds no split bead.
 func specReadyBoardFrom(store beads.Client) ([]*beads.Issue, error) {
 	issues, err := store.ReadyFiltered(specReadyOptions())
 	var truncated *beads.ErrReadyTruncated
-	if errors.As(err, &truncated) {
-		return issues, nil
+	if err != nil && !errors.As(err, &truncated) {
+		return issues, err
 	}
-	return issues, err
+	held, err := specSplitHeldFrom(store)
+	if err != nil {
+		return nil, err
+	}
+	// A label that lands between the two reads puts the bead on both: the ready
+	// row was read without it, and the split list with it. The split list is
+	// the later read, so the bead is reported as the route holds it, once.
+	onBoard := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		onBoard[issue.ID] = true
+	}
+	for _, issue := range held {
+		if !onBoard[issue.ID] {
+			issues = append(issues, issue)
+		}
+	}
+	return issues, nil
+}
+
+// specSplitHeldFrom lists the rig's open beads wearing the split label: the
+// beads a person or bird cut, whose work lives on the children (hq-et8bc). They
+// are read apart from the ready query because that query filters the label, and
+// the tick reports each one as skipped with the route's own reason. A closed
+// split parent is the split's record and not work waiting on a seat, so it is
+// left out.
+func specSplitHeldFrom(store beads.Client) ([]*beads.Issue, error) {
+	issues, err := store.List(beads.ListOptions{Label: specdispatch.SplitLabel, Status: "open", Limit: 0})
+	if err != nil {
+		return nil, fmt.Errorf("listing the beads the split route holds: %w", err)
+	}
+	return issues, nil
 }
 
 // annotateSpecOnce adds text as a comment unless the bead already carries a

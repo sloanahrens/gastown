@@ -84,10 +84,10 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 	var res specStoryPointStepResult
 	splitOver := env.StoryPointSplitOver
 	if splitOver > 0 && latest.HasLabel(specdispatch.SplitLabel) {
-		// The ready query already excludes a split bead, so this only catches a
-		// label that landed after the board read. The bead keeps the record it
-		// has; the route adds none and does not sling it.
-		res.Hold = fmt.Sprintf("%s: %salready labeled for splitting", beadID, specdispatch.SkipSplitOver)
+		// The ready board reads a split bead apart from the candidates, so this
+		// only catches a label that landed after the board read. The bead keeps
+		// the record it has; the route adds none and does not sling it.
+		res.Hold = specSplitHeldLine(beadID, latest.Labels, splitOver)
 		return res
 	}
 	answer := specStoryPointRun(env, beadID)
@@ -187,6 +187,38 @@ func specSplitRungActs(rung string) bool {
 		return true
 	}
 	return false
+}
+
+// specSplitHeldLine is the tick's skip line for a bead wearing the split label:
+// the route that holds it, the estimate the bead's own labels record, and the
+// trigger that estimate is at or over. The label is the split's record and
+// outlasts the children it was cut into (hq-et8bc), so the line is written with
+// the route's setting off as well; a bead whose labels no longer stand the
+// decision up says what they say and claims no trigger. The decision is the
+// route's own: specSplitVerdict reads the labels, and the trigger is the
+// dispatcher's setting, passed in rather than copied.
+func specSplitHeldLine(beadID string, labels []string, trigger float64) string {
+	var o specEstimateOutcome
+	specEstimateFromLabels(&o, labels)
+	minutes, rung, why := specSplitVerdict(specStoryPointAnswer{outcome: o})
+	if why != "" {
+		return fmt.Sprintf("%s: %salready labeled for splitting; its labels name no estimate the route can read (%s)",
+			beadID, specdispatch.SkipSplitOver, why)
+	}
+	points := o.Points
+	if !storypoints.Valid(points) {
+		// An estimate whose bead kept no sp: label still has its minutes, so
+		// the line names the point those minutes make.
+		if p, err := storypoints.FromMinutes(minutes); err == nil {
+			points = p
+		}
+	}
+	estimate := fmt.Sprintf("estimated %s min (sp:%d, rung %s)", specMinutesText(minutes), points, rung)
+	if trigger <= 0 || rung == "shape" || minutes < trigger {
+		return fmt.Sprintf("%s: %salready labeled for splitting; %s", beadID, specdispatch.SkipSplitOver, estimate)
+	}
+	return fmt.Sprintf("%s: %s%s, at or over the %s-minute trigger; held for splitting",
+		beadID, specdispatch.SkipSplitOver, estimate, specTriggerText(trigger))
 }
 
 // specSplitNote is the comment the split route leaves on a bead it holds: the
