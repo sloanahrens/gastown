@@ -346,6 +346,98 @@ func TestSpecDispatchSplitRouteAlreadyLabeledNotTouched(t *testing.T) {
 	}
 }
 
+// A bead sent back for rework is never held for splitting: its work is already
+// on a branch, and the findings a rejection appends raise its estimate over the
+// trigger the first pass stayed under (gt-bj22wp). The exemption reads the
+// label before the estimate, so the route spends no estimate on the bead, and
+// a bead without the label is still judged and held.
+func TestSpecDispatchSplitRouteNeverHoldsAReworkBead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		labels    []string
+		wantCalls int
+		wantHeld  bool
+	}{
+		{name: "a rework bead", labels: []string{reworkLabel}, wantCalls: 0},
+		{name: "a bead without the label", wantCalls: 1, wantHeld: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+			spec.Labels = tc.labels
+			f := newFakeSpecTown(spec)
+			env := f.env()
+			env.After = neverTimer
+			env.StoryPointSplitOver = 11
+			calls := 0
+			env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+				calls++
+				return splitOutcome("estimated", 13, 11.2, "all", "nearest beads: gt-b"), nil
+			}
+			r := runSpecDispatchCycle(env)
+
+			if calls != tc.wantCalls {
+				t.Errorf("estimated the bead %d time(s), want %d", calls, tc.wantCalls)
+			}
+			if tc.wantHeld {
+				if !slices.Contains(f.labels["gt-a"], specdispatch.SplitLabel) {
+					t.Errorf("labels = %v, want %s", f.labels["gt-a"], specdispatch.SplitLabel)
+				}
+				if notes := splitNotes(f, "gt-a"); len(notes) != 1 {
+					t.Errorf("split notes = %q, want one", notes)
+				}
+				if lines := splitHoldLines(r.Skipped); len(lines) != 1 {
+					t.Errorf("split hold lines = %q, want one", lines)
+				}
+				if len(f.slung) != 0 {
+					t.Errorf("slung %v, want the bead held", f.slung)
+				}
+				return
+			}
+			if slices.Contains(f.labels["gt-a"], specdispatch.SplitLabel) {
+				t.Errorf("labels = %v, want no %s", f.labels["gt-a"], specdispatch.SplitLabel)
+			}
+			if notes := splitNotes(f, "gt-a"); len(notes) != 0 {
+				t.Errorf("split notes = %q, want none", notes)
+			}
+			if lines := splitHoldLines(r.Skipped); len(lines) != 0 {
+				t.Errorf("split hold lines = %q, want none", lines)
+			}
+			if got := strings.Join(f.slung, " "); got != "gt-a" {
+				t.Errorf("slung %q, want gt-a: a rework bead is never held for splitting", got)
+			}
+		})
+	}
+}
+
+// The rework exemption covers every hold the route writes, including the one
+// for a bead already wearing the split label: the route must not hold a bead
+// whose work is on a branch, so it writes nothing and runs no estimate
+// (gt-bj22wp). The ready query filters a split bead before the candidate loop,
+// so the guard this pins is the one for a label that lands mid-tick.
+func TestSpecDispatchSplitRouteReworkExemptionCoversTheSplitHold(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown()
+	env := f.env()
+	env.After = neverTimer
+	env.StoryPointSplitOver = 11
+	calls := 0
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		calls++
+		return splitOutcome("estimated", 13, 20, "all", ""), nil
+	}
+	latest := specdispatch.Spec{ID: "gt-a", Labels: []string{reworkLabel, specdispatch.SplitLabel}}
+	step := specStoryPointStep(env, "gt-a", latest)
+
+	if calls != 0 {
+		t.Errorf("estimated a rework bead %d time(s), want none", calls)
+	}
+	if step.Hold != "" || len(step.Notices) != 0 || len(step.Errors) != 0 {
+		t.Errorf("step = %+v, want no hold, notice or error", step)
+	}
+}
+
 // TestSpecDispatchSplitRouteEstimateFromLabels: an estimate that is already
 // current has no fresh numbers, so the route reads the labels the command
 // wrote. Two labels that disagree leave the value unset, and the route then
