@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -886,11 +887,22 @@ func overrunSaveMessage(bead string) string {
 // save. A WIP commit made on no branch, or on a HEAD that is not the kept
 // branch, cannot reach that branch, so it is refused rather than left
 // unpushed. A refused commit or push is an error, and the stop keeps the
-// sandbox.
+// sandbox. A sandbox that reports it is gone is errSandboxGone, never a
+// successful save.
 func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	g, err := d.overrunSeatGit(seat)
 	if err != nil {
 		return overrunSave{}, err
+	}
+	// The checkpoint reads a failed status as a refusal, not an error, so a
+	// sandbox that has gone would come back as "uncommitted work could not be
+	// committed". The sandbox handle is asked first, so a sandbox that reports
+	// it is gone is errSandboxGone. Only that answer short-circuits: another
+	// failed status leaves the checkpoint's own refusal as it was.
+	if overrunWorktreeLabel(g) == overrunSandboxCloneLabel {
+		if _, err := g.Status(); err != nil && errors.Is(err, session.ErrNothingToPush) {
+			return overrunSave{}, overrunSandboxGone(err)
+		}
 	}
 	committed := false
 	switch d.checkpointWith(g, seat.Rig, seat.Polecat, overrunSaveMessage(seat.Bead)) {
@@ -951,6 +963,22 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 // it. Any other error from the seam is a failure neither may read as "nothing
 // to do".
 var errOverrunNoWorktree = errors.New("worktree cannot be resolved")
+
+// errSandboxGone is what the save and the dirty check return when the seat's
+// sandbox handle reports the sandbox gone (session.ErrNothingToPush). A
+// vanished sandbox is never read as a clean tree or as nothing to save: the
+// work may have gone with it.
+var errSandboxGone = errors.New("sandbox is gone")
+
+// overrunSandboxGone maps the sandbox runner's "already gone" answer to
+// errSandboxGone, keeping the runner's own error matchable. Any other error
+// comes back unchanged, so a git failure stays what it is.
+func overrunSandboxGone(err error) error {
+	if err != nil && errors.Is(err, session.ErrNothingToPush) {
+		return fmt.Errorf("%w: %w", errSandboxGone, err)
+	}
+	return err
+}
 
 // overrunSeatWorktree is the seat's worktree. One that cannot be resolved is
 // errOverrunNoWorktree, never an empty answer: the save and the dirty check
@@ -1068,6 +1096,13 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 	if err != nil || sb.Session == "" {
 		return nil, false, err
 	}
+	// The in-sandbox runner cannot tell a branch from another argument, so a
+	// branch name it would be handed is refused here, before any git call runs
+	// in the sandbox. An empty branch is not refused: the save reads it from
+	// the clone itself, which answers a name git made.
+	if seat.Branch != "" && !overrunCloneBranchValid(seat.Branch) {
+		return nil, false, fmt.Errorf("sandbox %s: branch %q is not a branch name, so the seat's work cannot be pushed", sb.Session, seat.Branch)
+	}
 	rec := sb.Record
 	if !sb.Read {
 		read, sandboxed, err := d.readSandboxRecordFor(d.config.TownRoot, sb.Session)
@@ -1087,6 +1122,19 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
 	}
 	return labelOverrunSandboxGit(git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath())), true, nil
+}
+
+// overrunCloneBranch is a branch name the in-sandbox runner can be handed: a
+// letter or digit first, then only name characters.
+var overrunCloneBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
+
+// overrunCloneBranchValid reports whether name may be handed to the in-sandbox
+// runner as a branch. It is the rule session.validCloneBranch applies to the
+// branch its own push uses, which the session package keeps unexported; the
+// guard applies it because the runner has no way to tell a branch from another
+// argument.
+func overrunCloneBranchValid(name string) bool {
+	return overrunCloneBranch.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // validSandboxCloneDir reports whether dir can be handed to the in-sandbox
@@ -1114,7 +1162,8 @@ func (d *Daemon) sandboxGitRunnerFor(rec session.SandboxRecord) (func(dir string
 }
 
 // overrunWorktreeDirty reports whether the seat's worktree holds uncommitted
-// work now. A status that cannot be read is an error, never clean.
+// work now. A status that cannot be read is an error, never clean, and a
+// sandbox that reports it is gone is errSandboxGone.
 func (d *Daemon) overrunWorktreeDirty(seat overrunSeat) (bool, error) {
 	g, err := d.overrunSeatGit(seat)
 	if err != nil {
@@ -1122,7 +1171,7 @@ func (d *Daemon) overrunWorktreeDirty(seat overrunSeat) (bool, error) {
 	}
 	status, err := g.Status()
 	if err != nil {
-		return false, fmt.Errorf("read status of %s/%s: %w", seat.Rig, seat.Polecat, err)
+		return false, overrunSandboxGone(fmt.Errorf("read status of %s/%s: %w", seat.Rig, seat.Polecat, err))
 	}
 	return !status.Clean, nil
 }
