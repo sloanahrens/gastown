@@ -30,6 +30,11 @@ cluster in step prints nothing and exits 0. Each difference prints one line nami
 its JSON path and a fingerprint of each side, never either value, since a
 Deployment's spec can hold a secret, and the command exits 1.
 
+When the recorded flags, the values file, the render or a live Deployment cannot
+be read, the command names what it could not read and exits 2, so a script can
+tell that apart from a cluster that differs: an unread Deployment is not one in
+step.
+
 Nothing is applied and no file is written; the only cluster calls are the reads.
 The flags come from the recorded file, so a live render must have run with
 --record-flags first.`,
@@ -58,11 +63,33 @@ func realClusterDriftDeps(out io.Writer) clusterDriftDeps {
 	return clusterDriftDeps{render: realClusterRenderDeps(out), kubectl: realRunFunc(), out: out}
 }
 
+// driftExitUnreadable is the status of a run that never compared: the recorded
+// flags, the values file, the render or a live Deployment could not be read. It
+// is 2 rather than 1 so a caller can tell an unreadable input from a cluster
+// that is out of step.
+const driftExitUnreadable = 2
+
 // runClusterDrift compares each Deployment the recorded flags render with the live
 // one, prints every difference, and returns a silent exit 1 when it found one.
-// Every input it cannot read is an error naming what it could not read, never an
-// empty difference list, since an unread Deployment is not one in step.
+// Every input it cannot read ends the run with driftExitUnreadable and an error
+// naming what it could not read, never 0, since an unread Deployment is not one in
+// step.
 func runClusterDrift(ctx context.Context, d clusterDriftDeps) error {
+	err := compareClusterDrift(ctx, d)
+	if err == nil {
+		return nil
+	}
+	// A difference is the answer, not a failure to read: it keeps its own code
+	// and prints no error line.
+	if _, ok := IsSilentExit(err); ok {
+		return err
+	}
+	return &ExitCodeError{Code: driftExitUnreadable, Err: err}
+}
+
+// compareClusterDrift is the run behind runClusterDrift: it returns raw errors,
+// and runClusterDrift gives every one of them the unreadable exit status.
+func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	root, err := d.render.findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace, so the recorded render flags cannot be read: %w", err)
