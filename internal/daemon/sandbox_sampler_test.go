@@ -87,7 +87,7 @@ func TestSandboxSamplerDefaultsToTheRowWriter(t *testing.T) {
 	row := sandboxSeatRow("mango-toast")
 	sampler := newSandboxSampler(metricsDir,
 		&fakeSeatSource{tick: resourcesampler.SeatTick{Rows: []resourcesampler.Row{row}}},
-		fixedClock{now: now}, nil, nil)
+		fixedClock{now: now}, nil, nil, 0)
 
 	sampler.Tick(context.Background())
 
@@ -105,6 +105,8 @@ func TestSandboxSamplerTick(t *testing.T) {
 	toast, nux := sandboxSeatRow("mango-toast"), sandboxSeatRow("mango-nux")
 	for _, test := range []struct {
 		name string
+		// ctx is the tick's caller context; nil is context.Background.
+		ctx context.Context
 		// source is the fake the tick reads; nil stands for a sampler built
 		// without one.
 		source sandboxSeatSource
@@ -161,6 +163,17 @@ func TestSandboxSamplerTick(t *testing.T) {
 			wantLogHas: "the day file is read-only",
 		},
 		{
+			// The fake answers anyway, so the tick refusing the rows is what
+			// keeps them out of the file: a caller that gave up on the read is
+			// not a cluster sample. The line names the caller, not the
+			// sampler's bound, which is what a read the caller ended is.
+			name:       "a caller that ended the read writes nothing and logs once",
+			ctx:        canceledContext(),
+			source:     &fakeSeatSource{tick: resourcesampler.SeatTick{Rows: []resourcesampler.Row{toast}}},
+			wantLogs:   1,
+			wantLogHas: "the caller ended the read",
+		},
+		{
 			name:       "no source logs and writes nothing",
 			wantLogs:   1,
 			wantLogHas: "no seat source",
@@ -181,9 +194,14 @@ func TestSandboxSamplerTick(t *testing.T) {
 					return write(dir, row, at)
 				},
 				func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+				0,
 			)
+			ctx := test.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
 
-			sampler.Tick(context.Background())
+			sampler.Tick(ctx)
 
 			if writes != test.wantWrites {
 				t.Errorf("the tick wrote %d rows, want %d", writes, test.wantWrites)
@@ -202,5 +220,106 @@ func TestSandboxSamplerTick(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// canceledContext is a caller context that ended before the tick read the
+// seats.
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// hangingFirstTickSource is a seat source whose first tick hangs on its later
+// seats until the read's context ends, then reports them the way the production
+// source reports a tick its bound cut: the seats read before it as rows, the
+// rest skipped, and a nil Tick error. Every later tick answers with the row,
+// the recovered cluster.
+type hangingFirstTickSource struct {
+	row   resourcesampler.Row
+	ticks int
+}
+
+func (h *hangingFirstTickSource) Tick(ctx context.Context) (resourcesampler.SeatTick, error) {
+	h.ticks++
+	if h.ticks > 1 {
+		return resourcesampler.SeatTick{Rows: []resourcesampler.Row{h.row}}, nil
+	}
+	if _, bounded := ctx.Deadline(); !bounded {
+		// A tick with no bound answers at once, so a sampler that never bounded
+		// the read fails the test instead of hanging it.
+		return resourcesampler.SeatTick{Rows: []resourcesampler.Row{h.row}}, nil
+	}
+	<-ctx.Done()
+	return resourcesampler.SeatTick{
+		Rows:    []resourcesampler.Row{h.row},
+		Skipped: []resourcesampler.SeatSkip{{Seat: "mango-nux", Err: ctx.Err()}},
+	}, nil
+}
+
+// TestSandboxSamplerTickEndsAtItsBound is the bead's acceptance (gt-psegop): the
+// tick ends at its own bound, writes nothing it read before the bound, and the
+// next tick reads the recovered source and writes its row.
+func TestSandboxSamplerTickEndsAtItsBound(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	row := sandboxSeatRow("mango-toast")
+	metricsDir := t.TempDir()
+	var logs []string
+	timeout := 10 * time.Millisecond
+	sampler := newSandboxSampler(metricsDir, &hangingFirstTickSource{row: row}, fixedClock{now: now}, nil,
+		func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		timeout,
+	)
+
+	sampler.Tick(context.Background())
+
+	if got := sandboxSamplerDayRows(t, metricsDir, now); got != nil {
+		t.Errorf("the bounded tick wrote\n%+v\nwant no rows", got)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("the bounded tick logged %d lines, want 1 naming the bound: %q", len(logs), logs)
+	}
+	for _, want := range []string{"bound", timeout.String()} {
+		if !strings.Contains(logs[0], want) {
+			t.Errorf("the log line %q does not name %q", logs[0], want)
+		}
+	}
+
+	sampler.Tick(context.Background())
+
+	if got := sandboxSamplerDayRows(t, metricsDir, now); !reflect.DeepEqual(got, []resourcesampler.Row{row}) {
+		t.Errorf("the next tick's day file holds\n%+v\nwant\n%+v", got, []resourcesampler.Row{row})
+	}
+}
+
+// deadlineRecordingSource records the deadline of the context it is read with,
+// and answers no rows, so a tick that reads it writes nothing either way.
+type deadlineRecordingSource struct {
+	bounded   bool
+	remaining time.Duration
+}
+
+func (d *deadlineRecordingSource) Tick(ctx context.Context) (resourcesampler.SeatTick, error) {
+	deadline, bounded := ctx.Deadline()
+	d.bounded, d.remaining = bounded, time.Until(deadline)
+	return resourcesampler.SeatTick{}, nil
+}
+
+// TestSandboxSamplerDefaultTimeout pins the zero timeout's default at the seam
+// the source sees: the read is bounded, and the bound is the default (gt-psegop).
+func TestSandboxSamplerDefaultTimeout(t *testing.T) {
+	t.Parallel()
+	source := &deadlineRecordingSource{}
+	sampler := newSandboxSampler(t.TempDir(), source, nil, nil, nil, 0)
+
+	sampler.Tick(context.Background())
+
+	if !source.bounded {
+		t.Fatalf("the seat read had no deadline, want the %s default", defaultSandboxSamplerTimeout)
+	}
+	if source.remaining > defaultSandboxSamplerTimeout || source.remaining < defaultSandboxSamplerTimeout-time.Second {
+		t.Errorf("the seat read was bounded %s away, want the %s default", source.remaining, defaultSandboxSamplerTimeout)
 	}
 }
