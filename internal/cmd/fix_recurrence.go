@@ -232,6 +232,7 @@ type fixRecurrenceRow struct {
 	ID           string                `json:"id"`
 	Title        string                `json:"title"`
 	Description  string                `json:"description"`
+	IssueType    string                `json:"issue_type"`
 	Status       string                `json:"status"`
 	CreatedAt    string                `json:"created_at"`
 	ClosedAt     string                `json:"closed_at"`
