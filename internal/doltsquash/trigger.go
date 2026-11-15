@@ -17,14 +17,34 @@ const (
 	TriggerQueryP95       Trigger = "query p95"
 )
 
-// Reading is one measured value, or the error that kept it from being read.
+// Reading is one measured value, or the error that kept it from being read;
+// only a value Read built with no error is compared.
 type Reading[T any] struct {
+	// Value is the number the read yielded. Evaluate compares it only when
+	// Read built the Reading and Err is nil.
 	Value T
-	Err   error
+	// Err is why the read failed. Evaluate never compares a Reading that
+	// carries one, so a failed read stays unreadable even beside a stale value.
+	Err error
+	// read marks a Reading Read built. A caller who never marked a value is
+	// reported unreadable rather than compared as a zero.
+	read bool
 }
 
-// Inputs is what one daily check read for a database. A zero Reading is a
-// readable zero, so a caller whose read failed must set Err.
+// Read returns a Reading of a value that was measured.
+func Read[T any](v T) Reading[T] { return Reading[T]{Value: v, read: true} }
+
+// Failed returns an unreadable Reading that carries err.
+func Failed[T any](err error) Reading[T] { return Reading[T]{Err: err} }
+
+// readable reports whether Evaluate may compare the value: Read built the
+// Reading and its read reported no error.
+func (r Reading[T]) readable() bool { return r.read && r.Err == nil }
+
+// Inputs is what one daily check read for a database. An input the caller did
+// not build with Read, or one carrying an error, is named in
+// Verdict.Unreadable and never compared; Decide includes those names in the
+// reason it returns.
 type Inputs struct {
 	BackupBytes    Reading[int64]
 	BackupDuration Reading[time.Duration]
@@ -44,8 +64,9 @@ type Verdict struct {
 	// TrippedBy names the triggers whose reading is over its threshold, in
 	// check order.
 	TrippedBy []Trigger
-	// Unreadable names the inputs whose read failed. An unreadable input is
-	// never compared.
+	// Unreadable names the inputs whose value was never read, whether the read
+	// failed or the caller left the Reading zero. An unreadable input is never
+	// compared.
 	Unreadable []Trigger
 }
 
@@ -56,10 +77,11 @@ func (v Verdict) Tripped() bool { return len(v.TrippedBy) > 0 }
 // could not be read.
 func Evaluate(in Inputs, th Thresholds) Verdict {
 	var v Verdict
-	check := func(t Trigger, err error, over bool) {
-		if err != nil {
-			// An unreadable input's value is not compared: a stale or zero
-			// value must not trip a run for a number nobody read.
+	check := func(t Trigger, readable, over bool) {
+		if !readable {
+			// A value nobody read — the read failed, or the caller never
+			// recorded one — is named, not compared: a stale or zero number
+			// must not trip a run, and a zero must not pass as a quiet answer.
 			v.Unreadable = append(v.Unreadable, t)
 			return
 		}
@@ -67,9 +89,9 @@ func Evaluate(in Inputs, th Thresholds) Verdict {
 			v.TrippedBy = append(v.TrippedBy, t)
 		}
 	}
-	check(TriggerBackupBytes, in.BackupBytes.Err, in.BackupBytes.Value > th.BackupBytes)
-	check(TriggerBackupDuration, in.BackupDuration.Err, in.BackupDuration.Value > th.BackupDuration)
-	check(TriggerQueryP95, in.QueryP95.Err, in.QueryP95.Value > th.QueryP95)
+	check(TriggerBackupBytes, in.BackupBytes.readable(), in.BackupBytes.Value > th.BackupBytes)
+	check(TriggerBackupDuration, in.BackupDuration.readable(), in.BackupDuration.Value > th.BackupDuration)
+	check(TriggerQueryP95, in.QueryP95.readable(), in.QueryP95.Value > th.QueryP95)
 	return v
 }
 
