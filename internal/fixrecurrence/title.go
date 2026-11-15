@@ -16,7 +16,7 @@ const (
 	Recurrence Relationship = "recurrence"
 	// SameClass says the new bead is another instance of the class the cited
 	// bead fixed.
-	SameClass Relationship = "same-class"
+	SameClass Relationship = "same class"
 	// Regression says a change the cited bead made broke something.
 	Regression Relationship = "regression"
 	// FollowUp says the cited bead's fix was partial, or this work continues it.
@@ -48,7 +48,7 @@ func ClassifyTitle(title, id string) (Relationship, float64) {
 	}
 	// Three cited beads make it unclear which one a keyword belongs to, so the
 	// title is a reference unless it names the grouping itself.
-	if distinctIDCount(title) >= 3 && !groupingRe.MatchString(title) {
+	if distinctIDCount(title, id) >= 3 && !groupingRe.MatchString(title) {
 		return Reference, 0
 	}
 	for _, r := range rules {
@@ -257,20 +257,58 @@ func isIDByte(c byte) bool {
 
 // beadIDPattern is the town's bead id shape as prose writes it, the same shape
 // internal/taskfile reads: a two-to-four letter prefix, a hyphen, a
-// three-to-six character core, then any dotted numeric child suffixes. Case is
-// ignored because a citation is matched case-insensitively too.
+// three-to-six character tail, then any dotted numeric child suffixes. Case is
+// ignored because a citation is matched case-insensitively too. This shape
+// alone cannot tell an id from a hyphenated word ("fail-open" fits it), so
+// distinctIDCount asks for more than a shape match.
 var beadIDPattern = regexp.MustCompile(`(?i)[a-z]{2,4}-[a-z0-9]{3,6}(?:\.[0-9]+)*`)
 
-// distinctIDCount is how many different beads title names. A candidate touching
-// a longer token is part of it rather than an id of its own: the gt-wisp of
-// gt-wisp-l8d8bv is not a bead.
-func distinctIDCount(title string) int {
+// distinctIDCount is how many different beads title names, counting only the
+// citations that name a bead rather than a hyphenated word. A candidate
+// touching a longer token is part of it rather than an id of its own: the
+// gt-wisp of gt-wisp-l8d8bv is not a bead.
+func distinctIDCount(title, citedID string) int {
+	prefix := idPrefix(citedID)
 	seen := make(map[string]bool)
 	for _, loc := range beadIDPattern.FindAllStringIndex(title, -1) {
 		if continuesIDBefore(title, loc[0]) || continuesIDAfter(title, loc[1]) {
 			continue
 		}
-		seen[strings.ToLower(title[loc[0]:loc[1]])] = true
+		token := strings.ToLower(title[loc[0]:loc[1]])
+		if !countsAsID(token, prefix) {
+			continue
+		}
+		seen[token] = true
 	}
 	return len(seen)
+}
+
+// idPrefix is the store prefix a bead id is minted under: the letters before
+// its first hyphen, or "" for an id with no hyphen.
+func idPrefix(id string) string {
+	if i := strings.IndexByte(id, '-'); i > 0 {
+		return strings.ToLower(id[:i])
+	}
+	return ""
+}
+
+// countsAsID reports whether token names a bead rather than a hyphenated word
+// such as "fail-open" or "same-class". A tail carrying a digit is a minted id
+// whatever its prefix; a tail of letters alone is also a minted id (gt-eagle),
+// so there the token counts only under the prefix of the bead the title cites
+// — the store its other citations come from. A word-hyphen-word is neither.
+//
+// The rule misses a real id from another store whose tail has no digit
+// ("hq-abc"): the title is then not demoted for naming three beads. That
+// direction leaves an ambiguity undemoted, where counting a word would demote a
+// title that names one bead too many.
+func countsAsID(token, citedPrefix string) bool {
+	prefix, tail, ok := strings.Cut(token, "-")
+	if !ok {
+		return false
+	}
+	if citedPrefix != "" && prefix == citedPrefix {
+		return true
+	}
+	return strings.ContainsAny(tail, "0123456789")
 }
