@@ -174,12 +174,18 @@ type SeatTick struct {
 }
 
 // SeatSource reads each live seat's cgroup files into one row per seat, the
-// seats being the sandbox records under the town (gt-a24bcc).
+// seats being the sandbox records under the town (gt-a24bcc). It keeps each
+// seat's last good reading between ticks, so cpu_pct is the delta over the
+// seat's own previous sample (gt-bru6l7). Tick is not safe for concurrent use:
+// the patrol ticks serially, and the readings are not locked.
 type SeatSource struct {
 	townRoot string
 	runner   SeatExec
 	clock    Clock
 	timeout  time.Duration
+	// previous is each seat's last reading that wrote a row, keyed by the
+	// sandbox record's name. A seat with no entry is sampled for the first time.
+	previous map[string]SeatReading
 }
 
 // NewSeatSource returns the source a patrol ticks: each seat read through
@@ -194,12 +200,15 @@ func NewSeatSource(townRoot string, runner SeatExec, clock Clock, timeout time.D
 	return &SeatSource{townRoot: townRoot, runner: runner, clock: clock, timeout: timeout}
 }
 
-// Tick reads every live seat once and returns the rows of those that read.
+// Tick reads every live seat once and returns the rows of those that read. Each
+// row's cpu_pct is measured against the seat's previous reading that wrote a
+// row, so the first tick a seat is read reports null CPU.
 //
 // A failure of the whole source — no town root, no exec seam, a workspace map or
 // a registry directory that cannot be read — is an error and no rows. One seat's
 // failure is not the tick's: it is reported in Skipped and the other seats still
-// write, since one wedged sandbox says nothing about the rest.
+// write, since one wedged sandbox says nothing about the rest. A seat that failed
+// keeps its last reading, so its next row is measured over the whole gap.
 func (s *SeatSource) Tick(ctx context.Context) (SeatTick, error) {
 	if s.runner == nil {
 		return SeatTick{}, errors.New("sandbox source: no exec seam")
@@ -217,8 +226,13 @@ func (s *SeatSource) Tick(ctx context.Context) (SeatTick, error) {
 	}
 	now := s.clock.Now()
 	argv := seatReadArgv()
+	if s.previous == nil {
+		s.previous = make(map[string]SeatReading)
+	}
+	listed := make(map[string]bool, len(records))
 	var tick SeatTick
 	for _, record := range records {
+		listed[record.name] = true
 		if record.err != nil {
 			tick.skip(record.name, record.err)
 			continue
@@ -236,15 +250,25 @@ func (s *SeatSource) Tick(ctx context.Context) (SeatTick, error) {
 			tick.skip(seat.Name, err)
 			continue
 		}
-		// previous is nil and the reading SeatRow returns is unused: the delta
-		// against a seat's own previous sample is the next bead's (gt-bru6l7),
-		// so this tick reports the first-sample row.
-		row, _, err := SeatRow(seat, text, now, nil, workspaces)
+		var previous *SeatReading
+		if last, ok := s.previous[record.name]; ok {
+			previous = &last
+		}
+		row, reading, err := SeatRow(seat, text, now, previous, workspaces)
 		if err != nil {
 			tick.skip(seat.Name, err)
 			continue
 		}
+		s.previous[record.name] = reading
 		tick.Rows = append(tick.Rows, row)
+	}
+	// A seat whose record is gone has ended. Dropping its reading means a seat
+	// that comes back under the same name starts from a first sample, not from
+	// the old cgroup's counter.
+	for name := range s.previous {
+		if !listed[name] {
+			delete(s.previous, name)
+		}
 	}
 	return tick, nil
 }
