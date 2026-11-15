@@ -428,9 +428,9 @@ shared name; it must walk with the trimmed maps.
 - **The nine strings must not change.** Of the tree's 367 live
   `//testpolicy:allow` comments, 251 name one of the nine — 121 `parallel`, 57
   `no-env`, 27 `no-global-swap`, 20 `prod-no-setenv`, 19 `no-chdir`, 4
-  `no-host-env`, 3 `no-skip`, none `fake-clock-epoch` — and the rest name a
-  shared rule or `no-git`. A renamed rule stops matching its exemptions and
-  fails `TestPolicy` on a site nobody edited:
+  `no-host-env`, 3 `no-skip`, none `fake-clock-epoch` or `prod-no-sleep` — and
+  the rest name a shared rule or `no-git`. A renamed rule stops matching its
+  exemptions and fails `TestPolicy` on a site nobody edited:
 
   ```sh
   git grep -h -oE '//testpolicy:allow [a-z-]+' origin/main -- '*.go' |
