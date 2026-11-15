@@ -41,7 +41,7 @@ func init() { NewOpenShellBackend = newOpenShellBackend }
 
 const (
 	sandboxHome             = "/sandbox"        // the sandbox's root; uploads land here
-	sandboxTownRoot         = "/sandbox/gt"     // the skeleton's town root inside the sandbox
+	sandboxTownRoot         = "/sandbox/gt"     // the skeleton's town root inside the sandbox (SandboxTownRootPath)
 	sandboxCacheDir         = "/tmp/gt-cache"   // the cache claim's mount point, outside /sandbox
 	dockerCacheDir          = "/sandbox/.cache" // the docker cache volume's mount point
 	sandboxDoltPort         = "3307"

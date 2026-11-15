@@ -1019,7 +1019,7 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
 	}
-	return git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner)), true, nil
+	return git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner), session.SandboxTownRootPath()), true, nil
 }
 
 // validSandboxCloneDir reports whether dir can be handed to the in-sandbox

@@ -309,30 +309,44 @@ func TestNewGitWithRemoteExecRefusesANilExec(t *testing.T) {
 	NewGitWithRemoteExec("/sandbox/x", nil)
 }
 
-// TestRemoteGitDoesNotRunTheTownRootGuardOnTheHost: the town-root mutation guard
-// stats host directories, so for a working directory that lives in a sandbox it
-// cannot answer; a mutating call goes straight to exec without the guard's
-// rev-parse --show-toplevel.
-func TestRemoteGitDoesNotRunTheTownRootGuardOnTheHost(t *testing.T) {
+// TestRemoteGitRefusesAMutationInTheRemoteTownRoot: for a working directory in a
+// sandbox the guard asks the remote's git for the repository top level and
+// refuses a mutation that resolves to a town root the caller named; a clone
+// below it, a read, and a Git with no town root named are allowed. The host's
+// own filesystem is never consulted.
+func TestRemoteGitRefusesAMutationInTheRemoteTownRoot(t *testing.T) {
 	t.Parallel()
-	var seen [][]string
-	exec := func(c ExecCall) (string, string, error) {
-		seen = append(seen, c.Args())
-		return "", "", nil
+	const townRoot = "/sandbox/gt"
+	tests := []struct {
+		name     string
+		topLevel string
+		roots    []string
+		call     func(*Git) error
+		wantErr  bool
+	}{
+		{"mutation resolving to the town root", townRoot, []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, true},
+		{"mutation in a clone below it", "/sandbox/gt/rig/polecats/x/rig", []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, false},
+		{"a read resolving to the town root", townRoot, []string{townRoot}, func(g *Git) error { _, err := g.Rev("HEAD"); return err }, false},
+		{"no town root named", townRoot, nil, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, false},
 	}
-
-	if err := NewGitWithRemoteExec("/sandbox/gt/rig", exec).Add("-A"); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-
-	for _, a := range seen {
-		for _, w := range a {
-			if w == "--show-toplevel" {
-				t.Errorf("the guard's rev-parse ran for a remote Git: %v", seen)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			exec := func(c ExecCall) (string, string, error) {
+				for _, a := range c.Args() {
+					if a == "--show-toplevel" {
+						return tc.topLevel + "\n", "", nil
+					}
+				}
+				return "", "", nil
 			}
-		}
-	}
-	if len(seen) != 1 {
-		t.Errorf("exec calls = %v, want exactly the add", seen)
+			err := tc.call(NewGitWithRemoteExec("/sandbox/gt/rig/polecats/x/rig", exec, tc.roots...))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, ErrUnsafeTownRootGitMutation) {
+				t.Errorf("err = %v, want ErrUnsafeTownRootGitMutation", err)
+			}
+		})
 	}
 }
