@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/session"
@@ -445,20 +447,29 @@ func TestOverrunOriginReadRetryAtTheCapHandsBackWithANoteAndRaisesTheItem(t *tes
 	}
 }
 
-// A raise that cannot reach the town must not release the bead without its
-// item: at the cap the stop holds with the failure counted and the seat still
-// the bead's, and the next tick tries the raise and the hand-back again
-// (gt-3ignmh).
-func TestOverrunOriginReadRetryCapHoldsWhenTheItemCannotBeRaised(t *testing.T) {
-	t.Parallel()
-	d, _ := newOverrunDaemon(t, false)
-	// A failed raise backs off on the daemon's clock (1s, then 2s), so the
-	// retries are driven rather than waited out.
+// unraisableItem is a sandbox-gone stop whose origin read never answers and
+// whose high-severity item cannot be delivered: the escalation store is down.
+// The clock is fake, so the escalation's own retries are driven rather than
+// slept through.
+type unraisableItem struct {
+	d       *Daemon
+	f       *overrunFake
+	clk     *clockwork.FakeClock
+	rec     *notifyfake.Recorder
+	buf     *bytes.Buffer
+	deleted *int
+}
+
+func newUnraisableItem(t *testing.T) *unraisableItem {
+	t.Helper()
+	d, buf := newOverrunDaemon(t, false)
 	clk := newFixedClock()
 	d.clock = clk
 	seedStopSandbox(t, d)
 	seedHostWorktreeStub(t, d)
-	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: errors.New("could not resolve host: origin")} }
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originErr: errors.New("could not resolve host: origin")}
+	}
 	rec := notifyfake.New()
 	rec.Fail(notifyfake.KindEscalate, errors.New("the escalation store is down"))
 	d.notifier = rec
@@ -466,25 +477,66 @@ func TestOverrunOriginReadRetryCapHoldsWhenTheItemCannotBeRaised(t *testing.T) {
 	deleted := 0
 	f := newOverrunFake(20*time.Minute, stopSeat)
 	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+	return &unraisableItem{d: d, f: f, clk: clk, rec: rec, buf: buf, deleted: &deleted}
+}
 
-	runOnClock(t, clk, time.Second, func() { d.runOverrunGuard(f.seams()) })
-	for tick := 2; tick < overrunOriginReadMaxAttempts; tick++ {
-		runOnClock(t, clk, time.Second, func() { pushTick(d, f) })
-	}
-	// The tick that reaches the cap, with the high-severity raise failing, and
-	// the retry after it: the count stays at the cap rather than growing a tick.
-	runOnClock(t, clk, time.Second, func() { pushTick(d, f) })
-	runOnClock(t, clk, time.Second, func() { pushTick(d, f) })
+// tick runs one guard tick on the fake clock: the first with the seat listed,
+// the later ones resuming the pending stop from its saved state.
+func (x *unraisableItem) tick(t *testing.T, first bool) {
+	t.Helper()
+	runOnClock(t, x.clk, time.Second, func() {
+		if first {
+			x.d.runOverrunGuard(x.f.seams())
+			return
+		}
+		pushTick(x.d, x.f)
+	})
+}
 
-	if len(f.handedBack) != 0 {
-		t.Errorf("hand-backs = %q, want none while the item cannot be raised", f.handedBack)
+// driveToTheOriginCap runs the ticks that reach overrunOriginReadMaxAttempts.
+// The last of them is at the cap, where the stop attempts the high-severity
+// item and fails it.
+func (x *unraisableItem) driveToTheOriginCap(t *testing.T) {
+	t.Helper()
+	x.tick(t, true)
+	for tick := 2; tick <= overrunOriginReadMaxAttempts; tick++ {
+		x.tick(t, false)
+		if tick < overrunOriginReadMaxAttempts && len(x.f.handedBack) != 0 {
+			t.Fatalf("tick %d: handed back below the cap: %q", tick, x.f.handedBack)
+		}
 	}
-	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+}
+
+func (x *unraisableItem) state(t *testing.T) overrunState {
+	t.Helper()
+	st, err := readOverrunState(x.d.config.TownRoot, stopSeat.Bead)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return st
+}
+
+// A raise that cannot reach the town keeps the bead until its own cap: the
+// item is raised before the hand-back so a bead is never released without it,
+// and short of overrunOriginRaiseMaxAttempts the stop counts the failed raise
+// and holds (gt-cfu238).
+func TestOverrunOriginReadRetryRaiseFailureHoldsBelowItsCap(t *testing.T) {
+	t.Parallel()
+	x := newUnraisableItem(t)
+	x.driveToTheOriginCap(t) // the raise attempt at the cap fails and holds
+
+	x.tick(t, false) // raise attempt 2
+	x.tick(t, false) // raise attempt 3
+
+	if len(x.f.handedBack) != 0 {
+		t.Errorf("hand-backs = %q, want none while the item can still be raised next tick", x.f.handedBack)
+	}
+	st := x.state(t)
 	if st.OriginReadFailures != overrunOriginReadMaxAttempts {
 		t.Errorf("OriginReadFailures = %d, want the cap %d", st.OriginReadFailures, overrunOriginReadMaxAttempts)
+	}
+	if st.OriginReadRaiseFailures != 3 {
+		t.Errorf("OriginReadRaiseFailures = %d, want 3, one per failed raise", st.OriginReadRaiseFailures)
 	}
 	if !st.StoppedAt.IsZero() {
 		t.Error("the stop finished though the item was never raised")
@@ -575,6 +627,101 @@ func TestOverrunOriginReadRetryClearsTheCountWhenTheRecordStopsAnswering(t *test
 	}
 	if st.OriginReadFailures != 0 {
 		t.Errorf("OriginReadFailures = %d, want 0: the step answered without a read, so no read is pending", st.OriginReadFailures)
+	}
+}
+
+// An escalation store that stays down must not hold the bead for good: past
+// overrunOriginRaiseMaxAttempts the stop hands the bead back without its item,
+// and the note says so, so the operator knows no escalation holds the alarm
+// (gt-cfu238).
+func TestOverrunOriginReadRetryCapHandsBackWhenTheItemStaysUnraised(t *testing.T) {
+	t.Parallel()
+	x := newUnraisableItem(t)
+	x.driveToTheOriginCap(t) // raise attempt 1 fails and holds
+
+	// Raise attempts 2 through the one below the cap fail and hold the bead.
+	for attempt := 2; attempt < overrunOriginRaiseMaxAttempts; attempt++ {
+		x.tick(t, false)
+		if len(x.f.handedBack) != 0 {
+			t.Fatalf("raise attempt %d of %d: handed back below the raise cap: %q",
+				attempt, overrunOriginRaiseMaxAttempts, x.f.handedBack)
+		}
+	}
+	x.tick(t, false) // the raise that reaches its cap gives up
+
+	if len(x.f.handedBack) != 1 {
+		t.Fatalf("hand-backs = %q, want the bead handed back once at the raise cap", x.f.handedBack)
+	}
+	if len(x.f.handBackNotes) != 1 {
+		t.Fatalf("notes = %q, want exactly one", x.f.handBackNotes)
+	}
+	note := x.f.handBackNotes[0]
+	if !strings.Contains(note, stopSeat.Branch) {
+		t.Errorf("note %q does not name the branch origin could not be read for (%s)", note, stopSeat.Branch)
+	}
+	if !strings.Contains(note, "not raised") {
+		t.Errorf("note %q does not say the high-severity item was not raised", note)
+	}
+	if *x.deleted != 0 {
+		t.Errorf("the sandbox record was removed %d times, want 0: its work may be nowhere", *x.deleted)
+	}
+	if _, ok, err := session.ReadSandboxRecord(x.d.config.TownRoot, overrunStopSessionName); !ok || err != nil {
+		t.Errorf("the sandbox record is gone (ok %v, err %v); the stop keeps it for the operator", ok, err)
+	}
+	highTried := false
+	for _, call := range x.rec.Escalations() {
+		if call.Err == nil {
+			t.Errorf("an escalation was delivered though the store was down: %+v", call)
+		}
+		if strings.EqualFold(call.Escalation.Severity, "high") {
+			highTried = true
+		}
+	}
+	if !highTried {
+		t.Error("the high-severity item was never attempted, so the hand-back did not wait on a real raise")
+	}
+	st := x.state(t)
+	if st.OriginReadRaiseFailures != overrunOriginRaiseMaxAttempts {
+		t.Errorf("OriginReadRaiseFailures = %d, want the raise cap %d", st.OriginReadRaiseFailures, overrunOriginRaiseMaxAttempts)
+	}
+	if st.StoppedAt.IsZero() {
+		t.Error("the stop did not finish at the raise cap: the bead would be held forever")
+	}
+	if !strings.Contains(x.buf.String(), "handed back without it") {
+		t.Errorf("the log does not warn that the bead was handed back without its item:\n%s", x.buf.String())
+	}
+}
+
+// A read that answers resolves the raise failures an earlier tick counted: the
+// hand-back proceeds on the answer it now has, and neither count is left behind
+// for a later tick to read as one that gave up (gt-cfu238).
+func TestOverrunOriginReadRetryRaiseFailuresClearedWhenTheReadAnswers(t *testing.T) {
+	t.Parallel()
+	x := newUnraisableItem(t)
+	x.driveToTheOriginCap(t)
+	x.tick(t, false) // raise attempt 2 fails and holds
+	if st := x.state(t); st.OriginReadRaiseFailures == 0 {
+		t.Fatal("no raise failure was counted, so the clear below proves nothing")
+	}
+
+	x.d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + stopSeat.Branch, Hash: "aaa111"}}}
+	}
+	x.tick(t, false)
+
+	if len(x.f.handedBack) != 1 {
+		t.Fatalf("hand-backs = %q, want the bead handed back once the read answered", x.f.handedBack)
+	}
+	if *x.deleted != 1 {
+		t.Errorf("the sandbox record was removed %d times, want once: origin holds the branch", *x.deleted)
+	}
+	if note := x.f.handBackNotes[0]; strings.Contains(note, "not raised") {
+		t.Errorf("note %q says the item was not raised, but the stop never gave up on it", note)
+	}
+	st := x.state(t)
+	if st.OriginReadFailures != 0 || st.OriginReadRaiseFailures != 0 {
+		t.Errorf("counts = %d failed reads, %d failed raises after the read answered; want both 0",
+			st.OriginReadFailures, st.OriginReadRaiseFailures)
 	}
 }
 
