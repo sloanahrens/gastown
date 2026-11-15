@@ -72,6 +72,11 @@ func TestIntegrationLaunchBuildsTheTaskFileFromOneBeadRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
+	// bd init runs in this directory, and a missing one fails the exec with
+	// ENOENT under the binary's name.
+	if err := os.MkdirAll(mayorRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	initBeadsDBWithPrefix(t, mayorRigPath, prefix)
 
 	db := beads.NewPinned(filepath.Join(mayorRigPath, ".beads"))
