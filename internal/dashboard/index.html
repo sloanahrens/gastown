@@ -5331,19 +5331,34 @@ const isTownStore = b => b.rig === TOWN_STORE;
 // the bead (internal/daemon/hold_stale_attention.go). needs-pro is not one:
 // it asks for a seat, not for a person. The reading carries no field naming
 // the dispatcher's labels, so this is that one list, in one place, for the
-// page. Matched as dispatch.HasLabel matches: case- and space-insensitive.
+// page, and the page tests check it both ways against the Go rules
+// (TestQueueHeldLabelsTrackTheDispatchersRules). Matched as dispatch.HasLabel
+// matches: case- and space-insensitive.
 const HELD_LABELS = ["operator", "operator-only", "overseer-only", "human-only", "crew-only",
   "held", "needs-human", "gt:needs-human", "needs-overseer", "gt:needs-overseer",
   "needs-operator", "gt:needs-operator", "needs-split"];
-const heldByLabel = b => (b.labels || []).some(l => HELD_LABELS.indexOf(String(l).trim().toLowerCase()) >= 0);
+// heldLabelOn is the hold label a bead wears, spelled as the list spells it
+// ("held" for "  Held  "), or "" when it wears none. It is the label the row's
+// tag names, so the tag says which label holds the bead rather than only that
+// one does.
+function heldLabelOn(b) {
+  for (const l of b.labels || []) {
+    const t = String(l).trim().toLowerCase();
+    if (HELD_LABELS.indexOf(t) >= 0) return t;
+  }
+  return "";
+}
+const heldByLabel = b => heldLabelOn(b) !== "";
 
 // splitHeld is a ready bead the split route holds: the dispatcher's last tick
 // reported it under the route's own line, "split: " and then the estimate and
 // the trigger (specdispatch.SkipSplitOver, written by the tick's split-held
 // line). The page reads that report rather than deriving the threshold from the
 // bead's own labels, so the route's decision stays the dispatcher's (gt-bgumb7).
-// A row with no tick reason is not split-held: the split label outlasts the
-// decision it recorded.
+// The page tests build their reasons from that constant, so a reworded prefix
+// fails them rather than silently counting held beads as ready
+// (TestQueueSplitHeldReadsTheDispatchersReasonLine). A row with no tick reason
+// is not split-held: the split label outlasts the decision it recorded.
 function splitHeld(b) { return /^split: /.test(skipWhy(b.skip_reason || b.shape_note)); }
 
 // DISPATCH_PIECES are the pieces the "ready to dispatch" union is made of: the
@@ -5628,7 +5643,7 @@ function drawQueueList(box, s) {
     // lints to, as it does in the pieces (gt-bgumb7): a bead nobody may sling
     // is not drawn as ready.
     else if (splitHeld(b)) { const g = el("span", "tag", "held for splitting"); g.title = "the split route holds this bead, which is not slung as it stands: " + (b.skip_reason || b.shape_note || ""); t.append(document.createTextNode(" "), g); }
-    else if (heldByLabel(b)) { const g = el("span", "tag", "held"); g.title = "a hold label keeps this bead off the dispatcher: " + (b.shape_note || "the spec dispatcher slings only beads nobody holds"); t.append(document.createTextNode(" "), g); }
+    else if (heldByLabel(b)) { const g = el("span", "tag", "held"); g.title = "held by the label " + heldLabelOn(b) + ": the spec dispatcher slings only beads nobody holds"; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "skipped") {
       // A stale ledger's skipped shape is left over from a tick the page
