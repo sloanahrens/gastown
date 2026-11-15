@@ -351,9 +351,10 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // A decision — the proposal adopted, the rule's rejection with its reason, or a
 // retrain that has too few rows to fit — is stored as the week's last run, so
 // the week is spent however it was decided. A step that failed is written on the
-// line and leaves the week unspent, so the next hour tries again: an extract
-// that has not run for the day yet, or an embedder that is unreachable, is worth
-// another look rather than a week of stale weights.
+// line, returned as the run's error so the hour exits non-zero, and leaves the
+// week unspent, so the next hour tries again: an extract that has not run for
+// the day yet, or an embedder that is unreachable, is worth another look rather
+// than a week of stale weights.
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
@@ -394,7 +395,7 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	train.Out = io.Discard
 	if err := train.runStoryPointsTrain(ctx, real, env); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
-			return c.receipt("story points weekly: failed: %v; the next hour tries again", err)
+			return c.weeklyFailure(err)
 		}
 		if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 			return err
@@ -407,13 +408,23 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	adopt := c
 	adopt.Out = &decision
 	if err := adopt.runStoryPointsAdopt(ctx, real, env); err != nil {
-		return c.receipt("story points weekly: failed: %v; the next hour tries again", err)
+		return c.weeklyFailure(err)
 	}
 	if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 		return err
 	}
 	return c.receipt("story points weekly: %s",
 		strings.TrimPrefix(strings.TrimSpace(decision.String()), storyPointsAdoptReceipt))
+}
+
+// weeklyFailure is the weekly run's line and error for a retrain or adoption that
+// failed. The line names the failure and that the week is not spent; the error
+// carries the same failure to the hour, so the plugin exits non-zero rather than
+// recording a run that retrained nothing as a success. A line that cannot be
+// written is joined to the error, so neither is lost.
+func (c Commands) weeklyFailure(err error) error {
+	failure := fmt.Errorf("story points weekly: failed: %w", err)
+	return errors.Join(failure, c.receipt("%v; the next hour tries again", failure))
 }
 
 // now is the clock the weekly run reads: Now when the caller set one, the wall

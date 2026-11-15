@@ -159,15 +159,17 @@ func TestStoryPointsWeeklyReportsARetrainThatCannotFit(t *testing.T) {
 }
 
 // TestStoryPointsWeeklyReportsAFailedRetrainAndLeavesTheWeek: a retrain that
-// failed — here on an embedder that cannot be reached — is on the line, and the
-// week is not spent, so the next hour tries again.
+// failed — here on an embedder that cannot be reached — is on the line and is
+// returned as the run's error, so the hour exits non-zero, and the week is not
+// spent, so the next hour tries again.
 func TestStoryPointsWeeklyReportsAFailedRetrainAndLeavesTheWeek(t *testing.T) {
 	t.Parallel()
 	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
 	var out strings.Builder
 	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{fail: true})
-	if err := c.RunStoryPointsWeekly(context.Background()); err != nil {
-		t.Fatalf("RunStoryPointsWeekly: %v", err)
+	err := c.RunStoryPointsWeekly(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "embedder unreachable") {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want the failed retrain returned", err)
 	}
 	got := out.String()
 	if !strings.HasPrefix(got, "story points weekly: failed: ") || !strings.Contains(got, "embedder unreachable") {

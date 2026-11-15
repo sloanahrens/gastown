@@ -32,8 +32,8 @@ prints a skipped line and exits 0, so the daemon records the hour as skipped
 rather than as a failure. Every step runs whichever one fails, and the command
 fails with the first failing step's error. A dataset failure is logged one line
 each and does not fail the command. The weekly retrain writes one line naming its
-outcome; a last-run stamp it cannot read, or a town it cannot wire, fails the
-command instead.
+outcome; a retrain or adoption that fails, a last-run stamp it cannot read, or
+a town it cannot wire, fails the command too.
 
 This is the one entry point the daemon's town-metrics plugin calls.`,
 	Args: cobra.NoArgs,
