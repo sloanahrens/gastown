@@ -130,13 +130,17 @@ func digestCheck(ctx context.Context, name string, probe func(context.Context) (
 }
 
 // queueReasons are the health line's reasons that name a queue a person has to
-// work through, not a fault: beads waiting for the overseer or a human, and
-// open escalations. A reason is a key here carrying a count; the key alone does
-// not make it a queue state (see isCount).
-var queueReasons = map[string]bool{
-	"needs-overseer": true,
-	"needs-human":    true,
-	"escalations":    true,
+// work through, not a fault: beads waiting for the overseer or a human, and an
+// open escalation. Each maps to the check its value must pass, because the key
+// alone does not make a reason a queue state: a person wait carries a count
+// (needs-overseer=2) and the escalation field carries how old the oldest open
+// escalation is (escalation=oldest_2h, its value as internal/townhealth
+// renders it). The key list and the values are the ones the town writes; a
+// reason outside them fails.
+var queueReasons = map[string]func(string) bool{
+	"needs-overseer": isCount,
+	"needs-human":    isCount,
+	"escalation":     isOldestAge,
 }
 
 // healthCheck verifies the install, not the town's queue: it passes on a GREEN
@@ -163,13 +167,14 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 
 // queueOnlyHealthLine reports whether line is a health line a roll may pass on,
 // and the queue reasons it ignored. A GREEN verdict passes whatever it lists;
-// a DEGRADED one passes only when every reason it lists is a queue state, a
-// queueReasons key carrying a count. The reasons are the tokens after the
-// colon, separated by commas or by spaces, so both the comma-separated form and
-// the space-separated line the town renders read. Anything else — a RED or
-// UNKNOWN verdict, a key outside queueReasons, a value that is not a count, a
-// DEGRADED line with no reason, a line without the "<VERDICT> tick <age> ago"
-// head — is not ok, so a shape this does not know fails rather than passes.
+// a DEGRADED one passes only when every reason it lists is a queue state, one
+// of the queueReasons keys carrying the value its field writes. The reasons
+// are the tokens after the colon, separated by commas or by spaces, so both
+// the comma-separated form and the space-separated line the town renders read.
+// Anything else — a RED or UNKNOWN verdict, a key outside queueReasons, a
+// value that is not the one its field writes, a DEGRADED line with no reason, a
+// line without the "<VERDICT> tick <age> ago" head — is not ok, so a shape
+// this does not know fails rather than passes.
 func queueOnlyHealthLine(line string) (queue []string, ok bool) {
 	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
 	if !found {
@@ -203,13 +208,32 @@ func queueOnlyHealthLine(line string) (queue []string, ok bool) {
 		return nil, false
 	}
 	for _, reason := range tokens {
-		key, count, found := strings.Cut(reason, "=")
-		if !found || !queueReasons[strings.ToLower(key)] || !isCount(count) {
+		key, value, found := strings.Cut(reason, "=")
+		accept, known := queueReasons[strings.ToLower(key)]
+		if !found || !known || !accept(value) {
 			return nil, false
 		}
 		queue = append(queue, reason)
 	}
 	return queue, true
+}
+
+// isOldestAge reports whether s is the value the town's escalation field
+// writes: "oldest" joined to the age of the oldest open escalation, which is a
+// short duration with a single unit as internal/townhealth's Short renders it
+// (400ms, 28s, 5m, 2h, 3d), the space between the two words compacted to an
+// underscore. A count is not this value, and neither is an age without a unit.
+func isOldestAge(s string) bool {
+	age, found := strings.CutPrefix(s, "oldest_")
+	if !found {
+		return false
+	}
+	for _, unit := range []string{"ms", "s", "m", "h", "d"} {
+		if count, found := strings.CutSuffix(age, unit); found {
+			return isCount(count)
+		}
+	}
+	return false
 }
 
 // isCount reports whether s is a whole-number count: one or more decimal
