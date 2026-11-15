@@ -11,7 +11,8 @@ import (
 // and KindEscalate args follow gt, so a runner prefixes the binary the Kind
 // names.
 const (
-	// KindDepAdd adds one dependency edge from a citing bead to a closed bead.
+	// KindDepAdd adds one dependency edge from a citing bead to the bead it
+	// cites.
 	KindDepAdd = "dep-add"
 	// KindLabelAdd adds one label to one bead.
 	KindLabelAdd = "label-add"
@@ -60,7 +61,9 @@ type State struct {
 // store's dependency edges and labels, plus a chronic label and an escalation
 // for every cited fix that two or more distinct citing beads now claim did not
 // hold. A write the state already carries, and one an earlier proposal already
-// asked for, is emitted once.
+// asked for, is emitted once. Proposals are ordered by citing bead, cited bead,
+// relationship and whether they are ambiguous, so the caller's order never
+// decides the plan.
 func Plan(proposals []Proposal, state State) []Action {
 	claims := claimsByOld(state)
 	ordered := slices.Clone(proposals)
@@ -68,7 +71,13 @@ func Plan(proposals []Proposal, state State) []Action {
 		if c := cmp.Compare(a.New, b.New); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.Old, b.Old)
+		if c := cmp.Compare(a.Old, b.Old); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Rel, b.Rel); c != 0 {
+			return c
+		}
+		return compareAmbiguous(a.Ambiguous, b.Ambiguous)
 	})
 	var actions []Action
 	seen := make(map[string]bool)
@@ -100,7 +109,7 @@ func planProposal(actions []Action, seen map[string]bool, claims map[string]map[
 	if !state.hasEdge(p.New, p.Old, p.Rel) {
 		actions = addAction(actions, seen, Action{
 			Kind: KindDepAdd,
-			Args: []string{"dep", "add", p.New, p.Old, "--type=" + depType},
+			Args: bdWriteArgs([]string{"dep", "add", "--type=" + depType}, p.New, p.Old),
 		})
 	}
 	for _, l := range relationshipLabels(p) {
@@ -209,7 +218,27 @@ func relationshipLabels(p Proposal) []beadLabel {
 
 // labelAddAction is the bd write that adds one label to one bead.
 func labelAddAction(bead, label string) Action {
-	return Action{Kind: KindLabelAdd, Args: []string{"update", bead, "--add-label=" + label}}
+	return Action{Kind: KindLabelAdd, Args: bdWriteArgs([]string{"update", "--add-label=" + label}, bead)}
+}
+
+// bdWriteArgs is the argv of a bd write: the command and its flags, then the
+// bead ids past a "--" so a bead id that starts with a hyphen stays an operand
+// and is never read as a flag.
+func bdWriteArgs(flags []string, ids ...string) []string {
+	args := append(slices.Clone(flags), "--")
+	return append(args, ids...)
+}
+
+// compareAmbiguous orders an ambiguous proposal before one that claims a
+// relationship.
+func compareAmbiguous(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return -1
+	}
+	return 1
 }
 
 // escalateAction is the escalation a chronic fix raises: its fingerprint names

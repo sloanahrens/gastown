@@ -10,11 +10,11 @@ import (
 // The test spells each write's argv itself, so a row pins the contract a runner
 // reads rather than echoing the implementation.
 func depAdd(new, old, depType string) Action {
-	return Action{Kind: KindDepAdd, Args: []string{"dep", "add", new, old, "--type=" + depType}}
+	return Action{Kind: KindDepAdd, Args: []string{"dep", "add", "--type=" + depType, "--", new, old}}
 }
 
 func labelAdd(bead, label string) Action {
-	return Action{Kind: KindLabelAdd, Args: []string{"update", bead, "--add-label=" + label}}
+	return Action{Kind: KindLabelAdd, Args: []string{"update", "--add-label=" + label, "--", bead}}
 }
 
 func chronicEscalate(old string, citing int) Action {
@@ -172,7 +172,7 @@ func TestPlan(t *testing.T) {
 			},
 		},
 		{
-			name: "two claims from one citing bead are one incident",
+			name: "two claims from one citing bead are one incident, ordered by relationship",
 			proposals: []Proposal{
 				{New: "gt-new", Old: "gt-old", Rel: Recurrence},
 				{New: "gt-new", Old: "gt-old", Rel: SameClass},
@@ -183,6 +183,15 @@ func TestPlan(t *testing.T) {
 				labelAdd("gt-old", "recurred"),
 				labelAdd("gt-new", "same-class-of:gt-old"),
 				labelAdd("gt-old", "class-recurred"),
+			},
+		},
+		{
+			name:      "a dash-prefixed id stays an operand past the separator",
+			proposals: []Proposal{{New: "-gt-new", Old: "gt-old", Rel: Recurrence}},
+			want: []Action{
+				depAdd("-gt-new", "gt-old", "related"),
+				labelAdd("-gt-new", "recurrence-of:gt-old"),
+				labelAdd("gt-old", "recurred"),
 			},
 		},
 		{
@@ -229,6 +238,34 @@ func TestPlan(t *testing.T) {
 	}
 }
 
+// TestPlanTiesDoNotFollowInputOrder pins the order of proposals that agree on
+// citing and cited bead: the relationship, then the ambiguous flag, decides it,
+// so reversing the caller's slice leaves the plan unchanged.
+func TestPlanTiesDoNotFollowInputOrder(t *testing.T) {
+	t.Parallel()
+	proposals := []Proposal{
+		{New: "gt-new", Old: "gt-old", Rel: Recurrence},
+		{New: "gt-new", Old: "gt-old", Rel: Recurrence, Ambiguous: true},
+		{New: "gt-new", Old: "gt-old", Rel: SameClass},
+	}
+	reversed := slices.Clone(proposals)
+	slices.Reverse(reversed)
+	want := []Action{
+		labelAdd("gt-new", "fix-rel:ambiguous"),
+		depAdd("gt-new", "gt-old", "related"),
+		labelAdd("gt-new", "recurrence-of:gt-old"),
+		labelAdd("gt-old", "recurred"),
+		labelAdd("gt-new", "same-class-of:gt-old"),
+		labelAdd("gt-old", "class-recurred"),
+	}
+	if got := Plan(proposals, State{}); !eqActions(got, want) {
+		t.Errorf("Plan() = %#v, want %#v", got, want)
+	}
+	if got := Plan(reversed, State{}); !eqActions(got, want) {
+		t.Errorf("Plan(reversed) = %#v, want %#v", got, want)
+	}
+}
+
 func TestPlanIsIdempotent(t *testing.T) {
 	t.Parallel()
 	proposals := []Proposal{
@@ -269,16 +306,16 @@ func applyActions(t *testing.T, state State, actions []Action) State {
 	for _, a := range actions {
 		switch a.Kind {
 		case KindDepAdd:
-			if len(a.Args) != 5 {
-				t.Fatalf("dep-add args = %v, want dep add <new> <old> --type=<type>", a.Args)
+			if len(a.Args) != 6 || a.Args[3] != "--" {
+				t.Fatalf("dep-add args = %v, want dep add --type=<type> -- <new> <old>", a.Args)
 			}
-			typ := strings.TrimPrefix(a.Args[4], "--type=")
-			next.Deps[Edge{New: a.Args[2], Old: a.Args[3], Rel: relationshipOfType(t, typ)}] = true
+			typ := strings.TrimPrefix(a.Args[2], "--type=")
+			next.Deps[Edge{New: a.Args[4], Old: a.Args[5], Rel: relationshipOfType(t, typ)}] = true
 		case KindLabelAdd:
-			if len(a.Args) != 3 {
-				t.Fatalf("label-add args = %v, want update <bead> --add-label=<label>", a.Args)
+			if len(a.Args) != 4 || a.Args[2] != "--" {
+				t.Fatalf("label-add args = %v, want update --add-label=<label> -- <bead>", a.Args)
 			}
-			bead, label := a.Args[1], strings.TrimPrefix(a.Args[2], "--add-label=")
+			bead, label := a.Args[3], strings.TrimPrefix(a.Args[1], "--add-label=")
 			if next.Labels[bead] == nil {
 				next.Labels[bead] = make(map[string]bool)
 			}
