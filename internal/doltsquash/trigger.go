@@ -1,7 +1,11 @@
 // Package doltsquash decides when a rolling Dolt history squash runs.
 package doltsquash
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // Trigger names an input the daily squash check reads for one database.
 type Trigger string
@@ -67,4 +71,80 @@ func Evaluate(in Inputs, th Thresholds) Verdict {
 	check(TriggerBackupDuration, in.BackupDuration.Err, in.BackupDuration.Value > th.BackupDuration)
 	check(TriggerQueryP95, in.QueryP95.Err, in.QueryP95.Value > th.QueryP95)
 	return v
+}
+
+// Settings are the values a daily check decides against: the trigger
+// thresholds and the keep window. The squash block of daemon.json fills them
+// (D8 of docs/plans/2026-11-15-dolt-squash-plan.md).
+type Settings struct {
+	Thresholds Thresholds
+	// KeepDays is how many days of history stay unsquashed. Decide refuses a
+	// value below 1: a zero window would put the cut at the check's clock and
+	// a negative one after it, so every commit would be squashed.
+	KeepDays int
+}
+
+// RunInterval is the shortest gap between two squash runs: a check inside it is
+// not due even when a threshold trips (design step 1, "no run in the last 24
+// hours").
+const RunInterval = 24 * time.Hour
+
+// Decision is a daily check's answer for one database.
+type Decision struct {
+	// Due reports whether a squash run may start now.
+	Due bool
+	// Cut is the instant a commit must predate to be squashed: the check's
+	// clock minus the keep window.
+	Cut time.Time
+	// Verdict names the thresholds the readings are over and the inputs that
+	// could not be read.
+	Verdict Verdict
+	// Reason is the log line: why the check is due, or what held it back,
+	// naming every unreadable input.
+	Reason string
+}
+
+// Decide reports whether a squash run is due at now for one database, with the
+// cut instant it would squash to. lastRun is when the previous run started,
+// zero when none is recorded; a run started inside RunInterval holds the check
+// back even when a threshold trips. A stamp after now is read as a backwards
+// clock and holds nothing back, so a clock set back costs one extra run rather
+// than a schedule that never comes due. A KeepDays below 1 is an error, not a
+// decision.
+func Decide(now, lastRun time.Time, in Inputs, cfg Settings) (Decision, error) {
+	if cfg.KeepDays < 1 {
+		return Decision{}, fmt.Errorf("doltsquash: keep_days %d is below 1, so the cut would leave no history", cfg.KeepDays)
+	}
+	v := Evaluate(in, cfg.Thresholds)
+	d := Decision{
+		Cut:     now.Add(-time.Duration(cfg.KeepDays) * 24 * time.Hour),
+		Verdict: v,
+	}
+	switch {
+	case !v.Tripped():
+		d.Reason = "no threshold tripped"
+	case !lastRun.IsZero() && !lastRun.After(now) && now.Sub(lastRun) < RunInterval:
+		d.Reason = fmt.Sprintf("tripped (%s), but the last run started %s ago, inside the %s gate",
+			joinTriggers(v.TrippedBy), now.Sub(lastRun).Truncate(time.Minute), hours(RunInterval))
+	default:
+		d.Due = true
+		d.Reason = "due: " + joinTriggers(v.TrippedBy) + " over the limit"
+	}
+	if len(v.Unreadable) > 0 {
+		d.Reason += "; unreadable: " + joinTriggers(v.Unreadable)
+	}
+	return d, nil
+}
+
+func joinTriggers(ts []Trigger) string {
+	names := make([]string, len(ts))
+	for i, t := range ts {
+		names[i] = string(t)
+	}
+	return strings.Join(names, ", ")
+}
+
+// hours renders a duration in whole hours for a log line.
+func hours(d time.Duration) string {
+	return fmt.Sprintf("%gh", d.Hours())
 }
