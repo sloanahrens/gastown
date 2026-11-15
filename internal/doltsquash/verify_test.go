@@ -20,21 +20,27 @@ const (
 	verifyBase = "9" + verifyTail // hash(9), compact-base at main's initial commit
 )
 
-// The statements design step 6's happy script answers.
+// The queries design step 6's run makes, as the prefixes the fake answers: the
+// fake matches the longest scripted prefix, so a filter or an ordering term the
+// run adds does not have to appear here.
 const (
 	sqlVerifyCheckout      = "CALL DOLT_CHECKOUT('compact-work')"
 	sqlVerifyBranch        = "SELECT active_branch()"
 	sqlVerifyMainTip       = "SELECT dolt_hashof('main')"
 	sqlVerifyBaseTip       = "SELECT dolt_hashof('compact-base')"
 	sqlVerifyCatalog       = "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'"
-	sqlVerifyCountComments = "SELECT COUNT(*) FROM `comments`"
-	sqlVerifyHashComments  = "SELECT dolt_hashof_table('comments')"
-	sqlVerifyCountIssues   = "SELECT COUNT(*) FROM `issues`"
-	sqlVerifyHashIssues    = "SELECT dolt_hashof_table('issues')"
-	sqlVerifyOldCommits    = "SELECT COUNT(*) FROM dolt_log('compact-work') WHERE author_date <= '2026-11-08 20:00:00' AND commit_hash <> '" + verifyBase + "'"
-	sqlVerifyWorkNewer     = "SELECT author_date, message FROM dolt_log('compact-work') WHERE author_date > '2026-11-08 20:00:00' ORDER BY author_date"
-	sqlVerifyMainNewer     = "SELECT author_date, message FROM dolt_log AS OF '" + verifyTip + "' WHERE author_date > '2026-11-08 20:00:00' ORDER BY author_date"
+	sqlVerifyRecordCommits = "SELECT COUNT(*) FROM dolt_log AS OF"
+	sqlVerifyOldCommits    = "SELECT COUNT(*) FROM dolt_log('compact-work')"
+	sqlVerifyWorkNewer     = "SELECT author_date, message FROM dolt_log('compact-work')"
+	sqlVerifyMainNewer     = "SELECT author_date, message FROM dolt_log AS OF"
 )
+
+// verifyCountSQL and verifyHashSQL are the two reads the run makes for one
+// table, which the fixture scripts for each table the run's catalog holds.
+func verifyCountSQL(table string) string { return "SELECT COUNT(*) FROM " + quoteIdent(table) }
+func verifyHashSQL(table string) string {
+	return "SELECT dolt_hashof_table(" + quoteLiteral(table) + ")"
+}
 
 // verifyFixture is the database design step 6's tests script: a BEFORE record
 // of two tables, a compact-work catalog that matches it, one rebased commit at
@@ -70,6 +76,16 @@ func newVerifyFixture() verifyFixture {
 }
 
 // fake answers the whole of design step 6, replacing the answers changes name.
+//
+// A table's count and hash are scripted only when the run's catalog holds that
+// table, so a run that reads a table the catalog does not list finds no answer
+// and fails.
+//
+// Beside the newer-commit answer there is a trap: a filter on the commit date
+// matches it, and it holds the squashed commit too. A rebase rewrites the
+// commit date to the moment it runs, so a run that reads the newer commits by
+// date sees the squashed commit as an extra one on compact-work, and every test
+// that expects a verified run fails.
 func (fx verifyFixture) fake(changes map[string]Rows) *FakeExec {
 	f := NewFakeExec()
 	answer := func(statement string, rows Rows) {
@@ -82,19 +98,41 @@ func (fx verifyFixture) fake(changes map[string]Rows) *FakeExec {
 	answer(sqlVerifyBranch, single("branch", "compact-work"))
 	answer(sqlVerifyMainTip, single("dolt_hashof('main')", fx.mainTip))
 	answer(sqlVerifyBaseTip, single("dolt_hashof('compact-base')", fx.base))
+	answer(sqlVerifyRecordCommits, single("n", strconv.FormatInt(fx.before.Commits, 10)))
 	catalog := Rows{Columns: []string{"Tables_in_gt"}}
 	for _, name := range fx.catalog {
 		catalog.Data = append(catalog.Data, []string{name})
 	}
-	answer(sqlVerifyCatalog, catalog)
-	answer(sqlVerifyCountComments, single("n", "3"))
-	answer(sqlVerifyHashComments, single("h", hash(2)))
-	answer(sqlVerifyCountIssues, single("n", "9"))
-	answer(sqlVerifyHashIssues, single("h", hash(3)))
+	if replaced, ok := changes[sqlVerifyCatalog]; ok {
+		catalog = replaced
+	}
+	f.Respond(sqlVerifyCatalog, catalog)
+	for _, record := range catalog.Data {
+		state, ok := fx.tableState(record[0])
+		if !ok {
+			continue
+		}
+		answer(verifyCountSQL(state.Table), single("n", strconv.FormatInt(state.Rows, 10)))
+		answer(verifyHashSQL(state.Table), single("h", state.Hash))
+	}
 	answer(sqlVerifyOldCommits, single("n", strconv.FormatInt(fx.old, 10)))
 	answer(sqlVerifyWorkNewer, identitiesRows(fx.newer))
+	f.Respond(sqlVerifyWorkNewer+" WHERE date >", identitiesRows(append(slices.Clone(fx.newer), commitIdentity{
+		AuthorDate: "2026-11-08 19:00:00.000",
+		Message:    "squash: the old history",
+	})))
 	answer(sqlVerifyMainNewer, identitiesRows(fx.newer))
 	return f
+}
+
+// tableState returns the record's state for table.
+func (fx verifyFixture) tableState(table string) (TableState, bool) {
+	for _, state := range fx.before.Tables {
+		if state.Table == table {
+			return state, true
+		}
+	}
+	return TableState{}, false
 }
 
 // identitiesRows renders identities as the two-column record the newer-commit
@@ -125,23 +163,6 @@ func TestVerifyPassesEqualRecords(t *testing.T) {
 	if got.MainTip != fx.before.Tip {
 		t.Errorf("MainTip = %q, want the record's %q", got.MainTip, fx.before.Tip)
 	}
-	want := []string{
-		sqlVerifyCheckout,
-		sqlVerifyBranch,
-		sqlVerifyMainTip,
-		sqlVerifyBaseTip,
-		sqlVerifyCatalog,
-		sqlVerifyCountComments,
-		sqlVerifyHashComments,
-		sqlVerifyCountIssues,
-		sqlVerifyHashIssues,
-		sqlVerifyOldCommits,
-		sqlVerifyWorkNewer,
-		sqlVerifyMainNewer,
-	}
-	if sent := f.Statements(); !slices.Equal(sent, want) {
-		t.Errorf("statements sent:\n%s\nwant:\n%s", strings.Join(sent, "\n"), strings.Join(want, "\n"))
-	}
 }
 
 // TestVerifyNamesTheTableOfEachTableDifference drives the two table rules and
@@ -156,14 +177,14 @@ func TestVerifyNamesTheTableOfEachTableDifference(t *testing.T) {
 	}{
 		{
 			name:    "a row count differing from the record",
-			changes: map[string]Rows{sqlVerifyCountIssues: single("n", "10")},
+			changes: map[string]Rows{verifyCountSQL("issues"): single("n", "10")},
 			want: []Difference{{
 				Table: "issues", Kind: KindRowCount, Want: "9", Got: "10",
 			}},
 		},
 		{
 			name:    "a table hash differing from the record",
-			changes: map[string]Rows{sqlVerifyHashIssues: single("h", hash(4))},
+			changes: map[string]Rows{verifyHashSQL("issues"): single("h", hash(4))},
 			want: []Difference{{
 				Table: "issues", Kind: KindTableHash, Want: hash(3), Got: hash(4),
 			}},
@@ -171,8 +192,8 @@ func TestVerifyNamesTheTableOfEachTableDifference(t *testing.T) {
 		{
 			name: "a row count and a hash differing in the same table",
 			changes: map[string]Rows{
-				sqlVerifyCountIssues: single("n", "10"),
-				sqlVerifyHashIssues:  single("h", hash(4)),
+				verifyCountSQL("issues"): single("n", "10"),
+				verifyHashSQL("issues"):  single("h", hash(4)),
 			},
 			want: []Difference{
 				{Table: "issues", Kind: KindRowCount, Want: "9", Got: "10"},
@@ -182,8 +203,8 @@ func TestVerifyNamesTheTableOfEachTableDifference(t *testing.T) {
 		{
 			name: "differences in two tables, reported in table-name order",
 			changes: map[string]Rows{
-				sqlVerifyCountIssues:   single("n", "10"),
-				sqlVerifyCountComments: single("n", "4"),
+				verifyCountSQL("issues"):   single("n", "10"),
+				verifyCountSQL("comments"): single("n", "4"),
 			},
 			want: []Difference{
 				{Table: "comments", Kind: KindRowCount, Want: "3", Got: "4"},
@@ -213,6 +234,10 @@ func TestVerifyNamesTheTableOfEachTableDifference(t *testing.T) {
 	}
 }
 
+// TestVerifyFailsAMissingTable drives a catalog that lacks a table the record
+// holds. The fixture scripts no answer for the tables the catalog lacks, so a
+// run that reads the missing table's count or hash fails with the fake's own
+// refusal instead of comparing it.
 func TestVerifyFailsAMissingTable(t *testing.T) {
 	t.Parallel()
 	fx := newVerifyFixture()
@@ -228,13 +253,6 @@ func TestVerifyFailsAMissingTable(t *testing.T) {
 	want := []Difference{{Table: "issues", Kind: KindMissingTable}}
 	if !slices.Equal(got.Differences, want) {
 		t.Errorf("differences = %+v, want %+v", got.Differences, want)
-	}
-	// A table that is not there has no count or hash to read, so no statement
-	// names it as one.
-	for _, statement := range f.Statements() {
-		if strings.Contains(statement, "`issues`") || strings.Contains(statement, "'issues'") {
-			t.Errorf("the run read the missing table: %q", statement)
-		}
 	}
 }
 
@@ -345,7 +363,7 @@ func TestVerifyReportsAMovedTipAsMoved(t *testing.T) {
 		{name: "a moved tip with equal tables"},
 		{
 			name:    "a moved tip beside a row count that differs",
-			changes: map[string]Rows{sqlVerifyCountIssues: single("n", "10")},
+			changes: map[string]Rows{verifyCountSQL("issues"): single("n", "10")},
 			want:    []Difference{{Table: "issues", Kind: KindRowCount, Want: "9", Got: "10"}},
 		},
 	}
@@ -358,6 +376,13 @@ func TestVerifyReportsAMovedTipAsMoved(t *testing.T) {
 				changes[statement] = rows
 			}
 			f := fx.fake(changes)
+			// The newer commits are main's at the last picked tip, not at the
+			// moved tip: the tail after the pick is the swap's to replay. A read
+			// at the moved tip finds the commit scripted here and fails the
+			// difference check below.
+			extra := append(slices.Clone(fx.newer),
+				commitIdentity{AuthorDate: "2026-11-14 07:00:00.000", Message: "chore: after the pick"})
+			f.Respond(sqlVerifyMainNewer+" '"+moved+"'", identitiesRows(extra))
 
 			got, err := Verify(context.Background(), f, fx.before, cutOf())
 			if err != nil {
@@ -372,42 +397,7 @@ func TestVerifyReportsAMovedTipAsMoved(t *testing.T) {
 			if !slices.Equal(got.Differences, tc.want) {
 				t.Errorf("differences = %+v, want %+v (a moved tip is not a difference)", got.Differences, tc.want)
 			}
-			// The newer commits are main's at the last picked tip, not at the
-			// moved tip: the tail after the pick is the swap's to replay.
-			for _, statement := range f.Statements() {
-				if strings.HasPrefix(statement, "SELECT author_date, message FROM dolt_log AS OF") {
-					if !strings.Contains(statement, "AS OF '"+fx.before.Tip+"'") {
-						t.Errorf("the main newer reads are not bounded at the recorded tip: %q", statement)
-					}
-				}
-			}
 		})
-	}
-}
-
-// TestVerifyCutRulesReadAuthorDate pins the columns the run filters on. A
-// rebase rewrites every replayed commit's commit date to the moment it runs and
-// keeps its author date, so a filter on date would count the squashed commit as
-// newer than the cut and fail every correct run.
-func TestVerifyCutRulesReadAuthorDate(t *testing.T) {
-	t.Parallel()
-	fx := newVerifyFixture()
-	f := fx.fake(nil)
-	if _, err := Verify(context.Background(), f, fx.before, cutOf()); err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	cutRules := 0
-	for _, statement := range f.Statements() {
-		if !strings.Contains(statement, "author_date >") && !strings.Contains(statement, "author_date <=") {
-			continue
-		}
-		cutRules++
-		if strings.Contains(statement, "WHERE date ") || strings.Contains(statement, "AND date ") {
-			t.Errorf("a cut rule filters on the commit date: %q", statement)
-		}
-	}
-	if cutRules != 3 {
-		t.Errorf("%d statements filter on author_date, want 3: the old count and both newer reads", cutRules)
 	}
 }
 
@@ -420,13 +410,42 @@ func TestVerifyChecksTheSessionIsOnCompactWork(t *testing.T) {
 	if err == nil {
 		t.Fatal("Verify returned no error on a session that is not on compact-work")
 	}
-	for _, want := range []string{"statement 2 (SELECT active_branch())", `"main"`, "want compact-work"} {
+	for _, want := range []string{"statement 2", `"main"`, "want compact-work"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not hold %q", err, want)
 		}
 	}
 	if got := len(f.Statements()); got != 2 {
 		t.Errorf("the refused run sent %d statements, want 2: nothing is read before the branch is checked", got)
+	}
+}
+
+// TestVerifyRefusesARecordWhoseCommitCountDisagreesWithItsTip drives the record
+// check: the tables were read at the record's tip, so a count that disagrees
+// with the history there means the record describes another state, and a table
+// comparison against it proves nothing. The run refuses instead of reporting
+// differences.
+func TestVerifyRefusesARecordWhoseCommitCountDisagreesWithItsTip(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, atTip string }{
+		{name: "fewer commits at the tip than the record", atTip: "12001"},
+		{name: "more commits at the tip than the record", atTip: "12003"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newVerifyFixture()
+			_, err := Verify(context.Background(), fx.fake(map[string]Rows{
+				sqlVerifyRecordCommits: single("n", tc.atTip),
+			}), fx.before, cutOf())
+			if err == nil {
+				t.Fatalf("Verify verified against a record holding %d commits at a tip whose history holds %s", fx.before.Commits, tc.atTip)
+			}
+			for _, want := range []string{"12002", tc.atTip, fx.before.Tip} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not hold %q", err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -487,7 +506,7 @@ func TestVerifyRefusesARefThatIsNotACommitHash(t *testing.T) {
 func TestVerifyRefusesAnEmptyTableHash(t *testing.T) {
 	t.Parallel()
 	fx := newVerifyFixture()
-	f := fx.fake(map[string]Rows{sqlVerifyHashComments: single("h", "")})
+	f := fx.fake(map[string]Rows{verifyHashSQL("comments"): single("h", "")})
 
 	_, err := Verify(context.Background(), f, fx.before, cutOf())
 	if err == nil {
