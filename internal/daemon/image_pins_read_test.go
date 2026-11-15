@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
@@ -36,19 +38,59 @@ const (
 	pinsReadOwner = "owner"
 )
 
-// pinsReadURL is the forge URL a fixture pin names for repo.
-func pinsReadURL(repo string) string {
+// pinsReadPinURL is the forge URL a fixture pin names for repo.
+func pinsReadPinURL(repo string) string {
 	return "http://forgejo:3000/" + pinsReadOwner + "/" + repo + ".git"
 }
 
-// pinsReadFile is the image-pins file the reader is handed: the four sources,
-// each named by urlOf and pinned at its fixture commit.
-func pinsReadFile(urlOf func(repo string) string) []byte {
+// pinsReadPinLines is the fixture file's four pin lines, in the order the file
+// names them, so a structural fixture changes only the line it tests.
+func pinsReadPinLines() []string {
+	return []string{
+		"bd " + pinsReadPinURL("beads") + " " + pinsReadBDCommit,
+		"om " + pinsReadPinURL("organic-mechanic") + " " + pinsReadOMCommit,
+		"hm " + pinsReadPinURL("history-man") + " " + pinsReadHMCommit,
+		"devops " + pinsReadPinURL("devops") + " " + pinsReadDevopsCommit,
+	}
+}
+
+// pinsReadFixture is the image-pins file the reader is handed: a comment line,
+// then the four sources, each named by urlOf and pinned at its fixture commit.
+// urlOf exists so the placeholder fixture writes {owner} where the file does.
+func pinsReadFixture(urlOf func(repo string) string) []byte {
 	return []byte("# the four external sources\n" +
 		"bd " + urlOf("beads") + " " + pinsReadBDCommit + "\n" +
 		"om " + urlOf("organic-mechanic") + " " + pinsReadOMCommit + "\n" +
 		"hm " + urlOf("history-man") + " " + pinsReadHMCommit + "\n" +
 		"devops " + urlOf("devops") + " " + pinsReadDevopsCommit + "\n")
+}
+
+// pinsReadFixtureWithBDURL is the fixture file with the bd line's URL replaced
+// by raw, for the rows that drive one pin's URL refusal.
+func pinsReadFixtureWithBDURL(raw string) []byte {
+	return pinsReadFixture(func(repo string) string {
+		if repo == "beads" {
+			return raw
+		}
+		return pinsReadPinURL(repo)
+	})
+}
+
+// pinsReadFileWithLines is the fixture's four pin lines changed by mutate, so a
+// structural fixture writes only the line it tests.
+func pinsReadFileWithLines(mutate func([]string) []string) []byte {
+	return []byte(strings.Join(mutate(append([]string(nil), pinsReadPinLines()...)), "\n") + "\n")
+}
+
+// pinsReadOtherStates is what the reader must report for the fixture's om, hm
+// and devops pins when bd is the only pin that fails: each read its own tip, one
+// commit behind.
+func pinsReadOtherStates() []ImagePinState {
+	return []ImagePinState{
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip, Behind: 1},
+		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Behind: 1},
+		{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 1},
+	}
 }
 
 // pinsReadLS is the ls-remote output that answers tip as the source's main.
@@ -111,9 +153,9 @@ func (f *fakePinCompare) CompareCommits(_ context.Context, owner, repo, base, he
 // the tip as head.
 func pinsReadCompareKey(base, head string) string { return base + "..." + head }
 
-// pinsReadHealthies is a git and a compare that answer every fixture source:
+// pinsReadAllHealthy is a git and a compare that answer every fixture source:
 // each pin trails its tip by one commit.
-func pinsReadHealthies() (*fakePinTips, *fakePinCompare) {
+func pinsReadAllHealthy() (*fakePinTips, *fakePinCompare) {
 	git := &fakePinTips{answers: map[string]string{}, errs: map[string]error{}}
 	cmp := &fakePinCompare{behind: map[string]int{}, nilFor: map[string]bool{}, errs: map[string]error{}}
 	for _, p := range []struct{ repo, pin, tip string }{
@@ -122,7 +164,7 @@ func pinsReadHealthies() (*fakePinTips, *fakePinCompare) {
 		{"history-man", pinsReadHMCommit, pinsReadHMTip},
 		{"devops", pinsReadDevopsCommit, pinsReadDevopsTip},
 	} {
-		git.answers[pinsReadURL(p.repo)] = pinsReadLS(p.tip)
+		git.answers[pinsReadPinURL(p.repo)] = pinsReadLS(p.tip)
 		cmp.behind[pinsReadCompareKey(p.pin, p.tip)] = 1
 	}
 	return git, cmp
@@ -149,23 +191,23 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 	git := &fakePinTips{answers: map[string]string{}, errs: map[string]error{}}
 	cmp := &fakePinCompare{behind: map[string]int{}}
 	for _, tt := range tests {
-		git.answers[pinsReadURL(tt.repo)] = pinsReadLS(tt.tip)
+		git.answers[pinsReadPinURL(tt.repo)] = pinsReadLS(tt.tip)
 		cmp.behind[pinsReadCompareKey(tt.pin, tt.tip)] = tt.behind
 	}
 
-	reads, err := ReadImagePinTips(context.Background(), pinsReadFile(pinsReadURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
 	require.NoError(t, err)
 
-	require.Len(t, reads, len(tests))
+	require.Len(t, states, len(tests))
 	for i, tt := range tests {
-		want := ImagePinRead{Name: tt.name, Pin: tt.pin, Tip: tt.tip, Behind: tt.behind}
-		assert.Equal(t, want, reads[i], "%s pin read", tt.name)
+		want := ImagePinState{Name: tt.name, Pin: tt.pin, Tip: tt.tip, Behind: tt.behind}
+		assert.Equal(t, want, states[i], "%s pin read", tt.name)
 		wantCall := pinsReadCompareCall{owner: pinsReadOwner, repo: tt.repo, base: tt.pin, head: tt.tip}
 		assert.Equal(t, wantCall, cmp.calls[i], "%s pin comparison", tt.name)
 	}
 	assert.Equal(t, []string{
-		pinsReadURL("beads"), pinsReadURL("organic-mechanic"),
-		pinsReadURL("history-man"), pinsReadURL("devops"),
+		pinsReadPinURL("beads"), pinsReadPinURL("organic-mechanic"),
+		pinsReadPinURL("history-man"), pinsReadPinURL("devops"),
 	}, git.asked, "each source's tip is read once, in the file's order")
 }
 
@@ -173,14 +215,14 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 // read as zero behind, and the compare API is asked about the other three only.
 func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadHealthies()
-	git.answers[pinsReadURL("beads")] = pinsReadLS(pinsReadBDCommit)
+	git, cmp := pinsReadAllHealthy()
+	git.answers[pinsReadPinURL("beads")] = pinsReadLS(pinsReadBDCommit)
 
-	reads, err := ReadImagePinTips(context.Background(), pinsReadFile(pinsReadURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
 	require.NoError(t, err)
 
-	require.Len(t, reads, 4)
-	assert.Equal(t, ImagePinRead{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDCommit, Behind: 0}, reads[0],
+	require.Len(t, states, 4)
+	assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDCommit, Behind: 0}, states[0],
 		"a pin at its tip is zero behind")
 	require.Len(t, cmp.calls, 3, "the pin at its tip is not compared")
 	for _, call := range cmp.calls {
@@ -193,21 +235,21 @@ func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 // owner's repository.
 func TestImagePinsReadExpandsTheForgeOwner(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadHealthies()
+	git, cmp := pinsReadAllHealthy()
 	placeholderURL := func(repo string) string {
 		return "http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git"
 	}
 	ownerOf := func() (string, error) { return pinsReadOwner, nil }
 
-	reads, err := ReadImagePinTips(context.Background(), pinsReadFile(placeholderURL), ownerOf, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(placeholderURL), ownerOf, git.read, cmp)
 	require.NoError(t, err)
 
-	require.Len(t, reads, 4)
+	require.Len(t, states, 4)
 	require.Len(t, cmp.calls, 4)
 	for i, call := range cmp.calls {
 		assert.Equal(t, pinsReadOwner, call.owner, "comparison %d names the expanded owner", i)
 	}
-	assert.Equal(t, pinsReadBDTip, reads[0].Tip, "the expanded URL's source is still the one read")
+	assert.Equal(t, pinsReadBDTip, states[0].Tip, "the expanded URL's source is still the one read")
 }
 
 // TestImagePinsReadLeavesTheOwnerResolverUncalled: a file with no {owner}
@@ -216,113 +258,135 @@ func TestImagePinsReadExpandsTheForgeOwner(t *testing.T) {
 // and counts its calls, so a read that asks it early fails on the count alone.
 func TestImagePinsReadLeavesTheOwnerResolverUncalled(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadHealthies()
+	git, cmp := pinsReadAllHealthy()
 	calls := 0
 	ownerOf := func() (string, error) {
 		calls++
 		return pinsReadOwner, nil
 	}
 
-	reads, err := ReadImagePinTips(context.Background(), pinsReadFile(pinsReadURL), ownerOf, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), ownerOf, git.read, cmp)
 	require.NoError(t, err)
 
-	require.Len(t, reads, 4)
+	require.Len(t, states, 4)
 	assert.Equal(t, 0, calls, "the file holds no %s placeholder, so the resolver is not asked", config.ForgeOwnerPlaceholder)
 }
 
-// TestImagePinsReadAFailedTipDoesNotStopTheOtherPins: one source's git answer
-// fails, the read reports the error naming that pin, and the other three pins'
-// tips are still read rather than skipped. A failure never becomes a pin read
-// from another pin's answer or from nothing.
-func TestImagePinsReadAFailedTipDoesNotStopTheOtherPins(t *testing.T) {
+// TestImagePinsReadAFailedTipIsThatPinsError is acceptance box 1 for a tip
+// read: one source's git answer fails, that pin's Err names it, the other three
+// pins are read rather than skipped, and no pin is reported with a guessed tip.
+func TestImagePinsReadAFailedTipIsThatPinsError(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadHealthies()
-	git.errs[pinsReadURL("beads")] = errors.New("remote hung up")
+	git, cmp := pinsReadAllHealthy()
+	git.errs[pinsReadPinURL("beads")] = errors.New("remote hung up")
 
-	reads, err := ReadImagePinTips(context.Background(), pinsReadFile(pinsReadURL), nil, git.read, cmp)
-	require.ErrorContains(t, err, "bd pin: cannot read refs/heads/main")
-	assert.NotContains(t, err.Error(), "om pin", "the healthy pins' reads are not reported as failures")
-	assert.Nil(t, reads, "the pins that did read are not returned as the whole file")
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
+	require.NoError(t, err, "a pin's failed read is not the file's error")
+	require.Len(t, states, 4)
+
+	require.Error(t, states[0].Err, "the failed bd read is that pin's error")
+	assert.Contains(t, states[0].Err.Error(), "bd pin: cannot read refs/heads/main")
+	assert.Equal(t, "bd", states[0].Name, "the failed state still names its pin")
+	assert.Equal(t, pinsReadBDCommit, states[0].Pin, "the failed state still names the file's commit")
+	assert.Empty(t, states[0].Tip, "a failed read never reports a guessed tip")
+	assert.Equal(t, pinsReadOtherStates(), states[1:], "the other three pins are still read")
 	assert.Equal(t, []string{
-		pinsReadURL("beads"), pinsReadURL("organic-mechanic"),
-		pinsReadURL("history-man"), pinsReadURL("devops"),
+		pinsReadPinURL("beads"), pinsReadPinURL("organic-mechanic"),
+		pinsReadPinURL("history-man"), pinsReadPinURL("devops"),
 	}, git.asked, "every source's tip is read, including the ones after the failed pin")
 }
 
-// TestImagePinsReadRefusals drives every branch that refuses: the read reports
-// no pins and an error naming what failed, never a pin with a guessed answer.
-func TestImagePinsReadRefusals(t *testing.T) {
+// TestImagePinsReadAFailedCompareIsThatPinsError is acceptance box 1 for a
+// compare: the source's tip reads, the comparison fails, that pin's Err names it,
+// and the other three pins are read rather than skipped.
+func TestImagePinsReadAFailedCompareIsThatPinsError(t *testing.T) {
 	t.Parallel()
-	placeholderFile := pinsReadFile(func(repo string) string {
-		return "http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git"
-	})
-	// badURL is the fixture file with beads' URL replaced by raw.
-	badURL := func(raw string) []byte {
-		return pinsReadFile(func(repo string) string {
-			if repo == "beads" {
-				return raw
-			}
-			return pinsReadURL(repo)
-		})
-	}
+	git, cmp := pinsReadAllHealthy()
+	cmp.errs[pinsReadCompareKey(pinsReadBDCommit, pinsReadBDTip)] = errors.New("forgejo: server error")
+
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
+	require.NoError(t, err, "a pin's failed compare is not the file's error")
+	require.Len(t, states, 4)
+
+	require.Error(t, states[0].Err, "the failed bd compare is that pin's error")
+	assert.Contains(t, states[0].Err.Error(), "bd pin "+pinsReadBDCommit[:12]+": cannot compare it with refs/heads/main")
+	assert.Equal(t, pinsReadBDTip, states[0].Tip, "the tip read before the compare is kept")
+	assert.Equal(t, pinsReadOtherStates(), states[1:], "the other three pins are still read")
+}
+
+// TestImagePinsReadAnUnparseableURLIsThatPinsError is acceptance box 2: a pin URL
+// that does not parse is that pin's Err, the other three pins are read, and the
+// URL is never handed to git.
+func TestImagePinsReadAnUnparseableURLIsThatPinsError(t *testing.T) {
+	t.Parallel()
+	git, cmp := pinsReadAllHealthy()
+	badURL := "http://forgejo:3000/%zz/beads.git"
+
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixtureWithBDURL(badURL), nil, git.read, cmp)
+	require.NoError(t, err, "a pin's URL failure is not the file's error")
+	require.Len(t, states, 4)
+
+	require.Error(t, states[0].Err, "the unparseable bd URL is that pin's error")
+	assert.Contains(t, states[0].Err.Error(), "bd pin: its URL does not parse")
+	assert.Equal(t, "bd", states[0].Name)
+	assert.Equal(t, pinsReadBDCommit, states[0].Pin)
+	assert.Empty(t, states[0].Tip, "a pin whose URL does not parse is never read")
+	assert.Equal(t, pinsReadOtherStates(), states[1:], "the other three pins are still read")
+	assert.Equal(t, []string{
+		pinsReadPinURL("organic-mechanic"), pinsReadPinURL("history-man"), pinsReadPinURL("devops"),
+	}, git.asked, "the unparseable URL is never handed to git")
+}
+
+// TestImagePinsReadOnePinRefused drives every branch that fails one pin: the
+// failure is that pin's Err, it names the pin, and the other three pins still
+// read.
+func TestImagePinsReadOnePinRefused(t *testing.T) {
+	t.Parallel()
 	bdKey := pinsReadCompareKey(pinsReadBDCommit, pinsReadBDTip)
+	bdURL := pinsReadPinURL("beads")
 
 	tests := []struct {
-		name    string
-		file    []byte
-		ownerOf func() (string, error)
-		setup   func(*fakePinTips, *fakePinCompare)
-		noGit   bool
-		noCmp   bool
-		want    string
+		name  string
+		file  []byte
+		setup func(*fakePinTips, *fakePinCompare)
+		want  string
 	}{
-		{name: "no git seam", noGit: true, want: "no git to read"},
-		{name: "no compare seam", noCmp: true, want: "no forgejo compare"},
-		{name: "an unparseable file", file: []byte("bd not-a-pin-line\n"), want: "image pins file: line 1"},
-		{name: "a placeholder with no resolver", file: placeholderFile, want: "nothing was given to expand it"},
+		{name: "a URL that does not parse", file: pinsReadFixtureWithBDURL("http://forgejo:3000/%zz/beads.git"), want: "its URL does not parse"},
+		{name: "a URL that is not http(s)", file: pinsReadFixtureWithBDURL("ssh://forgejo:3000/owner/beads.git"), want: "not http:// or https://"},
+		{name: "a URL that names no host", file: pinsReadFixtureWithBDURL("http:///owner/beads.git"), want: "names no host"},
+		{name: "a URL that carries a credential", file: pinsReadFixtureWithBDURL("http://user:pass@forgejo:3000/owner/beads.git"), want: "carries a credential"},
+		{name: "a URL that carries a query", file: pinsReadFixtureWithBDURL("http://forgejo:3000/owner/beads.git?token=x"), want: "carries a query or fragment"},
+		{name: "a URL without an owner and repository", file: pinsReadFixtureWithBDURL("http://forgejo:3000/beads.git"), want: "exactly one owner and one repository"},
+		{name: "a URL whose owner traverses", file: pinsReadFixtureWithBDURL("http://forgejo:3000/../beads.git"), want: "no usable owner"},
+		{name: "a URL whose repository is empty", file: pinsReadFixtureWithBDURL("http://forgejo:3000/owner/.git"), want: "no usable repository"},
 		{
-			name: "a resolver that fails", file: placeholderFile,
-			ownerOf: func() (string, error) { return "", errors.New("town has no forge.owner") },
-			want:    "town has no forge.owner",
-		},
-		{
-			name: "a resolver that names no usable owner", file: placeholderFile,
-			ownerOf: func() (string, error) { return "not an owner!", nil },
-			want:    `forge.owner: "not an owner!" is not a Forgejo owner name`,
-		},
-		{name: "a URL without an owner and repository", file: badURL("http://forgejo:3000/beads.git"), want: "exactly one owner and one repository"},
-		{name: "a URL whose owner traverses", file: badURL("http://forgejo:3000/../beads.git"), want: "no usable owner"},
-		{name: "a URL whose repository is empty", file: badURL("http://forgejo:3000/owner/.git"), want: "no usable repository"},
-		{
-			name: "a tip read that fails",
-			setup: func(git *fakePinTips, _ *fakePinCompare) {
-				git.errs[pinsReadURL("beads")] = errors.New("remote hung up")
-			},
-			want: "bd pin: cannot read refs/heads/main",
+			name:  "a tip read that fails",
+			setup: func(git *fakePinTips, _ *fakePinCompare) { git.errs[bdURL] = errors.New("remote hung up") },
+			want:  "bd pin: cannot read refs/heads/main",
 		},
 		{
 			name:  "a tip answer with no main ref",
-			setup: func(git *fakePinTips, _ *fakePinCompare) { git.answers[pinsReadURL("beads")] = "" },
+			setup: func(git *fakePinTips, _ *fakePinCompare) { git.answers[bdURL] = "" },
 			want:  "named no commit",
 		},
 		{
 			name: "a tip answer that is not a sha",
 			setup: func(git *fakePinTips, _ *fakePinCompare) {
-				git.answers[pinsReadURL("beads")] = pinsReadLS("not-a-sha")
+				git.answers[bdURL] = pinsReadLS("not-a-sha")
 			},
 			want: "not a full 40-character",
 		},
 		{
 			name: "a tip answer naming another ref",
 			setup: func(git *fakePinTips, _ *fakePinCompare) {
-				git.answers[pinsReadURL("beads")] = pinsReadBDTip + "\trefs/heads/other\n"
+				git.answers[bdURL] = pinsReadBDTip + "\trefs/heads/other\n"
 			},
 			want: "a line that is not",
 		},
 		{
 			name: "a tip answer naming two commits",
 			setup: func(git *fakePinTips, _ *fakePinCompare) {
-				git.answers[pinsReadURL("beads")] = pinsReadLS(pinsReadBDTip) + pinsReadLS(pinsReadOtherTip)
+				git.answers[bdURL] = pinsReadLS(pinsReadBDTip) + pinsReadLS(pinsReadOtherTip)
 			},
 			want: "was answered 2 times",
 		},
@@ -347,13 +411,102 @@ func TestImagePinsReadRefusals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			git, cmp := pinsReadHealthies()
+			git, cmp := pinsReadAllHealthy()
 			file := tt.file
 			if file == nil {
-				file = pinsReadFile(pinsReadURL)
+				file = pinsReadFixture(pinsReadPinURL)
 			}
 			if tt.setup != nil {
 				tt.setup(git, cmp)
+			}
+
+			states, err := ReadImagePinTips(context.Background(), file, nil, git.read, cmp)
+			require.NoError(t, err, "one pin's failure is not the file's error")
+			require.Len(t, states, 4)
+			require.Error(t, states[0].Err, "the bd pin's failure is its error")
+			assert.Contains(t, states[0].Err.Error(), tt.want)
+			assert.Equal(t, "bd", states[0].Name, "the failed state names its pin")
+			assert.Equal(t, pinsReadBDCommit, states[0].Pin, "the failed state names the file's commit")
+			assert.Equal(t, pinsReadOtherStates(), states[1:], "the other three pins are still read")
+		})
+	}
+}
+
+// TestImagePinsReadFileRefusals drives every branch that refuses the file: the
+// read reports no pins and an error naming what failed, never a partial list.
+func TestImagePinsReadFileRefusals(t *testing.T) {
+	t.Parallel()
+	placeholderURL := func(repo string) string {
+		return "http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git"
+	}
+	placeholderFile := pinsReadFixture(placeholderURL)
+
+	tests := []struct {
+		name    string
+		file    []byte
+		ownerOf func() (string, error)
+		noGit   bool
+		noCmp   bool
+		want    string
+	}{
+		{name: "no git seam", noGit: true, want: "no git to read"},
+		{name: "no compare seam", noCmp: true, want: "no forgejo compare"},
+		{
+			name: "a line that is not three fields",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[0] = "bd not-a-pin-line"
+				return lines
+			}),
+			want: "image pins file: line 1",
+		},
+		{
+			name: "an unknown pin name",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[0] = "zz " + pinsReadPinURL("beads") + " " + pinsReadBDCommit
+				return lines
+			}),
+			want: `unknown pin name "zz"`,
+		},
+		{
+			name: "a duplicate pin name",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[1] = lines[0]
+				return lines
+			}),
+			want: `duplicate pin name "bd"`,
+		},
+		{
+			name: "a commit that is not a full sha",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[0] = "bd " + pinsReadPinURL("beads") + " not-a-sha"
+				return lines
+			}),
+			want: "not a full 40-character lowercase hex sha",
+		},
+		{
+			name: "a missing pin",
+			file: pinsReadFileWithLines(func(lines []string) []string { return lines[1:] }),
+			want: "missing pin for bd",
+		},
+		{name: "a placeholder with no resolver", file: placeholderFile, want: "nothing was given to expand it"},
+		{
+			name: "a resolver that fails", file: placeholderFile,
+			ownerOf: func() (string, error) { return "", errors.New("town has no forge.owner") },
+			want:    "town has no forge.owner",
+		},
+		{
+			name: "a resolver that names no usable owner", file: placeholderFile,
+			ownerOf: func() (string, error) { return "not an owner!", nil },
+			want:    `forge.owner: "not an owner!" is not a Forgejo owner name`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			git, cmp := pinsReadAllHealthy()
+			file := tt.file
+			if file == nil {
+				file = pinsReadFixture(pinsReadPinURL)
 			}
 			var tipGit PinTipGit = git.read
 			if tt.noGit {
@@ -364,9 +517,77 @@ func TestImagePinsReadRefusals(t *testing.T) {
 				compare = nil
 			}
 
-			reads, err := ReadImagePinTips(context.Background(), file, tt.ownerOf, tipGit, compare)
+			states, err := ReadImagePinTips(context.Background(), file, tt.ownerOf, tipGit, compare)
 			require.ErrorContains(t, err, tt.want)
-			assert.Nil(t, reads, "a refused read reports no pins")
+			assert.Nil(t, states, "a refused read reports no pins")
+		})
+	}
+}
+
+// TestImagePinsReadFileShapeAgreesWithTheGuardParser keeps the reader's restated
+// shape checks equal to the pin-drift guard's parser: on a file whose URLs all
+// parse, the reader refuses exactly what daemonimage.ParsePins refuses, so the
+// two cannot drift apart on a file either should refuse.
+func TestImagePinsReadFileShapeAgreesWithTheGuardParser(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		file   []byte
+		refuse bool
+	}{
+		{"the fixture file", pinsReadFixture(pinsReadPinURL), false},
+		{
+			name: "a line that is not three fields",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[0] = "bd not-a-pin-line"
+				return lines
+			}),
+			refuse: true,
+		},
+		{
+			name: "an unknown pin name",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[0] = "zz " + pinsReadPinURL("beads") + " " + pinsReadBDCommit
+				return lines
+			}),
+			refuse: true,
+		},
+		{
+			name: "a duplicate pin name",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[1] = lines[0]
+				return lines
+			}),
+			refuse: true,
+		},
+		{
+			name: "a commit that is not a full sha",
+			file: pinsReadFileWithLines(func(lines []string) []string {
+				lines[0] = "bd " + pinsReadPinURL("beads") + " not-a-sha"
+				return lines
+			}),
+			refuse: true,
+		},
+		{
+			name:   "a missing pin",
+			file:   pinsReadFileWithLines(func(lines []string) []string { return lines[1:] }),
+			refuse: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, guardErr := daemonimage.ParsePins(tt.file)
+			git, cmp := pinsReadAllHealthy()
+			_, readErr := ReadImagePinTips(context.Background(), tt.file, nil, git.read, cmp)
+
+			if !tt.refuse {
+				require.NoError(t, guardErr, "the guard parser accepts the fixture file")
+				require.NoError(t, readErr, "the reader accepts the fixture file")
+				return
+			}
+			require.Error(t, guardErr, "the guard parser refuses the file")
+			require.Error(t, readErr, "the reader refuses the file the guard parser refuses")
 		})
 	}
 }
