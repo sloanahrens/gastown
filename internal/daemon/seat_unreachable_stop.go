@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 const (
@@ -29,27 +30,31 @@ const (
 
 // seatUnreachableStopSeams are the stop path's side effects for a seat the
 // polecat-health pass cannot read. Production fills them from the guard's own
-// stop seams (overrunStopSeams), so the pause, the sandbox removal, the
-// hand-back, the agent-bead reset, the cleanup status and the retire are the
-// overrun stop's, and a seat released because it is unreachable reads as
-// released as one the stop released. Only the pause (whose reason and actor
-// have to say why this path stopped the seat) and the branch the hand-back
-// comment names are this path's own; the rest are the guard's.
+// stop seams (overrunStopSeams), so the hand-back, the agent-bead reset, the
+// cleanup status and the retire are the overrun stop's, and a seat released
+// because it is unreachable reads as released as one the stop released. The
+// pause (whose reason and actor have to say why this path stopped the seat), the
+// branch the hand-back comment names, the origin read and the record clear are
+// this path's own; the rest are the guard's.
 //
-// pause and handBack are required: a release that cannot park the seat or hand
-// the bead back is no release, so a nil one refuses it rather than acting on
-// half of it. The rest follow the overrun stop's "nil means none" — a host seat
-// with no sandbox record, a test with no retire — and each nil one leaves that
-// single step out.
+// pause, the origin read, the record clear and handBack are required: a release
+// that cannot park the seat, cannot say where the seat's work is, cannot free the
+// seat's name or cannot hand the bead back is no release, so a nil one refuses
+// it rather than acting on half of it. The rest follow the overrun stop's "nil
+// means none" — a test with no retire — and each nil one leaves that single step
+// out.
 type seatUnreachableStopSeams struct {
 	// pause parks the seat while it is released, so no new sling lands on the
 	// name before the hand-back and the retire are done. Required.
 	pause func(seat overrunSeat) error
-	// removeSandbox deletes the gateway sandbox object the seat ran in, through
-	// the overrun stop's own removal: a released seat whose sandbox is left in
-	// phase Error holds the name, and the next sling to it fails. nil means no
-	// sandbox step (a host seat, or a test that does not exercise it).
-	removeSandbox func(seat overrunSeat) error
+	// originHolds asks origin whether it holds the branch the seat's work is on,
+	// and names that branch. Required: a release that cannot tell where the work
+	// is must not clear the seat's sandbox record away.
+	originHolds func(seat overrunSeat) (branch string, held bool, err error)
+	// clearSandboxRecord clears the seat's sandbox record through the seat-ended
+	// writer (gt-jhoi1). Required: a record left behind keeps the name bound
+	// after the bead is released.
+	clearSandboxRecord func(seat overrunSeat) error
 	// beadStillHeld re-reads the bead just before the hand-back and reports
 	// whether it is still hooked to this seat. Required: a release that cannot
 	// tell whose bead it would hand back must not hand it back. A bead that has
@@ -79,23 +84,24 @@ type seatUnreachableStopSeams struct {
 
 // stopSeamsForUnreachableSeats fills the release's seams from the guard's own
 // stop seams, so nothing is copied from the stop: the release is the stop's
-// steps 1, 2's sandbox removal, 5 and 6 over a seat whose session answers
-// nothing.
+// steps 1, 5 and 6 over a seat whose session answers nothing. Its origin read and
+// record clear are this path's own (gt-35ihg5).
 func (d *Daemon) stopSeamsForUnreachableSeats(s overrunSeams) seatUnreachableStopSeams {
 	return seatUnreachableStopSeams{
 		pause: func(seat overrunSeat) error {
 			return agentpause.Pause(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat,
 				seatUnreachablePauseReason, seatUnreachableActor, "")
 		},
-		removeSandbox:  s.removeSandbox,
-		beadStillHeld:  s.beadStillHeld,
-		handBack:       s.handBack,
-		resetAgentBead: s.resetAgentBead,
-		recordCleanup:  s.recordCleanup,
-		retire:         s.retire,
-		submittedNow:   s.submittedNow,
-		slungAt:        s.slungAt,
-		branch:         d.seatUnreachableBranch,
+		originHolds:        d.seatUnreachableOriginHolds,
+		clearSandboxRecord: d.seatUnreachableClearSandboxRecord,
+		beadStillHeld:      s.beadStillHeld,
+		handBack:           s.handBack,
+		resetAgentBead:     s.resetAgentBead,
+		recordCleanup:      s.recordCleanup,
+		retire:             s.retire,
+		submittedNow:       s.submittedNow,
+		slungAt:            s.slungAt,
+		branch:             d.seatUnreachableBranch,
 	}
 }
 
@@ -116,6 +122,70 @@ func (d *Daemon) seatUnreachableBranch(seat overrunSeat) string {
 		return ""
 	}
 	return branch
+}
+
+// seatUnreachableOriginHolds reads origin for the branch the seat's sandbox ran,
+// from the town's own copy of the seat's worktree: the sandbox is often the
+// thing that stopped answering, which is why the seat is being released, so it is
+// never asked. The branch is the seat's own, or the sandbox record's when the
+// seat names none, and branch is returned for the warning a branch origin does
+// not hold carries.
+//
+// A seat with no sandbox record has no branch this release is about, so it
+// answers held and the release leaves nothing alone (gt-35ihg5). A record that
+// cannot be read is an error, as every read of it is, and so is a record and a
+// seat that together name no branch, or a seat with no worktree to ask from:
+// nothing can be asked about a branch nobody named, and clearing the record of a
+// seat whose work is unknown is what this read exists to prevent.
+func (d *Daemon) seatUnreachableOriginHolds(seat overrunSeat) (string, bool, error) {
+	sb, err := d.overrunSandboxSession(seat)
+	if err != nil {
+		return "", false, err
+	}
+	if sb.Session == "" {
+		return "", true, nil
+	}
+	rec, sandboxed, err := d.readSandboxRecordFor(d.config.TownRoot, sb.Session)
+	if err != nil {
+		return "", false, overrunRecordReadError(sb.Session, err)
+	}
+	if !sandboxed {
+		return "", true, nil
+	}
+	branch := seat.Branch
+	if branch == "" || branch == "(unknown)" {
+		branch = rec.Branch
+	}
+	if branch == "" || branch == "(unknown)" {
+		return "", false, fmt.Errorf("sandbox %s names no branch to ask origin about", sb.Session)
+	}
+	workDir := resolvePolecatWorktree(filepath.Join(d.config.TownRoot, seat.Rig, "polecats"), seat.Polecat, seat.Rig)
+	if workDir == "" {
+		return branch, false, fmt.Errorf("%s/%s has no worktree to read origin from", seat.Rig, seat.Polecat)
+	}
+	_, held, err := originBranchRead(d.gitAt(workDir), branch)
+	if err != nil {
+		return branch, false, err
+	}
+	return branch, held, nil
+}
+
+// seatUnreachableClearSandboxRecord clears the seat's sandbox record through the
+// seat-ended writer, which forgets the record and writes the seat's end line for
+// the usage ledger, so the seat's name is free for the next dispatch and the
+// seat's hours outlive the record (gt-jhoi1). A seat with no sandbox record has
+// nothing to clear, and a record another removal already took writes no second
+// line: the writer is idempotent, so a retried release cannot line the seat
+// twice (gt-35ihg5).
+func (d *Daemon) seatUnreachableClearSandboxRecord(seat overrunSeat) error {
+	sb, err := d.overrunSandboxSession(seat)
+	if err != nil {
+		return err
+	}
+	if sb.Session == "" {
+		return nil
+	}
+	return session.RemoveSandboxRecordAt(d.config.TownRoot, sb.Session, d.clk().Now)
 }
 
 // seatUnreachableBeadStillHeld is the release's own bead read: a bead is the
@@ -204,6 +274,46 @@ func seatUnreachableNote(alert seatUnreachable, now time.Time) string {
 		alert.Rig, alert.Polecat, parkedAge(now.Sub(alert.Since)), oneLineReason(alert.Err))
 }
 
+// raiseSeatUnreachableBranchAbsent warns about, and raises the item for, a seat
+// whose branch origin answered it does not hold. The release goes on — the bead
+// has to come back to the pool — but the seat's commits may have gone with its
+// sandbox, so the warning names the seat, the branch and what origin answered,
+// and the item tells a person who can look for the work. A raise that fails is
+// logged and holds nothing back, as the overrun stop's own sandbox-gone raise
+// does: the next tick raises the same item under the same key (gt-mp9zrg).
+func (d *Daemon) raiseSeatUnreachableBranchAbsent(alert seatUnreachable, branch string) {
+	who := alert.Rig + "/" + alert.Polecat
+	d.logger.Printf("seat_unreachable: WARNING: %s: origin holds no branch %s, so the seat's commits may be nowhere; clearing its sandbox record and handing %s back once",
+		who, branch, alert.Bead)
+	message := fmt.Sprintf("the seat-unreachable release of %s on %s found origin holds no branch %s: the seat's commits may have gone with its sandbox, and no copy is on origin.",
+		who, alert.Bead, branch)
+	if err := d.escalateAlertSeverity("MEDIUM", "seat-unreachable-sandbox-gone:"+who+":"+alert.Bead, seatUnreachableActor, message); err != nil {
+		d.logger.Printf("seat_unreachable: WARNING: %s: the sandbox-gone item for %s was not raised: %s",
+			who, alert.Bead, oneLineReason(err))
+	}
+}
+
+// raiseSeatUnreachableReleaseFailure raises the item a failed release leaves
+// behind. The seat is still owed its release — nothing marked the outage
+// released, so the next tick runs every step again — and the item says so,
+// naming the seat, the bead, how long it has been unreadable and one bounded
+// line of the step's error, so a seat the release cannot finish reaches a
+// person rather than sitting out the outage unnoticed (gt-35ihg5). A raise that
+// fails is logged and changes nothing: the next tick raises it again and the
+// seat stays owed whatever happens here.
+func (d *Daemon) raiseSeatUnreachableReleaseFailure(alert seatUnreachable, now time.Time, err error) {
+	who := alert.Rig + "/" + alert.Polecat
+	reason := oneLineReason(err)
+	d.logger.Printf("seat_unreachable: WARNING: %s: the release of %s failed and stays owed to the next tick: %s",
+		who, alert.Bead, reason)
+	message := fmt.Sprintf("the seat-unreachable release of %s on %s failed after %s unreadable; its bead stays held and every tick retries it: %s",
+		who, alert.Bead, parkedAge(now.Sub(alert.Since)), reason)
+	if raiseErr := d.escalateAlertSeverity("MEDIUM", "seat-unreachable-release:"+who+":"+alert.Bead, seatUnreachableActor, message); raiseErr != nil {
+		d.logger.Printf("seat_unreachable: WARNING: %s: the release-failure item for %s was not raised: %s",
+			who, alert.Bead, oneLineReason(raiseErr))
+	}
+}
+
 // releaseUnreachableSeats takes the stop path for every seat the polecat-health
 // pass has found unreadable for seatUnreachableReleaseAfter at now, and for no
 // other seat. No nudge is sent: a nudge is delivered to a session, and this one
@@ -211,12 +321,15 @@ func seatUnreachableNote(alert seatUnreachable, now time.Time) string {
 //
 // The seat list the guard judges cannot hold these seats — overrunWorkingSeats
 // reads each seat's session first and drops a seat it cannot read — so this is
-// where the daemon stops and releases them. A release that fails is logged and
-// left to the next tick: the tracker keeps the outage while the seat stays
-// unreadable, and every step of the release is safe to repeat. A release that
-// ends marks its outage, so the seat is not released again until a good read
-// clears the outage. In a dry run nothing is paused, written, marked or
-// released, and the log says what would have been.
+// where the daemon stops and releases them. A release that fails stays owed to
+// the next tick: nothing marks the outage released, the tracker keeps it while
+// the seat stays unreadable, and every step of the release is safe to repeat.
+// The failure is raised as an item as well as logged, so a seat no step can
+// finish reaches a person instead of sitting out the outage on a board that
+// still shows it working (gt-35ihg5). A release that ends marks its outage, so
+// the seat is not released again until a good read clears the outage. In a dry
+// run nothing is paused, written, marked or released, and the log says what
+// would have been.
 func (d *Daemon) releaseUnreachableSeats(s seatUnreachableStopSeams, now time.Time, dry bool) {
 	for _, alert := range seatUnreachableDue(d.seatUnreachable.outagesAt(), now) {
 		who := alert.Rig + "/" + alert.Polecat
@@ -230,23 +343,27 @@ func (d *Daemon) releaseUnreachableSeats(s seatUnreachableStopSeams, now time.Ti
 			// (a push, a bd write), so the log gets one bounded line of it,
 			// never the whole capture.
 			d.logger.Printf("seat_unreachable: %s: %s", who, oneLineReason(err))
+			d.raiseSeatUnreachableReleaseFailure(alert, now, err)
 		}
 	}
 }
 
 // releaseUnreachableSeat releases one seat's bead and the seat with it: pause
-// the seat, delete the gateway sandbox object it ran in, hand the bead back to
-// the pool with seatUnreachableNote, reset the seat's agent bead, record the
-// cleanup status that reset clears and retire the seat. A seat with nothing the
-// daemon may release — no bead it could read, a record that is held or
-// submitted — is left alone and logged once.
+// the seat, ask origin for the branch its sandbox ran, clear the seat's sandbox
+// record, hand the bead back to the pool with seatUnreachableNote, reset the
+// seat's agent bead, record the cleanup status that reset clears and retire the
+// seat. A seat with nothing the daemon may release — no bead it could read, a
+// record that is held or submitted — is left alone and logged once.
 //
-// The sandbox goes with the release because a sandbox left behind, in phase
-// Error or merely stopped, keeps the seat's name bound: the dispatcher reuses
-// the name and its next slings fail on the stale object (gt-wgim24, operator
-// decision 2026-11-14). The removal is the overrun stop's own, so it asks the
-// push first and keeps the object when the work cannot be shown to have reached
-// origin.
+// The sandbox is not asked and not deleted here: a seat unreachable for fifteen
+// minutes usually has a sandbox the gateway cannot speak for any more (its pod
+// gone, its phase Error), and a step that waits on it strands the bead and the
+// name together. Origin is the one place the work can still be vouched for, so
+// the release asks it and leaves a branch it holds untouched; the record is
+// cleared through the seat-ended writer, which frees the seat's name whether or
+// not the gateway ever answers; and a sandbox the gateway still holds in a
+// failure phase is the patrol's, which deletes one by seat name with no record
+// (removeErroredSeatSandbox, gt-jhoi1).
 //
 // The hold is re-read here and not taken on the pass's word: the tracker carries
 // an outage through the passes that skip a seat (gt-q6hafz), so a seat an
@@ -267,13 +384,16 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 		d.crashSkipLog.logf(d.logger.Printf, "seat-unreachable:"+who, format, args...)
 		return nil
 	}
-	if s.pause == nil || s.beadStillHeld == nil || s.handBack == nil {
+	if s.pause == nil || s.originHolds == nil || s.clearSandboxRecord == nil ||
+		s.beadStillHeld == nil || s.handBack == nil {
 		// One half of a release is no release: the seat would end up parked
 		// with its bead, or its bead handed back with the seat still holding
-		// it, or a bead handed back with nothing having read whose it is. An
+		// it, or a bead handed back with nothing having read whose it is, or its
+		// sandbox record cleared with nothing having asked where the work is. An
 		// unwired seam refuses instead of acting on the other steps.
-		return fmt.Errorf("release seams incomplete (pause %t, bead read %t, hand-back %t): refusing to release %s",
-			s.pause != nil, s.beadStillHeld != nil, s.handBack != nil, alert.Bead)
+		return fmt.Errorf("release seams incomplete (pause %t, origin read %t, record clear %t, bead read %t, hand-back %t): refusing to release %s",
+			s.pause != nil, s.originHolds != nil, s.clearSandboxRecord != nil,
+			s.beadStillHeld != nil, s.handBack != nil, alert.Bead)
 	}
 	if alert.Bead == "" {
 		return skip("seat_unreachable: %s holds no bead the pass could read; nothing to release", who)
@@ -323,14 +443,27 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 	if err := s.pause(seat); err != nil {
 		return fmt.Errorf("pausing the seat after %s unreadable: %w", parkedAge(now.Sub(alert.Since)), err)
 	}
-	// The sandbox goes before the hand-back, as in the overrun stop: a refused
-	// removal keeps the object and stops the release here, with the seat parked
-	// and its bead still the seat's, so the next tick retries it. A seat with no
-	// sandbox record has no step at all.
-	if s.removeSandbox != nil {
-		if err := s.removeSandbox(seat); err != nil {
-			return fmt.Errorf("sandbox not removed after %s unreadable: %w", parkedAge(now.Sub(alert.Since)), err)
-		}
+	// 2b. The branch and the sandbox record, before the hand-back.
+	//
+	// A branch origin holds is left untouched: origin already has the work, so
+	// the release writes nothing to it. A branch origin does not hold is the
+	// overrun stop's sandbox-gone case, warned about and raised before the bead
+	// goes back, because the seat's commits may be nowhere (gt-mp9zrg). A read
+	// that answered nothing is unknown, so the release waits for the next tick: a
+	// record cleared on a guess can take the only copy of the work with the name.
+	branch, onOrigin, err := s.originHolds(seat)
+	if err != nil {
+		return fmt.Errorf("origin not read for the seat's branch, %s unreadable: %w", parkedAge(now.Sub(alert.Since)), err)
+	}
+	if !onOrigin {
+		d.raiseSeatUnreachableBranchAbsent(alert, branch)
+	}
+	// The record goes whatever origin answered, so a seat whose sandbox the
+	// gateway can no longer speak for does not keep its name bound. A record that
+	// cannot be cleared stops the release here, with the bead still the seat's,
+	// so the next tick retries it.
+	if err := s.clearSandboxRecord(seat); err != nil {
+		return fmt.Errorf("sandbox record of %s not cleared: %w", who, err)
 	}
 	if err := s.handBack(seat, elapsed, seatUnreachableNote(alert, now)); err != nil {
 		return fmt.Errorf("handing %s back: %w", alert.Bead, err)
