@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 const (
@@ -151,4 +153,66 @@ func joinNaming(parts []string) string {
 		return parts[0]
 	}
 	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+}
+
+// imagePinsBeadList is the bead lookup the refresh filer reads through: the
+// beads opts selects, in whatever status they are. beads.Client.List satisfies
+// it.
+type imagePinsBeadList func(opts beads.ListOptions) ([]*beads.Issue, error)
+
+// imagePinsBeadCreate files one bead and returns it. beads.Client.Create
+// satisfies it.
+type imagePinsBeadCreate func(opts beads.CreateOptions) (*beads.Issue, error)
+
+// imagePinsOpenRefreshBead finds the open refresh bead the planner reads, with
+// the time it was opened, which is the age the planner measures. It returns nil
+// when no refresh bead is open, and skips closed ones. Two open refresh beads
+// are refused: the planner holds one at a time, so a second is a state the
+// filer cannot name. An open bead whose created time does not parse is refused
+// too, rather than handed to the planner with a zero age.
+func imagePinsOpenRefreshBead(list imagePinsBeadList) (*ImagePinRefreshBead, error) {
+	issues, err := list(beads.ListOptions{Label: imagePinsRefreshLabel, Status: "all"})
+	if err != nil {
+		return nil, fmt.Errorf("image pins refresh bead: listing the %s beads: %w", imagePinsRefreshLabel, err)
+	}
+	var open *ImagePinRefreshBead
+	for _, is := range issues {
+		if beads.IssueStatus(is.Status) == beads.StatusClosed {
+			continue
+		}
+		openedAt := beads.ParseIssueTime(is.CreatedAt)
+		if is.CreatedAt != "" && openedAt.IsZero() {
+			return nil, fmt.Errorf("image pins refresh bead: %s has a created time %q that does not parse: its age is unknown", is.ID, is.CreatedAt)
+		}
+		if open != nil {
+			return nil, fmt.Errorf("image pins refresh bead: %s and %s are both open: the planner holds one refresh bead at a time", open.ID, is.ID)
+		}
+		open = &ImagePinRefreshBead{ID: is.ID, OpenedAt: openedAt}
+	}
+	return open, nil
+}
+
+// imagePinsFileRefreshBead builds the refresh bead for pins and files it through
+// create, returning the new bead's id. A refused set of pins never reaches
+// create. A failed create returns its error and no id, so nothing is recorded
+// for a bead that was not made.
+func imagePinsFileRefreshBead(create imagePinsBeadCreate, pins []ImagePinState) (string, error) {
+	draft, err := imagePinsRefreshBead(pins)
+	if err != nil {
+		return "", err
+	}
+	issue, err := create(beads.CreateOptions{
+		Title:       draft.Title,
+		Description: draft.Description,
+		Acceptance:  draft.Acceptance,
+		Labels:      draft.Labels,
+		Priority:    2,
+	})
+	if err != nil {
+		return "", fmt.Errorf("image pins refresh bead: filing %q: %w", draft.Title, err)
+	}
+	if issue == nil || issue.ID == "" {
+		return "", fmt.Errorf("image pins refresh bead: filing %q returned no bead id", draft.Title)
+	}
+	return issue.ID, nil
 }
