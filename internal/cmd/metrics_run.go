@@ -22,14 +22,17 @@ func init() {
 
 var metricsRunCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Run one town-metrics hour: snapshot, install regime events, Jev dataset refresh, then analyse, under the single-flight lock",
+	Short: "Run one town-metrics hour: snapshot, install regime events, Jev dataset refresh, then analyse, and the weekly story-point retrain, under the single-flight lock",
 	Long: `Takes <town>/.runtime/town-metrics.lock, then runs the snapshot, records the
 install receipts the regime log does not hold, the Jev dataset refresh once in
 each period the analysis is due, and the analysis, passing the receipts through.
-A run that finds the lock held by another run prints a skipped line and exits 0,
-so the daemon records the hour as skipped rather than as a failure. Every step
-runs whichever one fails, and the command fails with the first failing step's
-error. A dataset failure is logged one line each and does not fail the command.
+It then retrains the story-point weights and adopts the proposal when a week has
+passed since the last decision. A run that finds the lock held by another run
+prints a skipped line and exits 0, so the daemon records the hour as skipped
+rather than as a failure. Every step runs whichever one fails, and the command
+fails with the first failing step's error. A dataset failure is logged one line
+each and does not fail the command, and the weekly retrain writes the outcome as
+one line whatever it decided.
 
 This is the one entry point the daemon's town-metrics plugin calls.`,
 	Args: cobra.NoArgs,
@@ -65,8 +68,8 @@ type metricsHourSteps struct {
 	// it wrote and each failure.
 	dataset func(ctx context.Context, town string) (int, []error)
 	// weekly runs the story-points retrain and then its adoption when a week has
-	// passed. It runs after the analysis, whose extract writes the landings table
-	// the retrain reads.
+	// passed. It runs after the analysis, so a day the analysis extracts has the
+	// landings table the retrain reads.
 	weekly func(ctx context.Context, out io.Writer, town string) error
 }
 
@@ -105,8 +108,9 @@ func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
 // analysis's own stamp check, and before the analysis's first step. It writes a
 // stamp naming the due period, so the other hours of that period skip it while a
 // failing analysis retries. A dataset failure is logged one line each and never
-// stops the analysis or fails the hour. The weekly story-points job runs last,
-// on the extract the analysis just wrote, whatever the analysis decided.
+// stops the analysis or fails the hour. The weekly story-points job runs last, so
+// an hour that analyses has today's extract in place for it, and it runs whatever
+// the analysis decided.
 func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps metricsHourSteps) error {
 	if steps.weekly == nil {
 		return errors.New("metrics hour: the steps have no weekly job, so the story-point weights would never be retrained")

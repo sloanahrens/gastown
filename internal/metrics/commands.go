@@ -357,8 +357,9 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 //
 // What the run cannot read fails it: a last-run stamp that cannot be read or
 // does not hold a time, a town that was not named or wired, and a decision that
-// cannot be recorded. The first two are a guard whose input is unknown, which is
-// not a reason to retrain; the third would be taken again by the next hour.
+// cannot be recorded. The first two are a guard whose input is unknown, and a
+// guard that cannot say whether the week is spent does not retrain; a decision
+// that could not be recorded would be taken again by the next hour.
 func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	c = c.withDefaults()
 	if c.Town == "" {
@@ -424,10 +425,10 @@ func (c Commands) now() time.Time {
 	return time.Now()
 }
 
-// storyPointsWeeklyStampPath is the file recording the week's last decision. It
-// sits beside the runtime weights, which is the story-points state the town
-// keeps, so a revert and the retrain that follows it are read in one place. The
-// town must be named: a relative stamp would land in the process's directory.
+// storyPointsWeeklyStampPath is the file recording the week's last decision,
+// beside the runtime weights in the town's story-points state. The town must be
+// named: with no town the runtime path is empty, and the stamp would land in the
+// process's own directory.
 func storyPointsWeeklyStampPath(town string) string {
 	return filepath.Join(filepath.Dir(storypoints.RuntimeWeightsPath(town)), storyPointsWeeklyStampName)
 }

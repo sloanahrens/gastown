@@ -189,6 +189,9 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
+		// fewRows gives the town fewer measured landings than a retrain fits, so
+		// the case reaches the run's own recording of the week.
+		fewRows bool
 		// layOut prepares the town and returns the run.
 		layOut func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands
 		want   string
@@ -228,7 +231,8 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 			want: "the wired town is empty",
 		},
 		{
-			name: "the skip cannot be recorded",
+			name:    "the skip cannot be recorded",
+			fewRows: true,
 			layOut: func(t *testing.T, fix trainTestFixture, out *strings.Builder) Commands {
 				c := weeklyCommands(t, fix, out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
 				c.storyPointsStore.Write = func(string, string, func(io.Writer) error) error {
@@ -242,11 +246,11 @@ func TestStoryPointsWeeklyRefusals(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			beads := trainTestBeads(90, 1, true)
-			if tc.want == "record the last run in" {
-				beads = trainTestBeads(10, 1, true)
+			rows := 90
+			if tc.fewRows {
+				rows = 10
 			}
-			fix := newTrainTestFixture(t, beads)
+			fix := newTrainTestFixture(t, trainTestBeads(rows, 1, true))
 			var out strings.Builder
 			err := tc.layOut(t, fix, &out).RunStoryPointsWeekly(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
