@@ -50,6 +50,13 @@ type seatUnreachableStopSeams struct {
 	// phase Error holds the name, and the next sling to it fails. nil means no
 	// sandbox step (a host seat, or a test that does not exercise it).
 	removeSandbox func(seat overrunSeat) error
+	// beadStillHeld re-reads the bead just before the hand-back and reports
+	// whether it is still hooked to this seat. Required: a release that cannot
+	// tell whose bead it would hand back must not hand it back. A bead that has
+	// already gone back to the pool, or moved to another seat, is not this
+	// seat's any more, and handing it back again would write the note and the
+	// label onto someone else's run.
+	beadStillHeld func(seat overrunSeat) (bool, error)
 	// handBack opens the bead with the note, hands it back to the pool and
 	// ends the molecule it carried. Required.
 	handBack func(seat overrunSeat, elapsed time.Duration, note string) error
@@ -81,6 +88,7 @@ func (d *Daemon) stopSeamsForUnreachableSeats(s overrunSeams) seatUnreachableSto
 				seatUnreachablePauseReason, seatUnreachableActor, "")
 		},
 		removeSandbox:  s.removeSandbox,
+		beadStillHeld:  s.beadStillHeld,
 		handBack:       s.handBack,
 		resetAgentBead: s.resetAgentBead,
 		recordCleanup:  s.recordCleanup,
@@ -110,6 +118,32 @@ func (d *Daemon) seatUnreachableBranch(seat overrunSeat) string {
 	return branch
 }
 
+// seatUnreachableBeadStillHeld is the release's own bead read: a bead is the
+// seat's to hand back only while it is still hooked to it (gt-wgim24).
+func (d *Daemon) seatUnreachableBeadStillHeld(seat overrunSeat) (bool, error) {
+	status, assignee, err := d.overrunBeadState(seat)
+	if err != nil {
+		return false, fmt.Errorf("reading bead %s: %w", seat.Bead, err)
+	}
+	return seatUnreachableHoldsBead(seat, status, assignee), nil
+}
+
+// seatUnreachableHoldsBead reports whether a bead in this status and assignee is
+// still hooked to the seat. The assignee must be the seat's, and the bead must
+// not be open — the release already handed it back, or someone reopened it — or
+// closed. The hand-back's own read treats an open, unassigned bead as a
+// half-finished hand-back; this path is past that point, so it ends instead.
+func seatUnreachableHoldsBead(seat overrunSeat, status, assignee string) bool {
+	if assignee != overrunSeatAssignee(seat) {
+		return false
+	}
+	switch status {
+	case "open", "closed", "tombstone":
+		return false
+	}
+	return true
+}
+
 // outagesAt returns the tracker's first-failure times, one per seat, in seat
 // order. It is a copy taken under the watch's lock, so the guard can act on
 // what the polecat-health pass observed without holding up that pass.
@@ -117,7 +151,8 @@ func (w *seatUnreachableWatch) outagesAt() []seatUnreachable {
 	w.mu.Lock()
 	out := make([]seatUnreachable, 0, len(w.outages))
 	for key, outage := range w.outages {
-		out = append(out, seatUnreachable{Rig: key.rig, Polecat: key.polecat, Bead: outage.bead, Since: outage.since, Err: outage.err})
+		out = append(out, seatUnreachable{Rig: key.rig, Polecat: key.polecat, Bead: outage.bead,
+			Since: outage.since, Err: outage.err, Released: outage.released})
 	}
 	w.mu.Unlock()
 	slices.SortFunc(out, func(a, b seatUnreachable) int {
@@ -126,14 +161,31 @@ func (w *seatUnreachableWatch) outagesAt() []seatUnreachable {
 	return out
 }
 
+// markReleased records on the seat's outage that the daemon released it, keyed by
+// the seat and the outage's first-failure time: a marker written for one outage
+// does not silence the next, and a tick whose pass has already moved the seat on
+// (a good read cleared it, or a new outage started) leaves it unmarked
+// (gt-wgim24).
+func (w *seatUnreachableWatch) markReleased(key seatKey, since time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	outage, ok := w.outages[key]
+	if !ok || !outage.since.Equal(since) {
+		return
+	}
+	outage.released = true
+	w.outages[key] = outage
+}
+
 // seatUnreachableDue names the seats among outages whose session has answered
 // nothing for seatUnreachableReleaseAfter at now. A seat that has been readable
-// since, or that never got a failed read, is not in outages at all, so it is
-// left alone by construction.
+// since, or that never got a failed read, is not in outages at all, and one
+// already released for this outage is marked, so both are left alone by
+// construction.
 func seatUnreachableDue(outages []seatUnreachable, now time.Time) []seatUnreachable {
 	var due []seatUnreachable
 	for _, out := range outages {
-		if now.Sub(out.Since) < seatUnreachableReleaseAfter {
+		if out.Released || now.Sub(out.Since) < seatUnreachableReleaseAfter {
 			continue
 		}
 		due = append(due, out)
@@ -161,8 +213,10 @@ func seatUnreachableNote(alert seatUnreachable, now time.Time) string {
 // reads each seat's session first and drops a seat it cannot read — so this is
 // where the daemon stops and releases them. A release that fails is logged and
 // left to the next tick: the tracker keeps the outage while the seat stays
-// unreadable, and every step of the release is safe to repeat. In a dry run
-// nothing is paused, written or released, and the log says what would have been.
+// unreadable, and every step of the release is safe to repeat. A release that
+// ends marks its outage, so the seat is not released again until a good read
+// clears the outage. In a dry run nothing is paused, written, marked or
+// released, and the log says what would have been.
 func (d *Daemon) releaseUnreachableSeats(s seatUnreachableStopSeams, now time.Time, dry bool) {
 	for _, alert := range seatUnreachableDue(d.seatUnreachable.outagesAt(), now) {
 		who := alert.Rig + "/" + alert.Polecat
@@ -200,18 +254,26 @@ func (d *Daemon) releaseUnreachableSeats(s seatUnreachableStopSeams, now time.Ti
 // the release does not read as a hold is its own: a release that stopped between
 // its pause and its retire leaves the seat parked by seatUnreachableActor, and
 // refusing that park would leave the bead held for good.
+//
+// Two guards keep a released seat from being released again, since the seat
+// stays unreadable and parked, and a release that ends marks the outage rather
+// than trusting the next tick to find nothing left to do: the bead is re-read
+// before the seat is touched, and a bead that is no longer hooked to it — one an
+// earlier tick already returned to the pool, or the dispatcher slung elsewhere —
+// ends the release with nothing done to the seat (gt-wgim24).
 func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUnreachable, now time.Time) error {
 	who := alert.Rig + "/" + alert.Polecat
 	skip := func(format string, args ...any) error {
 		d.crashSkipLog.logf(d.logger.Printf, "seat-unreachable:"+who, format, args...)
 		return nil
 	}
-	if s.pause == nil || s.handBack == nil {
+	if s.pause == nil || s.beadStillHeld == nil || s.handBack == nil {
 		// One half of a release is no release: the seat would end up parked
 		// with its bead, or its bead handed back with the seat still holding
-		// it. An unwired seam refuses instead of acting on the other steps.
-		return fmt.Errorf("release seams incomplete (pause %t, hand-back %t): refusing to release %s",
-			s.pause != nil, s.handBack != nil, alert.Bead)
+		// it, or a bead handed back with nothing having read whose it is. An
+		// unwired seam refuses instead of acting on the other steps.
+		return fmt.Errorf("release seams incomplete (pause %t, bead read %t, hand-back %t): refusing to release %s",
+			s.pause != nil, s.beadStillHeld != nil, s.handBack != nil, alert.Bead)
 	}
 	if alert.Bead == "" {
 		return skip("seat_unreachable: %s holds no bead the pass could read; nothing to release", who)
@@ -241,6 +303,22 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 		if start, ok := s.slungAt(seat); ok && !start.After(now) {
 			elapsed = now.Sub(start)
 		}
+	}
+	// The bead is re-read before anything is written for the seat: an earlier
+	// tick of this path may already have handed it back, or the dispatcher may
+	// have slung it to another seat, and either way it is not this seat's to
+	// hand back again. That ends the release as done, with nothing done to the
+	// seat. The hand-back re-reads it too, so a bead that moves while the seat
+	// is released is still refused there.
+	held, err := s.beadStillHeld(seat)
+	if err != nil {
+		return fmt.Errorf("re-reading %s before releasing the seat: %w", alert.Bead, err)
+	}
+	if !held {
+		d.seatUnreachable.markReleased(seatKey{rig: alert.Rig, polecat: alert.Polecat}, alert.Since)
+		d.logger.Printf("seat_unreachable: %s: %s is no longer hooked to it (open, closed or moved); the release is done",
+			who, alert.Bead)
+		return nil
 	}
 	if err := s.pause(seat); err != nil {
 		return fmt.Errorf("pausing the seat after %s unreadable: %w", parkedAge(now.Sub(alert.Since)), err)
@@ -275,6 +353,11 @@ func (d *Daemon) releaseUnreachableSeat(s seatUnreachableStopSeams, alert seatUn
 			return fmt.Errorf("seat not retired after handing %s back: %w", alert.Bead, err)
 		}
 	}
+	// The seat is still unreadable and the pass skips a parked seat, so the
+	// tracker would carry this outage and hand the same bead back every tick.
+	// The mark ends the release for this outage; a good read drops the outage
+	// and the mark with it (gt-wgim24).
+	d.seatUnreachable.markReleased(seatKey{rig: alert.Rig, polecat: alert.Polecat}, alert.Since)
 	d.logger.Printf("seat_unreachable: released %s held by %s, unreadable for %s: %s",
 		alert.Bead, who, parkedAge(now.Sub(alert.Since)), oneLineReason(alert.Err))
 	return nil

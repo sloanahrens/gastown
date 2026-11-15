@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/stretchr/testify/require"
@@ -33,6 +35,12 @@ type releaseFake struct {
 	submitted bool
 	branch    string
 	slung     map[string]time.Time
+
+	// beadMoved makes the bead re-read before the hand-back report the bead no
+	// longer the seat's; beadReadErr makes it fail; beadReads counts its calls.
+	beadMoved   bool
+	beadReadErr error
+	beadReads   int
 }
 
 func (f *releaseFake) step(name string, seat overrunSeat) error {
@@ -44,6 +52,13 @@ func (f *releaseFake) seams() seatUnreachableStopSeams {
 	return seatUnreachableStopSeams{
 		pause:         func(seat overrunSeat) error { return f.step("pause", seat) },
 		removeSandbox: func(seat overrunSeat) error { return f.step("sandbox", seat) },
+		beadStillHeld: func(overrunSeat) (bool, error) {
+			f.beadReads++
+			if f.beadReadErr != nil {
+				return false, f.beadReadErr
+			}
+			return !f.beadMoved, nil
+		},
 		handBack: func(seat overrunSeat, elapsed time.Duration, note string) error {
 			if err := f.step("hand-back", seat); err != nil {
 				return err
@@ -91,6 +106,64 @@ func seatRecord(t *testing.T, d *Daemon) intent.Record {
 	rec, err := intent.Read(d.config.TownRoot, intent.Seat{Rig: releaseSeat.Rig, Role: constants.RolePolecat, Name: releaseSeat.Polecat})
 	require.NoError(t, err)
 	return rec
+}
+
+// seatUnreachableBeadStillHeldFor runs the production bead re-read closure for
+// releaseSeat over a bead store seeded with the bead's status and assignee.
+func seatUnreachableBeadStillHeldFor(t *testing.T, bd *beadsfake.Fake) (bool, error) {
+	t.Helper()
+	d := &Daemon{
+		config:           &Config{TownRoot: t.TempDir()},
+		openOverrunBeads: func() overrunHandBackStore { return bd },
+	}
+	return d.overrunStopSeams(overrunSeams{}).beadStillHeld(releaseSeat)
+}
+
+// TestSeatUnreachableBeadStillHeld reads the bead through the production re-read
+// the release's hand-back is gated on: only a bead still hooked to this seat is
+// handed back, while an open bead (already returned to the pool, or reopened), a
+// bead assigned to another seat, and a closed one are not (gt-wgim24).
+func TestSeatUnreachableBeadStillHeld(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		status   string
+		assignee string
+		want     bool
+	}{
+		{"hooked to the seat", "hooked", "gastown/polecats/capable", true},
+		{"in progress on the seat", "in_progress", "gastown/polecats/capable", true},
+		{"open again", "open", "gastown/polecats/capable", false},
+		{"open and unassigned", "open", "", false},
+		{"another polecat", "hooked", "gastown/polecats/other", false},
+		{"bare polecat name", "hooked", "capable", false},
+		{"closed", "closed", "gastown/polecats/capable", false},
+		{"tombstone", "tombstone", "gastown/polecats/capable", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := beadsfake.New()
+			bd.Seed(beads.Issue{ID: releaseSeat.Bead, Status: tc.status, Assignee: tc.assignee})
+			got, err := seatUnreachableBeadStillHeldFor(t, bd)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got, "bead %s held by %q", tc.status, tc.assignee)
+		})
+	}
+}
+
+// TestSeatUnreachableBeadStillHeldRefusesAnUnreadableBead: a bead the read
+// cannot answer is not the seat's, and the error reaches the release, which
+// stops before the hand-back (gt-wgim24).
+func TestSeatUnreachableBeadStillHeldRefusesAnUnreadableBead(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New()
+	bd.Seed(beads.Issue{ID: releaseSeat.Bead, Status: "hooked", Assignee: "gastown/polecats/capable"})
+	bd.FailWith("show", errors.New("dolt timeout"))
+	got, err := seatUnreachableBeadStillHeldFor(t, bd)
+	require.Error(t, err)
+	require.False(t, got, "an unreadable bead must not be handed back")
+	require.Contains(t, err.Error(), releaseSeat.Bead)
 }
 
 // TestSeatUnreachableReleaseAtFifteenMinutes drives the overrun guard's tick,
@@ -463,9 +536,146 @@ func TestSeatUnreachableReleaseNoteIsOneBoundedLine(t *testing.T) {
 	}, f.notes, "the note must be one line, so a multi-line capture cannot reach the bead")
 }
 
+// TestSeatUnreachableReleaseHappensOncePerOutage: a release that ends marks the
+// seat's outage, so the next tick hands nothing back while the seat stays
+// unreadable and parked; a good read drops the outage and the mark with it, so a
+// later outage is released afresh (gt-wgim24).
+func TestSeatUnreachableReleaseHappensOncePerOutage(t *testing.T) {
+	t.Parallel()
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	released := []string{
+		"pause gastown/capable",
+		"sandbox gastown/capable",
+		"hand-back gastown/capable",
+		"reset-agent-bead gastown/capable",
+		"record-cleanup gastown/capable",
+		"retire gastown/capable",
+	}
+	releasedTwice := append(append([]string{}, released...), released...)
+	steps := []struct {
+		name string
+		// goodReadThenFail drops the outage with an answer and starts a new
+		// outage twenty minutes in; false leaves the first outage running.
+		goodReadThenFail bool
+		want             []string
+	}{
+		{"a second tick of the same outage hands nothing back", false, released},
+		{"a new outage after a good read is released again", true, releasedTwice},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := unreachableReleaseTown(t)
+			watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+			f := &releaseFake{}
+
+			d.releaseUnreachableSeats(f.seams(), releaseStart.Add(16*time.Minute), false)
+			require.Equal(t, released, f.calls, "the first due tick must release the seat")
+
+			if step.goodReadThenFail {
+				good := &seatReadSet{}
+				good.add(seatRead{Rig: releaseSeat.Rig, Polecat: releaseSeat.Polecat, Bead: releaseSeat.Bead})
+				d.seatUnreachable.observe(releaseStart.Add(17*time.Minute), good)
+				watchUnreachable(d, releaseStart.Add(20*time.Minute), releaseSeat.Bead, gone)
+				d.releaseUnreachableSeats(f.seams(), releaseStart.Add(36*time.Minute), false)
+			} else {
+				// The release parked the seat, so the next health pass skips it
+				// and the tracker carries the outage through that skip.
+				held := &seatReadSet{}
+				held.skip(releaseSeat.Rig, releaseSeat.Polecat)
+				d.seatUnreachable.observe(releaseStart.Add(17*time.Minute), held)
+				d.releaseUnreachableSeats(f.seams(), releaseStart.Add(18*time.Minute), false)
+			}
+
+			require.Equal(t, step.want, f.calls, "only a new outage may be released again")
+			require.Len(t, f.handBacks, len(step.want)/len(released), "each release hands the bead back once")
+		})
+	}
+}
+
+// TestSeatUnreachableReleaseMarkDoesNotOutliveItsOutage: the release's mark is
+// keyed by the outage's first-failure time, so an outage that ends and a new one
+// that starts while the release runs is not silenced by the finished one's mark
+// (gt-wgim24).
+func TestSeatUnreachableReleaseMarkDoesNotOutliveItsOutage(t *testing.T) {
+	t.Parallel()
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	d, _ := unreachableReleaseTown(t)
+	watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+	f := &releaseFake{}
+	seams := f.seams()
+	newOutageAt := releaseStart.Add(16 * time.Minute)
+	seams.handBack = func(seat overrunSeat, _ time.Duration, _ string) error {
+		f.calls = append(f.calls, "hand-back "+seat.Rig+"/"+seat.Polecat)
+		// The health pass answers for the seat while the release still runs: the
+		// old outage ends and a new one starts.
+		good := &seatReadSet{}
+		good.add(seatRead{Rig: seat.Rig, Polecat: seat.Polecat, Bead: seat.Bead})
+		d.seatUnreachable.observe(newOutageAt, good)
+		failed := &seatReadSet{}
+		failed.add(seatRead{Rig: seat.Rig, Polecat: seat.Polecat, Bead: seat.Bead, Err: gone})
+		d.seatUnreachable.observe(newOutageAt, failed)
+		return nil
+	}
+
+	d.releaseUnreachableSeats(seams, newOutageAt, false)
+	d.releaseUnreachableSeats(seams, newOutageAt.Add(15*time.Minute), false)
+
+	handBacks := 0
+	for _, call := range f.calls {
+		if call == "hand-back gastown/capable" {
+			handBacks++
+		}
+	}
+	require.Equal(t, 2, handBacks,
+		"the new outage must be released even though the old one's release ended after it began")
+}
+
+// TestSeatUnreachableReleaseEndsAtABeadThatMoved: before it touches the seat the
+// release re-reads the bead, and a bead that has gone back to the pool, been
+// reopened or moved to another seat is not this seat's to hand back again: the
+// release ends as done with one log line and nothing done to the seat. A read
+// that fails stops the release for the next tick (gt-wgim24).
+func TestSeatUnreachableReleaseEndsAtABeadThatMoved(t *testing.T) {
+	t.Parallel()
+	steps := []struct {
+		name    string
+		moved   bool
+		readErr error
+		wantLog string
+	}{
+		{"a bead re-hooked to another seat is not handed back", true, nil,
+			"gt-p4aqut is no longer hooked to it"},
+		{"a bead read that fails stops the release for the next tick", false, errors.New("bd: connection refused"),
+			"re-reading gt-p4aqut before releasing the seat"},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs := unreachableReleaseTown(t)
+			watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod gastown-capable is gone"))
+			f := &releaseFake{beadMoved: step.moved, beadReadErr: step.readErr}
+
+			d.releaseUnreachableSeats(f.seams(), releaseStart.Add(16*time.Minute), false)
+
+			require.Empty(t, f.calls, "a bead that is not the seat's must not release the seat")
+			require.Equal(t, 1, f.beadReads, "the bead must be re-read once before the release")
+			require.Empty(t, f.handBacks, "nothing may be handed back")
+			require.Contains(t, logs.String(), step.wantLog)
+			if !step.moved {
+				return
+			}
+			d.releaseUnreachableSeats(f.seams(), releaseStart.Add(17*time.Minute), false)
+			require.Empty(t, f.calls, "a moved bead ends the release for this outage")
+			require.Equal(t, 1, f.beadReads, "a moved bead is not re-read on the next tick")
+		})
+	}
+}
+
 // TestSeatUnreachableReleaseRefusesHalfWiredSeams: a release that cannot pause
-// the seat or hand the bead back is no release, so the missing seam refuses it
-// and acts on nothing rather than running the steps it has (gt-wgim24).
+// the seat, read whose bead it would hand back, or hand the bead back is no
+// release, so the missing seam refuses it and acts on nothing rather than
+// running the steps it has (gt-wgim24).
 func TestSeatUnreachableReleaseRefusesHalfWiredSeams(t *testing.T) {
 	t.Parallel()
 	steps := []struct {
@@ -473,6 +683,7 @@ func TestSeatUnreachableReleaseRefusesHalfWiredSeams(t *testing.T) {
 		unwire func(*seatUnreachableStopSeams)
 	}{
 		{"no pause seam", func(s *seatUnreachableStopSeams) { s.pause = nil }},
+		{"no bead read seam", func(s *seatUnreachableStopSeams) { s.beadStillHeld = nil }},
 		{"no hand-back seam", func(s *seatUnreachableStopSeams) { s.handBack = nil }},
 	}
 	for _, step := range steps {

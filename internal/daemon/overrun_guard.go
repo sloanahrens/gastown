@@ -199,6 +199,14 @@ type overrunSeams struct {
 	// unreadable bead. nil means the stop cannot tell and records the end; the
 	// hand-back's own check still refuses a bead that is not the seat's.
 	stillOurs func(seat overrunSeat) (bool, error)
+	// beadStillHeld reports whether the bead is still hooked to the seat. The
+	// seat-unreachable release reads it just before its hand-back, so a bead
+	// already back in the pool, or slung to another seat, is not handed back
+	// again (gt-wgim24). Unlike stillOurs, an open bead is not the seat's: the
+	// release is past the half-handed-back point stillOurs finishes. An error
+	// fails the release, so nothing is written on an unreadable bead. nil means
+	// the release cannot tell whose bead it is and refuses it.
+	beadStillHeld func(seat overrunSeat) (bool, error)
 	// endRun records on the bead that the stop ended its run
 	// (events.TypeOverrunStop), at the time the run ended, so the dispatch
 	// after the hand-back is a new run the guard polices afresh. Without it a
