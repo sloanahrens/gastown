@@ -539,6 +539,25 @@ func TestRunDerivesTheForgeOwnerFromTheOriginURL(t *testing.T) {
 		{name: "an scp-like origin URL", remotes: []string{"origin"}, origin: shape("git@forge.invalid:", account, "/gastown.git"), wantCode: exitClean},
 		{name: "a local path origin", remotes: []string{"origin"}, origin: shape("/", account, "/gastown.git"), wantCode: exitClean},
 		{
+			// git reports a remote URL verbatim, so one that does not parse is
+			// reachable: it names no account, and a run that exempted it would
+			// hide the finding this case asserts prints.
+			name:     "an unparseable origin URL",
+			remotes:  []string{"origin"},
+			origin:   shape("https://forge.invalid:3000/", "%zz", "/gastown.git"),
+			wantCode: exitFindings,
+			wantOut:  file + ":1 " + hygiene.RuleBlockedWord + "\n",
+		},
+		{
+			// A URL with no path element also names no account, so it exempts
+			// nothing rather than standing in for every account.
+			name:     "an origin URL with no path element",
+			remotes:  []string{"origin"},
+			origin:   shape("https://forge.invalid:3000", "/"),
+			wantCode: exitFindings,
+			wantOut:  file + ":1 " + hygiene.RuleBlockedWord + "\n",
+		},
+		{
 			// The URL is there under another name, so a run that read it would
 			// exempt the account: only the remote's name makes it the origin.
 			name:     "no remote named origin",
