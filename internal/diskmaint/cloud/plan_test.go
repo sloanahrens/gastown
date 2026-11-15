@@ -671,3 +671,60 @@ func TestPlanKeepsAnImageAnotherRepositoryAlsoTags(t *testing.T) {
 		t.Errorf("Kept[%s] = %q, want %q", fractalsRepo+":t1", got, want)
 	}
 }
+
+// TestParseDeployReadsRefsGluedToPunctuation holds the deploy keep rule to the
+// refs a workflow glues to JSON, quotes or a list (the rework of gt-p427gz): the
+// tag is kept wherever its punctuation sits, and a templated tag still refuses.
+func TestParseDeployReadsRefsGluedToPunctuation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		tag  string
+	}{
+		{"a ref in a JSON object", `{"image":"fractals-nextjs:t7"}` + "\n", "t7"},
+		{"a ref in a quoted list", `images: ['reg.example/team/fractals-nextjs:t8', "other:x"]` + "\n", "t8"},
+		{"a ref after a long flag and a comma", `--image=fractals-nextjs:t9,` + "\n", "t9"},
+		{"a ref in a shell assignment with a semicolon", `IMAGE=fractals-nextjs:t10; make deploy` + "\n", "t10"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, why := parseDeploy(tc.text)
+			if why != "" {
+				t.Fatalf("parseDeploy refused: %s", why)
+			}
+			if !got.tags[tc.tag] {
+				t.Errorf("tags = %v, want %q kept", got.tags, tc.tag)
+			}
+		})
+	}
+	if _, why := parseDeploy("image: fractals-nextjs:${{ github.sha }}\n"); why != refuseDeployName {
+		t.Errorf("a templated tag: refusal = %q, want %q", why, refuseDeployName)
+	}
+}
+
+// TestParseLabelsRefusesWhatItCannotUse pins the two label-file edges om raised
+// in the third review of gt-p427gz: a registry with a port and no tag is refused,
+// not skipped, and a file with only comments is an empty list, which refuses.
+func TestParseLabelsRefusesWhatItCannotUse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"a registry with a port and no tag", "ubuntu:docker://registry.example:5000/team/fractals-nextjs\n", refuseLabelLine},
+		{"a file of comments only", "# runner labels\n# none yet\n", refuseEmptyLabels},
+		{"an empty file", "", refuseEmptyLabels},
+		{"a file cut short", "ci-base:docker://fractals-nextjs:t1", refuseLabelShort},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, why := parseLabels(tc.text); why != tc.want {
+				t.Errorf("parseLabels refusal = %q, want %q", why, tc.want)
+			}
+		})
+	}
+}

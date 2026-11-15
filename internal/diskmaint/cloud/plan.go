@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
@@ -32,9 +33,9 @@ const (
 	latestTag = "latest"
 	// imageTimeLayout is the created time docker image ls prints.
 	imageTimeLayout = "2006-01-02 15:04:05 -0700 MST"
-	// fieldPunctuation is what a workflow's YAML or shell line may put around an
-	// image ref: a quote, a list bracket, a shell grouping character, a trailing
-	// comma or semicolon.
+	// fieldPunctuation is what a workflow's YAML, JSON or shell line may put around
+	// an image ref: a quote, a list bracket, a brace, a shell grouping character, a
+	// comma or semicolon. Each ends a field wherever it sits.
 	fieldPunctuation = "\"'`,;()[]{}"
 	// inspectFormat asks docker for an image's id and the registry refs it
 	// carries, one line per image, because the id docker lists is the device's
@@ -254,19 +255,26 @@ func parseDeploy(text string) (named, string) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// A YAML list item starts with a dash; the field after it is the value.
-		for _, field := range strings.Fields(strings.TrimPrefix(line, "-")) {
-			// A ref holds no "=", so in an assignment (IMAGE=repo:tag) or a long
-			// flag (--image=repo:tag) the ref is the part after the last one.
-			if i := strings.LastIndex(field, "="); i >= 0 {
-				field = field[i+1:]
-			}
-			if why := n.place(strings.Trim(field, fieldPunctuation), deployRefusals); why != "" {
+		// A YAML list item starts with a dash; the field after it is the value. A ref
+		// holds no space, quote, bracket, brace, comma, semicolon or "=", so each of
+		// them ends a field wherever it sits: a ref glued to JSON ({"image":"repo:tag"}),
+		// to a list (['repo:tag']), to an assignment (IMAGE=repo:tag) or to a long flag
+		// (--image=repo:tag) is read as the ref alone. A templated tag keeps its "$"
+		// in the field, so it still refuses the plan.
+		for _, field := range strings.FieldsFunc(strings.TrimPrefix(line, "-"), isFieldBreak) {
+			if why := n.place(field, deployRefusals); why != "" {
 				return named{}, why
 			}
 		}
 	}
 	return n, ""
+}
+
+// isFieldBreak reports whether r ends a field in a workflow line: white space,
+// or one of the characters a workflow puts around or in front of an image ref
+// (fieldPunctuation and "=").
+func isFieldBreak(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(fieldPunctuation+"=", r)
 }
 
 // place adds one ref to the sets, or returns the refusal for a ref this plan
