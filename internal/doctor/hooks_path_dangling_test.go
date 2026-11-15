@@ -11,14 +11,14 @@ import (
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
-// danglingRig is a rig with a crew clone crew/sloan that has a .githooks
+// danglingRig is a rig with a crew clone crew/alice that has a .githooks
 // directory and one commit, and a linked worktree crew/jay-inv of that clone.
 // The worktree reads the clone's config, as git makes it.
 func danglingRig(t *testing.T) (ctx *CheckContext, clone, worktree string) {
 	t.Helper()
 	const rigName = "testrig"
 	townRoot := t.TempDir()
-	clone = filepath.Join(townRoot, rigName, "crew", "sloan")
+	clone = filepath.Join(townRoot, rigName, "crew", "alice")
 	worktree = filepath.Join(townRoot, rigName, "crew", "jay-inv")
 	gf := gitfake.New()
 	gf.InitRepo(t, clone)
@@ -48,11 +48,11 @@ func TestHooksPathChecksReportADanglingPath(t *testing.T) {
 
 	perRig := NewHooksPathConfiguredCheck()
 	perRigResult := perRig.Run(ctx)
-	assertDanglingDetail(t, "per-rig", perRigResult, "crew/sloan", dangling, configFile, worktree)
+	assertDanglingDetail(t, "per-rig", perRigResult, "crew/alice", dangling, configFile, worktree)
 
 	allRigs := NewHooksPathAllRigsCheck()
 	allRigsResult := allRigs.Run(ctx)
-	assertDanglingDetail(t, "all-rigs", allRigsResult, filepath.Join("testrig", "crew", "sloan"), dangling, configFile, worktree)
+	assertDanglingDetail(t, "all-rigs", allRigsResult, filepath.Join("testrig", "crew", "alice"), dangling, configFile, worktree)
 
 	if err := perRig.Fix(ctx); err != nil {
 		t.Fatalf("per-rig Fix: %v", err)
@@ -94,8 +94,8 @@ func assertDanglingDetail(t *testing.T, label string, result *CheckResult, rel, 
 // Fix does not rewrite it.
 func TestHooksPathChecksLeaveAValidPathAlone(t *testing.T) {
 	t.Parallel()
-	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "sloan"))
-	clone := filepath.Join(ctx.RigPath(), "crew", "sloan")
+	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "alice"))
+	clone := filepath.Join(ctx.RigPath(), "crew", "alice")
 	valid := t.TempDir()
 	if err := ctx.git(clone).ConfigSet("core.hooksPath", valid); err != nil {
 		t.Fatal(err)
@@ -124,8 +124,8 @@ func TestHooksPathChecksLeaveAValidPathAlone(t *testing.T) {
 // does not rewrite the value.
 func TestHooksPathChecksRefuseAnUnreadablePath(t *testing.T) {
 	t.Parallel()
-	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "sloan"))
-	clone := filepath.Join(ctx.RigPath(), "crew", "sloan")
+	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "alice"))
+	clone := filepath.Join(ctx.RigPath(), "crew", "alice")
 	file := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestHooksPathChecksRefuseAnUnreadableClone(t *testing.T) {
 	t.Parallel()
 	const rigName = "testrig"
 	townRoot := t.TempDir()
-	clone := filepath.Join(townRoot, rigName, "crew", "sloan")
+	clone := filepath.Join(townRoot, rigName, "crew", "alice")
 	for _, dir := range []string{filepath.Join(clone, ".git"), filepath.Join(clone, ".githooks")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -170,8 +170,8 @@ func TestHooksPathChecksRefuseAnUnreadableClone(t *testing.T) {
 	if got.Status != StatusError {
 		t.Fatalf("per-rig = %v %v, want Error", got.Status, got.Details)
 	}
-	if len(got.Details) != 1 || !strings.HasPrefix(got.Details[0], "crew/sloan: ") {
-		t.Fatalf("details = %v, want one detail naming crew/sloan", got.Details)
+	if len(got.Details) != 1 || !strings.HasPrefix(got.Details[0], "crew/alice: ") {
+		t.Fatalf("details = %v, want one detail naming crew/alice", got.Details)
 	}
 }
 
@@ -217,7 +217,7 @@ func failGitOpens(ctx *CheckContext, fail failingRepo) {
 // be read is not judged unset. The check errors rather than report it.
 func TestHooksPathChecksRefuseAConfigThatCannotBeRead(t *testing.T) {
 	t.Parallel()
-	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "sloan"))
+	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "alice"))
 	failGitOpens(ctx, failingRepo{failGet: true})
 
 	if got := NewHooksPathConfiguredCheck().Run(ctx); got.Status != StatusError {
@@ -230,8 +230,8 @@ func TestHooksPathChecksRefuseAConfigThatCannotBeRead(t *testing.T) {
 // The check errors.
 func TestHooksPathChecksRefuseAWorktreeListThatCannotBeRead(t *testing.T) {
 	t.Parallel()
-	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "sloan"))
-	clone := filepath.Join(ctx.RigPath(), "crew", "sloan")
+	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "alice"))
+	clone := filepath.Join(ctx.RigPath(), "crew", "alice")
 	if err := ctx.git(clone).ConfigSet("core.hooksPath", filepath.Join(ctx.TownRoot, "gone")); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestHooksPathChecksRefuseAWorktreeListThatCannotBeRead(t *testing.T) {
 // cannot write its config, Fix returns the error instead of passing.
 func TestHooksPathFixReportsAFailedWrite(t *testing.T) {
 	t.Parallel()
-	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "sloan"))
+	ctx := hooksPathRig(t, "testrig", filepath.Join("crew", "alice"))
 	check := NewHooksPathConfiguredCheck()
 	if got := check.Run(ctx); got.Status != StatusWarning {
 		t.Fatalf("per-rig = %v %v, want Warning", got.Status, got.Details)

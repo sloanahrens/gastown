@@ -93,7 +93,7 @@ func TestCensusBudgetCheckFailsOneCallerOver(t *testing.T) {
 	writeCensusLog(t, town, 60, func(int) []string {
 		return []string{
 			"list@metrics.queueLandingColumn=20",
-			"list@landworker.RetryBeads.List=6",
+			"show@daemon.(*Daemon).showRigBead=6",
 		}
 	})
 
@@ -111,7 +111,7 @@ func TestCensusBudgetCheckFailsOneCallerOver(t *testing.T) {
 			t.Errorf("detail %q must hold the average and the budget (%s)", detail, want)
 		}
 	}
-	if got := censusDetail(r, "landworker.RetryBeads.List"); got != "" {
+	if got := censusDetail(r, "daemon.(*Daemon).showRigBead"); got != "" {
 		t.Errorf("a caller within budget is reported: %q", got)
 	}
 }
@@ -170,12 +170,12 @@ func TestCensusBudgetCheckNamesACallerTheTableDropped(t *testing.T) {
 	writeCensusLog(t, town, 60, func(int) []string {
 		return []string{
 			"list@metrics.queueLandingColumn=1",
-			"list@landworker.RetryBeads.List=1",
+			"show@daemon.(*Daemon).showRigBead=1",
 		}
 	})
 
 	chk := censusCheck()
-	chk.Budgets = []beads.CensusBudget{{Caller: "landworker.RetryBeads.List", CallsPerMinute: 6.9}}
+	chk.Budgets = []beads.CensusBudget{{Caller: "daemon.(*Daemon).showRigBead", CallsPerMinute: 6.9}}
 
 	r := chk.Run(&CheckContext{TownRoot: town})
 
@@ -186,7 +186,7 @@ func TestCensusBudgetCheckNamesACallerTheTableDropped(t *testing.T) {
 	if detail == "" || !strings.Contains(detail, "no budget") {
 		t.Fatalf("details %q must name the dropped caller as unbudgeted", r.Details)
 	}
-	if got := censusDetail(r, "landworker.RetryBeads.List"); got != "" {
+	if got := censusDetail(r, "daemon.(*Daemon).showRigBead"); got != "" {
 		t.Errorf("a budgeted caller with no calls in the log is reported: %q", got)
 	}
 }
@@ -291,7 +291,7 @@ func TestCensusBudgetCheckPassesWithinBudget(t *testing.T) {
 	writeCensusLog(t, town, 60, func(int) []string {
 		return []string{
 			"list@metrics.queueLandingColumn=2",
-			"list@landworker.RetryBeads.List=6",
+			"show@daemon.(*Daemon).showRigBead=6",
 		}
 	})
 
@@ -588,7 +588,7 @@ func TestCensusBudgetCheckWarnsOnTornRecords(t *testing.T) {
 			fmt.Fprintf(&b, "%s bd census: total=6 window=60s top: list@metrics.queueLa\n", stamp)
 			continue
 		}
-		fmt.Fprintf(&b, "%s bd census: total=6 window=60s top: list@landworker.RetryBeads.List=6\n", stamp)
+		fmt.Fprintf(&b, "%s bd census: total=6 window=60s top: show@daemon.(*Daemon).showRigBead=6\n", stamp)
 	}
 	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
 
