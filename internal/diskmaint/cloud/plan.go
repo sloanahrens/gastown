@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -35,6 +36,13 @@ const (
 	// image ref: a quote, a list bracket, a shell grouping character, a trailing
 	// comma or semicolon.
 	fieldPunctuation = "\"'`,;()[]{}"
+	// inspectFormat asks docker for an image's id and the registry refs it
+	// carries, one line per image, because the id docker lists is the device's
+	// name for the image and a pin names the registry's.
+	inspectFormat = "{{.Id}} {{json .RepoDigests}}"
+	// refNameMax bounds the ref a refusal names, so one malformed line cannot
+	// put a whole file into a log.
+	refNameMax = 120
 )
 
 // The rules a Kept entry names, one per way an image survives a plan.
@@ -56,30 +64,49 @@ const (
 // how many tags it spares.
 var ruleNewest = fmt.Sprintf("among the newest %d %s tags", keepNewest, fractalsRepo)
 
-// The reasons a plan is refused. Each is fixed text: a runner's error carries
-// the command's output, which a refusal never echoes.
+// The reasons a plan is refused. A runner's error carries the command's output,
+// which a refusal never echoes; the three that name a ref take it from a file the
+// caller configured, cut at refNameMax, so the operator can find the line.
 const (
 	refuseNoLabels    = "no runner label list is configured; the plan is refused"
 	refuseEmptyLabels = "the runner label list names no label; the plan is refused"
 	refuseLabelRead   = "the runner label list is unreadable; the plan is refused"
+	refuseLabelShort  = "the runner label list does not end in a newline, so the read is cut short; the plan is refused"
 	refuseLabelLine   = "a runner label names a fractals-nextjs image with no tag; the plan is refused"
 	refuseLabelName   = "a runner label names a tag or digest docker cannot have; the plan is refused"
+	refuseLabelRef    = "a runner label names an image ref docker cannot read: %s; the plan is refused"
 	refuseNoDeploy    = "no deploy workflow is configured; the plan is refused"
 	refuseEmptyDeploy = "the deploy workflow is empty; the plan is refused"
 	refuseDeployRead  = "the deploy workflow is unreadable; the plan is refused"
 	refuseDeployName  = "a deploy workflow names a fractals-nextjs image with a tag or digest docker cannot have; the plan is refused"
+	refuseDeployRef   = "a deploy workflow names an image ref docker cannot read: %s; the plan is refused"
+	refuseDigestRead  = "the registry digests the daemon carries are unreadable; the plan is refused"
+	refuseUnpinned    = "a runner label or deploy workflow pins an image digest no listed image carries: %s; the plan is refused"
 	refuseUndated     = "a fractals-nextjs tag has no readable created time; the plan is refused"
 )
 
+// refusals is how one source words the refs it cannot use: an image ref docker
+// cannot read (named, so the line is found), a tag or digest docker cannot have,
+// a ref of this repository that names no tag, and the tag such a ref names where
+// the source allows one.
+type refusals struct {
+	unreadable, badName, untagged, latest string
+}
+
+var (
+	labelRefusals  = refusals{unreadable: refuseLabelRef, badName: refuseLabelName, untagged: refuseLabelLine}
+	deployRefusals = refusals{unreadable: refuseDeployRef, badName: refuseDeployName, latest: latestTag}
+)
+
 // Plan lists the fractals-nextjs images the two keep rules leave for removal.
-// It keeps the repository's newest keepNewest tags and every tag or image a
-// runner label or the deploy workflow names, reading both lists through Run
-// from cfg.LabelsFile and cfg.DeployFile so the set is never a constant; each
-// kept image carries the rule that spared it. A read the plan cannot make, or a
-// value it cannot read, refuses the plan with no actions.
+// It keeps the repository's newest keepNewest tags and every tag, digest or
+// image id a runner label or the deploy workflow names, reading both lists
+// through Run from cfg.LabelsFile and cfg.DeployFile so the set is never a
+// constant; each kept image carries the rule that spared it. A read the plan
+// cannot make, or a value it cannot read, refuses the plan with no actions.
 func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
 	plan := diskmaint.Plan{Target: planTarget, Policy: p}
-	named, namedIDs, why := t.namedRefs(ctx)
+	named, why := t.namedRefs(ctx)
 	if why != "" {
 		plan.Refused = why
 		return plan, nil
@@ -94,69 +121,100 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		plan.Refused = why
 		return plan, nil
 	}
-	plan.Kept, plan.Actions = decide(images, ranked, named, namedIDs)
+	pinned, why := t.pinnedImages(ctx, images, named.digests)
+	if why != "" {
+		plan.Refused = why
+		return plan, nil
+	}
+	plan.Kept, plan.Actions = decide(images, ranked, named, pinned)
 	return plan, nil
 }
 
-// namedRefs returns the fractals-nextjs tags and image ids the runner labels and
-// the deploy workflow name, or the fixed reason one of the two lists cannot be
-// read. Both are caller settings read through Run: a list this code kept of its
-// own would name whatever it chose, and a list it cannot read is a set of images
-// it cannot know are in use.
-func (t *Target) namedRefs(ctx context.Context) (map[string]bool, map[string]bool, string) {
-	tags, ids, why := t.labelRefs(ctx)
+// named is what the runner labels and the deploy workflow name: tags of the
+// repository, registry digests they pin, and image ids they name outright. The
+// three stay apart because a digest and an image id are different values, and a
+// ref that names a tag and a digest puts one in each.
+type named struct {
+	tags, digests, ids map[string]bool
+}
+
+// newNamed returns empty sets ready to add to.
+func newNamed() named {
+	return named{tags: map[string]bool{}, digests: map[string]bool{}, ids: map[string]bool{}}
+}
+
+// merge adds another source's refs to this one.
+func (n *named) merge(o named) {
+	for tag := range o.tags {
+		n.tags[tag] = true
+	}
+	for digest := range o.digests {
+		n.digests[digest] = true
+	}
+	for id := range o.ids {
+		n.ids[id] = true
+	}
+}
+
+// namedRefs returns the refs the runner labels and the deploy workflow name, or
+// the fixed reason one of the two lists cannot be read. Both are caller settings
+// read through Run: a list this code kept of its own would name whatever it
+// chose, and a list it cannot read is a set of images it cannot know are in use.
+func (t *Target) namedRefs(ctx context.Context) (named, string) {
+	labels, why := t.labelRefs(ctx)
 	if why != "" {
-		return nil, nil, why
+		return named{}, why
 	}
-	deployTags, deployIDs, why := t.deployRefs(ctx)
+	deploy, why := t.deployRefs(ctx)
 	if why != "" {
-		return nil, nil, why
+		return named{}, why
 	}
-	for tag := range deployTags {
-		tags[tag] = true
-	}
-	for id := range deployIDs {
-		ids[id] = true
-	}
-	return tags, ids, ""
+	labels.merge(deploy)
+	return labels, ""
 }
 
 // labelRefs reads the runner label list the caller configured.
-func (t *Target) labelRefs(ctx context.Context) (map[string]bool, map[string]bool, string) {
+func (t *Target) labelRefs(ctx context.Context) (named, string) {
 	if t.cfg.LabelsFile == "" {
-		return nil, nil, refuseNoLabels
+		return named{}, refuseNoLabels
 	}
 	// "--" ends cat's options, so a path that starts with a dash is a file name
 	// and not a flag.
 	out, err := t.cfg.Run(ctx, nil, "cat", "--", t.cfg.LabelsFile)
 	if err != nil {
-		return nil, nil, refuseLabelRead
+		return named{}, refuseLabelRead
 	}
 	return parseLabels(string(out))
 }
 
 // deployRefs reads the deploy workflow the caller configured.
-func (t *Target) deployRefs(ctx context.Context) (map[string]bool, map[string]bool, string) {
+func (t *Target) deployRefs(ctx context.Context) (named, string) {
 	if t.cfg.DeployFile == "" {
-		return nil, nil, refuseNoDeploy
+		return named{}, refuseNoDeploy
 	}
 	out, err := t.cfg.Run(ctx, nil, "cat", "--", t.cfg.DeployFile)
 	if err != nil {
-		return nil, nil, refuseDeployRead
+		return named{}, refuseDeployRead
 	}
 	return parseDeploy(string(out))
 }
 
-// parseLabels returns the fractals-nextjs tags and image ids a runner label list
-// names. Each line is one label, "<name>:docker://<ref>", where the ref is the
-// image a job started by that label runs in. A line naming no image is a label
-// of another kind and is skipped; a ref of this repository that names no tag, or
-// a tag or digest docker cannot have, refuses the plan, since the image it names
-// is unknown. A file with no label line at all refuses it too: an empty read
-// cannot be told from a truncated one, and reading it as an empty keep list
-// would free every image outside the newest window.
-func parseLabels(text string) (map[string]bool, map[string]bool, string) {
-	tags, ids := map[string]bool{}, map[string]bool{}
+// parseLabels returns the refs a runner label list names. Each line is one
+// label, "<name>:docker://<ref>", where the ref is the image a job started by
+// that label runs in. A line naming no image is a label of another kind and is
+// skipped; a ref of this repository the plan cannot read, or one that names no
+// tag, refuses the plan, since the image it names is then unknown. A file with
+// no label line, or one whose last line has no newline after it, refuses the
+// plan too: a short read cannot be told from a file that names fewer labels, and
+// reading one as a smaller keep list would free images a label still uses.
+func parseLabels(text string) (named, string) {
+	if strings.TrimSpace(text) == "" {
+		return named{}, refuseEmptyLabels
+	}
+	if !strings.HasSuffix(text, "\n") {
+		return named{}, refuseLabelShort
+	}
+	n := newNamed()
 	labels := 0
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -168,43 +226,29 @@ func parseLabels(text string) (map[string]bool, map[string]bool, string) {
 		if i < 0 {
 			continue
 		}
-		ref := parseImageRef(strings.TrimSpace(line[i+len(labelMarker):]))
-		if repoBase(ref.repo) != fractalsRepo {
-			continue
-		}
-		switch {
-		case ref.digest != "":
-			if !registry.ValidDigest(ref.digest) {
-				return nil, nil, refuseLabelName
-			}
-			ids[ref.digest] = true
-		case ref.tag == "":
-			return nil, nil, refuseLabelLine
-		case !registry.ValidTag(ref.tag):
-			return nil, nil, refuseLabelName
-		default:
-			tags[ref.tag] = true
+		if why := n.place(strings.TrimSpace(line[i+len(labelMarker):]), labelRefusals); why != "" {
+			return named{}, why
 		}
 	}
 	if labels == 0 {
-		return nil, nil, refuseEmptyLabels
+		return named{}, refuseEmptyLabels
 	}
-	return tags, ids, ""
+	return n, ""
 }
 
-// parseDeploy returns the fractals-nextjs tags and image ids a deploy workflow
-// names. The workflow is YAML the plan does not parse: every field of every line
-// is read as a possible image ref, quoted, in a list, or after an assignment, so
-// "image: registry/fractals-nextjs:v1" and "IMAGE=fractals-nextjs:v1" both
-// count. A ref with no tag names docker's default tag, latest. A tag or digest docker
-// cannot have — a templated one above all, whose image is not known until the
-// run — refuses the plan. An empty file refuses it: it cannot be told from a
-// truncated read.
-func parseDeploy(text string) (map[string]bool, map[string]bool, string) {
-	tags, ids := map[string]bool{}, map[string]bool{}
+// parseDeploy returns the refs a deploy workflow names. The workflow is YAML the
+// plan does not parse: every field of every line is read as a possible image
+// ref, quoted, in a list, or after an assignment, so "image:
+// registry/fractals-nextjs:v1" and "IMAGE=fractals-nextjs:v1" both count. A ref
+// with no tag names docker's default tag, latest. A tag or digest docker cannot
+// have — a templated one above all, whose image is not known until the run —
+// refuses the plan. An empty file refuses it: it cannot be told from a truncated
+// read.
+func parseDeploy(text string) (named, string) {
 	if strings.TrimSpace(text) == "" {
-		return nil, nil, refuseEmptyDeploy
+		return named{}, refuseEmptyDeploy
 	}
+	n := newNamed()
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -217,46 +261,113 @@ func parseDeploy(text string) (map[string]bool, map[string]bool, string) {
 			if i := strings.LastIndex(field, "="); i >= 0 {
 				field = field[i+1:]
 			}
-			ref := parseImageRef(strings.Trim(field, fieldPunctuation))
-			if repoBase(ref.repo) != fractalsRepo {
-				continue
-			}
-			switch {
-			case ref.digest != "":
-				if !registry.ValidDigest(ref.digest) {
-					return nil, nil, refuseDeployName
-				}
-				ids[ref.digest] = true
-			case ref.tag == "":
-				tags[latestTag] = true
-			case !registry.ValidTag(ref.tag):
-				return nil, nil, refuseDeployName
-			default:
-				tags[ref.tag] = true
+			if why := n.place(strings.Trim(field, fieldPunctuation), deployRefusals); why != "" {
+				return named{}, why
 			}
 		}
 	}
-	return tags, ids, ""
+	return n, ""
+}
+
+// place adds one ref to the sets, or returns the refusal for a ref this plan
+// cannot use. A ref of another repository names no image this plan removes and
+// is skipped. A ref of this repository that docker cannot read refuses the plan
+// naming it: the file says it names our image and which image is unknown. A ref
+// that names a tag and a digest puts both in the sets, so the images either one
+// matches are kept.
+func (n *named) place(raw string, r refusals) string {
+	ref, ok := parseImageRef(raw)
+	if ref.id != "" {
+		n.ids[ref.id] = true
+		return ""
+	}
+	if !ok {
+		// A digest with no repository in front of it is refused as well: nothing
+		// says whose image it names, and a real digest there is a pin the plan
+		// has to honor.
+		if ours(ref.repo) || (ref.repo == "" && registry.ValidDigest(ref.digest)) {
+			return fmt.Sprintf(r.unreadable, refForName(raw))
+		}
+		return ""
+	}
+	if !ours(ref.repo) {
+		return ""
+	}
+	if ref.digest != "" {
+		if !registry.ValidDigest(ref.digest) {
+			return r.badName
+		}
+		n.digests[ref.digest] = true
+	}
+	switch {
+	case ref.tag != "":
+		if !registry.ValidTag(ref.tag) {
+			return r.badName
+		}
+		n.tags[ref.tag] = true
+	case ref.digest != "":
+		// The digest names the image and needs no tag.
+	case r.latest == "":
+		return r.untagged
+	default:
+		n.tags[r.latest] = true
+	}
+	return ""
 }
 
 // imageRef is one docker image reference split into the repository it names and
-// the tag or digest it pins.
+// the tag, digest or image id it pins.
 type imageRef struct {
-	repo, tag, digest string
+	repo, tag, digest, id string
 }
 
-// parseImageRef splits a ref at its digest, else at its tag. The tag's colon
-// counts only after the last slash, so a registry's port stays part of the
-// repository: "registry.example:5000/team/fractals-nextjs" pins no tag, and
-// "registry.example:5000/team/fractals-nextjs:v1" pins v1.
-func parseImageRef(ref string) imageRef {
-	if i := strings.Index(ref, "@"); i >= 0 {
-		return imageRef{repo: ref[:i], digest: ref[i+1:]}
+// parseImageRef reads a ref as a repository, tag, digest or image id, and
+// reports false for one docker cannot read: no repository, a second tag, a tag
+// with no name, no digest after the "@", or a second digest. The repository
+// comes back even then, so a caller can tell a malformed ref of this repository
+// from a ref of another one.
+func parseImageRef(raw string) (imageRef, bool) {
+	if registry.ValidDigest(raw) {
+		return imageRef{id: raw}, true
 	}
-	if i, slash := strings.LastIndex(ref, ":"), strings.LastIndex(ref, "/"); i > slash {
-		return imageRef{repo: ref[:i], tag: ref[i+1:]}
+	var out imageRef
+	name, pinned := raw, false
+	if i := strings.Index(raw, "@"); i >= 0 {
+		name, out.digest, pinned = raw[:i], raw[i+1:], true
 	}
-	return imageRef{repo: ref}
+	repo, tag, tagged := splitTag(name)
+	out.repo, out.tag = repo, tag
+	switch {
+	case out.repo == "":
+		return out, false
+	case strings.Contains(repoBase(out.repo), ":"):
+		return out, false
+	case tagged && out.tag == "":
+		return out, false
+	case pinned && (out.digest == "" || strings.Contains(out.digest, "@")):
+		return out, false
+	}
+	return out, true
+}
+
+// splitTag splits a repository from the tag after its last slash, and reports
+// whether a tag colon was there: a registry's port is a colon before the last
+// slash and stays part of the repository.
+func splitTag(name string) (repo, tag string, tagged bool) {
+	if i, slash := strings.LastIndex(name, ":"), strings.LastIndex(name, "/"); i > slash {
+		return name[:i], name[i+1:], true
+	}
+	return name, "", false
+}
+
+// ours reports whether a ref names this repository: its last path element, read
+// up to a colon, so the tail of a malformed ref still reads as ours.
+func ours(repo string) bool {
+	base := repoBase(repo)
+	if i := strings.Index(base, ":"); i >= 0 {
+		base = base[:i]
+	}
+	return base == fractalsRepo
 }
 
 // repoBase is a repository's last path element, so a label naming
@@ -267,6 +378,112 @@ func repoBase(repo string) string {
 		return repo[i+1:]
 	}
 	return repo
+}
+
+// refForName is a ref as a refusal names it, cut at refNameMax bytes so one
+// malformed line cannot put a whole file into a log.
+func refForName(ref string) string {
+	if len(ref) > refNameMax {
+		return ref[:refNameMax] + "..."
+	}
+	return ref
+}
+
+// pinnedImages resolves the registry digests the labels and the workflow pin to
+// the image ids the daemon says carry them, reading the daemon only when a pin
+// exists. A pin is matched against an image's registry refs, never its id: the
+// id is this device's name for the image and the digest is the content's. A pin
+// no listed image carries refuses the plan naming it, because nothing says the
+// image it names is gone rather than read past.
+func (t *Target) pinnedImages(ctx context.Context, images []dockerimg.Image, pins map[string]bool) (map[string]bool, string) {
+	if len(pins) == 0 {
+		return map[string]bool{}, ""
+	}
+	carried, why := t.registryDigests(ctx, images)
+	if why != "" {
+		return nil, why
+	}
+	byDigest := map[string][]string{}
+	for id, refs := range carried {
+		for _, ref := range refs {
+			d := digestOf(ref)
+			byDigest[d] = append(byDigest[d], id)
+		}
+	}
+	ids := map[string]bool{}
+	var unpinned []string
+	for pin := range pins {
+		if len(byDigest[pin]) == 0 {
+			unpinned = append(unpinned, pin)
+			continue
+		}
+		for _, id := range byDigest[pin] {
+			ids[id] = true
+		}
+	}
+	if len(unpinned) == 0 {
+		return ids, ""
+	}
+	sort.Strings(unpinned)
+	return nil, fmt.Sprintf(refuseUnpinned, unpinned[0])
+}
+
+// registryDigests reads the registry refs every listed image carries in one
+// docker inspect call. A read that fails, a line that does not parse, a ref that
+// is not a repository digest, or an image the daemon does not answer for refuses
+// the plan: a pin matched against a partial map would free the image it names.
+func (t *Target) registryDigests(ctx context.Context, images []dockerimg.Image) (map[string][]string, string) {
+	ids := make([]string, 0, len(images))
+	seen := make(map[string]bool, len(images))
+	for _, im := range images {
+		if !seen[im.ID] {
+			seen[im.ID] = true
+			ids = append(ids, im.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return map[string][]string{}, ""
+	}
+	args := append([]string{"image", "inspect", "--format", inspectFormat}, ids...)
+	out, err := t.client().Docker(ctx, args...)
+	if err != nil {
+		return nil, refuseDigestRead
+	}
+	carried := make(map[string][]string, len(ids))
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		id, rest, ok := strings.Cut(line, " ")
+		if !ok || !registry.ValidDigest(id) {
+			return nil, refuseDigestRead
+		}
+		var refs []string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(rest)), &refs); err != nil {
+			return nil, refuseDigestRead
+		}
+		for _, ref := range refs {
+			if !registry.ValidDigest(digestOf(ref)) {
+				return nil, refuseDigestRead
+			}
+		}
+		carried[id] = refs
+	}
+	if len(carried) != len(ids) {
+		return nil, refuseDigestRead
+	}
+	return carried, ""
+}
+
+// digestOf is the digest part of a repo@digest ref, or "" when it names none: a
+// pin names the same content whatever host prefix the ref carries, so the digest
+// alone matches it to a local image.
+func digestOf(ref string) string {
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		return ref[i+1:]
+	}
+	return ""
 }
 
 // aged is one fractals-nextjs tag and its image's creation time.
@@ -308,9 +525,9 @@ func isFractalsTag(im dockerimg.Image) bool {
 // decide splits every listed image into the kept list and the removals. An
 // image id is removed only when no tag of it is kept and no tag of it sits
 // outside this repository's candidates, because a removal names the id and
-// docker drops every tag that points at it. named holds the tags a runner label
-// or the deploy workflow names, namedIDs the image ids one pins by digest.
-func decide(images []dockerimg.Image, ranked []aged, named, namedIDs map[string]bool) ([]diskmaint.Kept, []diskmaint.Action) {
+// docker drops every tag that points at it. n holds the refs a runner label or
+// the deploy workflow names, pinned the image ids a digest pin resolved to.
+func decide(images []dockerimg.Image, ranked []aged, n named, pinned map[string]bool) ([]diskmaint.Kept, []diskmaint.Action) {
 	keptImage := map[string]bool{}
 	for _, im := range images {
 		if !isFractalsTag(im) {
@@ -318,12 +535,22 @@ func decide(images []dockerimg.Image, ranked []aged, named, namedIDs map[string]
 		}
 	}
 	for i, r := range ranked {
-		if i < keepNewest || named[r.im.Tag] {
+		if i < keepNewest || n.tags[r.im.Tag] {
 			keptImage[r.im.ID] = true
 		}
 	}
-	for id := range namedIDs {
+	for id := range pinned {
 		keptImage[id] = true
+	}
+	for id := range n.ids {
+		keptImage[id] = true
+	}
+
+	// tagsOf is every tag of each image, so a removal can name the rows that
+	// leave with the image it names.
+	tagsOf := make(map[string][]string, len(ranked))
+	for _, r := range ranked {
+		tagsOf[r.im.ID] = append(tagsOf[r.im.ID], r.im.Tag)
 	}
 
 	var kept []diskmaint.Kept
@@ -333,19 +560,20 @@ func decide(images []dockerimg.Image, ranked []aged, named, namedIDs map[string]
 		switch {
 		case i < keepNewest:
 			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: ruleNewest})
-		case named[r.im.Tag], namedIDs[r.im.ID]:
+		case n.tags[r.im.Tag], pinned[r.im.ID], n.ids[r.im.ID]:
 			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: ruleLabel})
 		case keptImage[r.im.ID]:
 			kept = append(kept, diskmaint.Kept{Ref: tagRef(r.im), Rule: ruleKeptImage})
 		case planned[r.im.ID]:
-			// One action per image id: another tag of it already names it.
+			// One action per image id: another tag of it already names it, and
+			// the action names every tag it drops.
 		default:
 			planned[r.im.ID] = true
 			actions = append(actions, diskmaint.Action{
 				Kind:  actionRemove,
 				Ref:   r.im.ID,
 				Bytes: r.im.Bytes(),
-				Why:   fmt.Sprintf("older than the newest %d %s tags and no runner label or deploy workflow names it", keepNewest, fractalsRepo),
+				Why:   removeWhy(tagsOf[r.im.ID]),
 			})
 		}
 	}
@@ -355,6 +583,17 @@ func decide(images []dockerimg.Image, ranked []aged, named, namedIDs map[string]
 		}
 	}
 	return kept, actions
+}
+
+// removeWhy explains a removal and names every tag it drops, so a dry run shows
+// the rows that leave with the image.
+func removeWhy(tags []string) string {
+	refs := make([]string, len(tags))
+	for i, tag := range tags {
+		refs[i] = fractalsRepo + ":" + tag
+	}
+	return fmt.Sprintf("older than the newest %d %s tags and no runner label or deploy workflow names it; the removal drops %s",
+		keepNewest, fractalsRepo, strings.Join(refs, ", "))
 }
 
 // tagRef names a tag the plan decided not to remove.

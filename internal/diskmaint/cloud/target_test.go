@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,17 +31,57 @@ type call struct {
 // records every one, so a test asserts what was asked for and never reaches a
 // real daemon.
 type fakeDocker struct {
-	calls     []call
-	images    string
-	imagesErr error
+	calls      []call
+	images     string
+	imagesErr  error
+	digests    map[string][]string
+	digestsErr error
+	// digestsRaw, when set, is the inspect output as given, so a test can drive
+	// a read that answers for fewer images than it was asked about.
+	digestsRaw string
 }
 
 func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, call{env: slices.Clone(env), args: slices.Clone(args)})
-	if name != "docker" || len(args) == 0 || args[0] != "image" {
+	if name != "docker" || len(args) < 2 || args[0] != "image" {
 		return nil, errors.New("unexpected command")
 	}
-	return []byte(f.images), f.imagesErr
+	switch args[1] {
+	case "ls":
+		return []byte(f.images), f.imagesErr
+	case "inspect":
+		return f.inspect(args[2:])
+	}
+	return nil, errors.New("unexpected command")
+}
+
+// inspect answers docker image inspect for the ids of the given argv: every
+// asked id's registry refs, or an empty list for an image that carries none, as
+// docker prints a local-only image's RepoDigests. The format is spelled out here,
+// so a plan that asked docker for another field fails.
+func (f *fakeDocker) inspect(args []string) ([]byte, error) {
+	if f.digestsErr != nil {
+		return nil, f.digestsErr
+	}
+	if len(args) < 3 || args[0] != "--format" || args[1] != "{{.Id}} {{json .RepoDigests}}" {
+		return nil, errors.New("unexpected image inspect")
+	}
+	if f.digestsRaw != "" {
+		return []byte(f.digestsRaw), nil
+	}
+	var b strings.Builder
+	for _, id := range args[2:] {
+		refs := f.digests[id]
+		if refs == nil {
+			refs = []string{}
+		}
+		line, err := json.Marshal(refs)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&b, "%s %s\n", id, line)
+	}
+	return []byte(b.String()), nil
 }
 
 // ledger is a throwaway ledger; the skeleton's Measure reads none of it.
