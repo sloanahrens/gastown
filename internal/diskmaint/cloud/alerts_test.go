@@ -141,6 +141,9 @@ func TestDiskAlertsUnreadableRaisesItsOwnKey(t *testing.T) {
 		{name: "an exec fails", f: &diskDocker{ps: running, dfErr: map[string]error{running: errors.New("no df")}}},
 		{name: "df does not parse", f: &diskDocker{ps: running, df: map[string]string{running: "not a reading\n"}}},
 		{name: "an id that is not an id", f: &diskDocker{ps: notAnID, df: map[string]string{notAnID: dfAnswer(90)}}},
+		// A list with text that is not an id is untrustworthy whatever the
+		// other containers answer, so their share does not make the disk read.
+		{name: "an id that is not an id beside a container that answers", f: &diskDocker{ps: notAnID + "\n" + running, df: map[string]string{notAnID: dfAnswer(90), running: dfAnswer(50)}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -246,38 +249,106 @@ func TestReadingSkipsAContainerItCannotAsk(t *testing.T) {
 	}
 }
 
+// TestReadingSkipsAContainerWhoseDFDoesNotParse: a running container that prints
+// df output with no usable share says nothing about the disk, so the container
+// that answers is the reading and the disk is not unreadable.
+func TestReadingSkipsAContainerWhoseDFDoesNotParse(t *testing.T) {
+	t.Parallel()
+	readable, garbled := containerID('a'), containerID('b')
+	f := &diskDocker{
+		ps: garbled + "\n" + readable + "\n",
+		df: map[string]string{
+			garbled:  "not a reading\n",
+			readable: dfAnswer(40),
+		},
+	}
+	reading := diskTarget(t, f.run).Reading(context.Background())
+	if reading.Err != nil {
+		t.Fatalf("Reading = %v, want the share the readable container gave", reading.Err)
+	}
+	if reading.UsedPct != 40 {
+		t.Fatalf("Reading = %+v, want 40%% from the container that answered", reading)
+	}
+}
+
 // TestReadingRefusesWhenNoContainerAnswers: containers that all fail to answer
-// leave the disk unreadable, so a daemon showing no disk is never quiet.
+// leave the disk unreadable, so a daemon showing no disk is never quiet, and the
+// refusal names every container it asked and why each one failed.
 func TestReadingRefusesWhenNoContainerAnswers(t *testing.T) {
 	t.Parallel()
 	first, second := containerID('a'), containerID('b')
-	f := &diskDocker{
-		ps:    first + "\n" + second + "\n",
-		dfErr: map[string]error{first: errors.New("no df"), second: errors.New("no df")},
+	cases := []struct {
+		name    string
+		f       *diskDocker
+		reasons []error
+	}{
+		{
+			name:    "no container has df",
+			f:       &diskDocker{ps: first + "\n" + second + "\n", dfErr: map[string]error{first: errors.New("no df"), second: errors.New("no df")}},
+			reasons: []error{errNoDF},
+		},
+		{
+			name:    "no container's df parses",
+			f:       &diskDocker{ps: first + "\n" + second + "\n", df: map[string]string{first: "not a reading\n", second: "not a reading\n"}},
+			reasons: []error{errParseDF},
+		},
+		{
+			name:    "one container has no df and the other does not parse",
+			f:       &diskDocker{ps: first + "\n" + second + "\n", dfErr: map[string]error{first: errors.New("no df")}, df: map[string]string{second: "not a reading\n"}},
+			reasons: []error{errNoDF, errParseDF},
+		},
 	}
-	reading := diskTarget(t, f.run).Reading(context.Background())
-	if reading.Err == nil || !errors.Is(reading.Err, errNoReader) {
-		t.Fatalf("Reading = %+v, want the no-reader refusal", reading)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reading := diskTarget(t, tc.f.run).Reading(context.Background())
+			if reading.Err == nil || !errors.Is(reading.Err, errNoReader) {
+				t.Fatalf("Reading = %+v, want the no-reader refusal", reading)
+			}
+			for _, reason := range tc.reasons {
+				if !errors.Is(reading.Err, reason) {
+					t.Errorf("Reading = %v, want the skip reason %v", reading.Err, reason)
+				}
+			}
+			for _, id := range []string{first, second} {
+				if !strings.Contains(reading.Err.Error(), id) {
+					t.Errorf("Reading = %v, want the refusal to name container %s", reading.Err, id)
+				}
+			}
+		})
 	}
 }
 
 // TestDiskAlertsUnreadableClearsWhenTheDiskReadsAgain drives the clear through
 // the target: an open unreadable alert clears on the first pass a container can
-// answer, even while a container without df is still running.
+// answer, whatever the other running container's answer is worth.
 func TestDiskAlertsUnreadableClearsWhenTheDiskReadsAgain(t *testing.T) {
 	t.Parallel()
-	readable, bare := containerID('a'), containerID('b')
-	f := &diskDocker{
-		ps:    bare + "\n" + readable + "\n",
-		df:    map[string]string{readable: dfAnswer(55)},
-		dfErr: map[string]error{bare: errors.New("exec: df: not found")},
+	readable, other := containerID('a'), containerID('b')
+	cases := []struct {
+		name string
+		f    *diskDocker
+	}{
+		{
+			name: "the other container has no df",
+			f:    &diskDocker{ps: other + "\n" + readable + "\n", df: map[string]string{readable: dfAnswer(55)}, dfErr: map[string]error{other: errors.New("exec: df: not found")}},
+		},
+		{
+			name: "the other container's df does not parse",
+			f:    &diskDocker{ps: other + "\n" + readable + "\n", df: map[string]string{other: "not a reading\n", readable: dfAnswer(55)}},
+		},
 	}
-	alerts := diskTarget(t, f.run).DiskAlerts(context.Background(), map[string]bool{unreadableKey: true})
-	got := onlyAlert(t, alerts)
-	if got.Key != unreadableKey || !got.Clear || got.Raise || !got.Unreadable {
-		t.Fatalf("alert = %+v, want a clear of %q", got, unreadableKey)
-	}
-	if got.Name != readingName {
-		t.Fatalf("alert names the disk %q, want %q", got.Name, readingName)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alerts := diskTarget(t, tc.f.run).DiskAlerts(context.Background(), map[string]bool{unreadableKey: true})
+			got := onlyAlert(t, alerts)
+			if got.Key != unreadableKey || !got.Clear || got.Raise || !got.Unreadable {
+				t.Fatalf("alert = %+v, want a clear of %q", got, unreadableKey)
+			}
+			if got.Name != readingName {
+				t.Fatalf("alert names the disk %q, want %q", got.Name, readingName)
+			}
+		})
 	}
 }
