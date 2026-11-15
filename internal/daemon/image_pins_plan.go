@@ -65,15 +65,21 @@ type ImagePinPlan struct {
 // PlanImagePins decides whether the daemon files a refresh bead and which pins
 // it names, and raises the items the states show now. A pin files at
 // daemonimage.PinRefreshBehind commits behind its source tip, the same trigger
-// `gt daemon image pins` uses; a pin whose read failed never files, because its
-// distance is unknown; an open refresh bead blocks a second file and raises
+// `gt daemon image pins` uses; a pin whose read failed never files and raises
+// no item; an open refresh bead blocks a second file and raises
 // image-pins-refresh-stuck once it is older than imagePinsRefreshStuck. A bead
 // with no OpenedAt raises that item too: an age that cannot be shown to be
 // under the bound is not fresh.
 func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Time) ImagePinPlan {
 	var plan ImagePinPlan
 	for _, pin := range pins {
-		if pin.Err != nil || pin.Behind < daemonimage.PinRefreshBehind {
+		if pin.Err != nil {
+			// Behind is not trusted with a failed read: the pin's distance is
+			// unknown, and the image-pins-unreadable item for it comes with the
+			// stale item (gt-3ycfvf).
+			continue
+		}
+		if pin.Behind < daemonimage.PinRefreshBehind {
 			continue
 		}
 		plan.File = append(plan.File, pin)

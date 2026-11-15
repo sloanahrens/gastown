@@ -102,6 +102,26 @@ func TestPlanImagePins(t *testing.T) {
 	}
 }
 
+// TestPlanImagePinsFailedReadRaisesNothingYet pins both halves of a failed
+// read's decision: the pin files nothing and raises no item. The
+// image-pins-unreadable:<name> item arrives with the stale item (gt-3ycfvf),
+// and that landing rewrites this test to expect it.
+func TestPlanImagePinsFailedReadRaisesNothingYet(t *testing.T) {
+	t.Parallel()
+	// Behind is over the file threshold so a planner that ignored Err would
+	// file this pin.
+	pin := ImagePinState{Name: "om", Pin: "pin-om", Behind: 34, Err: errors.New("ls-remote exited 128")}
+
+	got := PlanImagePins([]ImagePinState{pin}, nil, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+
+	if len(got.File) != 0 {
+		t.Errorf("File = %+v, want no pin filed on a failed read", got.File)
+	}
+	if len(got.Items) != 0 {
+		t.Errorf("Items = %+v, want none: the unreadable item is not raised yet", got.Items)
+	}
+}
+
 // TestPlanImagePinsFileCarriesThePinState: the filer names each pin's commit
 // and tip, so the decision hands over the whole state it decided on, not just
 // the name.
