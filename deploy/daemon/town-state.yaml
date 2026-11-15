@@ -63,9 +63,6 @@ entries:
   - path: <rig>/.repo.git
     owner: daemon
     why: the rig's bare repository the landing worker fetches and merges into; the name is constants.DirRepoGit, which internal/rig and the daemon build the path from
-  - path: <rig>/mayor/rig
-    owner: daemon
-    why: the rig's canonical clone the landing worker and promoter land on; the name is constants.DirMayor and constants.DirRig, which rig.RepoPath resolves (all nine rigs of this town have it, read 2026-11-06)
   - path: <rig>/.beads
     owner: daemon
     why: the rig's beads workspace internal/rig/manager.go InitBeads creates and bd writes, as the town-level .beads row

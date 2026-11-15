@@ -175,7 +175,6 @@ func TestExportImportRoundTrip(t *testing.T) {
 		".claude-town/session1.json":         `{"session":"1"}`,
 		"gastown/config.json":                `{"name":"gastown"}`,
 		"gastown/.repo.git/HEAD":             "ref: refs/heads/main\n",
-		"gastown/mayor/rig/README.md":        "the canonical clone\n",
 		".runtime/jev/run.json":              `{"run":1}`,
 		".runtime/landings/landing1.json":    `{"landing":1}`,
 		".runtime/container/kubeconfig.yaml": "apiVersion: v1\n",
@@ -194,8 +193,10 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The skipped classes, each inside a daemon-owned row.
-	writeStateFile(t, town, "gastown/mayor/rig/.git/HEAD", "ref: refs/heads/main\n", 0o644)
+	// The skipped classes, each inside a daemon-owned row: a checked-out plugin's
+	// git tree under the rig's plugins row, Dolt's data under the town's beads
+	// row, a lock file under daemon/.
+	writeStateFile(t, town, "gastown/plugins/p/.git/HEAD", "ref: refs/heads/main\n", 0o644)
 	writeStateFile(t, town, ".beads/.dolt-data/config.yaml", "listener: 127.0.0.1\n", 0o644)
 	writeStateFile(t, town, "daemon/state.lock", "", 0o644)
 	if err := syscall.Mkfifo(filepath.Join(town, "logs", "pipe"), 0o644); err != nil {
@@ -251,7 +252,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		}
 	}
 	printed := sum.String()
-	for _, want := range []string{"Dolt data", "git trees", "sockets", "lock files", "the rig clones are re-fetched from Forgejo"} {
+	for _, want := range []string{"Dolt data", "git trees", "sockets", "lock files"} {
 		if !strings.Contains(printed, want) {
 			t.Errorf("summary does not name %q:\n%s", want, printed)
 		}

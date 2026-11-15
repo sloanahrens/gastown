@@ -609,14 +609,14 @@ type Mount struct {
 }
 
 // townRootDirs are the directory names the manifest's rig rows are built from.
+// The manifest spells one rig row, the bare repository; the canonical clone row
+// is retired (gt-3lvcjz.26).
 // The renderer imports only internal/manifestdata, so it passes the names in
 // itself; TestMountsMatchTheTownStateManifest holds the rendered table equal to
 // townstate.Default(), so a rename in internal/constants fails that test rather
 // than the render.
 var townRootDirs = manifestdata.DirNames{
 	RepoGit: ".repo.git",
-	Mayor:   "mayor",
-	Rig:     "rig",
 }
 
 // Mounts is the daemon pod's mount table, in the order the pod mounts it. Its

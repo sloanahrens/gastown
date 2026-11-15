@@ -390,11 +390,11 @@ func entryNamed(m *Manifest, p string) (Entry, bool) {
 	return Entry{}, false
 }
 
-// TestTownStateRigPathsAreTheProductionNames ties the rig repository and
-// canonical clone rows to the names the code that uses them is built from, not
-// to a layout this test assumes. Three links: the manifest rows are spelled with
-// constants.DirRepoGit, constants.DirMayor and constants.DirRig; rig.Rig's
-// resolvers find a rig built from those constants and the rows class what they
+// TestTownStateRigPathsAreTheProductionNames ties the rig repository row to the
+// name the code that uses it is built from, not to a layout this test assumes.
+// Three links: the manifest's repository row is spelled with
+// constants.DirRepoGit and no row names the retired canonical clone; rig.Rig's
+// resolvers find a rig built from the constants and the rows class what they
 // return daemon; and no code that runs git in a rig's repository (the daemon,
 // the landing worker, the promoter, internal/rig) spells ".repo.git" itself, so
 // a rename in constants moves every user and the manifest together.
@@ -402,13 +402,14 @@ func TestTownStateRigPathsAreTheProductionNames(t *testing.T) {
 	t.Parallel()
 
 	m := Default()
-	for _, want := range []string{
-		RigPlaceholder + "/" + constants.DirRepoGit,
-		RigPlaceholder + "/" + constants.DirMayor + "/" + constants.DirRig,
-	} {
-		if !m.names(want) {
-			t.Errorf("the manifest has no row %q; its rig rows must be spelled with the constants production builds paths from", want)
-		}
+	want := RigPlaceholder + "/" + constants.DirRepoGit
+	if !m.names(want) {
+		t.Errorf("the manifest has no row %q; its rig rows must be spelled with the constants production builds paths from", want)
+	}
+	// The canonical clone is retired (gt-3lvcjz.26): the export must not carry
+	// it, so no row may name it again.
+	if retired := RigPlaceholder + "/" + constants.DirMayor + "/" + constants.DirRig; m.names(retired) {
+		t.Errorf("the manifest has a row %q for the retired canonical clone", retired)
 	}
 
 	town := t.TempDir()
