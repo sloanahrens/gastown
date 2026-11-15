@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/session"
@@ -107,9 +108,14 @@ func TestOverrunSandboxGitSaveCommitsAndPushesTheDirtyClone(t *testing.T) {
 		answers: map[string]overrunSandboxSaveAnswer{
 			// The clone holds one staged modification: the seat ran git add and was
 			// stopped before it committed.
-			"status --porcelain -uall":                    {out: "M  " + stagedFile + "\n"},
-			"ls-files -v -z":                              {out: ""},
-			"rev-parse --absolute-git-dir":                {out: clone + "/.git\n"},
+			"status --porcelain -uall":     {out: "M  " + stagedFile + "\n"},
+			"ls-files -v -z":               {out: ""},
+			"rev-parse --absolute-git-dir": {out: clone + "/.git\n"},
+			// The clone is in no merge and no rebase, so the checkpoint dog's
+			// marker probes all print nothing.
+			"rev-parse --revs-only MERGE_HEAD":            {out: ""},
+			"rev-parse --revs-only rebase-merge/onto":     {out: ""},
+			"rev-parse --revs-only rebase-apply/onto":     {out: ""},
 			"diff --cached --name-status --no-renames -z": {out: "M\x00" + stagedFile + "\x00"},
 			"add -A": {},
 			// These are the revert guard's reads. The clone never fetched origin's
@@ -278,5 +284,215 @@ func TestOverrunSandboxCloneDirtyCheckReadsTheCloneNotTheCleanStub(t *testing.T)
 	}
 	if len(hostOpens) != 0 {
 		t.Errorf("the dirty check opened the host worktree for a sandbox seat: %v", hostOpens)
+	}
+}
+
+// The clone the mid-rebase fixtures live in, and the edit it holds staged: the
+// seat ran `git add` for it and was stopped before it committed.
+const (
+	overrunMidRebaseClone      = "/sandbox/gt/gastown/polecats/capable/gastown"
+	overrunMidRebaseStagedFile = "internal/foo.go"
+)
+
+// overrunMidRebaseScript is the in-sandbox runner of a clone the seat left
+// mid-rebase: it holds one staged edit, and rebase-merge/onto holds the commit
+// the rebase replays onto, the file git writes when a merge-backed rebase
+// starts. The rest of what it answers is what the save does to that clone when
+// no guard stops it, so a run that reaches add, commit or push is a guard that
+// let a mid-rebase clone through.
+func overrunMidRebaseScript() *overrunSandboxSaveScript {
+	commitKey := "commit -m " + overrunSaveMessage(stopSeat.Bead)
+	return &overrunSandboxSaveScript{
+		// The clone is on the seat's branch at the pre-commit SHA; the commit
+		// call moves it to wipSHA.
+		clone:     overrunSandboxSaveClone{branch: stopSeat.Branch, head: preCommitSHA, wipCommit: wipSHA},
+		commitKey: commitKey,
+		answers: map[string]overrunSandboxSaveAnswer{
+			"status --porcelain -uall":                    {out: "M  " + overrunMidRebaseStagedFile + "\n"},
+			"ls-files -v -z":                              {out: ""},
+			"rev-parse --absolute-git-dir":                {out: overrunMidRebaseClone + "/.git\n"},
+			"rev-parse --revs-only MERGE_HEAD":            {out: ""},
+			"rev-parse --revs-only rebase-merge/onto":     {out: preCommitSHA + "\n"},
+			"rev-parse --revs-only rebase-apply/onto":     {out: ""},
+			"diff --cached --name-status --no-renames -z": {out: "M\x00" + overrunMidRebaseStagedFile + "\x00"},
+			"add -A": {},
+			// The revert guard's reads. The clone never fetched origin's main, so
+			// the guard has no merged baseline to compare against and passes, the
+			// behavior checkpointRevertGuard documents.
+			"remote get-url origin":   {out: "git@github.com:steveyegge/gastown.git\n"},
+			"remote get-url upstream": {err: errors.New("fatal: No such remote 'upstream'")},
+			"rev-parse origin/main":   {err: errors.New("fatal: ambiguous argument 'origin/main': unknown revision")},
+			// The WIP commit and its push, which only a run past the guard makes.
+			commitKey:                               {},
+			"symbolic-ref refs/remotes/origin/HEAD": {out: "refs/remotes/origin/main\n"},
+			"push origin " + wipSHA + ":refs/heads/" + stopSeat.Branch: {},
+		},
+	}
+}
+
+// overrunSandboxSeat makes d route the seat's git calls into script: the seat's
+// sandbox record, written to the town root, names the clone directory, and the
+// script is the in-sandbox runner.
+func overrunSandboxSeat(t *testing.T, d *Daemon, script *overrunSandboxSaveScript) {
+	t.Helper()
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	if err := session.WriteSandboxRecord(d.config.TownRoot, *overrunStopSandboxRecord(overrunMidRebaseClone)); err != nil {
+		t.Fatalf("write the sandbox record: %v", err)
+	}
+	d.sandboxGitRunnerFn = func(townRoot string, rec session.SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
+		if rec.WorkDir != overrunMidRebaseClone {
+			t.Errorf("the in-sandbox runner was built for %q, want the record's clone %q", rec.WorkDir, overrunMidRebaseClone)
+		}
+		return func(dir string, args ...string) ([]byte, error) { return script.run(t, dir, args...) }, nil
+	}
+}
+
+// overrunSandboxHostStub is the host stub the mid-rebase tests give d: a clean
+// checkout of origin's main at the seat's host worktree, so a read that reached
+// this host would find a clean worktree and nothing to save. It records every
+// handle opened here, which a sandbox seat's steps must never open.
+type overrunSandboxHostStub struct{ opens []string }
+
+func overrunSandboxHostStubFor(t *testing.T, d *Daemon) *overrunSandboxHostStub {
+	t.Helper()
+	s := &overrunSandboxHostStub{}
+	stub := gitfake.New()
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	stub.InitBare(t, origin)
+	stub.Commit(t, origin, "main", "initial", map[string]string{"a.txt": "a\n"})
+	hostWork := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	stub.Clone(t, origin, hostWork)
+	d.openGitFn = func(dir string) daemonGit {
+		s.opens = append(s.opens, dir)
+		g, ok := stub.Open(dir).(daemonGit)
+		if !ok {
+			t.Fatalf("the host stub does not implement daemonGit for %s", dir)
+		}
+		return g
+	}
+	return s
+}
+
+// overrunSandboxCallAt is the index of the first recorded in-sandbox call whose
+// arguments are args, or -1.
+func overrunSandboxCallAt(calls []overrunSandboxGitCall, args ...string) int {
+	return slices.IndexFunc(calls, func(c overrunSandboxGitCall) bool { return slices.Equal(c.args, args) })
+}
+
+// TestOverrunSandboxCloneMidRebaseIsRefusedByTheCheckpointGuard is this bead's
+// repro: the seat's clone stopped mid-rebase holds a half-replayed commit and
+// one staged edit, and the host stub is clean at main. The save's checkpoint
+// must read the rebase markers through the in-sandbox runner, in the clone, and
+// refuse the work the host path refuses, before any add, commit or push. A
+// guard that read this host finds no marker, commits the half-replayed tree and
+// pushes it to the seat's branch.
+func TestOverrunSandboxCloneMidRebaseIsRefusedByTheCheckpointGuard(t *testing.T) {
+	t.Parallel()
+	script := overrunMidRebaseScript()
+	d, buf := newOverrunDaemon(t, false)
+	overrunSandboxSeat(t, d, script)
+	stub := overrunSandboxHostStubFor(t, d)
+
+	saved, err := d.overrunSaveWork(stopSeat)
+
+	if err == nil {
+		t.Fatalf("save = %+v, nil; want a refusal: the clone is mid-rebase", saved)
+	}
+	if !strings.Contains(buf.String(), "checkpoint_dog: skipping "+stopSeat.Rig+"/"+stopSeat.Polecat+": rebase in progress") {
+		t.Errorf("log lacks the checkpoint guard's rebase skip for the clone:\n%s", buf.String())
+	}
+	if overrunSandboxCallAt(script.calls, "rev-parse", "--revs-only", "rebase-merge/onto") < 0 {
+		t.Errorf("the guard never asked the clone for its rebase marker: %v", script.calls)
+	}
+	for _, forbidden := range [][]string{
+		{"add", "-A"},
+		{"commit", "-m", overrunSaveMessage(stopSeat.Bead)},
+		{"push", "origin", wipSHA + ":refs/heads/" + stopSeat.Branch},
+	} {
+		if at := overrunSandboxCallAt(script.calls, forbidden...); at >= 0 {
+			t.Errorf("a clone mid-rebase ran %v (call %d): the guard let it through", forbidden, at)
+		}
+	}
+	for _, c := range script.calls {
+		if c.dir != overrunMidRebaseClone {
+			t.Errorf("in-sandbox call %v ran in %q, want the record's clone %q", c.args, c.dir, overrunMidRebaseClone)
+		}
+	}
+	if len(stub.opens) != 0 {
+		t.Errorf("the save opened the host worktree for a sandbox seat: %v", stub.opens)
+	}
+}
+
+// A marker probe that fails is an error the checkpoint refuses on, never an
+// absent marker: a runner failure must not checkpoint a clone that may be
+// mid-rebase.
+func TestOverrunSandboxCloneMarkerProbeFailureRefusesTheSave(t *testing.T) {
+	t.Parallel()
+	script := overrunMidRebaseScript()
+	script.answers["rev-parse --revs-only MERGE_HEAD"] = overrunSandboxSaveAnswer{err: errors.New("sandbox gt-capable: the clone is unreachable")}
+	d, buf := newOverrunDaemon(t, false)
+	overrunSandboxSeat(t, d, script)
+	stub := overrunSandboxHostStubFor(t, d)
+
+	saved, err := d.overrunSaveWork(stopSeat)
+
+	if err == nil {
+		t.Fatalf("save = %+v, nil; want a refusal: the marker probe failed", saved)
+	}
+	if !strings.Contains(buf.String(), "cannot read the worktree's operation markers") {
+		t.Errorf("log lacks the refused marker probe:\n%s", buf.String())
+	}
+	if at := overrunSandboxCallAt(script.calls, "add", "-A"); at >= 0 {
+		t.Errorf("a clone whose markers could not be read was staged (call %d)", at)
+	}
+	if len(stub.opens) != 0 {
+		t.Errorf("the save opened the host worktree for a sandbox seat: %v", stub.opens)
+	}
+}
+
+// A stop that cannot save a clone mid-rebase holds at the retry before any
+// sandbox step: the sandbox and its record are kept, and the bead is not handed
+// back over the work the stop refused to save.
+func TestOverrunSandboxCloneMidRebaseKeepsTheSandbox(t *testing.T) {
+	t.Parallel()
+	script := overrunMidRebaseScript()
+	d, buf := newOverrunDaemon(t, false)
+	overrunSandboxSeat(t, d, script)
+	overrunSandboxHostStubFor(t, d)
+
+	var deleted []string
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.removeSandbox = func(seat overrunSeat) error {
+		return d.overrunRemoveSandbox(seat,
+			func(string, session.SandboxRecord) error { return nil },
+			func(_ string, rec session.SandboxRecord) error {
+				deleted = append(deleted, rec.Session)
+				return nil
+			})
+	}
+	seams := f.seams()
+	seams.saveWork = d.overrunSaveWork
+
+	d.runOverrunGuard(seams)
+
+	if len(deleted) != 0 {
+		t.Errorf("the sandbox holding a clone mid-rebase was deleted: %q", deleted)
+	}
+	if slices.Contains(f.calls, "sandbox "+stopSeat.Rig+"/"+stopSeat.Polecat) {
+		t.Errorf("the stop asked to remove the sandbox of a clone mid-rebase: %q", f.calls)
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok || err != nil {
+		t.Errorf("the sandbox record of the kept sandbox is gone (ok %v, err %v)", ok, err)
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("the bead was handed back over work the stop refused to save: %q", f.handedBack)
+	}
+	if !strings.Contains(buf.String(), "work not saved, retrying next tick (1 of") {
+		t.Errorf("log lacks the held save:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "rebase in progress") {
+		t.Errorf("log lacks the checkpoint guard's rebase skip for the clone:\n%s", buf.String())
 	}
 }

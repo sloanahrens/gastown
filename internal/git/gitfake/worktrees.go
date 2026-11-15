@@ -232,6 +232,30 @@ func (h *handle) GitDir() (string, error) {
 	return gitDirOf(r), nil
 }
 
+// OperationInProgress reports the merge or rebase the handle's checkout is in
+// the middle of, reading the marker files git keeps in its git directory. The
+// fake holds no operation state in memory, so it reads the same on-disk markers
+// git would: MERGE_HEAD for a merge, rebase-merge/onto and rebase-apply/onto for
+// a rebase. A test writes them into the checkout's git directory.
+func (h *handle) OperationInProgress() (string, error) {
+	dir, err := h.GitDir()
+	if err != nil {
+		return "", err
+	}
+	for _, op := range []struct{ marker, name string }{
+		{"MERGE_HEAD", "merge"},
+		{"rebase-merge/onto", "rebase"},
+		{"rebase-apply/onto", "rebase"},
+	} {
+		if _, err := os.Stat(filepath.Join(dir, op.marker)); err == nil {
+			return op.name + " in progress", nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read the %s marker %s: %w", op.name, op.marker, err)
+		}
+	}
+	return "", nil
+}
+
 // abs resolves path against the handle's directory, as git resolves a path
 // argument against its working directory.
 func (h *handle) abs(path string) string {

@@ -359,36 +359,32 @@ func (d *Daemon) checkpointWith(g daemonGit, rigName, polecatName, message strin
 //
 //   - unmerged index entries: a merge or rebase stopped on conflicts. The
 //     staged tree would hold the conflict markers themselves.
-//   - MERGE_HEAD in the worktree's git directory: a merge stopped before it
-//     was committed, conflict markers or not.
-//   - rebase-merge/ or rebase-apply/: a rebase (interactive or not) in
-//     progress, whose half-replayed commits are not work to keep.
+//   - a merge in progress (MERGE_HEAD): stopped before it was committed,
+//     conflict markers or not.
+//   - a rebase in progress (rebase-merge/onto or rebase-apply/onto): whose
+//     half-replayed commits are not work to keep.
 //
 // Detection reads git state, never file contents, so a file that merely
 // contains a marker is ordinary work. Nothing here resolves or alters the
 // conflict.
 //
-// A git directory that cannot be located blocks the checkpoint: a safety
-// check that could not run must not read as a check that passed.
+// The operation markers are read through the handle's own runner
+// (OperationInProgress), not from this host's filesystem, so a sandbox seat's
+// clone is asked about its own state instead of reading absent for every marker
+// and being checkpointed mid-rebase (gt-m5mwdv).
+//
+// An operation that cannot be read blocks the checkpoint: a safety check that
+// could not run must not read as a check that passed.
 func checkpointBlockedReason(g daemonGit, status *gtgit.GitStatus) string {
 	if len(status.Unmerged) > 0 {
 		return fmt.Sprintf("unmerged paths: %s", strings.Join(status.Unmerged, ", "))
 	}
 
-	gitDir, err := g.GitDir()
+	op, err := g.OperationInProgress()
 	if err != nil {
-		return fmt.Sprintf("cannot locate the worktree's git directory: %v", err)
+		return fmt.Sprintf("cannot read the worktree's operation markers: %v", err)
 	}
-	for _, op := range []struct{ marker, name string }{
-		{"MERGE_HEAD", "merge"},
-		{"rebase-merge", "rebase"},
-		{"rebase-apply", "rebase"},
-	} {
-		if _, err := os.Stat(filepath.Join(gitDir, op.marker)); err == nil {
-			return op.name + " in progress"
-		}
-	}
-	return ""
+	return op
 }
 
 // unstageCheckpointed resets the index to HEAD for every path except those in
