@@ -58,3 +58,30 @@ func TestSandboxProfileBeadAccess(t *testing.T) {
 		})
 	}
 }
+
+// A reader that takes BeadAccess after WithDefaults always sees a mode: unset
+// arrives as the dolt default and a set value survives, so no read can carry
+// the empty string into a session profile (gt-jwg5ff).
+func TestSandboxProfileWithDefaultsFillsBeadAccess(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		set  string
+	}{
+		{name: "unset becomes the dolt default"},
+		{name: "dolt survives", set: SandboxBeadAccessDolt},
+		{name: "files survives", set: SandboxBeadAccessFiles},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			want := tc.set
+			if want == "" {
+				want = SandboxBeadAccessDolt
+			}
+			if got := (SandboxProfile{BeadAccess: tc.set}).WithDefaults().BeadAccess; got != want {
+				t.Fatalf("WithDefaults().BeadAccess = %q, want %q", got, want)
+			}
+		})
+	}
+}

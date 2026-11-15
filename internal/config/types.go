@@ -1851,8 +1851,8 @@ type SandboxProfile struct {
 	// closed).
 	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
 	// BeadAccess is where the seat's task lives: SandboxBeadAccessDolt (the
-	// default) or SandboxBeadAccessFiles. Read it through BeadAccessMode;
-	// nothing reads the value yet (gt-1m0kb).
+	// default) or SandboxBeadAccessFiles. WithDefaults fills the default and
+	// Validate refuses any other value; nothing acts on the value yet (gt-1m0kb).
 	BeadAccess string `json:"bead_access,omitempty"`
 	// KubernetesNamespace names the namespace the gateway places this profile's
 	// sandbox pods in; "" means defaultSandboxKubernetesNamespace (see
@@ -1936,16 +1936,10 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 	if p.Driver == "" {
 		p.Driver = SandboxDriverDocker
 	}
-	return p
-}
-
-// BeadAccessMode returns where the seat's task lives: BeadAccess when set, else
-// SandboxBeadAccessDolt.
-func (p SandboxProfile) BeadAccessMode() string {
 	if p.BeadAccess == "" {
-		return SandboxBeadAccessDolt
+		p.BeadAccess = SandboxBeadAccessDolt
 	}
-	return p.BeadAccess
+	return p
 }
 
 // Validate reports the first field of p that is unset or malformed, naming the
@@ -1957,9 +1951,8 @@ func (p SandboxProfile) BeadAccessMode() string {
 // kubernetes profile sets no CacheVolume (a Docker volume does not exist there;
 // a k8s cache is a separate design), and a kubernetes profile may name a
 // KubernetesCacheClaim that is a DNS-1123 name, which a docker profile may not
-// (gt-jofne). The kubernetes scheduling fields
-// are refused on a docker profile and checked for the pod and resources the
-// gateway accepts.
+// (gt-jofne). The kubernetes scheduling fields are refused on a docker profile
+// and checked for the pod and resources the gateway accepts.
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
 		return fmt.Errorf("sandboxes.%s.image: required", name)
