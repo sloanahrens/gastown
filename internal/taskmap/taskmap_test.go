@@ -347,3 +347,23 @@ func TestSessionInjectUseAddsNoRuleTheHelpLacks(t *testing.T) {
 		}
 	}
 }
+
+// TestTownStateSeedUseNamesTheSituation pins the line place_p7f.go gives town
+// state seed (gt-yqf0hm): the Use names the situation that calls for the seed,
+// so the helper Pod that carries it out is no part of the entry.
+func TestTownStateSeedUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("town state seed")
+	if !ok {
+		t.Fatal(`Lookup("town state seed") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") {
+		t.Errorf("town state seed Use = %q; want a line starting \"Use this when\" that names the situation", e.Use)
+	}
+	for _, mechanism := range []string{"Pod", "helper"} {
+		if strings.Contains(e.Use, mechanism) {
+			t.Errorf("town state seed Use = %q; it names the mechanism %q, not the situation that calls for the command", e.Use, mechanism)
+		}
+	}
+}
