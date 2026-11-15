@@ -49,12 +49,12 @@ func snapshotTruncationMarker() string {
 var beadIDPattern = regexp.MustCompile(`[a-z]{2,4}-[a-z0-9]{3,6}(?:\.[0-9]+)*`)
 
 // Snapshot renders one block per bead that text names and lookup knows, in
-// order of first appearance, and returns "" when it names none.
+// order of first appearance, and returns "" when lookup knows none of them.
 //
 // lookup is the only source of a Brief, so the same text and the same answers
 // always render the same bytes: nothing here reads a clock, a bead or the
-// environment. An id the lookup does not know is left out, and a text naming
-// no bead never calls lookup at all.
+// environment. An id the lookup does not know is left out, and lookup is asked
+// once per distinct id the text names, so a text naming no bead never calls it.
 func Snapshot(text string, lookup func(id string) (Brief, bool)) string {
 	var blocks []string
 	for _, id := range beadIDs(text) {
@@ -128,10 +128,32 @@ func briefBlock(id string, b Brief) string {
 		sb.WriteString("\n\nStatus: " + status)
 	}
 	if desc := strings.TrimRight(b.Description, "\n"); desc != "" {
-		cut := capBytes(desc, maxBriefBytes, briefTruncationMarker())
+		cut := capBytes(escapeLineHeadings(desc), maxBriefBytes, briefTruncationMarker())
 		sb.WriteString("\n\n" + strings.TrimRight(cut, "\n"))
 	}
 	return sb.String()
+}
+
+// escapeLineHeadings stops a description from posing as structure: a line an
+// ATX parser would read as a heading gets a backslash before its "#", so it
+// renders as the text the bead wrote instead of forging a block heading of its
+// own. Up to three leading spaces still start a heading; four spaces or a tab
+// make indented code, which is already inert.
+func escapeLineHeadings(text string) string {
+	if !strings.Contains(text, "#") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		indent := 0
+		for indent < len(line) && indent < 3 && line[indent] == ' ' {
+			indent++
+		}
+		if indent < len(line) && line[indent] == '#' {
+			lines[i] = line[:indent] + `\` + line[indent:]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // capBytes cuts text that exceeds limit bytes to fit it, marker included, and
