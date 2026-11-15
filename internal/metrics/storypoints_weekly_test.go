@@ -213,10 +213,65 @@ func TestStoryPointsWeeklySpendsTheWeekOnAFailureNoHourCanMeetDifferently(t *tes
 	requireNoWeeklyWeights(t, fix.town)
 }
 
-// TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet: no landings table for
-// the day yet is the extract's lateness, not the week's verdict: the failure is
-// returned and the week is left unspent for the next hour.
-func TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet(t *testing.T) {
+// previousExtractDir is the fixture's metrics root joined to the day before its
+// extract's day.
+func previousExtractDir(t *testing.T, fix trainTestFixture) string {
+	t.Helper()
+	today, err := time.Parse(time.DateOnly, commandToday)
+	if err != nil {
+		t.Fatalf("commandToday %q is not a date: %v", commandToday, err)
+	}
+	return filepath.Join(filepath.Dir(fix.outDir), today.AddDate(0, 0, -1).Format(time.DateOnly))
+}
+
+// layOutPreviousExtract writes the landings table of the day before the
+// fixture's extract under its metrics root: the extract ran yesterday, so
+// today's table is merely not due yet. Only the table's presence is read.
+func layOutPreviousExtract(t *testing.T, fix trainTestFixture) {
+	t.Helper()
+	writeAt(t, filepath.Join(previousExtractDir(t, fix), landingsName),
+		strings.Join(landingColumns, ",")+"\n")
+}
+
+// TestStoryPointsWeeklyWaitsForTheDaysExtract: no landings table for the day yet
+// is the extract's lateness, not a fault, while yesterday's extract is under the
+// metrics root: the run writes its wait line saying the next hour tries again,
+// leaves the week unspent, and returns nil so the hour exits 0.
+func TestStoryPointsWeeklyWaitsForTheDaysExtract(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	if err := os.RemoveAll(fix.outDir); err != nil {
+		t.Fatal(err)
+	}
+	layOutPreviousExtract(t, fix)
+	var out strings.Builder
+	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err != nil {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want nil: a missing extract is the wait for it", err)
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, "story points weekly: waiting: ") || !strings.Contains(got, "run extract first") {
+		t.Errorf("out = %q, want the wait and the step that writes the table", got)
+	}
+	if !strings.Contains(got, "the next hour tries again") {
+		t.Errorf("out = %q, want it to say the next hour tries again", got)
+	}
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Errorf("out holds %d lines, want the run's one line", n)
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing extract spent the week (stat err = %v)", err)
+	}
+}
+
+// TestStoryPointsWeeklyFailsWhenTheExtractHasNotRunForADay: no extract for the
+// day nor for the day before is not the day's lateness but an extract that has
+// stopped: the run writes its line, returns the error so the hour exits non-zero
+// and the daemon escalates, and leaves the week unspent.
+func TestStoryPointsWeeklyFailsWhenTheExtractHasNotRunForADay(t *testing.T) {
 	t.Parallel()
 	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
 	if err := os.RemoveAll(fix.outDir); err != nil {
@@ -227,14 +282,96 @@ func TestStoryPointsWeeklyLeavesTheWeekWhenNoExtractHasRunYet(t *testing.T) {
 
 	err := c.RunStoryPointsWeekly(context.Background())
 
-	if err == nil {
-		t.Fatal("RunStoryPointsWeekly err = nil, want the missing extract returned")
+	if err == nil || !strings.Contains(err.Error(), "run extract first") {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want the missing extract returned after a day", err)
 	}
-	if !strings.Contains(out.String(), "the next hour tries again") {
-		t.Errorf("out = %q, want it to say the next hour tries again", out.String())
+	got := out.String()
+	if !strings.HasPrefix(got, "story points weekly: failed: ") || !strings.Contains(got, "the previous day has no extract either") {
+		t.Errorf("out = %q, want the failure and why the wait is over", got)
+	}
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Errorf("out holds %d lines, want the run's one line", n)
 	}
 	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a missing extract spent the week (stat err = %v)", err)
+	}
+}
+
+// TestStoryPointsWeeklyFailsWhenThePreviousDayCannotBeRead: a previous day's
+// table that cannot be read is not a day the extract did not run, and it is not
+// counted as one: the run returns the error and leaves the week unspent.
+func TestStoryPointsWeeklyFailsWhenThePreviousDayCannotBeRead(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	if err := os.RemoveAll(fix.outDir); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the table goes reads as an error, not as an absent table.
+	if err := os.MkdirAll(filepath.Join(previousExtractDir(t, fix), landingsName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "the previous day's extract") {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want the unreadable previous day returned", err)
+	}
+	if got := out.String(); !strings.Contains(got, "could not be checked") {
+		t.Errorf("out = %q, want it to say the previous day could not be checked", got)
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("an unreadable previous day spent the week (stat err = %v)", err)
+	}
+}
+
+// TestStoryPointsWeeklyFailsWhenTheWaitLineIsNotWritten: the wait's line is all
+// the hour reports, so a line that cannot be written fails the run rather than
+// exiting 0 over a wait nobody was told about.
+func TestStoryPointsWeeklyFailsWhenTheWaitLineIsNotWritten(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	if err := os.RemoveAll(fix.outDir); err != nil {
+		t.Fatal(err)
+	}
+	layOutPreviousExtract(t, fix)
+	c := weeklyCommands(t, fix, &strings.Builder{}, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+	c.Out = failingWriter{}
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "closed pipe") {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want the failed line returned", err)
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing extract spent the week (stat err = %v)", err)
+	}
+}
+
+// TestStoryPointsWeeklyFailsWhenTheDayDirectoryIsNotADay: the wait's bound is
+// the day before the day the wired extract directory names; a directory that
+// names no day is an error, not a wait, because nothing says which table the day
+// before it holds.
+func TestStoryPointsWeeklyFailsWhenTheDayDirectoryIsNotADay(t *testing.T) {
+	t.Parallel()
+	fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
+	var out strings.Builder
+	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+	c.Wire = func(context.Context) (RealTown, error) {
+		return RealTown{Town: fix.town, Extract: ExtractEnv{OutDir: filepath.Dir(fix.outDir)}}, nil
+	}
+
+	err := c.RunStoryPointsWeekly(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "is not named for a day") {
+		t.Fatalf("RunStoryPointsWeekly err = %v, want the unnamed day directory returned", err)
+	}
+	if got := out.String(); !strings.Contains(got, "could not be checked") {
+		t.Errorf("out = %q, want it to say the previous day could not be checked", got)
+	}
+	if _, err := os.Stat(storyPointsWeeklyStampPath(fix.town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("an unnamed day directory spent the week (stat err = %v)", err)
 	}
 }
 
