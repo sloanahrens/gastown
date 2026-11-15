@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/ring"
+	"github.com/steveyegge/gastown/internal/taskmap"
 )
 
 // ringTestKey is shaped like a signing key. No verb output may carry it.
@@ -179,6 +180,64 @@ func TestRingRemoveThenStatusIsAbsent(t *testing.T) {
 	}
 	if !strings.Contains(out, "absent") {
 		t.Fatalf("status after remove = %q, want an absent Ring", out)
+	}
+}
+
+// ringFirstLine is the line gt ring status prints first: the Ring's state.
+func ringFirstLine(out string) string {
+	return strings.SplitN(out, "\n", 2)[0]
+}
+
+// TestRingForgeCheckQuotesTheStatusLine confirms the ring forge Check against
+// the state line gt ring status prints after a forge (gt-vry3ku).
+func TestRingForgeCheckQuotesTheStatusLine(t *testing.T) {
+	t.Parallel()
+	root := ringTestTown(t)
+	d := ringTestDeps(root, ringTestEnv, ringTestNow)
+	if _, err := ringRun(runRingForge, d); err != nil {
+		t.Fatalf("forge: %v", err)
+	}
+	out, err := ringRun(runRingStatus, d)
+	if got := ringExit(err); got != 0 {
+		t.Fatalf("status after forge exits %d, want 0", got)
+	}
+	entry, ok := taskmap.Lookup("ring forge")
+	if !ok {
+		t.Fatal(`Lookup("ring forge") found no entry`)
+	}
+	if line := ringFirstLine(out); !strings.Contains(entry.Check, "prints "+line) {
+		t.Errorf("ring forge Check = %q; the status line after a forge is %q", entry.Check, line)
+	}
+}
+
+// TestRingRemoveCheckQuotesTheStatusLine confirms the ring remove Check against
+// the state line gt ring status prints after a remove. That line carries the
+// reason in parentheses, so the Check names the line's start (gt-vry3ku).
+func TestRingRemoveCheckQuotesTheStatusLine(t *testing.T) {
+	t.Parallel()
+	root := ringTestTown(t)
+	d := ringTestDeps(root, ringTestEnv, ringTestNow)
+	if _, err := ringRun(runRingForge, d); err != nil {
+		t.Fatalf("forge: %v", err)
+	}
+	if _, err := ringRun(runRingRemove, d); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	out, err := ringRun(runRingStatus, d)
+	if got := ringExit(err); got != 3 {
+		t.Fatalf("status after remove exits %d, want 3", got)
+	}
+	entry, ok := taskmap.Lookup("ring remove")
+	if !ok {
+		t.Fatal(`Lookup("ring remove") found no entry`)
+	}
+	const start = "ring: absent"
+	line := ringFirstLine(out)
+	if !strings.HasPrefix(line, start) {
+		t.Fatalf("status after remove starts %q, want a line starting %q", line, start)
+	}
+	if !strings.Contains(entry.Check, "a line starting "+start) {
+		t.Errorf("ring remove Check = %q; the status line after a remove is %q, so the Check must name its start", entry.Check, line)
 	}
 }
 
