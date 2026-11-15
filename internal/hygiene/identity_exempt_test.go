@@ -3,10 +3,23 @@ package hygiene
 import (
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/manifestdata"
 )
+
+// scanExempting scans one file through Scan with the options a guard passes, so
+// the exemption is exercised where the scan applies it rather than through a
+// helper it calls.
+func scanExempting(t *testing.T, fsys fstest.MapFS, opts ...ScanOption) []Finding {
+	t.Helper()
+	findings, _, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), nil, opts...)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	return findings
+}
 
 // TestInfrastructureIdentityIsExemptOnlyInItsOwnPosition checks the two
 // infrastructure identities against the shipped rules and blocklist: each is not
@@ -99,18 +112,77 @@ func TestInfrastructureIdentityIsExemptOnlyInItsOwnPosition(t *testing.T) {
 			for _, rule := range tc.want {
 				want = append(want, Finding{Path: "docs/note.md", Rule: rule, Line: 1, LineHash: HashLine(tc.line)})
 			}
-			assertFindings(t, scanFS(t, singleFile("docs/note.md", tc.line+"\n"), nil), want...)
+			exempt := ExemptIdentities(owner, root)
+			assertFindings(t, scanExempting(t, singleFile("docs/note.md", tc.line+"\n"), exempt), want...)
 		})
 	}
 }
 
-// TestAnEmptyIdentityPathReplacesNothing keeps a lost setting from excusing every
-// line: an identity whose value is empty is not in the line, so it exempts
-// nothing.
-func TestAnEmptyIdentityPathReplacesNothing(t *testing.T) {
+// TestValidateAllowRefusesARowForAnExemptedLine: a row written for a line the
+// scan exempts would excuse nothing, so validation run with the same exemption
+// refuses it and the allow file cannot spend a row on an identity.
+func TestValidateAllowRefusesARowForAnExemptedLine(t *testing.T) {
 	t.Parallel()
-	line := "home: " + planted("/Users/", "jane", "/notes.txt")
-	if got := replaceWholePath(line, "", townRootPlaceholder); got != line {
-		t.Fatalf("replaceWholePath with an empty path returned %q, want the line unchanged", got)
+	line := "mountPath: " + manifestdata.PodTownRoot
+	fsys := singleFile("docs/note.md", line+"\n")
+	row := Allow{Path: "docs/note.md", Rule: RuleHomePath, Line: HashLine(line), Reason: "the pod mount"}
+	if err := ValidateAllow(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), []Allow{row}, ExemptIdentities(config.DefaultForgeOwner, manifestdata.PodTownRoot)); err == nil {
+		t.Fatal("ValidateAllow accepted a row for a line the scan exempts")
+	}
+	if err := ValidateAllow(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), []Allow{row}); err != nil {
+		t.Fatalf("ValidateAllow with no exemption refused the row: %v", err)
+	}
+}
+
+// TestAnEmptyIdentityExemptsNothing keeps a lost setting from excusing every
+// line: an identity the caller leaves empty is not in the line, so the scan
+// exempts nothing and the line stays a finding. Each row runs through Scan, the
+// way the guard runs it, so an exemption applied to an empty identity turns it
+// red.
+func TestAnEmptyIdentityExemptsNothing(t *testing.T) {
+	t.Parallel()
+	owner := config.DefaultForgeOwner
+	root := manifestdata.PodTownRoot
+	urlLine := "origin: http://forgejo:3000/" + owner + "/gastown.git"
+	rootLine := "mountPath: " + root
+	tests := []struct {
+		name string
+		line string
+		opts []ScanOption
+		want []string // the rules that must fire on the line, in order
+	}{
+		{
+			name: "no identity named",
+			line: urlLine,
+			want: []string{RuleBlockedWord},
+		},
+		{
+			name: "an empty forge owner",
+			line: urlLine,
+			opts: []ScanOption{ExemptIdentities("", root)},
+			want: []string{RuleBlockedWord},
+		},
+		{
+			name: "an empty town root",
+			line: rootLine,
+			opts: []ScanOption{ExemptIdentities(owner, "")},
+			want: []string{RuleHomePath, RuleBlockedWord},
+		},
+		{
+			name: "both identities empty",
+			line: rootLine,
+			opts: []ScanOption{ExemptIdentities("", "")},
+			want: []string{RuleHomePath, RuleBlockedWord},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			want := make([]Finding, 0, len(tc.want))
+			for _, rule := range tc.want {
+				want = append(want, Finding{Path: "docs/note.md", Rule: rule, Line: 1, LineHash: HashLine(tc.line)})
+			}
+			assertFindings(t, scanExempting(t, singleFile("docs/note.md", tc.line+"\n"), tc.opts...), want...)
+		})
 	}
 }
