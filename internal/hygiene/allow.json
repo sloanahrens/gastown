@@ -1,1 +1,287 @@
-[]
+[
+  {
+    "path": ".beads/.gitignore",
+    "rule": "forbidden directory",
+    "reason": "beads runtime documentation and config the repository ships on purpose"
+  },
+  {
+    "path": ".beads/PRIME.md",
+    "rule": "forbidden directory",
+    "reason": "beads runtime documentation and config the repository ships on purpose"
+  },
+  {
+    "path": ".beads/README.md",
+    "rule": "forbidden directory",
+    "reason": "beads runtime documentation and config the repository ships on purpose"
+  },
+  {
+    "path": ".beads/config.yaml",
+    "rule": "forbidden directory",
+    "reason": "beads runtime documentation and config the repository ships on purpose"
+  },
+  {
+    "path": ".claude/commands/reaper.md",
+    "rule": "forbidden directory",
+    "reason": "Claude Code command the repository ships; only local Claude state is ignored"
+  },
+  {
+    "path": ".claude/skills/crew-commit/SKILL.md",
+    "rule": "forbidden directory",
+    "reason": "Claude Code command the repository ships; only local Claude state is ignored"
+  },
+  {
+    "path": ".claude/skills/ghi-list/SKILL.md",
+    "rule": "forbidden directory",
+    "reason": "Claude Code command the repository ships; only local Claude state is ignored"
+  },
+  {
+    "path": ".claude/skills/pr-list/SKILL.md",
+    "rule": "forbidden directory",
+    "reason": "Claude Code command the repository ships; only local Claude state is ignored"
+  },
+  {
+    "path": ".claude/skills/pr-sheriff/skill.md",
+    "rule": "forbidden directory",
+    "reason": "Claude Code command the repository ships; only local Claude state is ignored"
+  },
+  {
+    "path": ".runtime/setup-hooks/01-git-config.sh",
+    "rule": "forbidden directory",
+    "reason": "setup hook the repository ships, not per-host session state"
+  },
+  {
+    "path": "deep-review/unit-tier-diagnosis.md",
+    "rule": "forbidden directory",
+    "reason": "deep review document the repository keeps"
+  },
+  {
+    "path": "internal/sandbox/testdata/town/.beads/metadata.json",
+    "rule": "forbidden directory",
+    "reason": "sandbox town fixture: the town's beads files the test data must hold"
+  },
+  {
+    "path": "internal/sandbox/testdata/town/.beads/routes.jsonl",
+    "rule": "forbidden directory",
+    "reason": "sandbox town fixture: the town's beads files the test data must hold"
+  },
+  {
+    "path": "internal/sandbox/testdata/town/gastown/mayor/rig/.beads/config.yaml",
+    "rule": "forbidden directory",
+    "reason": "sandbox town fixture: the town's beads files the test data must hold"
+  },
+  {
+    "path": "internal/sandbox/testdata/town/gastown/mayor/rig/.beads/metadata.json",
+    "rule": "forbidden directory",
+    "reason": "sandbox town fixture: the town's beads files the test data must hold"
+  },
+  {
+    "path": "cmd/bdgw/exec_test.go",
+    "rule": "blocked word",
+    "line": "d1c9c2ebb98f9806",
+    "reason": "test fixture: the caller name a bdgateway frame carries"
+  },
+  {
+    "path": "cmd/bdgw/exec_test.go",
+    "rule": "blocked word",
+    "line": "04be5b0472a15d80",
+    "reason": "test fixture: the log line the test asserts on"
+  },
+  {
+    "path": "cmd/bdgw/exec_test.go",
+    "rule": "blocked word",
+    "line": "6180b9903a3d5c01",
+    "reason": "test fixture: the failure message names the caller it wants"
+  },
+  {
+    "path": "cmd/forgejo-create-repo/main_test.go",
+    "rule": "blocked word",
+    "line": "aa9116b4bad5d249",
+    "reason": "test fixture: a sample OWNER/NAME repository"
+  },
+  {
+    "path": "cmd/forgejo-create-repo/main_test.go",
+    "rule": "blocked word",
+    "line": "f4d9fe1d4e6a1912",
+    "reason": "test fixture: the sample repository owner"
+  },
+  {
+    "path": "cmd/forgejo-create-repo/main_test.go",
+    "rule": "blocked word",
+    "line": "cfdcd0402b0a1c0f",
+    "reason": "test fixture: an invalid OWNER/NAME argument in a table row"
+  },
+  {
+    "path": "cmd/forgejo-create-repo/main_test.go",
+    "rule": "blocked word",
+    "line": "fceada53d7f4385e",
+    "reason": "test fixture: the dry-run plan text the test asserts on"
+  },
+  {
+    "path": "cmd/forgejo-create-repo/main_test.go",
+    "rule": "blocked word",
+    "line": "e90e91fd221137b2",
+    "reason": "test fixture: the Forgejo admin route the test expects"
+  },
+  {
+    "path": "cmd/forgejo-create-repo/main_test.go",
+    "rule": "blocked word",
+    "line": "557449032258971b",
+    "reason": "test fixture: the RESULT line the test asserts on"
+  },
+  {
+    "path": "cmd/gt-wrap/bddocker_test.go",
+    "rule": "blocked word",
+    "line": "091f784105f9d3df",
+    "reason": "test fixture: a complete bddocker config file the test writes"
+  },
+  {
+    "path": "cmd/gt-wrap/bddocker_test.go",
+    "rule": "blocked word",
+    "line": "5ad789d0fd7a8808",
+    "reason": "test fixture: the parsed target config the test compares"
+  },
+  {
+    "path": "deploy/ci/testdata/images-town/gastown/config.json",
+    "rule": "blocked word",
+    "line": "b8994e7cdae485ad",
+    "reason": "CI test fixture town config: the Forgejo remote the example town names"
+  },
+  {
+    "path": "deploy/data/compose_test.go",
+    "rule": "home directory path",
+    "line": "d9764af4cb7d0049",
+    "reason": "test fixture compose volume: the configured town root host path"
+  },
+  {
+    "path": "deploy/data/compose_test.go",
+    "rule": "blocked word",
+    "line": "d9764af4cb7d0049",
+    "reason": "test fixture compose volume: the town root path names the configured account"
+  },
+  {
+    "path": "deploy/k8s/daemon/bdgateway_test.go",
+    "rule": "email address",
+    "line": "039efddb26535711",
+    "reason": "test input: a URL carrying user information, which the validator rejects"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "da5b95cabca82ae1",
+    "reason": "test value: the configured Claude state directory of the town account"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "da5b95cabca82ae1",
+    "reason": "test value: the account name in the Claude state directory path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "332c4226098ef45b",
+    "reason": "golden input: the Claude state directory the deployment renders"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "332c4226098ef45b",
+    "reason": "test value: the account name in the Claude state directory path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "a59eddac4a168b9c",
+    "reason": "test value: a relative Claude state path the builder refuses"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "889773b00af95215",
+    "reason": "test value: a relative Claude state path the builder refuses"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "b482608fe7411637",
+    "reason": "test value: the Claude state directory a refused mount test uses"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "b482608fe7411637",
+    "reason": "test value: the account name in the Claude state directory path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "d2d70328175f19ec",
+    "reason": "test value: a host path outside the town root, refused by the builder"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "d2d70328175f19ec",
+    "reason": "test value: the account name in the refused host path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "50d84bc4f090e8df",
+    "reason": "test fixture: the configured landing work host path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "50d84bc4f090e8df",
+    "reason": "test fixture: the account name in the landing work host path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "7040095e809e7d5e",
+    "reason": "test fixture: the resolved path an escaped entry names"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "7040095e809e7d5e",
+    "reason": "test fixture: the account name in the resolved path"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "home directory path",
+    "line": "7e6aec6208aa32d9",
+    "reason": "test fixture: an environment value the builder copies"
+  },
+  {
+    "path": "deploy/k8s/daemon/daemon_test.go",
+    "rule": "blocked word",
+    "line": "7e6aec6208aa32d9",
+    "reason": "test fixture: the account name in the environment value"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/deployment-daemon-bdgateway.yaml",
+    "rule": "home directory path",
+    "line": "456864531eadd33b",
+    "reason": "golden file: the comment names the host's Claude state path outside the town root"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/deployment-daemon-bdgateway.yaml",
+    "rule": "blocked word",
+    "line": "456864531eadd33b",
+    "reason": "golden file: the comment names the account whose Claude state is outside the town root"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/deployment-daemon-bdgateway.yaml",
+    "rule": "home directory path",
+    "line": "b2108592317e95de",
+    "reason": "golden file: the configured town root the daemon runs in"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/deployment-daemon-bdgateway.yaml",
+    "rule": "blocked word",
+    "line": "b2108592317e95de",
+    "reason": "golden file: the town root names the configured account"
+  }
+]
