@@ -1,4 +1,0 @@
-update
-update images
-update rollback
-update status
