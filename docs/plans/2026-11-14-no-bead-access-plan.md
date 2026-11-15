@@ -1,4 +1,4 @@
-> Status: active (2026-11). This doc merged in gt-1m0kb; beads filed from it carry the remaining work, in waves as their predecessors land.
+> Status: historical (2026-11). Merged in: gt-1m0kb (the beads filed from it carry the remaining work). Not maintained.
 
 # Polecats with no bead access: implementation plan
 
