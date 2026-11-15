@@ -592,6 +592,35 @@ func TestPodRunVerifyListsThePairChecks(t *testing.T) {
 	}
 }
 
+// TestPodRunRefusesAMissingImagesFile: a pod target's values file that does not
+// read stops the run before any step, so the pair probes never read a pair the
+// file does not name.
+func TestPodRunRefusesAMissingImagesFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	ran := false
+	seams := updateSeams{
+		FindTownRoot: func() (string, error) { return townRoot, nil },
+		DepsFactory: func(string) (update.Deps, error) {
+			return update.Deps{Store: &update.Store{Dir: update.Dir(townRoot)}, Clock: updateClock{}}, nil
+		},
+		Run: func(context.Context, update.Deps, update.Options) (update.State, error) {
+			ran = true
+			return update.State{Outcome: update.OutcomeOK}, nil
+		},
+		PodRun: (&podDaemonKubectl{}).run,
+	}
+
+	_, err := runPodCommand(t, seams, "--images", filepath.Join(townRoot, "missing.yaml"),
+		"--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+	if err == nil || !strings.Contains(err.Error(), "the --images values file") {
+		t.Fatalf("gt update --images error = %v, want the values file refusal", err)
+	}
+	if ran {
+		t.Error("the run started, want the values file refusal before any step")
+	}
+}
+
 // TestNonPodRunVerifyListsNoPairChecks holds the probes a run without a pod
 // target wires, as realUpdateDeps builds them: the pair extension is absent, so
 // the verify result is the four checks the town's own reads answer.
