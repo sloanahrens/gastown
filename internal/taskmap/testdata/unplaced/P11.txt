@@ -3,11 +3,6 @@ dolt
 dolt archive-now
 dolt cleanup
 dolt compare
-dolt container
-dolt container plan
-dolt dump
-dolt fix-metadata
-dolt init
 dolt init-rig
 dolt kill-imposters
 dolt latency
