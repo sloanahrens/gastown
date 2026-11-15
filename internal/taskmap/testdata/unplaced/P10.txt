@@ -1,7 +1,3 @@
-config agent set
-config agent-email-domain
-config cost-tier
-config daemon
 config daemon diff
 config daemon get
 config daemon set
