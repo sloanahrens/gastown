@@ -263,3 +263,21 @@ func TestChannelAdminStaysInternal(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigDaemonSetCheckPointsAtBackupName pins the rule for the config
+// daemon entries (gt-xjidcc): the backup naming is stated once, in the
+// config daemon entry, and the set Check points at it rather than restating it.
+func TestConfigDaemonSetCheckPointsAtBackupName(t *testing.T) {
+	t.Parallel()
+
+	set, ok := Lookup("config daemon set")
+	if !ok {
+		t.Fatal(`Lookup("config daemon set") found no entry`)
+	}
+	if strings.Contains(set.Check, "config.json.bak-") {
+		t.Errorf("config daemon set Check = %q; it restates the backup naming, want a pointer to the config daemon entry", set.Check)
+	}
+	if _, ok := Lookup("config daemon"); !ok {
+		t.Error(`Lookup("config daemon") found no entry; the set Check points at it and needs it to exist`)
+	}
+}
