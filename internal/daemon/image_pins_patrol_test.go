@@ -1097,9 +1097,10 @@ func TestImagePinsCompareForRefusesAMissingToken(t *testing.T) {
 }
 
 // bdCallRecord is one bd call a seam was asked to run: the directory bd would
-// run in and its argv.
+// run in, the environment it would start from and its argv.
 type bdCallRecord struct {
 	dir  string
+	env  []string
 	args []string
 }
 
@@ -1115,8 +1116,8 @@ func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
 	townRoot := t.TempDir()
 	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0)}
 	var calls []bdCallRecord
-	d.imagePinsBeadRunner = func(_ context.Context, dir string, args []string) ([]byte, []byte, error) {
-		calls = append(calls, bdCallRecord{dir: dir, args: args})
+	d.imagePinsBeadRunner = func(_ context.Context, dir string, env, args []string) ([]byte, []byte, error) {
+		calls = append(calls, bdCallRecord{dir: dir, env: env, args: args})
 		return []byte("[]"), nil, nil
 	}
 
@@ -1131,6 +1132,59 @@ func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
 	wantDir := filepath.Join(townRoot, rebuildGTSourceRig, ".beads")
 	if calls[0].dir != wantDir {
 		t.Errorf("the bd call runs in %s, want the gt source rig's database directory %s", calls[0].dir, wantDir)
+	}
+}
+
+// TestImagePinsBeadsRoutesWithTheTownsMutationEnv: the client's bd calls start
+// from the town's mutation routing environment, not the process one
+// (gt-ff9cxi). No BEADS_DIR and no database pin reach bd, so the working
+// directory chooses the database the refresh bead is filed into, and the
+// endpoint the town names is the server the call dials.
+func TestImagePinsBeadsRoutesWithTheTownsMutationEnv(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeImagePinsTownDolt(t, townRoot, `,"dolt":{"host":"127.0.0.8","port":4507}`)
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0)}
+	var calls []bdCallRecord
+	d.imagePinsBeadRunner = func(_ context.Context, dir string, env, args []string) ([]byte, []byte, error) {
+		calls = append(calls, bdCallRecord{dir: dir, env: env, args: args})
+		return []byte("[]"), nil, nil
+	}
+
+	if _, err := d.imagePinsBeads().List(beads.ListOptions{Label: imagePinsRefreshLabel}); err != nil {
+		t.Fatalf("List through the patrol's client: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want the one List", len(calls))
+	}
+
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE"} {
+		if value, ok := lookupEnvIn(calls[0].env, key); ok {
+			t.Errorf("the bd call carries %s=%s, so the env, not the working directory, chooses the database", key, value)
+		}
+	}
+	for key, want := range map[string]string{
+		"BD_DOLT_AUTO_COMMIT":    "on",
+		"BEADS_DOLT_SERVER_HOST": "127.0.0.8",
+		"BEADS_DOLT_SERVER_PORT": "4507",
+		"BEADS_DOLT_PORT":        "4507",
+	} {
+		if got, _ := lookupEnvIn(calls[0].env, key); got != want {
+			t.Errorf("the bd call's %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// writeImagePinsTownDolt writes mayor/town.json under root; extra is appended
+// to the town object, so it carries the town's dolt block or nothing.
+func writeImagePinsTownDolt(t *testing.T, root, extra string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"` + extra + `}`
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(town), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
