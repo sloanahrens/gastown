@@ -71,7 +71,7 @@ rule lines. It takes no group or word.
 With --hook-json, print Claude Code's SessionStart hook output instead: its
 additionalContext is the card and the re-read line when the session is the
 overseer (its actor is town/crew/overseer, or its agent name is overseer), and
-today's restore text for any other session. It takes no group or word.
+the re-read line alone for any other session. It takes no group or word.
 
 Examples:
   gt how
@@ -89,7 +89,14 @@ func init() {
 	rootCmd.AddCommand(howCmd)
 }
 
+// runHowCmd is the command's entry point; it reads the process environment for
+// the hook branch. runHowCmdWithEnv holds the logic, so a test supplies its own
+// environment instead of depending on the one gt happens to run in (gt-y1juz1).
 func runHowCmd(cmd *cobra.Command, args []string) error {
+	return runHowCmdWithEnv(cmd, args, os.Getenv)
+}
+
+func runHowCmdWithEnv(cmd *cobra.Command, args []string, getenv func(string) string) error {
 	m := howDefault{taskmap.Default()}
 	card, err := cmd.Flags().GetBool("card")
 	if err != nil {
@@ -100,7 +107,7 @@ func runHowCmd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("read --hook-json: %w", err)
 	}
 	if hookJSON {
-		return runHowHookJSON(cmd.OutOrStdout(), m, os.Getenv, overseerCardRules, args)
+		return runHowHookJSON(cmd.OutOrStdout(), m, getenv, overseerCardRules, args)
 	}
 	if card {
 		return runHowCard(cmd.OutOrStdout(), m, args)

@@ -11,8 +11,8 @@ import (
 
 // how_card.go holds the overseer card: the rule file and its loader
 // (gt-j669b4.8), the --card flag that prints it (gt-4n47gt), and the
-// --hook-json flag that gives a session its card or today's restore text at
-// session start (gt-ec569g).
+// --hook-json flag that gives a session its card and the re-read line, or the
+// re-read line alone, at session start (gt-ec569g).
 
 // overseerCardFile holds the overseer card's rule lines, one per line and no
 // headings: what a just-compacted overseer reads before it acts (gt-j669b4.8).
@@ -68,19 +68,22 @@ const (
 	// howHookJSONEventName is the hook this output answers: a session start.
 	howHookJSONEventName = "SessionStart"
 
-	// howHookJSONRestoreText is the line a just-compacted session reads: the
-	// design puts it after the overseer's card and gives it alone to every
-	// other session, copied from ~/.claude/hooks/post-compact-restore.sh. That
-	// file is not present in this sandbox (the gap gt-j669b4.8 recorded for the
-	// card), so this constant holds the one line the plan quotes verbatim and
-	// TestHowCardHookJSON pins it: correcting it to the script's full text is a
-	// one-line diff.
-	howHookJSONRestoreText = "Context was just compacted. Re-read /gastown, then /handoff gt-overseer."
+	// howHookJSONRestoreText is the line a session start reads after the
+	// overseer's card, or alone for every other session: re-read the town's
+	// directives, then hand off. This repository owns the line; it is not a copy
+	// of a file outside it, so a change to the instruction is reviewed as a diff
+	// here and no outside file can drift from it.
+	//
+	// It makes no claim that the context was compacted. This hook answers every
+	// SessionStart — startup, resume, clear and compact alike — so a line saying
+	// the context was just compacted would be false for most of them
+	// (gt-y1juz1). TestHowCardHookJSON pins what a session reads.
+	howHookJSONRestoreText = "Re-read /gastown, then /handoff gt-overseer."
 )
 
 func init() {
 	howCmd.Flags().Bool("card", false, "print the overseer card: the lookup rule, the task groups and the rule lines")
-	howCmd.Flags().Bool("hook-json", false, "print the SessionStart hook JSON: the overseer's card and re-read line, or today's restore text")
+	howCmd.Flags().Bool("hook-json", false, "print the SessionStart hook JSON: the overseer's card and the re-read line, or the re-read line alone")
 }
 
 // overseerCardRules returns the card's rule lines, in file order. howCardText,
@@ -167,9 +170,10 @@ type howHookJSONSpecificOutput struct {
 }
 
 // runHowHookJSON writes the SessionStart hook JSON for the calling session: the
-// card and the re-read line for the overseer, today's restore text for any
+// card and the re-read line for the overseer, the re-read line alone for any
 // other session. getenv is the process environment, so a test passes its own
-// and the branch is decided from the arguments, not from a hidden read.
+// and the branch is decided by the arguments, not from a hidden read of the
+// live environment.
 func runHowHookJSON(out io.Writer, m howMap, getenv func(string) string, loadRules func() ([]string, error), args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("gt how --hook-json takes no group or word, got %q", strings.Join(args, " "))
@@ -207,9 +211,9 @@ func isOverseer(actor, agentName string) bool {
 }
 
 // howHookJSONContext returns the text the hook adds to a session's context. The
-// overseer gets the card and then the restore line; any other session gets the
-// restore line alone, so this command changes nothing for it. A card that
-// cannot be built is the card's error, never text without the card.
+// overseer gets the card and then the re-read line; any other session gets the
+// re-read line alone, so it is told to re-read and hand off and nothing more. A
+// card that cannot be built is the card's error, never text without the card.
 func howHookJSONContext(actor, agentName string, m howMap, loadRules func() ([]string, error)) (string, error) {
 	if !isOverseer(actor, agentName) {
 		return howHookJSONRestoreText + "\n", nil
