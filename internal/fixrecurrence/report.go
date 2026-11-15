@@ -2,6 +2,7 @@ package fixrecurrence
 
 import (
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -46,11 +47,25 @@ const chronicStrikes = 2
 // points at it, and a since at or after until is an empty window. Follow-up
 // and reference edges are counted and never count as failure; a relationship
 // the package does not define does, because the report has no channel to
-// refuse it. The caller supplies only edges from a bead created after the
-// cited bead closed; Report has no timestamps to enforce that order itself.
+// refuse it. Bead ids are compared case-insensitively, as the pair extractor
+// compares a citation, and a closed list holding one id in two cases counts it
+// once: Chronic lists the spelling of the record that closed the bug earliest,
+// and of the lexicographically smaller spelling when two records close at the
+// same instant, so the result does not depend on the caller's slice order. The
+// caller supplies only edges from a bead created after the cited bead closed;
+// Report has no timestamps to enforce that order itself.
 func Report(closed []Closed, edges []Edge, since, until time.Time) ReportResult {
 	result := ReportResult{PerRelationship: make(map[Relationship]int)}
-	inWindow := make(map[string]bool, len(closed))
+	// closedRecord is the spelling and close time one in-window record gave an
+	// id. The close time orders two records of the same id in two cases so the
+	// spelling the report lists does not depend on the caller's slice order.
+	type closedRecord struct {
+		id       string
+		closedAt time.Time
+	}
+	// inWindow keys a lowercased id to the record it keeps, so the report lists
+	// a record's id rather than an edge's spelling of it.
+	inWindow := make(map[string]closedRecord, len(closed))
 	for _, c := range closed {
 		// A record naming no bead, or one with no close time, cannot be shown to
 		// have closed in this window, so it is not counted as held or failed.
@@ -60,7 +75,13 @@ func Report(closed []Closed, edges []Edge, since, until time.Time) ReportResult 
 		if c.ClosedAt.Before(since) || !c.ClosedAt.Before(until) {
 			continue
 		}
-		inWindow[c.ID] = true
+		key := strings.ToLower(c.ID)
+		prev, ok := inWindow[key]
+		if !ok ||
+			c.ClosedAt.Before(prev.closedAt) ||
+			(c.ClosedAt.Equal(prev.closedAt) && c.ID < prev.id) {
+			inWindow[key] = closedRecord{id: c.ID, closedAt: c.ClosedAt}
+		}
 	}
 
 	type claimKey struct {
@@ -73,12 +94,16 @@ func Report(closed []Closed, edges []Edge, since, until time.Time) ReportResult 
 	// relationships it asserts.
 	struck := make(map[string]map[string]bool)
 	for _, e := range edges {
+		newKey, oldKey := strings.ToLower(e.New), strings.ToLower(e.Old)
 		// An edge names no claim without a citing bead, when it cites the bead
 		// itself, or when the bead it accuses did not close in this window.
-		if e.New == "" || e.New == e.Old || !inWindow[e.Old] {
+		if newKey == "" || newKey == oldKey {
 			continue
 		}
-		key := claimKey{e.New, e.Old, e.Rel}
+		if _, ok := inWindow[oldKey]; !ok {
+			continue
+		}
+		key := claimKey{newKey, oldKey, e.Rel}
 		if seenClaims[key] {
 			continue
 		}
@@ -87,19 +112,19 @@ func Report(closed []Closed, edges []Edge, since, until time.Time) ReportResult 
 		if holdsFix(e.Rel) {
 			continue
 		}
-		if struck[e.Old] == nil {
-			struck[e.Old] = make(map[string]bool)
+		if struck[oldKey] == nil {
+			struck[oldKey] = make(map[string]bool)
 		}
-		struck[e.Old][e.New] = true
+		struck[oldKey][newKey] = true
 	}
 
-	for id := range inWindow {
+	for key, rec := range inWindow {
 		result.Total++
-		switch strikes := len(struck[id]); {
+		switch strikes := len(struck[key]); {
 		case strikes == 0:
 			result.Held++
 		case strikes >= chronicStrikes:
-			result.Chronic = append(result.Chronic, id)
+			result.Chronic = append(result.Chronic, rec.id)
 		}
 	}
 	slices.Sort(result.Chronic)

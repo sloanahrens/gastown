@@ -77,6 +77,24 @@ func TestReportHeldRate(t *testing.T) {
 			want:   ReportResult{Held: 2, Total: 2, Rate: 1},
 		},
 		{
+			name:   "a self edge spelled in another case is not a failure",
+			closed: closedBeads(windowMid, "gt-ol01", "gt-ol02"),
+			edges:  []Edge{{New: "GT-OL01", Old: "gt-ol01", Rel: Recurrence}},
+			want:   ReportResult{Held: 2, Total: 2, Rate: 1},
+		},
+		{
+			name:   "an edge finds a closed bug whose id is spelled in another case",
+			closed: closedBeads(windowMid, "GT-OL01", "gt-ol02"),
+			edges:  []Edge{{New: "gt-nw01", Old: "gt-ol01", Rel: Recurrence}},
+			want:   ReportResult{Held: 1, Total: 2, Rate: 0.5},
+		},
+		{
+			name:   "an edge spelled in another case still fails the fix",
+			closed: closedBeads(windowMid, "gt-ol01", "gt-ol02"),
+			edges:  []Edge{{New: "gt-nw01", Old: "GT-OL01", Rel: Recurrence}},
+			want:   ReportResult{Held: 1, Total: 2, Rate: 0.5},
+		},
+		{
 			name:   "an edge with no citing bead is not a failure",
 			closed: closedBeads(windowMid, "gt-ol01", "gt-ol02"),
 			edges:  []Edge{{Old: "gt-ol01", Rel: Recurrence}},
@@ -144,6 +162,60 @@ func TestReportChronic(t *testing.T) {
 			want: nil,
 		},
 		{
+			name:   "one citing bead spelled in two cases is one strike",
+			closed: closedBeads(windowMid, "gt-ol01"),
+			edges: []Edge{
+				{New: "gt-NW01", Old: "gt-ol01", Rel: Recurrence},
+				{New: "gt-nw01", Old: "GT-OL01", Rel: Recurrence},
+			},
+			want: nil,
+		},
+		{
+			name:   "strikes in another case list the closed record's spelling",
+			closed: closedBeads(windowMid, "GT-OL01"),
+			edges: []Edge{
+				{New: "gt-nw01", Old: "gt-ol01", Rel: Recurrence},
+				{New: "gt-nw02", Old: "gt-ol01", Rel: Recurrence},
+			},
+			want: []string{"GT-OL01"},
+		},
+		{
+			name: "a bug closed twice in two cases lists the earlier record's spelling",
+			closed: []Closed{
+				{ID: "GT-OL01", ClosedAt: windowMid},
+				{ID: "gt-ol01", ClosedAt: windowMid.Add(time.Hour)},
+			},
+			edges: []Edge{
+				{New: "gt-nw01", Old: "gt-ol01", Rel: Recurrence},
+				{New: "gt-nw02", Old: "gt-ol01", Rel: Recurrence},
+			},
+			want: []string{"GT-OL01"},
+		},
+		{
+			name: "the close time, not the slice order, picks the spelling",
+			closed: []Closed{
+				{ID: "gt-ol01", ClosedAt: windowMid.Add(time.Hour)},
+				{ID: "GT-OL01", ClosedAt: windowMid},
+			},
+			edges: []Edge{
+				{New: "gt-nw01", Old: "gt-ol01", Rel: Recurrence},
+				{New: "gt-nw02", Old: "gt-ol01", Rel: Recurrence},
+			},
+			want: []string{"GT-OL01"},
+		},
+		{
+			name: "two records closed at the same instant list the smaller spelling",
+			closed: []Closed{
+				{ID: "gt-ol01", ClosedAt: windowMid},
+				{ID: "GT-OL01", ClosedAt: windowMid},
+			},
+			edges: []Edge{
+				{New: "gt-nw01", Old: "gt-ol01", Rel: Recurrence},
+				{New: "gt-nw02", Old: "gt-ol01", Rel: Recurrence},
+			},
+			want: []string{"GT-OL01"},
+		},
+		{
 			name:   "follow-ups alone never make a fix chronic",
 			closed: closedBeads(windowMid, "gt-ol01"),
 			edges: []Edge{
@@ -201,6 +273,20 @@ func TestReportPerRelationship(t *testing.T) {
 		Relationship("unrecognised"): 1,
 		Relationship(""):             1,
 	}
+	got := Report(closed, edges, reportSince, reportUntil)
+	if !reflect.DeepEqual(got.PerRelationship, want) {
+		t.Errorf("Report() PerRelationship = %v, want %v", got.PerRelationship, want)
+	}
+}
+
+func TestReportPerRelationshipMatchesIDsCaseInsensitively(t *testing.T) {
+	t.Parallel()
+	closed := closedBeads(windowMid, "gt-ol01")
+	edges := []Edge{
+		{New: "gt-NW01", Old: "gt-ol01", Rel: Recurrence},
+		{New: "gt-nw01", Old: "GT-OL01", Rel: Recurrence},
+	}
+	want := map[Relationship]int{Recurrence: 1}
 	got := Report(closed, edges, reportSince, reportUntil)
 	if !reflect.DeepEqual(got.PerRelationship, want) {
 		t.Errorf("Report() PerRelationship = %v, want %v", got.PerRelationship, want)
@@ -269,6 +355,16 @@ func TestReportWindow(t *testing.T) {
 			name: "the same bug closed twice counts once",
 			closed: []Closed{
 				{ID: "gt-ol01", ClosedAt: windowMid},
+				{ID: "gt-ol01", ClosedAt: windowMid.Add(time.Hour)},
+			},
+			since: reportSince,
+			until: reportUntil,
+			want:  1,
+		},
+		{
+			name: "the same bug closed twice in two cases counts once",
+			closed: []Closed{
+				{ID: "GT-OL01", ClosedAt: windowMid},
 				{ID: "gt-ol01", ClosedAt: windowMid.Add(time.Hour)},
 			},
 			since: reportSince,
