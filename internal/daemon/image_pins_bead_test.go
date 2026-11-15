@@ -314,6 +314,13 @@ func TestImagePinsOpenRefreshBeadRefusesWhatItCannotRead(t *testing.T) {
 			}},
 			want: "does not parse",
 		},
+		{
+			name: "an open bead with no created time",
+			store: &refreshStore{beads: []*beads.Issue{
+				refreshIssue("gt-r1", "open", imagePinsRefreshLabel, ""),
+			}},
+			want: "does not parse",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

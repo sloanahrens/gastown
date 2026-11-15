@@ -181,7 +181,7 @@ func imagePinsOpenRefreshBead(list imagePinsBeadList) (*ImagePinRefreshBead, err
 			continue
 		}
 		openedAt := beads.ParseIssueTime(is.CreatedAt)
-		if is.CreatedAt != "" && openedAt.IsZero() {
+		if openedAt.IsZero() {
 			return nil, fmt.Errorf("image pins refresh bead: %s has a created time %q that does not parse: its age is unknown", is.ID, is.CreatedAt)
 		}
 		if open != nil {
