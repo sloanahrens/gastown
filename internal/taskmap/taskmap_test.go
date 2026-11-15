@@ -11,35 +11,21 @@ func TestValidate(t *testing.T) {
 
 	placed := Entry{Path: "status", Group: "orient", Use: "Use this to see where the town stands."}
 	tests := []struct {
-		name     string
-		entries  []Entry
-		paths    []string
-		unplaced []string
-		want     []string
+		name    string
+		entries []Entry
+		paths   []string
+		want    []string
 	}{
 		{
-			name:     "clean",
-			entries:  []Entry{placed},
-			paths:    []string{"status", "new-thing"},
-			unplaced: []string{"new-thing"},
+			name:    "clean",
+			entries: []Entry{placed},
+			paths:   []string{"status"},
 		},
 		{
-			name:    "command with no entry and no unplaced line",
+			name:    "command with no entry",
 			entries: []Entry{placed},
 			paths:   []string{"status", "orphan"},
-			want:    []string{`"orphan": no task map entry and no line in testdata/unplaced`},
-		},
-		{
-			name:     "unplaced line has an entry",
-			entries:  []Entry{placed},
-			paths:    []string{"status"},
-			unplaced: []string{"status"},
-			want:     []string{`"status": line in testdata/unplaced but the command has an entry (remove the line)`},
-		},
-		{
-			name:     "unplaced line names no command",
-			unplaced: []string{"gone"},
-			want:     []string{`"gone": line in testdata/unplaced but no such command (remove the line)`},
+			want:    []string{`"orphan": no task map entry`},
 		},
 		{
 			name:    "entry has unknown group",
@@ -71,9 +57,9 @@ func TestValidate(t *testing.T) {
 
 			reg := NewRegistry()
 			reg.Register(tc.entries...)
-			got := reg.Validate(tc.paths, tc.unplaced)
+			got := reg.Validate(tc.paths)
 			if !slices.Equal(got, tc.want) {
-				t.Fatalf("Validate(%v, %v) = %q, want %q", tc.paths, tc.unplaced, got, tc.want)
+				t.Fatalf("Validate(%v) = %q, want %q", tc.paths, got, tc.want)
 			}
 		})
 	}
@@ -130,8 +116,8 @@ func TestPackageFunctions(t *testing.T) {
 	}
 	// A registered entry names a command the caller did not pass, so at least
 	// this entry must be reported however many placement beads have landed.
-	if problems := Validate(nil, nil); len(problems) == 0 {
-		t.Error("Validate(nil, nil) reported no problem; want the registered entry flagged as naming no command")
+	if problems := Validate(nil); len(problems) == 0 {
+		t.Error("Validate(nil) reported no problem; want the registered entry flagged as naming no command")
 	}
 }
 
