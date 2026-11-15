@@ -1,12 +1,23 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
+
+	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
 // tickPinsFile is the pins file the tick's reader answers, so a test can check
@@ -354,5 +365,674 @@ func TestImagePinsTickStopsAtTheFailedRead(t *testing.T) {
 					counts.tips, counts.open, counts.file, tt.wantTips, tt.wantOpen, tt.wantFile)
 			}
 		})
+	}
+}
+
+// TestImagePinsPatrolIsOffUnlessEnabled holds the opt-in default (gt-01lcq2): a
+// town that never names image_pins runs no tick, and a town that names it runs
+// one unless disabled_patrols holds it off.
+func TestImagePinsPatrolIsOffUnlessEnabled(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		config *DaemonPatrolConfig
+		want   bool
+	}{
+		{"no config", nil, false},
+		{"no patrols section", &DaemonPatrolConfig{}, false},
+		{"the key absent", &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, false},
+		{"enabled false", &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: false}}}, false},
+		{"enabled true", &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true}}}, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsPatrolEnabled(tt.config, "image_pins"); got != tt.want {
+				t.Errorf("IsPatrolEnabled(image_pins) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	d := &Daemon{
+		patrolConfig:    &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true}}},
+		disabledPatrols: map[string]bool{"image_pins": true},
+	}
+	if d.isPatrolActive("image_pins") {
+		t.Error("isPatrolActive says image_pins runs: a town that disabled it runs no tick")
+	}
+}
+
+// TestImagePinsInterval: the ticker asks for the patrol's configured interval,
+// clamped up to the floor, and for the default when the key is absent or does
+// not parse.
+func TestImagePinsInterval(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		config *DaemonPatrolConfig
+		want   time.Duration
+	}{
+		{"no config", nil, defaultImagePinsInterval},
+		{"the key absent", &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, defaultImagePinsInterval},
+		{"an interval that does not parse", &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true, Interval: "half an hour"}}}, defaultImagePinsInterval},
+		{"a zero interval", &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true, Interval: "0s"}}}, defaultImagePinsInterval},
+		{"an interval under the floor", &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true, Interval: "10s"}}}, minImagePinsInterval},
+		{"a configured interval", &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true, Interval: "2h"}}}, 2 * time.Hour},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := imagePinsInterval(tt.config); got != tt.want {
+				t.Errorf("imagePinsInterval = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStartImagePinsTicker: the patrol gets its own ticker when it is on, at the
+// interval its config entry names, and none when the town does not name it
+// (gt-01lcq2).
+func TestStartImagePinsTicker(t *testing.T) {
+	t.Parallel()
+	var intervals []time.Duration
+	ticks := make(chan time.Time)
+	stops := 0
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(io.Discard, "", 0),
+	}
+	d.newImagePinsTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+		intervals = append(intervals, interval)
+		return ticks, func() { stops++ }
+	}
+
+	if channel, stop := d.startImagePinsTicker(); channel != nil || stop != nil {
+		t.Error("a town that does not name image_pins started its ticker")
+	}
+	if len(intervals) != 0 {
+		t.Errorf("a town that does not name image_pins asked for tickers at %v, want none", intervals)
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true}}}
+	channel, stop := d.startImagePinsTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("a town that names image_pins started no ticker")
+	}
+	if len(intervals) != 1 || intervals[0] != defaultImagePinsInterval {
+		t.Errorf("the ticker asks for an interval of %v, want the %v default", intervals, defaultImagePinsInterval)
+	}
+	stop()
+	if stops != 1 {
+		t.Errorf("the stop func ran %d times, want the ticker stopped once", stops)
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true, Interval: "90m"}}}
+	channel, stop = d.startImagePinsTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("a town that names image_pins with an interval started no ticker")
+	}
+	if len(intervals) != 2 || intervals[1] != 90*time.Minute {
+		t.Errorf("the ticker asks for an interval of %v, want the configured 90m", intervals)
+	}
+	stop()
+
+	// The production ticker, with no seam: the patrol still gets a channel and
+	// a stop func, so Run's defer has a real ticker to stop.
+	plain := &Daemon{
+		config:       &Config{TownRoot: t.TempDir()},
+		logger:       log.New(io.Discard, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true}}},
+	}
+	channel, stop = plain.startImagePinsTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("the patrol started no ticker without a ticker seam")
+	}
+	stop()
+}
+
+// imagePinsTestDaemon is a daemon whose image_pins tick reads the test's seams.
+func imagePinsTestDaemon(t *testing.T, logged io.Writer) *Daemon {
+	t.Helper()
+	return &Daemon{
+		config:       &Config{TownRoot: t.TempDir()},
+		logger:       log.New(logged, "", 0),
+		clock:        clockwork.NewFakeClockAt(time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true}}},
+	}
+}
+
+// TestTriggerImagePinsTicksThroughTheTownSeams is the patrol's wiring test
+// (gt-01lcq2): one trigger runs the tick over the seams built for the town, and
+// the bead the planner asks for is filed and named in the log.
+func TestTriggerImagePinsTicksThroughTheTownSeams(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	counts := &tickCounts{}
+	store := &refreshStore{}
+	pins := []ImagePinState{refreshPin("bd", pinBD, tipBD, 20)}
+	now := d.clk().Now()
+	var built int
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		built++
+		return tickSeams(counts, now, pins, nil, store)
+	}
+
+	d.triggerImagePins()
+
+	if built != 1 {
+		t.Fatalf("the trigger built the town's seams %d times, want 1", built)
+	}
+	if counts.pins != 1 || counts.tips != 1 || counts.open != 1 || counts.file != 1 {
+		t.Errorf("seam calls (pins, tips, open, file) = (%d, %d, %d, %d), want (1, 1, 1, 1)",
+			counts.pins, counts.tips, counts.open, counts.file)
+	}
+	if len(store.created) != 1 {
+		t.Fatalf("beads filed = %d, want the one the planner asked for", len(store.created))
+	}
+	if !strings.Contains(logged.String(), "filed the refresh bead "+store.created[0].ID) {
+		t.Errorf("the log does not name the filed bead:\n%s", logged.String())
+	}
+}
+
+// TestTriggerImagePinsOffBuildsNoSeams: a switched-off patrol builds no seam and
+// reads nothing, whether its key is off or the daemon holds no config at all.
+func TestTriggerImagePinsOffBuildsNoSeams(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: false}}}
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		t.Error("a disabled patrol built the town's seams")
+		return imagePinsTickSeams{}
+	}
+	d.triggerImagePins()
+
+	noConfig := &Daemon{config: nil, logger: log.New(io.Discard, "", 0)}
+	noConfig.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		t.Error("a daemon with no config built the town's seams")
+		return imagePinsTickSeams{}
+	}
+	noConfig.triggerImagePins()
+}
+
+// TestTriggerImagePinsLogsAFailedTick: a tick that cannot read the pins ends in
+// a log line naming the failure, never the silence of a town with nothing due
+// (gt-01lcq2).
+func TestTriggerImagePinsLogsAFailedTick(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		seams := tickSeams(&tickCounts{}, d.clk().Now(), nil, nil, &refreshStore{})
+		seams.readPins = func() ([]byte, error) { return nil, errors.New("the pins file is not there") }
+		return seams
+	}
+
+	d.triggerImagePins()
+
+	got := logged.String()
+	if !strings.Contains(got, "image_pins:") || !strings.Contains(got, "the pins file is not there") {
+		t.Errorf("the failed tick is not logged with its failure:\n%s", got)
+	}
+	if strings.Contains(got, "filed the refresh bead") {
+		t.Errorf("a failed tick logged a filed bead:\n%s", got)
+	}
+}
+
+// TestImagePinsSkipsATickWhileOneRuns: a tick that arrives while the previous
+// one still reads is skipped and logged, and the guard is released when that
+// tick ends so the next one runs (gt-01lcq2).
+func TestImagePinsSkipsATickWhileOneRuns(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	d.ctx = context.Background()
+	reads := make(chan struct{}, 1)
+	release := make(chan struct{})
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		seams := tickSeams(&tickCounts{}, d.clk().Now(), []ImagePinState{refreshPin("bd", pinBD, tipBD, 0)}, nil, &refreshStore{})
+		seams.readPins = func() ([]byte, error) {
+			reads <- struct{}{}
+			<-release
+			return tickPinsFile, nil
+		}
+		return seams
+	}
+
+	d.startImagePinsTick()
+	waitForSignal(t, reads, "the first tick never reached the pins read")
+	d.startImagePinsTick()
+	if !strings.Contains(logged.String(), "previous tick still running, skipping") {
+		t.Errorf("the second tick was not logged as skipped:\n%s", logged.String())
+	}
+	close(release)
+	d.imagePinsCycles.Wait()
+	if d.imagePinsRunning.Load() {
+		t.Error("the guard stayed set after the tick ended, so no later tick could run")
+	}
+}
+
+// imagePinsCollected returns what the attention tick's collector for kind
+// raises from d, as a town tick would see it.
+func imagePinsCollected(t *testing.T, d *Daemon, kind attention.Kind) []attention.Item {
+	t.Helper()
+	c := collectorFor(t, d.attentionSources(d.clk().Now()), kind)
+	items, err := c.collect(context.Background())
+	if err != nil {
+		t.Fatalf("%s collector: %v", kind, err)
+	}
+	return items
+}
+
+// TestImagePinsFailedTickRaisesUnreadable: a tick that cannot read the pins is
+// image-pins-unreadable in the attention queue, never silence, and the next
+// tick that reads cleanly clears it (gt-01lcq2).
+func TestImagePinsFailedTickRaisesUnreadable(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		seams := tickSeams(&tickCounts{}, d.clk().Now(), nil, nil, &refreshStore{})
+		seams.readPins = func() ([]byte, error) { return nil, errors.New("the pins file is not there") }
+		return seams
+	}
+
+	d.triggerImagePins()
+
+	items := imagePinsCollected(t, d, attention.KindImagePinsUnreadable)
+	if len(items) != 1 {
+		t.Fatalf("a failed tick raised %d unreadable item(s), want 1: %+v", len(items), items)
+	}
+	if items[0].Key != imagePinsUnreadableKey {
+		t.Errorf("item key = %q, want %q", items[0].Key, imagePinsUnreadableKey)
+	}
+	if !strings.Contains(items[0].Summary, "the pins file is not there") {
+		t.Errorf("item summary %q does not name the failure", items[0].Summary)
+	}
+
+	// The next tick reads a pin at its tip: nothing is unreadable any more, so
+	// the item clears rather than outliving the failure.
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		return tickSeams(&tickCounts{}, d.clk().Now(), []ImagePinState{refreshPin("bd", pinBD, tipBD, 0)}, nil, &refreshStore{})
+	}
+	d.triggerImagePins()
+
+	if items := imagePinsCollected(t, d, attention.KindImagePinsUnreadable); len(items) != 0 {
+		t.Errorf("a clean tick left %+v in the queue, want the failure cleared", items)
+	}
+}
+
+// TestImagePinsPlannerItemsReachTheirCollectors: each planner item reaches the
+// collector for its own kind, keyed by its pin, and raises nothing under
+// another kind (gt-01lcq2).
+func TestImagePinsPlannerItemsReachTheirCollectors(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	now := d.clk().Now()
+	open := &ImagePinRefreshBead{ID: "gt-refresh4", OpenedAt: now.Add(-4 * time.Hour)}
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		return tickSeams(&tickCounts{}, now, []ImagePinState{refreshPin("bd", pinBD, tipBD, 30)}, open, &refreshStore{})
+	}
+
+	d.triggerImagePins()
+
+	stale := imagePinsCollected(t, d, attention.KindImagePinsStale)
+	if len(stale) != 1 {
+		t.Fatalf("stale items = %+v, want the one pin item", stale)
+	}
+	if stale[0].Key != imagePinsStaleKey+":bd" {
+		t.Errorf("stale item key = %q, want %q", stale[0].Key, imagePinsStaleKey+":bd")
+	}
+	if stale[0].Severity != attention.SeverityMedium {
+		t.Errorf("stale item severity = %q, want the planner's %q", stale[0].Severity, attention.SeverityMedium)
+	}
+	if !strings.Contains(stale[0].Summary, "30 commits behind") {
+		t.Errorf("stale item summary %q does not name the distance", stale[0].Summary)
+	}
+	stuck := imagePinsCollected(t, d, attention.KindImagePinsRefreshStuck)
+	if len(stuck) != 1 || stuck[0].Key != imagePinsRefreshStuckKey {
+		t.Errorf("refresh-stuck items = %+v, want the one open-bead item keyed %q", stuck, imagePinsRefreshStuckKey)
+	}
+	if items := imagePinsCollected(t, d, attention.KindImagePinsUnreadable); len(items) != 0 {
+		t.Errorf("a tick that read every pin raised unreadable items %+v", items)
+	}
+}
+
+// TestImagePinsCollectorIsEmptyWhileThePatrolIsOff: a patrol the town switches
+// off has no read to publish, so the items it raised clear rather than outlive
+// the setting (gt-01lcq2).
+func TestImagePinsCollectorIsEmptyWhileThePatrolIsOff(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := imagePinsTestDaemon(t, &logged)
+	d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+		seams := tickSeams(&tickCounts{}, d.clk().Now(), nil, nil, &refreshStore{})
+		seams.readPins = func() ([]byte, error) { return nil, errors.New("the pins file is not there") }
+		return seams
+	}
+	d.triggerImagePins()
+	if items := imagePinsCollected(t, d, attention.KindImagePinsUnreadable); len(items) != 1 {
+		t.Fatalf("the failed tick raised %+v, want the one unreadable item", items)
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: false}}}
+	if items := imagePinsCollected(t, d, attention.KindImagePinsUnreadable); len(items) != 0 {
+		t.Errorf("a switched-off patrol kept %+v in the queue, want none", items)
+	}
+}
+
+// TestImagePinsAttentionRefusesAnUnknownItemKey: a planner key the collectors
+// cannot name is an error the collector returns, never an item dropped
+// (gt-01lcq2).
+func TestImagePinsAttentionRefusesAnUnknownItemKey(t *testing.T) {
+	t.Parallel()
+	var a imagePinsAttention
+	a.record([]ImagePinItem{{Key: "image-pins-from-a-newer-daemon", Pin: "bd"}}, nil)
+
+	items, err := a.observed()
+	if err == nil || !strings.Contains(err.Error(), "image-pins-from-a-newer-daemon") {
+		t.Fatalf("observed = (%+v, %v), want an error naming the unknown key", items, err)
+	}
+	s := &attentionSources{imagePins: a.observed}
+	if _, err := s.collectImagePins(attention.KindImagePinsStale)(context.Background()); err == nil {
+		t.Error("the collector dropped the unknown item instead of returning the error")
+	}
+}
+
+// TestStopImagePinsPatrolJoinsTheRunningTick: Run's return stops the ticker and
+// waits for the tick it started, and a tick still running at the bound is
+// logged and left (gt-01lcq2).
+func TestStopImagePinsPatrolJoinsTheRunningTick(t *testing.T) {
+	t.Parallel()
+	t.Run("the tick the ticker started is joined", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		d := imagePinsTestDaemon(t, &logged)
+		d.ctx = context.Background()
+		d.imagePinsJoinWait = time.Hour
+		reads := make(chan struct{}, 1)
+		release := make(chan struct{})
+		d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+			seams := tickSeams(&tickCounts{}, d.clk().Now(), []ImagePinState{refreshPin("bd", pinBD, tipBD, 0)}, nil, &refreshStore{})
+			seams.readPins = func() ([]byte, error) {
+				reads <- struct{}{}
+				<-release
+				return tickPinsFile, nil
+			}
+			return seams
+		}
+		d.startImagePinsTick()
+		waitForSignal(t, reads, "the tick never reached the pins read")
+
+		stopped := make(chan struct{})
+		stopCalled := make(chan struct{})
+		go func() {
+			d.stopImagePinsPatrol(func() { close(stopCalled) })
+			close(stopped)
+		}()
+		waitForSignal(t, stopCalled, "the stop func never ran")
+		select {
+		case <-stopped:
+			t.Fatal("stopImagePinsPatrol returned while the tick still ran")
+		default:
+		}
+		close(release)
+		waitForSignal(t, stopped, "stopImagePinsPatrol never returned after the tick finished")
+		if d.imagePinsRunning.Load() {
+			t.Error("the join returned with the tick's guard still set")
+		}
+	})
+
+	t.Run("a tick past the bound is logged and left", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		d := imagePinsTestDaemon(t, &logged)
+		d.ctx = context.Background()
+		d.imagePinsJoinWait = 30 * time.Millisecond
+		reads := make(chan struct{}, 1)
+		release := make(chan struct{})
+		d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+			seams := tickSeams(&tickCounts{}, d.clk().Now(), []ImagePinState{refreshPin("bd", pinBD, tipBD, 0)}, nil, &refreshStore{})
+			seams.readPins = func() ([]byte, error) {
+				reads <- struct{}{}
+				<-release
+				return tickPinsFile, nil
+			}
+			return seams
+		}
+		d.startImagePinsTick()
+		waitForSignal(t, reads, "the tick never reached the pins read")
+
+		d.stopImagePinsPatrol(nil)
+		if !strings.Contains(logged.String(), "still running") {
+			t.Errorf("the left-behind tick is not logged:\n%s", logged.String())
+		}
+
+		close(release)
+		d.imagePinsCycles.Wait()
+	})
+}
+
+// TestReadImagePinsFile: the pins file is read from the gt checkout the ensure
+// seam names, and a checkout that cannot be resolved or a file that is not there
+// is the read's error, never an empty file (gt-01lcq2).
+func TestReadImagePinsFile(t *testing.T) {
+	t.Parallel()
+	checkout := t.TempDir()
+	path := filepath.Join(checkout, filepath.FromSlash(daemonimage.PinsPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, tickPinsFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	d.imagePinsEnsureFn = func(context.Context, string, string, string) (string, error) {
+		return checkout, nil
+	}
+	got, err := d.readImagePinsFile(context.Background())
+	if err != nil {
+		t.Fatalf("readImagePinsFile: %v", err)
+	}
+	if !slices.Equal(got, tickPinsFile) {
+		t.Errorf("readImagePinsFile = %q, want %q", got, tickPinsFile)
+	}
+
+	d.imagePinsEnsureFn = func(context.Context, string, string, string) (string, error) {
+		return "", errors.New("rig gastown has no bare repo")
+	}
+	if got, err := d.readImagePinsFile(context.Background()); err == nil || !strings.Contains(err.Error(), "rig gastown has no bare repo") {
+		t.Errorf("an unresolvable checkout = (%q, %v), want the ensure failure", got, err)
+	}
+
+	d.imagePinsEnsureFn = func(context.Context, string, string, string) (string, error) {
+		return t.TempDir(), nil
+	}
+	if _, err := d.readImagePinsFile(context.Background()); err == nil || !strings.Contains(err.Error(), daemonimage.PinsPath) {
+		t.Errorf("a missing pins file = %v, want an error naming %s", err, daemonimage.PinsPath)
+	}
+}
+
+// TestImagePinsCompareRefusesATownWithNoForgejo: a tick that cannot build the
+// compare reports it instead of a read that can count no pin's lag (gt-01lcq2).
+// Each case asserts the cause it names: a town with a readable registry and no
+// rig is the empty rig list, and a rig with no remote is the URL the compare
+// cannot be built from.
+func TestImagePinsCompareRefusesATownWithNoForgejo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		townJSON string
+		want     string
+	}{
+		{
+			name:     "a town whose rig list is empty",
+			townJSON: `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","registry":{"rigs":{}}}`,
+			want:     "rig list is unreadable or empty",
+		},
+		{
+			name:     "a town whose one rig names no remote",
+			townJSON: `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","registry":{"rigs":{"demo":{}}}}`,
+			want:     "not a URL with a scheme and host",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(tc.townJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+			cmp, err := d.imagePinsCompare()
+			if err == nil {
+				t.Fatal("a town whose rigs name no Forgejo built a compare")
+			}
+			if cmp != nil {
+				t.Errorf("imagePinsCompare = %v with an error, want no compare", cmp)
+			}
+			if !strings.Contains(err.Error(), "image pins patrol") {
+				t.Errorf("error %q does not name the patrol", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name its cause %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadImagePinTipsRefusesWithoutACompare: a tip read that cannot build the
+// compare reports it, instead of reading the file back at zero lag (gt-01lcq2).
+func TestReadImagePinTipsRefusesWithoutACompare(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	pins, err := d.readImagePinTips(context.Background(), tickPinsFile)
+	if err == nil {
+		t.Fatalf("readImagePinTips = %+v, want the compare's refusal", pins)
+	}
+	if pins != nil {
+		t.Errorf("a refused read returned states: %+v", pins)
+	}
+}
+
+// TestImagePinsTipGit: the tip read runs the ls-remote of the source's main,
+// answers git's stdout on success, and reports a failed call by the call and its
+// bound, never by git's output, which a failed fetch can fill with the URL it was
+// given (gt-01lcq2).
+func TestImagePinsTipGit(t *testing.T) {
+	t.Parallel()
+	const url = "https://forge.example.com/town/bd"
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		answer  []byte
+		runErr  error
+		ctx     func() (context.Context, context.CancelFunc)
+		want    string
+		wantSub string
+	}{
+		{
+			name:   "git answers the ref",
+			answer: []byte(tipBD + "\t" + pinTipRef + "\n"),
+			want:   tipBD + "\t" + pinTipRef + "\n",
+			ctx:    func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+		},
+		{
+			name:    "git fails",
+			runErr:  errors.New("exit status 128"),
+			ctx:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			wantSub: "git ls-remote " + pinTipRef + ": exit status 128",
+		},
+		{
+			name:   "the call's bound has passed",
+			runErr: errors.New("signal: killed"),
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), now.Add(-time.Second))
+			},
+			wantSub: "did not answer within " + imagePinsGitTimeout.String(),
+		},
+		{
+			name:   "the tick was canceled",
+			runErr: errors.New("signal: killed"),
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			wantSub: "stopped before it answered",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := tt.ctx()
+			defer cancel()
+			var argv []string
+			d := &Daemon{logger: log.New(io.Discard, "", 0)}
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				argv = cmd.Args
+				return tt.answer, []byte("fatal: could not read"), tt.runErr
+			}
+
+			got, err := d.imagePinsTipGit(ctx)(url)
+
+			want := []string{"git", "ls-remote", "--refs", url, pinTipRef}
+			if !slices.Equal(argv, want) {
+				t.Errorf("argv = %v, want %v", argv, want)
+			}
+			if tt.wantSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantSub) {
+					t.Errorf("error = %v, want it to name %q", err, tt.wantSub)
+				}
+				if strings.Contains(err.Error(), "fatal: could not read") {
+					t.Errorf("error %q carries git's output", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the tip read = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("the tip read = %q, want git's answer %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestImagePinsCompareForRefusesAMissingToken: the compare needs the viewer's
+// token, and a token file that is not there is the build's error, never a client
+// that reads as anonymous (gt-01lcq2).
+func TestImagePinsCompareForRefusesAMissingToken(t *testing.T) {
+	t.Parallel()
+	cmp, err := imagePinsCompareFor("https://forge.example.com/api/v1", filepath.Join(t.TempDir(), "forgejo-viewer.env"))
+	if err == nil {
+		t.Fatal("a missing token file built a compare")
+	}
+	if cmp != nil {
+		t.Errorf("imagePinsCompareFor = %v with an error, want no compare", cmp)
+	}
+	if !strings.Contains(err.Error(), "image pins patrol") {
+		t.Errorf("error %q does not name the patrol", err)
+	}
+}
+
+// TestImagePinsCompareForBuildsTheViewerClient: a readable viewer token builds
+// the compare the tick counts a pin's lag with (gt-01lcq2).
+func TestImagePinsCompareForBuildsTheViewerClient(t *testing.T) {
+	t.Parallel()
+	tokenFile := filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	if err := os.WriteFile(tokenFile, []byte("FORGEJO_TOKEN=placeholder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmp, err := imagePinsCompareFor("https://forge.example.com/api/v1", tokenFile)
+	if err != nil {
+		t.Fatalf("imagePinsCompareFor: %v", err)
+	}
+	if cmp == nil {
+		t.Fatal("imagePinsCompareFor built no compare")
 	}
 }

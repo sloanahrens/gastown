@@ -250,6 +250,11 @@ type attentionSources struct {
 	// config.parse_failed collector names (patrol_reload.go, gt-6frjqf).
 	patrolFailure *patrolLoadFailure
 
+	// imagePins is the image_pins patrol's last tick (image_pins_patrol.go):
+	// nil while the patrol is off, so its items clear rather than outliving
+	// the setting that asked for them (gt-01lcq2).
+	imagePins func() ([]attention.Item, error)
+
 	// refusals is gt done's refusal ledger; refusalBead reads one refused
 	// bead in its own rig.
 	refusals    func() ([]attention.Refusal, error)
@@ -732,6 +737,14 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The story point estimator's drift over the newest extract's landings,
 		// and the measure that could not be read (gt-my0o23).
 		{kind: attention.KindStoryPointsDrift, collect: s.collectStoryPointsDrift},
+		// The image pins patrol's last tick (gt-01lcq2): a pin at the stale
+		// bound, a read that failed (the whole tick's included), and the
+		// refresh bead it filed still unlanded. Separate entries for the
+		// reason the tier-sweep kinds above are, so a failed collector keeps
+		// the previous items of its own kind only.
+		{kind: attention.KindImagePinsStale, collect: s.collectImagePins(attention.KindImagePinsStale)},
+		{kind: attention.KindImagePinsUnreadable, collect: s.collectImagePins(attention.KindImagePinsUnreadable)},
+		{kind: attention.KindImagePinsRefreshStuck, collect: s.collectImagePins(attention.KindImagePinsRefreshStuck)},
 	}, s.questionCollectors()...)
 }
 
@@ -770,6 +783,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
 	s.pairReady = d.pairReady.observed
+	// A patrol that is off raises nothing and has no tick to read, so the
+	// collector carries no read and the queue clears its items.
+	if d.isPatrolActive("image_pins") {
+		s.imagePins = d.imagePinsAttention.observed
+	}
 	// A polecat-health pass that is off raises nothing, so its items clear
 	// rather than outliving the patrol that asked for them (gt-q6hafz).
 	if d.isPatrolActive("polecat-health") {

@@ -172,6 +172,16 @@ const (
 	// landings the way the measured polecat time does, or the drift measure
 	// cannot be read (gt-my0o23).
 	KindStoryPointsDrift Kind = "storypoints-drift"
+	// KindImagePinsStale: an image pin trails its source's origin/main by the
+	// patrol's stale bound, so the refresh the patrol files at the file bound
+	// has not landed (gt-01lcq2).
+	KindImagePinsStale Kind = "image-pins-stale"
+	// KindImagePinsUnreadable: a pin's read failed, or the patrol's whole tick
+	// did, so no pin's distance from its tip is known (gt-01lcq2).
+	KindImagePinsUnreadable Kind = "image-pins-unreadable"
+	// KindImagePinsRefreshStuck: the refresh bead the patrol filed has sat
+	// unlanded past its bound, so the pins wait for it (gt-01lcq2).
+	KindImagePinsRefreshStuck Kind = "image-pins-refresh-stuck"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -191,6 +201,7 @@ func Kinds() []Kind {
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
+		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 	}
 }
 

@@ -154,6 +154,12 @@ var ruleOwners = map[string]Owner{
 	// the reading and starts the retrain, or finds what stopped the extract
 	// (gt-my0o23).
 	RuleStoryPointsDrift: OwnerOverseer,
+	// The image pins are the town's own pin file to keep current: the overseer
+	// reads why a refresh has not landed, or what the pin read could not see
+	// (gt-01lcq2).
+	RuleImagePinsStale:        OwnerOverseer,
+	RuleImagePinsUnreadable:   OwnerOverseer,
+	RuleImagePinsRefreshStuck: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
