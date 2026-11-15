@@ -1,9 +1,8 @@
 // Package taskmap gives every gt command a task group and a one-line use, so
 // an agent looking for a tool finds it by the job to be done rather than by
-// rediscovering the command tree. Entries are added with Register. Commands
-// that have no entry yet are listed, one path per line, in the batch files
-// under testdata/unplaced, and TestEveryCommandHasATask in internal/cmd fails
-// when a runnable, visible command has neither an entry nor a line there.
+// rediscovering the command tree. Entries are added with Register, and
+// TestEveryCommandHasATask in internal/cmd fails when a runnable, visible
+// command has no entry.
 package taskmap
 
 import (
@@ -109,8 +108,8 @@ func Search(word string) []Entry {
 }
 
 // Validate returns the problems Registry.Validate reports for the default map.
-func Validate(paths []string, unplaced []string) []string {
-	return defaultRegistry.Validate(paths, unplaced)
+func Validate(paths []string) []string {
+	return defaultRegistry.Validate(paths)
 }
 
 // Register adds es to r, replacing an entry at the same path.
@@ -153,38 +152,19 @@ func (r *Registry) Search(word string) []Entry {
 }
 
 // Validate returns the problems that stop r covering every command: a path
-// with no entry and no unplaced line, an unplaced line that has an entry or
-// names no command, and a registered entry that has an unknown group, an
-// empty or multi-line Use, or names no command. The result is empty when the
-// map is clean.
-func (r *Registry) Validate(paths []string, unplaced []string) []string {
+// with no entry, and a registered entry that has an unknown group, an empty
+// or multi-line Use, or names no command. The result is empty when the map is
+// clean.
+func (r *Registry) Validate(paths []string) []string {
 	commands := make(map[string]bool, len(paths))
 	for _, p := range paths {
 		commands[p] = true
 	}
-	excused := make(map[string]bool, len(unplaced))
 	var problems []string
-	for _, p := range unplaced {
-		if excused[p] {
-			continue
-		}
-		excused[p] = true
-		if _, ok := r.entries[p]; ok {
-			problems = append(problems, fmt.Sprintf("%q: line in testdata/unplaced but the command has an entry (remove the line)", p))
-			continue
-		}
-		if !commands[p] {
-			problems = append(problems, fmt.Sprintf("%q: line in testdata/unplaced but no such command (remove the line)", p))
-		}
-	}
 	for _, p := range paths {
-		if _, ok := r.entries[p]; ok {
-			continue
+		if _, ok := r.entries[p]; !ok {
+			problems = append(problems, fmt.Sprintf("%q: no task map entry", p))
 		}
-		if excused[p] {
-			continue
-		}
-		problems = append(problems, fmt.Sprintf("%q: no task map entry and no line in testdata/unplaced", p))
 	}
 	for path, e := range r.entries {
 		if !commands[path] {
