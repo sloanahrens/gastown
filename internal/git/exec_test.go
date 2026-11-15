@@ -296,3 +296,43 @@ func TestNewGitWithRemoteExecDoesNotStatTheWorkDirOnTheHost(t *testing.T) {
 		t.Errorf("a host working directory that does not exist must be refused before exec: err=%v calls=%d", err, calls)
 	}
 }
+
+// TestNewGitWithRemoteExecRefusesANilExec: a remote Git with no exec would run
+// git on this host in a directory that is not here, so the constructor refuses.
+func TestNewGitWithRemoteExecRefusesANilExec(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("NewGitWithRemoteExec with a nil exec did not panic")
+		}
+	}()
+	NewGitWithRemoteExec("/sandbox/x", nil)
+}
+
+// TestRemoteGitDoesNotRunTheTownRootGuardOnTheHost: the town-root mutation guard
+// stats host directories, so for a working directory that lives in a sandbox it
+// cannot answer; a mutating call goes straight to exec without the guard's
+// rev-parse --show-toplevel.
+func TestRemoteGitDoesNotRunTheTownRootGuardOnTheHost(t *testing.T) {
+	t.Parallel()
+	var seen [][]string
+	exec := func(c ExecCall) (string, string, error) {
+		seen = append(seen, c.Args())
+		return "", "", nil
+	}
+
+	if err := NewGitWithRemoteExec("/sandbox/gt/rig", exec).Add("-A"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	for _, a := range seen {
+		for _, w := range a {
+			if w == "--show-toplevel" {
+				t.Errorf("the guard's rev-parse ran for a remote Git: %v", seen)
+			}
+		}
+	}
+	if len(seen) != 1 {
+		t.Errorf("exec calls = %v, want exactly the add", seen)
+	}
+}

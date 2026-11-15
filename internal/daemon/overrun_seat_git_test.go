@@ -19,7 +19,8 @@ type overrunSeatGitFixture struct {
 }
 
 // newOverrunSeatGitFixture seeds stopSeat's sandbox. record is the record the
-// stop reads; a nil runner leaves the runner unlinked; out is what every
+// stop reads (nil: no sandbox record, a host seat); runnerErr, when set, is the
+// error the runner build answers (an unlinked runner); out is what every
 // in-sandbox git call prints.
 func newOverrunSeatGitFixture(t *testing.T, record *session.SandboxRecord, runnerErr error, out string) overrunSeatGitFixture {
 	t.Helper()
@@ -155,7 +156,10 @@ func TestOverrunSeatGitRefusesWhatCannotSeeASandboxSeatsWork(t *testing.T) {
 		want      string
 	}{
 		{"runner not linked", overrunStopSandboxRecord("/sandbox/gt/gastown/polecats/capable/gastown"), session.ErrNoSandboxGitExec, "no in-sandbox git runner"},
-		{"record names no clone directory", overrunStopSandboxRecord(""), nil, "names no clone directory"},
+		{"record names no clone directory", overrunStopSandboxRecord(""), nil, "no usable clone directory"},
+		{"clone directory is relative", overrunStopSandboxRecord("polecats/capable/gastown"), nil, "no usable clone directory"},
+		{"clone directory climbs out", overrunStopSandboxRecord("/sandbox/gt/../etc"), nil, "no usable clone directory"},
+		{"clone directory holds a newline", overrunStopSandboxRecord("/sandbox/gt\nx"), nil, "no usable clone directory"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

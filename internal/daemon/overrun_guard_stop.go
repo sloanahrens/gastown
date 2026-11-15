@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1011,14 +1012,29 @@ func (d *Daemon) overrunSandboxGit(seat overrunSeat) (daemonGit, bool, error) {
 		}
 		rec = read
 	}
-	if rec.WorkDir == "" {
-		return nil, false, fmt.Errorf("sandbox %s: its record names no clone directory, so its work cannot be saved", sb.Session)
+	if !validSandboxCloneDir(rec.WorkDir) {
+		return nil, false, fmt.Errorf("sandbox %s: its record names no usable clone directory (%q), so its work cannot be saved", sb.Session, rec.WorkDir)
 	}
 	runner, err := d.sandboxGitRunnerFor(rec)
 	if err != nil {
 		return nil, false, fmt.Errorf("sandbox %s: no in-sandbox git runner, so its work cannot be saved: %w", sb.Session, err)
 	}
 	return git.NewGitWithRemoteExec(rec.WorkDir, sandboxGitExec(runner)), true, nil
+}
+
+// validSandboxCloneDir reports whether dir can be handed to the in-sandbox
+// runner as a clone directory: absolute, with no ".." element and no newline or
+// NUL, so a record cannot steer a git call out of the sandbox's own tree.
+func validSandboxCloneDir(dir string) bool {
+	if dir == "" || !path.IsAbs(dir) || strings.ContainsAny(dir, "\n\x00") {
+		return false
+	}
+	for _, elem := range strings.Split(dir, "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // sandboxGitRunnerFor is the in-sandbox git runner for rec: sandboxGitRunnerFn's

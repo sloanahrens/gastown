@@ -404,6 +404,13 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 }
 
 func (g *Git) guardUnsafeTownRootMutation(args []string) error {
+	// A remote working directory lives where exec runs git, not on this host: the
+	// town root this guard protects is a host directory, and isTownRoot would
+	// stat the sandbox's path here and answer "not the town root" for any path.
+	// The guard cannot see a sandbox, so it does not pretend to (NewGitWithRemoteExec).
+	if g.remote {
+		return nil
+	}
 	cmd, rest := gitSubcommand(args)
 	if cmd == "" {
 		return nil
