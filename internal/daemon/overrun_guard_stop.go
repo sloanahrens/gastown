@@ -316,10 +316,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// diverged is not held: the stop records it (SandboxDiverged), keeps the
 	// sandbox, and hands the bead back once, because a later read that finds the
 	// sandbox gone would otherwise delete the commits only it holds. A gone
-	// sandbox whose origin read cannot be made holds the stop and counts the
-	// failure in OriginReadFailures, up to overrunOriginReadMaxAttempts; a read
-	// that later succeeds clears the count.
+	// sandbox whose origin read cannot be made counts the failure in
+	// OriginReadFailures: short of overrunOriginReadMaxAttempts the stop holds
+	// the bead and retries on the next tick, and a read that later succeeds
+	// clears the count; at the cap it gives up, because a sustained outage would
+	// otherwise hold the bead forever — it keeps the sandbox's record, raises
+	// the item at high severity, and hands the bead back with a note, the seat
+	// left paused (originReadGaveUp).
 	saveKept := st.SaveGaveUp
+	// originReadGaveUp is the reason the stop gave up on the origin read at the
+	// cap, for the hand-back note. It is set on every tick that reaches the cap:
+	// the stop asks the gone sandbox again each tick, so a retried hand-back
+	// recovers the reason it could not save.
+	originReadGaveUp := ""
 	// A sandbox whose push origin refused as diverged is kept for good: the
 	// stop never asks it again, because a later read that finds it gone would
 	// otherwise delete the commits only it holds (SandboxDiverged).
@@ -395,18 +404,44 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			}
 		case errors.Is(err, errOriginReadUnknown):
 			// Origin may hold the gone sandbox's work, and only it can say
-			// whether it does: the stop keeps the sandbox's record and holds
-			// the bead, counting the failure so the persisted state shows how
-			// long it has tried (gt-u4i5jg). The count stops at the cap.
+			// whether it does: short of the cap the stop keeps the sandbox's
+			// record and holds the bead, counting the failure so the persisted
+			// state shows how long it has tried (gt-u4i5jg). The count stops at
+			// the cap.
 			if st.OriginReadFailures < overrunOriginReadMaxAttempts {
 				st.OriginReadFailures++
 			}
+			if st.OriginReadFailures < overrunOriginReadMaxAttempts {
+				if !save() {
+					return
+				}
+				d.logger.Printf("overrun_guard: stop %s on %s waits: origin could not be read for the seat's branch after its sandbox was found gone, retrying next tick (%d of %d), sandbox record kept: %v",
+					who, st.Bead, st.OriginReadFailures, overrunOriginReadMaxAttempts, err)
+				return
+			}
+			// At the cap: a read that has failed every tick the stop has tried
+			// is a sustained origin outage, and no later tick is owed a different
+			// answer. The stop gives up on the read — keeps the sandbox's record,
+			// since the commits may live only there, and hands the bead back with
+			// the reason in the note (gt-3ignmh). The item is raised at high
+			// severity because the work may be nowhere, and raised before the
+			// hand-back: a failed raise holds the stop for the next tick, so the
+			// bead is never released without its item.
+			originReadGaveUp = oneLineReason(err)
+			message := fmt.Sprintf("the overrun stop of %s on %s could not read origin for branch %s after %d attempts, and the seat's sandbox is gone: %s. The seat's commits may be nowhere; the sandbox record is kept and the seat stays paused.",
+				who, st.Bead, branch, st.OriginReadFailures, originReadGaveUp)
+			if rerr := d.escalateAlertSeverity("HIGH", "overrun-sandbox-gone-unreadable:"+who+":"+st.Bead, overrunActor, message); rerr != nil {
+				d.logger.Printf("overrun_guard: WARNING: %s: the high-severity item for %s was not raised, so the bead is not handed back yet: %s",
+					who, st.Bead, oneLineReason(rerr))
+				save()
+				return
+			}
+			sandboxKept = true
 			if !save() {
 				return
 			}
-			d.logger.Printf("overrun_guard: stop %s on %s waits: origin could not be read for the seat's branch after its sandbox was found gone, retrying next tick (%d of %d), sandbox record kept: %v",
-				who, st.Bead, st.OriginReadFailures, overrunOriginReadMaxAttempts, err)
-			return
+			d.logger.Printf("overrun_guard: stop %s on %s: origin could not be read for branch %s after %d attempts, giving up; the sandbox record is kept and the bead is handed back with a high-severity item: %v",
+				who, st.Bead, branch, st.OriginReadFailures, err)
 		case errors.Is(err, errSandboxRecordCorrupt):
 			sandboxKept = true
 			d.logger.Printf("overrun_guard: WARNING: stop %s on %s: sandbox record unreadable, sandbox kept; handing the bead back with a note: %v", who, st.Bead, err)
@@ -427,8 +462,11 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 	}
 
-	// 3. Checkpoint the worktree.
-	if st.CheckpointedAt.IsZero() && !st.CheckpointGaveUp {
+	// 3. Checkpoint the worktree. A stop that gave up on the origin read skips
+	// this and the push: the seat's sandbox is gone, so the handle they would
+	// run on is the sandbox's, not a worktree that holds the seat's work, and
+	// asking it again would hold a bead the cap has already answered.
+	if st.CheckpointedAt.IsZero() && !st.CheckpointGaveUp && originReadGaveUp == "" {
 		if err := s.checkpoint(seat); err != nil {
 			st.CheckpointFailures++
 			d.logger.Printf("overrun_guard: stop %s on %s: checkpoint failed (%d of %d): %v",
@@ -471,8 +509,9 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// exists only in the worktree and the seat reads recoverable. A failed
 	// push is retried every tick: the hand-back waits for it, up to
 	// overrunPushMaxAttempts; a non-fast-forward rejection, which no retry
-	// changes, gives up at once.
-	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil {
+	// changes, gives up at once. A stop that gave up on the origin read skips
+	// it with the checkpoint above.
+	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil && originReadGaveUp == "" {
 		pushSeat := seat
 		pushSeat.Bead, pushSeat.Branch, pushSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 		// Read before the push: afterwards origin holds the head whatever it
@@ -550,6 +589,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 	if st.SandboxDiverged != "" {
 		notes = append(notes, st.SandboxDiverged)
+	} else if originReadGaveUp != "" {
+		notes = append(notes, fmt.Sprintf("Origin could not be read for branch %s after %d attempts (%s), so whether the seat's gone sandbox got its work out is unknown: "+
+			"the commits may be nowhere. The sandbox's record is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
+			branch, st.OriginReadFailures, originReadGaveUp, who))
 	} else if sandboxKept {
 		notes = append(notes, fmt.Sprintf("The seat's sandbox could not be removed: its record is unreadable, so it may hold commits that were never pushed. "+
 			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.", who))

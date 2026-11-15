@@ -335,6 +335,137 @@ func TestOverrunOriginReadRetryClearsCountWhenALaterReadSucceeds(t *testing.T) {
 	}
 }
 
+// A read that keeps failing reaches the cap: a sustained origin outage must not
+// hold a bead forever, so the stop raises the item at high severity, keeps the
+// sandbox's record and hands the bead back once with a note naming the branch,
+// leaving the seat paused for an operator (gt-3ignmh).
+func TestOverrunOriginReadRetryAtTheCapHandsBackWithANoteAndRaisesTheItem(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	readErr := errors.New("could not resolve host: origin")
+	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: readErr} }
+	rec := notifyfake.New()
+	d.notifier = rec
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	// The ticks below the cap all hold the bead, so the assertion at the cap
+	// proves the count reached it rather than the first tick handing back.
+	d.runOverrunGuard(f.seams())
+	for tick := 2; tick < overrunOriginReadMaxAttempts; tick++ {
+		pushTick(d, f)
+		if len(f.handedBack) != 0 {
+			t.Fatalf("tick %d: handed back below the cap: %q", tick, f.handedBack)
+		}
+	}
+
+	pushTick(d, f) // the tick that reaches the cap
+
+	if len(f.handedBack) != 1 {
+		t.Fatalf("hand-backs = %q, want the bead handed back once at the cap", f.handedBack)
+	}
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("notes = %q, want exactly one", f.handBackNotes)
+	}
+	if note := f.handBackNotes[0]; !strings.Contains(note, stopSeat.Branch) {
+		t.Errorf("note %q does not name the branch origin could not be read for (%s)", note, stopSeat.Branch)
+	}
+	if deleted != 0 {
+		t.Errorf("the sandbox record was removed %d times, want 0: its work may be nowhere", deleted)
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok || err != nil {
+		t.Errorf("the sandbox record is gone (ok %v, err %v); the stop keeps it for the operator", ok, err)
+	}
+	// The cap is a give-up, not a release: the seat stays paused with step 6
+	// skipped, so the worktree and the name are not handed to new work.
+	if slices.Contains(f.calls, "reset-agent-bead gastown/capable") || slices.Contains(f.calls, "retire gastown/capable") {
+		t.Errorf("calls %q include the release; a kept sandbox leaves the seat paused", f.calls)
+	}
+	// The checkpoint and the push act on a worktree that no longer holds the
+	// seat's work, so the give-up skips them rather than holding the bead
+	// through their own caps.
+	if slices.Contains(f.calls, "checkpoint gastown/capable") || slices.Contains(f.calls, "push gastown/capable") {
+		t.Errorf("calls %q checkpoint or push after the origin read gave up", f.calls)
+	}
+
+	var high []notifyfake.Call
+	for _, call := range rec.Escalations() {
+		if strings.EqualFold(call.Escalation.Severity, "high") {
+			high = append(high, call)
+		}
+	}
+	if len(high) != 1 {
+		t.Fatalf("high-severity escalations = %+v, want one for the seat whose origin stayed unreadable", high)
+	}
+	if reason := high[0].Escalation.Reason; !strings.Contains(reason, stopSeat.Bead) || !strings.Contains(reason, stopSeat.Branch) {
+		t.Errorf("escalation reason %q does not name the bead %s and its branch %s", reason, stopSeat.Bead, stopSeat.Branch)
+	}
+
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.OriginReadFailures != overrunOriginReadMaxAttempts {
+		t.Errorf("OriginReadFailures = %d, want the cap %d", st.OriginReadFailures, overrunOriginReadMaxAttempts)
+	}
+	if st.StoppedAt.IsZero() {
+		t.Error("the stop did not finish at the cap: the bead would be held forever")
+	}
+	if !strings.Contains(buf.String(), "giving up") {
+		t.Errorf("the log does not say the stop gave up on the origin read:\n%s", buf.String())
+	}
+}
+
+// A raise that cannot reach the town must not release the bead without its
+// item: at the cap the stop holds with the failure counted and the seat still
+// the bead's, and the next tick tries the raise and the hand-back again
+// (gt-3ignmh).
+func TestOverrunOriginReadRetryCapHoldsWhenTheItemCannotBeRaised(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	// A failed raise backs off on the daemon's clock (1s, then 2s), so the
+	// retries are driven rather than waited out.
+	clk := newFixedClock()
+	d.clock = clk
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit { return &pushStubGit{originErr: errors.New("could not resolve host: origin")} }
+	rec := notifyfake.New()
+	rec.Fail(notifyfake.KindEscalate, errors.New("the escalation store is down"))
+	d.notifier = rec
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	runOnClock(t, clk, time.Second, func() { d.runOverrunGuard(f.seams()) })
+	for tick := 2; tick < overrunOriginReadMaxAttempts; tick++ {
+		runOnClock(t, clk, time.Second, func() { pushTick(d, f) })
+	}
+	// The tick that reaches the cap, with the high-severity raise failing, and
+	// the retry after it: the count stays at the cap rather than growing a tick.
+	runOnClock(t, clk, time.Second, func() { pushTick(d, f) })
+	runOnClock(t, clk, time.Second, func() { pushTick(d, f) })
+
+	if len(f.handedBack) != 0 {
+		t.Errorf("hand-backs = %q, want none while the item cannot be raised", f.handedBack)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.OriginReadFailures != overrunOriginReadMaxAttempts {
+		t.Errorf("OriginReadFailures = %d, want the cap %d", st.OriginReadFailures, overrunOriginReadMaxAttempts)
+	}
+	if !st.StoppedAt.IsZero() {
+		t.Error("the stop finished though the item was never raised")
+	}
+}
+
 // A gone sandbox whose branch origin holds is nothing to alarm about: the stop
 // removes the sandbox's record and hands the bead back exactly as it did before
 // the origin read existed (gt-lahjz4).
