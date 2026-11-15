@@ -163,7 +163,7 @@ func TestMacTownStateComparesTheTableExpansion(t *testing.T) {
 	t.Parallel()
 	root := macTownFixture(t, macTownOlder, map[string]string{
 		"mayor/town.json":                   "{}",
-		"mayor/rigs.json":                   `{"version":1,"rigs":{"alpha":{"git_url":"http://forgejo:3000/sloan/alpha.git"}}}`,
+		"mayor/rigs.json":                   `{"version":1,"rigs":{"alpha":{"git_url":"http://forgejo:3000/alice/alpha.git"}}}`,
 		"settings/config.json":              "{}",
 		"settings/models.json":              "{}",
 		"settings/placement.json":           "{}",
