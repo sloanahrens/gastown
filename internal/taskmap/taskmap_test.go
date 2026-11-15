@@ -230,6 +230,36 @@ func TestMailDeleteUseNamesTheSituation(t *testing.T) {
 	}
 }
 
+// TestLandUseNamesTheSituation pins the task map's rule for the land parent
+// (gt-ihezzz): a Use names the situation that sends a reader to the landing
+// queue, not the menu of subcommands beneath it.
+func TestLandUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("land")
+	if !ok {
+		t.Fatal(`Lookup("land") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") {
+		t.Errorf("land Use = %q; want a line starting \"Use this when\" that names the situation, not the subcommand menu", e.Use)
+	}
+}
+
+// TestOmStatsUseNamesTheSituation applies the same rule to land om-stats
+// (gt-ihezzz): the judgement it serves leads, and the breakdown by day, rig
+// and agent follows it.
+func TestOmStatsUseNamesTheSituation(t *testing.T) {
+	t.Parallel()
+
+	e, ok := Lookup("land om-stats")
+	if !ok {
+		t.Fatal(`Lookup("land om-stats") found no entry`)
+	}
+	if !strings.HasPrefix(e.Use, "Use this when") {
+		t.Errorf("land om-stats Use = %q; want a line starting \"Use this when\" that names the situation, not the report's mechanism", e.Use)
+	}
+}
+
 // TestChannelAdminStaysInternal pins the grouping judgement place_p9a.go
 // records (gt-jii0vu): channel create and delete administer a channel, which
 // no task group describes, so a move needs that judgement revisited.
