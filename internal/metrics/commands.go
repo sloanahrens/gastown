@@ -369,6 +369,34 @@ func weeklyRetryable(err error) bool {
 	return errors.As(err, &noExtract) || errors.As(err, &embedder)
 }
 
+// extractRanYesterday says whether the extract ran on the day before the run's
+// day: the landings table of the day directory before the wired one sits under
+// the same metrics root. The run's day is the directory the Wire built for today,
+// which the extract names from the clock it runs on, so the check reads no clock
+// of its own and cannot name a different day than the one the steps read. A table
+// that is not there is false; a day directory that is not named for a date, and a
+// table that cannot be read, are errors: neither is counted as a day the extract
+// did not run.
+func extractRanYesterday(env Env, outDir string) (bool, error) {
+	if env.ReadFile == nil {
+		return false, errors.New("story points weekly: Env.ReadFile is unset, so the previous day's extract cannot be read")
+	}
+	day, err := time.Parse(time.DateOnly, filepath.Base(outDir))
+	if err != nil {
+		return false, fmt.Errorf("story points weekly: %s is not named for a day, so the previous day's extract cannot be found", outDir)
+	}
+	path := filepath.Join(filepath.Dir(outDir), day.AddDate(0, 0, -1).Format(time.DateOnly), landingsName)
+	_, err = env.ReadFile(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("read the previous day's extract %s: %w", path, err)
+	}
+}
+
 // StoryPointsWeeklyEvery is how often the hour retrains the story-point weights
 // and adopts them: a week. The stamp the week is counted from is the last run
 // that reached a decision, not the last run that tried.
@@ -393,8 +421,10 @@ const storyPointsWeeklyStampName = "weekly.stamp"
 // the week is spent however it was decided. A step that failed is written on the
 // line and returned as the run's error so the hour exits non-zero, except for the
 // two failures that leave the week unspent for the next hour: an extract that has
-// not run for the day yet is an expected wait, so its line is written and the run
-// succeeds; an unreachable embedder is returned as the error. Any other failure
+// not run for the day yet is an expected wait — its line is written and the run
+// succeeds — but only while the previous day's extract is under the metrics root,
+// so an extract that has not run for a whole day is still returned as the error;
+// an unreachable embedder is returned as the error. Any other failure
 // spends the week, with its error on the line: the same files and the same code
 // fail the same way, and a retry every hour of the week wires the town each time
 // for nothing.
@@ -450,7 +480,7 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	train.Embedder = embedder
 	if err := train.runStoryPointsTrain(ctx, real, env); err != nil {
 		if !errors.Is(err, storypoints.ErrTooFewSamples) {
-			return c.weeklyFailure(stampPath, now, err)
+			return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 		}
 		if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 			return err
@@ -464,7 +494,7 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	adopt.Out = &decision
 	adopt.Embedder = embedder
 	if err := adopt.runStoryPointsAdopt(ctx, real, env); err != nil {
-		return c.weeklyFailure(stampPath, now, err)
+		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
 	}
 	if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 		return err
@@ -475,21 +505,36 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 
 // weeklyFailure is the weekly run's line and error for a retrain or adoption that
 // failed. Both failures the next hour can meet differently (weeklyRetryable)
-// leave the week unspent, and the line says the next hour tries again. A day's
-// extract that has not run yet is the expected wait for it: its line is written
-// and the failure is not returned, so the hour exits 0. An unreachable embedder
-// is returned, so the hour exits non-zero rather than recording a run that
+// leave the week unspent. A day's extract that has not run yet is the expected
+// wait for it only while the previous day's extract is under the metrics root
+// (extractRanYesterday): the line says the next hour tries again and the failure
+// is not part of the returned error, so the hour exits 0 through the hours before
+// the day's extract. Once the previous day's table is missing as well, the
+// extract has not run for a day, which is the fault this wait would otherwise
+// hide: the failure is returned and the line says the wait is over. An embedder
+// that did not answer and a previous day's extract that could not be checked are
+// returned too, so the hour exits non-zero rather than reporting a run that
 // retrained nothing as a success. Any other failure spends the week: it is
 // recorded as the week's last run, returned to the hour, and the line names the
 // failure and says the week is spent. A week that cannot be recorded stays open,
-// so the next hour tries again, and the error says so. A line that cannot be
-// written is returned, or joined to the error, so neither is lost.
-func (c Commands) weeklyFailure(stampPath string, now time.Time, err error) error {
+// so the next hour tries again, and the error says so. The wait's line is the
+// only report of it, so a line that cannot be written is returned; the other
+// lines' write errors are joined to their failures, so neither is lost.
+func (c Commands) weeklyFailure(env Env, outDir, stampPath string, now time.Time, err error) error {
 	failure := fmt.Errorf("story points weekly: failed: %w", err)
 	if weeklyRetryable(err) {
 		var noExtract errNoExtract
 		if errors.As(err, &noExtract) {
-			return c.receipt("%v; the next hour tries again", failure)
+			ranYesterday, lerr := extractRanYesterday(env, outDir)
+			if lerr != nil {
+				return errors.Join(failure, lerr,
+					c.receipt("%v; the extract that ran yesterday could not be checked, so this is not read as the day's lateness", failure))
+			}
+			if ranYesterday {
+				return c.receipt("story points weekly: waiting: %v; the next hour tries again", err)
+			}
+			return errors.Join(failure,
+				c.receipt("%v; the previous day has no extract either, so the wait is over", failure))
 		}
 		return errors.Join(failure, c.receipt("%v; the next hour tries again", failure))
 	}
