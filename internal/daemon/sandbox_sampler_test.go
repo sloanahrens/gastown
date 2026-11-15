@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -573,26 +574,278 @@ func TestSandboxSamplerBuildsTheGatewaySourceByDefault(t *testing.T) {
 }
 
 // TestStartSandboxSamplerTicker: the patrol gets its own ticker when it is on,
-// and none when the town does not name it.
+// and none when the town does not name it. The interval it asks for is the
+// patrol's cadence — the 60 s default, or the configured value (gt-23zbmi).
 func TestStartSandboxSamplerTicker(t *testing.T) {
 	t.Parallel()
+	ticks := make(chan time.Time)
+	var intervals []time.Duration
+	stops := 0
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(io.Discard, "", 0),
-		clock:  clockwork.NewFakeClockAt(time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)),
+	}
+	d.newSandboxSamplerTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+		intervals = append(intervals, interval)
+		return ticks, func() { stops++ }
 	}
 
-	if ticker := d.startSandboxSamplerTicker(); ticker != nil {
-		ticker.Stop()
-		t.Fatal("a town that does not name sandbox_sampler started its ticker")
+	if channel, stop := d.startSandboxSamplerTicker(); channel != nil || stop != nil {
+		t.Error("a town that does not name sandbox_sampler started its ticker")
+	}
+	if len(intervals) != 0 {
+		t.Errorf("a town that does not name sandbox_sampler asked for tickers at %v, want none", intervals)
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true}}}
+	channel, stop := d.startSandboxSamplerTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("a town that names sandbox_sampler started no ticker")
+	}
+	if len(intervals) != 1 || intervals[0] != defaultSandboxSamplerInterval {
+		t.Errorf("the ticker asks for an interval of %v, want the %v default", intervals, defaultSandboxSamplerInterval)
+	}
+	stop()
+	if stops != 1 {
+		t.Errorf("the stop func ran %d times, want the ticker stopped once", stops)
 	}
 
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true, Interval: "90s"}}}
-	ticker := d.startSandboxSamplerTicker()
-	if ticker == nil {
-		t.Fatal("a town that names sandbox_sampler started no ticker")
+	channel, stop = d.startSandboxSamplerTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("a town that names sandbox_sampler with an interval started no ticker")
 	}
-	ticker.Stop()
+	if len(intervals) != 2 || intervals[1] != 90*time.Second {
+		t.Errorf("the ticker asks for an interval of %v, want the configured 90s", intervals)
+	}
+	stop()
+
+	// The production ticker, with no seam: the patrol still gets a channel and
+	// a stop func, so Run's defer has a real ticker to stop.
+	plain := &Daemon{
+		config:       &Config{TownRoot: t.TempDir()},
+		logger:       log.New(io.Discard, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true}}},
+	}
+	channel, stop = plain.startSandboxSamplerTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("the patrol started no ticker without a ticker seam")
+	}
+	stop()
+}
+
+// signaledSeatSource is a seat source that answers one row and signals the
+// read, so a test waits on the read itself instead of on a timer.
+type signaledSeatSource struct {
+	read chan struct{}
+	row  resourcesampler.Row
+}
+
+func (s *signaledSeatSource) Tick(context.Context) (resourcesampler.SeatTick, error) {
+	select {
+	case s.read <- struct{}{}:
+	default:
+	}
+	return resourcesampler.SeatTick{Rows: []resourcesampler.Row{s.row}}, nil
+}
+
+// heldSeatSource is a seat source that holds every read until the test releases
+// it and ignores the read's context: it keeps one tick in flight while the test
+// checks what the daemon's loop is doing.
+type heldSeatSource struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	reads   int
+}
+
+func (s *heldSeatSource) Tick(context.Context) (resourcesampler.SeatTick, error) {
+	s.mu.Lock()
+	s.reads++
+	s.mu.Unlock()
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return resourcesampler.SeatTick{}, nil
+}
+
+// readCount is how many reads the source has answered or still holds.
+func (s *heldSeatSource) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// sandboxRunDaemon is a daemon wired for a unit test of Run: the
+// sandbox_sampler patrol is on, its seat source is the test's, and its ticker
+// is a channel the test sends on.
+type sandboxRunDaemon struct {
+	d         *Daemon
+	ticks     chan time.Time
+	intervals []time.Duration
+	stops     int
+	logs      *censusLogSink
+}
+
+// newSandboxRunDaemon builds a daemon Run can start in a unit test. The
+// heartbeat dispatches and restarts sessions, the legacy-socket sweep touches
+// the tmux socket directory, and the landing, resource-sampler and
+// spec-dispatch patrols do real host work, so each is stubbed or switched off
+// the way the census test does it (census_log_test.go).
+func newSandboxRunDaemon(t *testing.T, source sandboxSeatSource) *sandboxRunDaemon {
+	t.Helper()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logs := newCensusLogSink()
+	d := &Daemon{
+		config: DefaultConfig(town),
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			SandboxSampler: &PatrolConfig{Enabled: true},
+		}},
+	}
+	d.disabledPatrols = map[string]bool{
+		"landing_infra":    true,
+		"resource_sampler": true,
+		"spec_dispatch":    true,
+	}
+	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
+	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
+	d.newSandboxSeatSource = func(string, resourcesampler.Clock, time.Duration) sandboxSeatSource {
+		return source
+	}
+	r := &sandboxRunDaemon{d: d, ticks: make(chan time.Time), logs: logs}
+	d.newSandboxSamplerTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+		r.intervals = append(r.intervals, interval)
+		return r.ticks, func() { r.stops++ }
+	}
+	return r
+}
+
+// start runs the daemon and returns the channel Run's error arrives on.
+func (r *sandboxRunDaemon) start(t *testing.T) <-chan error {
+	t.Helper()
+	r.d.ctx, r.d.cancel = context.WithCancel(context.Background())
+	t.Cleanup(r.d.cancel)
+	done := make(chan error, 1)
+	go func() { done <- r.d.Run() }()
+	return done
+}
+
+// sendTick delivers one tick to the loop's sandbox_sampler case, failing rather
+// than blocking the package when the loop stopped reading it.
+func (r *sandboxRunDaemon) sendTick(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	select {
+	case r.ticks <- time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC):
+	case <-ctx.Done():
+		t.Fatal("the daemon's loop stopped reading the sandbox sampler ticker")
+	}
+}
+
+// stop cancels the daemon context and requires Run to return cleanly.
+func (r *sandboxRunDaemon) stop(t *testing.T, done <-chan error) {
+	t.Helper()
+	r.d.cancel()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after the daemon context ended = %v, want a clean shutdown", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not return after the daemon context ended")
+	}
+}
+
+// TestRunSandboxSamplerTickDrivesThePatrol is the Run wiring and cadence
+// acceptance (gt-23zbmi): Run asks for the patrol's ticker at the 60 s default,
+// a tick on that ticker reads the seat source, and the row lands in the host
+// rows' day file. The census test's stubs keep the rest of startup off the
+// host.
+func TestRunSandboxSamplerTickDrivesThePatrol(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	row := sandboxSeatRow("mango-run")
+	source := &signaledSeatSource{read: make(chan struct{}, 1), row: row}
+	r := newSandboxRunDaemon(t, source)
+	done := r.start(t)
+
+	r.sendTick(t)
+	waitForSignal(t, source.read, "a tick on Run's ticker never reached the seat source")
+	r.d.sandboxSamplerCycles.Wait()
+
+	if len(r.intervals) != 1 || r.intervals[0] != defaultSandboxSamplerInterval {
+		t.Errorf("Run asked for ticker intervals %v, want one of %v", r.intervals, defaultSandboxSamplerInterval)
+	}
+	metricsDir := filepath.Join(r.d.config.TownRoot, ".runtime", "metrics")
+	if got := sandboxSamplerDayRows(t, metricsDir, now); !reflect.DeepEqual(got, []resourcesampler.Row{row}) {
+		t.Errorf("the day file holds\n%+v\nwant\n%+v", got, []resourcesampler.Row{row})
+	}
+
+	r.stop(t, done)
+	if r.stops != 1 {
+		t.Errorf("Run stopped the patrol's ticker %d times, want once", r.stops)
+	}
+}
+
+// TestRunSandboxSamplerTickDoesNotHoldTheLoop is the finding's acceptance
+// (gt-23zbmi): a seat read that waits on the gateway holds its own goroutine,
+// so Run still reaches its shutdown while the tick is blocked. A tick run
+// inline in the select loop would leave Run inside the read.
+func TestRunSandboxSamplerTickDoesNotHoldTheLoop(t *testing.T) {
+	t.Parallel()
+	source := &heldSeatSource{started: make(chan struct{}, 1), release: make(chan struct{})}
+	r := newSandboxRunDaemon(t, source)
+	var once sync.Once
+	t.Cleanup(func() {
+		once.Do(func() { close(source.release) })
+		r.d.sandboxSamplerCycles.Wait()
+	})
+	done := r.start(t)
+
+	r.sendTick(t)
+	waitForSignal(t, source.started, "a tick on Run's ticker never reached the seat source")
+
+	r.stop(t, done) // the read is still blocked: Run must not be
+}
+
+// TestSandboxSamplerSkipsATickWhileOneReads is the refusal the off-loop tick
+// needs: a tick that arrives while the previous one is still reading the seats
+// is skipped and logged, never a second read of the gateway for one interval,
+// and the guard is released for the tick after it (gt-23zbmi).
+func TestSandboxSamplerSkipsATickWhileOneReads(t *testing.T) {
+	t.Parallel()
+	source := &heldSeatSource{started: make(chan struct{}, 1), release: make(chan struct{})}
+	r := newSandboxRunDaemon(t, source)
+	var once sync.Once
+	t.Cleanup(func() {
+		once.Do(func() { close(source.release) })
+		r.d.sandboxSamplerCycles.Wait()
+	})
+	d := r.d
+
+	d.startSandboxSamplerTick()
+	waitForSignal(t, source.started, "the first tick never reached the seat source")
+
+	d.startSandboxSamplerTick()
+
+	r.logs.waitForLine(t, "still reading the seats")
+	once.Do(func() { close(source.release) })
+	d.sandboxSamplerCycles.Wait()
+	if got := source.readCount(); got != 1 {
+		t.Errorf("the seats were read %d times, want the one tick", got)
+	}
+	if d.sandboxSamplerRunning.Load() {
+		t.Error("the guard stayed set after the tick ended, so no later tick could run")
+	}
 }
 
 // fakeVMSource is one tick's VM source outcome, and records the read so a test
