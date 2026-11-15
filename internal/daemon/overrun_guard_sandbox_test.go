@@ -535,3 +535,84 @@ func TestOverrunSandboxClonePushGoesThroughTheSandboxRunner(t *testing.T) {
 		t.Errorf("the push opened the host worktree for a sandbox seat: %v", stub.opens)
 	}
 }
+
+// TestOverrunSandboxCloneResetGoesThroughTheSandboxRunner is this bead's repro
+// of the reset after a confirmed push: origin holds the clone's branch tip, the
+// clone is clean and on that branch, so the reset puts it back to origin's main
+// and drops the kept branch. Every call the reset makes must reach the
+// in-sandbox runner in the clone directory, and the host stub must never be
+// opened: the stub is a clean checkout with no branch of the seat's, so a reset
+// that read it would find HEAD off the branch and leave the clone as it is.
+func TestOverrunSandboxCloneResetGoesThroughTheSandboxRunner(t *testing.T) {
+	t.Parallel()
+	const (
+		clone     = overrunMidRebaseClone
+		originURL = "git@github.com:steveyegge/gastown.git"
+	)
+	branchRef := "refs/heads/" + stopSeat.Branch
+	// What both origin listings answer: the branch at the clone's tip.
+	originHoldsBranch := preCommitSHA + "\t" + branchRef + "\n"
+	script := &overrunSandboxSaveScript{
+		// The clone is on the seat's branch at the commit origin holds.
+		clone: overrunSandboxSaveClone{branch: stopSeat.Branch, head: preCommitSHA},
+		answers: map[string]overrunSandboxSaveAnswer{
+			// The clone holds nothing uncommitted and no stash.
+			"status --porcelain -uall":    {},
+			"stash list":                  {},
+			"rev-parse --abbrev-ref HEAD": {out: stopSeat.Branch + "\n"},
+			// origin holds the branch at the clone's tip, asked both by the
+			// reset's confirmation and by the cleanup status's unpushed count.
+			"ls-remote --refs origin " + branchRef + "*":  {out: originHoldsBranch},
+			"ls-remote --heads origin " + stopSeat.Branch: {out: originHoldsBranch},
+			// The branch is pushed to the fetch URL, and the clone tracks no
+			// upstream, so the clean base is origin/main.
+			"remote get-url origin":                 {out: originURL + "\n"},
+			"remote get-url --push origin":          {out: originURL + "\n"},
+			"remote get-url upstream":               {err: errors.New("fatal: No such remote 'upstream'")},
+			"symbolic-ref refs/remotes/origin/HEAD": {out: "refs/remotes/origin/main\n"},
+			// The town-root guard's probe before each mutating call: the clone's
+			// own top level, which is below the town root, so the write is allowed.
+			"-C " + clone + " rev-parse --show-toplevel": {out: clone + "\n"},
+			// The reset's two writes.
+			"checkout --detach origin/main": {},
+			"branch -D " + stopSeat.Branch:  {},
+		},
+	}
+	d, buf := newOverrunDaemon(t, false)
+	overrunSandboxSeat(t, d, script)
+	stub := overrunSandboxHostStubFor(t, d)
+
+	if err := d.overrunResetWorktree(stopSeat); err != nil {
+		t.Fatalf("reset = %v, want the clone detached at origin/main with its branch dropped", err)
+	}
+	checkoutAt := overrunSandboxCallAt(script.calls, "checkout", "--detach", "origin/main")
+	if checkoutAt < 0 {
+		t.Fatalf("the in-sandbox runner saw no detach at origin/main: %v", script.calls)
+	}
+	deleteAt := overrunSandboxCallAt(script.calls, "branch", "-D", stopSeat.Branch)
+	if deleteAt < 0 {
+		t.Fatalf("the in-sandbox runner saw no delete of %s: %v", stopSeat.Branch, script.calls)
+	}
+	if deleteAt < checkoutAt {
+		t.Errorf("the branch delete (call %d) came before the detach (call %d); the reset detaches first", deleteAt, checkoutAt)
+	}
+	for _, c := range script.calls {
+		// The town-root guard's probe is the one call with no directory of its
+		// own: it names the clone with -C instead.
+		if slices.Equal(c.args, []string{"-C", clone, "rev-parse", "--show-toplevel"}) {
+			continue
+		}
+		if c.dir != clone {
+			t.Errorf("in-sandbox call %v ran in %q, want the record's clone %q", c.args, c.dir, clone)
+		}
+	}
+	if len(stub.opens) != 0 {
+		t.Errorf("the reset opened the host worktree for a sandbox seat: %v", stub.opens)
+	}
+	if !strings.Contains(buf.String(), "worktree reset to origin/main, branch "+stopSeat.Branch+" dropped") {
+		t.Errorf("log lacks the reset of the clone:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "in the "+overrunSandboxCloneLabel+")") {
+		t.Errorf("the reset's log line does not name the worktree it reset:\n%s", buf.String())
+	}
+}
