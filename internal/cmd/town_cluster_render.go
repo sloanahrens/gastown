@@ -110,11 +110,25 @@ type clusterRenderFlags struct {
 
 var clusterRender clusterRenderFlags
 
+// clusterRenderRecordOptions are the two flags that tie a run to the recorded-flags
+// file. They are not fields of clusterRenderFlags because that struct's every
+// field is recorded in the file, and these two describe the file itself.
+type clusterRenderRecordOptions struct {
+	record bool
+	use    bool
+	// named reports whether the operator gave a flag on the command line, which
+	// wins over its recorded value; nil means nothing was named.
+	named func(flag string) bool
+}
+
+var clusterRenderRecord clusterRenderRecordOptions
+
 // clusterRenderDeps is what the render takes from the host: the town it runs in,
 // the environment the pod carries, the reads of the repo's files, the defaults
-// the config directories come from, and the steps that write the manifests. A
-// test supplies its own, so no unit test reads the live town or fails a real
-// write to find out what the render does then.
+// the config directories come from, and the steps that write the manifests. It
+// carries the recorded-flags options for the same reason, so a replay needs no
+// package state to test. A test supplies its own, so no unit test reads the live
+// town or fails a real write to find out what the render does then.
 type clusterRenderDeps struct {
 	findTown                 func() (string, error)
 	containerEnv             func(townRoot string) (map[string]string, error)
@@ -129,6 +143,8 @@ type clusterRenderDeps struct {
 	encode                   func(io.Writer, any) error
 	mkdirAll                 func(path string) error
 	writeFile                func(path string, data []byte) error
+	saveRecord               func(path string, f clusterRenderFlags) error
+	record                   clusterRenderRecordOptions
 	out                      io.Writer
 }
 
@@ -151,7 +167,8 @@ func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 		writeFile: func(path string, data []byte) error {
 			return os.WriteFile(path, data, 0o644) //nolint:gosec // manifests hold no secret; the operator reads them
 		},
-		out: out,
+		saveRecord: saveRenderFlags,
+		out:        out,
 	}
 }
 
@@ -205,6 +222,10 @@ func init() {
 		"the postgres image the nightly dump runs in, by digest; its pg_dump must match the server's major version; it needs --tracker-backup")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonBdGatewayURL, "daemon-bd-gateway-url", "",
 		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only")
+	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
+		"write the flags this run used to the town's recorded-flags file, so a later render replays them with --use-recorded; a live render only")
+	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.use, "use-recorded", false,
+		"take the flags recorded under the town root as this run's defaults; a flag named on the command line wins over its recorded value, and a run with nothing recorded is refused")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
@@ -212,7 +233,12 @@ func init() {
 
 func runTownClusterRender(cmd *cobra.Command, _ []string) error {
 	clusterRender.daemonBdGatewayURLSet = cmd.Flags().Changed("daemon-bd-gateway-url")
-	return runClusterRender(realClusterRenderDeps(cmd.OutOrStdout()), clusterRender)
+	d := realClusterRenderDeps(cmd.OutOrStdout())
+	// A recorded value is a default: the parsed flag set answers which flags the
+	// operator gave, and those win over the file.
+	d.record = clusterRenderRecord
+	d.record.named = cmd.Flags().Changed
+	return runClusterRender(d, clusterRender)
 }
 
 // xdgConfigSubdir is the directory sub lives in under the XDG config home, which
@@ -290,6 +316,68 @@ func (f clusterRenderFlags) validate() error {
 	return nil
 }
 
+// withRecorded is f with every flag the operator did not name taken from r, the
+// flags a live render recorded: the record is a default, and the command line
+// wins over it. A flag the operator named keeps the value given, so `--cpu ""` is
+// refused as empty rather than filled in from the file.
+func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag string) bool) clusterRenderFlags {
+	if named == nil {
+		named = func(string) bool { return false }
+	}
+	texts := []struct {
+		flag string
+		dst  *string
+		src  string
+	}{
+		{"dir", &f.dir, r.dir},
+		{"out", &f.out, r.out},
+		{"namespace", &f.namespace, r.namespace},
+		{"cpu", &f.cpu, r.cpu},
+		{"memory", &f.memory, r.memory},
+		{"host-gateway", &f.hostGateway, r.hostGateway},
+		{"proxy-image", &f.proxyImage, r.proxyImage},
+		{"polecat-image", &f.polecatImage, r.polecatImage},
+		{"config-dir", &f.configDir, r.configDir},
+		{"openshell-config-dir", &f.openShellConfigDir, r.openShellConfigDir},
+		{"forge-host", &f.forgeHost, r.forgeHost},
+		{"dolt-backup-host-path", &f.doltBackupHostPath, r.doltBackupHostPath},
+		{"dashboard-claude-dir", &f.dashboardClaudeDir, r.dashboardClaudeDir},
+		{"bd-gateway-url", &f.bdGatewayURL, r.bdGatewayURL},
+		{"daemon-claude-dir", &f.daemonClaudeDir, r.daemonClaudeDir},
+		{"tracker-dsn-secret", &f.trackerDSNSecret, r.trackerDSNSecret},
+		{"tracker-backup-image", &f.trackerBackupImage, r.trackerBackupImage},
+		{"daemon-bd-gateway-url", &f.daemonBdGatewayURL, r.daemonBdGatewayURL},
+	}
+	for _, p := range texts {
+		if !named(p.flag) {
+			*p.dst = p.src
+		}
+	}
+	switches := []struct {
+		flag string
+		dst  *bool
+		src  bool
+	}{
+		{"rehearsal", &f.rehearsal, r.rehearsal},
+		{"confirm-container-stopped", &f.confirmStopped, r.confirmStopped},
+		{"with-helper", &f.withHelper, r.withHelper},
+		{"dashboard", &f.dashboard, r.dashboard},
+		{"tracker", &f.tracker, r.tracker},
+		{"tracker-backup", &f.trackerBackup, r.trackerBackup},
+	}
+	for _, p := range switches {
+		if !named(p.flag) {
+			*p.dst = p.src
+		}
+	}
+	// A recorded URL answers that the flag was named by holding one, so a replay
+	// keeps the refusal of an empty value that the live render's command line had.
+	if !named("daemon-bd-gateway-url") {
+		f.daemonBdGatewayURLSet = r.daemonBdGatewayURLSet
+	}
+	return f
+}
+
 // checkOutDir refuses an --out that holds anything, so the render never mixes
 // its files with another apply set. A missing directory is fine: it is made.
 func checkOutDir(path string) error {
@@ -308,6 +396,29 @@ func checkOutDir(path string) error {
 // runClusterRender writes the manifests for f into f.out and prints the
 // Secret-creating commands. Every refusal happens before the first write.
 func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
+	townRoot, err := d.findTown()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace, so the pod's environment cannot be read: %w", err)
+	}
+	recordPath := renderFlagsPathIn(townRoot)
+	// The record describes the live pair that is running, so a rehearsal refuses to
+	// write one: its flags would be replayed into a live render as a rehearsal.
+	if d.record.record && f.rehearsal {
+		return errors.New("--record-flags is for a live render: the recorded flags describe the pair that is running, so drop --rehearsal, or drop --record-flags")
+	}
+	if d.record.use {
+		// The recorded flags are this run's defaults, and the replay takes them
+		// before anything reads the flags: they are the last live render's --dir,
+		// --out, --cpu and the rest, so a replay names only what it changes.
+		rec, ok, err := loadRenderFlags(recordPath)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("--use-recorded: no render has recorded its flags at %s, so there are no defaults to take; run a live render with --record-flags first, or drop the flag, and no file was written", recordPath)
+		}
+		f = f.withRecorded(rec, d.record.named)
+	}
 	if f.configDir == "" {
 		dir, err := xdgConfigSubdir("gt", d.getenv, d.userHome)
 		if err != nil {
@@ -334,10 +445,6 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	}
 	if !ok {
 		return fmt.Errorf("--dir %s holds no image pair at %s, and a render needs the daemon's digest: run gt update images first", f.dir, imagevalues.PathIn(f.dir))
-	}
-	townRoot, err := d.findTown()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace, so the pod's environment cannot be read: %w", err)
 	}
 	env, err := d.containerEnv(townRoot)
 	if err != nil {
@@ -473,6 +580,14 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 			return fmt.Errorf("cannot write the running values file %s, and the manifests are written: %w", townValues, err)
 		}
 	}
+	// The record names the flags this run used, resolved defaults and all, so a
+	// replay renders the same pod. It is written after the manifests, so a render
+	// that wrote none leaves the previous render's flags in place.
+	if d.record.record {
+		if err := d.saveRecord(recordPath, f); err != nil {
+			return fmt.Errorf("cannot write the recorded render flags, and the manifests are written: %w", err)
+		}
+	}
 	fmt.Fprintf(d.out, "Wrote %d manifests to %s, in apply order:\n", len(objects), f.out)
 	for _, o := range objects {
 		fmt.Fprintf(d.out, "  %s\n", o.file)
@@ -500,6 +615,12 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if !f.rehearsal {
 		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
 		fmt.Fprintf(d.out, "  %s\n", podValuesCopyLine(namespace, townValues))
+	}
+	if d.record.record {
+		fmt.Fprintf(d.out, "Recorded the flags this render used to %s; --use-recorded takes them as a later run's defaults\n", recordPath)
+	}
+	if d.record.use {
+		fmt.Fprintf(d.out, "Took the flags recorded at %s as defaults; a flag given on this command line took precedence\n", recordPath)
 	}
 	return nil
 }
