@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // keptSeatAttentionNow is the tick every collection in these tests judges
@@ -19,11 +21,71 @@ var keptSeatAttentionNow = time.Date(2026, 11, 12, 22, 0, 0, 0, time.UTC)
 // keptSeatSince writes a kept record for gastown/name whose keep began age ago.
 func keptSeatSince(t *testing.T, town, name, bead string, age time.Duration) {
 	t.Helper()
-	rec := keptSandboxSeatRecord{Bead: bead, Reason: keptSeatReason, Since: keptSeatAttentionNow.Add(-age)}
+	keptSeatRecord(t, town, name, bead, keptSeatReason, age)
+}
+
+// keptSeatRetiredSince writes a kept record for gastown/name, kept age ago, for
+// the reason a record that does not say stop gives: what a slung polecat's
+// record says.
+func keptSeatRetiredSince(t *testing.T, town, name, bead string, age time.Duration) {
+	t.Helper()
+	keptSeatRecord(t, town, name, bead, retiredRecordKeepReason, age)
+}
+
+func keptSeatRecord(t *testing.T, town, name, bead, reason string, age time.Duration) {
+	t.Helper()
+	rec := keptSandboxSeatRecord{Bead: bead, Reason: reason, Since: keptSeatAttentionNow.Add(-age)}
 	if err := writeKeptSandboxSeat(town, attentionRig, name, rec); err != nil {
 		t.Fatalf("writing the kept record for %s: %v", name, err)
 	}
 }
+
+// keptSeatAgentID is the agent bead the daemon reads for gastown/name.
+func keptSeatAgentID(f *attentionFixture, name string) string {
+	town := f.d.config.TownRoot
+	return beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, attentionRig), attentionRig, name)
+}
+
+// keptSeatHooked gives gastown/name the agent bead the daemon reads, hooking
+// hook (empty for no hook), and answers the hooked bead's own read with status.
+// A seat whose keep reason is not the retired record never asks it.
+func keptSeatHooked(t *testing.T, f *attentionFixture, name, hook, status string) {
+	t.Helper()
+	id := keptSeatAgentID(f, name)
+	r := keptSeatHookReader{issues: map[string]*beads.Issue{
+		id: {ID: id, Description: "hook_bead: " + hook},
+	}}
+	if hook != "" {
+		r.issues[hook] = &beads.Issue{ID: hook, Status: status}
+	}
+	f.d.openWorkBeads = r.open
+}
+
+// keptSeatHookReader answers the daemon's hook reads from memory: the issue by
+// id, a routing error for the ids in fail, no bead and no error for the ids in
+// noBead, and beads.ErrNotFound otherwise.
+type keptSeatHookReader struct {
+	issues map[string]*beads.Issue
+	fail   map[string]error
+	noBead map[string]bool
+}
+
+func (r keptSeatHookReader) open([]string, time.Duration) workBeadReader { return r }
+
+func (r keptSeatHookReader) Show(id string) (*beads.Issue, error) {
+	if err := r.fail[id]; err != nil {
+		return nil, err
+	}
+	if r.noBead[id] {
+		return nil, nil
+	}
+	if is, ok := r.issues[id]; ok {
+		return is, nil
+	}
+	return nil, beads.ErrNotFound
+}
+
+func (r keptSeatHookReader) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
 
 // A seat kept more than thirty minutes raises one high item that names the seat,
 // its bead and the age, and carries the daemon's reason verbatim. A seat kept
@@ -158,6 +220,177 @@ func TestKeptSeatAttentionNamesAnUnrecordedBead(t *testing.T) {
 	}
 	if items[0].Bead != "" || !strings.Contains(items[0].Summary, "on no recorded bead: ") {
 		t.Errorf("item = %+v, want no bead and the summary to say no recorded bead", items[0])
+	}
+}
+
+// A seat kept with the retired-record reason whose polecat now hooks a
+// different bead that is still open or hooked raises no item: the seat was
+// slung new work, not left waiting for the overseer (gt-jw437c).
+func TestKeptSeatAttentionSkipsAReSlungSeat(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{string(beads.StatusOpen), beads.StatusHooked} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+			keptSeatHooked(t, f, "capable", "gt-new1", status)
+			c := collectorFor(t, f.src, attention.KindSandboxSeatKept)
+
+			items, err := c.collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("items = %+v, want none for a seat slung new work", items)
+			}
+		})
+	}
+}
+
+// A seat still raises its item when any one of the three does not hold: the
+// hook names the record's own bead, there is no hook, the hooked bead is under
+// way, the reason is another one, or the hook cannot be read — never a skip
+// (gt-jw437c). A gateway alarm raises whatever the hook says.
+func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, f *attentionFixture)
+		want  string
+		// wantLog is the read failure the row drives, as the collector logs it:
+		// empty for a row that asks no hook and so logs nothing.
+		wantLog string
+	}{
+		{
+			name: "the record's own bead",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-old1", string(beads.StatusOpen))
+			},
+			want: retiredRecordKeepReason,
+		},
+		{
+			name: "no hook",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "", "")
+			},
+			want: retiredRecordKeepReason,
+		},
+		{
+			name: "the hooked bead is under way",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusInProgress))
+			},
+			want: retiredRecordKeepReason,
+		},
+		{
+			name: "another keep reason, however the hook reads",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusOpen))
+			},
+			want: keptSeatReason,
+		},
+		{
+			name: "a sandbox the gateway has not confirmed gone",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRecord(t, f.d.config.TownRoot, "capable", "gt-old1", sandboxNotGoneReason, 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusOpen))
+			},
+			want: sandboxNotGoneReason,
+		},
+		{
+			name: "the agent bead cannot be read",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				id := keptSeatAgentID(f, "capable")
+				f.d.openWorkBeads = keptSeatHookReader{
+					fail: map[string]error{id: errors.New("bd show: store unavailable")},
+				}.open
+			},
+			want:    retiredRecordKeepReason,
+			wantLog: "cannot read its hook",
+		},
+		{
+			name: "the hooked bead cannot be read",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				id := keptSeatAgentID(f, "capable")
+				f.d.openWorkBeads = keptSeatHookReader{
+					issues: map[string]*beads.Issue{id: {ID: id, Description: "hook_bead: gt-new1"}},
+					fail:   map[string]error{"gt-new1": errors.New("bd show: store unavailable")},
+				}.open
+			},
+			want:    retiredRecordKeepReason,
+			wantLog: "cannot read the hooked bead gt-new1",
+		},
+		{
+			name: "the hooked bead reads as no bead",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				id := keptSeatAgentID(f, "capable")
+				f.d.openWorkBeads = keptSeatHookReader{
+					issues: map[string]*beads.Issue{id: {ID: id, Description: "hook_bead: gt-new1"}},
+					noBead: map[string]bool{"gt-new1": true},
+				}.open
+			},
+			want:    retiredRecordKeepReason,
+			wantLog: "the hooked bead gt-new1 reads as no bead",
+		},
+		{
+			name: "a gateway alarm",
+			setup: func(t *testing.T, f *attentionFixture) {
+				keptSeatRetiredSince(t, f.d.config.TownRoot, "capable", "gt-old1", 3*time.Hour)
+				keptSeatHooked(t, f, "capable", "gt-new1", string(beads.StatusOpen))
+				f.d.gatewayTallies = map[string]gatewayTally{
+					gatewayTallyKey(attentionRig, "capable"): {alarm: "cannot count gateway tries for gastown/capable"},
+				}
+			},
+			want: "cannot count gateway tries",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			tt.setup(t, f)
+			c := collectorFor(t, f.src, attention.KindSandboxSeatKept)
+
+			items, err := c.collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one", items)
+			}
+			if !strings.Contains(items[0].Summary, ": "+tt.want) {
+				t.Errorf("summary = %q, want it to carry the reason %q", items[0].Summary, tt.want)
+			}
+			if tt.wantLog == "" {
+				if f.logs.Len() != 0 {
+					t.Errorf("logged %q, want no read failure logged", f.logs.String())
+				}
+			} else if !strings.Contains(f.logs.String(), tt.wantLog) {
+				t.Errorf("logged %q, want the read failure %q", f.logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
+// The retired-record reason this collector skips on is the one the seat end
+// gives a record that does not say stop: the two texts must not drift
+// (gt-jw437c).
+func TestKeptSeatAttentionRetiredReasonMatchesTheSeatEnd(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/nux/gt-old1+x1"
+	e := sandboxSeatEnd{
+		SandboxSeat: true, SandboxGone: true, Landed: true, Retired: false,
+		Branch: branch, LandedBranch: branch, CleanupStatus: polecat.CleanupClean,
+	}
+	if got := e.keepReason(); got != retiredRecordKeepReason {
+		t.Errorf("retiredRecordKeepReason = %q, want the seat end's reason %q", retiredRecordKeepReason, got)
 	}
 }
 
