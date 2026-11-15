@@ -499,6 +499,33 @@ func TestDashQueueOverlaysTheDispatchersSkippedVerdict(t *testing.T) {
 	}
 }
 
+// The split route's line is the tick's own record of why a bead lints clean and
+// is still not slung: the bead the route holds keeps its row on the ready list,
+// and the row says skipped with the route's reason, so the page can say why no
+// seat takes it (gt-4yq0js).
+func TestDashQueueShowsASplitHeldBeadSkippedWithTheTickReason(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
+	const reason = "gt-split: split: estimated 10.4 min (sp:8, rung all), at or over the 10-minute trigger; held for splitting"
+	gastown := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "gt-split", Title: "cut into siblings", Type: "task", Description: dashesShape},
+	}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown}, "gastown")
+	r.verdicts = func() (*specdispatch.Ledger, error) {
+		return &specdispatch.Ledger{SavedAt: since.Add(time.Minute), Verdicts: map[string]specdispatch.Verdict{
+			"gt-split": {Bead: "gt-split", Rig: "gastown", Class: specVerdictSkipped, Reason: reason, FirstAt: since, Ticks: 1},
+		}}, nil
+	}
+	q := r.read(since.Add(2 * time.Minute))
+	if q == nil || len(q.Ready) != 1 {
+		t.Fatalf("ready = %+v", q)
+	}
+	row := q.Ready[0]
+	if row.Shape != "skipped" || row.ShapeNote != reason {
+		t.Errorf("shape = %q note = %q, want skipped and the split route's reason", row.Shape, row.ShapeNote)
+	}
+}
+
 // A shape the lint itself decided against is not overwritten by the ledger: an
 // assigned bead stays held and a parked rig's bead stays parked, each still
 // carrying the verdict's fields so the page can say why the dispatcher passed

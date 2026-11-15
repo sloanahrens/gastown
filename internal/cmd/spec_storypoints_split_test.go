@@ -328,6 +328,13 @@ func TestSpecDispatchSplitRouteAlreadyLabeledNotTouched(t *testing.T) {
 	if step.Hold == "" {
 		t.Error("the route did not hold an already-labeled bead")
 	}
+	// The hold names what the label records, as the board's own split line
+	// does: one wording for one decision (gt-4yq0js).
+	for _, want := range []string{"gt-a: split: ", "estimated 20.0 min (sp:13, rung all)", "at or over the 15-minute trigger"} {
+		if !strings.Contains(step.Hold, want) {
+			t.Errorf("hold %q lacks %q", step.Hold, want)
+		}
+	}
 	if len(step.Notices) != 0 || len(step.Errors) != 0 {
 		t.Errorf("step wrote notices %q and errors %q, want none", step.Notices, step.Errors)
 	}
@@ -527,6 +534,124 @@ func TestSpecDispatchSplitRouteVerdictRefusals(t *testing.T) {
 			_, rung, reason := specSplitVerdict(tc.answer)
 			if rung != tc.wantRung || !strings.Contains(reason, tc.wantReason) {
 				t.Errorf("verdict = rung %q reason %q, want rung %q and reason %q", rung, reason, tc.wantRung, tc.wantReason)
+			}
+		})
+	}
+}
+
+// A bead the split route holds is not slung and is reported by the tick as
+// skipped, with the route named, the minutes its labels record and the trigger
+// they are at or over: that line is the ledger's entry, and the dashboard's
+// ready row for the bead is what reads it to stop counting the bead as
+// dispatchable (gt-4yq0js).
+func TestSpecDispatchReportsASplitHeldBeadSkipped(t *testing.T) {
+	t.Parallel()
+	held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
+	held.Labels = []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", specdispatch.SplitLabel}
+	f := newFakeSpecTown(held, cleanSpec("gt-work", 1, "2026-09-29T11:00:00Z"))
+	env := f.env()
+	env.StoryPointSplitOver = 10
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		return splitOutcome("estimated", 3, 4, "all", ""), nil
+	}
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "gt-work" {
+		t.Fatalf("slung %q, want only the bead no route holds", got)
+	}
+	lines := splitHoldLines(r.Skipped)
+	if len(lines) != 1 {
+		t.Fatalf("split hold lines = %q, want the split-held bead reported once", lines)
+	}
+	for _, want := range []string{"gt-split: split: ", "estimated 10.4 min (sp:8, rung all)", "at or over the 10-minute trigger"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("skip line %q lacks %q", lines[0], want)
+		}
+	}
+	verdicts := specTickVerdicts(r)
+	if len(verdicts) != 1 || verdicts[0].Bead != "gt-split" || verdicts[0].Class != specVerdictSkipped || verdicts[0].Reason != lines[0] {
+		t.Errorf("ledger = %+v, want one skipped entry for gt-split carrying the line", verdicts)
+	}
+}
+
+// A split-labelled bead the route's labels no longer stand up is still held —
+// the label is the split's record — so it is still reported, and the line says
+// what the labels say instead of claiming a trigger that does not hold. Rows:
+// no estimate at all, minutes with no rung, an estimate under the trigger, the
+// trigger off, and a shape-only rung the route never acts on (gt-4yq0js).
+func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		labels  []string
+		trigger float64
+		want    []string
+		refuse  []string
+	}{
+		{
+			name:    "no estimate at all",
+			labels:  []string{specdispatch.SplitLabel},
+			trigger: 11,
+			want:    []string{"gt-split: split: ", "its labels name no estimate the route can read"},
+			refuse:  []string{"trigger"},
+		},
+		{
+			name:    "minutes with no rung",
+			labels:  []string{specdispatch.SplitLabel, "sp-minutes:10.4"},
+			trigger: 11,
+			want:    []string{"gt-split: split: ", "records no rung"},
+			refuse:  []string{"trigger", "10.4"},
+		},
+		{
+			name:    "estimate under the trigger",
+			labels:  []string{specdispatch.SplitLabel, "sp:3", "sp-rung:all", "sp-minutes:4"},
+			trigger: 11,
+			want:    []string{"gt-split: split: ", "estimated 4.0 min (sp:3, rung all)"},
+			refuse:  []string{"trigger", "at or over"},
+		},
+		{
+			name:    "the trigger is off now",
+			labels:  []string{specdispatch.SplitLabel, "sp:8", "sp-rung:all", "sp-minutes:10.4"},
+			trigger: 0,
+			want:    []string{"gt-split: split: ", "estimated 10.4 min (sp:8, rung all)"},
+			refuse:  []string{"trigger", "at or over"},
+		},
+		{
+			name:    "a shape-only rung",
+			labels:  []string{specdispatch.SplitLabel, "sp-rung:shape", "sp-minutes:10.4"},
+			trigger: 11,
+			want:    []string{"gt-split: split: ", "estimated 10.4 min (sp:8, rung shape)"},
+			refuse:  []string{"trigger", "at or over"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
+			held.Labels = tc.labels
+			f := newFakeSpecTown(held)
+			env := f.env()
+			env.StoryPointSplitOver = tc.trigger
+			r := runSpecDispatchCycle(env)
+
+			if len(f.slung) != 0 {
+				t.Fatalf("slung %v, want the split-held bead left alone", f.slung)
+			}
+			lines := splitHoldLines(r.Skipped)
+			if len(lines) != 1 {
+				t.Fatalf("split hold lines = %q, want the bead reported once", lines)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("skip line %q lacks %q", lines[0], want)
+				}
+			}
+			for _, refuse := range tc.refuse {
+				if strings.Contains(lines[0], refuse) {
+					t.Errorf("skip line %q claims %q, which the labels do not stand up", lines[0], refuse)
+				}
+			}
+			if verdicts := specTickVerdicts(r); len(verdicts) != 1 || verdicts[0].Class != specVerdictSkipped {
+				t.Errorf("ledger = %+v, want one skipped entry", verdicts)
 			}
 		})
 	}

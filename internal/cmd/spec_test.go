@@ -231,10 +231,18 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Candidates: func() specBoardRead {
 			var list []specdispatch.Spec
 			var skipped []specDispatchEntry
+			var splitHeld []specCandidate
 			labeled := 0
 			for _, s := range f.specs {
 				if s.HasLabel(specdispatch.DispatchFailedLabel) {
 					labeled++
+					continue
+				}
+				// specCandidates reads a split-labelled bead apart from the
+				// candidates: the ready query filters the label, and the tick
+				// reports the bead with the route's own reason (gt-4yq0js).
+				if s.HasLabel(specdispatch.SplitLabel) && specdispatch.NotWorkBead(s) == "" {
+					splitHeld = append(splitHeld, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID)})
 					continue
 				}
 				if ok, why := specdispatch.Eligible(s, 2); ok {
@@ -251,7 +259,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			for _, s := range list {
 				out = append(out, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID), Blockers: f.blockers[s.ID]})
 			}
-			return specBoardRead{Candidates: out, LabeledFailed: labeled, Skipped: skipped}
+			return specBoardRead{Candidates: out, SplitHeld: splitHeld, LabeledFailed: labeled, Skipped: skipped}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
 			f.mu.Lock()
@@ -3162,6 +3170,49 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	}
 }
 
+// A split-labelled bead is not a candidate and not a generic "not eligible"
+// skip: it is carried apart so the tick can report it with the split route's
+// reason, which names the estimate and the trigger (gt-4yq0js).
+func TestSpecCandidatesSortsASplitHeldBeadOut(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-task", Type: "task", Status: "open", Priority: 2},
+			{ID: "gt-split", Type: "task", Status: "open", Priority: 1, Labels: []string{specdispatch.SplitLabel, "sp:8", "sp-rung:all", "sp-minutes:10.4"}},
+		}, nil
+	}
+
+	got := specCandidates(townRoot, 2, board)
+	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-task" {
+		t.Fatalf("candidates = %+v, want only the bead no route holds", got.Candidates)
+	}
+	if len(got.SplitHeld) != 1 || got.SplitHeld[0].Spec.ID != "gt-split" || got.SplitHeld[0].Rig != "gastown" {
+		t.Fatalf("split held = %+v, want gt-split in gastown", got.SplitHeld)
+	}
+	if len(got.Skipped) != 0 {
+		t.Errorf("skipped = %+v, want the split bead reported by the tick, not as a label refusal", got.Skipped)
+	}
+}
+
+// An epic wearing the split label was never the dispatcher's work — the ready
+// board leaves epics out — so the tick reports nothing for it: the split reason
+// would explain a bead the dispatcher never considered (gt-4yq0js).
+func TestSpecCandidatesLeavesASplitEpicAlone(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-epic", Type: "epic", Status: "open", Priority: 1, Labels: []string{specdispatch.SplitLabel}},
+		}, nil
+	}
+
+	got := specCandidates(townRoot, 2, board)
+	if len(got.Candidates) != 0 || len(got.SplitHeld) != 0 || len(got.Skipped) != 0 {
+		t.Errorf("read = %+v, want an epic the board leaves out and nothing reported for it", got)
+	}
+}
+
 // A bead the spec-dispatch-failed label holds out because its sling was killed
 // at its bound is slung again while its retries remain: the read clears the
 // label, the bead is a candidate of this tick, and the tick says so. A labeled
@@ -3789,19 +3840,28 @@ func TestSpecReadyQuery(t *testing.T) {
 	}
 }
 
-// specReadyStub answers ReadyFiltered with a canned board and records the
-// query it was asked. Only that method runs, so the rest of beads.Client stays
-// unsatisfied.
+// specReadyStub answers ReadyFiltered with a canned board and List with the
+// beads the split route holds, and records the queries it was asked. Only those
+// two methods run, so the rest of beads.Client stays unsatisfied.
 type specReadyStub struct {
 	beads.Client
 	options beads.ReadyOptions
 	issues  []*beads.Issue
 	err     error
+
+	listOptions beads.ListOptions
+	split       []*beads.Issue
+	listErr     error
 }
 
 func (s *specReadyStub) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
 	s.options = opts
 	return s.issues, s.err
+}
+
+func (s *specReadyStub) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	s.listOptions = opts
+	return s.split, s.listErr
 }
 
 // TestSpecReadyBoardReadsACutBoardAsPartial: a board bd reports as cut is the
@@ -3834,6 +3894,49 @@ func TestSpecReadyBoardReportsAFailedQuery(t *testing.T) {
 
 	if _, err := specReadyBoardFrom(stub); err == nil || !strings.Contains(err.Error(), "database locked") {
 		t.Fatalf("specReadyBoardFrom err = %v, want bd's failure", err)
+	}
+}
+
+// TestSpecReadyBoardCarriesTheSplitHeldBeads: the ready query filters the split
+// label server-side, so the board reads those beads apart and carries them,
+// which is what lets the tick report one as skipped with the route's reason
+// (gt-4yq0js). A bead on both reads is carried once: the label landed between
+// them, and the later read is the one that saw it.
+func TestSpecReadyBoardCarriesTheSplitHeldBeads(t *testing.T) {
+	t.Parallel()
+	stub := &specReadyStub{
+		issues: []*beads.Issue{{ID: "gt-ready"}, {ID: "gt-raced"}},
+		split:  []*beads.Issue{{ID: "gt-split"}, {ID: "gt-raced"}},
+	}
+
+	issues, err := specReadyBoardFrom(stub)
+	if err != nil {
+		t.Fatalf("specReadyBoardFrom = %v", err)
+	}
+	var ids []string
+	for _, i := range issues {
+		ids = append(ids, i.ID)
+	}
+	if got := strings.Join(ids, " "); got != "gt-ready gt-raced gt-split" {
+		t.Errorf("board = %q, want the ready rows and the split-held bead once each", got)
+	}
+	if stub.listOptions.Label != specdispatch.SplitLabel || stub.listOptions.Status != "open" || stub.listOptions.Limit != 0 {
+		t.Errorf("split query = %+v, want the rig's open split-labelled beads, uncapped", stub.listOptions)
+	}
+}
+
+// TestSpecReadyBoardReportsAFailedSplitRead: a split list that cannot be read is
+// the rig's error, not a rig holding no split bead: a tick that cannot see them
+// would leave every one of them unexplained on the dashboard (gt-4yq0js).
+func TestSpecReadyBoardReportsAFailedSplitRead(t *testing.T) {
+	t.Parallel()
+	stub := &specReadyStub{
+		issues:  []*beads.Issue{{ID: "gt-ready"}},
+		listErr: errors.New("bd list: database locked"),
+	}
+
+	if _, err := specReadyBoardFrom(stub); err == nil || !strings.Contains(err.Error(), "the split route holds") {
+		t.Fatalf("specReadyBoardFrom err = %v, want the split read's failure named", err)
 	}
 }
 
