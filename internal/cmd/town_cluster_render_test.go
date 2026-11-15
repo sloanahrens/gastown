@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -103,7 +104,14 @@ func clusterRenderTestTown(t *testing.T) string {
 // temporary repo.
 func clusterRenderTestDeps(t *testing.T, out io.Writer) clusterRenderDeps {
 	t.Helper()
-	town := clusterRenderTestTown(t)
+	return clusterRenderDepsAt(t, clusterRenderTestTown(t), out)
+}
+
+// clusterRenderDepsAt is clusterRenderTestDeps in the town it names, so a test can
+// render twice in one town: the first run recording its flags, the second
+// replaying them.
+func clusterRenderDepsAt(t *testing.T, town string, out io.Writer) clusterRenderDeps {
+	t.Helper()
 	return clusterRenderDeps{
 		findTown:                 func() (string, error) { return town, nil },
 		containerEnv:             func(string) (map[string]string, error) { return map[string]string{}, nil },
@@ -118,6 +126,7 @@ func clusterRenderTestDeps(t *testing.T, out io.Writer) clusterRenderDeps {
 		encode:                   k8sdaemon.YAML,
 		mkdirAll:                 func(path string) error { return os.MkdirAll(path, 0o755) },
 		writeFile:                func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		saveRecord:               saveRenderFlags,
 		out:                      out,
 	}
 }
@@ -2010,4 +2019,287 @@ func TestTownClusterRenderRefusesAnUnwritableRunningValuesFile(t *testing.T) {
 	}
 	err = runClusterRender(d, f)
 	requireErrorNames(t, err, "running values file", imagevalues.PathIn(filepath.Join(town, "gastown")))
+}
+
+// renderedText is the whole text of one rendered file.
+func renderedText(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// TestTownClusterRenderRecordsItsFlagsAndReplaysThem: a live render with
+// --record-flags writes the flags it used, defaults and all, and a later
+// --use-recorded render of that town writes the same manifests.
+func TestTownClusterRenderRecordsItsFlagsAndReplaysThem(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	// The config directories are left empty, so the record must hold the ones the
+	// run resolved rather than the empty flags it was given.
+	f.configDir, f.openShellConfigDir = "", ""
+	town := clusterRenderTestTown(t)
+	var first bytes.Buffer
+	d := clusterRenderDepsAt(t, town, &first)
+	d.record = clusterRenderRecordOptions{record: true}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("the recording render: %v", err)
+	}
+	recordPath := renderFlagsPathIn(town)
+	rec, ok, err := loadRenderFlags(recordPath)
+	if err != nil {
+		t.Fatalf("reading the recorded flags: %v", err)
+	}
+	if !ok {
+		t.Fatalf("the render recorded no flags at %s", recordPath)
+	}
+	if want := filepath.Join("/fake/home", ".config", "gt"); rec.configDir != want {
+		t.Errorf("recorded --config-dir = %q, want the resolved %q: the record holds the flags the run used", rec.configDir, want)
+	}
+	for _, diff := range []struct {
+		flag string
+		got  any
+		want any
+	}{
+		{"--dir", rec.dir, f.dir},
+		{"--out", rec.out, f.out},
+		{"--cpu", rec.cpu, f.cpu},
+		{"--memory", rec.memory, f.memory},
+		{"--forge-host", rec.forgeHost, f.forgeHost},
+		{"--confirm-container-stopped", rec.confirmStopped, true},
+	} {
+		if diff.got != diff.want {
+			t.Errorf("recorded %s = %v, want the value the run used, %v", diff.flag, diff.got, diff.want)
+		}
+	}
+	if !strings.Contains(first.String(), recordPath) {
+		t.Errorf("the render did not say where it recorded the flags:\n%s", first.String())
+	}
+
+	// The replay names only a fresh --out; every other flag is the record's.
+	replay := clusterRenderFlags{out: filepath.Join(t.TempDir(), "replay")}
+	d = clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{
+		use:   true,
+		named: func(flag string) bool { return flag == "out" },
+	}
+	if err := runClusterRender(d, replay); err != nil {
+		t.Fatalf("the replay: %v", err)
+	}
+	wantNames := dirNames(t, f.out)
+	gotNames := dirNames(t, replay.out)
+	if !slices.Equal(gotNames, wantNames) {
+		t.Fatalf("the replay wrote %v, want the recorded render's %v", gotNames, wantNames)
+	}
+	for _, name := range wantNames {
+		if got, want := renderedText(t, filepath.Join(replay.out, name)), renderedText(t, filepath.Join(f.out, name)); got != want {
+			t.Errorf("the replay's %s differs from the recorded render's:\n%s\nwant:\n%s", name, got, want)
+		}
+	}
+}
+
+// TestTownClusterRenderCommandLineFlagWinsOverTheRecordedOne: a flag named on the
+// replay's command line wins over its recorded value.
+func TestTownClusterRenderCommandLineFlagWinsOverTheRecordedOne(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.namespace = "gt-recorded"
+	town := clusterRenderTestTown(t)
+	d := clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{record: true}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("the recording render: %v", err)
+	}
+	replay := clusterRenderFlags{out: filepath.Join(t.TempDir(), "replay"), namespace: "gt-replay"}
+	d = clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{
+		use: true,
+		named: func(flag string) bool {
+			return flag == "namespace" || flag == "out"
+		},
+	}
+	if err := runClusterRender(d, replay); err != nil {
+		t.Fatalf("the replay: %v", err)
+	}
+	names := dirNames(t, replay.out)
+	if !slices.Contains(names, "01-namespace-gt-replay.yaml") {
+		t.Fatalf("the replay wrote %v, want the namespace file of the one named on the command line", names)
+	}
+	if slices.Contains(names, "01-namespace-gt-recorded.yaml") {
+		t.Fatalf("the replay rendered the recorded namespace over the one named on the command line: %v", names)
+	}
+}
+
+// TestTownClusterRenderRefusesARecordedReplayWithNothingRecorded: a replay with no
+// record takes no defaults from nowhere, and writes no manifest.
+func TestTownClusterRenderRefusesARecordedReplayWithNothingRecorded(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	var out bytes.Buffer
+	d := clusterRenderTestDeps(t, &out)
+	town, err := d.findTown()
+	if err != nil {
+		t.Fatalf("finding the town: %v", err)
+	}
+	d.record = clusterRenderRecordOptions{use: true}
+	err = runClusterRender(d, f)
+	requireErrorNames(t, err, "--use-recorded", "no render has recorded its flags", renderFlagsPathIn(town))
+	if out.Len() != 0 {
+		t.Fatalf("a refused replay printed %q", out.String())
+	}
+	if names := dirNames(t, f.out); len(names) != 0 {
+		t.Fatalf("a refused replay wrote %v", names)
+	}
+}
+
+// TestTownClusterRenderRefusesTheRecordedFlags drives the remaining refusals the
+// two flags add: a rehearsal's record, a recorded file the loader refuses, and a
+// record that cannot be written. Each names its cause; none leaves a claimed
+// success.
+func TestTownClusterRenderRefusesTheRecordedFlags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		mutate         func(t *testing.T, town string, d *clusterRenderDeps, f *clusterRenderFlags)
+		cause          string
+		wroteManifests bool // the record is written after the manifests, so they exist
+	}{
+		{
+			name: "recording a rehearsal",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps, f *clusterRenderFlags) {
+				f.rehearsal = true
+				f.forgeHost = ""
+				f.confirmStopped = false
+				f.namespace = "gt-rehearsal"
+				d.record = clusterRenderRecordOptions{record: true}
+			},
+			cause: "--record-flags is for a live render",
+		},
+		{
+			name: "a recorded file that the loader refuses",
+			mutate: func(t *testing.T, town string, d *clusterRenderDeps, _ *clusterRenderFlags) {
+				path := renderFlagsPathIn(town)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("making the record's directory: %v", err)
+				}
+				if err := os.WriteFile(path, []byte(`{"cpu":`), 0o600); err != nil {
+					t.Fatalf("writing the refused record: %v", err)
+				}
+				d.record = clusterRenderRecordOptions{use: true}
+			},
+			cause: "are refused",
+		},
+		{
+			name: "a record that cannot be written",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps, _ *clusterRenderFlags) {
+				d.record = clusterRenderRecordOptions{record: true}
+				d.saveRecord = func(string, clusterRenderFlags) error { return errors.New("read-only") }
+			},
+			cause:          "cannot write the recorded render flags, and the manifests are written",
+			wroteManifests: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			town := clusterRenderTestTown(t)
+			var out bytes.Buffer
+			d := clusterRenderDepsAt(t, town, &out)
+			tt.mutate(t, town, &d, &f)
+			// A run that refuses records nothing, so whatever the file held when it
+			// started is still there.
+			recordPath := renderFlagsPathIn(town)
+			before, beforeErr := os.ReadFile(recordPath)
+			err := runClusterRender(d, f)
+			requireErrorNames(t, err, tt.cause)
+			if out.Len() != 0 {
+				t.Fatalf("a refused run printed %q", out.String())
+			}
+			names := dirNames(t, f.out)
+			if !tt.wroteManifests && len(names) != 0 {
+				t.Fatalf("a refused run wrote %v", names)
+			}
+			if tt.wroteManifests && len(names) == 0 {
+				t.Fatal("the refusal says the manifests are written, and the run wrote none")
+			}
+			after, afterErr := os.ReadFile(recordPath)
+			if (beforeErr == nil) != (afterErr == nil) || !bytes.Equal(before, after) {
+				t.Fatalf("a refused run changed the recorded flags at %s", recordPath)
+			}
+		})
+	}
+}
+
+// filledRenderFlagsRecord is a recorded flag set with a value in every field,
+// built from the record's own fields so a field added to it is filled here too.
+func filledRenderFlagsRecord(t *testing.T) renderFlagsRecord {
+	t.Helper()
+	var r renderFlagsRecord
+	value := reflect.ValueOf(&r).Elem()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString(strings.ToLower(value.Type().Field(i).Name))
+		case reflect.Bool:
+			field.SetBool(true)
+		default:
+			t.Fatalf("renderFlagsRecord.%s is a %s, which this test cannot fill", value.Type().Field(i).Name, field.Kind())
+		}
+	}
+	return r
+}
+
+// TestRenderFlagsWithRecordedCoversTheFlagStruct: with nothing named on the
+// command line, every flag of the record is the replay's. A flag added to the
+// struct and not to withRecorded fails here, since a replay would render it empty.
+func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
+	t.Parallel()
+	full := filledRenderFlagsRecord(t).flags()
+	got := (clusterRenderFlags{}).withRecorded(full, nil)
+	if got == full {
+		return
+	}
+	fullValue, gotValue := reflect.ValueOf(full), reflect.ValueOf(got)
+	flagType := fullValue.Type()
+	for i := 0; i < flagType.NumField(); i++ {
+		name := flagType.Field(i).Name
+		switch want, g := fullValue.Field(i), gotValue.Field(i); want.Kind() {
+		case reflect.String:
+			if want.String() != g.String() {
+				t.Errorf("withRecorded drops %s: nothing was named, so the record's %q should be the replay's, got %q", name, want.String(), g.String())
+			}
+		case reflect.Bool:
+			if want.Bool() != g.Bool() {
+				t.Errorf("withRecorded drops %s: nothing was named, so the record's %v should be the replay's, got %v", name, want.Bool(), g.Bool())
+			}
+		}
+	}
+}
+
+// TestRenderFlagsWithRecordedKeepsWhatWasNamed: a flag named on the command line
+// keeps the value it was given, even an empty one, which is then refused as empty
+// rather than filled in from the file.
+func TestRenderFlagsWithRecordedKeepsWhatWasNamed(t *testing.T) {
+	t.Parallel()
+	recorded := clusterRenderFlags{dir: "/recorded", cpu: "2", memory: "4Gi", rehearsal: true}
+	named := clusterRenderFlags{cpu: "", memory: "8Gi", rehearsal: false}
+	got := named.withRecorded(recorded, func(flag string) bool {
+		return flag == "cpu" || flag == "memory" || flag == "rehearsal"
+	})
+	if got.cpu != "" {
+		t.Errorf("--cpu named empty = %q, want the empty value kept, not the recorded %q", got.cpu, recorded.cpu)
+	}
+	if got.rehearsal {
+		t.Error("--rehearsal named false is true again, so the recorded value won over the command line")
+	}
+	if got.memory != "8Gi" {
+		t.Errorf("--memory = %q, want the named 8Gi", got.memory)
+	}
+	if got.dir != "/recorded" {
+		t.Errorf("--dir = %q, want the unnamed flag's recorded /recorded", got.dir)
+	}
 }
