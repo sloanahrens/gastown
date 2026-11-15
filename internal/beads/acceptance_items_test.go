@@ -22,6 +22,57 @@ func TestAcceptanceItemsDescribeEachItem(t *testing.T) {
 	}
 }
 
+// TestAcceptanceBoxesGiveEachBoxItsLineAndOffset: each box reports the line it
+// sits on, the byte offset of its "[" in that line, and whether it is ticked,
+// in the order AcceptanceItems reads the boxes.
+func TestAcceptanceBoxesGiveEachBoxItsLineAndOffset(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		text string
+		want []AcceptanceBox
+	}{
+		{
+			name: "boxes on consecutive lines",
+			text: "- [ ] a\n- [x] b",
+			want: []AcceptanceBox{{Line: 0, At: 2}, {Line: 1, At: 2, Checked: true}},
+		},
+		{
+			name: "an indented box offsets into the raw line",
+			text: "  - [ ] a",
+			want: []AcceptanceBox{{Line: 0, At: 4}},
+		},
+		{
+			name: "a closed fence's copy is skipped and the real box keeps its line",
+			text: "- [ ] a\n```\n- [ ] b\n```\n- [ ] b",
+			want: []AcceptanceBox{{Line: 0, At: 2}, {Line: 4, At: 2}},
+		},
+		{
+			name: "an unfinished fence reads as text, so its next line's box counts",
+			text: "```\n- [ ] a",
+			want: []AcceptanceBox{{Line: 1, At: 2}},
+		},
+		{
+			name: "an unboxed item between boxes is not a box",
+			text: "- [ ] a\n- b\n- [ ] c",
+			want: []AcceptanceBox{{Line: 0, At: 2}, {Line: 2, At: 2}},
+		},
+		{
+			name: "no box",
+			text: "- a\n1. b",
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AcceptanceBoxes(tt.text); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("AcceptanceBoxes(%q) = %+v, want %+v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestFenceMarkerReadsOnlyAFenceLine: a fence is three or more backticks or
 // tildes; a backtick fence's info string may not hold a backtick.
 func TestFenceMarkerReadsOnlyAFenceLine(t *testing.T) {
