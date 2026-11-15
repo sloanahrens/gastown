@@ -66,9 +66,10 @@ type PlanInput struct {
 // at it: it keeps every named tag (any tag not shaped like a commit hash) and so
 // every digest one points at, plus the dev tag, the installed commit's tag,
 // every in-use digest and the newest Keep dated candidates. A candidate that
-// shares a kept digest survives with it. An undated manifest is never deleted: it
-// takes no Keep slot, and the plan names it kept so the report shows it. An
-// input it cannot read, or a name it cannot validate, refuses the plan.
+// shares a kept digest survives with it. An undated manifest is never deleted:
+// its digest is always kept, whatever the Keep window holds, and the plan names
+// it kept so the report shows it. An input it cannot read, or a name it cannot
+// validate, refuses the plan.
 func BuildPlan(in PlanInput) diskmaint.Plan {
 	plan := diskmaint.Plan{Target: planTarget}
 	if why := nameRefusal(in); why != "" {
@@ -146,8 +147,8 @@ func refuseReason(in PlanInput) string {
 // newestFirst returns the candidate tags ordered by creation time, newest
 // first, with the tag name breaking a tie so the order is stable. An undated
 // candidate has the zero time, so it always sorts behind every dated one and
-// never takes a Keep slot; its digest is in the keep set regardless, so no rank
-// can delete it.
+// cannot displace a dated candidate from a Keep slot; its digest is in the keep
+// set regardless, so no rank can delete it.
 func newestFirst(tags []TagInfo) []TagInfo {
 	var candidates []TagInfo
 	for _, ti := range tags {

@@ -88,9 +88,11 @@ func (f *fakeRegistry) handler(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		// A fixture with the zero Created time stands for a config blob that
-		// carries no created field, the shape the polecat image has.
-		if ti.Created.IsZero() {
+		// A fixture marked Undated stands for a config blob that carries no
+		// created field, the shape the polecat image has. Any other fixture
+		// carries one, a zero Created included: it formats as the zero instant,
+		// which a reader has to date rather than treat as absent.
+		if ti.Undated {
 			_, _ = w.Write([]byte(blobBody("")))
 			return
 		}
@@ -257,7 +259,7 @@ func TestPlanTreatsAMissingCreatedBlobAsUndated(t *testing.T) {
 		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
 		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
 		fakeTag(RepoMain, "c000002", dg("a2"), planTime(2), 300),
-		fakeTag(RepoMain, "c000003", dg("a3"), time.Time{}, 400),
+		undatedTag(RepoMain, "c000003", dg("a3")),
 	}})
 
 	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 1})
@@ -273,6 +275,34 @@ func TestPlanTreatsAMissingCreatedBlobAsUndated(t *testing.T) {
 	}
 	if rule := keptRule(plan, RepoMain+":c000003"); rule != ruleUndated {
 		t.Fatalf("c000003 kept by %q, want %q: %v", rule, ruleUndated, plan.Kept)
+	}
+}
+
+// TestPlanTreatsAPresentZeroCreatedAsDated pins the fixture's blob convention:
+// only a manifest marked Undated is served without a created field, so a zero
+// Created formats as the zero instant and reads as a date. The manifest is then
+// the oldest dated candidate, not an undated one nothing may delete.
+func TestPlanTreatsAPresentZeroCreatedAsDated(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), time.Time{}, 200),
+		fakeTag(RepoMain, "c000002", dg("a2"), planTime(1), 300),
+	}})
+
+	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 1})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("plan refused: %s", plan.Refused)
+	}
+	want := []string{mainRef(dg("a1"))}
+	if got := actionRefs(plan); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want the oldest dated manifest %v deleted", got, want)
+	}
+	if rule := keptRule(plan, RepoMain+":c000001"); rule != "" {
+		t.Fatalf("c000001 kept by %q, want no keep rule: a config blob with a created field is dated", rule)
 	}
 }
 
