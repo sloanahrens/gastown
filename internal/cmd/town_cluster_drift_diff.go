@@ -19,12 +19,11 @@ import (
 // template, so the live object carries it and the render never names it.
 const restartedAtAnnotation = "kubectl.kubernetes.io/restartedAt"
 
-// serverSetKeys are the Deployment fields the API server fills in after the
-// render is applied. The one-way walk already skips a field the render never
-// names; the skip keeps a render that ever names one from reporting the
-// server's value as drift (gt-jqfk62).
-var serverSetKeys = map[string]bool{
-	"status":            true,
+// serverSetMetadataKeys are the Deployment metadata fields the API server fills
+// in after the render is applied. The one-way walk already skips a field the
+// render never names; the skip keeps a render that ever names one from
+// reporting the server's value as drift (gt-jqfk62).
+var serverSetMetadataKeys = map[string]bool{
 	"generation":        true,
 	"resourceVersion":   true,
 	"uid":               true,
@@ -32,17 +31,14 @@ var serverSetKeys = map[string]bool{
 	"creationTimestamp": true,
 }
 
-// deploymentDrift lists every field the rendered Deployment names that the live
-// one lacks or carries differently, one line per field as "<JSON path>:
-// rendered <value>, live <value>", sorted. rendered is the render's own
-// decoding and live is `kubectl get deployment -o json`'s.
-//
-// The comparison is one-way: a field only the live object carries, such as a
-// server default, is not drift. An image roll is not drift either, so container
-// images and the annotations a rollout writes are skipped. Either side empty or
-// nil is an error, never an empty list: an object that decoded to nothing is
-// unreadable, and reading it as a cluster in step would report the worst case
-// as the best (gt-jqfk62).
+// serverSetRootKeys are the top-level Deployment fields the server sets.
+var serverSetRootKeys = map[string]bool{
+	"status": true,
+}
+
+// deploymentDrift lists every rendered Deployment field the live one lacks or
+// carries differently, one sorted line per field naming its JSON path and both
+// values, and refuses either side that decoded to nothing (gt-jqfk62).
 func deploymentDrift(rendered, live map[string]any) ([]string, error) {
 	if len(rendered) == 0 {
 		return nil, errors.New("deployment drift: the rendered Deployment has no fields, so it was not read; an unreadable render is not a cluster in step")
@@ -61,7 +57,9 @@ type driftWalk struct {
 	drift []string
 }
 
-// object compares the rendered object at path against the live object.
+// object compares the rendered object at path against the live object and walks
+// only the render's keys, since a field only the live object carries, such as a
+// server default, is not drift.
 func (w *driftWalk) object(path string, rendered, live map[string]any) {
 	for _, key := range slices.Sorted(maps.Keys(rendered)) {
 		if driftIgnoresKey(path, key) {
@@ -141,13 +139,15 @@ func (w *driftWalk) list(path string, rendered, live []any) {
 			return
 		}
 	}
+	// A positional list's length is part of its value: a live command with one
+	// extra argument runs something the render never named, and is drift even
+	// though that entry alone is live-only (gt-jqfk62).
+	if len(rendered) != len(live) {
+		w.difference(path, rendered, live)
+		return
+	}
 	for i, entry := range rendered {
-		entryPath := path + "[" + strconv.Itoa(i) + "]"
-		if i >= len(live) {
-			w.missingEntry(entryPath, entry)
-			continue
-		}
-		w.value(entryPath, entry, live[i])
+		w.value(path+"["+strconv.Itoa(i)+"]", entry, live[i])
 	}
 }
 
@@ -193,7 +193,10 @@ func (w *driftWalk) missingEntry(path string, rendered any) {
 // driftIgnoresKey reports whether the compare skips key in the object at
 // parent. A container's image is skipped because an image roll is not drift,
 // the two rollout annotations for the same reason, and the server-set fields
-// because their value belongs to the cluster (gt-jqfk62).
+// because their value belongs to the cluster (gt-jqfk62). The annotation names
+// are fully qualified, so they skip wherever they appear; the server-set keys
+// skip only at the Deployment root and under metadata, since a label or env
+// var may be named "generation" and still hold what the render names.
 func driftIgnoresKey(parent, key string) bool {
 	switch key {
 	case "image":
@@ -201,7 +204,10 @@ func driftIgnoresKey(parent, key string) bool {
 	case k8sdaemon.PolecatImageAnnotation, restartedAtAnnotation:
 		return true
 	}
-	return serverSetKeys[key]
+	if parent == "" {
+		return serverSetRootKeys[key]
+	}
+	return parent == "metadata" && serverSetMetadataKeys[key]
 }
 
 // containerEntryPath reports whether path is the map of one container, the only
@@ -343,7 +349,13 @@ func listEntryKey(entry any, keyField string) (string, bool) {
 // quantityPattern is the Kubernetes quantity spelling the compare reads: a
 // decimal number, an optional exponent, and an optional suffix. A value that
 // does not match is compared as text.
-var quantityPattern = regexp.MustCompile(`^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$`)
+var quantityPattern = regexp.MustCompile(`^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))([eE][+-]?[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$`)
+
+// quantityMaxExponent bounds a decimal exponent before big.Rat parses it: the
+// API's quantities fit an int64, whose worst case is 10^18, so a larger
+// exponent is not a quantity and reads as text instead of building an integer
+// too big to compare (gt-jqfk62).
+const quantityMaxExponent = 18
 
 // quantitySuffixes gives each suffix its base and exponent.
 var quantitySuffixes = map[string]struct {
@@ -392,11 +404,17 @@ func quantityValue(text string) (*big.Rat, bool) {
 	if match == nil {
 		return nil, false
 	}
-	number, ok := new(big.Rat).SetString(match[1])
+	if exponent := match[2]; exponent != "" {
+		value, err := strconv.Atoi(exponent[1:])
+		if err != nil || value > quantityMaxExponent || value < -quantityMaxExponent {
+			return nil, false
+		}
+	}
+	number, ok := new(big.Rat).SetString(match[1] + match[2])
 	if !ok {
 		return nil, false
 	}
-	suffix, ok := quantitySuffixes[match[2]]
+	suffix, ok := quantitySuffixes[match[3]]
 	if !ok {
 		return nil, false
 	}

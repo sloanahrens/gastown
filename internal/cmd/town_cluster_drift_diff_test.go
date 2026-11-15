@@ -246,6 +246,22 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			want: []string{`spec.template.spec.initContainers[name=registry-proxy].command[2]: rendered "sleep infinity", live "exit 1"`},
 		},
 		{
+			name: "a positional list the live object made longer",
+			live: func(t *testing.T, live map[string]any) {
+				initContainer := driftInitContainer(t, live, "registry-proxy")
+				initContainer["command"] = append(initContainer["command"].([]any), "--extra")
+			},
+			want: []string{`spec.template.spec.initContainers[name=registry-proxy].command: rendered ["/bin/sh","-c","sleep infinity"], live ["/bin/sh","-c","sleep infinity","--extra"]`},
+		},
+		{
+			name: "a positional list the live object made shorter",
+			live: func(t *testing.T, live map[string]any) {
+				initContainer := driftInitContainer(t, live, "registry-proxy")
+				initContainer["command"] = initContainer["command"].([]any)[:2]
+			},
+			want: []string{`spec.template.spec.initContainers[name=registry-proxy].command: rendered ["/bin/sh","-c","sleep infinity"], live ["/bin/sh","-c"]`},
+		},
+		{
 			name: "a probe",
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["readinessProbe"].(map[string]any)["periodSeconds"] = 15
@@ -267,6 +283,18 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				resources["limits"].(map[string]any)["memory"] = "2Gi"
 			},
 			want: []string{`spec.template.spec.containers[name=daemon].resources.limits.memory: rendered "1024Mi", live "2Gi"`},
+		},
+		{
+			name: "a quantity exponent beyond anything a quantity fits",
+			rendered: func(t *testing.T, rendered map[string]any) {
+				resources := driftContainer(t, rendered, "daemon")["resources"].(map[string]any)
+				resources["requests"].(map[string]any)["cpu"] = "1e999999999999"
+			},
+			live: func(t *testing.T, live map[string]any) {
+				resources := driftContainer(t, live, "daemon")["resources"].(map[string]any)
+				resources["requests"].(map[string]any)["cpu"] = "1"
+			},
+			want: []string{`spec.template.spec.containers[name=daemon].resources.requests.cpu: rendered "1e999999999999", live "1"`},
 		},
 		{
 			name: "a volume",
@@ -321,6 +349,26 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 				live["metadata"].(map[string]any)["annotations"].(map[string]any)["image"] = "other"
 			},
 			want: []string{`metadata.annotations.image: rendered "daemon", live "other"`},
+		},
+		{
+			name: "a label named like a server-set key",
+			rendered: func(t *testing.T, rendered map[string]any) {
+				rendered["metadata"].(map[string]any)["labels"].(map[string]any)["uid"] = "a"
+			},
+			live: func(t *testing.T, live map[string]any) {
+				live["metadata"].(map[string]any)["labels"].(map[string]any)["uid"] = "b"
+			},
+			want: []string{`metadata.labels.uid: rendered "a", live "b"`},
+		},
+		{
+			name: "a quantity exponent past the bound, spelled as digits",
+			rendered: func(t *testing.T, rendered map[string]any) {
+				driftContainer(t, rendered, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "1e20"
+			},
+			live: func(t *testing.T, live map[string]any) {
+				driftContainer(t, live, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "100000000000000000000"
+			},
+			want: []string{`spec.template.spec.containers[name=daemon].resources.requests.cpu: rendered "1e20", live "100000000000000000000"`},
 		},
 		{
 			name: "a port the live object does not carry",
@@ -420,6 +468,24 @@ func TestDeploymentDriftIgnoresImageRolls(t *testing.T) {
 			},
 			live: func(t *testing.T, live map[string]any) {
 				driftContainer(t, live, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "1"
+			},
+		},
+		{
+			name: "an exponent spelling the API canonicalized",
+			rendered: func(t *testing.T, rendered map[string]any) {
+				driftContainer(t, rendered, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "1e3"
+			},
+			live: func(t *testing.T, live map[string]any) {
+				driftContainer(t, live, "daemon")["resources"].(map[string]any)["requests"].(map[string]any)["cpu"] = "1k"
+			},
+		},
+		{
+			name: "a server-set metadata field the render names",
+			rendered: func(t *testing.T, rendered map[string]any) {
+				rendered["metadata"].(map[string]any)["generation"] = 1
+			},
+			live: func(t *testing.T, live map[string]any) {
+				live["metadata"].(map[string]any)["generation"] = 3
 			},
 		},
 		{
