@@ -13,9 +13,10 @@ import (
 // The statements the swap sends around its renames, keyed so a test can script
 // one answer and let the rest stand.
 const (
-	sqlCompactWorkTip   = "SELECT dolt_hashof('compact-work')"
-	sqlMainPreSquashTip = "SELECT dolt_hashof('main-pre-squash')"
-	sqlDoltBranch       = "CALL DOLT_BRANCH"
+	sqlCompactWorkTip     = "SELECT dolt_hashof('compact-work')"
+	sqlMainPreSquashTip   = "SELECT dolt_hashof('main-pre-squash')"
+	sqlMainPreSquashCount = "SELECT COUNT(*) FROM dolt_branches WHERE name = 'main-pre-squash'"
+	sqlDoltBranch         = "CALL DOLT_BRANCH"
 )
 
 // The fixture commits the swap's tests read. hash renders n modulo its
@@ -70,14 +71,16 @@ func pickedWithConflicts() Rows {
 
 // swapFake answers a swap's reads up to the old main's tail list: the session
 // on compact-work before the renames and on main after them, compact-work's
-// tip, and main-pre-squash's tip. A rename answers with no rows, as Dolt's
-// branch procedures do.
+// tip, the count of branches named main-pre-squash (none), and
+// main-pre-squash's tip. A rename answers with no rows, as Dolt's branch
+// procedures do.
 func swapFake(swappedTip, oldTip string) *FakeExec {
 	f := NewFakeExec()
 	f.Respond(sqlActiveBranch, single("branch", "compact-work"))
 	f.Respond(sqlActiveBranch, single("branch", "main"))
 	f.Respond(sqlDoltBranch, Rows{})
 	f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", swappedTip))
+	f.Respond(sqlMainPreSquashCount, single("COUNT(*)", "0"))
 	f.Respond(sqlMainPreSquashTip, single("dolt_hashof('main-pre-squash')", oldTip))
 	return f
 }
@@ -116,7 +119,7 @@ func TestSwapRenamesMainToMainPreSquashFirstAndBothForced(t *testing.T) {
 	}
 	// The tip that becomes main is read before either rename, so a commit a
 	// writer lands during the swap cannot be mistaken for the swapped content.
-	want := []string{sqlActiveBranch, sqlCompactWorkTip, swapRenames[0], swapRenames[1], sqlActiveBranch, sqlMainPreSquashTip}
+	want := []string{sqlActiveBranch, sqlCompactWorkTip, sqlMainPreSquashCount, swapRenames[0], swapRenames[1], sqlActiveBranch, sqlMainPreSquashTip}
 	if got := f.Statements(); !slices.Equal(got, want) {
 		t.Errorf("statements = %q, want %q", got, want)
 	}
@@ -190,7 +193,7 @@ func TestSwapKeepsBothBranchesWhenAConflictMeetsACommitLandedOnTheNewMain(t *tes
 		t.Fatalf("Swap returned the conflict %+v, want %+v", got.Conflict, want)
 	}
 	if got.RenamedBack {
-		t.Error("Swap renamed back with a commit landed on the new main: that commit would be dropped")
+		t.Error("Swap renamed back with a commit landed on the new main: that commit would be moved off main")
 	}
 	if got.Tail != 3 || got.Replayed != 2 {
 		t.Errorf("Swap replayed %d of a tail of %d, want the pick that conflicted counted as attempted", got.Replayed, got.Tail)
@@ -261,6 +264,9 @@ func TestSwapDoesNotReadItsOwnPicksAsLandedCommits(t *testing.T) {
 	f.Respond(pickStatement(c3), pickedWithConflicts())
 	f.Respond(sqlMainTip, single("dolt_hashof('main')", p2))
 	f.Respond(tailStatement(swapped, p2), tailRows(p1, p2))
+	// The rename back moves that same tip to compact-work, so its read back
+	// names the tip the check read.
+	f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", p2))
 
 	got, err := Swap(context.Background(), f, verified, sleep)
 	if err != nil {
@@ -287,12 +293,15 @@ func TestSwapRefusesAValueThatIsNotACommitHash(t *testing.T) {
 		name   string
 		script func(*FakeExec)
 		start  string
-		want   string
+		// sent is how many statements the refused run sends before it stops.
+		sent int
+		want string
 	}{
 		{
 			name:   "the verified tip",
 			script: func(*FakeExec) {},
 			start:  "main",
+			sent:   0,
 			want:   "the verified tip",
 		},
 		{
@@ -302,6 +311,7 @@ func TestSwapRefusesAValueThatIsNotACommitHash(t *testing.T) {
 				f.Respond(sqlCompactWorkTip, single("h", "HEAD"))
 			},
 			start: verified,
+			sent:  2,
 			want:  "compact-work's tip",
 		},
 		{
@@ -311,9 +321,11 @@ func TestSwapRefusesAValueThatIsNotACommitHash(t *testing.T) {
 				f.Respond(sqlActiveBranch, single("branch", "main"))
 				f.Respond(sqlDoltBranch, Rows{})
 				f.Respond(sqlCompactWorkTip, single("h", swapped))
+				f.Respond(sqlMainPreSquashCount, single("COUNT(*)", "0"))
 				f.Respond(sqlMainPreSquashTip, single("h", "HEAD"))
 			},
 			start: verified,
+			sent:  7,
 			want:  "main-pre-squash's tip",
 		},
 	}
@@ -334,8 +346,8 @@ func TestSwapRefusesAValueThatIsNotACommitHash(t *testing.T) {
 			if picks := pickStatements(f); len(picks) != 0 {
 				t.Errorf("picks = %q, want none: nothing is picked from a value the run cannot trust", picks)
 			}
-			if tc.start != verified && len(f.Statements()) != 0 {
-				t.Errorf("a refused verified tip sent %d statements, want none", len(f.Statements()))
+			if got := len(f.Statements()); got != tc.sent {
+				t.Errorf("the refused run sent %d statements, want %d: it stopped at the value it could not trust", got, tc.sent)
 			}
 		})
 	}
@@ -389,9 +401,9 @@ func TestSwapStopsOnAFailedStatement(t *testing.T) {
 	c1 := hash(tailFirst)
 	refused := errors.New("the connection was closed")
 	// Statement positions: 1 the first branch check, 2 compact-work's tip, 3
-	// and 4 the renames, 5 the second branch check, 6 the old main's tip, 7 the
-	// tail list, 8 the first pick.
-	for failAt := 1; failAt <= 8; failAt++ {
+	// the main-pre-squash count, 4 and 5 the renames, 6 the second branch
+	// check, 7 the old main's tip, 8 the tail list, 9 the first pick.
+	for failAt := 1; failAt <= 9; failAt++ {
 		t.Run(fmt.Sprintf("statement_%d", failAt), func(t *testing.T) {
 			t.Parallel()
 			sleep := &testSleeper{clk: newTestClock()}
@@ -440,15 +452,15 @@ func TestSwapStopsOnAPickErrorThatIsNotAConflict(t *testing.T) {
 // conflict makes before it may rename back: a refused tip read, a refused log
 // read, and a log that lists nothing while the tip moved. Each leaves the
 // branches swapped, because renaming back against a commit the run could not
-// name would drop it.
+// name would move that commit off main unseen.
 func TestSwapRefusesToRecoverFromAConflictItCannotRead(t *testing.T) {
 	t.Parallel()
 	verified, swapped, oldTip := hash(verifiedCommit), hash(swappedCommit), hash(oldTipCommit)
 	c1 := hash(tailFirst)
 	moved := hash(movedMainTip)
 	refused := errors.New("the connection was closed")
-	// The conflict is the eighth statement; the tip read and the log read that
-	// follow it are the ninth and tenth.
+	// The conflict is the ninth statement; the tip read and the log read that
+	// follow it are the tenth and eleventh.
 	tests := []struct {
 		name  string
 		after func(*FakeExec)
@@ -456,16 +468,16 @@ func TestSwapRefusesToRecoverFromAConflictItCannotRead(t *testing.T) {
 	}{
 		{
 			name:  "the new main's tip read fails",
-			after: func(f *FakeExec) { f.FailAt(9, refused) },
-			want:  "statement 9 (",
+			after: func(f *FakeExec) { f.FailAt(10, refused) },
+			want:  "statement 10 (",
 		},
 		{
 			name: "the landed commits read fails",
 			after: func(f *FakeExec) {
 				f.Respond(sqlMainTip, single("dolt_hashof('main')", moved))
-				f.FailAt(10, refused)
+				f.FailAt(11, refused)
 			},
-			want: "statement 10 (",
+			want: "statement 11 (",
 		},
 		{
 			name: "the landed commits read lists nothing at a moved tip",
@@ -527,15 +539,15 @@ func TestSwapStopsWhenTheRenameBackFails(t *testing.T) {
 	f.Respond(tailStatement(verified, oldTip), tailRows(c1))
 	f.Respond(pickStatement(c1), pickedWithConflicts())
 	f.Respond(sqlMainTip, single("dolt_hashof('main')", swapped))
-	// The conflict is the eighth statement, the tip read is the ninth, and the
-	// first rename back is the tenth.
-	f.FailAt(10, refused)
+	// The conflict is the ninth statement, the tip read is the tenth, and the
+	// first rename back is the eleventh.
+	f.FailAt(11, refused)
 
 	got, err := Swap(context.Background(), f, verified, sleep)
 	if !errors.Is(err, refused) {
 		t.Fatalf("Swap returned %v, want the injected error", err)
 	}
-	if want := "statement 10 (CALL DOLT_BRANCH('-m', '--force', 'main', 'compact-work'))"; !strings.Contains(err.Error(), want) {
+	if want := "statement 11 (CALL DOLT_BRANCH('-m', '--force', 'main', 'compact-work'))"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q does not hold %q", err, want)
 	}
 	if got.RenamedBack {
@@ -543,6 +555,202 @@ func TestSwapStopsWhenTheRenameBackFails(t *testing.T) {
 	}
 	if got, want := branchStatements(f), append(slices.Clone(swapRenames), swapRenameBack[0]); !slices.Equal(got, want) {
 		t.Errorf("renames = %q, want %q: the run stopped at the first rename back", got, want)
+	}
+}
+
+// conflictFake answers the swap of one tail commit whose pick leaves conflicts
+// with the new main's tip still at the swapped tip: the check reads no commit
+// landed, so the swap renames back.
+func conflictFake(verified, swapped, oldTip, c1 string) *FakeExec {
+	f := swapFake(swapped, oldTip)
+	f.Respond(tailStatement(verified, oldTip), tailRows(c1))
+	f.Respond(pickStatement(c1), pickedWithConflicts())
+	f.Respond(sqlMainTip, single("dolt_hashof('main')", swapped))
+	return f
+}
+
+// TestSwapRefusesAnExistingMainPreSquash drives the branch count the swap reads
+// before its first rename: a branch that already holds main-pre-squash would be
+// overwritten by the forced rename, so the run refuses before either rename.
+func TestSwapRefusesAnExistingMainPreSquash(t *testing.T) {
+	t.Parallel()
+	verified, swapped := hash(verifiedCommit), hash(swappedCommit)
+	sleep := &testSleeper{clk: newTestClock()}
+	f := NewFakeExec()
+	f.Respond(sqlActiveBranch, single("branch", "compact-work"))
+	f.Respond(sqlCompactWorkTip, single("h", swapped))
+	f.Respond(sqlMainPreSquashCount, single("COUNT(*)", "1"))
+
+	_, err := Swap(context.Background(), f, verified, sleep)
+	if err == nil {
+		t.Fatal("Swap returned no error for an existing main-pre-squash")
+	}
+	for _, want := range []string{"main-pre-squash", "want none"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not hold %q", err, want)
+		}
+	}
+	if renames := branchStatements(f); len(renames) != 0 {
+		t.Errorf("renames = %q, want none: a forced rename would overwrite the branch", renames)
+	}
+	if picks := pickStatements(f); len(picks) != 0 {
+		t.Errorf("picks = %q, want none", picks)
+	}
+}
+
+// TestSwapUndoesTheRenameBackWhenACommitLandsInTheWindow drives the race the
+// check cannot see: a commit reaches the new main after the check read the tip
+// and before the rename back moves it. Reading back the tip the renames moved
+// names that commit, so the renames are undone and both branches stay as the
+// swap left them.
+func TestSwapUndoesTheRenameBackWhenACommitLandsInTheWindow(t *testing.T) {
+	t.Parallel()
+	verified, swapped, oldTip := hash(verifiedCommit), hash(swappedCommit), hash(oldTipCommit)
+	c1, landed := hash(tailFirst), hash(landedOnMain)
+	sleep := &testSleeper{clk: newTestClock()}
+	f := conflictFake(verified, swapped, oldTip, c1)
+	f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
+	f.Respond(tailStatement(swapped, landed), tailRows(landed))
+
+	got, err := Swap(context.Background(), f, verified, sleep)
+	if err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+	if got.RenamedBack {
+		t.Error("Swap reports a rename back though a commit landed in the window: that commit would be moved off main")
+	}
+	want := &SwapConflict{Commit: c1, Unpicked: []string{c1}, Landed: []string{landed}}
+	if got.Conflict == nil || got.Conflict.Commit != want.Commit ||
+		!slices.Equal(got.Conflict.Unpicked, want.Unpicked) || !slices.Equal(got.Conflict.Landed, want.Landed) {
+		t.Fatalf("Swap returned the conflict %+v, want %+v", got.Conflict, want)
+	}
+	if !strings.Contains(got.Reason, landed) {
+		t.Errorf("Reason %q does not hold %q: the item must name the commit that landed", got.Reason, landed)
+	}
+	if got, want := branchStatements(f), slices.Concat(swapRenames, swapRenameBack, swapRenames); !slices.Equal(got, want) {
+		t.Errorf("renames = %q, want %q: the rename back is undone", got, want)
+	}
+}
+
+// TestSwapRefusesToFinishARenameBackItCannotVerify drives the reads the swap
+// makes after the rename back: it cannot tell a commit that landed in the
+// window from the tip the check read, so it stops and reports no rename back it
+// did not verify. The cases where the swap already renamed forth again leave
+// both branches as the swap left them.
+func TestSwapRefusesToFinishARenameBackItCannotVerify(t *testing.T) {
+	t.Parallel()
+	verified, swapped, oldTip := hash(verifiedCommit), hash(swappedCommit), hash(oldTipCommit)
+	c1, landed := hash(tailFirst), hash(landedOnMain)
+	refused := errors.New("the connection was closed")
+	// The rename back is statements 11 and 12, the read of the tip it moved is
+	// statement 13, the undo is 14 and 15, and the log of the commits it moved
+	// is 16.
+	tests := []struct {
+		name  string
+		after func(*FakeExec)
+		want  string
+		// renames is how many branch renames the refused run sends, the swap's
+		// two included, so 4 is the two renames back and no undo.
+		renames int
+	}{
+		{
+			name:    "the moved tip read fails",
+			after:   func(f *FakeExec) { f.FailAt(13, refused) },
+			want:    "a commit that landed between the check and the renames is not ruled out",
+			renames: 4,
+		},
+		{
+			name: "the moved tip is not a hash",
+			after: func(f *FakeExec) {
+				f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", "HEAD"))
+			},
+			want:    "the tip they moved cannot be trusted",
+			renames: 4,
+		},
+		{
+			name: "the moved log read fails",
+			after: func(f *FakeExec) {
+				f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
+				f.FailAt(16, refused)
+			},
+			want:    "statement 16 (",
+			renames: 6,
+		},
+		{
+			name: "the moved log lists nothing",
+			after: func(f *FakeExec) {
+				f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
+				f.Respond(tailStatement(swapped, landed), tailRows())
+			},
+			want:    "a landed commit would be missed",
+			renames: 6,
+		},
+		{
+			name: "a moved commit is not a hash",
+			after: func(f *FakeExec) {
+				f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
+				f.Respond(tailStatement(swapped, landed), tailRows("HEAD"))
+			},
+			want:    "a commit that landed between the check and the renames",
+			renames: 6,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sleep := &testSleeper{clk: newTestClock()}
+			f := conflictFake(verified, swapped, oldTip, c1)
+			tc.after(f)
+
+			got, err := Swap(context.Background(), f, verified, sleep)
+			if err == nil {
+				t.Fatalf("Swap returned no error, want one holding %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not hold %q", err, tc.want)
+			}
+			if got.RenamedBack {
+				t.Error("Swap reports a rename back it could not verify")
+			}
+			if got := len(branchStatements(f)); got != tc.renames {
+				t.Errorf("the refused run sent %d renames, want %d", got, tc.renames)
+			}
+		})
+	}
+}
+
+// TestSwapStopsWhenTheUndoOfTheRenameBackFails drives an undo statement that
+// Dolt refuses: the run stops with that error, so the caller's item describes
+// the branches as they actually are.
+func TestSwapStopsWhenTheUndoOfTheRenameBackFails(t *testing.T) {
+	t.Parallel()
+	verified, swapped, oldTip := hash(verifiedCommit), hash(swappedCommit), hash(oldTipCommit)
+	c1, landed := hash(tailFirst), hash(landedOnMain)
+	refused := errors.New("the connection was closed")
+	for failAt := 14; failAt <= 15; failAt++ {
+		t.Run(fmt.Sprintf("statement_%d", failAt), func(t *testing.T) {
+			t.Parallel()
+			sleep := &testSleeper{clk: newTestClock()}
+			f := conflictFake(verified, swapped, oldTip, c1)
+			f.Respond(sqlCompactWorkTip, single("dolt_hashof('compact-work')", landed))
+			f.FailAt(failAt, refused)
+
+			got, err := Swap(context.Background(), f, verified, sleep)
+			if !errors.Is(err, refused) {
+				t.Fatalf("Swap returned %v, want the injected error", err)
+			}
+			if want := fmt.Sprintf("statement %d (CALL DOLT_BRANCH", failAt); !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not hold %q", err, want)
+			}
+			if got.RenamedBack {
+				t.Error("Swap reports a rename back it did not keep")
+			}
+			// The swap's two renames, the rename back's two, and the undo's up
+			// to the one that failed.
+			if got, want := len(branchStatements(f)), len(swapRenames)+len(swapRenameBack)+failAt-13; got != want {
+				t.Errorf("the run sent %d renames, want %d: it stopped at the failed one", got, want)
+			}
+		})
 	}
 }
 
@@ -573,7 +781,7 @@ func TestSwapRefusesASessionOnAnotherBranch(t *testing.T) {
 			name:     "after the swap",
 			branches: []string{"compact-work", "main-pre-squash"},
 			want:     `answered "main-pre-squash", want main`,
-			sent:     5,
+			sent:     6,
 			renames:  2,
 		},
 	}
@@ -587,6 +795,7 @@ func TestSwapRefusesASessionOnAnotherBranch(t *testing.T) {
 			}
 			f.Respond(sqlDoltBranch, Rows{})
 			f.Respond(sqlCompactWorkTip, single("h", swapped))
+			f.Respond(sqlMainPreSquashCount, single("COUNT(*)", "0"))
 			f.Respond(sqlMainPreSquashTip, single("h", oldTip))
 			f.Respond(tailStatement(verified, oldTip), tailRows(c1))
 			f.Respond(sqlCherryPick, pickedAs(hash(firstPick)))
