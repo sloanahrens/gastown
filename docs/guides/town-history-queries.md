@@ -30,8 +30,14 @@ gzip members under it as more rows arrive.
 
 ## The columns
 
-The events files start with this header, which is the events table's own column
-order:
+The events files start with a header row naming the events table's columns, in
+the table's own column order. The daemon holds no list of those names: it writes
+the columns its `SELECT *` returns, so a column added to the events table reaches
+the next file's header without a daemon change. A file's header is fixed once
+written, and the daemon refuses to append a member under a different one, so on
+the day the columns change that database's export fails until the next day's
+file starts. The line below is the shape the queries here assume; a file's own
+first line is what that file holds.
 
 ```
 issue_id,event_type,actor,old_value,new_value,comment,created_at,id
@@ -40,7 +46,7 @@ issue_id,event_type,actor,old_value,new_value,comment,created_at,id
 | Column | Holds |
 |--------|-------|
 | `issue_id` | the bead the event happened to |
-| `event_type` | one of the types listed below |
+| `event_type` | one of the types `archiveEventTypes` accepts, below |
 | `actor` | who caused it: an agent, a command, or a person |
 | `old_value`, `new_value` | the change the event records |
 | `comment` | the sentence bd writes with the event: `Added label: <label>` on a label add, the reason on a close, the body on a `commented` |
@@ -83,15 +89,11 @@ CREATE OR REPLACE VIEW events AS
 
 ## The event types the rollup knows
 
-The metrics rollup accepts exactly these `event_type` values, and refuses a row
-with any other as one it cannot read rather than counting it as nothing:
-
-`claimed`, `closed`, `commented`, `created`, `dependency_added`,
-`label_added`, `label_removed`, `reopened`, `status_changed`, `updated`.
-
-The list is `archiveEventTypes` in
+The metrics rollup accepts the `event_type` values `archiveEventTypes` holds in
 [the events-archive loader](../../internal/metrics/loaders_events_archive.go),
-the one place it lives; read that before you treat a new type as known.
+the one place that set lives; read it there before you treat a type as known.
+Any other type names a row the rollup cannot read, which it refuses rather than
+counts as nothing.
 
 ## How the archive reaches the metrics tables
 
