@@ -17,23 +17,32 @@ type Store interface {
 	SetAcceptance(beadID, text string) error
 	// AddComment adds a comment from author to beadID.
 	AddComment(beadID, author, text string) error
+	// SetStatus sets beadID's status to status.
+	SetStatus(beadID, status string) error
 }
 
 // Apply writes the parts of r that change the bead through store: the seat's
-// notes, the acceptance boxes it ticked and its findings. actor is the seat's
-// name, the author every finding is commented under.
+// notes, the acceptance boxes it ticked, its findings and a deferred status.
+// actor is the seat's name, the author every finding is commented under.
+//
+// A deferred result sets the bead's status to deferred, after the other writes.
+// A done result sets no status: the landing path owns the status of a task it
+// lands.
 //
 // The writes run in that order. Every one is attempted even after an earlier
 // one failed, so one failed write neither hides the writes after it nor reads
 // as success: Apply returns all the failures joined, and nil only when every
-// write it made succeeded.
+// write it made succeeded. A status other than StatusDone or StatusDeferred,
+// which Validate does not return, is refused into that joined error with no
+// status written: a hand-built Result must not skip the status and read as a
+// clean run.
 //
 // r.Ticked holds zero-based indexes into the checkbox lines of acceptance, read
 // in order by beads.AcceptanceBoxes: an index outside that list is an error and
 // no acceptance text is written for it. The acceptance is written only when
 // ticking changed it, and a note only when r.Notes is not empty.
 //
-// The status and the escalation request are not applied here.
+// The escalation request is not applied here.
 func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 	var errs []error
 	if r.Notes != "" {
@@ -55,6 +64,16 @@ func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 		if err := store.AddComment(beadID, actor, finding); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: add finding %d to %s: %w", i, beadID, err))
 		}
+	}
+	switch r.Status {
+	case StatusDone:
+		// The landing path sets the status of a task it lands.
+	case StatusDeferred:
+		if err := store.SetStatus(beadID, string(StatusDeferred)); err != nil {
+			errs = append(errs, fmt.Errorf("outbox: set status of %s: %w", beadID, err))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("outbox: set status of %s: result status %q is neither %q nor %q", beadID, r.Status, StatusDone, StatusDeferred))
 	}
 	return errors.Join(errs...)
 }
