@@ -7,16 +7,12 @@ package colima
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
-	"regexp"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 )
 
@@ -45,37 +41,12 @@ var (
 	// errNoLedger reports a target built without a ledger. Every apply must
 	// leave a record, so a run that cannot write one does not start.
 	errNoLedger = errors.New("colima apply: no ledger configured")
-	// errNoRunner reports a target with no docker runner.
-	errNoRunner = errors.New("no docker runner configured")
-	// errNoDockerHost reports a target that does not name the colima daemon.
-	// Without it docker would talk to whatever daemon the environment picks.
-	errNoDockerHost = errors.New("no docker host configured; the colima daemon is not named")
-	// errListImages reports an unreadable image list. The runner's error carries
-	// the command's stderr, so it is dropped in favor of this fixed reason.
-	errListImages = errors.New("list docker images failed; the image list is unreadable")
-	// errListContainers reports an unreadable container list.
-	errListContainers = errors.New("list docker containers failed; the in-use set is unreadable")
-	// errInspect reports an unreadable container image lookup.
-	errInspect = errors.New("inspect container images failed; the in-use set is unreadable")
-	// errParse reports a line of docker output that does not parse, so the
-	// listing is refused rather than read partly.
-	errParse = errors.New("docker output line does not parse; the listing is refused")
 	// errBadRef reports a plan action whose ref is not sha256:<64 hex>.
 	errBadRef = errors.New("ref is not sha256:<64 hex>")
 	// errPlanRefused reports an apply of a refused plan. Nothing is removed. The
 	// refusal is an error here as well as a ledger line, so a direct caller does
 	// not read it as success.
 	errPlanRefused = errors.New("colima apply: the plan is refused; nothing was removed")
-)
-
-var (
-	// containerPattern matches the short or full container ids docker ps prints.
-	containerPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
-	// sizeUnits are the units docker's human-readable sizes use.
-	sizeUnits = map[string]float64{
-		"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12,
-		"KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40,
-	}
 )
 
 // Compile-time check that the colima target satisfies the diskmaint contract.
@@ -105,18 +76,10 @@ func NewTarget(cfg Config) *Target {
 // Name is the target's name in plans and ledger entries.
 func (t *Target) Name() string { return planTarget }
 
-// image is one line of docker image ls --format {{json .}}.
-type image struct {
-	Repository string `json:"Repository"`
-	Tag        string `json:"Tag"`
-	ID         string `json:"ID"`
-	Size       string `json:"Size"`
-}
-
 // Measure reports the bytes every image on the daemon holds, tagged or not. An
 // unreadable image list is an error, never a zero.
 func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
-	images, err := t.images(ctx)
+	images, err := t.client().Images(ctx)
 	if err != nil {
 		return diskmaint.Measurement{}, fmt.Errorf("measure: %w", err)
 	}
@@ -129,7 +92,7 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 			continue
 		}
 		seen[im.ID] = true
-		used += im.bytes()
+		used += im.Bytes()
 	}
 	return diskmaint.Measurement{
 		Used:   used,
@@ -143,12 +106,12 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 // caller applies only when its policy asks for it.
 func (t *Target) Plan(ctx context.Context, _ diskmaint.Policy) (diskmaint.Plan, error) {
 	plan := diskmaint.Plan{Target: planTarget}
-	images, err := t.images(ctx)
+	images, err := t.client().Images(ctx)
 	if err != nil {
 		plan.Refused = err.Error()
 		return plan, nil
 	}
-	inUse, err := t.inUse(ctx)
+	inUse, err := t.client().InUse(ctx)
 	if err != nil {
 		plan.Refused = err.Error()
 		return plan, nil
@@ -171,7 +134,7 @@ func (t *Target) Plan(ctx context.Context, _ diskmaint.Policy) (diskmaint.Plan, 
 			plan.Actions = append(plan.Actions, diskmaint.Action{
 				Kind:  actionRemove,
 				Ref:   im.ID,
-				Bytes: im.bytes(),
+				Bytes: im.Bytes(),
 				Why:   "dangling and no container uses it",
 			})
 		default:
@@ -208,70 +171,6 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 	return result, err
 }
 
-// images reads the daemon's image list. Every line must parse and carry a
-// valid image id; one that does not refuses the whole listing.
-func (t *Target) images(ctx context.Context) ([]image, error) {
-	out, err := t.docker(ctx, "image", "ls", "--no-trunc", "--format", "{{json .}}")
-	if err != nil {
-		return nil, t.listErr(err, errListImages)
-	}
-	var images []image
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var im image
-		if err := json.Unmarshal([]byte(line), &im); err != nil || !registry.ValidDigest(im.ID) {
-			return nil, errParse
-		}
-		images = append(images, im)
-	}
-	return images, nil
-}
-
-// inUse is the set of image ids a container, running or stopped, uses. Any
-// container or image id that does not parse refuses the set, so a container
-// the set misses can never make a dangling image look unused.
-func (t *Target) inUse(ctx context.Context) (map[string]bool, error) {
-	out, err := t.docker(ctx, "ps", "-a", "-q")
-	if err != nil {
-		return nil, t.listErr(err, errListContainers)
-	}
-	ids := strings.Fields(string(out))
-	used := map[string]bool{}
-	if len(ids) == 0 {
-		return used, nil
-	}
-	for _, id := range ids {
-		if !containerPattern.MatchString(id) {
-			return nil, errParse
-		}
-	}
-	args := append([]string{"inspect", "--format", "{{.Image}}"}, ids...)
-	out, err = t.docker(ctx, args...)
-	if err != nil {
-		return nil, t.listErr(err, errInspect)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		id := strings.TrimSpace(line)
-		if !registry.ValidDigest(id) {
-			return nil, errParse
-		}
-		used[id] = true
-	}
-	return used, nil
-}
-
-// listErr is the fixed reason for a failed docker call. A missing runner or host
-// is named as such; any other failure is the given sentinel, since the runner's
-// error carries the command's stderr.
-func (t *Target) listErr(err, fallback error) error {
-	if errors.Is(err, errNoRunner) || errors.Is(err, errNoDockerHost) {
-		return err
-	}
-	return fallback
-}
-
 // removePlanned removes each named image and returns the reasons to record. An
 // action whose ref does not validate becomes a Failure before any command runs.
 func (t *Target) removePlanned(ctx context.Context, actions []diskmaint.Action, result *diskmaint.Result) []string {
@@ -283,7 +182,7 @@ func (t *Target) removePlanned(ctx context.Context, actions []diskmaint.Action, 
 			errs = append(errs, err.Error())
 			continue
 		}
-		if _, err := t.docker(ctx, "rmi", id); err != nil {
+		if _, err := t.client().Docker(ctx, "rmi", id); err != nil {
 			result.Failed = append(result.Failed, diskmaint.Failure{Action: a, Err: removeFailed})
 			errs = append(errs, fmt.Sprintf("rmi %s failed; the image is still present", id))
 			continue
@@ -306,16 +205,13 @@ func actionID(a diskmaint.Action) (string, error) {
 	return a.Ref, nil
 }
 
-// ready reports whether the target can reach a daemon at all.
-func (t *Target) ready() error {
-	if t.cfg.Run == nil {
-		return errNoRunner
-	}
-	if t.cfg.DockerHost == "" {
-		return errNoDockerHost
-	}
-	return nil
+// client is the shared docker reader pointed at the target's daemon.
+func (t *Target) client() dockerimg.Client {
+	return dockerimg.Client{Host: t.cfg.DockerHost, Run: t.cfg.Run}
 }
+
+// ready reports whether the target can reach a daemon at all.
+func (t *Target) ready() error { return t.client().Ready() }
 
 // record appends the run's one ledger line.
 func (t *Target) record(plan diskmaint.Plan, result diskmaint.Result, errs []string) error {
@@ -334,27 +230,4 @@ func (t *Target) record(plan diskmaint.Plan, result diskmaint.Result, errs []str
 		return fmt.Errorf("record the apply: %w", err)
 	}
 	return nil
-}
-
-// docker runs docker against the colima daemon with args.
-func (t *Target) docker(ctx context.Context, args ...string) ([]byte, error) {
-	if err := t.ready(); err != nil {
-		return nil, err
-	}
-	return t.cfg.Run(ctx, []string{"DOCKER_HOST=" + t.cfg.DockerHost}, "docker", args...)
-}
-
-// bytes is the image's listed size, or 0 when docker printed one that does not
-// parse: a size is best-effort and never a reason to refuse.
-func (im image) bytes() int64 {
-	i := strings.IndexFunc(im.Size, func(r rune) bool { return !(r >= '0' && r <= '9' || r == '.') })
-	if i <= 0 {
-		return 0
-	}
-	n, err := strconv.ParseFloat(im.Size[:i], 64)
-	mult, ok := sizeUnits[im.Size[i:]]
-	if err != nil || !ok || n < 0 {
-		return 0
-	}
-	return int64(math.Round(n * mult))
 }

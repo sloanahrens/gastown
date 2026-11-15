@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
 )
 
 // dockerHost is a placeholder daemon socket; every test checks it reaches docker.
@@ -68,7 +69,7 @@ func (f *fakeDocker) rmiCalls() []call {
 }
 
 // imageLines renders images as docker image ls --format {{json .}} prints them.
-func imageLines(t *testing.T, images ...image) string {
+func imageLines(t *testing.T, images ...dockerimg.Image) string {
 	t.Helper()
 	var b strings.Builder
 	for _, im := range images {
@@ -113,12 +114,12 @@ func TestPlanRemovesOnlyUnusedDanglingImages(t *testing.T) {
 	unused, inUse := imgID('1'), imgID('2')
 	f := &fakeDocker{
 		images: imageLines(t,
-			image{Repository: none, Tag: none, ID: unused, Size: "1.5GB"},
-			image{Repository: none, Tag: none, ID: inUse, Size: "10MB"},
-			image{Repository: "gastown/app", Tag: "v1", ID: imgID('3'), Size: "200MB"},
-			image{Repository: none, Tag: "v9", ID: imgID('4'), Size: "5MB"},
+			dockerimg.Image{Repository: none, Tag: none, ID: unused, Size: "1.5GB"},
+			dockerimg.Image{Repository: none, Tag: none, ID: inUse, Size: "10MB"},
+			dockerimg.Image{Repository: "gastown/app", Tag: "v1", ID: imgID('3'), Size: "200MB"},
+			dockerimg.Image{Repository: none, Tag: "v9", ID: imgID('4'), Size: "5MB"},
 			// A repeated row for the unused id must not plan its removal twice.
-			image{Repository: none, Tag: none, ID: unused, Size: "1.5GB"},
+			dockerimg.Image{Repository: none, Tag: none, ID: unused, Size: "1.5GB"},
 		),
 		containers: "abc123abc123\n",
 		inspect:    inUse + "\n",
@@ -163,7 +164,7 @@ func TestPlanRemovesOnlyUnusedDanglingImages(t *testing.T) {
 
 func TestPlanRefusesWhenAnInputIsUnreadable(t *testing.T) {
 	t.Parallel()
-	good := imageLines(t, image{Repository: "<none>", Tag: "<none>", ID: imgID('1'), Size: "1MB"})
+	good := imageLines(t, dockerimg.Image{Repository: "<none>", Tag: "<none>", ID: imgID('1'), Size: "1MB"})
 	cases := []struct {
 		name string
 		f    fakeDocker
@@ -172,37 +173,37 @@ func TestPlanRefusesWhenAnInputIsUnreadable(t *testing.T) {
 		{
 			name: "unreadable image list",
 			f:    fakeDocker{imagesErr: errors.New("SECRET stderr")},
-			want: errListImages,
+			want: dockerimg.ErrListImages,
 		},
 		{
 			name: "unreadable container list",
 			f:    fakeDocker{images: good, containersErr: errors.New("SECRET stderr")},
-			want: errListContainers,
+			want: dockerimg.ErrListContainers,
 		},
 		{
 			name: "unreadable container image lookup",
 			f:    fakeDocker{images: good, containers: "abc123abc123\n", inspectErr: errors.New("SECRET stderr")},
-			want: errInspect,
+			want: dockerimg.ErrInspect,
 		},
 		{
 			name: "image line that is not JSON",
 			f:    fakeDocker{images: "not json\n"},
-			want: errParse,
+			want: dockerimg.ErrParse,
 		},
 		{
 			name: "image line with a bad id",
-			f:    fakeDocker{images: imageLines(t, image{Repository: "<none>", Tag: "<none>", ID: "short"})},
-			want: errParse,
+			f:    fakeDocker{images: imageLines(t, dockerimg.Image{Repository: "<none>", Tag: "<none>", ID: "short"})},
+			want: dockerimg.ErrParse,
 		},
 		{
 			name: "container id that does not parse",
 			f:    fakeDocker{images: good, containers: "zz; rm -rf /\n"},
-			want: errParse,
+			want: dockerimg.ErrParse,
 		},
 		{
 			name: "container image line that does not parse",
 			f:    fakeDocker{images: good, containers: "abc123abc123\n", inspect: "not-a-digest\n"},
-			want: errParse,
+			want: dockerimg.ErrParse,
 		},
 	}
 	for _, tc := range cases {
@@ -237,8 +238,8 @@ func TestPlanRefusesWithoutRunnerOrDockerHost(t *testing.T) {
 		cfg  Config
 		want error
 	}{
-		{name: "no runner", cfg: Config{DockerHost: dockerHost}, want: errNoRunner},
-		{name: "no docker host", cfg: Config{Run: (&fakeDocker{}).run}, want: errNoDockerHost},
+		{name: "no runner", cfg: Config{DockerHost: dockerHost}, want: dockerimg.ErrNoRunner},
+		{name: "no docker host", cfg: Config{Run: (&fakeDocker{}).run}, want: dockerimg.ErrNoDockerHost},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -331,8 +332,8 @@ func TestApplyRemovesNothingForRefusedOrEmptyPlan(t *testing.T) {
 		plan    diskmaint.Plan
 		wantErr error
 	}{
-		{name: "refused", plan: diskmaint.Plan{Target: "colima", Refused: errListImages.Error()}, wantErr: errPlanRefused},
-		{name: "refused with actions", plan: diskmaint.Plan{Target: "colima", Refused: errInspect.Error(),
+		{name: "refused", plan: diskmaint.Plan{Target: "colima", Refused: dockerimg.ErrListImages.Error()}, wantErr: errPlanRefused},
+		{name: "refused with actions", plan: diskmaint.Plan{Target: "colima", Refused: dockerimg.ErrInspect.Error(),
 			Actions: []diskmaint.Action{{Kind: "remove-image", Ref: imgID('1')}}}, wantErr: errPlanRefused},
 		{name: "empty", plan: diskmaint.Plan{Target: "colima"}},
 	}
@@ -362,8 +363,8 @@ func TestApplyRefusesWithoutDockerHost(t *testing.T) {
 	target := NewTarget(Config{Run: f.run, Ledger: ledger})
 	plan := diskmaint.Plan{Target: "colima", Actions: []diskmaint.Action{{Kind: "remove-image", Ref: imgID('1')}}}
 
-	if _, err := target.Apply(context.Background(), plan); !errors.Is(err, errNoDockerHost) {
-		t.Fatalf("Apply err = %v, want errNoDockerHost", err)
+	if _, err := target.Apply(context.Background(), plan); !errors.Is(err, dockerimg.ErrNoDockerHost) {
+		t.Fatalf("Apply err = %v, want dockerimg.ErrNoDockerHost", err)
 	}
 	if n := len(f.calls); n != 0 {
 		t.Errorf("Apply without a docker host made %d calls, want none", n)
@@ -402,9 +403,9 @@ func TestApplyReportsLedgerWriteFailure(t *testing.T) {
 func TestMeasureSumsEveryImage(t *testing.T) {
 	t.Parallel()
 	f := &fakeDocker{images: imageLines(t,
-		image{Repository: "<none>", Tag: "<none>", ID: imgID('1'), Size: "1.5GB"},
-		image{Repository: "gastown/app", Tag: "v1", ID: imgID('2'), Size: "200MB"},
-		image{Repository: "<none>", Tag: "<none>", ID: imgID('3'), Size: "0B"},
+		dockerimg.Image{Repository: "<none>", Tag: "<none>", ID: imgID('1'), Size: "1.5GB"},
+		dockerimg.Image{Repository: "gastown/app", Tag: "v1", ID: imgID('2'), Size: "200MB"},
+		dockerimg.Image{Repository: "<none>", Tag: "<none>", ID: imgID('3'), Size: "0B"},
 	)}
 	target, _ := newTarget(t, f)
 
@@ -421,9 +422,9 @@ func TestMeasureCountsAnImageOnceForEachTag(t *testing.T) {
 	t.Parallel()
 	// docker prints one row per tag, each carrying the image's id and size.
 	f := &fakeDocker{images: imageLines(t,
-		image{Repository: "gastown/app", Tag: "v1", ID: imgID('1'), Size: "200MB"},
-		image{Repository: "gastown/app", Tag: "latest", ID: imgID('1'), Size: "200MB"},
-		image{Repository: "<none>", Tag: "<none>", ID: imgID('2'), Size: "50MB"},
+		dockerimg.Image{Repository: "gastown/app", Tag: "v1", ID: imgID('1'), Size: "200MB"},
+		dockerimg.Image{Repository: "gastown/app", Tag: "latest", ID: imgID('1'), Size: "200MB"},
+		dockerimg.Image{Repository: "<none>", Tag: "<none>", ID: imgID('2'), Size: "50MB"},
 	)}
 	target, _ := newTarget(t, f)
 
@@ -444,8 +445,8 @@ func TestMeasureRefusesUnreadableList(t *testing.T) {
 	f := &fakeDocker{imagesErr: errors.New("SECRET stderr")}
 	target, _ := newTarget(t, f)
 
-	if _, err := target.Measure(context.Background()); !errors.Is(err, errListImages) {
-		t.Fatalf("Measure err = %v, want errListImages", err)
+	if _, err := target.Measure(context.Background()); !errors.Is(err, dockerimg.ErrListImages) {
+		t.Fatalf("Measure err = %v, want dockerimg.ErrListImages", err)
 	}
 }
 
@@ -463,7 +464,7 @@ func TestSizeParsing(t *testing.T) {
 		"-1MB":    0,
 	}
 	for size, want := range cases {
-		if got := (image{Size: size}).bytes(); got != want {
+		if got := (dockerimg.Image{Size: size}).Bytes(); got != want {
 			t.Errorf("bytes(%q) = %d, want %d", size, got, want)
 		}
 	}
