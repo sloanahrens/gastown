@@ -206,6 +206,28 @@ func TestSandboxSourceUnlimitedSeat(t *testing.T) {
 	}
 }
 
+// TestSandboxSourceLongMarkerName shows that a marker naming a long, unknown
+// section is refused with an error cut to what a log line carries, rather than
+// with the whole marker the seat printed (gt-kuncsk).
+func TestSandboxSourceLongMarkerName(t *testing.T) {
+	t.Parallel()
+	workspaces := seatWorkspaces(t)
+	now := time.Date(2026, 11, 14, 9, 30, 0, 0, time.UTC)
+	marker := "@@ " + strings.Repeat("x", 4096) + " @@"
+	text := strings.Replace(seatRead(seatFiles()), "@@ memory.max @@", marker, 1)
+
+	_, _, err := SeatRow(seatIdentity(), text, now, nil, workspaces)
+	if err == nil {
+		t.Fatal("a marker naming no cgroup file: no error")
+	}
+	if len(err.Error()) > 200 {
+		t.Errorf("the error is %d bytes, want one cut to a log line", len(err.Error()))
+	}
+	if !strings.Contains(err.Error(), "...") {
+		t.Errorf("the error %q does not mark the name as cut", err.Error())
+	}
+}
+
 // TestSandboxSourceUnreadableSeat covers every text a seat read must refuse:
 // each case writes no row rather than one of zeros (gt-kuncsk). Each row is one
 // reason to fail.
@@ -225,6 +247,9 @@ func TestSandboxSourceUnreadableSeat(t *testing.T) {
 		return seatRead(files)
 	}
 	noName := Seat{Name: "", Rig: "gastown"}
+	named := func(name string) *Seat { return &Seat{Name: name, Rig: "gastown"} }
+	longLabel := strings.Repeat("a", 63)
+	tooLong := strings.Join([]string{longLabel, longLabel, longLabel, longLabel}, ".")
 	for _, test := range []struct {
 		name  string
 		text  string
@@ -255,10 +280,19 @@ func TestSandboxSourceUnreadableSeat(t *testing.T) {
 		{name: "a some line with no avg10", text: with("cpu.pressure", "some avg60=1.00\n")},
 		{name: "an avg10 that is not a number", text: with("cpu.pressure", "some avg10=soon\n")},
 		{name: "a negative avg10", text: with("cpu.pressure", "some avg10=-1.00\n")},
+		{name: "a NaN avg10", text: with("cpu.pressure", "some avg10=NaN\n")},
+		{name: "an infinite avg10", text: with("cpu.pressure", "some avg10=+Inf\n")},
 		{name: "a memory.pressure with an unreadable some avg10", text: with("memory.pressure", "some avg10=soon\nfull avg10=0.50\n")},
 		{name: "a memory.pressure with no full line", text: with("memory.pressure", "some avg10=4.50\n")},
 		{name: "a memory.pressure with an unreadable full avg10", text: with("memory.pressure", "some avg10=4.50\nfull avg10=soon\n")},
 		{name: "a seat with no name", text: healthy, seat: &noName},
+		{name: "a seat name with a space", text: healthy, seat: named("mango toast")},
+		{name: "a seat name starting with a dash", text: healthy, seat: named("-mango")},
+		{name: "a seat name ending with a dash", text: healthy, seat: named("mango-")},
+		{name: "an uppercase seat name", text: healthy, seat: named("Mango-toast")},
+		{name: "a seat name with an empty label", text: healthy, seat: named("mango..toast")},
+		{name: "a seat name whose label is too long", text: healthy, seat: named(strings.Repeat("a", 64))},
+		{name: "a seat name longer than 253 bytes", text: healthy, seat: named(tooLong)},
 		{name: "a seat with no workspace map", text: healthy, noMap: true},
 	} {
 		seat := seatIdentity()

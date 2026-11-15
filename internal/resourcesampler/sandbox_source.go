@@ -24,9 +24,11 @@ const (
 	seatComponent = "seat"
 )
 
-// seatCgroupFiles are the cgroup files one seat read prints, and so the
-// sections the parser requires. cpu.stat and memory.current are the reading
-// itself; the rest are null when the kernel does not publish them.
+// seatCgroupFiles are the cgroup files one seat read prints. The parser
+// requires a section for every one of them: a file the kernel does not publish
+// is printed as a marker with no text after it, never as a missing section.
+// cpu.stat and memory.current are the reading itself; the rest are null when
+// their section carries no text.
 var seatCgroupFiles = []string{"cpu.stat", "memory.current", "memory.max", "cpu.pressure", "memory.pressure"}
 
 // seatCgroupMarker is the line a seat read prints before each file's text:
@@ -37,6 +39,8 @@ var seatCgroupMarker = regexp.MustCompile(`^@@ (\S+) @@$`)
 // Seat is the identity a live seat's row carries, read from its sandbox record.
 type Seat struct {
 	// Name is the sandbox name the seat's exec addresses: the record's session.
+	// SeatRow refuses one that is not a sandbox name, since the name becomes an
+	// exec argument.
 	Name    string
 	Rig     string
 	Polecat string
@@ -70,10 +74,14 @@ type seatCgroup struct {
 //
 // The text is what one read of the seat's cgroup files prints: for each file in
 // seatCgroupFiles, a marker line naming it and then its contents, and a closing
-// "@@ end @@" marker.
+// "@@ end @@" marker. A file the kernel does not publish is printed as its
+// marker with no text after it, so every file keeps its section.
 func SeatRow(seat Seat, text string, now time.Time, previous *SeatReading, workspaces *workspaceid.Map) (Row, SeatReading, error) {
 	if seat.Name == "" {
 		return Row{}, SeatReading{}, errors.New("sandbox source: the seat has no name")
+	}
+	if !validSeatName(seat.Name) {
+		return Row{}, SeatReading{}, fmt.Errorf("sandbox source: seat name %s is not a sandbox name", shorten(seat.Name))
 	}
 	if workspaces == nil {
 		return Row{}, SeatReading{}, errors.New("sandbox source: no workspace map")
@@ -132,11 +140,12 @@ func seatCPU(reading SeatReading, previous *SeatReading) (float64, *float64) {
 	return interval.Seconds(), &pct
 }
 
-// parseSeatCgroup reads a seat's cgroup text into its readings. The CPU and
-// memory readings are required, and a text without them is an error that drops
-// the seat's row. The limit and the pressures are null when the kernel does not
-// publish them, and an error when the file is there without a readable value,
-// so a damaged read is never reported as an absent one.
+// parseSeatCgroup reads a seat's cgroup text into its readings. cpu.stat and
+// memory.current carry the reading itself, so a section without a value there
+// is an error that drops the seat's row. memory.max and the pressure files are
+// null when their section carries no text, which is how the read prints a file
+// the kernel does not publish; a section that carries text without a readable
+// value is an error, so a damaged reading is never reported as an absent one.
 func parseSeatCgroup(text string) (seatCgroup, error) {
 	sections, err := splitSeatCgroup(text)
 	if err != nil {
@@ -197,7 +206,7 @@ func splitSeatCgroup(text string) (map[string]string, error) {
 		}
 		name := match[1]
 		if ended {
-			return nil, fmt.Errorf("the read prints %q after its end marker", name)
+			return nil, fmt.Errorf("the read prints %s after its end marker", shorten(name))
 		}
 		if name == "end" {
 			flush()
@@ -205,11 +214,11 @@ func splitSeatCgroup(text string) (map[string]string, error) {
 			continue
 		}
 		if !slices.Contains(seatCgroupFiles, name) {
-			return nil, fmt.Errorf("the read prints %q, which is not one of the seat's cgroup files", name)
+			return nil, fmt.Errorf("the read prints %s, which is not one of the seat's cgroup files", shorten(name))
 		}
 		flush()
 		if _, duplicate := sections[name]; duplicate {
-			return nil, fmt.Errorf("the read prints %s twice", name)
+			return nil, fmt.Errorf("the read prints %s twice", shorten(name))
 		}
 		current, body = name, nil
 	}
@@ -254,7 +263,7 @@ func parseCgroupBytes(name, text string) (int64, error) {
 }
 
 // parseMemoryMax reads memory.max, which is null for no limit: the file prints
-// "max" for it, and a kernel that does not publish the file leaves no text.
+// "max" for it, and a file the kernel does not publish reads as an empty text.
 func parseMemoryMax(text string) (*int64, error) {
 	value := strings.TrimSpace(text)
 	if value == "" || value == "max" {
@@ -268,8 +277,10 @@ func parseMemoryMax(text string) (*int64, error) {
 }
 
 // parsePressure reads one line's avg10 from a PSI file's text: the "some" or
-// "full" line. An empty text is a kernel that publishes no pressure, which is
-// null; a line that is there without a readable avg10 is an error.
+// "full" line. An empty text is a file the kernel does not publish, which is
+// null; a line that is there without a readable avg10 is an error. The reading
+// must be a finite number, since a NaN or an infinity cannot be written to the
+// row's JSON.
 func parsePressure(file, line, text string) (*float64, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, nil
@@ -285,13 +296,37 @@ func parsePressure(file, line, text string) (*float64, error) {
 				continue
 			}
 			pct, err := strconv.ParseFloat(value, 64)
-			if err != nil || pct < 0 {
+			if err != nil || pct < 0 || math.IsNaN(pct) || math.IsInf(pct, 0) {
 				return nil, fmt.Errorf("%s's %s avg10 %s is not a percentage", file, line, shorten(value))
 			}
 			return &pct, nil
 		}
 	}
 	return nil, fmt.Errorf("%s has no readable %s avg10", file, line)
+}
+
+// validSeatName reports whether name has the shape a kubernetes object name
+// has: a DNS subdomain, which is the rule the control node read applies to the
+// name it puts in a request path (internal/daemon/attention_host_node.go). The
+// seat name becomes an exec argument, so one outside that shape is refused
+// rather than passed on. The rule is restated here because package daemon
+// imports this one, and cannot be imported back.
+func validSeatName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // optionalString is the row's pointer field for an identity the record may not
