@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -224,6 +225,7 @@ func TestHowCardCommandRunsTheCard(t *testing.T) {
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("card", true, "")
+	cmd.Flags().Bool("hook-json", false, "")
 	cmd.SetOut(&out)
 	if err := runHowCmd(cmd, nil); err != nil {
 		t.Fatalf("runHowCmd with --card: %v", err)
@@ -437,5 +439,328 @@ func TestHowCardIsNotARoleDirective(t *testing.T) {
 	}
 	if row := rowFor("polecat"); strings.Contains(row, "UNUSED") {
 		t.Errorf("gt directive list flags a role directive as unused: %q", row)
+	}
+}
+
+// howHookEnv returns a getenv over env: a key the map does not name reads "",
+// as an unset variable does.
+func howHookEnv(env map[string]string) func(string) string {
+	return func(key string) string { return env[key] }
+}
+
+// TestHowCardHookJSON drives the context decision: the overseer, named by either
+// identity value, reads the card and the re-read line, while a bird, a polecat
+// and a session with no identity read today's restore text.
+func TestHowCardHookJSON(t *testing.T) {
+	t.Parallel()
+
+	card, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+	overseerText := card + howHookJSONRestoreText + "\n"
+	otherText := howHookJSONRestoreText + "\n"
+
+	tests := []struct {
+		name      string
+		actor     string
+		agentName string
+		want      string
+		wantCard  bool
+	}{
+		{
+			name:     "the actor names the overseer",
+			actor:    overseerActor,
+			want:     overseerText,
+			wantCard: true,
+		},
+		{
+			name:      "the agent name names the overseer",
+			agentName: overseerAgentName,
+			want:      overseerText,
+			wantCard:  true,
+		},
+		{
+			name:      "both identity values name the overseer",
+			actor:     overseerActor,
+			agentName: overseerAgentName,
+			want:      overseerText,
+			wantCard:  true,
+		},
+		{
+			name:     "a padded actor still names the overseer",
+			actor:    "  " + overseerActor + " ",
+			want:     overseerText,
+			wantCard: true,
+		},
+		{
+			name:      "a bird reads today's text",
+			actor:     "town/crew/eagle",
+			agentName: "eagle",
+			want:      otherText,
+		},
+		{
+			name:  "a polecat reads today's text",
+			actor: "gastown/polecats/valkyrie",
+			want:  otherText,
+		},
+		{
+			name: "no identity reads today's text",
+			want: otherText,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := howHookJSONContext(tc.actor, tc.agentName, howDefault{taskmap.Default()}, overseerCardRules)
+			if err != nil {
+				t.Fatalf("howHookJSONContext(%q, %q): %v", tc.actor, tc.agentName, err)
+			}
+			if got != tc.want {
+				t.Errorf("howHookJSONContext(%q, %q) = %q, want %q", tc.actor, tc.agentName, got, tc.want)
+			}
+			if hasCard := strings.HasPrefix(got, overseerCardTitle+"\n"); hasCard != tc.wantCard {
+				t.Errorf("howHookJSONContext(%q, %q) carries the card = %v, want %v", tc.actor, tc.agentName, hasCard, tc.wantCard)
+			}
+			if tc.wantCard && !strings.HasSuffix(got, howHookJSONRestoreText+"\n") {
+				t.Errorf("howHookJSONContext(%q, %q) does not end with the restore line: %q", tc.actor, tc.agentName, got)
+			}
+		})
+	}
+}
+
+// TestHowCardHookJSONReturnsALoaderError checks a card that cannot be built
+// fails the hook output rather than sending the session text without its card.
+func TestHowCardHookJSONReturnsALoaderError(t *testing.T) {
+	t.Parallel()
+
+	loadErr := errors.New("the rule file could not be read")
+	context, err := howHookJSONContext(overseerActor, "", howFixture(), func() ([]string, error) {
+		return nil, loadErr
+	})
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("howHookJSONContext error = %v, want the loader's %v", err, loadErr)
+	}
+	if context != "" {
+		t.Errorf("howHookJSONContext returned %q with the loader's error, want no context", context)
+	}
+}
+
+// TestHowCardHookJSONIdentityFromEnv checks the two identity values read from
+// the environment: BEADS_ACTOR, then BD_ACTOR for a spawned crew session, and
+// CLAUDE_AGENT_NAME for a bird.
+func TestHowCardHookJSONIdentityFromEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		env       map[string]string
+		wantActor string
+		wantAgent string
+	}{
+		{
+			name:      "BEADS_ACTOR is the actor",
+			env:       map[string]string{"BEADS_ACTOR": overseerActor},
+			wantActor: overseerActor,
+		},
+		{
+			name:      "BD_ACTOR is the actor when BEADS_ACTOR is unset",
+			env:       map[string]string{"BD_ACTOR": "town/crew/overseer"},
+			wantActor: "town/crew/overseer",
+		},
+		{
+			name:      "BEADS_ACTOR leads BD_ACTOR",
+			env:       map[string]string{"BEADS_ACTOR": "town/crew/dunlin", "BD_ACTOR": "town/crew/overseer"},
+			wantActor: "town/crew/dunlin",
+		},
+		{
+			name:      "a blank BEADS_ACTOR falls to BD_ACTOR",
+			env:       map[string]string{"BEADS_ACTOR": "  ", "BD_ACTOR": "town/crew/overseer"},
+			wantActor: "town/crew/overseer",
+		},
+		{
+			name:      "the agent name comes from CLAUDE_AGENT_NAME",
+			env:       map[string]string{"CLAUDE_AGENT_NAME": "eagle"},
+			wantAgent: "eagle",
+		},
+		{
+			name: "no variable set names no identity",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			actor, agent := howHookIdentity(howHookEnv(tc.env))
+			if actor != tc.wantActor {
+				t.Errorf("actor = %q, want %q", actor, tc.wantActor)
+			}
+			if agent != tc.wantAgent {
+				t.Errorf("agent name = %q, want %q", agent, tc.wantAgent)
+			}
+		})
+	}
+}
+
+// TestHowCardHookJSONRefusesAnArgument checks --hook-json refuses a group or
+// word rather than answer as if the argument had chosen part of the context,
+// and that nothing reaches the writer.
+func TestHowCardHookJSONRefusesAnArgument(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	err := runHowHookJSON(&out, howFixture(), howHookEnv(nil), overseerCardRules, []string{"roll"})
+	if err == nil {
+		t.Fatal("runHowHookJSON accepted an argument, want an error")
+	}
+	if !strings.Contains(err.Error(), "roll") {
+		t.Errorf("runHowHookJSON error %q does not name the argument", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowHookJSON wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardHookJSONReturnsAWriteError checks the writer's error reaches the
+// caller, so a hook whose output could not be delivered does not report success.
+func TestHowCardHookJSONReturnsAWriteError(t *testing.T) {
+	t.Parallel()
+
+	if err := runHowHookJSON(failingHowWriter{}, howFixture(), howHookEnv(nil), overseerCardRules, nil); err == nil {
+		t.Fatal("runHowHookJSON swallowed the writer's error")
+	}
+}
+
+// TestHowCardHookJSONWritesTheSessionStartOutput checks the wire form: one
+// SessionStart JSON document whose additionalContext is the decided text.
+func TestHowCardHookJSONWritesTheSessionStartOutput(t *testing.T) {
+	t.Parallel()
+
+	card, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "the overseer",
+			env:  map[string]string{"BEADS_ACTOR": overseerActor},
+			want: card + howHookJSONRestoreText + "\n",
+		},
+		{
+			name: "a bird",
+			env:  map[string]string{"BEADS_ACTOR": "town/crew/eagle", "CLAUDE_AGENT_NAME": "eagle"},
+			want: howHookJSONRestoreText + "\n",
+		},
+		{
+			name: "no identity",
+			want: howHookJSONRestoreText + "\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var out bytes.Buffer
+			if err := runHowHookJSON(&out, howDefault{taskmap.Default()}, howHookEnv(tc.env), overseerCardRules, nil); err != nil {
+				t.Fatalf("runHowHookJSON: %v", err)
+			}
+			var got howHookJSONOutput
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatalf("runHowHookJSON wrote %q, want one JSON document: %v", out.String(), err)
+			}
+			if got.HookSpecificOutput.HookEventName != howHookJSONEventName {
+				t.Errorf("hookEventName = %q, want %q", got.HookSpecificOutput.HookEventName, howHookJSONEventName)
+			}
+			if got.HookSpecificOutput.AdditionalContext != tc.want {
+				t.Errorf("additionalContext = %q, want %q", got.HookSpecificOutput.AdditionalContext, tc.want)
+			}
+		})
+	}
+}
+
+// TestHowCardHookJSONCommandRunsTheHookJSON drives runHowCmd with --hook-json on
+// the command it reads, so deleting the flag branch fails here even though
+// runHowHookJSON still writes the JSON. The process environment decides the
+// branch, so both texts are accepted; the listing a deleted branch would print
+// does not parse as JSON.
+func TestHowCardHookJSONCommandRunsTheHookJSON(t *testing.T) {
+	t.Parallel()
+
+	if howCmd.Flags().Lookup("hook-json") == nil {
+		t.Fatal("gt how registers no --hook-json flag")
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("card", true, "")
+	cmd.Flags().Bool("hook-json", true, "")
+	cmd.SetOut(&out)
+	if err := runHowCmd(cmd, nil); err != nil {
+		t.Fatalf("runHowCmd with --hook-json: %v", err)
+	}
+
+	var got howHookJSONOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("gt how --hook-json wrote %q, want one JSON document: %v", out.String(), err)
+	}
+	if got.HookSpecificOutput.HookEventName != howHookJSONEventName {
+		t.Errorf("hookEventName = %q, want %q", got.HookSpecificOutput.HookEventName, howHookJSONEventName)
+	}
+
+	card, err := howCardText(howDefault{taskmap.Default()}, overseerCardRules)
+	if err != nil {
+		t.Fatalf("howCardText: %v", err)
+	}
+	overseerText := card + howHookJSONRestoreText + "\n"
+	otherText := howHookJSONRestoreText + "\n"
+	if context := got.HookSpecificOutput.AdditionalContext; context != overseerText && context != otherText {
+		t.Errorf("additionalContext = %q, want the overseer's card and re-read line or today's text", context)
+	}
+}
+
+// TestHowCardHookJSONCommandRefusesACommandWithoutTheFlag checks runHowCmd fails
+// closed when the command carries --card but no --hook-json: an unreadable flag
+// must not fall through to a listing.
+func TestHowCardHookJSONCommandRefusesACommandWithoutTheFlag(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("card", false, "")
+	cmd.SetOut(&out)
+	err := runHowCmd(cmd, nil)
+	if err == nil {
+		t.Fatal("runHowCmd ran without a --hook-json flag, want an error")
+	}
+	if !strings.Contains(err.Error(), "hook-json") {
+		t.Errorf("runHowCmd error %q does not name the flag", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowCmd wrote %q before refusing", out.String())
+	}
+}
+
+// TestHowCardHookJSONReturnsALoaderErrorThroughTheCommand checks the command's
+// entry point hands a failed card loader back to the caller, so no text without
+// the card reaches the hook.
+func TestHowCardHookJSONReturnsALoaderErrorThroughTheCommand(t *testing.T) {
+	t.Parallel()
+
+	loadErr := errors.New("the rule file could not be read")
+	var out bytes.Buffer
+	err := runHowHookJSON(&out, howFixture(), howHookEnv(map[string]string{"BEADS_ACTOR": overseerActor}), func() ([]string, error) {
+		return nil, loadErr
+	}, nil)
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("runHowHookJSON error = %v, want the loader's %v", err, loadErr)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runHowHookJSON wrote %q with the loader's error, want nothing", out.String())
 	}
 }

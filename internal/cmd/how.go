@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -67,12 +68,18 @@ With --card, print the overseer card instead of the listing: its title, the
 lookup rule, every task group with its one-line description, then the card's
 rule lines. It takes no group or word.
 
+With --hook-json, print Claude Code's SessionStart hook output instead: its
+additionalContext is the card and the re-read line when the session is the
+overseer (its actor is town/crew/overseer, or its agent name is overseer), and
+today's restore text for any other session. It takes no group or word.
+
 Examples:
   gt how
   gt how roll
   gt how install
   gt how roll --history
-  gt how --card`,
+  gt how --card
+  gt how --hook-json`,
 	Args:         cobra.MaximumNArgs(1),
 	RunE:         runHowCmd,
 	SilenceUsage: true,
@@ -87,6 +94,13 @@ func runHowCmd(cmd *cobra.Command, args []string) error {
 	card, err := cmd.Flags().GetBool("card")
 	if err != nil {
 		return fmt.Errorf("read --card: %w", err)
+	}
+	hookJSON, err := cmd.Flags().GetBool("hook-json")
+	if err != nil {
+		return fmt.Errorf("read --hook-json: %w", err)
+	}
+	if hookJSON {
+		return runHowHookJSON(cmd.OutOrStdout(), m, os.Getenv, overseerCardRules, args)
 	}
 	if card {
 		return runHowCard(cmd.OutOrStdout(), m, args)

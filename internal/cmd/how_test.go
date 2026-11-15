@@ -185,6 +185,7 @@ func howRealMap(t *testing.T, args ...string) string {
 	// the flag the command would be one production never builds.
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("card", false, "")
+	cmd.Flags().Bool("hook-json", false, "")
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	if err := runHowCmd(cmd, args); err != nil {
