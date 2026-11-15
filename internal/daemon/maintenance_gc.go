@@ -869,7 +869,7 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// own quiet guard still holds for the write. The per-database
 		// outcomes are the archive request path's; the cycle's gc decisions need
 		// only the unarchived set.
-		_, unarchived, _ := d.maintenanceArchive(databases)
+		unarchived, _ := d.maintenanceArchive(databases)
 		// Backup next (maintenance_backup.go); the gc only runs once the
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)

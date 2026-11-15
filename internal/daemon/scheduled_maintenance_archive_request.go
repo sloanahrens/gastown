@@ -173,7 +173,7 @@ func (d *Daemon) serveArchiveRequest(req update.RequestFile) {
 	d.logger.Printf("scheduled_maintenance: archive request for run %s: %d database(s) discovered", req.RunID, len(databases))
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
-		_, _, outcomes := d.maintenanceArchive(databases)
+		_, outcomes := d.maintenanceArchive(databases)
 		detail, outcome := archiveRequestDetail(databases, outcomes)
 		d.logger.Printf("scheduled_maintenance: archive request for run %s %s", req.RunID, outcome)
 		d.answerArchive(req, outcome, detail)

@@ -368,7 +368,7 @@ func archiveRunFailure(databases []string, err error) (map[string]bool, map[stri
 // the archive unrun for days (gt-3b4iou). A misconfigured directory, batch
 // bound or budget is a failure: it does not stop the backup, and it skips the
 // gc of every database.
-func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, map[string]bool, map[string]archiveDatabaseOutcome) {
+func (d *Daemon) maintenanceArchive(databases []string) (map[string]bool, map[string]archiveDatabaseOutcome) {
 	dir, err := d.maintenanceArchiveDir()
 	if err != nil {
 		// A set directory the daemon cannot use is a misconfiguration, not
@@ -380,7 +380,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 				"Fix %s in the daemon config; until then a flatten discards history it has not written out.",
 			err, maintenanceArchiveDirKey))
 		unarchived, outcomes := archiveRunFailure(databases, err)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
+		return unarchived, outcomes
 	}
 	if dir == "" {
 		// Once per run, not once per database: the step is off, not broken.
@@ -388,7 +388,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 		// No gc is skipped (the second return is nil), but a request path that
 		// somehow got here is told, per database, that nothing was archived.
 		_, outcomes := archiveRunFailure(databases, fmt.Errorf("%s is unset in the daemon config — history archiving is off", maintenanceArchiveDirKey))
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}, nil, outcomes
+		return nil, outcomes
 	}
 	// A bound the step cannot read is refused before any database is touched,
 	// like a bad directory: the reads would otherwise each fail with the same
@@ -401,7 +401,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 				"Fix the history archive's batch bound in the daemon config; until then a flatten discards history it has not written out.",
 			err))
 		unarchived, outcomes := archiveRunFailure(databases, err)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
+		return unarchived, outcomes
 	}
 	// The budget is refused the same way and in the same place: an unreadable
 	// value would otherwise end every database's loop at once, one error per
@@ -414,7 +414,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 				"Fix %s in the daemon config; until then a flatten discards history it has not written out.",
 			err, config.MaintenanceArchiveBudgetKey))
 		unarchived, outcomes := archiveRunFailure(databases, err)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
+		return unarchived, outcomes
 	}
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
@@ -426,7 +426,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 				"No database's dolt_log or events was archived this run. A flatten discards history it has not written out.",
 			err))
 		unarchived, outcomes := archiveRunFailure(databases, err)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
+		return unarchived, outcomes
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		d.logger.Printf("scheduled_maintenance: archive: cannot create %s: %v — no history archived this run", dir, err)
@@ -435,7 +435,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 				"No database's dolt_log or events was archived this run. A flatten discards history it has not written out.",
 			dir, err))
 		unarchived, outcomes := archiveRunFailure(databases, err)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
+		return unarchived, outcomes
 	}
 	// MkdirAll leaves an existing directory's mode alone, so a directory this
 	// step did not create (or one made under a looser umask) can stay
@@ -500,7 +500,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 				"The gc of those databases is skipped until their archive completes. Archiving to %s.",
 			len(failed), strings.Join(failed, "\n"), dir))
 	}
-	return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived, outcomes
+	return unarchived, outcomes
 }
 
 // logArchiveStop reports the per-cycle stops that can leave a database behind,
