@@ -1138,7 +1138,7 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 // TestCIEngineSizeAfterIsReadFromDu: the size after a removal is du's first field.
 // A du that fails, prints nothing or prints a non-number is a failed run that says
 // so, and the removals still ran. A du that exits 1 is a failure whatever its
-// stdout, unless every stderr line is the vanishing-file report.
+// stdout, unless every stderr line is du's own vanishing-file report.
 func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 	t.Parallel()
 	listing := engListing(t,
@@ -1167,6 +1167,14 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 		"du exits 1 with vanished files and a non-KiB": {
 			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "lots\n", stderr: "du: " + root + "/volumes/aaa: No such file or directory\n"}},
 			"du of the data root failed (exit status 1, stderr: du: " + root + "/volumes/aaa: No such file or directory)",
+		},
+		"du exits 1 with another program's vanish line": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "sh: 1: ci-entrypoint: No such file or directory\n"}},
+			"du of the data root failed (exit status 1, stderr: sh: 1: ci-entrypoint: No such file or directory)",
+		},
+		"du exits 1 with a vanish line and another program's": {
+			engineRemoveAnswers{duReply: &cliReply{code: 1, stdout: "10485760\t" + root + "\n", stderr: "du: cannot access '" + root + "/volumes/aaa': No such file or directory\ncp: cannot stat '" + root + "/volumes/bbb': No such file or directory\n"}},
+			"du of the data root failed (exit status 1, stderr: du: cannot access '" + root + "/volumes/aaa': No such file or directory)",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1200,6 +1208,8 @@ func TestCIEngineSizeAfterAcceptsAVanishedFile(t *testing.T) {
 	for name, stderr := range map[string]string{
 		"two vanished volumes": "du: " + root + "/volumes/aaa: No such file or directory\n" +
 			"du: " + root + "/volumes/bbb: No such file or directory\n",
+		"du's own report wording": "du: cannot access '" + root + "/volumes/aaa': No such file or directory\n" +
+			"du: cannot read directory '" + root + "/volumes/bbb': No such file or directory\n",
 		"a kubectl warning alongside": "Warning: a transient kubectl line\n" +
 			"du: " + root + "/volumes/aaa: No such file or directory\n",
 	} {
