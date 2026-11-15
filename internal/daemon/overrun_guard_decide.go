@@ -86,6 +86,13 @@ const (
 	// not resolve. The count stops at the cap. A stop short of it holds the bead
 	// and retries on the next tick.
 	overrunOriginReadMaxAttempts = 5
+	// overrunOriginRaiseMaxAttempts is how many failed raises of the cap's
+	// high-severity item a stop tolerates, one per tick, before it hands the
+	// bead back without one. The raise comes before the hand-back so a bead is
+	// never released without its item, but an escalation store that stays down
+	// would otherwise hold the bead for good: the drop is recorded in the town
+	// feed and the hand-back note carries the reason.
+	overrunOriginRaiseMaxAttempts = 5
 	// overrunCommentMaxAttempts is how many failed bead comments a scheduled
 	// stop tolerates, one per tick, before it ends without one.
 	overrunCommentMaxAttempts = 5
@@ -376,10 +383,20 @@ type overrunState struct {
 	// path of this stop (overrunStop, step 2b): a read that returned an error,
 	// a record naming no branch, and a worktree that did not resolve. It is
 	// capped at overrunOriginReadMaxAttempts and cleared when a later read of
-	// origin succeeds (or is no longer needed), so a stop that cannot learn
-	// whether the gone sandbox's work reached origin keeps the bead with a
-	// record of how long it has tried.
+	// origin succeeds (or is no longer needed). Short of the cap the stop holds
+	// the bead with a record of how long it has tried; at the cap it gives up
+	// on the read, keeps the sandbox's record and hands the bead back with the
+	// reason and a high-severity item.
 	OriginReadFailures int `json:"origin_read_failures,omitempty"`
+
+	// OriginReadRaiseFailures counts the failed raises of that high-severity
+	// item, one per tick once OriginReadFailures reached its cap. A failed
+	// raise holds the bead so it is never handed back without its item, up to
+	// overrunOriginRaiseMaxAttempts; past that bound the bead is handed back
+	// anyway, since a failed raise is already recorded in the town feed as a
+	// dropped escalation and the hand-back note carries the reason. It is
+	// cleared with OriginReadFailures.
+	OriginReadRaiseFailures int `json:"origin_read_raise_failures,omitempty"`
 
 	// SandboxDiverged is set when the sandbox's push was refused because its
 	// branch diverged from origin (overrunStop, step 2b). It holds the hand-back

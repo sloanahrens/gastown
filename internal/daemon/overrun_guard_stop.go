@@ -419,22 +419,37 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			// the reason in the note (gt-3ignmh). The item is raised at high
 			// severity because the work may be nowhere, and raised before the
 			// hand-back: a failed raise holds the stop for the next tick, so the
-			// bead is never released without its item.
+			// bead is never released without its item. That hold is bounded by
+			// overrunOriginRaiseMaxAttempts, because an escalation store that
+			// stays down would otherwise hold the bead for good (gt-cfu238).
 			originReadGaveUp = oneLineReason(err)
 			message := fmt.Sprintf("the overrun stop of %s on %s could not read origin for branch %s after %d attempts, and the seat's sandbox is gone: %s. The seat's commits may be nowhere; the sandbox record is kept and the seat stays paused.",
 				who, st.Bead, branch, st.OriginReadFailures, originReadGaveUp)
-			if rerr := d.escalateAlertSeverity("HIGH", "overrun-sandbox-gone-unreadable:"+who+":"+st.Bead, overrunActor, message); rerr != nil {
-				d.logger.Printf("overrun_guard: WARNING: %s: the high-severity item for %s was not raised, so the bead is not handed back yet: %s",
-					who, st.Bead, oneLineReason(rerr))
-				save()
-				return
+			raiseErr := d.escalateAlertSeverity("HIGH", "overrun-sandbox-gone-unreadable:"+who+":"+st.Bead, overrunActor, message)
+			if raiseErr != nil {
+				if st.OriginReadRaiseFailures < overrunOriginRaiseMaxAttempts {
+					st.OriginReadRaiseFailures++
+				}
+				if st.OriginReadRaiseFailures < overrunOriginRaiseMaxAttempts {
+					d.logger.Printf("overrun_guard: WARNING: %s: the high-severity item for %s was not raised, so the bead is not handed back yet (%d of %d): %s",
+						who, st.Bead, st.OriginReadRaiseFailures, overrunOriginRaiseMaxAttempts, oneLineReason(raiseErr))
+					save()
+					return
+				}
+				d.logger.Printf("overrun_guard: WARNING: %s: the high-severity item for %s was not raised after %d attempts, so the bead is handed back without it: %s",
+					who, st.Bead, st.OriginReadRaiseFailures, oneLineReason(raiseErr))
 			}
 			sandboxKept = true
 			if !save() {
 				return
 			}
-			d.logger.Printf("overrun_guard: stop %s on %s: origin could not be read for branch %s after %d attempts, giving up; the sandbox record is kept and the bead is handed back with a high-severity item: %v",
-				who, st.Bead, branch, st.OriginReadFailures, err)
+			if raiseErr == nil {
+				d.logger.Printf("overrun_guard: stop %s on %s: origin could not be read for branch %s after %d attempts, giving up; the sandbox record is kept and the bead is handed back with a high-severity item: %v",
+					who, st.Bead, branch, st.OriginReadFailures, err)
+			} else {
+				d.logger.Printf("overrun_guard: stop %s on %s: origin could not be read for branch %s after %d attempts, giving up; the sandbox record is kept and the bead is handed back though no high-severity item could be raised: %v",
+					who, st.Bead, branch, st.OriginReadFailures, err)
+			}
 		case errors.Is(err, errSandboxRecordCorrupt):
 			sandboxKept = true
 			d.logger.Printf("overrun_guard: WARNING: stop %s on %s: sandbox record unreadable, sandbox kept; handing the bead back with a note: %v", who, st.Bead, err)
@@ -460,11 +475,12 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// step, a save that gave up, a sandbox kept for good), or it left no read
 	// to retry (origin answered, the record did not parse, the push diverged).
 	// A count left by an earlier tick would otherwise outlive the read it was
-	// counting (gt-7xp2jh). The give-up at the cap is the one exception: its
-	// hand-back note names how many attempts the stop made, so the count stays
-	// in the state it finishes with.
-	if originReadGaveUp == "" && st.OriginReadFailures != 0 {
-		st.OriginReadFailures = 0
+	// counting (gt-7xp2jh). The failed raises of the item that count held are
+	// cleared with it, for the same reason (gt-cfu238). The give-up at the cap
+	// is the one exception: its hand-back note names how many attempts the stop
+	// made, so both counts stay in the state it finishes with.
+	if originReadGaveUp == "" && (st.OriginReadFailures != 0 || st.OriginReadRaiseFailures != 0) {
+		st.OriginReadFailures, st.OriginReadRaiseFailures = 0, 0
 		if !save() {
 			return
 		}
@@ -601,6 +617,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		notes = append(notes, fmt.Sprintf("Origin could not be read for branch %s after %d attempts (%s), so whether the seat's gone sandbox got its work out is unknown: "+
 			"the commits may be nowhere. The sandbox's record is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
 			branch, st.OriginReadFailures, originReadGaveUp, who))
+		if st.OriginReadRaiseFailures >= overrunOriginRaiseMaxAttempts {
+			notes = append(notes, fmt.Sprintf("The high-severity item for this was not raised after %d attempts; the town feed holds a dropped-escalation record for it instead.",
+				st.OriginReadRaiseFailures))
+		}
 	} else if sandboxKept {
 		notes = append(notes, fmt.Sprintf("The seat's sandbox could not be removed: its record is unreadable, so it may hold commits that were never pushed. "+
 			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.", who))
@@ -1057,7 +1077,9 @@ var errSandboxGone = errors.New("sandbox is gone")
 // cannot ask origin what it holds for the seat's branch: the read failed, the
 // sandbox record named no branch, or the seat's worktree did not resolve. The
 // stop counts it in overrunState.OriginReadFailures and holds the bead, because
-// the sandbox is gone and only origin can say whether its work got out.
+// the sandbox is gone and only origin can say whether its work got out; at
+// overrunOriginReadMaxAttempts it gives up, keeps the sandbox's record and
+// hands the bead back with the reason and a high-severity item.
 var errOriginReadUnknown = errors.New("origin could not be read")
 
 // overrunSandboxGone maps the sandbox runner's "already gone" answer to
