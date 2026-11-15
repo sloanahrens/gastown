@@ -271,6 +271,10 @@ type updateSeams struct {
 	// InPod reports whether this process runs in a pod, which --pod-in-cluster
 	// requires. Nil reports false, so an in-cluster run with no seam is refused.
 	InPod func() bool
+	// WriteTownValues writes the town's own values file after an ok pod roll, the
+	// copy the render and the pair-ready check read. A nil seam writes through
+	// imagevalues.Write rather than skip the write.
+	WriteTownValues func(path string, v imagevalues.Values) error
 }
 
 // inPod reports whether the run's process is in a pod: a nil InPod is not.
@@ -295,6 +299,9 @@ func productionUpdateSeams() updateSeams {
 		ImageSwap:    realImageSwap,
 		PodRun:       realRunFunc(),
 		InPod:        func() bool { return runsInPod(os.Getenv) },
+		// A pod roll leaves the town's own values file at the pair it rolled to,
+		// so the town's readers see it without an overseer copying the file.
+		WriteTownValues: imagevalues.Write,
 		Notifier: func(townRoot string) notify.Notifier {
 			return &notify.CLI{Dir: townRoot}
 		},
@@ -441,6 +448,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	// Dolt data; the host runs that cycle. The plan's other steps are planned as
 	// they are for any run.
 	opts.PodTarget = pod != nil
+	// imagesValues is the pair the run installs, kept for the town's own copy of
+	// the file an ok pod roll writes.
+	var imagesValues imagevalues.Values
 	// A pod target installs the commit its images file records: main's tip keeps
 	// moving while the pair for one green commit is rolled, and the digest install
 	// refuses a file for any other commit than the run's target.
@@ -450,6 +460,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 			return fmt.Errorf("the --images values file: %w", err)
 		}
 		opts.ImagesCommit = values.Commit
+		imagesValues = values
 	}
 	// Only the digest install skips the host install under a pod target. A pod
 	// target with the install step selected and no --images is refused before
@@ -477,6 +488,15 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 			return NewSilentExit(1)
 		}
 	}
+	// A pod roll that ends ok leaves the town's own values file at the pair it
+	// rolled to: the render and the pair-ready check read that copy, and one left
+	// stale rolls the daemon back on the next render. The recorded outcome stays
+	// what the run reported, so a failed write is reported after the report.
+	var townValuesErr error
+	if pod != nil && req.Images != "" && !req.DryRun && st.Outcome == update.OutcomeOK {
+		path := imagevalues.PathIn(filepath.Join(townRoot, "gastown"))
+		townValuesErr = writeTownValues(seams.WriteTownValues, path, imagesValues)
+	}
 	if err := writeUpdateResult(out, st, req.JSON); err != nil {
 		fmt.Fprintf(errOut, "gt update: %v\n", err)
 		return NewSilentExit(1)
@@ -488,11 +508,28 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if runErr != nil {
 		fmt.Fprintf(errOut, "gt update: %v\n", runErr)
 	}
+	if townValuesErr != nil {
+		fmt.Fprintf(errOut, "gt update: %v\n", townValuesErr)
+		return NewSilentExit(1)
+	}
 	code := updateOutcomeExitCode(st.Outcome)
 	if code == 0 {
 		return nil
 	}
 	return NewSilentExit(code)
+}
+
+// writeTownValues writes v to path through write, the seam a test fakes. An
+// unwired seam writes through imagevalues.Write: every production command has
+// the writer, so a missing seam must not skip the town's copy.
+func writeTownValues(write func(path string, v imagevalues.Values) error, path string, v imagevalues.Values) error {
+	if write == nil {
+		write = imagevalues.Write
+	}
+	if err := write(path, v); err != nil {
+		return fmt.Errorf("writing the town's images file %s: %w", path, err)
+	}
+	return nil
 }
 
 // updateOutcomeTerminal reports whether the outcome says how the run ended,
