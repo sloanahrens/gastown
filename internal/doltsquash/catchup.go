@@ -148,13 +148,13 @@ func Catchup(ctx context.Context, ex Exec, from string, clk Clock, sleep Sleeper
 			continue
 		}
 		for _, commit := range commits {
-			applied, retries, err := s.pick(ctx, commit, sleep)
+			outcome, err := s.pick(ctx, commit, sleep)
 			if err != nil {
 				return result, err
 			}
 			result.Picks++
-			result.Retries += retries
-			if !applied {
+			result.Retries += outcome.retries
+			if outcome.commit == "" {
 				result.Empty++
 			}
 		}
@@ -194,56 +194,79 @@ func pickStatement(commit string) string {
 	return "CALL DOLT_CHERRY_PICK(" + quoteLiteral(commit) + ")"
 }
 
-// pick cherry-picks one commit onto compact-work. It reports whether the
-// commit changed the branch: false means Dolt answered "nothing to commit",
-// because the change was already there. An uncommitted working set is retried
-// on sleep up to catchupRetries; every other answer, including a pick left in
-// conflict, stops the run.
-func (s *designStep) pick(ctx context.Context, commit string, sleep Sleeper) (bool, int, error) {
+// pickOutcome is what one cherry-pick did.
+type pickOutcome struct {
+	// commit is the hash of the commit the pick made; empty means Dolt answered
+	// "nothing to commit", because the change was already on the branch.
+	commit string
+	// retries is how many waits the pick spent on a working set a writer held.
+	retries int
+}
+
+// pick cherry-picks one commit onto the session's branch. An uncommitted
+// working set is retried on sleep up to catchupRetries; every other answer,
+// including a pick left in conflict, stops the run.
+func (s *designStep) pick(ctx context.Context, commit string, sleep Sleeper) (pickOutcome, error) {
 	statement := pickStatement(commit)
 	for retries := 0; ; retries++ {
 		rows, err := s.exec(ctx, statement)
 		if err == nil {
-			if err := pickResult(commit, rows); err != nil {
-				return false, retries, fmt.Errorf("doltsquash: statement %d (%s): %w", s.n, shortStatement(statement), err)
+			made, err := pickResult(commit, rows)
+			if err != nil {
+				return pickOutcome{retries: retries}, fmt.Errorf("doltsquash: statement %d (%s): %w", s.n, shortStatement(statement), err)
 			}
-			return true, retries, nil
+			return pickOutcome{commit: made, retries: retries}, nil
 		}
 		switch {
 		case strings.Contains(err.Error(), pickNothingToCommit):
-			return false, retries, nil
+			return pickOutcome{retries: retries}, nil
 		case strings.Contains(err.Error(), pickUncommittedChanges):
 			if retries == catchupRetries {
-				return false, retries, err
+				return pickOutcome{retries: retries}, err
 			}
 			sleep.Sleep(catchupWait(retries))
 		default:
-			return false, retries, err
+			return pickOutcome{retries: retries}, err
 		}
 	}
 }
 
-// pickResult refuses a pick that did not create a commit. Dolt answers a
-// conflicting pick with a row of conflict counts and no hash, and the run must
-// stop there: the branch holds a merge state that only the recovery table can
-// resolve.
-func pickResult(commit string, rows Rows) error {
+// pickConflictError reports a pick Dolt answered with conflict counts and no
+// commit. Dolt does not fail the statement, so the result row is the only sign,
+// and the branch holds a merge state the run cannot continue past: the
+// catch-up stops, and the swap reads the type to tell this answer from every
+// other stop.
+type pickConflictError struct {
+	commit                         string
+	data, schema, constraintCounts string
+}
+
+// Error renders the conflict as the run's stop message.
+func (e *pickConflictError) Error() string {
+	return fmt.Sprintf("the pick of %s left conflicts (data %s, schema %s, constraint %s), which the run cannot continue past",
+		e.commit, e.data, e.schema, e.constraintCounts)
+}
+
+// pickResult refuses a pick that did not create a commit, and returns the hash
+// of the one it made. A conflicting pick answers with conflict counts and no
+// hash, which the caller must tell from any other stop: it is the only answer
+// the recovery table has a state for.
+func pickResult(commit string, rows Rows) (string, error) {
 	if len(rows.Data) != 1 {
-		return fmt.Errorf("the pick of %s returned %d records, want one naming the new commit", commit, len(rows.Data))
+		return "", fmt.Errorf("the pick of %s returned %d records, want one naming the new commit", commit, len(rows.Data))
 	}
 	record := rows.Data[0]
 	if len(record) != 4 {
-		return fmt.Errorf("the pick of %s returned a record of %d values, want the new hash and three conflict counts",
+		return "", fmt.Errorf("the pick of %s returned a record of %d values, want the new hash and three conflict counts",
 			commit, len(record))
 	}
 	if record[1] != "0" || record[2] != "0" || record[3] != "0" {
-		return fmt.Errorf("the pick of %s left conflicts (data %s, schema %s, constraint %s), which the run cannot continue past",
-			commit, record[1], record[2], record[3])
+		return "", &pickConflictError{commit: commit, data: record[1], schema: record[2], constraintCounts: record[3]}
 	}
 	if err := checkCommitHash("the new commit", record[0]); err != nil {
-		return fmt.Errorf("the pick of %s returned no commit hash: %w", commit, err)
+		return "", fmt.Errorf("the pick of %s returned no commit hash: %w", commit, err)
 	}
-	return nil
+	return record[0], nil
 }
 
 // catchupWait is the wait before the retry after attempt, counting from zero:
