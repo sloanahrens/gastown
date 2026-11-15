@@ -48,6 +48,7 @@ func sessionBackendForAgentWith(resolve backendResolver, ts *config.TownSettings
 				CacheVolume:          cp.CacheVolume,
 				Driver:               cp.Driver,
 				KubernetesCacheClaim: cp.KubernetesCacheClaim,
+				BeadAccess:           cp.BeadAccessMode(),
 				EndedHoldSeconds:     cp.EndedHold(),
 				NodeSelector:         cp.NodeSelector,
 				Tolerations:          cp.Tolerations,

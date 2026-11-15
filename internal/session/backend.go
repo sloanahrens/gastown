@@ -32,6 +32,10 @@ type Profile struct {
 	// KubernetesCacheClaim is the shared claim a kubernetes driver mounts at
 	// /tmp/gt-cache, outside /sandbox; "" means no cache mount (gt-zl804).
 	KubernetesCacheClaim string
+	// BeadAccess is where the seat's task lives: config.SandboxBeadAccessDolt
+	// (the default) or config.SandboxBeadAccessFiles. The config conversion
+	// fills the default; nothing reads it yet (gt-1m0kb).
+	BeadAccess string
 	// EndedHoldSeconds is how long the sandbox stays up after the agent's session
 	// ends, so the daemon can copy the seat's transcripts out (gt-yck7hz). 0 is
 	// config.DefaultSandboxEndedHoldSeconds.
