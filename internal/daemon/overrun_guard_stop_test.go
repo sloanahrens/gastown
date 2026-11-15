@@ -759,6 +759,14 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 			if tt.sandboxed {
 				seedStopSandboxRecord(t, d)
 			}
+			if errors.Is(tt.pushErr, session.ErrNothingToPush) {
+				// A sandbox the push finds gone is removed only when origin is
+				// read back holding the seat's branch (gt-lahjz4).
+				seedHostWorktreeStub(t, d)
+				d.openGitFn = func(string) daemonGit {
+					return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + stopSeat.Branch, Hash: "aaa111"}}}
+				}
+			}
 			var calls []string
 			push := func(string, session.SandboxRecord) error {
 				calls = append(calls, "push")

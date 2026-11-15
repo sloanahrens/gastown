@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -164,6 +165,12 @@ func TestStop_DivergedSandboxIsAskedAgainByTheNextStop(t *testing.T) {
 		})
 	}
 	f.resetWorktree = func(overrunSeat) error { return nil }
+	// The second stop's push finds the sandbox gone, so it reads origin back
+	// before it removes the record, and origin holds the branch (gt-lahjz4).
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + stopSeat.Branch, Hash: "aaa111"}}}
+	}
 
 	d.runOverrunGuard(f.seams())
 	if pushes != 1 || len(f.handBackNotes) != 1 {
