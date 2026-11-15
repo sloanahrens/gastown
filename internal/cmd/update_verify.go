@@ -151,18 +151,86 @@ func (p *verifyProbes) ImageLabel(ctx context.Context) (string, error) {
 	return label, nil
 }
 
-// podImageLabelProbes is the run's verify probes with the image label of a pod
-// target read from the registry. The update Job runs in a pod with no docker, so
-// the docker inspect ImageLabel makes cannot answer there.
+// podImageLabelProbes is the run's verify probes for a pod target: the image
+// label of the target pair read from the registry, and the pair extension's two
+// checks. The update Job runs in a pod with no docker, so the docker inspect
+// ImageLabel makes cannot answer there.
 type podImageLabelProbes struct {
 	update.VerifyProbes
-	label func(context.Context) (string, error)
+	label       func(context.Context) (string, error)
+	wantPolecat string
+	annotation  func(context.Context) (string, error)
+	devTag      func(context.Context) (string, error)
 }
 
+var _ update.PairProbes = podImageLabelProbes{}
+
 // ImageLabel is the commit label of the target pair's polecat image, from the
-// registry.
+// registry. A run with no registry read wired is an error, never a pass.
 func (p podImageLabelProbes) ImageLabel(ctx context.Context) (string, error) {
+	if p.label == nil {
+		return "", errors.New("the run has no image label reader")
+	}
 	return p.label(ctx)
+}
+
+// WantPolecat is the polecat digest the --images file names, and empty for a run
+// that names no file, where both pair checks fail.
+func (p podImageLabelProbes) WantPolecat() string { return p.wantPolecat }
+
+// PolecatAnnotation is the digest of the Deployment's polecat-image annotation.
+// A run with no reader wired is an error, never a pass.
+func (p podImageLabelProbes) PolecatAnnotation(ctx context.Context) (string, error) {
+	if p.annotation == nil {
+		return "", errors.New("the run has no Deployment annotation reader")
+	}
+	return p.annotation(ctx)
+}
+
+// DevTagDigest is the digest the sandbox registry's dev tag names. A run with no
+// reader wired is an error, never a pass.
+func (p podImageLabelProbes) DevTagDigest(ctx context.Context) (string, error) {
+	if p.devTag == nil {
+		return "", errors.New("the run has no dev tag reader")
+	}
+	return p.devTag(ctx)
+}
+
+// podTargetAnnotation reads the Deployment's polecat-image annotation through the
+// swap's running pair read, so verify and the install that restores a pair read
+// the one command.
+func podTargetAnnotation(target podDaemonTarget, run update.RunFunc) func(context.Context) (string, error) {
+	swap := podDaemonSwap{
+		Context:    target.Context,
+		Namespace:  target.Namespace,
+		InCluster:  target.InCluster,
+		Deployment: target.Deployment,
+		Run:        run,
+	}
+	return func(ctx context.Context) (string, error) {
+		pair, err := swap.RunningPair(ctx)
+		if err != nil {
+			return "", err
+		}
+		return podRefDigest(pair.Polecat), nil
+	}
+}
+
+// podTargetDevTag reads the sandbox registry's dev tag through the pair check's
+// read, gt daemon polecat-devtag in the daemon pod: only that pod reaches the
+// registry.
+func podTargetDevTag(target podDaemonTarget, run update.RunFunc) func(context.Context) (string, error) {
+	check := podPairCheck{Run: run, Target: target}
+	return func(ctx context.Context) (string, error) {
+		read, err := check.readPodDevTag(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !read.Present {
+			return "", errors.New("the sandbox registry holds no dev tag for the polecat image")
+		}
+		return read.Digest, nil
+	}
 }
 
 // podTargetImageLabel reads the commit label of the polecat image the values file

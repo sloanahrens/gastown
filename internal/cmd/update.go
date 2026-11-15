@@ -413,10 +413,29 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return fmt.Errorf("preparing the pod daemon: %w", err)
 	}
+	// imagesValues is the pair the run installs: the pod probes check against it,
+	// and an ok pod roll writes the town's own copy of the file from it. A pod
+	// target installs the commit its images file records: main's tip keeps moving
+	// while the pair for one green commit is rolled, and the digest install
+	// refuses a file for any other commit than the run's target.
+	var imagesValues imagevalues.Values
+	if pod != nil && req.Images != "" {
+		imagesValues, err = imagevalues.Load(req.Images)
+		if err != nil {
+			return fmt.Errorf("the --images values file: %w", err)
+		}
+	}
 	if pod != nil {
 		// The Job runs in a pod with no docker, so the image label of the target
-		// pair is read from the registry the --images file names.
-		deps.Verify = podImageLabelProbes{VerifyProbes: deps.Verify, label: podTargetImageLabel(seams.Images, townRoot, req.Images)}
+		// pair is read from the registry the --images file names, and the pair's
+		// two records are read from the Deployment and the daemon pod.
+		deps.Verify = podImageLabelProbes{
+			VerifyProbes: deps.Verify,
+			label:        podTargetImageLabel(seams.Images, townRoot, req.Images),
+			wantPolecat:  podRefDigest(imagesValues.Polecat),
+			annotation:   podTargetAnnotation(*pod, seams.PodRun),
+			devTag:       podTargetDevTag(*pod, seams.PodRun),
+		}
 	}
 	if req.Images != "" {
 		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod, out)
@@ -449,19 +468,8 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	// Dolt data; the host runs that cycle. The plan's other steps are planned as
 	// they are for any run.
 	opts.PodTarget = pod != nil
-	// imagesValues is the pair the run installs, kept for the town's own copy of
-	// the file an ok pod roll writes.
-	var imagesValues imagevalues.Values
-	// A pod target installs the commit its images file records: main's tip keeps
-	// moving while the pair for one green commit is rolled, and the digest install
-	// refuses a file for any other commit than the run's target.
 	if pod != nil && req.Images != "" {
-		values, err := imagevalues.Load(req.Images)
-		if err != nil {
-			return fmt.Errorf("the --images values file: %w", err)
-		}
-		opts.ImagesCommit = values.Commit
-		imagesValues = values
+		opts.ImagesCommit = imagesValues.Commit
 	}
 	// Only the digest install skips the host install under a pod target. A pod
 	// target with the install step selected and no --images is refused before
