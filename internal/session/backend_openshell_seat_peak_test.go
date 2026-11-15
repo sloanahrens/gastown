@@ -199,6 +199,75 @@ func TestSeatPeakHungReadWritesNoRowAndTheSeatEndCompletes(t *testing.T) {
 	if !warningSays(*warnings, "peak row is not written") {
 		t.Errorf("warnings = %v, want one naming the peak row that is not written", *warnings)
 	}
+	if want := "did not answer within " + time.Nanosecond.String(); !warningSays(*warnings, want) {
+		t.Errorf("warnings = %v, want the cut named with the bound it was given", *warnings)
+	}
+}
+
+// TestSeatPeakProductionBoundIsTheDefault pins what a binary with no test value
+// does: the recorder is handed a context bounded by seatPeakTimeout, so the
+// production default is exercised and not only a value a test sets (gt-b3yb24).
+func TestSeatPeakProductionBoundIsTheDefault(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	writeOpsRecord(t, b)
+	// The baseline is read before the call under test, so the bound measured
+	// from it holds the default plus whatever the end did before the read; the
+	// band below still tells the production default from a test's own value.
+	start := time.Now()
+	var bound time.Duration
+	var bounded bool
+	b.seatPeak = func(ctx context.Context, _ string, _ SeatPeakExec, _ SandboxRecord, _ time.Time) error {
+		deadline, ok := ctx.Deadline()
+		bounded = ok
+		if ok {
+			bound = deadline.Sub(start)
+		}
+		return nil
+	}
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !bounded {
+		t.Fatal("the read ran with no bound, want the production default")
+	}
+	if bound <= seatPeakTimeout/2 || bound >= 2*seatPeakTimeout {
+		t.Errorf("the read was bounded at %s, want the production default %s", bound, seatPeakTimeout)
+	}
+}
+
+// TestSeatPeakReadLostToAFailedDeleteIsNotWarned pins where a lost row is
+// reported: a delete that fails keeps the record and the sandbox, so the next
+// attempt reads the peak again, and the seat's end must not also say the row is
+// lost. Warning there logged a peak warning on every seat delete whose gateway
+// was not live (gt-b3yb24).
+func TestSeatPeakReadLostToAFailedDeleteIsNotWarned(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"delete": errors.New("exit status 1"), "exec": errors.New("exit status 1")},
+		Stderr: map[string]string{"delete": "exec failed: gateway unreachable"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	writeOpsRecord(t, b)
+	warnings := seatPeakWarnings(b)
+	var recorders int
+	read := seatPeakRead(nil)
+	b.seatPeak = func(ctx context.Context, townRoot string, exec SeatPeakExec, rec SandboxRecord, endedAt time.Time) error {
+		recorders++
+		return read(ctx, townRoot, exec, rec, endedAt)
+	}
+
+	if err := b.Delete(openshellTestSession); err == nil {
+		t.Fatal("Delete = nil, want the gateway's delete failure")
+	}
+	if recorders != 1 {
+		t.Fatalf("the recorder ran %d times, want the read attempted once", recorders)
+	}
+	if warningSays(*warnings, "peak row is not written") {
+		t.Errorf("warnings = %v, want no peak warning for a delete that did not complete", *warnings)
+	}
 }
 
 // TestSeatPeakRefusedRowKeepsTheSeatEnd pins the recorder's own failure: a row
