@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/fixrecurrence"
 )
 
@@ -36,9 +36,12 @@ type fixRecurrenceDeps struct {
 	now     func() time.Time
 }
 
-// realFixRecurrenceDeps is fixRecurrenceDeps on this host.
+// realFixRecurrenceDeps is fixRecurrenceDeps on this host. The rig directory is
+// the caller's, read through callercwd so a scan started elsewhere reads the
+// rig's store rather than this process's directory; Require refuses a caller
+// path that is not present here, where bd could not find that store.
 func realFixRecurrenceDeps() fixRecurrenceDeps {
-	return fixRecurrenceDeps{workDir: os.Getwd, run: runFixRecurrenceBD, now: time.Now}
+	return fixRecurrenceDeps{workDir: callercwd.Require, run: runFixRecurrenceBD, now: time.Now}
 }
 
 // runFixRecurrenceBD runs bd in dir with the process environment, leaving
@@ -81,7 +84,8 @@ proposal is printed. --json prints one JSON object per proposal on its own
 line, and without it one readable line per proposal.
 
 The scan reads only. It writes no bead and never applies an edge; a bead read
-that fails is an error, and a bead list that yields no pair prints nothing.
+that fails is an error, a bead row bd reports without a creation time is an
+error, and a bead list that yields no pair prints nothing.
 
 Examples:
   gt fix-recurrence scan
@@ -156,6 +160,12 @@ func fixRecurrenceBeads(raw []byte) ([]fixrecurrence.Bead, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Every pair is dated by the citing bead's creation, so a bead without
+		// one cannot be judged and would vanish from the signal. Refuse the
+		// read instead of reading it as a bead that cites nothing.
+		if created.IsZero() {
+			return nil, fmt.Errorf("bead %s: created_at is missing, so its citations cannot be dated", row.ID)
+		}
 		closed, err := fixRecurrenceTime(row.ID, "closed_at", row.ClosedAt)
 		if err != nil {
 			return nil, err
@@ -176,8 +186,9 @@ func fixRecurrenceBeads(raw []byte) ([]fixrecurrence.Bead, error) {
 }
 
 // fixRecurrenceTime parses one bd timestamp. An empty value is the zero time,
-// which every time decision reads as unknown; a value that does not parse
-// fails the read rather than standing in as one.
+// which the caller reads as unknown -- a missing close is not a close, and a
+// missing creation fails the read -- and a value that does not parse fails the
+// read rather than standing in as one.
 func fixRecurrenceTime(id, field, raw string) (time.Time, error) {
 	if raw == "" {
 		return time.Time{}, nil
@@ -190,7 +201,10 @@ func fixRecurrenceTime(id, field, raw string) (time.Time, error) {
 }
 
 // fixRecurrenceSince keeps the proposals whose citing bead was created at or
-// after from. A zero from is all time.
+// after from. A zero from is all time. The read refuses a bead whose created_at
+// is missing, and Propose names a listed bead, so every proposal's citing bead
+// is in created with a known time: no proposal is left out because its time
+// could not be read.
 func fixRecurrenceSince(proposals []fixrecurrence.Proposal, listed []fixrecurrence.Bead, from time.Time) []fixrecurrence.Proposal {
 	if from.IsZero() {
 		return proposals
@@ -201,8 +215,6 @@ func fixRecurrenceSince(proposals []fixrecurrence.Proposal, listed []fixrecurren
 	}
 	kept := make([]fixrecurrence.Proposal, 0, len(proposals))
 	for _, p := range proposals {
-		// Propose names a citing bead the list holds; a missing entry reads as
-		// the zero time, which is before any window.
 		if created[p.New].Before(from) {
 			continue
 		}

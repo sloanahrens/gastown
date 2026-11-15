@@ -198,6 +198,13 @@ func TestFixRecurrenceScanRefusesUnreadableBeadList(t *testing.T) {
 			out:  `[{"id":"gt-one","created_at":"2026-10-01T00:00:00Z","closed_at":"last week"}]`,
 			want: "gt-one: closed_at",
 		},
+		{
+			// A bead with no creation time cannot be dated, so reading it as a
+			// bead that cites nothing would drop it from the signal unseen.
+			name: "missing created_at",
+			out:  `[{"id":"gt-one","title":"recurrence of gt-two","status":"open"}]`,
+			want: "gt-one: created_at is missing",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
