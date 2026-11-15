@@ -1,7 +1,7 @@
-// Package landtest holds the fixture for a rig's landing log. The pool's
-// occupancy, the patrol's seat cap and the polecat classifier all read the
-// log, so the tests of all three write it through this package rather than a
-// copy each.
+// Package landtest holds the fixtures the land, done and cmd tests share: a
+// rig's landing log, the verdict store, and the notes of a bead that ran a
+// local review round. Each has more than one reader, so it lives here rather
+// than in a copy per package.
 //
 // It is a fixture: nothing outside a test imports it.
 package landtest
