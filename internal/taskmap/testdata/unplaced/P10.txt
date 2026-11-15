@@ -1,8 +1,3 @@
-tap guard permission-request
-tap guard polecat-paths
-tap guard pr-workflow
-tap guard question-tool
-tap guard sandbox-secrets
 tap guard script-files
 tap list
 tap nudge-drain
