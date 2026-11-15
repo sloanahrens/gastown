@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1658,9 +1659,15 @@ func tryAcquireSlingBeadLock(townRoot, beadID string) (func(), error) {
 // open landed before this unlink locks the nameless inode, sees it has no name,
 // and reopens rather than share the lock with a fresh file at the same path
 // (gt-xtfnq).
-func unlinkThenUnlock(path string, unlock func()) func() {
+// The extra paths are sidecars written beside the lock, such as the holder
+// record; they go before the lock drops so a waiter that takes it next never
+// reads a record from the sling it replaced.
+func unlinkThenUnlock(path string, unlock func(), sidecars ...string) func() {
 	return func() {
 		_ = os.Remove(path)
+		for _, sidecar := range sidecars {
+			_ = os.Remove(sidecar)
+		}
 		unlock()
 	}
 }
@@ -1710,14 +1717,22 @@ var ErrAssigneeLockTimeout = errors.New("assignee sling lock timed out")
 
 // assigneeLockTimeout is the give-up on a lock that never freed, with the
 // message a person reads and Is so errors.Is reaches ErrAssigneeLockTimeout.
-// The message is unchanged from the one the timeout has always printed.
+// The message keeps the sentence the timeout has always printed and adds the
+// holder when its sidecar names one.
 type assigneeLockTimeout struct {
 	agent   string
 	seconds int
+	// holder is the clause naming who held the lock, from the holder's
+	// sidecar; empty when the timeout was built without reading one.
+	holder string
 }
 
 func (e assigneeLockTimeout) Error() string {
-	return fmt.Sprintf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", e.agent, e.seconds)
+	why := "another sling may be stuck"
+	if e.holder != "" {
+		why = e.holder + "; " + why
+	}
+	return fmt.Sprintf("timed out acquiring assignee sling lock for %s after %ds (%s)", e.agent, e.seconds, why)
 }
 
 // Is reports the sentinel this timeout matches: errors.Is(err,
@@ -1736,6 +1751,7 @@ func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(ti
 
 	safeAgent := strings.NewReplacer("/", "_", ":", "_").Replace(targetAgent)
 	lockPath := filepath.Join(lockDir, "assignee_"+safeAgent+".flock")
+	holderPath := assigneeLockHolderPath(lockPath)
 
 	// Try non-blocking acquire with retry. hookBeadWithRetry itself has 10 retries
 	// with up to 30s backoff, so we allow generous total wait time for the lock.
@@ -1744,7 +1760,15 @@ func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(ti
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		unlock, err := lock.FlockTryAcquireStable(lockPath)
 		if err == nil {
-			return unlinkThenUnlock(lockPath, unlock), nil
+			if err := writeAssigneeLockHolder(holderPath); err != nil {
+				// A lock whose holder nobody can name is half an acquire: the
+				// next timeout would print no clue. Fail closed, and take any
+				// older record with it so a reader never names the sling this
+				// one replaced.
+				unlinkThenUnlock(lockPath, unlock, holderPath)()
+				return nil, fmt.Errorf("recording the holder of the assignee sling lock for %s: %w", targetAgent, err)
+			}
+			return unlinkThenUnlock(lockPath, unlock, holderPath), nil
 		}
 		if !errors.Is(err, lock.ErrFlockHeld) {
 			return nil, fmt.Errorf("acquiring assignee sling lock for %s: %w", targetAgent, err)
@@ -1754,7 +1778,59 @@ func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(ti
 		}
 	}
 
-	return nil, assigneeLockTimeout{agent: targetAgent, seconds: maxAttempts * retryInterval / 1000}
+	return nil, assigneeLockTimeout{
+		agent:   targetAgent,
+		seconds: maxAttempts * retryInterval / 1000,
+		holder:  assigneeLockHolderText(holderPath),
+	}
+}
+
+// slingProcessStart is when this process began: the initialisation of this
+// package, which runs before main. A lock holder records it beside its pid so
+// a later reader can tell from `ps` whether the pid still names the sling that
+// took the lock or a newer process that the kernel handed the same pid.
+var slingProcessStart = time.Now()
+
+// assigneeLockHolderPath is the holder record beside an assignee flock.
+func assigneeLockHolderPath(lockPath string) string {
+	return strings.TrimSuffix(lockPath, ".flock") + ".holder"
+}
+
+// writeAssigneeLockHolder records who holds the lock, for the timeout a sling
+// that waits on it prints.
+func writeAssigneeLockHolder(path string) error {
+	record := fmt.Sprintf("pid %d started %s\n", os.Getpid(), slingProcessStart.UTC().Format(time.RFC3339))
+	return os.WriteFile(path, []byte(record), 0644)
+}
+
+// assigneeLockHolderText answers a timeout's "who holds it" from the holder
+// record at path. It never fails the timeout: a record that is missing, empty
+// or not the shape writeAssigneeLockHolder wrote is described as such, because
+// naming the holder is a clue on the error and not a condition of reporting it.
+// Only parsed fields are re-rendered, never the file's own bytes, so a file
+// some other process wrote cannot put its text in the error or the log line
+// that carries it.
+func assigneeLockHolderText(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "no holder recorded: the holder sidecar is missing"
+		}
+		return "no holder recorded: the holder sidecar could not be read"
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 4 || fields[0] != "pid" || fields[2] != "started" {
+		return "no holder recorded: the holder sidecar is not a holder record"
+	}
+	pid, err := strconv.Atoi(fields[1])
+	if err != nil || pid <= 0 {
+		return "no holder recorded: the holder sidecar is not a holder record"
+	}
+	started, err := time.Parse(time.RFC3339, fields[3])
+	if err != nil {
+		return "no holder recorded: the holder sidecar is not a holder record"
+	}
+	return fmt.Sprintf("held by pid %d started %s", pid, started.UTC().Format(time.RFC3339))
 }
 
 // resolvePRBranch resolves a GitHub PR number to its head branch name via `gh pr view`.
