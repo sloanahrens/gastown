@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,12 +14,22 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
 // releaseSeat is the seat the release tests act on.
 var releaseSeat = overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-p4aqut"}
+
+// releaseBranch is the branch releaseSeat's sandbox runs, as its record names it.
+const releaseBranch = "polecat/capable/gt-p4aqut+x1"
+
+// releaseSession is the sandbox record name a town with the "gt" prefix gives
+// releaseSeat.
+const releaseSession = "gt-capable"
 
 // releaseStart is when the seat's session first failed to answer.
 var releaseStart = time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
@@ -41,6 +53,39 @@ type releaseFake struct {
 	beadMoved   bool
 	beadReadErr error
 	beadReads   int
+
+	// originAbsent makes the origin read answer that origin holds no branch of
+	// the seat's (absent is held), originBranch is the branch the read names, and
+	// originErr fails the read.
+	originAbsent bool
+	originBranch string
+	originErr    error
+
+	// sandboxAhead makes the sandbox proof answer that the clone holds commits
+	// origin's tip does not, and sandboxProofErr makes it fail.
+	sandboxAhead    bool
+	sandboxProofErr error
+
+	// deleted is the session of each record the sandbox release handed to the
+	// deleter, deleteErr fails that delete, and nilDeleter stands in for a
+	// binary with no record deleter linked.
+	deleted    []string
+	deleteErr  error
+	nilDeleter bool
+
+	// running is the production step running right now, so a fake read can
+	// answer for the step that asks it rather than for a count of calls.
+	running string
+}
+
+// inStep names the production step the release is running, "" when none is.
+func (f *releaseFake) inStep(name string) { f.running = name }
+
+// deleter is the record deleter the production sandbox release runs: the fake
+// gateway's delete, which records the record it was given and answers deleteErr.
+func (f *releaseFake) deleter(_ string, rec session.SandboxRecord) error {
+	f.deleted = append(f.deleted, rec.Session)
+	return f.deleteErr
 }
 
 func (f *releaseFake) step(name string, seat overrunSeat) error {
@@ -50,8 +95,24 @@ func (f *releaseFake) step(name string, seat overrunSeat) error {
 
 func (f *releaseFake) seams() seatUnreachableStopSeams {
 	return seatUnreachableStopSeams{
-		pause:         func(seat overrunSeat) error { return f.step("pause", seat) },
-		removeSandbox: func(seat overrunSeat) error { return f.step("sandbox", seat) },
+		pause: func(seat overrunSeat) error { return f.step("pause", seat) },
+		originHolds: func(seat overrunSeat) (string, bool, error) {
+			if err := f.step("origin", seat); err != nil {
+				return "", false, err
+			}
+			branch := f.originBranch
+			if branch == "" {
+				branch = releaseBranch
+			}
+			if f.originErr != nil {
+				return branch, false, f.originErr
+			}
+			return branch, !f.originAbsent, nil
+		},
+		sandboxOnOrigin: func(overrunSeat, string) (bool, error) {
+			return !f.sandboxAhead, f.sandboxProofErr
+		},
+		releaseSandbox: func(seat overrunSeat) error { return f.step("sandbox-release", seat) },
 		beadStillHeld: func(overrunSeat) (bool, error) {
 			f.beadReads++
 			if f.beadReadErr != nil {
@@ -79,16 +140,106 @@ func (f *releaseFake) seams() seatUnreachableStopSeams {
 	}
 }
 
-// unreachableReleaseTown is a daemon with a town root and a logger, for the
-// release tests that need no patrol config.
+// unreachableReleaseTown is a daemon with a town root, a logger and a recording
+// notifier, so a release that raises an item records it instead of running gt.
 func unreachableReleaseTown(t *testing.T) (*Daemon, *lockedBuffer) {
 	t.Helper()
 	logs := &lockedBuffer{}
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(logs, "", 0),
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(logs, "", 0),
+		notifier: notifyfake.New(),
 	}
 	return d, logs
+}
+
+// raisedItems returns the items a release on d raised.
+func raisedItems(d *Daemon) []notifyfake.Call {
+	return d.notifier.(*notifyfake.Recorder).Escalations()
+}
+
+// releaseSandboxRecord is the record of releaseSeat's sandbox: the session name
+// the "gt" prefix gives it, and the branch its clone ran.
+func releaseSandboxRecord() session.SandboxRecord {
+	return session.SandboxRecord{
+		Session: releaseSession,
+		Rig:     releaseSeat.Rig,
+		Polecat: releaseSeat.Polecat,
+		Branch:  releaseBranch,
+	}
+}
+
+// seedReleaseSandbox gives releaseSeat a sandbox: the town's registry gives the
+// rig the "gt" prefix the session name is built from, the record names the branch
+// its clone ran, and the seat's host worktree is the stub the origin read resolves.
+func seedReleaseSandbox(t *testing.T, d *Daemon) session.SandboxRecord {
+	t.Helper()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", releaseSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	rec := releaseSandboxRecord()
+	require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+	seedHostWorktreeStub(t, d)
+	return rec
+}
+
+// seedReleaseBranchOnOrigin gives releaseSeat a host worktree whose branch is
+// releaseBranch, and an origin that holds it, so a release driven through the
+// production seams asks origin and finds the seat's work there. It is for the
+// tests that go through the guard's own wiring, where the branch comes from the
+// worktree rather than from a fake.
+func seedReleaseBranchOnOrigin(t *testing.T, d *Daemon) {
+	t.Helper()
+	seedHostWorktreeStub(t, d)
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{branch: releaseBranch,
+			originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	}
+}
+
+// seedReleaseRecords writes sandbox records for a rig the town's registry does
+// not list, so the seat's sandbox is found by the rig and polecat the records
+// name, as the stop's lookup does for an unlisted rig.
+func seedReleaseRecords(t *testing.T, d *Daemon, recs ...session.SandboxRecord) {
+	t.Helper()
+	for _, rec := range recs {
+		require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+	}
+}
+
+// productionSandboxSeams is the release's seams with the origin read and the
+// sandbox release left at the production pair, recording both in fake's calls as
+// the fake's own seams do. The sandbox release's delete goes to the fake's
+// deleter, so no gateway is asked. Each wrapper names the step it is in, so a
+// fake read can fail for the step that asks rather than for the position of its
+// call in the run.
+func productionSandboxSeams(d *Daemon, f *releaseFake) seatUnreachableStopSeams {
+	seams := f.seams()
+	seams.originHolds = func(seat overrunSeat) (string, bool, error) {
+		f.calls = append(f.calls, "origin "+seat.Rig+"/"+seat.Polecat)
+		f.inStep("origin")
+		defer f.inStep("")
+		return d.seatUnreachableOriginHolds(seat)
+	}
+	seams.releaseSandbox = func(seat overrunSeat) error {
+		f.calls = append(f.calls, "sandbox-release "+seat.Rig+"/"+seat.Polecat)
+		f.inStep("sandbox-release")
+		defer f.inStep("")
+		var deleter func(string, session.SandboxRecord) error
+		if !f.nilDeleter {
+			deleter = f.deleter
+		}
+		return d.seatUnreachableReleaseSandbox(seat, deleter)
+	}
+	return seams
+}
+
+// releaseProductionSandbox runs the release over the production origin read and
+// sandbox release, with the other steps of fake.
+func releaseProductionSandbox(t *testing.T, d *Daemon, f *releaseFake) []string {
+	t.Helper()
+	d.releaseUnreachableSeats(productionSandboxSeams(d, f), releaseStart.Add(16*time.Minute), false)
+	return f.calls
 }
 
 // watchUnreachable hands the seat-unreachable watch one failed read at start, as
@@ -193,6 +344,7 @@ func TestSeatUnreachableReleaseAtFifteenMinutes(t *testing.T) {
 		t.Run(step.name, func(t *testing.T) {
 			t.Parallel()
 			d, _ := newOverrunDaemon(t, false)
+			seedReleaseBranchOnOrigin(t, d)
 			f := newOverrunFake(0)
 			f.now = releaseStart.Add(step.age)
 			watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
@@ -269,7 +421,8 @@ func TestSeatUnreachableReleaseResumesItsOwnPause(t *testing.T) {
 
 	require.Equal(t, []string{
 		"pause gastown/capable",
-		"sandbox gastown/capable",
+		"origin gastown/capable",
+		"sandbox-release gastown/capable",
 		"hand-back gastown/capable",
 		"reset-agent-bead gastown/capable",
 		"record-cleanup gastown/capable",
@@ -366,17 +519,23 @@ func TestSeatUnreachableReleaseRetriesAFailedHandBack(t *testing.T) {
 	f := &releaseFake{failOn: map[string]error{"hand-back": errors.New("bd: connection refused")}}
 
 	d.releaseUnreachableSeats(f.seams(), releaseStart.Add(16*time.Minute), false)
-	require.Equal(t, []string{"pause gastown/capable", "sandbox gastown/capable", "hand-back gastown/capable"}, f.calls,
-		"a failed hand-back must stop the release there")
+	require.Equal(t, []string{
+		"pause gastown/capable",
+		"origin gastown/capable",
+		"sandbox-release gastown/capable",
+		"hand-back gastown/capable",
+	}, f.calls, "a failed hand-back must stop the release there")
 
 	f.failOn = nil
 	d.releaseUnreachableSeats(f.seams(), releaseStart.Add(17*time.Minute), false)
 	require.Equal(t, []string{
 		"pause gastown/capable",
-		"sandbox gastown/capable",
+		"origin gastown/capable",
+		"sandbox-release gastown/capable",
 		"hand-back gastown/capable",
 		"pause gastown/capable",
-		"sandbox gastown/capable",
+		"origin gastown/capable",
+		"sandbox-release gastown/capable",
 		"hand-back gastown/capable",
 		"reset-agent-bead gastown/capable",
 		"record-cleanup gastown/capable",
@@ -384,11 +543,59 @@ func TestSeatUnreachableReleaseRetriesAFailedHandBack(t *testing.T) {
 	}, f.calls, "the next tick must finish the release")
 }
 
+// TestSeatUnreachableReleaseRetriesOnTheBranchItRemembered: the release reads the
+// seat's branch once and keeps it on the outage. The sandbox release drops the
+// record a branch-less seat names its branch with, so a release that finished
+// that step and then failed at a later one must still name the branch on the next
+// tick, through the production origin read: the seat's worktree answers no branch
+// any more and the record is gone, so a release that forgot it would have nothing
+// to ask origin about and stay stuck on every tick after (gt-35ihg5).
+func TestSeatUnreachableReleaseRetriesOnTheBranchItRemembered(t *testing.T) {
+	t.Parallel()
+	d, logs := unreachableReleaseTown(t)
+	seedReleaseSandbox(t, d)
+	origin := &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	d.openGitFn = func(string) daemonGit { return origin }
+	watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod gastown-capable is gone"))
+
+	// Tick 1: the seat's worktree answers its branch, the sandbox and its record
+	// go, and the hand-back fails.
+	f := &releaseFake{branch: releaseBranch, failOn: map[string]error{"hand-back": errors.New("bd: connection refused")}}
+	d.releaseUnreachableSeats(productionSandboxSeams(d, f), releaseStart.Add(16*time.Minute), false)
+	require.Equal(t, []string{releaseSession}, f.deleted,
+		"the sandbox must be deleted on the branch the seat named")
+	require.NoFileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json",
+		"the record must have gone with its sandbox")
+	require.Len(t, f.handBacks, 0, "the failed hand-back must hand nothing back")
+	raisedOnFirstTick := len(raisedItems(d))
+	require.Equal(t, 1, raisedOnFirstTick, "the failed release must raise its item")
+
+	// The release parked the seat, so the health pass skips it and the tracker
+	// carries the outage — the branch with it — to the next tick.
+	held := &seatReadSet{}
+	held.skip(releaseSeat.Rig, releaseSeat.Polecat)
+	d.seatUnreachable.observe(releaseStart.Add(17*time.Minute), held)
+
+	// Tick 2: the seat's worktree answers no branch any more, and no record is
+	// left to name one.
+	f.branch = ""
+	f.failOn = nil
+	d.releaseUnreachableSeats(productionSandboxSeams(d, f), releaseStart.Add(18*time.Minute), false)
+
+	require.Equal(t, []string{releaseSeat.Bead + " " + releaseBranch + " 18m0s"}, f.handBacks,
+		"the retried release must name the branch it remembered")
+	require.Equal(t, []string{"retire gastown/capable"}, f.calls[len(f.calls)-1:],
+		"the retried release must finish")
+	require.NotContains(t, logs.String(), "names no branch",
+		"the retry must not stay stuck on a branch it forgot")
+	require.Len(t, raisedItems(d), raisedOnFirstTick, "a release that finishes raises nothing new")
+}
+
 // TestSeatUnreachableReleaseStopsAtAFailedStep runs the release's steps in the
-// overrun stop's order: a failed pause, hand-back, agent-bead reset or retire
-// stops the release where it failed, so the next tick repeats the hand-back and
-// the release, while a cleanup status that cannot be recorded holds nothing back
-// (gt-wgim24).
+// overrun stop's order: a failed pause, origin read, record clear, hand-back,
+// agent-bead reset or retire stops the release where it failed, so the next tick
+// repeats it, while a cleanup status that cannot be recorded holds nothing back
+// (gt-wgim24, gt-35ihg5).
 func TestSeatUnreachableReleaseStopsAtAFailedStep(t *testing.T) {
 	t.Parallel()
 	gone := errors.New("sandbox pod gastown-capable is gone")
@@ -400,24 +607,32 @@ func TestSeatUnreachableReleaseStopsAtAFailedStep(t *testing.T) {
 		{"a pause that fails releases nothing", "pause", []string{
 			"pause gastown/capable",
 		}},
-		{"a sandbox that cannot be removed keeps the bead for the next tick", "sandbox", []string{
+		{"an origin read that fails keeps the record and the bead for the next tick", "origin", []string{
 			"pause gastown/capable",
-			"sandbox gastown/capable",
+			"origin gastown/capable",
+		}},
+		{"a sandbox that cannot be released keeps the bead for the next tick", "sandbox-release", []string{
+			"pause gastown/capable",
+			"origin gastown/capable",
+			"sandbox-release gastown/capable",
 		}},
 		{"a hand-back that fails keeps the rest for the next tick", "hand-back", []string{
 			"pause gastown/capable",
-			"sandbox gastown/capable",
+			"origin gastown/capable",
+			"sandbox-release gastown/capable",
 			"hand-back gastown/capable",
 		}},
 		{"an agent bead that cannot be reset stops the release", "reset-agent-bead", []string{
 			"pause gastown/capable",
-			"sandbox gastown/capable",
+			"origin gastown/capable",
+			"sandbox-release gastown/capable",
 			"hand-back gastown/capable",
 			"reset-agent-bead gastown/capable",
 		}},
 		{"a cleanup status that cannot be recorded holds nothing back", "record-cleanup", []string{
 			"pause gastown/capable",
-			"sandbox gastown/capable",
+			"origin gastown/capable",
+			"sandbox-release gastown/capable",
 			"hand-back gastown/capable",
 			"reset-agent-bead gastown/capable",
 			"record-cleanup gastown/capable",
@@ -425,7 +640,8 @@ func TestSeatUnreachableReleaseStopsAtAFailedStep(t *testing.T) {
 		}},
 		{"a seat that cannot be retired leaves the release to the next tick", "retire", []string{
 			"pause gastown/capable",
-			"sandbox gastown/capable",
+			"origin gastown/capable",
+			"sandbox-release gastown/capable",
 			"hand-back gastown/capable",
 			"reset-agent-bead gastown/capable",
 			"record-cleanup gastown/capable",
@@ -470,28 +686,382 @@ func TestSeatUnreachableReleaseNamesTheKeptBranchAndRun(t *testing.T) {
 	require.Equal(t, []string{"seat gastown/capable unreachable for 16m: sandbox pod gastown-capable is gone"}, f.notes)
 }
 
-// TestSeatUnreachableReleaseDeletesTheGatewaySandbox drives the overrun guard's
-// tick over a sandboxed seat unreadable for fifteen minutes: the release must
-// delete the gateway sandbox object the seat ran in, through the stop's own
-// removal and before the bead is handed back, or the next sling to the name
-// fails on the stale object (gt-wgim24, operator decision 2026-11-14).
-func TestSeatUnreachableReleaseDeletesTheGatewaySandbox(t *testing.T) {
+// TestSeatUnreachableReleaseReleasesTheSandboxOfAHeldBranch drives the release
+// over a sandboxed seat unreadable for fifteen minutes whose branch origin
+// already holds, through the production origin read and sandbox release: the
+// gateway's sandbox goes through the record deleter, its record with it, the
+// seat's end line is written for the ledger, and the branch is left untouched —
+// the release writes nothing to origin, so the only thing it asked was what
+// origin holds (gt-35ihg5).
+func TestSeatUnreachableReleaseReleasesTheSandboxOfAHeldBranch(t *testing.T) {
 	t.Parallel()
-	d, _ := newOverrunDaemon(t, false)
-	f := newOverrunFake(0)
-	f.now = releaseStart.Add(15 * time.Minute)
-	f.removeSandbox = func(overrunSeat) error { return nil }
+	d, logs := unreachableReleaseTown(t)
+	seedReleaseSandbox(t, d)
+	origin := &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	d.openGitFn = func(string) daemonGit { return origin }
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+
+	f := &releaseFake{}
+	releaseProductionSandbox(t, d, f)
+
+	require.Equal(t, []string{releaseSession}, f.deleted,
+		"the sandbox the seat ran in must be deleted through the record deleter")
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, releaseSession); err != nil || ok {
+		require.Failf(t, "the seat's sandbox record survived the release", "ok=%v err=%v", ok, err)
+	}
+	ledger, err := os.ReadFile(session.SandboxSeatLedgerPath(d.config.TownRoot))
+	require.NoError(t, err, "the seat-ended writer must write the seat's end line")
+	require.Contains(t, string(ledger), `"session":"`+releaseSession+`"`, "the end line must name the seat's record")
+	require.Empty(t, origin.pushes, "a branch origin holds must be left untouched")
+	require.NotContains(t, logs.String(), "origin holds no branch", "a branch origin holds is no alarm")
+	require.Len(t, f.handBacks, 1, "the bead must still be handed back once")
+	require.Empty(t, raisedItems(d), "a branch origin holds raises nothing")
+}
+
+// TestSeatUnreachableReleaseKeepsTheSandboxOfAGoneBranch: origin answered and
+// holds no such branch, so the seat's commits may be nowhere. The release keeps
+// the sandbox and its record — they may be the only copy of the work — and hands
+// the bead back once, while it warns with the seat and the branch and raises the
+// item for a person who can look for the work (gt-mp9zrg, gt-35ihg5).
+func TestSeatUnreachableReleaseKeepsTheSandboxOfAGoneBranch(t *testing.T) {
+	t.Parallel()
+	d, logs := unreachableReleaseTown(t)
+	seedReleaseSandbox(t, d)
+	origin := &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}}}
+	d.openGitFn = func(string) daemonGit { return origin }
 	watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod gastown-capable is gone"))
 
-	d.runOverrunGuard(f.seams())
+	f := &releaseFake{}
+	releaseProductionSandbox(t, d, f)
 
+	require.Empty(t, f.deleted, "a sandbox origin cannot vouch for must not be deleted")
+	require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json",
+		"the record must stay with the sandbox it names")
+	require.Len(t, f.handBacks, 1, "a branch origin does not hold still hands the bead back once")
+	log := logs.String()
+	require.Contains(t, log, "WARNING")
+	require.Contains(t, log, "origin holds no branch "+releaseBranch)
+	require.Contains(t, log, releaseSeat.Rig+"/"+releaseSeat.Polecat)
+	raised := raisedItems(d)
+	require.Len(t, raised, 1, "the absence of the branch must be raised once")
+	require.Contains(t, raised[0].Escalation.Description, "origin holds no branch "+releaseBranch)
+	require.Equal(t, "MEDIUM", raised[0].Escalation.Severity)
+	require.Equal(t, "seat-unreachable-sandbox-gone:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+}
+
+// TestSeatUnreachableReleaseAsksOriginWithoutASandboxRecord: a seat whose
+// sandbox record is already gone — an earlier tick dropped it, or the seat never
+// ran in a sandbox — is not a seat with nothing to ask origin about. Origin is
+// asked for the seat's own branch, and its answer decides: a branch origin holds
+// releases nothing and raises nothing, and one it does not hold warns, raises the
+// sandbox-gone item and keeps the bead coming back. A seat that names no branch
+// either is not answered with "held": the release stays owed and raises the
+// failure item (gt-35ihg5).
+func TestSeatUnreachableReleaseAsksOriginWithoutASandboxRecord(t *testing.T) {
+	t.Parallel()
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	steps := []struct {
+		name       string
+		originRefs []git.RemoteRef
+		branch     string
+		// unlisted leaves the rig out of the registry, so the seat's sandbox is
+		// looked for by rig and polecat and names no session at all.
+		unlisted  bool
+		wantCalls []string
+		wantItem  string
+		wantBack  int
+	}{
+		{
+			name:       "origin holds the seat's branch",
+			originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}},
+			branch:     releaseBranch,
+			wantCalls: []string{
+				"pause gastown/capable",
+				"origin gastown/capable",
+				"sandbox-release gastown/capable",
+				"hand-back gastown/capable",
+				"reset-agent-bead gastown/capable",
+				"record-cleanup gastown/capable",
+				"retire gastown/capable",
+			},
+			wantBack: 1,
+		},
+		{
+			name:       "origin holds no branch of the seat's",
+			originRefs: []git.RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}},
+			branch:     releaseBranch,
+			wantCalls: []string{
+				"pause gastown/capable",
+				"origin gastown/capable",
+				"hand-back gastown/capable",
+				"reset-agent-bead gastown/capable",
+				"record-cleanup gastown/capable",
+				"retire gastown/capable",
+			},
+			wantItem: "seat-unreachable-sandbox-gone:gastown/capable:gt-p4aqut",
+			wantBack: 1,
+		},
+		{
+			name:       "a rig with no prefix and no record asks origin too",
+			originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}},
+			branch:     releaseBranch,
+			unlisted:   true,
+			wantCalls: []string{
+				"pause gastown/capable",
+				"origin gastown/capable",
+				"sandbox-release gastown/capable",
+				"hand-back gastown/capable",
+				"reset-agent-bead gastown/capable",
+				"record-cleanup gastown/capable",
+				"retire gastown/capable",
+			},
+			wantBack: 1,
+		},
+		{
+			name:     "the seat names no branch to ask about",
+			branch:   "",
+			unlisted: true,
+			wantCalls: []string{
+				"pause gastown/capable",
+				"origin gastown/capable",
+			},
+			wantItem: "seat-unreachable-release:gastown/capable:gt-p4aqut",
+		},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := unreachableReleaseTown(t)
+			if !step.unlisted {
+				reg := session.NewPrefixRegistry()
+				reg.Register("gt", releaseSeat.Rig)
+				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+			}
+			seedHostWorktreeStub(t, d)
+			d.openGitFn = func(string) daemonGit { return &pushStubGit{originRefs: step.originRefs} }
+			watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+			f := &releaseFake{branch: step.branch}
+
+			require.Equal(t, step.wantCalls, releaseProductionSandbox(t, d, f))
+			require.Len(t, f.handBacks, step.wantBack)
+			require.Empty(t, f.deleted, "a seat with no sandbox record has nothing to delete")
+			raised := raisedItems(d)
+			if step.wantItem == "" {
+				require.Empty(t, raised, "a branch origin holds raises nothing")
+				return
+			}
+			require.Len(t, raised, 1, "the release's answer must be raised once")
+			require.Equal(t, step.wantItem, raised[0].Escalation.Fingerprint)
+		})
+	}
+}
+
+// TestSeatUnreachableReleaseFailureStaysOwedAndRaisesTheItem: a release whose
+// origin read fails is not finished, and nothing may mark the outage released.
+// The seat stays owed, so the next tick runs the release again from the pause,
+// and the failure is raised with the seat, the bead and a bounded reason, so a
+// seat no tick can release reaches a person instead of sitting out the outage
+// (gt-35ihg5).
+func TestSeatUnreachableReleaseFailureStaysOwedAndRaisesTheItem(t *testing.T) {
+	t.Parallel()
+	d, logs := unreachableReleaseTown(t)
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	readErr := errors.New("could not resolve host: origin\ngit ls-remote: exit status 128")
+	watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+	f := &releaseFake{originErr: readErr}
+
+	d.releaseUnreachableSeats(f.seams(), releaseStart.Add(16*time.Minute), false)
+
+	require.Equal(t, []string{"pause gastown/capable", "origin gastown/capable"}, f.calls,
+		"a failed origin read must stop the release before the record is cleared")
+	require.Empty(t, f.handBacks, "nothing may be handed back")
+
+	raised := raisedItems(d)
+	require.Len(t, raised, 1, "a failed release must raise one item")
+	require.Equal(t, "seat-unreachable-release:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+	require.Equal(t, "MEDIUM", raised[0].Escalation.Severity)
+	require.Contains(t, raised[0].Escalation.Reason, "gt-p4aqut")
+	require.Contains(t, raised[0].Escalation.Reason, "16m")
+	require.NotContains(t, raised[0].Escalation.Reason, "\n", "the reason carries one bounded line")
+	require.Contains(t, logs.String(), "stays owed to the next tick")
+
+	// The seat is still owed: the same outage is released again next tick, from
+	// the pause, which is every step the failed release ran repeating safely.
+	f.originErr = nil
+	d.releaseUnreachableSeats(f.seams(), releaseStart.Add(17*time.Minute), false)
 	require.Equal(t, []string{
-		"sandbox gastown/capable",
+		"pause gastown/capable",
+		"origin gastown/capable",
+		"pause gastown/capable",
+		"origin gastown/capable",
+		"sandbox-release gastown/capable",
 		"hand-back gastown/capable",
 		"reset-agent-bead gastown/capable",
 		"record-cleanup gastown/capable",
 		"retire gastown/capable",
-	}, f.calls, "the release must delete the sandbox, before it hands the bead back")
+	}, f.calls, "a failed release must stay owed to the next tick")
+	require.Len(t, f.handBacks, 1, "the retried release hands the bead back once")
+}
+
+// TestSeatUnreachableReleaseStopsWhenTheRecordCannotBeAsked drives the production
+// origin read through every answer that is not an answer about the branch: a
+// lookup that cannot tell which record is the seat's, a record and a seat that
+// together name no branch, a seat with no worktree, and an origin that cannot be
+// read. Each fails the release before the sandbox is released, so the sandbox and
+// its record stay for the next tick, and each is raised rather than passing as a
+// release with nothing left to do (gt-35ihg5).
+func TestSeatUnreachableReleaseStopsWhenTheRecordCannotBeAsked(t *testing.T) {
+	t.Parallel()
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	readErr := errors.New("could not resolve host: origin")
+	steps := []struct {
+		name string
+		// seed writes the seat's sandbox records for a rig the registry does not
+		// list; worktree brings the stub the origin read resolves, and originErr
+		// makes the git handle answer that origin cannot be read.
+		seed      func(d *Daemon)
+		worktree  bool
+		originErr error
+		want      string
+	}{
+		{"the lookup cannot tell which record is the seat's", func(d *Daemon) {
+			seedReleaseRecords(t, d, releaseSandboxRecord(),
+				session.SandboxRecord{Session: releaseSeat.Polecat, Rig: releaseSeat.Rig, Polecat: releaseSeat.Polecat, Branch: releaseBranch})
+		}, true, nil, "2 records name it"},
+		{"the record and the seat name no branch", func(d *Daemon) {
+			rec := releaseSandboxRecord()
+			rec.Branch = ""
+			seedReleaseRecords(t, d, rec)
+		}, true, nil, "names no branch to ask origin about"},
+		{"the seat has no worktree to ask from", func(d *Daemon) {
+			seedReleaseRecords(t, d, releaseSandboxRecord())
+		}, false, nil, "has no worktree to read origin from"},
+		{"origin cannot be read", func(d *Daemon) {
+			seedReleaseRecords(t, d, releaseSandboxRecord())
+		}, true, readErr, "could not resolve host: origin"},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs := unreachableReleaseTown(t)
+			step.seed(d)
+			if step.worktree {
+				seedHostWorktreeStub(t, d)
+			}
+			d.openGitFn = func(string) daemonGit {
+				return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}, originErr: step.originErr}
+			}
+			watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+			f := &releaseFake{}
+
+			require.Equal(t, []string{"pause gastown/capable", "origin gastown/capable"},
+				releaseProductionSandbox(t, d, f), "an unanswerable origin read must stop the release before the sandbox is released")
+			require.Empty(t, f.handBacks, "nothing may be handed back")
+			require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json",
+				"the record must stay for the next tick")
+			raised := raisedItems(d)
+			require.Len(t, raised, 1, "a failed release must raise one item")
+			require.Equal(t, "seat-unreachable-release:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+			require.Contains(t, logs.String(), step.want)
+		})
+	}
+}
+
+// TestSeatUnreachableReleaseStopsWhenTheSandboxCannotBeReleased: origin answered
+// and holds the branch, and the sandbox release then fails — its record read
+// cannot be answered, or the gateway refuses the delete. The sandbox and its
+// record stay together, the bead is not handed back, and the failure is raised,
+// so the next tick retries a release that is owed rather than one recorded as
+// done (gt-35ihg5).
+func TestSeatUnreachableReleaseStopsWhenTheSandboxCannotBeReleased(t *testing.T) {
+	t.Parallel()
+	gone := errors.New("sandbox pod gastown-capable is gone")
+	steps := []struct {
+		name string
+		// readErr fails the record read the sandbox release asks for, keyed on
+		// the step asking rather than on the position of the call; deleteErr is
+		// what the gateway answers to the delete, and nilDeleter stands in for a
+		// binary with no record deleter linked.
+		readErr    error
+		deleteErr  error
+		nilDeleter bool
+		wantLog    string
+	}{
+		{name: "the record cannot be read when the sandbox is released", readErr: errors.New("registry unreadable"), wantLog: "registry unreadable"},
+		{name: "the gateway refuses the delete", deleteErr: errors.New("gateway: dial tcp 10.0.0.5:443: connection refused"), wantLog: "connection refused"},
+		{name: "no sandbox deleter is linked", nilDeleter: true, wantLog: "no sandbox deleter is linked"},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs := unreachableReleaseTown(t)
+			rec := releaseSandboxRecord()
+			reg := session.NewPrefixRegistry()
+			reg.Register("gt", releaseSeat.Rig)
+			d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+			require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+			seedHostWorktreeStub(t, d)
+			f := &releaseFake{deleteErr: step.deleteErr, nilDeleter: step.nilDeleter}
+			d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+				if f.running == "sandbox-release" && step.readErr != nil {
+					return session.SandboxRecord{}, false, step.readErr
+				}
+				return rec, true, nil
+			}
+			d.openGitFn = func(string) daemonGit {
+				return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+			}
+			watchUnreachable(d, releaseStart, releaseSeat.Bead, gone)
+
+			require.Equal(t, []string{"pause gastown/capable", "origin gastown/capable", "sandbox-release gastown/capable"},
+				releaseProductionSandbox(t, d, f), "a sandbox that cannot be released must stop the release there")
+			require.Empty(t, f.handBacks, "nothing may be handed back")
+			require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json",
+				"the record must stay with its sandbox for the next tick")
+			raised := raisedItems(d)
+			require.Len(t, raised, 1, "a failed release must raise one item")
+			require.Equal(t, "seat-unreachable-release:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+			require.Contains(t, logs.String(), "sandbox of gastown/capable not released")
+			require.Contains(t, logs.String(), step.wantLog)
+		})
+	}
+}
+
+// TestSeatUnreachableReleaseStopsWhenTheSandboxLookupFails: the sandbox release
+// looks the seat's sandbox up again, and a lookup that cannot read the seat's
+// record stops the release with the bead still the seat's, so the next tick
+// retries it rather than the record going on a guess (gt-35ihg5).
+func TestSeatUnreachableReleaseStopsWhenTheSandboxLookupFails(t *testing.T) {
+	t.Parallel()
+	d, logs := unreachableReleaseTown(t)
+	rec := releaseSandboxRecord()
+	require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+	seedHostWorktreeStub(t, d)
+	// The origin read's lookup answers; the sandbox release's lookup cannot be
+	// read, keyed on the step asking rather than on the position of the call.
+	f := &releaseFake{}
+	d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		if f.running == "sandbox-release" {
+			return session.SandboxRecord{}, false, errors.New("records listing unreadable")
+		}
+		return rec, true, nil
+	}
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	}
+	watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod gastown-capable is gone"))
+
+	require.Equal(t, []string{"pause gastown/capable", "origin gastown/capable", "sandbox-release gastown/capable"},
+		releaseProductionSandbox(t, d, f), "a lookup that cannot read the record must stop the release there")
+	require.Empty(t, f.handBacks, "nothing may be handed back")
+	require.Empty(t, f.deleted, "no delete may run on a record the lookup could not read")
+	require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json",
+		"the record must stay for the next tick")
+	raised := raisedItems(d)
+	require.Len(t, raised, 1, "a failed release must raise one item")
+	require.Equal(t, "seat-unreachable-release:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+	require.Contains(t, logs.String(), "records listing unreadable")
 }
 
 // TestSeatUnreachableReleaseRunsWhenTheSeatListFails: the unreachable seats come
@@ -501,6 +1071,7 @@ func TestSeatUnreachableReleaseDeletesTheGatewaySandbox(t *testing.T) {
 func TestSeatUnreachableReleaseRunsWhenTheSeatListFails(t *testing.T) {
 	t.Parallel()
 	d, logs := newOverrunDaemon(t, false)
+	seedReleaseBranchOnOrigin(t, d)
 	f := newOverrunFake(0)
 	f.now = releaseStart.Add(15 * time.Minute)
 	watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod gastown-capable is gone"))
@@ -545,7 +1116,8 @@ func TestSeatUnreachableReleaseHappensOncePerOutage(t *testing.T) {
 	gone := errors.New("sandbox pod gastown-capable is gone")
 	released := []string{
 		"pause gastown/capable",
-		"sandbox gastown/capable",
+		"origin gastown/capable",
+		"sandbox-release gastown/capable",
 		"hand-back gastown/capable",
 		"reset-agent-bead gastown/capable",
 		"record-cleanup gastown/capable",
@@ -683,6 +1255,8 @@ func TestSeatUnreachableReleaseRefusesHalfWiredSeams(t *testing.T) {
 		unwire func(*seatUnreachableStopSeams)
 	}{
 		{"no pause seam", func(s *seatUnreachableStopSeams) { s.pause = nil }},
+		{"no origin read seam", func(s *seatUnreachableStopSeams) { s.originHolds = nil }},
+		{"no sandbox release seam", func(s *seatUnreachableStopSeams) { s.releaseSandbox = nil }},
 		{"no bead read seam", func(s *seatUnreachableStopSeams) { s.beadStillHeld = nil }},
 		{"no hand-back seam", func(s *seatUnreachableStopSeams) { s.handBack = nil }},
 	}
@@ -701,4 +1275,155 @@ func TestSeatUnreachableReleaseRefusesHalfWiredSeams(t *testing.T) {
 			require.Contains(t, logs.String(), "release seams incomplete", "the missing seam must be logged")
 		})
 	}
+}
+
+// sandboxGitScript is an in-sandbox git runner that answers by subcommand, so a
+// proof test says what the clone does without counting calls: fetchErr fails the
+// fetch, aheadErr makes merge-base report the clone ahead of what was fetched.
+type sandboxGitScript struct {
+	fetchErr error
+	aheadErr error
+	calls    []string
+}
+
+func (g *sandboxGitScript) run(_ string, args ...string) ([]byte, error) {
+	g.calls = append(g.calls, strings.Join(args, " "))
+	switch args[0] {
+	case "fetch":
+		return nil, g.fetchErr
+	case "merge-base":
+		return nil, g.aheadErr
+	}
+	return nil, fmt.Errorf("unexpected in-sandbox git call %v", args)
+}
+
+// proofTown is a release town whose sandbox record names a clone, whose origin
+// holds the seat's branch, and whose in-sandbox runner is script.
+func proofTown(t *testing.T, script *sandboxGitScript) *Daemon {
+	t.Helper()
+	d, _ := unreachableReleaseTown(t)
+	rec := releaseSandboxRecord()
+	rec.WorkDir = "/sandbox/gt/gastown/polecats/capable/gastown"
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", releaseSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	require.NoError(t, session.WriteSandboxRecord(d.config.TownRoot, rec))
+	seedHostWorktreeStub(t, d)
+	d.sandboxGitRunnerFn = func(string, session.SandboxRecord) (func(string, ...string) ([]byte, error), error) {
+		return script.run, nil
+	}
+	origin := &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + releaseBranch, Hash: "aaa111"}}}
+	d.openGitFn = func(string) daemonGit { return origin }
+	return d
+}
+
+// TestSeatUnreachableSandboxOnOriginNeedsProofFromTheClone: origin holding a
+// branch of the seat's name says nothing about the commits beyond its tip, so
+// the proof is the clone's own: HEAD an ancestor of what origin's tip fetches.
+// A clone that is ahead, and a fetch that fails, are both unproven, and so is a
+// record that names no clone; only an ancestor HEAD, or no sandbox at all, is
+// proof (gt-35ihg5).
+func TestSeatUnreachableSandboxOnOriginNeedsProofFromTheClone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		script  sandboxGitScript
+		want    bool
+		wantErr bool
+	}{
+		{name: "the clone's head is on origin's tip", want: true},
+		{name: "the clone is ahead of origin's tip", script: sandboxGitScript{aheadErr: errors.New("exit status 1")}, wantErr: true},
+		{name: "the fetch fails", script: sandboxGitScript{fetchErr: errors.New("sandbox unreachable")}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			script := tc.script
+			d := proofTown(t, &script)
+
+			got, err := d.seatUnreachableSandboxOnOrigin(releaseSeat, releaseBranch)
+
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			require.Equal(t, "fetch --quiet origin "+releaseBranch, script.calls[0],
+				"the clone fetches the seat's branch before it compares")
+		})
+	}
+	t.Run("a record naming no clone is unproven", func(t *testing.T) {
+		t.Parallel()
+		d, _ := unreachableReleaseTown(t)
+		seedReleaseSandbox(t, d)
+		got, err := d.seatUnreachableSandboxOnOrigin(releaseSeat, releaseBranch)
+		require.False(t, got)
+		require.Error(t, err)
+	})
+}
+
+// TestSeatUnreachableReleaseKeepsASandboxAheadOfOrigin: origin holds a branch of
+// the seat's name, but the clone holds commits beyond its tip. The release keeps
+// the sandbox and its record, hands the bead back once and raises the
+// sandbox-ahead item; and a clone origin does cover is released as before
+// (gt-35ihg5).
+func TestSeatUnreachableReleaseKeepsASandboxAheadOfOrigin(t *testing.T) {
+	t.Parallel()
+	t.Run("the clone is ahead", func(t *testing.T) {
+		t.Parallel()
+		script := &sandboxGitScript{aheadErr: errors.New("exit status 1")}
+		d := proofTown(t, script)
+		watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod is gone"))
+		f := &releaseFake{}
+		seams := f.seams()
+		seams.originHolds = d.seatUnreachableOriginHolds
+		seams.sandboxOnOrigin = d.seatUnreachableSandboxOnOrigin
+		seams.releaseSandbox = func(seat overrunSeat) error {
+			return d.seatUnreachableReleaseSandbox(seat, f.deleter)
+		}
+
+		d.releaseUnreachableSeats(seams, releaseStart.Add(16*time.Minute), false)
+
+		require.Empty(t, f.deleted, "a sandbox ahead of origin must not be deleted")
+		require.FileExists(t, session.SandboxRegistryDir(d.config.TownRoot)+"/"+releaseSession+".json")
+		require.Len(t, f.handBacks, 1, "the bead still goes back once")
+		raised := raisedItems(d)
+		require.Len(t, raised, 1)
+		require.Equal(t, "seat-unreachable-sandbox-ahead:gastown/capable:gt-p4aqut", raised[0].Escalation.Fingerprint)
+		require.Contains(t, raised[0].Escalation.Description, "holds commits origin's tip does not")
+	})
+	t.Run("the clone cannot be read", func(t *testing.T) {
+		t.Parallel()
+		script := &sandboxGitScript{fetchErr: errors.New("sandbox unreachable")}
+		d := proofTown(t, script)
+		watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod is gone"))
+		f := &releaseFake{}
+		seams := f.seams()
+		seams.originHolds = d.seatUnreachableOriginHolds
+		seams.sandboxOnOrigin = d.seatUnreachableSandboxOnOrigin
+		seams.releaseSandbox = func(seat overrunSeat) error {
+			return d.seatUnreachableReleaseSandbox(seat, f.deleter)
+		}
+
+		d.releaseUnreachableSeats(seams, releaseStart.Add(16*time.Minute), false)
+
+		require.Empty(t, f.deleted)
+		raised := raisedItems(d)
+		require.Len(t, raised, 1)
+		require.Contains(t, raised[0].Escalation.Description, "could not be compared with origin")
+	})
+	t.Run("the clone is on origin", func(t *testing.T) {
+		t.Parallel()
+		d := proofTown(t, &sandboxGitScript{})
+		watchUnreachable(d, releaseStart, releaseSeat.Bead, errors.New("sandbox pod is gone"))
+		f := &releaseFake{}
+		seams := f.seams()
+		seams.originHolds = d.seatUnreachableOriginHolds
+		seams.sandboxOnOrigin = d.seatUnreachableSandboxOnOrigin
+		seams.releaseSandbox = func(seat overrunSeat) error {
+			return d.seatUnreachableReleaseSandbox(seat, f.deleter)
+		}
+
+		d.releaseUnreachableSeats(seams, releaseStart.Add(16*time.Minute), false)
+
+		require.Equal(t, []string{releaseSession}, f.deleted)
+		require.Empty(t, raisedItems(d))
+	})
 }
