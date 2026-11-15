@@ -6,14 +6,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 )
-
-// localRoundWithMajor is the note the retired local round formatter wrote for
-// round 1 of head abcdef1: one major finding that no reply answers. The
-// formatter left with the round (gt-755l63), so the fixture is the literal
-// bytes it wrote; beads that ran a round before 2026-11-14 still carry theirs.
-const localRoundWithMajor = "LOCAL ROUND (1): head=abcdef1 at=2026-11-13T02:30:00Z\n" +
-	"LOCAL ROUND FINDING id:f1 sev:major internal/x/a.go:12 — unbounded poll loop"
 
 // TestSubmitIgnoresAnUnansweredLocalRoundMajor pins gt-6qb84r in the unit
 // tier: the operator retired the polecat's local review round on 2026-11-14,
@@ -38,7 +32,7 @@ func TestSubmitIgnoresAnUnansweredLocalRoundMajor(t *testing.T) {
 		Title:  "the work",
 		Type:   "task",
 		Status: string(beads.StatusHooked),
-		Notes:  localRoundWithMajor,
+		Notes:  landtest.LocalRoundWithMajor,
 	})
 
 	if err := h.submit(); err != nil {

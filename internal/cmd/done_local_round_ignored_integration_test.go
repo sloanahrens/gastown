@@ -5,14 +5,9 @@ package cmd
 import (
 	"strings"
 	"testing"
-)
 
-// localRoundWithMajor is the note the retired local round formatter wrote for
-// round 1 of head abcdef1: one major finding that no reply answers. The
-// formatter left with the round (gt-755l63), so the fixture is the literal
-// bytes it wrote; beads that ran a round before 2026-11-14 still carry theirs.
-const localRoundWithMajor = "LOCAL ROUND (1): head=abcdef1 at=2026-11-13T02:30:00Z\n" +
-	"LOCAL ROUND FINDING id:f1 sev:major internal/x/a.go:12 — unbounded poll loop"
+	"github.com/steveyegge/gastown/internal/land/landtest"
+)
 
 // TestIntegrationRunDoneIgnoresAnUnansweredLocalRoundMajor pins gt-6qb84r: the
 // operator retired the polecat's local review round on 2026-11-14, so gt done
@@ -24,7 +19,7 @@ func TestIntegrationRunDoneIgnoresAnUnansweredLocalRoundMajor(t *testing.T) {
 	r := runDoneSubmitRecording(t, passingDoneGate(), nil,
 		func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) },
 		func(t *testing.T, currentBeadsDir, ownerBeadsDir string) string {
-			return installSubmitSourceBDRecorderWithNotes(t, currentBeadsDir, ownerBeadsDir, localRoundWithMajor)
+			return installSubmitSourceBDRecorderWithNotes(t, currentBeadsDir, ownerBeadsDir, landtest.LocalRoundWithMajor)
 		})
 	if r.err != nil {
 		t.Fatalf("gt done with an unanswered LOCAL ROUND major in the work bead's notes: %v", r.err)
