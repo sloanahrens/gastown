@@ -1641,13 +1641,18 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 // work is gone with it, so the town's copy of the seat's worktree asks: origin
 // is the one place that can still show whether the work got out.
 //
-// Answering yes, and answering that origin has no such branch, both let the
-// stop proceed as it did before this rule (the absent branch's warning is
-// gt-mp9zrg). A read that fails is different: the answer is unknown, the seat's
-// commits may be nowhere, and a hand-back would lose them without a trace. So
-// the stop logs the WARNING with a bounded one-line reason, raises the
+// Origin holding the branch is the work having got out, and the stop proceeds
+// as it did before this rule. Origin answering that it holds no such branch is
+// the one case the stop can neither see nor undo: the sandbox is gone and the
+// branch is not on origin, so the work may be nowhere. The stop then logs the
+// WARNING naming the seat, the branch and what origin holds, raises the
 // escalation the attention queue already raises for the overseer (no new item
-// kind), and returns an error naming the unknown answer, which keeps the
+// kind), and proceeds, so the bead is handed back once (gt-mp9zrg).
+//
+// A read that fails is different: the answer is unknown, the seat's commits may
+// be nowhere, and a hand-back would lose them without a trace. So the stop logs
+// the WARNING with a bounded one-line reason, raises the same kind of
+// escalation, and returns an error naming the unknown answer, which keeps the
 // sandbox's record and holds the stop for the next tick (gt-lahjz4). A record
 // naming no branch and a worktree that cannot be resolved are the same unknown
 // answer.
@@ -1658,6 +1663,7 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 		branch = rec.Branch
 	}
 	var readErr error
+	var originSHA string
 	switch {
 	case branch == "" || branch == "(unknown)":
 		readErr = fmt.Errorf("the sandbox %s record names no branch to ask origin about", sessionName)
@@ -1665,25 +1671,37 @@ func (d *Daemon) overrunGoneSandboxOrigin(seat overrunSeat, sessionName string, 
 		workDir, err := d.overrunSeatWorktree(seat)
 		if err != nil {
 			readErr = err
-		} else if _, err := originBranchRead(d.gitAt(workDir), branch); err != nil {
+		} else if originSHA, err = originBranchRead(d.gitAt(workDir), branch); err != nil {
 			readErr = err
 		}
 	}
-	if readErr == nil {
+	if readErr != nil {
+		// The error's text is a git error's, which carries the command's
+		// output: the log line, the escalation and the error the stop logs
+		// again each get one bounded line of it, never the whole capture.
+		reason := oneLineReason(readErr)
+		d.logger.Printf("overrun_guard: WARNING: %s: sandbox %s is gone and origin could not be read for branch %s, so its work may be nowhere: %s; the bead stays with the seat and the stop retries",
+			who, sessionName, branch, reason)
+		message := fmt.Sprintf("the overrun stop of %s on %s found its sandbox %s gone and could not read origin for branch %s: %s. The seat's commits may have gone with the sandbox; the bead is not handed back, and the stop retries.",
+			who, seat.Bead, sessionName, branch, reason)
+		if err := d.escalateAlertSeverity("MEDIUM", "overrun-sandbox-gone:"+who+":"+seat.Bead, overrunActor, message); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: the sandbox-gone item for %s was not raised: %s", who, seat.Bead, oneLineReason(err))
+		}
+		return fmt.Errorf("sandbox %s is gone and origin could not be read for branch %s: %s", sessionName, branch, reason)
+	}
+	if originSHA != "" {
 		return nil
 	}
-	// The error's text is a git error's, which carries the command's output:
-	// the log line, the escalation and the error the stop logs again each get
-	// one bounded line of it, never the whole capture.
-	reason := oneLineReason(readErr)
-	d.logger.Printf("overrun_guard: WARNING: %s: sandbox %s is gone and origin could not be read for branch %s, so its work may be nowhere: %s; the bead stays with the seat and the stop retries",
-		who, sessionName, branch, reason)
-	message := fmt.Sprintf("the overrun stop of %s on %s found its sandbox %s gone and could not read origin for branch %s: %s. The seat's commits may have gone with the sandbox; the bead is not handed back, and the stop retries.",
-		who, seat.Bead, sessionName, branch, reason)
-	if err := d.escalateAlertSeverity("MEDIUM", "overrun-sandbox-gone:"+who+":"+seat.Bead, overrunActor, message); err != nil {
+	// Origin answered and holds no such branch: the sandbox is gone and origin
+	// has no copy, so the stop raises the item before handing the bead back.
+	d.logger.Printf("overrun_guard: WARNING: %s: sandbox %s is gone and origin holds no branch %s, so the seat's commits may be nowhere; the stop hands the bead back once and raises the overseer item for it",
+		who, sessionName, branch)
+	message := fmt.Sprintf("the overrun stop of %s on %s found its sandbox %s gone and origin holds no branch %s: the seat's commits may have gone with the sandbox, and no copy is on origin.",
+		who, seat.Bead, sessionName, branch)
+	if err := d.escalateAlertSeverity("MEDIUM", "overrun-sandbox-gone-absent:"+who+":"+seat.Bead, overrunActor, message); err != nil {
 		d.logger.Printf("overrun_guard: WARNING: %s: the sandbox-gone item for %s was not raised: %s", who, seat.Bead, oneLineReason(err))
 	}
-	return fmt.Errorf("sandbox %s is gone and origin could not be read for branch %s: %s", sessionName, branch, reason)
+	return nil
 }
 
 // overrunSandbox is the sandbox of a seat as the stop's lookup finds it.

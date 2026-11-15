@@ -283,6 +283,64 @@ func TestOverrunSandboxGoneOriginHeldProceedsAsBefore(t *testing.T) {
 	}
 }
 
+// A gone sandbox whose branch origin does not hold is the case the stop can
+// neither see nor undo: the sandbox is gone and origin has no copy of the work.
+// The stop logs the WARNING naming the seat, the branch and origin's answer,
+// raises the escalation the attention queue shows the overseer, then removes the
+// record and hands the bead back once. It never says the push was done, because
+// the guard cannot see that it was (gt-mp9zrg).
+func TestOverrunSandboxGoneOriginBranchAbsentWarnsRaisesAndHandsBackOnce(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	seedHostWorktreeStub(t, d)
+	// Origin answers, and holds another branch but not the seat's.
+	d.openGitFn = func(string) daemonGit {
+		return &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}}}
+	}
+	notified := notifyfake.New()
+	d.notifier = notified
+
+	deleted := 0
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = overrunGoneSandboxStop(d, session.ErrNothingToPush, &deleted)
+
+	d.runOverrunGuard(f.seams())
+
+	if deleted != 1 {
+		t.Errorf("the sandbox record was removed %d times, want once: origin answered that it has no such branch", deleted)
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q, want the bead handed back once", f.handedBack)
+	}
+	log := buf.String()
+	for _, want := range []string{
+		"WARNING",
+		stopSeat.Rig + "/" + stopSeat.Polecat,
+		stopSeat.Branch,
+		"origin holds no branch " + stopSeat.Branch,
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("the log does not carry %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "treating the push as done") {
+		t.Errorf("the log treats the push as done on a path where the guard cannot see it:\n%s", log)
+	}
+	raised := notified.Escalations()
+	if len(raised) != 1 {
+		t.Fatalf("escalations = %+v, want one for the branch origin lacks", raised)
+	}
+	reason := raised[0].Escalation.Reason
+	if !strings.Contains(reason, stopSeat.Bead) || !strings.Contains(reason, stopSeat.Branch) {
+		t.Errorf("escalation reason %q does not name the bead %s and its branch %s",
+			reason, stopSeat.Bead, stopSeat.Branch)
+	}
+	if _, ok, err := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); ok || err != nil {
+		t.Errorf("the sandbox record survived the stop (ok %v, err %v); the bead was handed back", ok, err)
+	}
+}
+
 // A sandbox whose record names no branch is an unknown answer too: the stop
 // cannot ask origin what it holds for the seat, so it keeps the record and holds
 // the bead rather than reading silence as an absent branch (gt-lahjz4).
