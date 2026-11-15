@@ -530,8 +530,8 @@ func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
 	if !strings.Contains(err.Error(), "record the apply") {
 		t.Errorf("err = %v, want it to name the record", err)
 	}
-	if len(result.Done) == 0 || result.Done[0].Ref != imgID('1') {
-		t.Errorf("Done = %+v, want the removal it could not record", result.Done)
+	if got, want := doneRefs(result), []string{imgID('1'), "builder"}; !slices.Equal(got, want) {
+		t.Errorf("Done = %v, want the removal it could not record and the build cache prune", got)
 	}
 }
 
