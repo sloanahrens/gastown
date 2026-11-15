@@ -92,14 +92,6 @@ func (r VerifyResult) OK() bool { return len(r.Differences) == 0 }
 // holds has the record's row count and dolt_hashof_table, exactly one commit of
 // the squashed range is at or before cut, and the commits newer than cut are on
 // compact-work one for one.
-//
-// The cut rules read author_date, not date: a rebase rewrites every replayed
-// commit's hash and commit date to the moment it runs and keeps the author date
-// and message, so a cut read from date would count the squashed commit as newer
-// than cut and put it in the newer range on every run. The plan's base leaves
-// the initial commit untouched and its author date is at or before cut too, so
-// the one-commit rule counts the rebased range: the log without compact-base's
-// tip.
 func Verify(ctx context.Context, ex Exec, before Before, cut time.Time) (VerifyResult, error) {
 	if err := checkCommitHash("the recorded main tip", before.Tip); err != nil {
 		return VerifyResult{}, err
@@ -116,6 +108,20 @@ func Verify(ctx context.Context, ex Exec, before Before, cut time.Time) (VerifyR
 		return VerifyResult{}, fmt.Errorf(
 			"doltsquash: statement %d (SELECT active_branch()) answered %q, want compact-work: the squashed tables must be read on compact-work",
 			s.n, branch)
+	}
+	// The record's commit count is what its tip's history holds. The tables were
+	// read from the working set at that tip, so a count that disagrees means the
+	// record describes another state, and a table comparison against it proves
+	// nothing.
+	atTip, err := s.number(ctx, fmt.Sprintf(
+		"SELECT COUNT(*) FROM dolt_log AS OF %s", quoteLiteral(before.Tip)))
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if atTip != before.Commits {
+		return VerifyResult{}, fmt.Errorf(
+			"doltsquash: the BEFORE record holds %d commits, but the history at its tip %s holds %d",
+			before.Commits, before.Tip, atTip)
 	}
 	mainTip, err := s.scalar(ctx, "SELECT dolt_hashof('main')")
 	if err != nil {
@@ -139,6 +145,11 @@ func Verify(ctx context.Context, ex Exec, before Before, cut time.Time) (VerifyR
 	if err := s.compareTables(ctx, before.Tables, catalog, &result); err != nil {
 		return VerifyResult{}, err
 	}
+	// Both cut rules read author_date, not date: a rebase rewrites the commit
+	// date to the moment it runs and keeps the author date, so a cut read from
+	// date counts the squashed commit as newer on every run. compact-base keeps
+	// the initial commit, at or before the cut too, so the one-commit rule
+	// counts the rebased range as the log without base's tip.
 	cutLiteral := quoteLiteral(formatCut(cut))
 	old, err := s.number(ctx, fmt.Sprintf(
 		"SELECT COUNT(*) FROM dolt_log('compact-work') WHERE author_date <= %s AND commit_hash <> %s",
