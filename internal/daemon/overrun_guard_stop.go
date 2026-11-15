@@ -966,11 +966,14 @@ func (d *Daemon) overrunSeatWorktree(seat overrunSeat) (string, error) {
 }
 
 // overrunSeatGit is the one seam that picks the git handle the overrun stop's
-// save, dirty check, push and reset run over. Every seat gets its host
-// worktree's handle today; gt-bh77is takes the seam over for a seat with a
-// sandbox record, so the same save, push and reset code runs inside the
-// sandbox. A worktree that cannot be resolved is errOverrunNoWorktree, never a
-// nil handle: the caller cannot save work it cannot see.
+// save, dirty check, push and reset run over. A seat with a sandbox record gets
+// the in-sandbox handle on its clone directory, so the same save, push and
+// reset code runs inside the sandbox; every other seat gets its host worktree's
+// handle. A host worktree that cannot be resolved is errOverrunNoWorktree,
+// never a nil handle: the caller cannot save work it cannot see. A sandbox
+// seat's sandbox that cannot be seen, from an unreadable record to a runner
+// that is not linked, is an error too, never its host stub, which reads a clean
+// tree and would call the work saved.
 func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
