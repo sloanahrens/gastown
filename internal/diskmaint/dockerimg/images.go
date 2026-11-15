@@ -1,6 +1,6 @@
 // Package dockerimg reads the images a docker daemon holds and the containers
-// that use them, and parses the sizes docker prints. It is shared so the colima
-// and cloud targets read a Colima VM's daemon the same way.
+// that use them, and parses the sizes docker prints. It exists so a package that
+// reads a docker daemon does not build its own docker calls.
 package dockerimg
 
 import (
@@ -70,7 +70,7 @@ func (im Image) Bytes() int64 {
 // Client reads the daemon Host names, running every call through Run.
 type Client struct {
 	// Host is the daemon socket, passed to every docker call as DOCKER_HOST,
-	// e.g. unix://<home>/.colima/gt-sbx/docker.sock.
+	// e.g. unix://<home>/.colima/<profile>/docker.sock.
 	Host string
 	// Run runs docker.
 	Run diskmaint.Runner
