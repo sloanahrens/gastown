@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -197,7 +198,7 @@ func (d *Daemon) seatUnreachableOriginHolds(seat overrunSeat) (string, bool, err
 // there and asks whether the clone's HEAD is an ancestor of what it fetched. A
 // seat with no sandbox record has nothing to lose and answers true. Any failure
 // to run either call, including a clone that is ahead (merge-base exits 1), is
-// an unproven answer, never a proof: the caller keeps the sandbox (gt-35ihg5).
+// an unproven answer carried as an error, never a proof: the caller keeps the sandbox (gt-35ihg5).
 func (d *Daemon) seatUnreachableSandboxOnOrigin(seat overrunSeat, branch string) (bool, error) {
 	sb, err := d.overrunSandboxSession(seat)
 	if err != nil {
@@ -227,10 +228,18 @@ func (d *Daemon) seatUnreachableSandboxOnOrigin(seat overrunSeat, branch string)
 		return false, fmt.Errorf("sandbox %s: fetch of origin's %s failed: %w", sb.Session, branch, err)
 	}
 	if _, err := run(rec.WorkDir, "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"); err != nil {
-		return false, nil
+		// merge-base exits 1 for "not an ancestor" and otherwise for a failure
+		// the runner folds into the same error, so both are unproven and the
+		// caller keeps the sandbox; errCloneAhead names the one the caller
+		// words as an ahead clone.
+		return false, fmt.Errorf("sandbox %s: %w: %v", sb.Session, errCloneAhead, err)
 	}
 	return true, nil
 }
+
+// errCloneAhead marks a sandbox clone whose HEAD is not shown to be on origin's
+// tip: it holds commits origin does not, or the comparison could not run.
+var errCloneAhead = errors.New("the clone's head is not on origin's tip")
 
 // seatUnreachableReleaseSandbox deletes the gateway sandbox the seat ran in and
 // drops its record, through the record deleter: the object is deleted first (a
@@ -416,7 +425,7 @@ func (d *Daemon) raiseSeatUnreachableBranchAbsent(alert seatUnreachable, branch 
 func (d *Daemon) raiseSeatUnreachableSandboxAhead(alert seatUnreachable, branch string, cause error) {
 	who := alert.Rig + "/" + alert.Polecat
 	why := "its clone holds commits origin's tip does not"
-	if cause != nil {
+	if cause != nil && !errors.Is(cause, errCloneAhead) {
 		why = "its clone could not be compared with origin (" + oneLineReason(cause) + ")"
 	}
 	d.logger.Printf("seat_unreachable: WARNING: %s: origin holds %s but %s; keeping its sandbox and record, and handing %s back once",

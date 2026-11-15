@@ -1332,7 +1332,7 @@ func TestSeatUnreachableSandboxOnOriginNeedsProofFromTheClone(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "the clone's head is on origin's tip", want: true},
-		{name: "the clone is ahead of origin's tip", script: sandboxGitScript{aheadErr: errors.New("exit status 1")}},
+		{name: "the clone is ahead of origin's tip", script: sandboxGitScript{aheadErr: errors.New("exit status 1")}, wantErr: true},
 		{name: "the fetch fails", script: sandboxGitScript{fetchErr: errors.New("sandbox unreachable")}, wantErr: true},
 	}
 	for _, tc := range tests {
