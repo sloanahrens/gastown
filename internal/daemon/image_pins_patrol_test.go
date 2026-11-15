@@ -17,6 +17,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -1092,6 +1093,44 @@ func TestImagePinsCompareForRefusesAMissingToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "image pins patrol") {
 		t.Errorf("error %q does not name the patrol", err)
+	}
+}
+
+// bdCallRecord is one bd call a seam was asked to run: the directory bd would
+// run in and its argv.
+type bdCallRecord struct {
+	dir  string
+	args []string
+}
+
+// TestImagePinsBeadsOpensTheGTSourceRigDatabase is the client's test
+// (gt-fu9c8a): the patrol panicked the daemon on its first tick because
+// imagePinsBeads called WithTimeout on a NewPinned wrapper, so this test calls
+// the constructor itself and drives one bd call through the client it returns.
+// That call must run in the gt source rig's .beads directory, where the refresh
+// bead is filed and looked up, and a client whose copies dropped its bd seam
+// would not answer at all.
+func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0)}
+	var calls []bdCallRecord
+	d.imagePinsBeadRunner = func(_ context.Context, dir string, args []string) ([]byte, []byte, error) {
+		calls = append(calls, bdCallRecord{dir: dir, args: args})
+		return []byte("[]"), nil, nil
+	}
+
+	store := d.imagePinsBeads()
+	if _, err := store.List(beads.ListOptions{Label: imagePinsRefreshLabel}); err != nil {
+		t.Fatalf("List through the patrol's client: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want the one List", len(calls))
+	}
+	wantDir := filepath.Join(townRoot, rebuildGTSourceRig, ".beads")
+	if calls[0].dir != wantDir {
+		t.Errorf("the bd call runs in %s, want the gt source rig's database directory %s", calls[0].dir, wantDir)
 	}
 }
 
