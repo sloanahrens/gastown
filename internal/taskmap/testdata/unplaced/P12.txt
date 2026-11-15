@@ -1,4 +1,0 @@
-theme cli
-tracker
-tracker replay
-tracker status
