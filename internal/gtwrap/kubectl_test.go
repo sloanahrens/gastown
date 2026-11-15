@@ -21,6 +21,11 @@ import (
 )
 
 const (
+	// kubeTown is the town root on the Mac. The pod mounts the town-state claim at
+	// that same path, so it is also the pod's town root (manifestdata.PodTownRoot)
+	// and the target does not rewrite the tool's output.
+	// TestPodTownRootIsTheSharedConstant keeps the two in step, and
+	// TestPodLaunchMapsOntoAConfiguredPodRoot covers the two differing.
 	kubeTown      = "/Users/sloan/gt"
 	kubeContext   = "colima-gt-control"
 	kubeNamespace = "gt"
@@ -142,7 +147,7 @@ func kubeCall(t *testing.T, dir string, tty bool) Call {
 		"TERM=xterm-256color",
 		// The caller's Dolt host is replaced, so this value must not reach the pod.
 		"BEADS_DOLT_SERVER_HOST=127.0.0.1",
-		"HOME=/Users/sloan",
+		"HOME=/Users/user",
 		"CLAUDE_CODE_OAUTH_TOKEN=placeholder",
 	}
 	call, err := Plan("gt", []string{"status", "--line"}, env, dir, tty)
@@ -179,7 +184,7 @@ func TestKubectlExecArgvUnderTheTown(t *testing.T) {
 			want := append(execPrefix(tty),
 				"env", "GT_ROLE=polecat", "TERM=xterm-256color", testDolt,
 				"sh", "-c", podWalkUpScript, "sh",
-				"/Users/sloan/gt/rig/polecats", podTownRoot, "/Users/sloan/gt/rig/polecats",
+				kubeTown+"/rig/polecats", podTownRoot, kubeTown+"/rig/polecats",
 				"gt", "status", "--line")
 			if !slices.Equal(f.attached[0], want) {
 				t.Fatalf("attached argv\n got %q\nwant %q", f.attached[0], want)
@@ -195,7 +200,7 @@ func TestKubectlExecArgvOutsideTheTown(t *testing.T) {
 	t.Parallel()
 	f := healthyKube()
 	var note bytes.Buffer
-	outside := "/Users/sloan/Documents/scratch"
+	outside := "/Users/user/Documents/scratch"
 	exit, err := testKubectl(f, &note).Launch(kubeCall(t, outside, false))
 	if err != nil || exit != 0 {
 		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
@@ -518,7 +523,7 @@ func TestPodLaunchSetsCallerCwdOnlyWhenWalked(t *testing.T) {
 		},
 		{
 			name:    "outside the town",
-			dir:     "/Users/sloan/Documents/scratch",
+			dir:     "/Users/user/Documents/scratch",
 			dirs:    map[string]bool{podTownRoot: true},
 			wantSet: false,
 		},
@@ -582,7 +587,7 @@ func TestPodDirMapsTheTownOntoThePodTownRoot(t *testing.T) {
 		{name: "the town itself", dir: kubeTown, want: podTownRoot, mapped: true},
 		{name: "a directory under the town", dir: kubeTown + "/rig/polecats/cheedo", want: podTownRoot + "/rig/polecats/cheedo", mapped: true},
 		{name: "a sibling sharing the town's prefix", dir: kubeTown + "-old/rig", want: podTownRoot, mapped: false},
-		{name: "the parent of the town", dir: "/Users/sloan", want: podTownRoot, mapped: false},
+		{name: "the parent of the town", dir: "/Users/user", want: podTownRoot, mapped: false},
 		{name: "a directory elsewhere", dir: "/tmp/work", want: podTownRoot, mapped: false},
 	}
 	for _, tt := range tests {

@@ -10,7 +10,7 @@ import (
 // Mac's, the town the wrapper maps onto.
 const (
 	rewritePodRoot = "/town"
-	rewriteTown    = "/Users/sloan/gt"
+	rewriteTown    = "/Users/user/gt"
 )
 
 // TestOutputRewritesThePodRoot: a line that holds the pod town root is rewritten to

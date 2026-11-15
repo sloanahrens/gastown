@@ -753,7 +753,7 @@ func TestExecutorEnv(t *testing.T) {
 				"BD_DOLT_AUTO_COMMIT": "1",
 			},
 		},
-		{name: "an unknown key", env: map[string]string{"GT_ROOT": "/Users/sloan/gt"}, wantErr: ErrEnvNotAllowed},
+		{name: "an unknown key", env: map[string]string{"GT_ROOT": "/Users/user/gt"}, wantErr: ErrEnvNotAllowed},
 		{name: "BEADS_DIR", env: map[string]string{"BEADS_DIR": "/etc"}, wantErr: ErrEnvNotAllowed},
 		{name: "HOME", env: map[string]string{"HOME": "/root"}, wantErr: ErrEnvNotAllowed},
 		{name: "PATH", env: map[string]string{"PATH": "/bin"}, wantErr: ErrEnvNotAllowed},
