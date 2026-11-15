@@ -1,4 +1,0 @@
-dolt status
-dolt stop
-dolt top
-dolt unpause
