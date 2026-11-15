@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,6 +39,10 @@ This command handles the step-to-step transition for polecats:
 IMPORTANT: This is the canonical way to complete molecule steps. Do NOT manually
 close steps with 'gt bead close' or 'bd close' - they skip the auto-continuation logic.
 
+A molecule that pours no steps (a root-only wisp) has nothing to complete: the
+command prints one line saying so and exits 0. Under --json it prints the line
+to stderr and one JSON object with action "no_steps" to stdout.
+
 Example:
   gt mol step done gt-abc.1    # Complete step 1 of molecule gt-abc`,
 	Args: cobra.ExactArgs(1),
@@ -62,12 +67,10 @@ type StepDoneResult struct {
 	NextStepTitle string   `json:"next_step_title,omitempty"`
 	ParallelSteps []string `json:"parallel_steps,omitempty"` // Multiple ready steps for fan-out
 	Complete      bool     `json:"complete"`
-	Action        string   `json:"action"` // "continue", "parallel", "done", "no_more_ready"
+	Action        string   `json:"action"` // "continue", "parallel", "done", "no_more_ready", "no_steps"
 }
 
 func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
-	stepID := args[0]
-
 	// The step hands work to the caller's worktree and commits there, so the
 	// directory has to be present in this process.
 	cwd, err := callercwd.Require()
@@ -90,27 +93,42 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.New(workDir)
+	return stepDoneRun{
+		out:      os.Stdout,
+		errOut:   os.Stderr,
+		client:   beads.New(workDir),
+		stepID:   args[0],
+		cwd:      cwd,
+		townRoot: townRoot,
+		workDir:  workDir,
+		dryRun:   moleculeStepDryRun,
+		asJSON:   moleculeJSON,
+	}.run()
+}
 
-	// Step 1: Verify the step exists
-	step, err := b.Show(stepID)
+// stepDoneRun is one gt mol step done call with its environment resolved, so a
+// test drives the whole flow without a town on disk.
+type stepDoneRun struct {
+	out, errOut    io.Writer
+	client         beads.Client
+	stepID         string
+	cwd, townRoot  string
+	workDir        string
+	dryRun, asJSON bool
+}
+
+func (r stepDoneRun) run() error {
+	// Step 1: Find the step and its molecule
+	poured, noSteps, err := resolveStepForDone(r.client, r.stepID)
 	if err != nil {
-		return fmt.Errorf("step not found: %w", err)
+		return err
 	}
-
-	// Step 2: Extract molecule ID from step ID (gt-xxx.1 -> gt-xxx)
-	// Also handle wisp format (go-wisp-xxx) by using the step's Parent field
-	moleculeID := extractMoleculeIDFromStep(stepID)
-	if moleculeID == "" {
-		// Fallback: use the step's Parent field (for wisps)
-		if step.Parent != "" {
-			moleculeID = step.Parent
-		} else {
-			return fmt.Errorf("cannot extract molecule ID from step %s (expected format: prefix.N or wisp with parent)", stepID)
-		}
+	if noSteps {
+		return reportNoSteps(r.out, r.errOut, r.stepID, poured.moleculeID, r.asJSON)
 	}
+	step, moleculeID := poured.step, poured.moleculeID
 
-	result, readySteps, err := completeStep(os.Stdout, os.Stderr, b, step, moleculeID, moleculeStepDryRun, moleculeJSON)
+	result, readySteps, err := completeStep(r.out, r.errOut, r.client, step, moleculeID, r.dryRun, r.asJSON)
 	if err != nil {
 		return err
 	}
@@ -118,30 +136,134 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 	// --json reports what happened and stops: the next-step assignment and the
 	// gt done run below act on the session, which a caller reading JSON did not
 	// ask for.
-	if moleculeJSON {
+	if r.asJSON {
 		return nil
 	}
 
 	// Step 5: Handle next action
 	switch result.Action {
 	case "continue":
-		return handleStepContinue(cwd, townRoot, readySteps[0], moleculeStepDryRun)
+		return handleStepContinue(r.cwd, r.townRoot, readySteps[0], r.dryRun)
 
 	case "parallel":
-		return handleParallelSteps(cwd, townRoot, workDir, readySteps, moleculeStepDryRun)
+		return handleParallelSteps(r.cwd, r.townRoot, r.workDir, readySteps, r.dryRun)
 
 	case "done":
-		return handleMoleculeComplete(cwd, townRoot, moleculeID, moleculeStepDryRun)
+		return handleMoleculeComplete(r.cwd, r.townRoot, moleculeID, r.dryRun)
 
 	case "no_more_ready":
-		fmt.Printf("\n%s All remaining steps are blocked - waiting on dependencies\n",
+		fmt.Fprintf(r.out, "\n%s All remaining steps are blocked - waiting on dependencies\n",
 			style.Dim.Render("ℹ"))
-		fmt.Printf("Run 'gt mol progress %s' to see blocked steps\n", moleculeID)
+		fmt.Fprintf(r.out, "Run 'gt mol progress %s' to see blocked steps\n", moleculeID)
 		return nil
 	}
 
 	return nil
 }
+
+// stepsNotTrackedLine is the one line a done call prints when the molecule has
+// no poured steps: there is nothing to complete and nothing to hand over.
+const stepsNotTrackedLine = "Steps are not tracked for this molecule; nothing to complete."
+
+// noStepsAction is the StepDoneResult action for a done call that found
+// nothing to complete.
+const noStepsAction = "no_steps"
+
+// reportNoSteps says a done call had nothing to complete: one human line, or a
+// JSON result with noStepsAction. Under --json the human line goes to errOut,
+// so stdout holds only the JSON object a caller parses.
+func reportNoSteps(out, errOut io.Writer, stepID, moleculeID string, asJSON bool) error {
+	if !asJSON {
+		fmt.Fprintln(out, stepsNotTrackedLine)
+		return nil
+	}
+	fmt.Fprintln(errOut, stepsNotTrackedLine)
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(StepDoneResult{StepID: stepID, MoleculeID: moleculeID, Action: noStepsAction}); err != nil {
+		return fmt.Errorf("writing step result: %w", err)
+	}
+	return nil
+}
+
+// stepReader is the beads read surface deciding whether a done call names a
+// poured step.
+type stepReader interface {
+	Show(id string) (*beads.Issue, error)
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+}
+
+// pouredStep is the step a done call completes and the molecule that holds it.
+type pouredStep struct {
+	step       *beads.Issue
+	moleculeID string
+}
+
+// resolveStepForDone returns the step a done call completes, or reports that
+// the molecule it names has no poured steps.
+//
+// A molecule bonded root-only carries its checklist in the formula and pours no
+// step beads, so a seat or an instruction that still names a step finds
+// nothing. That must be harmless: this reports noSteps and the caller exits 0
+// (gt-i7lsrk). Only a bead of issue type "molecule" reads that way; any other
+// bead that has no steps keeps the refusals below, so a mistyped id, or a plain
+// task, fails instead of passing as done.
+func resolveStepForDone(r stepReader, stepID string) (pouredStep, bool, error) {
+	found, showErr := r.Show(stepID)
+	if showErr == nil {
+		// A step id names its molecule: gt-abc.1 belongs to gt-abc.
+		if moleculeID := extractMoleculeIDFromStep(stepID); moleculeID != "" {
+			return pouredStep{step: found, moleculeID: moleculeID}, false, nil
+		}
+		// Any other bead is a step only when nothing hangs off it. A molecule
+		// root carries its steps as children, and a wisp step carries its
+		// molecule as Parent.
+		children, err := r.List(beads.ListOptions{Parent: stepID, Status: "all"})
+		if err != nil {
+			return pouredStep{}, false, fmt.Errorf("listing molecule steps: %w", err)
+		}
+		if len(children) == 0 {
+			if found.Parent != "" {
+				return pouredStep{step: found, moleculeID: found.Parent}, false, nil
+			}
+			if found.Type == moleculeIssueType {
+				return pouredStep{moleculeID: found.ID}, true, nil
+			}
+		}
+		return pouredStep{}, false, fmt.Errorf("cannot extract molecule ID from step %s (expected format: prefix.N or wisp with parent)", stepID)
+	}
+	if !errors.Is(showErr, beads.ErrNotFound) {
+		return pouredStep{}, false, fmt.Errorf("step not found: %w", showErr)
+	}
+
+	// The step bead is absent. Only a molecule that exists and poured no steps
+	// reads as untracked; a missing molecule, or one that has steps of its own,
+	// keeps the refusal so a bad id never passes as done.
+	moleculeID := extractMoleculeIDFromStep(stepID)
+	if moleculeID == "" {
+		return pouredStep{}, false, fmt.Errorf("step not found: %w", showErr)
+	}
+	molecule, molErr := r.Show(moleculeID)
+	if molErr != nil {
+		if errors.Is(molErr, beads.ErrNotFound) {
+			return pouredStep{}, false, fmt.Errorf("step not found: %w", showErr)
+		}
+		return pouredStep{}, false, fmt.Errorf("reading molecule %s: %w", moleculeID, molErr)
+	}
+	children, err := r.List(beads.ListOptions{Parent: moleculeID, Status: "all"})
+	if err != nil {
+		return pouredStep{}, false, fmt.Errorf("listing molecule steps: %w", err)
+	}
+	if len(children) == 0 && molecule.Type == moleculeIssueType {
+		return pouredStep{moleculeID: moleculeID}, true, nil
+	}
+	return pouredStep{}, false, fmt.Errorf("step not found: %w", showErr)
+}
+
+// moleculeIssueType is bd's issue type for a molecule root: the one issue type
+// whose empty step list means "steps are not tracked" rather than "this is not
+// a molecule".
+const moleculeIssueType = "molecule"
 
 // completeStep closes step (or says it would, on a dry run), then reads what
 // comes next. The human lines go to out, or to errOut under asJSON so stdout
