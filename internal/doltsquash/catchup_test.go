@@ -179,6 +179,51 @@ func TestCatchupReplaysTheTailBoundedByTheRecordedTip(t *testing.T) {
 	}
 }
 
+// TestCatchupCountsQuietWaitsPerStretch drives main while the replay waits:
+// main is quiet for one window, lands a commit, and repeats, more times than
+// one stretch's bound. Each landing is picked, which starts a new quiet
+// stretch; a budget counted across the whole run would stop a replay that is
+// keeping up.
+func TestCatchupCountsQuietWaitsPerStretch(t *testing.T) {
+	t.Parallel()
+	const landings = 12
+	from := hash(0x41)
+	// tip(0) is the tip the replay starts at; tip(i) follows the i-th landing.
+	tip := func(i int) string {
+		if i == 0 {
+			return from
+		}
+		return hash(0x71 + i)
+	}
+	commit := func(i int) string { return hash(0x61 + i) }
+	clk := newTestClock()
+	sleep := &testSleeper{clk: clk}
+	f := catchupFake(from)
+	for i := 1; i <= landings; i++ {
+		f.Respond(sqlMainTip, single("dolt_hashof('main')", tip(i)))
+		f.Respond(sqlMainTip, single("dolt_hashof('main')", tip(i)))
+	}
+	// The last tip is read once more, by the pass that finds it quiet.
+	f.Respond(sqlMainTip, single("dolt_hashof('main')", tip(landings)))
+	f.Respond(tailStatement(from, from), tailRows())
+	for i := 1; i <= landings; i++ {
+		f.Respond(tailStatement(tip(i-1), tip(i)), tailRows(commit(i)))
+		f.Respond(tailStatement(tip(i), tip(i)), tailRows())
+	}
+	f.Respond(sqlCherryPick, pickedRow())
+
+	got, err := Catchup(context.Background(), f, from, clk, sleep)
+	if err != nil {
+		t.Fatalf("Catchup: %v", err)
+	}
+	if want := (CatchupResult{Tip: tip(landings), Passes: 2*landings + 2, Picks: landings}); got != want {
+		t.Errorf("Catchup returned %+v, want %+v", got, want)
+	}
+	if want := landings + 1; len(sleep.waits) != want {
+		t.Errorf("waits = %v, want %d quiet windows: one per empty pass", sleep.waits, want)
+	}
+}
+
 func TestCatchupTreatsNothingToCommitAsBenign(t *testing.T) {
 	t.Parallel()
 	from, tip := hash(0x41), hash(0x51)
@@ -493,6 +538,51 @@ func TestCatchupStopsOnAReadError(t *testing.T) {
 				t.Errorf("the run sent %d statements, want %d: it stopped at the failed read", got, tc.failAt)
 			}
 		})
+	}
+}
+
+// movingTail is an Exec whose main tip moves one commit on every read, so
+// every pass finds a commit to pick and no tip ever holds still.
+type movingTail struct {
+	n int
+}
+
+func (m *movingTail) Exec(ctx context.Context, statement string) (Rows, error) {
+	switch {
+	case strings.HasPrefix(statement, sqlActiveBranch):
+		return single("branch", "compact-work"), nil
+	case strings.HasPrefix(statement, sqlMainTip):
+		m.n++
+		return single("dolt_hashof('main')", hash(m.n)), nil
+	case strings.HasPrefix(statement, sqlDoltTail):
+		return tailRows(hash(m.n)), nil
+	case strings.HasPrefix(statement, sqlCherryPick):
+		return pickedRow(), nil
+	}
+	return Rows{}, fmt.Errorf("movingTail: unscripted statement %q", statement)
+}
+
+// TestCatchupStopsAtThePassBound drives a main that moves on every read: no
+// tip holds still, so the replay stops at the pass bound rather than reading
+// tips without end.
+func TestCatchupStopsAtThePassBound(t *testing.T) {
+	t.Parallel()
+	from := hash(0x41)
+	clk := newTestClock()
+	sleep := &testSleeper{clk: clk}
+	ex := &movingTail{}
+
+	got, err := Catchup(context.Background(), ex, from, clk, sleep)
+	if err == nil {
+		t.Fatalf("Catchup returned %+v, want an error: main never held still", got)
+	}
+	for _, want := range []string{fmt.Sprintf("read main's tip %d times", catchupMaxPasses), "not holding still", hash(ex.n)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not hold %q", err, want)
+		}
+	}
+	if got.Passes != catchupMaxPasses {
+		t.Errorf("the replay read main's tip %d times, want %d: the pass bound ends it", got.Passes, catchupMaxPasses)
 	}
 }
 

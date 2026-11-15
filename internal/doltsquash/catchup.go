@@ -8,14 +8,23 @@ import (
 )
 
 // CatchupQuietTip is how long main's tip must hold still before an empty tail
-// ends the replay: design step 5's quiet window.
+// ends the replay.
 const CatchupQuietTip = 300 * time.Millisecond
 
-// catchupQuietWaits bounds the quiet windows one run may spend. The window ends
-// the replay on the second empty pass, so a clock that has not advanced past it
-// after this many waits is not keeping time, and the replay stops instead of
-// waiting forever.
+// catchupQuietWaits bounds the quiet windows one stretch of empty passes may
+// spend. The window ends the replay on the second empty pass at a tip, so a
+// clock that has not advanced past it after this many waits is not keeping
+// time, and the replay stops instead of waiting forever. A pass that picks
+// commits starts a new stretch: main was active, and those windows were spent
+// watching a tail that has since been replayed.
 const catchupQuietWaits = 8
+
+// catchupMaxPasses bounds how many times one run may read main's tip. Each
+// pass reads it once, and a stretch of empty passes spends at most
+// catchupQuietWaits+1 of them, so a catch-up that ends at a quiet tip uses far
+// fewer than this many; a run that reaches the bound has not seen main hold
+// still and stops instead of replaying without end.
+const catchupMaxPasses = 10000
 
 // catchupRetries bounds how many times one pick's "uncommitted changes" is
 // retried before the run returns it. The waits double from catchupBackoff to
@@ -49,7 +58,7 @@ type Sleeper interface {
 	Sleep(d time.Duration)
 }
 
-// CatchupResult is what design step 5's replay did.
+// CatchupResult is what the replay did.
 type CatchupResult struct {
 	// Tip is the tip of main the replay stopped at: the quiet tip.
 	Tip string
@@ -66,9 +75,9 @@ type CatchupResult struct {
 	Retries int
 }
 
-// Catchup runs design step 5: it replays the commits after from that main has
-// and compact-work does not, one cherry-pick at a time, until main's tip has
-// held still for CatchupQuietTip with nothing left to pick.
+// Catchup replays the commits after from that main has and compact-work does
+// not, one cherry-pick at a time, until main's tip has held still for
+// CatchupQuietTip with nothing left to pick.
 //
 // from is the tip the rebase branched compact-work at. It is the replay's
 // lower bound, and each pass's upper bound is a tip read before that pass, so
@@ -95,6 +104,11 @@ func Catchup(ctx context.Context, ex Exec, from string, clk Clock, sleep Sleeper
 	for {
 		if err := ctx.Err(); err != nil {
 			return result, fmt.Errorf("doltsquash: the replay stopped between passes: %w", err)
+		}
+		if result.Passes >= catchupMaxPasses {
+			return result, fmt.Errorf(
+				"doltsquash: the replay read main's tip %d times without reaching a quiet tip, so it stopped at tip %s: main is not holding still",
+				result.Passes, result.Tip)
 		}
 		tip, err := s.scalar(ctx, "SELECT dolt_hashof('main')")
 		if err != nil {
@@ -144,7 +158,12 @@ func Catchup(ctx context.Context, ex Exec, from string, clk Clock, sleep Sleeper
 				result.Empty++
 			}
 		}
+		// The commits through tip are replayed: the next quiet stretch starts
+		// at this tip, and the windows counted before it watched an earlier
+		// tail.
 		picked = tip
+		seenTip, seenAt = "", time.Time{}
+		quietWaits = 0
 	}
 }
 
