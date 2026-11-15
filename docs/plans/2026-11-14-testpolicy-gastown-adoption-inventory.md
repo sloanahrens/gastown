@@ -1,4 +1,4 @@
-> Status: historical (2026-11). Merged in: gt-zq17ds. Not maintained.
+> Status: historical (2026-11). Merged in: gt-zq17ds, gt-b119av. Not maintained.
 
 # Gastown's internal/testpolicy against the shared module: adoption inventory
 
@@ -7,6 +7,12 @@ of gastown's `internal/testpolicy` classed against the module
 `gt.local/testpolicy` (the `testpolicymod/` directory of `sloan/devops`), each
 class cited by file and function name, and every exported name with the callers
 it has outside the package.
+
+The first half (gt-zq17ds) is the comparison above. The second half (gt-b119av,
+below the "What the comparison settles" section) names gastown's extra rules and
+how each registers through the module's `Rule` seam, says what in gastown's six
+lists and `policy_test.go` stays, and lists the implementation beads of slice 7
+in dependency order with the operator's publishing step.
 
 ## What was read, and how to reproduce it
 
@@ -337,68 +343,288 @@ needs a `gt.local/testpolicy` version to require. No repository named
 Forgejo host at the time of writing (three `git ls-remote` calls, each
 `Repository not found`), and the module still lives inside `sloan/devops` at
 `testpolicymod/`. A publish under another name would not have shown up in that
-check.
+check. Re-checked for this half, with the same answer for all three, and
+`sloan/devops` itself carries only the tags `v0.1.0` to `v0.1.7` — its own
+module's releases, none of them for `gt.local/testpolicy`.
+
+## Gastown's nine extra rules, and how each registers through the Rule seam
+
+`rules.go` declares fifteen rule constants. Five of them are the module's
+(`RuleNoSleep`, `RuleNoSubprocess`, `RuleNoNetwork`, `RuleNoBuild`,
+`RuleNoExecFiles`), one — `RuleAllowReason` — belongs to the module's allow
+machinery, and the other nine are gastown's own. The nine are what adoption
+registers as `Rule` values. None is emitted by the module's `sharedRules()`,
+whose single rule `testFileRule` (`Name()` `"test-file"`) runs the module's
+`checkTestFile` over `ctx.Tests` and reports only the five shared names.
+
+All nine are emitted today from three unexported functions: `checkTestFile`
+(through `checkTestCall` and `checkEnvValue`) for the seven test-file rules, and
+`checkProdFile` for the two production-file rules. Each extra rule registers as
+one struct whose `Name()` is its constant and whose `Check` reads
+`*shared.ScanContext`:
+
+```go
+shared "gt.local/testpolicy"   // the module's package is also named testpolicy
+
+type noEnvRule struct{}
+
+func (noEnvRule) Name() string { return RuleNoEnv }
+func (noEnvRule) Check(ctx *shared.ScanContext) []shared.Violation { ... }
+
+// gastownRules is the list every gastown scan passes as extra ...Rule.
+func gastownRules() []shared.Rule {
+	return []shared.Rule{noEnvRule{}, noHostEnvRule{}, noChdirRule{}, noSkipRule{},
+		fakeClockEpochRule{}, noGlobalSwapRule{}, parallelRule{},
+		prodSetenvRule{}, prodSleepRule{}}
+}
+```
+
+`Name()` returning the constant, rather than one name for the whole set, is
+what keeps the registration and the exemption in one name space: an
+`//testpolicy:allow` comment covers a violation by its `Violation.Rule`, and
+`checkRuleNames` refuses a nil rule, an empty `Name()` and a repeated `Name()`
+across the shared and extra rules before any directory is read.
+
+One rule per constant, and each reads only what it needs:
+
+| Rule | Today's emitter | `ScanContext` fields | What `Check` walks | Helper that moves with it | Fixture rows that pin it |
+|---|---|---|---|---|---|
+| `RuleNoEnv` (`no-env`) | `bannedTestCalls` for `os.Setenv`/`os.Unsetenv` and `bannedTestMethods` for `Setenv`, both read by `checkTestCall` | `Tests`, `Fset`, `Imports` | test-file call expressions: `Setenv` on a `*testing.T/B/F/TB` receiver, else the `os` call | `isTestingReceiver`, `isTestingType` | `env` (2), `setenv_in_subtest` (1); `nontesting_receiver` stays clean |
+| `RuleNoHostEnv` (`no-host-env`) | `checkTestCall`'s `os.Getenv`/`LookupEnv` and `os.UserHomeDir`/`UserConfigDir`/`UserCacheDir` switch, plus `checkEnvValue` for a reader used as a value | `Tests`, `Prod`, `Fset`, `Imports` | test-file calls, then selectors the calls did not mark, in one walk (the `called` set is what stops a call being reported twice) | `envName`, `constValue`, `packageConsts` | `host_env_reads` (6), `host_env_unjudged` (2), `host_env_value` (10); `host_env_declared`, `host_env_other`, `host_env_seam` stay clean |
+| `RuleNoChdir` (`no-chdir`) | `bannedTestCalls` for `os.Chdir` and `bannedTestMethods` for `Chdir` | `Tests`, `Fset`, `Imports` | test-file call expressions, by the same receiver test as `no-env` | `isTestingReceiver`, `isTestingType` | `chdir` (2) |
+| `RuleNoSkip` (`no-skip`) | `bannedTestMethods` for `Skip`, `Skipf`, `SkipNow` | `Tests`, `Fset`, `Imports` | test-file call expressions on a testing receiver | `isTestingReceiver`, `isTestingType` | `skip` (3) |
+| `RuleFakeClockEpoch` (`fake-clock-epoch`) | `bannedTestCalls` for `clockwork.NewFakeClock` | `Tests`, `Fset`, `Imports` | test-file call expressions with an import path | — | `fake_clock_epoch` (1) |
+| `RuleNoGlobalSwap` (`no-global-swap`) | `checkTestFile`'s `*ast.AssignStmt` branch | `Tests`, `Prod`, `Fset`, `Imports` | assignment statements with `Tok == token.ASSIGN`: an unresolved identifier that names a package variable, or `pkg.Name` on an import | `packageVars` | `global_swap` (1); `global_shadow`, `global_blank` stay clean |
+| `RuleParallel` (`parallel`) | `checkTestFile`'s top-level `*ast.FuncDecl` loop | `Tests`, `Fset`, `Imports` | test functions whose one parameter is `*testing.T` and whose body calls no `t.Parallel()` directly, not descending into a `t.Run` closure | `testingParam`, `isTestingType`, `callsMethodOn` | `parallel_missing`, `parallel_subtest_only` (1 each) |
+| `RuleProdSetenv` (`prod-no-setenv`) | `checkProdFile` | `Prod`, `Fset`, `Imports` | production-file calls to `os.Setenv`/`os.Unsetenv` in a package not named `main` | — | `prod_setenv` (1) |
+| `RuleProdSleep` (`prod-no-sleep`) | `checkProdFile`, guarded by the package's imports | `Prod`, `Fset`, `Imports` | production-file `time.Sleep` calls in a package where some production file imports `github.com/jonboulle/clockwork` | `importsPath` | `prod_sleep_clock` (1) |
+
+None of the nine reads `ctx.Allow`: the module applies every exemption to every
+rule's output after the rules run, so a rule carries no allow code and no
+exemption logic of its own. Three helpers the rules need live in `scan.go`
+today — `packageVars`, `packageConsts` and `importsPath` — and move into
+gastown's rule file with them.
+
+The two banned-call maps hold shared and extra entries mixed today. Adoption
+leaves gastown's rule file the extra entries only — `os.Setenv`/`os.Unsetenv`,
+`os.Chdir` and `clockwork.NewFakeClock` in `bannedTestCalls`, plus all of
+`bannedTestMethods`, which the module has no copy of — while the `os/exec`,
+`os.WriteFile`/`os.OpenFile`, `os.Chmod` and `#!` branches go with the shared
+rules, because the module's `CheckTestCall` and `checkTestFile` already carry
+them. An extra rule built on a reused `CheckTestCall` therefore cannot report a
+shared name; it must walk with the trimmed maps.
+
+**What the registration must not do.**
+
+- **No extra rule may be named `test-file`.** It is the module's own
+  registration, and `checkRuleNames` fails the whole scan on the repeat.
+- **No extra rule may emit a shared name or `allow-reason`.** Exemptions are
+  applied by the violation's rule string, so a gastown rule emitting `no-sleep`
+  would have its finding suppressed by an exemption written for the shared
+  rule, and the same call would also be reported by `testFileRule`.
+- **`RuleAllowReason` must be deleted, not registered.** The module's
+  `CollectAllows` emits it; gastown's `applyAllows` emits it too today, so
+  keeping both reports every unreasoned exemption twice.
+- **The nine strings must not change.** Of the tree's 367 live
+  `//testpolicy:allow` comments, 251 name one of the nine — 121 `parallel`, 57
+  `no-env`, 27 `no-global-swap`, 20 `prod-no-setenv`, 19 `no-chdir`, 4
+  `no-host-env`, 3 `no-skip`, none `fake-clock-epoch` — and the rest name a
+  shared rule or `no-git`. A renamed rule stops matching its exemptions and
+  fails `TestPolicy` on a site nobody edited:
+
+  ```sh
+  git grep -h -oE '//testpolicy:allow [a-z-]+' origin/main -- '*.go' |
+    sed 's#.*allow ##' | sort | uniq -c | sort -rn
+  ```
+
+**What adoption changes in the scanner's callers.** Two functions call
+gastown's allow machinery today: `ScanDirWithExemptions` in `scan.go` and
+`GitFreeFindings` in `gitfree.go`. The module splits the pass into
+`CollectAllows(fset, files)` and `applyAllows(allowed, vs)`, so both callers
+rewire: `ScanDirWithExemptions` disappears into the module's scanner, and
+`GitFreeFindings` collects the allowed keys once and applies them inside its
+helper fixpoint loop.
+
+**The way this fails open.** `TestPolicy` is green on today's tree, so every
+extra-rule finding in a converted package is already exempted and the
+unconverted list covers the rest: an adoption that takes the module's scanner
+but forgets to pass `gastownRules()` leaves `TestPolicy` green with nine rules
+switched off. The fixture rows in `TestScanDirFixtures` and
+`TestScanDirWithExemptions` are the only guard, which is why S7.1's exit
+criterion is those rows unchanged.
+
+## What stays in gastown: the six lists, the policy test, the checks outside the seam
+
+The module carries no list file, no ratchet constant, and no tree-level check.
+Per the plan's §7.4 the rig keeps its data files, their counts and
+`policy_test.go`; what moves is the mechanism that reads them.
+
+| List | Entries at origin/main | Pin | Reader and check that stay | Module counterpart |
+|---|---:|---|---|---|
+| `unconverted.txt` | 1 (`internal/beads`) | `maxUnconverted = 1` | `TestPolicy`; membership read with the module's `ReadList` | none |
+| `overbudget.txt` | 0 | `maxOverBudget = 0` | `ParseOverBudget`, `ReadOverBudget`, `CheckOverBudget` | none |
+| `realgit.txt` | 0 | `maxRealGit = 0` | `RealGitFiles`, `CheckRealGit`, `ConvertedShare` | none |
+| `gitfree.txt` | 24 | `minGitFree = 24` | `GitFreeFindings`, `CheckGitFree` | none |
+| `docker.txt` | 2 | kept exact by `TestDockerTier` | `StartsContainers`, `CheckDockerTier` | none |
+| `sweep-host.txt` | 11 | `maxSweepHost = 11` | `ReadSweepHost`, `ParseSweepHost`, `CheckSweepHost*` | none |
+
+`unconverted.txt`'s membership and `realgit.txt`'s are the ones the scanner
+adoption touches, and only through `ReadList`: S7.2 takes the module's `ReadList`
+in place of gastown's, and its test (`TestReadListAndPackageDirs`) replaces
+`list_test.go`. The module's `RelPath` also takes the place of gastown's
+unexported `relPath` in `realgit.go`, which S7.2's file list above misses: its
+callers are in `realgit.go` and `tiermain_test.go`. The list files, their header
+prose and their line counts do not change.
+
+`policy_test.go` stays whole. These parts of it survive adoption unchanged:
+
+- the `-seed` flag and its print-instead-of-fail path;
+- `maxUnconverted` and `maxOverBudget`, and the shrink-only ratchet that fails
+  a listed package which already passes (`originallyListed`, the `realgit`
+  membership exemption);
+- the per-package loop, its exemption log line, and the rule that only
+  converted packages log exemptions;
+- `CheckOverBudget` over the whole tree, and `CheckContracts` with its
+  integration-name findings filtered by `originallyListed` while
+  fake-contract findings are never filtered.
+
+Three things in it change, and only at the seam: the scan call becomes
+`shared.ScanDirWithExemptions(dir, gastownRules()...)`; `RuleAllowReason`
+becomes the module's constant; and the five shared rule constants come from the
+module, so `rules.go` keeps only the nine and their helpers.
+
+The checks below are not package-scanner rules — each judges a tree, a list or a
+run, so none registers through the `Rule` seam and all stay in gastown:
+
+| Check | Rule names it emits | Driven by |
+|---|---|---|
+| `CheckContracts`, `RuleContract`, `RuleIntegrationName` | `fake-contract`, `integration-name` | `TestPolicy`, over every directory |
+| `CheckGitFree`, `GitFreeFindings`, `RuleNoGit` | `no-git` | `TestGitFree`; its allow pass becomes the module's `CollectAllows` plus `applyAllows` in S7.0 |
+| `CheckDockerTier`, `StartsContainers` | none | `TestDockerTier` |
+| `CheckRealGit`, `RealGitFiles`, `ConvertedShare` | none | `TestRealGit` |
+| `CheckOverBudget`, `ParseOverBudget`, `ReadOverBudget` | none | `TestPolicy` |
+| the `CheckSweepHost*` family | none | `TestSweepHost*` |
+| `CheckUnitTierMains`, `AllowedTools`, `RuleAllowTools` | `allow-tools` | `TestUnitTierMains`, `TestAllowedTools`; a constant, not a scanner rule |
+| `growOnlyHeader` (`unionmerge_test.go`) | none | the grow-only list headers |
+
+`RuleTierSplit` and `checkTierSplit` are devops's own rule and never existed in
+gastown (`git grep TierSplit` at origin/main finds nothing). The devops plan's
+§6 counts "eight gastown rules the copy dropped" where this tree names nine; the
+plan gives the count but not the list, so which one its eight omits is not
+determined here. The table above is the list to build from: each of the nine
+has a constant in `rules.go` and a fixture row that pins it, and a slice-7 bead
+written for eight would leave one rule unregistered and its exemptions dead.
 
 ## Implementation beads for gastown's adoption (slice 7)
 
-Sizes are story points in this rig's scale. Each is blocked by the operator's
-publication of the module version that carries its slice; the class column
-above says which of these the module already carries.
+Sizes are story points in this rig's scale, and every bead is under 8. The order
+below is the dependency order, which is not the numeric order of the ids: S7.4
+and S7.5 are blocked only by S7.2 and start before S7.3, whose own precondition
+is a module version that carries devops's slice 6a. The version column is the
+module release each bead's first file needs, per dv-oqr3's build order (§8 of
+the devops plan: slice N ships as `v0.N.0`); the class column above says which
+of those files the module already carries.
+
+| Order | Bead | Points | Needs module | Blocked by |
+|---:|---|---:|---|---|
+| 1 | S7.0 — scanner, allow machinery, Rule seam | 5 | `v0.1.0` or later | operator publishing |
+| 2 | S7.1 — the nine extra rules as module Rules | 5 | `v0.1.0` or later | S7.0 |
+| 3 | S7.2 — lists, split and tier parsing | 3 | `v0.2.0` or later | S7.0 |
+| 4 | S7.4 — changed/triggers and presubmit selectors | 5 | `v0.4.0` or later | S7.2 |
+| 5 | S7.5 — slow/scripts checks and tierwall | 5 | `v0.5.0` or later | S7.2 |
+| 6 | S7.3 — CPU, budget and `cmd/budget` | 5 | the first version carrying 3b and 6a | S7.2 |
+| 7 | S7.6 — the per-Test ratchet | 3 | the same version | S7.3 |
+| 8 | S7.7 — delete the last duplicate, verify the tree | 2 | any | S7.1, S7.4, S7.5, S7.6 |
 
 1. **S7.0 — add `gt.local/testpolicy` and adopt the scanner, allow machinery and
-   Rule seam.** 5 points. Files: `go.mod`, `go.sum`, `scan.go`, `allow.go`,
-   `srccache.go`, `main_test.go`. Make `ScanDir` and `ScanDirWithExemptions`
-   thin wrappers over the module's `ScanDirWithRules` and pass gastown's rules
-   as arguments; decide whether `srccache.go` survives or is deleted with
-   `TestCheckoutFilesAreParsedOnce`. Exit: `TestScanDirFixtures`,
+   Rule seam.** 5 points. Needs `v0.1.0`. Files: `go.mod`, `go.sum`, `scan.go`,
+   `allow.go`, `srccache.go`, `main_test.go`. Make `ScanDir` and
+   `ScanDirWithExemptions` thin wrappers over the module's `ScanDirWithRules` and
+   pass gastown's rules as arguments; decide whether `srccache.go` survives or
+   is deleted with `TestCheckoutFilesAreParsedOnce`. Exit: `TestScanDirFixtures`,
    `TestScanDirWithExemptions` and `TestPolicy` pass unchanged; `go build ./...`
    exits 0.
-2. **S7.1 — adopt the six shared rules and keep the nine extra rules as module
-   Rules.** 5 points. Depends on S7.0. Files: `rules.go`, `scan_test.go`, the
-   15 shared fixture files. Delete the moved checks and constants; write the
-   nine extra rules as `Rule` types that recompute what they need from
-   `ScanContext`; prove each rule row still fires. Exit: every row of
-   `TestScanDirFixtures` and `TestPolicy` unchanged.
+2. **S7.1 — adopt the module's shared rules and keep the nine extra rules as
+   module Rules.** 5 points. Needs `v0.1.0`. Blocked by S7.0. Files: `rules.go`,
+   `scan_test.go`, the 15 shared fixture files. Delete the moved checks and
+   constants; write the nine extra rules as `Rule` types that recompute what
+   they need from `ScanContext`; prove each rule row still fires. Exit: every
+   row of `TestScanDirFixtures` and `TestPolicy` unchanged.
 3. **S7.2 — adopt the module's lists, split and tier-wall parsing.** 3 points.
-   Depends on S7.0. Files: `list.go`, `split.go`, `tier.go`, `list_test.go`,
-   `split_test.go`, `tier_test.go`. Delete the gastown copies; the six lists
-   stay. Gastown's `PackageDirs` nested-module skip and the module's `RelPath`
-   have to be reconciled before both can live in one function. Exit:
-   `TestSplitTestArgs`, `TestPartitionPackages`, `TestTagsArgs`,
+   Needs `v0.2.0`. Blocked by S7.0. Files: `list.go`, `split.go`, `tier.go`,
+   `list_test.go`, `split_test.go`, `tier_test.go`. Delete the gastown copies;
+   the six lists stay. Gastown's `PackageDirs` nested-module skip and the
+   module's `RelPath` have to be reconciled before both can live in one
+   function. Exit: `TestSplitTestArgs`, `TestPartitionPackages`, `TestTagsArgs`,
    `TestParsePackageWalls`, `TestWallOverruns` pass, and `cmd/budget` builds.
-4. **S7.3 — adopt the module's CPU and budget code and `cmd/budget`.** 5 points.
-   Depends on S7.2 and on slices 3b (dv-ebt2.5) and 6a (dv-ebt2.11) reaching the
-   module. Files: `cpu.go`,
-   `budget.go`, `overbudget.go`, their tests, `cmd/budget/*`. Keep
-   `overbudget.txt` and the Makefile's invocations. Exit: `make gate`'s budget
-   stage and `make tier-check` behave as before.
-5. **S7.4 — adopt the module's changed/triggers code and presubmit selectors.**
-   5 points. Depends on S7.2 and on slices 4a (dv-ebt2.6) and 4b (dv-ebt2.7).
-   Files:
-   `internal/land/changed.go`, `internal/land/cmd/changedpkgs`,
-   `internal/presubmit/cmd/errbranch`, `internal/presubmit/cmd/gomodrationale` —
-   they live outside `internal/testpolicy` in gastown, a layout difference from
-   devops. Exit: `make presubmit`'s package selection and its two judges are
-   unchanged.
-6. **S7.5 — adopt the module's slow/scripts checks and the tierwall command.**
-   5 points. Depends on S7.2 and on slices 5a (dv-ebt2.8), 5b (dv-ebt2.9) and 5c
-   (dv-ebt2.10). Files:
-   `internal/testpolicy/cmd/tierwall/*`, `internal/shelltier/*`, the `scripts/`
-   tree, the Makefile's two `cmd/tierwall` invocations. Keep gastown's shell
-   manifest. Exit: `make gate`'s tierwall stage and `make test-slow` behave as
+4. **S7.4 — adopt the module's changed/triggers code and presubmit selectors.**
+   5 points. Needs `v0.4.0`. Blocked by S7.2 and on slices 4a (dv-ebt2.6) and 4b
+   (dv-ebt2.7) reaching the module. Files: `internal/land/changed.go`,
+   `internal/land/cmd/changedpkgs`, `internal/presubmit/cmd/errbranch`,
+   `internal/presubmit/cmd/gomodrationale` — they live outside
+   `internal/testpolicy` in gastown, a layout difference from devops. Exit:
+   `make presubmit`'s package selection and its two judges are unchanged.
+5. **S7.5 — adopt the module's slow/scripts checks and the tierwall command.**
+   5 points. Needs `v0.5.0`. Blocked by S7.2 and on slices 5a (dv-ebt2.8), 5b
+   (dv-ebt2.9) and 5c (dv-ebt2.10). Files: `internal/testpolicy/cmd/tierwall/*`,
+   `internal/shelltier/*`, the `scripts/` tree, the Makefile's two `cmd/tierwall`
+   invocations. Keep gastown's shell manifest. Exit: `make gate`'s tierwall stage
+   and `make test-slow` behave as before.
+6. **S7.3 — adopt the module's CPU and budget code and `cmd/budget`.** 5 points.
+   Needs the first published version carrying slice 3b (dv-ebt2.5) and 6a
+   (dv-ebt2.11). Blocked by S7.2. Files: `cpu.go`, `budget.go`, `overbudget.go`,
+   their tests, `cmd/budget/*`. Keep `overbudget.txt` and the Makefile's
+   invocations. Exit: `make gate`'s budget stage and `make tier-check` behave as
    before.
-7. **S7.6 — adopt the module's per-Test ratchet code.** 3 points. Depends on
-   S7.3 and on slice 6a (dv-ebt2.11). Files: `overbudget.go`, `policy_test.go`, the ratchet
-   constants. Keep gastown's lists and their pins. Exit: every ratchet fails
-   the same way on the same input.
-8. **S7.7 — delete the last duplicate and verify the tree.** 2 points. Depends
-   on S7.1, S7.4, S7.5, S7.6. Exit: `git grep` finds one copy of each moved
+7. **S7.6 — adopt the module's per-Test ratchet code.** 3 points. Needs the same
+   version as S7.3. Blocked by S7.3 and on slice 6a (dv-ebt2.11). Files:
+   `overbudget.go`, `policy_test.go`, the ratchet constants. Keep gastown's
+   lists and their pins. Exit: every ratchet fails the same way on the same
+   input.
+8. **S7.7 — delete the last duplicate and verify the tree.** 2 points. Blocked
+   by S7.1, S7.4, S7.5 and S7.6. Exit: `git grep` finds one copy of each moved
    function; `make gate` exits 0; no `replace` for `gt.local/testpolicy`
    remains.
 
+### What the operator must do
+
+Publishing is the operator's act, not any polecat's: the devops plan gives
+version tags to the operator's own account so the registry's trust stays with
+the human who owns it. A `replace` to a local path is no substitute for a
+published version — S7.7's exit criterion requires none to remain. Four steps:
+
+1. **Create the module's repository** under the account the Forgejo Go registry
+   serves, with `testpolicymod/`'s contents at its root (`go.mod` included) and
+   the registry's mapping from `gt.local/testpolicy` to it — the mapping
+   `gt.local/devops` already has. At this bead's read no such repository existed:
+   `sloan/testpolicy`, `sloan/testpolicymod` and `sloan/gt-testpolicy` each
+   answered `Repository not found`, and `sloan/devops` carries only its own
+   `v0.1.0`–`v0.1.7` tags. Whether the module's source moves there or is copied
+   from `devops` each release is the operator's choice; slices 1 to 6 keep
+   devops green either way.
+2. **Tag each slice as its version**, per the devops plan's build order: slice 1
+   `v0.1.0`, slice 2 `v0.2.0`, slice 3 `v0.3.0`, slice 4 `v0.4.0`, slice 5
+   `v0.5.0`, slice 6 `v0.6.0`. Tag the commit where both the module's own
+   `go test ./...` and devops's adoption of that slice are green: a slice is one
+   version plus a rig's adoption, and a tag taken before devops's half proves
+   nothing gastown's bead can rely on.
+3. **Confirm gastown can resolve each tag before the bead is dispatched.** From
+   a gastown checkout, `go get gt.local/testpolicy@v0.N.0` must record the
+   requirement in `go.mod` and `go.sum` through the registry. A version that
+   does not resolve leaves the bead blocked, not green.
+4. **Tell the bead owner the repository and the version, and re-dispatch the
+   bead the table above names.** Until `v0.1.0` exists no S7 bead can start;
+   until `v0.2.0` none past S7.1; S7.3 and S7.6 wait for the first version that
+   carries devops's 3b and 6a.
+
+Publishing is the same gesture for all seven slices; only step 4 is new at
+gastown's end. No other operator action is needed: the six lists, their pins and
+`policy_test.go` stay in gastown, so adoption publishes no gastown data.
+
 ## Gate
 
-This is a docs-only change: the only file it touches is this one.
+This is a docs-only change: the only file it touches is this one. Both halves
+checked it the same way:
 
 ```
 $ go run ./cmd/docs-lint
