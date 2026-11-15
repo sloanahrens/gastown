@@ -1,10 +1,9 @@
-> Status: historical (2026-11). Merged in: gt-1m0kb. Not maintained.
+> Status: active (2026-11). This doc merged in gt-1m0kb; beads filed from it carry the remaining work, in waves as their predecessors land.
 
 # Polecats with no bead access: implementation plan
 
-Plan for gt-1m0kb. The design and the thirteen accepted recommendations are in the
-`~/.claude` repo, `docs/specs/2026-11-12-polecat-no-bead-access-design.md` (section 8,
-accepted by the operator in grilling round 3, 2026-11-13). The call census is
+Plan for gt-1m0kb. The design behind it had thirteen recommendations, accepted by the
+operator in grilling round 3, 2026-11-13. The call census is
 `docs/design/polecat-no-bead-access-census.md` (landed 2026-11-14). The operator's ruling of
 2026-11-14: a polecat calls no outside service it does not need, and a polecat calling its
 own review is debt to purge.
@@ -31,7 +30,6 @@ These shrink the call list the later phases must replace, so they go before them
 |---|---|---|
 | Local review round removal, four beads | gt-dpl81b, gt-6qb84r, gt-i9rw9d, gt-755l63 | removes `gt review-preview` and the `gt done` local round gate, so file-mode `gt done` never has to port them |
 | Step wisp removal, chain filed from the trace | gt-fcx123 (trace) then its removal beads | removes `gt mol step done`, `gt prime --step` and the molecule close inside `gt done` from the seat |
-| Seat-end hooks that read the agent bead | none: host side already | the stop hook's agent bead read stays host side |
 
 ## Phase 1: the task file (the seat still has Dolt, nothing changes for it)
 
@@ -41,14 +39,14 @@ These shrink the call list the later phases must replace, so they go before them
 | T2 | A test that `TASK.md` for a fixture bead carries every fact `gt prime` prints for the same bead | taskfile test, `internal/cmd/prime_payload.go` read-only | T1 |
 | T3 | The daemon writes `TASK.md` into the sandbox at spawn, read-only, in a directory the host excludes through `.git/info/exclude` before the seat starts | `internal/session/backend_openshell.go` and its ops file | T1 |
 | T4 | Depth-one snapshot: the beads the task text names are rendered read-only into the task directory | taskfile package | T1 |
-| T5 | Rework: a re-slung seat gets `TASK.md` rebuilt with the om, gate and overseer findings in it, and the rejection-unchanged fact (`done_rejection_unchanged.go:284`) written into it, because `gt done` cannot ask the bead mid-run | daemon sling path | T3 |
+| T5 | Rework: a re-slung seat gets `TASK.md` rebuilt with the om, gate and overseer findings in it, and the rejection-unchanged fact (`reportUnchangedSinceRejection` in `internal/done/done_rejection_unchanged.go`) written into it, because `gt done` cannot ask the bead mid-run | daemon sling path | T3 |
 
 ## Phase 2: the outbox and the host apply
 
 | # | Task | Files | Depends |
 |---|---|---|---|
 | O1 | Outbox schema and validator: `result.json` (status, ticked boxes, findings, escalation request) and `notes.md`; size cap, own bead id only, a fixed list of actions, no label, assignee or close of other beads | create an outbox package | none |
-| O2 | Host apply: from a validated outbox write the notes, ticks, comments, status and findings under the seat's actor; no swallowed errors (`internal/done/done.go:2030` ignores its `bd.Update` error today) | outbox package, beads client | O1 |
+| O2 | Host apply: from a validated outbox write the notes, ticks, comments, status and findings under the seat's actor; no swallowed errors (`noteVerifiedPushFailure` in `internal/done/done.go` ignores its `bd.Update` error today) | outbox package, beads client | O1 |
 | O3 | Seat-end copy-out of the outbox before the sandbox is deleted, with the transcript copy; a failed copy keeps the sandbox | `internal/cmd/sandbox_seat_*`, session package | O1 |
 | O4 | HELP: the escalation request in the outbox is read at seat end and on the patrol tick (about 10 minutes) and creates the escalation bead as the seat | daemon patrol | O2 |
 | O5 | The landing block: the host writes the READY TO LAND block from the applied outbox after the seat ends | landing code | O2 |
