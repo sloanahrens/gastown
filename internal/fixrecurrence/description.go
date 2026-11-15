@@ -101,10 +101,11 @@ func descriptionIDStart(id string) string {
 // descriptionIDSameSentence matches the cited id at the start of a rule whose
 // phrase follows it: no id character runs into it from either side, and the one
 // character it consumes after the id may neither continue the id nor end its
-// sentence or line. A full stop after the id ends the sentence there, so the
+// sentence or line: a full stop, an exclamation mark or a question mark ends the
+// sentence there, so the
 // rules built on this one read only what the id's own sentence says.
 func descriptionIDSameSentence(id string) string {
-	return descriptionIDStart(id) + `[^a-z0-9.\n\r-]`
+	return descriptionIDStart(id) + `[^a-z0-9.!?\n\r-]`
 }
 
 // descriptionIDEnd matches the cited id up to its end: the character after it

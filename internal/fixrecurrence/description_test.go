@@ -191,6 +191,18 @@ func TestClassifyDescriptionTightRules(t *testing.T) {
 			want: Reference,
 		},
 		{
+			name: "an exclamation mark after the id ends the sentence",
+			desc: "gt-0nk! The weather persists.",
+			id:   "gt-0nk",
+			want: Reference,
+		},
+		{
+			name: "a question mark after the id ends the sentence",
+			desc: "is it gt-0nk? The weather persists.",
+			id:   "gt-0nk",
+			want: Reference,
+		},
+		{
 			name: "a new line after the id ends what it says",
 			desc: "gt-0nk\n- the weather persists",
 			id:   "gt-0nk",
@@ -221,10 +233,19 @@ func TestClassifyDescriptionTightRules(t *testing.T) {
 			want: Reference,
 		},
 		{
-			name: "the negator sits further back than the phrase window",
+			// Four words between the negator and the phrase are read as the
+			// negation; a fifth word out, the negator is no longer seen.
+			name: "the negator four words back still negates",
 			desc: "the logs say there is not under any circumstances a recurrence of gt-0nk",
 			id:   "gt-0nk",
 			want: Reference,
+		},
+		{
+			name:            "the negator sits further back than the phrase window",
+			desc:            "the logs say there is not under any of the many circumstances a recurrence of gt-0nk",
+			id:              "gt-0nk",
+			want:            Recurrence,
+			titleConfidence: 0.9,
 		},
 	}
 	for _, tt := range tests {
