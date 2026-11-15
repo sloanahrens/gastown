@@ -126,7 +126,7 @@ func (e sandboxSeatEnd) keepReason() string {
 	case e.Branch != e.LandedBranch:
 		return "the seat works " + e.Branch + ", not the landed " + e.LandedBranch
 	case !e.Retired:
-		return "the seat's record does not say stop: something still wants it"
+		return retiredRecordKeepReason
 	}
 	return ""
 }
