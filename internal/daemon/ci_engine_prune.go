@@ -847,11 +847,16 @@ func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContex
 
 // ciEngineDuVanished reports whether du's stderr is only the report of files that
 // vanished while it walked the data root: at least one such line, and no line of
-// any other kind. kubectl's own lines are skipped, as ciEngineFailure skips them.
-// An empty stderr is not this case, so a bare non-zero status with no diagnosis
-// stays a failure.
+// any other kind. A report is du's own diagnosis, so it carries du's program prefix
+// and ends in the errno text; another program's line ending the same way is not one,
+// and its exit status stays a failure. kubectl's own lines are skipped, as
+// ciEngineFailure skips them. An empty stderr is not this case, so a bare non-zero
+// status with no diagnosis stays a failure.
 func ciEngineDuVanished(stderr []byte) bool {
-	const vanished = "No such file or directory"
+	const (
+		duPrefix = "du: "
+		vanished = ": No such file or directory"
+	)
 	lines := 0
 	for _, raw := range strings.Split(string(stderr), "\n") {
 		if ciEngineKubectlLine(raw) {
@@ -861,7 +866,7 @@ func ciEngineDuVanished(stderr []byte) bool {
 		if line == "" {
 			continue
 		}
-		if !strings.HasSuffix(line, vanished) {
+		if !strings.HasPrefix(line, duPrefix) || !strings.HasSuffix(line, vanished) {
 			return false
 		}
 		lines++
