@@ -408,7 +408,7 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 // directory is in a sandbox. A mutating call is refused when the remote's
 // repository top level for the call's effective directory is one of the town
 // roots named at construction; a read, a Git with no town root named, and a top
-// level the remote cannot report are allowed, as the host guard allows them.
+// level the remote cannot report is refused (the remote guard fails closed).
 func (g *Git) guardRemoteTownRootMutation(args []string) error {
 	cmd, rest := gitSubcommand(args)
 	if cmd == "" || len(g.remoteTownRoots) == 0 || !gitSubcommandMutatesWorktree(cmd, rest) {
@@ -420,7 +420,10 @@ func (g *Git) guardRemoteTownRootMutation(args []string) error {
 	}
 	top, ok := gitTopLevel(g.runner(), effective)
 	if !ok {
-		return nil
+		// Unlike the host guard, the remote guard fails closed: a sandbox seat's
+		// mutation that cannot be placed relative to the town root is refused, not
+		// passed as if it had been checked.
+		return fmt.Errorf("%w: could not read the repository top level of %s, so the mutation cannot be checked: git %s", ErrUnsafeTownRootGitMutation, effective, strings.Join(args, " "))
 	}
 	for _, root := range g.remoteTownRoots {
 		if top == filepath.Clean(root) {

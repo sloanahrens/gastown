@@ -327,6 +327,7 @@ func TestRemoteGitRefusesAMutationInTheRemoteTownRoot(t *testing.T) {
 		{"mutation resolving to the town root", townRoot, []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, true},
 		{"mutation in a clone below it", "/sandbox/gt/rig/polecats/x/rig", []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, false},
 		{"a read resolving to the town root", townRoot, []string{townRoot}, func(g *Git) error { _, err := g.Rev("HEAD"); return err }, false},
+		{"top level the remote cannot report", "", []string{townRoot}, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, true},
 		{"no town root named", townRoot, nil, func(g *Git) error { _, err := g.run("checkout", "main"); return err }, false},
 	}
 	for _, tc := range tests {
