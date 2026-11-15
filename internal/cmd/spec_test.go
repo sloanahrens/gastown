@@ -206,6 +206,29 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	return f
 }
 
+// productionCandidates is the tick's candidate read run through the production
+// board read: specCandidatesWith over specReadyBoardFrom, with the fake's split
+// beads on the split list and its other beads on the ready list. The split
+// route's classification is then the production one, not a copy the fake keeps
+// (gt-4yq0js).
+func (f *fakeSpecTown) productionCandidates(t *testing.T) func() specBoardRead {
+	t.Helper()
+	townRoot := specTown(t)
+	notDocked := func(string, string) (bool, string) { return false, "" }
+	return func() specBoardRead {
+		store := &specReadyStub{}
+		for _, s := range f.specs {
+			issue := issueOfSpec(s)
+			if s.HasLabel(specdispatch.SplitLabel) {
+				store.split = append(store.split, &issue)
+			} else {
+				store.issues = append(store.issues, &issue)
+			}
+		}
+		return specCandidatesWith(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked)
+	}
+}
+
 // specDispatchTestInFlight is the fixture's sling cap: above every candidate
 // count a fake town is built with, so the fixture's tests that predate the cap
 // keep running their candidates at once. A test about the cap sets
@@ -231,18 +254,10 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Candidates: func() specBoardRead {
 			var list []specdispatch.Spec
 			var skipped []specDispatchEntry
-			var splitHeld []specCandidate
 			labeled := 0
 			for _, s := range f.specs {
 				if s.HasLabel(specdispatch.DispatchFailedLabel) {
 					labeled++
-					continue
-				}
-				// specCandidates reads a split-labelled bead apart from the
-				// candidates: the ready query filters the label, and the tick
-				// reports the bead with the route's own reason (gt-4yq0js).
-				if s.HasLabel(specdispatch.SplitLabel) && specdispatch.NotWorkBead(s) == "" {
-					splitHeld = append(splitHeld, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID)})
 					continue
 				}
 				if ok, why := specdispatch.Eligible(s, 2); ok {
@@ -259,7 +274,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			for _, s := range list {
 				out = append(out, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID), Blockers: f.blockers[s.ID]})
 			}
-			return specBoardRead{Candidates: out, SplitHeld: splitHeld, LabeledFailed: labeled, Skipped: skipped}
+			return specBoardRead{Candidates: out, LabeledFailed: labeled, Skipped: skipped}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
 			f.mu.Lock()
@@ -3925,18 +3940,65 @@ func TestSpecReadyBoardCarriesTheSplitHeldBeads(t *testing.T) {
 	}
 }
 
-// TestSpecReadyBoardReportsAFailedSplitRead: a split list that cannot be read is
-// the rig's error, not a rig holding no split bead: a tick that cannot see them
-// would leave every one of them unexplained on the dashboard (gt-4yq0js).
-func TestSpecReadyBoardReportsAFailedSplitRead(t *testing.T) {
+// TestSpecReadyBoardKeepsTheReadyRowsWhenTheSplitReadFails: a split list that
+// cannot be read is reported, not read as a rig holding no split bead, but the
+// ready rows are still the board. The split label keeps held beads off the ready
+// query, so none of those rows is one of them (gt-4yq0js).
+func TestSpecReadyBoardKeepsTheReadyRowsWhenTheSplitReadFails(t *testing.T) {
 	t.Parallel()
 	stub := &specReadyStub{
 		issues:  []*beads.Issue{{ID: "gt-ready"}},
 		listErr: errors.New("bd list: database locked"),
 	}
 
-	if _, err := specReadyBoardFrom(stub); err == nil || !strings.Contains(err.Error(), "the split route holds") {
-		t.Fatalf("specReadyBoardFrom err = %v, want the split read's failure named", err)
+	issues, err := specReadyBoardFrom(stub)
+	var partial *specPartialBoardError
+	if !errors.As(err, &partial) || !strings.Contains(err.Error(), "the split route holds") {
+		t.Fatalf("specReadyBoardFrom err = %v, want a partial board naming the split read", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-ready" {
+		t.Errorf("board = %+v, want the ready rows the split read did not stop", issues)
+	}
+}
+
+// A split read that fails keeps the rig's ready rows in the tick's candidates,
+// and the failure is reported beside them. A ready query that fails still holds
+// the whole rig out: there is no board to keep (gt-4yq0js).
+func TestSpecCandidatesKeepsTheReadyRowsWhenTheSplitReadFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		stub       *specReadyStub
+		candidates []string
+		errLine    string
+	}{
+		{
+			name:       "split read fails",
+			stub:       &specReadyStub{issues: []*beads.Issue{{ID: "gt-task", Type: "task", Status: "open", Priority: 2}}, listErr: errors.New("bd list: database locked")},
+			candidates: []string{"gt-task"},
+			errLine:    "the split route holds",
+		},
+		{
+			name:    "ready query fails",
+			stub:    &specReadyStub{err: errors.New("bd ready: database locked")},
+			errLine: "bd ready: database locked",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			board := func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(tc.stub) }
+			got := specCandidates(specTown(t), 2, board)
+
+			var ids []string
+			for _, c := range got.Candidates {
+				ids = append(ids, c.Spec.ID)
+			}
+			if strings.Join(ids, " ") != strings.Join(tc.candidates, " ") {
+				t.Errorf("candidates = %q, want %q", ids, tc.candidates)
+			}
+			if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], tc.errLine) {
+				t.Errorf("errors = %q, want the failure named with %q", got.Errors, tc.errLine)
+			}
+		})
 	}
 }
 

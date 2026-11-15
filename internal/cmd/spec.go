@@ -4437,7 +4437,12 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 		issues, err := board(rigPath)
 		if err != nil {
 			read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", name, err))
-			continue
+			// A partial board keeps its ready rows; any other failure holds the
+			// rig out of this tick.
+			var partial *specPartialBoardError
+			if !errors.As(err, &partial) {
+				continue
+			}
 		}
 		// The rig's retry set is read on the first labeled bead the board
 		// holds, once: a rig whose board holds none pays nothing for it.
@@ -4751,8 +4756,9 @@ func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
 // ready query filters that label server-side (gt-q6zoo), so without this read
 // the tick never sees a bead the split route holds and writes no skip line for
 // it: the dashboard's ready row for it keeps the shape the lint gave it, with
-// no reason anywhere saying why no seat takes it (gt-4yq0js). A read that
-// fails is the rig's error, never a rig that holds no split bead.
+// no reason anywhere saying why no seat takes it (gt-4yq0js). A split read that
+// fails returns the ready rows with a specPartialBoardError: the rows are still
+// the board, and the caller reports the failure beside them.
 func specReadyBoardFrom(store beads.Client) ([]*beads.Issue, error) {
 	issues, err := store.ReadyFiltered(specReadyOptions())
 	var truncated *beads.ErrReadyTruncated
@@ -4761,7 +4767,7 @@ func specReadyBoardFrom(store beads.Client) ([]*beads.Issue, error) {
 	}
 	held, err := specSplitHeldFrom(store)
 	if err != nil {
-		return nil, err
+		return issues, &specPartialBoardError{err: err}
 	}
 	// A label that lands between the two reads puts the bead on both: the ready
 	// row was read without it, and the split list with it. The split list is
@@ -4777,6 +4783,16 @@ func specReadyBoardFrom(store beads.Client) ([]*beads.Issue, error) {
 	}
 	return issues, nil
 }
+
+// specPartialBoardError is a board whose ready rows were read and whose split
+// list was not. The ready query filters the split label, so none of those rows
+// is a held bead, and Eligible refuses the label on the candidate path too: the
+// rows are dispatched, and the failure is reported beside them.
+type specPartialBoardError struct{ err error }
+
+func (e *specPartialBoardError) Error() string { return e.err.Error() }
+
+func (e *specPartialBoardError) Unwrap() error { return e.err }
 
 // specSplitHeldFrom lists the rig's open beads wearing the split label: the
 // beads a person or bird cut, whose work lives on the children (hq-et8bc). They
