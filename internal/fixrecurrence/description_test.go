@@ -55,8 +55,8 @@ func TestClassifyDescriptionTightRules(t *testing.T) {
 			titleConfidence: wantTitleStrict,
 		},
 		{
-			name:            "id then the signal after a full stop",
-			desc:            "gt-0nk. Not fixed by the port",
+			name:            "id then the signal after a colon",
+			desc:            "the port landed; see gt-0nk: it persists",
 			id:              "gt-0nk",
 			want:            Recurrence,
 			titleConfidence: wantTitleStrict,
@@ -173,8 +173,26 @@ func TestClassifyDescriptionTightRules(t *testing.T) {
 			want: Reference,
 		},
 		{
+			name: "the signal opens the sentence after the id",
+			desc: "gt-0nk. Not fixed by the port",
+			id:   "gt-0nk",
+			want: Reference,
+		},
+		{
+			name: "an unrelated sentence after the id carries the signal",
+			desc: "gt-0nk. The weather persists.",
+			id:   "gt-0nk",
+			want: Reference,
+		},
+		{
 			name: "the signal opens an unrelated later sentence",
 			desc: "gt-0nk shipped. The weather persists.",
+			id:   "gt-0nk",
+			want: Reference,
+		},
+		{
+			name: "a new line after the id ends what it says",
+			desc: "gt-0nk\n- the weather persists",
 			id:   "gt-0nk",
 			want: Reference,
 		},
@@ -194,6 +212,18 @@ func TestClassifyDescriptionTightRules(t *testing.T) {
 			name: "not the same class",
 			desc: "this is not the same class as gt-4mnd: another flag",
 			id:   "gt-4mnd",
+			want: Reference,
+		},
+		{
+			name: "no recurrence many words before the phrase",
+			desc: "classify this as not at all a recurrence of gt-0nk",
+			id:   "gt-0nk",
+			want: Reference,
+		},
+		{
+			name: "the negator sits further back than the phrase window",
+			desc: "the logs say there is not under any circumstances a recurrence of gt-0nk",
+			id:   "gt-0nk",
 			want: Reference,
 		},
 	}
