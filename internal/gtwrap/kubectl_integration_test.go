@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // TestIntegrationKubernetesTargetReachesTheDaemonPod drives the kubernetes target
@@ -20,8 +22,11 @@ func TestIntegrationKubernetesTargetReachesTheDaemonPod(t *testing.T) {
 		t.Skip("GT_TEST_K8S is not 1, so the control cluster is not reached")
 	}
 	var note bytes.Buffer
+	// The live target runs from the town root on this Mac, which the Deployment
+	// mounts at the same path inside the pod, so the wrapper rewrites nothing.
+	town := manifestdata.PodTownRoot
 	k := Kubectl{
-		Town:       kubeTown,
+		Town:       town,
 		Context:    kubeContext,
 		Namespace:  kubeNamespace,
 		Deployment: kubeDeploy,
@@ -40,12 +45,12 @@ func TestIntegrationKubernetesTargetReachesTheDaemonPod(t *testing.T) {
 	}
 	// A directory the pod lacks runs in the nearest existing ancestor, the town
 	// root, and the tool is told the caller's Mac directory there.
-	missing := filepath.Join(kubeTown, "gt-wrap-integration-missing")
+	missing := filepath.Join(town, "gt-wrap-integration-missing")
 	exit, err := k.Launch(Call{Argv: []string{"sh", "-c", `test "$GT_CALLER_CWD" = "$1"`, "sh", missing}, Dir: missing})
 	if err != nil || exit != 0 {
 		t.Fatalf("a call from a missing directory = %d, %v; want 0, nil with GT_CALLER_CWD naming it", exit, err)
 	}
-	exit, err = k.Launch(Call{Argv: []string{"gt", "status", "--line"}, Dir: kubeTown})
+	exit, err = k.Launch(Call{Argv: []string{"gt", "status", "--line"}, Dir: town})
 	if err != nil || exit != 0 {
 		t.Fatalf("gt status --line through the kubernetes target = %d, %v; want 0, nil", exit, err)
 	}
