@@ -1,8 +1,3 @@
-config default-agent list
-config get
-config migrate
-config secrets
-config secrets migrate
 tap guard bd-create-store
 tap guard bd-init
 tap guard container-suite
