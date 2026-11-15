@@ -208,6 +208,12 @@ type openshellBackend struct {
 	// revoker ends the tracker tokens of a seat whose sandbox is gone. Nil is
 	// the host's tracker revoker; tests set it.
 	revoker seattoken.Revoker
+	// seatPeak is the recorder a seat's end hands its peak read to. Nil is the
+	// linked SeatPeakRecorder. Tests set it.
+	seatPeak func(ctx context.Context, townRoot string, exec SeatPeakExec, rec SandboxRecord, endedAt time.Time) error
+	// seatPeakTimeout bounds a seat's end read of its peak files; zero is
+	// seatPeakTimeout. Tests set it.
+	seatPeakTimeout time.Duration
 	// warnf reports a warning. Nil writes to stderr; tests set it.
 	warnf func(format string, args ...any)
 }
@@ -1841,4 +1847,60 @@ func (b *openshellBackend) promptRenderer() config.SystemPromptRender {
 		return b.renderPrompt
 	}
 	return config.SystemPromptRenderer
+}
+
+// SeatPeakExec is the sandbox exec seam a seat's end read runs through: the
+// method set of *sandbox.CLI's Exec. It is an interface so the recorder linked
+// in from internal/resourcesampler names no concrete type of this package.
+type SeatPeakExec interface {
+	Exec(ctx context.Context, name string, env map[string]string, argv []string, stdin []byte) (stdout, stderr []byte, err error)
+}
+
+// SeatPeakRecorder records a seat's peak row as its end comes: it reads the
+// seat's cgroup peak files through the exec seam, builds the row and appends it
+// to the town's bead-peaks.jsonl. internal/resourcesampler sets it from its
+// init, because that package reads the sandbox registry through this one and so
+// cannot be called back from here. Nil means no recorder is linked, and a
+// seat's end warns that its peak row is not written.
+var SeatPeakRecorder func(ctx context.Context, townRoot string, exec SeatPeakExec, rec SandboxRecord, endedAt time.Time) error
+
+// seatPeakTimeout bounds a seat's end read of its cgroup peak files. The read
+// prints three small files, so one that takes longer is a wedged gateway
+// call, and a seat's end must not wait on it (gt-wi50nw).
+const seatPeakTimeout = 2 * time.Second
+
+// recordSeatPeak runs the recorder over a seat that is ending, before the
+// gateway deletes the sandbox the read addresses, under the seatPeakBound the
+// recorder's exec is bounded by. It is best effort by design: a read that fails
+// or outlasts the bound, and a row the recorder refuses or cannot append, write
+// no row and are warnings; the seat's end completes either way (gt-wi50nw).
+func (b *openshellBackend) recordSeatPeak(rec SandboxRecord) {
+	recorder := b.seatPeak
+	if recorder == nil {
+		recorder = SeatPeakRecorder
+	}
+	if recorder == nil {
+		b.warn("sandbox %s: no seat peak recorder is linked, so its seat's peak row is not written", rec.Session)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), b.seatPeakBound())
+	defer cancel()
+	err := recorder(ctx, b.townRoot, b.cli, rec, b.clock())
+	if isSandboxNotFound(err) {
+		// A sandbox that is already gone has no peak files to read, as it has
+		// no transcripts to copy: there is no row to lose.
+		return
+	}
+	if err != nil {
+		b.warn("sandbox %s: its seat's peak row is not written: %v", rec.Session, err)
+	}
+}
+
+// seatPeakBound is how long a seat's end read may take: the test's when one is
+// set, else seatPeakTimeout.
+func (b *openshellBackend) seatPeakBound() time.Duration {
+	if b.seatPeakTimeout > 0 {
+		return b.seatPeakTimeout
+	}
+	return seatPeakTimeout
 }

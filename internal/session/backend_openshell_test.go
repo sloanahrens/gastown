@@ -138,6 +138,11 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 		renderPrompt: openshellPromptRender,
 		installedGT:  func() string { return openshellTestGTCommit },
 		policyRoot:   func(townRoot string) (string, error) { return openshellTestPolicyRoot(townRoot), nil },
+		// A recorder is linked in production (internal/resourcesampler sets
+		// session.SeatPeakRecorder), so the test backend links one that runs the
+		// seat's read through the seam, as the linked one does. The peak row's
+		// own tests set theirs.
+		seatPeak: seatPeakRead(nil),
 	}
 	return b, pushes
 }

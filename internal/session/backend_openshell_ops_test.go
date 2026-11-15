@@ -265,9 +265,11 @@ func TestOpenShellOpsDeleteRemovesTheSandboxAndItsRecord(t *testing.T) {
 	if err := b.Delete(openshellTestSession); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	// The sandbox holds no transcript, so the copy lists it and downloads nothing.
+	// The sandbox holds no transcript, so the copy lists it and downloads
+	// nothing; the seat's peak row is read before the sandbox goes.
 	want := [][]string{
 		{"openshell", "sandbox", "exec", "-n", openshellTestSession, "--no-tty", "--no-login-shell", "--", "find", sandboxProjectsDir, "-type", "f", "-name", "*.jsonl", "-printf", `%T@ %s %p\n`},
+		sandboxExec(seatPeakArgv...),
 		{"openshell", "sandbox", "delete", openshellTestSession},
 	}
 	if !reflect.DeepEqual(fake.Calls(), want) {

@@ -529,12 +529,13 @@ type seatSandboxDelete struct {
 }
 
 // deleteSeatSandbox deletes the sandbox rec describes: the seat's transcripts
-// are saved first, then the sandbox is deleted, and its tracker token ends when
-// d.revoke. It is the one delete sequence the three recorded-seat callers share
-// (Delete, the patrol's record delete and createOrReplaceEndedSeat); the caller
-// removes the record afterwards. A failed delete returns *sandboxDeleteFailed,
-// so a caller with wording of its own for that step can tell it from a failed
-// transcript copy; its message is the gateway error's.
+// are saved first, then the seat's peak row is read, then the sandbox is
+// deleted, and its tracker token ends when d.revoke. It is the one delete
+// sequence the three recorded-seat callers share (Delete, the patrol's record
+// delete and createOrReplaceEndedSeat); the caller removes the record
+// afterwards. A failed delete returns *sandboxDeleteFailed, so a caller with
+// wording of its own for that step can tell it from a failed transcript copy;
+// its message is the gateway error's.
 func (b *openshellBackend) deleteSeatSandbox(rec SandboxRecord, d seatSandboxDelete) error {
 	if d.stopOnCopyFailure {
 		if err := b.saveSeatTranscripts(rec); err != nil {
@@ -543,6 +544,10 @@ func (b *openshellBackend) deleteSeatSandbox(rec SandboxRecord, d seatSandboxDel
 	} else {
 		b.copySeatTranscripts(rec)
 	}
+	// The peak row is read last, as close to the delete as the sequence allows:
+	// memory.peak is a high-water mark and cpu.stat a running total, so the
+	// later the read the more of the seat's life it covers (gt-wi50nw).
+	b.recordSeatPeak(rec)
 	if err := b.deleteSandbox(rec.Session); err != nil {
 		return &sandboxDeleteFailed{err}
 	}
