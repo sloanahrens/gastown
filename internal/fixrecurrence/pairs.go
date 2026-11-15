@@ -8,8 +8,8 @@ import (
 
 // Bead is one bead the pair extractor reads: the prose that may cite another
 // bead, the status and timestamps that decide whether it is the cited bead or
-// the newer one, and the dependency edges an agent already set. ID and the keys
-// of Edges are the store's own spelling, which is lowercase.
+// the newer one, and the dependency edges an agent already set. A citation
+// matches an id case-insensitively; the keys of Edges are the store's spelling.
 type Bead struct {
 	ID          string
 	Title       string
@@ -32,38 +32,32 @@ type Pair struct {
 	Old string
 }
 
-// Pairs returns every citation pair the beads form, sorted by New then Old.
-// A bead's title and description are scanned for bead ids; a citation is a pair
-// when the cited id names a closed bead in the list, that bead's close time is
-// earlier than the citing bead's creation, and no dependency edge already joins
-// the two beads in either direction. The comparison reads the beads' own
-// timestamps, never the wall clock.
-//
-// No pair is made by a bead citing itself, by a citation of an id the list does
-// not hold, or by a citation of an id the list holds twice — which record is the
-// bead, and when it closed, are both unknown. A closed bead whose close time is
-// zero makes no pair either: that time is unknown, not the beginning of time.
-//
-// The citation is not classified here. A pair says the newer bead named the
-// older one, not how it relates to it.
+// Pairs returns every citation pair the beads form, sorted by New then Old: a
+// bead whose title or description cites a closed bead that closed before the
+// citing bead was created, where no dependency edge already joins the two.
 func Pairs(beads []Bead) []Pair {
 	byID := make(map[string]*Bead, len(beads))
 	ambiguous := make(map[string]bool)
 	for i := range beads {
-		if _, ok := byID[beads[i].ID]; ok {
-			ambiguous[beads[i].ID] = true
+		key := strings.ToLower(beads[i].ID)
+		if _, ok := byID[key]; ok {
+			ambiguous[key] = true
 			continue
 		}
-		byID[beads[i].ID] = &beads[i]
+		byID[key] = &beads[i]
 	}
 	var pairs []Pair
 	for i := range beads {
 		newBead := &beads[i]
-		newKey := newBead.ID
+		// An empty id names no bead, and an id the list holds twice names no
+		// single record, so neither can be the citing bead.
+		newKey := strings.ToLower(newBead.ID)
 		if newKey == "" || ambiguous[newKey] {
 			continue
 		}
 		for _, citedKey := range citations(newBead) {
+			// A bead is no recurrence of itself, and a citation of an id the
+			// list holds twice names no single record.
 			if citedKey == newKey || ambiguous[citedKey] {
 				continue
 			}
@@ -107,10 +101,10 @@ func citations(bead *Bead) []string {
 }
 
 // closedBefore reports whether old is a closed bead whose close is known and
-// earlier than new's creation. A zero close time is unknown, so it makes no
-// pair, and a close at the same instant as the creation is not before it.
-func closedBefore(old, new *Bead) bool {
-	return old.Status == "closed" && !old.ClosedAt.IsZero() && old.ClosedAt.Before(new.CreatedAt)
+// earlier than the citing bead's creation. A zero close time is unknown, so it
+// makes no pair, and a close at the creation instant is not before it.
+func closedBefore(older, newer *Bead) bool {
+	return older.Status == "closed" && !older.ClosedAt.IsZero() && older.ClosedAt.Before(newer.CreatedAt)
 }
 
 // edged reports whether an agent already set a dependency edge between the two

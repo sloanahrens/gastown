@@ -156,6 +156,38 @@ func TestPairs(t *testing.T) {
 			want: []Pair{{New: "gt-me9t", Old: "gt-4mnd"}},
 		},
 		{
+			name: "a citation names a bead whose id is not lowercase",
+			beads: []Bead{
+				{ID: "GT-4MND", Status: "closed", CreatedAt: at(1), ClosedAt: at(2)},
+				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "recurrence of gt-4mnd"},
+			},
+			want: []Pair{{New: "gt-me9t", Old: "GT-4MND"}},
+		},
+		{
+			name: "a bead citing its own id in another case is no pair",
+			// The close precedes the creation, so only the self-citation
+			// check refuses this row.
+			beads: []Bead{
+				{ID: "GT-ME9T", Status: "closed", CreatedAt: at(5), ClosedAt: at(1), Title: "recurrence of gt-me9t"},
+			},
+		},
+		{
+			name: "two ids that differ only in case name no single record",
+			beads: []Bead{
+				{ID: "gt-4mnd", Status: "closed", CreatedAt: at(1), ClosedAt: at(2)},
+				{ID: "GT-4MND", Status: "open", CreatedAt: at(3)},
+				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "recurrence of gt-4mnd"},
+			},
+		},
+		{
+			name: "a citing id the list holds in two cases makes no pair",
+			beads: []Bead{
+				{ID: "gt-4mnd", Status: "closed", CreatedAt: at(1), ClosedAt: at(2)},
+				{ID: "gt-me9t", Status: "open", CreatedAt: at(5), Title: "recurrence of gt-4mnd"},
+				{ID: "GT-ME9T", Status: "open", CreatedAt: at(6), Title: "recurrence of gt-4mnd"},
+			},
+		},
+		{
 			name: "a citation glued to a longer token is no pair",
 			beads: []Bead{
 				{ID: "gt-wisp", Status: "closed", CreatedAt: at(1), ClosedAt: at(2)},
