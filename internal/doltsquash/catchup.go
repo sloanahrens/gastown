@@ -8,14 +8,19 @@ import (
 )
 
 // CatchupQuietTip is how long main's tip must hold still before an empty tail
-// ends the replay: the design's 300 ms, about a hundredth of the town's 25 s
-// commit interval.
+// ends the replay: design step 5's quiet window.
 const CatchupQuietTip = 300 * time.Millisecond
 
+// catchupQuietWaits bounds the quiet windows one run may spend. The window ends
+// the replay on the second empty pass, so a clock that has not advanced past it
+// after this many waits is not keeping time, and the replay stops instead of
+// waiting forever.
+const catchupQuietWaits = 8
+
 // catchupRetries bounds how many times one pick's "uncommitted changes" is
-// retried before the run returns it. The waits below total under four seconds,
-// so a working set a writer holds longer fails the pass instead of stalling the
-// run.
+// retried before the run returns it. The waits double from catchupBackoff to
+// catchupBackoffCap, so a working set a writer holds longer fails the pick
+// instead of stalling the run.
 const catchupRetries = 8
 
 // catchupBackoff is the wait before the first retry of a pick; each later wait
@@ -86,6 +91,7 @@ func Catchup(ctx context.Context, ex Exec, from string, clk Clock, sleep Sleeper
 	picked := from
 	var seenTip string
 	var seenAt time.Time
+	quietWaits := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return result, fmt.Errorf("doltsquash: the replay stopped between passes: %w", err)
@@ -117,6 +123,12 @@ func Catchup(ctx context.Context, ex Exec, from string, clk Clock, sleep Sleeper
 			if quietTip(seenTip, tip, seenAt, clk.Now()) {
 				return result, nil
 			}
+			quietWaits++
+			if quietWaits > catchupQuietWaits {
+				return result, fmt.Errorf(
+					"doltsquash: main's tip %s stayed empty through %d quiet windows of %s each: the clock did not advance past one, so the replay cannot see a quiet tip",
+					tip, catchupQuietWaits, CatchupQuietTip)
+			}
 			seenTip, seenAt = tip, clk.Now()
 			sleep.Sleep(CatchupQuietTip)
 			continue
@@ -137,11 +149,12 @@ func Catchup(ctx context.Context, ex Exec, from string, clk Clock, sleep Sleeper
 }
 
 // quietTip reports whether tip may end the replay: the same tip an earlier
-// empty pass observed, at least CatchupQuietTip earlier on the clock. A clock
-// that reads before the observation is not quiet, so a clock that stepped back
-// never ends the replay.
+// empty pass observed, at least CatchupQuietTip earlier on the clock. seenTip
+// is empty until an empty pass records one, so the first empty pass is never a
+// quiet tip. A clock that reads before the observation is not quiet either, so
+// a clock that stepped back does not end the replay.
 func quietTip(seenTip, tip string, seenAt, now time.Time) bool {
-	if seenTip == "" || seenTip != tip || seenAt.IsZero() {
+	if seenTip != tip {
 		return false
 	}
 	return now.Sub(seenAt) >= CatchupQuietTip
@@ -150,8 +163,8 @@ func quietTip(seenTip, tip string, seenAt, now time.Time) bool {
 // tailStatement lists the commits after from up to tip, oldest first. Dolt's
 // dolt_log takes one revision per argument, so the range is a single argument
 // in git's from..tip form. Both ends are hashes the run recorded, because a
-// list read from the live tip can hold a commit the next pass picks again (the
-// lab race).
+// list read from the live tip can hold a commit an earlier pass already picked,
+// and the replay would pick it twice.
 func tailStatement(from, tip string) string {
 	return fmt.Sprintf("SELECT commit_hash FROM dolt_log(%s) ORDER BY commit_order ASC",
 		quoteLiteral(from+".."+tip))

@@ -8,11 +8,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // sqlCherryPick is the prefix of every pick statement, so a test can script one
 // answer for all picks or an exact statement for one commit.
 const sqlCherryPick = "CALL DOLT_CHERRY_PICK"
+
+// sqlDoltTail is the prefix of every tail list statement, so a test can pick
+// the log reads out of the statements the fake received.
+const sqlDoltTail = "SELECT commit_hash FROM dolt_log("
 
 // tailRows answers a tail list with one record per commit, oldest first.
 func tailRows(commits ...string) Rows {
@@ -50,6 +56,26 @@ func pickStatements(f *FakeExec) []string {
 		}
 	}
 	return picks
+}
+
+// tailRanges returns the revision argument of each tail list the fake
+// received, in order, so a test asserts the range the replay read rather than
+// the statement it was rendered into.
+func tailRanges(t *testing.T, f *FakeExec) []string {
+	t.Helper()
+	var ranges []string
+	for _, statement := range f.Statements() {
+		rest, ok := strings.CutPrefix(statement, sqlDoltTail+"'")
+		if !ok {
+			continue
+		}
+		revision, _, ok := strings.Cut(rest, "'")
+		if !ok {
+			t.Fatalf("the tail list %q does not close its revision", statement)
+		}
+		ranges = append(ranges, revision)
+	}
+	return ranges
 }
 
 // wantPicks returns the pick statement for each commit, in order.
@@ -112,12 +138,12 @@ func TestCatchupLooksAgainAfterTheQuietWait(t *testing.T) {
 	}
 }
 
-// TestCatchupReplaysTheTailBoundedByTheRecordedTip drives the lab's race: main
-// advances between a pass's tip read and its list read, so the live log holds a
-// commit the recorded tip does not. The fake answers the bounded range with the
-// two commits main held at tip1 and the unbounded log with those plus c3, so a
-// replay that lists the live tip picks c3 in the first pass and again in the
-// next.
+// TestCatchupReplaysTheTailBoundedByTheRecordedTip drives the race that an
+// unbounded range loses: main advances between a pass's tip read and its list
+// read, so the live log holds a commit the recorded tip does not. The fake
+// answers the bounded range with the two commits main held at tip1 and the
+// unbounded log with those plus c3, so a replay that lists the live tip picks
+// c3 in the first pass and again in the next.
 func TestCatchupReplaysTheTailBoundedByTheRecordedTip(t *testing.T) {
 	t.Parallel()
 	from, tip1, tip2 := hash(0x41), hash(0x51), hash(0x52)
@@ -139,14 +165,17 @@ func TestCatchupReplaysTheTailBoundedByTheRecordedTip(t *testing.T) {
 	if want := (CatchupResult{Tip: tip2, Passes: 4, Picks: 3}); got != want {
 		t.Errorf("Catchup returned %+v, want %+v", got, want)
 	}
-	if got := pickStatements(f); !slices.Equal(got, wantPicks(c1, c2, c3)) {
-		t.Errorf("picks = %q, want %q: a range read past its recorded tip picks a commit twice",
-			got, wantPicks(c1, c2, c3))
+	if got, want := pickStatements(f), wantPicks(c1, c2, c3); !slices.Equal(got, want) {
+		t.Errorf("picks = %q, want %q: a range read past its recorded tip picks a commit twice", got, want)
 	}
-	for _, statement := range f.Statements() {
-		if strings.HasPrefix(statement, "SELECT commit_hash FROM dolt_log('main')") {
-			t.Errorf("the replay listed the live log instead of a range bounded by the recorded tip: %q", statement)
-		}
+	if got, want := tailRanges(t, f), []string{
+		from + ".." + tip1,
+		tip1 + ".." + tip2,
+		tip2 + ".." + tip2,
+		// The second look at the empty tail that shows the tip held still.
+		tip2 + ".." + tip2,
+	}; !slices.Equal(got, want) {
+		t.Errorf("the replay read the ranges %q, want %q: every range starts where the last pass ended and ends at the tip that pass recorded", got, want)
 	}
 }
 
@@ -512,31 +541,75 @@ func TestCatchupStopsWhenItsContextEndsBetweenPasses(t *testing.T) {
 	}
 }
 
-func TestQuietTipOnTheInjectedClock(t *testing.T) {
+// clockStepSleeper is the package's sleeper with a fixed step: Sleep records
+// the wait and advances the clock by step instead of by the wait, so a table
+// drives the quiet rule to, past and short of the window.
+type clockStepSleeper struct {
+	clk   *clockwork.FakeClock
+	step  time.Duration
+	waits []time.Duration
+}
+
+func (s *clockStepSleeper) Sleep(d time.Duration) {
+	s.waits = append(s.waits, d)
+	s.clk.Advance(s.step)
+}
+
+// TestCatchupQuietTipOnTheInjectedClock is the quiet-tip rule's table, driven
+// through Catchup: an empty tail at the tip the replay reached ends the replay
+// only once the clock has advanced CatchupQuietTip past that observation. A
+// clock that never gets there is stopped by the wait bound instead of looping.
+func TestCatchupQuietTipOnTheInjectedClock(t *testing.T) {
 	t.Parallel()
-	tip, other := hash(0x51), hash(0x52)
+	from := hash(0x41)
 	tests := []struct {
-		name    string
-		seenTip string
-		advance time.Duration
-		want    bool
+		name string
+		step time.Duration
+		// ends is whether the empty tail at that step is the quiet tip.
+		ends bool
 	}{
-		{"never observed", "", time.Second, false},
-		{"observed at another tip", other, time.Second, false},
-		{"before the window", tip, CatchupQuietTip - time.Millisecond, false},
-		{"exactly at the window", tip, CatchupQuietTip, true},
-		{"past the window", tip, time.Second, true},
-		{"a clock that reads before the observation", tip, -time.Second, false},
+		{"exactly the window", CatchupQuietTip, true},
+		{"past the window", 2 * CatchupQuietTip, true},
+		{"before the window", CatchupQuietTip - time.Millisecond, false},
+		{"a clock that stands still", 0, false},
+		{"a clock that steps back", -CatchupQuietTip, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			clk := newTestClock()
-			seenAt := clk.Now()
-			clk.Advance(tc.advance)
-			if got := quietTip(tc.seenTip, tip, seenAt, clk.Now()); got != tc.want {
-				t.Errorf("quietTip(%q, %q, seen at %v, now %v) = %v, want %v",
-					tc.seenTip, tip, seenAt, clk.Now(), got, tc.want)
+			sleep := &clockStepSleeper{clk: clk, step: tc.step}
+			f := catchupFake(from)
+			f.Respond(tailStatement(from, from), tailRows())
+
+			got, err := Catchup(context.Background(), f, from, clk, sleep)
+			if tc.ends {
+				if err != nil {
+					t.Fatalf("Catchup: %v", err)
+				}
+				// The first empty pass is not the quiet tip: the replay ends on
+				// the second look at the same tip, not the first.
+				if want := (CatchupResult{Tip: from, Passes: 2}); got != want {
+					t.Errorf("Catchup returned %+v, want %+v", got, want)
+				}
+				if want := []time.Duration{CatchupQuietTip}; !slices.Equal(sleep.waits, want) {
+					t.Errorf("waits = %v, want %v", sleep.waits, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Catchup returned %+v, want an error: a clock that does not reach the quiet window cannot end the replay", got)
+			}
+			for _, want := range []string{from, "quiet windows"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not hold %q", err, want)
+				}
+			}
+			if want := catchupQuietWaits + 1; got.Passes != want {
+				t.Errorf("the replay read main's tip %d times, want %d: it waited out the bound", got.Passes, want)
+			}
+			if want := catchupQuietWaits; len(sleep.waits) != want {
+				t.Errorf("waits = %v, want %d quiet windows", sleep.waits, want)
 			}
 		})
 	}
