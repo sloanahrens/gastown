@@ -1311,6 +1311,14 @@ type Daemon struct {
 	resourceSamplerMu  sync.Mutex
 	newResourceSampler newResourceSamplerFn
 
+	// sandboxSamplerPatrol is the sandbox_sampler patrol's sampler, built on
+	// its first tick. newSandboxSeatSource builds the live seat source: nil
+	// means the gateway's own, and a test sets it to hand the patrol a fake
+	// (sandbox_sampler.go).
+	sandboxSamplerPatrol *sandboxSampler
+	sandboxSamplerMu     sync.Mutex
+	newSandboxSeatSource newSandboxSeatSourceFn
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -1794,6 +1802,19 @@ func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.D
 	}
 }
 
+// startSandboxSamplerTicker starts the sandbox_sampler patrol's own ticker
+// when the patrol is active, and returns nil when it is not: the seat rows are
+// a 60 s series and the heartbeat is minutes apart (gt-7d7jvn).
+func (d *Daemon) startSandboxSamplerTicker() *time.Ticker {
+	if !d.isPatrolActive("sandbox_sampler") {
+		return nil
+	}
+	interval := sandboxSamplerInterval(d.patrol())
+	ticker := time.NewTicker(interval)
+	d.logger.Printf("Sandbox sampler ticker started (interval %v)", interval)
+	return ticker
+}
+
 // Run starts the daemon main loop.
 func (d *Daemon) Run() (err error) {
 	pc := d.patrol()
@@ -2257,6 +2278,16 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Resource sampler ticker started (interval %v)", interval)
 	}
 
+	// Start the sandbox sampler ticker if enabled (default off, gt-7d7jvn):
+	// it pays one exec per live seat through the gateway, so a town turns it
+	// on rather than an upgrade.
+	sandboxSamplerTicker := d.startSandboxSamplerTicker()
+	var sandboxSamplerChan <-chan time.Time
+	if sandboxSamplerTicker != nil {
+		sandboxSamplerChan = sandboxSamplerTicker.C
+		defer sandboxSamplerTicker.Stop()
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2435,6 +2466,13 @@ func (d *Daemon) Run() (err error) {
 			// the metrics snapshot (gt-qqwey).
 			if !d.isShutdownInProgress() {
 				d.triggerResourceSampler()
+			}
+
+		case <-sandboxSamplerChan:
+			// Sandbox sampler — appends one row per live sandbox seat for the
+			// metrics snapshot (gt-7d7jvn).
+			if !d.isShutdownInProgress() {
+				d.triggerSandboxSampler()
 			}
 
 		case <-findingsFilerChan:

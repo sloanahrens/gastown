@@ -591,6 +591,15 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.PatrolScan.Enabled
 	}
+	// sandbox_sampler defaults OFF: each tick pays one exec per live seat
+	// through the sandbox gateway, so an upgrade starts none on its own
+	// (gt-7d7jvn).
+	if patrol == "sandbox_sampler" {
+		if config == nil || config.Patrols == nil || config.Patrols.SandboxSampler == nil {
+			return false
+		}
+		return config.Patrols.SandboxSampler.Enabled
+	}
 	if config == nil || config.Patrols == nil {
 		return true // Default: enabled
 	}

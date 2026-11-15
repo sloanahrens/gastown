@@ -78,6 +78,7 @@ var daemonSteps = []DaemonStep{
 	{"hm_sync", DaemonStepPatrol, DaemonStepHost, nil, "hm on the host (the plugin of the same name does the same)"},
 	{"landing_infra", DaemonStepPatrol, DaemonStepHost, nil, "the landing worker's companion: watches Forgejo and its run queue for a landing worker that runs on the host"},
 	{"resource_sampler", DaemonStepPatrol, DaemonStepSeam, nil, "ps rows for the host's components would describe the container"},
+	{"sandbox_sampler", DaemonStepPatrol, DaemonStepRuns, []string{"openshell"}, "in process, and its one exec per live seat is openshell sandbox exec, which the image carries (deploy/daemon/Dockerfile, gt-7d7jvn)"},
 
 	{"handler", DaemonStepPatrol, DaemonStepRuns, []string{"bash"}, "dispatches the plugins that run here"},
 	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},

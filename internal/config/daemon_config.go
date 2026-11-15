@@ -381,6 +381,13 @@ type PatrolsConfig struct {
 	// switched on would leave every new town with that error.
 	ResourceSampler *PatrolConfig `json:"resource_sampler,omitempty"`
 
+	// SandboxSampler appends one row per live sandbox seat every interval, the
+	// sandbox series beside the host's in the metrics day file
+	// (internal/daemon/sandbox_sampler.go, gt-7d7jvn). Off when absent: each
+	// tick pays one exec per live seat through the sandbox gateway, so a town
+	// must ask for it.
+	SandboxSampler *PatrolConfig `json:"sandbox_sampler,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.

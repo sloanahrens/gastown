@@ -4,9 +4,11 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/resourcesampler"
+	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
 // sandboxSeatSource is the one call a tick makes of the live seats: the seat
@@ -24,6 +26,39 @@ type sandboxRowWriter func(metricsDir string, row resourcesampler.Row, now time.
 // whole-tick backstop behind the source's per-seat DefaultSeatTimeout, since one
 // tick pays one exec per seat (gt-psegop).
 const defaultSandboxSamplerTimeout = 15 * resourcesampler.DefaultSeatTimeout
+
+// defaultSandboxSamplerInterval is the period between two seat samples: the
+// seat rows are a 60 s series beside the host's, so the patrol runs a ticker
+// of its own rather than the heartbeat (gt-7d7jvn).
+const defaultSandboxSamplerInterval = 60 * time.Second
+
+// minSandboxSamplerInterval bounds a configured interval up: one tick pays one
+// exec per live seat, so a shorter one only loads the gateway.
+const minSandboxSamplerInterval = 5 * time.Second
+
+// sandboxSamplerInterval is the period between two samples: the configured
+// patrols.sandbox_sampler.interval, clamped up to minSandboxSamplerInterval,
+// or the default when the key is absent or does not parse.
+func sandboxSamplerInterval(config *DaemonPatrolConfig) time.Duration {
+	if config != nil && config.Patrols != nil && config.Patrols.SandboxSampler != nil {
+		if d, err := time.ParseDuration(config.Patrols.SandboxSampler.Interval); err == nil && d > 0 {
+			return max(d, minSandboxSamplerInterval)
+		}
+	}
+	return defaultSandboxSamplerInterval
+}
+
+// newSandboxSeatSourceFn builds the seat source the patrol ticks. Nil means the
+// live one: the town's sandbox records read through the gateway's openshell
+// CLI, at the daemon's clock and the source's own per-seat bound.
+type newSandboxSeatSourceFn func(townRoot string, clock resourcesampler.Clock, timeout time.Duration) sandboxSeatSource
+
+// gatewaySeatSource is the live seat source: *sandbox.CLI is the exec seam
+// resourcesampler.SeatExec names, and the empty Gateway reads openshell's
+// active one.
+func gatewaySeatSource(townRoot string, clock resourcesampler.Clock, timeout time.Duration) sandboxSeatSource {
+	return resourcesampler.NewSeatSource(townRoot, &sandbox.CLI{}, clock, timeout)
+}
 
 // sandboxSampler turns one tick of the seat source into rows in the town's
 // metrics. The source, the writer, the clock and the logger are seams; the
@@ -121,4 +156,39 @@ func (s *sandboxSampler) log(format string, args ...any) {
 		return
 	}
 	s.errLog.Printf(format, args...)
+}
+
+// triggerSandboxSampler runs one seat sample. The patrol's own ticker calls it
+// (daemon.go): the heartbeat is minutes apart, and the seat rows are a 60 s
+// series (gt-7d7jvn).
+func (d *Daemon) triggerSandboxSampler() {
+	if d.config == nil || !d.isPatrolActive("sandbox_sampler") {
+		return
+	}
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.sandboxSampler().Tick(ctx)
+}
+
+// sandboxSampler returns the patrol's sampler, building it on first use. It
+// writes into the host rows' metrics directory, so the two series share a day
+// file, and the sampler's own bound ends a tick the gateway hangs on.
+func (d *Daemon) sandboxSampler() *sandboxSampler {
+	d.sandboxSamplerMu.Lock()
+	defer d.sandboxSamplerMu.Unlock()
+	if d.sandboxSamplerPatrol == nil {
+		build := d.newSandboxSeatSource
+		if build == nil {
+			build = gatewaySeatSource
+		}
+		clock := d.clk()
+		d.sandboxSamplerPatrol = newSandboxSampler(
+			filepath.Join(d.config.TownRoot, ".runtime", "metrics"),
+			build(d.config.TownRoot, clock, resourcesampler.DefaultSeatTimeout),
+			clock, nil, d.logger.Printf, 0,
+		)
+	}
+	return d.sandboxSamplerPatrol
 }

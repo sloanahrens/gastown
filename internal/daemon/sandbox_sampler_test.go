@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/resourcesampler"
 )
@@ -405,4 +408,189 @@ func TestSandboxSamplerDefaultTimeout(t *testing.T) {
 	if source.remaining > defaultSandboxSamplerTimeout || source.remaining < defaultSandboxSamplerTimeout-time.Second {
 		t.Errorf("the seat read was bounded %s away, want the %s default", source.remaining, defaultSandboxSamplerTimeout)
 	}
+}
+
+// TestSandboxSamplerDefaultsOff is the patrol's registration test (gt-7d7jvn):
+// a town that does not name the key samples no seat, so an upgrade never
+// starts one gateway exec per live seat on its own.
+func TestSandboxSamplerDefaultsOff(t *testing.T) {
+	t.Parallel()
+	if IsPatrolEnabled(nil, "sandbox_sampler") {
+		t.Error("sandbox_sampler runs with no daemon config, want it off")
+	}
+	if IsPatrolEnabled(&DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, "sandbox_sampler") {
+		t.Error("sandbox_sampler runs with its key absent, want it off")
+	}
+	off := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: false}}}
+	if IsPatrolEnabled(off, "sandbox_sampler") {
+		t.Error("an explicit enabled=false left sandbox_sampler on")
+	}
+	on := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true}}}
+	if !IsPatrolEnabled(on, "sandbox_sampler") {
+		t.Error("an explicit enabled=true did not turn sandbox_sampler on")
+	}
+}
+
+// TestSandboxSamplerInterval pins the patrol's own cadence: 60 seconds unless
+// configured, and a configured value cannot make it pay for a seat read more
+// often than the floor (gt-7d7jvn).
+func TestSandboxSamplerInterval(t *testing.T) {
+	t.Parallel()
+	if got := sandboxSamplerInterval(nil); got != 60*time.Second {
+		t.Errorf("the default interval = %v, want 60s", got)
+	}
+	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true, Interval: "90s"}}}
+	if got := sandboxSamplerInterval(cfg); got != 90*time.Second {
+		t.Errorf("the configured interval = %v, want 90s", got)
+	}
+	cfg.Patrols.SandboxSampler.Interval = "soon"
+	if got := sandboxSamplerInterval(cfg); got != 60*time.Second {
+		t.Errorf("an interval that does not parse = %v, want the 60s default", got)
+	}
+	cfg.Patrols.SandboxSampler.Interval = "1s"
+	if got := sandboxSamplerInterval(cfg); got != minSandboxSamplerInterval {
+		t.Errorf("a 1s interval = %v, want the %v floor", got, minSandboxSamplerInterval)
+	}
+}
+
+// countingSeatSource counts the patrol's ticks and answers with one recorded
+// outcome.
+type countingSeatSource struct {
+	ticks int
+	tick  resourcesampler.SeatTick
+	err   error
+}
+
+func (c *countingSeatSource) Tick(context.Context) (resourcesampler.SeatTick, error) {
+	c.ticks++
+	return c.tick, c.err
+}
+
+// seatSourceSpec is what the daemon handed the seat-source seam when it built
+// the patrol's sampler.
+type seatSourceSpec struct {
+	townRoot string
+	clock    resourcesampler.Clock
+	timeout  time.Duration
+}
+
+// newSandboxPatrolDaemon is a daemon whose seat source is a fake the test
+// counts, and whose clock a test moves by hand.
+func newSandboxPatrolDaemon(t *testing.T, town string, clock clockwork.Clock, config *DaemonPatrolConfig) (*Daemon, *countingSeatSource, *seatSourceSpec) {
+	t.Helper()
+	source := &countingSeatSource{}
+	spec := &seatSourceSpec{}
+	d := &Daemon{
+		config:       &Config{TownRoot: town},
+		patrolConfig: config,
+		logger:       log.New(io.Discard, "", 0),
+		clock:        clock,
+	}
+	d.newSandboxSeatSource = func(townRoot string, clock resourcesampler.Clock, timeout time.Duration) sandboxSeatSource {
+		spec.townRoot, spec.clock, spec.timeout = townRoot, clock, timeout
+		return source
+	}
+	return d, source, spec
+}
+
+// TestTriggerSandboxSamplerTicksThroughTheLiveSeams is the patrol's wiring
+// test (gt-7d7jvn): one trigger reads the seat source the seam builds for the
+// town at the source's per-seat bound, and the row lands in the host rows' day
+// file.
+func TestTriggerSandboxSamplerTicksThroughTheLiveSeams(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	clock := clockwork.NewFakeClockAt(now)
+	config := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true}}}
+	d, source, spec := newSandboxPatrolDaemon(t, town, clock, config)
+	source.tick = resourcesampler.SeatTick{Rows: []resourcesampler.Row{sandboxSeatRow("mango-aaa")}}
+
+	d.triggerSandboxSampler()
+
+	if source.ticks != 1 {
+		t.Fatalf("the trigger read the seats %d times, want 1", source.ticks)
+	}
+	if spec.townRoot != town {
+		t.Errorf("the seat source read %q, want the town root %q", spec.townRoot, town)
+	}
+	if spec.clock != clock {
+		t.Errorf("the seat source read clock %v, want the daemon's %v", spec.clock, clock)
+	}
+	if spec.timeout != resourcesampler.DefaultSeatTimeout {
+		t.Errorf("the seat source read timeout = %v, want the %v per-seat bound", spec.timeout, resourcesampler.DefaultSeatTimeout)
+	}
+	metricsDir := filepath.Join(town, ".runtime", "metrics")
+	if got := sandboxSamplerDayRows(t, metricsDir, now); !reflect.DeepEqual(got, []resourcesampler.Row{sandboxSeatRow("mango-aaa")}) {
+		t.Errorf("the day file holds\n%+v\nwant\n%+v", got, []resourcesampler.Row{sandboxSeatRow("mango-aaa")})
+	}
+}
+
+// TestTriggerSandboxSamplerOffTicksNothing: a switched-off patrol builds no
+// source and reads no seat, whether the key is off or the daemon holds no
+// config at all.
+func TestTriggerSandboxSamplerOffTicksNothing(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC))
+	config := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: false}}}
+	d, source, spec := newSandboxPatrolDaemon(t, t.TempDir(), clock, config)
+
+	d.triggerSandboxSampler()
+
+	if source.ticks != 0 {
+		t.Errorf("a disabled patrol read the seats %d times, want none", source.ticks)
+	}
+	if spec.townRoot != "" {
+		t.Error("a disabled patrol built a seat source")
+	}
+	if d.sandboxSamplerPatrol != nil {
+		t.Error("a disabled patrol built a sampler")
+	}
+
+	noConfig := &Daemon{config: nil, logger: log.New(io.Discard, "", 0), clock: clock}
+	noConfig.newSandboxSeatSource = func(string, resourcesampler.Clock, time.Duration) sandboxSeatSource {
+		t.Error("a daemon with no config built a seat source")
+		return source
+	}
+	noConfig.triggerSandboxSampler()
+}
+
+// TestSandboxSamplerBuildsTheGatewaySourceByDefault: with no seam set, the
+// patrol's sampler reads the source through the gateway's own openshell CLI
+// and writes beside the host rows (gt-7d7jvn).
+func TestSandboxSamplerBuildsTheGatewaySourceByDefault(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+
+	sampler := d.sandboxSampler()
+
+	if _, ok := sampler.source.(*resourcesampler.SeatSource); !ok {
+		t.Fatalf("the sampler's source is %T, want the gateway seat source", sampler.source)
+	}
+	if want := filepath.Join(d.config.TownRoot, ".runtime", "metrics"); sampler.metricsDir != want {
+		t.Errorf("the sampler writes %q, want the host rows' directory %q", sampler.metricsDir, want)
+	}
+}
+
+// TestStartSandboxSamplerTicker: the patrol gets its own ticker when it is on,
+// and none when the town does not name it.
+func TestStartSandboxSamplerTicker(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(io.Discard, "", 0),
+		clock:  clockwork.NewFakeClockAt(time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)),
+	}
+
+	if ticker := d.startSandboxSamplerTicker(); ticker != nil {
+		ticker.Stop()
+		t.Fatal("a town that does not name sandbox_sampler started its ticker")
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{SandboxSampler: &PatrolConfig{Enabled: true, Interval: "90s"}}}
+	ticker := d.startSandboxSamplerTicker()
+	if ticker == nil {
+		t.Fatal("a town that names sandbox_sampler started no ticker")
+	}
+	ticker.Stop()
 }
