@@ -2,12 +2,10 @@ package daemon
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -95,8 +93,9 @@ func TestOverrunSeatGitReadsTheSandboxCloneForASandboxSeat(t *testing.T) {
 }
 
 // TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox: a seat with no
-// sandbox record is a host seat and keeps its host handle, the very one the
-// daemon's opener returns; no in-sandbox runner is built for it.
+// sandbox record is a host seat and keeps its host handle: the handle the
+// daemon's opener returns for the seat's worktree, which reads that checkout's
+// branch. No in-sandbox runner is built for it.
 func TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox(t *testing.T) {
 	t.Parallel()
 	f := newOverrunSeatGitFixture(t, nil, nil, "")
@@ -105,31 +104,21 @@ func TestOverrunSeatGitKeepsTheHostWorktreeForASeatWithNoSandbox(t *testing.T) {
 		built = true
 		return nil, errors.New("no runner expected")
 	}
-	host := git.NewGit(t.TempDir())
-	var opened []string
-	f.d.openGitFn = func(dir string) daemonGit {
-		opened = append(opened, dir)
-		return host
-	}
-	// The host worktree must resolve for the seat: the polecat directory holds one.
+	world := useGitfake(t, f.d) // replaces the failing opener with the fake world's
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	world.InitBare(t, origin)
+	world.Commit(t, origin, "main", "initial", map[string]string{"a.txt": "x"})
 	worktree := filepath.Join(f.d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
-	if err := os.MkdirAll(worktree, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	world.Clone(t, origin, worktree)
 
 	got, err := f.d.overrunSeatGit(stopSeat)
 
 	if err != nil {
 		t.Fatalf("overrunSeatGit: %v", err)
 	}
-	if got != daemonGit(host) {
-		t.Errorf("overrunSeatGit = %v, want the host handle the opener returned", got)
-	}
-	if len(opened) != 1 || opened[0] != worktree {
-		t.Errorf("host handle opened for %v, want exactly the seat's worktree %q", opened, worktree)
+	branch, err := got.CurrentBranch()
+	if err != nil || branch != "main" {
+		t.Errorf("the handle reads branch %q (err %v), want the host checkout's main", branch, err)
 	}
 	if built {
 		t.Error("an in-sandbox runner was built for a seat with no sandbox record")
