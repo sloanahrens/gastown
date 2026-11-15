@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -655,15 +656,169 @@ func TestReadImagePinsFile(t *testing.T) {
 // compare reports it instead of a read that can count no pin's lag (gt-01lcq2).
 func TestImagePinsCompareRefusesATownWithNoForgejo(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		town func(t *testing.T) string
+	}{
+		{"a town whose rig list is empty", func(t *testing.T) string { return t.TempDir() }},
+		{"a town whose one rig names no remote", func(t *testing.T) string {
+			t.Helper()
+			town := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","registry":{"rigs":{"demo":{}}}}`
+			if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(townJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return town
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: tc.town(t)}, logger: log.New(io.Discard, "", 0)}
+			cmp, err := d.imagePinsCompare()
+			if err == nil {
+				t.Fatal("a town whose rigs name no Forgejo built a compare")
+			}
+			if cmp != nil {
+				t.Errorf("imagePinsCompare = %v with an error, want no compare", cmp)
+			}
+			if !strings.Contains(err.Error(), "image pins patrol") {
+				t.Errorf("error %q does not name the patrol", err)
+			}
+		})
+	}
+}
+
+// TestReadImagePinTipsRefusesWithoutACompare: a tip read that cannot build the
+// compare reports it, instead of reading the file back at zero lag (gt-01lcq2).
+func TestReadImagePinTipsRefusesWithoutACompare(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
-	cmp, err := d.imagePinsCompare()
+	pins, err := d.readImagePinTips(context.Background(), tickPinsFile)
 	if err == nil {
-		t.Fatal("a town whose rigs name no Forgejo built a compare")
+		t.Fatalf("readImagePinTips = %+v, want the compare's refusal", pins)
+	}
+	if pins != nil {
+		t.Errorf("a refused read returned states: %+v", pins)
+	}
+}
+
+// TestImagePinsTipGit: the tip read runs the ls-remote of the source's main,
+// answers git's stdout on success, and reports a failed call by the call and its
+// bound, never by git's output, which a failed fetch can fill with the URL it was
+// given (gt-01lcq2).
+func TestImagePinsTipGit(t *testing.T) {
+	t.Parallel()
+	const url = "https://forge.example.com/town/bd"
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		answer  []byte
+		runErr  error
+		ctx     func() (context.Context, context.CancelFunc)
+		want    string
+		wantSub string
+	}{
+		{
+			name:   "git answers the ref",
+			answer: []byte(tipBD + "\t" + pinTipRef + "\n"),
+			want:   tipBD + "\t" + pinTipRef + "\n",
+			ctx:    func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+		},
+		{
+			name:    "git fails",
+			runErr:  errors.New("exit status 128"),
+			ctx:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			wantSub: "git ls-remote " + pinTipRef + ": exit status 128",
+		},
+		{
+			name:   "the call's bound has passed",
+			runErr: errors.New("signal: killed"),
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), now.Add(-time.Second))
+			},
+			wantSub: "did not answer within " + imagePinsGitTimeout.String(),
+		},
+		{
+			name:   "the tick was canceled",
+			runErr: errors.New("signal: killed"),
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			wantSub: "stopped before it answered",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := tt.ctx()
+			defer cancel()
+			var argv []string
+			d := &Daemon{logger: log.New(io.Discard, "", 0)}
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				argv = cmd.Args
+				return tt.answer, []byte("fatal: could not read"), tt.runErr
+			}
+
+			got, err := d.imagePinsTipGit(ctx)(url)
+
+			want := []string{"git", "ls-remote", "--refs", url, pinTipRef}
+			if !slices.Equal(argv, want) {
+				t.Errorf("argv = %v, want %v", argv, want)
+			}
+			if tt.wantSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantSub) {
+					t.Errorf("error = %v, want it to name %q", err, tt.wantSub)
+				}
+				if strings.Contains(err.Error(), "fatal: could not read") {
+					t.Errorf("error %q carries git's output", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the tip read = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("the tip read = %q, want git's answer %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestImagePinsCompareForRefusesAMissingToken: the compare needs the viewer's
+// token, and a token file that is not there is the build's error, never a client
+// that reads as anonymous (gt-01lcq2).
+func TestImagePinsCompareForRefusesAMissingToken(t *testing.T) {
+	t.Parallel()
+	cmp, err := imagePinsCompareFor("https://forge.example.com/api/v1", filepath.Join(t.TempDir(), "forgejo-viewer.env"))
+	if err == nil {
+		t.Fatal("a missing token file built a compare")
 	}
 	if cmp != nil {
-		t.Errorf("imagePinsCompare = %v with an error, want no compare", cmp)
+		t.Errorf("imagePinsCompareFor = %v with an error, want no compare", cmp)
 	}
 	if !strings.Contains(err.Error(), "image pins patrol") {
 		t.Errorf("error %q does not name the patrol", err)
+	}
+}
+
+// TestImagePinsCompareForBuildsTheViewerClient: a readable viewer token builds
+// the compare the tick counts a pin's lag with (gt-01lcq2).
+func TestImagePinsCompareForBuildsTheViewerClient(t *testing.T) {
+	t.Parallel()
+	tokenFile := filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	if err := os.WriteFile(tokenFile, []byte("FORGEJO_TOKEN=placeholder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmp, err := imagePinsCompareFor("https://forge.example.com/api/v1", tokenFile)
+	if err != nil {
+		t.Fatalf("imagePinsCompareFor: %v", err)
+	}
+	if cmp == nil {
+		t.Fatal("imagePinsCompareFor built no compare")
 	}
 }

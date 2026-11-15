@@ -200,8 +200,11 @@ func (d *Daemon) imagePinsTipGit(ctx context.Context) PinTipGit {
 		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		stdout, _, err := d.runCmd(cmd)
 		if err != nil {
-			if callCtx.Err() != nil {
-				return nil, fmt.Errorf("git ls-remote %s did not answer within %s: %w", pinTipRef, imagePinsGitTimeout, callCtx.Err())
+			switch {
+			case errors.Is(callCtx.Err(), context.DeadlineExceeded):
+				return nil, fmt.Errorf("git ls-remote %s did not answer within %s: %w", pinTipRef, imagePinsGitTimeout, err)
+			case callCtx.Err() != nil:
+				return nil, fmt.Errorf("git ls-remote %s stopped before it answered: %w", pinTipRef, err)
 			}
 			return nil, fmt.Errorf("git ls-remote %s: %w", pinTipRef, err)
 		}
@@ -224,11 +227,23 @@ func (d *Daemon) imagePinsCompare() (ImagePinCompare, error) {
 	if err != nil {
 		return nil, fmt.Errorf("image pins patrol: %w", err)
 	}
-	client, err := forgejo.NewClient(config.ForgejoRoleViewer,
+	return imagePinsCompareFor(apiBase, d.imagePinsTokenFile)
+}
+
+// imagePinsCompareFor builds the town's viewer client for apiBase. An empty
+// tokenPath reads the viewer role's own token file; a test names one under its
+// temporary directory.
+func imagePinsCompareFor(apiBase, tokenPath string) (ImagePinCompare, error) {
+	opts := []forgejo.Option{
 		forgejo.WithBaseURL(apiBase),
-		forgejo.WithHTTPClient(&http.Client{Timeout: imagePinsHTTPTimeout}))
+		forgejo.WithHTTPClient(&http.Client{Timeout: imagePinsHTTPTimeout}),
+	}
+	if tokenPath != "" {
+		opts = append(opts, forgejo.WithTokenFile(tokenPath))
+	}
+	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("image pins patrol: %w", err)
+		return nil, fmt.Errorf("image pins patrol: the %s token: %w", config.ForgejoRoleViewer, err)
 	}
 	return client, nil
 }

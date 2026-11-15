@@ -1354,6 +1354,10 @@ type Daemon struct {
 	// from: nil is buildsrc.Ensure, and a test sets it to name a checkout under
 	// its temporary town.
 	imagePinsEnsureFn func(ctx context.Context, townRoot, rig, rev string) (string, error)
+	// imagePinsTokenFile names the viewer token file the compare reads: empty
+	// is the role's own file, and a test names one under its temporary
+	// directory.
+	imagePinsTokenFile string
 
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
