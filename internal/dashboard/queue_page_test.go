@@ -77,7 +77,9 @@ func TestWorkQueueMarksBeadsHeldByAnAssignee(t *testing.T) {
 	page := string(indexHTML)
 	for _, want := range []string{
 		`else if (b.shape === "held")`,
-		`chip("held", inRig.filter(b => b.shape === "held").length`,
+		// The chip counts the held piece, so a bead a hold label keeps off the
+		// dispatcher is counted beside the one an assignee holds (gt-bgumb7).
+		`chip("held", inRig.filter(b => readyPiece(b) === "held").length`,
 		"the spec dispatcher: shaped, unassigned",
 	} {
 		if !strings.Contains(page, want) {

@@ -58,13 +58,22 @@ const (
 var (
 	routingHoldLabels = []string{"needs-pro"}
 	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-overseer", "needs-operator", "needs-split", HumanOnlyLabel, NeedsOverseerLabel, NeedsOperatorLabel, OverseerOnlyLabel, OperatorOnlyLabel}
-	// dispatchHoldLabels is the two lists in the order the rule reports them.
-	// The operator reservation (OperatorReservation) is the third decision a
-	// label records, and the one that also reaches through the assignee; it is
-	// applied in DispatchHoldFields rather than listed here so a caller reads
-	// the same rule before it spends a polecat seat.
-	dispatchHoldLabels = append(append([]string(nil), routingHoldLabels...), humanHoldLabels...)
+	// dispatchHoldLabels is the two lists in the order the rule reports them,
+	// the second read through HumanHoldLabels so the list a reader outside this
+	// package sees and the one the rule weighs cannot part. The operator
+	// reservation (OperatorReservation) is the third decision a label records,
+	// and the one that also reaches through the assignee; it is applied in
+	// DispatchHoldFields rather than listed here so a caller reads the same rule
+	// before it spends a polecat seat.
+	dispatchHoldLabels = append(append([]string(nil), routingHoldLabels...), HumanHoldLabels()...)
 )
+
+// HumanHoldLabels returns the labels in humanHoldLabels, the holds no polecat
+// can settle. A reader that must know the vocabulary before it sees a bead's
+// fields — the dashboard's page script, whose copy of the list the page tests
+// check against this one — reads it here rather than keeping a second
+// definition of it (gt-bgumb7).
+func HumanHoldLabels() []string { return append([]string(nil), humanHoldLabels...) }
 
 // dispatchHoldStatuses are the statuses beads calls CategoryFrozen, "excluded
 // from bd ready": a dispatcher that fed one would take on work the tracker
