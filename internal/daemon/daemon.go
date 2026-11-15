@@ -1363,6 +1363,13 @@ type Daemon struct {
 	// is the role's own file, and a test names one under its temporary
 	// directory.
 	imagePinsTokenFile string
+	// imagePinsBeadRunner runs the refresh bead's bd calls through this
+	// function instead of a subprocess and hands it the directory bd would run
+	// in (beads.WithDirRunner), so a unit test exercises the real wrapper in
+	// process and can assert the database it is bound to. nil runs bd; the
+	// tick tests inject whole seams, so this is the one seam that reaches the
+	// client's construction (gt-fu9c8a).
+	imagePinsBeadRunner func(ctx context.Context, dir string, args []string) (stdout, stderr []byte, err error)
 
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
