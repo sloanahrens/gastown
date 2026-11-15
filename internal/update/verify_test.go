@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 const (
@@ -327,18 +329,23 @@ func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
 		},
 		{
 			name:    "degraded for every queue, comma separated as the bead writes it",
-			line:    "DEGRADED tick 5s ago: needs-overseer=1, needs-human=2, escalations=1",
-			ignored: []string{"needs-overseer=1", "needs-human=2", "escalations=1"},
+			line:    "DEGRADED tick 5s ago: needs-overseer=1, needs-human=2, escalation=oldest_2h",
+			ignored: []string{"needs-overseer=1", "needs-human=2", "escalation=oldest_2h"},
 		},
 		{
-			name:    "degraded for an open escalation, plural and singular",
-			line:    "DEGRADED tick 5s ago: escalation=oldest_2h escalations=1",
-			ignored: []string{"escalation=oldest_2h", "escalations=1"},
+			name:    "degraded for an open escalation, the line internal/townhealth renders",
+			line:    "DEGRADED tick 5s ago: escalation=oldest_2h",
+			ignored: []string{"escalation=oldest_2h"},
 		},
 		{
-			name:    "degraded for a queue, space separated as the line renders it",
+			name:    "degraded for a queue and an open escalation, space separated as the line renders it",
 			line:    "DEGRADED tick 4ms ago: escalation=oldest_2h needs-human=1",
 			ignored: []string{"escalation=oldest_2h", "needs-human=1"},
+		},
+		{
+			name:    "degraded for a bead waiting on the operator, the third person label the town writes",
+			line:    "DEGRADED tick 28s ago: needs-operator=2",
+			ignored: []string{"needs-operator=2"},
 		},
 	}
 	for _, tt := range tests {
@@ -366,10 +373,92 @@ func TestVerifyHealthIsAQueueStateNotAFailedRoll(t *testing.T) {
 	}
 }
 
+// TestVerifyHealthPassesTheLineTheTownRenders drives Verify on the lines the
+// producer writes: a report whose only non-green field is a queue state,
+// rendered by internal/townhealth.Line. The parser's fixtures are copies of
+// those shapes, so this ties them to the producer rather than to themselves,
+// and the table covers every key the producer renders as a queue state — each
+// person label and the escalation field.
+func TestVerifyHealthPassesTheLineTheTownRenders(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		field  townhealth.Field
+		reason string
+	}{
+		{
+			name: "open escalation",
+			field: townhealth.Field{
+				Name:    townhealth.FieldEscalation,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "oldest " + townhealth.Short(2*time.Hour),
+			},
+			reason: "escalation=oldest_2h",
+		},
+		{
+			name: "bead waiting on the operator",
+			field: townhealth.Field{
+				Name:    townhealth.FieldNeedsOperator,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "2",
+			},
+			reason: "needs-operator=2",
+		},
+		{
+			name: "bead waiting on the overseer",
+			field: townhealth.Field{
+				Name:    townhealth.FieldNeedsOverseer,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "1",
+			},
+			reason: "needs-overseer=1",
+		},
+		{
+			name: "bead waiting on a human",
+			field: townhealth.Field{
+				Name:    townhealth.FieldNeedsHuman,
+				Tag:     townhealth.Live,
+				Verdict: townhealth.Degraded,
+				Value:   "3",
+			},
+			reason: "needs-human=3",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			report := townhealth.Report{
+				At:      now.Add(-2 * time.Minute),
+				Verdict: townhealth.Degraded,
+				Fields:  []townhealth.Field{tt.field},
+			}
+			line := townhealth.Line(report, now, 5*time.Minute)
+			if !strings.Contains(line, tt.reason) {
+				t.Fatalf("producer line %q does not carry the reason this test pins", line)
+			}
+			probes := greenProbes()
+			probes.health = line
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertFailedChecks(t, checks)
+			detail := findCheck(t, checks, checkHealth).Detail
+			if !strings.Contains(detail, "ignored "+tt.reason) {
+				t.Errorf("health detail %q does not say it ignored the producer's %s reason", detail, tt.name)
+			}
+		})
+	}
+}
+
 // TestVerifyHealthRefusesEveryOtherLine drives the refusal branches of the
 // health check: any verdict other than GREEN or DEGRADED, a DEGRADED line with
-// a reason that is not a queue state or with none at all, and a line whose
-// shape is not the one the town writes each fail, carrying the line as read.
+// a reason that is not a queue state (a key outside queueReasons, a value that
+// is not the one its field writes) or with none at all, and a line whose shape
+// is not the one the town writes each fail, carrying the line as read.
 func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 	t.Parallel()
 	lines := []struct {
@@ -384,6 +473,17 @@ func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 		{"degraded for a promote lag", "DEGRADED tick 1m ago: promote/gastown=3_behind[R]"},
 		{"degraded for a queue and a fault", "DEGRADED tick 2m ago: needs-overseer=1, main=behind"},
 		{"degraded for an unknown queue field", "DEGRADED tick 2m ago: needs-overseer[?]"},
+		{"degraded for a queue value that is not a count", "DEGRADED tick 2m ago: needs-overseer=lots"},
+		{"degraded for an operator wait that is not a count", "DEGRADED tick 2m ago: needs-operator=soon"},
+		{"degraded for a queue with an empty value", "DEGRADED tick 2m ago: needs-overseer="},
+		{"degraded for a queue with a signed count", "DEGRADED tick 2m ago: needs-overseer=-1"},
+		{"degraded for a queue carrying a tag marker", "DEGRADED tick 2m ago: needs-overseer=1[R]"},
+		{"degraded for an escalation given as a count, not an age", "DEGRADED tick 2m ago: escalation=1"},
+		{"degraded for an escalation age without the oldest prefix", "DEGRADED tick 2m ago: escalation=2h"},
+		{"degraded for an escalation age with no unit", "DEGRADED tick 2m ago: escalation=oldest_2"},
+		{"degraded for an escalation age with no number", "DEGRADED tick 2m ago: escalation=oldest_h"},
+		{"degraded for an escalation age that is not a short duration", "DEGRADED tick 2m ago: escalation=oldest_lots"},
+		{"degraded for the plural escalation key the town never writes", "DEGRADED tick 2m ago: escalations=1"},
 		{"degraded with no reason", "DEGRADED tick 2m ago"},
 		{"degraded with an empty reason list", "DEGRADED tick 2m ago:"},
 		{"degraded beside a landing pause, a shape verify does not read", "DEGRADED tick 1m ago (landings paused: 2d): needs-overseer=1"},
