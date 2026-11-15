@@ -59,37 +59,28 @@ func TestSandboxProfileBeadAccess(t *testing.T) {
 	}
 }
 
-// BeadAccessMode is the read a caller takes the mode from: unset reads as the
-// dolt default, the two accepted values read back, and any other value is
-// refused there, so a caller never carries a mode Validate would reject
-// (gt-jwg5ff).
-func TestSandboxProfileBeadAccessMode(t *testing.T) {
+// A reader that takes BeadAccess after WithDefaults always sees a mode: unset
+// arrives as the dolt default and a set value survives, so no read can carry
+// the empty string into a session profile (gt-jwg5ff).
+func TestSandboxProfileWithDefaultsFillsBeadAccess(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		set     string
-		want    string
-		wantErr string
+		name string
+		set  string
 	}{
-		{name: "unset reads as the dolt default", want: SandboxBeadAccessDolt},
-		{name: "dolt reads back", set: SandboxBeadAccessDolt, want: SandboxBeadAccessDolt},
-		{name: "files reads back", set: SandboxBeadAccessFiles, want: SandboxBeadAccessFiles},
-		{name: "an unknown value is refused", set: "beads", wantErr: `bead_access "beads": want dolt or files`},
-		{name: "the value is case-sensitive", set: "Files", wantErr: `bead_access "Files": want dolt or files`},
-		{name: "a near miss is refused", set: "file", wantErr: `bead_access "file": want dolt or files`},
+		{name: "unset becomes the dolt default"},
+		{name: "dolt survives", set: SandboxBeadAccessDolt},
+		{name: "files survives", set: SandboxBeadAccessFiles},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := SandboxProfile{BeadAccess: tc.set}.BeadAccessMode()
-			if tc.wantErr != "" {
-				if err == nil || err.Error() != tc.wantErr {
-					t.Fatalf("BeadAccessMode = %q, %v, want the error %q", got, err, tc.wantErr)
-				}
-				return
+			want := tc.set
+			if want == "" {
+				want = SandboxBeadAccessDolt
 			}
-			if err != nil || got != tc.want {
-				t.Fatalf("BeadAccessMode = %q, %v, want %q", got, err, tc.want)
+			if got := (SandboxProfile{BeadAccess: tc.set}).WithDefaults().BeadAccess; got != want {
+				t.Fatalf("WithDefaults().BeadAccess = %q, want %q", got, want)
 			}
 		})
 	}

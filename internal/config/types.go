@@ -1851,8 +1851,8 @@ type SandboxProfile struct {
 	// closed).
 	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
 	// BeadAccess is where the seat's task lives: SandboxBeadAccessDolt (the
-	// default) or SandboxBeadAccessFiles. Read it through BeadAccessMode, which
-	// refuses any other value; nothing reads the value yet (gt-1m0kb).
+	// default) or SandboxBeadAccessFiles. WithDefaults fills the default and
+	// Validate refuses any other value; nothing acts on the value yet (gt-1m0kb).
 	BeadAccess string `json:"bead_access,omitempty"`
 	// KubernetesNamespace names the namespace the gateway places this profile's
 	// sandbox pods in; "" means defaultSandboxKubernetesNamespace (see
@@ -1936,21 +1936,10 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 	if p.Driver == "" {
 		p.Driver = SandboxDriverDocker
 	}
-	return p
-}
-
-// BeadAccessMode returns where the seat's task lives: BeadAccess when set, else
-// SandboxBeadAccessDolt. It refuses a value Validate refuses rather than read it
-// as the default, so a typo cannot leave a seat the store access it was meant to
-// give up.
-func (p SandboxProfile) BeadAccessMode() (string, error) {
-	switch p.BeadAccess {
-	case "":
-		return SandboxBeadAccessDolt, nil
-	case SandboxBeadAccessDolt, SandboxBeadAccessFiles:
-		return p.BeadAccess, nil
+	if p.BeadAccess == "" {
+		p.BeadAccess = SandboxBeadAccessDolt
 	}
-	return "", fmt.Errorf("bead_access %q: want dolt or files", p.BeadAccess)
+	return p
 }
 
 // Validate reports the first field of p that is unset or malformed, naming the
