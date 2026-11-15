@@ -1,8 +1,3 @@
-land
-land om-lessons
-land om-stats
-land requeue
-land takeover
 land wait
 reaper
 reaper auto-close
