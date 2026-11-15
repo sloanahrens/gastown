@@ -824,6 +824,108 @@ func TestPlanKeepsTheNewestDeployBaseAsTheRollback(t *testing.T) {
 	}
 }
 
+// TestPlanKeepsTheImageOfADeployBaseItKeeps holds the shared-id rule: a
+// fractals-nextjs tag whose image a kept deploy-base tag also names is kept,
+// because a removal names the image id and docker drops every tag of it. The
+// base is kept as the rollback in one case and named by the workflow in the
+// other, so both ways of keeping a base protect its image.
+func TestPlanKeepsTheImageOfADeployBaseItKeeps(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		deploy  string
+		base    string // the base tag whose image fractals:t1 shares
+		bases   []dockerimg.Image
+		removed []string
+	}{
+		{
+			// The only base is the newest, so it is the rollback, and the image
+			// it shares with fractals:t1 cannot go.
+			name:    "the rollback shares the image",
+			deploy:  cleanDeploy,
+			base:    "b1",
+			bases:   []dockerimg.Image{base("b1", '1', 1, "500MB")},
+			removed: []string{imgID('3'), imgID('2')},
+		},
+		{
+			// The workflow names b1, so the rollback is the newer b2, and b1's
+			// image is spared by the label rule instead.
+			name:    "a base the workflow names shares the image",
+			deploy:  "name: deploy\nenv:\n  BASE_IMAGE: deploy-base:b1\n",
+			base:    "b1",
+			bases:   []dockerimg.Image{base("b1", '1', 1, "500MB"), base("b2", 'c', 2, "500MB")},
+			removed: []string{imgID('3'), imgID('2')},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			images, digests := daemon(t, append([]dockerimg.Image{
+				fractals("t8", '8', 8, "80MB"), fractals("t7", '7', 7, "70MB"),
+				fractals("t6", '6', 6, "60MB"), fractals("t5", '5', 5, "50MB"),
+				fractals("t4", '4', 4, "40MB"),
+				// Outside the newest five, and its image is the base's too.
+				fractals("t3", '3', 3, "30MB"),
+				fractals("t2", '2', 2, "20MB"),
+				fractals("t1", '1', 1, "10MB"),
+			}, tc.bases...)...)
+			f := &fakeDaemon{
+				images:  images,
+				digests: digests,
+				labels:  "node:docker://code.forgejo.org/oci/node:lts\n",
+				deploy:  tc.deploy,
+			}
+			plan := planOf(t, f, diskmaint.Policy{})
+
+			got := rules(plan)
+			if got[deployBaseRepo+":"+tc.base] == "" {
+				t.Errorf("Kept[%s:%s] = none, want a rule: the base is kept", deployBaseRepo, tc.base)
+			}
+			if want := ruleKeptImage; got[fractalsRepo+":t1"] != want {
+				t.Errorf("Kept[%s:t1] = %q, want %q: %s shares the kept base's image", fractalsRepo, got[fractalsRepo+":t1"], want, fractalsRepo+":t1")
+			}
+			if !slices.Equal(removed(plan), tc.removed) {
+				t.Errorf("removals = %v, want %v", removed(plan), tc.removed)
+			}
+		})
+	}
+}
+
+// TestPlanRollbackSkipsABaseAContainerReferences holds the in-use half of the
+// rollback rule: the rollback is the newest base that is not in use, and a
+// container of any state makes its base in use. Without the skip, the rollback
+// is b3 and the real previous base, b2, is planned for removal.
+func TestPlanRollbackSkipsABaseAContainerReferences(t *testing.T) {
+	t.Parallel()
+	images, digests := daemon(t,
+		fractals("t1", '1', 1, "10MB"),
+		base("b1", 'a', 1, "500MB"),
+		base("b2", 'b', 2, "500MB"),
+		base("b3", 'c', 3, "500MB"),
+	)
+	f := &fakeDaemon{
+		images:  images,
+		digests: digests,
+		// A stopped container still references its image: docker ps -a is what
+		// lists it, and it makes b3 in use.
+		containers: []container{{id: "aaaaaaaaaaaa", image: imgID('c'), state: stateStopped}},
+		labels:     "node:docker://code.forgejo.org/oci/node:lts\n",
+		deploy:     cleanDeploy,
+	}
+	plan := planOf(t, f, diskmaint.Policy{})
+
+	got := rules(plan)
+	if want := ruleInUse; got[deployBaseRepo+":b3"] != want {
+		t.Errorf("Kept[%s:b3] = %q, want %q", deployBaseRepo, got[deployBaseRepo+":b3"], want)
+	}
+	if want := ruleRollback; got[deployBaseRepo+":b2"] != want {
+		t.Errorf("Kept[%s:b2] = %q, want %q: the rollback is the newest base not in use", deployBaseRepo, got[deployBaseRepo+":b2"], want)
+	}
+	if want := []string{imgID('a')}; !slices.Equal(removed(plan), want) {
+		t.Errorf("removals = %v, want %v", removed(plan), want)
+	}
+}
+
 // TestPlanKeepsImagesAContainerReferences holds the in-use rule: docker ps -a
 // lists a running, created and stopped container, and the image of every one is
 // kept. The fake answers a ps without -a with the running container alone, so a

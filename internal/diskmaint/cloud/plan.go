@@ -599,6 +599,13 @@ type planInput struct {
 // it, and no tag of it sits outside this plan's candidates, because a removal
 // names the id and docker drops every tag that points at it.
 func decide(in planInput) ([]diskmaint.Kept, []diskmaint.Action) {
+	rollback := rollbackTag(in.bases, in.named, in.pinned, in.inUse)
+	// keptImage is every image id a rule keeps. A kept tag keeps its image too,
+	// whichever repository the tag is in: a removal names the image id, so a
+	// removal planned from another tag of that id would drop the kept tag with
+	// it. The base tags are read here as well as in the split below, because a
+	// fractals-nextjs tag sharing a base's image is spared by that rule only
+	// once the base's id is known to be kept.
 	keptImage := map[string]bool{}
 	for _, im := range in.images {
 		if !isCandidate(im) {
@@ -610,7 +617,11 @@ func decide(in planInput) ([]diskmaint.Kept, []diskmaint.Action) {
 			keptImage[r.im.ID] = true
 		}
 	}
-	rollback := rollbackTag(in.bases, in.named, in.pinned)
+	for _, r := range in.bases {
+		if in.named.tags[imageKey(r.im)] || imageKey(r.im) == rollback {
+			keptImage[r.im.ID] = true
+		}
+	}
 	for id := range in.pinned {
 		keptImage[id] = true
 	}
@@ -688,13 +699,16 @@ func (in planInput) spared(r aged, rollback string, keptImage map[string]bool) s
 	return ""
 }
 
-// rollbackTag is the newest deploy-base tag besides the one in use, which a
-// deploy rolls back to, or "" when there is no base tag at all. When no label,
-// workflow or pin names a base, none is in use as far as the plan can tell, and
-// the newest tag is the one a deploy would start from: it is kept.
-func rollbackTag(bases []aged, n named, pinned map[string]bool) string {
+// rollbackTag is the newest deploy-base tag besides the ones in use, which a
+// deploy rolls back to, or "" when there is no base tag at all. A base is in use
+// when a runner label, the deploy workflow, a digest pin or an image id names
+// it, or when a container of any state references its image: none of those is
+// the base a rollback should go to while it is still needed. When no base is in
+// use as far as the plan can tell, the newest tag is the one a deploy would
+// start from, and it is kept.
+func rollbackTag(bases []aged, n named, pinned, inUse map[string]bool) string {
 	for _, r := range bases {
-		if n.tags[imageKey(r.im)] || pinned[r.im.ID] || n.ids[r.im.ID] {
+		if n.tags[imageKey(r.im)] || pinned[r.im.ID] || n.ids[r.im.ID] || inUse[r.im.ID] {
 			continue
 		}
 		return imageKey(r.im)
