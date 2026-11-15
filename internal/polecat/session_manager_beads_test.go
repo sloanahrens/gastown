@@ -27,11 +27,11 @@ func TestValidateIssueRefusesMissingAndTerminal(t *testing.T) {
 	}
 	m := sessionManagerOn(db)
 
-	if err := m.validateIssue(open.ID, "/work"); err != nil {
+	if _, err := m.validateIssue(open.ID, "/work"); err != nil {
 		t.Errorf("validateIssue(open) = %v, want nil", err)
 	}
 	for _, id := range []string{done.ID, "gt-missing"} {
-		if err := m.validateIssue(id, "/work"); !errors.Is(err, ErrIssueInvalid) {
+		if _, err := m.validateIssue(id, "/work"); !errors.Is(err, ErrIssueInvalid) {
 			t.Errorf("validateIssue(%s) = %v, want ErrIssueInvalid", id, err)
 		}
 	}
@@ -86,7 +86,7 @@ func TestBeadsForNamesTheDatabaseEachIDRoutesTo(t *testing.T) {
 	}
 
 	for _, tc := range ids {
-		if err := m.validateIssue(tc.id, worktree); err != nil {
+		if _, err := m.validateIssue(tc.id, worktree); err != nil {
 			t.Fatalf("validateIssue(%s): %v", tc.id, err)
 		}
 	}
