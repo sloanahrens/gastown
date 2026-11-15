@@ -816,22 +816,57 @@ func (d *Daemon) ciEngineExec(ctx context.Context, kubeconfig, kubeContext, pod 
 }
 
 // ciEngineDataRootKiB reads the data root's size in KiB through du -sk, whose
-// first field is the figure. The error names the failure the way every engine exec
-// does: the exit status and the first bounded stderr line, never stdout.
+// first field is the figure. A CI job's volume can be removed while du walks the
+// root, and du then prints the total for everything it did read and exits 1; such
+// a run still gives its figure, which the caller would otherwise lose. Any other
+// non-zero exit is a failure, and so is a vanished-file run with no figure. The
+// error names the failure the way every engine exec does: the exit status and the
+// first bounded stderr line, never stdout.
 func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
 	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "du", "-sk", ciEngineRoot)
-	if err != nil {
-		return 0, fmt.Errorf("du of the data root failed (%s)", ciEngineFailure(err, stderr))
+	failed := func() error { return fmt.Errorf("du of the data root failed (%s)", ciEngineFailure(err, stderr)) }
+	if err != nil && !ciEngineDuVanished(stderr) {
+		return 0, failed()
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
+		if err != nil {
+			return 0, failed()
+		}
 		return 0, errors.New("du printed no figure")
 	}
-	kib, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil || kib < 0 {
+	kib, parseErr := strconv.ParseInt(fields[0], 10, 64)
+	if parseErr != nil || kib < 0 {
+		if err != nil {
+			return 0, failed()
+		}
 		return 0, fmt.Errorf("du printed %q, not a KiB figure", fields[0])
 	}
 	return kib, nil
+}
+
+// ciEngineDuVanished reports whether du's stderr is only the report of files that
+// vanished while it walked the data root: at least one such line, and no line of
+// any other kind. kubectl's own lines are skipped, as ciEngineFailure skips them.
+// An empty stderr is not this case, so a bare non-zero status with no diagnosis
+// stays a failure.
+func ciEngineDuVanished(stderr []byte) bool {
+	const vanished = "No such file or directory"
+	lines := 0
+	for _, raw := range strings.Split(string(stderr), "\n") {
+		if ciEngineKubectlLine(raw) {
+			continue
+		}
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if !strings.HasSuffix(line, vanished) {
+			return false
+		}
+		lines++
+	}
+	return lines > 0
 }
 
 // ciEnginePruneLogf logs one refusal or failure line of the engine prune, at most
