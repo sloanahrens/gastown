@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+// The client's other refusals and the size parse are covered by the colima
+// target's tests (internal/diskmaint/colima/target_test.go), so this package does
+// not pin them a second time. The container-id refusal stays here: the colima
+// row refuses on its empty inspect answer whether or not the id is checked, so
+// only this test shows the id refused before it reaches the inspect command line.
+
 // dockerHost is a placeholder daemon socket; every test checks it reaches docker.
 const dockerHost = "unix:///placeholder/.colima/gt-sbx/docker.sock"
 
@@ -90,34 +96,6 @@ func TestImagesReadsTheDaemonListing(t *testing.T) {
 	}
 }
 
-func TestImagesRefusesWhatItCannotRead(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		f    fakeDocker
-		want error
-	}{
-		{name: "unreadable list", f: fakeDocker{imagesErr: errors.New("SECRET stderr")}, want: ErrListImages},
-		{name: "line that is not JSON", f: fakeDocker{images: "not json\n"}, want: ErrParse},
-		{name: "image id that does not parse", f: fakeDocker{images: imageLines(t, Image{ID: "short"})}, want: ErrParse},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := tc.f
-			got, err := f.client().Images(context.Background())
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("Images err = %v, want %v", err, tc.want)
-			}
-			if got != nil {
-				t.Errorf("Images = %+v, want none beside the error", got)
-			}
-			if strings.Contains(err.Error(), "SECRET") {
-				t.Errorf("refusal echoes command output: %q", err)
-			}
-		})
-	}
-}
-
 func TestInUseIsTheImagesOfEveryContainer(t *testing.T) {
 	t.Parallel()
 	used, other := imgID('1'), imgID('2')
@@ -146,6 +124,23 @@ func TestInUseIsTheImagesOfEveryContainer(t *testing.T) {
 	}
 }
 
+func TestInUseRefusesAContainerIDBeforeInspect(t *testing.T) {
+	t.Parallel()
+	// The inspect answer is valid, so only the container-id guard can refuse this.
+	f := &fakeDocker{containers: "zz; rm -rf /\n", inspect: imgID('1') + "\n"}
+
+	got, err := f.client().InUse(context.Background())
+	if !errors.Is(err, ErrParse) {
+		t.Fatalf("InUse err = %v, want %v", err, ErrParse)
+	}
+	if got != nil {
+		t.Errorf("InUse = %v, want none beside the error", got)
+	}
+	if len(f.calls) != 1 {
+		t.Errorf("made %d docker calls before refusing, want only the container list", len(f.calls))
+	}
+}
+
 func TestInUseIsEmptyWithoutContainers(t *testing.T) {
 	t.Parallel()
 	f := &fakeDocker{containers: ""}
@@ -159,86 +154,5 @@ func TestInUseIsEmptyWithoutContainers(t *testing.T) {
 	}
 	if len(f.calls) != 1 {
 		t.Errorf("made %d calls, want only the container list", len(f.calls))
-	}
-}
-
-func TestInUseRefusesWhatItCannotRead(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name      string
-		f         fakeDocker
-		want      error
-		wantCalls int
-	}{
-		// wantCalls is how far the client got before refusing, so each row
-		// isolates its own guard: the container-id row hands back a valid
-		// inspect answer, so only that guard can refuse it.
-		{name: "unreadable container list", f: fakeDocker{containersErr: errors.New("SECRET stderr")}, want: ErrListContainers, wantCalls: 1},
-		{name: "container id that does not parse", f: fakeDocker{containers: "zz; rm -rf /\n", inspect: imgID('1') + "\n"}, want: ErrParse, wantCalls: 1},
-		{name: "unreadable inspect", f: fakeDocker{containers: "abc123abc123\n", inspectErr: errors.New("SECRET stderr")}, want: ErrInspect, wantCalls: 2},
-		{name: "image id that does not parse", f: fakeDocker{containers: "abc123abc123\n", inspect: "not-a-digest\n"}, want: ErrParse, wantCalls: 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := tc.f
-			got, err := f.client().InUse(context.Background())
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("InUse err = %v, want %v", err, tc.want)
-			}
-			if got != nil {
-				t.Errorf("InUse = %v, want none beside the error", got)
-			}
-			if strings.Contains(err.Error(), "SECRET") {
-				t.Errorf("refusal echoes command output: %q", err)
-			}
-			if len(f.calls) != tc.wantCalls {
-				t.Errorf("made %d docker calls before refusing, want %d", len(f.calls), tc.wantCalls)
-			}
-		})
-	}
-}
-
-func TestClientRefusesWithoutRunnerOrHost(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name   string
-		client Client
-		want   error
-	}{
-		{name: "no runner", client: Client{Host: dockerHost}, want: ErrNoRunner},
-		{name: "no host", client: Client{Run: (&fakeDocker{}).run}, want: ErrNoDockerHost},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.client.Docker(context.Background(), "ps"); !errors.Is(err, tc.want) {
-				t.Errorf("Docker err = %v, want %v", err, tc.want)
-			}
-			if _, err := tc.client.Images(context.Background()); !errors.Is(err, tc.want) {
-				t.Errorf("Images err = %v, want %v", err, tc.want)
-			}
-			if _, err := tc.client.InUse(context.Background()); !errors.Is(err, tc.want) {
-				t.Errorf("InUse err = %v, want %v", err, tc.want)
-			}
-		})
-	}
-}
-
-func TestBytesParsesTheSizeDockerPrints(t *testing.T) {
-	t.Parallel()
-	cases := map[string]int64{
-		"1.5GB":   1_500_000_000,
-		"200MB":   200_000_000,
-		"3kB":     3_000,
-		"10KiB":   10_240,
-		"0B":      0,
-		"":        0,
-		"garbage": 0,
-		"12XB":    0,
-		"-1MB":    0,
-	}
-	for size, want := range cases {
-		if got := (Image{Size: size}).Bytes(); got != want {
-			t.Errorf("Bytes(%q) = %d, want %d", size, got, want)
-		}
 	}
 }
