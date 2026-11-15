@@ -331,7 +331,7 @@ func TestImagePinsReadRefusals(t *testing.T) {
 			setup: func(_ *fakePinTips, cmp *fakePinCompare) {
 				cmp.errs[bdKey] = errors.New("forgejo: server error")
 			},
-			want: "cannot compare it with refs/heads/main",
+			want: "bd pin 111111111111: cannot compare it with refs/heads/main",
 		},
 		{
 			name:  "a comparison answer with no comparison",
