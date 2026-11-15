@@ -550,6 +550,7 @@ func TestSpecDispatchReportsASplitHeldBeadSkipped(t *testing.T) {
 	held.Labels = []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", specdispatch.SplitLabel}
 	f := newFakeSpecTown(held, cleanSpec("gt-work", 1, "2026-09-29T11:00:00Z"))
 	env := f.env()
+	env.Candidates = f.productionCandidates(t)
 	env.StoryPointSplitOver = 10
 	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
 		return splitOutcome("estimated", 3, 4, "all", ""), nil
@@ -630,6 +631,7 @@ func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
 			held.Labels = tc.labels
 			f := newFakeSpecTown(held)
 			env := f.env()
+			env.Candidates = f.productionCandidates(t)
 			env.StoryPointSplitOver = tc.trigger
 			r := runSpecDispatchCycle(env)
 

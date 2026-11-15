@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -500,9 +502,10 @@ func TestDashQueueOverlaysTheDispatchersSkippedVerdict(t *testing.T) {
 }
 
 // The split route's line is the tick's own record of why a bead lints clean and
-// is still not slung: the bead the route holds keeps its row on the ready list,
-// and the row says skipped with the route's reason, so the page can say why no
-// seat takes it (gt-4yq0js).
+// is still not slung. The fixture's ready list is the dashboard's ReadyAll,
+// which carries the split label; the tick's ready query does not, which
+// TestDashQueueSplitLabelIsOnTheDashboardReadOnly pins. The row says skipped
+// with the route's reason, so the page can say why no seat takes it (gt-4yq0js).
 func TestDashQueueShowsASplitHeldBeadSkippedWithTheTickReason(t *testing.T) {
 	t.Parallel()
 	since := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
@@ -523,6 +526,20 @@ func TestDashQueueShowsASplitHeldBeadSkippedWithTheTickReason(t *testing.T) {
 	row := q.Ready[0]
 	if row.Shape != "skipped" || row.ShapeNote != reason {
 		t.Errorf("shape = %q note = %q, want skipped and the split route's reason", row.Shape, row.ShapeNote)
+	}
+}
+
+// The fixture above puts a split bead on the dashboard's ready list. That is
+// where production has it: the dashboard reads ReadyAll, which excludes only
+// the bookkeeping labels, while the tick's ready query also excludes the split
+// label, so the tick reads the bead from the split list instead (gt-4yq0js).
+func TestDashQueueSplitLabelIsOnTheDashboardReadOnly(t *testing.T) {
+	t.Parallel()
+	if !slices.Contains(specReadyOptions().ExcludeLabels, specdispatch.SplitLabel) {
+		t.Errorf("the tick's ready query does not exclude %q: %v", specdispatch.SplitLabel, specReadyOptions().ExcludeLabels)
+	}
+	if slices.Contains(constants.NonDispatchableBeadLabels, specdispatch.SplitLabel) {
+		t.Errorf("the dashboard's ready read excludes %q, so a split bead is not on its list", specdispatch.SplitLabel)
 	}
 }
 
