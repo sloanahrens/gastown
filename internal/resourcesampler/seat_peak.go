@@ -1,12 +1,18 @@
 package resourcesampler
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // seatPeakFiles are the cgroup files one seat's end read prints. memory.peak is
@@ -167,3 +173,95 @@ func splitSeatPeak(text string) (map[string]string, error) {
 	}
 	return sections, nil
 }
+
+// seatPeaksFile is the peaks file's name under the town's resources directory,
+// the file internal/metrics reads a bead's peak cells from
+// (internal/metrics/peaks.go, readPeaks).
+const seatPeaksFile = "bead-peaks.jsonl"
+
+// seatPeakReadArgv is the command a seat's end read runs: a shell that prints
+// each of the seat's peak files under the marker line splitSeatPeak reads it
+// by, then the end marker. It has the shape seatReadArgv prints for a live
+// seat's files, so a read cut short is refused here too; a file the kernel
+// does not publish prints its marker and no text, which the row builder
+// refuses where it needs a value.
+func seatPeakReadArgv() []string {
+	var script strings.Builder
+	for _, name := range seatPeakFiles {
+		fmt.Fprintf(&script, "printf '@@ %s @@\\n'\ncat %s/%s 2>/dev/null\nprintf '\\n'\n", name, seatCgroupRoot, name)
+	}
+	script.WriteString("printf '@@ end @@\\n'\n")
+	return []string{"sh", "-c", script.String()}
+}
+
+// seatPeakMetricsDir is the town's metrics directory: the parent of the
+// resources directory readPeaks finds bead-peaks.jsonl under
+// (internal/metrics/peaks.go).
+func seatPeakMetricsDir(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "metrics")
+}
+
+// appendSeatPeak appends row to bead-peaks.jsonl under metricsDir's resources
+// subdirectory, as one whole JSON line, creating the directory and file when
+// they are missing with the modes the metrics reader expects. It is the writer
+// recordSeatPeak appends a seat's end row through (gt-wi50nw).
+//
+// An empty metricsDir is an error rather than an empty first path element,
+// which would write the row into the caller's working directory. The row is
+// encoded before the file is touched, so one that cannot become a line leaves
+// no empty file behind.
+func appendSeatPeak(metricsDir string, row PeakRow) error {
+	if metricsDir == "" {
+		return errors.New("sandbox peak: metrics directory is empty")
+	}
+	line, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("sandbox peak: encode row: %w", err)
+	}
+	dir := filepath.Join(metricsDir, rowsSubdir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("sandbox peak: rows directory: %w", err)
+	}
+	path := filepath.Join(dir, seatPeaksFile)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("sandbox peak: peaks file: %w", err)
+	}
+	defer file.Close()
+	return appendLine(append(line, '\n'), file.Write)
+}
+
+// recordSeatPeak is the recorder a seat's end calls: it reads rec's seat peak
+// files through exec, under the context session bounds the read with, builds
+// the row and appends it to the town's bead-peaks.jsonl. It is linked into
+// session.SeatPeakRecorder by init, because this package imports session and
+// session cannot import it back.
+//
+// A read that fails writes no row and returns the failure; so does a text the
+// row builder refuses, and a row that cannot be appended. The caller decides
+// that none of these fails the seat's end.
+func recordSeatPeak(ctx context.Context, townRoot string, exec session.SeatPeakExec, rec session.SandboxRecord, endedAt time.Time) error {
+	if exec == nil {
+		return errors.New("sandbox peak: no exec seam")
+	}
+	if townRoot == "" {
+		return errors.New("sandbox peak: the town root is empty, so the row has no file to go to")
+	}
+	seat, err := seatFromRecord(rec)
+	if err != nil {
+		return fmt.Errorf("sandbox peak: %w", err)
+	}
+	stdout, _, err := exec.Exec(ctx, rec.Session, nil, seatPeakReadArgv(), nil)
+	if err != nil {
+		return fmt.Errorf("sandbox peak: seat %s: reading its peak files: %w", rec.Session, err)
+	}
+	row, err := SeatPeakRow(seat, rec.CreatedAt, endedAt, string(stdout))
+	if err != nil {
+		return err
+	}
+	return appendSeatPeak(seatPeakMetricsDir(townRoot), row)
+}
+
+// init links the recorder into the session package: session's seat end cannot
+// import this package, which reads the sandbox registry through session.
+func init() { session.SeatPeakRecorder = recordSeatPeak }

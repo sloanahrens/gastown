@@ -571,8 +571,20 @@ func TestOpenShellOpsDeleteFailedListingLogsOneLineAndStillDeletes(t *testing.T)
 	if callIndex(fake.Calls(), "delete") < 0 {
 		t.Fatalf("openshell calls = %v, want the sandbox deleted", fake.Calls())
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "copying its transcripts out failed") || !strings.Contains(warnings[0], "listing its transcripts") {
+	// The listing failure is warned once. The peak read goes through the same
+	// unreachable gateway, so its lost row is named too, and the delete still
+	// runs (gt-wi50nw).
+	failed := 0
+	for _, warning := range warnings {
+		if strings.Contains(warning, "copying its transcripts out failed") {
+			failed++
+		}
+	}
+	if failed != 1 || !strings.Contains(strings.Join(warnings, "\n"), "listing its transcripts") {
 		t.Fatalf("warnings = %q, want one line saying the listing failed", warnings)
+	}
+	if !warningSays(warnings, "peak row is not written") {
+		t.Errorf("warnings = %q, want the peak row the same failure lost to be named", warnings)
 	}
 }
 

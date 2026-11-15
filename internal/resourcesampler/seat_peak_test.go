@@ -1,10 +1,18 @@
 package resourcesampler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // peakStarted and peakEnded bound the seat's life: ten minutes.
@@ -211,4 +219,271 @@ func withoutFile(files map[string]string, name string) map[string]string {
 		}
 	}
 	return out
+}
+
+// peakRecord is the sandbox record of the seat peakSeat names: its creation
+// stamp starts the seat's life.
+func peakRecord() session.SandboxRecord {
+	return session.SandboxRecord{
+		Session:   peakSeat().Name,
+		Rig:       "gastown",
+		Polecat:   "nux",
+		WorkBead:  "gt-7l5fbu",
+		CreatedAt: peakStarted,
+	}
+}
+
+// peakReadText is the text one run of seatPeakReadArgv prints for files: the
+// argv is run in the in-process shell the live read's test uses, so the
+// recorder's test reads a text the production command really prints.
+func peakReadText(t *testing.T, files map[string]string) string {
+	t.Helper()
+	text, err := seatShell(t, seatPeakReadArgv(), files)
+	if err != nil {
+		t.Fatalf("running the seat's peak read: %v", err)
+	}
+	return text
+}
+
+// peakExec is the sandbox exec seam recordSeatPeak reads through: it answers
+// with text, or with err, and records the argv it was asked to run.
+type peakExec struct {
+	text  string
+	err   error
+	calls [][]string
+}
+
+func (e *peakExec) Exec(_ context.Context, _ string, env map[string]string, argv []string, _ []byte) ([]byte, []byte, error) {
+	e.calls = append(e.calls, append([]string(nil), argv...))
+	if len(env) > 0 {
+		return nil, nil, errors.New("the peak read takes no env")
+	}
+	if e.err != nil {
+		return nil, nil, e.err
+	}
+	return []byte(e.text), nil, nil
+}
+
+// peakLines reads the lines of town's bead-peaks.jsonl, or nil when the file
+// was never written.
+func peakLines(t *testing.T, townRoot string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(townRoot, ".runtime", "metrics", "resources", seatPeaksFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading the peaks file: %v", err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+// TestSeatPeakReadArgvPrintsTheShapeTheRowBuilderParses runs the command a
+// seat's end read runs and hands what it printed to the row builder: the three
+// files reach the row, and a file the kernel does not publish prints its
+// marker with no text, which the builder refuses for the limit it must have.
+func TestSeatPeakReadArgvPrintsTheShapeTheRowBuilderParses(t *testing.T) {
+	t.Parallel()
+	row, err := SeatPeakRow(peakSeat(), peakStarted, peakEnded, peakReadText(t, peakFiles()))
+	if err != nil {
+		t.Fatalf("the read's text: %v", err)
+	}
+	if row.PeakMemBytes != 1<<31 || row.MemLimitBytes == nil || *row.MemLimitBytes != 1<<32 {
+		t.Errorf("memory = %d of %v bytes, want 2GiB of 4GiB", row.PeakMemBytes, row.MemLimitBytes)
+	}
+	if row.PeakCPUPct == nil || *row.PeakCPUPct != 50 {
+		t.Errorf("peak_cpu_pct = %s, want 50", floatText(row.PeakCPUPct))
+	}
+	if _, err := SeatPeakRow(peakSeat(), peakStarted, peakEnded, peakReadText(t, withoutFile(peakFiles(), "memory.max"))); err == nil {
+		t.Error("the read of a seat with no memory.max wrote a row, want a refusal")
+	}
+}
+
+// TestSeatPeakEndWritesTheRow shows a seat's end read becoming one line of the
+// peaks file: the row carries the seat's bead, its life and its peaks, and the
+// recorder reads the files through the command the seat's read runs.
+func TestSeatPeakEndWritesTheRow(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	exec := &peakExec{text: peakReadText(t, peakFiles())}
+	if err := recordSeatPeak(context.Background(), town, exec, peakRecord(), peakEnded); err != nil {
+		t.Fatalf("recordSeatPeak: %v", err)
+	}
+	if len(exec.calls) != 1 || !reflect.DeepEqual(exec.calls[0], seatPeakReadArgv()) {
+		t.Fatalf("the recorder ran %v, want the seat read's argv", exec.calls)
+	}
+	lines := peakLines(t, town)
+	if len(lines) != 1 {
+		t.Fatalf("%d lines in the peaks file, want one: %v", len(lines), lines)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &fields); err != nil {
+		t.Fatalf("the line is not a JSON object: %v: %q", err, lines[0])
+	}
+	want := map[string]any{
+		"v":               float64(1),
+		"bead":            "gt-7l5fbu",
+		"sandbox":         peakSeat().Name,
+		"started_at":      "2026-11-15T08:00:00Z",
+		"ended_at":        "2026-11-15T08:10:00Z",
+		"peak_mem_bytes":  float64(1 << 31),
+		"peak_cpu_pct":    50.0,
+		"mem_limit_bytes": float64(1 << 32),
+		"source":          "sandbox",
+	}
+	for key, value := range want {
+		if got := fields[key]; got != value {
+			t.Errorf("%s = %v, want %v", key, got, value)
+		}
+	}
+}
+
+// TestSeatPeakEndWritesNoRowWhenItCannot shows every refusal writing no line:
+// a read that failed, a text the row builder refuses, a seat name that must
+// not reach the exec, and a town root that would put the row in the working
+// directory.
+func TestSeatPeakEndWritesNoRowWhenItCannot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		exec *peakExec
+		rec  session.SandboxRecord
+		// want is a substring of the refusal, so each row fails by its own
+		// branch and not by a neighbour that happens to catch it.
+		want string
+		// wantCalls is how many times the read reached the exec seam.
+		wantCalls int
+	}{
+		{
+			name: "a read that failed", exec: &peakExec{err: errors.New("gateway refused the exec")},
+			rec: peakRecord(), want: "reading its peak files", wantCalls: 1,
+		},
+		{
+			name: "a text the row builder refuses", exec: &peakExec{text: peakRead(withoutFile(peakFiles(), "memory.peak"))},
+			rec: peakRecord(), want: "prints no memory.peak", wantCalls: 1,
+		},
+		{
+			name: "a seat name that is not a sandbox name", exec: &peakExec{text: peakReadText(t, peakFiles())},
+			rec: session.SandboxRecord{Session: "Gt_Sbx", CreatedAt: peakStarted}, want: "is not a sandbox name",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			town := t.TempDir()
+			err := recordSeatPeak(context.Background(), town, tc.exec, tc.rec, peakEnded)
+			if err == nil {
+				t.Fatal("recordSeatPeak = nil, want the refusal")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("refusal = %q, want it to say %q", err, tc.want)
+			}
+			if len(tc.exec.calls) != tc.wantCalls {
+				t.Errorf("the read reached the exec seam %d times, want %d", len(tc.exec.calls), tc.wantCalls)
+			}
+			if lines := peakLines(t, town); len(lines) != 0 {
+				t.Errorf("the peaks file holds %v, want no line", lines)
+			}
+		})
+	}
+}
+
+// TestSeatPeakEndRefusesAnEmptyTownRoot pins that a recorder with no town names
+// no peaks file: the read is not even run, since its row could only land in the
+// working directory.
+func TestSeatPeakEndRefusesAnEmptyTownRoot(t *testing.T) {
+	t.Parallel()
+	exec := &peakExec{text: peakReadText(t, peakFiles())}
+	err := recordSeatPeak(context.Background(), "", exec, peakRecord(), peakEnded)
+	if err == nil || !strings.Contains(err.Error(), "town root is empty") {
+		t.Fatalf("recordSeatPeak = %v, want a refusal naming the town root", err)
+	}
+	if len(exec.calls) != 0 {
+		t.Errorf("the read ran %v before the town root was checked", exec.calls)
+	}
+}
+
+// TestSeatPeakEndRefusesANilExec shows the seam itself is checked: a recorder
+// with no exec cannot read anything, and says so instead of writing a row of
+// nothing.
+func TestSeatPeakEndRefusesANilExec(t *testing.T) {
+	t.Parallel()
+	err := recordSeatPeak(context.Background(), t.TempDir(), nil, peakRecord(), peakEnded)
+	if err == nil || !strings.Contains(err.Error(), "no exec seam") {
+		t.Fatalf("recordSeatPeak = %v, want a refusal naming the exec seam", err)
+	}
+}
+
+// TestSeatPeakAppendRefusesWhatItCannotWrite pins every way the peaks file is
+// not written: a row that cannot be encoded leaves no file, and an empty
+// metrics directory, a resources path that is not a directory and a peaks file
+// that cannot be opened are refusals rather than a silent loss.
+func TestSeatPeakAppendRefusesWhatItCannotWrite(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	tests := []struct {
+		name string
+		// empty passes no metrics directory at all.
+		empty bool
+		row   PeakRow
+		// prepare builds the tree the append must refuse.
+		prepare func(t *testing.T, metricsDir string)
+		want    string
+	}{
+		{
+			name: "an empty metrics directory", empty: true, want: "metrics directory is empty",
+		},
+		{
+			name: "a row JSON cannot encode", row: PeakRow{V: 1, PeakCPUPct: &nan}, want: "encode row",
+		},
+		{
+			name: "a resources path that is a file", want: "rows directory",
+			prepare: func(t *testing.T, metricsDir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(metricsDir, rowsSubdir), []byte("not a directory\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a peaks file that cannot be opened", want: "peaks file",
+			prepare: func(t *testing.T, metricsDir string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(metricsDir, rowsSubdir, seatPeaksFile), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			metricsDir := t.TempDir()
+			if tc.empty {
+				metricsDir = ""
+			}
+			if tc.prepare != nil {
+				tc.prepare(t, metricsDir)
+			}
+			err := appendSeatPeak(metricsDir, tc.row)
+			if err == nil {
+				t.Fatal("appendSeatPeak = nil, want the refusal")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("refusal = %q, want it to say %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestSeatPeakRecorderIsLinked pins the init that hands the session package
+// its recorder: session cannot import this package, so a lost link would
+// silently stop every seat's peak row.
+func TestSeatPeakRecorderIsLinked(t *testing.T) {
+	t.Parallel()
+	if session.SeatPeakRecorder == nil {
+		t.Fatal("session.SeatPeakRecorder is nil, want recordSeatPeak linked")
+	}
+	if got, want := reflect.ValueOf(session.SeatPeakRecorder).Pointer(), reflect.ValueOf(recordSeatPeak).Pointer(); got != want {
+		t.Errorf("session.SeatPeakRecorder = %#x, want recordSeatPeak %#x", got, want)
+	}
 }

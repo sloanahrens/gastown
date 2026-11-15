@@ -71,7 +71,9 @@ func TestOpenShellPrepareReplacesAnEndedSandboxHoldingTheName(t *testing.T) {
 		t.Errorf("copied transcripts = %v, want the old seat's transcript saved before the delete", copied)
 	}
 
-	want := []string{"create", "get", "exec", "exec", "download", "delete", "create"}
+	// The exec before the delete is the seat's peak read: it is taken once the
+	// transcript copy is done and before the sandbox goes (gt-wi50nw).
+	want := []string{"create", "get", "exec", "exec", "download", "exec", "delete", "create"}
 	got := verbsOf(gw.calls)
 	if len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
 		t.Fatalf("first calls = %q, want %q (the held sandbox must be saved and deleted before the second create)", got, want)
