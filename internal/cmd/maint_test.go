@@ -1276,9 +1276,9 @@ func TestMaintPlanCloudPrintsTheDaemonsDryRunPlan(t *testing.T) {
 // id through the VM's socket, and the run lands as one apply line.
 func TestMaintApplyCloudRemovesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
-	if got := maintSubcommand(t, maintCmd, maintModeApply).Use; got != "apply [target]" {
-		t.Fatalf("maint apply Use = %q, want it to take a target", got)
-	}
+	// The apply leaf is registered under maint; maintRunIn below drives the run
+	// path that leaf and the plan leaf share.
+	maintSubcommand(t, maintCmd, maintModeApply)
 	town, labelsPath, deployPath := writeMaintCloudTown(t, "unix:///cloud/docker.sock")
 	runner := &maintCloudRunner{
 		files: map[string]string{
@@ -1378,10 +1378,53 @@ func TestMaintCloudRefusesSettingsItCannotUse(t *testing.T) {
 				t.Fatal(err)
 			}
 			targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("maintTargets() = %v, %v; want an error naming %q", maintTargetNames(targets), err, tc.want)
+			if err != nil {
+				t.Fatalf("maintTargets() error = %v, want every target: a cloud setting the target cannot use must not fail the build", err)
+			}
+			for _, name := range []string{maintTargetBaks, maintTargetSizes, maintTargetWorktree} {
+				if _, ok := targets[name]; !ok {
+					t.Fatalf("targets = %v, want %s beside the refused cloud target", maintTargetNames(targets), name)
+				}
+			}
+			plan, err := targets[maintTargetCloud].Plan(context.Background(), diskmaint.Policy{})
+			if err != nil {
+				t.Fatalf("cloud Plan() error = %v, want the refusal in the plan", err)
+			}
+			if !strings.Contains(plan.Refused, tc.want) {
+				t.Fatalf("cloud plan refusal = %q, want it to name %q", plan.Refused, tc.want)
 			}
 		})
+	}
+}
+
+// TestMaintUnreadableCloudSettingsRefuseOnlyTheCloudTarget pins the scope of a
+// cloud setting the target cannot use: a run of another target passes, and a
+// run that includes cloud fails, naming the setting.
+func TestMaintUnreadableCloudSettingsRefuseOnlyTheCloudTarget(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	settings := filepath.Join(town, "settings")
+	if err := os.MkdirAll(settings, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"daemon":{"env":{"GT_CLOUD_DOCKER_HOST":"tcp://10.0.0.2:2375"}}}`
+	if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v, want the other targets", err)
+	}
+	deps := maintDeps{
+		Targets: func() (map[string]diskmaint.Target, error) { return targets, nil },
+		Now:     func() time.Time { return maintTestNow },
+		Keep:    5,
+	}
+	if err := runMaint(io.Discard, deps, maintModePlan, maintTargetSizes); err != nil {
+		t.Fatalf("runMaint(plan sizes) error = %v, want none: the unreadable cloud setting is the cloud target's", err)
+	}
+	if err := runMaint(io.Discard, deps, maintModePlan, maintTargetCloud); err == nil || !strings.Contains(err.Error(), maintCloudDockerHostKey) {
+		t.Fatalf("runMaint(plan cloud) error = %v, want the refusal to name %s", err, maintCloudDockerHostKey)
 	}
 }
 
