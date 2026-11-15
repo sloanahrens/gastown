@@ -3,11 +3,6 @@ hooks sync
 init
 install
 plugin
-plugin history
-plugin list
-plugin record-run
-plugin run
-plugin show
 plugin sync
 ring
 ring forge
