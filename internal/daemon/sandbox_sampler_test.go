@@ -148,7 +148,7 @@ func TestSandboxSamplerDefaultsToTheRowWriter(t *testing.T) {
 	row := sandboxSeatRow("mango-toast")
 	sampler := newSandboxSampler(metricsDir,
 		&fakeSeatSource{tick: resourcesampler.SeatTick{Rows: []resourcesampler.Row{row}}},
-		fixedClock{now: now}, nil, nil, 0)
+		nil, fixedClock{now: now}, nil, nil, 0)
 
 	sampler.Tick(context.Background())
 
@@ -249,7 +249,7 @@ func TestSandboxSamplerTick(t *testing.T) {
 			if write == nil {
 				write = resourcesampler.AppendRow
 			}
-			sampler := newSandboxSampler(metricsDir, test.source, fixedClock{now: now},
+			sampler := newSandboxSampler(metricsDir, test.source, nil, fixedClock{now: now},
 				func(dir string, row resourcesampler.Row, at time.Time) error {
 					writes++
 					return write(dir, row, at)
@@ -295,7 +295,7 @@ func TestSandboxSamplerNilLoggerIsNotSilent(t *testing.T) {
 	metricsDir := t.TempDir()
 	sampler := newSandboxSampler(metricsDir,
 		&fakeSeatSource{err: errors.New("the sandbox records cannot be listed")},
-		fixedClock{now: now}, nil, nil, 0)
+		nil, fixedClock{now: now}, nil, nil, 0)
 	var buf bytes.Buffer
 	sampler.errLog = log.New(&buf, "", 0)
 
@@ -354,7 +354,7 @@ func TestSandboxSamplerTickEndsAtItsBound(t *testing.T) {
 	metricsDir := t.TempDir()
 	var logs []string
 	timeout := 10 * time.Millisecond
-	sampler := newSandboxSampler(metricsDir, &hangingFirstTickSource{row: row}, fixedClock{now: now}, nil,
+	sampler := newSandboxSampler(metricsDir, &hangingFirstTickSource{row: row}, nil, fixedClock{now: now}, nil,
 		func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 		timeout,
 	)
@@ -398,7 +398,7 @@ func (d *deadlineRecordingSource) Tick(ctx context.Context) (resourcesampler.Sea
 func TestSandboxSamplerDefaultTimeout(t *testing.T) {
 	t.Parallel()
 	source := &deadlineRecordingSource{}
-	sampler := newSandboxSampler(t.TempDir(), source, nil, nil, nil, 0)
+	sampler := newSandboxSampler(t.TempDir(), source, nil, nil, nil, nil, 0)
 
 	sampler.Tick(context.Background())
 
@@ -593,4 +593,222 @@ func TestStartSandboxSamplerTicker(t *testing.T) {
 		t.Fatal("a town that names sandbox_sampler started no ticker")
 	}
 	ticker.Stop()
+}
+
+// fakeVMSource is one tick's VM source outcome, and records the read so a test
+// can place it in the writer's event order.
+type fakeVMSource struct {
+	tick   resourcesampler.VMTick
+	err    error
+	ticks  int
+	onTick func(ctx context.Context)
+}
+
+func (f *fakeVMSource) Tick(ctx context.Context) (resourcesampler.VMTick, error) {
+	f.ticks++
+	if f.onTick != nil {
+		f.onTick(ctx)
+	}
+	return f.tick, f.err
+}
+
+// hangingVMSource is a VM read that answers only when its bound ends it, the
+// way a wedged gateway call does.
+type hangingVMSource struct {
+	bounded bool
+}
+
+func (h *hangingVMSource) Tick(ctx context.Context) (resourcesampler.VMTick, error) {
+	_, h.bounded = ctx.Deadline()
+	<-ctx.Done()
+	return resourcesampler.VMTick{}, ctx.Err()
+}
+
+// sandboxVMRow is a row the VM source could have returned, in the shape the
+// design's row table gives the VM.
+func sandboxVMRow() resourcesampler.Row {
+	cluster, load := "gt-sbx", 0.52
+	return resourcesampler.Row{
+		V:         resourcesampler.SchemaVersion,
+		TS:        "2026-11-14T09:30:05Z",
+		Source:    "sandbox",
+		Class:     "sandbox",
+		Component: "vm",
+		Name:      "gt-sbx",
+		MemBytes:  1 << 30,
+		Workspace: "acme",
+		Cluster:   &cluster,
+		Load1:     &load,
+	}
+}
+
+// TestSandboxSamplerWritesTheVMRow is the bead's acceptance: the VM row goes
+// through the same writer as the seat rows, in the same day file, and the VM
+// read starts only after the seat rows are written (gt-2qe2m6).
+func TestSandboxSamplerWritesTheVMRow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	metricsDir := t.TempDir()
+	seat, vmRow := sandboxSeatRow("mango-toast"), sandboxVMRow()
+	var events []string
+	vm := &fakeVMSource{tick: resourcesampler.VMTick{Row: &vmRow}, onTick: func(context.Context) {
+		events = append(events, "vm read")
+	}}
+	sampler := newSandboxSampler(metricsDir,
+		&fakeSeatSource{tick: resourcesampler.SeatTick{Rows: []resourcesampler.Row{seat}}},
+		vm, fixedClock{now: now},
+		func(dir string, row resourcesampler.Row, at time.Time) error {
+			events = append(events, "write "+row.Component)
+			return resourcesampler.AppendRow(dir, row, at)
+		}, nil, 0)
+
+	sampler.Tick(context.Background())
+
+	want := []resourcesampler.Row{seat, vmRow}
+	if got := sandboxSamplerDayRows(t, metricsDir, now); !reflect.DeepEqual(got, want) {
+		t.Errorf("the day file holds\n%+v\nwant the seat row then the VM row\n%+v", got, want)
+	}
+	if wantEvents := []string{"write seat", "vm read", "write vm"}; !reflect.DeepEqual(events, wantEvents) {
+		t.Errorf("the tick did %v, want %v: the VM read starts after the seat rows write", events, wantEvents)
+	}
+	if vm.ticks != 1 {
+		t.Errorf("the tick read the VM %d times, want 1", vm.ticks)
+	}
+}
+
+// TestSandboxSamplerVMWritesNoRowOnFailure is the bead's acceptance: a VM read
+// that fails, or that finds no seat to read, writes no VM row and never zeros,
+// and the seat rows the tick already wrote stay (gt-2qe2m6).
+func TestSandboxSamplerVMWritesNoRowOnFailure(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	seat := sandboxSeatRow("mango-toast")
+	for _, test := range []struct {
+		name string
+		vm   sandboxVMSource
+		// wantLogs counts the lines the tick logs.
+		wantLogs int
+		// wantLogHas must each appear in the logged lines.
+		wantLogHas []string
+	}{
+		{
+			name:       "a vm read that fails",
+			vm:         &fakeVMSource{err: errors.New("the workspace map cannot be read")},
+			wantLogs:   1,
+			wantLogHas: []string{"vm read", "the workspace map cannot be read"},
+		},
+		{
+			name: "every live seat skipped",
+			vm: &fakeVMSource{tick: resourcesampler.VMTick{Skipped: []resourcesampler.SeatSkip{
+				{Seat: "mango-aaa", Err: errors.New("the read was cut short")},
+				{Seat: "mango-bbb", Err: errors.New("the read was cut short")},
+			}}},
+			wantLogs:   2,
+			wantLogHas: []string{"vm read", "mango-aaa", "mango-bbb"},
+		},
+		{
+			name:     "no live seat",
+			vm:       &fakeVMSource{},
+			wantLogs: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			metricsDir := t.TempDir()
+			var logs []string
+			sampler := newSandboxSampler(metricsDir,
+				&fakeSeatSource{tick: resourcesampler.SeatTick{Rows: []resourcesampler.Row{seat}}},
+				test.vm, fixedClock{now: now}, nil,
+				func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+				0)
+
+			sampler.Tick(context.Background())
+
+			if got := sandboxSamplerDayRows(t, metricsDir, now); !reflect.DeepEqual(got, []resourcesampler.Row{seat}) {
+				t.Errorf("the day file holds\n%+v\nwant only the seat row: a VM read that wrote no row must not cost it", got)
+			}
+			if len(logs) != test.wantLogs {
+				t.Errorf("the tick logged %d lines, want %d: %q", len(logs), test.wantLogs, logs)
+			}
+			for _, want := range test.wantLogHas {
+				if !strings.Contains(strings.Join(logs, "\n"), want) {
+					t.Errorf("the logged lines %q do not name %q", logs, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSandboxSamplerVMSlowStillWritesTheSeatRows is the attempt-2 finding's
+// acceptance: the VM read has a bound of its own, so a read that hangs costs
+// the VM row and logs one line, and the seat rows the tick wrote stay
+// (gt-2qe2m6).
+func TestSandboxSamplerVMSlowStillWritesTheSeatRows(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 9, 30, 5, 0, time.UTC)
+	metricsDir := t.TempDir()
+	seat := sandboxSeatRow("mango-toast")
+	vm := &hangingVMSource{}
+	var logs []string
+	sampler := newSandboxSampler(metricsDir,
+		&fakeSeatSource{tick: resourcesampler.SeatTick{Rows: []resourcesampler.Row{seat}}},
+		vm, fixedClock{now: now}, nil,
+		func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		0)
+	sampler.vmTimeout = 10 * time.Millisecond
+
+	sampler.Tick(context.Background())
+
+	if got := sandboxSamplerDayRows(t, metricsDir, now); !reflect.DeepEqual(got, []resourcesampler.Row{seat}) {
+		t.Errorf("the day file holds\n%+v\nwant the seat row only: a VM read that hangs must not cost it", got)
+	}
+	if !vm.bounded {
+		t.Error("the VM read was called with no deadline")
+	}
+	if len(logs) != 1 {
+		t.Fatalf("the tick logged %d lines, want 1 naming the VM read's bound: %q", len(logs), logs)
+	}
+	for _, want := range []string{"vm read", "bound", sampler.vmTimeout.String()} {
+		if !strings.Contains(logs[0], want) {
+			t.Errorf("the log line %q does not name %q", logs[0], want)
+		}
+	}
+}
+
+// TestSandboxSamplerRegistersTheVMSource is the bead's acceptance: the patrol's
+// sampler carries the gateway VM source beside the seat source, bounded by its
+// own default (gt-2qe2m6).
+func TestSandboxSamplerRegistersTheVMSource(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+
+	sampler := d.sandboxSampler()
+
+	if _, ok := sampler.vm.(*resourcesampler.VMSource); !ok {
+		t.Fatalf("the sampler's VM source is %T, want the gateway VM source", sampler.vm)
+	}
+	if sampler.vmTimeout != defaultVMReadTimeout {
+		t.Errorf("the VM read is bounded %v, want its own %v default", sampler.vmTimeout, defaultVMReadTimeout)
+	}
+	if sampler.metricsDir != filepath.Join(d.config.TownRoot, ".runtime", "metrics") {
+		t.Errorf("the VM row writes %q, want the seat rows' directory %q", sampler.metricsDir, filepath.Join(d.config.TownRoot, ".runtime", "metrics"))
+	}
+}
+
+// TestVMReadBudgetLeavesRoomForTheNextSeat pins the production shape the
+// next-seat fallback depends on: the VM read's whole bound covers more than one
+// seat's own bound, so a first seat that hangs for all of its bound does not use
+// up the budget before the fallback tries the next seat (gt-2qe2m6).
+func TestVMReadBudgetLeavesRoomForTheNextSeat(t *testing.T) {
+	t.Parallel()
+	if vmSeatAttempts < 2 {
+		t.Fatalf("vmSeatAttempts = %d, want at least 2 so a fallback can run", vmSeatAttempts)
+	}
+	if defaultVMReadTimeout < 2*resourcesampler.DefaultSeatTimeout {
+		t.Errorf("the VM read budget %v is under two per-seat bounds (%v): a hung first seat would exhaust it",
+			defaultVMReadTimeout, resourcesampler.DefaultSeatTimeout)
+	}
+	if want := vmSeatAttempts * resourcesampler.DefaultSeatTimeout; defaultVMReadTimeout != want {
+		t.Errorf("the VM read budget is %v, want %d per-seat bounds = %v", defaultVMReadTimeout, vmSeatAttempts, want)
+	}
 }
