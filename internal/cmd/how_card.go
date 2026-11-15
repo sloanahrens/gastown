@@ -2,6 +2,7 @@ package cmd
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -9,7 +10,9 @@ import (
 )
 
 // how_card.go holds the overseer card: the rule file and its loader
-// (gt-j669b4.8), and the --card flag that prints it (gt-4n47gt).
+// (gt-j669b4.8), the --card flag that prints it (gt-4n47gt), and the
+// --hook-json flag that gives a session its card or today's restore text at
+// session start (gt-ec569g).
 
 // overseerCardFile holds the overseer card's rule lines, one per line and no
 // headings: what a just-compacted overseer reads before it acts (gt-j669b4.8).
@@ -47,10 +50,37 @@ const (
 	// gt how --card writes, title, lookup rule and group lines included,
 	// because that text is what reaches an agent's context.
 	overseerCardPrintMaxBytes = 2500
+
+	// overseerActor and overseerAgentName are the two identity values that mark
+	// the overseer session: the actor beads records for it, and the agent name
+	// gt bird start sets. Either one is enough (gt-ec569g).
+	overseerActor     = "town/crew/overseer"
+	overseerAgentName = "overseer"
+
+	// howHookActorEnv and howHookAgentEnv are the environment the session's
+	// identities are read from: BEADS_ACTOR is the identity bd attributes to,
+	// BD_ACTOR is what a spawned crew session exports, and CLAUDE_AGENT_NAME is
+	// the name gt bird start sets (internal/bird/plan.go).
+	howHookActorEnv     = "BEADS_ACTOR"
+	howHookCrewActorEnv = "BD_ACTOR"
+	howHookAgentEnv     = "CLAUDE_AGENT_NAME"
+
+	// howHookJSONEventName is the hook this output answers: a session start.
+	howHookJSONEventName = "SessionStart"
+
+	// howHookJSONRestoreText is the line a just-compacted session reads: the
+	// design puts it after the overseer's card and gives it alone to every
+	// other session, copied from ~/.claude/hooks/post-compact-restore.sh. That
+	// file is not present in this sandbox (the gap gt-j669b4.8 recorded for the
+	// card), so this constant holds the one line the plan quotes verbatim and
+	// TestHowCardHookJSON pins it: correcting it to the script's full text is a
+	// one-line diff.
+	howHookJSONRestoreText = "Context was just compacted. Re-read /gastown, then /handoff gt-overseer."
 )
 
 func init() {
 	howCmd.Flags().Bool("card", false, "print the overseer card: the lookup rule, the task groups and the rule lines")
+	howCmd.Flags().Bool("hook-json", false, "print the SessionStart hook JSON: the overseer's card and re-read line, or today's restore text")
 }
 
 // overseerCardRules returns the card's rule lines, in file order. howCardText,
@@ -123,4 +153,70 @@ func howCardText(m howMap, loadRules func() ([]string, error)) (string, error) {
 		return "", fmt.Errorf("the overseer card is %d bytes, not under %d: trim the rule file or a group description", n, overseerCardPrintMaxBytes)
 	}
 	return b.String(), nil
+}
+
+// howHookJSONOutput is the SessionStart hook output Claude Code reads: it adds
+// hookSpecificOutput.additionalContext to the model's context.
+type howHookJSONOutput struct {
+	HookSpecificOutput howHookJSONSpecificOutput `json:"hookSpecificOutput"`
+}
+
+type howHookJSONSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	AdditionalContext string `json:"additionalContext"`
+}
+
+// runHowHookJSON writes the SessionStart hook JSON for the calling session: the
+// card and the re-read line for the overseer, today's restore text for any
+// other session. getenv is the process environment, so a test passes its own
+// and the branch is decided from the arguments, not from a hidden read.
+func runHowHookJSON(out io.Writer, m howMap, getenv func(string) string, loadRules func() ([]string, error), args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("gt how --hook-json takes no group or word, got %q", strings.Join(args, " "))
+	}
+	actor, agentName := howHookIdentity(getenv)
+	context, err := howHookJSONContext(actor, agentName, m, loadRules)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(howHookJSONOutput{
+		HookSpecificOutput: howHookJSONSpecificOutput{
+			HookEventName:     howHookJSONEventName,
+			AdditionalContext: context,
+		},
+	})
+}
+
+// howHookIdentity reads the two identity values a session may carry: the actor
+// beads records (BEADS_ACTOR, then BD_ACTOR, which is set instead of it on a
+// spawned crew session), and the agent name gt bird start sets. A value is
+// returned as read; isOverseer trims it before comparing.
+func howHookIdentity(getenv func(string) string) (actor, agentName string) {
+	actor = getenv(howHookActorEnv)
+	if strings.TrimSpace(actor) == "" {
+		actor = getenv(howHookCrewActorEnv)
+	}
+	return actor, getenv(howHookAgentEnv)
+}
+
+// isOverseer reports whether either identity value names the overseer session.
+// The values are trimmed first: the environment is the session's, not this
+// command's, and a padded value must not name a different role.
+func isOverseer(actor, agentName string) bool {
+	return strings.TrimSpace(actor) == overseerActor || strings.TrimSpace(agentName) == overseerAgentName
+}
+
+// howHookJSONContext returns the text the hook adds to a session's context. The
+// overseer gets the card and then the restore line; any other session gets the
+// restore line alone, so this command changes nothing for it. A card that
+// cannot be built is the card's error, never text without the card.
+func howHookJSONContext(actor, agentName string, m howMap, loadRules func() ([]string, error)) (string, error) {
+	if !isOverseer(actor, agentName) {
+		return howHookJSONRestoreText + "\n", nil
+	}
+	card, err := howCardText(m, loadRules)
+	if err != nil {
+		return "", err
+	}
+	return card + howHookJSONRestoreText + "\n", nil
 }
