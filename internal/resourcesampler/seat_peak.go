@@ -41,6 +41,7 @@ type PeakRow struct {
 // The row is refused, not zeroed, when the seat's name is not a sandbox name,
 // its end time is unset, or the read cannot be trusted: memory.peak and cpu.stat
 // must each read as a value. A seat with no bead is written with a null bead.
+// memory.max must print a limit or max, so an empty read is refused.
 // peak_cpu_pct is the seat's CPU total as a percent of one core over its life;
 // it is null when the start is unknown or the life is not positive.
 func SeatPeakRow(seat Seat, startedAt, endedAt time.Time, text string) (PeakRow, error) {
@@ -64,6 +65,11 @@ func SeatPeakRow(seat Seat, startedAt, endedAt time.Time, text string) (PeakRow,
 	peak, err := parseCgroupBytes("memory.peak", sections["memory.peak"])
 	if err != nil {
 		return PeakRow{}, fmt.Errorf("sandbox peak: seat %s: %w", seat.Name, err)
+	}
+	// parseMemoryMax reads an empty text as no limit, which is right for a file the
+	// kernel does not publish but would make a seat with an unread limit unlimited.
+	if strings.TrimSpace(sections["memory.max"]) == "" {
+		return PeakRow{}, fmt.Errorf("sandbox peak: seat %s: memory.max is empty, so the seat's limit is unknown", seat.Name)
 	}
 	limit, err := parseMemoryMax(sections["memory.max"])
 	if err != nil {
