@@ -1006,10 +1006,9 @@ func overrunWorktreeLabel(g daemonGit) string {
 // handle. The handle carries the label of the worktree it runs on (see
 // overrunWorktreeLabel), so a log line can name the one it examined. A host
 // worktree that cannot be resolved is errOverrunNoWorktree, never a nil handle:
-// the caller cannot save work it cannot see. A sandbox seat's sandbox that
-// cannot be seen, from an unreadable record to a runner that is not linked, is
-// an error too, never its host stub, which reads a clean tree and would call
-// the work saved.
+// the caller cannot save work it cannot see. A sandbox seat whose sandbox cannot
+// be seen is an error too, never its host handle (see overrunSandboxGit for the
+// refusals).
 func (d *Daemon) overrunSeatGit(seat overrunSeat) (daemonGit, error) {
 	if d.overrunSeatGitFn != nil {
 		return d.overrunSeatGitFn(seat)
