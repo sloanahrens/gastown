@@ -1,12 +1,17 @@
 package resourcesampler
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
@@ -311,5 +316,366 @@ func TestSandboxSourceUnreadableSeat(t *testing.T) {
 		if !reflect.DeepEqual(row, Row{}) || !reflect.DeepEqual(reading, SeatReading{}) {
 			t.Errorf("%s: error with row %+v and reading %+v, want neither", test.name, row, reading)
 		}
+	}
+}
+
+// fakeSeatExec is the exec seam a test fills: read answers one seat's read and
+// calls records the seats the source asked about, in call order.
+type fakeSeatExec struct {
+	read  func(ctx context.Context, name string) (string, error)
+	calls []string
+	argv  [][]string
+}
+
+func (f *fakeSeatExec) Exec(ctx context.Context, name string, _ map[string]string, argv []string, _ []byte) ([]byte, []byte, error) {
+	f.calls = append(f.calls, name)
+	f.argv = append(f.argv, argv)
+	if f.read == nil {
+		return nil, nil, errors.New("the seam has no read")
+	}
+	text, err := f.read(ctx, name)
+	return []byte(text), nil, err
+}
+
+// seatTown is a town root with the workspace map a seat row's workspace id
+// comes from.
+func seatTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	writeWorkspaceMap(t, townRoot, `{"default":"customer-zero","rigs":{"gastown":"acme"}}`)
+	return townRoot
+}
+
+// writeSeatRecord records one seat of the town, through the writer the spawn
+// uses.
+func writeSeatRecord(t *testing.T, townRoot string, rec session.SandboxRecord) {
+	t.Helper()
+	if err := session.WriteSandboxRecord(townRoot, rec); err != nil {
+		t.Fatalf("writing the record for %q: %v", rec.Session, err)
+	}
+}
+
+// seatTickNow is the sample time the tick tests run at.
+func seatTickNow() time.Time { return time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC) }
+
+// TestSandboxSourceTick reads the town's live seats: one row per record, the
+// record's rig, polecat and bead on it, and one exec per seat with the argv the
+// parser's text comes from (gt-a24bcc).
+func TestSandboxSourceTick(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-toast", Rig: "gastown", Polecat: "toast", WorkBead: "gt-abc"})
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-nux", Rig: "gastown", Polecat: "nux"})
+	runner := &fakeSeatExec{read: func(context.Context, string) (string, error) {
+		return seatRead(seatFiles()), nil
+	}}
+
+	tick, err := NewSeatSource(townRoot, runner, &fakeClock{now: seatTickNow()}, time.Second).Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(tick.Skipped) != 0 {
+		t.Errorf("skipped %+v, want no skip", tick.Skipped)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"mango-nux", "mango-toast"}) {
+		t.Errorf("seats read = %v, want both records in name order", runner.calls)
+	}
+	if len(tick.Rows) != 2 {
+		t.Fatalf("%d rows, want one per seat: %+v", len(tick.Rows), tick.Rows)
+	}
+	want := []Row{
+		{
+			V: 1, TS: "2026-11-14T10:00:00Z", Source: "sandbox", Class: "sandbox", Component: "seat",
+			Name: "mango-nux", Rig: seatStringPtr("gastown"), Polecat: seatStringPtr("nux"),
+			MemBytes: 1 << 30, MemLimitBytes: seatInt64Ptr(2 << 30), Workspace: "acme",
+			Cluster: seatStringPtr(SandboxCluster), PressureCPUSomePct: seatFloatPtr(3.5),
+			PressureMemSomePct: seatFloatPtr(4.5), PressureMemFullPct: seatFloatPtr(0.5),
+		},
+		{
+			V: 1, TS: "2026-11-14T10:00:00Z", Source: "sandbox", Class: "sandbox", Component: "seat",
+			Name: "mango-toast", Rig: seatStringPtr("gastown"), Polecat: seatStringPtr("toast"),
+			Bead: seatStringPtr("gt-abc"), MemBytes: 1 << 30, MemLimitBytes: seatInt64Ptr(2 << 30),
+			Workspace: "acme", Cluster: seatStringPtr(SandboxCluster), PressureCPUSomePct: seatFloatPtr(3.5),
+			PressureMemSomePct: seatFloatPtr(4.5), PressureMemFullPct: seatFloatPtr(0.5),
+		},
+	}
+	if !reflect.DeepEqual(tick.Rows, want) {
+		t.Errorf("rows = %+v, want %+v", tick.Rows, want)
+	}
+	for i, argv := range runner.argv {
+		if !reflect.DeepEqual(argv, seatReadArgv()) {
+			t.Errorf("call %d ran %v, want the seat read's argv", i, argv)
+		}
+	}
+}
+
+// TestSandboxSourceReadArgv covers the command one seat read runs: it names
+// every cgroup file the parser requires, under the marker line it reads the
+// file by, and closes with the end marker (gt-a24bcc).
+func TestSandboxSourceReadArgv(t *testing.T) {
+	t.Parallel()
+	argv := seatReadArgv()
+	if len(argv) != 3 || argv[0] != "sh" || argv[1] != "-c" {
+		t.Fatalf("argv = %v, want sh -c <script>", argv)
+	}
+	script := argv[2]
+	for _, name := range seatCgroupFiles {
+		if !strings.Contains(script, "@@ "+name+" @@") {
+			t.Errorf("the read prints no %s marker", name)
+		}
+		if !strings.Contains(script, "cat "+seatCgroupRoot+"/"+name+" ") {
+			t.Errorf("the read does not print %s/%s", seatCgroupRoot, name)
+		}
+	}
+	if !strings.HasSuffix(script, "printf '@@ end @@\\n'\n") {
+		t.Errorf("the read does not close with the end marker: %q", script)
+	}
+}
+
+// TestSandboxSourceTickSeatFailures is the bead's acceptance: a seat whose read
+// fails writes no row while the other seats still do (gt-a24bcc).
+func TestSandboxSourceTickSeatFailures(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		read func(context.Context, string) (string, error)
+	}{
+		{
+			name: "an exec that fails",
+			read: func(_ context.Context, name string) (string, error) {
+				if name == "mango-aaa" {
+					return "", errors.New("sandbox mango-aaa is not running")
+				}
+				return seatRead(seatFiles()), nil
+			},
+		},
+		{
+			name: "a text the parser refuses",
+			read: func(_ context.Context, name string) (string, error) {
+				if name == "mango-aaa" {
+					return "@@ cpu.stat @@\nusage_usec 1000\n", nil
+				}
+				return seatRead(seatFiles()), nil
+			},
+		},
+	} {
+		townRoot := seatTown(t)
+		writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-aaa", Rig: "gastown"})
+		writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-zzz", Rig: "gastown"})
+		tick, err := NewSeatSource(townRoot, &fakeSeatExec{read: test.read}, &fakeClock{now: seatTickNow()}, time.Second).Tick(context.Background())
+		if err != nil {
+			t.Errorf("%s: tick: %v", test.name, err)
+			continue
+		}
+		if len(tick.Rows) != 1 || tick.Rows[0].Name != "mango-zzz" {
+			t.Errorf("%s: rows = %+v, want only mango-zzz's", test.name, tick.Rows)
+		}
+		if len(tick.Skipped) != 1 || tick.Skipped[0].Seat != "mango-aaa" || tick.Skipped[0].Err == nil {
+			t.Errorf("%s: skipped = %+v, want mango-aaa with its reason", test.name, tick.Skipped)
+		}
+	}
+}
+
+// TestSandboxSourceTickInvalidName is the bead's acceptance: a name that fails
+// validation is never passed to the exec seam (gt-a24bcc).
+func TestSandboxSourceTickInvalidName(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		write  func(t *testing.T, townRoot string)
+		skipOn string
+	}{
+		{
+			name: "a session name that is not a DNS label",
+			write: func(t *testing.T, townRoot string) {
+				t.Helper()
+				// The record writer accepts this session name, so a town can
+				// really hold it; it is not a name an exec may address.
+				writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "Mango_toast", Rig: "gastown"})
+			},
+			skipOn: "Mango_toast",
+		},
+		{
+			name: "a record that names no session",
+			write: func(t *testing.T, townRoot string) {
+				t.Helper()
+				dir := session.SandboxRegistryDir(townRoot)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("creating the registry: %v", err)
+				}
+				path := filepath.Join(dir, "no-seat.json")
+				if err := os.WriteFile(path, []byte(`{"session":"","rig":"gastown"}`), 0o644); err != nil {
+					t.Fatalf("writing %s: %v", path, err)
+				}
+			},
+			skipOn: "no-seat",
+		},
+	} {
+		townRoot := seatTown(t)
+		test.write(t, townRoot)
+		writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-zzz", Rig: "gastown"})
+		runner := &fakeSeatExec{read: func(context.Context, string) (string, error) {
+			return seatRead(seatFiles()), nil
+		}}
+		tick, err := NewSeatSource(townRoot, runner, &fakeClock{now: seatTickNow()}, time.Second).Tick(context.Background())
+		if err != nil {
+			t.Errorf("%s: tick: %v", test.name, err)
+			continue
+		}
+		if !reflect.DeepEqual(runner.calls, []string{"mango-zzz"}) {
+			t.Errorf("%s: seats read = %v, want only mango-zzz: the refused name reached the seam", test.name, runner.calls)
+		}
+		if len(tick.Rows) != 1 || tick.Rows[0].Name != "mango-zzz" {
+			t.Errorf("%s: rows = %+v, want only mango-zzz's", test.name, tick.Rows)
+		}
+		if len(tick.Skipped) != 1 || tick.Skipped[0].Seat != test.skipOn || tick.Skipped[0].Err == nil {
+			t.Errorf("%s: skipped = %+v, want %s with its reason", test.name, tick.Skipped, test.skipOn)
+		}
+	}
+}
+
+// TestSandboxSourceTickCorruptRecord shows a record that is not a record: the
+// seat it stands for writes no row, and the seats beside it still do
+// (gt-a24bcc).
+func TestSandboxSourceTickCorruptRecord(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-zzz", Rig: "gastown"})
+	path := filepath.Join(session.SandboxRegistryDir(townRoot), "mango-aaa.json")
+	if err := os.WriteFile(path, []byte("{not a record"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	runner := &fakeSeatExec{read: func(context.Context, string) (string, error) {
+		return seatRead(seatFiles()), nil
+	}}
+
+	tick, err := NewSeatSource(townRoot, runner, &fakeClock{now: seatTickNow()}, time.Second).Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(tick.Rows) != 1 || tick.Rows[0].Name != "mango-zzz" {
+		t.Errorf("rows = %+v, want only mango-zzz's", tick.Rows)
+	}
+	if len(tick.Skipped) != 1 || tick.Skipped[0].Seat != "mango-aaa" || tick.Skipped[0].Err == nil {
+		t.Errorf("skipped = %+v, want mango-aaa with its read error", tick.Skipped)
+	}
+}
+
+// TestSandboxSourceTickTimeout covers the per-seat bound: a seat whose read
+// outlasts it writes no row, the next seat still reads, and each seat's exec is
+// handed a deadline (gt-a24bcc).
+func TestSandboxSourceTickTimeout(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTown(t)
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-aaa-hang", Rig: "gastown"})
+	writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-zzz-ok", Rig: "gastown"})
+	runner := &fakeSeatExec{read: func(ctx context.Context, name string) (string, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			return "", errors.New("the seam was called with no deadline")
+		}
+		if name != "mango-aaa-hang" {
+			return seatRead(seatFiles()), nil
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}
+
+	tick, err := NewSeatSource(townRoot, runner, &fakeClock{now: seatTickNow()}, 20*time.Millisecond).Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(tick.Rows) != 1 || tick.Rows[0].Name != "mango-zzz-ok" {
+		t.Errorf("rows = %+v, want the seat after the hung one", tick.Rows)
+	}
+	if len(tick.Skipped) != 1 || tick.Skipped[0].Seat != "mango-aaa-hang" {
+		t.Fatalf("skipped = %+v, want the hung seat", tick.Skipped)
+	}
+	if !errors.Is(tick.Skipped[0].Err, context.DeadlineExceeded) {
+		t.Errorf("the hung seat's reason = %v, want the deadline", tick.Skipped[0].Err)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"mango-aaa-hang", "mango-zzz-ok"}) {
+		t.Errorf("seats read = %v, want the hung seat and then the next", runner.calls)
+	}
+}
+
+// TestSandboxSourceTickRefusals covers what fails the whole tick: no rows, no
+// exec, and an error that names the cause (gt-a24bcc).
+func TestSandboxSourceTickRefusals(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T) (townRoot string, runner SeatExec, clock Clock)
+	}{
+		{
+			name: "no town root",
+			setup: func(*testing.T) (string, SeatExec, Clock) {
+				return "", &fakeSeatExec{}, &fakeClock{now: seatTickNow()}
+			},
+		},
+		{
+			name: "no exec seam",
+			setup: func(t *testing.T) (string, SeatExec, Clock) {
+				t.Helper()
+				return seatTown(t), nil, &fakeClock{now: seatTickNow()}
+			},
+		},
+		{
+			name: "a workspace map that will not load",
+			setup: func(t *testing.T) (string, SeatExec, Clock) {
+				t.Helper()
+				townRoot := t.TempDir()
+				writeWorkspaceMap(t, townRoot, `{"default":"","rigs":{}}`)
+				writeSeatRecord(t, townRoot, session.SandboxRecord{Session: "mango-zzz", Rig: "gastown"})
+				return townRoot, &fakeSeatExec{}, &fakeClock{now: seatTickNow()}
+			},
+		},
+		{
+			name: "a registry that cannot be listed",
+			setup: func(t *testing.T) (string, SeatExec, Clock) {
+				t.Helper()
+				townRoot := seatTown(t)
+				dir := session.SandboxRegistryDir(townRoot)
+				if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+					t.Fatalf("creating .runtime: %v", err)
+				}
+				// A regular file where the registry belongs: the listing fails
+				// with something other than "no such directory", the case that
+				// must not read as a town with no seat.
+				if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+					t.Fatalf("writing %s: %v", dir, err)
+				}
+				return townRoot, &fakeSeatExec{}, &fakeClock{now: seatTickNow()}
+			},
+		},
+	} {
+		townRoot, runner, clock := test.setup(t)
+		tick, err := NewSeatSource(townRoot, runner, clock, time.Second).Tick(context.Background())
+		if err == nil {
+			t.Errorf("%s: no error, tick %+v", test.name, tick)
+			continue
+		}
+		if !reflect.DeepEqual(tick, SeatTick{}) {
+			t.Errorf("%s: error with tick %+v, want none", test.name, tick)
+		}
+		if fake, ok := runner.(*fakeSeatExec); ok && len(fake.calls) != 0 {
+			t.Errorf("%s: the seam was called for %v, want no exec", test.name, fake.calls)
+		}
+	}
+}
+
+// TestSandboxSourceTickNoSeats shows a town that never ran a sandbox: no rows,
+// no skip, and no error (gt-a24bcc).
+func TestSandboxSourceTickNoSeats(t *testing.T) {
+	t.Parallel()
+	runner := &fakeSeatExec{}
+	tick, err := NewSeatSource(t.TempDir(), runner, &fakeClock{now: seatTickNow()}, time.Second).Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(tick.Rows) != 0 || len(tick.Skipped) != 0 {
+		t.Errorf("tick = %+v, want no row and no skip", tick)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("the seam was called for %v, want no exec", runner.calls)
 	}
 }
