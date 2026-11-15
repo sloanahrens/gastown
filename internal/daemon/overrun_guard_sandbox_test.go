@@ -192,3 +192,91 @@ func TestOverrunSandboxGitSaveCommitsAndPushesTheDirtyClone(t *testing.T) {
 		t.Errorf("the host stub moved to %q, want it left at %q: the stub's worktree is not the seat's work", tip, stubBase)
 	}
 }
+
+// TestOverrunSandboxCloneDirtyCheckReadsTheCloneNotTheCleanStub proves the
+// late dirty check, the read the stop makes before the sandbox is removed,
+// examines the sandbox seat's clone and not its host stub. The clone holds an
+// edit the seat staged and never committed; the stub is a clean checkout of
+// origin's main. A check that read the stub would answer clean and let the
+// sandbox, and the only copy of the edit, be deleted.
+func TestOverrunSandboxCloneDirtyCheckReadsTheCloneNotTheCleanStub(t *testing.T) {
+	t.Parallel()
+	const (
+		clone      = "/sandbox/gt/gastown/polecats/capable/gastown"
+		stagedFile = "internal/foo.go"
+	)
+	script := &overrunSandboxSaveScript{
+		clone: overrunSandboxSaveClone{branch: stopSeat.Branch, head: preCommitSHA, wipCommit: wipSHA},
+		answers: map[string]overrunSandboxSaveAnswer{
+			// The clone holds one staged modification: the seat ran git add and
+			// was stopped before it committed.
+			"status --porcelain -uall": {out: "M  " + stagedFile + "\n"},
+			// The status read's skip-worktree lookup (sparse checkout), which finds
+			// none here.
+			"ls-files -v -z": {out: ""},
+		},
+	}
+
+	d, _ := newOverrunDaemon(t, false)
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	d.readSandboxRecord = func(townRoot, name string) (session.SandboxRecord, bool, error) {
+		return *overrunStopSandboxRecord(clone), true, nil
+	}
+	d.sandboxGitRunnerFn = func(townRoot string, rec session.SandboxRecord) (func(dir string, args ...string) ([]byte, error), error) {
+		if rec.WorkDir != clone {
+			t.Errorf("the in-sandbox runner was built for %q, want the record's clone %q", rec.WorkDir, clone)
+		}
+		return func(dir string, args ...string) ([]byte, error) { return script.run(t, dir, args...) }, nil
+	}
+
+	// The host stub: a clean checkout of origin's main at the seat's host
+	// worktree, so a dirty check that read it would answer clean. The opener
+	// records every call, and a sandbox seat must never make one.
+	stub := gitfake.New()
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	stub.InitBare(t, origin)
+	stub.Commit(t, origin, "main", "initial", map[string]string{"a.txt": "a\n"})
+	hostWork := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	stub.Clone(t, origin, hostWork)
+	hostGit, ok := stub.Open(hostWork).(daemonGit)
+	if !ok {
+		t.Fatalf("the gitfake stub does not implement daemonGit for %s", hostWork)
+	}
+	if status, err := hostGit.Status(); err != nil || !status.Clean {
+		t.Fatalf("the host stub reads %+v, %v; want a clean checkout, or the test proves nothing", status, err)
+	}
+	var hostOpens []string
+	d.openGitFn = func(dir string) daemonGit {
+		hostOpens = append(hostOpens, dir)
+		g, ok := stub.Open(dir).(daemonGit)
+		if !ok {
+			t.Fatalf("the gitfake stub does not implement daemonGit for %s", dir)
+		}
+		return g
+	}
+
+	dirty, err := d.overrunWorktreeDirty(stopSeat)
+
+	if err != nil {
+		t.Fatalf("dirty check = %v, want the clone's staged edit read as dirty", err)
+	}
+	if !dirty {
+		t.Fatal("the sandbox clone's uncommitted edit was read as clean: the check read the host stub instead")
+	}
+	// The check's one status read is two calls: git status, and the
+	// skip-worktree lookup its parser makes after it. Nothing else runs.
+	want := []overrunSandboxGitCall{
+		{dir: clone, args: []string{"status", "--porcelain", "-uall"}},
+		{dir: clone, args: []string{"ls-files", "-v", "-z"}},
+	}
+	if !slices.EqualFunc(script.calls, want, func(a, b overrunSandboxGitCall) bool {
+		return a.dir == b.dir && slices.Equal(a.args, b.args)
+	}) {
+		t.Errorf("in-sandbox calls = %v, want one status read in the clone %q: %v", script.calls, clone, want)
+	}
+	if len(hostOpens) != 0 {
+		t.Errorf("the dirty check opened the host worktree for a sandbox seat: %v", hostOpens)
+	}
+}
