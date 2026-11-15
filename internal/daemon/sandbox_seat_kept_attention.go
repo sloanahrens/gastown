@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // keptSeatAttentionAfter is how long a kept sandbox seat may stand before the
@@ -16,12 +17,23 @@ import (
 // (gt-l38v7r).
 const keptSeatAttentionAfter = 30 * time.Minute
 
+// retiredRecordKeepReason is the keep reason a seat whose intent record does not
+// say stop carries: sandbox_seat_end.go's keepReason case for !Retired. A seat
+// slung new work keeps this reason, because its record is the new run's and
+// nothing has asked the new run to stop, so the reason alone is not a seat to
+// wake anyone for (gt-jw437c).
+const retiredRecordKeepReason = "the seat's record does not say stop: something still wants it"
+
 // collectKeptSandboxSeats raises one high item per kept sandbox seat whose
 // record's since is more than keptSeatAttentionAfter before now. The item names
 // the seat, its bead and the age, and carries the daemon's own keep reason
 // verbatim, so the overseer reads the reason the keep gave and never a guess at
 // it. The key is the seat, so a seat raises one item however many ticks it stays
 // kept, and the item clears when the record is gone.
+//
+// A seat that carries the retired-record reason while its polecat hooks a
+// different bead that is still open or hooked is not raised: that is a seat
+// slung new work, not one waiting for the overseer (gt-jw437c).
 //
 // A seat whose gateway count cannot be kept in its record (the tally's alarm) is
 // raised at once, naming the alarm, whatever the record says: a record that
@@ -66,6 +78,20 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 		if tally.alarm != "" {
 			reason = tally.alarm
 		}
+		// A seat slung new work since its record was written carries the
+		// retired-record reason, which is exactly what a re-slung polecat's
+		// record says: nothing has asked its new run to stop. It is not a kept
+		// seat to wake anyone for (gt-jw437c).
+		if reason == retiredRecordKeepReason {
+			reSlung, err := s.keptSeatReSlung(seat)
+			if err != nil {
+				// A hook that cannot be read is never a re-sling: the seat
+				// raises as it did before, and the log says why (gt-jw437c).
+				s.d.logger.Printf("attention: kept sandbox seat %s/%s: %v", seat.Rig, seat.Name, err)
+			} else if reSlung {
+				continue
+			}
+		}
 		out = append(out, keptSeatItem(seat.Rig, seat.Name, seat.Bead, parkedAge(kept), reason))
 	}
 	alarmOnly := make([]string, 0, len(tallies))
@@ -80,6 +106,37 @@ func (s *attentionSources) collectKeptSandboxSeats(_ context.Context) ([]attenti
 		out = append(out, keptSeatItem(rig, name, "", "with no readable record", tallies[key].alarm))
 	}
 	return out, nil
+}
+
+// keptSeatReSlung reports whether the polecat's agent bead now hooks a bead
+// other than the one the seat's record names, and that bead is still open or
+// hooked: the shape of a seat slung new work after its record was written. The
+// hook is read the way the patrol scan reads a polecat's hook
+// (patrolScanHost.AgentRecord), and the bead it names the way the scan reads a
+// work bead.
+//
+// Every failed read is the error, never "no re-sling": a hook this cannot read
+// leaves the seat raising as it did before, because a re-sling is the one
+// answer that withholds an item (gt-jw437c).
+func (s *attentionSources) keptSeatReSlung(seat KeptSandboxSeat) (bool, error) {
+	h := &patrolScanHost{d: s.d}
+	rec, err := h.AgentRecord(seat.Rig, seat.Name)
+	if err != nil {
+		return false, fmt.Errorf("cannot read its hook: %w", err)
+	}
+	hook := strings.TrimSpace(rec.HookBead)
+	if hook == "" || hook == strings.TrimSpace(seat.Bead) {
+		return false, nil
+	}
+	issue, err := h.readBeads(seat.Rig).Show(hook)
+	if err != nil {
+		return false, fmt.Errorf("cannot read the hooked bead %s: %w", hook, err)
+	}
+	if issue == nil {
+		return false, fmt.Errorf("the hooked bead %s reads as no bead", hook)
+	}
+	status := beads.IssueStatus(issue.Status)
+	return status == beads.StatusOpen || status == beads.IssueStatusHooked, nil
 }
 
 // keptSeatItem is the kept-seat item of one seat, carrying reason verbatim.
