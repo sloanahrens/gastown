@@ -32,6 +32,7 @@ var knownOwnerDataFileNamers = map[string]string{
 	"internal/daemon/image_pins_read.go":          "reader: parseImagePins expands image-pins through config.ExpandForgeOwner",
 	"internal/daemonimage/build.go":               "comment: the pins file Plan names",
 	"internal/daemonimage/pins.go":                "reader: ParsePins, and PinsPath",
+	"internal/daemon/image_pins_bead.go":          "the refresh bead's label and command name the pins files; it reads no data file",
 	"internal/daemon/image_pins_plan.go":          "attention key name only (image-pins-refresh-stuck); it reads no data file",
 	"internal/polecat/imagectx/imagectx.go":       "reader: ParseSeedURLs expands and refuses the placeholder",
 	"internal/polecat/imagectx/cmd/build/main.go": "reader: readFile expands image-pins and seed-urls",
