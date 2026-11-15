@@ -28,7 +28,7 @@ func (f *fakeTestSocketProbe) ListSessions() ([]string, error) {
 func (f *fakeTestSocketProbe) GetPanePID(string) (string, error) { return "4242", nil }
 
 func (f *fakeTestSocketProbe) PaneCurrentPath(string) (string, error) {
-	return "/private/var/folders/xy/T", nil
+	return "/var/folders/xy/T", nil
 }
 
 func (f *fakeTestSocketProbe) KillServer() error {
@@ -94,7 +94,7 @@ func TestTmuxTestSocketCheck_ReportsLeftover(t *testing.T) {
 	joined := strings.Join(result.Details, "\n")
 	for _, want := range []string{
 		"gt-test-91506", "owner pid 91506 is gone", "gt-test-modeA-2",
-		"pane_pid=4242", "cwd=/private/var/folders/xy/T",
+		"pane_pid=4242", "cwd=/var/folders/xy/T",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("details missing %q:\n%s", want, joined)

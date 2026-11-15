@@ -18,13 +18,13 @@ func crewHooksWrite(t *testing.T, p, content string) {
 	}
 }
 
-// crewHooksTown makes a Mac town holding one main crew clone, gastown/crew/sloan.
+// crewHooksTown makes a Mac town holding one main crew clone, gastown/crew/alice.
 // A nil config leaves its .git/config absent. It returns the town root and the
 // clone path.
 func crewHooksTown(t *testing.T, config *string) (string, string) {
 	t.Helper()
 	town := t.TempDir()
-	clone := filepath.Join(town, "gastown", "crew", "sloan")
+	clone := filepath.Join(town, "gastown", "crew", "alice")
 	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestMacCrewHooksPassesHealthyClones(t *testing.T) {
 			if tc.worktree {
 				// A linked worktree whose .git is a file has no config of its own. Scanning
 				// it would read a missing .git/config and report an error.
-				crewHooksWrite(t, filepath.Join(town, "gastown", "crew", "sloan-wt", ".git"), "gitdir: /nonexistent/gitdir\n")
+				crewHooksWrite(t, filepath.Join(town, "gastown", "crew", "alice-wt", ".git"), "gitdir: /nonexistent/gitdir\n")
 			}
 
 			res := crewHooksRun(town)
