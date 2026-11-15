@@ -1885,6 +1885,13 @@ func (b *Beads) run(args ...string) ([]byte, error) {
 // --body-file=- that read multi-line content from stdin (avoids embedding
 // newlines in --description, which bd 1.0.3+ rejects).
 func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
+	return b.runWithStdinCtx(nil, stdinData, args...)
+}
+
+// runWithStdinCtx is runWithStdin with a per-call context: a non-nil ctx
+// parents the subprocess deadline, so a caller's own budget bounds the call
+// instead of the wrapper's (WithCallContext) or the subprocess budget.
+func (b *Beads) runWithStdinCtx(ctx context.Context, stdinData []byte, args ...string) ([]byte, error) {
 	// bd v0.59+ requires --flat for --json to produce JSON output on "list" commands.
 	// Without --flat, bd list --json silently returns human-readable tree format,
 	// causing all JSON parsing to fail. Inject --flat before --allow-stale prepend
@@ -1902,7 +1909,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	runEnv = b.applyAccessMode(runEnv, args)
 	runEnv = applyNewDatabaseOptIn(runEnv, args)
 
-	out, err := b.runBdWithRetry(stdinData, runEnv, args)
+	out, err := b.runBdWithRetry(ctx, stdinData, runEnv, args)
 	if err != nil {
 		return out, err
 	}
@@ -1956,7 +1963,7 @@ func (b *Beads) runMachine(args ...string) ([]byte, error) {
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir, "BD_MACHINE=1")
 	runEnv = b.applyAccessMode(runEnv, args)
-	return b.runBdWithRetry(nil, runEnv, args)
+	return b.runBdWithRetry(nil, nil, runEnv, args)
 }
 
 // runReadyCLI executes a bd ready --json invocation with BD_JSON_ENVELOPE=1
@@ -1977,13 +1984,13 @@ func (b *Beads) runReadyCLI(args ...string) ([]byte, error) {
 	// cannot ride another process's auto-commit mode, the way every other
 	// pinned call does (applyAccessMode).
 	runEnv = b.applyAccessMode(runEnv, args)
-	return b.runBdWithRetry(nil, runEnv, args)
+	return b.runBdWithRetry(nil, nil, runEnv, args)
 }
 
 // runBdOnce executes exactly one bd subprocess and is where every pinned and
 // routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
 // attempt here keeps the --flat handling per invocation.
-func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]byte, error) {
+func (b *Beads) runBdOnce(callCtx context.Context, stdinData []byte, runEnv []string, args []string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
@@ -1993,9 +2000,13 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]b
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
 	// The context covers both the initial attempt and the --flat retry. A
-	// caller with its own budget (WithCallContext) parents the deadline, so
-	// its budget ends the call instead of the subprocess budget.
-	parent := b.callCtx
+	// caller with its own budget (WithCallContext, or the ctx a method takes)
+	// parents the deadline, so its budget ends the call instead of the
+	// subprocess budget. A per-call ctx is the more specific of the two.
+	parent := callCtx
+	if parent == nil {
+		parent = b.callCtx
+	}
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -2060,7 +2071,7 @@ func (b *Beads) runWithRouting(args ...string) ([]byte, error) {
 	if machineExempt(args) {
 		env = WithoutMachineEnv(env)
 	}
-	out, err := b.runBdWithRetry(nil, env, args)
+	out, err := b.runBdWithRetry(nil, nil, env, args)
 	if err != nil {
 		return out, err
 	}
@@ -2125,7 +2136,7 @@ func gateCheckLine(text string) string {
 // only, its stderr dropped inside run.
 func (b *Beads) gateCheckStreams(args []string) (stdout, stderr []byte, err error) {
 	if b.plain {
-		return b.runPlainOut(nil, args)
+		return b.runPlainOut(nil, nil, args)
 	}
 	out, err := b.run(args...)
 	return out, nil, err
@@ -3766,7 +3777,7 @@ func (b *Beads) runText(args ...string) ([]byte, error) {
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	runEnv = forceBDReadOnly(WithoutMachineEnv(runEnv))
-	return b.runBdWithRetry(nil, runEnv, args)
+	return b.runBdWithRetry(nil, nil, runEnv, args)
 }
 
 // ListByIDs reads the issues with the given ids from c in one `bd list --id`

@@ -161,6 +161,8 @@ func ArgsAreReadOnly(args []string) bool {
 		return len(args) > 1 && (args[1] == "list" || args[1] == "show")
 	case "kv":
 		return len(args) > 1 && (args[1] == "get" || args[1] == "list")
+	case "sample":
+		return len(args) > 1 && args[1] == "list"
 	case "message":
 		return len(args) > 1 && args[1] == "thread"
 	case "mol":

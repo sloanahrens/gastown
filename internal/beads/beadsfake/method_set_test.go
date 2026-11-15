@@ -185,6 +185,8 @@ var engineVerbs = map[string]string{
 	"MigrateRepoID":                "moves a repo's beads to the prefix's canonical database (rig manager)",
 	"PreloadBeads":                 "warms the wisps and issues snapshots from one bd sql read",
 	"PreloadMergeRequests":         "warms the merge-request cache for a fleet-wide branch scan",
+	"ReadCostSamples":              "reads cost sample rows through bd sample list; its Client/Admin entry and fake land in gt-qlz5eg",
+	"WriteCostSample":              "writes a cost sample row through bd sample add; its Client/Admin entry and fake land in gt-qlz5eg",
 	"PurgeClosedEphemeral":         "deletes closed wisps past a grace period",
 	"RecordReassignment":           "records a reassignment in the issue's notes (polecat reuse)",
 	"ReopenUnassigned":             "returns an in_progress, unassigned issue to open (doctor repair)",

@@ -288,14 +288,15 @@ func (e *CLIError) Unwrap() []error {
 	return []error{e.Err, ErrUnavailable}
 }
 
-// runPlain runs one bd call for a plain wrapper.
-func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
-	stdout, stderr, err := b.runPlainOut(stdin, args)
+// runPlain runs one bd call for a plain wrapper. A non-nil ctx is the call's
+// parent, so a caller's own budget bounds it.
+func (b *Beads) runPlain(ctx context.Context, stdin []byte, args []string) ([]byte, error) {
+	stdout, stderr, err := b.runPlainOut(ctx, stdin, args)
 	if err != nil && bdRejectedFlat(string(stderr)) {
 		// run injects --flat into every "list --json", and a bd older than
 		// v0.59 refuses it; retry once without the flag, as runBdOnce does for
 		// the policy path.
-		retried, _, retryErr := b.runPlainOut(stdin, stripFlatFlag(args))
+		retried, _, retryErr := b.runPlainOut(ctx, stdin, stripFlatFlag(args))
 		return retried, retryErr
 	}
 	return stdout, err
@@ -304,10 +305,13 @@ func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
 // runPlainOut is runPlain that keeps bd's stderr on success too, for a call
 // whose answer bd writes there: machine mode keeps stdout for the JSON
 // envelope.
-func (b *Beads) runPlainOut(stdin []byte, args []string) (stdout, stderr []byte, err error) {
-	ctx := context.Background()
-	if b.callCtx != nil {
+func (b *Beads) runPlainOut(callCtx context.Context, stdin []byte, args []string) (stdout, stderr []byte, err error) {
+	ctx := callCtx
+	if ctx == nil {
 		ctx = b.callCtx
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if b.plainTimeout > 0 {
 		var cancel context.CancelFunc
