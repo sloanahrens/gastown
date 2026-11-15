@@ -14,7 +14,7 @@ package taskmap
 func init() {
 	Register(
 		Entry{Path: "crew restart", Group: "seats", Use: "Use this when a crew member has become confused or stuck and needs a clean start with a fresh session, without a handoff note.", Check: "gt crew status <name> shows the session running again"},
-		Entry{Path: "crew stale", Group: "seats", Use: "Use this to find the crew clones that have gone a day without a fetch and are missing commits from origin/main, before choosing which to refresh.", Check: "empty output means every crew clone was fetched within a day"},
+		Entry{Path: "crew stale", Group: "seats", Use: "Use this to find the crew clones that have not fetched within a day, and any whose state could not be read, before choosing which to refresh.", Check: "empty output means every crew clone was fetched within a day"},
 		Entry{Path: "crew start", Group: "seats", Use: "Use this when a rig's crew members, or the ones you name, need a running session, creating any workspace that does not exist yet.", Check: "gt crew status <name> shows the session running"},
 		Entry{Path: "crew status", Group: "seats", Use: "Use this to see one crew member's session state, git state, branch and mail inbox, or every crew member's across all rigs.", Check: "the output names the session state and the workspace's git status"},
 		Entry{Path: "crew stop", Group: "seats", Use: "Use this when a crew member's session must end, by name, for a whole rig, or with --all, keeping its output for debugging unless --force skips the capture.", Check: "gt crew status <name> shows the session no longer running"},
