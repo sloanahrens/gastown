@@ -3,8 +3,11 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/fixrecurrence"
 )
@@ -12,8 +15,7 @@ import (
 // fix_held.go is the fix-recurrence signal's rate (gt-t9vnda): it reads the
 // rig's beads once, the way `gt fix-recurrence scan` does, and hands
 // fixrecurrence.Report the bugs the window closed and the claims the store
-// already carries against them. The `gt fix-held` command that prints the
-// result lands with gt-tiaczu.
+// already carries against them. `gt fix-held` prints that result (gt-tiaczu).
 
 // The labels Plan writes on a citing bead when it records a recurrence or a
 // same-class claim (internal/fixrecurrence/plan.go). Each names a claim from
@@ -154,4 +156,162 @@ func fixHeldLabel(label string) (fixrecurrence.Relationship, string, bool) {
 		return fixrecurrence.SameClass, old, true
 	}
 	return "", "", false
+}
+
+// fixHeldDefaultSince is the window a run reports without --since.
+const fixHeldDefaultSince = "30d"
+
+// fixHeldRelationships is the report's row order: every relationship the
+// package defines, so a relationship nothing claimed still shows its zero
+// rather than leaving the reader to notice a missing row.
+var fixHeldRelationships = []fixrecurrence.Relationship{
+	fixrecurrence.Recurrence,
+	fixrecurrence.SameClass,
+	fixrecurrence.Regression,
+	fixrecurrence.FollowUp,
+	fixrecurrence.Reference,
+}
+
+// fixHeldJSON is the report's --json shape: the same fields the text prints,
+// with the per-relationship counts as one object keyed by the relationship.
+type fixHeldJSON struct {
+	Held            int            `json:"held"`
+	Total           int            `json:"total"`
+	Rate            float64        `json:"rate"`
+	PerRelationship map[string]int `json:"per_relationship"`
+	Chronic         []string       `json:"chronic"`
+}
+
+func init() {
+	rootCmd.AddCommand(newFixHeldCmd(realFixRecurrenceDeps()))
+}
+
+// newFixHeldCmd is `gt fix-held`: the report over the rig of the caller, read
+// once. The deps are the argument so a test drives it with a fake runner and a
+// fixed clock.
+func newFixHeldCmd(d fixRecurrenceDeps) *cobra.Command {
+	var since string
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:     "fix-held",
+		GroupID: GroupDiag,
+		Short:   "Report the fix-held rate over the bugs a window closed",
+		Long: `Read the current rig's beads and report the fix-held rate over the window
+ending now: the bugs that closed in it, and the ones no claim of a failed fix
+points at. A claim is a typed dependency edge or a label the fix-recurrence plan
+writes, from a bead created after the cited bug closed.
+
+--since sets the window as Nd for days or a Go duration such as 36h. The window
+includes a bug closed exactly --since ago and stops at the moment the report
+runs. A bug whose close time the rows do not carry is an error rather than a bug
+counted as held, and a bead read that fails is an error: a partial list is never
+reported as the rig's rate.
+
+The report prints the held count and rate, one line per relationship, and the
+chronic list -- the bugs two or more citing beads mark as failed fixes. --json
+prints the same fields as one JSON object.
+
+Exit status: 0 when the report printed, 2 when it could not be made: the rig
+directory or its beads cannot be read, a row is missing a time, --since is not
+a valid window, or the report cannot be written.
+
+Examples:
+  gt fix-held
+  gt fix-held --since 7d
+  gt fix-held --json`,
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runFixHeldCmd(cmd, d, since, asJSON)
+		},
+	}
+	cmd.Flags().StringVar(&since, "since", fixHeldDefaultSince, "Report the window ending now: Nd or a Go duration such as 36h")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Print the report as one JSON object")
+	return cmd
+}
+
+// runFixHeldCmd makes the report and prints it. A failure is printed by
+// fixHeldFail, so no caller sees a partial report and exit 0.
+func runFixHeldCmd(cmd *cobra.Command, d fixRecurrenceDeps, since string, asJSON bool) error {
+	now := d.now()
+	from, err := parseSince(since, now)
+	if err != nil {
+		return fixHeldFail(cmd, err)
+	}
+	result, err := fixHeldReport(d, from, now)
+	if err != nil {
+		return fixHeldFail(cmd, err)
+	}
+	if asJSON {
+		if err := writeFixHeldJSON(cmd.OutOrStdout(), result); err != nil {
+			return fixHeldFail(cmd, err)
+		}
+		return nil
+	}
+	if err := printFixHeldReport(cmd.OutOrStdout(), result); err != nil {
+		return fixHeldFail(cmd, err)
+	}
+	return nil
+}
+
+// fixHeldFail prints a failed run's error on stderr, naming the command, and
+// exits 2 the way `gt usage report` does: the command is silent to main, so
+// without this line the error would be lost, and a report stream that fails to
+// take the report is the same failure as a read that fails, not a usage error.
+func fixHeldFail(cmd *cobra.Command, err error) error {
+	fmt.Fprintf(cmd.ErrOrStderr(), "gt fix-held: %v\n", err)
+	return NewSilentExit(2)
+}
+
+// printFixHeldReport writes the report as one line per field, checking every
+// write so a report cut short fails instead of looking like a short one.
+func printFixHeldReport(w io.Writer, result fixrecurrence.ReportResult) error {
+	if _, err := fmt.Fprintf(w, "held %d of %d (rate %.2f)\n", result.Held, result.Total, result.Rate); err != nil {
+		return fmt.Errorf("writing the report: %w", err)
+	}
+	for _, rel := range fixHeldRelationships {
+		if _, err := fmt.Fprintf(w, "%s %d\n", rel, result.PerRelationship[rel]); err != nil {
+			return fmt.Errorf("writing the report: %w", err)
+		}
+	}
+	if _, err := fmt.Fprintf(w, "chronic: %s\n", fixHeldChronicLine(result.Chronic)); err != nil {
+		return fmt.Errorf("writing the report: %w", err)
+	}
+	return nil
+}
+
+// fixHeldChronicLine is the chronic list on one line: the ids Report sorted
+// against each other, and "none" for a window no bug failed twice.
+func fixHeldChronicLine(chronic []string) string {
+	if len(chronic) == 0 {
+		return "none"
+	}
+	return strings.Join(chronic, ", ")
+}
+
+// writeFixHeldJSON writes the report as one JSON object holding the fields the
+// text prints. Every relationship is a key, with its zero, so a reader of
+// either form totals the same claims.
+func writeFixHeldJSON(w io.Writer, result fixrecurrence.ReportResult) error {
+	perRelationship := make(map[string]int, len(fixHeldRelationships))
+	for _, rel := range fixHeldRelationships {
+		perRelationship[string(rel)] = result.PerRelationship[rel]
+	}
+	chronic := result.Chronic
+	if chronic == nil {
+		chronic = []string{}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(fixHeldJSON{
+		Held:            result.Held,
+		Total:           result.Total,
+		Rate:            result.Rate,
+		PerRelationship: perRelationship,
+		Chronic:         chronic,
+	}); err != nil {
+		return fmt.Errorf("writing the report: %w", err)
+	}
+	return nil
 }

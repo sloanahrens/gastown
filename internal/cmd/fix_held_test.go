@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -273,6 +275,250 @@ func TestFixHeldRefusesAnUnparseableList(t *testing.T) {
 	_, err := fixHeldReport(fixRecurrenceTestDeps(bd), since, until)
 	if err == nil || !strings.Contains(err.Error(), "does not parse") {
 		t.Errorf("error %v, want the unparseable list refused", err)
+	}
+}
+
+// fixHeldCmdFixture is the command tests' rig: two bugs the window's claims
+// leave held, one struck by a single recurrence, and one two citing beads fail
+// -- a recurrence and a same-class claim -- which makes it chronic. Every citing
+// bead was created after the bug it names closed.
+const fixHeldCmdFixture = `[
+  {"id":"gt-heldone","title":"fix one","issue_type":"bug","status":"closed","created_at":"2026-09-01T00:00:00Z","closed_at":"2026-10-20T00:00:00Z"},
+  {"id":"gt-heldtwo","title":"fix two","issue_type":"bug","status":"closed","created_at":"2026-09-01T00:00:00Z","closed_at":"2026-10-21T00:00:00Z"},
+  {"id":"gt-struck","title":"fix three","issue_type":"bug","status":"closed","created_at":"2026-09-01T00:00:00Z","closed_at":"2026-10-22T00:00:00Z"},
+  {"id":"gt-chronic","title":"fix four","issue_type":"bug","status":"closed","created_at":"2026-09-01T00:00:00Z","closed_at":"2026-10-23T00:00:00Z"},
+  {"id":"gt-citerone","title":"broke again","issue_type":"task","status":"open","created_at":"2026-11-01T00:00:00Z","labels":["recurrence-of:gt-struck"]},
+  {"id":"gt-citertwo","title":"broke again","issue_type":"task","status":"open","created_at":"2026-11-01T00:00:00Z","labels":["recurrence-of:gt-chronic"]},
+  {"id":"gt-citerthree","title":"another instance","issue_type":"task","status":"open","created_at":"2026-11-02T00:00:00Z","labels":["same-class-of:gt-chronic"]}
+]`
+
+// fixHeldCmdRun is one run of `gt fix-held`: what it wrote to each stream and
+// the error Execute returned.
+type fixHeldCmdRun struct {
+	stdout string
+	stderr string
+	err    error
+}
+
+// runFixHeldCmdTest runs the production command with args, the way main runs
+// it, so the flags, the read and the printing are all driven. out is the
+// command's standard output.
+func runFixHeldCmdTest(t *testing.T, d fixRecurrenceDeps, out io.Writer, args ...string) fixHeldCmdRun {
+	t.Helper()
+	cmd := newFixHeldCmd(d)
+	var stdout, stderr bytes.Buffer
+	if out != nil {
+		cmd.SetOut(out)
+	} else {
+		cmd.SetOut(&stdout)
+	}
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return fixHeldCmdRun{stdout: stdout.String(), stderr: stderr.String(), err: err}
+}
+
+// TestFixHeldCmdPrintsTheReport pins the person-readable report: the rate, one
+// line per relationship including the ones nothing claimed, and the chronic
+// list, for the default 30d window.
+func TestFixHeldCmdPrintsTheReport(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{
+			name: "claims of every kind",
+			out:  fixHeldCmdFixture,
+			want: `held 2 of 4 (rate 0.50)
+recurrence 2
+same class 1
+regression 0
+follow-up 0
+reference 0
+chronic: gt-chronic
+`,
+		},
+		{
+			name: "an empty window",
+			out:  `[]`,
+			want: `held 0 of 0 (rate 0.00)
+recurrence 0
+same class 0
+regression 0
+follow-up 0
+reference 0
+chronic: none
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &fixRecurrenceFakeBD{out: tt.out}
+			run := runFixHeldCmdTest(t, fixRecurrenceTestDeps(bd), nil)
+			if run.err != nil {
+				t.Fatalf("command failed: %v", run.err)
+			}
+			if run.stdout != tt.want {
+				t.Errorf("output:\n%s\nwant:\n%s", run.stdout, tt.want)
+			}
+			// The report is one read of the rig's beads, in the rig directory.
+			if len(bd.calls) != 1 {
+				t.Fatalf("ran bd %d times, want the one list read: %v", len(bd.calls), bd.calls)
+			}
+			if bd.dirs[0] != "/town/gastown" {
+				t.Errorf("bd ran in %q, want the rig directory", bd.dirs[0])
+			}
+		})
+	}
+}
+
+// TestFixHeldCmdPrintsJSON pins --json to one object carrying the fields the
+// text prints, with every relationship a key so the two forms total the same.
+func TestFixHeldCmdPrintsJSON(t *testing.T) {
+	t.Parallel()
+	bd := &fixRecurrenceFakeBD{out: fixHeldCmdFixture}
+	run := runFixHeldCmdTest(t, fixRecurrenceTestDeps(bd), nil, "--json")
+	if run.err != nil {
+		t.Fatalf("command failed: %v", run.err)
+	}
+	want := `{
+  "held": 2,
+  "total": 4,
+  "rate": 0.5,
+  "per_relationship": {
+    "follow-up": 0,
+    "recurrence": 2,
+    "reference": 0,
+    "regression": 0,
+    "same class": 1
+  },
+  "chronic": [
+    "gt-chronic"
+  ]
+}
+`
+	if run.stdout != want {
+		t.Errorf("output:\n%s\nwant:\n%s", run.stdout, want)
+	}
+	if len(bd.calls) != 1 {
+		t.Errorf("ran bd %d times, want the one list read: %v", len(bd.calls), bd.calls)
+	}
+}
+
+// TestFixHeldCmdKeepsTheSinceWindow pins --since: a bug that closed before the
+// window is not counted, and one inside it is.
+func TestFixHeldCmdKeepsTheSinceWindow(t *testing.T) {
+	t.Parallel()
+	bd := &fixRecurrenceFakeBD{out: `[
+  {"id":"gt-recent","title":"fix","issue_type":"bug","status":"closed","created_at":"2026-09-01T00:00:00Z","closed_at":"2026-11-10T00:00:00Z"},
+  {"id":"gt-stale","title":"fix","issue_type":"bug","status":"closed","created_at":"2026-09-01T00:00:00Z","closed_at":"2026-10-20T00:00:00Z"}
+]`}
+	run := runFixHeldCmdTest(t, fixRecurrenceTestDeps(bd), nil, "--since", "7d")
+	if run.err != nil {
+		t.Fatalf("command failed: %v", run.err)
+	}
+	if want := "held 1 of 1 (rate 1.00)\n"; !strings.HasPrefix(run.stdout, want) {
+		t.Errorf("output:\n%s\nwant it to start %q", run.stdout, want)
+	}
+}
+
+// TestFixHeldCmdRefusesABadSince pins that a --since no window can be built
+// from fails before the rig is read, with the reason on stderr.
+func TestFixHeldCmdRefusesABadSince(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		since string
+		want  string
+	}{
+		{name: "zero days", since: "0d", want: `--since "0d": days must be a whole number of at least 1`},
+		{name: "not a duration", since: "yesterday", want: `--since "yesterday": want Nd or a positive Go duration`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &fixRecurrenceFakeBD{out: `[]`}
+			run := runFixHeldCmdTest(t, fixRecurrenceTestDeps(bd), nil, "--since", tt.since)
+			if code, ok := IsSilentExit(run.err); !ok || code != 2 {
+				t.Fatalf("error %v, want a silent exit 2", run.err)
+			}
+			if !strings.Contains(run.stderr, "gt fix-held: "+tt.want) {
+				t.Errorf("stderr %q, want it to carry %q", run.stderr, tt.want)
+			}
+			if run.stdout != "" {
+				t.Errorf("output %q, want nothing printed", run.stdout)
+			}
+			if len(bd.calls) != 0 {
+				t.Errorf("ran bd %d times without a window, want none", len(bd.calls))
+			}
+		})
+	}
+}
+
+// TestFixHeldCmdReportsAReadFailure pins that a rig the command cannot read
+// fails it, with the reason on stderr and no report on stdout.
+func TestFixHeldCmdReportsAReadFailure(t *testing.T) {
+	t.Parallel()
+	bd := &fixRecurrenceFakeBD{err: errors.New("bd refused")}
+	run := runFixHeldCmdTest(t, fixRecurrenceTestDeps(bd), nil)
+	if code, ok := IsSilentExit(run.err); !ok || code != 2 {
+		t.Fatalf("error %v, want a silent exit 2", run.err)
+	}
+	if want := "gt fix-held: reading the rig's beads: bd refused"; !strings.Contains(run.stderr, want) {
+		t.Errorf("stderr %q, want it to carry %q", run.stderr, want)
+	}
+	if run.stdout != "" {
+		t.Errorf("output %q, want no partial report", run.stdout)
+	}
+}
+
+// fixHeldWriteErrorWriter fails its failAt-th write and takes every other one,
+// so the report's own check on that write is the only thing that can stop the
+// command: a check that is dropped leaves the run exiting 0.
+type fixHeldWriteErrorWriter struct {
+	failAt int
+	writes int
+}
+
+func (w *fixHeldWriteErrorWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == w.failAt {
+		return 0, errors.New("stdout closed")
+	}
+	return len(p), nil
+}
+
+// TestFixHeldCmdReportsAWriteFailure pins that a report stream that stops
+// taking the report fails the command: the header, a relationship row, the
+// chronic line and the JSON object each report the write, so a truncated
+// report never exits 0.
+func TestFixHeldCmdReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		args   []string
+		failAt int
+	}{
+		{name: "text header", failAt: 1},
+		{name: "relationship row", failAt: 3},
+		{name: "chronic line", failAt: 7},
+		{name: "json object", args: []string{"--json"}, failAt: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &fixRecurrenceFakeBD{out: fixHeldCmdFixture}
+			run := runFixHeldCmdTest(t, fixRecurrenceTestDeps(bd), &fixHeldWriteErrorWriter{failAt: tt.failAt}, tt.args...)
+			if code, ok := IsSilentExit(run.err); !ok || code != 2 {
+				t.Fatalf("error %v, want a silent exit 2", run.err)
+			}
+			if want := "gt fix-held: writing the report: stdout closed"; !strings.Contains(run.stderr, want) {
+				t.Errorf("stderr %q, want it to carry %q", run.stderr, want)
+			}
+		})
 	}
 }
 
