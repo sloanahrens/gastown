@@ -1,28 +1,8 @@
-// Package fixrecurrence reads the prose in which agents already write that a
-// bead is a recurrence of a fix that did not hold (gt-y3n4au).
 package fixrecurrence
 
 import (
 	"regexp"
 	"strings"
-)
-
-// Relationship is how a new bead stands to a closed bead it cites.
-type Relationship string
-
-// The relationships a cited bead can hold. Reference is the answer for a bead
-// that merely mentions the id: no signal phrase sits beside it.
-const (
-	// Recurrence is the symptom back after a fix: the fix did not hold.
-	Recurrence Relationship = "recurrence"
-	// SameClass is another instance of the bug the cited fix closed.
-	SameClass Relationship = "same class"
-	// Regression is a defect the cited fix introduced.
-	Regression Relationship = "regression"
-	// FollowUp is the residue of a fix that was partial.
-	FollowUp Relationship = "follow-up"
-	// Reference is a mention of the id with no signal beside it.
-	Reference Relationship = "reference"
 )
 
 // A description is read with the title classifier's tight rules only: the ones
