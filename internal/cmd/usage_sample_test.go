@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/usage"
 )
 
@@ -226,11 +228,284 @@ func TestUsageSampleRefusedStoreExitsNonZeroWithStrict(t *testing.T) {
 	}
 }
 
-func TestDefaultUsageSampleStoreRefusesAsUnwired(t *testing.T) {
+// fakeClaudePlanDeps wires the command's store to the beads fake the way
+// production wires it to the town's beads client, so the verb runs the same
+// adapter in the test.
+func fakeClaudePlanDeps(r *usageSampleRig, client beads.Client) usageSampleDeps {
+	deps := r.deps()
+	deps.openStore = func() (usage.Store, error) { return clientClaudePlanStore{client: client}, nil }
+	return deps
+}
+
+// fakeClaudePlanRows reads every claude_plan row the fake holds, newest first.
+func fakeClaudePlanRows(t *testing.T, f *beadsfake.Fake) []beads.Sample {
+	t.Helper()
+	rows, err := f.ReadCostSamples(context.Background(), beads.SampleKindClaudePlan, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("ReadCostSamples: %v", err)
+	}
+	return rows
+}
+
+func TestUsageSampleWritesOneClaudePlanRowToTheBeadsStore(t *testing.T) {
 	t.Parallel()
-	_, err := defaultUsageSampleDeps().openStore()
-	if !errors.Is(err, usage.ErrNoStore) {
-		t.Errorf("openStore err = %v, want it to wrap usage.ErrNoStore", err)
+	r := newUsageSampleRig()
+	// bd stores At at second precision, so the row's time is the injected clock
+	// cut to the second rather than the clock's sub-second value.
+	r.now = r.now.Add(350 * time.Millisecond)
+	f := beadsfake.New()
+
+	stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, f), statusLinePayload("41", "12"), "--strict")
+	if err != nil {
+		t.Fatalf("exit err = %v, want nil; stderr = %q", err, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want none", stderr)
+	}
+	rows := fakeClaudePlanRows(t, f)
+	if len(rows) != 1 {
+		t.Fatalf("claude_plan rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.Kind != beads.SampleKindClaudePlan {
+		t.Errorf("kind = %q, want %q", row.Kind, beads.SampleKindClaudePlan)
+	}
+	if want := r.now.Truncate(time.Second); !row.At.Equal(want) {
+		t.Errorf("at = %v, want the injected clock at second precision %v", row.At, want)
+	}
+	if row.FiveHourPct == nil || *row.FiveHourPct != 41 || row.SevenDayPct == nil || *row.SevenDayPct != 12 {
+		t.Errorf("percentages = %v, %v; want 41, 12", row.FiveHourPct, row.SevenDayPct)
+	}
+	if row.FiveHourResetsAt == nil || row.FiveHourResetsAt.Unix() != 1794400000 ||
+		row.SevenDayResetsAt == nil || row.SevenDayResetsAt.Unix() != 1794700000 {
+		t.Errorf("resets = %v, %v; want the payload's epoch seconds", row.FiveHourResetsAt, row.SevenDayResetsAt)
+	}
+	balance, err := f.ReadCostSamples(context.Background(), beads.SampleKindDeepSeekBalance, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("ReadCostSamples(deepseek_balance): %v", err)
+	}
+	if len(balance) != 0 {
+		t.Errorf("deepseek_balance rows = %d, want 0: the reading is a claude_plan row", len(balance))
+	}
+}
+
+func TestUsageSampleDedupesAgainstTheBeadsStore(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	f := beadsfake.New()
+	deps := fakeClaudePlanDeps(r, f)
+	payload := statusLinePayload("41", "12")
+	start := r.now
+
+	feed := func(at time.Duration) {
+		t.Helper()
+		r.now = start.Add(at)
+		if stderr, err := runUsageSampleCmd(t, deps, payload); err != nil || stderr != "" {
+			t.Fatalf("feed at +%v: err=%v stderr=%q", at, err, stderr)
+		}
+	}
+	feed(0)
+	feed(time.Minute)
+	if rows := fakeClaudePlanRows(t, f); len(rows) != 1 {
+		t.Fatalf("rows after two feeds inside ten minutes = %d, want 1", len(rows))
+	}
+	feed(11 * time.Minute)
+	if rows := fakeClaudePlanRows(t, f); len(rows) != 2 {
+		t.Errorf("rows after a feed past ten minutes = %d, want 2", len(rows))
+	}
+}
+
+func TestUsageSampleRefusesANewestRowWithNoReading(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		drop    func(*beads.Sample)
+		missing string
+	}{
+		{"five-hour percentage", func(s *beads.Sample) { s.FiveHourPct = nil }, "five_hour_pct"},
+		{"five-hour reset", func(s *beads.Sample) { s.FiveHourResetsAt = nil }, "five_hour_resets_at"},
+		{"seven-day percentage", func(s *beads.Sample) { s.SevenDayPct = nil }, "seven_day_pct"},
+		{"seven-day reset", func(s *beads.Sample) { s.SevenDayResetsAt = nil }, "seven_day_resets_at"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUsageSampleRig()
+			f := beadsfake.New()
+			// A claude_plan row missing one reading is not a reading. The fake
+			// stores it as bd would: the kind and time alone pass its checks.
+			at := r.now.Add(-time.Hour)
+			pct41, pct12 := 41.0, 12.0
+			fiveResets := time.Unix(1794400000, 0).UTC()
+			sevenResets := time.Unix(1794700000, 0).UTC()
+			row := beads.Sample{
+				Kind:             beads.SampleKindClaudePlan,
+				At:               at,
+				FiveHourPct:      &pct41,
+				FiveHourResetsAt: &fiveResets,
+				SevenDayPct:      &pct12,
+				SevenDayResetsAt: &sevenResets,
+			}
+			tc.drop(&row)
+			if err := f.WriteCostSample(context.Background(), row); err != nil {
+				t.Fatalf("seed the incomplete row: %v", err)
+			}
+
+			stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, f), statusLinePayload("41", "12"), "--strict")
+			if err == nil {
+				t.Fatal("exit err = nil, want non-zero: a row with no reading must not read as a plan")
+			}
+			assertOneStderrLine(t, stderr)
+			if !strings.Contains(stderr, tc.missing) {
+				t.Errorf("stderr = %q, want the missing reading %q named", stderr, tc.missing)
+			}
+			if rows := fakeClaudePlanRows(t, f); len(rows) != 1 {
+				t.Errorf("rows = %d, want the one seeded row: the reading was not written", len(rows))
+			}
+		})
+	}
+}
+
+// racingClient appends another writer's row on the store's re-read, after the
+// command read the newest row itself. The store's compare must see it.
+type racingClient struct {
+	*beadsfake.Fake
+	reads      int
+	competitor beads.Sample
+}
+
+func (c *racingClient) ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]beads.Sample, error) {
+	c.reads++
+	if c.reads == 2 {
+		if err := c.Fake.WriteCostSample(ctx, c.competitor); err != nil {
+			return nil, err
+		}
+	}
+	return c.Fake.ReadCostSamples(ctx, kind, since, limit)
+}
+
+func TestUsageSampleDoesNotDuplicateWhenAnotherWriterAppendsFirst(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	at := r.now.UTC().Truncate(time.Second)
+	pct41, pct12 := 41.0, 12.0
+	fiveResets := time.Unix(1794400000, 0).UTC()
+	sevenResets := time.Unix(1794700000, 0).UTC()
+	client := &racingClient{
+		Fake: beadsfake.New(),
+		competitor: beads.Sample{
+			Kind:             beads.SampleKindClaudePlan,
+			At:               at,
+			FiveHourPct:      &pct41,
+			FiveHourResetsAt: &fiveResets,
+			SevenDayPct:      &pct12,
+			SevenDayResetsAt: &sevenResets,
+		},
+	}
+
+	stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, client), statusLinePayload("41", "12"), "--strict")
+	if err != nil {
+		t.Fatalf("exit err = %v, want nil: the competitor's row covers the reading; stderr = %q", err, stderr)
+	}
+	rows := fakeClaudePlanRows(t, client.Fake)
+	if len(rows) != 1 {
+		t.Fatalf("claude_plan rows = %d, want only the competitor's: a row the store's compare did not see must not be duplicated", len(rows))
+	}
+	if !rows[0].At.Equal(at) {
+		t.Errorf("row at = %v, want the competitor's %v", rows[0].At, at)
+	}
+}
+
+func TestUsageSampleRefusesWhenTheBeadsStoreReadFails(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	f := beadsfake.New()
+	f.FailWith("sample list", errors.New("sample list failed"))
+
+	stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, f), statusLinePayload("41", "12"), "--strict")
+	if err == nil {
+		t.Fatal("exit err = nil, want non-zero: an unreadable newest row must not write a duplicate")
+	}
+	assertOneStderrLine(t, stderr)
+	if !strings.Contains(stderr, "sample list failed") {
+		t.Errorf("stderr = %q, want the store's error", stderr)
+	}
+	f.FailWith("sample list", nil)
+	if rows := fakeClaudePlanRows(t, f); len(rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(rows))
+	}
+}
+
+// flakyRereadClient serves the command's first read and fails every read after
+// it, so the store's own re-read inside the append is the one that fails.
+type flakyRereadClient struct {
+	*beadsfake.Fake
+	reads int
+}
+
+func (c *flakyRereadClient) ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]beads.Sample, error) {
+	c.reads++
+	if c.reads > 1 {
+		return nil, errors.New("sample list failed on the re-read")
+	}
+	return c.Fake.ReadCostSamples(ctx, kind, since, limit)
+}
+
+func TestUsageSampleRefusesWhenTheStoreRereadFails(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	client := &flakyRereadClient{Fake: beadsfake.New()}
+
+	stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, client), statusLinePayload("41", "12"), "--strict")
+	if err == nil {
+		t.Fatal("exit err = nil, want non-zero: a re-read that fails must not append over a row it could not check")
+	}
+	assertOneStderrLine(t, stderr)
+	if !strings.Contains(stderr, "sample list failed on the re-read") {
+		t.Errorf("stderr = %q, want the store's error", stderr)
+	}
+	if rows := fakeClaudePlanRows(t, client.Fake); len(rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(rows))
+	}
+}
+
+func TestUsageSampleReportsWhenTheBeadsStoreWriteFails(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	f := beadsfake.New()
+	f.FailWith("sample add", errors.New("sample add failed"))
+
+	stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, f), statusLinePayload("41", "12"), "--strict")
+	if err == nil {
+		t.Fatal("exit err = nil, want non-zero under --strict: the row did not land")
+	}
+	assertOneStderrLine(t, stderr)
+	if !strings.Contains(stderr, "sample add failed") {
+		t.Errorf("stderr = %q, want the store's error", stderr)
+	}
+	if rows := fakeClaudePlanRows(t, f); len(rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(rows))
+	}
+}
+
+func TestOpenClaudePlanStoreUsesTheTownItResolves(t *testing.T) {
+	t.Parallel()
+	store, err := openClaudePlanStoreFrom(func() (string, error) { return t.TempDir(), nil })
+	if err != nil {
+		t.Fatalf("openClaudePlanStoreFrom = %v, want a store over the resolved town", err)
+	}
+	if store == nil {
+		t.Fatal("store = nil, want a store over the resolved town")
+	}
+}
+
+func TestOpenClaudePlanStoreRefusesWhenTheTownIsNotFound(t *testing.T) {
+	t.Parallel()
+	_, err := openClaudePlanStoreFrom(func() (string, error) { return "", errors.New("no Gas Town here") })
+	if err == nil {
+		t.Fatal("openClaudePlanStoreFrom err = nil, want an error: a store over no town is never opened")
+	}
+	if !strings.Contains(err.Error(), "no Gas Town here") {
+		t.Errorf("err = %v, want it to carry the finder's error", err)
 	}
 }
 
