@@ -1,12 +1,10 @@
 package taskmap
 
-// Placements for batch P6 piece B (gt-1y0yf5): the formula namespace's
-// remaining commands. Group judgement: every one of them shapes the work
+// Placements for batch P6 piece B (gt-1y0yf5): the formula create, list and
+// overlay commands, all five in dispatch because each one shapes the work
 // instructions a town hands its agents (writing a formula, finding one,
-// customizing a step at prime time), so all five sit in dispatch with the
-// `formula` parent piece A placed; if overlays were only ever read by a human
-// looking for them, list and edit could lean toward orient, but they change
-// what an agent is told to do.
+// customizing a step at prime time). Overlay list and edit read files a human
+// may look for, but what they change is what an agent is told to do.
 func init() {
 	Register(
 		Entry{Path: "formula create", Group: "dispatch", Use: "Use this when the town has no formula for work you will repeat, to start a new formula file from a template.", Check: "the run prints Created formula with the new file's path"},
