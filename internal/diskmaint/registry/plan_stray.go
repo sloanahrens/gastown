@@ -51,9 +51,9 @@ func nameRefusal(in PlanInput) string {
 
 // planStrayRepos plans the stray repositories: every digest of a stray repo is
 // a delete action, except a digest the keep set already holds (a kept tag
-// shares it, or a pod uses it) and every tag of a repo a sandbox record names.
-// A repo outside StrayRepos and RepoMain is ignored: the plan touches only the
-// repos it was told about.
+// shares it, or a pod uses it), an undated manifest, and every tag of a repo a
+// sandbox record names. A repo outside StrayRepos and RepoMain is ignored: the
+// plan touches only the repos it was told about.
 func planStrayRepos(in PlanInput, keepDigests map[string]bool) ([]diskmaint.Action, []diskmaint.Kept) {
 	var actions []diskmaint.Action
 	var kept []diskmaint.Kept
@@ -76,6 +76,10 @@ func planStrayRepos(in PlanInput, keepDigests map[string]bool) ([]diskmaint.Acti
 			ref := repo + "@" + ti.Digest
 			if keepDigests[ti.Digest] {
 				kept = append(kept, diskmaint.Kept{Ref: ref, Rule: strayKeepRule(ti.Digest, in)})
+				continue
+			}
+			if ti.Undated {
+				kept = append(kept, diskmaint.Kept{Ref: ref, Rule: ruleUndated})
 				continue
 			}
 			why := strayWhy

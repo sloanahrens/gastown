@@ -88,6 +88,12 @@ func (f *fakeRegistry) handler(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		// A fixture with the zero Created time stands for a config blob that
+		// carries no created field, the shape the polecat image has.
+		if ti.Created.IsZero() {
+			_, _ = w.Write([]byte(blobBody("")))
+			return
+		}
 		_, _ = w.Write([]byte(blobBody(ti.Created.Format(time.RFC3339Nano))))
 	default:
 		http.NotFound(w, r)
@@ -239,6 +245,34 @@ func TestPlanAssemblesInputAndBuildsPlan(t *testing.T) {
 	})
 	if !plansEqual(plan, want) {
 		t.Fatalf("plan = %+v, want BuildPlan of the same data = %+v", plan, want)
+	}
+}
+
+// TestPlanTreatsAMissingCreatedBlobAsUndated is the regression the daily run
+// met: one manifest whose config carries no created time refused the whole
+// plan. It must instead be kept, and the dated manifests past keep deleted.
+func TestPlanTreatsAMissingCreatedBlobAsUndated(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+		fakeTag(RepoMain, "c000002", dg("a2"), planTime(2), 300),
+		fakeTag(RepoMain, "c000003", dg("a3"), time.Time{}, 400),
+	}})
+
+	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 1})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("plan refused: %s: a config blob with no created time must not refuse the plan", plan.Refused)
+	}
+	want := []string{mainRef(dg("a1"))}
+	if got := actionRefs(plan); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want only the dated manifest past keep 1 %v", got, want)
+	}
+	if rule := keptRule(plan, RepoMain+":c000003"); rule != ruleUndated {
+		t.Fatalf("c000003 kept by %q, want %q: %v", rule, ruleUndated, plan.Kept)
 	}
 }
 

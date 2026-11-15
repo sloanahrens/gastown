@@ -28,6 +28,7 @@ const planTarget = "registry"
 // The rules a Kept entry names, one per way a tag survives a run.
 const (
 	ruleNamedTag   = "named tag"
+	ruleUndated    = "undated"
 	ruleInstalled  = "installed commit"
 	ruleInUse      = "in use"
 	ruleNewest     = "newest keep"
@@ -43,6 +44,10 @@ type TagInfo struct {
 	// digest ManifestDigest read instead: only the digest is known, so it is
 	// deleted by digest and the action says so.
 	Unreadable bool
+	// Undated marks a manifest whose config carries no created time, so Created
+	// is the zero time. No delete rule touches it: a main-repo tag is kept with
+	// ruleUndated, and a stray digest likewise.
+	Undated bool
 }
 
 // PlanInput is everything a retention decision reads; any failed read in Errs
@@ -60,9 +65,10 @@ type PlanInput struct {
 // Retention is by digest, because deleting a digest drops every tag that points
 // at it: it keeps every named tag (any tag not shaped like a commit hash) and so
 // every digest one points at, plus the dev tag, the installed commit's tag,
-// every in-use digest and the newest Keep candidates. A candidate that shares a
-// kept digest survives with it. An input it cannot read, or a name it cannot
-// validate, refuses the plan.
+// every in-use digest and the newest Keep dated candidates. A candidate that
+// shares a kept digest survives with it. An undated manifest is never deleted: it
+// takes no Keep slot, and the plan names it kept so the report shows it. An
+// input it cannot read, or a name it cannot validate, refuses the plan.
 func BuildPlan(in PlanInput) diskmaint.Plan {
 	plan := diskmaint.Plan{Target: planTarget}
 	if why := nameRefusal(in); why != "" {
@@ -82,8 +88,9 @@ func BuildPlan(in PlanInput) diskmaint.Plan {
 	for _, ti := range tags {
 		// A named tag (dev among them) is never a candidate, and deleting the
 		// digest it points at would delete the tag too: keep that digest for
-		// every tag sharing it, candidate or not.
-		if !isCandidateTag(ti.Tag) || strings.HasPrefix(in.InstalledCommit, ti.Tag) {
+		// every tag sharing it, candidate or not. An undated manifest has no
+		// age to rank, so it is kept without taking a Keep slot.
+		if !isCandidateTag(ti.Tag) || ti.Undated || strings.HasPrefix(in.InstalledCommit, ti.Tag) {
 			keepDigests[ti.Digest] = true
 		}
 	}
@@ -137,7 +144,10 @@ func refuseReason(in PlanInput) string {
 }
 
 // newestFirst returns the candidate tags ordered by creation time, newest
-// first, with the tag name breaking a tie so the order is stable.
+// first, with the tag name breaking a tie so the order is stable. An undated
+// candidate has the zero time, so it always sorts behind every dated one and
+// never takes a Keep slot; its digest is in the keep set regardless, so no rank
+// can delete it.
 func newestFirst(tags []TagInfo) []TagInfo {
 	var candidates []TagInfo
 	for _, ti := range tags {
@@ -155,7 +165,8 @@ func newestFirst(tags []TagInfo) []TagInfo {
 }
 
 // deleteActions returns one action per digest outside the keep set, oldest
-// first; two tags sharing a digest name it once.
+// first; two tags sharing a digest name it once. An undated manifest's digest is
+// always in the keep set, so no age rank can reach one.
 func deleteActions(candidates []TagInfo, keepDigests map[string]bool, keep int) []diskmaint.Action {
 	rank := map[string]int{}
 	var order []string
@@ -184,6 +195,8 @@ func deleteActions(candidates []TagInfo, keepDigests map[string]bool, keep int) 
 // keepRule names why a candidate tag survived, most specific reason first.
 func keepRule(ti TagInfo, in PlanInput, newestKept map[string]bool) string {
 	switch {
+	case ti.Undated:
+		return ruleUndated
 	case strings.HasPrefix(in.InstalledCommit, ti.Tag):
 		return ruleInstalled
 	case in.InUseDigests[ti.Digest]:

@@ -104,6 +104,28 @@ func TestPlanSandboxKeptRefNamesTheValidatedRepo(t *testing.T) {
 	}
 }
 
+// TestPlanStrayKeepsUndatedManifest pins that a stray repository's undated
+// manifest survives: with no date it is never planned for deletion.
+func TestPlanStrayKeepsUndatedManifest(t *testing.T) {
+	t.Parallel()
+	in := strayInput(map[string][]TagInfo{
+		straySeed: {
+			undatedTag(straySeed, "p1", dg("bbbb0001")),
+			strayTag(straySeed, "p2", dg("bbbb0002"), 2),
+		},
+	})
+
+	p := BuildPlan(in)
+
+	want := []string{straySeed + "@" + dg("bbbb0002")}
+	if got := actionRefs(p); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want only the dated digest %v", got, want)
+	}
+	if rule := keptRule(p, straySeed+"@"+dg("bbbb0001")); rule != ruleUndated {
+		t.Fatalf("undated stray digest kept by %q, want %q: %v", rule, ruleUndated, p.Kept)
+	}
+}
+
 func TestPlanStrayDigestInUseIsKept(t *testing.T) {
 	t.Parallel()
 	inUse := dg("bbbb0001")

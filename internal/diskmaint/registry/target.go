@@ -288,7 +288,7 @@ func (t *Target) manifestTags(ctx context.Context, repo string, tags []TagInfo) 
 	for _, ti := range tags {
 		m, err := t.client.GetManifest(ctx, repo, ti.Tag)
 		if err == nil {
-			out = append(out, TagInfo{Repo: repo, Tag: ti.Tag, Digest: m.Digest, Created: m.Created, Bytes: m.Bytes})
+			out = append(out, TagInfo{Repo: repo, Tag: ti.Tag, Digest: m.Digest, Created: m.Created, Undated: m.Undated, Bytes: m.Bytes})
 			continue
 		}
 		if slices.Contains(StrayRepos, repo) {

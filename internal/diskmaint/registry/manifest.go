@@ -47,6 +47,11 @@ type Manifest struct {
 	Digest  string
 	Created time.Time
 	Bytes   int64
+	// Undated marks a manifest whose config blob carries no created time, so
+	// Created is the zero time and no build date is known. Retention never
+	// deletes an undated manifest: a zero time read as a date would place it
+	// before every kept image and delete it first.
+	Undated bool
 }
 
 // manifestDoc is the part of a manifest body the client reads. It is one shape
@@ -85,10 +90,11 @@ func (d manifestDoc) isIndex() bool {
 // GetManifest reads the manifest ref names in repo. For an image manifest its
 // digest comes from Docker-Content-Digest, its created time from the config
 // blob and its size from the config and layers. For an index the digest is the
-// index's own, the created time is the newest child's, and the size adds up the
-// config and layers of every child, counting a blob that several children share
-// once. A repo or ref that fails validation returns ErrBadName and sends no
-// request; a missing created time is an error, never a zero time.
+// index's own, the created time is the newest dated child's, and the size adds
+// up the config and layers of every child, counting a blob that several
+// children share once. A repo or ref that fails validation returns ErrBadName
+// and sends no request. A manifest whose config carries no created time is
+// returned as undated, never as a zero time to be ranked as old.
 func (c *Client) GetManifest(ctx context.Context, repo, ref string) (Manifest, error) {
 	if !ValidRepo(repo) {
 		return Manifest{}, fmt.Errorf("manifest %q: %w", repo, ErrBadName)
@@ -155,7 +161,7 @@ func (c *Client) imageManifest(ctx context.Context, repo, digest string, doc man
 	if !ValidDigest(doc.Config.Digest) {
 		return manifestRead{}, fmt.Errorf("manifest %s: the config digest fails validation", digest)
 	}
-	created, err := c.blobCreated(ctx, repo, doc.Config.Digest, walk)
+	created, undated, err := c.blobCreated(ctx, repo, doc.Config.Digest, walk)
 	if err != nil {
 		return manifestRead{}, err
 	}
@@ -164,7 +170,7 @@ func (c *Client) imageManifest(ctx context.Context, repo, digest string, doc man
 		blobs[layerKey(digest, layer.Digest, i)] = layer.Size
 	}
 	return manifestRead{
-		manifest: Manifest{Digest: digest, Created: created, Bytes: totalBytes(blobs)},
+		manifest: Manifest{Digest: digest, Created: created, Undated: undated, Bytes: totalBytes(blobs)},
 		blobs:    blobs,
 	}, nil
 }
@@ -189,13 +195,14 @@ func totalBytes(blobs map[string]int64) int64 {
 	return total
 }
 
-// indexManifest reads every child of an index: the newest child's created time
-// dates the index, and the children's blobs add up to its size.
+// indexManifest reads every child of an index: the newest dated child's created
+// time dates the index, an index whose children are all undated is itself
+// undated, and the children's blobs add up to its size.
 func (c *Client) indexManifest(ctx context.Context, repo, digest string, doc manifestDoc, depth int, walk *manifestWalk) (manifestRead, error) {
 	if len(doc.Manifests) == 0 {
 		return manifestRead{}, fmt.Errorf("index %s: no child manifests", digest)
 	}
-	read := manifestRead{manifest: Manifest{Digest: digest}, blobs: map[string]int64{}}
+	read := manifestRead{manifest: Manifest{Digest: digest, Undated: true}, blobs: map[string]int64{}}
 	for _, child := range doc.Manifests {
 		if !ValidDigest(child.Digest) {
 			return manifestRead{}, fmt.Errorf("index %s: a child digest fails validation", digest)
@@ -204,8 +211,9 @@ func (c *Client) indexManifest(ctx context.Context, repo, digest string, doc man
 		if err != nil {
 			return manifestRead{}, err
 		}
-		if childRead.manifest.Created.After(read.manifest.Created) {
+		if !childRead.manifest.Undated && (read.manifest.Undated || childRead.manifest.Created.After(read.manifest.Created)) {
 			read.manifest.Created = childRead.manifest.Created
+			read.manifest.Undated = false
 		}
 		for blobDigest, size := range childRead.blobs {
 			read.blobs[blobDigest] = size
@@ -215,23 +223,27 @@ func (c *Client) indexManifest(ctx context.Context, repo, digest string, doc man
 	return read, nil
 }
 
-// blobCreated reads the created time from a config blob.
-func (c *Client) blobCreated(ctx context.Context, repo, digest string, walk *manifestWalk) (time.Time, error) {
+// blobCreated reads the created time from a config blob. A blob without a
+// created field is undated: it returns the zero time with undated set, so the
+// caller keeps it rather than ranking it as old. A created field that is present
+// but not an RFC3339 time is still an error, because its age is unknown rather
+// than absent.
+func (c *Client) blobCreated(ctx context.Context, repo, digest string, walk *manifestWalk) (time.Time, bool, error) {
 	path := "/v2/" + repo + "/blobs/" + digest
 	var blob struct {
 		Created string `json:"created"`
 	}
 	if _, err := c.getJSON(ctx, path, "", &blob, walk); err != nil {
-		return time.Time{}, err
+		return time.Time{}, false, err
 	}
 	if blob.Created == "" {
-		return time.Time{}, fmt.Errorf("GET %s: the config blob has no created time", path)
+		return time.Time{}, true, nil
 	}
 	created, err := time.Parse(time.RFC3339Nano, blob.Created)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("GET %s: created is not an RFC3339 time: %w", path, err)
+		return time.Time{}, false, fmt.Errorf("GET %s: created is not an RFC3339 time: %w", path, err)
 	}
-	return created.UTC(), nil
+	return created.UTC(), false, nil
 }
 
 // ManifestDigest reads the manifest ref names in repo and returns the digest of
