@@ -1,8 +1,3 @@
-polecat git-state
-polecat identity
-polecat identity add
-polecat identity list
-polecat identity reconcile
 polecat identity remove
 polecat identity rename
 polecat identity show
