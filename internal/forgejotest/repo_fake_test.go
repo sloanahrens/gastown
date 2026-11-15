@@ -36,7 +36,7 @@ func roundTrip(t *testing.T, f *RepoFake, method, route, auth, body string) (*ht
 // route the run should not call is a 404.
 func TestRepoFakeAnswersTheThreeRoutes(t *testing.T) {
 	t.Parallel()
-	f := NewRepoFake("sloan", "notes")
+	f := NewRepoFake("alice", "notes")
 	cases := []struct {
 		name       string
 		method     string
@@ -44,9 +44,9 @@ func TestRepoFakeAnswersTheThreeRoutes(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{"repository read", http.MethodGet, "/repos/sloan/notes", http.StatusNotFound, ""},
-		{"admin create", http.MethodPost, "/admin/users/sloan/repos", http.StatusCreated, `{"name":"notes"}`},
-		{"contents commit", http.MethodPost, "/repos/sloan/notes/contents", http.StatusCreated, `{"commit":{"sha":"abc123"}}`},
+		{"repository read", http.MethodGet, "/repos/alice/notes", http.StatusNotFound, ""},
+		{"admin create", http.MethodPost, "/admin/users/alice/repos", http.StatusCreated, `{"name":"notes"}`},
+		{"contents commit", http.MethodPost, "/repos/alice/notes/contents", http.StatusCreated, `{"commit":{"sha":"abc123"}}`},
 		{"unknown route", http.MethodGet, "/version", http.StatusNotFound, ""},
 	}
 	for _, tc := range cases {
@@ -66,19 +66,19 @@ func TestRepoFakeAnswersTheThreeRoutes(t *testing.T) {
 // route answers.
 func TestRepoFakeOverridesEachRoute(t *testing.T) {
 	t.Parallel()
-	f := NewRepoFake("sloan", "notes")
+	f := NewRepoFake("alice", "notes")
 	f.RepoStatus = http.StatusOK
 	f.CreateStatus = http.StatusForbidden
 	f.SeedStatus = http.StatusUnprocessableEntity
 	f.SeedReply = `{"message":"refused"}`
 
-	if resp, _ := roundTrip(t, f, http.MethodGet, "/repos/sloan/notes", "", ""); resp.StatusCode != http.StatusOK {
+	if resp, _ := roundTrip(t, f, http.MethodGet, "/repos/alice/notes", "", ""); resp.StatusCode != http.StatusOK {
 		t.Errorf("repository read = %d, want the override %d", resp.StatusCode, http.StatusOK)
 	}
-	if resp, _ := roundTrip(t, f, http.MethodPost, "/admin/users/sloan/repos", "", ""); resp.StatusCode != http.StatusForbidden {
+	if resp, _ := roundTrip(t, f, http.MethodPost, "/admin/users/alice/repos", "", ""); resp.StatusCode != http.StatusForbidden {
 		t.Errorf("admin create = %d, want the override %d", resp.StatusCode, http.StatusForbidden)
 	}
-	resp, body := roundTrip(t, f, http.MethodPost, "/repos/sloan/notes/contents", "", "")
+	resp, body := roundTrip(t, f, http.MethodPost, "/repos/alice/notes/contents", "", "")
 	if resp.StatusCode != http.StatusUnprocessableEntity || body != f.SeedReply {
 		t.Errorf("contents commit = %d %q, want the overrides %d %q", resp.StatusCode, body, http.StatusUnprocessableEntity, f.SeedReply)
 	}
@@ -88,9 +88,9 @@ func TestRepoFakeOverridesEachRoute(t *testing.T) {
 // and a read still answers while WritesDown is set.
 func TestRepoFakeTransportFailures(t *testing.T) {
 	t.Parallel()
-	down := NewRepoFake("sloan", "notes")
+	down := NewRepoFake("alice", "notes")
 	down.Down = true
-	req, err := http.NewRequest(http.MethodGet, down.API()+"/repos/sloan/notes", nil)
+	req, err := http.NewRequest(http.MethodGet, down.API()+"/repos/alice/notes", nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -98,12 +98,12 @@ func TestRepoFakeTransportFailures(t *testing.T) {
 		t.Error("a request to a Down fake answered; want a transport error")
 	}
 
-	writesDown := NewRepoFake("sloan", "notes")
+	writesDown := NewRepoFake("alice", "notes")
 	writesDown.WritesDown = true
-	if resp, _ := roundTrip(t, writesDown, http.MethodGet, "/repos/sloan/notes", "", ""); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := roundTrip(t, writesDown, http.MethodGet, "/repos/alice/notes", "", ""); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("read of a WritesDown fake = %d, want it answered normally", resp.StatusCode)
 	}
-	write, err := http.NewRequest(http.MethodPost, writesDown.API()+"/admin/users/sloan/repos", strings.NewReader("{}"))
+	write, err := http.NewRequest(http.MethodPost, writesDown.API()+"/admin/users/alice/repos", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -116,8 +116,8 @@ func TestRepoFakeTransportFailures(t *testing.T) {
 // an empty body answered as if it had arrived.
 func TestRepoFakeRefusesAnUnreadableBody(t *testing.T) {
 	t.Parallel()
-	f := NewRepoFake("sloan", "notes")
-	req, err := http.NewRequest(http.MethodPost, f.API()+"/repos/sloan/notes/contents", iotest.ErrReader(errors.New("body failed")))
+	f := NewRepoFake("alice", "notes")
+	req, err := http.NewRequest(http.MethodPost, f.API()+"/repos/alice/notes/contents", iotest.ErrReader(errors.New("body failed")))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -133,16 +133,16 @@ func TestRepoFakeRefusesAnUnreadableBody(t *testing.T) {
 // Writes lists only the non-GET calls.
 func TestRepoFakeRecordsMethodPathAuthAndBody(t *testing.T) {
 	t.Parallel()
-	f := NewRepoFake("sloan", "notes")
-	roundTrip(t, f, http.MethodGet, "/repos/sloan/notes", "token read-secret", "")
-	roundTrip(t, f, http.MethodPost, "/admin/users/sloan/repos", "token write-secret", `{"name":"notes"}`)
+	f := NewRepoFake("alice", "notes")
+	roundTrip(t, f, http.MethodGet, "/repos/alice/notes", "token read-secret", "")
+	roundTrip(t, f, http.MethodPost, "/admin/users/alice/repos", "token write-secret", `{"name":"notes"}`)
 
 	reqs := f.Requests()
 	if len(reqs) != 2 {
 		t.Fatalf("recorded %d requests, want 2", len(reqs))
 	}
 	got := reqs[1]
-	wantPath := APIPath + "/admin/users/sloan/repos"
+	wantPath := APIPath + "/admin/users/alice/repos"
 	if got.Method != http.MethodPost || got.Path != wantPath || got.Auth != "token write-secret" || string(got.Body) != `{"name":"notes"}` {
 		t.Errorf("recorded = %+v, want the POST with its path, auth and body", got)
 	}
