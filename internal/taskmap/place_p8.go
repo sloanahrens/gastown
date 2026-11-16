@@ -22,6 +22,7 @@ func init() {
 		Entry{Path: "daemon enable-supervisor", Group: "host", Use: "Use this when the daemon must come back by itself after a crash or a reboot, on a Linux host with systemd.", Check: "gt daemon status exits 0"},
 		Entry{Path: "daemon image", Group: "host", Use: "Use this when the daemon container needs an image for a gt revision, reading the dry-run plan first and building with --apply."},
 		Entry{Path: "daemon logs", Group: "host", Use: "Use this when you need to know why the daemon restarted, skipped or refused an agent, from its own log."},
+		Entry{Path: "daemon preflight", Group: "host", Use: "Use this before the daemon is started or updated, to see in one pass which of its pre-roll checks fail, without changing the town.", Check: "the printed lines say ok for each check and the command exits 0"},
 		Entry{Path: "daemon rehearse", Group: "host", Use: "Use this before a container daemon is started, to see whether a scratch copy of the live settings passes every check without touching the live town.", Check: "the printed table lists each check and the command exits 0"},
 		Entry{Path: "daemon restart", Group: "host", Use: "Use this after replacing the gt binary, so the daemon runs the new program rather than the one it started from.", Check: "gt daemon status no longer reports a rebuilt binary"},
 		Entry{Path: "daemon rotate-logs", Group: "host", Use: "Use this when the daemon's log files have grown past the size limit and you want them rotated in place."},
