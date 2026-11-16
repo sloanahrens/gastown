@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -887,4 +888,317 @@ func TestTierSweepImagesRetryCountReadByAFreshDaemon(t *testing.T) {
 		t.Fatalf("the restarted daemon's cycle left %d retries for %q, want %d for %q",
 			st.ImagesRetries, st.ImagesRetrySHA, tierSweepImagesRetryMax, imagesRetryGreen)
 	}
+}
+
+// imagesRetryExhaustedKey is the exhausted item's key: the kind, the rig and
+// the green tip's 12-character stamp, the shape bead gt-j6cwqr's own table test
+// names.
+func imagesRetryExhaustedKey(rig, sha string) string {
+	return string(attention.KindTierSweepImagesRetryExhausted) + ":" + rig + ":" + greenRefShortSHA(sha)
+}
+
+// imagesRetryExhaustedCase is one record and images answer the exhausted item
+// is asked about.
+type imagesRetryExhaustedCase struct {
+	name       string
+	lastGreen  string
+	retries    int
+	retrySHA   string
+	answer     tierSweepImagesAnswer
+	wantRaised bool
+	// wantAnswer is the phrase the summary must carry for the answer it read.
+	wantAnswer string
+}
+
+// The item is raised when the count reaches the cap for the green tip and the
+// images answer is not published: a failed run and an answer the pair check
+// does not hold both raise it, because neither is proof the images published.
+// A count below the cap, one recorded for another tip, and a published answer
+// raise nothing.
+func TestTierSweepImagesRetryExhaustedRaised(t *testing.T) {
+	t.Parallel()
+	green := "0123456789abcdef0123456789abcdef01234567"
+	cases := []imagesRetryExhaustedCase{
+		{
+			name: "the cap for the green tip with its images still failed", lastGreen: green,
+			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesFailed,
+			wantRaised: true, wantAnswer: "the build still failed",
+		},
+		{
+			name: "the cap with no images answer holds the item raised", lastGreen: green,
+			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesUnanswered,
+			wantRaised: true, wantAnswer: "the pair check holds no answer for the run",
+		},
+		{
+			name: "a count past the cap names the count the record read", lastGreen: green,
+			retries: tierSweepImagesRetryMax + 1, retrySHA: green, answer: tierSweepImagesFailed,
+			wantRaised: true, wantAnswer: "the build still failed",
+		},
+		{
+			name: "one below the cap raises nothing", lastGreen: green,
+			retries: tierSweepImagesRetryMax - 1, retrySHA: green, answer: tierSweepImagesFailed,
+		},
+		{
+			name: "the published images run raises nothing", lastGreen: green,
+			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesPublished,
+		},
+		{
+			name: "a count recorded for another tip does not count", lastGreen: green,
+			retries: tierSweepImagesRetryMax, retrySHA: "older1", answer: tierSweepImagesFailed,
+		},
+		{
+			name: "no green tip is nothing to name", retries: tierSweepImagesRetryMax,
+			answer: tierSweepImagesFailed,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{}
+			d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return c.answer }
+			src := &attentionSources{
+				d:             d,
+				tierSweepRigs: func() []string { return []string{"gastown"} },
+				tierSweep: func(string) (tierSweepState, error) {
+					return tierSweepState{
+						LastGreenSHA: c.lastGreen, ImagesRetries: c.retries, ImagesRetrySHA: c.retrySHA,
+					}, nil
+				},
+			}
+
+			items, err := src.collectTierSweepImagesRetryExhausted(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.wantRaised {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none", items)
+				}
+				return
+			}
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one", items)
+			}
+			it := items[0]
+			if it.Key != imagesRetryExhaustedKey("gastown", c.lastGreen) {
+				t.Errorf("key = %q, want %q", it.Key, imagesRetryExhaustedKey("gastown", c.lastGreen))
+			}
+			if it.Kind != attention.KindTierSweepImagesRetryExhausted || it.Severity != attention.SeverityHigh {
+				t.Errorf("item = %+v, want the exhausted kind at the first failure's severity", it)
+			}
+			if it.Rig != "gastown" || it.SHA != c.lastGreen {
+				t.Errorf("item = %+v, want the rig and the green tip %q", it, c.lastGreen)
+			}
+			for _, want := range []string{
+				"gastown",
+				greenRefShortSHA(c.lastGreen),
+				fmt.Sprintf("%d early re-runs", c.retries),
+				c.wantAnswer,
+			} {
+				if !strings.Contains(it.Summary, want) {
+					t.Errorf("summary %q does not name %q", it.Summary, want)
+				}
+			}
+		})
+	}
+}
+
+// A record the collector cannot read is an error, not an empty answer: the
+// queue keeps the item the previous tick raised rather than clearing a real
+// alarm on an unanswered read.
+func TestTierSweepImagesRetryExhaustedUnreadableRecordKeepsTheItem(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	green := imagesRetryGreen
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			LastGreenSHA: green, ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: green,
+		}, nil
+	}
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesFailed }
+	key := imagesRetryExhaustedKey(attentionRig, green)
+
+	st := f.tick(t, now)
+	itemByKey(t, st, key)
+
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{}, errors.New("the record file cannot be read")
+	}
+	st = f.tick(t, now.Add(time.Minute))
+	if _, ok := attention.Find(st, key); !ok {
+		t.Fatalf("items = %+v, want the item kept across an unreadable record", st.Items)
+	}
+}
+
+// A cancelled tick stops the collector rather than reading a record nobody is
+// left to see.
+func TestTierSweepImagesRetryExhaustedStopsOnACancelledTick(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.src.collectTierSweepImagesRetryExhausted(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// The cap is raised once: a second tick that still sees the condition keeps the
+// item's first_seen and writes no second new event.
+func TestTierSweepImagesRetryExhaustedRaisedOnce(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	green := imagesRetryGreen
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			LastGreenSHA: green, ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: green,
+		}, nil
+	}
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesFailed }
+	key := imagesRetryExhaustedKey(attentionRig, green)
+
+	st := f.tick(t, now)
+	first := itemByKey(t, st, key)
+	if !first.FirstSeen.Equal(now) {
+		t.Fatalf("FirstSeen = %v, want the tick that raised it, %v", first.FirstSeen, now)
+	}
+	st = f.tick(t, now.Add(time.Minute))
+	second := itemByKey(t, st, key)
+	if !second.FirstSeen.Equal(now) {
+		t.Errorf("the second tick moved FirstSeen to %v, want %v", second.FirstSeen, now)
+	}
+
+	var raised, cleared int
+	for _, e := range f.events(t) {
+		if e.Key != key {
+			continue
+		}
+		switch e.State {
+		case attention.EventNew:
+			raised++
+		case attention.EventCleared:
+			cleared++
+		}
+	}
+	if raised != 1 || cleared != 0 {
+		t.Errorf("events = %d new, %d cleared, want exactly one new and no clear", raised, cleared)
+	}
+}
+
+// An unanswered images read keeps a raised item: the pair check has not reached
+// the green tip, so it is no proof the images published and must not clear the
+// alarm a failed answer raised (gt-opkfch).
+func TestTierSweepImagesRetryExhaustedKeptAcrossAnUnansweredTick(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	green := imagesRetryGreen
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			LastGreenSHA: green, ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: green,
+		}, nil
+	}
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesFailed }
+	key := imagesRetryExhaustedKey(attentionRig, green)
+
+	first := itemByKey(t, f.tick(t, now), key)
+
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesUnanswered }
+	second := itemByKey(t, f.tick(t, now.Add(time.Minute)), key)
+	if !second.FirstSeen.Equal(first.FirstSeen) {
+		t.Errorf("the unanswered tick moved FirstSeen to %v, want %v", second.FirstSeen, first.FirstSeen)
+	}
+	if !strings.Contains(second.Summary, "holds no answer") {
+		t.Errorf("summary %q does not name the unanswered read", second.Summary)
+	}
+	var raised, cleared int
+	for _, e := range f.events(t) {
+		if e.Key != key {
+			continue
+		}
+		switch e.State {
+		case attention.EventNew:
+			raised++
+		case attention.EventCleared:
+			cleared++
+		}
+	}
+	if raised != 1 || cleared != 0 {
+		t.Errorf("events = %d new, %d cleared, want exactly one new and no clear", raised, cleared)
+	}
+}
+
+// The images run succeeding clears the item: the pair check answers published
+// for the green tip, so no failure is left for the count to belong to. The
+// record still holding the spent count is what proves the answer is what
+// clears it.
+func TestTierSweepImagesRetryExhaustedClearsOnImagesSuccess(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	green := imagesRetryGreen
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			LastGreenSHA: green, ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: green,
+		}, nil
+	}
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesFailed }
+	key := imagesRetryExhaustedKey(attentionRig, green)
+
+	itemByKey(t, f.tick(t, now), key)
+
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesPublished }
+	st := f.tick(t, now.Add(time.Minute))
+	if _, ok := attention.Find(st, key); ok {
+		t.Fatalf("items = %+v, want the item cleared by the published images run", st.Items)
+	}
+	if !hasClearedEvent(f.events(t), key) {
+		t.Errorf("events = %+v, want a cleared event for %q", f.events(t), key)
+	}
+}
+
+// A new green sha clears the item: the record moved its tip and with it the
+// retries, so the count no longer belongs to the commit the item names.
+func TestTierSweepImagesRetryExhaustedClearsOnNewGreenSHA(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	green := imagesRetryGreen
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			LastGreenSHA: green, ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: green,
+		}, nil
+	}
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesFailed }
+	key := imagesRetryExhaustedKey(attentionRig, green)
+
+	itemByKey(t, f.tick(t, now), key)
+
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{LastGreenSHA: imagesRetryTIP}, nil
+	}
+	st := f.tick(t, now.Add(time.Minute))
+	if _, ok := attention.Find(st, key); ok {
+		t.Fatalf("items = %+v, want the item cleared by the new green tip", st.Items)
+	}
+	if !hasClearedEvent(f.events(t), key) {
+		t.Errorf("events = %+v, want a cleared event for %q", f.events(t), key)
+	}
+}
+
+// hasClearedEvent reports whether events holds a clear for key.
+func hasClearedEvent(events []attention.Event, key string) bool {
+	for _, e := range events {
+		if e.Key == key && e.State == attention.EventCleared {
+			return true
+		}
+	}
+	return false
 }
