@@ -408,6 +408,14 @@ type PatrolsConfig struct {
 	// turns it on rather than an upgrade.
 	OmLessons *OmLessonsConfig `json:"om_lessons,omitempty"`
 
+	// ReworkNumbers runs the rework program's weekly numbers step: one document
+	// under .runtime holding the program's two numbers and each lever's deltas
+	// (internal/daemon/rework_numbers.go, gt-2232t4). Off when absent: the
+	// document serves the rework program, so a town that has not started the
+	// program gains nothing from a step that writes it, and turns it on rather
+	// than an upgrade.
+	ReworkNumbers *ReworkNumbersConfig `json:"rework_numbers,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.
@@ -2196,6 +2204,17 @@ func (c *DeepSeekBalanceConfig) UnmarshalJSON(data []byte) error {
 	}
 	*c = decoded
 	return nil
+}
+
+// ReworkNumbersConfig configures the rework numbers patrol: whether the town
+// runs the rework program's weekly numbers step
+// (internal/daemon/rework_numbers.go, docs/design/rework-program.md lever 6).
+//
+// The patrol is opt-in. The document it writes is the rework program's own
+// feed, so a town that has not started the program must not get one from a
+// default.
+type ReworkNumbersConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // OmLessonsConfig configures the om_lessons patrol: the interval between its

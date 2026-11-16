@@ -1,16 +1,22 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/metrics"
@@ -593,4 +599,415 @@ func TestReworkProgramRunRefusesUnwritableDocument(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "writing the rework program's document") {
 		t.Fatalf("run error %v, want the failed write named", err)
 	}
+}
+
+// reworkProgramRead is the document a run left in town.
+func reworkProgramRead(t *testing.T, town string) reworkNumbersDocument {
+	t.Helper()
+	data, err := os.ReadFile(reworkProgramOut(t, town))
+	if err != nil {
+		t.Fatalf("the town has no document: %v", err)
+	}
+	var doc reworkNumbersDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("the document is not JSON: %v", err)
+	}
+	return doc
+}
+
+// reworkNumbersTestDaemon builds a daemon whose rework_numbers patrol is
+// enabled, over town.
+func reworkNumbersTestDaemon(t *testing.T, town string, logged io.Writer) *Daemon {
+	t.Helper()
+	return &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logged, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			ReworkNumbers: &agentconfig.ReworkNumbersConfig{Enabled: true},
+		}},
+	}
+}
+
+// reworkProgramSource is the tick's step over a fake record source: the figure
+// week, counting each read of it.
+func reworkProgramSource(t *testing.T, read *int) reworkNumbersStepFunc {
+	t.Helper()
+	recs, reviews := reworkProgramFigureWeek(t)
+	return func(town string, now func() time.Time) *reworkNumbersStep {
+		step := newReworkNumbersStep(town, now)
+		step.read = func() (reworkNumbersRecord, error) {
+			*read = *read + 1
+			return reworkNumbersRecord{Landings: recs, Reviews: reviews}, nil
+		}
+		return step
+	}
+}
+
+// TestReworkProgramRunInsideTheWeekWritesNothing is the bead's acceptance: a
+// tick in the week the last-run record names does nothing, and it is the town's
+// record that decides, so the next tick's step — a fresh one, as a restarted
+// daemon builds — decides as the first did.
+func TestReworkProgramRunInsideTheWeekWritesNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+
+	ran, _, err := d.runReworkNumbersTick(reworkProgramNow())
+	if err != nil || !ran {
+		t.Fatalf("the week's first tick = %v, %v; want a run with no error", ran, err)
+	}
+	wrote := reworkProgramRead(t, town)
+	if !wrote.GeneratedAt.Equal(reworkProgramNow()) {
+		t.Fatalf("the first run generated %s, want %s", wrote.GeneratedAt, reworkProgramNow())
+	}
+
+	later := reworkProgramNow().Add(6 * time.Hour)
+	ran, note, err := d.runReworkNumbersTick(later)
+	if err != nil {
+		t.Fatalf("the tick inside the week: %v", err)
+	}
+	if ran {
+		t.Fatal("a tick inside the week ran, want it to do nothing")
+	}
+	if read != 1 {
+		t.Errorf("a tick inside the week read the town's records %d times, want the first tick's one", read)
+	}
+	if !strings.Contains(note, "already ran") {
+		t.Errorf("the tick inside the week said %q, want the week named as already run", note)
+	}
+	if after := reworkProgramRead(t, town); !after.GeneratedAt.Equal(wrote.GeneratedAt) {
+		t.Fatalf("the document was rewritten at %s, want the first run's %s", after.GeneratedAt, wrote.GeneratedAt)
+	}
+}
+
+// TestReworkProgramRunInTheNextWeekWritesAgain: the record holds the week, not
+// a countdown, so the next week's first tick runs and replaces the document.
+func TestReworkProgramRunInTheNextWeekWritesAgain(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+
+	if ran, _, err := d.runReworkNumbersTick(reworkProgramNow()); err != nil || !ran {
+		t.Fatalf("the first week's tick = %v, %v; want a run with no error", ran, err)
+	}
+
+	nextWeek := reworkProgramNow().AddDate(0, 0, 7)
+	ran, note, err := d.runReworkNumbersTick(nextWeek)
+	if err != nil || !ran {
+		t.Fatalf("the next week's tick = %v, %v; want a run with no error", ran, err)
+	}
+	if !strings.Contains(note, "is due") {
+		t.Errorf("the next week's tick said %q, want the new week named as due", note)
+	}
+	if read != 2 {
+		t.Errorf("the two weeks read the town's records %d times, want one read each", read)
+	}
+	if doc := reworkProgramRead(t, town); !doc.GeneratedAt.Equal(nextWeek) {
+		t.Fatalf("the document was generated at %s, want the next week's run at %s", doc.GeneratedAt, nextWeek)
+	}
+}
+
+// TestReworkProgramUnreadableLastRunRunsTheWeek: a record the town cannot read
+// makes the week due and says why, rather than skipping it on a broken file.
+func TestReworkProgramUnreadableLastRunRunsTheWeek(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+	record := reworkNumbersLastRunPath(town)
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatalf("the last-run directory: %v", err)
+	}
+	if err := os.WriteFile(record, []byte("{not a record"), 0o644); err != nil {
+		t.Fatalf("the broken record: %v", err)
+	}
+
+	ran, note, err := d.runReworkNumbersTick(reworkProgramNow())
+	if err != nil || !ran {
+		t.Fatalf("a week with a broken record = %v, %v; want a run with no error", ran, err)
+	}
+	if !strings.Contains(note, "cannot be read") {
+		t.Errorf("a broken record said %q, want the unreadable record named", note)
+	}
+	reworkProgramRead(t, town)
+}
+
+// TestReworkProgramRefusesUnnameableRunWeek: a clock whose week cannot be named
+// stops the tick before it reads anything, and writes no document.
+func TestReworkProgramRefusesUnnameableRunWeek(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	source := reworkProgramSource(t, &read)
+	d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+		step := source(town, now)
+		step.weekOf = func(string) (string, error) { return "", errors.New("no calendar here") }
+		return step
+	}
+
+	ran, _, err := d.runReworkNumbersTick(reworkProgramNow())
+	if ran || err == nil || !strings.Contains(err.Error(), "the week of") {
+		t.Fatalf("an unnameable week = %v, %v; want no run and the week named", ran, err)
+	}
+	if read != 0 {
+		t.Errorf("an unnameable week read the town's records %d times, want none", read)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("an unnameable week wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramRefusesUnnameableRecordWeek: a record whose own time cannot
+// be named a week is an error, not a week read as never run: the next tick would
+// then either rerun the week or skip it on a guess.
+func TestReworkProgramRefusesUnnameableRecordWeek(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	source := reworkProgramSource(t, &read)
+	d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+		step := source(town, now)
+		step.weekOf = func(ts string) (string, error) {
+			if strings.HasPrefix(ts, "2026-11-09") {
+				return "", errors.New("no calendar here")
+			}
+			return "2026-11-16", nil
+		}
+		return step
+	}
+	if err := writeReworkNumbersLastRun(reworkNumbersLastRunPath(town), reworkProgramNow().AddDate(0, 0, -7)); err != nil {
+		t.Fatalf("the last-run record: %v", err)
+	}
+
+	ran, _, err := d.runReworkNumbersTick(reworkProgramNow())
+	if ran || err == nil || !strings.Contains(err.Error(), "the week of the last run") {
+		t.Fatalf("an unnameable record week = %v, %v; want no run and the record's week named", ran, err)
+	}
+	if read != 0 {
+		t.Errorf("an unnameable record week read the town's records %d times, want none", read)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("an unnameable record week wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramRunReportsARecordItCannotWrite: the document lands, and the
+// run still fails, naming the record: a silent failure would leave the next tick
+// running the week again with nothing said about why.
+func TestReworkProgramRunReportsARecordItCannotWrite(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+	// The record's path is held by a directory, so no rename can land on it.
+	if err := os.MkdirAll(reworkNumbersLastRunPath(town), 0o755); err != nil {
+		t.Fatalf("the record's path: %v", err)
+	}
+
+	ran, _, err := d.runReworkNumbersTick(reworkProgramNow())
+	if !ran || err == nil || !strings.Contains(err.Error(), "recording the rework program's run") {
+		t.Fatalf("an unwritable record = %v, %v; want the document written and the record named", ran, err)
+	}
+	reworkProgramRead(t, town)
+}
+
+// TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled is the bead's
+// second acceptance: the patrol's own ticker exists only when
+// daemon.patrols.rework_numbers.enabled is true, and a town that names no key
+// starts nothing.
+func TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(io.Discard, "", 0),
+	}
+	if channel, stop := d.startReworkNumbersTicker(); channel != nil || stop != nil {
+		t.Error("a town that names no rework_numbers started its ticker")
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ReworkNumbers: &agentconfig.ReworkNumbersConfig{Enabled: false},
+	}}
+	if channel, stop := d.startReworkNumbersTicker(); channel != nil || stop != nil {
+		t.Error("a disabled rework_numbers started its ticker")
+	}
+
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ReworkNumbers: &agentconfig.ReworkNumbersConfig{Enabled: true},
+	}}
+	channel, stop := d.startReworkNumbersTicker()
+	if channel == nil || stop == nil {
+		t.Fatal("an enabled rework_numbers started no ticker")
+	}
+	stop()
+}
+
+// TestReworkProgramReworkNumbersTickRunsTheStepOnce: one started tick runs the
+// step once, logs what it did, and frees the guard; a tick that arrives while a
+// run is still going is skipped and logged; and a failed run is logged rather
+// than counted as a document.
+func TestReworkProgramReworkNumbersTickRunsTheStepOnce(t *testing.T) {
+	t.Parallel()
+
+	t.Run("one tick, one run", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		read := 0
+		d := reworkNumbersTestDaemon(t, t.TempDir(), &logged)
+		d.reworkNumbersStepFor = reworkProgramSource(t, &read)
+
+		d.startReworkNumbersTick()
+		d.reworkNumbersCycles.Wait()
+
+		if read != 1 {
+			t.Errorf("a tick read the town's records %d times, want once", read)
+		}
+		if d.reworkNumbersRunning.Load() {
+			t.Error("the guard stayed set after the run ended, so no later tick could run")
+		}
+		if !strings.Contains(logged.String(), "wrote this week's document") {
+			t.Errorf("the tick logged %q, want the document it wrote", logged.String())
+		}
+	})
+
+	t.Run("a tick while one runs is skipped", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		d := reworkNumbersTestDaemon(t, t.TempDir(), &logged)
+		reached := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var reads atomic.Int32
+		d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+			step := newReworkNumbersStep(town, now)
+			step.read = func() (reworkNumbersRecord, error) {
+				reads.Add(1)
+				reached <- struct{}{}
+				<-release
+				return reworkNumbersRecord{}, errors.New("the ledger is unreadable")
+			}
+			return step
+		}
+
+		d.startReworkNumbersTick()
+		waitForSignal(t, reached, "the first tick never read the records")
+		d.startReworkNumbersTick()
+		if !strings.Contains(logged.String(), "previous run still going, skipping") {
+			t.Errorf("the second tick was not logged as skipped: %q", logged.String())
+		}
+		close(release)
+		d.reworkNumbersCycles.Wait()
+		if got := reads.Load(); got != 1 {
+			t.Errorf("two starting ticks read the records %d times, want once", got)
+		}
+	})
+
+	t.Run("a failed run is logged, not counted", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		d := reworkNumbersTestDaemon(t, t.TempDir(), &logged)
+		d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+			step := newReworkNumbersStep(town, now)
+			step.read = func() (reworkNumbersRecord, error) {
+				return reworkNumbersRecord{}, errors.New("the landing ledger is unreadable")
+			}
+			return step
+		}
+
+		d.startReworkNumbersTick()
+		d.reworkNumbersCycles.Wait()
+
+		if !strings.Contains(logged.String(), "the landing ledger is unreadable") {
+			t.Errorf("a failed run logged %q, want the error named", logged.String())
+		}
+		if strings.Contains(logged.String(), "wrote this week's document") {
+			t.Errorf("a failed run logged a written document: %q", logged.String())
+		}
+	})
+}
+
+// TestReworkProgramReworkNumbersStopJoinsTheRun: Run's return stops the ticker
+// and waits for the run it started, and a run still going at the bound is
+// logged and left.
+func TestReworkProgramReworkNumbersStopJoinsTheRun(t *testing.T) {
+	t.Parallel()
+
+	blocking := func(t *testing.T, logged io.Writer) (*Daemon, chan struct{}, func()) {
+		t.Helper()
+		reached := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		d := reworkNumbersTestDaemon(t, t.TempDir(), logged)
+		d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+			step := newReworkNumbersStep(town, now)
+			step.read = func() (reworkNumbersRecord, error) {
+				reached <- struct{}{}
+				<-release
+				return reworkNumbersRecord{}, errors.New("the ledger is unreadable")
+			}
+			return step
+		}
+		t.Cleanup(func() {
+			unblock()
+			d.reworkNumbersCycles.Wait()
+		})
+		return d, reached, unblock
+	}
+
+	t.Run("the run the ticker started is joined", func(t *testing.T) {
+		t.Parallel()
+		d, reached, unblock := blocking(t, io.Discard)
+		d.reworkNumbersJoinWait = time.Hour
+
+		d.startReworkNumbersTick()
+		waitForSignal(t, reached, "the run never read the records")
+
+		stopped := make(chan struct{})
+		stopCalled := make(chan struct{})
+		go func() {
+			d.stopReworkNumbersPatrol(func() { close(stopCalled) })
+			close(stopped)
+		}()
+		waitForSignal(t, stopCalled, "the stop func never ran")
+		select {
+		case <-stopped:
+			t.Fatal("stopReworkNumbersPatrol returned while the run still went")
+		default:
+		}
+		unblock()
+		waitForSignal(t, stopped, "stopReworkNumbersPatrol never returned after the run ended")
+		if d.reworkNumbersRunning.Load() {
+			t.Error("the join returned with the run's guard still set")
+		}
+	})
+
+	t.Run("a run past the bound is logged and left", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		d, reached, unblock := blocking(t, &logged)
+		d.reworkNumbersJoinWait = 30 * time.Millisecond
+
+		d.startReworkNumbersTick()
+		waitForSignal(t, reached, "the run never read the records")
+
+		stopped := make(chan struct{})
+		go func() {
+			d.stopReworkNumbersPatrol(nil)
+			close(stopped)
+		}()
+		waitForSignal(t, stopped, "stopReworkNumbersPatrol never returned past the bound")
+		if !strings.Contains(logged.String(), "still going") {
+			t.Errorf("a run left past the bound was not logged: %q", logged.String())
+		}
+		unblock()
+		d.reworkNumbersCycles.Wait()
+	})
 }
