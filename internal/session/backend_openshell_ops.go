@@ -715,9 +715,11 @@ func SandboxOutboxCopyDir(townRoot, rig, polecat string) string {
 // The copy is this seat's outbox or nothing: whatever a previous seat of the
 // same name left in the copy directory is cleared first, so a reader never
 // finds it as this seat's. A sandbox that is already gone has no outbox to
-// copy, which is not a failure; every other failure is returned and the partial
-// copy removed, so the caller can keep the sandbox that holds the only copy of
-// what the seat wrote.
+// copy, which is not a failure. Every other failure is returned, so the caller
+// can keep the sandbox that holds the only copy of what the seat wrote; a
+// failure partway through the downloads removes what it wrote, and a listing
+// that fails leaves an earlier copy alone, since the copy it cannot replace may
+// be the only one.
 func CopySandboxSeatOutbox(townRoot string, rec SandboxRecord) error {
 	return recordBackend(townRoot, rec).copySeatOutbox(rec)
 }
@@ -807,8 +809,8 @@ func (b *openshellBackend) listSeatOutbox(ctx context.Context, rec SandboxRecord
 // parseSandboxOutboxListing reads the outbox listing: one "<name> <size>" line
 // per file under the outbox directory. The sandbox chooses this output, so a
 // name that is neither outbox file, a name listed twice, a size that is not a
-// byte count, and a file the copy's cap would leave out are each an error: the
-// host copies only what it can name and bound.
+// byte count, and a file past the copy's cap are each an error: the host copies
+// only what it can name and bound.
 func parseSandboxOutboxListing(out string) ([]sandboxOutboxEntry, error) {
 	sizes := map[string]int64{}
 	for _, line := range strings.Split(out, "\n") {
