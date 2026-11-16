@@ -3,9 +3,6 @@ package beadsfake
 import (
 	"context"
 	"fmt"
-	"maps"
-	"math"
-	"slices"
 	"sort"
 	"time"
 
@@ -14,23 +11,16 @@ import (
 )
 
 // WriteUsageRecord appends row to the fake's usage records. As bd's sample add
-// does, it refuses a zero BuiltAt, a record with no bead and a cost JSON cannot
-// carry, and it stores BuiltAt in UTC at second precision and Start and End in
-// UTC. The row is a copy, so changing row afterwards does not change what a
-// read returns.
+// does, it refuses a row beads.ValidateUsageRecordRow refuses, and it stores
+// BuiltAt in UTC at second precision and Start and End in UTC. The row is a
+// copy, so changing row afterwards does not change what a read returns.
 func (f *Fake) WriteUsageRecord(_ context.Context, row beads.UsageRecordRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failure("sample add"); err != nil {
 		return err
 	}
-	if row.BuiltAt.IsZero() {
-		return fmt.Errorf("sample add: no sample time given")
-	}
-	if row.Record.Bead == "" {
-		return fmt.Errorf("sample add: record has no bead, so no reader can file the row")
-	}
-	if err := checkUsageCosts(row.Record); err != nil {
+	if err := beads.ValidateUsageRecordRow(row); err != nil {
 		return fmt.Errorf("sample add: %w", err)
 	}
 	row.BuiltAt = row.BuiltAt.UTC().Truncate(time.Second)
@@ -80,31 +70,6 @@ func (f *Fake) ReadUsageRecords(_ context.Context, since time.Time, limit int) (
 		out = append(out, cloneUsageRecordRow(r.row))
 	}
 	return out, nil
-}
-
-// checkUsageCosts refuses a cost or share JSON cannot carry, named by its field,
-// as *Beads does.
-func checkUsageCosts(rec usagerecord.Record) error {
-	if err := finite("est_cost_usd", rec.EstCostUSD); err != nil {
-		return err
-	}
-	if err := finite("subagents.share", rec.Subagents.Share); err != nil {
-		return err
-	}
-	for _, model := range slices.Sorted(maps.Keys(rec.Models)) {
-		if err := finite("models."+model+".est_cost_usd", rec.Models[model].EstCostUSD); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// finite refuses a value JSON cannot carry.
-func finite(field string, v float64) error {
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return fmt.Errorf("%s %v is not a finite number", field, v)
-	}
-	return nil
 }
 
 // cloneUsageRecordRow copies row so a stored row and the row a caller holds

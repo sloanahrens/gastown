@@ -34,19 +34,15 @@ type UsageRecordRow struct {
 	Sessions []string
 }
 
-// WriteUsageRecord appends row to the usage records through bd sample add. A
-// zero BuiltAt, a record with no bead, and a cost or share JSON cannot carry are
-// each refused before bd runs; a bd whose help does not list the sample verb is
-// refused by name (beads be-1qqu).
+// WriteUsageRecord appends row to the usage records through bd sample add. It
+// refuses what ValidateUsageRecordRow refuses, before bd runs; a bd whose help
+// does not list the sample verb is refused by name (beads be-1qqu).
 func (b *Beads) WriteUsageRecord(ctx context.Context, row UsageRecordRow) error {
-	at, err := sampleAt(row.BuiltAt)
-	if err != nil {
+	if err := ValidateUsageRecordRow(row); err != nil {
 		return fmt.Errorf("bd sample add: %w", err)
 	}
-	if row.Record.Bead == "" {
-		return fmt.Errorf("bd sample add: record has no bead, so no reader can file the row")
-	}
-	if err := checkUsageCosts(row.Record); err != nil {
+	at, err := sampleAt(row.BuiltAt)
+	if err != nil {
 		return fmt.Errorf("bd sample add: %w", err)
 	}
 	// Start and End are the run's own bounds, so their instant is kept and only
@@ -71,6 +67,21 @@ func (b *Beads) WriteUsageRecord(ctx context.Context, row UsageRecordRow) error 
 		return fmt.Errorf("bd sample add: %w", err)
 	}
 	return nil
+}
+
+// ValidateUsageRecordRow refuses a row no store can write: one built at no
+// time, a record with no bead that no reader could file, and a cost or share the
+// row's JSON cannot carry. Every store holding usage records refuses these
+// identically, so the check lives here once and each names its own backend in
+// the prefix it wraps the bare refusal with.
+func ValidateUsageRecordRow(row UsageRecordRow) error {
+	if row.BuiltAt.IsZero() {
+		return fmt.Errorf("no sample time given")
+	}
+	if row.Record.Bead == "" {
+		return fmt.Errorf("record has no bead, so no reader can file the row")
+	}
+	return checkUsageCosts(row.Record)
 }
 
 // ReadUsageRecords returns the usage record rows, newest built first, one per
