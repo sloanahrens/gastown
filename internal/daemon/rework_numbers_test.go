@@ -1,0 +1,631 @@
+package daemon
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/metrics"
+)
+
+// The tests drive the step's run with a fake record source, so no ledger, review
+// log or clock outside the test decides a figure.
+
+// reworkProgramNow is the run's clock: a Monday noon, which is the week the run
+// falls in and is still filling.
+func reworkProgramNow() time.Time {
+	return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+}
+
+// reworkProgramDay is noon on day, so a record's week is its date's Monday in
+// every time zone the record could be read in.
+func reworkProgramDay(t *testing.T, day string) time.Time {
+	t.Helper()
+	at, err := time.Parse(time.DateOnly, day)
+	if err != nil {
+		t.Fatalf("test day %q: %v", day, err)
+	}
+	return at.Add(12 * time.Hour)
+}
+
+// reworkProgramWeek records n landings landed on day, the first twoRounds of
+// them with two om review rounds, each with secs polecat seconds.
+func reworkProgramWeek(t *testing.T, prefix, day string, n, twoRounds int, secs float64) ([]landings.Record, []land.ReviewRecord) {
+	t.Helper()
+	at := reworkProgramDay(t, day)
+	recs := make([]landings.Record, 0, n)
+	reviews := make([]land.ReviewRecord, 0, n+twoRounds)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("gt-%s-%02d", prefix, i)
+		recs = append(recs, landings.Record{Bead: id, Rig: "gastown", LandedAt: at, PolecatSecs: secs})
+		reviews = append(reviews, land.ReviewRecord{BeadID: id, Rig: "gastown", Attempt: 1})
+		if i < twoRounds {
+			reviews = append(reviews, land.ReviewRecord{BeadID: id, Rig: "gastown", Attempt: 2})
+		}
+	}
+	return recs, reviews
+}
+
+// reworkProgramFigureWeek is one complete figure week: twenty beads, four with
+// two rounds, each timed ten minutes. A lever test adds its landing to it.
+func reworkProgramFigureWeek(t *testing.T) ([]landings.Record, []land.ReviewRecord) {
+	t.Helper()
+	return reworkProgramWeek(t, "base", "2026-11-09", 20, 4, 600)
+}
+
+// reworkProgramStep is a fresh town and the step that writes its document at a
+// fixed clock.
+func reworkProgramStep(t *testing.T) (string, *reworkNumbersStep) {
+	t.Helper()
+	town := t.TempDir()
+	return town, newReworkNumbersStep(town, reworkProgramNow)
+}
+
+// reworkProgramOut is the document's path in town.
+func reworkProgramOut(t *testing.T, town string) string {
+	t.Helper()
+	return filepath.Join(town, ".runtime", "rework-numbers", "latest.json")
+}
+
+// reworkProgramRunWith runs the step over a fake record source and returns the
+// document it wrote.
+func reworkProgramRunWith(t *testing.T, town string, step *reworkNumbersStep, in reworkNumbersRecord) reworkNumbersDocument {
+	t.Helper()
+	step.read = func() (reworkNumbersRecord, error) { return in, nil }
+	if err := step.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	data, err := os.ReadFile(reworkProgramOut(t, town))
+	if err != nil {
+		t.Fatalf("the run wrote no document: %v", err)
+	}
+	var doc reworkNumbersDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("the document is not JSON: %v", err)
+	}
+	return doc
+}
+
+// reworkProgramLever returns one lever's row.
+func reworkProgramLever(t *testing.T, doc reworkNumbersDocument, lever int) reworkNumbersLever {
+	t.Helper()
+	for _, row := range doc.Levers {
+		if row.Lever == lever {
+			return row
+		}
+	}
+	t.Fatalf("the document has no row for lever %d", lever)
+	return reworkNumbersLever{}
+}
+
+// reworkProgramWeekOfAfter answers metrics.WeekOf for the first n calls and
+// answer for the rest. The report makes the first calls (now, the window's
+// first day, then one per landing), so a test puts the lever's week past them.
+func reworkProgramWeekOfAfter(n int, answer func(string) (string, error)) func(string) (string, error) {
+	calls := 0
+	return func(ts string) (string, error) {
+		calls++
+		if calls > n {
+			return answer(ts)
+		}
+		return metrics.WeekOf(ts)
+	}
+}
+
+// reworkProgramFigure asserts a figure's value, within rounding.
+func reworkProgramFigure(t *testing.T, label string, fig reworkNumbersFigure, want float64) {
+	t.Helper()
+	if fig.Value == nil {
+		t.Fatalf("%s: no value (reason %q), want %v", label, fig.Reason, want)
+	}
+	if math.Abs(*fig.Value-want) > 1e-9 {
+		t.Fatalf("%s: %v, want %v", label, *fig.Value, want)
+	}
+}
+
+// reworkProgramReason asserts a figure has no value and the reason given.
+func reworkProgramReason(t *testing.T, label string, fig reworkNumbersFigure, want string) {
+	t.Helper()
+	if fig.Value != nil {
+		t.Fatalf("%s: value %v, want no value with reason %q", label, *fig.Value, want)
+	}
+	if fig.Reason != want {
+		t.Fatalf("%s: reason %q, want %q", label, fig.Reason, want)
+	}
+}
+
+// TestReworkProgramRunWritesNumbersAndLeverDeltas is the bead's acceptance: one
+// run over a fake record source writes the two numbers for the last complete
+// week and the lever's before/after deltas, under the document's wire names.
+func TestReworkProgramRunWritesNumbersAndLeverDeltas(t *testing.T) {
+	t.Parallel()
+	before, beforeReviews := reworkProgramWeek(t, "before", "2026-10-26", 20, 10, 1200)
+	after, afterReviews := reworkProgramWeek(t, "after", "2026-11-09", 20, 5, 600)
+	// The lever lands between the two windows, so both are complete.
+	recs := append(before, after...)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-04")})
+	reviews := append(beforeReviews, afterReviews...)
+
+	town, step := reworkProgramStep(t)
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	var wire struct {
+		Numbers struct {
+			Week           string `json:"week"`
+			TwoRoundsShare struct {
+				Value *float64 `json:"value"`
+			} `json:"two_rounds_share"`
+			MeanPolecatMinutes struct {
+				Value *float64 `json:"value"`
+			} `json:"mean_polecat_minutes"`
+		} `json:"numbers"`
+		Levers []struct {
+			Lever                   int      `json:"lever"`
+			TwoRoundsShareDelta     *float64 `json:"two_rounds_share_delta"`
+			MeanPolecatMinutesDelta *float64 `json:"mean_polecat_minutes_delta"`
+		} `json:"levers"`
+	}
+	data, err := os.ReadFile(reworkProgramOut(t, town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("the document is not JSON: %v", err)
+	}
+	if wire.Numbers.Week != "2026-11-09" {
+		t.Fatalf("numbers week %q, want the last complete week 2026-11-09", wire.Numbers.Week)
+	}
+	reworkProgramFigure(t, "numbers.two_rounds_share", reworkNumbersFigure{Value: wire.Numbers.TwoRoundsShare.Value}, 0.25)
+	reworkProgramFigure(t, "numbers.mean_polecat_minutes", reworkNumbersFigure{Value: wire.Numbers.MeanPolecatMinutes.Value}, 10)
+
+	// The acceptance is about the lever deltas, so read them off the wire.
+	lever := doc.Levers[1]
+	if lever.Lever != 2 {
+		t.Fatalf("row %d is lever %d, want the design doc's order with lever 2 second", 1, lever.Lever)
+	}
+	reworkProgramFigure(t, "lever 2 before two_rounds_share", lever.Before.TwoRoundsShare, 0.5)
+	reworkProgramFigure(t, "lever 2 after two_rounds_share", lever.After.TwoRoundsShare, 0.25)
+	reworkProgramFigure(t, "lever 2 before mean_polecat_minutes", lever.Before.MeanPolecatMinutes, 20)
+	reworkProgramFigure(t, "lever 2 after mean_polecat_minutes", lever.After.MeanPolecatMinutes, 10)
+	var deltas struct {
+		TwoRounds   *float64 `json:"two_rounds_share_delta"`
+		MeanPolecat *float64 `json:"mean_polecat_minutes_delta"`
+	}
+	for _, raw := range wire.Levers {
+		if raw.Lever == 2 {
+			deltas.TwoRounds, deltas.MeanPolecat = raw.TwoRoundsShareDelta, raw.MeanPolecatMinutesDelta
+		}
+	}
+	reworkProgramFigure(t, "lever 2 two_rounds_share_delta", reworkNumbersFigure{Value: deltas.TwoRounds}, -0.25)
+	reworkProgramFigure(t, "lever 2 mean_polecat_minutes_delta", reworkNumbersFigure{Value: deltas.MeanPolecat}, -10)
+}
+
+// TestReworkProgramRunRefusesFailedRead: a record source that fails stops the
+// run, and the previous document is not replaced.
+func TestReworkProgramRunRefusesFailedRead(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	step.read = func() (reworkNumbersRecord, error) {
+		return reworkNumbersRecord{}, errors.New("the ledger is unreadable")
+	}
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), "reading the rework program's records") {
+		t.Fatalf("run error %v, want the failed read named", err)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a failed read wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramRunRefusesBadWindow: a window the report cannot build is an
+// error, not a document with no numbers.
+func TestReworkProgramRunRefusesBadWindow(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	step.weeks = 0
+	step.read = func() (reworkNumbersRecord, error) { return reworkNumbersRecord{}, nil }
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), "want at least 1") {
+		t.Fatalf("run error %v, want the window refusal", err)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a refused window wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramRunRefusesNoCompleteWeek: a one-week window is the week the
+// run falls in, which is still filling, so there is no figure week to write.
+func TestReworkProgramRunRefusesNoCompleteWeek(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	step.weeks = 1
+	step.read = func() (reworkNumbersRecord, error) { return reworkNumbersRecord{}, nil }
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), "holds no complete week") {
+		t.Fatalf("run error %v, want the no-complete-week refusal", err)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a window with no complete week wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramRunRefusesUnnameableLeverWeek: a week function that fails on
+// the lever's landing fails the run: a lever row cannot be left without the week
+// its landing names.
+func TestReworkProgramRunRefusesUnnameableLeverWeek(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-04")})
+	step.weekOf = reworkProgramWeekOfAfter(2+len(recs), func(string) (string, error) {
+		return "", errors.New("the clock cannot name this week")
+	})
+	step.read = func() (reworkNumbersRecord, error) {
+		return reworkNumbersRecord{Landings: recs, Reviews: reviews}, nil
+	}
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), "the week of gt-a4yodt's landing") ||
+		!strings.Contains(err.Error(), "the clock cannot name this week") {
+		t.Fatalf("run error %v, want the unnameable lever week and its cause named", err)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("an unnameable lever week wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramRunRefusesUnparsableLeverWeek: a week that is not a date is a
+// failed run, not a lever row with an empty window.
+func TestReworkProgramRunRefusesUnparsableLeverWeek(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-04")})
+	step.weekOf = reworkProgramWeekOfAfter(2+len(recs), func(string) (string, error) {
+		return "not-a-week", nil
+	})
+	step.read = func() (reworkNumbersRecord, error) {
+		return reworkNumbersRecord{Landings: recs, Reviews: reviews}, nil
+	}
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), `the week of gt-a4yodt's landing, "not-a-week"`) {
+		t.Fatalf("run error %v, want the unparsable lever week named", err)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("an unparsable lever week wrote a document: %v", statErr)
+	}
+}
+
+// TestReworkProgramLeverWithoutBead: a lever with no shipping bead, and the
+// retired lever, carry the reason their row has no deltas.
+func TestReworkProgramLeverWithoutBead(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-04")})
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	for _, lever := range []int{1, 3, 4, 5} {
+		row := reworkProgramLever(t, doc, lever)
+		if row.Reason != "no shipping bead recorded yet" {
+			t.Fatalf("lever %d reason %q, want no shipping bead recorded yet", lever, row.Reason)
+		}
+		if row.TwoRoundsShareDelta != nil || row.MeanPolecatMinutesDelta != nil {
+			t.Fatalf("lever %d has deltas over no shipping bead", lever)
+		}
+	}
+	retired := reworkProgramLever(t, doc, 7)
+	if retired.Reason != "retired by gt-dpl81b" {
+		t.Fatalf("lever 7 reason %q, want retired by gt-dpl81b", retired.Reason)
+	}
+	if retired.TwoRoundsShareDelta != nil || retired.MeanPolecatMinutesDelta != nil {
+		t.Fatal("the retired lever has deltas")
+	}
+}
+
+// TestReworkProgramLeverUnlanded: a shipping bead with no landing record leaves
+// its lever row a reason, and the other rows stand.
+func TestReworkProgramLeverUnlanded(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	if row := reworkProgramLever(t, doc, 2); row.Reason != "no landing record for gt-a4yodt" {
+		t.Fatalf("lever 2 reason %q, want no landing record for gt-a4yodt", row.Reason)
+	}
+	if row := reworkProgramLever(t, doc, 6); row.Reason != "no landing record for gt-1zkwsb" {
+		t.Fatalf("lever 6 reason %q, want no landing record for gt-1zkwsb", row.Reason)
+	}
+}
+
+// TestReworkProgramLeverNoLandingTime: a landing record with no landed_at
+// cannot date its lever.
+func TestReworkProgramLeverNoLandingTime(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown"})
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	if row := reworkProgramLever(t, doc, 2); row.Reason != "the landing record for gt-a4yodt has no landed_at" {
+		t.Fatalf("lever 2 reason %q, want the undated landing record named", row.Reason)
+	}
+	if doc.Records.NoLandingTime != 1 {
+		t.Fatalf("no_landing_time %d, want 1", doc.Records.NoLandingTime)
+	}
+}
+
+// TestReworkProgramLeverWeekStillFilling: the week after a lever that landed in
+// the last complete week is the week the run falls in, so it is no figure week.
+func TestReworkProgramLeverWeekStillFilling(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-10")})
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	row := reworkProgramLever(t, doc, 2)
+	if row.After.Week != "2026-11-16" {
+		t.Fatalf("lever 2 after week %q, want the week the run falls in", row.After.Week)
+	}
+	reworkProgramReason(t, "lever 2 after two_rounds_share", row.After.TwoRoundsShare, "the week is still filling, so it is no figure week")
+	reworkProgramReason(t, "lever 2 after mean_polecat_minutes", row.After.MeanPolecatMinutes, "the week is still filling, so it is no figure week")
+	if row.TwoRoundsShareDelta != nil || row.MeanPolecatMinutesDelta != nil {
+		t.Fatal("a lever with a still-filling week has deltas")
+	}
+}
+
+// TestReworkProgramLeverWeekOutsideWindow: a lever landed in the window's first
+// week has its before week outside the report.
+func TestReworkProgramLeverWeekOutsideWindow(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-09-29")})
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	row := reworkProgramLever(t, doc, 2)
+	if row.Before.Week != "2026-09-21" {
+		t.Fatalf("lever 2 before week %q, want 2026-09-21", row.Before.Week)
+	}
+	reworkProgramReason(t, "lever 2 before two_rounds_share", row.Before.TwoRoundsShare, "the week is outside the window")
+	reworkProgramReason(t, "lever 2 before mean_polecat_minutes", row.Before.MeanPolecatMinutes, "the week is outside the window")
+	if row.TwoRoundsShareDelta != nil || row.MeanPolecatMinutesDelta != nil {
+		t.Fatal("a lever with a week outside the window has deltas")
+	}
+}
+
+// TestReworkProgramLeverWindowNoTimedLanding: a lever window with enough beads
+// but no polecat time gives the share and leaves the mean nil with its reason.
+func TestReworkProgramLeverWindowNoTimedLanding(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	untimed, untimedReviews := reworkProgramWeek(t, "untimed", "2026-10-26", 20, 0, 0)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, untimed...)
+	reviews = append(reviews, untimedReviews...)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-04")})
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	row := reworkProgramLever(t, doc, 2)
+	reworkProgramFigure(t, "lever 2 before two_rounds_share", row.Before.TwoRoundsShare, 0)
+	reworkProgramReason(t, "lever 2 before mean_polecat_minutes", row.Before.MeanPolecatMinutes, "no landing in the week carries a polecat time")
+	if row.MeanPolecatMinutesDelta != nil {
+		t.Fatal("a lever over an untimed mean has a mean delta")
+	}
+}
+
+// TestReworkProgramLeverWeekTooThin: a before week under twenty beads is too
+// thin for a figure, so the lever has no delta over it.
+func TestReworkProgramLeverWeekTooThin(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	thin, thinReviews := reworkProgramWeek(t, "thin", "2026-10-26", 19, 4, 600)
+	recs, reviews := reworkProgramFigureWeek(t)
+	recs = append(recs, thin...)
+	reviews = append(reviews, thinReviews...)
+	recs = append(recs, landings.Record{Bead: "gt-a4yodt", Rig: "gastown", LandedAt: reworkProgramDay(t, "2026-11-04")})
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	row := reworkProgramLever(t, doc, 2)
+	if row.Before.Beads != 19 {
+		t.Fatalf("lever 2 before beads %d, want 19", row.Before.Beads)
+	}
+	reworkProgramReason(t, "lever 2 before two_rounds_share", row.Before.TwoRoundsShare, "too few beads in the week to say")
+	if row.TwoRoundsShareDelta != nil || row.MeanPolecatMinutesDelta != nil {
+		t.Fatal("a lever over a too-thin week has deltas")
+	}
+}
+
+// TestReworkProgramNumbersTooThin: the figure week under twenty beads gives a
+// reason, never a zero share or a mean over nothing.
+func TestReworkProgramNumbersTooThin(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramWeek(t, "thin", "2026-11-09", 19, 4, 600)
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	if doc.Numbers.Beads != 19 {
+		t.Fatalf("numbers beads %d, want 19", doc.Numbers.Beads)
+	}
+	reworkProgramReason(t, "numbers.two_rounds_share", doc.Numbers.TwoRoundsShare, "too few beads in the week to say")
+	reworkProgramReason(t, "numbers.mean_polecat_minutes", doc.Numbers.MeanPolecatMinutes, "too few beads in the week to say")
+}
+
+// TestReworkProgramNumbersNoTimedLanding: a week with enough beads but no
+// polecat time gives the share and leaves the mean nil with its reason.
+func TestReworkProgramNumbersNoTimedLanding(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	recs, reviews := reworkProgramWeek(t, "untimed", "2026-11-09", 20, 0, 0)
+	doc := reworkProgramRunWith(t, town, step, reworkNumbersRecord{Landings: recs, Reviews: reviews})
+
+	reworkProgramFigure(t, "numbers.two_rounds_share", doc.Numbers.TwoRoundsShare, 0)
+	reworkProgramReason(t, "numbers.mean_polecat_minutes", doc.Numbers.MeanPolecatMinutes, "no landing in the week carries a polecat time")
+	if doc.Numbers.Timed != 0 || doc.Numbers.Untimed != 20 {
+		t.Fatalf("timed %d, untimed %d, want 0 and 20", doc.Numbers.Timed, doc.Numbers.Untimed)
+	}
+}
+
+// TestReworkProgramReadersCountUnreadable: the town's own readers count a
+// landings line and a review line that are not records, and skip a queue line.
+func TestReworkProgramReadersCountUnreadable(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, ".runtime", "landings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	landing := `{"bead":"gt-1","rig":"gastown","landed_at":"2026-11-11T12:00:00Z","polecat_secs":600}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "gastown.jsonl"), []byte(landing+"not a record\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reviews := strings.Join([]string{
+		`{"bead":"gt-1","rig":"gastown","attempt":2}`,
+		"not a record",
+		`{"followup_queue":{"findings":[]}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "reviews.jsonl"), []byte(reviews), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	step := newReworkNumbersStep(town, reworkProgramNow)
+	if err := step.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	data, err := os.ReadFile(reworkProgramOut(t, town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc reworkNumbersDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("the document is not JSON: %v", err)
+	}
+	if doc.Records.UnreadableLines != 2 {
+		t.Fatalf("unreadable_lines %d, want the landings line and the review line", doc.Records.UnreadableLines)
+	}
+}
+
+// TestReworkProgramReadersMissingFilesAreEmpty: a town that never landed has no
+// records and no error, and the document says why its figures are absent.
+func TestReworkProgramReadersMissingFilesAreEmpty(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	step := newReworkNumbersStep(town, reworkProgramNow)
+	if err := step.run(); err != nil {
+		t.Fatalf("run over a town with no records: %v", err)
+	}
+	data, err := os.ReadFile(reworkProgramOut(t, town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc reworkNumbersDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("the document is not JSON: %v", err)
+	}
+	if doc.Records.UnreadableLines != 0 || doc.Records.OutsideWindow != 0 || doc.Records.NoLandingTime != 0 {
+		t.Fatalf("record counts %+v, want all zero", doc.Records)
+	}
+	reworkProgramReason(t, "numbers.two_rounds_share", doc.Numbers.TwoRoundsShare, "too few beads in the week to say")
+}
+
+// TestReworkProgramReadersUnopenableLanding: a ledger that cannot be opened is
+// a failed read the run reports, not an empty rig.
+func TestReworkProgramReadersUnopenableLanding(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, ".runtime", "landings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ledger := filepath.Join(dir, "gastown.jsonl")
+	if err := os.Symlink(ledger, ledger); err != nil {
+		t.Fatalf("a self-referential symlink is how this test breaks a read: %v", err)
+	}
+	err := newReworkNumbersStep(town, reworkProgramNow).run()
+	if err == nil || !strings.Contains(err.Error(), "opening landings file") {
+		t.Fatalf("run error %v, want the unopenable ledger named", err)
+	}
+}
+
+// TestReworkProgramReadersUnopenableReview: a review log that cannot be opened
+// is a failed read the run reports, not a town with no verdicts.
+func TestReworkProgramReadersUnopenableReview(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, ".runtime", "landings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "reviews.jsonl")
+	if err := os.Symlink(log, log); err != nil {
+		t.Fatalf("a self-referential symlink is how this test breaks a read: %v", err)
+	}
+	err := newReworkNumbersStep(town, reworkProgramNow).run()
+	if err == nil || !strings.Contains(err.Error(), "opening the review records") {
+		t.Fatalf("run error %v, want the unopenable review log named", err)
+	}
+}
+
+// TestReworkProgramReadersUnreadableReview: a review log that opens but cannot
+// be read fails the run too.
+func TestReworkProgramReadersUnreadableReview(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory opens as a file and fails on its first read.
+	if err := os.MkdirAll(filepath.Join(town, ".runtime", "landings", "reviews.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := newReworkNumbersStep(town, reworkProgramNow).run()
+	if err == nil || !strings.Contains(err.Error(), "reading the review records") {
+		t.Fatalf("run error %v, want the unreadable review log named", err)
+	}
+}
+
+// TestReworkProgramReadersUnreadableDir: a landings path that is not a
+// directory is a failed read the run reports, not an empty week.
+func TestReworkProgramReadersUnreadableDir(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, ".runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, ".runtime", "landings"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	step := newReworkNumbersStep(town, reworkProgramNow)
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), "reading the landings directory") {
+		t.Fatalf("run error %v, want the unreadable landings directory named", err)
+	}
+}
+
+// TestReworkProgramRunRefusesUnwritableDocument: a document path that cannot be
+// a file is the run's error, never a silent success.
+func TestReworkProgramRunRefusesUnwritableDocument(t *testing.T) {
+	t.Parallel()
+	town, step := reworkProgramStep(t)
+	if err := os.MkdirAll(filepath.Join(town, ".runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, ".runtime", "rework-numbers"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recs, reviews := reworkProgramFigureWeek(t)
+	step.read = func() (reworkNumbersRecord, error) {
+		return reworkNumbersRecord{Landings: recs, Reviews: reviews}, nil
+	}
+	err := step.run()
+	if err == nil || !strings.Contains(err.Error(), "writing the rework program's document") {
+		t.Fatalf("run error %v, want the failed write named", err)
+	}
+}

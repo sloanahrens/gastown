@@ -179,6 +179,9 @@ const (
 	SourceJevScorecard = "jev_scorecard"
 	SourceOM           = "om"
 	SourceQueue        = "queue"
+	// SourceReworkNumbers is the rework program's document, read apart from
+	// the rework table beside it.
+	SourceReworkNumbers = "rework_numbers"
 	// SourceBirds is the birds' rows on the Reports page's list, read apart
 	// from the overseer's report beside them.
 	SourceBirds = "birds"
@@ -897,8 +900,13 @@ type State struct {
 	ClaudePlan *ClaudePlan `json:"claude_plan,omitempty"`
 	// Rework is what each om review bar costs in rework, from the landing
 	// worker's review log. It is nil until the reader first reports.
-	Rework *Rework         `json:"rework,omitempty"`
-	Spend  json.RawMessage `json:"spend,omitempty"`
+	Rework *Rework `json:"rework,omitempty"`
+	// ReworkNumbers is the rework program's weekly numbers and lever deltas,
+	// the document the daemon's weekly step writes, carried verbatim so a
+	// later panel reads it without a second reader. It is nil until a run has
+	// written a document the reader could use.
+	ReworkNumbers json.RawMessage `json:"rework_numbers,omitempty"`
+	Spend         json.RawMessage `json:"spend,omitempty"`
 	// SpendReason says why the spend pane has no report because its tool is
 	// absent where the dashboard runs, the NotInClusterReason; empty otherwise.
 	SpendReason string `json:"spend_reason,omitempty"`
@@ -1058,6 +1066,9 @@ type Config struct {
 	ClaudePlan func() *ClaudePlan
 	// Rework reads the om rework table from the landing worker's review log.
 	Rework func() *Rework
+	// ReworkNumbers reads the rework program's document verbatim, nil when no
+	// run has written one or its last read failed.
+	ReworkNumbers func() json.RawMessage
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -1137,6 +1148,9 @@ type Config struct {
 	QueueEvery        time.Duration
 	TrendEvery        time.Duration
 
+	// ReworkNumbersEvery is the rework numbers document's own poll clock.
+	ReworkNumbersEvery time.Duration
+
 	RingSize int // feed entries kept for a page that connects late
 }
 
@@ -1206,6 +1220,9 @@ func (c *Config) defaults() {
 	// The log gains a line per om verdict, a few an hour; a read is one small
 	// file.
 	def(&c.ReworkEvery, 60*time.Second)
+	// The step writes the document once a week, and a read is one small file,
+	// so a minute is slack to spare.
+	def(&c.ReworkNumbersEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	// The daemon appends to events.jsonl once a heartbeat; a read is a stat and
