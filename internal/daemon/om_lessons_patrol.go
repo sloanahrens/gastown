@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -127,12 +128,27 @@ func omLessonsTownSources(townRoot string) (omLessonsSources, error) {
 	return omLessonsSources{
 		Days: omlessons.DefaultDays,
 		Records: func(since time.Time) ([]land.ReviewRecord, error) {
-			return land.TownReviewsFile(townRoot).Since(since)
+			return omLessonsTownRecords(townRoot, since)
 		},
 		Rules: func() (map[string]bool, error) {
 			return omLessonsDirectiveRules(filepath.Join(townRoot, "directives"))
 		},
 	}, nil
+}
+
+// omLessonsTownRecords reads the review records of the window that starts at
+// since. The log's own reader takes an absent file as no records, since a town
+// that has not landed yet has none; the patrol refuses instead, because a moved
+// or unconfigured log would otherwise read as a clean week with no findings.
+func omLessonsTownRecords(townRoot string, since time.Time) ([]land.ReviewRecord, error) {
+	file := land.TownReviewsFile(townRoot)
+	if _, err := os.Stat(file.Path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("the town's review log %s does not exist, so the week cannot be read", file.Path)
+		}
+		return nil, fmt.Errorf("the town's review log %s: %w", file.Path, err)
+	}
+	return file.Since(since)
 }
 
 // omLessonsRuleHeading matches a numbered rule's heading in a directive, such

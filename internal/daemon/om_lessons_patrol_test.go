@@ -594,7 +594,7 @@ func TestReworkProgramOmLessonsRunReadsTheTownsOwnRecords(t *testing.T) {
 		t.Fatalf("write _common.md: %v", err)
 	}
 
-	now := time.Now()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	file := land.TownReviewsFile(town)
 	add := func(bead string, at time.Time, title string) {
 		t.Helper()
@@ -604,18 +604,18 @@ func TestReworkProgramOmLessonsRunReadsTheTownsOwnRecords(t *testing.T) {
 		}
 	}
 	for _, bead := range []string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e"} {
-		add(bead, now.AddDate(0, 0, -1), "fail-open: a failed read reads as clean")
+		add(bead, at.AddDate(0, 0, -1), "fail-open: a failed read reads as clean")
 	}
 	for _, bead := range []string{"gt-r1", "gt-r2", "gt-r3", "gt-r4", "gt-r5"} {
-		add(bead, now.AddDate(0, 0, -2), "the refusal branch has no test")
+		add(bead, at.AddDate(0, 0, -2), "the refusal branch has no test")
 	}
-	add("gt-prior", now.AddDate(0, 0, -10), "fail-open: a failed read reads as clean")
-	add("gt-old", now.AddDate(0, 0, -30), "fail-open: a failed read reads as clean")
+	add("gt-prior", at.AddDate(0, 0, -10), "fail-open: a failed read reads as clean")
+	add("gt-old", at.AddDate(0, 0, -30), "fail-open: a failed read reads as clean")
 
 	d := omLessonsTestDaemon(t, io.Discard)
 	d.config.TownRoot = town
 
-	proposals, err := d.runOmLessonsTick(context.Background(), now)
+	proposals, err := d.runOmLessonsTick(context.Background(), at)
 	if err != nil {
 		t.Fatalf("the pass over the town's own records: %v", err)
 	}
@@ -649,20 +649,34 @@ func TestReworkProgramOmLessonsRunRefusesAnUnreadableInput(t *testing.T) {
 	readable := func() omLessonsSources {
 		return omLessonsFakeSources(nil, map[string]bool{"1": true})
 	}
-	townWithDirectives := func(t *testing.T, polecat, common string) *Daemon {
+	// town builds a daemon over a temp town that holds the two directive files
+	// when their text is non-empty, and the town's review log when withLog is
+	// set.
+	town := func(t *testing.T, polecat, common string, withLog bool) *Daemon {
 		t.Helper()
-		dir := filepath.Join(t.TempDir(), "directives")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("make the directives directory: %v", err)
+		root := t.TempDir()
+		if polecat != "" || common != "" {
+			dir := filepath.Join(root, "directives")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("make the directives directory: %v", err)
+			}
+			for name, text := range map[string]string{"polecat.md": polecat, "_common.md": common} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
 		}
-		if err := os.WriteFile(filepath.Join(dir, "polecat.md"), []byte(polecat), 0o644); err != nil {
-			t.Fatalf("write polecat.md: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "_common.md"), []byte(common), 0o644); err != nil {
-			t.Fatalf("write _common.md: %v", err)
+		if withLog {
+			log := land.TownReviewsFile(root)
+			if err := os.MkdirAll(filepath.Dir(log.Path), 0o755); err != nil {
+				t.Fatalf("make the landings directory: %v", err)
+			}
+			if err := os.WriteFile(log.Path, nil, 0o644); err != nil {
+				t.Fatalf("write the review log: %v", err)
+			}
 		}
 		d := omLessonsTestDaemon(t, io.Discard)
-		d.config.TownRoot = filepath.Dir(dir)
+		d.config.TownRoot = root
 		return d
 	}
 
@@ -744,9 +758,30 @@ func TestReworkProgramOmLessonsRunRefusesAnUnreadableInput(t *testing.T) {
 			want: "no town root is named",
 		},
 		{
+			name: "a town with no review log",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				d := town(t, "## 1. Failure is not success\n", "## 3. Test the branch that refuses\n", false)
+				return d.runOmLessonsTick(context.Background(), at)
+			},
+			want: "review log",
+		},
+		{
+			name: "a review log below a file",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				root := t.TempDir()
+				if err := os.WriteFile(filepath.Join(root, ".runtime"), []byte("not a directory"), 0o644); err != nil {
+					t.Fatalf("block the town's runtime directory: %v", err)
+				}
+				d := omLessonsTestDaemon(t, io.Discard)
+				d.config.TownRoot = root
+				return d.runOmLessonsTick(context.Background(), at)
+			},
+			want: "not a directory",
+		},
+		{
 			name: "a town with no directives directory",
 			run: func(t *testing.T) ([]omlessons.Proposal, error) {
-				d := omLessonsTestDaemon(t, io.Discard)
+				d := town(t, "", "", true)
 				return d.runOmLessonsTick(context.Background(), at)
 			},
 			want: "reading the directive",
@@ -754,7 +789,7 @@ func TestReworkProgramOmLessonsRunRefusesAnUnreadableInput(t *testing.T) {
 		{
 			name: "a directive with no numbered rule heading",
 			run: func(t *testing.T) ([]omlessons.Proposal, error) {
-				d := townWithDirectives(t, "# What om rejects\n\nNo numbered rule here.\n", "The shared rules, unnumbered.\n")
+				d := town(t, "# What om rejects\n\nNo numbered rule here.\n", "The shared rules, unnumbered.\n", true)
 				return d.runOmLessonsTick(context.Background(), at)
 			},
 			want: "no numbered rules",
