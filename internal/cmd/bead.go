@@ -518,14 +518,38 @@ func (v *beadVerbs) note(id, text string) error {
 // is one atomic append, so a seat killed partway through loses the note it was
 // writing and never the notes before it (gt-w9male).
 func (v *beadVerbs) noteToOutbox(seat *seatOutbox, id, text string) error {
-	if id != seat.beadID {
-		return fmt.Errorf("not noting %s: a file-mode seat writes only its own bead, %s", id, seat.beadID)
+	if err := ownBeadWrite(seat, "noting", id); err != nil {
+		return err
 	}
-	if err := v.appendOutboxLine(seat, text); err != nil {
+	if err := v.appendOutboxLine(seat, "noting", text); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintf(v.out, "✓ Noted on %s\n", id)
 	return err
+}
+
+// commentToOutbox appends a comment to a file-mode seat's outbox rather than to
+// a bead. The outbox carries one text stream, notes.md, which the host applies
+// as the bead's notes, so a comment arrives as a note and a seat's killed run
+// loses only the comment it was writing (gt-jqo63z).
+func (v *beadVerbs) commentToOutbox(seat *seatOutbox, id, text string) error {
+	if err := ownBeadWrite(seat, "commenting", id); err != nil {
+		return err
+	}
+	if err := v.appendOutboxLine(seat, "commenting", text); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(v.out, "✓ Commented on %s\n", id)
+	return err
+}
+
+// ownBeadWrite refuses a file-mode write of id on any bead but the seat's own.
+// verb names the write the caller ran, so the refusal reads as that verb.
+func ownBeadWrite(seat *seatOutbox, verb, id string) error {
+	if id == seat.beadID {
+		return nil
+	}
+	return fmt.Errorf("not %s %s: a file-mode seat writes only its own bead, %s", verb, id, seat.beadID)
 }
 
 // seatTaskPath and seatTaskFilePath are the task directory and task file under
@@ -684,21 +708,23 @@ const outboxLockFile = ".outbox-notes.lock"
 // whose own tool calls can run together, and a killed seat drops its flock when
 // the process ends. The temporary and lock files sit in .gt beside the outbox,
 // not in it: the host's copy refuses any name in the outbox directory but
-// result.json and notes.md, so a kill must not leave one there.
-func (v *beadVerbs) appendOutboxLine(seat *seatOutbox, text string) error {
+// result.json and notes.md, so a kill must not leave one there. verb ("noting",
+// "commenting") names the caller in each failure, so the error reads as the
+// command that ran.
+func (v *beadVerbs) appendOutboxLine(seat *seatOutbox, verb, text string) error {
 	fsys := outboxFS(osOutboxFS{})
 	if v.outboxFS != nil {
 		fsys = v.outboxFS
 	}
 	unlock, err := lock.FlockAcquire(filepath.Join(filepath.Dir(seat.dir), outboxLockFile))
 	if err != nil {
-		return fmt.Errorf("not noting on %s: the outbox lock cannot be taken: %w", seat.beadID, err)
+		return fmt.Errorf("not %s on %s: the outbox lock cannot be taken: %w", verb, seat.beadID, err)
 	}
 	defer unlock()
 	notesPath := filepath.Join(seat.dir, outbox.NotesFile)
 	previous, err := fsys.ReadFile(notesPath)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("not noting on %s: its outbox notes cannot be read: %w", seat.beadID, err)
+		return fmt.Errorf("not %s on %s: its outbox notes cannot be read: %w", verb, seat.beadID, err)
 	}
 	next := appendNoteLine(previous, text)
 	// The host validates notes.md with outbox.Validate at seat end. Running the
@@ -706,19 +732,19 @@ func (v *beadVerbs) appendOutboxLine(seat *seatOutbox, text string) error {
 	// still report it, instead of at seat end, where the outbox is all there is.
 	raw := []byte(fmt.Sprintf(`{"bead_id":%s,"status":"done"}`, strconv.Quote(seat.beadID)))
 	if _, err := outbox.Validate(raw, next, seat.beadID); err != nil {
-		return fmt.Errorf("not noting on %s: %w", seat.beadID, err)
+		return fmt.Errorf("not %s on %s: %w", verb, seat.beadID, err)
 	}
 	if err := fsys.MkdirAll(seat.dir, 0o755); err != nil {
-		return fmt.Errorf("not noting on %s: its outbox directory cannot be made: %w", seat.beadID, err)
+		return fmt.Errorf("not %s on %s: its outbox directory cannot be made: %w", verb, seat.beadID, err)
 	}
 	tmp := filepath.Join(filepath.Dir(seat.dir), "."+outbox.NotesFile+"."+strconv.Itoa(os.Getpid())+".tmp")
 	if err := fsys.WriteFile(tmp, next, 0o644); err != nil {
 		return removeOutboxTemp(fsys, tmp,
-			fmt.Errorf("not noting on %s: the outbox write failed, so it keeps its previous notes: %w", seat.beadID, err))
+			fmt.Errorf("not %s on %s: the outbox write failed, so it keeps its previous notes: %w", verb, seat.beadID, err))
 	}
 	if err := fsys.Rename(tmp, notesPath); err != nil {
 		return removeOutboxTemp(fsys, tmp,
-			fmt.Errorf("not noting on %s: the outbox write did not land, so it keeps its previous notes: %w", seat.beadID, err))
+			fmt.Errorf("not %s on %s: the outbox write did not land, so it keeps its previous notes: %w", verb, seat.beadID, err))
 	}
 	return nil
 }
@@ -874,10 +900,17 @@ func (v *beadVerbs) comment(id, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("nothing to comment: the text is empty")
 	}
+	seat, err := v.fileOutbox()
+	if err != nil {
+		return err
+	}
+	if seat != nil {
+		return v.commentToOutbox(seat, id, text)
+	}
 	if err := v.client.AddComment(id, text); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(v.out, "✓ Commented on %s\n", id)
+	_, err = fmt.Fprintf(v.out, "✓ Commented on %s\n", id)
 	return err
 }
 
