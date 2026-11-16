@@ -123,6 +123,12 @@ const (
 	// build failed is not known (gt-3vafwr).
 	RuleImagesUnknown = "images.unknown"
 
+	// RuleTierSweepImagesRetryExhausted is the images-retries-exhausted rule:
+	// the sweep used every early re-run on a green commit's images build and it
+	// still failed, so that commit waits for the hourly cycle with no images to
+	// roll onto (gt-j6cwqr).
+	RuleTierSweepImagesRetryExhausted = "tier_sweep.images_retry_exhausted"
+
 	// RuleConfigEnvShadowed is a settings daemon.env key the container's
 	// environment shadowed at start: the pod's value is kept, and the stale
 	// settings entry is what the overseer removes (gt-ih19g6).
@@ -270,6 +276,10 @@ var ruleFlags = map[string]RuleFlags{
 	// overseer's next look, the way the unreadable pair check is, and is not
 	// reported as a clean commit (gt-3vafwr).
 	RuleImagesUnknown: flagsAsk,
+	// Every early re-run is spent and the build still fails, so nothing retries
+	// it before the next hourly cycle: like a first failure, the overseer is
+	// woken to re-run the build or fix what broke it (gt-j6cwqr).
+	RuleTierSweepImagesRetryExhausted: flagsWake,
 	// The pod's value is already in force, so nothing is broken; the stale
 	// settings entry is for the overseer's next look (gt-ih19g6).
 	RuleConfigEnvShadowed: flagsAsk,
@@ -382,58 +392,59 @@ func Rules() []string {
 // kindRules maps a kind to its rule id. The disk kinds are keyed by the item
 // instead (RuleFor), because each raises two rules.
 var kindRules = map[Kind]string{
-	KindRiskPath:                 RuleRiskPath,
-	KindRedMain:                  RuleRedMain,
-	KindRejectedTwice:            RuleRejectedTwice,
-	KindReviewRejected:           RuleReviewRejected,
-	KindEscalation:               RuleEscalation,
-	KindPolecatStall:             RulePolecatStall,
-	KindLandingStuck:             RuleLandingStuck,
-	KindQueueStuck:               RuleQueueStuck,
-	KindDirectPush:               RuleDirectPush,
-	KindSlotHeld:                 RuleSlotHeld,
-	KindSlotDeadHolder:           RuleSlotDeadHolder,
-	KindBDSlow:                   RuleBDSlow,
-	KindTierSweepRed:             RuleTierSweepRed,
-	KindTierSweepStarved:         RuleTierSweepStarved,
-	KindTierSweepStuck:           RuleTierSweepStuck,
-	KindTierSweepGuardUnreadable: RuleTierSweepGuardUnreadable,
-	KindCacheTrimNoOp:            RuleCacheTrimNoOp,
-	KindRevertRefused:            RuleRevertRefused,
-	KindBlockedMail:              RuleBlockedMail,
-	KindOverrunStopped:           RuleOverrunStopped,
-	KindScheduledGate:            RuleScheduledGate,
-	KindHostMem:                  RuleHostMemLow,
-	KindHostForgejo:              RuleHostForgejoDown,
-	KindConfigEnvShadowed:        RuleConfigEnvShadowed,
-	KindConfigParseFailed:        RuleConfigParseFailed,
-	KindHostProbe:                RuleHostProbe,
-	KindQuestionNew:              RuleQuestionNew,
-	KindQuestionAnswered:         RuleQuestionAnswered,
-	KindQuestionStale:            RuleQuestionStale,
-	KindOverseerSilent:           RuleOverseerSilent,
-	KindDispatchIdle:             RuleDispatchIdle,
-	KindDeployFailed:             RuleDeployFailed,
-	KindReviewBacklog:            RuleReviewBacklog,
-	KindBirdReportStale:          RuleBirdReportStale,
-	KindPostLandUnknown:          RulePostLandUnknown,
-	KindGreenRef:                 RuleGreenRef,
-	KindDoltImageBehind:          RuleDoltImageBehind,
-	KindDeployPairReady:          RuleDeployPairReady,
-	KindDeployPairUnreadable:     RuleDeployPairUnreadable,
-	KindImagesFailed:             RuleImagesFailed,
-	KindImagesUnknown:            RuleImagesUnknown,
-	KindSandboxSeatKept:          RuleSandboxSeatKept,
-	KindUpdateRolledBack:         RuleUpdateRolledBack,
-	KindHoldStale:                RuleHoldStale,
-	KindSandboxPending:           RuleSandboxPending,
-	KindSeatSandboxStale:         RuleSeatSandboxStale,
-	KindSeatUnreachable:          RuleSeatUnreachable,
-	KindStoryPointsDrift:         RuleStoryPointsDrift,
-	KindImagePinsStale:           RuleImagePinsStale,
-	KindImagePinsUnreadable:      RuleImagePinsUnreadable,
-	KindImagePinsRefreshStuck:    RuleImagePinsRefreshStuck,
-	KindImagePinsDeadLayer:       RuleImagePinsDeadLayer,
+	KindRiskPath:                      RuleRiskPath,
+	KindRedMain:                       RuleRedMain,
+	KindRejectedTwice:                 RuleRejectedTwice,
+	KindReviewRejected:                RuleReviewRejected,
+	KindEscalation:                    RuleEscalation,
+	KindPolecatStall:                  RulePolecatStall,
+	KindLandingStuck:                  RuleLandingStuck,
+	KindQueueStuck:                    RuleQueueStuck,
+	KindDirectPush:                    RuleDirectPush,
+	KindSlotHeld:                      RuleSlotHeld,
+	KindSlotDeadHolder:                RuleSlotDeadHolder,
+	KindBDSlow:                        RuleBDSlow,
+	KindTierSweepRed:                  RuleTierSweepRed,
+	KindTierSweepStarved:              RuleTierSweepStarved,
+	KindTierSweepStuck:                RuleTierSweepStuck,
+	KindTierSweepGuardUnreadable:      RuleTierSweepGuardUnreadable,
+	KindCacheTrimNoOp:                 RuleCacheTrimNoOp,
+	KindRevertRefused:                 RuleRevertRefused,
+	KindBlockedMail:                   RuleBlockedMail,
+	KindOverrunStopped:                RuleOverrunStopped,
+	KindScheduledGate:                 RuleScheduledGate,
+	KindHostMem:                       RuleHostMemLow,
+	KindHostForgejo:                   RuleHostForgejoDown,
+	KindConfigEnvShadowed:             RuleConfigEnvShadowed,
+	KindConfigParseFailed:             RuleConfigParseFailed,
+	KindHostProbe:                     RuleHostProbe,
+	KindQuestionNew:                   RuleQuestionNew,
+	KindQuestionAnswered:              RuleQuestionAnswered,
+	KindQuestionStale:                 RuleQuestionStale,
+	KindOverseerSilent:                RuleOverseerSilent,
+	KindDispatchIdle:                  RuleDispatchIdle,
+	KindDeployFailed:                  RuleDeployFailed,
+	KindReviewBacklog:                 RuleReviewBacklog,
+	KindBirdReportStale:               RuleBirdReportStale,
+	KindPostLandUnknown:               RulePostLandUnknown,
+	KindGreenRef:                      RuleGreenRef,
+	KindDoltImageBehind:               RuleDoltImageBehind,
+	KindDeployPairReady:               RuleDeployPairReady,
+	KindDeployPairUnreadable:          RuleDeployPairUnreadable,
+	KindImagesFailed:                  RuleImagesFailed,
+	KindImagesUnknown:                 RuleImagesUnknown,
+	KindTierSweepImagesRetryExhausted: RuleTierSweepImagesRetryExhausted,
+	KindSandboxSeatKept:               RuleSandboxSeatKept,
+	KindUpdateRolledBack:              RuleUpdateRolledBack,
+	KindHoldStale:                     RuleHoldStale,
+	KindSandboxPending:                RuleSandboxPending,
+	KindSeatSandboxStale:              RuleSeatSandboxStale,
+	KindSeatUnreachable:               RuleSeatUnreachable,
+	KindStoryPointsDrift:              RuleStoryPointsDrift,
+	KindImagePinsStale:                RuleImagePinsStale,
+	KindImagePinsUnreadable:           RuleImagePinsUnreadable,
+	KindImagePinsRefreshStuck:         RuleImagePinsRefreshStuck,
+	KindImagePinsDeadLayer:            RuleImagePinsDeadLayer,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

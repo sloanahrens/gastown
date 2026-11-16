@@ -136,6 +136,11 @@ const (
 	// pair is missing could not be read, so whether its build failed is unknown
 	// (gt-3vafwr). It is not a clean commit, and the next readable list clears it.
 	KindImagesUnknown Kind = "images-unknown"
+	// KindTierSweepImagesRetryExhausted: the sweep spent every early re-run on a
+	// green commit whose images build kept failing, so it stopped retrying and
+	// that commit still has no daemon and polecat images to roll onto
+	// (gt-j6cwqr).
+	KindTierSweepImagesRetryExhausted Kind = "tier-sweep-images-retry-exhausted"
 	// KindConfigEnvShadowed: a settings daemon.env key was not applied at
 	// start, because the container's environment already sets it to another
 	// value (gt-ih19g6).
@@ -202,6 +207,7 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
+		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
