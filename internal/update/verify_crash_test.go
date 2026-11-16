@@ -288,7 +288,9 @@ func TestPreRollGuardCrashProbeErrorKeepsTheWait(t *testing.T) {
 // stays unreadable is reported once for the whole wait, however many polls it
 // takes, and one that fails again after a good read is reported again. The
 // standard logger is redirected only to observe what the wait writes, never to
-// steer it, so this test runs with the package's other tests paused.
+// steer it.
+//
+//testpolicy:allow parallel — captures the process-wide standard log output that the wait writes to
 func TestPreRollGuardCrashProbeErrorLogIsBounded(t *testing.T) {
 	unreadable := errors.New("kubectl: no route to host")
 	tests := []struct {
