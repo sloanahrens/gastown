@@ -74,8 +74,10 @@ type Fake struct {
 	failures    map[string]error
 	version     *beads.VersionInfo
 	schemaLevel int
-	// samples is the cost samples table, in write order.
-	samples []beads.Sample
+	// samples is the cost samples table, in write order, and usageRecords its
+	// usage_record rows.
+	samples      []beads.Sample
+	usageRecords []beads.UsageRecordRow
 
 	// journal is the events journal (bd events tail): one record per
 	// create, update, close and comment, as bd journals them in a store whose

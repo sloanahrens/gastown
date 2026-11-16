@@ -37,6 +37,18 @@ func (c *Client) ReadCostSamples(context.Context, string, time.Time, int) ([]bea
 	return nil, fmt.Errorf("ReadCostSamples: the tracker client runs no bd, so it cannot read cost sample rows")
 }
 
+// WriteUsageRecord refuses: the tracker client runs no bd, so it has no
+// samples table to append to, and no request is sent.
+func (c *Client) WriteUsageRecord(context.Context, beads.UsageRecordRow) error {
+	return fmt.Errorf("WriteUsageRecord: the tracker client runs no bd, so it cannot write a usage record row")
+}
+
+// ReadUsageRecords refuses: the tracker client runs no bd, so it has no
+// samples table to read, and no request is sent.
+func (c *Client) ReadUsageRecords(context.Context, time.Time, int) ([]beads.UsageRecordRow, error) {
+	return nil, fmt.Errorf("ReadUsageRecords: the tracker client runs no bd, so it cannot read usage record rows")
+}
+
 // SchemaLevel refuses: the tracker knows the wire schema this client speaks,
 // which is not the migration level of the store behind it.
 func (c *Client) SchemaLevel() (int, error) {

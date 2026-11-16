@@ -3,15 +3,17 @@ package dashboard
 import (
 	"sort"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/usagerecord"
 )
 
 // The Usage panel's payload: what the town spent over the last day, folded out
 // of the per-record files the usage scan writes under
 // <town>/.runtime/usage/beads. The reader that opens those files lives with the
 // town's other readers, internal/cmd/dashboard_usage.go, for the reason the
-// deep review reader's does; this file holds the payload's types and the
-// arithmetic that turns records into them, so the windows and the sort order
-// are testable without a disk.
+// deep review reader's does; this file holds the payload's types (the record's
+// from usagerecord) and the arithmetic that turns records into them, so the
+// windows and the sort order are testable without a disk.
 
 // The classes a record's own class field carries.
 const (
@@ -45,70 +47,16 @@ const (
 	usageDeepReviewRows = 5
 )
 
-// UsageModel is one model's share of a record: what the panel adds up per class
-// and model.
-type UsageModel struct {
-	Calls         int64   `json:"calls"`
-	Input         int64   `json:"input"`
-	Output        int64   `json:"output"`
-	CacheCreation int64   `json:"cache_creation"`
-	CacheRead     int64   `json:"cache_read"`
-	EstCostUSD    float64 `json:"est_cost_usd"`
-}
-
-// UsageTotals is a record's totals across every model it used.
-type UsageTotals struct {
-	Calls         int64 `json:"calls"`
-	Input         int64 `json:"input"`
-	Output        int64 `json:"output"`
-	CacheCreation int64 `json:"cache_creation"`
-	CacheRead     int64 `json:"cache_read"`
-	// Uncached counts the tokens the run paid full price for: input, output
-	// and cache creation. It is what the panel shows for a Claude record,
-	// whose cost the scan does not estimate.
-	Uncached int64 `json:"uncached"`
-}
-
-// UsageSubagents is how much of a record's work ran in subagents rather than on
-// the seat's own loop.
-type UsageSubagents struct {
-	Calls    int64   `json:"calls"`
-	Share    float64 `json:"share"`
-	Uncached int64   `json:"uncached"`
-}
-
-// UsageActivity is what a record's session did, as opposed to what it spent.
-type UsageActivity struct {
-	ToolCalls      int64 `json:"tool_calls"`
-	Edits          int64 `json:"edits"`
-	TestRuns       int64 `json:"test_runs"`
-	FailedTestRuns int64 `json:"failed_test_runs"`
-}
-
-// UsageRecord is one scan file: a bead's run of one kind. Its fields carry the
-// scan's JSON names so the reader decodes a file into it directly, and a
-// file whose shape is wrong fails the decode rather than arriving half-filled.
-type UsageRecord struct {
-	Bead  string `json:"bead"`
-	Kind  string `json:"kind"`
-	Class string `json:"class"`
-	Rig   string `json:"rig"`
-	// Workspace is the workspace the run spent in, absent from records the
-	// scan wrote before it carried one and so read as the empty string then.
-	Workspace string  `json:"workspace,omitempty"`
-	Seat      *string `json:"seat"`
-	Complete  bool    `json:"complete"`
-	// Start and End are the run's RFC3339 bounds. A record without a parsable
-	// End cannot be placed in any window and is counted as Skipped.
-	Start      time.Time             `json:"start"`
-	End        time.Time             `json:"end"`
-	WallS      int64                 `json:"wall_s"`
-	EstCostUSD float64               `json:"est_cost_usd"`
-	Models     map[string]UsageModel `json:"models"`
-	Totals     UsageTotals           `json:"totals"`
-	Subagents  UsageSubagents        `json:"subagents"`
-	Activity   UsageActivity         `json:"activity"`
-}
+// The record and its parts are usagerecord's types under the names the panel
+// draws with: internal/beads carries the same record as a stored row, and cannot
+// import this package (see usagerecord's package comment).
+type (
+	UsageModel     = usagerecord.Model
+	UsageTotals    = usagerecord.Totals
+	UsageSubagents = usagerecord.Subagents
+	UsageActivity  = usagerecord.Activity
+	UsageRecord    = usagerecord.Record
+)
 
 // UsageClassModelRow is one class and model's share of the window: the panel's
 // answer to "where did the day's tokens go".
