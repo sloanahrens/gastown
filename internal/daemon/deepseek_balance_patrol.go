@@ -8,20 +8,23 @@ package daemon
 //
 // The key reaches only the fetch seam. Every line this file logs names the key
 // file's path, never its contents, and so does every error the reader returns.
-// The tick that fetches the balance and writes the cost_samples row is
-// gt-a5c8ld; until it lands the production seams carry no fetch, and a
-// configured tick refuses rather than reporting a balance it did not read.
+// A configured tick fetches the balance and writes it as a deepseek_balance row
+// in cost_samples (gt-a5c8ld). A tick whose seams carry no fetch refuses rather
+// than reporting a balance it did not read.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deepseekbalance"
 )
 
 const (
@@ -29,8 +32,11 @@ const (
 	// daemon.container_off.
 	deepSeekBalancePatrol = "deepseek_balance"
 
-	// deepSeekBalanceTickTimeout bounds a whole tick, the fetch gt-a5c8ld adds
-	// included, so a stuck request frees the patrol's single-flight guard.
+	// deepSeekBalanceAPI is the DeepSeek API the balance is read from.
+	deepSeekBalanceAPI = "https://api.deepseek.com"
+
+	// deepSeekBalanceTickTimeout bounds a whole tick, the fetch and the row
+	// write included, so a stuck request frees the patrol's single-flight guard.
 	deepSeekBalanceTickTimeout = 2 * time.Minute
 
 	// deepSeekBalanceJoinWait bounds how long Run waits for a tick still
@@ -93,9 +99,9 @@ type deepSeekBalanceTickSeams struct {
 	// one: an absent file is the unconfigured town, not a failure. An error it
 	// returns names the path and never the key.
 	readKey func(path string) (key string, configured bool, err error)
-	// fetch reads the balance with key and does the tick's work with it. It is
-	// given the key, never the path, and must keep the key out of its errors.
-	// Production wires it in gt-a5c8ld; nil refuses a configured tick.
+	// fetch reads the balance with key and writes the row. It is given the key,
+	// never the path, and must keep the key out of its errors. Nil refuses a
+	// configured tick.
 	fetch func(ctx context.Context, key string) error
 }
 
@@ -110,17 +116,53 @@ func (s deepSeekBalanceTickSeams) check() error {
 }
 
 // deepSeekBalanceSeamsOf returns the seams a tick runs with: production's key
-// reader, or the test's replacements when it set them.
+// reader and fetch, or the test's replacements when it set them.
 func (d *Daemon) deepSeekBalanceSeamsOf() deepSeekBalanceTickSeams {
 	if d.newDeepSeekBalanceSeams != nil {
 		return d.newDeepSeekBalanceSeams()
 	}
-	return deepSeekBalanceTickSeams{readKey: deepSeekBalanceReadKey}
+	return deepSeekBalanceTickSeams{readKey: deepSeekBalanceReadKey, fetch: d.fetchDeepSeekBalance}
+}
+
+// fetchDeepSeekBalance reads the balance with key and writes it as a
+// deepseek_balance row stamped with the daemon's clock. A failed fetch writes no
+// row: its error is returned and the tick logs it. The key travels only in the
+// request's Authorization header, so neither the row nor an error carries it.
+func (d *Daemon) fetchDeepSeekBalance(ctx context.Context, key string) error {
+	client := d.deepSeekBalanceHTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	s, err := deepseekbalance.Fetch(ctx, client, deepSeekBalanceAPI, key)
+	if err != nil {
+		return err
+	}
+	total, granted, toppedUp := s.Total, s.Granted, s.ToppedUp
+	row := beads.Sample{
+		Kind:     beads.SampleKindDeepSeekBalance,
+		At:       d.clk().Now(),
+		Total:    &total,
+		Granted:  &granted,
+		ToppedUp: &toppedUp,
+	}
+	if err := d.costSampleBeads().WriteCostSample(ctx, row); err != nil {
+		return fmt.Errorf("writing the deepseek_balance row: %w", err)
+	}
+	return nil
+}
+
+// costSampleBeads opens the store the balance row is written to: the town
+// database, unless a test hands one in.
+func (d *Daemon) costSampleBeads() beads.Client {
+	if d.openCostSampleBeads != nil {
+		return d.openCostSampleBeads()
+	}
+	return beads.New(d.config.TownRoot)
 }
 
 // startDeepSeekBalanceTick runs one tick on its own goroutine: a tick reads the
-// key file and, once gt-a5c8ld lands, makes an HTTPS request, neither of which
-// belongs on the main select loop. A tick that arrives while the previous one
+// key file and makes an HTTPS request, neither of which belongs on the main
+// select loop. A tick that arrives while the previous one
 // still runs is skipped and logged, since two ticks at once would spend the
 // account's requests twice.
 func (d *Daemon) startDeepSeekBalanceTick() {

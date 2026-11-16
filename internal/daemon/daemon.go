@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1401,6 +1402,12 @@ type Daemon struct {
 	// newDeepSeekBalanceSeams replaces the tick's seams in tests: nil is the
 	// production key reader, and a test sets it to hand the tick a fake fetch.
 	newDeepSeekBalanceSeams func() deepSeekBalanceTickSeams
+	// deepSeekBalanceHTTP is the client the balance is read through: nil is the
+	// default client, and a test hands it a transport that answers in process.
+	deepSeekBalanceHTTP *http.Client
+	// openCostSampleBeads opens the store the balance row is written to: nil is
+	// the town database, and a test hands it a beadsfake.
+	openCostSampleBeads func() beads.Client
 
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
