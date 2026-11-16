@@ -165,6 +165,26 @@ type Record struct {
 	// clears it, so a new session on the seat never inherits it.
 	SandboxOwed bool `json:"sandbox_owed,omitempty"`
 
+	// The finished-turn facts: what the seat's last turn ended as, which gt done
+	// writes to the agent bead today and which the readers move here
+	// (docs/plans/2026-11-15-agent-bead-retirement-design.md). They describe the
+	// session that ended, so MarkSlung clears the first three when new work is
+	// slung and keeps LastWorkBead, which is history.
+	//
+	// TurnState is done, stuck or awaiting-gate, and empty when no turn's facts
+	// are recorded — a fresh record, or one MarkSlung has cleared.
+	TurnState string `json:"turn_state,omitempty"`
+	// ExitType is the exit status the turn ended with; gt done's final statuses
+	// are COMPLETED, DEFERRED and ESCALATED.
+	ExitType string `json:"exit_type,omitempty"`
+	// CleanupStatus is the git state the seat last reported: clean,
+	// has_uncommitted, has_stash or has_unpushed.
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// LastWorkBead is the bead the turn ended on. Unlike WorkBead, which is the
+	// work now waiting to land and goes when the seat is reused, this survives a
+	// sling: it says what the seat did last.
+	LastWorkBead string `json:"last_work_bead,omitempty"`
+
 	// The pause marker fields, unchanged in name and meaning. Paused is
 	// always serialized and always equals Held().
 	Paused          bool      `json:"paused"`
@@ -228,6 +248,50 @@ func MarkSubmitted(townRoot string, s Seat, workBead, actor string, now time.Tim
 	return err
 }
 
+// TurnEnd is the set of facts gt done has to record when a seat's turn ends:
+// what the turn ended as, the exit status, the git state the session reported
+// and the bead the turn was working on.
+type TurnEnd struct {
+	TurnState     string
+	ExitType      string
+	CleanupStatus string
+	WorkBead      string
+}
+
+// MarkTurnEnded records the facts of the turn that has just ended (see TurnEnd).
+// It sets TurnState, ExitType and CleanupStatus and puts e.WorkBead in
+// LastWorkBead; WorkBead, which is the work waiting to land, is left alone.
+//
+// Unlike MarkSubmitted, a hold does not stop this write: these are observations
+// of what the session did, not a desired state, so a seat the operator parked
+// still records its turn's end, and the park itself (desired, frozen, pause
+// fields) is left exactly as it was.
+func MarkTurnEnded(townRoot string, s Seat, e TurnEnd, actor string, now time.Time) error {
+	_, err := Update(townRoot, s, func(r *Record) error {
+		r.TurnState = e.TurnState
+		r.ExitType = e.ExitType
+		r.CleanupStatus = e.CleanupStatus
+		r.LastWorkBead = e.WorkBead
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
+}
+
+// SetCleanupStatus records the git state a seat's session reported, changing
+// nothing else on the record but the bookkeeping (Actor and UpdatedAt). It is
+// the write for a cleanup status found after the turn's own facts were recorded
+// — a push that failed late, or a stalled seat the overrun guard stopped — and
+// it writes on a held seat the way MarkTurnEnded does.
+func SetCleanupStatus(townRoot string, s Seat, status, actor string, now time.Time) error {
+	_, err := Update(townRoot, s, func(r *Record) error {
+		r.CleanupStatus = status
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
+}
+
 // ClearSubmitted returns a submitted seat to run when new work is dispatched
 // to it. A seat in any other state is left as it is.
 func ClearSubmitted(townRoot string, s Seat, actor string, now time.Time) error {
@@ -271,6 +335,11 @@ func MarkSlung(townRoot string, s Seat, agent, actor string, now time.Time) erro
 		// The sandbox debt of a stalled release is the previous session's too.
 		r.Progress = nil
 		r.SandboxOwed = false
+		// The finished-turn facts describe the session that ended, so they go
+		// with it: a reader must never see the previous turn's "done" on the
+		// seat's new one. LastWorkBead is what the seat did, not what it is
+		// doing, and stays.
+		r.TurnState, r.ExitType, r.CleanupStatus = "", "", ""
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		return nil
 	})
