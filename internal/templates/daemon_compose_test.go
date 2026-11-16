@@ -855,40 +855,135 @@ func TestRenderDaemonCompose_EscapesADollarInAValue(t *testing.T) {
 // declaration counts only when every name it declares ends in Image, which is
 // the one marker the file itself carries; taking every string constant instead
 // would let a service naming a bare version pass the pin check.
+//
+// A reference may be built from another constant (DindImage concatenates
+// dockerImageDigest, gt-55fq3n), so imageRefsInSource evaluates each value as a
+// const expression rather than reading a bare literal.
 func imageTable(t *testing.T) []string {
 	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), "images.go", nil, parser.SkipObjectResolution)
+	src, err := os.ReadFile("images.go")
 	if err != nil {
-		t.Fatalf("parsing images.go: %v", err)
+		t.Fatalf("reading images.go: %v", err)
 	}
-	var refs []string
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok || !declaresAnImage(vs.Names) {
-				continue
-			}
-			for _, v := range vs.Values {
-				lit, ok := v.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
-				}
-				s, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					t.Fatalf("unquoting %s in images.go: %v", lit.Value, err)
-				}
-				refs = append(refs, s)
-			}
-		}
+	refs, err := imageRefsInSource(src)
+	if err != nil {
+		t.Fatalf("reading the image table of images.go: %v", err)
 	}
 	if len(refs) == 0 {
 		t.Fatal("images.go declares no …Image constant; an empty table would pin nothing")
 	}
 	return refs
+}
+
+// imageRefsInSource returns the image references declared in one images.go
+// source. A constant whose value it cannot evaluate is an error, never a
+// skipped entry: a short table would leave the pin check silent about the
+// reference that was dropped.
+func imageRefsInSource(src []byte) ([]string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), "images.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+
+	exprs := map[string]ast.Expr{}
+	var imageSpecs []*ast.ValueSpec
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		var inherited []ast.Expr
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if len(vs.Values) > 0 {
+				inherited = vs.Values
+			}
+			for i, name := range vs.Names {
+				if i >= len(inherited) {
+					return nil, fmt.Errorf("constant %s has no value the scan can follow", name.Name)
+				}
+				exprs[name.Name] = inherited[i]
+			}
+			if declaresAnImage(vs.Names) {
+				imageSpecs = append(imageSpecs, vs)
+			}
+		}
+	}
+
+	var refs []string
+	for _, vs := range imageSpecs {
+		for _, name := range vs.Names {
+			value, ok := evalConstString(exprs[name.Name], exprs, map[string]bool{})
+			if !ok {
+				return nil, fmt.Errorf("constant %s has a value the scan cannot evaluate, so the image table would silently omit it", name.Name)
+			}
+			refs = append(refs, value)
+		}
+	}
+	return refs, nil
+}
+
+// TestImagePinDurabilityImageTableReadsConstantsAndRefusesUnreadable is a table
+// over synthetic images.go sources: a reference concatenated from another
+// constant is read as the whole reference, a version string is not an image,
+// and a value the scan cannot follow is an error rather than a skipped entry.
+func TestImagePinDurabilityImageTableReadsConstantsAndRefusesUnreadable(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	ref := "data.forgejo.org/oci/docker@" + digest
+
+	tests := []struct {
+		name    string
+		src     string
+		want    []string
+		wantErr string // substring of the error; "" when the scan succeeds
+	}{
+		{
+			name: "a literal reference",
+			src:  "package templates\nconst DindImage = \"" + ref + "\"",
+			want: []string{ref},
+		},
+		{
+			name: "a reference built from a constant",
+			src: "package templates\nconst (\n\tdockerImageDigest = \"" + digest + "\"\n" +
+				"\tDindImage = \"data.forgejo.org/oci/docker@\" + dockerImageDigest\n)",
+			want: []string{ref},
+		},
+		{
+			name: "a version is not an image",
+			src:  "package templates\nconst DoltVersion = \"2.3.2\"",
+		},
+		{
+			name:    "a value the scan cannot follow refuses",
+			src:     "package templates\nconst DindImage = pinFromAnotherFile",
+			wantErr: "cannot evaluate",
+		},
+		{
+			name:    "a name with no value to inherit refuses",
+			src:     "package templates\nconst (\n\tA, B = \"x\"\n\tC, D\n)",
+			wantErr: "no value the scan can follow",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := imageRefsInSource([]byte(tt.src))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one naming %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("refs = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 // declaresAnImage reports whether every name in a const declaration marks its
