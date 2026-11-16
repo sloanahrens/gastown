@@ -260,9 +260,9 @@ func (d *Daemon) lastUpdateLaunch() time.Time {
 
 // updateFacts gathers what the due check knows, from the same sources the
 // rebuild_gt cycle reads: the update job's state file, the pending-install
-// marker, the installed build's staleness against main, and the landing
-// records of the rig whose checkout the binary is built from. An unreadable
-// source is an error, never an empty value.
+// marker, the installed build's staleness against main, the image ledger the
+// update command writes, and the landing records of the rig whose checkout the
+// binary is built from. An unreadable source is an error, never an empty value.
 func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	facts := UpdateFacts{Standby: d.standbyReason(now)}
 
@@ -320,6 +320,18 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 		// the same failed run cannot restart (gt-tb5vx).
 		facts.MainSHA = d.updateRemoteMainSHA(now, d.config.TownRoot)
 	}
+
+	// The image ledger holds the pair a pre-swap check refused, read through the
+	// ledger the update command writes so the patrol and the run agree on the
+	// record. No file is no refusal (no digest install has run here); a file
+	// that cannot be read is an unknown fact, never an empty record, so the
+	// heartbeat refuses the launch rather than guess (gt-naf038).
+	rec, err := update.FileImageLedger{Dir: update.Dir(d.config.TownRoot)}.Read()
+	if err != nil {
+		return facts, err
+	}
+	facts.RefusedCommit, facts.RefusedReason = rec.Refused.Commit, rec.RefusedReason
+
 	facts.MainMoved = info.IsStale
 	if !info.IsStale {
 		return facts, nil
