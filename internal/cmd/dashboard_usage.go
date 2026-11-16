@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
@@ -44,21 +47,48 @@ const (
 	// first of the billing month: a calendar month is at most 31 days, and the
 	// extra day covers a record that ends on the boundary itself.
 	usageMonthRecord = 32 * 24 * time.Hour
+	// usageRowsLimit caps one poll's read of the usage_records rows. A read that
+	// fills it is refused rather than folded: the rows that fell off the cap are
+	// the window's oldest, so a total built from them would be short without
+	// saying so (the claude_plan rows keep the same cap, gt-u9dsir).
+	usageRowsLimit = 20000
 )
+
+// usageRowsRead reads the town's usage_records rows built at or after since, up
+// to limit, newest built first. It is the beads store's ReadUsageRecords with
+// the context dropped, since the dashboard's pollers carry none.
+type usageRowsRead func(since time.Time, limit int) ([]beads.UsageRecordRow, error)
 
 // dashUsageReader reads the usage scan's records. dir is the usage root, so the
 // reading and its cache are testable against a temp directory; the cache holds
 // each file's last decode, keyed by path, and a file the directory no longer
 // holds leaves with it.
 //
+// The rows are read first and the files fold in beside them: a row outlives the
+// file path a later bead removes, so a record filed only as a row still counts.
+//
 // Two of the hub's pollers read through it - the Usage panel's day and the plan
 // line's month - and each runs on its own goroutine, so the cache is guarded by
 // mu (gt-d8sem).
 type dashUsageReader struct {
 	dir string
-	mu  sync.Mutex
+	// rows reads the usage_records rows. Nil until withRows wires it; with no
+	// rows the reader folds the files alone.
+	rows usageRowsRead
+	mu   sync.Mutex
 	// cache is guarded by mu.
 	cache map[string]usageCached
+}
+
+// usageKey is a record's identity in the records directory: one file per bead
+// and kind, so a row for one kind never hides a file of the other.
+type usageKey struct {
+	bead, kind string
+}
+
+// usageKeyOf is the identity of rec.
+func usageKeyOf(rec dashboard.UsageRecord) usageKey {
+	return usageKey{bead: rec.Bead, kind: rec.Kind}
 }
 
 // usageCached is one record file as it was when last read.
@@ -74,17 +104,88 @@ func newDashUsageReader(townRoot string) *dashUsageReader {
 	}
 }
 
-// read is the panel's whole reading. A records directory that cannot be listed
-// is an unavailable panel and never an empty day: "nothing ran today" and "the
-// records could not be read" are different things to tell the operator.
+// withRows wires the town's usage_records rows into the reader.
+func (r *dashUsageReader) withRows(rows usageRowsRead) *dashUsageReader {
+	r.rows = rows
+	return r
+}
+
+// dashboardUsageRows reads the town's usage_records rows through the town's beads
+// store, the store the seat-end and om-review writers file them in.
+func dashboardUsageRows(townRoot string) usageRowsRead {
+	client := beads.New(townRoot)
+	return func(since time.Time, limit int) ([]beads.UsageRecordRow, error) {
+		return client.ReadUsageRecords(context.Background(), since, limit)
+	}
+}
+
+// read is the panel's whole reading. A row read that fails, or that fills its
+// cap, is an unavailable panel with no reason, and so is a records directory that
+// cannot be listed: "nothing ran today" and "the records could not be read" are
+// different things to tell the operator.
 func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
-	entries, err := os.ReadDir(r.recordsDir())
+	since := now.Add(-usageStaleRecord)
+	rows, err := r.rowRecords(since)
+	if err != nil {
+		return &dashboard.Usage{Unavailable: true}
+	}
+	entries, err := r.entries()
 	if err != nil {
 		return unavailableUsage(err)
 	}
-	u := dashboard.AggregateUsage(r.records(entries, now.Add(-usageStaleRecord)), now, r.unmatched())
+	u := dashboard.AggregateUsage(r.merge(rows, entries, since), now, r.unmatched())
 	u.AsOf = r.asOf()
 	return &u
+}
+
+// rowRecords is the usage_records rows built at or after since, as the records
+// they hold, newest built first. Nil when no row store is wired. A read that
+// fills usageRowsLimit is an error, never a short series.
+func (r *dashUsageReader) rowRecords(since time.Time) ([]dashboard.UsageRecord, error) {
+	if r.rows == nil {
+		return nil, nil
+	}
+	rows, err := r.rows(since, usageRowsLimit)
+	if err != nil {
+		return nil, fmt.Errorf("reading the usage_records rows: %w", err)
+	}
+	if len(rows) == usageRowsLimit {
+		return nil, fmt.Errorf("the usage_records read filled its cap of %d rows, so the window's start is not known to be in the rows", usageRowsLimit)
+	}
+	recs := make([]dashboard.UsageRecord, 0, len(rows))
+	for _, row := range rows {
+		recs = append(recs, row.Record)
+	}
+	return recs, nil
+}
+
+// merge is the record set both readers fold: rows first, then each file record
+// whose bead and kind no row holds. A row wins over the file of the same bead
+// and kind, so that record is never counted twice.
+func (r *dashUsageReader) merge(rows []dashboard.UsageRecord, entries []os.DirEntry, since time.Time) []dashboard.UsageRecord {
+	held := make(map[usageKey]bool, len(rows))
+	recs := make([]dashboard.UsageRecord, 0, len(rows)+len(entries))
+	for _, rec := range rows {
+		held[usageKeyOf(rec)] = true
+		recs = append(recs, rec)
+	}
+	for _, rec := range r.records(entries, since) {
+		if !held[usageKeyOf(rec)] {
+			recs = append(recs, rec)
+		}
+	}
+	return recs
+}
+
+// entries lists the records directory. Once a row store is wired a directory
+// that is not there is no entries rather than an error, since the rows outlive
+// the files; without one, a directory that is not there is the error.
+func (r *dashUsageReader) entries() ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(r.recordsDir())
+	if err != nil && r.rows != nil && errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return entries, err
 }
 
 // unavailableUsage is the panel when the records directory cannot be listed. A
@@ -107,16 +208,21 @@ func (r *dashUsageReader) absent() bool {
 }
 
 // monthRecords is the record set the Claude plan's API-equivalent figures are
-// computed from: the same files the panel reads, reaching back far enough to
-// hold the whole billing month. A records directory that cannot be listed is
-// nil, which the plan reader draws as no figure at all rather than as a month
-// of no spend.
+// computed from: the same rows and files the panel reads, reaching back far
+// enough to hold the whole billing month. A row read that fails, or a records
+// directory that cannot be listed, is nil, which the plan reader draws as no
+// figure at all rather than as a month of no spend.
 func (r *dashUsageReader) monthRecords(now time.Time) []dashboard.UsageRecord {
-	entries, err := os.ReadDir(r.recordsDir())
+	since := now.Add(-usageMonthRecord)
+	rows, err := r.rowRecords(since)
 	if err != nil {
 		return nil
 	}
-	return r.records(entries, now.Add(-usageMonthRecord))
+	entries, err := r.entries()
+	if err != nil {
+		return nil
+	}
+	return r.merge(rows, entries, since)
 }
 
 // recordsDir is where the scan writes one record per bead and kind.
