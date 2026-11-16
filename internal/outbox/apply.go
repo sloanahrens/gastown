@@ -40,7 +40,8 @@ type Store interface {
 // write it made succeeded. A status other than StatusDone or StatusDeferred,
 // which Validate does not return, is refused into that joined error with no
 // status written: a hand-built Result must not skip the status and read as a
-// clean run.
+// clean run. An escalation whose text is empty is refused the same way, with no
+// escalation raised.
 //
 // r.Ticked holds zero-based indexes into the checkbox lines of acceptance, read
 // in order by beads.AcceptanceBoxes: an index outside that list is an error and
@@ -79,7 +80,11 @@ func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 		errs = append(errs, fmt.Errorf("outbox: set status of %s: result status %q is neither %q nor %q", beadID, r.Status, StatusDone, StatusDeferred))
 	}
 	if r.Escalation != nil {
-		if err := store.Escalate(beadID, actor, r.Escalation.Text); err != nil {
+		// An empty request is the one Escalation that Validate refuses; raising it
+		// would create an escalation bead carrying no text (gt-5rmlks).
+		if r.Escalation.Text == "" {
+			errs = append(errs, fmt.Errorf("outbox: escalate on %s: escalation text is empty", beadID))
+		} else if err := store.Escalate(beadID, actor, r.Escalation.Text); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: escalate on %s: %w", beadID, err))
 		}
 	}
