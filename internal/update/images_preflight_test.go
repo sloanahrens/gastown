@@ -207,6 +207,75 @@ func TestPreRollGuardKeepsTheInstallPath(t *testing.T) {
 	})
 }
 
+// TestPreRollGuardClearsARefusalOnAnEarlySuccess holds a later successful
+// install to the record: when the daemon already runs the target pair and the
+// install leaves it alone, a refusal the record still names is cleared with the
+// same record write the swap path makes, and a record that names no refusal is
+// not written.
+func TestPreRollGuardClearsARefusalOnAnEarlySuccess(t *testing.T) {
+	t.Parallel()
+	refusal := CheckPreflight + " " + CheckPair + ": no digest for the daemon image"
+
+	tests := []struct {
+		name       string
+		recorded   ImageRecord
+		wantRecord ImageRecord
+		wantWrites int
+	}{
+		{
+			name:       "a refusal the record still names is cleared",
+			recorded:   ImageRecord{Current: newPair, Previous: oldPair, Refused: newPair, RefusedReason: refusal},
+			wantRecord: ImageRecord{Current: newPair, Previous: oldPair},
+			wantWrites: 1,
+		},
+		{
+			name:       "a record that names no refusal is left as it was",
+			recorded:   ImageRecord{Current: newPair, Previous: oldPair},
+			wantRecord: ImageRecord{Current: newPair, Previous: oldPair},
+			wantWrites: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newImageFixture(t, tt.recorded)
+			f.inst.PreSwap = func(context.Context, ImagePair) error { return nil }
+
+			res, err := f.inst.Install(context.Background(), newPair.Commit)
+			if err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if ClassifyInstall(res) != ResultOK {
+				t.Fatalf("result = %+v, want an installed pair", res)
+			}
+			if len(f.swap.applied) != 0 {
+				t.Errorf("applied = %+v, want no swap when the daemon already runs the pair", f.swap.applied)
+			}
+			if f.ledger.rec != tt.wantRecord || len(f.ledger.writes) != tt.wantWrites {
+				t.Errorf("record = %+v after %d writes, want %+v after %d", f.ledger.rec, len(f.ledger.writes), tt.wantRecord, tt.wantWrites)
+			}
+		})
+	}
+
+	t.Run("a refusal the record cannot clear fails the install", func(t *testing.T) {
+		t.Parallel()
+		f := newImageFixture(t, ImageRecord{Current: newPair, Previous: oldPair, Refused: newPair, RefusedReason: refusal})
+		f.inst.PreSwap = func(context.Context, ImagePair) error { return nil }
+		f.ledger.writeErr = errors.New("the state directory is read-only")
+
+		res, err := f.inst.Install(context.Background(), newPair.Commit)
+		if err == nil || !strings.Contains(err.Error(), "clearing the refused daemon image pair") {
+			t.Fatalf("Install = %+v, %v; want the uncleared refusal named as an error", res, err)
+		}
+		if len(f.swap.applied) != 0 {
+			t.Errorf("applied = %+v, want no swap", f.swap.applied)
+		}
+		if f.ledger.rec.Refused != newPair {
+			t.Errorf("record = %+v, want the refusal still on it", f.ledger.rec)
+		}
+	})
+}
+
 // TestPreRollGuardLegacyLedgerReadsAndRewrites holds the record's new keys to
 // backward compatibility: a file written before them reads with no refusal, and
 // a rewrite keeps the recorded pairs and records no refusal. encoding/json

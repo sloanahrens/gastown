@@ -56,7 +56,7 @@ func imagePairOf(v imagevalues.Values) ImagePair {
 // pod, Previous is the pair its Deployment ran, read from the cluster, and names
 // no commit: a Deployment carries the two images and no build. Refused is the
 // pair a pre-swap check refused and RefusedReason the failure it named; a later
-// install that swaps clears both.
+// install that succeeds clears both.
 type ImageRecord struct {
 	V             int       `json:"v"`
 	Current       ImagePair `json:"current"`
@@ -438,10 +438,18 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 		// commit and the pair check, when wired, holds the pair; otherwise a run
 		// that stopped between the record and the swap left the service behind,
 		// and the swap runs again with the previous pair that record kept.
+		previous = rec.Previous
 		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) && d.pairHolds(ctx, target) {
+			// The install succeeded, so a refusal the record still names is
+			// cleared with the record write the swap path makes below: a pair
+			// the daemon runs must not stay recorded as refused.
+			if rec.Refused != (ImagePair{}) {
+				if err := d.Images.Ledger.Write(ImageRecord{Current: target, Previous: previous}); err != nil {
+					return InstallResult{}, fmt.Errorf("clearing the refused daemon image pair on the record: %w", err)
+				}
+			}
 			return res, nil
 		}
-		previous = rec.Previous
 	}
 
 	// The previous pair is on record before the first change to the service.
