@@ -1,11 +1,17 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/stretchr/testify/require"
 )
 
@@ -189,5 +195,324 @@ func TestTierSweepImagesRetryStateRoundTrip(t *testing.T) {
 	if got.ImagesRetries != want.ImagesRetries || got.ImagesRetrySHA != want.ImagesRetrySHA {
 		t.Fatalf("round trip = %d retries for %q, want %d for %q",
 			got.ImagesRetries, got.ImagesRetrySHA, want.ImagesRetries, want.ImagesRetrySHA)
+	}
+}
+
+// imagesRetryListing is one record and images answer the early candidate list
+// is asked about. The green tip is long enough to carry the pair check's stamp.
+type imagesRetryListing struct {
+	name         string
+	lastSHA      string
+	lastGreenSHA string
+	sinceLastRun time.Duration
+	retries      int
+	retrySHA     string
+	imagesFailed bool
+	mainSHA      string
+	mainErr      error
+	noRepo       bool
+	wantListed   bool
+}
+
+const (
+	// imagesRetryGreen is a green tip whose first 12 characters key the pair
+	// check's failed-run map.
+	imagesRetryGreen = "green0abcdef"
+	imagesRetryTIP   = "newtip0abcde"
+)
+
+func TestTierSweepImagesRetryCandidates(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	cases := []imagesRetryListing{
+		{
+			name:    "a failed images build at the green tip is listed once main moved and the gap passed",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: true,
+		},
+		{
+			name:    "a green images answer is not listed however far main moved",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: time.Hour,
+			mainSHA: imagesRetryTIP, wantListed: false,
+		},
+		{
+			name:    "origin/main at the last green sha is not listed",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryGreen, wantListed: false,
+		},
+		{
+			name:    "an unreadable origin/main is listed so the run's own read decides",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainErr: errors.New("the remote did not answer"), wantListed: true,
+		},
+		{
+			name:    "a retry inside the 15 minute gap is not listed",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: 5 * time.Minute,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: false,
+		},
+		{
+			name:         "no green tip recorded is not listed",
+			sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: false,
+		},
+		{
+			name:    "the max retries for this tip is not listed",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: time.Hour,
+			retries: tierSweepImagesRetryMax, retrySHA: imagesRetryGreen,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: false,
+		},
+		{
+			name:    "retries recorded for another sha do not stop the listing",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: tierSweepImagesRetryMax, retrySHA: "older1",
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: true,
+		},
+		{
+			name:    "a rig whose bare repo is gone is not listed",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryTIP, noRepo: true, wantListed: false,
+		},
+		{
+			name:    "a red sweep is still listed with a green images answer",
+			lastSHA: "red1", lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			mainSHA: imagesRetryTIP, wantListed: true,
+		},
+		{
+			name:    "a red sweep inside its own gap is not listed",
+			lastSHA: "red1", lastGreenSHA: imagesRetryGreen, sinceLastRun: 5 * time.Minute,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+				return c.mainSHA, c.mainErr
+			}
+			if c.imagesFailed {
+				d.pairReady.failed = map[string]pairReadyFailedRun{
+					imagesFailedKey("gastown", greenRefShortSHA(c.lastGreenSHA)): {},
+				}
+			}
+			if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+				LastRun: now.Add(-c.sinceLastRun), LastSHA: c.lastSHA, LastGreenSHA: c.lastGreenSHA,
+				ImagesRetries: c.retries, ImagesRetrySHA: c.retrySHA,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if c.noRepo {
+				if err := os.RemoveAll(filepath.Join(d.config.TownRoot, "gastown", ".repo.git")); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			listed := slices.Contains(d.tierSweepEarlyCandidates(now), "gastown")
+			if listed != c.wantListed {
+				t.Fatalf("listed = %v, want %v", listed, c.wantListed)
+			}
+		})
+	}
+}
+
+// A red record is settled by the record alone: neither the images answer nor
+// origin/main is asked for it, so a red sweep costs the heartbeat no git read.
+func TestTierSweepImagesRetryDoesNotAskForARedRecord(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.imagesFailedFor = func(string, string) bool {
+		t.Error("a red record's images answer was asked for")
+		return false
+	}
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+		t.Error("a red record's origin/main was read")
+		return "", nil
+	}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-15 * time.Minute), LastSHA: "red1", LastGreenSHA: imagesRetryGreen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Contains(d.tierSweepEarlyCandidates(now), "gastown") {
+		t.Fatal("a red record with its gap passed was not listed")
+	}
+}
+
+// The images answer decides only a record its own conditions already allow: a
+// record inside the gap, one with no green tip and one at the retry cap do not
+// ask for it.
+func TestTierSweepImagesRetryDoesNotAskTheImagesAnswerWhenTheRecordRefuses(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	cases := []struct {
+		name string
+		st   tierSweepState
+	}{
+		{name: "inside the gap", st: tierSweepState{LastRun: now.Add(-time.Minute), LastSHA: imagesRetryGreen, LastGreenSHA: imagesRetryGreen}},
+		{name: "no green tip", st: tierSweepState{LastRun: now.Add(-time.Hour)}},
+		{
+			name: "at the retry cap",
+			st: tierSweepState{
+				LastRun: now.Add(-time.Hour), LastSHA: imagesRetryGreen, LastGreenSHA: imagesRetryGreen,
+				ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: imagesRetryGreen,
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.imagesFailedFor = func(string, string) bool {
+				t.Error("the images answer was asked for a record the rule already refuses")
+				return false
+			}
+			if err := writeTierSweepState(d.config.TownRoot, "gastown", c.st); err != nil {
+				t.Fatal(err)
+			}
+			if len(d.tierSweepEarlyCandidates(now)) != 0 {
+				t.Fatal("a record the retry rule refuses was listed")
+			}
+		})
+	}
+}
+
+// imagesRetryTriggerCase is one trigger scenario: the rig's record, the images
+// answer, where origin/main is, the sweep beads still open and how long ago the
+// last cycle ran.
+type imagesRetryTriggerCase struct {
+	name         string
+	lastSHA      string
+	lastGreenSHA string
+	sinceLastRun time.Duration
+	imagesFailed bool
+	mainSHA      string
+	openTitles   []string
+	wantListed   bool
+	wantRun      bool
+}
+
+// setupImagesRetry builds a daemon whose gastown record is as c says and whose
+// hourly patrol clock was last set 20 minutes ago, so the interval is not due.
+func setupImagesRetry(t *testing.T, c imagesRetryTriggerCase) (*Daemon, *tierSweepRunRecorder, *tierSweepFakeBeads, *bytes.Buffer) {
+	t.Helper()
+	now := atHour(time.Now(), 15)
+	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	rec.green()
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return c.mainSHA, nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	for _, title := range c.openTitles {
+		bd.open = append(bd.open, &beads.Issue{ID: "gt-red", Title: title})
+	}
+	if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", now.Add(-20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if c.imagesFailed {
+		d.pairReady.failed = map[string]pairReadyFailedRun{
+			imagesFailedKey("gastown", greenRefShortSHA(c.lastGreenSHA)): {},
+		}
+	}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-c.sinceLastRun), LastSHA: c.lastSHA, LastGreenSHA: c.lastGreenSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return d, rec, bd, logs
+}
+
+// tierSweepImagesRetryLine is the line a cycle started by an images failure
+// logs. It must not be the red line: no red bead closed for this reason.
+const tierSweepImagesRetryLine = "tier_sweep: gastown: images build failed at the green tip and main moved; re-running now"
+
+func TestTierSweepImagesRetryEarlyReRun(t *testing.T) {
+	t.Parallel()
+	cases := []imagesRetryTriggerCase{
+		{
+			name:    "main moved after a failed images build re-runs the rig",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: true, wantRun: true,
+		},
+		{
+			name:    "a green images answer does not re-run however far main moved",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: time.Hour,
+			mainSHA: imagesRetryTIP, wantListed: false, wantRun: false,
+		},
+		{
+			name:    "origin/main at the green tip does not re-run the rig",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryGreen, wantListed: false, wantRun: false,
+		},
+		{
+			name:    "an open red bead holds the retry",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			imagesFailed: true, mainSHA: imagesRetryTIP,
+			openTitles: []string{tierSweepBeadPrefix("gastown", "shell") + "TestFoo"},
+			wantListed: true, wantRun: false,
+		},
+		{
+			name:    "five minutes since the last run waits",
+			lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: 5 * time.Minute,
+			imagesFailed: true, mainSHA: imagesRetryTIP, wantListed: false, wantRun: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, _, logs := setupImagesRetry(t, c)
+			if listed := slices.Contains(d.tierSweepEarlyCandidates(d.clk().Now()), "gastown"); listed != c.wantListed {
+				t.Fatalf("listed = %v, want %v", listed, c.wantListed)
+			}
+
+			d.triggerTierSweep()
+			waitTierSweepIdle(t, d)
+
+			ran := len(rec.stages) > 0
+			if ran != c.wantRun {
+				t.Fatalf("ran = %v, want %v\n%s", ran, c.wantRun, logs.String())
+			}
+			logged := strings.Contains(logs.String(), tierSweepImagesRetryLine)
+			if logged != c.wantRun {
+				t.Fatalf("images retry line logged = %v, want %v\n%s", logged, c.wantRun, logs.String())
+			}
+			if strings.Contains(logs.String(), tierSweepEarlyLine) {
+				t.Fatalf("the red sweep line claimed beads closed for an images retry\n%s", logs.String())
+			}
+			if !c.wantListed && !strings.Contains(logs.String(), "no early re-run candidate") {
+				t.Fatalf("a rig that was not listed did not say so\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// An early re-run it starts leaves the record green at the tip it swept and
+// the patrol's hourly clock where it was, like the red reason's re-run.
+func TestTierSweepImagesRetryEarlyReRunRecordsTheCycle(t *testing.T) {
+	t.Parallel()
+	d, rec, _, _ := setupImagesRetry(t, imagesRetryTriggerCase{
+		lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+		imagesFailed: true, mainSHA: imagesRetryTIP,
+	})
+	before, _, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+
+	if len(rec.stages) == 0 {
+		t.Fatal("no stage ran for a failed images build whose tip moved")
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != imagesRetryTIP || st.LastGreenSHA != imagesRetryTIP {
+		t.Fatalf("record = %+v, want the retry to land green on %s", st, imagesRetryTIP)
+	}
+	after, _, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.Equal(before) {
+		t.Fatalf("hourly last-run moved from %v to %v; an early re-run must not consume the hour", before, after)
 	}
 }
