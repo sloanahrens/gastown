@@ -127,6 +127,12 @@ const (
 // taken back by then keeps the bead handed back, and the release is left to its
 // new holder.
 //
+// A stop the guard began for a reason of its own (seat.StopReason, the mid-run
+// tripwire) hands that reason back as its first note sentence, saved with the
+// stop so a tick that resumes it repeats the same reason; the needs-split
+// attention item names it in place of the 20 minute wording. A stop with no
+// reason writes both as they always were.
+//
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
 // skipping ahead. StoppedAt is written last, and the run the stop ended is not
@@ -155,6 +161,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		// Saved with the stop's first step, so a stop resumed on a later tick
 		// still dates the run its rework decision belongs to.
 		st.SlingAt = seat.SlingAt
+		// A stop that begins takes the seat's reason, and one that began on an
+		// earlier tick keeps the saved one: a paused seat is off the seat list,
+		// so the tick that resumes the stop reads none from it.
+		st.StopReason = seat.StopReason
 	}
 	// A stop resumed from any saved progress may find the seat taken back, so
 	// StopBeganAt decides, not SessionStoppedAt: a failed clearPause or save
@@ -595,6 +605,9 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		handed.ReworkSHA = st.ReworkSHA
 	}
 	var notes []string
+	if reason := overrunStopReasonSentence(st.StopReason); reason != "" {
+		notes = append(notes, reason)
+	}
 	if st.SavedHead != "" {
 		if st.SaveCommitted {
 			notes = append(notes, fmt.Sprintf("The seat's uncommitted work was saved before the stop as a WIP commit, and branch %s was pushed at %s.",
@@ -1949,10 +1962,29 @@ func overrunStopReason(seat overrunSeat) string {
 	return fmt.Sprintf("%s on %s", overrunPauseReason, seat.Bead)
 }
 
+// overrunStopReasonText is a stop's own reason as one line with no closing full
+// stop, so each caller decides how it ends: the hand-back note closes it as a
+// sentence, the attention summary goes on to the split instruction.
+func overrunStopReasonText(reason string) string {
+	return strings.TrimSuffix(strings.Join(strings.Fields(reason), " "), ".")
+}
+
+// overrunStopReasonSentence is a stop's own reason as one sentence of the
+// hand-back note. An empty reason is no sentence, so a stop the 20 minute rule
+// began writes the note it always did.
+func overrunStopReasonSentence(reason string) string {
+	text := overrunStopReasonText(reason)
+	if text == "" {
+		return ""
+	}
+	return text + "."
+}
+
 // collectOverrunStopped raises one low item per bead the guard handed back and
 // an operator has not yet split: the bead still carries needs-split. The item
-// names the bead and how long the polecat ran, read from the guard's record;
-// removing the label clears it.
+// names the bead and how long the polecat ran, read from the guard's record,
+// and the reason the guard recorded when it stopped the seat for one of its
+// own; removing the label clears it.
 func (s *attentionSources) collectOverrunStopped(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	for _, rigName := range s.d.getKnownRigs() {
@@ -1969,6 +2001,11 @@ func (s *attentionSources) collectOverrunStopped(ctx context.Context) ([]attenti
 			summary := is.ID + " needs a split"
 			if st, err := readOverrunState(s.d.config.TownRoot, is.ID); err == nil && !st.StoppedAt.IsZero() {
 				summary = fmt.Sprintf("%s stopped after %s (20 minute rule); needs a split", is.ID, st.Elapsed.Round(time.Second))
+				// A stop the guard began for its own reason names it in place of
+				// the rule, which did not stop this seat.
+				if reason := overrunStopReasonText(st.StopReason); reason != "" {
+					summary = fmt.Sprintf("%s stopped after %s; %s; needs a split", is.ID, st.Elapsed.Round(time.Second), reason)
+				}
 			}
 			out = append(out, attention.Item{
 				Key:      "overrun:" + is.ID,

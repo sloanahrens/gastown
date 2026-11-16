@@ -301,6 +301,11 @@ type overrunState struct {
 	// tick still tells a head the seat produced from the branch it resumed
 	// (overrunFinishedOnOrigin).
 	SlingAt time.Time `json:"sling_at,omitzero"`
+	// StopReason is why the stop began, when it was not the 20 minute rule. It
+	// is saved so the stop resumed on a later tick — where the seat carries no
+	// reason — hands the same reason back, and so the needs-split attention
+	// item can name it after the stop has finished (collectOverrunStopped).
+	StopReason string `json:"stop_reason,omitempty"`
 
 	// StopBeganAt is when the pause marker went down, SessionStoppedAt when
 	// the session was confirmed gone, CheckpointedAt when the worktree
