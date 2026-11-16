@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -527,12 +528,17 @@ func (v *beadVerbs) noteToOutbox(seat *seatOutbox, id, text string) error {
 	return err
 }
 
-// seatTaskDir and seatTaskFile are the task directory and task file the runtime
-// archive stages under a seat's root (internal/session's runtimeTaskDir and
-// runtimeTaskFile).
+// seatTaskPath and seatTaskFilePath are the task directory and task file under
+// a seat's root, which the runtime archive stages at .gt/task
+// (internal/session's runtimeTaskDir and runtimeTaskFile; escalate's
+// seatTaskDirName and seatTaskFile name the same entries inside .gt).
+// seatTownDir is the sandbox town root under that root: the archive lays its
+// checkout out at <root>/gt (internal/session's sandboxTownRoot is
+// "/sandbox/gt").
 const (
-	seatTaskDir  = ".gt/task"
-	seatTaskFile = seatTaskDir + "/TASK.md"
+	seatTaskPath     = ".gt/" + seatTaskDirName
+	seatTaskFilePath = seatTaskPath + "/" + seatTaskFile
+	seatTownDir      = "gt"
 )
 
 // seatOutbox is the outbox of a seat in file mode: the one bead it may write
@@ -544,24 +550,55 @@ type seatOutbox struct {
 	dir string
 }
 
-// findSeatRoot returns the root of the sandbox seat whose worktree holds dir:
-// the nearest ancestor holding the runtime archive's file-mode marker, or ""
-// when there is none, which is every caller outside a sandbox. The marker's
-// value decides file mode afterwards (taskfile.FileMode); an unreadable marker
-// reads as dolt mode there, and the seat's bead call then fails loudly where no
-// route to Dolt exists.
-func findSeatRoot(dir string) string {
-	marker := filepath.Join(seatTaskDir, taskfile.ModeFile)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
-			return dir
+// findSeatRoot returns the root of the file-mode seat whose worktree holds dir:
+// the nearest ancestor whose runtime archive marker reads taskfile.ModeFiles, or
+// "" when there is none, which is every caller outside a sandbox. The archive
+// stages the marker only for files mode, so a marker naming another value is
+// not the archive's and the walk goes on: stopping at one inside dir's town
+// tree would let a file there turn a file-mode seat's writes back into bead
+// writes.
+//
+// Two states are errors rather than a fall-through to a bead write, which file
+// mode forbids (gt-w9male). A marker that cannot be read leaves the mode
+// unknown, so the caller refuses instead of assuming dolt mode. A files marker
+// whose root does not hold dir under its sandbox town root is some other run's
+// left-over and not this caller's seat: the archive stages the checkout at
+// <root>/gt, so a marker anywhere else cannot be the seat holding dir.
+func findSeatRoot(dir string) (string, error) {
+	marker := filepath.Join(seatTaskPath, taskfile.ModeFile)
+	for cur := dir; ; {
+		markerPath := filepath.Join(cur, marker)
+		data, err := os.ReadFile(markerPath)
+		switch {
+		case err == nil:
+			if strings.TrimSpace(string(data)) == taskfile.ModeFiles {
+				if !inSeatTown(cur, dir) {
+					return "", fmt.Errorf("not writing the outbox: %s holds a file-mode marker but %s is not under its sandbox town root, so the marker belongs to another run", markerPath, dir)
+				}
+				return cur, nil
+			}
+		case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+			// No marker at cur; a component of the path being a file is no
+			// marker either.
+		default:
+			return "", fmt.Errorf("not writing the outbox: the file-mode marker %s cannot be read, so the caller cannot tell whether it writes a bead or its outbox: %w", markerPath, err)
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", nil
 		}
-		dir = parent
+		cur = parent
 	}
+}
+
+// inSeatTown reports whether dir is inside root's sandbox town root, the
+// checkout the runtime archive stages at <root>/gt.
+func inSeatTown(root, dir string) bool {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return false
+	}
+	return rel == seatTownDir || strings.HasPrefix(rel, seatTownDir+string(filepath.Separator))
 }
 
 // fileOutbox returns the outbox the caller's seat writes, or nil when the
@@ -572,11 +609,14 @@ func (v *beadVerbs) fileOutbox() (*seatOutbox, error) {
 	if v.seatDir == nil {
 		return nil, nil
 	}
-	root := findSeatRoot(v.seatDir())
-	if root == "" || !taskfile.FileMode(filepath.Join(root, seatTaskDir)) {
+	root, err := findSeatRoot(v.seatDir())
+	if err != nil {
+		return nil, err
+	}
+	if root == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(filepath.Join(root, seatTaskFile))
+	data, err := os.ReadFile(filepath.Join(root, seatTaskFilePath))
 	if err != nil {
 		return nil, fmt.Errorf("not writing the outbox: a file-mode seat reads its own bead from TASK.md, which cannot be read: %w", err)
 	}

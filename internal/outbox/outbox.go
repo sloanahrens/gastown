@@ -35,8 +35,8 @@ import (
 const (
 	// Dir is the outbox directory under a seat's root.
 	Dir = ".gt/outbox"
-	// NotesFile is the seat's notes inside Dir, which `gt bead note` and
-	// `gt bead comment` append to in file mode.
+	// NotesFile is the seat's notes inside Dir, which `gt bead note` appends
+	// to in file mode.
 	NotesFile = "notes.md"
 )
 

@@ -20,19 +20,19 @@ import (
 // directory inside such a seat instead of a sandbox, so every step from the
 // verb to the outbox file runs.
 
-// newFileModeSeat returns the root of a seat in file mode whose TASK.md names
+// newNoteSeat returns the root of a seat in file mode whose TASK.md names
 // beadID, with the runtime archive's marker and task file written under it.
-func newFileModeSeat(t *testing.T, beadID string) string {
+func newNoteSeat(t *testing.T, beadID string) string {
 	t.Helper()
 	root := t.TempDir()
-	taskDir := filepath.Join(root, seatTaskDir)
+	taskDir := filepath.Join(root, seatTaskPath)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(taskDir, taskfile.ModeFile), []byte(taskfile.ModeFiles+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, seatTaskFile), []byte("# TASK "+beadID+": a task\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, seatTaskFilePath), []byte("# TASK "+beadID+": a task\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return root
@@ -44,7 +44,13 @@ func newFileModeSeat(t *testing.T, beadID string) string {
 // root is part of what every test here drives.
 func seatVerbs(t *testing.T, root string) (*beadVerbs, *callingStore, *bytes.Buffer) {
 	t.Helper()
-	worktree := filepath.Join(root, "gt", "gastown", "polecats", "slit", "gastown")
+	return seatVerbsAt(t, filepath.Join(root, "gt", "gastown", "polecats", "slit", "gastown"))
+}
+
+// seatVerbsAt is seatVerbs with the working directory named, for the callers
+// that must run from outside a seat's town root.
+func seatVerbsAt(t *testing.T, worktree string) (*beadVerbs, *callingStore, *bytes.Buffer) {
+	t.Helper()
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +92,7 @@ func outboxNotes(t *testing.T, root string) []byte {
 
 func TestNoBeadAccessNoteAppendsToTheOutbox(t *testing.T) {
 	t.Parallel()
-	root := newFileModeSeat(t, "gt-own1")
+	root := newNoteSeat(t, "gt-own1")
 	v, store, out := seatVerbs(t, root)
 	for _, note := range []string{"the retry never resets its counter", "the gate is green"} {
 		if err := v.note("gt-own1", note); err != nil {
@@ -117,7 +123,7 @@ func TestNoBeadAccessNoteRefusesAnotherBead(t *testing.T) {
 		id := id
 		t.Run(id, func(t *testing.T) {
 			t.Parallel()
-			root := newFileModeSeat(t, "gt-own1")
+			root := newNoteSeat(t, "gt-own1")
 			v, store, _ := seatVerbs(t, root)
 			err := v.note(id, "a note")
 			if err == nil {
@@ -204,7 +210,7 @@ func TestNoBeadAccessNoteFailedWriteKeepsThePreviousNotes(t *testing.T) {
 		name, fsys := name, fsys
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			root := newFileModeSeat(t, "gt-own1")
+			root := newNoteSeat(t, "gt-own1")
 			dir := filepath.Join(root, outbox.Dir)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
@@ -251,7 +257,7 @@ func TestNoBeadAccessNoteFailedWriteKeepsThePreviousNotes(t *testing.T) {
 
 func TestNoBeadAccessNoteRefusesAnUntakeableOutboxLock(t *testing.T) {
 	t.Parallel()
-	root := newFileModeSeat(t, "gt-own1")
+	root := newNoteSeat(t, "gt-own1")
 	// A directory where the lock file belongs makes the flock unopenable, as a
 	// stuck or damaged lock path would.
 	if err := os.Mkdir(filepath.Join(root, ".gt", outboxLockFile), 0o755); err != nil {
@@ -277,22 +283,22 @@ func TestNoBeadAccessNoteRefusesATaskWithoutABead(t *testing.T) {
 	t.Parallel()
 	overwrite := func(content string) func(t *testing.T, root string) {
 		return func(t *testing.T, root string) {
-			if err := os.WriteFile(filepath.Join(root, seatTaskFile), []byte(content), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, seatTaskFilePath), []byte(content), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	cases := map[string]func(t *testing.T, root string){
 		"missing": func(t *testing.T, root string) {
-			if err := os.Remove(filepath.Join(root, seatTaskFile)); err != nil {
+			if err := os.Remove(filepath.Join(root, seatTaskFilePath)); err != nil {
 				t.Fatal(err)
 			}
 		},
 		"a directory": func(t *testing.T, root string) {
-			if err := os.Remove(filepath.Join(root, seatTaskFile)); err != nil {
+			if err := os.Remove(filepath.Join(root, seatTaskFilePath)); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Mkdir(filepath.Join(root, seatTaskFile), 0o755); err != nil {
+			if err := os.Mkdir(filepath.Join(root, seatTaskFilePath), 0o755); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -304,7 +310,7 @@ func TestNoBeadAccessNoteRefusesATaskWithoutABead(t *testing.T) {
 		name, arrange := name, arrange
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			root := newFileModeSeat(t, "gt-own1")
+			root := newNoteSeat(t, "gt-own1")
 			arrange(t, root)
 			v, store, _ := seatVerbs(t, root)
 			err := v.note("gt-own1", "a note")
@@ -337,7 +343,7 @@ func TestNoBeadAccessNoteRefusesWhatTheOutboxWouldRefuse(t *testing.T) {
 		name, c := name, c
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			root := newFileModeSeat(t, "gt-own1")
+			root := newNoteSeat(t, "gt-own1")
 			dir := filepath.Join(root, outbox.Dir)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
@@ -373,5 +379,92 @@ func TestNoBeadAccessNoteLeavesDoltModeAlone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, outbox.Dir)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a dolt-mode note wrote an outbox: %v", err)
+	}
+}
+
+// A files-mode marker that exists but cannot be read leaves the mode unknown.
+// The note refuses there rather than taking dolt mode and writing the bead,
+// which file mode forbids (gt-w9male).
+func TestNoBeadAccessNoteRefusesAnUnreadableMarker(t *testing.T) {
+	t.Parallel()
+	root := newNoteSeat(t, "gt-own1")
+	marker := filepath.Join(root, seatTaskPath, taskfile.ModeFile)
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the marker belongs cannot be read as its content.
+	if err := os.Mkdir(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v, store, _ := seatVerbs(t, root)
+	err := v.note("gt-own1", "a note")
+	if err == nil {
+		t.Fatal("a note was accepted while the file-mode marker could not be read")
+	}
+	if !strings.Contains(err.Error(), "cannot be read") {
+		t.Errorf("error %q does not say the marker cannot be read", err)
+	}
+	if notes := outboxNotes(t, root); notes != nil {
+		t.Errorf("the outbox holds %q after a refused note", notes)
+	}
+	if len(store.calls) != 0 {
+		t.Errorf("the bead store was written when the marker could not be read: %v", store.calls)
+	}
+}
+
+// A files-mode marker outside the caller's own town root is another run's
+// left-over. It must not turn a caller elsewhere on the host into a seat and
+// redirect its notes to that outbox (gt-w9male).
+func TestNoBeadAccessNoteRefusesAMarkerOutsideItsTownRoot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, worktree string }{
+		{"a sibling directory", "work"},
+		{"the seat root itself", "."},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := newNoteSeat(t, "gt-own1")
+			v, store, _ := seatVerbsAt(t, filepath.Join(root, tc.worktree))
+			err := v.note("gt-own1", "a note")
+			if err == nil {
+				t.Fatalf("a marker at %s/ made the caller at %s its seat", root, tc.worktree)
+			}
+			if !strings.Contains(err.Error(), "sandbox town root") {
+				t.Errorf("error %q does not name the sandbox town root", err)
+			}
+			if notes := outboxNotes(t, root); notes != nil {
+				t.Errorf("the stray marker's outbox holds %q", notes)
+			}
+			if len(store.calls) != 0 {
+				t.Errorf("the bead store was written for a refused note: %v", store.calls)
+			}
+		})
+	}
+}
+
+// The archive stages its marker only above the town root. A marker naming
+// another mode inside the seat's town tree is not the archive's, and it must
+// not turn a file-mode seat's writes back into bead writes (gt-w9male).
+func TestNoBeadAccessNoteIgnoresAMarkerNamingAnotherMode(t *testing.T) {
+	t.Parallel()
+	root := newNoteSeat(t, "gt-own1")
+	// A marker inside the town root, between the seat root and the worktree.
+	inner := filepath.Join(root, seatTownDir, "gastown", seatTaskPath)
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inner, taskfile.ModeFile), []byte("dolt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v, store, _ := seatVerbs(t, root)
+	if err := v.note("gt-own1", "a note"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(outboxNotes(t, root)), "a note\n"; got != want {
+		t.Errorf("outbox notes = %q, want %q", got, want)
+	}
+	if len(store.calls) != 0 {
+		t.Errorf("an inner marker turned the seat's note into a bead write: %v", store.calls)
 	}
 }
