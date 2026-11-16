@@ -182,6 +182,10 @@ const (
 	// KindImagePinsRefreshStuck: the refresh bead the patrol filed has sat
 	// unlanded past its bound, so the pins wait for it (gt-01lcq2).
 	KindImagePinsRefreshStuck Kind = "image-pins-refresh-stuck"
+	// KindImagePinsDeadLayer: a layer of a digest-pinned image is no longer
+	// served by its registry, so the pin names an image the registry can no
+	// longer hand out (gt-kyomsc).
+	KindImagePinsDeadLayer Kind = "image-pins-dead-layer"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -202,6 +206,7 @@ func Kinds() []Kind {
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
+		KindImagePinsDeadLayer,
 	}
 }
 

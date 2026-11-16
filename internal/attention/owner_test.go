@@ -109,3 +109,21 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestImagePinDurabilityDeadLayerIsTheOverseers pins the dead-layer row to the
+// overseer: the pin file is the town's own to move, and the row is explicit so
+// the value a reader filters by is never the family default's (gt-kyomsc).
+func TestImagePinDurabilityDeadLayerIsTheOverseers(t *testing.T) {
+	t.Parallel()
+
+	got, ok := ruleOwners[RuleImagePinsDeadLayer]
+	if !ok {
+		t.Fatalf("the owner table has no row for %q", RuleImagePinsDeadLayer)
+	}
+	if got != OwnerOverseer {
+		t.Errorf("the owner table gives %q to %q, want %q", RuleImagePinsDeadLayer, got, OwnerOverseer)
+	}
+	if owner := RuleOwner(RuleImagePinsDeadLayer); owner != got {
+		t.Errorf("RuleOwner(%q) = %q, want the table's %q", RuleImagePinsDeadLayer, owner, got)
+	}
+}

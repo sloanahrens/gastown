@@ -160,6 +160,10 @@ var ruleOwners = map[string]Owner{
 	RuleImagePinsStale:        OwnerOverseer,
 	RuleImagePinsUnreadable:   OwnerOverseer,
 	RuleImagePinsRefreshStuck: OwnerOverseer,
+	// A layer the registry no longer serves is the town's own pin file to
+	// move: the overseer re-pins the image to one the registry still hands
+	// out (gt-kyomsc).
+	RuleImagePinsDeadLayer: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

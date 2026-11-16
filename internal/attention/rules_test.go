@@ -156,3 +156,38 @@ func TestEventWithoutNewFieldsReadsAsInfo(t *testing.T) {
 		t.Errorf("legacy line lost its fields: %+v", e)
 	}
 }
+
+// TestImagePinDurabilityDeadLayerKind is the dead-layer item's place in the
+// tables: a kind listed for readers, one rule of its own, and the same severity
+// class as the unreadable read it is raised beside (gt-kyomsc).
+func TestImagePinDurabilityDeadLayerKind(t *testing.T) {
+	t.Parallel()
+
+	found := false
+	for _, k := range Kinds() {
+		if k == KindImagePinsDeadLayer {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Kinds() does not list %q, so readers and the rule check skip it", KindImagePinsDeadLayer)
+	}
+
+	item := Item{Kind: KindImagePinsDeadLayer, Key: "image-pins-dead-layer:pin"}
+	if got := RuleFor(item); got != RuleImagePinsDeadLayer {
+		t.Errorf("RuleFor(%q) = %q, want %q", item.Kind, got, RuleImagePinsDeadLayer)
+	}
+
+	want, ok := Flags(RuleImagePinsUnreadable)
+	if !ok {
+		t.Fatalf("Flags(%q) has no row, so there is no severity class to match", RuleImagePinsUnreadable)
+	}
+	got, ok := Flags(RuleImagePinsDeadLayer)
+	if !ok {
+		t.Fatalf("Flags(%q) has no row", RuleImagePinsDeadLayer)
+	}
+	if got != want {
+		t.Errorf("Flags(%q) = %+v, want the unreadable read's class %+v", RuleImagePinsDeadLayer, got, want)
+	}
+}
