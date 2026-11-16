@@ -17,19 +17,27 @@ const spendWatchName = "spend.json"
 
 // spendWatch is the document that file carries, the one the hourly snapshot
 // (internal/metrics moneyAddDeepSeek), gt tail's rate and gt report's spend
-// section read as the town's live DeepSeek reading. The readers take ts as the
-// reading's instant and both figures as optional, so a report that carries no
-// rate writes no per_hour rather than a zero.
+// section read as the town's live DeepSeek reading. TS is the instant the
+// balance is stamped with: the newest row's own instant for a report built from
+// the town's cost rows, and the poll's instant otherwise, so a reading the rows
+// no longer advance carries its age rather than the poll's. The readers take ts
+// as the reading's instant and both figures as optional, so a report that
+// carries no rate writes no per_hour rather than a zero.
 type spendWatch struct {
 	TS      time.Time `json:"ts"`
 	PerHour *float64  `json:"per_hour,omitempty"`
 	Balance float64   `json:"balance"`
 }
 
-// writeSpendWatch rewrites the watch's spend file from one spend report at now,
-// which is the instant the report was read. A report that carries no balance is
-// no reading and writes nothing: the old file keeps its own age rather than
-// being restamped with a figure the report does not have. The write goes to a
+// writeSpendWatch rewrites the watch's spend file from one spend report read at
+// now. The file is stamped with the instant the report's balance is from: a
+// report built from the town's cost rows carries the newest row's own instant
+// in balance_at, and the stamp is that, so a patrol that stopped shows the
+// snapshot, gt tail and gt report the reading's age rather than passing it off
+// as this poll's live rate (gt-u3fp8i). A report that carries no balance_at is
+// stamped now. A report that carries no balance is no reading
+// and writes nothing: the old file keeps its own age rather than being
+// restamped with a figure the report does not have. The write goes to a
 // temporary file beside the target and is renamed over it, so a reader sees the
 // previous reading or this one and never a half-written document.
 func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
@@ -79,9 +87,18 @@ func writeSpendWatchWith(dir string, report json.RawMessage, now time.Time, crea
 	if d.Balance == nil {
 		return nil
 	}
+	ts := now
+	if d.BalanceAt != nil {
+		// A balance_at that will not sort with the town's readings is a broken
+		// report, not a reading to serve.
+		if d.BalanceAt.IsZero() {
+			return fmt.Errorf("spend watch: the report's balance_at is the zero instant")
+		}
+		ts = *d.BalanceAt
+	}
 	// The file has one per_hour field, and the 1-hour pace is the report's
 	// current rate: the 24-hour pace beside it is a daily average.
-	doc := spendWatch{TS: now.UTC(), PerHour: d.Pace1h.PerHour, Balance: *d.Balance}
+	doc := spendWatch{TS: ts.UTC(), PerHour: d.Pace1h.PerHour, Balance: *d.Balance}
 	data, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("spend watch: encoding the reading: %w", err)

@@ -96,6 +96,11 @@ type deepSeekSpend struct {
 	// WatcherPID is null or empty when the spend watcher is not running.
 	WatcherPID any    `json:"watcher_pid"`
 	LastSample string `json:"last_sample"`
+	// BalanceAt is the instant the report's balance was read, when the writer
+	// knows it. The dashboard's rows report carries the newest row's instant
+	// here, because its balance is that row's reading and not the poll's; a
+	// report with a live balance leaves it out.
+	BalanceAt *time.Time `json:"balance_at"`
 	// Error is set, and empty or not, when the spend read failed and the report
 	// carries no figures: its first line is the reason the row gives.
 	Error *string `json:"error"`

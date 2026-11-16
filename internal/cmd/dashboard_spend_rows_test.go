@@ -179,6 +179,137 @@ func TestResolveSpendReadsTheRowsOnEveryPoll(t *testing.T) {
 	}
 }
 
+// TestResolveSpendReadsOnlyTheRowsWrittenSinceTheLastPoll: the all-time series
+// is folded incrementally. The first poll takes the whole table; each later poll
+// reads only the rows written since the newest it holds - the cursor row can
+// come back with an inclusive since, and it is folded once - so the panel does
+// not re-read and re-fold the whole table on every poll (gt-u3fp8i).
+func TestResolveSpendReadsOnlyTheRowsWrittenSinceTheLastPoll(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	writeSpendLedger(t, home)
+	homeFn := func() (string, error) { return home, nil }
+
+	first := time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
+	older := first.Add(-10 * time.Minute)
+	second := first.Add(5 * time.Minute)
+	answers := [][]beads.Sample{
+		{deepSeekBalanceRow(first, 40.75, ""), deepSeekBalanceRow(older, 41.00, "")},
+		{deepSeekBalanceRow(second, 40.25, ""), deepSeekBalanceRow(first, 40.75, "")},
+		{deepSeekBalanceRow(second, 40.25, "")},
+	}
+	type ask struct {
+		since time.Time
+		limit int
+	}
+	var asks []ask
+	calls := 0
+	rows := func(_ string, since time.Time, limit int) ([]beads.Sample, error) {
+		asks = append(asks, ask{since, limit})
+		if calls >= len(answers) {
+			return nil, fmt.Errorf("poll %d has no scripted answer", calls)
+		}
+		answer := answers[calls]
+		calls++
+		return answer, nil
+	}
+	spend, _ := resolveSpendIn(false, "", homeFn, os.Stat, spendUnused, rows, nil)
+
+	if r := decodeDeepSeekReport(t, spend()); r.Samples != 2 || r.Balance == nil || *r.Balance != 40.75 {
+		t.Fatalf("first poll: %d samples with balance %v, want the whole table's 2 and 40.75", r.Samples, r.Balance)
+	}
+	if r := decodeDeepSeekReport(t, spend()); r.Samples != 3 || r.Balance == nil || *r.Balance != 40.25 {
+		t.Errorf("second poll: %d samples with balance %v, want the new row folded once: 3 and 40.25", r.Samples, r.Balance)
+	}
+	if r := decodeDeepSeekReport(t, spend()); r.Samples != 3 || r.Balance == nil || *r.Balance != 40.25 {
+		t.Errorf("third poll: %d samples with balance %v, want the cursor row not folded twice: 3 and 40.25", r.Samples, r.Balance)
+	}
+	if len(asks) != 3 {
+		t.Fatalf("row reads = %d, want one per poll", len(asks))
+	}
+	if !asks[0].since.IsZero() {
+		t.Errorf("first poll read since %v, want the whole series", asks[0].since)
+	}
+	if !asks[1].since.Equal(first) || !asks[2].since.Equal(second) {
+		t.Errorf("incremental polls read since %v then %v, want the newest held row %v then %v", asks[1].since, asks[2].since, first, second)
+	}
+	for i, a := range asks {
+		if a.limit != deepSeekRowScanLimit {
+			t.Errorf("poll %d read with limit %d, want the package's own cap of %d", i, a.limit, deepSeekRowScanLimit)
+		}
+	}
+}
+
+// TestResolveSpendRefusesAFullIncrementalDeepSeekRowRead: a later poll whose new
+// rows fill the cap is refused like the first, and the series keeps what it
+// already folded, so the poll answers the ledger with the reason logged.
+func TestResolveSpendRefusesAFullIncrementalDeepSeekRowRead(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	writeSpendLedger(t, home)
+	homeFn := func() (string, error) { return home, nil }
+
+	at := time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
+	calls := 0
+	rows := func(string, time.Time, int) ([]beads.Sample, error) {
+		calls++
+		if calls == 1 {
+			return []beads.Sample{deepSeekBalanceRow(at, 40.25, "")}, nil
+		}
+		return make([]beads.Sample, deepSeekRowScanLimit), nil
+	}
+	var logged []string
+	whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	spend, _ := resolveSpendIn(false, "", homeFn, os.Stat, spendUnused, rows, whyLog)
+
+	if r := decodeDeepSeekReport(t, spend()); r.Balance == nil || *r.Balance != 40.25 {
+		t.Fatalf("first poll: balance %v, want the row's 40.25", r.Balance)
+	}
+	if r := decodeDeepSeekReport(t, spend()); r.Balance == nil || *r.Balance != 51.00 {
+		t.Errorf("full incremental read: balance %v, want the ledger's 51.00", r.Balance)
+	}
+	if len(logged) != 2 || !strings.Contains(logged[1], spendFileSourceLedger) || !strings.Contains(logged[1], "filled its cap") {
+		t.Errorf("the why-log = %q, want the rows then the ledger with the cap named", logged)
+	}
+}
+
+// TestDeepSeekSpendRowsFirstFoldsAtTheInjectedClock: the report's pace windows
+// are computed at the clock the source was built with, never the process clock,
+// so a test drives them.
+func TestDeepSeekSpendRowsFirstFoldsAtTheInjectedClock(t *testing.T) {
+	t.Parallel()
+
+	newest := time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
+	older := newest.Add(-20 * time.Minute)
+	rows := rowsOf(
+		deepSeekBalanceRow(newest, 40.00, ""),
+		deepSeekBalanceRow(older, 50.00, ""),
+	)
+	spend := deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, func() time.Time {
+		return newest.Add(10 * time.Minute)
+	}, nil)
+
+	out := spend()
+	if out == nil {
+		t.Fatal("the rows source gave no report")
+	}
+	var r struct {
+		Pace1h struct {
+			PerHour *float64 `json:"per_hour"`
+		} `json:"pace_1h"`
+	}
+	if err := json.Unmarshal(out, &r); err != nil {
+		t.Fatalf("the report is not JSON: %v", err)
+	}
+	// $10 spent over 20 minutes is $30 an hour at the injected clock. The
+	// process clock would put both rows far outside the 1-hour window.
+	if r.Pace1h.PerHour == nil || *r.Pace1h.PerHour != 30 {
+		t.Errorf("pace_1h.per_hour = %v, want 30 at the injected clock", r.Pace1h.PerHour)
+	}
+}
+
 // TestResolveSpendFallsBackWhenTheDeepSeekRowsFail: a rows read that fails
 // answers the ledger with the reason logged once, so a bd hiccup does not blank
 // a panel whose ledger is still there.

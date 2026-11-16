@@ -32,6 +32,20 @@ func spendReport(t *testing.T, balance, perHour1h, perHour24h any) json.RawMessa
 	return raw
 }
 
+// spendRowsReport is the report the dashboard builds from the town's
+// deepseek_balance rows: a balance, its pace, and the instant the balance was
+// read.
+func spendRowsReport(t *testing.T, balance, perHour1h float64, readAt time.Time) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"balance":    balance,
+		"pace_1h":    map[string]any{"per_hour": perHour1h},
+		"balance_at": readAt,
+	})
+	require.NoError(t, err)
+	return raw
+}
+
 // spendWatchDoc reads the watch file back the way the snapshot, gt tail and gt
 // report read it.
 type spendWatchDoc struct {
@@ -72,6 +86,30 @@ func TestPollSpendWritesTheWatchFile(t *testing.T) {
 	assert.InDelta(t, 1.25, *doc.PerHour, 1e-9, "the watch file did not take the report's hourly rate")
 	assert.True(t, spendWatchNow.Equal(doc.TS), "ts = %s, want the poll's now %s", doc.TS, spendWatchNow)
 	assert.Contains(t, string(raw), `"ts":"2026-11-01T17:04:05Z"`, "ts is not RFC 3339 UTC")
+}
+
+// A report built from the town's cost rows stamps the watch file with the row's
+// own instant, not the poll's: the balance is that row's reading, so a patrol
+// that stopped must not pass its last figure off as fresh to the snapshot, gt
+// tail and gt report (gt-u3fp8i).
+func TestPollSpendStampsARowReportWithTheRowsInstant(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "watch")
+	readAt := spendWatchNow.Add(-2 * time.Hour)
+	h := NewHub(Config{
+		Now:      func() time.Time { return spendWatchNow },
+		Spend:    func() json.RawMessage { return spendRowsReport(t, 74.55, 1.25, readAt) },
+		WatchDir: dir,
+	})
+
+	h.pollSpend()
+
+	doc, raw := readSpendWatch(t, dir)
+	require.NotNil(t, doc.Balance, "the watch file carries no balance")
+	assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
+	assert.True(t, readAt.Equal(doc.TS), "ts = %s, want the row's instant %s", doc.TS, readAt)
+	assert.Contains(t, string(raw), `"ts":"2026-11-01T15:04:05Z"`, "ts is not the row's RFC 3339 UTC instant")
 }
 
 // A report with no balance is no reading: the file keeps its own age instead of
@@ -146,6 +184,21 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		data, readErr := os.ReadFile(path)
 		require.NoError(t, readErr)
 		assert.Equal(t, oldDoc, string(data), "a failed write left the reading altered")
+	})
+
+	t.Run("a balance_at of the zero instant is a failure", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, spendWatchName)
+		require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))
+
+		report := json.RawMessage(`{"balance":74.55,"balance_at":"0001-01-01T00:00:00Z"}`)
+		err := writeSpendWatch(dir, report, spendWatchNow)
+
+		require.Error(t, err, "a balance with no instant is not a reading")
+		data, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		assert.Equal(t, oldDoc, string(data), "a refused write left the reading altered")
 	})
 
 	// The temporary file's creation, write and close each refuse in turn. The

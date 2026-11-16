@@ -88,15 +88,19 @@ rows the balance patrol writes) on every poll, and answers from
 ~/.claude/tools/deepseek-spend.py --json, or from the report built in process
 from the balance ledger in ~/.claude/docs/research/deepseek-spend, only while
 the town has no usable row (in the cluster the ledger is the file source). The
-log names the source that answered each time it changes. Neither the rows nor
-the ledger report carries a live balance. The command runs every five minutes
-while a page is open; with no rows and neither file, the spend panel is left
-out. Each report read also rewrites the town's watch reading,
-<town>/.runtime/watch/spend.json, as {ts, per_hour, balance} — what the hourly
-snapshot, gt tail and gt report read as the live DeepSeek rate — with ts the
-instant of the read. A report that carries no balance leaves the file as it
-was, and a file that cannot be rewritten is marked on the Reads pane and
-leaves the panel drawing the report it read.
+log names the source that answered each time it changes. The rows carry the
+balance of the newest sample the balance patrol wrote, and the ledger report the
+balance of its newest row; neither is a live read, and only the tool asks for
+one.
+The command runs every five minutes while a page is open; with no rows and
+neither file, the spend panel is left out. Each report read also rewrites the
+town's watch reading, <town>/.runtime/watch/spend.json, as {ts, per_hour,
+balance} — what the hourly snapshot, gt tail and gt report read as the live
+DeepSeek rate — with ts the newest sample's instant when the rows answer, so a
+patrol that stopped shows the reading's age rather than the poll's, and
+otherwise the instant the report was read. A report that carries no balance
+leaves the file as it was, and a file that cannot be rewritten is marked on the
+Reads pane and leaves the panel drawing the report it read.
 
 --jev-spend-cmd names the command that prints the Jev ledger's spend as JSON
 (default: gt jev spend --json --hours 24). The command is split like a shell
@@ -1026,7 +1030,7 @@ func resolveSpendIn(inCluster bool, flagValue string, home func() (string, error
 	}
 	h, err := home()
 	if err != nil {
-		return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, whyLog), dashboard.NotInClusterReason
+		return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, time.Now, whyLog), dashboard.NotInClusterReason
 	}
 	tool := filepath.Join(h, ".claude", "tools", "deepseek-spend.py")
 	dir := spendDirIn(h)
@@ -1034,14 +1038,14 @@ func resolveSpendIn(inCluster bool, flagValue string, home func() (string, error
 	hasLedger := !errors.Is(ledgerErr, fs.ErrNotExist)
 	if inCluster {
 		if hasLedger {
-			return deepSeekSpendRowsFirst(rows, dashboardSpendLedger(dir, whyLog), spendFileSourceLedger, whyLog), ""
+			return deepSeekSpendRowsFirst(rows, dashboardSpendLedger(dir, whyLog), spendFileSourceLedger, time.Now, whyLog), ""
 		}
-		return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, whyLog), dashboard.NotInClusterReason
+		return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, time.Now, whyLog), dashboard.NotInClusterReason
 	}
 	if _, err := stat(tool); !errors.Is(err, fs.ErrNotExist) {
 		toolSpend := dashboardSpend([]string{tool, "--json"}, run)
 		if !hasLedger {
-			return deepSeekSpendRowsFirst(rows, toolSpend, spendFileSourceTool, whyLog), ""
+			return deepSeekSpendRowsFirst(rows, toolSpend, spendFileSourceTool, time.Now, whyLog), ""
 		}
 		ledgerSpend := dashboardSpendLedger(dir, whyLog)
 		fileSpend := func() json.RawMessage {
@@ -1052,12 +1056,12 @@ func resolveSpendIn(inCluster bool, flagValue string, home func() (string, error
 			whyLog.note(spendToolSource, "no answer; the balance ledger answers")
 			return ledgerSpend()
 		}
-		return deepSeekSpendRowsFirst(rows, fileSpend, spendFileSourceToolThenLedger, whyLog), ""
+		return deepSeekSpendRowsFirst(rows, fileSpend, spendFileSourceToolThenLedger, time.Now, whyLog), ""
 	}
 	if hasLedger {
-		return deepSeekSpendRowsFirst(rows, dashboardSpendLedger(dir, whyLog), spendFileSourceLedger, whyLog), ""
+		return deepSeekSpendRowsFirst(rows, dashboardSpendLedger(dir, whyLog), spendFileSourceLedger, time.Now, whyLog), ""
 	}
-	return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, whyLog), dashboard.NotInClusterReason
+	return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, time.Now, whyLog), dashboard.NotInClusterReason
 }
 
 // spendRunner runs a spend command and returns what it printed. The dashboard's

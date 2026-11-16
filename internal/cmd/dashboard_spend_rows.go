@@ -61,54 +61,117 @@ func (l *dashWhyLog) spendSource(source, why string) {
 	l.logf("deepseek spend source: %s", msg)
 }
 
-// deepSeekRowReport reads the town's deepseek_balance rows and builds the spend
-// report they hold. ReadCostSamples answers newest first and deepseekspend.Build
-// folds the series oldest first, so the rows are reversed before they go in. A
-// row with no total is not a reading and is skipped, never folded as a zero
-// balance; its count comes back so the caller can name the rows it could not
-// use. A read that fills the scan cap is refused for the same reason the claude
-// plan rows are. A nil report with no error is a town with no usable row; a
-// failed read is an error, never an empty series.
-func deepSeekRowReport(read costSamplesRead, now time.Time) (json.RawMessage, int, error) {
-	rows, err := read(beads.SampleKindDeepSeekBalance, time.Time{}, deepSeekRowScanLimit)
+// deepSeekRowsReport is the spend report built from the town's rows, plus the
+// instant its balance was read. The watch writer stamps spend.json with
+// BalanceAt, so a patrol that stopped leaves its last reading with its own age
+// downstream rather than passing as this poll's live rate (gt-u3fp8i).
+type deepSeekRowsReport struct {
+	deepseekspend.Report
+	BalanceAt time.Time `json:"balance_at"`
+}
+
+// deepSeekRowSeries is the town's deepseek_balance rows folded so far. The store
+// is written only by appending a row (internal/beads exposes no sample update or
+// delete), so the first poll reads the whole series and each later poll reads
+// only the rows written since the newest it holds, folding them onto the series
+// it kept. Every poll folds the whole series into its report, because
+// spent_ledger, the credits and the gaps are all-time figures.
+//
+// A read that fails or fills its cap leaves the series as it was, so the next
+// poll asks again from the same cursor; a failed poll never partly folds the
+// rows it did read.
+type deepSeekRowSeries struct {
+	read costSamplesRead
+	// rows is every usable row read so far, oldest first.
+	rows []deepseekspend.Row
+	// events is the alert lines those rows carry, oldest first.
+	events []string
+	// newest is the instant of the newest row read so far, usable or not, and
+	// the cursor the next read starts after.
+	newest time.Time
+	// unusable counts the rows read so far that carried no total.
+	unusable int
+	// started is whether the first, whole-series read has answered.
+	started bool
+}
+
+// report folds the series at now. A nil report with no error is a town with no
+// usable row; a failed read is an error, never an empty series. The unusable
+// count comes back so the caller can name the rows it could not use.
+func (s *deepSeekRowSeries) report(now time.Time) (json.RawMessage, int, error) {
+	if err := s.poll(); err != nil {
+		return nil, s.unusable, err
+	}
+	if len(s.rows) == 0 {
+		return nil, s.unusable, nil
+	}
+	out, err := json.Marshal(deepSeekRowsReport{
+		Report: deepseekspend.Build(deepseekspend.Input{
+			Constants: deepseekspend.CurrentConstants(time.Local),
+			Rows:      s.rows,
+			Events:    s.events,
+			Now:       now,
+			Days:      deepseekspend.DefaultDays,
+		}),
+		BalanceAt: s.rows[len(s.rows)-1].At,
+	})
 	if err != nil {
-		return nil, 0, err
+		return nil, s.unusable, err
+	}
+	return out, s.unusable, nil
+}
+
+// poll reads the rows the series does not hold yet and folds them on. The read
+// answers newest first, so it is folded oldest first. On an incremental read the
+// since filter may return the cursor row itself, so a row at or before the
+// cursor is dropped as already folded; a second row at the cursor's whole-second
+// instant is the one row this cannot tell from it. A row with no total is not a
+// reading and is skipped, never folded as a zero balance. A read that fills the
+// cap is refused whole: on the first poll the series' start is not known to be
+// in the rows, and on a later one the rows written since the cursor are not
+// known to be all there.
+func (s *deepSeekRowSeries) poll() error {
+	since := time.Time{}
+	if s.started {
+		since = s.newest
+	}
+	rows, err := s.read(beads.SampleKindDeepSeekBalance, since, deepSeekRowScanLimit)
+	if err != nil {
+		return err
 	}
 	if len(rows) == deepSeekRowScanLimit {
-		return nil, 0, fmt.Errorf("the read filled its cap of %d rows, so the series' start is not known to be in the rows", deepSeekRowScanLimit)
+		return fmt.Errorf("the read filled its cap of %d rows, so the series' start is not known to be in the rows", deepSeekRowScanLimit)
 	}
+	incremental := s.started
+	var added []deepseekspend.Row
+	var newEvents []string
 	unusable := 0
-	ledger := make([]deepseekspend.Row, 0, len(rows))
-	var events []string
 	for i := len(rows) - 1; i >= 0; i-- {
 		row := rows[i]
+		if incremental && !row.At.After(s.newest) {
+			// The cursor row, returned again by a since filter that includes it.
+			continue
+		}
 		if row.Total == nil {
 			unusable++
 			continue
 		}
-		ledger = append(ledger, deepseekspend.Row{
+		added = append(added, deepseekspend.Row{
 			At:      row.At,
 			Balance: *row.Total,
 			Granted: row.Granted,
 			Topped:  row.ToppedUp,
 		})
-		events = append(events, noteLines(row.Note)...)
+		newEvents = append(newEvents, noteLines(row.Note)...)
 	}
-	if len(ledger) == 0 {
-		return nil, unusable, nil
+	s.rows = append(s.rows, added...)
+	s.events = append(s.events, newEvents...)
+	s.unusable += unusable
+	s.started = true
+	if len(rows) > 0 && rows[0].At.After(s.newest) {
+		s.newest = rows[0].At
 	}
-	report := deepseekspend.Build(deepseekspend.Input{
-		Constants: deepseekspend.CurrentConstants(time.Local),
-		Rows:      ledger,
-		Events:    events,
-		Now:       now,
-		Days:      deepseekspend.DefaultDays,
-	})
-	out, err := json.Marshal(report)
-	if err != nil {
-		return nil, unusable, err
-	}
-	return out, unusable, nil
+	return nil
 }
 
 // noteLines is the alert lines a deepseek_balance row's note carries: the patrol
@@ -121,18 +184,20 @@ func noteLines(note string) []string {
 }
 
 // deepSeekSpendRowsFirst is the spend source when the town may have
-// deepseek_balance rows: every poll reads them before the file source, and a
+// deepseek_balance rows: every poll folds them before the file source, and a
 // town with usable rows is answered from them. file answers only while the town
 // has no usable row, when the row read failed, or when it filled its cap; the
 // reason goes to the log beside the source that answered, so a pane that fell
 // back is not read as a town with no rows. A nil rows read is a hub with no row
-// store wired and leaves the file source exactly as it was.
-func deepSeekSpendRowsFirst(rows costSamplesRead, file func() json.RawMessage, fileSource string, whyLog *dashWhyLog) func() json.RawMessage {
+// store wired and leaves the file source exactly as it was. The clock is
+// injected so a test drives the report's pace windows.
+func deepSeekSpendRowsFirst(rows costSamplesRead, file func() json.RawMessage, fileSource string, now func() time.Time, whyLog *dashWhyLog) func() json.RawMessage {
 	if rows == nil {
 		return file
 	}
+	series := &deepSeekRowSeries{read: rows}
 	return func() json.RawMessage {
-		out, unusable, err := deepSeekRowReport(rows, time.Now())
+		out, unusable, err := series.report(now())
 		switch {
 		case err != nil:
 			whyLog.spendSource(fileSource, "reading the deepseek_balance rows: "+dashWhy(err))

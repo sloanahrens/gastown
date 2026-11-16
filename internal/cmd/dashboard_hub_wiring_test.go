@@ -51,3 +51,52 @@ func TestDashboardHubReadsTitlesThroughOpenDashboardBeads(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardHubWiresTheDeepSeekRowsReadToResolveSpend guards the spend
+// source's production wiring at its call site: newDashboardHub hands resolveSpend
+// the dashboard beads handle's costSamples read, so the COST pane reads the
+// town's deepseek_balance rows before any file (gt-u3fp8i). The hub's spend
+// closure is not reachable from a unit test without the real environment, which
+// the unit tier forbids, so the argument is read from the function body, as
+// TestDashboardHubReadsTitlesThroughOpenDashboardBeads reads the reader choice.
+func TestDashboardHubWiresTheDeepSeekRowsReadToResolveSpend(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "dashboard.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing dashboard.go: %v", err)
+	}
+	var hub *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "newDashboardHub" {
+			hub = fn
+		}
+	}
+	if hub == nil {
+		t.Fatal("dashboard.go has no newDashboardHub")
+	}
+	var calls []*ast.CallExpr
+	ast.Inspect(hub.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "resolveSpend" {
+			calls = append(calls, call)
+		}
+		return true
+	})
+	if len(calls) != 1 {
+		t.Fatalf("newDashboardHub calls resolveSpend %d times, want 1", len(calls))
+	}
+	if len(calls[0].Args) != 3 {
+		t.Fatalf("resolveSpend is called with %d arguments, want the flag, the rows read and the log", len(calls[0].Args))
+	}
+	sel, ok := calls[0].Args[1].(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "costSamples" {
+		t.Fatalf("resolveSpend's rows argument is %T, want beadReads.costSamples", calls[0].Args[1])
+	}
+	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "beadReads" {
+		t.Errorf("resolveSpend's rows come from %T, want the dashboard beads handle beadReads", sel.X)
+	}
+}
