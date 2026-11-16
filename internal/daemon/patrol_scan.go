@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -20,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/seatfacts"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
@@ -653,6 +655,9 @@ func (h *patrolScanHost) ClearSubmission(rig, name, workBead string) (bool, erro
 // AgentRecord reads the polecat's agent bead: the state, the gt done exit type
 // and the cleanup status gt done wrote beside it. One read answers all three,
 // since they are one record of how the last turn ended.
+//
+// It also reads the seat's intent record and logs where the two disagree
+// (shadowAgentRecord, gt-8adi4i). The bead's values are what it returns.
 func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, error) {
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(h.town(), rig), rig, name)
 	issue, err := h.readBeads(rig).Show(id)
@@ -680,7 +685,79 @@ func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, 
 			rec.HookBead = f.HookBead
 		}
 	}
+	h.shadowAgentRecord(rig, name, rec)
 	return rec, nil
+}
+
+// agentBeadShadowKey names one shadow line: the seat, the field the intent
+// record and the agent bead disagree on, and the pair of values they answered
+// with. The values are part of the key so a disagreement logs again when a
+// value changes, while a repeated read of the same one does not (gt-8adi4i).
+type agentBeadShadowKey struct {
+	seat   string
+	field  string
+	intent string
+	bead   string
+}
+
+// agentBeadShadowLogged is what this daemon process has logged. It is package
+// state rather than a field of patrolScanHost because the host lives one tick
+// and the shadow window is read across ticks: one disagreement is one line for
+// the whole run, however many ticks read it. The set grows by one entry per
+// distinct key and is never pruned; the state fields hold a small closed
+// vocabulary and the two bead fields hold bead ids, so its size follows the
+// seats and turns the town has run, not the number of ticks.
+var (
+	agentBeadShadowMu     sync.Mutex
+	agentBeadShadowLogged = map[agentBeadShadowKey]struct{}{}
+)
+
+// logAgentBeadShadow writes one shadow line unless this daemon process has
+// written it already.
+func (h *patrolScanHost) logAgentBeadShadow(key agentBeadShadowKey, line string) {
+	agentBeadShadowMu.Lock()
+	_, seen := agentBeadShadowLogged[key]
+	if !seen {
+		agentBeadShadowLogged[key] = struct{}{}
+	}
+	agentBeadShadowMu.Unlock()
+	if seen {
+		return
+	}
+	h.d.logger.Print(line)
+}
+
+// shadowAgentRecord reads the seat's intent record and logs every fact on
+// which it and the agent bead disagree, once per seat, field and value pair in
+// this daemon process (gt-8adi4i, the shadow window of the agent bead
+// retirement plan). It changes nothing its caller reads: until the window
+// shows the two sources agree the bead is the source, and the record is only
+// observed.
+//
+// A record that cannot be read is logged once and leaves the bead's record
+// standing. That is the same fail-closed read every intent reader makes, but
+// the shadow is not a decision: refusing to answer here would take a bead read
+// that succeeded and turn it into an error, so the unreadable record is
+// reported and the tick carries on with the bead (gt-8adi4i).
+//
+// A host with no logger writes nothing and remembers nothing. In the daemon
+// every host has one, and a host without one has nowhere to put the line, so
+// it must not spend the entry that would spare the next reader the write.
+func (h *patrolScanHost) shadowAgentRecord(rig, name string, bead patrolscan.AgentRecord) {
+	if h.d.logger == nil {
+		return
+	}
+	seat := rig + "/" + name
+	facts, err := seatfacts.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
+	if err != nil {
+		h.logAgentBeadShadow(agentBeadShadowKey{seat: seat, field: "intent_record"},
+			fmt.Sprintf("agentbead_shadow: %s intent record unreadable, the bead's values stand: %v", seat, err))
+		return
+	}
+	for _, d := range seatfacts.Disagreements(facts, bead) {
+		h.logAgentBeadShadow(agentBeadShadowKey{seat: seat, field: d.Field, intent: d.Intent, bead: d.Bead},
+			fmt.Sprintf("agentbead_shadow: %s %s intent=%s bead=%s", seat, d.Field, d.Intent, d.Bead))
+	}
 }
 
 // PolecatEscalations reads the escalations the rig's polecat seats raised, open
