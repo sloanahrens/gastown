@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/daemon"
 )
@@ -158,5 +161,117 @@ func TestPreRollGuardProductionChecksAreWired(t *testing.T) {
 	if townPreflightChecks.bdHandshake == nil ||
 		reflect.ValueOf(townPreflightChecks.bdHandshake).Pointer() != reflect.ValueOf(bdTownHandshake).Pointer() {
 		t.Error("the preflight's bd-handshake check is not bdTownHandshake")
+	}
+}
+
+// preflightCommand runs the built `gt daemon preflight` over the checks and
+// town-root lookup passed in and returns its output, the command (for its
+// silence flags) and the error, so a test drives the command the binary runs.
+func preflightCommand(checks preflightChecks, findTownRoot func() (string, error)) (string, *cobra.Command, error) {
+	var out bytes.Buffer
+	cmd := newDaemonPreflightCmd(checks, findTownRoot)
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	return out.String(), cmd, err
+}
+
+// TestPreRollGuardFailedResultPrintsFAILAndExitsOne pins that a failed check
+// prints its FAIL line with the check's name and error and that the command's
+// exit status is 1.
+func TestPreRollGuardFailedResultPrintsFAILAndExitsOne(t *testing.T) {
+	t.Parallel()
+	errHandshake := errors.New("the bd on PATH is not a fork build")
+	var calls preflightCall
+	checks := fakePreflightChecks(&calls, nil, errHandshake)
+
+	out, cmd, err := preflightCommand(checks, func() (string, error) { return "/town", nil })
+
+	want := "ok  " + preflightNameTownConfig + "\n" +
+		"FAIL " + preflightNameBDHandshake + ": the bd on PATH is not a fork build\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+	code, silent := IsSilentExit(err)
+	if !silent || code != 1 {
+		t.Fatalf("error = %v, want a silent exit 1", err)
+	}
+	if !cmd.SilenceErrors || !cmd.SilenceUsage {
+		t.Error("the silent exit would be printed as a cobra error over the per-check lines")
+	}
+	if calls.townConfig != 1 || calls.handshake != 1 {
+		t.Errorf("checks ran town-config %d, bd-handshake %d times, want each once",
+			calls.townConfig, calls.handshake)
+	}
+}
+
+// TestPreRollGuardAllPassingPrintsOkAndExitsZero pins that passing checks each
+// print an ok line and that the command's exit status is 0.
+func TestPreRollGuardAllPassingPrintsOkAndExitsZero(t *testing.T) {
+	t.Parallel()
+	var calls preflightCall
+	checks := fakePreflightChecks(&calls, nil, nil)
+
+	out, _, err := preflightCommand(checks, func() (string, error) { return "/town", nil })
+
+	want := "ok  " + preflightNameTownConfig + "\n" + "ok  " + preflightNameBDHandshake + "\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+	if err != nil {
+		t.Errorf("error = %v, want nil for a passing preflight", err)
+	}
+}
+
+// TestPreRollGuardTownLookupFailureIsNotACheckFailure pins that a town the
+// command cannot find prints no check line and fails with the lookup's own
+// error, not a silent exit 1 that reads like a failed check.
+func TestPreRollGuardTownLookupFailureIsNotACheckFailure(t *testing.T) {
+	t.Parallel()
+	findErr := errors.New("no town found from /nowhere")
+	var calls preflightCall
+
+	out, cmd, err := preflightCommand(fakePreflightChecks(&calls, nil, nil), func() (string, error) { return "", findErr })
+
+	if out != "" {
+		t.Errorf("output = %q, want no check lines when the town root is unknown", out)
+	}
+	if !errors.Is(err, findErr) {
+		t.Fatalf("error = %v, want the town lookup's error %v", err, findErr)
+	}
+	if _, silent := IsSilentExit(err); silent {
+		t.Error("a town lookup failure exited silently as if the exit status were the answer")
+	}
+	if cmd.SilenceErrors {
+		t.Error("the town lookup failure was silenced, so nothing would name it")
+	}
+	if calls.townConfig != 0 || calls.handshake != 0 {
+		t.Errorf("checks ran town-config %d, bd-handshake %d times after the lookup failed, want none",
+			calls.townConfig, calls.handshake)
+	}
+}
+
+// TestPreRollGuardFailedWriteIsNotASilentExit pins that a line the writer
+// refused fails the command with that error, so a lost FAIL line is never
+// reported as the preflight's own exit status.
+func TestPreRollGuardFailedWriteIsNotASilentExit(t *testing.T) {
+	t.Parallel()
+	var calls preflightCall
+	cmd := newDaemonPreflightCmd(fakePreflightChecks(&calls, nil, nil), func() (string, error) { return "/town", nil })
+	cmd.SetOut(failingWriter{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{})
+
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("a failed write did not fail the command")
+	}
+	if _, silent := IsSilentExit(err); silent {
+		t.Errorf("a failed write exited silently as %v", err)
+	}
+	if cmd.SilenceErrors {
+		t.Error("a failed write was silenced as if the exit status were the answer")
 	}
 }
