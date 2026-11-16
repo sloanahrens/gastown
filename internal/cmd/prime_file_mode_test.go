@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/taskfile"
 )
@@ -57,7 +59,7 @@ func TestNoBeadAccessPrimeFileModePrintsFromTaskFile(t *testing.T) {
 		writeFile(t, taskPath, task)
 
 		opener := &noBeadAccessOpener{t: t}
-		work, err := primeSeatWork(ctx, taskPath, opener.open)
+		work, err := primeSeatWork(ctx, taskPath, primeSeatDeps{open: opener.open, clock: fakeSeatClock()})
 		if err != nil {
 			t.Fatalf("primeSeatWork = %v, want the TASK.md text", err)
 		}
@@ -90,8 +92,9 @@ func TestNoBeadAccessPrimeFileModePrintsFromTaskFile(t *testing.T) {
 				},
 			}
 		}
+		clock := fakeSeatClock()
 
-		work, err := primeSeatWork(ctx, filepath.Join(taskDir, "TASK.md"), open)
+		work, err := primeSeatWork(ctx, filepath.Join(taskDir, "TASK.md"), primeSeatDeps{open: open, clock: clock})
 		if err != nil {
 			t.Fatalf("primeSeatWork = %v, want the hooked bead", err)
 		}
@@ -100,6 +103,11 @@ func TestNoBeadAccessPrimeFileModePrintsFromTaskFile(t *testing.T) {
 		}
 		if opened == 0 {
 			t.Error("dolt-mode prime opened no bead store; the door must be the one the opener records")
+		}
+		// The retry sleeps on the injected clock, never the host's: a first
+		// attempt that answers has nothing to wait for.
+		if len(clock.slept) != 0 {
+			t.Errorf("dolt-mode prime slept %v; the first attempt answered", clock.slept)
 		}
 	})
 }
@@ -131,7 +139,7 @@ func TestNoBeadAccessPrimeFileModeMissingTaskNamesThePath(t *testing.T) {
 			tc.setup(t, taskPath)
 
 			opener := &noBeadAccessOpener{t: t}
-			work, err := primeSeatWork(ctx, taskPath, opener.open)
+			work, err := primeSeatWork(ctx, taskPath, primeSeatDeps{open: opener.open, clock: fakeSeatClock()})
 			if err == nil {
 				t.Fatalf("primeSeatWork = nil, want an error naming %s", taskPath)
 			}
@@ -141,13 +149,53 @@ func TestNoBeadAccessPrimeFileModeMissingTaskNamesThePath(t *testing.T) {
 			if len(opener.opened) != 0 {
 				t.Errorf("file-mode prime opened the bead store at %q instead of failing; it must fall back to no bead", opener.opened)
 			}
-			// The printing step hands the read failure back as the run's error
-			// instead of printing an empty task.
-			if err := runPrimeFileMode(io.Discard, ctx, work, err); err == nil {
-				t.Error("runPrimeFileMode = nil over a failed task read; the seat must not start with no task")
+			// The refusal rides the file-mode path, so prime hands the error
+			// back as the run's error instead of printing an empty task.
+			if !work.fileMode {
+				t.Fatalf("primeSeatWork = %+v, want the refusal on the file-mode path", work)
+			}
+			if got := runPrimeFileMode(io.Discard, ctx, work, err); !errors.Is(got, err) {
+				t.Errorf("runPrimeFileMode = %v, want the seat's own refusal %v", got, err)
 			}
 		})
 	}
+}
+
+// A marker that is there but cannot be read leaves the mode unknown: the seat
+// may have no route to Dolt, so prime refuses instead of opening the bead store
+// on the guess that it is dolt mode (gt-w1mzol).
+func TestNoBeadAccessPrimeUnknownModeRefusesTheBeadStore(t *testing.T) {
+	t.Parallel()
+	ctx := RoleContext{Role: RolePolecat, Rig: "gastown", Polecat: "dag"}
+	taskDir := t.TempDir()
+	// A directory at the marker's path is present but unreadable as a file.
+	if err := os.Mkdir(filepath.Join(taskDir, taskfile.ModeFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	opener := &noBeadAccessOpener{t: t}
+	work, err := primeSeatWork(ctx, filepath.Join(taskDir, "TASK.md"), primeSeatDeps{open: opener.open, clock: fakeSeatClock()})
+	if err == nil {
+		t.Fatal("primeSeatWork = nil over an unreadable marker; want the mode to be refused")
+	}
+	if !work.fileMode {
+		t.Fatalf("primeSeatWork = %+v, want the refusal on the file-mode path so prime returns it", work)
+	}
+	if !strings.Contains(err.Error(), "bead access is unknown") {
+		t.Errorf("primeSeatWork error = %q, want it to refuse the unknown mode", err)
+	}
+	if want := filepath.Join(taskDir, taskfile.ModeFile); !strings.Contains(err.Error(), want) {
+		t.Errorf("primeSeatWork error = %q, want it to name the marker %s", err, want)
+	}
+	if len(opener.opened) != 0 {
+		t.Errorf("prime opened the bead store at %q on an unknown mode; it must open none", opener.opened)
+	}
+}
+
+// fakeSeatClock is a clock whose Sleep returns at once and records the wait, so
+// the dolt-mode retry never touches the host's clock.
+func fakeSeatClock() *sleepRecorder {
+	return &sleepRecorder{Clock: clockwork.NewFakeClockAt(time.Unix(0, 0))}
 }
 
 // A file-mode run that cannot read the role directives fails before printing,
