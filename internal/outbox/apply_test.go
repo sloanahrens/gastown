@@ -368,6 +368,88 @@ func TestApplyFailedEscalationIsJoinedWithEarlierErrors(t *testing.T) {
 	}
 }
 
+// TestNoBeadAccessApplyCreatesTheEscalationFromAValidatedOutbox: the escalation
+// bead is created once from a decoded outbox, as the seat that wrote it
+// (gt-5rmlks).
+func TestNoBeadAccessApplyCreatesTheEscalationFromAValidatedOutbox(t *testing.T) {
+	t.Parallel()
+	const raw = `{"bead_id": "gt-swfo9e", "status": "deferred",
+		"escalation": {"text": "HELP: the acceptance list names a missing file"}}`
+	r, err := Validate([]byte(raw), nil, testBead)
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+	store := &fakeStore{}
+	if err := Apply(store, testBead, testActor, acceptance, r); err != nil {
+		t.Fatalf("Apply() error = %v, want nil", err)
+	}
+	want := []storeCall{
+		{op: "SetStatus", beadID: testBead, status: "deferred"},
+		{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the acceptance list names a missing file"},
+	}
+	if !reflect.DeepEqual(store.calls, want) {
+		t.Errorf("Apply() calls = %#v, want %#v", store.calls, want)
+	}
+}
+
+// TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText: an outbox that asks
+// for no help creates no escalation, and one whose request is empty — whether
+// the decoder refused it or a host built the Result by hand — creates none and
+// is reported (gt-5rmlks).
+func TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// raw is the result.json to decode; empty means result is handed to
+		// Apply directly, as a host that built it without Validate would.
+		raw     string
+		result  Result
+		wantErr string
+	}{
+		{
+			name:   "an outbox with no request creates none",
+			raw:    `{"bead_id": "gt-swfo9e", "status": "done"}`,
+			result: Result{},
+		},
+		{
+			name:    "an outbox the decoder refuses for an empty request creates none and is reported",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "escalation": {"text": ""}}`,
+			wantErr: "escalation text is empty",
+		},
+		{
+			name:    "a hand-built result with an empty request creates none and is reported",
+			result:  Result{Status: StatusDone, Escalation: &Escalation{}},
+			wantErr: "escalation text is empty",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{}
+			r := tt.result
+			var err error
+			if tt.raw != "" {
+				r, err = Validate([]byte(tt.raw), nil, testBead)
+			}
+			// A host stops at the outbox it could not validate and applies
+			// nothing.
+			if err == nil {
+				err = Apply(store, testBead, testActor, acceptance, r)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("error = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to name %q", err, tt.wantErr)
+			}
+			if len(store.calls) != 0 {
+				t.Errorf("store calls = %#v, want no escalation bead created", store.calls)
+			}
+		})
+	}
+}
+
 func TestApplyRefusedStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
