@@ -1447,6 +1447,22 @@ type Daemon struct {
 	// source.
 	reworkNumbersStepFor reworkNumbersStepFunc
 
+	// imagePinLayersRunning and imagePinLayersCycles are the image_pin_layers
+	// run's single-flight guard and cycle count: a due run reads every pin from
+	// its registry off the select loop, and Run's return joins one it left
+	// (image_pin_layers.go).
+	imagePinLayersRunning atomic.Bool
+	imagePinLayersCycles  sync.WaitGroup
+	// imagePinLayersJoinWait overrides imagePinLayersJoinWait in tests.
+	imagePinLayersJoinWait time.Duration
+	// imagePinLayersRun is the patrol's run seam: nil is
+	// imagePinLayersRunSkeleton, which reads nothing until a later bead fills
+	// the body, and a test sets it to count the runs.
+	imagePinLayersRun imagePinLayersRunFunc
+	// newImagePinLayersTicker is where the patrol's ticker comes from: nil is
+	// time.NewTicker, and a test sets it to record the cadence.
+	newImagePinLayersTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -2476,6 +2492,16 @@ func (d *Daemon) Run() (err error) {
 		defer d.stopReworkNumbersPatrol(stopReworkNumbers)
 	}
 
+	// Start the image pin layers ticker if enabled (default off, gt-rhrbyd;
+	// its config block says why). The ticker checks whether today's run is
+	// due; the last-run record under .runtime decides, so a restart inside the
+	// day reruns nothing. The defer stops the ticker and joins a run it left
+	// going.
+	imagePinLayersChan, stopImagePinLayers := d.startImagePinLayersTicker()
+	if stopImagePinLayers != nil {
+		defer d.stopImagePinLayersPatrol(stopImagePinLayers)
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2694,6 +2720,14 @@ func (d *Daemon) Run() (err error) {
 			// decides whether this tick is the week's run (gt-2232t4).
 			if !d.isShutdownInProgress() {
 				d.startReworkNumbersTick()
+			}
+
+		case <-imagePinLayersChan:
+			// image_pin_layers — a due run checks every digest pin against its
+			// registry, on its own goroutine; the last-run record under
+			// .runtime decides whether this tick is today's run (gt-rhrbyd).
+			if !d.isShutdownInProgress() {
+				d.startImagePinLayersTick()
 			}
 
 		case <-findingsFilerChan:

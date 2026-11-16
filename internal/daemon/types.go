@@ -608,6 +608,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.ImagePins.Enabled
 	}
+	// image_pin_layers defaults OFF, and its key absent means off
+	// (gt-rhrbyd; the PatrolsConfig.ImagePinLayers field says why).
+	if patrol == "image_pin_layers" {
+		if config == nil || config.Patrols == nil || config.Patrols.ImagePinLayers == nil {
+			return false
+		}
+		return config.Patrols.ImagePinLayers.Enabled
+	}
 	// deepseek_balance is opt-in; its config block says why (gt-whaxw7).
 	if patrol == "deepseek_balance" {
 		if config == nil || config.Patrols == nil || config.Patrols.DeepSeekBalance == nil {

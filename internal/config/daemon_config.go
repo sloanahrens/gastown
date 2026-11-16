@@ -395,6 +395,13 @@ type PatrolsConfig struct {
 	// four compares, so a town turns it on rather than an upgrade.
 	ImagePins *PatrolConfig `json:"image_pins,omitempty"`
 
+	// ImagePinLayers checks every digest-pinned image's layers once a day, so a
+	// layer a registry no longer serves is found before the next images build
+	// (internal/daemon/image_pin_layers.go, gt-rhrbyd). Off when absent: the
+	// check reads every pin from its registry, so a town turns it on rather
+	// than an upgrade.
+	ImagePinLayers *ImagePinLayersConfig `json:"image_pin_layers,omitempty"`
+
 	// DeepSeekBalance reads the DeepSeek account balance every interval, from
 	// the key file its block names (internal/daemon/deepseek_balance_patrol.go,
 	// gt-whaxw7). Off when absent: each tick spends one request against the
@@ -2253,6 +2260,16 @@ func (c *DeepSeekBalanceConfig) UnmarshalJSON(data []byte) error {
 // feed, so a town that has not started the program must not get one from a
 // default.
 type ReworkNumbersConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ImagePinLayersConfig configures the image_pin_layers patrol: whether the town
+// checks every digest-pinned image's layers once a day
+// (internal/daemon/image_pin_layers.go).
+//
+// The patrol is opt-in. Each run reads every pin from its registry, so a town
+// that has not asked for it must not get it from a default.
+type ImagePinLayersConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
