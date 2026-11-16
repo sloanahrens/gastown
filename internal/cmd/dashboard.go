@@ -96,11 +96,12 @@ The command runs every five minutes while a page is open; with no rows and
 neither file, the spend panel is left out. Each report read also rewrites the
 town's watch reading, <town>/.runtime/watch/spend.json, as {ts, per_hour,
 balance} — what the hourly snapshot, gt tail and gt report read as the live
-DeepSeek rate — with ts the newest sample's instant when the rows answer, so a
-patrol that stopped shows the reading's age rather than the poll's, and
-otherwise the instant the report was read. A report that carries no balance
-leaves the file as it was, and a file that cannot be rewritten is marked on the
-Reads pane and leaves the panel drawing the report it read.
+DeepSeek rate — with ts the instant the balance is from: the newest row's own
+when the rows answer, and the newest ledger sample's for a file report, so a
+patrol or ledger that stopped shows the reading's age rather than the poll's. A
+report that carries no balance or no instant of its own leaves the file as it
+was, and a file that cannot be rewritten is marked on the Reads pane and leaves
+the panel drawing the report it read.
 
 --jev-spend-cmd names the command that prints the Jev ledger's spend as JSON
 (default: gt jev spend --json --hours 24). The command is split like a shell

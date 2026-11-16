@@ -125,11 +125,13 @@ func (s *deepSeekRowSeries) report(now time.Time) (json.RawMessage, int, error) 
 // answers newest first, so it is folded oldest first. On an incremental read the
 // since filter may return the cursor row itself, so a row at or before the
 // cursor is dropped as already folded; a second row at the cursor's whole-second
-// instant is the one row this cannot tell from it. A row with no total is not a
-// reading and is skipped, never folded as a zero balance. A read that fills the
-// cap is refused whole: on the first poll the series' start is not known to be
-// in the rows, and on a later one the rows written since the cursor are not
-// known to be all there.
+// instant is the one row this cannot tell from it. A row written late with an
+// instant before the cursor is dropped the same way, so a backfilled row is
+// never folded (accepted limitation: the store only appends). A row with no
+// total is not a reading and is skipped, never folded as a zero balance. A read
+// that fills the cap is refused whole: on the first poll the series' start is
+// not known to be in the rows, and on a later one the rows written since the
+// cursor are not known to be all there.
 func (s *deepSeekRowSeries) poll() error {
 	since := time.Time{}
 	if s.started {
