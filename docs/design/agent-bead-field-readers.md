@@ -1,4 +1,4 @@
-> Status: historical (2026-11-16). A census of the code that reads and writes four agent-bead fields, taken from `origin/main` at `0f1df68e`. It records the code as it was; not maintained.
+> Status: historical (2026-11). Merged in: gt-2l1v6y (the census is P1.1's input to the agent-bead retirement design). Not maintained.
 
 # Who reads and writes `notification_level`, `role_type`, `active_mr` and `last_source_issue`
 
@@ -391,7 +391,7 @@ The plan names three verdicts — display, decision, derivable — which cover r
 
 ## What this changes in the design
 
-- `active_mr` stays in the field map's "open" column no longer: it must be carried, and the reaper is the reader that decides it.
+- `active_mr` no longer stays in the field map's "open" column: it must be carried, and the reaper is the reader that decides it.
 - `notification_level` moves from "none: display or derivable" to carried: it gates delivery, and no seat name or work bead states a mute.
 - `role_type` is confirmed as needing no home: the seat ID already carries it. The one by-role query in mail must read the intent records instead of a description.
 - No fifth field surfaced. The remaining description keys in these lines (`rig`) are already in the field map.
