@@ -311,7 +311,7 @@ func TestAgentBeadRetireTurnStateWindow(t *testing.T) {
 			want: []Disagreement{{Field: "turn_state", Intent: "done", Bead: "working"}},
 		},
 		{
-			name: "a working bead whose value differs only in space",
+			name: "a done bead whose value differs only in space",
 			f:    Facts{TurnState: "done"},
 			a:    patrolscan.AgentRecord{State: " done "},
 			want: []Disagreement{{Field: "turn_state", Intent: "done", Bead: " done "}},
