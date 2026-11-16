@@ -1440,6 +1440,14 @@ type specLintOpts struct {
 	// which the lint refuses a bead by its own sp-minutes label. Zero is off,
 	// and the lint then reads no story-point label (gt-mtzx6s).
 	LintOverMinutes float64
+	// BudgetMaxLines is story_points.lint_budget_max_lines: the change budget
+	// in added lines a bead's Size section may declare, past which the lint
+	// refuses it. Zero or below is off (gt-muzkwi).
+	BudgetMaxLines int
+	// BudgetRequired is story_points.lint_budget_required: the lint refuses a
+	// bead whose Size section declares no change budget at all. False is off
+	// (gt-muzkwi).
+	BudgetRequired bool
 	// Estimate is --estimate's run of one bead's estimate, nil when the flag
 	// is off. It writes the labels and the note before the check, and the lint
 	// reads the size that run wrote (gt-5ynb86).
@@ -1456,10 +1464,14 @@ type specLintOpts struct {
 const specLintEstimateWait = specStoryPointTimeout
 
 // specLintOptsFrom is the settings gt spec lint runs with, read from the town's
-// spec_dispatch block: the story-point size gate (gt-mtzx6s). A nil block is
-// every setting off.
+// spec_dispatch block: the story-point size gate (gt-mtzx6s) and the change
+// budget gate (gt-muzkwi). A nil block is every setting off.
 func specLintOptsFrom(sd *config.SpecDispatchConfig) specLintOpts {
-	return specLintOpts{LintOverMinutes: sd.StoryPointsLintOver()}
+	return specLintOpts{
+		LintOverMinutes: sd.StoryPointsLintOver(),
+		BudgetMaxLines:  sd.StoryPointsLintBudgetMaxLines(),
+		BudgetRequired:  sd.StoryPointsLintBudgetRequired(),
+	}
 }
 
 // specLintOptsFor is the settings and flags one gt spec lint run reads: the
@@ -1476,7 +1488,11 @@ func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimat
 
 // lintOptions is the lint's own view of the settings.
 func (o specLintOpts) lintOptions() specdispatch.LintOptions {
-	return specdispatch.LintOptions{LintOverMinutes: o.LintOverMinutes}
+	return specdispatch.LintOptions{
+		LintOverMinutes: o.LintOverMinutes,
+		BudgetMaxLines:  o.BudgetMaxLines,
+		BudgetRequired:  o.BudgetRequired,
+	}
 }
 
 // gt spec lint --estimate (gt-5ynb86): the lint never estimates by itself, so
@@ -2069,6 +2085,13 @@ type specDispatchEnv struct {
 	// lint refuses a candidate whose own sp-minutes label is at or over it, so
 	// the bead is split before a seat finds out at the overrun stop.
 	StoryPointLintOver float64
+	// StoryPointLintBudgetMaxLines is the change budget ceiling in added lines
+	// (story_points.lint_budget_max_lines, gt-muzkwi). Zero is off.
+	StoryPointLintBudgetMaxLines int
+	// StoryPointLintBudgetRequired refuses a candidate whose Size section
+	// declares no change budget (story_points.lint_budget_required,
+	// gt-muzkwi). False is off.
+	StoryPointLintBudgetRequired bool
 	// StoryPointEstimate is the estimate the tick runs for a bead, under a
 	// context the tick cancels on timeout. Production is specStoryPointEstimate.
 	// The outcome carries the numbers the split route reads.
@@ -2165,6 +2188,17 @@ func specLockTimeoutRecorded(storeFor func(beadID string) beads.Client) func(bea
 			texts = append(texts, c.Text)
 		}
 		return specdispatch.LockTimeoutRecorded(texts), nil
+	}
+}
+
+// lintOptions is the settings the tick lints a candidate with: the same
+// settings gt spec lint reads, so a candidate the seat's lint would refuse is
+// held here instead of slung (gt-muzkwi).
+func (e specDispatchEnv) lintOptions() specdispatch.LintOptions {
+	return specdispatch.LintOptions{
+		LintOverMinutes: e.StoryPointLintOver,
+		BudgetMaxLines:  e.StoryPointLintBudgetMaxLines,
+		BudgetRequired:  e.StoryPointLintBudgetRequired,
 	}
 }
 
@@ -2487,7 +2521,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				continue
 			}
 			full = walked
-			verdict = specdispatch.LintWith(full, env.Template, specdispatch.LintOptions{LintOverMinutes: env.StoryPointLintOver})
+			verdict = specdispatch.LintWith(full, env.Template, env.lintOptions())
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
 		}
 		// A clean verdict is the only shape the estimate-ahead pass reads: the
@@ -3773,8 +3807,11 @@ func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, to
 	env.StoryPointShadow = sd.StoryPointsShadow()
 	env.StoryPointSplitOver = sd.StoryPointsSplitOver()
 	// The size gate that refuses an over-estimate bead at lint time lives in
-	// the same block (gt-mtzx6s).
+	// the same block (gt-mtzx6s), and so does the change budget gate
+	// (gt-muzkwi).
 	env.StoryPointLintOver = sd.StoryPointsLintOver()
+	env.StoryPointLintBudgetMaxLines = sd.StoryPointsLintBudgetMaxLines()
+	env.StoryPointLintBudgetRequired = sd.StoryPointsLintBudgetRequired()
 	env.StoryPointEstimate = specStoryPointEstimate(townRoot)
 }
 
