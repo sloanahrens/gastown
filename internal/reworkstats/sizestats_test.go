@@ -19,6 +19,20 @@ func sizeRec(bead string, addedLines int, secs float64, attempts int) landings.R
 	return rec
 }
 
+// sizeLowerBoundRec and sizeUpperBoundRec are sizeRec whose polecat time is
+// flagged as a bound: a floor or a ceiling on the time, not a measurement.
+func sizeLowerBoundRec(bead string, addedLines int, secs float64, attempts int) landings.Record {
+	rec := sizeRec(bead, addedLines, secs, attempts)
+	rec.PolecatLowerBound = true
+	return rec
+}
+
+func sizeUpperBoundRec(bead string, addedLines int, secs float64, attempts int) landings.Record {
+	rec := sizeRec(bead, addedLines, secs, attempts)
+	rec.PolecatUpperBound = true
+	return rec
+}
+
 // sizeGotWant is one bucket's figures as the tests state them.
 type sizeGotWant struct {
 	label      string
@@ -148,6 +162,49 @@ func TestRunawayBeadSizeStatsSkipsUntimedOrUnsized(t *testing.T) {
 				if bucket.Beads != want {
 					t.Errorf("%s: Beads = %d, want %d", bucket.Label, bucket.Beads, want)
 				}
+			}
+		})
+	}
+}
+
+// TestRunawayBeadSizeStatsSkipsBoundTimes: a polecat time flagged as a bound is
+// an edge of the time, not the time, so it takes no bucket and is counted with
+// the unmeasured records. Each row puts a bound beside two exact records of 5
+// and 20 minutes. Were the bound let into the bucket, its 60 or 90 minutes would
+// move the median off 12.5, and its two seats would raise the multi-attempt and
+// over-30 shares off zero.
+func TestRunawayBeadSizeStatsSkipsBoundTimes(t *testing.T) {
+	t.Parallel()
+	exact := []landings.Record{
+		sizeRec("gt-exact-1", 10, 300, 1),
+		sizeRec("gt-exact-2", 20, 1200, 1),
+	}
+	tests := []struct {
+		name  string
+		bound landings.Record
+	}{
+		{"lower bound", sizeLowerBoundRec("gt-bound-lower", 30, 3600, 2)},
+		{"upper bound", sizeUpperBoundRec("gt-bound-upper", 30, 5400, 2)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			recs := append(append([]landings.Record{}, exact...), tt.bound)
+			buckets, skipped := SizeStats(recs)
+			if skipped != 1 {
+				t.Errorf("skipped = %d, want 1: the bound-flagged record is the only one left out", skipped)
+			}
+			for _, bucket := range buckets {
+				want := sizeGotWant{}
+				if bucket.Label == "under 50" {
+					want = sizeGotWant{label: bucket.Label, beads: 2, median: 12.5}
+				}
+				if bucket.Beads != want.beads {
+					t.Errorf("%s: Beads = %d, want %d", bucket.Label, bucket.Beads, want.beads)
+				}
+				sizeCheckFloat(t, bucket.Label+" MedianMinutes", bucket.MedianMinutes, want.median)
+				sizeCheckFloat(t, bucket.Label+" MultiAttemptShare", bucket.MultiAttemptShare, want.multiShare)
+				sizeCheckFloat(t, bucket.Label+" Over30Share", bucket.Over30Share, want.over30)
 			}
 		})
 	}

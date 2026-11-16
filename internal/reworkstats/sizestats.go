@@ -7,8 +7,9 @@ import (
 )
 
 // sizeBuckets defines the added-lines buckets, in report order. Edge is the
-// added-line count that opens the bucket, so a record of exactly the edge
-// count belongs to the bucket the edge opens and each label's range is exact.
+// added-line count that opens the bucket: the work item writes the ranges as
+// "under 50, 50 to 150, 150 to 300", which overlap at each edge, so the label
+// names the last count the bucket holds and the edge count opens the next one.
 var sizeBuckets = []struct {
 	Label string
 	Edge  int
@@ -48,6 +49,12 @@ type SizeBucket struct {
 // for a landing written before it existed and for one that only deleted lines,
 // and a reader that folded either into a bucket would read a short sample as a
 // complete one.
+//
+// A record whose polecat time is bound-flagged takes no bucket either: a lower
+// or upper bound is an edge of the time, not the time, and folding it into the
+// median and the over-30 share would move both toward the bound. Every figure
+// in a bucket is over the same records, so the record is left out of the whole
+// bucket and counted in the second return with the unmeasured ones.
 func SizeStats(recs []landings.Record) ([]SizeBucket, int) {
 	buckets := make([]SizeBucket, len(sizeBuckets))
 	for i, def := range sizeBuckets {
@@ -58,7 +65,7 @@ func SizeStats(recs []landings.Record) ([]SizeBucket, int) {
 	over30 := make([]int, len(buckets))
 	skipped := 0
 	for _, rec := range recs {
-		if rec.AddedLines <= 0 || rec.PolecatSecs <= 0 {
+		if rec.AddedLines <= 0 || rec.PolecatSecs <= 0 || rec.PolecatLowerBound || rec.PolecatUpperBound {
 			skipped++
 			continue
 		}
