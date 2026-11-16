@@ -12,11 +12,21 @@ import (
 // claudePlanRowScanSpan is how far back one poll reads the town's claude_plan
 // rows: one weekly window, the span the meter folds, plus a day, so the reading
 // that closed the window before this one is still in the series. A count of
-// rows cannot bound that span: the status line appends a row on every changed
+// rows cannot name that span: the status line appends a row on every changed
 // reading and holds only an unchanged one to the ten-minute heartbeat, so a
 // busy town writes far more rows in a week than a count sized for a quiet one
 // holds, and the window's start would fall off the read (gt-u9dsir).
 const claudePlanRowScanSpan = 8 * 24 * time.Hour
+
+// claudePlanRowScanLimit caps one poll's row read over that span. It is this
+// package's count, never the store's default, which this repo does not define:
+// a read that leaves the limit to bd stops at whatever count bd holds and drops
+// the window's start without saying so (gt-u9dsir). The cap holds a quiet
+// town's ten-minute heartbeat with room to spare and a busy session's changed
+// readings with it, and a read that fills it is refused rather than folded,
+// because a full cap is the one case where the window's start is not known to
+// be in the rows.
+const claudePlanRowScanLimit = 20000
 
 // claudePlanSourceRows names the row series in the plan meter's log line.
 const claudePlanSourceRows = "the town's claude_plan rows"
@@ -51,14 +61,16 @@ func newDashboardClaudePlanReader(path string, usage *dashUsageReader, planUSDMo
 // partial row another writer left cannot pull the meter down (gt-j3ya0x). The
 // skipped count comes back beside the samples so the caller can name the rows
 // it could not use; without it a fallback over unusable rows reads the same as
-// a town with no rows (gt-u9dsir). A failed read is the caller's error, never
-// an empty series.
+// a town with no rows (gt-u9dsir). A read that fills the scan cap is refused,
+// never folded: the rows that fell off it are the window's start. A failed read
+// is the caller's error, never an empty series.
 func claudePlanRowSamples(read costSamplesRead, now time.Time) ([]dashboard.ClaudePlanSample, int, error) {
-	// The span is this read's bound, so the count is left to the store's own:
-	// no fixed count names a span whose row rate the writer sets.
-	rows, err := read(beads.SampleKindClaudePlan, now.Add(-claudePlanRowScanSpan), 0)
+	rows, err := read(beads.SampleKindClaudePlan, now.Add(-claudePlanRowScanSpan), claudePlanRowScanLimit)
 	if err != nil {
 		return nil, 0, err
+	}
+	if len(rows) == claudePlanRowScanLimit {
+		return nil, 0, fmt.Errorf("the read filled its cap of %d rows, so the window's start is not known to be in the series", claudePlanRowScanLimit)
 	}
 	unusable := 0
 	samples := make([]dashboard.ClaudePlanSample, 0, len(rows))
@@ -84,7 +96,8 @@ func claudePlanRowSamples(read costSamplesRead, now time.Time) ([]dashboard.Clau
 // answer while it has any, and the series file answers only while no row
 // exists, so the first row the status line writes is read at the next poll. The
 // why-log names the source that answered, once per change. A rows read that
-// fails falls back to the file with the reason logged, so a bd hiccup does not
+// fails, or that fills the scan cap so the window's start is not known to be in
+// it, falls back to the file with the reason logged, so a bd hiccup does not
 // blank a meter whose old series is still there (gt-hutsr6). Rows that carry no
 // complete reading are named in the log beside whichever source answered, so a
 // fallback over unusable rows is not read as a town that has no rows

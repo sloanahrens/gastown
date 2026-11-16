@@ -95,8 +95,8 @@ func TestClaudePlanReadPrefersTheCostRows(t *testing.T) {
 	if want := fixedClaudePlanNow.Add(-claudePlanRowScanSpan); len(sinces) != 1 || !sinces[0].Equal(want) {
 		t.Errorf("the poll read rows since %v, want %v, a span that covers the weekly window", sinces, want)
 	}
-	if len(limits) != 1 || limits[0] != 0 {
-		t.Errorf("the poll read rows with limits %v, want no count of its own (0 = the store's bound)", limits)
+	if len(limits) != 1 || limits[0] != claudePlanRowScanLimit {
+		t.Errorf("the poll read rows with limits %v, want its own count of %d, not the store's default", limits, claudePlanRowScanLimit)
 	}
 }
 
@@ -164,6 +164,64 @@ func TestClaudePlanReadFallsBackWhenTheRowsFail(t *testing.T) {
 	if len(logged) != 1 || !strings.Contains(logged[0], file) || !strings.Contains(logged[0], "connection refused") {
 		t.Errorf("the why-log = %q, want one line naming %s and the failed rows read", logged, file)
 	}
+}
+
+// TestClaudePlanReadRefusesAFullRowCap: a rows read that comes back with as
+// many rows as it asked for has dropped whatever came before them, and the
+// window's start is the first thing that falls off, so the poll refuses that
+// series and answers from the file with the reason logged rather than fold a
+// partial week as the whole one (gt-u9dsir).
+func TestClaudePlanReadRefusesAFullRowCap(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	file := writeClaudePlanSeries(t, town, fixedClaudePlanNow) // the file stands at 38%
+
+	var logged []string
+	rows := func(string, time.Time, int) ([]beads.Sample, error) {
+		return fullClaudePlanRows(claudePlanRowScanLimit), nil
+	}
+	p := claudePlanRead(t, town, rows, &logged)()
+
+	if p.WeeklyPct != 38 {
+		t.Errorf("the meter reads %v%% from a full-cap read, want the file's 38%%", p.WeeklyPct)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], file) || !strings.Contains(logged[0], "filled its cap") {
+		t.Errorf("the why-log = %q, want one line naming %s and the full row cap", logged, file)
+	}
+}
+
+// TestClaudePlanReadAcceptsAReadJustUnderTheCap: one row under the cap is not a
+// full cap, so the rows answer and the file is left alone; the refusal is the
+// filled cap itself, not a read of any size (gt-u9dsir).
+func TestClaudePlanReadAcceptsAReadJustUnderTheCap(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	writeClaudePlanSeries(t, town, fixedClaudePlanNow) // the file stands at 38%
+
+	var logged []string
+	rows := func(string, time.Time, int) ([]beads.Sample, error) {
+		return fullClaudePlanRows(claudePlanRowScanLimit-1), nil
+	}
+	p := claudePlanRead(t, town, rows, &logged)()
+
+	if p.WeeklyPct != 7 {
+		t.Errorf("the meter reads %v%%, want the rows' 7%% from a read under the cap", p.WeeklyPct)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], claudePlanSourceRows) {
+		t.Errorf("the why-log = %q, want one line naming %q", logged, claudePlanSourceRows)
+	}
+}
+
+// fullClaudePlanRows is n copies of one complete claude_plan row, the shape a
+// read comes back in when a town wrote more rows than the scan asked for.
+func fullClaudePlanRows(n int) []beads.Sample {
+	rows := make([]beads.Sample, n)
+	for i := range rows {
+		rows[i] = claudePlanRow(fixedClaudePlanNow, 3, 7)
+	}
+	return rows
 }
 
 // TestClaudePlanReadSkipsPartialRows: a row missing a reading is not a reading,
