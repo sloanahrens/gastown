@@ -457,6 +457,32 @@ func TestNoBeadAccessSeatEndRetriesOnlyTheEscalation(t *testing.T) {
 	}
 }
 
+// A seat's outbox title replaces its bead's title, the edit a file-mode
+// `gt bead update` makes with no bead to write it (gt-s4gfph).
+func TestNoBeadAccessSeatEndAppliesTheOutboxTitle(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	const want = "DISPROVEN: the retry resets; the counter is reset at the call site"
+	writeSeatOutbox(t, f.town,
+		`{"bead_id":"`+endBead+`","status":"done","title":"`+want+`"}`, "")
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end did not finish a seat whose outbox it applied")
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue.Title != want {
+		t.Errorf("bead title = %q, want the seat's title %q", issue.Title, want)
+	}
+}
+
 // An outbox is applied once however many times the seat end runs: a pass that
 // reads the same bytes again writes no second note, finding, tick or escalation
 // (gt-s4gfph).

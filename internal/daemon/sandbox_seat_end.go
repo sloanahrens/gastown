@@ -818,6 +818,11 @@ type seatOutboxStore struct {
 	escalationErr error
 }
 
+// SetTitle replaces the bead's title with the one the seat ended with.
+func (s *seatOutboxStore) SetTitle(beadID, title string) error {
+	return s.bd.Update(beadID, beads.UpdateOptions{Title: &title})
+}
+
 // AppendNotes appends the seat's notes to its bead.
 func (s *seatOutboxStore) AppendNotes(beadID, text string) error {
 	return s.bd.AppendNotes(beadID, text)
