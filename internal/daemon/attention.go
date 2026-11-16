@@ -689,6 +689,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindTierSweepStuck, collect: s.collectTierSweepStuck},
 		{kind: attention.KindTierSweepGuardUnreadable, collect: s.collectTierSweepGuardUnreadable},
+		// The retries the sweep spent on a green commit whose images build kept
+		// failing, read from the same tier-sweep record the RED and starved
+		// items above use (gt-yhvp5m).
+		{kind: attention.KindTierSweepImagesRetryExhausted, collect: s.collectTierSweepImagesRetryExhausted},
 		{kind: attention.KindGreenRef, collect: s.collectGreenRef},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
@@ -2051,6 +2055,51 @@ func (s *attentionSources) collectTierSweepGuardUnreadable(ctx context.Context) 
 			Rig:      rig,
 			Summary: fmt.Sprintf("tier sweep %s: %s failed (exit %d): %s; the cycle is deferred, and the cluster access it needs is recorded in deploy/k8s/sweep-rbac.yaml",
 				rig, u.Argv0Verb, u.ExitCode, u.FirstLine),
+		})
+	}
+	return out, nil
+}
+
+// collectTierSweepImagesRetryExhausted raises one item per rig whose record has
+// spent tierSweepImagesRetryMax early re-runs on its green commit and whose
+// images build still failed (gt-yhvp5m). Nothing retries the build until the
+// hourly cycle then, and the commit has no daemon or polecat images to roll
+// onto. The item names the rig, the green commit and the retries spent.
+//
+// It clears on the first tick after the condition stops: a cycle whose images
+// run succeeded clears the count (tierSweepImagesRetryRecorded reads the
+// published pair), and a new green sha moves the count with it. An answer the
+// pair check does not hold raises nothing, so a read that has not reached the
+// commit cannot stand in for a success.
+func (s *attentionSources) collectTierSweepImagesRetryExhausted(ctx context.Context) ([]attention.Item, error) {
+	if s.d == nil {
+		return nil, nil
+	}
+	var out []attention.Item
+	for _, rig := range s.tierSweepRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		st, err := s.tierSweep(rig)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		if st.LastGreenSHA == "" || st.ImagesRetrySHA != st.LastGreenSHA ||
+			st.ImagesRetries < tierSweepImagesRetryMax {
+			continue
+		}
+		if s.d.tierSweepImagesAnswerFor(rig, st.LastGreenSHA) != tierSweepImagesFailed {
+			continue
+		}
+		sha12 := greenRefShortSHA(st.LastGreenSHA)
+		out = append(out, attention.Item{
+			Key:      "tier-sweep-images-retry-exhausted:" + rig + ":" + sha12,
+			Kind:     attention.KindTierSweepImagesRetryExhausted,
+			Severity: attention.SeverityHigh,
+			Rig:      rig,
+			SHA:      st.LastGreenSHA,
+			Summary: fmt.Sprintf("images retries exhausted on %s for green %s: %d early re-runs ran and the build still failed, so the commit waits for the hourly cycle",
+				rig, sha12, st.ImagesRetries),
 		})
 	}
 	return out, nil
