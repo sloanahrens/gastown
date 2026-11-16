@@ -17,6 +17,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
 )
 
@@ -358,41 +359,24 @@ func TestReworkProgramOmLessonsEachTickCallsTheRunSeamOnce(t *testing.T) {
 	})
 }
 
-// TestReworkProgramOmLessonsSkeletonPassProposesNothing: a daemon with no run
-// seam wired runs the skeleton, which reads nothing and proposes nothing, and
-// a pass that fails is logged rather than counted as a clean one.
-func TestReworkProgramOmLessonsSkeletonPassProposesNothing(t *testing.T) {
+// TestReworkProgramOmLessonsFailedPassIsLoggedNotCounted: a pass that fails is
+// logged rather than counted as a clean one.
+func TestReworkProgramOmLessonsFailedPassIsLoggedNotCounted(t *testing.T) {
 	t.Parallel()
+	var logged bytes.Buffer
+	d := omLessonsTestDaemon(t, &logged)
+	d.omLessonsRun = func(context.Context, time.Time) ([]omlessons.Proposal, error) {
+		return nil, errors.New("the review records are unreadable")
+	}
 
-	t.Run("the skeleton proposes nothing", func(t *testing.T) {
-		t.Parallel()
-		var logged bytes.Buffer
-		d := omLessonsTestDaemon(t, &logged)
+	d.triggerOmLessons()
 
-		d.triggerOmLessons()
-
-		if !strings.Contains(logged.String(), "the pass built 0 proposal(s)") {
-			t.Errorf("the skeleton pass logged %q, want the zero proposals it built", logged.String())
-		}
-	})
-
-	t.Run("a failed pass is logged, not counted", func(t *testing.T) {
-		t.Parallel()
-		var logged bytes.Buffer
-		d := omLessonsTestDaemon(t, &logged)
-		d.omLessonsRun = func(context.Context, time.Time) ([]omlessons.Proposal, error) {
-			return nil, errors.New("the review records are unreadable")
-		}
-
-		d.triggerOmLessons()
-
-		if !strings.Contains(logged.String(), "the review records are unreadable") {
-			t.Errorf("a failed pass logged %q, want the error named", logged.String())
-		}
-		if strings.Contains(logged.String(), "proposal(s)") {
-			t.Errorf("a failed pass logged a proposal count: %q", logged.String())
-		}
-	})
+	if !strings.Contains(logged.String(), "the review records are unreadable") {
+		t.Errorf("a failed pass logged %q, want the error named", logged.String())
+	}
+	if strings.Contains(logged.String(), "proposal(s)") {
+		t.Errorf("a failed pass logged a proposal count: %q", logged.String())
+	}
 }
 
 // TestReworkProgramOmLessonsStopJoinsTheRunningPass: Run's return stops the
@@ -468,4 +452,328 @@ func TestReworkProgramOmLessonsStopJoinsTheRunningPass(t *testing.T) {
 		unblock()
 		d.omLessonsCycles.Wait()
 	})
+}
+
+// omLessonsFinding is one finding of a fake review record: the severity and the
+// title om writes it with.
+func omLessonsFinding(severity, title string) land.ReviewFindingText {
+	return land.ReviewFindingText{Severity: severity, Title: title}
+}
+
+// omLessonsFakeSources is a pass's inputs over named records and rules, so a
+// test drives the pass without a review log on disk.
+func omLessonsFakeSources(records []land.ReviewRecord, rules map[string]bool) omLessonsSources {
+	return omLessonsSources{
+		Records: func(time.Time) ([]land.ReviewRecord, error) { return records, nil },
+		Rules:   func() (map[string]bool, error) { return rules, nil },
+	}
+}
+
+// omLessonsReviewRecord is one fake review record: a bead, the landing attempt
+// it belongs to and the findings it carries at at.
+func omLessonsReviewRecord(bead string, at time.Time, attempt int, findings ...land.ReviewFindingText) land.ReviewRecord {
+	return land.ReviewRecord{BeadID: bead, Rig: "gastown", At: at, Attempt: attempt, Verdict: land.VerdictApprove, FindingText: findings}
+}
+
+// TestReworkProgramOmLessonsRunBuildsOneProposalPerRejectionClass: one pass over
+// a fake record source yields one proposal per class of the table, with the
+// class's counts and three example beads, a too-few class carrying no coverage,
+// and the coverage text each class's rule reads.
+func TestReworkProgramOmLessonsRunBuildsOneProposalPerRejectionClass(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	recent := at.AddDate(0, 0, -3)
+	prior := at.AddDate(0, 0, -10)
+
+	records := []land.ReviewRecord{
+		// Six findings on six beads: one bead carries a third attempt, so the
+		// class burned the two rounds past its first attempt.
+		omLessonsReviewRecord("gt-a", recent, 1, omLessonsFinding("major", "fail-open: a failed read reads as clean")),
+		omLessonsReviewRecord("gt-b", recent, 3, omLessonsFinding("major", "fail-open: a failed read reads as clean")),
+		omLessonsReviewRecord("gt-c", recent, 1, omLessonsFinding("major", "fail-open: a failed read reads as clean")),
+		omLessonsReviewRecord("gt-d", recent, 1, omLessonsFinding("major", "fail-open: a failed read reads as clean")),
+		omLessonsReviewRecord("gt-e", recent, 1, omLessonsFinding("major", "fail-open: a failed read reads as clean")),
+		omLessonsReviewRecord("gt-f", recent, 1, omLessonsFinding("major", "fail-open: a failed read reads as clean")),
+		// The prior window's one finding.
+		omLessonsReviewRecord("gt-z", prior, 1, omLessonsFinding("minor", "fail-open: a failed read reads as clean")),
+	}
+	for _, bead := range []string{"gt-r1", "gt-r2", "gt-r3", "gt-r4", "gt-r5"} {
+		records = append(records, omLessonsReviewRecord(bead, recent, 1, omLessonsFinding("minor", "the refusal branch has no test")))
+	}
+	for _, bead := range []string{"gt-n1", "gt-n2", "gt-n3", "gt-n4", "gt-n5"} {
+		records = append(records, omLessonsReviewRecord(bead, recent, 1, omLessonsFinding("minor", "the test passes with the fix removed")))
+	}
+	records = append(records,
+		omLessonsReviewRecord("gt-d1", recent, 1, omLessonsFinding("minor", "the doc says the pass refuses")),
+		omLessonsReviewRecord("gt-d2", recent, 1, omLessonsFinding("minor", "the doc says the pass refuses")),
+	)
+	// A class no numbered rule covers: its coverage is a gap once it has enough
+	// findings to say.
+	for _, bead := range []string{"gt-w1", "gt-w2", "gt-w3", "gt-w4", "gt-w5"} {
+		records = append(records, omLessonsReviewRecord(bead, recent, 1, omLessonsFinding("minor", "the loop sleeps on the wall clock")))
+	}
+
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(records, map[string]bool{"1": true, "3": true}))
+
+	proposals, err := d.runOmLessonsTick(context.Background(), at)
+	if err != nil {
+		t.Fatalf("the pass over a fake record source: %v", err)
+	}
+	if got, want := len(proposals), len(omlessons.ClassNames()); got != want {
+		t.Fatalf("the pass built %d proposal(s), want one for each of the table's %d classes", got, want)
+	}
+	byID := map[string]omlessons.Proposal{}
+	for _, p := range proposals {
+		if _, ok := omlessons.ClassNames()[p.ID]; !ok {
+			t.Errorf("the pass proposed %q, which is no class of the table", p.ID)
+		}
+		byID[p.ID] = p
+	}
+
+	failOpen, ok := byID["fail-open"]
+	if !ok {
+		t.Fatal("the pass built no proposal for fail-open")
+	}
+	if want := (omlessons.ClassCounts{Findings: 6, Beads: 6, Rounds: 2}); failOpen.Current != want {
+		t.Errorf("fail-open's current counts are %+v, want %+v", failOpen.Current, want)
+	}
+	if want := (omlessons.ClassCounts{Findings: 1, Beads: 1}); failOpen.Prior != want {
+		t.Errorf("fail-open's prior counts are %+v, want %+v", failOpen.Prior, want)
+	}
+	if got, want := strings.Join(failOpen.Examples, ","), "gt-a,gt-b,gt-c"; got != want {
+		t.Errorf("fail-open's examples are %q, want the first three beads %q", got, want)
+	}
+	if failOpen.TooFew {
+		t.Error("fail-open reads as too few with six findings in the window")
+	}
+	if want := "violated-anyway: rule #1 covers it and it still appears"; failOpen.Coverage != want {
+		t.Errorf("fail-open's coverage is %q, want %q", failOpen.Coverage, want)
+	}
+
+	if got, want := byID["missing-refusal-test"].Coverage, "violated-anyway: rule #3 covers it and it still appears"; got != want {
+		t.Errorf("missing-refusal-test's coverage is %q, want %q", got, want)
+	}
+	if got, want := byID["no-red-when-removed"].Coverage, "gap: the table names rule #2 and the directive has no rule #2"; got != want {
+		t.Errorf("no-red-when-removed's coverage is %q, want %q", got, want)
+	}
+	if got, want := byID["wall-clock-wait"].Coverage, "gap: no numbered rule covers it"; got != want {
+		t.Errorf("wall-clock-wait's coverage is %q, want %q", got, want)
+	}
+
+	tooFew, ok := byID["doc-contradicts-code"]
+	if !ok {
+		t.Fatal("the pass built no proposal for doc-contradicts-code")
+	}
+	if !tooFew.TooFew {
+		t.Error("a class with two findings in the window does not read as too few")
+	}
+	if got := tooFew.Current.Findings; got != 2 {
+		t.Errorf("doc-contradicts-code counts %d finding(s), want the two it has", got)
+	}
+	if tooFew.Coverage != "" {
+		t.Errorf("a too-few class carries coverage %q, want none", tooFew.Coverage)
+	}
+}
+
+// TestReworkProgramOmLessonsRunReadsTheTownsOwnRecords: a daemon with no run
+// seam wired reads the town's own review log and directive files, so a pass
+// over a real town builds the week's proposals from what it wrote, and a record
+// outside both windows counts nothing.
+func TestReworkProgramOmLessonsRunReadsTheTownsOwnRecords(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	directives := filepath.Join(town, "directives")
+	if err := os.MkdirAll(directives, 0o755); err != nil {
+		t.Fatalf("make the directives directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directives, "polecat.md"), []byte("# What om rejects\n\n## 1. Failure is not success (fail-open)\n\nA failure must stop the pass.\n"), 0o644); err != nil {
+		t.Fatalf("write polecat.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directives, "_common.md"), []byte("## 3. Test the branch that refuses\n\nEvery refusal branch needs a row.\n"), 0o644); err != nil {
+		t.Fatalf("write _common.md: %v", err)
+	}
+
+	now := time.Now()
+	file := land.TownReviewsFile(town)
+	add := func(bead string, at time.Time, title string) {
+		t.Helper()
+		rec := omLessonsReviewRecord(bead, at, 1, omLessonsFinding("minor", title))
+		if err := file.Append(rec); err != nil {
+			t.Fatalf("append the record for %s: %v", bead, err)
+		}
+	}
+	for _, bead := range []string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e"} {
+		add(bead, now.AddDate(0, 0, -1), "fail-open: a failed read reads as clean")
+	}
+	for _, bead := range []string{"gt-r1", "gt-r2", "gt-r3", "gt-r4", "gt-r5"} {
+		add(bead, now.AddDate(0, 0, -2), "the refusal branch has no test")
+	}
+	add("gt-prior", now.AddDate(0, 0, -10), "fail-open: a failed read reads as clean")
+	add("gt-old", now.AddDate(0, 0, -30), "fail-open: a failed read reads as clean")
+
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.config.TownRoot = town
+
+	proposals, err := d.runOmLessonsTick(context.Background(), now)
+	if err != nil {
+		t.Fatalf("the pass over the town's own records: %v", err)
+	}
+	byID := map[string]omlessons.Proposal{}
+	for _, p := range proposals {
+		byID[p.ID] = p
+	}
+
+	if got := byID["fail-open"].Current.Findings; got != 5 {
+		t.Errorf("fail-open counts %d finding(s), want the week's five and not the record 30 days old", got)
+	}
+	if got := byID["fail-open"].Prior.Findings; got != 1 {
+		t.Errorf("fail-open counts %d finding(s) in the prior window, want the one written there", got)
+	}
+	if want := "violated-anyway: rule #1 covers it and it still appears"; byID["fail-open"].Coverage != want {
+		t.Errorf("fail-open's coverage is %q, want %q, read from polecat.md", byID["fail-open"].Coverage, want)
+	}
+	if got := byID["missing-refusal-test"].Current.Findings; got != 5 {
+		t.Errorf("missing-refusal-test counts %d finding(s), want the week's five", got)
+	}
+	if want := "violated-anyway: rule #3 covers it and it still appears"; byID["missing-refusal-test"].Coverage != want {
+		t.Errorf("missing-refusal-test's coverage is %q, want %q, read from _common.md", byID["missing-refusal-test"].Coverage, want)
+	}
+}
+
+// TestReworkProgramOmLessonsRunRefusesAnUnreadableInput: every input the pass
+// cannot read is an error, never a week with no findings.
+func TestReworkProgramOmLessonsRunRefusesAnUnreadableInput(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	readable := func() omLessonsSources {
+		return omLessonsFakeSources(nil, map[string]bool{"1": true})
+	}
+	townWithDirectives := func(t *testing.T, polecat, common string) *Daemon {
+		t.Helper()
+		dir := filepath.Join(t.TempDir(), "directives")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("make the directives directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "polecat.md"), []byte(polecat), 0o644); err != nil {
+			t.Fatalf("write polecat.md: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "_common.md"), []byte(common), 0o644); err != nil {
+			t.Fatalf("write _common.md: %v", err)
+		}
+		d := omLessonsTestDaemon(t, io.Discard)
+		d.config.TownRoot = filepath.Dir(dir)
+		return d
+	}
+
+	cases := []struct {
+		name string
+		run  func(t *testing.T) ([]omlessons.Proposal, error)
+		want string
+	}{
+		{
+			name: "no sources at all",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				return omLessonsPass(omLessonsSources{})(context.Background(), at)
+			},
+			want: "the pass has no sources",
+		},
+		{
+			name: "a window under a day",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				sources := readable()
+				sources.Days = -1
+				return omLessonsPass(sources)(context.Background(), at)
+			},
+			want: "want at least one day",
+		},
+		{
+			name: "a cancelled pass",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return omLessonsPass(readable())(ctx, at)
+			},
+			want: "cancelled",
+		},
+		{
+			name: "the records cannot be read",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				sources := readable()
+				sources.Records = func(time.Time) ([]land.ReviewRecord, error) {
+					return nil, errors.New("the review log is locked")
+				}
+				return omLessonsPass(sources)(context.Background(), at)
+			},
+			want: "the review log is locked",
+		},
+		{
+			name: "the directives cannot be read",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				sources := readable()
+				sources.Rules = func() (map[string]bool, error) {
+					return nil, errors.New("polecat.md is unreadable")
+				}
+				return omLessonsPass(sources)(context.Background(), at)
+			},
+			want: "polecat.md is unreadable",
+		},
+		{
+			name: "a directive set with no numbered rule",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				sources := readable()
+				sources.Rules = func() (map[string]bool, error) { return map[string]bool{}, nil }
+				return omLessonsPass(sources)(context.Background(), at)
+			},
+			want: "no numbered rules",
+		},
+		{
+			name: "a daemon with no config",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				return (&Daemon{logger: log.New(io.Discard, "", 0)}).runOmLessonsTick(context.Background(), at)
+			},
+			want: "names no town",
+		},
+		{
+			name: "a daemon with no town root",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				d := omLessonsTestDaemon(t, io.Discard)
+				d.config.TownRoot = ""
+				return d.runOmLessonsTick(context.Background(), at)
+			},
+			want: "no town root is named",
+		},
+		{
+			name: "a town with no directives directory",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				d := omLessonsTestDaemon(t, io.Discard)
+				return d.runOmLessonsTick(context.Background(), at)
+			},
+			want: "reading the directive",
+		},
+		{
+			name: "a directive with no numbered rule heading",
+			run: func(t *testing.T) ([]omlessons.Proposal, error) {
+				d := townWithDirectives(t, "# What om rejects\n\nNo numbered rule here.\n", "The shared rules, unnumbered.\n")
+				return d.runOmLessonsTick(context.Background(), at)
+			},
+			want: "no numbered rules",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			proposals, err := c.run(t)
+			if err == nil {
+				t.Fatalf("the pass accepted %s and proposed %d proposal(s), want an error", c.name, len(proposals))
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("the pass failed with %q, want the error to name %q", err, c.want)
+			}
+			if proposals != nil {
+				t.Errorf("a refused pass returned %d proposal(s), want none", len(proposals))
+			}
+		})
+	}
 }
