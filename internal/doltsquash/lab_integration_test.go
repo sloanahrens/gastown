@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,6 +58,9 @@ const (
 	// shutdown. Both are deadlines a poll checks, not waits.
 	labStartTimeout = time.Minute
 	labStopTimeout  = 10 * time.Second
+	// labStartAttempts bounds one start's port race: the port is picked before
+	// the start runs, so anything on the host can take it in between.
+	labStartAttempts = 3
 	// labPollInterval is how often a poll tries again.
 	labPollInterval = 25 * time.Millisecond
 	// labPingTimeout bounds one readiness probe.
@@ -221,6 +225,10 @@ type labServer struct {
 	adminDB *sql.DB
 	db      *sql.DB
 	once    sync.Once
+	// dial and removeAll are the seams a test drives the teardown's checks
+	// through. nil means the real net.DialTimeout and os.RemoveAll.
+	dial      labDialer
+	removeAll func(path string) error
 }
 
 // startLabServer starts a dolt sql-server over a fresh data directory on a
@@ -228,20 +236,54 @@ type labServer struct {
 // teardown.
 func startLabServer(t *testing.T) *labServer {
 	t.Helper()
-	for attempt := 1; attempt <= 3; attempt++ {
-		srv, err := tryStartLabServer(t)
-		if err == nil {
-			return srv
-		}
-		t.Logf("start attempt %d: %v", attempt, err)
+	srv, err := labStartOnFreePort(labFreePort, func(port int) (*labServer, error) {
+		return tryStartLabServer(t, port)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("no Dolt server started after 3 attempts")
-	return nil
+	return srv
 }
 
-// tryStartLabServer runs one start attempt, so a port another process took
-// between the pick and the bind is retried instead of failing the test.
-func tryStartLabServer(t *testing.T) (*labServer, error) {
+// labPortRaceErr reports whether err is dolt refusing the port it was handed,
+// rather than failing for a reason a retry cannot help. Dolt writes "Port 49575
+// already in use." to its log, and the readiness poll carries the log's tail, so
+// the race reads through the start error (gt-8dbyw).
+func labPortRaceErr(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "already in use")
+}
+
+// labStartOnFreePort starts a server on a port nextPort picks. A start refused
+// because that port is already in use is retried on a fresh port, at most
+// labStartAttempts times; any other failure comes back at once, and so does the
+// last port race once the attempts run out.
+//
+// nextPort and start are parameters rather than the real pick and server so the
+// retry is drivable: a test hands in the ports and the failures it wants,
+// without a dolt binary.
+func labStartOnFreePort(nextPort func() (int, error), start func(port int) (*labServer, error)) (*labServer, error) {
+	var lastErr error
+	for attempt := 1; attempt <= labStartAttempts; attempt++ {
+		port, err := nextPort()
+		if err != nil {
+			return nil, err
+		}
+		var srv *labServer
+		srv, lastErr = start(port)
+		if lastErr == nil {
+			return srv, nil
+		}
+		if !labPortRaceErr(lastErr) {
+			return nil, lastErr
+		}
+	}
+	return nil, fmt.Errorf("no Dolt server started after %d attempts: %w", labStartAttempts, lastErr)
+}
+
+// tryStartLabServer runs one start attempt on port. Its caller retries a port
+// another process took between the pick and the bind on a fresh one, rather than
+// failing the test.
+func tryStartLabServer(t *testing.T, port int) (*labServer, error) {
 	t.Helper()
 	parent, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -250,10 +292,6 @@ func tryStartLabServer(t *testing.T) (*labServer, error) {
 	dataDir := filepath.Join(parent, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating the scratch data directory: %w", err)
-	}
-	port, err := labFreePort()
-	if err != nil {
-		return nil, err
 	}
 	logPath := filepath.Join(parent, "dolt-server.log")
 	logFile, err := os.Create(logPath)
@@ -343,11 +381,22 @@ func (s *labServer) pin(t *testing.T) *sql.Conn {
 	return conn
 }
 
+// labReporter is the part of *testing.T a teardown reports a failed check
+// through, so a test can drive a failure branch and read what it reported.
+type labReporter interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
+// labDialer is the dial a teardown's port check makes: the real net.DialTimeout,
+// or a test's.
+type labDialer func(network, address string, timeout time.Duration) (net.Conn, error)
+
 // teardown stops the server, removes its data directory, and checks both: the
 // process is gone, the port refuses a connection, and the directory no longer
 // exists. It runs once, from the test's end or from the cleanup, whichever
 // comes first.
-func (s *labServer) teardown(t *testing.T) {
+func (s *labServer) teardown(t labReporter) {
 	t.Helper()
 	s.once.Do(func() {
 		for _, db := range []*sql.DB{s.db, s.adminDB} {
@@ -355,7 +404,7 @@ func (s *labServer) teardown(t *testing.T) {
 				db.Close()
 			}
 		}
-		if s.cmd.Process != nil {
+		if s.cmd != nil && s.cmd.Process != nil {
 			_ = s.cmd.Process.Signal(os.Interrupt)
 			select {
 			case <-s.done:
@@ -364,16 +413,35 @@ func (s *labServer) teardown(t *testing.T) {
 				<-s.done
 			}
 		}
-		if err := os.RemoveAll(s.dataDir); err != nil {
+		if err := s.remove(); err != nil {
 			t.Errorf("removing the scratch data directory %s: %v", s.dataDir, err)
 		}
 		if _, err := os.Stat(s.dataDir); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("the scratch data directory %s is still there after the teardown: %v", s.dataDir, err)
 		}
-		if err := labPortRefused(s.port); err != nil {
+		if err := s.portRefused(); err != nil {
 			t.Errorf("the throwaway server's port: %v", err)
 		}
 	})
+}
+
+// remove removes the server's data directory, through the test's seam when it
+// set one.
+func (s *labServer) remove() error {
+	if s.removeAll != nil {
+		return s.removeAll(s.dataDir)
+	}
+	return os.RemoveAll(s.dataDir)
+}
+
+// portRefused checks the stopped server's port, through the test's dialer when
+// it set one.
+func (s *labServer) portRefused() error {
+	dial := s.dial
+	if dial == nil {
+		dial = net.DialTimeout
+	}
+	return labPortRefused(dial, s.port)
 }
 
 // logTail returns the end of the server log for a failure message.
@@ -401,11 +469,17 @@ func labFreePort() (int, error) {
 }
 
 // labPortRefused reports that nothing accepts a connection on port, which is how
-// a stopped server's port reads.
-func labPortRefused(port int) error {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+// a stopped server's port reads. Only a refused connection reads that way: a
+// dial that failed for another reason — a timeout, a host with no route, a
+// process out of descriptors — leaves the port unread, and the check reports
+// that rather than passing on a port it never saw refuse.
+func labPortRefused(dial labDialer, port int) error {
+	conn, err := dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
 	if err != nil {
-		return nil
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return nil
+		}
+		return fmt.Errorf("checking that port %d is refused: %w", port, err)
 	}
 	conn.Close()
 	return fmt.Errorf("port %d still accepts connections after the server stopped", port)
@@ -674,4 +748,209 @@ func labTableHashAt(t *testing.T, conn *sql.Conn, table, commit string) string {
 		}
 	}
 	return hash
+}
+
+// The failure branches below report through a labReporter, so a test drives one
+// and reads what it reported instead of failing itself.
+
+// labRecorder is a labReporter that keeps what a teardown reported.
+type labRecorder struct {
+	reported []string
+}
+
+// Helper does nothing: the recorder is not a testing.T.
+func (*labRecorder) Helper() {}
+
+// Errorf records one reported failure.
+func (r *labRecorder) Errorf(format string, args ...any) {
+	r.reported = append(r.reported, fmt.Sprintf(format, args...))
+}
+
+// count returns how many reported messages hold want.
+func (r *labRecorder) count(want string) int {
+	n := 0
+	for _, msg := range r.reported {
+		if strings.Contains(msg, want) {
+			n++
+		}
+	}
+	return n
+}
+
+// refusedDialer is the dial a port nothing listens on makes: the kernel refuses
+// the connection.
+func refusedDialer(string, string, time.Duration) (net.Conn, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+}
+
+// cleanServer is a server whose teardown has nothing to report: a data
+// directory that is removed, and a port that refuses.
+func cleanServer(t *testing.T) *labServer {
+	t.Helper()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("creating the scratch data directory: %v", err)
+	}
+	return &labServer{dataDir: dataDir, dial: refusedDialer}
+}
+
+// A teardown of a server that stopped and left nothing behind reports nothing.
+// The rows below each change one thing, so this row is what says a report means
+// a failure rather than every teardown reporting.
+func TestIntegrationLabTeardownReportsNothingOnACleanServer(t *testing.T) {
+	rec := &labRecorder{}
+	cleanServer(t).teardown(rec)
+	if len(rec.reported) != 0 {
+		t.Errorf("the teardown reported %q, want nothing", rec.reported)
+	}
+}
+
+// A data directory the removal could not remove is reported: a teardown that
+// passed would hide the scratch tree the check exists for.
+func TestIntegrationLabTeardownReportsADirectoryItCouldNotRemove(t *testing.T) {
+	srv := cleanServer(t)
+	srv.removeAll = func(string) error { return errors.New("permission denied") }
+	rec := &labRecorder{}
+	srv.teardown(rec)
+	if got := rec.count("removing the scratch data directory"); got != 1 {
+		t.Errorf("the teardown reported %q, want one message about the directory it could not remove", rec.reported)
+	}
+}
+
+// A removal that returns without removing is reported: RemoveAll's nil is not
+// evidence the directory is gone, so the check reads the filesystem itself.
+func TestIntegrationLabTeardownReportsADirectoryStillThere(t *testing.T) {
+	srv := cleanServer(t)
+	srv.removeAll = func(string) error { return nil }
+	rec := &labRecorder{}
+	srv.teardown(rec)
+	if got := rec.count("is still there after the teardown"); got != 1 {
+		t.Errorf("the teardown reported %q, want one message that the directory survived its removal", rec.reported)
+	}
+	if got := rec.count("removing the scratch data directory"); got != 0 {
+		t.Errorf("the teardown reported a removal failure it did not have: %q", rec.reported)
+	}
+}
+
+// A port that still accepts a connection is reported: the stopped server's port
+// must refuse, or the throwaway server outlived the test.
+func TestIntegrationLabTeardownReportsAPortStillAccepting(t *testing.T) {
+	srv := cleanServer(t)
+	conn, peer := net.Pipe()
+	defer peer.Close()
+	srv.dial = func(string, string, time.Duration) (net.Conn, error) { return conn, nil }
+	rec := &labRecorder{}
+	srv.teardown(rec)
+	if got := rec.count("still accepts connections after the server stopped"); got != 1 {
+		t.Errorf("the teardown reported %q, want one message that the port still accepts", rec.reported)
+	}
+}
+
+// The port check passes only on a refused connection. A dial that failed for
+// another reason leaves the port unread, and the teardown reports that with the
+// cause rather than reading it as a stopped server (om finding 23f23127b898).
+func TestIntegrationLabTeardownReportsAnUnansweredPortCheck(t *testing.T) {
+	srv := cleanServer(t)
+	unanswered := errors.New("too many open files")
+	srv.dial = func(string, string, time.Duration) (net.Conn, error) { return nil, unanswered }
+	rec := &labRecorder{}
+	srv.teardown(rec)
+	if got := rec.count("checking that port"); got != 1 {
+		t.Errorf("the teardown reported %q, want one message that the port check went unanswered", rec.reported)
+	}
+	if got := rec.count(unanswered.Error()); got != 1 {
+		t.Errorf("the report does not carry the dial's cause %q: %q", unanswered, rec.reported)
+	}
+	if got := rec.count("still accepts connections"); got != 0 {
+		t.Errorf("an unanswered dial was read as an accepting port: %q", rec.reported)
+	}
+}
+
+// A start refused for the port it was handed comes back on a fresh one, and the
+// server it returns is the one that started.
+func TestIntegrationLabStartOnFreePortRetriesOnPortRace(t *testing.T) {
+	var tried []int
+	picks := 0
+	srv, err := labStartOnFreePort(
+		func() (int, error) { picks++; return 41000 + picks, nil },
+		func(port int) (*labServer, error) {
+			tried = append(tried, port)
+			if len(tried) == 1 {
+				return nil, errors.New("dolt sql-server exited before it answered (wait: exit status 1)\nPort 41001 already in use.")
+			}
+			return &labServer{port: port}, nil
+		})
+	if err != nil {
+		t.Fatalf("labStartOnFreePort: %v", err)
+	}
+	if len(tried) != 2 {
+		t.Fatalf("start attempts on ports %v, want the refused port and a fresh one", tried)
+	}
+	if tried[0] == tried[1] {
+		t.Errorf("the retry reused port %d", tried[1])
+	}
+	if srv == nil || srv.port != tried[1] {
+		t.Errorf("the returned server is %+v, want the one that started on port %d", srv, tried[1])
+	}
+}
+
+// A start that failed for another reason is reported at once: a retry would
+// spend two more ports on a host that is not handing ports out twice, and hide
+// the first failure behind the last.
+func TestIntegrationLabStartOnFreePortReportsOtherFailuresWithoutRetrying(t *testing.T) {
+	want := errors.New("starting dolt sql-server: executable file not found in $PATH")
+	picks, calls := 0, 0
+	srv, err := labStartOnFreePort(
+		func() (int, error) { picks++; return 41000, nil },
+		func(int) (*labServer, error) { calls++; return nil, want })
+	if srv != nil {
+		t.Errorf("server = %+v, want nil when no start succeeded", srv)
+	}
+	if !errors.Is(err, want) {
+		t.Errorf("error = %v, want %v", err, want)
+	}
+	if picks != 1 || calls != 1 {
+		t.Errorf("picked %d ports and started %d times, want one of each", picks, calls)
+	}
+}
+
+// A picker that cannot pick a port is reported, not retried: there is no port to
+// start on, so another attempt would fail the same way.
+func TestIntegrationLabStartOnFreePortReportsAPortItCouldNotPick(t *testing.T) {
+	want := errors.New("picking a scratch port: address already in use")
+	picks := 0
+	srv, err := labStartOnFreePort(
+		func() (int, error) { picks++; return 0, want },
+		func(int) (*labServer, error) {
+			t.Error("a start ran without a port to run on")
+			return nil, nil
+		})
+	if srv != nil {
+		t.Errorf("server = %+v, want nil when no port was picked", srv)
+	}
+	if !errors.Is(err, want) {
+		t.Errorf("error = %v, want %v", err, want)
+	}
+	if picks != 1 {
+		t.Errorf("picked %d ports, want one attempt", picks)
+	}
+}
+
+// The retry runs out: every attempt gets a fresh port, and the last failure is
+// what comes back rather than a bare attempt count.
+func TestIntegrationLabStartOnFreePortGivesUpAfterThreeStarts(t *testing.T) {
+	race := errors.New("Port 41000 already in use.")
+	picks, calls := 0, 0
+	srv, err := labStartOnFreePort(
+		func() (int, error) { picks++; return 41000 + picks, nil },
+		func(int) (*labServer, error) { calls++; return nil, race })
+	if srv != nil {
+		t.Errorf("server = %+v, want nil when no start succeeded", srv)
+	}
+	if !errors.Is(err, race) {
+		t.Errorf("error = %v, want the last port race %v", err, race)
+	}
+	if picks != labStartAttempts || calls != labStartAttempts {
+		t.Errorf("picked %d ports and started %d times, want %d of each", picks, calls, labStartAttempts)
+	}
 }
