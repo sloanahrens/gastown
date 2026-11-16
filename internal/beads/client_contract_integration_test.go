@@ -109,34 +109,19 @@ func TestIntegrationClientContract(t *testing.T) {
 		t.Parallel()
 		beadsfake.RunVersionContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t, t.TempDir()) })
 	})
-	t.Run("cost samples", func(t *testing.T) {
+	// Both sample-row contracts need the bd's sample verb, so one probe gates
+	// them together; the fake answers both in the unit tier until the pin
+	// carries it (beads be-1qqu, gt-qlz5eg).
+	t.Run("samples", func(t *testing.T) {
 		t.Parallel()
 		offers, err := bdOffersSampleVerb()
 		if err != nil {
 			t.Fatalf("bd --help: %v", err)
 		}
 		if !offers {
-			// Skip in place with the blocker named (docs/testing.md): the bd at
-			// the deploy pin (b7e5e9c, 1.2.2) predates the sample verb, and
-			// WriteCostSample refuses that bd by name, so the suite cannot run
-			// until an image pair ships be-1qqu. The fake still runs it.
-			t.Skip("the bd on PATH predates the sample verb (beads be-1qqu, gt-qlz5eg): WriteCostSample refuses it by name")
+			t.Skip("the bd on PATH predates the sample verb (beads be-1qqu, gt-qlz5eg): both sample-row writes refuse it by name")
 		}
 		beadsfake.RunCostSamplesContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
-	})
-	t.Run("usage records", func(t *testing.T) {
-		t.Parallel()
-		offers, err := bdOffersSampleVerb()
-		if err != nil {
-			t.Fatalf("bd --help: %v", err)
-		}
-		if !offers {
-			// Skip in place with the blocker named (docs/testing.md): the bd at
-			// the deploy pin predates the sample verb, and WriteUsageRecord
-			// refuses that bd by name, so the suite cannot run until an image
-			// pair ships be-1qqu. The fake still runs it.
-			t.Skip("the bd on PATH predates the sample verb (beads be-1qqu): WriteUsageRecord refuses it by name")
-		}
 		beadsfake.RunUsageRecordsContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
 	})
 }
