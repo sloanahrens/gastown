@@ -151,6 +151,40 @@ func TestLandTakeoverWritesTheReadyBlockTheWaiverAndTheLabels(t *testing.T) {
 	}
 }
 
+// TestNoBeadAccessLandTakeoverWritesTheSharedBlock: the block gt land takeover
+// writes is land.FormatReadyNote's output for the branch tip, the target and
+// the caller, byte for byte — the same text gt done writes and the host path
+// that writes a block from an outbox will write. The takeover stamps the
+// submission time from the clock, so the comparison reads that stamp back from
+// the block rather than assuming one.
+func TestNoBeadAccessLandTakeoverWritesTheSharedBlock(t *testing.T) {
+	t.Parallel()
+	bd := newTakeoverBeads(beads.StatusOpen, []string{land.LabelNeedsOverseer})
+	remote := &fakeTakeoverRemote{tip: takeoverTip}
+
+	if err := takeOverLanding(bd, remote, "origin", takeoverRequestFor(nil), &bytes.Buffer{}); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if len(bd.updates) == 0 {
+		t.Fatal("the takeover wrote nothing")
+	}
+	written := bd.updates[0].AppendNotes
+	ready, ok := land.ParseReadyNote(written)
+	if !ok {
+		t.Fatalf("first write %q is not a READY TO LAND block", written)
+	}
+	if ready.Submitted.IsZero() {
+		t.Error("the block carries no submission time; the landing worker orders the queue by it")
+	}
+	want := land.FormatReadyNote(land.Work{
+		BeadID: takeoverBeadID, Branch: takeoverBranch, Head: takeoverTip,
+		Target: "main", Worker: takeoverCaller, Submitted: ready.Submitted,
+	})
+	if written != want {
+		t.Errorf("takeover wrote\n%q\nwant the shared builder's text\n%q", written, want)
+	}
+}
+
 // TestLandTakeoverRefusesWithoutWriting: every refusal comes before the first
 // write, so a refused takeover leaves the bead exactly as it was.
 func TestLandTakeoverRefusesWithoutWriting(t *testing.T) {
