@@ -214,6 +214,8 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 		// The town's copy is not what this fixture reads: it records the write
 		// rather than leaving the run to a writer the test did not wire.
 		WriteTownValues: noTownValuesWrite,
+		// The preflight is not what this fixture reads: its pairs pass the gate.
+		Preflight: preflightPassing,
 	}
 	args := append([]string{"--images", values}, extra...)
 	if _, err := runPodCommand(t, seams, args...); err != nil {

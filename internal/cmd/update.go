@@ -276,6 +276,12 @@ type updateSeams struct {
 	// with no seam wired is refused, as podDaemonDeps refuses a nil PodRun: a
 	// skipped write leaves the town's copy stale, which rolls the daemon back.
 	WriteTownValues func(path string, v imagevalues.Values) error
+	// Preflight runs the daemon's pre-roll checks over a town root. A digest
+	// install runs it before anything is installed or swapped, in this process,
+	// so it is the new image's own gt and bd that are checked. A digest install
+	// built with no seam wired is refused: a skipped preflight lets a pair the
+	// checks refuse be installed.
+	Preflight func(ctx context.Context, townRoot string) []PreflightResult
 }
 
 // inPod reports whether the run's process is in a pod: a nil InPod is not.
@@ -303,6 +309,7 @@ func productionUpdateSeams() updateSeams {
 		// A pod roll leaves the town's own values file at the pair it rolled to,
 		// so the town's readers see it without an overseer copying the file.
 		WriteTownValues: imagevalues.Write,
+		Preflight:       runPreflightChecks,
 		Notifier: func(townRoot string) notify.Notifier {
 			return &notify.CLI{Dir: townRoot}
 		},
@@ -816,6 +823,10 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 		Inner:  inner,
 		Path:   path,
 		Images: images,
+		// The town's pre-roll checks gate the install: they run before anything is
+		// installed or swapped, in this process, which is the new image's own gt
+		// and bd.
+		PreSwap: preSwapPreflight(townRoot, seams.Preflight),
 	}
 	if pod != nil {
 		// The pod's pair is checked once the swap reports it: its daemon's image
@@ -830,6 +841,45 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 		}.Check
 	}
 	return install, nil
+}
+
+// preSwapPreflight is a digest install's pre-swap gate: it runs the daemon's
+// pre-roll checks over townRoot through run and refuses the pair when any check
+// failed, naming every failed check and its message. A gate that cannot run — no
+// town root, no check seam, or a seam that reports no results — is a failure,
+// never a pass: an install nothing checked is not an install the checks passed.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult) func(context.Context, update.ImagePair) error {
+	return func(ctx context.Context, _ update.ImagePair) error {
+		switch {
+		case townRoot == "":
+			return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no town root to check")}
+		case run == nil:
+			return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no checks wired")}
+		}
+		if err := preflightFailure(run(ctx, townRoot)); err != nil {
+			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+		}
+		return nil
+	}
+}
+
+// preflightFailure names every check that failed and its message, so one pass
+// reports every problem the preflight found. A run of no checks at all is a
+// failure too, as a preflight that ran nothing has passed nothing.
+func preflightFailure(results []PreflightResult) error {
+	var failed []string
+	for _, result := range results {
+		if result.Err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", result.Name, result.Err))
+		}
+	}
+	if len(results) == 0 {
+		return errors.New("the preflight ran no checks")
+	}
+	if len(failed) > 0 {
+		return errors.New(strings.Join(failed, "; "))
+	}
+	return nil
 }
 
 // imageDeps is the set of effects a digest install and a rollback both reach:
