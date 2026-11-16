@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -20,10 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/omlessons"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
-
-// landOmLessonsProposeMinFindings is how many findings a class needs in the
-// window before --propose drafts a directive edit for it; fewer is too few to say.
-const landOmLessonsProposeMinFindings = 5
 
 var (
 	landOmLessonsSince      string
@@ -187,19 +182,6 @@ func readLandOmLessonsRules(dir string) (map[string]bool, error) {
 	return rules, nil
 }
 
-// landOmLessonsCoverage names a class's coverage. A class whose rule is in the
-// directive is violated-anyway when it still appears in the window. A class
-// with no rule, or whose rule number the directive does not carry, is a gap.
-func landOmLessonsCoverage(c omlessons.ClassRow, rules map[string]bool) string {
-	switch {
-	case c.Rule == 0:
-		return "gap: no numbered rule covers it"
-	case !rules[strconv.Itoa(c.Rule)]:
-		return fmt.Sprintf("gap: the table names rule #%d and the directive has no rule #%d", c.Rule, c.Rule)
-	}
-	return fmt.Sprintf("violated-anyway: rule #%d covers it and it still appears", c.Rule)
-}
-
 // writeLandOmLessonsProposals prints a draft for each class with enough
 // findings, and a too-few line for each class without. The drafts are text for
 // the overseer, who writes the edit itself.
@@ -208,18 +190,18 @@ func writeLandOmLessonsProposals(w io.Writer, report omlessons.Report, rules map
 	fmt.Fprintf(&b, "om lessons proposals: %s (%d days), against %s\n",
 		landOmLessonsRange(report.Window), report.Days, landOmLessonsRange(report.Prior))
 	fmt.Fprintf(&b, "rules read from %s; a class needs %d findings in the window to get a draft\n",
-		directivesDir, landOmLessonsProposeMinFindings)
-	for _, c := range report.Classes {
-		if c.Current.Findings < landOmLessonsProposeMinFindings {
-			fmt.Fprintf(&b, "\ntoo few to say: %s (%d finding(s) in the window)\n", c.Name, c.Current.Findings)
+		directivesDir, omlessons.ProposeMinFindings)
+	for _, p := range omlessons.Proposals(report, rules) {
+		if p.TooFew {
+			fmt.Fprintf(&b, "\ntoo few to say: %s (%d finding(s) in the window)\n", p.Name, p.Current.Findings)
 			continue
 		}
-		fmt.Fprintf(&b, "\n--- %s (%s)\n", c.Name, c.ID)
-		fmt.Fprintf(&b, "Coverage: %s\n", landOmLessonsCoverage(c, rules))
+		fmt.Fprintf(&b, "\n--- %s (%s)\n", p.Name, p.ID)
+		fmt.Fprintf(&b, "Coverage: %s\n", p.Coverage)
 		fmt.Fprintf(&b, "Counts: %d finding(s) on %d bead(s), %d round(s) burned; prior window %d finding(s) on %d bead(s), %d round(s)\n",
-			c.Current.Findings, c.Current.Beads, c.Current.Rounds,
-			c.Prior.Findings, c.Prior.Beads, c.Prior.Rounds)
-		fmt.Fprintf(&b, "Examples: %s\n", strings.Join(c.ExampleBeads, ", "))
+			p.Current.Findings, p.Current.Beads, p.Current.Rounds,
+			p.Prior.Findings, p.Prior.Beads, p.Prior.Rounds)
+		fmt.Fprintf(&b, "Examples: %s\n", strings.Join(p.Examples, ", "))
 		fmt.Fprintln(&b, "\nGoal: a directive edit that stops om raising this class.")
 		fmt.Fprintf(&b, "Constraints: the edit goes to the directive files in %s; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.\n", directivesDir)
 		fmt.Fprintln(&b, "Out of scope: om's bar or threshold; turning anything on.")
