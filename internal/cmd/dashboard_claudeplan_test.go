@@ -63,8 +63,8 @@ func rowsOf(rows ...beads.Sample) costSamplesRead {
 // claude_plan rows before the series file, so the page draws the series the
 // status line records now rather than an older copy, and the why-log names the
 // rows as the source that answered. The read reaches back the weekly window the
-// meter folds and leaves the count to the store, since a fixed count cannot
-// name a span whose row rate the status line sets (gt-u9dsir).
+// meter folds, and asks for this package's own row cap rather than leaving the
+// count to the store (gt-u9dsir).
 func TestClaudePlanReadPrefersTheCostRows(t *testing.T) {
 	t.Parallel()
 
