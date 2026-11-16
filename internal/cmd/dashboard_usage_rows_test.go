@@ -107,7 +107,8 @@ func TestUsageRowsCountARecordFiledOnlyAsARow(t *testing.T) {
 }
 
 // A row read that fails is an unavailable panel and an absent plan month, never
-// the files alone: a row the files lack would be dropped without saying so.
+// the files alone: a row the files lack would be dropped without saying so. The
+// panel names the failure in fixed words, not in the store's own error.
 func TestUsageRowsReadFailureIsUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -120,8 +121,8 @@ func TestUsageRowsReadFailureIsUnavailable(t *testing.T) {
 	}
 	r := newDashUsageReader(root).withRows(failing)
 
-	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != "" {
-		t.Errorf("read = %+v, want unavailable with no reason", u)
+	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsReadReason {
+		t.Errorf("read = %+v, want unavailable with the rows-read reason", u)
 	}
 	if month := r.monthRecords(usageReaderNow); month != nil {
 		t.Errorf("month = %+v, want no record set", month)
@@ -140,11 +141,73 @@ func TestUsageRowsCapFilledIsRefused(t *testing.T) {
 	}
 	r := newDashUsageReader(root).withRows(usageRowsFixed(full...))
 
-	if u := r.read(usageReaderNow); !u.Unavailable {
-		t.Errorf("read over a filled cap = %+v, want unavailable", u)
+	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsCapReason {
+		t.Errorf("read over a filled cap = %+v, want unavailable with the cap reason", u)
 	}
 	if month := r.monthRecords(usageReaderNow); month != nil {
 		t.Errorf("month over a filled cap = %d records, want none", len(month))
+	}
+}
+
+// usageRowWithSessions is a row of bead and kind that counts sessions.
+func usageRowWithSessions(bead, kind string, end time.Time, wallS int64, sessions ...string) beads.UsageRecordRow {
+	row := usageRowFor(bead, kind, end, wallS)
+	row.Sessions = sessions
+	return row
+}
+
+// A row written again for the same sessions is the same run, so it counts once:
+// the usage record writer drops a repeated write the same way.
+func TestUsageRowsRepeatedWriteCountsOnce(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	end := usageReaderNow.Add(-time.Hour)
+	r := newDashUsageReader(root).withRows(usageRowsFixed(
+		usageRowWithSessions("gt-d", dashboard.UsageKindWork, end, 700, "s1", "s2"),
+		usageRowWithSessions("gt-d", dashboard.UsageKindWork, end, 700, "s1", "s2"),
+	))
+
+	got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-d", dashboard.UsageKindWork)
+	if len(got) != 1 || got[0].WallS != 700 {
+		t.Fatalf("gt-d work records = %+v, want the one run with wall 700", got)
+	}
+}
+
+// Rows of one bead and kind that count different sessions are different runs, so
+// both count.
+func TestUsageRowsDisjointSessionsOfOneBeadBothCount(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	r := newDashUsageReader(root).withRows(usageRowsFixed(
+		usageRowWithSessions("gt-e", dashboard.UsageKindWork, usageReaderNow.Add(-time.Hour), 400, "s1"),
+		usageRowWithSessions("gt-e", dashboard.UsageKindWork, usageReaderNow.Add(-2*time.Hour), 250, "s2"),
+	))
+
+	got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-e", dashboard.UsageKindWork)
+	if len(got) != 2 {
+		t.Fatalf("gt-e work records = %+v, want both runs", got)
+	}
+}
+
+// Rows of one bead and kind that share a session but differ cannot be split into
+// their totals, so the panel is refused rather than counting the session twice.
+func TestUsageRowsSharedSessionWithDifferentTotalsIsRefused(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	end := usageReaderNow.Add(-time.Hour)
+	r := newDashUsageReader(root).withRows(usageRowsFixed(
+		usageRowWithSessions("gt-f", dashboard.UsageKindWork, end, 700, "s1", "s2"),
+		usageRowWithSessions("gt-f", dashboard.UsageKindWork, end, 300, "s2"),
+	))
+
+	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsConflictReason {
+		t.Errorf("read = %+v, want unavailable with the conflict reason", u)
+	}
+	if month := r.monthRecords(usageReaderNow); month != nil {
+		t.Errorf("month = %d records, want none", len(month))
 	}
 }
 

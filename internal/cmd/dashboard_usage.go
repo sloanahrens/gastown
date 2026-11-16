@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +52,11 @@ const (
 	// the window's oldest, so a total built from them would be short without
 	// saying so (the claude_plan rows keep the same cap, gt-u9dsir).
 	usageRowsLimit = 20000
+	// The reasons a panel's row reading is unavailable. Each names the cause in
+	// fixed words, so no output of the row store reaches the page.
+	usageRowsReadReason     = "the usage_records rows could not be read"
+	usageRowsCapReason      = "the usage_records read filled its cap, so the window's start is not in the rows"
+	usageRowsConflictReason = "two usage_records rows count the same session with different totals"
 )
 
 // usageRowsRead reads the town's usage_records rows built at or after since, up
@@ -119,15 +124,15 @@ func dashboardUsageRows(townRoot string) usageRowsRead {
 	}
 }
 
-// read is the panel's whole reading. A row read that fails, or that fills its
-// cap, is an unavailable panel with no reason, and so is a records directory that
-// cannot be listed: "nothing ran today" and "the records could not be read" are
-// different things to tell the operator.
+// read is the panel's whole reading. A row read that fails, or that cannot be
+// taken whole, is an unavailable panel with the reason it could not be, and so is
+// a records directory that cannot be listed: "nothing ran today" and "the records
+// could not be read" are different things to tell the operator.
 func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
 	since := now.Add(-usageStaleRecord)
-	rows, err := r.rowRecords(since)
-	if err != nil {
-		return &dashboard.Usage{Unavailable: true}
+	rows, reason := r.rowRecords(since)
+	if reason != "" {
+		return &dashboard.Usage{Unavailable: true, Reason: reason}
 	}
 	entries, err := r.entries()
 	if err != nil {
@@ -139,21 +144,79 @@ func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
 }
 
 // rowRecords is the usage_records rows built at or after since, as the records
-// they hold, newest built first. Nil when no row store is wired. A read that
-// fills usageRowsLimit is an error, never a short series.
-func (r *dashUsageReader) rowRecords(since time.Time) ([]dashboard.UsageRecord, error) {
+// they hold, newest built first. Nil and no reason when no row store is wired.
+// A reason, with nil records, says why the rows cannot be taken whole: the read
+// failed, it filled usageRowsLimit, or its rows share a session. The reason is
+// fixed text, never the store's own output, since that can carry a secret.
+func (r *dashUsageReader) rowRecords(since time.Time) ([]dashboard.UsageRecord, string) {
 	if r.rows == nil {
-		return nil, nil
+		return nil, ""
 	}
 	rows, err := r.rows(since, usageRowsLimit)
 	if err != nil {
-		return nil, fmt.Errorf("reading the usage_records rows: %w", err)
+		return nil, usageRowsReadReason
 	}
 	if len(rows) == usageRowsLimit {
-		return nil, fmt.Errorf("the usage_records read filled its cap of %d rows, so the window's start is not known to be in the rows", usageRowsLimit)
+		return nil, usageRowsCapReason
 	}
+	recs, err := dedupeUsageRows(rows)
+	if err != nil {
+		return nil, usageRowsConflictReason
+	}
+	return recs, ""
+}
+
+// usageKeptRow is a row dedupeUsageRows keeps: its record and the sessions it
+// counts.
+type usageKeptRow struct {
+	rec      dashboard.UsageRecord
+	sessions map[string]bool
+}
+
+// errUsageRowsConflict is dedupeUsageRows' refusal: two rows count one session
+// but are not the same run.
+var errUsageRowsConflict = errors.New("usage_records rows share a session but are not the same run")
+
+// dedupeUsageRows is the records of rows, newest built first, each session
+// counted once. A row that repeats an earlier row of its bead and kind - the same
+// sessions and the same record - is dropped, as the usage record writer drops a
+// repeated write. Any other session the row shares with an earlier one is refused,
+// since the totals of two rows that count one session cannot be split. A row with
+// no sessions has no totals to split, so it is kept as it is.
+func dedupeUsageRows(rows []beads.UsageRecordRow) ([]dashboard.UsageRecord, error) {
+	kept := make(map[usageKey][]usageKeptRow, len(rows))
 	recs := make([]dashboard.UsageRecord, 0, len(rows))
 	for _, row := range rows {
+		if len(row.Sessions) == 0 {
+			recs = append(recs, row.Record)
+			continue
+		}
+		key := usageKeyOf(row.Record)
+		repeat := false
+		for _, k := range kept[key] {
+			shared := 0
+			for _, s := range row.Sessions {
+				if k.sessions[s] {
+					shared++
+				}
+			}
+			if shared == 0 {
+				continue
+			}
+			if shared != len(row.Sessions) || len(k.sessions) != len(row.Sessions) || !reflect.DeepEqual(k.rec, row.Record) {
+				return nil, errUsageRowsConflict
+			}
+			repeat = true
+			break
+		}
+		if repeat {
+			continue
+		}
+		sessions := make(map[string]bool, len(row.Sessions))
+		for _, s := range row.Sessions {
+			sessions[s] = true
+		}
+		kept[key] = append(kept[key], usageKeptRow{rec: row.Record, sessions: sessions})
 		recs = append(recs, row.Record)
 	}
 	return recs, nil
@@ -209,13 +272,13 @@ func (r *dashUsageReader) absent() bool {
 
 // monthRecords is the record set the Claude plan's API-equivalent figures are
 // computed from: the same rows and files the panel reads, reaching back far
-// enough to hold the whole billing month. A row read that fails, or a records
-// directory that cannot be listed, is nil, which the plan reader draws as no
-// figure at all rather than as a month of no spend.
+// enough to hold the whole billing month. A row read that cannot be taken whole,
+// or a records directory that cannot be listed, is nil, which the plan reader
+// draws as no figure at all rather than as a month of no spend.
 func (r *dashUsageReader) monthRecords(now time.Time) []dashboard.UsageRecord {
 	since := now.Add(-usageMonthRecord)
-	rows, err := r.rowRecords(since)
-	if err != nil {
+	rows, reason := r.rowRecords(since)
+	if reason != "" {
 		return nil
 	}
 	entries, err := r.entries()
