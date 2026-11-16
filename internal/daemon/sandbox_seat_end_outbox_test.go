@@ -296,6 +296,17 @@ func (c failingEscalationClient) Create(beads.CreateOptions) (*beads.Issue, erro
 	return nil, c.err
 }
 
+// failingListClient is the town's bead store refusing a listing, which is how
+// the lookup for an already open escalation fails.
+type failingListClient struct {
+	beads.Client
+	err error
+}
+
+func (c failingListClient) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, c.err
+}
+
 // seatOutboxEscalation is result.json carrying a HELP request, the shape a
 // file-mode `gt escalate` writes: the description, then the severity line.
 func seatOutboxEscalation() string {
@@ -559,6 +570,122 @@ func TestNoBeadAccessSeatEndNotesWithoutAResultAreReported(t *testing.T) {
 	}
 	if issue.Notes != "" {
 		t.Errorf("notes = %q, want the bead untouched", issue.Notes)
+	}
+}
+
+// A name a path cannot hold names no applied record: the write and the read
+// both refuse it rather than reaching outside the runtime directory
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndRefusesAnUnnameableAppliedRecord(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if _, err := appliedSeatOutboxPath(town, endRig, "../escape"); err == nil {
+		t.Error("a polecat name that leaves the runtime directory named an applied record")
+	}
+	if _, _, err := readAppliedSeatOutbox(town, endRig, "../escape"); err == nil {
+		t.Error("a polecat name that leaves the runtime directory read an applied record")
+	}
+}
+
+// An applied record the host cannot read applies the outbox again, and says so:
+// a repeated note is the lesser harm, a record taken as applied is not
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndReappliesAnUnreadableAppliedRecord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		write func(t *testing.T, path string)
+	}{
+		{
+			name: "a record that is not JSON",
+			write: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a directory where the record should be",
+			write: func(t *testing.T, path string) {
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			f.seatDirs()
+			seedSeatBead(t, f, "")
+			writeSeatOutbox(t, f.town, seatOutboxEscalation(), "the seat's note\n")
+			landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+			if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+				t.Fatal("the first pass did not finish the seat")
+			}
+			path, err := appliedSeatOutboxPath(f.town, endRig, endPolecat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			tt.write(t, path)
+			var logs strings.Builder
+			f.host.d.logger = log.New(&logs, "", 0)
+
+			if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+				t.Fatal("the second pass did not finish the seat")
+			}
+			if !strings.Contains(logs.String(), "its applied record cannot be read, so its outbox is applied again") {
+				t.Errorf("log %q does not report the record it could not read", logs.String())
+			}
+			issue, err := f.agentDB.Show(endBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(issue.Notes, "the seat's note"); got != 2 {
+				t.Errorf("the seat's note is on the bead %d times, want the outbox applied again: %q", got, issue.Notes)
+			}
+		})
+	}
+}
+
+// An escalation the store cannot search for keeps the seat: the request may
+// already be filed, and a keep is the answer to a question that did not answer
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndUnreadableEscalationLookupKeepsTheSeat(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, seatOutboxEscalation(), "")
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return failingListClient{Client: f.agentDB, err: errors.New("dolt unavailable")}
+	}
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end finished a seat whose escalation lookup it could not read")
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed, want it kept")
+	}
+	path, err := keptSandboxSeatPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := readKeptSandboxSeatRecord(path)
+	if err != nil {
+		t.Fatalf("reading the kept record: %v", err)
+	}
+	if !strings.HasPrefix(kept.Reason, outboxEscalationReason) {
+		t.Errorf("kept record reason = %q, want %q", kept.Reason, outboxEscalationReason)
 	}
 }
 
