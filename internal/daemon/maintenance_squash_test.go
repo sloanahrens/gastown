@@ -200,6 +200,8 @@ func TestSquashCheckRefusesABlockOutOfBounds(t *testing.T) {
 func TestSquashCheckRunsAnywayOnACorruptLastRun(t *testing.T) {
 	t.Parallel()
 	d, server, _, logs := squashTickDaemon(t, squashEnabled())
+	root := squashBackupRoot(t, d)
+	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
 	path := patrolLastRunPath(d.config.TownRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -243,7 +245,8 @@ func TestSquashCheckSkipsWhileOneRuns(t *testing.T) {
 }
 
 // TestSquashCheckGatedOnceADay: a check recorded an hour ago holds the next one
-// off, so the numbers are read once a day.
+// off, so the numbers are read once a day, and the tick says nothing about a
+// hold it sees on every pass.
 func TestSquashCheckGatedOnceADay(t *testing.T) {
 	t.Parallel()
 	d, server, _, logs := squashTickDaemon(t, squashEnabled())
@@ -253,11 +256,64 @@ func TestSquashCheckGatedOnceADay(t *testing.T) {
 
 	d.runScheduledMaintenance()
 
-	if !strings.Contains(logs.String(), "squash: not due — last run") {
-		t.Errorf("the tick did not report the daily gate: %q", logs.String())
+	if strings.Contains(logs.String(), "squash:") {
+		t.Errorf("a check inside its gate logged on every tick: %q", logs.String())
 	}
 	if len(server.queries) != 0 {
 		t.Errorf("a check inside its gate read from Dolt: %v", server.queries)
+	}
+}
+
+// TestSquashDecideRefusalLogsAWarning drives the engine's refusal: a keep
+// window below one day is an error, not a verdict. The tick cannot reach it,
+// because ParseSquash bounds keep_days first, so the test calls the check with
+// a step built from settings the bounds would have refused.
+func TestSquashDecideRefusalLogsAWarning(t *testing.T) {
+	t.Parallel()
+	d, _, _, logs := squashTickDaemon(t, squashEnabled())
+	root := squashBackupRoot(t, d)
+	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	step := &squashStep{settings: &agentconfig.SquashSettings{Databases: []string{"gt"}, KeepDays: 0}}
+
+	d.runSquashCheck(step, squashTestNow)
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: WARNING: gt: doltsquash: keep_days 0 is below 1") {
+		t.Errorf("the refused decision did not log a WARNING: %q", got)
+	}
+	if strings.Contains(got, "no threshold tripped") {
+		t.Errorf("the refused decision logged a verdict: %q", got)
+	}
+}
+
+// TestSquashP95IsNearestRank pins the rank the p95 reads: ceil(95% of N) from
+// the bottom, so the nineteenth of twenty samples is the p95, not the twentieth.
+// The samples are given slowest first, so the sort is what puts them in rank.
+func TestSquashP95IsNearestRank(t *testing.T) {
+	t.Parallel()
+	descending := func(n int) []time.Duration {
+		out := make([]time.Duration, n)
+		for i := range out {
+			out[i] = time.Duration(n-i) * time.Millisecond
+		}
+		return out
+	}
+	cases := map[string]struct {
+		samples []time.Duration
+		want    time.Duration
+	}{
+		"one sample":         {descending(1), time.Millisecond},
+		"ten samples":        {descending(10), 10 * time.Millisecond},
+		"twenty samples":     {descending(20), 19 * time.Millisecond},
+		"twenty-one samples": {descending(21), 20 * time.Millisecond},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := squashP95(tc.samples); got != tc.want {
+				t.Errorf("squashP95 = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -286,8 +342,8 @@ func TestSquashCheckTrippedLogsDueAndRunsNothing(t *testing.T) {
 }
 
 // TestSquashCheckUnreadableReadingsDoNotTrip drives every way a reading can
-// fail: each one leaves its input unreadable and none of them trips a run,
-// because a number nobody could read is not a quiet day's zero.
+// fail: each one leaves its input unreadable, logs a WARNING naming it, and
+// logs no verdict, because a number nobody could read is not a quiet day's zero.
 func TestSquashCheckUnreadableReadingsDoNotTrip(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -392,8 +448,11 @@ func TestSquashCheckUnreadableReadingsDoNotTrip(t *testing.T) {
 			d.runScheduledMaintenance()
 
 			got := logs.String()
-			if !strings.Contains(got, "squash: gt: no threshold tripped") {
-				t.Errorf("an unreadable reading did not read as nothing tripped: %q", got)
+			if strings.Contains(got, "no threshold tripped") || strings.Contains(got, "squash: gt: due") {
+				t.Errorf("an unreadable reading logged a verdict: %q", got)
+			}
+			if !strings.Contains(got, "squash: WARNING: gt: the check did not decide, unreadable: ") {
+				t.Errorf("an unreadable reading logged no WARNING naming it: %q", got)
 			}
 			for _, want := range tc.wantLog {
 				if !strings.Contains(got, want) {

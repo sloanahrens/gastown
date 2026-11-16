@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
@@ -71,9 +72,9 @@ var squashLatencyMix = []beadsql.Query{
 	beadsql.IssueCount(),
 }
 
-// squashStep is the daily check's built step for the databases the squash
-// block enables. It exists only when the block does: config.ParseSquash builds
-// it, and it has no zero value a caller should use.
+// squashStep is the daily check's built step: the settings for the databases
+// the squash block enables. d.squashStep builds it, and only when the block is
+// on; a nil step means the block is off, so there is no zero value to use.
 type squashStep struct {
 	settings *agentconfig.SquashSettings
 }
@@ -121,7 +122,8 @@ func (d *Daemon) triggerSquashCheck() {
 	now := d.maintenance().now()
 	dec := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), now, squashCheckInterval)
 	if !dec.due {
-		d.logger.Printf("squash: not due — %s", dec.note)
+		// Silent: the tick reaches here every few minutes, and the due day's
+		// readings line is the record of the check.
 		return
 	}
 	if !d.squashCheckRunning.CompareAndSwap(false, true) {
@@ -142,12 +144,14 @@ func (d *Daemon) triggerSquashCheck() {
 // runSquashCheck reads the four numbers for each enabled database and logs
 // doltsquash.Decide's answer with the cut. It records the check's completion
 // on every way out, so a check that could not read anything is not retried
-// until the next day: an unreadable number trips no trigger, and a check that
-// re-read every five minutes would only repeat the same failure.
+// until the next day: a check that re-read every five minutes would only
+// repeat the same failure.
 //
-// The run's own last-run argument is the zero time: nothing has run yet, and
-// the record of a run belongs to D9b, which also owns the marker and the
-// backend the run executes against.
+// A number that cannot be read is a WARNING naming it, and no verdict is
+// logged for that database: a quiet-day line over an unreadable input would
+// read a failed read as a clean day. The run's own last-run argument is the
+// zero time: nothing has run yet, and the record of a run belongs to D9b, which
+// also owns the marker and the backend the run executes against.
 func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	defer d.recordPatrolRun(&d.squashCheckRun, squashCheckPatrol, d.maintenance().now())
 
@@ -164,9 +168,14 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	ctx := context.Background()
 	for _, db := range step.settings.Databases {
 		readings := d.readSquashInputs(ctx, db, now)
+		if names := readings.unreadable(); len(names) > 0 {
+			d.logger.Printf("squash: WARNING: %s: the check did not decide, unreadable: %s (%s)",
+				db, strings.Join(names, ", "), readings.describe())
+			continue
+		}
 		dec, err := doltsquash.Decide(now, time.Time{}, readings.inputs, settings)
 		if err != nil {
-			d.logger.Printf("squash: %s: %v — the check did not decide", db, err)
+			d.logger.Printf("squash: WARNING: %s: %v — the check did not decide", db, err)
 			continue
 		}
 		reason := dec.Reason
@@ -252,6 +261,25 @@ func (d *Daemon) readSquashBackup(db string, now time.Time) (size doltsquash.Rea
 	}
 	duration = doltsquash.Read(finished.Sub(started))
 	return size, duration, now.Sub(finished), nil
+}
+
+// unreadable names the numbers the check could not read, in the order the log
+// line gives them. An empty result means every number was read.
+func (r squashReadings) unreadable() []string {
+	var names []string
+	if r.inputs.BackupBytes.Err != nil {
+		names = append(names, "backup bytes")
+	}
+	if r.inputs.BackupDuration.Err != nil {
+		names = append(names, "backup duration")
+	}
+	if r.inputs.QueryP95.Err != nil {
+		names = append(names, "query p95")
+	}
+	if r.commitsErr != nil {
+		names = append(names, "main commits")
+	}
+	return names
 }
 
 // describe renders the readings for the check's log line.
