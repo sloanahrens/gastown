@@ -1,5 +1,7 @@
 package templates
 
+import "slices"
+
 // The image versions the daemon container and its compose file run at, in one
 // table, so a Dockerfile and a template that both name an image read the same
 // string instead of each carrying its own copy.
@@ -77,6 +79,15 @@ const (
 	ForgePostgresImage = "postgres:17.11"
 	ForgejoRunnerImage = "data.forgejo.org/forgejo/runner:13.2.0"
 )
+
+// DigestPinnedImages returns every image reference the package pins by digest,
+// each distinct reference once and sorted, for a verifier that checks one list
+// rather than naming the constants itself.
+func DigestPinnedImages() []string {
+	images := []string{DoltServerImage, DindImage, SweepDindImage}
+	slices.Sort(images)
+	return slices.Compact(images)
+}
 
 // ClientToolPin is one pinned client program of the daemon image (see
 // DaemonClientTools).
