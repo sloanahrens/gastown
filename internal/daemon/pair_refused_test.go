@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -271,4 +272,164 @@ func TestPreRollGuardAnIncompleteScanKeepsARefusedItem(t *testing.T) {
 	assert.Contains(t, got, attention.KindDeployPairRefused,
 		"an incomplete scan must not drop a refusal the ledger still records")
 	assert.NotContains(t, got, attention.KindDeployPairReady)
+}
+
+// TestPreRollGuardAFailedJudgeKeepsARefusedItemItDidNotReach: the per-green
+// judge fails and the scan breaks before it judges the refused commit, whether
+// another green was listed before it or it is the green that fails. The ledger
+// still names the refusal, so the item stays and no pair-ready item is raised.
+func TestPreRollGuardAFailedJudgeKeepsARefusedItemItDidNotReach(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// stops makes the next pass's judge fail before it judges the refused
+		// commit.
+		stops func(fx *pairFixture)
+	}{
+		{
+			name: "another green listed before it fails its comparison",
+			stops: func(fx *pairFixture) {
+				fx.api.branches = []forgejo.Branch{pairBranch(pairOther), pairBranch(pairGreen)}
+			},
+		},
+		{
+			name: "the refused commit itself fails its comparison",
+			stops: func(fx *pairFixture) {
+				delete(fx.api.compares, pairRunning+"..."+pairGreen)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
+			fx.run(pairT0)
+			require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused,
+				"the first read did not raise the refused item")
+
+			tt.stops(fx)
+			fx.run(pairT0.Add(pairReadyInterval))
+			require.Len(t, fx.logs, 1, "the second pass did not fail its comparison, so the test does not reach the break path")
+			require.Contains(t, fx.logs[0], "no comparison fixture",
+				"the second pass failed for another reason than the judge, so the test does not reach the break path")
+
+			got := pairItemKinds(fx.check.observed())
+			assert.Contains(t, got, attention.KindDeployPairRefused,
+				"a judge failure that never reached the refused commit must not drop its item")
+			assert.NotContains(t, got, attention.KindDeployPairReady)
+		})
+	}
+}
+
+// TestPreRollGuardARefusedItemJudgedBeforeTheBreakStaysOne: the scan judges the
+// refused commit and raises its item, then a later green's comparison fails. The
+// item the pass raised is not added a second time from what the rig held.
+func TestPreRollGuardARefusedItemJudgedBeforeTheBreakStaysOne(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
+	fx.run(pairT0)
+	require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused)
+
+	fx.api.branches = []forgejo.Branch{pairBranch(pairGreen), pairBranch(pairOther)}
+	fx.run(pairT0.Add(pairReadyInterval))
+	require.Len(t, fx.logs, 1, "the second pass did not fail its comparison, so the test does not reach the break path")
+
+	refused := 0
+	for _, it := range fx.check.observed() {
+		if it.Kind == attention.KindDeployPairRefused {
+			refused++
+		}
+	}
+	assert.Equal(t, 1, refused, "the item the pass raised and the item the rig held are the same refusal, so they are one item")
+}
+
+// TestPreRollGuardARefusedCommitBehindTheRunningOneGoesEvenIfTheScanBreaks: a
+// green commit the ledger still refuses but that the running commit has passed
+// is not newer, so its item is dropped, whether the scan completes or a later
+// green's comparison fails.
+func TestPreRollGuardARefusedCommitBehindTheRunningOneGoesEvenIfTheScanBreaks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		breaks bool
+	}{
+		{name: "the scan completes"},
+		{name: "a later green fails its comparison", breaks: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
+			fx.run(pairT0)
+			require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused)
+
+			// The running commit is ahead of the refused one, so it is not newer.
+			fx.api.compares[pairGreen+"..."+pairRunning] = 2
+			fx.api.compares[pairRunning+"..."+pairGreen] = 0
+			if tt.breaks {
+				fx.api.branches = []forgejo.Branch{pairBranch(pairGreen), pairBranch(pairOther)}
+			}
+			fx.run(pairT0.Add(pairReadyInterval))
+
+			got := pairItemKinds(fx.check.observed())
+			assert.NotContains(t, got, attention.KindDeployPairRefused,
+				"a refused commit the running commit has passed is not newer, so its item is gone")
+			assert.NotContains(t, got, attention.KindDeployPairReady)
+		})
+	}
+}
+
+// TestPreRollGuardTheLedgerSettlesARefusedItemWhenTheScanBreaks: the scan breaks
+// before it judges the refused commit, so only the ledger's answer on it can
+// settle the item: a readable ledger that does not name it clears it, and a
+// ledger that cannot be read leaves it.
+func TestPreRollGuardTheLedgerSettlesARefusedItemWhenTheScanBreaks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rec         update.ImageRecord
+		ledgerErr   error
+		wantRefused bool
+	}{
+		{name: "the ledger answers that nothing is refused", wantRefused: false},
+		{
+			name:        "the ledger refuses another commit",
+			rec:         update.ImageRecord{Refused: update.ImagePair{Commit: pairOther}, RefusedReason: pairRefusedReason},
+			wantRefused: false,
+		},
+		{
+			name:        "the ledger cannot be read",
+			ledgerErr:   errors.New("the daemon image record images.json is damaged"),
+			wantRefused: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
+			fx.run(pairT0)
+			require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused,
+				"the first read did not raise the refused item")
+
+			// A green listed before the refused commit fails its comparison, so
+			// the scan breaks before judging the refused commit.
+			fx.api.branches = []forgejo.Branch{pairBranch(pairOther), pairBranch(pairGreen)}
+			fx.check.ledger = pairRefusedLedger(tt.rec, tt.ledgerErr)
+			fx.run(pairT0.Add(pairReadyInterval))
+
+			got := pairItemKinds(fx.check.observed())
+			assert.NotContains(t, got, attention.KindDeployPairReady)
+			if tt.wantRefused {
+				assert.Contains(t, got, attention.KindDeployPairRefused,
+					"a ledger that could not say the refusal is gone must not lose its item to a scan that broke")
+				return
+			}
+			assert.NotContains(t, got, attention.KindDeployPairRefused,
+				"a readable ledger that does not name the commit settles the refusal")
+		})
+	}
 }

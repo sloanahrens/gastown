@@ -457,18 +457,18 @@ type pairReadyGreen struct {
 // the registry at its stamp, one for each green commit newer than running that
 // the update ledger records as refused, and one for each commit whose pair is
 // missing and whose images workflow run ended failed or canceled. A read that
-// cannot list the branches
-// returns an error, so the caller keeps what the rig held until the failure
-// bound. A listing that ended early or a branch whose comparison or image read
-// did not answer returns a non-nil scanErr with the items it did confirm plus
-// the items from prev whose branch it did not judge: a scan that could not read
-// a branch cannot say its pair is gone, and one branch's failure does not
-// discard the pass. An image that is not there is not an error: one image alone
-// raises nothing. A failed run list does not stop the pass either: that commit
-// raises its images-unknown item and the pass goes on. A ledger the check could
-// not read suppresses the pair-ready item, since a published pair may be the one
-// the pre-swap check refused; a refused item the rig holds stays. found is the
-// failed runs this read settled, for the next read to reuse.
+// cannot list the branches returns an error, so the caller keeps what the rig
+// held until the failure bound. A listing that ended early or a branch whose
+// comparison or image read did not answer returns a non-nil scanErr with the
+// items it did confirm plus the items from prev whose branch it did not judge: a
+// scan that could not read a branch cannot say its pair is gone, and one
+// branch's failure does not discard the pass. An image that is not there is not
+// an error: one image alone raises nothing. A failed run list does not stop the
+// pass either: that commit raises its images-unknown item and the pass goes on. A
+// ledger the check could not read suppresses the pair-ready item, since a
+// published pair may be the one the pre-swap check refused; a refused item the
+// rig holds stays. found is the failed runs this read settled, for the next read
+// to reuse.
 func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
@@ -485,13 +485,13 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 		seen[pairReadyKey(r.Rig, sha12)] = true
 		seen[imagesFailedKey(r.Rig, sha12)] = true
 		seen[imagesUnknownKey(r.Rig, sha12)] = true
-		// The ledger is what settles the refused item: a ledger that could not
-		// be read leaves a held refusal standing, since it cannot say the
-		// refusal is gone.
-		if refused.known {
-			seen[pairReadyRefusedKey(r.Rig, sha12)] = true
-		}
 	}
+	// refusedSettled names the refused items this pass decided: the commit it
+	// judged, whether the verdict was that the pair is refused or that it is not
+	// newer. Only judging the refused commit settles its item, so a scan that
+	// broke before reaching it leaves the item standing while the ledger names
+	// it.
+	refusedSettled := make(map[string]bool, 1)
 	incomplete := scan.err
 	for _, g := range scan.greens {
 		if g.sha == running {
@@ -510,6 +510,7 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 		// the running one's or behind it, which is what clears the item.
 		if refused.known && refused.commit == g.sha {
 			mark(g.sha12)
+			refusedSettled[pairReadyRefusedKey(r.Rig, g.sha12)] = true
 			if v.newer {
 				out = append(out, pairReadyRefusedItem(r.Rig, g, refused.reason))
 			}
@@ -552,10 +553,21 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 	}
 	if incomplete != nil {
 		for _, it := range prev {
-			if !pairReadyCommitItem(it.Kind) || seen[it.Key] {
+			if !pairReadyCommitItem(it.Kind) {
 				continue
 			}
-			if it.Kind == attention.KindDeployPairRefused && pairRefusedStale(it, refused, running) {
+			if it.Kind == attention.KindDeployPairRefused {
+				// A refusal is raised and cleared by the ledger, not by the
+				// branch read, so a commit the scan broke before judging keeps
+				// its item whichever green the break was on; pairReadyKept
+				// settles what it lifts against the ledger.
+				if refusedSettled[it.Key] {
+					continue
+				}
+				out = append(out, it)
+				continue
+			}
+			if seen[it.Key] {
 				continue
 			}
 			out = append(out, it)
@@ -567,7 +579,7 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 		// alone answers, so a refused item the rig holds stays until a readable
 		// ledger clears it or the running commit reaches it.
 		for _, it := range prev {
-			if it.Kind != attention.KindDeployPairRefused || seen[it.Key] {
+			if it.Kind != attention.KindDeployPairRefused {
 				continue
 			}
 			if pairRefusedStale(it, refused, running) {
