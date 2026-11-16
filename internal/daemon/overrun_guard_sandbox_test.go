@@ -571,8 +571,9 @@ func TestOverrunSandboxCloneResetGoesThroughTheSandboxRunner(t *testing.T) {
 			"remote get-url upstream":               {err: errors.New("fatal: No such remote 'upstream'")},
 			"symbolic-ref refs/remotes/origin/HEAD": {out: "refs/remotes/origin/main\n"},
 			// The town-root guard's probe before each mutating call: the clone's
-			// own top level, which is below the town root, so the write is allowed.
-			"-C " + clone + " rev-parse --show-toplevel": {out: clone + "\n"},
+			// own top level, read in the clone directory, which is below the town
+			// root, so the write is allowed.
+			"rev-parse --show-toplevel": {out: clone + "\n"},
 			// The reset's two writes.
 			"checkout --detach origin/main": {},
 			"branch -D " + stopSeat.Branch:  {},
@@ -597,11 +598,6 @@ func TestOverrunSandboxCloneResetGoesThroughTheSandboxRunner(t *testing.T) {
 		t.Errorf("the branch delete (call %d) came before the detach (call %d); the reset detaches first", deleteAt, checkoutAt)
 	}
 	for _, c := range script.calls {
-		// The town-root guard's probe is the one call with no directory of its
-		// own: it names the clone with -C instead.
-		if slices.Equal(c.args, []string{"-C", clone, "rev-parse", "--show-toplevel"}) {
-			continue
-		}
 		if c.dir != clone {
 			t.Errorf("in-sandbox call %v ran in %q, want the record's clone %q", c.args, c.dir, clone)
 		}
