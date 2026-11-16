@@ -62,6 +62,12 @@ type Record struct {
 	PolecatAttempts   []land.PolecatAttempt `json:"polecat_attempts,omitempty"`
 	PolecatLowerBound bool                  `json:"polecat_lower_bound,omitempty"`
 	PolecatUpperBound bool                  `json:"polecat_upper_bound,omitempty"`
+	// AddedLines and FilesChanged are the landed change's added lines, tests
+	// included, and its changed files; the landing worker fills them from the
+	// landed diff (gt-wr3rin), and a record written before the fields existed
+	// leaves them at zero (gt-9bkhff).
+	AddedLines   int `json:"added_lines,omitempty"`
+	FilesChanged int `json:"files_changed,omitempty"`
 }
 
 // Path is <town>/.runtime/landings/<rig>.jsonl, the file the landing worker
