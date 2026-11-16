@@ -358,9 +358,11 @@ type LintVerdict struct {
 	// Route is RouteRefuse; Field and Reason are its first entry.
 	Refusals []Refusal
 	// Warnings are advisory lines that change neither the route nor the exit
-	// code: the risk-path warning, and the note that its read did not run.
-	// A work bead's warnings are populated on every route, so a refused bead
-	// still learns its text names too many risk paths.
+	// code: the risk-path warning, the note that its read did not run, the
+	// story-point size gate's unread label, and the change-budget warning for
+	// a budget under twenty lines per acceptance box. A work bead's warnings
+	// are populated on every route, so a refused bead still learns its text
+	// names too many risk paths.
 	Warnings []string
 }
 
@@ -783,7 +785,8 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //
 // The shape decides the route and nothing else: the risk-path warning is
 // computed beside it and changes neither the route nor the exit code
-// (docs/design/rework-program.md, lever 2).
+// (docs/design/rework-program.md, lever 2), and so is the change-budget
+// warning for a budget under twenty lines per acceptance box (gt-ed0hjd).
 func Lint(s Spec, t Template) LintVerdict {
 	return LintWith(s, t, LintOptions{})
 }
@@ -815,6 +818,10 @@ func lint(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if NotWorkBead(s) == "" {
 		v.Warnings = riskPathWarnings(s)
 		if w := StoryPointsSizeGateWarning(s, opts.LintOverMinutes); w != "" {
+			v.Warnings = append(v.Warnings, w)
+		}
+		sections := Sections(s.Description)
+		if w := changeBudgetWarning(sections["size"], CountAcceptance(acceptanceText(s, sections))); w != "" {
 			v.Warnings = append(v.Warnings, w)
 		}
 	}
@@ -981,6 +988,37 @@ func changeBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool) 
 	return Refusal{Field: "size", Reason: fmt.Sprintf(
 		"the Size section declares at most %d added lines, over the change budget maximum of %d: split the bead by package (one bead per package) or by test group (one bead per group of acceptance boxes that share a fake)",
 		budget.Lines, opts.BudgetMaxLines)}, true
+}
+
+// The change budget's warning (gt-ed0hjd): the lint warns when a declared
+// budget falls under changeBudgetWarnMinPerBox added lines per acceptance box,
+// since a bead that landed on its first attempt added a median 34 lines per
+// box. It is advisory: the landing, not the lint, shows what a budget really
+// needed, so the author is told the measured number instead of refused.
+const (
+	// changeBudgetWarnMinPerBox is the declared added lines per acceptance box
+	// below which the lint warns.
+	changeBudgetWarnMinPerBox = 20
+	// changeBudgetWarnText is the one WARN line such a bead gets: the declared
+	// lines, the box count and the measured median.
+	changeBudgetWarnText = "declared %d lines for %d boxes: beads that landed on their first attempt added a median 34 lines per box"
+)
+
+// changeBudgetWarning is the WARN line a bead whose Size section declares fewer
+// than changeBudgetWarnMinPerBox added lines per acceptance box gets. Empty
+// when the Size section states no budget, when the Change line does not parse
+// (the refusal owns that reading), and when the budget is at or over
+// changeBudgetWarnMinPerBox lines per box; a bead with no boxes is that last
+// case, since zero boxes leave no per-box budget to fall short of.
+func changeBudgetWarning(size string, boxes int) string {
+	budget, found, err := ParseChangeBudget(size)
+	if err != nil || !found {
+		return ""
+	}
+	if budget.Lines >= changeBudgetWarnMinPerBox*boxes {
+		return ""
+	}
+	return fmt.Sprintf(changeBudgetWarnText, budget.Lines, boxes)
 }
 
 // StoryPointsSizeGateWarning is the WARN line a bead whose sp-minutes labels
