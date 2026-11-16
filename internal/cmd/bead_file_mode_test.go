@@ -76,6 +76,11 @@ func (s *callingStore) AppendNotes(id, text string) error {
 	return nil
 }
 
+func (s *callingStore) AddComment(id, text string) error {
+	s.calls = append(s.calls, "AddComment "+id+" "+text)
+	return nil
+}
+
 // outboxNotes returns the bytes of the seat's outbox notes file, or nil when it
 // does not exist.
 func outboxNotes(t *testing.T, root string) []byte {
@@ -137,6 +142,158 @@ func TestNoBeadAccessNoteRefusesAnotherBead(t *testing.T) {
 			}
 			if len(store.calls) != 0 {
 				t.Errorf("the bead store was written for a refused note: %v", store.calls)
+			}
+		})
+	}
+}
+
+// A comment in file mode reaches the seat's outbox on every call and never the
+// bead store, which file mode forbids (gt-jqo63z).
+func TestNoBeadAccessCommentAppendsToTheOutbox(t *testing.T) {
+	t.Parallel()
+	root := newNoteSeat(t, "gt-own1")
+	v, store, out := seatVerbs(t, root)
+	for _, comment := range []string{"the retry never resets its counter", "the gate is green"} {
+		if err := v.comment("gt-own1", comment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "the retry never resets its counter\nthe gate is green\n"
+	notes := outboxNotes(t, root)
+	if string(notes) != want {
+		t.Errorf("outbox notes = %q, want %q", notes, want)
+	}
+	// The host decodes what the seat wrote with outbox.Validate; the file the
+	// verb left must already satisfy it.
+	if _, err := outbox.Validate([]byte(`{"bead_id":"gt-own1","status":"done"}`), notes, "gt-own1"); err != nil {
+		t.Errorf("the outbox the seat wrote does not validate: %v", err)
+	}
+	if len(store.calls) != 0 {
+		t.Errorf("the bead store was written in file mode: %v", store.calls)
+	}
+	if got, want := out.String(), "✓ Commented on gt-own1\n✓ Commented on gt-own1\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+}
+
+func TestNoBeadAccessCommentRefusesAnotherBead(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"gt-other", "gt-own", "gt-own1 "} {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			root := newNoteSeat(t, "gt-own1")
+			v, store, _ := seatVerbs(t, root)
+			err := v.comment(id, "a comment")
+			if err == nil {
+				t.Fatalf("commenting on %q succeeded in a seat that may write gt-own1", id)
+			}
+			if !strings.Contains(err.Error(), "only its own bead") || !strings.Contains(err.Error(), "gt-own1") {
+				t.Errorf("error %q does not name the seat's own bead", err)
+			}
+			if !strings.Contains(err.Error(), "commenting") {
+				t.Errorf("error %q reads as another verb", err)
+			}
+			if notes := outboxNotes(t, root); notes != nil {
+				t.Errorf("the outbox holds %q after a refused comment", notes)
+			}
+			if len(store.calls) != 0 {
+				t.Errorf("the bead store was written for a refused comment: %v", store.calls)
+			}
+		})
+	}
+}
+
+// A seat whose own bead cannot be read cannot tell whether the comment names
+// that bead, so the comment refuses rather than falling through to a bead write
+// (gt-jqo63z).
+func TestNoBeadAccessCommentRefusesAnUnreadableSeat(t *testing.T) {
+	t.Parallel()
+	root := newNoteSeat(t, "gt-own1")
+	if err := os.Remove(filepath.Join(root, seatTaskFilePath)); err != nil {
+		t.Fatal(err)
+	}
+	v, store, _ := seatVerbs(t, root)
+	err := v.comment("gt-own1", "a comment")
+	if err == nil {
+		t.Fatal("a comment was accepted while TASK.md could not be read")
+	}
+	if !strings.Contains(err.Error(), "TASK.md") {
+		t.Errorf("error %q does not say TASK.md cannot be read", err)
+	}
+	if notes := outboxNotes(t, root); notes != nil {
+		t.Errorf("the outbox holds %q after a refused comment", notes)
+	}
+	if len(store.calls) != 0 {
+		t.Errorf("the bead store was written when TASK.md could not be read: %v", store.calls)
+	}
+}
+
+func TestNoBeadAccessCommentLeavesDoltModeAlone(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir() // a seat root with no file-mode marker
+	v, store, _ := seatVerbs(t, root)
+	if err := v.comment("gt-own1", "a comment"); err != nil {
+		t.Fatal(err)
+	}
+	const want = "AddComment gt-own1 a comment"
+	if len(store.calls) != 1 || store.calls[0] != want {
+		t.Errorf("dolt-mode comment calls = %v, want %q", store.calls, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, outbox.Dir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a dolt-mode comment wrote an outbox: %v", err)
+	}
+}
+
+// A comment whose outbox write fails reports the failure as a comment and
+// leaves the notes the seat already had, so a killed append never loses them
+// (gt-jqo63z).
+func TestNoBeadAccessCommentRefusesAFailedOutboxWrite(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("the seat was killed mid-write")
+	const previous = "the first comment\n"
+	for name, fsys := range map[string]failingOutboxFS{
+		"write":  {writeErr: boom},
+		"rename": {renameErr: boom},
+	} {
+		name, fsys := name, fsys
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := newNoteSeat(t, "gt-own1")
+			dir := filepath.Join(root, outbox.Dir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, outbox.NotesFile), []byte(previous), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			v, store, _ := seatVerbs(t, root)
+			v.outboxFS = fsys
+			err := v.comment("gt-own1", "the second comment")
+			if err == nil {
+				t.Fatal("a comment whose write failed reported success")
+			}
+			if !strings.Contains(err.Error(), "commenting") {
+				t.Errorf("error %q does not read as a failed comment", err)
+			}
+			if got := outboxNotes(t, root); string(got) != previous {
+				t.Errorf("outbox notes = %q after a failed write, want the previous %q", got, previous)
+			}
+			// The host's copy refuses a name in the outbox directory that is
+			// not one of its two files, so a killed write must leave none there.
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 1 || entries[0].Name() != outbox.NotesFile {
+				names := make([]string, len(entries))
+				for i, e := range entries {
+					names[i] = e.Name()
+				}
+				t.Errorf("the outbox directory holds %v after a failed write, want only %s", names, outbox.NotesFile)
+			}
+			if len(store.calls) != 0 {
+				t.Errorf("the bead store was written after a failed outbox write: %v", store.calls)
 			}
 		})
 	}
