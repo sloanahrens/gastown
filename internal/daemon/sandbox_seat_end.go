@@ -781,7 +781,7 @@ func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
 		return outboxNotReadReason + ": cannot read its bead: " + err.Error()
 	}
 	store := &seatOutboxStore{bd: bd, escalate: h.fileSeatEscalation}
-	if err := outbox.Apply(store, beadID, seat.Address(), beads.AcceptanceText(issue), decoded); err != nil {
+	if err := outbox.Apply(store, beadID, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, beads.AcceptanceText(issue), decoded); err != nil {
 		// Never swallowed: the copy on the host is where an operator finds what
 		// the bead did not get. Only the escalation keeps the seat, and the
 		// record below leaves it to be filed again.
@@ -852,6 +852,32 @@ func (s *seatOutboxStore) Escalate(beadID, actor, text string) error {
 		s.escalationErr = err
 	}
 	return err
+}
+
+// MarkReadyToLand appends the seat's READY TO LAND block and adds the label the
+// landing worker picks the bead by in one update, as gt done marks its own
+// submission: the block and the label land together or not at all. The rework
+// and overseer-review labels are removed with it, because a new head must face
+// om again (gt-g8t3m). A write the store reported is read back for the label,
+// since bd reporting success is not proof the write persisted (GH#1945): a lost
+// label is a submission nothing picks up, and the seat end records the outbox
+// as applied, so no later pass would write it again.
+func (s *seatOutboxStore) MarkReadyToLand(beadID, note string) error {
+	if err := s.bd.Update(beadID, beads.UpdateOptions{
+		AppendNotes:  note,
+		AddLabels:    []string{land.LabelReadyToLand},
+		RemoveLabels: []string{land.LabelRework, land.LabelOverseerReviewed},
+	}); err != nil {
+		return fmt.Errorf("adding %s: %w", land.LabelReadyToLand, err)
+	}
+	issue, err := s.bd.Show(beadID)
+	if err != nil {
+		return fmt.Errorf("reading %s back: %w", beadID, err)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		return fmt.Errorf("%s does not carry %s after the write", beadID, land.LabelReadyToLand)
+	}
+	return nil
 }
 
 // fileSeatEscalation files one outbox escalation request as an escalation bead

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // Store is the part of the bead store that Apply writes an outbox through. The
@@ -24,28 +25,50 @@ type Store interface {
 	// Escalate raises an escalation on beadID from actor with text as its
 	// request.
 	Escalate(beadID, actor, text string) error
+	// MarkReadyToLand appends note, a READY TO LAND block, to beadID's notes
+	// and adds the label the landing worker picks the bead by, in one write,
+	// as gt done marks its own submission.
+	MarkReadyToLand(beadID, note string) error
+}
+
+// Seat is the host's identity for the seat an outbox is applied for. Actor is
+// the address the seat's comments and escalation are written under. Worker is
+// the bare name the READY TO LAND block's Worker line carries: the host names
+// the seat, so a result.json cannot claim another worker's submission.
+type Seat struct {
+	Actor  string
+	Worker string
 }
 
 // Apply writes the parts of r that change the bead through store: the seat's
 // title, its notes, its acceptance (the block it replaced or the boxes it
-// ticked), its findings, a deferred status and its escalation request. actor is
-// the seat's name, the author every finding is commented under and the one the
-// escalation is raised from.
+// ticked), its findings, a deferred status, its escalation request and its
+// submission. seat.Actor is the author every finding is commented under and the
+// one the escalation is raised from.
 //
 // A deferred result sets the bead's status to deferred, after the other writes.
 // A done result sets no status: the landing path owns the status of a task it
 // lands.
 //
-// The writes run in that order, and an escalation that r carries is raised
-// last, after the status write. Every one is attempted even after an earlier
-// one failed, so one failed write neither hides the writes after it nor reads
-// as success: Apply returns all the failures joined, and nil only when every
-// write it made succeeded. A status other than StatusDone or StatusDeferred,
-// which Validate does not return, is refused into that joined error with no
-// status written: a hand-built Result must not skip the status and read as a
-// clean run. An escalation whose text is empty is refused the same way, with no
-// escalation raised, and so is a title or an acceptance that is empty: either
-// would replace what the bead has with nothing.
+// A done result that carries a submission marks the bead ready to land last,
+// after the escalation: Apply writes the READY TO LAND block with branch, head
+// and target from the submission, Worker from seat and Submitted from the
+// seat's own stamp, using the builder gt done writes its block with
+// (gt-kepije). That block and the ready label in the one store write are what
+// the landing worker finds the bead by.
+//
+// The writes run in that order, and every one is attempted even after an
+// earlier one failed, so one failed write neither hides the writes after it nor
+// reads as success: Apply returns all the failures joined, and nil only when
+// every write it made succeeded. A status other than StatusDone or
+// StatusDeferred, which Validate does not return, is refused into that joined
+// error with no status written: a hand-built Result must not skip the status
+// and read as a clean run. An escalation whose text is empty is refused the
+// same way, with no escalation raised, and so is a title or an acceptance that
+// is empty: either would replace what the bead has with nothing. A submission
+// whose branch, head or target is empty gets no block, and neither does one
+// that arrives with a status other than StatusDone: a deferred seat submits
+// nothing.
 //
 // r.Acceptance, when set, is the block that replaces the bead's, and r.Ticked
 // holds zero-based indexes into it. When it is not set the ticks index into
@@ -54,7 +77,7 @@ type Store interface {
 // acceptance text is written for it. The acceptance is written only when the
 // replacement or the ticks change the block the host read, and a note only when
 // r.Notes is not empty.
-func Apply(store Store, beadID, actor, acceptance string, r Result) error {
+func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) error {
 	var errs []error
 	if r.Title != nil {
 		if strings.TrimSpace(*r.Title) == "" {
@@ -82,7 +105,7 @@ func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 		}
 	}
 	for i, finding := range r.Findings {
-		if err := store.AddComment(beadID, actor, finding); err != nil {
+		if err := store.AddComment(beadID, seat.Actor, finding); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: add finding %d to %s: %w", i, beadID, err))
 		}
 	}
@@ -101,11 +124,50 @@ func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 		// would create an escalation bead carrying no text (gt-5rmlks).
 		if r.Escalation.Text == "" {
 			errs = append(errs, fmt.Errorf("outbox: escalate on %s: escalation text is empty", beadID))
-		} else if err := store.Escalate(beadID, actor, r.Escalation.Text); err != nil {
+		} else if err := store.Escalate(beadID, seat.Actor, r.Escalation.Text); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: escalate on %s: %w", beadID, err))
 		}
 	}
+	if r.Submission != nil {
+		if err := markReady(store, beadID, seat, r); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// markReady marks beadID ready to land for r's submission. It refuses, with the
+// block unwritten, a submission with a status other than StatusDone, which
+// Validate does not return, and one whose branch, head or target is empty:
+// either would queue a landing gt done never asked for. The Worker line is
+// seat.Worker, never a value from the outbox.
+func markReady(store Store, beadID string, seat Seat, r Result) error {
+	if r.Status != StatusDone {
+		return fmt.Errorf("outbox: mark %s ready to land: a %q result submits no branch", beadID, r.Status)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"branch", r.Submission.Branch},
+		{"head", r.Submission.Head},
+		{"target", r.Submission.Target},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("outbox: mark %s ready to land: the submission names no %s", beadID, field.name)
+		}
+	}
+	note := land.FormatReadyNote(land.Work{
+		Branch:    r.Submission.Branch,
+		Head:      r.Submission.Head,
+		Target:    r.Submission.Target,
+		Worker:    seat.Worker,
+		Submitted: r.Submission.SubmittedAt,
+	})
+	if err := store.MarkReadyToLand(beadID, note); err != nil {
+		return fmt.Errorf("outbox: mark %s ready to land: %w", beadID, err)
+	}
+	return nil
 }
 
 // ticked returns acceptance with the checkbox lines named by ticks ticked.
