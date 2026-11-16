@@ -126,6 +126,10 @@ type Usage struct {
 	// where the dashboard runs. Unavailable is set with it, so an older page
 	// still draws the pane as unread; the newer page draws the reason instead.
 	Reason string `json:"reason,omitempty"`
+	// Note says why the panel is drawn from the files alone: the usage_records
+	// rows could not be read, so the totals may lack a run that is only a row.
+	// The panel is not unavailable; the page draws the note beside it.
+	Note string `json:"note,omitempty"`
 }
 
 // AggregateUsage folds the records the reader decoded into the payload the page
