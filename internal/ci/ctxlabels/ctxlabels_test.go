@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
+	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
 )
 
 const (
@@ -256,6 +257,88 @@ func TestBDPinMatchesRefuses(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("bdPinMatches error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// seedPinsPath is the polecat seed-pins file, relative to the repository root.
+const seedPinsPath = "deploy/polecat/seed-pins"
+
+// seedPinMatchesBDPin is the check TestSeedPinMatchesBDPin runs on the
+// seed-pins bytes: the file must parse, name the beads rig, and pin it at want.
+// The seed and the image's bd are the same repository, so one commit is both
+// the bd binary's and the seeded beads source's. Each failure names the file.
+func seedPinMatchesBDPin(seed []byte, want string) error {
+	sources, err := polecatseed.Pins(seed)
+	if err != nil {
+		return fmt.Errorf("%s: %w", seedPinsPath, err)
+	}
+	for _, s := range sources {
+		if s.Rig != "beads" {
+			continue
+		}
+		if s.Commit != want {
+			return fmt.Errorf("%s pins beads at %s, but bdPin is %s: bump both to the same commit", seedPinsPath, s.Commit, want)
+		}
+		return nil
+	}
+	return fmt.Errorf("%s names no beads line, but bdPin is %s", seedPinsPath, want)
+}
+
+// TestSeedPinMatchesBDPin holds the shipped seed-pins file's beads row to
+// bdPin, so a bump of the bd pin cannot leave the seeded beads source at a
+// different commit than the bd binary built from that source.
+func TestSeedPinMatchesBDPin(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(seedPinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", seedPinsPath, err)
+	}
+	if err := seedPinMatchesBDPin(body, bdPin); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestSeedPinMatchesRefuses drives each refusal of the seed-pin check with a
+// fixture, so the assertion above cannot pass for the wrong reason: a beads
+// commit bdPin does not name, a file with no beads line, and one that does not
+// parse. Each refusal names the seed-pins file.
+func TestSeedPinMatchesRefuses(t *testing.T) {
+	t.Parallel()
+	const goodBD = "0123456789abcdef0123456789abcdef01234567"
+	const otherBD = "fedcba9876543210fedcba9876543210fedcba98"
+	seedWith := func(beads, devops string) string {
+		return "# a seed\nbeads " + beads + "\ndevops " + devops + "\n"
+	}
+	for _, tc := range []struct {
+		name    string
+		seed    string
+		want    string
+		wantErr string
+	}{
+		{name: "the beads line names bdPin", seed: seedWith(goodBD, otherBD), want: goodBD},
+		{name: "the beads line names another commit", seed: seedWith(otherBD, goodBD), want: goodBD,
+			wantErr: seedPinsPath + " pins beads at " + otherBD + ", but bdPin is " + goodBD},
+		{name: "the file has no beads line", seed: "devops " + goodBD + "\n", want: goodBD,
+			wantErr: seedPinsPath + " names no beads line, but bdPin is " + goodBD},
+		{name: "the file does not parse", seed: "beads\n", want: goodBD,
+			wantErr: seedPinsPath + ": line 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := seedPinMatchesBDPin([]byte(tc.seed), tc.want)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("seedPinMatchesBDPin: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("seedPinMatchesBDPin accepted the file")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("seedPinMatchesBDPin error = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
 	}
