@@ -25,6 +25,40 @@ test that observes it. The lint refuses an item that names a container or a
 live town (gt-hgt9j.3); those steps belong in the Gate. More than six items
 route the bead to the planner instead of a seat.
 
+## Change budget
+
+The Size section states the budget on one line:
+
+```text
+Change: at most N added lines in M files.
+```
+
+N counts every added line, tests included, and M counts the files the diff
+touches. A bead that cannot fit its budget is split by package or by test
+group, one deliverable each. When the lint's maximum is on,
+`lint_budget_max_lines` caps N at 300.
+
+The landed diff predicts both the wait and the rework. Across the 3,047 beads
+the daemon landed since 2026-10-26, the size of the diff and the time to land
+moved together:
+
+| Added lines | Median minutes | Needed 2+ attempts |
+|---|---|---|
+| under 50 | 4.5 | 11% |
+| 50 to 150 | 7.1 | 17% |
+| 150 to 300 | 10.0 | 31% |
+| 300 to 600 | 15.1 | 44% |
+| 600 to 1000 | 21 | 57% |
+| 1000 or more | 36 | 77% |
+
+The median bead spends 4 minutes per 100 added lines, and test lines are about
+70% of what it adds. A bead that landed on its first attempt added a median 79
+lines, with a 75th percentile of 245 and a 90th of 518.
+
+Short bead text does not mean small work: gt-ijldj7 carried three acceptance
+boxes and 2.4 KB of text, and it took four seats and 92 minutes to land 801
+lines.
+
 ## `## Files`
 
 A bead that changes repo files lists them under the section, one `verb: path`
