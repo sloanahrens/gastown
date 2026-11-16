@@ -29,7 +29,11 @@ package daemon
 // ledger records as refused raises deploy.pair_refused instead of
 // deploy.pair_ready, naming the reason, so no roll starts from it; it clears
 // when the ledger clears the refusal or the running commit reaches it. A ledger
-// the check cannot read refuses nothing it cannot see (gt-t8vf15).
+// the check cannot read is a pair answer it could not make: no pair-ready item
+// is raised while it is unreadable, since a published pair may be one the
+// pre-swap check refused, and the check raises its unmeasured item naming the
+// ledger. A refused item the check already holds survives an unreadable ledger,
+// which cannot say the refusal is gone (gt-t8vf15).
 //
 // Whether a green commit is newer than the running one is read from the rig's
 // bare clone, with no fetch: running is an ancestor of green. The Forgejo
@@ -166,11 +170,14 @@ type pairReadyFailedRun struct {
 }
 
 // pairReadyRefusal is the update ledger's answer on the refused pair: known is
-// false when the ledger could not be read, so the check raises no refused item
-// this pass. commit is the green commit the pre-swap check refused and reason
-// the failure it recorded, both empty when the ledger names no refusal.
+// false when the ledger could not be read, so the check raises no pair-ready
+// item this pass (it cannot say whether the pair was refused) and keeps the
+// refused items it holds. err is the read failure, for the item that says the
+// check is unmeasured. commit is the green commit the pre-swap check refused and
+// reason the failure it recorded, both empty when the ledger names no refusal.
 type pairReadyRefusal struct {
 	known  bool
+	err    error
 	commit string
 	reason string
 }
@@ -235,7 +242,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 		if r.Err != nil {
 			logf("deploy pair check: %s: %v", r.Rig, r.Err)
 			next[r.Rig] = fails[r.Rig] + 1
-			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, r.Err), refused.known)
+			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, r.Err), refused, running)
 			carryFailedRuns(nextFailed, failed, out[r.Rig])
 			continue
 		}
@@ -247,15 +254,21 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 		case err != nil:
 			logf("deploy pair check: %s: %v", r.Rig, err)
 			next[r.Rig] = fails[r.Rig] + 1
-			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, err), refused.known)
+			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, err), refused, running)
 		case scanErr != nil:
 			logf("deploy pair check: %s: %v", r.Rig, scanErr)
 			next[r.Rig] = fails[r.Rig] + 1
-			out[r.Rig] = pairReadyKept(items, next[r.Rig], pairReadyUnreadableItem(r.Rig, scanErr), refused.known)
+			out[r.Rig] = pairReadyKept(items, next[r.Rig], pairReadyUnreadableItem(r.Rig, scanErr), refused, running)
 		default:
 			out[r.Rig] = items
 		}
 		carryFailedRuns(nextFailed, failed, out[r.Rig])
+	}
+	if !refused.known {
+		// The pair answer is unmeasured while the ledger cannot be read, so the
+		// queue is told that once for the town, beside the rig items the pass
+		// still raised.
+		out[pairReadyTownState] = []attention.Item{pairReadyRefusalUnreadableItem(refused.err)}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -266,11 +279,11 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 
 // readRefused reads the update ledger's refused pair. known is false when the
 // ledger could not be read: a read that did not answer says nothing about what
-// the ledger records, so the check raises no refused item from it and the
-// pass's other reads are unaffected. The refused items the check already holds
-// survive a rig read that did not answer, since the ledger could not say the
-// refusal is gone. The outage is logged once, when the error changes, so a
-// damaged ledger is reported without a line per pass.
+// the ledger records, so the check raises no pair-ready item this pass (the
+// published pair may be the refused one) and keeps the refused items it holds,
+// since the ledger could not say the refusal is gone. The outage is logged once,
+// when the error changes, so a damaged ledger is reported without a line per
+// pass.
 func (c *pairReadyCheck) readRefused(townRoot string, logf func(string, ...any)) pairReadyRefusal {
 	read := c.ledger
 	if read == nil {
@@ -289,9 +302,9 @@ func (c *pairReadyCheck) readRefused(townRoot string, logf func(string, ...any))
 	c.mu.Unlock()
 	if err != nil {
 		if log {
-			logf("deploy pair check: the update ledger could not be read: %v; no refused pair is raised", err)
+			logf("deploy pair check: the update ledger could not be read: %v; no pair-ready item is raised from it", err)
 		}
-		return pairReadyRefusal{}
+		return pairReadyRefusal{err: err}
 	}
 	if rec.Refused.Commit == "" {
 		return pairReadyRefusal{known: true}
@@ -348,23 +361,35 @@ func carryFailedRuns(next, failed map[string]pairReadyFailedRun, items []attenti
 // read still confirms, with the check's unreadable item naming why. Before the
 // failure bound that is a partial scan's items or what the rig held; past it the
 // stale per-commit items are dropped, so an item the check cannot confirm for
-// good does not outlive the check that raised it. A refused item is dropped when
-// the ledger answered (refusedKnown), since the ledger, not the branch read, is
-// what raises and clears it.
-func pairReadyKept(prev []attention.Item, fails int, unreadable attention.Item, refusedKnown bool) []attention.Item {
+// good does not outlive the check that raised it. A refused item is dropped only
+// when pairRefusedStale says the read can no longer confirm it: the ledger, not
+// the branch read, is what raises and clears it, so a readable ledger that still
+// names the commit leaves the item standing.
+func pairReadyKept(prev []attention.Item, fails int, unreadable attention.Item, refused pairReadyRefusal, running string) []attention.Item {
 	var out []attention.Item
 	if fails < pairReadyForgetAfter {
 		for _, it := range prev {
 			if !pairReadyCommitItem(it.Kind) {
 				continue
 			}
-			if it.Kind == attention.KindDeployPairRefused && refusedKnown {
+			if it.Kind == attention.KindDeployPairRefused && pairRefusedStale(it, refused, running) {
 				continue
 			}
 			out = append(out, it)
 		}
 	}
 	return append(out, unreadable)
+}
+
+// pairRefusedStale reports whether a held refused item is one the check can no
+// longer confirm: the running commit reached the item's commit, or the ledger
+// answered and does not name that commit. A ledger that could not be read leaves
+// the item, since it cannot say the refusal is gone.
+func pairRefusedStale(it attention.Item, refused pairReadyRefusal, running string) bool {
+	if it.SHA == running {
+		return true
+	}
+	return refused.known && it.SHA != refused.commit
 }
 
 // snapshot is a copy of the items and failure counts the check holds, read
@@ -440,8 +465,10 @@ type pairReadyGreen struct {
 // a branch cannot say its pair is gone, and one branch's failure does not
 // discard the pass. An image that is not there is not an error: one image alone
 // raises nothing. A failed run list does not stop the pass either: that commit
-// raises its images-unknown item and the pass goes on. found is the failed runs
-// this read settled, for the next read to reuse.
+// raises its images-unknown item and the pass goes on. A ledger the check could
+// not read suppresses the pair-ready item, since a published pair may be the one
+// the pre-swap check refused; a refused item the rig holds stays. found is the
+// failed runs this read settled, for the next read to reuse.
 func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
@@ -456,9 +483,14 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 	seen := make(map[string]bool, len(scan.greens)*2)
 	mark := func(sha12 string) {
 		seen[pairReadyKey(r.Rig, sha12)] = true
-		seen[pairReadyRefusedKey(r.Rig, sha12)] = true
 		seen[imagesFailedKey(r.Rig, sha12)] = true
 		seen[imagesUnknownKey(r.Rig, sha12)] = true
+		// The ledger is what settles the refused item: a ledger that could not
+		// be read leaves a held refusal standing, since it cannot say the
+		// refusal is gone.
+		if refused.known {
+			seen[pairReadyRefusedKey(r.Rig, sha12)] = true
+		}
 	}
 	incomplete := scan.err
 	for _, g := range scan.greens {
@@ -499,6 +531,12 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 		}
 		mark(g.sha12)
 		if daemonFound && polecatFound {
+			// The ledger is what says a published pair was not refused. A ledger
+			// the check could not read leaves it unmeasured, so no item that
+			// says the pair is ready is raised from it.
+			if !refused.known {
+				continue
+			}
 			out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v))
 			continue
 		}
@@ -517,12 +555,26 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 			if !pairReadyCommitItem(it.Kind) || seen[it.Key] {
 				continue
 			}
-			if it.Kind == attention.KindDeployPairRefused && refused.known {
+			if it.Kind == attention.KindDeployPairRefused && pairRefusedStale(it, refused, running) {
 				continue
 			}
 			out = append(out, it)
 		}
 		return out, found, incomplete, nil
+	}
+	if !refused.known {
+		// A complete scan still could not settle the refusal, which the ledger
+		// alone answers, so a refused item the rig holds stays until a readable
+		// ledger clears it or the running commit reaches it.
+		for _, it := range prev {
+			if it.Kind != attention.KindDeployPairRefused || seen[it.Key] {
+				continue
+			}
+			if pairRefusedStale(it, refused, running) {
+				continue
+			}
+			out = append(out, it)
+		}
 	}
 	return out, found, nil, nil
 }
@@ -896,6 +948,18 @@ func pairReadyUnreadableItemAt(key, rig string, err error) attention.Item {
 		Severity: attention.SeverityLow,
 		Rig:      rig,
 		Summary:  summary,
+	}
+}
+
+// pairReadyRefusalUnreadableItem is the item for an update ledger the check
+// could not read: the town-wide pair answer is unmeasured, so no pair-ready item
+// is raised from it.
+func pairReadyRefusalUnreadableItem(err error) attention.Item {
+	return attention.Item{
+		Key:      pairReadyUnreadablePrefix + "town:update-ledger",
+		Kind:     attention.KindDeployPairUnreadable,
+		Severity: attention.SeverityLow,
+		Summary:  fmt.Sprintf("the pair check could not read the update ledger: %s; no pair-ready item is raised from it", oneLine(err.Error())),
 	}
 }
 

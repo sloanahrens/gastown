@@ -154,10 +154,11 @@ func TestPreRollGuardARefusedItemClears(t *testing.T) {
 	}
 }
 
-// TestPreRollGuardAnUnreadableLedgerRaisesNoRefusedItem: a ledger the check
-// cannot read refuses nothing it cannot see, raises no unreadable item of its
-// own, and leaves the rest of the read answering as it did.
-func TestPreRollGuardAnUnreadableLedgerRaisesNoRefusedItem(t *testing.T) {
+// TestPreRollGuardAnUnreadableLedgerRaisesNoPairReadyItem: a ledger the check
+// cannot read is a pair answer it could not make. The published pair raises no
+// pair-ready item, since it may be the one the pre-swap check refused, and the
+// check raises its unmeasured item naming the ledger once per outage.
+func TestPreRollGuardAnUnreadableLedgerRaisesNoPairReadyItem(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
 	fx.check.ledger = pairRefusedLedger(update.ImageRecord{}, errors.New("the daemon image record images.json is damaged"))
@@ -165,9 +166,11 @@ func TestPreRollGuardAnUnreadableLedgerRaisesNoRefusedItem(t *testing.T) {
 	fx.run(pairT0)
 
 	items := fx.check.observed()
-	require.Len(t, items, 1, "an unreadable ledger must not raise a refused item: %v", pairItemKinds(items))
-	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind,
-		"the published pair is still ready, since the ledger could not say it was refused")
+	require.Len(t, items, 1, "an unreadable ledger must raise no pair item: %v", pairItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+	assert.Equal(t, "deploy-pair-unreadable:town:update-ledger", items[0].Key)
+	assert.Contains(t, items[0].Summary, "images.json is damaged",
+		"the unmeasured item does not name the ledger the check could not read")
 	require.Len(t, fx.logs, 1, "the unreadable ledger is logged once")
 	assert.Contains(t, fx.logs[0], "could not be read")
 
@@ -176,25 +179,53 @@ func TestPreRollGuardAnUnreadableLedgerRaisesNoRefusedItem(t *testing.T) {
 	fx.run(pairT0.Add(pairReadyInterval))
 	assert.Len(t, fx.logs, 1, "the same outage must not be logged on every pass")
 
-	// A later readable ledger names the refusal again, and the item comes back.
+	// A later readable ledger names the refusal, the refused item is raised, and
+	// the unmeasured item is gone.
 	fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
 	fx.run(pairT0.Add(2 * pairReadyInterval))
-	assert.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused)
+	assert.Equal(t, []attention.Kind{attention.KindDeployPairRefused}, pairItemKinds(fx.check.observed()))
 }
 
-// TestPreRollGuardARefusedItemWaitsWhileTheLedgerIsUnreadable: a refused item
-// the check already holds is kept by a read of a rig that did not answer, since
-// the ledger could not say the refusal is gone; a readable ledger that clears
-// the refusal drops it even when the branch read that same pass failed.
-func TestPreRollGuardARefusedItemWaitsWhileTheLedgerIsUnreadable(t *testing.T) {
+// TestPreRollGuardARefusedItemSurvivesAnUnreadableLedger: an item the check
+// raised for a refused pair stays when the next pass cannot read the ledger,
+// even though the rig read itself answered: the ledger could not say the refusal
+// is gone, and the pair-ready item is not raised in its place.
+func TestPreRollGuardARefusedItemSurvivesAnUnreadableLedger(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
+	fx.run(pairT0)
+	require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused)
+
+	fx.check.ledger = pairRefusedLedger(update.ImageRecord{}, errors.New("the daemon image record images.json is damaged"))
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	got := pairItemKinds(fx.check.observed())
+	assert.Contains(t, got, attention.KindDeployPairRefused,
+		"a ledger that could not be read must not drop the refused item")
+	assert.NotContains(t, got, attention.KindDeployPairReady,
+		"a ledger that could not be read must not raise a pair-ready item")
+	assert.Contains(t, got, attention.KindDeployPairUnreadable,
+		"a ledger that could not be read must say the check is unmeasured")
+}
+
+// TestPreRollGuardARefusedItemOutlivesAFailedRigRead: a refused item the check
+// holds is kept by a rig read that did not answer when the ledger still names
+// the commit, and dropped when the ledger answers that nothing is refused or the
+// running commit reaches the refused one.
+func TestPreRollGuardARefusedItemOutlivesAFailedRigRead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
+		rec         update.ImageRecord
 		ledgerErr   error
+		reach       bool
 		wantRefused bool
 	}{
 		{name: "the ledger stays unreadable", ledgerErr: errors.New("the daemon image record images.json is damaged"), wantRefused: true},
 		{name: "the ledger answers that nothing is refused", wantRefused: false},
+		{name: "the ledger still refuses the commit", rec: pairRefusedRecord(), wantRefused: true},
+		{name: "the running commit reaches the refused commit", rec: pairRefusedRecord(), reach: true, wantRefused: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -204,18 +235,40 @@ func TestPreRollGuardARefusedItemWaitsWhileTheLedgerIsUnreadable(t *testing.T) {
 			fx.run(pairT0)
 			require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused)
 
-			fx.check.ledger = pairRefusedLedger(update.ImageRecord{}, tt.ledgerErr)
+			if tt.reach {
+				fx.writeRunning(t, pairGreen)
+			}
+			fx.check.ledger = pairRefusedLedger(tt.rec, tt.ledgerErr)
 			fx.rigErr = errors.New("the rig's Forgejo settings could not be read")
 			fx.run(pairT0.Add(pairReadyInterval))
 
 			got := pairItemKinds(fx.check.observed())
 			if tt.wantRefused {
 				assert.Contains(t, got, attention.KindDeployPairRefused,
-					"a ledger that could not be read must not drop the refused item")
+					"a ledger that still names the commit must not lose its refused item to a failed rig read")
 				return
 			}
 			assert.NotContains(t, got, attention.KindDeployPairRefused,
-				"a readable ledger that clears the refusal drops it even when the rig read failed")
+				"a refusal the read can no longer confirm must be dropped")
 		})
 	}
+}
+
+// TestPreRollGuardAnIncompleteScanKeepsARefusedItem: a listing that ended early
+// cannot say the refused commit's pair is gone, and the ledger still names it,
+// so the item stays.
+func TestPreRollGuardAnIncompleteScanKeepsARefusedItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.check.ledger = pairRefusedLedger(pairRefusedRecord(), nil)
+	fx.run(pairT0)
+	require.Contains(t, pairItemKinds(fx.check.observed()), attention.KindDeployPairRefused)
+
+	fx.api.branchErr = errors.New("forgejo answered 500 on that page")
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	got := pairItemKinds(fx.check.observed())
+	assert.Contains(t, got, attention.KindDeployPairRefused,
+		"an incomplete scan must not drop a refusal the ledger still records")
+	assert.NotContains(t, got, attention.KindDeployPairReady)
 }
