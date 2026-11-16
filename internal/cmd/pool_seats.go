@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/seatfacts"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -273,9 +274,15 @@ type poolSeatBatch struct {
 	show     func(bd beads.Client, id string) (*beads.Issue, error)
 	// bound is how many rigs readRigs reads at once; zero is poolSeatRigReads.
 	bound int
+	// shadow is where the dead-hooked read's shadow lines go; nil is os.Stderr,
+	// the stream the seat-record warning writes.
+	shadow io.Writer
 
 	mu   sync.Mutex
 	rigs map[string]*rigSeatBatch
+	// shadowed is the seats whose hook the shadow window has compared, so one
+	// seat logs at most once per batch — one occupancy read.
+	shadowed map[string]bool
 }
 
 // poolSeatRigReads is how many rigs the roster reads at once. Dolt answers
@@ -392,6 +399,11 @@ func (b *poolSeatBatch) hookHeld(rigName, polecatName string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// The hook read above keeps deciding the count; the shadow window only
+	// records where the intent record answers differently, so the answer above
+	// is returned whatever this logs (docs/plans/2026-11-15-agent-bead-retirement-plan.md,
+	// P1.7).
+	b.shadowSeatHook(rigName, polecatName, seat.hookBead)
 	rb.seatMu.Lock()
 	if rb.seats == nil {
 		rb.seats = make(map[string]poolSeatBeadRead)
@@ -399,6 +411,51 @@ func (b *poolSeatBatch) hookHeld(rigName, polecatName string) (bool, error) {
 	rb.seats[polecatName] = seat
 	rb.seatMu.Unlock()
 	return seat.held, nil
+}
+
+// shadowSeatHook logs where a sessionless seat's intent record and its agent
+// bead name different work beads, keeping the counts on the bead until the
+// overseer has read the window: the record's work_bead is the fact the
+// dead-hooked count moves onto next
+// (docs/plans/2026-11-15-agent-bead-retirement-plan.md, P1.7). The batch logs a
+// seat at most once however often it is asked about it, so the window reads as
+// a set of disagreeing seats rather than a tally of reads.
+//
+// A record that cannot be read is logged rather than skipped: the seat's two
+// sources could not be compared, which is not the same as agreeing.
+func (b *poolSeatBatch) shadowSeatHook(rigName, polecatName, beadHook string) {
+	if b.townRoot == "" {
+		return // no town, no record to read against
+	}
+	key := rigName + "/" + polecatName
+	b.mu.Lock()
+	if b.shadowed == nil {
+		b.shadowed = make(map[string]bool)
+	}
+	logged := b.shadowed[key]
+	b.shadowed[key] = true
+	b.mu.Unlock()
+	if logged {
+		return
+	}
+	facts, err := seatfacts.Read(b.townRoot, polecatIntentSeat(rigName, polecatName))
+	if err != nil {
+		fmt.Fprintf(b.shadowOut(), "agentbead_shadow: %s record unreadable, hook not compared: %v\n", key, err)
+		return
+	}
+	if facts.WorkBead == beadHook {
+		return
+	}
+	fmt.Fprintf(b.shadowOut(), "agentbead_shadow: %s hook intent=%s bead=%s\n", key, facts.WorkBead, beadHook)
+}
+
+// shadowOut is where the shadow window writes: the writer a test set, or the
+// stderr the seat-record warning uses.
+func (b *poolSeatBatch) shadowOut() io.Writer {
+	if b.shadow != nil {
+		return b.shadow
+	}
+	return os.Stderr
 }
 
 // landingWork is the poolSeatWorkFunc the landing seats are confirmed with: the
