@@ -273,6 +273,10 @@ func TestUsageRecordRefusesLocalInput(t *testing.T) {
 			r.Models = map[string]usagerecord.Model{"opus": {EstCostUSD: nan}}
 			return r
 		}, wantSub: "models.opus.est_cost_usd"},
+		{name: "write unencodable start", builtAt: at, bead: "gt-1", record: func(r usagerecord.Record) usagerecord.Record {
+			r.Start = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+			return r
+		}, wantSub: "encode usage_record payload"},
 		{name: "read negative limit", read: true, limit: -1, wantSub: "-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,6 +302,30 @@ func TestUsageRecordRefusesLocalInput(t *testing.T) {
 				t.Errorf("bd calls = %v, want none", calls)
 			}
 		})
+	}
+}
+
+// TestUsageRecordReadReturnsTheBdFailure: a bd sample list that fails is the
+// error, with no rows beside it.
+func TestUsageRecordReadReturnsTheBdFailure(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if strings.HasPrefix(strings.Join(args, " "), "sample list ") {
+			return reply{stderr: "Error: failed to open database: invalid connection", err: exitError{code: 1}}
+		}
+		return reply{err: fmt.Errorf("unexpected bd call %v", args)}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+
+	rows, err := b.ReadUsageRecords(context.Background(), time.Time{}, 0)
+	if err == nil {
+		t.Fatal("ReadUsageRecords = nil, want the bd failure returned")
+	}
+	if !strings.Contains(err.Error(), "bd sample list") {
+		t.Errorf("error = %q, want it to name the bd sample list call", err)
+	}
+	if rows != nil {
+		t.Errorf("ReadUsageRecords answered %v beside its error, want no rows", rows)
 	}
 }
 

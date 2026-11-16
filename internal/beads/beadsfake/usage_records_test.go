@@ -3,7 +3,9 @@ package beadsfake
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +137,41 @@ func TestFakeUsageRecordsReportScriptedFailures(t *testing.T) {
 	f.FailWith("sample list", boom)
 	if _, err := f.ReadUsageRecords(ctx, time.Time{}, 0); !errors.Is(err, boom) {
 		t.Errorf("ReadUsageRecords with FailWith(sample list) = %v, want boom", err)
+	}
+}
+
+// TestFakeUsageRecordsRefuseACostJSONCannotCarry: a record cost, a subagent
+// share and a model cost the payload cannot carry are each refused by their
+// field's name, and the refused write leaves no row.
+func TestFakeUsageRecordsRefuseACostJSONCannotCarry(t *testing.T) {
+	t.Parallel()
+	nan, inf := math.NaN(), math.Inf(1)
+	for _, tc := range []struct {
+		name string
+		edit func(*usagerecord.Record)
+		want string
+	}{
+		{"record cost", func(r *usagerecord.Record) { r.EstCostUSD = nan }, "est_cost_usd"},
+		{"subagent share", func(r *usagerecord.Record) { r.Subagents.Share = inf }, "subagents.share"},
+		{"model cost", func(r *usagerecord.Record) {
+			r.Models = map[string]usagerecord.Model{"opus": {EstCostUSD: nan}}
+		}, "models.opus.est_cost_usd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := New()
+			ctx := context.Background()
+			row := everyFieldUsageRow()
+			row.BuiltAt = sampleAt
+			tc.edit(&row.Record)
+			err := f.WriteUsageRecord(ctx, row)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("WriteUsageRecord = %v, want a refusal naming %q", err, tc.want)
+			}
+			if rows, err := f.ReadUsageRecords(ctx, time.Time{}, 0); err != nil || len(rows) != 0 {
+				t.Errorf("rows after the refused write = %v, %v; want none", rows, err)
+			}
+		})
 	}
 }
 
