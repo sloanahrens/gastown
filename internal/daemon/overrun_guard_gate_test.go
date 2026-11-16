@@ -267,6 +267,74 @@ func TestRunOverrunGuard_GateTimeIsNotCounted(t *testing.T) {
 	}
 }
 
+// A configured gate_allowance is the ceiling on one sling's banked gate time: a
+// seat that spends 20 minutes inside its gate under gate_allowance 5m banks 5
+// minutes, and the rest of the wait counts as its own time (gt-nbwd87).
+func TestOverrunGuardGateAllowanceCapsOneSlingsBankedGateTime(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	d.patrolConfig.Patrols.OverrunGuard.GateAllowance = "5m"
+	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-gate1"}
+	f := newOverrunFake(0, seat)
+	f.gateRunning = func(overrunSeat) (bool, error) { return true, nil }
+
+	var nudgedAt time.Time
+	for i := 1; i <= 20; i++ {
+		f.now = overrunSlung.Add(time.Duration(i) * time.Minute)
+		d.runOverrunGuard(f.seams())
+		if nudgedAt.IsZero() && len(f.nudges) > 0 {
+			nudgedAt = f.now
+		}
+	}
+
+	st, err := readOverrunState(d.config.TownRoot, seat.Bead)
+	if err != nil {
+		t.Fatalf("readOverrunState: %v", err)
+	}
+	if want := 5 * time.Minute; st.GateSpent != want {
+		t.Errorf("banked gate time after 20 minutes inside the gate = %v, want the 5m allowance", st.GateSpent)
+	}
+
+	nudgeAfter, _ := overrunGuardThresholds(d.patrolConfig)
+	wantMark := overrunSlung.Add(5*time.Minute + nudgeAfter)
+	switch {
+	case nudgedAt.IsZero():
+		t.Errorf("never marked inside a 20 minute gate under a 5m allowance, want a mark at %v: past the allowance the clock runs again",
+			wantMark.Sub(overrunSlung))
+	case !nudgedAt.Equal(wantMark):
+		t.Errorf("marked after %v of wall time, want %v: the 5m allowance, then the nudge threshold",
+			nudgedAt.Sub(overrunSlung), wantMark.Sub(overrunSlung))
+	}
+	if len(f.stops) != 0 {
+		t.Errorf("stopped %v after 20 minutes inside the gate, want none: its own time is under the stop threshold", f.stops)
+	}
+}
+
+// Without a gate_allowance the ceiling is unchanged: twice the stop threshold,
+// and no more, however long the gate holds the seat (gt-nbwd87).
+func TestOverrunGuardGateAllowanceDefaultBanksTwiceStopAfter(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-gate1"}
+	f := newOverrunFake(0, seat)
+	f.gateRunning = func(overrunSeat) (bool, error) { return true, nil }
+
+	tickOverrunGuard(d, f, 45, time.Minute)
+
+	st, err := readOverrunState(d.config.TownRoot, seat.Bead)
+	if err != nil {
+		t.Fatalf("readOverrunState: %v", err)
+	}
+	_, stopAfter := overrunGuardThresholds(d.patrolConfig)
+	if want := overrunMaxGateTotal(stopAfter); st.GateSpent != want {
+		t.Errorf("banked gate time after 45 minutes inside the gate = %v, want the default ceiling %v", st.GateSpent, want)
+	}
+	if len(f.nudges) != 0 || len(f.stops) != 0 {
+		t.Errorf("a seat in its gate was nudged %v / stopped %v after 45 minutes of wall time, want neither: past the ceiling the clock has run only 5 minutes",
+			f.nudges, f.stops)
+	}
+}
+
 // The same, through the production gate reader and a fake slot holder: the
 // seat holds the pool's slot under its own role for the whole run.
 func TestRunOverrunGuard_HeldGateSlotIsNotAnOverrun(t *testing.T) {
