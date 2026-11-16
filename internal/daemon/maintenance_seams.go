@@ -60,6 +60,10 @@ type maintenanceSeams struct {
 	// archiveOpenDB opens the pool an archive read runs on. A test injects a
 	// fake driver so a read's failure paths are reachable without a server.
 	archiveOpenDB func(dsn string) (*sql.DB, error)
+	// squashOpenDB opens the pool the daily squash check's reads run on. A
+	// test injects a fake driver so the check's readings, and a read that
+	// fails, are reachable without a server.
+	squashOpenDB func(dsn string) (*sql.DB, error)
 	// archiveAppend appends one gzip CSV member to an archive file and returns
 	// only once the file is closed. A test injects one that observes the state
 	// file while the member is written, proving the watermark moves after the
@@ -150,6 +154,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.archiveOpenDB == nil {
 		s.archiveOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
+	}
+	if s.squashOpenDB == nil {
+		s.squashOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
 	}
 	if s.archiveAppend == nil {
 		s.archiveAppend = appendArchiveTable
