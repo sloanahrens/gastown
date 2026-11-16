@@ -2062,15 +2062,16 @@ func (s *attentionSources) collectTierSweepGuardUnreadable(ctx context.Context) 
 
 // collectTierSweepImagesRetryExhausted raises one item per rig whose record has
 // spent tierSweepImagesRetryMax early re-runs on its green commit and whose
-// images build still failed (gt-yhvp5m). Nothing retries the build until the
-// hourly cycle then, and the commit has no daemon or polecat images to roll
-// onto. The item names the rig, the green commit and the retries spent.
+// images are not known to have published (gt-yhvp5m). Nothing retries the build
+// until the hourly cycle then, and the commit has no daemon or polecat images
+// to roll onto. The item names the rig, the green commit, the retries spent and
+// the answer it read.
 //
-// It clears on the first tick after the condition stops: a cycle whose images
-// run succeeded clears the count (tierSweepImagesRetryRecorded reads the
-// published pair), and a new green sha moves the count with it. An answer the
-// pair check does not hold raises nothing, so a read that has not reached the
-// commit cannot stand in for a success.
+// Only a published answer clears it: a failed run raises it, and so does an
+// answer the pair check does not hold, because a read that has not reached the
+// commit is no proof of a success and must not clear a raised item (gt-opkfch).
+// A cycle whose images run succeeded clears the count (tierSweepImagesRetryRecorded
+// reads the published pair), and a new green sha moves the count with it.
 func (s *attentionSources) collectTierSweepImagesRetryExhausted(ctx context.Context) ([]attention.Item, error) {
 	if s.d == nil {
 		return nil, nil
@@ -2088,8 +2089,13 @@ func (s *attentionSources) collectTierSweepImagesRetryExhausted(ctx context.Cont
 			st.ImagesRetries < tierSweepImagesRetryMax {
 			continue
 		}
-		if s.d.tierSweepImagesAnswerFor(rig, st.LastGreenSHA) != tierSweepImagesFailed {
+		answer := s.d.tierSweepImagesAnswerFor(rig, st.LastGreenSHA)
+		if answer == tierSweepImagesPublished {
 			continue
+		}
+		why := "the build still failed"
+		if answer == tierSweepImagesUnanswered {
+			why = "the pair check holds no answer for the run"
 		}
 		sha12 := greenRefShortSHA(st.LastGreenSHA)
 		out = append(out, attention.Item{
@@ -2098,8 +2104,8 @@ func (s *attentionSources) collectTierSweepImagesRetryExhausted(ctx context.Cont
 			Severity: attention.SeverityHigh,
 			Rig:      rig,
 			SHA:      st.LastGreenSHA,
-			Summary: fmt.Sprintf("images retries exhausted on %s for green %s: %d early re-runs ran and the build still failed, so the commit waits for the hourly cycle",
-				rig, sha12, st.ImagesRetries),
+			Summary: fmt.Sprintf("images retries exhausted on %s for green %s: %d early re-runs ran and %s, so the commit waits for the hourly cycle",
+				rig, sha12, st.ImagesRetries, why),
 		})
 	}
 	return out, nil

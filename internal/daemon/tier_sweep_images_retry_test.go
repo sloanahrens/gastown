@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -905,18 +906,33 @@ type imagesRetryExhaustedCase struct {
 	retrySHA   string
 	answer     tierSweepImagesAnswer
 	wantRaised bool
+	// wantAnswer is the phrase the summary must carry for the answer it read.
+	wantAnswer string
 }
 
-// The item is raised only when the count reaches the cap for the green tip and
-// the images run is still failed: a count below the cap, one recorded for
-// another tip, and either answer that is not a failure raise nothing.
+// The item is raised when the count reaches the cap for the green tip and the
+// images answer is not published: a failed run and an answer the pair check
+// does not hold both raise it, because neither is proof the images published.
+// A count below the cap, one recorded for another tip, and a published answer
+// raise nothing.
 func TestTierSweepImagesRetryExhaustedRaised(t *testing.T) {
 	t.Parallel()
 	green := "0123456789abcdef0123456789abcdef01234567"
 	cases := []imagesRetryExhaustedCase{
 		{
 			name: "the cap for the green tip with its images still failed", lastGreen: green,
-			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesFailed, wantRaised: true,
+			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesFailed,
+			wantRaised: true, wantAnswer: "the build still failed",
+		},
+		{
+			name: "the cap with no images answer holds the item raised", lastGreen: green,
+			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesUnanswered,
+			wantRaised: true, wantAnswer: "the pair check holds no answer for the run",
+		},
+		{
+			name: "a count past the cap names the count the record read", lastGreen: green,
+			retries: tierSweepImagesRetryMax + 1, retrySHA: green, answer: tierSweepImagesFailed,
+			wantRaised: true, wantAnswer: "the build still failed",
 		},
 		{
 			name: "one below the cap raises nothing", lastGreen: green,
@@ -925,10 +941,6 @@ func TestTierSweepImagesRetryExhaustedRaised(t *testing.T) {
 		{
 			name: "the published images run raises nothing", lastGreen: green,
 			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesPublished,
-		},
-		{
-			name: "an answer the pair check does not hold is no failure", lastGreen: green,
-			retries: tierSweepImagesRetryMax, retrySHA: green, answer: tierSweepImagesUnanswered,
 		},
 		{
 			name: "a count recorded for another tip does not count", lastGreen: green,
@@ -977,7 +989,12 @@ func TestTierSweepImagesRetryExhaustedRaised(t *testing.T) {
 			if it.Rig != "gastown" || it.SHA != c.lastGreen {
 				t.Errorf("item = %+v, want the rig and the green tip %q", it, c.lastGreen)
 			}
-			for _, want := range []string{"gastown", greenRefShortSHA(c.lastGreen), "3 early re-runs"} {
+			for _, want := range []string{
+				"gastown",
+				greenRefShortSHA(c.lastGreen),
+				fmt.Sprintf("%d early re-runs", c.retries),
+				c.wantAnswer,
+			} {
 				if !strings.Contains(it.Summary, want) {
 					t.Errorf("summary %q does not name %q", it.Summary, want)
 				}
@@ -1055,6 +1072,50 @@ func TestTierSweepImagesRetryExhaustedRaisedOnce(t *testing.T) {
 		t.Errorf("the second tick moved FirstSeen to %v, want %v", second.FirstSeen, now)
 	}
 
+	var raised, cleared int
+	for _, e := range f.events(t) {
+		if e.Key != key {
+			continue
+		}
+		switch e.State {
+		case attention.EventNew:
+			raised++
+		case attention.EventCleared:
+			cleared++
+		}
+	}
+	if raised != 1 || cleared != 0 {
+		t.Errorf("events = %d new, %d cleared, want exactly one new and no clear", raised, cleared)
+	}
+}
+
+// An unanswered images read keeps a raised item: the pair check has not reached
+// the green tip, so it is no proof the images published and must not clear the
+// alarm a failed answer raised (gt-opkfch).
+func TestTierSweepImagesRetryExhaustedKeptAcrossAnUnansweredTick(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	green := imagesRetryGreen
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			LastGreenSHA: green, ImagesRetries: tierSweepImagesRetryMax, ImagesRetrySHA: green,
+		}, nil
+	}
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesFailed }
+	key := imagesRetryExhaustedKey(attentionRig, green)
+
+	first := itemByKey(t, f.tick(t, now), key)
+
+	f.d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer { return tierSweepImagesUnanswered }
+	second := itemByKey(t, f.tick(t, now.Add(time.Minute)), key)
+	if !second.FirstSeen.Equal(first.FirstSeen) {
+		t.Errorf("the unanswered tick moved FirstSeen to %v, want %v", second.FirstSeen, first.FirstSeen)
+	}
+	if !strings.Contains(second.Summary, "holds no answer") {
+		t.Errorf("summary %q does not name the unanswered read", second.Summary)
+	}
 	var raised, cleared int
 	for _, e := range f.events(t) {
 		if e.Key != key {
