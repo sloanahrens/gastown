@@ -136,6 +136,21 @@ const (
 	// CloudCheckKeyFile is the name of the operator's config-directory file the
 	// Secret is created from, and the annotation the create line reads.
 	CloudCheckKeyFile = CloudCheckKeySecretName
+	// DeepSeekBalanceSecretName is the operator's Secret holding the DeepSeek
+	// balance patrol's key file, DeepSeekBalanceKey its one data key, and
+	// DeepSeekBalancePath where the pod mounts it, which is the patrol's default
+	// key file (config.DeepSeekBalanceDefaultKeyFile). The Secret is created
+	// outside the render from the operator's config-directory file
+	// DeepSeekBalanceFile, and mounted only when Values.DeepSeekBalanceKey says
+	// the operator has that file, so a town without it runs the patrol
+	// unconfigured rather than waiting on a Secret that was never created
+	// (gt-hfcssw). The key's content never enters a manifest.
+	DeepSeekBalanceSecretName = "gt-deepseek-balance" //nolint:gosec // a Secret name, not a credential
+	DeepSeekBalanceKey        = "deepseek.env"
+	DeepSeekBalancePath       = "/var/run/secrets/gt-deepseek-balance/deepseek.env"
+	// DeepSeekBalanceFile is the operator's config-directory file the Secret is
+	// created from, and the annotation the create line reads.
+	DeepSeekBalanceFile = DeepSeekBalanceKey
 	// HMConfigSecretName is the operator's Secret holding the derived hm config:
 	// the file `gt daemon compose write` derives under the town's .runtime, with
 	// the database, the embedder and the reranker at the host. hm reads its config
@@ -724,6 +739,14 @@ type Values struct {
 	// never waits on a Secret that was not created (gt-c57pax). A rehearsal
 	// never mounts it.
 	CloudCheckKey bool
+	// DeepSeekBalanceKey mounts the operator's gt-deepseek-balance Secret at
+	// DeepSeekBalancePath, the deepseek_balance patrol's default key file. The
+	// command render sets it only when the operator's config directory holds the
+	// deepseek.env file the Secret is created from, so a pod never waits on a
+	// Secret that was not created; a town without the key runs the patrol
+	// unconfigured, which logs one line and fetches nothing (gt-hfcssw). A
+	// rehearsal never mounts it.
+	DeepSeekBalanceKey bool
 	// HMConfig mounts the gt-hm-config Secret at HMConfigPath and sets HM_CONFIG to
 	// that path, so hm reads the derived config whose database and embedder and
 	// reranker URLs name the host. The command render sets it only when the derived
@@ -936,6 +959,9 @@ func Build(v Values) (Manifests, error) {
 	if v.CloudCheckKey {
 		m.Secrets = append(m.Secrets, cloudCheckKeySecret(namespace))
 	}
+	if v.DeepSeekBalanceKey {
+		m.Secrets = append(m.Secrets, deepSeekBalanceKeySecret(namespace))
+	}
 	if v.HMConfig {
 		m.Secrets = append(m.Secrets, hmConfigSecret(namespace))
 	}
@@ -1013,6 +1039,25 @@ func cloudCheckKeySecret(namespace string) Secret {
 		},
 		Type:       "Opaque",
 		StringData: map[string]string{CloudCheckKeyKey: ""},
+	}
+}
+
+// deepSeekBalanceKeySecret is the placeholder Secret for the DeepSeek balance
+// key: the operator's own Secret (DeepSeekBalanceSecretName) is created outside
+// the render from DeepSeekBalanceFile, and the source annotation lets the
+// command print that create line with the data key the patrol reads. The key's
+// content is never in the manifest.
+func deepSeekBalanceKeySecret(namespace string) Secret {
+	return Secret{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		Metadata: ObjectMeta{
+			Name:        DeepSeekBalanceSecretName,
+			Namespace:   namespace,
+			Labels:      labels(),
+			Annotations: map[string]string{SourceFileAnnotation: DeepSeekBalanceFile},
+		},
+		Type:       "Opaque",
+		StringData: map[string]string{DeepSeekBalanceKey: ""},
 	}
 }
 
@@ -1827,6 +1872,17 @@ func volumes(v Values) ([]Volume, error) {
 			},
 		})
 	}
+	if v.DeepSeekBalanceKey {
+		mode := int32(0o400)
+		vols = append(vols, Volume{
+			Name: DeepSeekBalanceSecretName,
+			Secret: &SecretVolumeSource{
+				SecretName:  DeepSeekBalanceSecretName,
+				DefaultMode: &mode,
+				Items:       []KeyToPath{{Key: DeepSeekBalanceKey, Path: DeepSeekBalanceKey}},
+			},
+		})
+	}
 	if v.HMConfig {
 		mode := int32(0o400)
 		vols = append(vols, Volume{
@@ -1965,6 +2021,14 @@ func mounts(v Values) []VolumeMount {
 			ReadOnly:  true,
 		})
 	}
+	if v.DeepSeekBalanceKey {
+		m = append(m, VolumeMount{
+			Name:      DeepSeekBalanceSecretName,
+			MountPath: DeepSeekBalancePath,
+			SubPath:   DeepSeekBalanceKey,
+			ReadOnly:  true,
+		})
+	}
 	if v.HMConfig {
 		m = append(m, VolumeMount{
 			Name:      HMConfigSecretName,
@@ -2062,9 +2126,11 @@ func (v Values) withDefaults() Values {
 		v.TerminationGraceSeconds = DefaultTerminationGraceSeconds
 	}
 	// A rehearsal runs beside the live pod and mounts no live credential
-	// (validateRehearsal), so its cloud check key is never mounted.
+	// (validateRehearsal), so its cloud check key and DeepSeek balance key are
+	// never mounted.
 	if v.Rehearsal {
 		v.CloudCheckKey = false
+		v.DeepSeekBalanceKey = false
 	}
 	return v
 }

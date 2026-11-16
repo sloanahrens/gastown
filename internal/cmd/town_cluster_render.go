@@ -134,6 +134,7 @@ type clusterRenderDeps struct {
 	containerEnv             func(townRoot string) (map[string]string, error)
 	readFile                 func(path string) ([]byte, error)
 	lstat                    func(path string) (fs.FileInfo, error)
+	stat                     func(path string) (fs.FileInfo, error)
 	getenv                   func(key string) string
 	userHome                 func() (string, error)
 	build                    func(k8sdaemon.Values) (k8sdaemon.Manifests, error)
@@ -156,6 +157,7 @@ func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 		containerEnv:             realDaemonComposeDeps(out).containerEnv,
 		readFile:                 os.ReadFile,
 		lstat:                    os.Lstat,
+		stat:                     os.Stat,
 		getenv:                   os.Getenv,
 		userHome:                 os.UserHomeDir,
 		build:                    k8sdaemon.Build,
@@ -630,7 +632,13 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 	}
 	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
 	hmConfig := false
+	// A rehearsal never mounts the DeepSeek balance key (withDefaults clears it),
+	// so the key file cannot change its manifest and the render does not read it.
+	deepSeekBalanceKey := false
 	if !f.rehearsal {
+		if deepSeekBalanceKey, err = deepSeekBalanceKeyConfigured(f.configDir, d.lstat, d.stat); err != nil {
+			return k8sdaemon.Values{}, imagevalues.Values{}, "", err
+		}
 		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
 			return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 		}
@@ -647,6 +655,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		Rehearsal:               f.rehearsal,
 		Secrets:                 secrets.Files,
 		CloudCheckKey:           cloudCheckKey,
+		DeepSeekBalanceKey:      deepSeekBalanceKey,
 		HMConfig:                hmConfig,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
@@ -731,6 +740,36 @@ func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, 
 		return false, fmt.Errorf("the cloud check's key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
 	}
 	return true, nil
+}
+
+// deepSeekBalanceKeyConfigured reports whether the operator's config directory
+// holds the deepseek.env file the gt-deepseek-balance Secret is created from.
+// The patrol runs without the key (one log line and no fetch), and the pod must
+// not mount a Secret that was never created, so the mount and its create line
+// are rendered only for a configured key: a regular file, or a symlink that
+// resolves to one. A directory, a special file or a dangling symlink is not
+// configured (the render goes on without the mount), since a create line over
+// it could not read it. A path that cannot be inspected for any other reason
+// refuses the render rather than guessing the file away (gt-hfcssw).
+func deepSeekBalanceKeyConfigured(configDir string, lstat, stat func(string) (fs.FileInfo, error)) (bool, error) {
+	path := filepath.Join(configDir, k8sdaemon.DeepSeekBalanceFile)
+	info, err := lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("the deepseek balance key file %s cannot be inspected, so the render cannot tell whether to mount it: %w", path, err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		info, err = stat(path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("the deepseek balance key file %s is a symlink that cannot be followed, so the render cannot tell whether to mount it: %w", path, err)
+		}
+	}
+	return info.Mode().IsRegular(), nil
 }
 
 // hmConfigConfigured reports whether the derived hm config exists under the town
