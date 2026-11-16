@@ -169,20 +169,33 @@ func TestNoBeadAccessHookUnknownModeRefusesTheBeadStore(t *testing.T) {
 	}
 }
 
-// A host or dolt-mode run whose task directory cannot be reached at all (a
-// parent that is a file) is not a seat with an unreadable marker: it shows its
-// hook from the bead status exactly as before file mode existed (gt-5d9lft).
-func TestNoBeadAccessHookUnreachableTaskDirectoryIsDoltMode(t *testing.T) {
+// A task directory that cannot be reached at all (a parent that is a file) is
+// a marker that cannot be read, not a seat the display may guess is in dolt
+// mode: the mode is unknown, so the display refuses instead of opening the bead
+// store (gt-5d9lft).
+func TestNoBeadAccessHookUnreachableTaskDirectoryRefusesTheBeadStore(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "not-a-directory")
 	writeFile(t, parent, "a file where the task directory's parent should be")
-	deps, _, beadStatusRuns := hookSeatDepsFor(t, filepath.Join(parent, "task", "TASK.md"))
+	taskPath := filepath.Join(parent, "task", "TASK.md")
+	markerPath := filepath.Join(parent, "task", taskfile.ModeFile)
+	deps, out, beadStatusRuns := hookSeatDepsFor(t, taskPath)
 
-	if err := runHookStatusWith(deps); err != nil {
-		t.Fatalf("runHookStatusWith over an unreachable task directory = %v, want the bead status", err)
+	err := runHookStatusWith(deps)
+	if err == nil {
+		t.Fatal("runHookStatusWith over an unreachable task directory = nil; want the mode refused")
 	}
-	if *beadStatusRuns != 1 {
-		t.Errorf("hook ran the bead status %d time(s), want once, as before file mode", *beadStatusRuns)
+	if !strings.Contains(err.Error(), "bead access is unknown") {
+		t.Errorf("runHookStatusWith error = %q, want it to refuse the unknown mode", err)
+	}
+	if !strings.Contains(err.Error(), markerPath) {
+		t.Errorf("runHookStatusWith error = %q, want it to name the marker %s", err, markerPath)
+	}
+	if *beadStatusRuns != 0 {
+		t.Errorf("hook ran the bead status %d time(s) over an unreachable task directory; it must read no bead", *beadStatusRuns)
+	}
+	if out.String() != "" {
+		t.Errorf("runHookStatusWith printed %q over an unreachable task directory; it must print nothing", out.String())
 	}
 }
 
@@ -245,6 +258,72 @@ func TestNoBeadAccessHookFileModeReturnsTheWriteFailure(t *testing.T) {
 	}
 	if beadStatusRuns != 0 {
 		t.Errorf("hook ran the bead status %d time(s) over a failed write; it must read no bead", beadStatusRuns)
+	}
+}
+
+// Each case drives the production deps builder over a test seat and a bead
+// status that records every run, then the display, so a builder that dropped
+// the target, the JSON flag or the bead status wires the display to the wrong
+// seat and turns a row red (gt-5d9lft).
+func TestNoBeadAccessHookSeatDepsDriveTheDisplay(t *testing.T) {
+	t.Parallel()
+	const task = "# TASK gt-5d9lft: file mode\n"
+
+	cases := []struct {
+		name string
+		// fileMode builds the seat's task path with a marker and this task, or
+		// without a marker when false.
+		fileMode bool
+		args     []string
+		json     bool
+		// wantErr is what the refusal must say; "" means the task is printed.
+		wantErr      string
+		wantBeadRuns int
+	}{
+		{name: "no argument prints the seat's task", fileMode: true},
+		{name: "dolt mode runs the bead status", wantBeadRuns: 1},
+		{name: "the target argument reaches the display", fileMode: true, args: []string{"gastown/polecats/other"}, wantErr: "another agent's hook"},
+		{name: "the json flag reaches the display", fileMode: true, json: true, wantErr: "as JSON"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var taskPath string
+			if tc.fileMode {
+				taskPath = hookSeatFixture(t, task)
+			} else {
+				taskPath = filepath.Join(t.TempDir(), "TASK.md") // no marker
+			}
+			var out strings.Builder
+			beadStatusRuns := 0
+			deps := hookSeatDisplayDeps(tc.args, taskPath, &out, tc.json, func() error {
+				beadStatusRuns++
+				return nil
+			})
+
+			err := runHookStatusWith(deps)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("runHookStatusWith = nil, want a refusal of the %s request", tc.name)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("runHookStatusWith error = %q, want it to refuse the %s request", err, tc.name)
+				}
+				if out.String() != "" {
+					t.Errorf("runHookStatusWith printed %q over a refused request; it must print nothing", out.String())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("runHookStatusWith = %v, want the display to answer", err)
+				}
+				if tc.fileMode != strings.HasSuffix(out.String(), task) {
+					t.Errorf("hook output (file mode %v) does not print the task as wired:\n%s", tc.fileMode, out.String())
+				}
+			}
+			if beadStatusRuns != tc.wantBeadRuns {
+				t.Errorf("hook ran the bead status %d time(s), want %d", beadStatusRuns, tc.wantBeadRuns)
+			}
+		})
 	}
 }
 
