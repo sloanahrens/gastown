@@ -111,7 +111,10 @@ type tailBeads struct {
 	// comments reads one bead's comments. It is nil for a reader built without
 	// a comment source, and then submittedBy names no one.
 	comments func(rig, id string) ([]beads.Comment, error)
-	max      int
+	// samples reads the town's cost sample rows. It is nil for a reader built
+	// without a store opener, and then costSamples reports that.
+	samples func(kind string, since time.Time, limit int) ([]beads.Sample, error)
+	max     int
 
 	mu     sync.Mutex
 	titles map[string]string
@@ -387,7 +390,12 @@ func tailTitleBeadID(l tailLine) (string, bool) {
 type tailStore interface {
 	Show(id string) (*beads.Issue, error)
 	Comments(id string) ([]beads.Comment, error)
+	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]beads.Sample, error)
 }
+
+// tailTownRig names the town's own store in the reader's opener: the database
+// whose samples table holds the cost rows gt usage sample appends to.
+const tailTownRig = "hq"
 
 // newTailBeadsFromStore builds the reader over one store opener. A title and a
 // landing's submitter are asked of the same store, so the opener's own cache
@@ -407,7 +415,24 @@ func newTailBeadsFromStore(open func(rig string) (tailStore, error), max int) *t
 		}
 		return s.Comments(id)
 	}
+	b.samples = func(kind string, since time.Time, limit int) ([]beads.Sample, error) {
+		s, err := open(tailTownRig)
+		if err != nil {
+			return nil, err
+		}
+		return s.ReadCostSamples(context.Background(), kind, since, limit)
+	}
 	return b
+}
+
+// costSamples reads the town's cost sample rows of kind, newest first, through
+// the store this reader already opens (gt-hutsr6). A reader with no opener
+// reports that, never an empty series, which would read as a town with no rows.
+func (b *tailBeads) costSamples(kind string, since time.Time, limit int) ([]beads.Sample, error) {
+	if b == nil || b.samples == nil {
+		return nil, fmt.Errorf("no beads store is open to read %s rows from", kind)
+	}
+	return b.samples(kind, since, limit)
 }
 
 // openTailBeads is the production tailBeads.show: the store that owns a rig's
