@@ -1426,8 +1426,8 @@ type Daemon struct {
 	// and Run's return joins one it left (om_lessons_patrol.go).
 	omLessonsRunning atomic.Bool
 	omLessonsCycles  sync.WaitGroup
-	// omLessonsJoinWait overrides omLessonsJoinWait in tests.
-	omLessonsJoinWait time.Duration
+	// omLessonsJoinGrace overrides omLessonsJoinWait in tests.
+	omLessonsJoinGrace time.Duration
 	// omLessonsRun is the patrol's run seam: nil is omLessonsRunSkeleton,
 	// which proposes nothing until a later bead fills the body, and a test sets
 	// it to count the passes.

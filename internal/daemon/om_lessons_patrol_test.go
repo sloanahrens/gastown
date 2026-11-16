@@ -423,7 +423,7 @@ func TestReworkProgramOmLessonsStopJoinsTheRunningPass(t *testing.T) {
 	t.Run("the pass the ticker started is joined", func(t *testing.T) {
 		t.Parallel()
 		d, reached, unblock := blocking(t, io.Discard)
-		d.omLessonsJoinWait = time.Hour
+		d.omLessonsJoinGrace = time.Hour
 
 		d.startOmLessonsTick()
 		waitForSignal(t, reached, "the pass never reached the run seam")
@@ -451,7 +451,7 @@ func TestReworkProgramOmLessonsStopJoinsTheRunningPass(t *testing.T) {
 		t.Parallel()
 		var logged bytes.Buffer
 		d, reached, unblock := blocking(t, &logged)
-		d.omLessonsJoinWait = 30 * time.Millisecond
+		d.omLessonsJoinGrace = 30 * time.Millisecond
 
 		d.startOmLessonsTick()
 		waitForSignal(t, reached, "the pass never reached the run seam")
