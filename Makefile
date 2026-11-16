@@ -302,6 +302,8 @@ lint: docs-lint
 	bash scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml --build-tags integration $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
 	go run ./cmd/repo-guards
+	@echo "lint: hygiene scan (the operator's name and paths stay out of the tracked tree, gt-xl8mb8)"
+	go run ./internal/hygiene/cmd/scan
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	$(CPU_CLASS) go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
