@@ -1166,6 +1166,18 @@ func (g labeledDaemonGit) GitDir() (string, error) {
 	return reader.GitDir()
 }
 
+// AddedLinesSince counts the lines the handle's worktree adds over base through
+// the handle it wraps, so a labeled handle answers the question its unlabeled
+// handle would (gt-3y4bol). A handle that cannot count added lines is an error,
+// never a zero count: a zero reads as a seat that added nothing.
+func (g labeledDaemonGit) AddedLinesSince(base string) (int, error) {
+	counter, ok := g.daemonGit.(addedLinesCounter)
+	if !ok {
+		return 0, fmt.Errorf("the %s handle cannot count added lines", g.label)
+	}
+	return counter.AddedLinesSince(base)
+}
+
 // labelOverrunHostGit labels a host seat's handle as the host worktree.
 func labelOverrunHostGit(g daemonGit) daemonGit {
 	return labeledDaemonGit{daemonGit: g, label: overrunHostWorktreeLabel}
