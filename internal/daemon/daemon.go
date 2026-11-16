@@ -726,6 +726,14 @@ type Daemon struct {
 	// delivering its alerts; a tick that finds it set skips rather than stack a
 	// second check behind a slow gt escalate (gt-3v0sf).
 	staleGCCheckRunning atomic.Bool
+	// squashCheckRunning is set while the daily squash check runs off the
+	// select loop; it blocks a second check beside the first
+	// (maintenance_squash.go).
+	squashCheckRunning atomic.Bool
+	// squashCheckRun is the daily squash check's last completion time as this
+	// process recorded it, which outranks the persisted record when a save
+	// failed (gt-4nqej).
+	squashCheckRun patrolLastRunMemory
 	// doltMaintMu serializes a gc call (write side, TryLock) against the
 	// daemon's own Dolt tasks (read side, TryRLock via tryDoltTask). Nobody
 	// blocks on it; see maintenance_gc_guard.go.

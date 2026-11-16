@@ -210,9 +210,17 @@ func (d *Daemon) runScheduledMaintenance() {
 	// not the window, so it runs before the window is parsed.
 	d.checkStaleMaintenanceGC(now)
 
+	// The daily squash check rides every tick too, and keeps its own daily
+	// gate: it reads the backup and Dolt numbers and is not tied to the window
+	// or to the quiet-window guard, because a reading taken only in a quiet
+	// instant would almost never be taken (gt-y6ovz). The block it is built
+	// from decides whether any of it runs (maintenance_squash.go).
+	d.triggerSquashCheck()
+
 	// An archive-now request runs the history archive pass and nothing else,
-	// and returns before any window work. It is reached only after the check
-	// above, so a tick that serves one still settles the stale-gc alerts.
+	// and returns before any window work. It is reached only after the
+	// stale-gc check above, so a tick that serves one still settles the
+	// stale-gc alerts.
 	if archiveRequested {
 		d.serveArchiveRequest(archiveRequest)
 		return
