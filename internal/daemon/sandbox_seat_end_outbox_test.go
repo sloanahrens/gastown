@@ -3,6 +3,8 @@ package daemon
 import (
 	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -153,6 +155,67 @@ func TestNoBeadAccessSeatEndSkipsTheCopyWhenTheSandboxIsGone(t *testing.T) {
 	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
 	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
 		t.Fatal("the seat end did not finish a seat whose sandbox is gone")
+	}
+}
+
+// A sandbox record the host cannot read is not copied from this step's account:
+// the copy is not asked, the log names the read failure, and the delete steps
+// that follow re-read the record and keep the seat with their own reason, so no
+// sandbox is deleted on a record this step could not read (gt-c6tofd).
+func TestNoBeadAccessSeatEndUnreadableRecordIsNotCopied(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	sessionName := f.host.sessionName(endRig, endPolecat)
+	registry := session.SandboxRegistryDir(f.town)
+	if err := os.MkdirAll(registry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(registry, sessionName+".json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+	asked := 0
+	f.host.sandboxOutboxCopy = func(string, session.SandboxRecord) error {
+		asked++
+		return nil
+	}
+	deleted := 0
+	f.host.sandboxDeleter = func(string, session.SandboxRecord) error {
+		deleted++
+		return nil
+	}
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end finished a seat whose sandbox record it could not read")
+	}
+	if asked != 0 {
+		t.Errorf("the outbox was copied %d times from a record the host could not read, want no copy", asked)
+	}
+	if deleted != 0 {
+		t.Errorf("the sandbox was deleted %d times on a record the host could not read, want it kept", deleted)
+	}
+	if !strings.Contains(logs.String(), "its outbox is not copied out") {
+		t.Errorf("log %q does not name the record it could not read", logs.String())
+	}
+	path, err := keptSandboxSeatPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := readKeptSandboxSeatRecord(path)
+	if err != nil {
+		t.Fatalf("reading the kept record: %v", err)
+	}
+	if strings.Contains(kept.Reason, outboxNotCopiedReason) {
+		t.Errorf("kept reason = %q, want the delete step's own reason, not this step's read failure", kept.Reason)
+	}
+	if !strings.Contains(kept.Reason, "cannot be read") {
+		t.Errorf("kept reason = %q, want the delete step's record read failure", kept.Reason)
 	}
 }
 
