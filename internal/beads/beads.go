@@ -1909,21 +1909,21 @@ func (b *Beads) runWithStdinCtx(ctx context.Context, stdinData []byte, args ...s
 // the retry loop, a transient failure is the answer. Only a non-idempotent
 // write belongs here — a retry after a connection lost mid-command can apply
 // the write a second time, so an ambiguous failure is reported instead,
-// leaving the caller to decide whether to write again.
-func (b *Beads) runOnceCtx(ctx context.Context, stdinData []byte, args ...string) ([]byte, error) {
+// leaving the caller to decide whether to write again. Every caller appends a
+// sample row and parses no output, so the call returns the error alone.
+func (b *Beads) runOnceCtx(ctx context.Context, stdinData []byte, args ...string) error {
 	args, runEnv := b.pinnedArgsAndEnv(args)
 
-	var out []byte
 	var err error
 	if b.plain {
-		out, err = b.runPlain(ctx, stdinData, args)
+		_, err = b.runPlain(ctx, stdinData, args)
 	} else {
-		out, err = b.runBdOnce(ctx, stdinData, runEnv, args)
+		_, err = b.runBdOnce(ctx, stdinData, runEnv, args)
 	}
 	if err != nil {
-		return out, b.explainPause(err)
+		return b.explainPause(err)
 	}
-	return LegacyPayload(args, out), nil
+	return nil
 }
 
 // pinnedArgsAndEnv returns args with the injections every pinned call gets and

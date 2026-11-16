@@ -66,7 +66,7 @@ func (b *Beads) WriteCostSample(ctx context.Context, s Sample) error {
 	args := []string{"sample", "add", "--kind", kind, "--at", at, "--json", "-"}
 	// No retry loop (runOnceCtx): a row is an append, so a retry after a
 	// connection lost mid-command could store the sample twice.
-	if _, err := b.runOnceCtx(ctx, payload, args...); err != nil {
+	if err := b.runOnceCtx(ctx, payload, args...); err != nil {
 		return fmt.Errorf("bd sample add: %w", err)
 	}
 	return nil
