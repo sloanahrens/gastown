@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/taskfile"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -25,6 +27,8 @@ var hookCmd = &cobra.Command{
 	Long: `Show what's on your hook, or attach new work.
 
 With no arguments, shows your current hook status (alias for 'gt mol status').
+In file mode (a seat with no bead access) it prints the task from its TASK.md
+instead, and reads no bead.
 With a bead ID, attaches that work to your hook.
 With a bead ID and target, attaches work to another agent's hook.
 
@@ -61,7 +65,7 @@ Examples:
   gt hook status                    # Show my hook
   gt hook status greenplace/nux     # Show nux's hook`,
 	Args: cobra.MaximumNArgs(1),
-	RunE: runMoleculeStatus,
+	RunE: runHookStatusSeat,
 }
 
 // hookShowCmd shows hook status in compact one-line format
@@ -191,10 +195,124 @@ func runHookOrStatus(cmd *cobra.Command, args []string) error {
 	}
 	if len(args) == 0 {
 		// No args - show status
-		return runMoleculeStatus(cmd, args)
+		return runHookStatusSeat(cmd, args)
 	}
 	// Has arg - attach work
 	return runHook(cmd, args)
+}
+
+// hookSeatDeps is what the hook display runs on: the seat's TASK.md, the
+// writer it prints to, the target and JSON flags it was asked for, and the
+// bead status every seat outside file mode reads. beadStatus is
+// runMoleculeStatus in production; the field exists so a test of the file-mode
+// display can prove the bead read never runs (gt-5d9lft).
+type hookSeatDeps struct {
+	taskPath   string
+	out        io.Writer
+	target     string
+	json       bool
+	beadStatus func() error
+}
+
+// hookSeatWork is the seat's hook as the display reads it: the TASK.md text in
+// file mode, and the bare path otherwise, where the bead status answers.
+type hookSeatWork struct {
+	task     string
+	taskPath string
+	fileMode bool
+}
+
+// hookSeatDisplayDeps is the display's production deps for the command being
+// run.
+func hookSeatDisplayDeps(cmd *cobra.Command, args []string) hookSeatDeps {
+	deps := hookSeatDeps{
+		taskPath:   primeSeatTaskPath(),
+		out:        os.Stdout,
+		json:       moleculeJSON,
+		beadStatus: func() error { return runMoleculeStatus(cmd, args) },
+	}
+	if len(args) > 0 {
+		deps.target = args[0]
+	}
+	return deps
+}
+
+// runHookStatusSeat shows a hook with the production deps.
+func runHookStatusSeat(cmd *cobra.Command, args []string) error {
+	return runHookStatusWith(hookSeatDisplayDeps(cmd, args))
+}
+
+// runHookStatusWith shows the hook on the caller's seat. A file-mode seat has
+// no route to Dolt (gt-1m0kb): it prints its own task from TASK.md, and
+// deps.beadStatus, the bead read, never runs. Every other seat gets the bead
+// status exactly as before.
+//
+// Two requests a file-mode seat cannot answer are refused rather than answered
+// with its own task, which is not the hook they name: another agent's hook
+// (deps.target) and the bead status as JSON (deps.json) both need the bead
+// store.
+func runHookStatusWith(deps hookSeatDeps) error {
+	work, err := hookSeatTask(deps.taskPath)
+	if err != nil {
+		return err
+	}
+	if !work.fileMode {
+		return deps.beadStatus()
+	}
+	if deps.target != "" {
+		return fmt.Errorf("gt hook: this seat is in file mode, so it has no bead access and can show only its own task, from %s; another agent's hook %q cannot be read", work.taskPath, deps.target)
+	}
+	if deps.json {
+		return fmt.Errorf("gt hook: this seat is in file mode, so it has no bead status to print as JSON; its task is the file %s", work.taskPath)
+	}
+	_, err = fmt.Fprint(deps.out, hookFileModeTask(work))
+	return err
+}
+
+// hookSeatTask reads the seat's hook. When the directory holding taskPath
+// carries the file-mode marker, the task is TASK.md's text and the bead store
+// is never consulted.
+//
+// A marker that is there but cannot be read leaves the mode unknown, and a
+// file-mode seat whose TASK.md is missing or unreadable has no bead to fall
+// back to: both are errors naming the path, so the display refuses instead of
+// reading a bead the seat may not reach (the rule gt prime follows, gt-w1mzol).
+// A task directory that cannot be reached at all is a host or dolt-mode run,
+// which the display treats exactly as before file mode existed.
+func hookSeatTask(taskPath string) (hookSeatWork, error) {
+	taskDir := filepath.Dir(taskPath)
+	files, err := taskfile.ReadFileMode(taskDir)
+	if err != nil {
+		if _, statErr := os.Stat(taskDir); statErr != nil {
+			files, err = false, nil
+		}
+	}
+	if err != nil {
+		return hookSeatWork{taskPath: taskPath},
+			fmt.Errorf("gt hook: the seat's bead access is unknown, so it reads neither its task file nor the bead store: %w", err)
+	}
+	if !files {
+		return hookSeatWork{taskPath: taskPath}, nil
+	}
+	data, err := os.ReadFile(taskPath)
+	if err != nil {
+		return hookSeatWork{taskPath: taskPath},
+			fmt.Errorf("gt hook: this seat is in file mode but its task file cannot be read, so there is no bead to fall back to: %w", err)
+	}
+	return hookSeatWork{fileMode: true, task: string(data), taskPath: taskPath}, nil
+}
+
+// hookFileModeTask is what the hook display prints for a file-mode seat: the
+// task from TASK.md under the line naming the file it came from, so a seat
+// whose output was cut short can read the whole file itself.
+func hookFileModeTask(work hookSeatWork) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## 📋 Hooked task (from %s)\n\n", work.taskPath)
+	b.WriteString(work.task)
+	if !strings.HasSuffix(work.task, "\n") {
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // runHookClear handles 'gt hook clear' - delegates to runUnsling
