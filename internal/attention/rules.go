@@ -123,6 +123,11 @@ const (
 	// nothing retries it (gt-d6ok4r).
 	RuleDeployPairRefused = "deploy.pair_refused"
 
+	// RuleDeployPairSkew is the skewed-pair rule: the bd commit a green
+	// commit's deploy image pins carries a schema level the live database does
+	// not, so the roll would start a daemon its handshake refuses (gt-qnjuqp).
+	RuleDeployPairSkew = "deploy.pair_skew"
+
 	// RuleImagesFailed is the failed-image-build rule: the images workflow's
 	// newest run for a green commit ended failed or canceled, so the commit
 	// has no daemon and polecat images to roll onto (gt-3vafwr).
@@ -285,6 +290,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A refused pair means the roll cannot start and nothing retries it: like
 	// a failed image build, the overseer is woken to fix the check (gt-d6ok4r).
 	RuleDeployPairRefused: flagsWake,
+	// A skewed pair cannot roll and nothing retries it by itself: the overseer
+	// is woken to move the bd pin or run the migration (gt-qnjuqp).
+	RuleDeployPairSkew: flagsWake,
 	// A green commit whose image build failed never gets the pair the roll
 	// waits on, and nothing retries it by itself: the overseer is woken to
 	// re-run the build or fix what broke it (gt-3vafwr).
@@ -450,6 +458,7 @@ var kindRules = map[Kind]string{
 	KindDeployPairUnreadable:          RuleDeployPairUnreadable,
 	KindDeployPairStuck:               RuleDeployPairStuck,
 	KindDeployPairRefused:             RuleDeployPairRefused,
+	KindDeployPairSkew:                RuleDeployPairSkew,
 	KindImagesFailed:                  RuleImagesFailed,
 	KindImagesUnknown:                 RuleImagesUnknown,
 	KindTierSweepImagesRetryExhausted: RuleTierSweepImagesRetryExhausted,
