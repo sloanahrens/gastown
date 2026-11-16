@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -187,6 +188,10 @@ type ClaudePlanReader struct {
 	// is EmbeddedClaudePrices unless a test points it elsewhere.
 	prices     func() (*ClaudePriceTable, error)
 	renewalDay int
+	// given is a series a caller read from another source, the town's cost
+	// rows. A non-nil slice is folded instead of the file at path; the closeout
+	// history still lives beside path (gt-hutsr6).
+	given []ClaudePlanSample
 }
 
 // NewClaudePlanReader returns a reader of the series at path, pricing its
@@ -229,8 +234,18 @@ func (r *ClaudePlanReader) WithUsageAbsent(absent func() bool) *ClaudePlanReader
 	return r
 }
 
+// WithSamples makes Read fold the given series instead of reading the file at
+// the reader's path, so a caller whose source answered draws the same payload
+// the file would (gt-hutsr6). The closeout history is still kept beside the
+// path. A nil slice reads the file.
+func (r *ClaudePlanReader) WithSamples(samples []ClaudePlanSample) *ClaudePlanReader {
+	r.given = samples
+	return r
+}
+
 // Read returns the block's payload from the series as it stands at now: a file
 // that is missing or unreadable is an unavailable block, never an empty week.
+// A series given by WithSamples is folded in place of the file.
 //
 // The poll also records windows whose reset has passed and trims the series. A
 // failure of either leaves the week and month as drawn and is reported in
@@ -238,7 +253,12 @@ func (r *ClaudePlanReader) WithUsageAbsent(absent func() bool) *ClaudePlanReader
 func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	samples, err := readClaudePlanSamples(r.path)
+	given := r.given != nil
+	samples := r.given
+	var err error
+	if !given {
+		samples, err = readClaudePlanSamples(r.path)
+	}
 	var p ClaudePlan
 	var stateErrs []error
 	if err != nil {
@@ -247,7 +267,14 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 			p.Reason = NotInClusterReason
 		}
 	} else {
-		if err := trimClaudePlanSamples(r.path, now.Add(-claudePlanRetentionDays*24*time.Hour)); err != nil {
+		if given {
+			// The rows answered, so this town may have never written a series
+			// file, and the closeout history's directory is one the dashboard
+			// must make before it appends there.
+			if err := os.MkdirAll(filepath.Dir(r.historyPath), 0o755); err != nil {
+				stateErrs = append(stateErrs, fmt.Errorf("weekly history directory: %w", err))
+			}
+		} else if err := trimClaudePlanSamples(r.path, now.Add(-claudePlanRetentionDays*24*time.Hour)); err != nil {
 			stateErrs = append(stateErrs, fmt.Errorf("series trim: %w", err))
 		}
 		p = ComputeClaudePlan(samples, now, r.planUSDMonth)

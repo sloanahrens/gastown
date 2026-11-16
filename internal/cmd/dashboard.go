@@ -123,15 +123,18 @@ unavailable and keeps the last good panel. The Cost panel's spend row is left
 alone.
 
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
-five-hour limits, read every minute from the samples the status line appends to
-.runtime/claude-plan/samples.jsonl, with the pace, the projection to the reset
-and the week's dollars drawn against that monthly price. The same read rolls the
-weeks up into the billing month that starts on the plan's renewal day
-(--claude-plan-renewal-day, the 18th by default): each week is recorded once, as
-its reset passes, in .runtime/claude-plan/weeks.jsonl, and the month reports what
-those weeks came to against the plan's price, how many ran to 90% of the limit
-and how it compares with the month before. The raw series is trimmed to ninety
-days as it is polled; the weekly history is what outlives it.
+five-hour limits, read every minute from the town's claude_plan cost samples
+(the rows gt usage sample records), and from the samples file the status line
+appends to .runtime/claude-plan/samples.jsonl only while the town has no such
+row, with the pace, the projection to the reset and the week's dollars drawn
+against that monthly price. The log names the source that answered each time it
+changes. The same read rolls the weeks up into the billing month that starts on
+the plan's renewal day (--claude-plan-renewal-day, the 18th by default): each
+week is recorded once, as its reset passes, in .runtime/claude-plan/weeks.jsonl,
+and the month reports what those weeks came to against the plan's price, how
+many ran to 90% of the limit and how it compares with the month before. The
+samples file is trimmed to ninety days while it is the source; the weekly
+history is what outlives it.
 
 The same samples draw a Claude series in the Cost panel's daily and hourly
 charts, in the same buckets as the DeepSeek bars: each rise in the weekly
@@ -257,7 +260,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, os.UserHomeDir, cmd.OutOrStdout())
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, cmd.OutOrStdout())
 	if err != nil {
 		return err
 	}
@@ -350,18 +353,6 @@ func dashboardMangoPath(townRoot, mangoDir string) string {
 	return filepath.Join(townRoot, ".runtime", "metrics", "latest")
 }
 
-// newDashboardClaudePlanReader builds the Cost panel's plan meter over the
-// status line series at path (see resolveClaudePlanPath), priced by the flag,
-// with the usage scan's records behind it so the plan line can lay what the
-// town's Claude tokens would have cost on the API beside the flat plan price
-// (gt-d8sem). The records come through the panel's own reader, whose cache the
-// two share, so a month of files is decoded once for both panels.
-func newDashboardClaudePlanReader(path string, usage *dashUsageReader, planUSDMonth float64) *dashboard.ClaudePlanReader {
-	return dashboard.NewClaudePlanReader(path, planUSDMonth).
-		WithUsage(usage.monthRecords).
-		WithUsageAbsent(usage.absent)
-}
-
 // closeCloudLedger releases the cloud step's database pool when the source holds
 // one. The hub is stopping, so a close error is reported on stderr, the one
 // place left to report it.
@@ -373,63 +364,10 @@ func closeCloudLedger(s cloudledger.Source) {
 	}
 }
 
-// dashboardClaudePlanPath is the town's own Claude plan series: one JSON line
-// per reading, under the town's runtime directory. It is the fallback
-// resolveClaudePlanPath answers with when the home tree has no series.
-func dashboardClaudePlanPath(townRoot string) string {
-	return filepath.Join(townRoot, ".runtime", "claude-plan", "samples.jsonl")
-}
-
-// resolveClaudePlanPath is the series the plan meter reads: the status line's
-// file under the home directory when it exists, else the town's own series. The
-// dashboard pod mounts the Mac's ~/.claude at the home path, so the file there is
-// the one the status line writes, and the town's copy is a snapshot that falls
-// behind it. The home lookup and the file check are injected so a test drives
-// each case without the real home. A home lookup that fails, or a check that
-// fails for a reason other than the file's absence, falls back to the town's
-// series and the reason goes to whyLog. Callers resolve it on every poll, so a
-// file that appears after the hub started is read at the next poll.
-func resolveClaudePlanPath(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog) string {
-	town := dashboardClaudePlanPath(townRoot)
-	h, err := home()
-	if err != nil {
-		whyLog.claudePlanSeries(town, fmt.Sprintf("no home directory: %v", err))
-		return town
-	}
-	homePath := filepath.Join(h, ".claude", ".runtime", "claude-plan", "samples.jsonl")
-	_, err = stat(homePath)
-	switch {
-	case err == nil:
-		whyLog.claudePlanSeries(homePath, "")
-		return homePath
-	case errors.Is(err, fs.ErrNotExist):
-		whyLog.claudePlanSeries(town, "")
-		return town
-	default:
-		whyLog.claudePlanSeries(town, fmt.Sprintf("cannot stat %s: %v", homePath, err))
-		return town
-	}
-}
-
-// newDashboardClaudePlanRead is the plan meter's read for the hub. It resolves the
-// series path on every poll, not once at build: the status line can begin writing
-// under the home directory after the hub has started, and the next poll must
-// read it. The series the meter starts on is resolved once at build too, so the
-// log names it from the start; the why-log logs a change only once.
-func newDashboardClaudePlanRead(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog, usage *dashUsageReader, planUSDMonth float64, renewalDay int) func() *dashboard.ClaudePlan {
-	resolve := func() string { return resolveClaudePlanPath(townRoot, home, stat, whyLog) }
-	resolve()
-	return func() *dashboard.ClaudePlan {
-		return newDashboardClaudePlanReader(resolve(), usage, planUSDMonth).
-			WithRenewalDay(renewalDay).
-			Read(time.Now())
-	}
-}
-
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, home func() (string, error), out io.Writer) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
 	// The cloud step's source comes from these settings, so a file that does
 	// not parse stops the hub here rather than showing a pane read from a step
 	// the town meant to configure differently.
@@ -540,7 +478,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
-	claudePlan := newDashboardClaudePlanRead(townRoot, home, os.Stat, whyLog, usage, claudePlanUSD, claudePlanRenewalDay)
+	claudePlan := newDashboardClaudePlanRead(townRoot, beadReads.costSamples, whyLog, usage, claudePlanUSD, claudePlanRenewalDay, time.Now)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
 	mango := dashboardMangoPath(townRoot, mangoDir)
@@ -1019,18 +957,18 @@ func (l *dashWhyLog) deployRepo(fellBack string) {
 // dashClaudePlanSource keys the plan meter's series in the log's last map.
 const dashClaudePlanSource = "claude plan series"
 
-// claudePlanSeries logs which series the plan meter reads, once per change: path
-// is the file that answered and fellBack is the reason the home lookup failed,
-// "" otherwise. A nil log records nothing.
-func (l *dashWhyLog) claudePlanSeries(path, fellBack string) {
+// claudePlanSeries logs which source the plan meter read, once per change:
+// source is the rows or the file that answered, and why is the reason a
+// preferred source did not, "" otherwise. A nil log records nothing.
+func (l *dashWhyLog) claudePlanSeries(source, why string) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	msg := path
-	if fellBack != "" {
-		msg = path + " (" + fellBack + ")"
+	msg := source
+	if why != "" {
+		msg = source + " (" + why + ")"
 	}
 	if l.last[dashClaudePlanSource] == msg {
 		return

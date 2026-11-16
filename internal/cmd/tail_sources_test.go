@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -1906,6 +1907,11 @@ type fakeCommentStore struct {
 	err      error
 	shows    int
 	comment  int
+
+	sampleRows []beads.Sample
+	sampleErr  error
+	kind       string
+	limit      int
 }
 
 func (s *fakeCommentStore) Show(id string) (*beads.Issue, error) {
@@ -1916,6 +1922,11 @@ func (s *fakeCommentStore) Show(id string) (*beads.Issue, error) {
 func (s *fakeCommentStore) Comments(string) ([]beads.Comment, error) {
 	s.comment++
 	return s.comments, s.err
+}
+
+func (s *fakeCommentStore) ReadCostSamples(_ context.Context, kind string, _ time.Time, limit int) ([]beads.Sample, error) {
+	s.kind, s.limit = kind, limit
+	return s.sampleRows, s.sampleErr
 }
 
 // TestTailBeadsFromStoreReadsComments: the production reader's comments
@@ -1949,6 +1960,44 @@ func TestTailBeadsFromStoreReadsComments(t *testing.T) {
 	b = newTailBeadsFromStore(func(string) (tailStore, error) { return nil, fmt.Errorf("no store") }, tailTitleCacheSize)
 	if got := b.submittedBy("gastown", "gt-1"); got != submitterUnknown {
 		t.Fatalf("submittedBy with no store = %q, want %q", got, submitterUnknown)
+	}
+}
+
+// TestTailBeadsReadsCostSamplesThroughTheTownStore: the plan meter's rows come
+// through the store the hub's reader already opens, over the town's own
+// database, and a reader with no store reports that rather than answering a
+// town with no rows (gt-hutsr6).
+func TestTailBeadsReadsCostSamplesThroughTheTownStore(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeCommentStore{sampleRows: []beads.Sample{{Kind: beads.SampleKindClaudePlan}}}
+	var opened []string
+	b := newTailBeadsFromStore(func(rig string) (tailStore, error) {
+		opened = append(opened, rig)
+		return store, nil
+	}, tailTitleCacheSize)
+
+	rows, err := b.costSamples(beads.SampleKindClaudePlan, time.Time{}, 7)
+	if err != nil {
+		t.Fatalf("costSamples: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("costSamples = %v, want the store's one row", rows)
+	}
+	if len(opened) != 1 || opened[0] != tailTownRig {
+		t.Fatalf("opened %v, want the town's store", opened)
+	}
+	if store.kind != beads.SampleKindClaudePlan || store.limit != 7 {
+		t.Errorf("the store was asked for kind %q with limit %d, want the caller's read", store.kind, store.limit)
+	}
+
+	var noStore *tailBeads
+	if _, err := noStore.costSamples(beads.SampleKindClaudePlan, time.Time{}, 0); err == nil {
+		t.Error("a reader with no store answered no error, want the missing store named")
+	}
+	unopenable := newTailBeadsFromStore(func(string) (tailStore, error) { return nil, fmt.Errorf("no store") }, tailTitleCacheSize)
+	if _, err := unopenable.costSamples(beads.SampleKindClaudePlan, time.Time{}, 0); err == nil {
+		t.Error("a store that cannot be opened answered no error, want the failed open named")
 	}
 }
 
