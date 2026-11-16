@@ -354,7 +354,7 @@ func TestRunOverrunGuard_DryRunInAGateLogsNoStop(t *testing.T) {
 
 	d.runOverrunGuard(f.seams())
 
-	if strings.Contains(buf.String(), "would stop") || strings.Contains(buf.String(), "would nudge") {
+	if strings.Contains(buf.String(), "would stop") || strings.Contains(buf.String(), "would mark") {
 		t.Errorf("dry run reported an action for a seat inside its gate:\n%s", buf.String())
 	}
 	if !strings.Contains(buf.String(), "inside its gate") {
@@ -373,7 +373,7 @@ func TestRunOverrunGuard_DryRunWaitingOnAnEscalationLogsNoStop(t *testing.T) {
 
 	d.runOverrunGuard(f.seams())
 
-	if strings.Contains(buf.String(), "would stop") || strings.Contains(buf.String(), "would nudge") {
+	if strings.Contains(buf.String(), "would stop") || strings.Contains(buf.String(), "would mark") {
 		t.Errorf("dry run reported an action for a seat waiting on its escalation:\n%s", buf.String())
 	}
 	if !strings.Contains(buf.String(), "waiting on an escalation") {
@@ -381,17 +381,6 @@ func TestRunOverrunGuard_DryRunWaitingOnAnEscalationLogsNoStop(t *testing.T) {
 	}
 	if st, err := readOverrunState(d.config.TownRoot, "gt-esc01"); err != nil || !st.sameWait(overrunState{}) {
 		t.Errorf("dry run wrote wait state %+v (err %v), want none", st, err)
-	}
-}
-
-// The nudge names the clock it is on, because a seat waiting inside its own
-// gate is the one case where a long-running bead is not an overrun (gt-vfwuc).
-func TestOverrunNudgeMessageNamesGateTime(t *testing.T) {
-	t.Parallel()
-	for _, want := range []string{"gate", "does not count"} {
-		if !strings.Contains(overrunNudgeMessage, want) {
-			t.Errorf("overrunNudgeMessage does not mention %q: %s", want, overrunNudgeMessage)
-		}
 	}
 }
 

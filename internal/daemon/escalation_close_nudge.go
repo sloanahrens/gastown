@@ -65,8 +65,8 @@ const escalationCloseNudgeHeadroom = 11 * time.Second
 // wait-idle fallback still in flight, and the pass then sends the close again,
 // so the seat reads it twice (gt-2fgnjc); a send given less than this, its
 // share when several closes divide a pass, is told apart by how long it ran
-// (escalationCloseSendCommitted). It is not overrunNudgeTimeout, so tuning the
-// overrun guard does not change this send.
+// (escalationCloseSendCommitted). It is this send's own bound, so tuning another
+// patrol's delivery does not change this send.
 const escalationCloseNudgeTimeout = escalationCloseDeliveryWorstCase + escalationCloseNudgeHeadroom
 
 // escalationCloseSendCommitPoint is where a wait-idle send has put the message
