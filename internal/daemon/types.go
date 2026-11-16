@@ -608,8 +608,7 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.ImagePins.Enabled
 	}
-	// deepseek_balance is opt-in: each tick spends a request against the
-	// account's key, so only an explicit enabled:true turns it on (gt-whaxw7).
+	// deepseek_balance is opt-in; its config block says why (gt-whaxw7).
 	if patrol == "deepseek_balance" {
 		if config == nil || config.Patrols == nil || config.Patrols.DeepSeekBalance == nil {
 			return false

@@ -214,10 +214,12 @@ func (d *Daemon) deepSeekBalanceKeyRead() {
 // operator meant it to hold one. A read error names the path only.
 func deepSeekBalanceReadKey(path string) (string, bool, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the operator's key_file setting
+	// An absent file is the unconfigured town, which the caller reports once. It
+	// is a state, not a failure, so it is the one read that returns no error.
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", false, nil
-		}
 		return "", false, fmt.Errorf("%s: %w", path, err)
 	}
 	key := ""
