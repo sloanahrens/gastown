@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,12 +12,16 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -104,6 +111,17 @@ const sandboxSessionLiveReason = "session still live"
 // copied out of its sandbox: the sandbox holds the only copy of what the seat
 // wrote, so the delete waits for a copy that works (gt-c6tofd).
 const outboxNotCopiedReason = "its outbox is not copied out of its sandbox, so nothing it wrote is deleted with it"
+
+// outboxNotReadReason is the keep reason of a seat whose copied-out outbox, or
+// the bead it is applied to, cannot be read: nothing is applied from a read
+// that failed, and the copy waits for one that works (gt-s4gfph).
+const outboxNotReadReason = "its outbox copy or its bead cannot be read, so the result it holds is not applied"
+
+// outboxEscalationReason is the keep reason of a seat whose outbox's HELP
+// request the store did not file as an escalation bead. That request is what
+// the outbox exists for, so the sandbox stays until a later pass files it
+// (gt-s4gfph).
+const outboxEscalationReason = "its outbox's escalation request is not filed as an escalation bead"
 
 // keepReason names why the seat's host directories must stay, or "" when they
 // may be removed. Every reason is a fact someone else measured; the first one
@@ -232,6 +250,15 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 				h.clearPendingSeatEnd(rig, name)
 				return nil
 			}
+		}
+		// The outbox is applied as soon as it is on the host, whatever keeps
+		// the seat afterwards: its HELP request is the seat's ask for a human
+		// at the moment it ended, so it is filed before any delete can make the
+		// seat wait a whole patrol tick (gt-s4gfph).
+		if why := h.applySeatOutbox(rig, name, landing.BeadID); why != "" {
+			kept = why
+			h.clearPendingSeatEnd(rig, name)
+			return nil
 		}
 		// A sandbox the gateway still holds is ended here, at the landing, once
 		// every other fact releases the seat (gt-0vb2fy). The probe takes that
@@ -615,6 +642,286 @@ func (h *patrolScanHost) copySeatOutbox(rig, name, gateway string) string {
 		return outboxNotCopiedReason + ": " + err.Error()
 	}
 	return ""
+}
+
+// The two files a seat's outbox holds, under the copy directory
+// session.CopySandboxSeatOutbox writes them into. notes.md is outbox.NotesFile,
+// the name the seat writes it under and the name a file-mode `gt bead note`
+// appends to.
+const (
+	seatOutboxResultFile = "result.json"
+	seatOutboxNotesFile  = outbox.NotesFile
+)
+
+// seatEscalationSource is the source an outbox's escalation is filed under.
+const seatEscalationSource = "sandbox-seat-end"
+
+// appliedSeatOutbox records what a pass applied from a seat's outbox, so a seat
+// end that runs again for the same seat writes nothing twice: the notes, the
+// ticks and the findings a pass wrote are not written again, and neither is an
+// escalation a pass filed. A record of another bead, or of other bytes, is
+// another run of the same polecat name and is applied (gt-s4gfph).
+type appliedSeatOutbox struct {
+	Bead      string `json:"bead"`
+	Digest    string `json:"digest"`
+	Escalated bool   `json:"escalated"`
+}
+
+// appliedSeatOutboxDir is <town>/.runtime/sandbox-seat-outbox.
+func appliedSeatOutboxDir(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "sandbox-seat-outbox")
+}
+
+// appliedSeatOutboxPath names the record of one seat, refusing a rig or polecat
+// name a path cannot hold.
+func appliedSeatOutboxPath(townRoot, rig, name string) (string, error) {
+	if err := polecat.CheckSandboxSeatNames(rig, name); err != nil {
+		return "", err
+	}
+	return filepath.Join(appliedSeatOutboxDir(townRoot), rig, name+".json"), nil
+}
+
+// readAppliedSeatOutbox returns the seat's record, false when it has none, and
+// an error for a record that exists and cannot be read.
+func readAppliedSeatOutbox(townRoot, rig, name string) (appliedSeatOutbox, bool, error) {
+	path, err := appliedSeatOutboxPath(townRoot, rig, name)
+	if err != nil {
+		return appliedSeatOutbox{}, false, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return appliedSeatOutbox{}, false, nil
+	}
+	if err != nil {
+		return appliedSeatOutbox{}, false, err
+	}
+	var rec appliedSeatOutbox
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return appliedSeatOutbox{}, false, fmt.Errorf("decoding %s: %w", path, err)
+	}
+	return rec, true, nil
+}
+
+// seatOutboxDigest is the identity of one outbox's bytes: two passes of one
+// seat's end read the same bytes, and a run that wrote the same two files again
+// has nothing new to report.
+func seatOutboxDigest(result, notes []byte) string {
+	sum := sha256.New()
+	sum.Write(result)
+	sum.Write([]byte{0}) // notes.md may begin with the bytes result.json ends with
+	sum.Write(notes)
+	return hex.EncodeToString(sum.Sum(nil))
+}
+
+// applySeatOutbox applies the outbox a seat wrote, copied out of its sandbox to
+// the host, through the town's bead store. It returns the reason the seat is
+// kept, or "" when the outbox is applied, the seat wrote none, or the validator
+// refused it.
+//
+// An outbox the validator refuses is logged and not applied, and the seat is not
+// kept for it: the sandbox holds the same bytes, so a later pass would refuse
+// them the same way, and the copy the end read stays on the host for an
+// operator.
+//
+// The writes happen once per outbox. A pass that filed the escalation records
+// it, so a seat the patrol offers again writes nothing twice; the writes a
+// partial failure left undone stay undone and the log names them. A pass that
+// could not file the escalation records that too, and a later pass files only
+// the escalation, so the retry does not repeat the notes and findings the
+// earlier pass wrote. A failed escalation is the one write that keeps the seat:
+// the seat's result is on the host copy, while a request for help nobody files
+// is gone with the sandbox (gt-s4gfph).
+func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
+	dir := session.SandboxOutboxCopyDir(h.town(), rig, name)
+	result, err := os.ReadFile(filepath.Join(dir, seatOutboxResultFile))
+	if errors.Is(err, os.ErrNotExist) {
+		// A seat that wrote no result.json reports nothing, and one that wrote
+		// notes without ending is reported here rather than dropped in silence:
+		// the notes are the seat's words, and they stay in the copy (gt-s4gfph).
+		if _, notesErr := os.Stat(filepath.Join(dir, seatOutboxNotesFile)); notesErr == nil {
+			h.d.logger.Printf("sandbox seat end %s/%s: its outbox holds %s but no %s, so nothing is applied; the copy stays at %s", rig, name, seatOutboxNotesFile, seatOutboxResultFile, dir)
+		}
+		return ""
+	}
+	if err != nil {
+		return outboxNotReadReason + ": " + err.Error()
+	}
+	notes, err := os.ReadFile(filepath.Join(dir, seatOutboxNotesFile))
+	if errors.Is(err, os.ErrNotExist) {
+		notes = nil // notes.md is optional: a seat that wrote none wrote no notes
+	} else if err != nil {
+		return outboxNotReadReason + ": " + err.Error()
+	}
+	decoded, err := outbox.Validate(result, notes, beadID)
+	if err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not applied: %v; the copy it was read from stays at %s", rig, name, err, dir)
+		return ""
+	}
+	digest := seatOutboxDigest(result, notes)
+	seat := h.seat(rig, name)
+	applied, haveApplied, appliedErr := readAppliedSeatOutbox(h.town(), rig, name)
+	if appliedErr != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: its applied record cannot be read, so its outbox is applied again: %v", rig, name, appliedErr)
+	}
+	if appliedErr == nil && haveApplied && applied.Bead == beadID && applied.Digest == digest {
+		if applied.Escalated || decoded.Escalation == nil {
+			return "" // this outbox was applied whole on an earlier pass
+		}
+		// The earlier pass wrote everything but the escalation, so only that is
+		// left to write.
+		if err := h.fileSeatEscalation(beadID, seat.Address(), decoded.Escalation.Text); err != nil {
+			return outboxEscalationReason + ": " + err.Error()
+		}
+		h.recordAppliedSeatOutbox(rig, name, appliedSeatOutbox{Bead: beadID, Digest: digest, Escalated: true})
+		return ""
+	}
+	bd := h.recoveryBeads()
+	issue, err := bd.Show(beadID)
+	if err != nil {
+		return outboxNotReadReason + ": cannot read its bead: " + err.Error()
+	}
+	store := &seatOutboxStore{bd: bd, escalate: h.fileSeatEscalation}
+	if err := outbox.Apply(store, beadID, seat.Address(), beads.AcceptanceText(issue), decoded); err != nil {
+		// Never swallowed: the copy on the host is where an operator finds what
+		// the bead did not get. Only the escalation keeps the seat, and the
+		// record below leaves it to be filed again.
+		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not applied in full: %v; the copy it was read from stays at %s", rig, name, err, dir)
+	}
+	h.recordAppliedSeatOutbox(rig, name, appliedSeatOutbox{Bead: beadID, Digest: digest, Escalated: store.escalationErr == nil})
+	if store.escalationErr != nil {
+		return outboxEscalationReason + ": " + store.escalationErr.Error()
+	}
+	return ""
+}
+
+// recordAppliedSeatOutbox records what a pass applied. A write that fails is
+// logged: the next pass applies the outbox again, which can repeat a note or a
+// finding, and that is better than a record saying it was applied (gt-s4gfph).
+func (h *patrolScanHost) recordAppliedSeatOutbox(rig, name string, rec appliedSeatOutbox) {
+	path, err := appliedSeatOutboxPath(h.town(), rig, name)
+	if err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot name its applied record: %v; a later pass applies its outbox again", rig, name, err)
+		return
+	}
+	if err := atomicfile.EnsureDirAndWriteJSON(path, rec); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot record its applied outbox: %v; a later pass applies it again", rig, name, err)
+	}
+}
+
+// seatOutboxStore is outbox.Store over the town's bead store: the writes a
+// copied-out outbox asks for, and the seat's HELP request filed as an escalation
+// bead. escalationErr is the escalation write's own failure, which Apply joins
+// with the others and which alone keeps the seat (gt-s4gfph).
+type seatOutboxStore struct {
+	bd            beads.Client
+	escalate      func(beadID, actor, text string) error
+	escalationErr error
+}
+
+// SetTitle replaces the bead's title with the one the seat ended with.
+func (s *seatOutboxStore) SetTitle(beadID, title string) error {
+	return s.bd.Update(beadID, beads.UpdateOptions{Title: &title})
+}
+
+// AppendNotes appends the seat's notes to its bead.
+func (s *seatOutboxStore) AppendNotes(beadID, text string) error {
+	return s.bd.AppendNotes(beadID, text)
+}
+
+// SetAcceptance replaces the bead's acceptance text, with the boxes the seat
+// ticked ticked.
+func (s *seatOutboxStore) SetAcceptance(beadID, text string) error {
+	return s.bd.Update(beadID, beads.UpdateOptions{Acceptance: &text})
+}
+
+// AddComment adds one of the seat's findings, under the seat's name.
+func (s *seatOutboxStore) AddComment(beadID, author, text string) error {
+	return s.bd.AddCommentAs(beadID, author, text)
+}
+
+// SetStatus sets the bead's status, the seat's deferred result.
+func (s *seatOutboxStore) SetStatus(beadID, status string) error {
+	return s.bd.Update(beadID, beads.UpdateOptions{Status: &status})
+}
+
+// Escalate files the seat's HELP request as an escalation bead, remembering a
+// failure so the caller can keep the seat for it.
+func (s *seatOutboxStore) Escalate(beadID, actor, text string) error {
+	err := s.escalate(beadID, actor, text)
+	if err != nil {
+		s.escalationErr = err
+	}
+	return err
+}
+
+// fileSeatEscalation files one outbox escalation request as an escalation bead
+// raised as the seat, about the bead the seat was given. The seat's text is the
+// bead's reason; its first line is the title, which is one line, and the
+// severity is the one the seat's `gt escalate` wrote into the text (a request
+// that names none the config accepts is medium, gt escalate's default).
+//
+// One open escalation stands for one bead's request, which its fingerprint
+// keys: a raise that finds one already open writes nothing, so a pass whose
+// applied record was lost, or the patrol's own outbox poll, adds no second bead
+// for the same request (gt-vwry).
+func (h *patrolScanHost) fileSeatEscalation(beadID, actor, text string) error {
+	bd := h.recoveryBeads()
+	title := seatEscalationHeadline(text)
+	fingerprint := notify.FingerprintLabel(seatEscalationKey(beadID))
+	open, err := beads.ListEscalationsByFingerprint(bd, fingerprint)
+	if err != nil {
+		return fmt.Errorf("looking for the bead's open escalation: %w", err)
+	}
+	if len(open) > 0 {
+		return nil
+	}
+	_, err = beads.CreateEscalationBead(bd, title, &beads.EscalationFields{
+		Severity:    seatEscalationSeverity(text),
+		Reason:      text,
+		Source:      seatEscalationSource,
+		EscalatedBy: actor,
+		EscalatedAt: h.d.clk().Now().UTC().Format(time.RFC3339),
+		RelatedBead: beadID,
+		Fingerprint: fingerprint,
+	})
+	if err != nil {
+		return fmt.Errorf("filing the escalation: %w", err)
+	}
+	return nil
+}
+
+// seatEscalationKey is the alert key one bead's outbox escalation is filed
+// under, whoever files it.
+func seatEscalationKey(beadID string) string { return seatEscalationSource + ":" + beadID }
+
+// seatEscalationHeadline is a request's first line: an escalation bead's title
+// is one line, and the whole request travels as its reason.
+func seatEscalationHeadline(text string) string {
+	text = strings.TrimSpace(text)
+	if i := strings.IndexAny(text, "\r\n"); i >= 0 {
+		text = text[:i]
+	}
+	return text
+}
+
+// seatEscalationSeverity reads the severity a seat's `gt escalate` wrote into
+// its request text ("Severity: <level>", escalate_impl.go's
+// escalationRequestText): the last line that names a level the config accepts.
+// The seat's file mode validates the severity before writing it, so the default
+// answers a request an earlier writer shaped without one.
+func seatEscalationSeverity(text string) string {
+	severity := config.SeverityMedium
+	for _, line := range strings.Split(text, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "Severity: ")
+		if !ok {
+			continue
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		if config.IsValidSeverity(value) {
+			severity = value
+		}
+	}
+	return severity
 }
 
 // removeSeatDirs removes the host directories of one sandbox seat, through the
