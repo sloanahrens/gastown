@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/taskfile"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -136,6 +137,20 @@ func init() {
 type RoleContext = RoleInfo
 
 func runPrime(cmd *cobra.Command, args []string) (retErr error) {
+	return runPrimeWith(cmd, primeSeatDeps{
+		taskPath: primeSeatTaskPath(),
+		open:     func(dir string) beads.Client { return beads.New(dir) },
+		clock:    clockwork.NewRealClock(),
+		out:      os.Stdout,
+	})
+}
+
+// runPrimeWith is runPrime over primeSeatDeps: the seat's task file, the one
+// door prime opens to a bead store, the clock its retry sleeps on, and where a
+// file-mode task is printed. runPrime passes the running seat's; a test passes
+// its own so it exercises this whole path without a sandbox, a Dolt server or
+// the host's clock (gt-w1mzol).
+func runPrimeWith(cmd *cobra.Command, deps primeSeatDeps) (retErr error) {
 	if err := validatePrimeFlags(); err != nil {
 		return err
 	}
@@ -244,8 +259,14 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
-	// P0: Fetch work context once.
-	hookedBead, hookErr := findAgentWork(ctx)
+	// P0: Fetch work context once. A file-mode seat has no route to Dolt: its
+	// work is the TASK.md the runtime archive staged, and prime prints that
+	// instead of a bead (gt-w1mzol).
+	work, seatErr := primeSeatWork(ctx, deps)
+	if work.fileMode {
+		return runPrimeFileMode(deps.out, ctx, work, seatErr)
+	}
+	hookedBead, hookErr := work.bead, work.beadErr
 	if hookErr != nil {
 		// Cross-rig / unresolvable hook bead (gt-el4): the agent bead names a
 		// hook bead that bd show cannot find. Don't sit idle "pontificating" —
@@ -339,6 +360,69 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	fmt.Print(payload.render(budget))
 	return nil
+}
+
+// runPrimeFileMode prints a file-mode seat's context from its TASK.md and
+// returns. The seat has no route to Dolt, so nothing here reads a bead: no hook
+// lookup, no molecule checklist read, no mail or memory injection (gt-w1mzol).
+// seatErr is the seat-side failure that made its task unreadable — the task
+// file, or the marker that would have said where the task lives — and it is
+// returned as the run's error instead of printing a task the seat does not
+// have.
+func runPrimeFileMode(out io.Writer, ctx RoleContext, work primeWork, seatErr error) error {
+	if seatErr != nil {
+		return seatErr
+	}
+	staticText, _, err := staticRoleText(ctx)
+	if err != nil {
+		return err
+	}
+	includeStatic := !primeStaticTextDelivered()
+	budget := 0
+	if primeHookMode && !includeStatic {
+		budget = primeHookBudget
+	}
+	_, err = fmt.Fprint(out, primeFileModePayload(ctx, work, staticText, includeStatic).render(budget))
+	return err
+}
+
+// primeFileModePayload is the context prime prints for a file-mode seat: the
+// session identity, the task from TASK.md under the autonomous-work framing,
+// and the role text when the runtime delivered no system prompt for it.
+func primeFileModePayload(ctx RoleContext, work primeWork, staticText string, includeStatic bool) *primePayload {
+	p := &primePayload{}
+	var identity strings.Builder
+	outputSessionMetadata(&identity, ctx)
+	p.add("session", 0, true, identity.String())
+	p.add("task", 1, true, primeFileModeTaskSection(ctx, work))
+	if includeStatic {
+		p.add("role", 1, true, staticText)
+	}
+	return p
+}
+
+// primeFileModeTaskSection renders the seat's task: the autonomous-work
+// instruction, framed for a seat that cannot read its bead (the hooked-bead
+// version tells it to run `bd show`), followed by the TASK.md text verbatim.
+// The path is printed because the runtime may cut short hook output: the seat
+// can then read the whole file itself.
+func primeFileModeTaskSection(ctx RoleContext, work primeWork) string {
+	var b strings.Builder
+	b.WriteString("\n## 🚨 AUTONOMOUS WORK MODE 🚨\n\n")
+	fmt.Fprintf(&b, "This seat is in file mode: its assignment is the task file at %s, and it has no bead access.\n\n", work.taskPath)
+	fmt.Fprintf(&b, "1. Announce: \"%s\" (ONE line, no elaboration)\n", buildRoleAnnouncement(ctx))
+	b.WriteString("2. Work the task below in order - it is the whole assignment\n")
+	if ctx.Role == RolePolecat {
+		fmt.Fprintln(&b)
+		fmt.Fprintf(&b, "**⚠️ MANDATORY: When all work is committed, run `%s done` to submit and exit.**\n", cli.Name())
+		fmt.Fprintf(&b, "Do NOT stop at the prompt. `%s done` is your final action.\n", cli.Name())
+	}
+	fmt.Fprintf(&b, "\n## 📋 Your task (from %s)\n\n", work.taskPath)
+	b.WriteString(work.task)
+	if !strings.HasSuffix(work.task, "\n") {
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // runPrimeStep implements `gt prime --step N [--formula NAME]`: print one
@@ -992,6 +1076,82 @@ func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
 	return attachment != nil && (attachment.AttachedMolecule != "" || attachment.AttachedFormula != "")
 }
 
+// primeWork is the seat's assignment as prime reads it: the hooked bead in dolt
+// mode, or the text of TASK.md in file mode. beadErr carries a dolt-mode hook
+// read failure, which prime reports without failing the run. fileMode is also
+// set for the refusal whose marker cannot be read: the seat is told from its
+// file side either way, and prime reports that error in place of a task.
+type primeWork struct {
+	bead     *beads.Issue
+	beadErr  error
+	task     string
+	taskPath string
+	fileMode bool
+}
+
+// primeSeatTaskPath is where the seat reads its task: TASK.md in the task
+// directory of the seat's .gt — the file the sandbox runtime archive stages as
+// .gt/task/TASK.md (internal/session's runtimeTaskFile). The sandbox image sets
+// HOME to /sandbox, so a seat's gtDataDir is the archive's /sandbox/.gt there;
+// a host run's gtDataDir is the seat's own ~/.gt, which holds no task
+// directory, so a host run reads no sandbox path (gt-w1mzol). This is the same
+// directory file-mode gt escalate reads its task from and writes its outbox to.
+func primeSeatTaskPath() string {
+	return filepath.Join(gtDataDir(), seatTaskDirName, seatTaskFile)
+}
+
+// primeSeatDeps are the seams prime's work read runs on. taskPath is the seat's
+// TASK.md (primeSeatTaskPath); open is the door to every bead store; clock is
+// what the dolt-mode retry sleeps on; out is where a file-mode task is printed.
+// A file-mode seat never calls open, which is what makes "no bead read"
+// testable.
+type primeSeatDeps struct {
+	taskPath string
+	open     func(dir string) beads.Client
+	clock    clockwork.Clock
+	out      io.Writer
+}
+
+// primeSeatWork reads the seat's assignment. When the directory holding
+// deps.taskPath carries the file-mode marker, the seat reads its task from that
+// file and deps.open — the door to the bead store — is never called. Outside
+// file mode deps.open is the door findAgentWork uses, and its failure comes
+// back in beadErr rather than as this function's error.
+//
+// A marker that is there but cannot be read leaves the mode unknown, and a
+// file-mode seat whose TASK.md is missing or unreadable has no bead to fall
+// back to: both come back as this function's error with fileMode set, so prime
+// returns the failure instead of printing a task or opening the store
+// (gt-w1mzol).
+func primeSeatWork(ctx RoleContext, deps primeSeatDeps) (primeWork, error) {
+	taskDir := filepath.Dir(deps.taskPath)
+	files, err := taskfile.ReadFileMode(taskDir)
+	if err != nil {
+		// Only a seat whose task directory is there can have a marker it cannot
+		// read. A directory that cannot be reached at all (absent, a parent that
+		// is not a directory, a parent that cannot be searched) is a host or
+		// dolt-mode run, which prime must treat exactly as before this check
+		// existed.
+		if _, statErr := os.Stat(taskDir); statErr != nil {
+			files, err = false, nil
+		}
+	}
+	if err != nil {
+		return primeWork{fileMode: true, taskPath: deps.taskPath},
+			fmt.Errorf("gt prime: the seat's bead access is unknown, so it reads neither its task file nor the bead store: %w", err)
+	}
+	if files {
+		data, err := os.ReadFile(deps.taskPath)
+		if err != nil {
+			return primeWork{fileMode: true, taskPath: deps.taskPath},
+				fmt.Errorf("gt prime: this seat is in file mode but its task file cannot be read, so there is no bead to fall back to: %w", err)
+		}
+		return primeWork{fileMode: true, task: string(data), taskPath: deps.taskPath}, nil
+	}
+	bead, err := findAgentWorkThrough(ctx, deps.open, deps.clock)
+	return primeWork{bead: bead, beadErr: err}, nil
+}
+
 // findAgentWork looks up hooked or in-progress beads assigned to this agent.
 // Primary: reads hook_bead from the agent bead (same strategy as detectSessionState/gt hook).
 // Fallback: queries by assignee for agents without an agent bead.
@@ -1003,11 +1163,29 @@ func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
 // Returns (nil, err) if all attempts failed due to database errors — the caller
 // MUST distinguish this from "no work" to avoid silently closing beads. (GH#2638)
 func findAgentWork(ctx RoleContext) (*beads.Issue, error) {
-	maxAttempts := 1
+	return findAgentWorkWithAttempts(ctx, agentWorkAttempts(ctx))
+}
+
+// agentWorkAttempts is the retry budget findAgentWork and findAgentWorkThrough
+// share: polecats and crew get five attempts to outlast the race where a slung
+// hook has not propagated, and everyone else (and a compact resume, which
+// must stay fast) gets one.
+func agentWorkAttempts(ctx RoleContext) int {
 	if (ctx.Role == RolePolecat || ctx.Role == RoleCrew) && !isCompactResume() {
-		maxAttempts = 5
+		return 5
 	}
-	return findAgentWorkWithAttempts(ctx, maxAttempts)
+	return 1
+}
+
+// findAgentWorkThrough is findAgentWork over injected seams: every bead store
+// is opened through open and the retry sleeps on clock. primeSeatWork passes
+// them on, so prime's one place to reach a bead store is named by its caller
+// and a test of the file-mode read can count the opens and does not sleep
+// (gt-w1mzol). Its budget is the one findAgentWork computes.
+func findAgentWorkThrough(ctx RoleContext, open func(dir string) beads.Client, clock clockwork.Clock) (*beads.Issue, error) {
+	return retryAgentWork(ctx, agentWorkAttempts(ctx), clock, func(ctx RoleContext, agentID string) (*beads.Issue, error) {
+		return findAgentWorkVia(ctx, agentID, open)
+	})
 }
 
 // findAgentWorkWithAttempts is findAgentWork with an explicit retry budget.

@@ -3,6 +3,7 @@ package taskfile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,55 @@ func TestNoBeadAccessFileModeWithoutATaskDirectory(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "absent")
 	if FileMode(root) {
 		t.Errorf("FileMode(%q) = true, want false for a missing task directory", root)
+	}
+}
+
+// ReadFileMode answers dolt mode for a marker that is not there, and refuses
+// to guess when one is there but cannot be read: a caller that would open the
+// bead store on a false answer must not read an unreadable marker as dolt mode
+// (gt-w1mzol).
+func TestNoBeadAccessReadFileModeRefusesAnUnreadableMarker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// root derives the task directory from a temporary one; nil uses it as
+		// it is.
+		root  func(tmp string) string
+		setup func(t *testing.T, root string)
+		want  bool
+		// wantErr is whether the answer must be an error, not a mode.
+		wantErr bool
+	}{
+		{name: "no marker", want: false},
+		{name: "absent task directory", root: func(tmp string) string { return filepath.Join(tmp, "absent") }, want: false},
+		{name: "a files marker", setup: writeMode(ModeFiles), want: true},
+		{name: "a dolt marker", setup: writeMode("dolt"), want: false},
+		{name: "an unreadable marker", setup: mkdirMode, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			if tc.root != nil {
+				root = tc.root(root)
+			}
+			if tc.setup != nil {
+				tc.setup(t, root)
+			}
+			got, err := ReadFileMode(root)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ReadFileMode(%q) = %v, nil; want an error", tc.name, got)
+				}
+				if want := filepath.Join(root, ModeFile); !strings.Contains(err.Error(), want) {
+					t.Errorf("ReadFileMode error = %q, want it to name the marker %s", err, want)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Errorf("ReadFileMode(%q) = %v, %v; want %v, nil", tc.name, got, err, tc.want)
+			}
+		})
 	}
 }
 
