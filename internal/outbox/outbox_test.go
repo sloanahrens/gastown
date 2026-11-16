@@ -49,6 +49,16 @@ func TestValidate(t *testing.T) {
 			want:  Result{Status: StatusDone},
 		},
 		{
+			name:  "the title and the acceptance block an update wrote",
+			raw:   `{"bead_id": "gt-swfo9e", "status": "deferred", "title": "DISPROVEN: the retry resets", "acceptance": "- [ ] the refusal names the verb"}`,
+			notes: "",
+			want: Result{
+				Status:     StatusDeferred,
+				Title:      strPtr("DISPROVEN: the retry resets"),
+				Acceptance: strPtr("- [ ] the refusal names the verb"),
+			},
+		},
+		{
 			name:  "a deferred result with an escalation",
 			raw:   `{"bead_id": "gt-swfo9e", "status": "deferred", "escalation": {"text": "HELP: blocked on a missing credential"}}`,
 			notes: "",
@@ -227,6 +237,30 @@ func TestValidateRefused(t *testing.T) {
 			wantErr: "escalation text is empty",
 		},
 		{
+			name:    "an empty title",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "deferred", "title": ""}`,
+			beadID:  beadID,
+			wantErr: "title is empty",
+		},
+		{
+			name:    "a title of spaces",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "deferred", "title": "  "}`,
+			beadID:  beadID,
+			wantErr: "title is empty",
+		},
+		{
+			name:    "an empty acceptance",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "deferred", "acceptance": ""}`,
+			beadID:  beadID,
+			wantErr: "acceptance is empty",
+		},
+		{
+			name:    "an acceptance of spaces",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "deferred", "acceptance": "\n\t"}`,
+			beadID:  beadID,
+			wantErr: "acceptance is empty",
+		},
+		{
 			name:    "trailing data after the result object",
 			raw:     `{"bead_id": "gt-swfo9e", "status": "done"} {}`,
 			beadID:  beadID,
@@ -275,6 +309,53 @@ func TestValidateMalformed(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, Result{}) {
 				t.Errorf("Validate(%q) returned a partial Result %#v with its error", tt.raw, got)
+			}
+		})
+	}
+}
+
+// strPtr returns a pointer to s, for the Result fields an outbox may omit.
+func strPtr(s string) *string { return &s }
+
+// TestEncodeRoundTrips: every field a seat can write survives the encoder and
+// the decoder, so a write for one change keeps the others a seat recorded
+// earlier.
+func TestEncodeRoundTrips(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-swfo9e"
+	const notes = "a note\n"
+	tests := []struct {
+		name   string
+		result Result
+	}{
+		{
+			name: "a title, a replacement acceptance and every other field",
+			result: Result{
+				Status:     StatusDeferred,
+				Title:      strPtr("DISPROVEN: the retry resets"),
+				Acceptance: strPtr("- [ ] the refusal names the verb"),
+				Ticked:     []int{0, 2},
+				Findings:   []string{"the retry never resets its counter"},
+				Escalation: &Escalation{Text: "HELP: the third criterion needs a decision"},
+			},
+		},
+		{
+			name:   "a result with no optional field",
+			result: Result{Status: StatusDone},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw := Encode(beadID, tt.result)
+			got, err := Validate(raw, []byte(notes), beadID)
+			if err != nil {
+				t.Fatalf("Validate(%s) error = %v", raw, err)
+			}
+			want := tt.result
+			want.Notes = notes
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Validate(Encode(r)) = %#v, want %#v", got, want)
 			}
 		})
 	}

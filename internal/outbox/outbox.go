@@ -8,13 +8,17 @@
 //	{
 //	  "bead_id": "gt-swfo9e",
 //	  "status": "done",
+//	  "title": "DISPROVEN: the retry resets; the counter is reset at the call site",
+//	  "acceptance": "## Acceptance\n- [x] the refusal names the verb",
 //	  "ticked_boxes": [0, 2],
 //	  "findings": ["the retry never resets its counter"],
 //	  "escalation": {"text": "HELP: the acceptance list names a missing file"}
 //	}
 //
 // bead_id is the bead the seat was given. The seat omits a field it has nothing
-// to report for.
+// to report for. title and acceptance are the edits a file-mode `gt bead
+// update` makes: the new title, and the whole replacement criteria block, as
+// bd's --acceptance means it.
 //
 // The package does no I/O: the host reads the two files and hands their contents
 // to Validate.
@@ -26,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -38,6 +43,9 @@ const (
 	// NotesFile is the seat's notes inside Dir, which `gt bead note` appends
 	// to in file mode.
 	NotesFile = "notes.md"
+	// ResultFile is the seat's result inside Dir, which `gt bead update`
+	// rewrites in file mode.
+	ResultFile = "result.json"
 )
 
 const (
@@ -66,6 +74,11 @@ const (
 // notes it wrote alongside.
 type Result struct {
 	Status Status
+	// Title is the title the seat set, or nil when it changed none.
+	Title *string
+	// Acceptance is the whole criteria block the seat set, or nil when it
+	// replaced none.
+	Acceptance *string
 	// Ticked is the zero-based indexes into the bead's acceptance list that the
 	// seat ticked.
 	Ticked []int
@@ -87,6 +100,8 @@ type Escalation struct {
 type wireResult struct {
 	BeadID      string      `json:"bead_id"`
 	Status      Status      `json:"status"`
+	Title       *string     `json:"title"`
+	Acceptance  *string     `json:"acceptance"`
 	TickedBoxes []int       `json:"ticked_boxes"`
 	Findings    []string    `json:"findings"`
 	Escalation  *Escalation `json:"escalation"`
@@ -100,8 +115,9 @@ type wireResult struct {
 // UTF-8; a raw that is not exactly one JSON object of the shape the package doc
 // gives; an unknown field, which is how it refuses a label, assignee, close or
 // other-bead field; a bead_id that is not beadID; a status other than StatusDone
-// or StatusDeferred; more than 5 findings; a finding over 2 KB; a negative or
-// repeated ticked box; and an escalation whose text is empty.
+// or StatusDeferred; a title or acceptance that is empty or only spaces; more
+// than 5 findings; a finding over 2 KB; a negative or repeated ticked box; and
+// an escalation whose text is empty.
 func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	if beadID == "" {
 		return Result{}, errors.New("outbox: no bead id was given to validate against")
@@ -138,6 +154,16 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	default:
 		return Result{}, fmt.Errorf("outbox: result.json status is neither %q nor %q", StatusDone, StatusDeferred)
 	}
+	// A title of nothing leaves the bead unnamed, and an acceptance of nothing
+	// replaces the criteria with none, which gt done reads as every box
+	// satisfied (gt-9smgr). The seat's own update refuses both, and a hand-built
+	// result must not get past the decoder with them either.
+	if wire.Title != nil && strings.TrimSpace(*wire.Title) == "" {
+		return Result{}, errors.New("outbox: result.json title is empty")
+	}
+	if wire.Acceptance != nil && strings.TrimSpace(*wire.Acceptance) == "" {
+		return Result{}, errors.New("outbox: result.json acceptance is empty, so it replaces the criteria with nothing")
+	}
 	if len(wire.Findings) > maxFindings {
 		return Result{}, fmt.Errorf("outbox: result.json has %d findings, more than the %d allowed", len(wire.Findings), maxFindings)
 	}
@@ -161,9 +187,34 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	}
 	return Result{
 		Status:     wire.Status,
+		Title:      wire.Title,
+		Acceptance: wire.Acceptance,
 		Ticked:     wire.TickedBoxes,
 		Findings:   wire.Findings,
 		Escalation: wire.Escalation,
 		Notes:      string(notes),
 	}, nil
+}
+
+// Encode returns the result.json bytes for beadID: every field of r, in the
+// shape Validate decodes, which is the only shape the host applies. A seat
+// writes all of r rather than the field it changed, so a later write keeps what
+// an earlier one recorded: an escalation raised after an update still carries
+// the update.
+//
+// Every field of the shape is a string, a string pointer, an int list or a list
+// of strings, so the encoding has no failure to report; a caller validates the
+// bytes it gets, and Validate refuses what the encoder could not have written
+// as a result the host applies.
+func Encode(beadID string, r Result) []byte {
+	raw, _ := json.MarshalIndent(wireResult{ //nolint:errcheck // wireResult holds only strings and ints; MarshalIndent cannot fail for it
+		BeadID:      beadID,
+		Status:      r.Status,
+		Title:       r.Title,
+		Acceptance:  r.Acceptance,
+		TickedBoxes: r.Ticked,
+		Findings:    r.Findings,
+		Escalation:  r.Escalation,
+	}, "", "  ")
+	return append(raw, '\n')
 }

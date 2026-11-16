@@ -40,6 +40,10 @@ func (f *fakeStore) AppendNotes(beadID, text string) error {
 	return f.record(storeCall{op: "AppendNotes", beadID: beadID, text: text})
 }
 
+func (f *fakeStore) SetTitle(beadID, title string) error {
+	return f.record(storeCall{op: "SetTitle", beadID: beadID, text: title})
+}
+
 func (f *fakeStore) SetAcceptance(beadID, text string) error {
 	return f.record(storeCall{op: "SetAcceptance", beadID: beadID, text: text})
 }
@@ -90,6 +94,39 @@ func TestApply(t *testing.T) {
 				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
 				{op: "AddComment", beadID: testBead, author: testActor, text: "the gate names a package the branch does not change"},
 			},
+		},
+		{
+			name:       "a title and a replacement acceptance are written before the notes and the acceptance whole",
+			acceptance: acceptance,
+			result: Result{
+				Status:     StatusDone,
+				Title:      strPtr("DISPROVEN: the retry resets; the counter is reset at the call site"),
+				Acceptance: strPtr("- [ ] the refusal names the verb"),
+				Notes:      "The title was disproved.\n",
+			},
+			want: []storeCall{
+				{op: "SetTitle", beadID: testBead, text: "DISPROVEN: the retry resets; the counter is reset at the call site"},
+				{op: "AppendNotes", beadID: testBead, text: "The title was disproved.\n"},
+				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the refusal names the verb"},
+			},
+		},
+		{
+			name:       "a tick indexes into the replacement acceptance, not the block the host read",
+			acceptance: acceptance,
+			result: Result{
+				Status:     StatusDone,
+				Acceptance: strPtr("- [ ] the first of the new block\n- [ ] the second of the new block"),
+				Ticked:     []int{1},
+			},
+			want: []storeCall{
+				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first of the new block\n- [x] the second of the new block"},
+			},
+		},
+		{
+			name:       "a replacement identical to the block the host read writes no acceptance",
+			acceptance: acceptance,
+			result:     Result{Status: StatusDone, Acceptance: strPtr(acceptance)},
+			want:       nil,
 		},
 		{
 			name:       "a deferred result writes the status deferred once after its other writes",
@@ -498,6 +535,60 @@ func TestApplyRefusedStatus(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("Apply() error = %q, want it to name %s", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(store.calls, tt.wantCalls) {
+				t.Errorf("Apply() calls = %#v, want %#v", store.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// TestApplyRefusesAnEmptyTitleOrAcceptance: Validate refuses both, and a
+// hand-built Result must not write them either, because either write replaces
+// what the bead has with nothing (gt-9smgr).
+func TestApplyRefusesAnEmptyTitleOrAcceptance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		result    Result
+		wantErr   string
+		wantCalls []storeCall
+	}{
+		{
+			name:    "an empty title",
+			result:  Result{Status: StatusDone, Title: strPtr("  ")},
+			wantErr: "the result's title is empty",
+		},
+		{
+			name:    "an empty acceptance",
+			result:  Result{Status: StatusDone, Acceptance: strPtr("")},
+			wantErr: "the criteria are not replaced",
+		},
+		{
+			name:    "a tick into an empty acceptance writes no acceptance",
+			result:  Result{Status: StatusDone, Acceptance: strPtr(""), Ticked: []int{0}},
+			wantErr: "the criteria are not replaced",
+		},
+		{
+			name:    "the writes after an empty acceptance are still made",
+			result:  Result{Status: StatusDeferred, Acceptance: strPtr("\n"), Findings: []string{"a finding"}},
+			wantErr: "the criteria are not replaced",
+			wantCalls: []storeCall{
+				{op: "AddComment", beadID: testBead, author: testActor, text: "a finding"},
+				{op: "SetStatus", beadID: testBead, status: "deferred"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{}
+			err := Apply(store, testBead, testActor, acceptance, tt.result)
+			if err == nil {
+				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Apply() error = %q, want it to name %q", err, tt.wantErr)
 			}
 			if !reflect.DeepEqual(store.calls, tt.wantCalls) {
 				t.Errorf("Apply() calls = %#v, want %#v", store.calls, tt.wantCalls)

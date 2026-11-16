@@ -696,57 +696,75 @@ func (osOutboxFS) Rename(oldpath, newpath string) error { return os.Rename(oldpa
 
 func (osOutboxFS) Remove(name string) error { return os.Remove(name) }
 
-// outboxLockFile is the flock file that serializes the notes appends of one
+// outboxLockFile is the flock file that serializes the outbox writes of one
 // seat. It sits beside the outbox, outside it, for the reason the temporary
 // file does.
 const outboxLockFile = ".outbox-notes.lock"
 
-// appendOutboxLine appends one line to a file-mode seat's outbox notes. The new
-// notes are composed and validated first, then written to a temporary file and
-// renamed over notes.md, so a seat killed partway through leaves the previous
-// notes, never half of the new one. A lock serializes the appends of one seat,
-// whose own tool calls can run together, and a killed seat drops its flock when
-// the process ends. The temporary and lock files sit in .gt beside the outbox,
-// not in it: the host's copy refuses any name in the outbox directory but
-// result.json and notes.md, so a kill must not leave one there. verb ("noting",
-// "commenting") names the caller in each failure, so the error reads as the
-// command that ran.
-func (v *beadVerbs) appendOutboxLine(seat *seatOutbox, verb, text string) error {
-	fsys := outboxFS(osOutboxFS{})
+// outboxFilesystem is the filesystem the caller's outbox writes run on.
+func (v *beadVerbs) outboxFilesystem() outboxFS {
 	if v.outboxFS != nil {
-		fsys = v.outboxFS
+		return v.outboxFS
 	}
+	return osOutboxFS{}
+}
+
+// writeOutboxFile composes name's new bytes and lands them under the seat's
+// outbox lock. compose reads whatever it needs and returns the whole new file,
+// already valid, or the error the caller reports; the bytes then go to a
+// temporary file and are renamed over name, so a seat killed partway through
+// leaves the previous file, never half of the new one. The lock serializes the
+// writes of one seat, whose own tool calls can run together, and a killed seat
+// drops its flock when the process ends. The temporary and lock files sit in
+// .gt beside the outbox, not in it: the host's copy refuses any name in the
+// outbox directory but result.json and notes.md, so a kill must not leave one
+// there. verb ("noting", "commenting", "updating") names the caller in each
+// failure, so the error reads as the command that ran.
+func (v *beadVerbs) writeOutboxFile(seat *seatOutbox, verb, name string, compose func(outboxFS) ([]byte, error)) error {
+	fsys := v.outboxFilesystem()
 	unlock, err := lock.FlockAcquire(filepath.Join(filepath.Dir(seat.dir), outboxLockFile))
 	if err != nil {
 		return fmt.Errorf("not %s on %s: the outbox lock cannot be taken: %w", verb, seat.beadID, err)
 	}
 	defer unlock()
-	notesPath := filepath.Join(seat.dir, outbox.NotesFile)
-	previous, err := fsys.ReadFile(notesPath)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("not %s on %s: its outbox notes cannot be read: %w", verb, seat.beadID, err)
-	}
-	next := appendNoteLine(previous, text)
-	// The host validates notes.md with outbox.Validate at seat end. Running the
-	// same rules now refuses a note the host would refuse while the seat can
-	// still report it, instead of at seat end, where the outbox is all there is.
-	raw := []byte(fmt.Sprintf(`{"bead_id":%s,"status":"done"}`, strconv.Quote(seat.beadID)))
-	if _, err := outbox.Validate(raw, next, seat.beadID); err != nil {
-		return fmt.Errorf("not %s on %s: %w", verb, seat.beadID, err)
+	next, err := compose(fsys)
+	if err != nil {
+		return err
 	}
 	if err := fsys.MkdirAll(seat.dir, 0o755); err != nil {
 		return fmt.Errorf("not %s on %s: its outbox directory cannot be made: %w", verb, seat.beadID, err)
 	}
-	tmp := filepath.Join(filepath.Dir(seat.dir), "."+outbox.NotesFile+"."+strconv.Itoa(os.Getpid())+".tmp")
+	tmp := filepath.Join(filepath.Dir(seat.dir), "."+name+"."+strconv.Itoa(os.Getpid())+".tmp")
 	if err := fsys.WriteFile(tmp, next, 0o644); err != nil {
 		return removeOutboxTemp(fsys, tmp,
-			fmt.Errorf("not %s on %s: the outbox write failed, so it keeps its previous notes: %w", verb, seat.beadID, err))
+			fmt.Errorf("not %s on %s: the outbox write failed, so it keeps the %s it had: %w", verb, seat.beadID, name, err))
 	}
-	if err := fsys.Rename(tmp, notesPath); err != nil {
+	if err := fsys.Rename(tmp, filepath.Join(seat.dir, name)); err != nil {
 		return removeOutboxTemp(fsys, tmp,
-			fmt.Errorf("not %s on %s: the outbox write did not land, so it keeps its previous notes: %w", verb, seat.beadID, err))
+			fmt.Errorf("not %s on %s: the outbox write did not land, so it keeps the %s it had: %w", verb, seat.beadID, name, err))
 	}
 	return nil
+}
+
+// appendOutboxLine appends one line to a file-mode seat's outbox notes. The new
+// notes are composed and validated first, then landed by writeOutboxFile.
+func (v *beadVerbs) appendOutboxLine(seat *seatOutbox, verb, text string) error {
+	return v.writeOutboxFile(seat, verb, outbox.NotesFile, func(fsys outboxFS) ([]byte, error) {
+		previous, err := fsys.ReadFile(filepath.Join(seat.dir, outbox.NotesFile))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("not %s on %s: its outbox notes cannot be read: %w", verb, seat.beadID, err)
+		}
+		next := appendNoteLine(previous, text)
+		// The host validates notes.md with outbox.Validate at seat end. Running
+		// the same rules now refuses a note the host would refuse while the seat
+		// can still report it, instead of at seat end, where the outbox is all
+		// there is.
+		raw := []byte(fmt.Sprintf(`{"bead_id":%s,"status":"done"}`, strconv.Quote(seat.beadID)))
+		if _, err := outbox.Validate(raw, next, seat.beadID); err != nil {
+			return nil, fmt.Errorf("not %s on %s: %w", verb, seat.beadID, err)
+		}
+		return next, nil
+	})
 }
 
 // removeOutboxTemp removes a temporary file the outbox write left, naming the
@@ -785,11 +803,126 @@ func (v *beadVerbs) update(id string, opts beads.UpdateOptions) error {
 	if opts.Acceptance != nil && strings.TrimSpace(*opts.Acceptance) == "" {
 		return fmt.Errorf("--acceptance is empty: the acceptance criteria were not changed")
 	}
+	seat, err := v.fileOutbox()
+	if err != nil {
+		return err
+	}
+	if seat != nil {
+		return v.updateToOutbox(seat, id, opts)
+	}
 	if err := v.client.Update(id, opts); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(v.out, "✓ Updated %s\n", id)
+	_, err = fmt.Fprintf(v.out, "✓ Updated %s\n", id)
 	return err
+}
+
+// updateToOutbox writes a file-mode update into the seat's outbox rather than
+// to its bead. The outbox carries two of update's fields, the title and the
+// acceptance block; a call reads result.json as it stands, sets what it named
+// and rewrites the file under the outbox lock, so a call keeps what an earlier
+// one recorded and a killed seat loses only the update it was writing
+// (gt-pm55bt).
+func (v *beadVerbs) updateToOutbox(seat *seatOutbox, id string, opts beads.UpdateOptions) error {
+	if err := ownBeadWrite(seat, "updating", id); err != nil {
+		return err
+	}
+	if err := outboxUpdateRefusal(seat.beadID, opts); err != nil {
+		return err
+	}
+	if err := v.writeOutboxFile(seat, "updating", outbox.ResultFile, func(fsys outboxFS) ([]byte, error) {
+		return v.outboxResultWithUpdate(seat, opts, fsys)
+	}); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(v.out, "✓ Updated %s in its outbox\n", id)
+	return err
+}
+
+// outboxUpdateRefusal returns why the outbox cannot carry this update, or nil.
+// It holds a title and an acceptance block: a priority, a label or a metadata
+// pair has no field there, and a seat that wrote one anyway would report
+// success for a change the host never makes.
+func outboxUpdateRefusal(beadID string, opts beads.UpdateOptions) error {
+	var refused []string
+	if opts.Priority != nil {
+		refused = append(refused, "--priority")
+	}
+	if len(opts.AddLabels) > 0 {
+		refused = append(refused, "--add-label")
+	}
+	if len(opts.RemoveLabels) > 0 {
+		refused = append(refused, "--remove-label")
+	}
+	if len(opts.SetMetadata) > 0 {
+		refused = append(refused, "--set-metadata")
+	}
+	if len(opts.UnsetMetadata) > 0 {
+		refused = append(refused, "--unset-metadata")
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("not updating %s: the outbox carries a title and an acceptance block, so a file-mode seat cannot set %s",
+		beadID, strings.Join(refused, ", "))
+}
+
+// outboxResultWithUpdate is the result.json a file-mode update leaves: what the
+// file holds, with the title and the acceptance block this call set. A seat
+// that has not ended has written no result.json, and the one an update starts
+// is deferred, never done: a seat that has not run gt done has reported no
+// finished run.
+func (v *beadVerbs) outboxResultWithUpdate(seat *seatOutbox, opts beads.UpdateOptions, fsys outboxFS) ([]byte, error) {
+	notes, err := readSeatOutboxFile(fsys, filepath.Join(seat.dir, outbox.NotesFile))
+	if err != nil {
+		return nil, fmt.Errorf("not updating %s: its outbox notes cannot be read: %w", seat.beadID, err)
+	}
+	raw, err := readSeatOutboxFile(fsys, filepath.Join(seat.dir, outbox.ResultFile))
+	if err != nil {
+		return nil, fmt.Errorf("not updating %s: its outbox result cannot be read: %w", seat.beadID, err)
+	}
+	// A seat that has not ended has written no result.json, and an empty file
+	// holds nothing an update would lose: either starts the deferred result.
+	existing := outbox.Result{Status: outbox.StatusDeferred}
+	if len(raw) > 0 {
+		decoded, err := outbox.Validate(raw, notes, seat.beadID)
+		if err != nil {
+			return nil, fmt.Errorf("not updating %s: the outbox result %s does not validate, so no update is written: %w",
+				seat.beadID, filepath.Join(seat.dir, outbox.ResultFile), err)
+		}
+		existing = decoded
+	}
+	// Ticked boxes are indexes into the block the seat last had, so replacing
+	// that block would leave them naming other lines.
+	if opts.Acceptance != nil && len(existing.Ticked) > 0 {
+		return nil, fmt.Errorf("not updating %s: the outbox already reports ticked boxes, which name lines of the acceptance block this update replaces",
+			seat.beadID)
+	}
+	if opts.Title != nil {
+		existing.Title = opts.Title
+	}
+	if opts.Acceptance != nil {
+		existing.Acceptance = opts.Acceptance
+	}
+	next := outbox.Encode(seat.beadID, existing)
+	// The host validates result.json at seat end. Running the same rules now
+	// refuses an update the host would refuse while the seat can still report
+	// it, instead of at seat end, where the outbox is all there is.
+	if _, err := outbox.Validate(next, notes, seat.beadID); err != nil {
+		return nil, fmt.Errorf("not updating %s: %w", seat.beadID, err)
+	}
+	return next, nil
+}
+
+// readSeatOutboxFile reads a file in a seat's outbox, returning nothing when it
+// is not there. Any other failure is returned: an unreadable outbox is not an
+// empty one, and a write must not be composed over it.
+func readSeatOutboxFile(fsys outboxFS, path string) ([]byte, error) {
+	data, err := fsys.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return data, err
 }
 
 // tickAttempts bounds the guarded write of tick: a block amended between the

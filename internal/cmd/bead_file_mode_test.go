@@ -65,10 +65,15 @@ func seatVerbsAt(t *testing.T, worktree string) (*beadVerbs, *callingStore, *byt
 }
 
 // callingStore counts the calls a file-mode verb must not make: any AppendNotes
-// it records is a bead write that escaped the outbox.
+// or Update it records is a bead write that escaped the outbox.
 type callingStore struct {
 	beads.Client
 	calls []string
+}
+
+func (s *callingStore) Update(id string, opts beads.UpdateOptions) error {
+	s.calls = append(s.calls, "Update "+id)
+	return nil
 }
 
 func (s *callingStore) AppendNotes(id, text string) error {

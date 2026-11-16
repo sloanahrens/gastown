@@ -158,6 +158,39 @@ func TestNoBeadAccessFileModeEscalateKeepsTheSeatsEarlierResult(t *testing.T) {
 	}
 }
 
+// TestNoBeadAccessFileModeEscalateKeepsTheSeatsUpdate: the result.json a
+// file-mode update wrote carries a title and an acceptance block, and writing
+// the escalation's request over it must keep them, or the host applies the
+// request and loses the update (gt-pm55bt).
+func TestNoBeadAccessFileModeEscalateKeepsTheSeatsUpdate(t *testing.T) {
+	t.Parallel()
+	seat := newFileModeSeat(t, fileModeTask)
+	writeSeatFile(t, seat.resultPath(), `{
+  "bead_id": "gt-abc1",
+  "status": "deferred",
+  "title": "DISPROVEN: the retry resets",
+  "acceptance": "- [x] the refusal names the verb"
+}
+`)
+
+	if err := seat.r.escalate([]string{"HELP: blocked"}); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	res, err := outbox.Validate(seat.written(t), nil, "gt-abc1")
+	if err != nil {
+		t.Fatalf("the written outbox does not validate: %v", err)
+	}
+	if res.Title == nil || *res.Title != "DISPROVEN: the retry resets" {
+		t.Errorf("title = %v, want the title the update wrote", res.Title)
+	}
+	if res.Acceptance == nil || *res.Acceptance != "- [x] the refusal names the verb" {
+		t.Errorf("acceptance = %v, want the block the update wrote", res.Acceptance)
+	}
+	if res.Escalation == nil || res.Escalation.Text != "HELP: blocked\n\nSeverity: high" {
+		t.Errorf("escalation = %+v, want the new request", res.Escalation)
+	}
+}
+
 // TestNoBeadAccessFileModeEscalateRefusesAnInvalidSeverity: the severity is
 // checked before anything is written, so a refused severity leaves no outbox
 // behind and reaches no bead.
