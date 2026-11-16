@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/stretchr/testify/require"
 )
@@ -163,15 +165,45 @@ func TestTierSweepImagesRetryAnswersThroughItsOverride(t *testing.T) {
 		imagesFailedKey("gastown", pairGreen12): {},
 	}
 	var gotRig, gotSHA string
-	d.tierSweepSeams.imagesFailedFor = func(rig, sha string) bool {
+	d.tierSweepSeams.imagesAnswer = func(rig, sha string) tierSweepImagesAnswer {
 		gotRig, gotSHA = rig, sha
-		return false
+		return tierSweepImagesUnanswered
 	}
-	if d.tierSweepImagesFailedFor("gastown", pairGreen) {
-		t.Fatal("the pair check's failed run answered over the seam that said not failed")
+	if got := d.tierSweepImagesAnswerFor("gastown", pairGreen); got != tierSweepImagesUnanswered {
+		t.Fatalf("answer = %v, want the seam's unanswered over the pair check's failed run", got)
 	}
 	if gotRig != "gastown" || gotSHA != pairGreen {
 		t.Fatalf("the seam was called with (%q, %q), want (%q, %q)", gotRig, gotSHA, "gastown", pairGreen)
+	}
+}
+
+// The check's own items answer the third answer: a commit whose pair of images
+// is in the registry reads as published, and a commit the check holds nothing
+// for reads as unanswered rather than as either verdict.
+func TestTierSweepImagesRetryAnswersThePublishedPair(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.run(pairT0)
+	d := &Daemon{}
+	d.pairReady.held = fx.check.held
+
+	cases := []struct {
+		name string
+		rig  string
+		sha  string
+		want tierSweepImagesAnswer
+	}{
+		{name: "the published pair's rig and commit", rig: "gastown", sha: pairGreen, want: tierSweepImagesPublished},
+		{name: "the same rig at another commit", rig: "gastown", sha: pairOther, want: tierSweepImagesUnanswered},
+		{name: "another rig at the same commit", rig: "devops", sha: pairGreen, want: tierSweepImagesUnanswered},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := d.tierSweepImagesAnswerFor(c.rig, c.sha); got != c.want {
+				t.Fatalf("tierSweepImagesAnswerFor(%q, %q) = %v, want %v", c.rig, c.sha, got, c.want)
+			}
+		})
 	}
 }
 
@@ -321,9 +353,9 @@ func TestTierSweepImagesRetryDoesNotAskForARedRecord(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
 	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
-	d.tierSweepSeams.imagesFailedFor = func(string, string) bool {
+	d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer {
 		t.Error("a red record's images answer was asked for")
-		return false
+		return tierSweepImagesUnanswered
 	}
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
 		t.Error("a red record's origin/main was read")
@@ -364,9 +396,9 @@ func TestTierSweepImagesRetryDoesNotAskTheImagesAnswerWhenTheRecordRefuses(t *te
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
-			d.tierSweepSeams.imagesFailedFor = func(string, string) bool {
+			d.tierSweepSeams.imagesAnswer = func(string, string) tierSweepImagesAnswer {
 				t.Error("the images answer was asked for a record the rule already refuses")
-				return false
+				return tierSweepImagesUnanswered
 			}
 			if err := writeTierSweepState(d.config.TownRoot, "gastown", c.st); err != nil {
 				t.Fatal(err)
@@ -514,5 +546,345 @@ func TestTierSweepImagesRetryEarlyReRunRecordsTheCycle(t *testing.T) {
 	}
 	if !after.Equal(before) {
 		t.Fatalf("hourly last-run moved from %v to %v; an early re-run must not consume the hour", before, after)
+	}
+}
+
+// imagesRetryClock is the daemon's fake clock, so a test moves the 15 minute
+// gap without sleeping.
+func imagesRetryClock(t *testing.T, d *Daemon) *clockwork.FakeClock {
+	t.Helper()
+	clk, ok := d.clock.(*clockwork.FakeClock)
+	if !ok {
+		t.Fatalf("test clock = %T, want a fake clock to advance", d.clock)
+	}
+	return clk
+}
+
+// imagesRetryTrigger runs the heartbeat with the hourly clock parked twenty
+// minutes short of due, so the trigger takes the early path an images retry
+// runs on, and waits for the cycle it starts.
+func imagesRetryTrigger(t *testing.T, d *Daemon) {
+	t.Helper()
+	if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", imagesRetryClock(t, d).Now().Add(-20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+}
+
+// imagesRetryRecording is one record and cycle outcome the recording rule is
+// asked about: the record as the cycle read it, the green tip the cycle
+// recorded, whether it was an early re-run, and what the pair check answers for
+// the green tips: failed, published, or nothing at all.
+type imagesRetryRecording struct {
+	name         string
+	lastSHA      string
+	lastGreenSHA string
+	sinceLastRun time.Duration
+	retries      int    // recorded against retrySHA
+	retrySHA     string // the tip the recorded retries belong to
+	greenSHA     string // the green tip the cycle recorded, "" when it recorded none
+	early        bool
+	imagesFailed []string
+	// imagesPublished is the green tips whose pair of images the pair check holds
+	// published, and the only tips it answers with a success.
+	imagesPublished []string
+	wantRetries     int
+	wantSHA         string
+}
+
+func TestTierSweepImagesRetryRecorded(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	cases := []imagesRetryRecording{
+		{
+			name: "an early re-run counts one for the failed sha", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			greenSHA: imagesRetryGreen, early: true, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 1, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "a second early re-run counts two", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 1, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryGreen, early: true, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 2, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "a new green sha clears the pair even when its images run failed", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryTIP, early: true, imagesFailed: []string{imagesRetryGreen, imagesRetryTIP},
+			wantRetries: 0, wantSHA: "",
+		},
+		{
+			name: "the published images run clears the pair", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryGreen, early: true, imagesPublished: []string{imagesRetryGreen},
+			wantRetries: 0, wantSHA: "",
+		},
+		{
+			name: "an images answer the check does not hold keeps the pair", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: imagesRetryGreen,
+			greenSHA:    imagesRetryGreen,
+			wantRetries: 2, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "an early re-run with no images answer spends no retry", lastSHA: "red1",
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryGreen, early: true,
+			wantRetries: 2, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "no green sha records nothing", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: imagesRetryGreen, early: true, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 0, wantSHA: "",
+		},
+		{
+			name: "a town-wide cycle keeps the pair", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryGreen, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 2, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "an early re-run inside the gap keeps the pair", lastSHA: "red1",
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap - time.Minute,
+			retries: 2, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryGreen, early: true, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 2, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "an early re-run at the cap keeps it", lastSHA: "red1",
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: tierSweepImagesRetryMax, retrySHA: imagesRetryGreen,
+			greenSHA: imagesRetryGreen, early: true, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: tierSweepImagesRetryMax, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "an early re-run for a sha the record did not count writes one", lastSHA: "red1",
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: tierSweepImagesRetryMax, retrySHA: "older1",
+			greenSHA: imagesRetryGreen, early: true, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 1, wantSHA: imagesRetryGreen,
+		},
+		{
+			name: "a count recorded for another tip stands for nothing", lastSHA: imagesRetryGreen,
+			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+			retries: 2, retrySHA: "older1",
+			greenSHA: imagesRetryGreen, imagesFailed: []string{imagesRetryGreen},
+			wantRetries: 0, wantSHA: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{}
+			d.tierSweepSeams.imagesAnswer = func(_, sha string) tierSweepImagesAnswer {
+				switch {
+				case slices.Contains(c.imagesFailed, sha):
+					return tierSweepImagesFailed
+				case slices.Contains(c.imagesPublished, sha):
+					return tierSweepImagesPublished
+				}
+				return tierSweepImagesUnanswered
+			}
+			prior := tierSweepState{
+				LastRun:        now.Add(-c.sinceLastRun),
+				LastSHA:        c.lastSHA,
+				LastGreenSHA:   c.lastGreenSHA,
+				ImagesRetries:  c.retries,
+				ImagesRetrySHA: c.retrySHA,
+			}
+			retries, sha := d.tierSweepImagesRetryRecorded("gastown", prior, c.greenSHA, c.early, now)
+			if retries != c.wantRetries || sha != c.wantSHA {
+				t.Fatalf("recorded %d retries for %q, want %d for %q", retries, sha, c.wantRetries, c.wantSHA)
+			}
+		})
+	}
+}
+
+// Each early re-run an images failure leaves due counts itself in the record:
+// the first writes one retry for the green sha whose images failed, the second
+// writes two. The stages read RED, so the tip never advances and the count
+// keeps the sha it belongs to.
+func TestTierSweepImagesRetryCountsEachEarlyReRun(t *testing.T) {
+	t.Parallel()
+	d, rec, _, logs := setupImagesRetry(t, imagesRetryTriggerCase{
+		lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+		imagesFailed: true, mainSHA: imagesRetryTIP,
+	})
+	// The stages judge RED: no verdict line means the cycle never goes green.
+	rec.result = nil
+	main := imagesRetryTIP
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return main, nil }
+
+	imagesRetryTrigger(t, d)
+	if !strings.Contains(logs.String(), tierSweepImagesRetryLine) {
+		t.Fatalf("the first re-run was not the images failure's:\n%s", logs.String())
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastGreenSHA != imagesRetryGreen {
+		t.Fatalf("LastGreenSHA = %q, want the RED re-run to leave %q", st.LastGreenSHA, imagesRetryGreen)
+	}
+	if st.ImagesRetries != 1 || st.ImagesRetrySHA != imagesRetryGreen {
+		t.Fatalf("the first re-run wrote %d retries for %q, want 1 for %q",
+			st.ImagesRetries, st.ImagesRetrySHA, imagesRetryGreen)
+	}
+
+	// The tip moved again and the gap passed while the images run still stands
+	// failed: the next early re-run counts against the same sha.
+	imagesRetryClock(t, d).Advance(tierSweepImagesRetryGap)
+	main = "secondtip0ab"
+	imagesRetryTrigger(t, d)
+	st = tierSweepTestState(t, d, "gastown")
+	if st.ImagesRetries != 2 || st.ImagesRetrySHA != imagesRetryGreen {
+		t.Fatalf("the second re-run wrote %d retries for %q, want 2 for %q",
+			st.ImagesRetries, st.ImagesRetrySHA, imagesRetryGreen)
+	}
+}
+
+// A sweep that produces a new green sha clears the retries: they were spent on
+// a failure the old tip owns, and no images run builds for a tip a newer green
+// has passed.
+func TestTierSweepImagesRetryGreenSweepResetsTheCount(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	rec.green()
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return imagesRetryTIP, nil }
+	// Both tips have a failed images run, so only the new green sha can be what
+	// clears the pair.
+	d.pairReady.failed = map[string]pairReadyFailedRun{
+		imagesFailedKey("gastown", greenRefShortSHA(imagesRetryGreen)): {},
+		imagesFailedKey("gastown", greenRefShortSHA(imagesRetryTIP)):   {},
+	}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-tierSweepImagesRetryGap), LastSHA: imagesRetryGreen, LastGreenSHA: imagesRetryGreen,
+		ImagesRetries: tierSweepImagesRetryMax - 1, ImagesRetrySHA: imagesRetryGreen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	imagesRetryTrigger(t, d)
+
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastGreenSHA != imagesRetryTIP {
+		t.Fatalf("LastGreenSHA = %q, want the green re-run's tip %q", st.LastGreenSHA, imagesRetryTIP)
+	}
+	if st.ImagesRetries != 0 || st.ImagesRetrySHA != "" {
+		t.Fatalf("the new green sha left %d retries for %q, want them cleared",
+			st.ImagesRetries, st.ImagesRetrySHA)
+	}
+}
+
+// The images run for the green sha succeeding clears the retries: the pair
+// check holds both images at the tip's stamp, so no failure is left for a count
+// to belong to.
+func TestTierSweepImagesRetryImagesSuccessClearsTheCount(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	rec.result = nil
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return imagesRetryTIP, nil }
+	// The images run's output is the published pair, which is the check's only
+	// answer that the run for the tip succeeded.
+	d.pairReady.held = map[string][]attention.Item{
+		"gastown": {{Key: pairReadyKey("gastown", greenRefShortSHA(imagesRetryGreen)), Kind: attention.KindDeployPairReady}},
+	}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-tierSweepImagesRetryGap), LastSHA: "red1", LastGreenSHA: imagesRetryGreen,
+		ImagesRetries: 2, ImagesRetrySHA: imagesRetryGreen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	imagesRetryTrigger(t, d)
+
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != imagesRetryTIP || st.LastGreenSHA != imagesRetryGreen {
+		t.Fatalf("record = %+v, want the RED cycle to leave the green tip %q", st, imagesRetryGreen)
+	}
+	if st.ImagesRetries != 0 || st.ImagesRetrySHA != "" {
+		t.Fatalf("the succeeded images run left %d retries for %q, want them cleared",
+			st.ImagesRetries, st.ImagesRetrySHA)
+	}
+}
+
+// The retries the loop spent survive the process: a daemon value whose pair
+// check has read nothing, as a restart starts, reads the count back from the
+// state file, the cap holds the fourth retry off, and the first cycle it writes
+// keeps the count rather than clearing a cap it cannot see a failure behind.
+func TestTierSweepImagesRetryCountReadByAFreshDaemon(t *testing.T) {
+	t.Parallel()
+	d, rec, _, logs := setupImagesRetry(t, imagesRetryTriggerCase{
+		lastSHA: imagesRetryGreen, lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
+		imagesFailed: true, mainSHA: imagesRetryTIP,
+	})
+	rec.result = nil
+	main := imagesRetryTIP
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return main, nil }
+
+	for i, tip := range []string{"tipone0abcd", "tiptwo0abcd", "tipthree0ab"} {
+		main = tip
+		imagesRetryTrigger(t, d)
+		st := tierSweepTestState(t, d, "gastown")
+		if st.ImagesRetries != i+1 || st.ImagesRetrySHA != imagesRetryGreen {
+			t.Fatalf("re-run %d wrote %d retries for %q, want %d for %q",
+				i+1, st.ImagesRetries, st.ImagesRetrySHA, i+1, imagesRetryGreen)
+		}
+		imagesRetryClock(t, d).Advance(tierSweepImagesRetryGap)
+	}
+
+	// The restarted daemon: the same town and seams, and a pair check that has
+	// read nothing, so it holds no images answer the dead process had in memory.
+	fresh := &Daemon{
+		config:           d.config,
+		patrolConfig:     d.patrolConfig,
+		logger:           d.logger,
+		clock:            d.clock,
+		sweepInClusterFn: d.sweepInClusterFn,
+		dogFeedFn:        d.dogFeedFn,
+		notifier:         d.notifier,
+		tierSweepSeams:   d.tierSweepSeams,
+		openGitFn:        d.openGitFn,
+	}
+	st, err := readTierSweepState(fresh.config.TownRoot, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ImagesRetries != tierSweepImagesRetryMax || st.ImagesRetrySHA != imagesRetryGreen {
+		t.Fatalf("the fresh daemon read %d retries for %q, want %d for %q",
+			st.ImagesRetries, st.ImagesRetrySHA, tierSweepImagesRetryMax, imagesRetryGreen)
+	}
+	if got := fresh.tierSweepImagesAnswerFor("gastown", st.LastGreenSHA); got != tierSweepImagesUnanswered {
+		t.Fatalf("the fresh daemon's pair check answered %v for %q, want no answer", got, st.LastGreenSHA)
+	}
+	if tierSweepImagesRetryRecordDue(st, fresh.clk().Now()) {
+		t.Fatal("the count the fresh daemon read back did not hold the fourth retry off")
+	}
+
+	// The hourly cycle a restarted daemon runs writes a record with no images
+	// answer to read, and it must keep the count: clearing it would hand the
+	// loop its cap back.
+	if err := savePatrolLastRun(fresh.config.TownRoot, "tier_sweep", fresh.clk().Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	ranBefore := len(rec.stages)
+	fresh.triggerTierSweep()
+	waitTierSweepIdle(t, fresh)
+	if len(rec.stages) == ranBefore {
+		t.Fatalf("the restarted daemon ran no cycle, so nothing wrote the record\n%s", logs.String())
+	}
+	st = tierSweepTestState(t, fresh, "gastown")
+	if st.ImagesRetries != tierSweepImagesRetryMax || st.ImagesRetrySHA != imagesRetryGreen {
+		t.Fatalf("the restarted daemon's cycle left %d retries for %q, want %d for %q",
+			st.ImagesRetries, st.ImagesRetrySHA, tierSweepImagesRetryMax, imagesRetryGreen)
 	}
 }
