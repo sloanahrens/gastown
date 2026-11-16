@@ -3,9 +3,6 @@ package templates_test
 import (
 	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -876,52 +873,26 @@ func imageTable(t *testing.T) []string {
 }
 
 // imageRefsInSource returns the image references declared in one images.go
-// source. A constant whose value it cannot evaluate is an error, never a
-// skipped entry: a short table would leave the pin check silent about the
-// reference that was dropped.
+// source. It reads the same const table as digestPinsInSource, so the two scans
+// of images.go cannot drift apart. A reference whose value it cannot evaluate
+// is an error, never a skipped entry: a short table would leave the pin check
+// silent about the reference that was dropped.
 func imageRefsInSource(src []byte) ([]string, error) {
-	file, err := parser.ParseFile(token.NewFileSet(), "images.go", src, parser.SkipObjectResolution)
+	exprs, names, image, err := constDeclsInSource(src)
 	if err != nil {
 		return nil, err
 	}
 
-	exprs := map[string]ast.Expr{}
-	var imageSpecs []*ast.ValueSpec
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
+	var refs []string
+	for _, name := range names {
+		if !image[name] {
 			continue
 		}
-		var inherited []ast.Expr
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			if len(vs.Values) > 0 {
-				inherited = vs.Values
-			}
-			for i, name := range vs.Names {
-				if i >= len(inherited) {
-					return nil, fmt.Errorf("constant %s has no value the scan can follow", name.Name)
-				}
-				exprs[name.Name] = inherited[i]
-			}
-			if declaresAnImage(vs.Names) {
-				imageSpecs = append(imageSpecs, vs)
-			}
+		value, ok := evalConstString(exprs[name], exprs, map[string]bool{})
+		if !ok {
+			return nil, fmt.Errorf("constant %s has a value the scan cannot evaluate, so the image table would silently omit it", name)
 		}
-	}
-
-	var refs []string
-	for _, vs := range imageSpecs {
-		for _, name := range vs.Names {
-			value, ok := evalConstString(exprs[name.Name], exprs, map[string]bool{})
-			if !ok {
-				return nil, fmt.Errorf("constant %s has a value the scan cannot evaluate, so the image table would silently omit it", name.Name)
-			}
-			refs = append(refs, value)
-		}
+		refs = append(refs, value)
 	}
 	return refs, nil
 }
@@ -984,22 +955,6 @@ func TestImagePinDurabilityImageTableReadsConstantsAndRefusesUnreadable(t *testi
 			}
 		})
 	}
-}
-
-// declaresAnImage reports whether every name in a const declaration marks its
-// value as an image. A declaration that mixes the two is skipped whole; the
-// caller's DaemonBaseImage guard then fails if the skipped declaration held the
-// image it needed, so a mixed block cannot quietly pin nothing.
-func declaresAnImage(names []*ast.Ident) bool {
-	if len(names) == 0 {
-		return false
-	}
-	for _, name := range names {
-		if !strings.HasSuffix(name.Name, "Image") {
-			return false
-		}
-	}
-	return true
 }
 
 // daemonImagePrefix is the local tag the deployer builds on this host; it is
