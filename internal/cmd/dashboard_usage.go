@@ -52,17 +52,22 @@ const (
 	// the window's oldest, so a total built from them would be short without
 	// saying so (the claude_plan rows keep the same cap, gt-u9dsir).
 	usageRowsLimit = 20000
+	// usageRowsTimeout bounds one poll's read of the usage_records rows, so a bd
+	// that hangs cannot hold a poller. It is dashboardSpendTimeout, the bound the
+	// dashboard's external command reads share.
+	usageRowsTimeout = dashboardSpendTimeout
 	// The reasons a panel's row reading is unavailable. Each names the cause in
 	// fixed words, so no output of the row store reaches the page.
 	usageRowsReadReason     = "the usage_records rows could not be read"
+	usageRowsTimedOutReason = "the usage_records read timed out"
 	usageRowsCapReason      = "the usage_records read filled its cap, so the window's start is not in the rows"
 	usageRowsConflictReason = "two usage_records rows count the same session with different totals"
 )
 
 // usageRowsRead reads the town's usage_records rows built at or after since, up
-// to limit, newest built first. It is the beads store's ReadUsageRecords with
-// the context dropped, since the dashboard's pollers carry none.
-type usageRowsRead func(since time.Time, limit int) ([]beads.UsageRecordRow, error)
+// to limit, newest built first. It is the beads store's ReadUsageRecords; the
+// context carries the read's deadline.
+type usageRowsRead func(ctx context.Context, since time.Time, limit int) ([]beads.UsageRecordRow, error)
 
 // dashUsageReader reads the usage scan's records. dir is the usage root, so the
 // reading and its cache are testable against a temp directory; the cache holds
@@ -80,7 +85,9 @@ type dashUsageReader struct {
 	// rows reads the usage_records rows. Nil until withRows wires it; with no
 	// rows the reader folds the files alone.
 	rows usageRowsRead
-	mu   sync.Mutex
+	// rowsTimeout bounds one row read. newDashUsageReader sets usageRowsTimeout.
+	rowsTimeout time.Duration
+	mu          sync.Mutex
 	// cache is guarded by mu.
 	cache map[string]usageCached
 }
@@ -104,8 +111,9 @@ type usageCached struct {
 
 func newDashUsageReader(townRoot string) *dashUsageReader {
 	return &dashUsageReader{
-		dir:   filepath.Join(townRoot, ".runtime", "usage"),
-		cache: map[string]usageCached{},
+		dir:         filepath.Join(townRoot, ".runtime", "usage"),
+		rowsTimeout: usageRowsTimeout,
+		cache:       map[string]usageCached{},
 	}
 }
 
@@ -119,8 +127,8 @@ func (r *dashUsageReader) withRows(rows usageRowsRead) *dashUsageReader {
 // store, the store the seat-end and om-review writers file them in.
 func dashboardUsageRows(townRoot string) usageRowsRead {
 	client := beads.New(townRoot)
-	return func(since time.Time, limit int) ([]beads.UsageRecordRow, error) {
-		return client.ReadUsageRecords(context.Background(), since, limit)
+	return func(ctx context.Context, since time.Time, limit int) ([]beads.UsageRecordRow, error) {
+		return client.ReadUsageRecords(ctx, since, limit)
 	}
 }
 
@@ -146,14 +154,20 @@ func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
 // rowRecords is the usage_records rows built at or after since, as the records
 // they hold, newest built first. Nil and no reason when no row store is wired.
 // A reason, with nil records, says why the rows cannot be taken whole: the read
-// failed, it filled usageRowsLimit, or its rows share a session. The reason is
-// fixed text, never the store's own output, since that can carry a secret.
+// failed or ran past rowsTimeout, it filled usageRowsLimit, or its rows share a
+// session. The reason is fixed text, never the store's own output, since that
+// can carry a secret.
 func (r *dashUsageReader) rowRecords(since time.Time) ([]dashboard.UsageRecord, string) {
 	if r.rows == nil {
 		return nil, ""
 	}
-	rows, err := r.rows(since, usageRowsLimit)
+	ctx, cancel := context.WithTimeout(context.Background(), r.rowsTimeout)
+	defer cancel()
+	rows, err := r.rows(ctx, since, usageRowsLimit)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, usageRowsTimedOutReason
+		}
 		return nil, usageRowsReadReason
 	}
 	if len(rows) == usageRowsLimit {
@@ -182,20 +196,30 @@ var errUsageRowsConflict = errors.New("usage_records rows share a session but ar
 // sessions and the same record - is dropped, as the usage record writer drops a
 // repeated write. Any other session the row shares with an earlier one is refused,
 // since the totals of two rows that count one session cannot be split. A row with
-// no sessions has no totals to split, so it is kept as it is.
+// no sessions claims no session that could overlap, so it is dropped only when an
+// earlier sessionless row of its bead and kind is the same record; otherwise it is
+// kept.
 func dedupeUsageRows(rows []beads.UsageRecordRow) ([]dashboard.UsageRecord, error) {
 	kept := make(map[usageKey][]usageKeptRow, len(rows))
 	recs := make([]dashboard.UsageRecord, 0, len(rows))
 	for _, row := range rows {
-		if len(row.Sessions) == 0 {
+		key := usageKeyOf(row.Record)
+		sessions := make(map[string]bool, len(row.Sessions))
+		for _, s := range row.Sessions {
+			sessions[s] = true
+		}
+		if len(sessions) == 0 {
+			if usageRowRepeats(kept[key], row.Record) {
+				continue
+			}
+			kept[key] = append(kept[key], usageKeptRow{rec: row.Record, sessions: sessions})
 			recs = append(recs, row.Record)
 			continue
 		}
-		key := usageKeyOf(row.Record)
 		repeat := false
 		for _, k := range kept[key] {
 			shared := 0
-			for _, s := range row.Sessions {
+			for s := range sessions {
 				if k.sessions[s] {
 					shared++
 				}
@@ -203,7 +227,7 @@ func dedupeUsageRows(rows []beads.UsageRecordRow) ([]dashboard.UsageRecord, erro
 			if shared == 0 {
 				continue
 			}
-			if shared != len(row.Sessions) || len(k.sessions) != len(row.Sessions) || !reflect.DeepEqual(k.rec, row.Record) {
+			if shared != len(sessions) || len(k.sessions) != len(sessions) || !reflect.DeepEqual(k.rec, row.Record) {
 				return nil, errUsageRowsConflict
 			}
 			repeat = true
@@ -212,14 +236,21 @@ func dedupeUsageRows(rows []beads.UsageRecordRow) ([]dashboard.UsageRecord, erro
 		if repeat {
 			continue
 		}
-		sessions := make(map[string]bool, len(row.Sessions))
-		for _, s := range row.Sessions {
-			sessions[s] = true
-		}
 		kept[key] = append(kept[key], usageKeptRow{rec: row.Record, sessions: sessions})
 		recs = append(recs, row.Record)
 	}
 	return recs, nil
+}
+
+// usageRowRepeats says a sessionless row of rec is already kept: an earlier kept
+// row of its bead and kind that counts no session and is the same record.
+func usageRowRepeats(kept []usageKeptRow, rec dashboard.UsageRecord) bool {
+	for _, k := range kept {
+		if len(k.sessions) == 0 && reflect.DeepEqual(k.rec, rec) {
+			return true
+		}
+	}
+	return false
 }
 
 // merge is the record set both readers fold: rows first, then each file record

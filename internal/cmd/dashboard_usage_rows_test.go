@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
@@ -29,7 +30,7 @@ func usageRowFor(bead, kind string, end time.Time, wallS int64) beads.UsageRecor
 
 // usageRowsFixed is a row store that answers every read with rows.
 func usageRowsFixed(rows ...beads.UsageRecordRow) usageRowsRead {
-	return func(time.Time, int) ([]beads.UsageRecordRow, error) {
+	return func(context.Context, time.Time, int) ([]beads.UsageRecordRow, error) {
 		return rows, nil
 	}
 }
@@ -116,7 +117,7 @@ func TestUsageRowsReadFailureIsUnavailable(t *testing.T) {
 	writeUsageRecord(t, records, "gt-a.work.json",
 		usageRecordBody("gt-a", "work", "polecat", usageReaderNow.Add(-time.Hour), 300), time.Hour)
 
-	failing := func(time.Time, int) ([]beads.UsageRecordRow, error) {
+	failing := func(context.Context, time.Time, int) ([]beads.UsageRecordRow, error) {
 		return nil, errors.New("sample list: bd is down")
 	}
 	r := newDashUsageReader(root).withRows(failing)
@@ -149,6 +150,41 @@ func TestUsageRowsCapFilledIsRefused(t *testing.T) {
 	}
 }
 
+// The row read carries a deadline, so a bd that hangs cannot hold the pollers.
+func TestUsageRowsReadCarriesADeadline(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	bounded := false
+	r := newDashUsageReader(root).withRows(func(ctx context.Context, _ time.Time, _ int) ([]beads.UsageRecordRow, error) {
+		_, bounded = ctx.Deadline()
+		return nil, nil
+	})
+
+	r.read(usageReaderNow)
+	if !bounded {
+		t.Fatal("the usage_records read ran with no deadline")
+	}
+}
+
+// A row read that runs past its deadline is an unavailable panel with the timeout
+// reason, not the generic read failure. The deadline is already past, and the
+// store returns its own error without waiting on the context, so the test ends
+// whether or not the deadline is applied; the store's error is not on the page.
+func TestUsageRowsReadPastItsDeadlineIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	r := newDashUsageReader(root).withRows(func(context.Context, time.Time, int) ([]beads.UsageRecordRow, error) {
+		return nil, errors.New("signal: killed")
+	})
+	r.rowsTimeout = 0
+
+	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsTimedOutReason {
+		t.Errorf("read past its deadline = %+v, want unavailable with the timed-out reason", u)
+	}
+}
+
 // usageRowWithSessions is a row of bead and kind that counts sessions.
 func usageRowWithSessions(bead, kind string, end time.Time, wallS int64, sessions ...string) beads.UsageRecordRow {
 	row := usageRowFor(bead, kind, end, wallS)
@@ -171,6 +207,62 @@ func TestUsageRowsRepeatedWriteCountsOnce(t *testing.T) {
 	got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-d", dashboard.UsageKindWork)
 	if len(got) != 1 || got[0].WallS != 700 {
 		t.Fatalf("gt-d work records = %+v, want the one run with wall 700", got)
+	}
+}
+
+// A sessionless row written again is the same run, so it counts once: the same
+// repeat the writer's file no-op makes.
+func TestUsageRowsRepeatedSessionlessWriteCountsOnce(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	end := usageReaderNow.Add(-time.Hour)
+	r := newDashUsageReader(root).withRows(usageRowsFixed(
+		usageRowFor("gt-s", dashboard.UsageKindWork, end, 700),
+		usageRowFor("gt-s", dashboard.UsageKindWork, end, 700),
+	))
+
+	got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-s", dashboard.UsageKindWork)
+	if len(got) != 1 {
+		t.Fatalf("gt-s work records = %+v, want the one run", got)
+	}
+}
+
+// Sessionless rows that differ are different runs and cannot be shown to overlap,
+// so both count.
+func TestUsageRowsDifferentSessionlessRunsBothCount(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	r := newDashUsageReader(root).withRows(usageRowsFixed(
+		usageRowFor("gt-t", dashboard.UsageKindWork, usageReaderNow.Add(-time.Hour), 400),
+		usageRowFor("gt-t", dashboard.UsageKindWork, usageReaderNow.Add(-2*time.Hour), 250),
+	))
+
+	got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-t", dashboard.UsageKindWork)
+	if len(got) != 2 {
+		t.Fatalf("gt-t work records = %+v, want both runs", got)
+	}
+}
+
+// A session id a row lists twice is still one session: a repeat of that row
+// counts once and is not refused as a conflict.
+func TestUsageRowsDuplicateSessionIDWithinARowIsNotAConflict(t *testing.T) {
+	t.Parallel()
+
+	root, _ := usageTestDir(t)
+	end := usageReaderNow.Add(-time.Hour)
+	r := newDashUsageReader(root).withRows(usageRowsFixed(
+		usageRowWithSessions("gt-u", dashboard.UsageKindWork, end, 500, "s1", "s1"),
+		usageRowWithSessions("gt-u", dashboard.UsageKindWork, end, 500, "s1", "s1"),
+	))
+
+	u := r.read(usageReaderNow)
+	if u.Unavailable {
+		t.Fatalf("a repeated row with a duplicated session came back unavailable: %+v", u)
+	}
+	if got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-u", dashboard.UsageKindWork); len(got) != 1 {
+		t.Fatalf("gt-u work records = %+v, want the one run", got)
 	}
 }
 
