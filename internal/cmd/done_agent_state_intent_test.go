@@ -193,6 +193,35 @@ func TestAgentBeadRetireFailedTurnEndWriteIsReported(t *testing.T) {
 	}
 }
 
+// A polecat turn that cannot name its seat is refused and reported rather than
+// written somewhere no supervisor reads (gt-ijldj7).
+func TestAgentBeadRetireTurnEndRefusesASeatItCannotName(t *testing.T) {
+	t.Parallel()
+	townRoot := doneBatchTown(t)
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	var warned []string
+	env := doneIntentEnv(t, db, &warned)
+	// A polecat identity with no polecat name: the agent bead ID resolves to
+	// nothing, so the turn's end has no seat to name either. Writing it anyway
+	// would put a record at a path no supervisor reads.
+	env.getenv = envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown"})
+
+	consumed, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", pendingForExit(done.ExitCompleted))
+	if err != nil {
+		t.Fatalf("gt done: %v", err)
+	}
+	if consumed {
+		t.Error("consumed = true with no agent bead to write")
+	}
+
+	if !strings.Contains(strings.Join(warned, "\n"), "no seat to name") {
+		t.Errorf("warnings lack the unnamed-seat refusal:\n%s", strings.Join(warned, "\n"))
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, ".runtime", "agents")); !os.IsNotExist(err) {
+		t.Fatalf("an unnameable seat wrote an intent record (stat err %v)", err)
+	}
+}
+
 // A crew run has no seat: its gt done submits a branch and retires no session,
 // so the turn-end write must name no seat rather than write a polecat record
 // under a crew member's name (gt-ijldj7).
