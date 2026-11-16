@@ -73,6 +73,9 @@ type updateTriggerState struct {
 	// notDueReason is the last not-due reason printed, so a hold that stands
 	// logs once rather than once per heartbeat.
 	notDueReason string
+	// ledgerErr is the last image-ledger read error printed, so a damaged
+	// record logs once rather than once per heartbeat.
+	ledgerErr string
 	// remoteFailedAt is the clock reading of the last failed main-tip read,
 	// zero when the last read succeeded or none has run. While now is inside
 	// updateRemoteBackoff of it, the hold makes no new read and reads main as
@@ -225,6 +228,30 @@ func (d *Daemon) clearUpdateNotDue() {
 	d.updateTrigger.mu.Unlock()
 }
 
+// noteUpdateLedgerUnreadable logs a damaged image record once per distinct
+// message. The record only spares a launch the run's pre-swap check would
+// refuse, so the due decision proceeds without it; this line is how an
+// operator learns the refused-pair hold is off (gt-naf038).
+func (d *Daemon) noteUpdateLedgerUnreadable(msg string) {
+	d.updateTrigger.mu.Lock()
+	seen := d.updateTrigger.ledgerErr == msg
+	if !seen {
+		d.updateTrigger.ledgerErr = msg
+	}
+	d.updateTrigger.mu.Unlock()
+	if !seen {
+		d.logger.Printf("update: the image ledger could not be read: %s; deciding without the refused-pair hold", msg)
+	}
+}
+
+// clearUpdateLedgerUnreadable forgets the ledger error once the record reads
+// again, so a later recurrence is reported.
+func (d *Daemon) clearUpdateLedgerUnreadable() {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.ledgerErr = ""
+	d.updateTrigger.mu.Unlock()
+}
+
 // noteUpdateLaunch records the launch so the next heartbeat waits out
 // updateLaunchSuppression before deciding again.
 func (d *Daemon) noteUpdateLaunch(now time.Time) {
@@ -262,7 +289,10 @@ func (d *Daemon) lastUpdateLaunch() time.Time {
 // rebuild_gt cycle reads: the update job's state file, the pending-install
 // marker, the installed build's staleness against main, the image ledger the
 // update command writes, and the landing records of the rig whose checkout the
-// binary is built from. An unreadable source is an error, never an empty value.
+// binary is built from. An unreadable source is an error, never an empty value,
+// except the image ledger: a damaged record only turns off the refused-pair
+// hold, a check the run repeats before any swap, and the decision proceeds on
+// the facts that did read (gt-naf038).
 func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	facts := UpdateFacts{Standby: d.standbyReason(now)}
 
@@ -323,14 +353,18 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 
 	// The image ledger holds the pair a pre-swap check refused, read through the
 	// ledger the update command writes so the patrol and the run agree on the
-	// record. No file is no refusal (no digest install has run here); a file
-	// that cannot be read is an unknown fact, never an empty record, so the
-	// heartbeat refuses the launch rather than guess (gt-naf038).
+	// record. A missing file is the ledger's empty record, no refusal. A file
+	// that cannot be read leaves the refusal unknown, and the decision goes
+	// ahead on the facts that were read: the run's own pre-swap check still
+	// refuses a bad pair before any swap, so holding every roll on a damaged
+	// file would stall the newer pair that is due (gt-naf038).
 	rec, err := update.FileImageLedger{Dir: update.Dir(d.config.TownRoot)}.Read()
 	if err != nil {
-		return facts, err
+		d.noteUpdateLedgerUnreadable(err.Error())
+	} else {
+		d.clearUpdateLedgerUnreadable()
+		facts.RefusedCommit, facts.RefusedReason = rec.Refused.Commit, rec.RefusedReason
 	}
-	facts.RefusedCommit, facts.RefusedReason = rec.Refused.Commit, rec.RefusedReason
 
 	facts.MainMoved = info.IsStale
 	if !info.IsStale {
