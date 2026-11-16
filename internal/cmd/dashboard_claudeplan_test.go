@@ -202,7 +202,7 @@ func TestClaudePlanReadAcceptsAReadJustUnderTheCap(t *testing.T) {
 
 	var logged []string
 	rows := func(string, time.Time, int) ([]beads.Sample, error) {
-		return fullClaudePlanRows(claudePlanRowScanLimit-1), nil
+		return fullClaudePlanRows(claudePlanRowScanLimit - 1), nil
 	}
 	p := claudePlanRead(t, town, rows, &logged)()
 
