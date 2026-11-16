@@ -587,9 +587,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
 	}
 	// The om review's usage record is written as each review returns, from the
-	// transcripts its run wrote (gt-6qc3nw.13). The sink lives as long as this
-	// rig's worker, so a bead's no-transcript note is logged once for it.
-	usage := &omUsageSink{townRoot: townRoot, logf: d.logger.Printf}
+	// transcripts its run wrote (gt-6qc3nw.13), as a row and a file in one call
+	// (gt-ox6ee1). The sink lives as long as this rig's worker, so a bead's
+	// no-transcript note is logged once for it.
+	usage := d.omUsageSinkFor(townRoot)
 	lander := &land.Lander{
 		Repo:               repo,
 		Remote:             landingRemote,

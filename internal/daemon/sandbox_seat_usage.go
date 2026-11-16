@@ -30,9 +30,17 @@ import (
 type seatUsageHook struct {
 	// list names the transcripts under a worktree. It has no default: a nil list
 	// is refused, so a seat end never reads the host's Claude config and home
-	// unless it was wired to. sandboxSeatEnder wires agentlog.ProjectTranscripts.
+	// unless it was wired to. sandboxSeatEndHost wires agentlog.ProjectTranscripts.
 	list func(townRoot, workDir string) ([]string, error)
-	// write merges a record into the usage tree; nil is usageattrib.Write.
+	// store is the town's usage_records rows the record is filed in beside its
+	// file. It has no default: an end that is not wired writes the file and
+	// reports the row's absence, so a missing wiring is logged, never silent.
+	// sandboxSeatEndHost wires the daemon's store.
+	store usageRecordStore
+	// write files a record as its file and its row in one call; nil is
+	// writeUsageRecord over store. A *usageRowNotWrittenError means the file is
+	// written and the row is not. A test replaces it to see the call, and it is
+	// what keeps the unit tier off bd.
 	write func(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error
 }
 
@@ -77,12 +85,14 @@ func (h *patrolScanHost) seatStartedAt(rig, name string, submitted time.Time) (t
 // and started at start, before its directories are removed. startErr is what
 // seatStartedAt reported. A seat with no transcript on the host, or none written
 // since it started, writes nothing and says why. A seat with no lister wired is
-// refused before anything is read. It returns the path of the record when one was
-// written, and incomplete: the reasons some transcript could not be read in full,
-// which the record already says its totals may understate. Every outcome that
-// writes no record returns a non-nil err, the reason. The caller logs err as not
-// written, or incomplete as written but not read in full, once; the removal goes
-// on either way.
+// refused before anything is read. It returns the path of the record file when
+// one was written, and incomplete: the reasons some transcript could not be read
+// in full, which the record already says its totals may understate. Every
+// outcome that writes a record and not its row, or writes no record at all,
+// returns a non-nil err, the reason; a path beside that err means the file is
+// there and the row is not. The caller logs the outcome once: not written, the
+// file written but not its row, or written but not read in full. The removal
+// goes on either way.
 func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) (written string, incomplete, err error) {
 	list := h.seatUsage.list
 	if list == nil {
@@ -90,7 +100,10 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	}
 	write := h.seatUsage.write
 	if write == nil {
-		write = usageattrib.Write
+		store := h.seatUsage.store
+		write = func(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+			return writeUsageRecord(h.d.ctxOrBackground(), store, usageDir, rec, sessionIDs)
+		}
 	}
 	clone := polecat.SandboxSeatHostDirsFor(filepath.Join(h.town(), rig), rig, name).ClonePath
 	// The copy taken from the sandbox before it was deleted is read first: the
@@ -163,15 +176,20 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		Complete: true,
 	}, sessions)
 	usageDir := filepath.Join(constants.TownRuntimePath(h.town()), "usage")
+	path := usageattrib.WorkRecordPath(usageDir, landing.BeadID)
 	if err := write(usageDir, rec, ids); err != nil {
-		return "", nil, errors.Join(err, errors.Join(readErrs...))
+		var rowOnly *usageRowNotWrittenError
+		if !errors.As(err, &rowOnly) {
+			path = ""
+		}
+		return path, nil, errors.Join(err, errors.Join(readErrs...))
 	}
 	// The cap cut the oldest of the seat's transcripts from the copy, so the record
 	// leaves them out and says so.
 	if fromCopy && skippedByCap > 0 {
 		readErrs = append(readErrs, fmt.Errorf("transcript copy cut by the cap: %d files skipped", skippedByCap))
 	}
-	return usageattrib.WorkRecordPath(usageDir, landing.BeadID), errors.Join(readErrs...), nil
+	return path, errors.Join(readErrs...), nil
 }
 
 // seatSession reads one transcript the seat's sessions wrote, with the messages

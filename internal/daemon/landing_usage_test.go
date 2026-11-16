@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -48,6 +52,148 @@ func fixedList(paths ...string) func(context.Context, string, string) ([]string,
 	return func(context.Context, string, string) ([]string, error) { return paths, nil }
 }
 
+// failingUsageStore is a usage_records store whose write always fails, for the
+// half-written case: the record file is written and the row is not.
+type failingUsageStore struct{ err error }
+
+func (s failingUsageStore) WriteUsageRecord(context.Context, beads.UsageRecordRow) error {
+	return s.err
+}
+
+// TestLandingUsageSinkWiresTheUsageRecordStore: the sink a rig's landing worker
+// records om usage through carries the town's usage_records store, so a
+// review's record is filed as a row beside its file and never as a file alone.
+func TestLandingUsageSinkWiresTheUsageRecordStore(t *testing.T) {
+	t.Parallel()
+	store := beadsfake.New()
+	d := &Daemon{
+		config:           &Config{TownRoot: t.TempDir()},
+		logger:           log.New(io.Discard, "", 0),
+		openUsageRecords: func() usageRecordStore { return store },
+	}
+	if got := d.omUsageSinkFor(t.TempDir()).store; got != store {
+		t.Errorf("the landing worker's usage_records store = %v, want the daemon's store %v", got, store)
+	}
+}
+
+// TestLandingUsageFileFailureWritesNoRow: a record the usage tree cannot take
+// costs the row too. The file is written first and refuses the record, so a
+// refused record never reaches the rows, and the review logs the record as not
+// written rather than as no usage.
+func TestLandingUsageFileFailureWritesNoRow(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A file where the usage tree's directory goes: the record file cannot be
+	// created under it.
+	if err := os.MkdirAll(constants.TownRuntimePath(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(constants.TownRuntimePath(town), "usage"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj := t.TempDir()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	transcript := filepath.Join(proj, "run.jsonl")
+	writeUsageTranscript(t, transcript, start.Add(time.Minute), seatCallLine("run", 100, 0, 20))
+	store := beadsfake.New()
+	var logged []string
+	sink := &omUsageSink{townRoot: town, store: store, list: fixedList(transcript),
+		logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }}
+
+	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: proj,
+		Start: start, End: start.Add(time.Hour)})
+
+	rows, err := store.ReadUsageRecords(context.Background(), time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the usage records: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("usage rows = %d, want none: the record the file refused must not reach the rows", len(rows))
+	}
+	if n := loggedLinesWith(logged, "its record file is not written"); n != 1 {
+		t.Errorf("file failure logged %d times, want once: %q", n, logged)
+	}
+}
+
+// TestLandingUsageWritesTheRowAndTheFile: an om review's usage is filed in one
+// write as the town's usage_records row and as the record file, and the row
+// carries the same record as the file.
+func TestLandingUsageWritesTheRowAndTheFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	proj := t.TempDir()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	transcript := filepath.Join(proj, "run.jsonl")
+	writeUsageTranscript(t, transcript, start.Add(time.Minute), seatCallLine("run", 100, 0, 20))
+	store := beadsfake.New()
+	sink := &omUsageSink{townRoot: town, store: store, list: fixedList(transcript), logf: func(string, ...any) {}}
+
+	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: proj,
+		Start: start, End: end})
+
+	rows, err := store.ReadUsageRecords(context.Background(), time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the usage records: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %d, want one for the review's run", len(rows))
+	}
+	row := rows[0]
+	if row.Record.Bead != "gt-abc" || row.Record.Kind != dashboard.UsageKindOM || row.Record.Class != dashboard.UsageClassOMReview {
+		t.Errorf("row names bead %q kind %q class %q, want gt-abc %q %q",
+			row.Record.Bead, row.Record.Kind, row.Record.Class, dashboard.UsageKindOM, dashboard.UsageClassOMReview)
+	}
+	if !row.BuiltAt.Equal(end) {
+		t.Errorf("row built at %v, want the run's end %v", row.BuiltAt, end)
+	}
+	if got := strings.Join(row.Sessions, ","); got != "run" {
+		t.Errorf("row sessions = %q, want the review's own session", got)
+	}
+
+	file := readOMUsage(t, town, "gt-abc")
+	if !file.UsageRecord.Start.Equal(row.Record.Start) || !file.End.Equal(row.Record.End) {
+		t.Errorf("file bounds %v..%v, want the row's %v..%v", file.Start, file.End, row.Record.Start, row.Record.End)
+	}
+	if file.Totals != row.Record.Totals {
+		t.Errorf("file totals %+v, want the row's %+v", file.Totals, row.Record.Totals)
+	}
+	if got := strings.Join(file.Sessions, ","); got != "run" {
+		t.Errorf("file sessions = %q, want the review's own session", got)
+	}
+}
+
+// TestLandingUsageRowFailureKeepsTheFile: a row that cannot be written costs the
+// row and not the record: the file is still written, and the failure is logged
+// rather than read as a review with no usage.
+func TestLandingUsageRowFailureKeepsTheFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	proj := t.TempDir()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	transcript := filepath.Join(proj, "run.jsonl")
+	writeUsageTranscript(t, transcript, start.Add(time.Minute), seatCallLine("run", 100, 0, 20))
+	var logged []string
+	sink := &omUsageSink{townRoot: town,
+		store: failingUsageStore{err: errors.New("bd sample add: Dolt is down")},
+		list:  fixedList(transcript),
+		logf:  func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }}
+
+	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: proj,
+		Start: start, End: start.Add(time.Hour)})
+
+	file := readOMUsage(t, town, "gt-abc")
+	if got := strings.Join(file.Sessions, ","); got != "run" {
+		t.Errorf("file sessions = %q, want the review's session written beside the failed row", got)
+	}
+	if n := loggedLinesWith(logged, "its usage_records row is not written"); n != 1 {
+		t.Errorf("row failure logged %d times, want once: %q", n, logged)
+	}
+	if n := loggedLinesWith(logged, "Dolt is down"); n != 1 {
+		t.Errorf("row failure does not name its cause: %q", logged)
+	}
+}
+
 // TestLandingUsageSumsTranscriptsOfTheRun: a review's record sums the transcripts
 // its run wrote and leaves out an earlier run's, carries the bead and rig with
 // kind om, and a second review adds its own session to the same record.
@@ -62,7 +208,7 @@ func TestLandingUsageSumsTranscriptsOfTheRun(t *testing.T) {
 	writeUsageTranscript(t, first, start.Add(30*time.Minute), seatCallLine("first", 100, 10, 20))
 	second := filepath.Join(proj, "second.jsonl")
 	writeUsageTranscript(t, second, start.Add(time.Hour), seatCallLine("second", 200, 0, 30))
-	sink := &omUsageSink{townRoot: town, list: fixedList(old, first, second), logf: func(string, ...any) {}}
+	sink := &omUsageSink{townRoot: town, store: beadsfake.New(), list: fixedList(old, first, second), logf: func(string, ...any) {}}
 
 	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: proj,
 		Start: start, End: start.Add(2 * time.Hour)})
@@ -224,7 +370,7 @@ func TestLandingUsageHonoursEndBound(t *testing.T) {
 	writeUsageTranscript(t, inB, end, seatCallLine("in-b", 200, 0, 20))
 	late := filepath.Join(proj, "late.jsonl")
 	writeUsageTranscript(t, late, end.Add(time.Second), seatCallLine("late", 5000, 0, 5000))
-	sink := &omUsageSink{townRoot: town, list: fixedList(before, inA, inB, late), logf: func(string, ...any) {}}
+	sink := &omUsageSink{townRoot: town, store: beadsfake.New(), list: fixedList(before, inA, inB, late), logf: func(string, ...any) {}}
 
 	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: proj,
 		Start: start, End: end})
@@ -435,7 +581,7 @@ func TestLandingUsageRealLayout(t *testing.T) {
 	configDir := t.TempDir()
 	home := t.TempDir()
 	var logged []string
-	sink := &omUsageSink{townRoot: town,
+	sink := &omUsageSink{townRoot: town, store: beadsfake.New(),
 		configDirFor: func() (string, error) { return configDir, nil },
 		userHomeDir:  func() (string, error) { return home, nil },
 		logf: func(f string, a ...any) {
@@ -489,7 +635,7 @@ func TestLandingUsagePodOMLayout(t *testing.T) {
 	end := start.Add(time.Hour)
 	writeUsageTranscript(t, filepath.Join(projDir, "session.jsonl"), start.Add(10*time.Minute), seatCallLine("session", 120, 0, 12))
 	var logged []string
-	sink := &omUsageSink{townRoot: town,
+	sink := &omUsageSink{townRoot: town, store: beadsfake.New(),
 		// CLAUDE_CONFIG_DIR unset (getenv returns "") and HOME the injected
 		// container home: the production resolution must yield $HOME/.claude.
 		configDirFor: func() (string, error) {
@@ -560,7 +706,7 @@ func TestLandingUsageRefusesUnsafeBeadID(t *testing.T) {
 		town := t.TempDir()
 		proj := t.TempDir()
 		writeUsageTranscript(t, filepath.Join(proj, "run.jsonl"), start.Add(time.Minute), seatCallLine("run", 10, 0, 1))
-		sink := &omUsageSink{townRoot: town, list: fixedList(filepath.Join(proj, "run.jsonl")), logf: func(string, ...any) {}}
+		sink := &omUsageSink{townRoot: town, store: beadsfake.New(), list: fixedList(filepath.Join(proj, "run.jsonl")), logf: func(string, ...any) {}}
 
 		sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-6qc3nw.13", Rig: "gastown", Dir: proj,
 			Start: start, End: start.Add(time.Hour)})
