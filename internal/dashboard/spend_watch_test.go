@@ -15,11 +15,33 @@ import (
 // spendWatchNow is the instant every watch-file fixture is written at.
 var spendWatchNow = time.Date(2026, 11, 1, 17, 4, 5, 0, time.UTC)
 
-// spendReport is the spend tool's report with a balance, its two paces and the
-// fields the watch file does not carry.
+// spendSampleStamp is the last_sample a file report names, in the ledger's own
+// minute-stamped local form, and spendSampleAt is the instant it denotes.
+const spendSampleStamp = "2026-11-01T16:04"
+
+var spendSampleAt = time.Date(2026, 11, 1, 16, 4, 0, 0, time.Local)
+
+// spendReport is the spend tool's report with a balance, its two paces, the
+// newest sample it read and the fields the watch file does not carry. The
+// sample stamp is the report's own as-of instant; a report that names none is
+// spendUndatedReport.
 func spendReport(t *testing.T, balance, perHour1h, perHour24h any) json.RawMessage {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{
+	return spendReportJSON(t, balance, perHour1h, perHour24h, spendSampleStamp)
+}
+
+// spendUndatedReport is a report with a balance and no instant naming where it
+// is from, as a tool that only prints a live balance gives.
+func spendUndatedReport(t *testing.T, balance, perHour1h float64) json.RawMessage {
+	t.Helper()
+	return spendReportJSON(t, balance, perHour1h, 2.5, "")
+}
+
+// spendReportJSON builds the report with last_sample set to stamp, or left out
+// when stamp is empty.
+func spendReportJSON(t *testing.T, balance, perHour1h, perHour24h any, stamp string) json.RawMessage {
+	t.Helper()
+	fields := map[string]any{
 		"balance":                 balance,
 		"pace_1h":                 map[string]any{"per_hour": perHour1h},
 		"pace_24h":                map[string]any{"per_hour": perHour24h},
@@ -27,6 +49,24 @@ func spendReport(t *testing.T, balance, perHour1h, perHour24h any) json.RawMessa
 		"credit":                  14.55,
 		"per_day":                 map[string]any{},
 		"runway_days_at_24h_pace": 20.0,
+	}
+	if stamp != "" {
+		fields["last_sample"] = stamp
+	}
+	raw, err := json.Marshal(fields)
+	require.NoError(t, err)
+	return raw
+}
+
+// spendRowsReport is the report the dashboard builds from the town's
+// deepseek_balance rows: a balance, its pace, and the instant the balance was
+// read.
+func spendRowsReport(t *testing.T, balance, perHour1h float64, readAt time.Time) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"balance":    balance,
+		"pace_1h":    map[string]any{"per_hour": perHour1h},
+		"balance_at": readAt,
 	})
 	require.NoError(t, err)
 	return raw
@@ -51,8 +91,9 @@ func readSpendWatch(t *testing.T, dir string) (spendWatchDoc, []byte) {
 
 // The snapshot's DeepSeek columns and the tail's rate are as old as the watch
 // file, so each successful spend poll restamps it from the reading it just
-// took: the dashboard's own report is the live reading the file was missing
-// (gt-jqtw9).
+// took: the dashboard's own report is the reading the file was missing, stamped
+// with the newest sample that report names rather than the poll's instant
+// (gt-jqtw9, gt-u3fp8i).
 func TestPollSpendWritesTheWatchFile(t *testing.T) {
 	t.Parallel()
 
@@ -70,8 +111,111 @@ func TestPollSpendWritesTheWatchFile(t *testing.T) {
 	assert.InDelta(t, 74.55, *doc.Balance, 1e-9, "the watch file did not take the report's balance")
 	require.NotNil(t, doc.PerHour, "the watch file carries no per_hour")
 	assert.InDelta(t, 1.25, *doc.PerHour, 1e-9, "the watch file did not take the report's hourly rate")
-	assert.True(t, spendWatchNow.Equal(doc.TS), "ts = %s, want the poll's now %s", doc.TS, spendWatchNow)
-	assert.Contains(t, string(raw), `"ts":"2026-11-01T17:04:05Z"`, "ts is not RFC 3339 UTC")
+	assert.True(t, spendSampleAt.Equal(doc.TS), "ts = %s, want the newest sample %s", doc.TS, spendSampleAt)
+	assert.Contains(t, string(raw), `"ts":"`+spendSampleAt.UTC().Format(time.RFC3339)+`"`, "ts is not the newest sample's RFC 3339 UTC instant")
+}
+
+// A report built from the town's cost rows stamps the watch file with the row's
+// own instant, not the poll's: the balance is that row's reading, so a patrol
+// that stopped must not pass its last figure off as fresh to the snapshot, gt
+// tail and gt report (gt-u3fp8i).
+func TestPollSpendStampsARowReportWithTheRowsInstant(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "watch")
+	readAt := spendWatchNow.Add(-2 * time.Hour)
+	h := NewHub(Config{
+		Now:      func() time.Time { return spendWatchNow },
+		Spend:    func() json.RawMessage { return spendRowsReport(t, 74.55, 1.25, readAt) },
+		WatchDir: dir,
+	})
+
+	h.pollSpend()
+
+	doc, raw := readSpendWatch(t, dir)
+	require.NotNil(t, doc.Balance, "the watch file carries no balance")
+	assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
+	assert.True(t, readAt.Equal(doc.TS), "ts = %s, want the row's instant %s", doc.TS, readAt)
+	assert.Contains(t, string(raw), `"ts":"2026-11-01T15:04:05Z"`, "ts is not the row's RFC 3339 UTC instant")
+}
+
+// A file report names the newest sample it read in last_sample, and that is the
+// instant its balance is from: the watch file is stamped with it, never with
+// the poll's (gt-u3fp8i).
+func TestSpendFileStampsALedgerReportWithItsSampleInstant(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, spendWatchName)
+	require.NoError(t, os.WriteFile(path, []byte(`{"ts":"2026-10-14T21:06:00Z","per_hour":0.12,"balance":5.2}`), 0o644))
+
+	require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5)))
+
+	doc, _ := readSpendWatch(t, dir)
+	require.NotNil(t, doc.Balance)
+	assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
+	assert.True(t, spendSampleAt.Equal(doc.TS), "ts = %s, want the ledger's newest sample %s", doc.TS, spendSampleAt)
+}
+
+// A file report with no balance_at and no last_sample dates nothing. When the
+// rows read falls back to it, writing it would restamp the newer row-stamped
+// reading with the poll's instant and pass the old balance off as fresh, so the
+// writer leaves the file alone (gt-u3fp8i).
+func TestSpendFileKeepsANewerRowStampedReadingOverAnUndatedLedgerReport(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, spendWatchName)
+	require.NoError(t, writeSpendWatch(dir, spendRowsReport(t, 74.55, 1.25, spendWatchNow)))
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	require.NoError(t, writeSpendWatch(dir, spendUndatedReport(t, 12.5, 0.5)))
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "an undated ledger report replaced the newer row-stamped reading or its stamp")
+	doc, _ := readSpendWatch(t, dir)
+	require.NotNil(t, doc.Balance)
+	assert.InDelta(t, 74.55, *doc.Balance, 1e-9, "the watch file took the undated report's balance")
+	assert.True(t, spendWatchNow.Equal(doc.TS), "ts = %s, want the row reading's instant %s", doc.TS, spendWatchNow)
+	assert.Empty(t, spendTemps(t, dir), "an undated report left a temporary file behind")
+}
+
+// A dated ledger report older than the reading in the file leaves the file
+// alone: when the rows read fails the ledger answers with its older sample, and
+// writing it would move the watch file back to that balance and stamp (gt-u3fp8i).
+func TestSpendFileKeepsANewerRowStampedReadingOverAnOlderDatedLedgerReport(t *testing.T) {
+	t.Parallel()
+
+	newer := spendSampleAt.Add(time.Hour)
+	dir := t.TempDir()
+	path := filepath.Join(dir, spendWatchName)
+	require.NoError(t, writeSpendWatch(dir, spendRowsReport(t, 74.55, 1.25, newer)))
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	require.NoError(t, writeSpendWatch(dir, spendReport(t, 12.5, 0.5, 2.5)))
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "an older dated ledger report replaced the newer row-stamped reading")
+	assert.Empty(t, spendTemps(t, dir), "an older report left a temporary file behind")
+}
+
+// A dated ledger report as new as the reading in the file, or newer, is written.
+func TestSpendFileWritesALedgerReportNotOlderThanTheReadingInTheFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, writeSpendWatch(dir, spendRowsReport(t, 74.55, 1.25, spendSampleAt.Add(-time.Hour))))
+
+	require.NoError(t, writeSpendWatch(dir, spendReport(t, 12.5, 0.5, 2.5)))
+
+	doc, _ := readSpendWatch(t, dir)
+	require.NotNil(t, doc.Balance)
+	assert.InDelta(t, 12.5, *doc.Balance, 1e-9, "a newer ledger report was not written")
+	assert.True(t, spendSampleAt.Equal(doc.TS), "ts = %s, want %s", doc.TS, spendSampleAt)
 }
 
 // A report with no balance is no reading: the file keeps its own age instead of
@@ -91,7 +235,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		before, err := os.Stat(path)
 		require.NoError(t, err)
 
-		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow))
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5)))
 
 		after, err := os.Stat(path)
 		require.NoError(t, err)
@@ -111,7 +255,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		other := filepath.Join(dir, spendWatchName+".tmp")
 		require.NoError(t, os.WriteFile(other, []byte("the other hub's reading in flight"), 0o644))
 
-		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow))
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5)))
 
 		data, err := os.ReadFile(other)
 		require.NoError(t, err, "the writer took the other hub's temporary file")
@@ -127,7 +271,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		path := filepath.Join(dir, spendWatchName)
 		require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))
 
-		require.NoError(t, writeSpendWatch(dir, spendReport(t, nil, 1.25, 2.5), spendWatchNow))
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, nil, 1.25, 2.5)))
 
 		data, err := os.ReadFile(path)
 		require.NoError(t, err)
@@ -140,12 +284,27 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		path := filepath.Join(dir, spendWatchName)
 		require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))
 
-		err := writeSpendWatch(dir, json.RawMessage(`{"balance":"not a number"}`), spendWatchNow)
+		err := writeSpendWatch(dir, json.RawMessage(`{"balance":"not a number"}`))
 
 		require.Error(t, err, "a report the writer cannot read is not a no-write")
 		data, readErr := os.ReadFile(path)
 		require.NoError(t, readErr)
 		assert.Equal(t, oldDoc, string(data), "a failed write left the reading altered")
+	})
+
+	t.Run("a balance_at of the zero instant is a failure", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, spendWatchName)
+		require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))
+
+		report := json.RawMessage(`{"balance":74.55,"balance_at":"0001-01-01T00:00:00Z"}`)
+		err := writeSpendWatch(dir, report)
+
+		require.Error(t, err, "a balance with no instant is not a reading")
+		data, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		assert.Equal(t, oldDoc, string(data), "a refused write left the reading altered")
 	})
 
 	// The temporary file's creation, write and close each refuse in turn. The
@@ -200,7 +359,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		want, err := os.Stat(plain)
 		require.NoError(t, err)
 
-		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow))
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5)))
 
 		got, err := os.Stat(filepath.Join(dir, spendWatchName))
 		require.NoError(t, err)
@@ -217,7 +376,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(held), 0o755))
 		require.NoError(t, os.WriteFile(held, []byte("kept"), 0o644))
 
-		err := writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow)
+		err := writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5))
 
 		require.Error(t, err, "a rename that the target refused reported no error")
 		assert.ErrorContains(t, err, "replacing", "a refused rename is not reported as a replacement")
@@ -227,17 +386,18 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		assert.Empty(t, spendTemps(t, dir), "a refused rename left the temporary file behind")
 	})
 
-	t.Run("an instant that will not encode is a failure", func(t *testing.T) {
+	t.Run("a last_sample that is not a ledger stamp is a failure", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		// time.Time encodes no year outside 0-9999, so this reading cannot be
-		// written; the writer reports it rather than leaving a file that parses
-		// as an older reading than it is.
-		err := writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC))
+		// The writer dates a file report from last_sample, so a value the
+		// ledger would not have written is a broken report, not a reading; the
+		// writer reports it rather than leaving a file it cannot date.
+		report := json.RawMessage(`{"balance":74.55,"last_sample":"10000-01-01T00:00:00"}`)
+		err := writeSpendWatch(dir, report)
 
-		require.Error(t, err, "a reading that would not encode reported no error")
+		require.Error(t, err, "a report whose last_sample is not a stamp reported no error")
 		_, statErr := os.Stat(filepath.Join(dir, spendWatchName))
-		assert.True(t, os.IsNotExist(statErr), "a reading that would not encode was written anyway")
+		assert.True(t, os.IsNotExist(statErr), "a reading the writer cannot date was written anyway")
 	})
 }
 

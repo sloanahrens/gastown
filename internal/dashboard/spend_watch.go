@@ -17,7 +17,10 @@ const spendWatchName = "spend.json"
 
 // spendWatch is the document that file carries, the one the hourly snapshot
 // (internal/metrics moneyAddDeepSeek), gt tail's rate and gt report's spend
-// section read as the town's live DeepSeek reading. The readers take ts as the
+// section read as the town's live DeepSeek reading. TS is the instant the
+// balance is stamped with: the report's own as-of instant, never the poll's, so
+// a reading the rows or the ledger no longer advance carries its age rather
+// than being passed off as this poll's live rate. The readers take ts as the
 // reading's instant and both figures as optional, so a report that carries no
 // rate writes no per_hour rather than a zero.
 type spendWatch struct {
@@ -26,14 +29,19 @@ type spendWatch struct {
 	Balance float64   `json:"balance"`
 }
 
-// writeSpendWatch rewrites the watch's spend file from one spend report at now,
-// which is the instant the report was read. A report that carries no balance is
-// no reading and writes nothing: the old file keeps its own age rather than
-// being restamped with a figure the report does not have. The write goes to a
+// writeSpendWatch rewrites the watch's spend file from one spend report. The
+// file is stamped with the instant the report's balance is from, and a report
+// that names none writes nothing, so a stale figure never overwrites a newer
+// reading with the poll's instant (gt-u3fp8i): the town's
+// cost rows answer with the newest row's own instant in balance_at, and a file
+// source (the ledger, or the tool that reports on it) with the newest sample
+// its last_sample names. A report that carries no balance is no reading
+// and writes nothing either: the old file keeps its own age rather than being
+// restamped with a figure the report does not have. The write goes to a
 // temporary file beside the target and is renamed over it, so a reader sees the
 // previous reading or this one and never a half-written document.
-func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
-	return writeSpendWatchWith(dir, report, now, createSpendTemp)
+func writeSpendWatch(dir string, report json.RawMessage) error {
+	return writeSpendWatchWith(dir, report, createSpendTemp)
 }
 
 // spendWatchWriter is the hub's copy of writeSpendWatch, with the state a
@@ -52,11 +60,11 @@ type spendWatchWriter struct {
 
 // write rewrites the watch file from one spend report, as writeSpendWatch does.
 // A read-only refusal is reported as nil, after the latch.
-func (w *spendWatchWriter) write(dir string, report json.RawMessage, now time.Time) error {
+func (w *spendWatchWriter) write(dir string, report json.RawMessage) error {
 	if w.readOnly {
 		return nil
 	}
-	err := writeSpendWatchWith(dir, report, now, w.create)
+	err := writeSpendWatchWith(dir, report, w.create)
 	if !IsReadOnlyErr(err) {
 		return err
 	}
@@ -68,7 +76,7 @@ func (w *spendWatchWriter) write(dir string, report json.RawMessage, now time.Ti
 }
 
 // writeSpendWatchWith is writeSpendWatch with its temporary-file create injected.
-func writeSpendWatchWith(dir string, report json.RawMessage, now time.Time, create func(dir string) (spendTempFile, error)) error {
+func writeSpendWatchWith(dir string, report json.RawMessage, create func(dir string) (spendTempFile, error)) error {
 	if dir == "" {
 		return nil
 	}
@@ -79,9 +87,23 @@ func writeSpendWatchWith(dir string, report json.RawMessage, now time.Time, crea
 	if d.Balance == nil {
 		return nil
 	}
+	ts, dated, err := spendWatchInstant(&d)
+	if err != nil {
+		return err
+	}
+	if !dated {
+		return nil
+	}
+	// A dated report older than the reading already in the file leaves it alone:
+	// when the rows read fails the file ledger answers with an older balance, and
+	// writing it would move the watch file back to that balance and its older
+	// stamp, over the newer row-stamped reading (gt-u3fp8i).
+	if onDisk, ok := spendWatchOnDisk(dir); ok && onDisk.After(ts) {
+		return nil
+	}
 	// The file has one per_hour field, and the 1-hour pace is the report's
 	// current rate: the 24-hour pace beside it is a daily average.
-	doc := spendWatch{TS: now.UTC(), PerHour: d.Pace1h.PerHour, Balance: *d.Balance}
+	doc := spendWatch{TS: ts.UTC(), PerHour: d.Pace1h.PerHour, Balance: *d.Balance}
 	data, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("spend watch: encoding the reading: %w", err)
@@ -90,6 +112,54 @@ func writeSpendWatchWith(dir string, report json.RawMessage, now time.Time, crea
 		return fmt.Errorf("spend watch: creating %s: %w", dir, err)
 	}
 	return writeSpendWatchVia(dir, data, create)
+}
+
+// spendWatchOnDisk is the instant of the reading the watch file in dir already
+// holds. ok is false when the file is absent, unreadable or carries no usable ts:
+// then there is no newer reading to protect and the report is written.
+func spendWatchOnDisk(dir string) (ts time.Time, ok bool) {
+	data, err := os.ReadFile(filepath.Join(dir, spendWatchName))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var cur spendWatch
+	if json.Unmarshal(data, &cur) != nil || cur.TS.IsZero() {
+		return time.Time{}, false
+	}
+	return cur.TS, true
+}
+
+// spendSampleLayouts are the forms a report's last_sample is written in: the
+// ledger's own stamp, which the Go report gives to the minute, and the same
+// stamp with seconds as some writers format it. Both are naive local times,
+// the way the watcher writes balance.log.
+var spendSampleLayouts = []string{"2006-01-02T15:04", "2006-01-02T15:04:05"}
+
+// spendWatchInstant is the instant the report's balance is from. A report built
+// from the town's cost rows carries it in balance_at, the newest row's own
+// instant. A file report carries no balance_at and names the newest sample it
+// read in last_sample, the ledger's stamp, which is the instant that balance is
+// from. dated is false when the report names neither: the balance is a reading
+// the report cannot date, and the watch writer leaves the file's own age alone
+// rather than replacing it with the poll's instant. A balance_at of the zero
+// instant, or a last_sample that does not parse, is a broken report and an
+// error, never a reading.
+func spendWatchInstant(d *deepSeekSpend) (ts time.Time, dated bool, err error) {
+	if d.BalanceAt != nil {
+		if d.BalanceAt.IsZero() {
+			return time.Time{}, false, fmt.Errorf("spend watch: the report's balance_at is the zero instant")
+		}
+		return *d.BalanceAt, true, nil
+	}
+	if d.LastSample == "" {
+		return time.Time{}, false, nil
+	}
+	for _, layout := range spendSampleLayouts {
+		if at, perr := time.ParseInLocation(layout, d.LastSample, time.Local); perr == nil {
+			return at, true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("spend watch: the report's last_sample is not a ledger timestamp")
 }
 
 // spendTempFile is the temporary file a reading is written to. An *os.File is

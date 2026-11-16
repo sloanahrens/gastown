@@ -1183,7 +1183,7 @@ func (h *Hub) pollSpend() {
 	// nothing, so a failed read leaves the file's own age showing.
 	var writeErr error
 	if len(sp) != 0 {
-		writeErr = h.spendWatch.write(h.cfg.WatchDir, sp, h.cfg.Now())
+		writeErr = h.spendWatch.write(h.cfg.WatchDir, sp)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
