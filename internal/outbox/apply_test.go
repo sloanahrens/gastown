@@ -7,10 +7,12 @@ import (
 	"testing"
 )
 
-const (
-	testBead  = "gt-swfo9e"
-	testActor = "gastown/polecats/capable"
-)
+const testBead = "gt-swfo9e"
+
+// testSeat is the seat an outbox is applied for: the full address its comments
+// are written under and the bare name its READY TO LAND block names as the
+// worker.
+var testSeat = Seat{Actor: "gastown/polecats/capable", Worker: "capable"}
 
 // storeCall is one call the fake store received.
 type storeCall struct {
@@ -60,6 +62,39 @@ func (f *fakeStore) Escalate(beadID, actor, text string) error {
 	return f.record(storeCall{op: "Escalate", beadID: beadID, author: actor, text: text})
 }
 
+func (f *fakeStore) MarkReadyToLand(beadID, note string) error {
+	return f.record(storeCall{op: "MarkReadyToLand", beadID: beadID, text: note})
+}
+
+// storeWithoutReady forwards the six Store writes to f and has no
+// MarkReadyToLand: the store of a host that applies an outbox but cannot mark a
+// bead ready to land.
+type storeWithoutReady struct{ f *fakeStore }
+
+func (s storeWithoutReady) AppendNotes(beadID, text string) error {
+	return s.f.AppendNotes(beadID, text)
+}
+
+func (s storeWithoutReady) SetTitle(beadID, title string) error {
+	return s.f.SetTitle(beadID, title)
+}
+
+func (s storeWithoutReady) SetAcceptance(beadID, text string) error {
+	return s.f.SetAcceptance(beadID, text)
+}
+
+func (s storeWithoutReady) AddComment(beadID, author, text string) error {
+	return s.f.AddComment(beadID, author, text)
+}
+
+func (s storeWithoutReady) SetStatus(beadID, status string) error {
+	return s.f.SetStatus(beadID, status)
+}
+
+func (s storeWithoutReady) Escalate(beadID, actor, text string) error {
+	return s.f.Escalate(beadID, actor, text)
+}
+
 // acceptance is the bead's acceptance text the ticks index into. Its second box
 // is already ticked.
 const acceptance = `## Acceptance
@@ -91,8 +126,8 @@ func TestApply(t *testing.T) {
 			want: []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "Ticked the first and third box and ran the gate.\n"},
 				{op: "SetAcceptance", beadID: testBead, text: tickedOneAndThree},
-				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
-				{op: "AddComment", beadID: testBead, author: testActor, text: "the gate names a package the branch does not change"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the retry never resets its counter"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the gate names a package the branch does not change"},
 			},
 		},
 		{
@@ -138,7 +173,7 @@ func TestApply(t *testing.T) {
 			},
 			want: []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "The third criterion needs a decision.\n"},
-				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the retry never resets its counter"},
 				{op: "SetStatus", beadID: testBead, status: "deferred"},
 			},
 		},
@@ -164,7 +199,7 @@ func TestApply(t *testing.T) {
 				Escalation: &Escalation{Text: "HELP: the acceptance list names a missing file"},
 			},
 			want: []storeCall{
-				{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the acceptance list names a missing file"},
+				{op: "Escalate", beadID: testBead, author: testSeat.Actor, text: "HELP: the acceptance list names a missing file"},
 			},
 		},
 		{
@@ -178,7 +213,7 @@ func TestApply(t *testing.T) {
 			want: []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "The third criterion needs a decision.\n"},
 				{op: "SetStatus", beadID: testBead, status: "deferred"},
-				{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the third criterion needs a decision"},
+				{op: "Escalate", beadID: testBead, author: testSeat.Actor, text: "HELP: the third criterion needs a decision"},
 			},
 		},
 		{
@@ -191,7 +226,7 @@ func TestApply(t *testing.T) {
 			},
 			want: []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "Ran the gate.\n"},
-				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the retry never resets its counter"},
 			},
 		},
 		{
@@ -199,7 +234,7 @@ func TestApply(t *testing.T) {
 			acceptance: acceptance,
 			result:     Result{Status: StatusDone, Findings: []string{"the retry never resets its counter"}},
 			want: []storeCall{
-				{op: "AddComment", beadID: testBead, author: testActor, text: "the retry never resets its counter"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the retry never resets its counter"},
 			},
 		},
 		{
@@ -245,7 +280,7 @@ func TestApply(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			if err := Apply(store, testBead, testActor, tt.acceptance, tt.result); err != nil {
+			if err := Apply(store, testBead, testSeat, tt.acceptance, tt.result); err != nil {
 				t.Fatalf("Apply() error = %v, want nil", err)
 			}
 			if !reflect.DeepEqual(store.calls, tt.want) {
@@ -293,7 +328,7 @@ func TestApplyRefusedTick(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
 			r := Result{Status: StatusDone, Notes: "a note", Ticked: tt.ticked, Findings: []string{"a finding"}}
-			err := Apply(store, testBead, testActor, tt.acceptance, r)
+			err := Apply(store, testBead, testSeat, tt.acceptance, r)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
 			}
@@ -304,7 +339,7 @@ func TestApplyRefusedTick(t *testing.T) {
 			// after the refusal are.
 			want := []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "a note"},
-				{op: "AddComment", beadID: testBead, author: testActor, text: "a finding"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "a finding"},
 			}
 			if !reflect.DeepEqual(store.calls, want) {
 				t.Errorf("Apply() calls = %#v, want %#v", store.calls, want)
@@ -338,7 +373,7 @@ func TestApplyFailedWriteDoesNotStopTheRest(t *testing.T) {
 		Ticked:   []int{0},
 		Findings: []string{"the first finding", "the second finding"},
 	}
-	err := Apply(store, testBead, testActor, acceptance, r)
+	err := Apply(store, testBead, testSeat, acceptance, r)
 	if err == nil {
 		t.Fatal("Apply() = nil with four failed writes, want every failure")
 	}
@@ -357,8 +392,8 @@ func TestApplyFailedWriteDoesNotStopTheRest(t *testing.T) {
 	want := []storeCall{
 		{op: "AppendNotes", beadID: testBead, text: "a note that fails"},
 		{op: "SetAcceptance", beadID: testBead, text: "## Acceptance\n- [x] the first criterion\n- [x] the second criterion\n- [ ] the third criterion"},
-		{op: "AddComment", beadID: testBead, author: testActor, text: "the first finding"},
-		{op: "AddComment", beadID: testBead, author: testActor, text: "the second finding"},
+		{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the first finding"},
+		{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "the second finding"},
 		{op: "SetStatus", beadID: testBead, status: "deferred"},
 	}
 	if !reflect.DeepEqual(store.calls, want) {
@@ -384,7 +419,7 @@ func TestApplyFailedEscalationIsJoinedWithEarlierErrors(t *testing.T) {
 		Notes:      "a note that fails",
 		Escalation: &Escalation{Text: "HELP: the third criterion needs a decision"},
 	}
-	err := Apply(store, testBead, testActor, acceptance, r)
+	err := Apply(store, testBead, testSeat, acceptance, r)
 	if err == nil {
 		t.Fatal("Apply() = nil with the note and the escalation failed, want both failures")
 	}
@@ -398,7 +433,7 @@ func TestApplyFailedEscalationIsJoinedWithEarlierErrors(t *testing.T) {
 	want := []storeCall{
 		{op: "AppendNotes", beadID: testBead, text: "a note that fails"},
 		{op: "SetStatus", beadID: testBead, status: "deferred"},
-		{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the third criterion needs a decision"},
+		{op: "Escalate", beadID: testBead, author: testSeat.Actor, text: "HELP: the third criterion needs a decision"},
 	}
 	if !reflect.DeepEqual(store.calls, want) {
 		t.Errorf("Apply() calls = %#v, want %#v", store.calls, want)
@@ -417,12 +452,12 @@ func TestNoBeadAccessApplyCreatesTheEscalationFromAValidatedOutbox(t *testing.T)
 		t.Fatalf("Validate() error = %v, want nil", err)
 	}
 	store := &fakeStore{}
-	if err := Apply(store, testBead, testActor, acceptance, r); err != nil {
+	if err := Apply(store, testBead, testSeat, acceptance, r); err != nil {
 		t.Fatalf("Apply() error = %v, want nil", err)
 	}
 	want := []storeCall{
 		{op: "SetStatus", beadID: testBead, status: "deferred"},
-		{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: the acceptance list names a missing file"},
+		{op: "Escalate", beadID: testBead, author: testSeat.Actor, text: "HELP: the acceptance list names a missing file"},
 	}
 	if !reflect.DeepEqual(store.calls, want) {
 		t.Errorf("Apply() calls = %#v, want %#v", store.calls, want)
@@ -471,7 +506,7 @@ func TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText(t *testing.T) {
 			// A host stops at the outbox it could not validate and applies
 			// nothing.
 			if err == nil {
-				err = Apply(store, testBead, testActor, acceptance, r)
+				err = Apply(store, testBead, testSeat, acceptance, r)
 			}
 			if tt.wantErr == "" {
 				if err != nil {
@@ -513,7 +548,7 @@ func TestApplyRefusedStatus(t *testing.T) {
 			wantErr: `result status "" is neither "done" nor "deferred"`,
 			wantCalls: []storeCall{
 				{op: "AppendNotes", beadID: testBead, text: "a note"},
-				{op: "AddComment", beadID: testBead, author: testActor, text: "a finding"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "a finding"},
 			},
 		},
 		{
@@ -521,7 +556,7 @@ func TestApplyRefusedStatus(t *testing.T) {
 			result:  Result{Escalation: &Escalation{Text: "HELP: no status was set"}},
 			wantErr: `result status "" is neither "done" nor "deferred"`,
 			wantCalls: []storeCall{
-				{op: "Escalate", beadID: testBead, author: testActor, text: "HELP: no status was set"},
+				{op: "Escalate", beadID: testBead, author: testSeat.Actor, text: "HELP: no status was set"},
 			},
 		},
 	}
@@ -529,7 +564,7 @@ func TestApplyRefusedStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			err := Apply(store, testBead, testActor, acceptance, tt.result)
+			err := Apply(store, testBead, testSeat, acceptance, tt.result)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %s", tt.wantErr)
 			}
@@ -574,7 +609,7 @@ func TestApplyRefusesAnEmptyTitleOrAcceptance(t *testing.T) {
 			result:  Result{Status: StatusDeferred, Acceptance: strPtr("\n"), Findings: []string{"a finding"}},
 			wantErr: "the criteria are not replaced",
 			wantCalls: []storeCall{
-				{op: "AddComment", beadID: testBead, author: testActor, text: "a finding"},
+				{op: "AddComment", beadID: testBead, author: testSeat.Actor, text: "a finding"},
 				{op: "SetStatus", beadID: testBead, status: "deferred"},
 			},
 		},
@@ -583,7 +618,7 @@ func TestApplyRefusesAnEmptyTitleOrAcceptance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			err := Apply(store, testBead, testActor, acceptance, tt.result)
+			err := Apply(store, testBead, testSeat, acceptance, tt.result)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
 			}

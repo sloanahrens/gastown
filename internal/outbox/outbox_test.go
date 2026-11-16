@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidate(t *testing.T) {
@@ -342,6 +343,21 @@ func TestEncodeRoundTrips(t *testing.T) {
 		{
 			name:   "a result with no optional field",
 			result: Result{Status: StatusDone},
+		},
+		{
+			name: "a submission, the branch a file-mode gt done pushed",
+			result: Result{Status: StatusDone, Submission: &Submission{
+				Branch:      "polecat/capable/gt-swfo9e",
+				Head:        "0123456789abcdef0123456789abcdef01234567",
+				Target:      "main",
+				SubmittedAt: time.Date(2026, 11, 16, 18, 40, 48, 0, time.UTC),
+			}},
+		},
+		{
+			name: "a submission with no stamp",
+			result: Result{Status: StatusDone, Submission: &Submission{
+				Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main",
+			}},
 		},
 	}
 	for _, tt := range tests {
