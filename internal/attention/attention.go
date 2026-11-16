@@ -128,6 +128,11 @@ const (
 	// commit, a rig's green branches or its images, so it judged nothing
 	// (gt-4nlpw8).
 	KindDeployPairUnreadable Kind = "deploy-pair-unreadable"
+	// KindDeployPairStuck: a green ref newer than the running daemon commit is
+	// past the stuck bound with its daemon and polecat images not both
+	// published, whether or not an images run exists, so no roll can start
+	// from it (gt-afwjb4).
+	KindDeployPairStuck Kind = "deploy-pair-stuck"
 	// KindImagesFailed: the images workflow's newest run for a green commit
 	// finished failed or canceled, so that commit's daemon and polecat images
 	// were never published and no roll can start from it (gt-3vafwr).
@@ -206,8 +211,8 @@ func Kinds() []Kind {
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
-		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
-		KindTierSweepImagesRetryExhausted,
+		KindDeployPairReady, KindDeployPairUnreadable, KindDeployPairStuck,
+		KindImagesFailed, KindImagesUnknown, KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
