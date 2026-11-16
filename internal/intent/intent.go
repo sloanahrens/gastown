@@ -165,20 +165,19 @@ type Record struct {
 	// clears it, so a new session on the seat never inherits it.
 	SandboxOwed bool `json:"sandbox_owed,omitempty"`
 
-	// The finished-turn facts: what the seat's last turn ended as, which gt done
-	// writes to the agent bead today and which the readers move here
-	// (docs/plans/2026-11-15-agent-bead-retirement-design.md). They describe the
-	// session that ended, so MarkSlung clears the first three when new work is
-	// slung and keeps LastWorkBead, which is history.
+	// The finished-turn facts MarkTurnEnded records (gt-chcarg). They describe
+	// the session that ended, so MarkSlung clears the first three when new work
+	// is slung and keeps LastWorkBead, which is history.
 	//
-	// TurnState is done, stuck or awaiting-gate, and empty when no turn's facts
-	// are recorded — a fresh record, or one MarkSlung has cleared.
+	// TurnState is the agent state the turn ended as: beads.AgentStateDone,
+	// AgentStateStuck or AgentStateAwaitingGate, and empty when no turn's facts
+	// are recorded.
 	TurnState string `json:"turn_state,omitempty"`
-	// ExitType is the exit status the turn ended with; gt done's final statuses
-	// are COMPLETED, DEFERRED and ESCALATED.
+	// ExitType is the status the turn ended with: done.ExitCompleted,
+	// ExitDeferred or ExitEscalated.
 	ExitType string `json:"exit_type,omitempty"`
-	// CleanupStatus is the git state the seat last reported: clean,
-	// has_uncommitted, has_stash or has_unpushed.
+	// CleanupStatus is the git state the seat last reported:
+	// polecat.CleanupClean, CleanupUncommitted, CleanupStash or CleanupUnpushed.
 	CleanupStatus string `json:"cleanup_status,omitempty"`
 	// LastWorkBead is the bead the turn ended on. Unlike WorkBead, which is the
 	// work now waiting to land and goes when the seat is reused, this survives a
@@ -279,14 +278,18 @@ func MarkTurnEnded(townRoot string, s Seat, e TurnEnd, actor string, now time.Ti
 }
 
 // SetCleanupStatus records the git state a seat's session reported, changing
-// nothing else on the record but the bookkeeping (Actor and UpdatedAt). It is
-// the write for a cleanup status found after the turn's own facts were recorded
-// — a push that failed late, or a stalled seat the overrun guard stopped — and
-// it writes on a held seat the way MarkTurnEnded does.
+// only CleanupStatus and UpdatedAt. It is the write for a cleanup status found
+// after the turn's own facts were recorded — a push that failed late, or a
+// stalled seat the overrun guard stopped — so those facts, and the Actor that
+// recorded them, are left as they were. It writes on a held seat the way
+// MarkTurnEnded does.
+//
+// The actor argument is part of the signature gt-chcarg specified; this write
+// records no actor (gt-v8ivf9).
 func SetCleanupStatus(townRoot string, s Seat, status, actor string, now time.Time) error {
 	_, err := Update(townRoot, s, func(r *Record) error {
 		r.CleanupStatus = status
-		r.Actor, r.UpdatedAt = actor, now.UTC()
+		r.UpdatedAt = now.UTC()
 		return nil
 	})
 	return err
