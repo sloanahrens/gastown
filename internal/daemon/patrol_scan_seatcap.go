@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/seatfacts"
 )
 
 // The pool's seat cap for a crash restart (gt-02tcp).
@@ -152,10 +153,54 @@ func (h *patrolScanHost) recordedAgent(rig, name string) (string, error) {
 		return "", nil
 	}
 	_, fields, err := beads.GetAgentBead(h.recoveryBeads(), id)
-	if err != nil || fields == nil {
+	if err != nil {
 		return "", err
 	}
+	// The cap keeps deciding on the bead; the shadow line beside this read says
+	// where the intent record answers differently (gt-eyph71). A bead that does
+	// not exist states no hook, so the comparison sees the empty hook the
+	// readers see.
+	beadHook := ""
+	if fields != nil {
+		beadHook = strings.TrimSpace(fields.HookBead)
+	}
+	h.shadowWorkBead(rig, name, beadHook)
+	if fields == nil {
+		return "", nil
+	}
 	return strings.TrimSpace(fields.Agent), nil
+}
+
+// shadowWorkBead logs where the seat's intent record and its agent bead
+// disagree about the hook — the bead the seat holds — as
+// `agentbead_shadow: <rig>/<name> hook intent=<v> bead=<v>`. The seat cap goes
+// on deciding on the bead (P1.7 of
+// docs/plans/2026-11-15-agent-bead-retirement-plan.md); the line is the shadow
+// window's measurement of the fact the cap moves onto the record in P2.2, so
+// the two can be compared before anything reads the record.
+//
+// It is logged once per seat and pair of values, through the Daemon's
+// seatShadowLog latch, not once per tick: patrol_scan runs every few minutes
+// and the window it feeds is days. An intent record that cannot be read is
+// logged the same way and decides nothing. That read fails closed, and
+// returning its error here would change what the cap answers — a shadow that
+// changes the decision would measure nothing.
+func (h *patrolScanHost) shadowWorkBead(rig, name, beadHook string) {
+	if h.d.logger == nil {
+		return
+	}
+	seat := rig + "/" + name
+	facts, err := seatfacts.Read(h.town(), intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name})
+	if err != nil {
+		h.d.seatShadowLog.logf(h.d.logger.Printf, seat,
+			"agentbead_shadow: %s hook unreadable intent record: %v", seat, err)
+		return
+	}
+	if facts.WorkBead == beadHook {
+		return
+	}
+	h.d.seatShadowLog.logf(h.d.logger.Printf, seat,
+		"agentbead_shadow: %s hook intent=%s bead=%s", seat, facts.WorkBead, beadHook)
 }
 
 // livePolecatCensus counts the town's live polecat sessions, in total and per
