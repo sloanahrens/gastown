@@ -344,3 +344,196 @@ func (s podDaemonSwap) kubectlOutput(ctx context.Context, step string, args ...s
 	}
 	return out, nil
 }
+
+// podCrashNotReadyAfter is how long a daemon pod may stay not Ready after it was
+// created before the crash probe calls it crashing: a pod the Deployment started
+// minutes ago that never became Ready cannot report the new build.
+const podCrashNotReadyAfter = 3 * time.Minute
+
+// podCrashRestartLimit is the restart count at which one container is reported
+// crashing. A container that has restarted twice is dying even when the poll
+// that reads it catches it between deaths.
+const podCrashRestartLimit = 2
+
+// podDaemonCrashing reads the daemon Deployment's newest pod through kubectl and
+// reports whether it is crashing and, when it is, why. A container waiting with
+// reason CrashLoopBackOff, a container restarted podCrashRestartLimit times or
+// more, or a pod still not Ready podCrashNotReadyAfter its creation all read as
+// crashing; why names the container and the reason. A read that fails or cannot
+// be judged is an error, never a healthy answer: an unreadable pod list says
+// nothing about the pod.
+//
+// The list is the daemon Deployment's own selector, podDaemonSelector, so it is
+// the pods that Deployment rolled. A pod the cluster is deleting is skipped: it
+// is not the pod that must come up. now stamps the pod's age.
+func podDaemonCrashing(ctx context.Context, run update.RunFunc, target podDaemonTarget, now time.Time) (bool, string, error) {
+	if run == nil {
+		return false, "", errors.New("pod daemon crash probe: no command runner is wired")
+	}
+	target, err := podCrashTarget(target)
+	if err != nil {
+		return false, "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, podProbeBound)
+	defer cancel()
+	argv := append(podKubectlPrefix(target.Context, target.Namespace, target.InCluster), "get", "pods", "-l", podDaemonSelector, "-o", "json")
+	out, exit, err := run(ctx, "", nil, "kubectl", argv...)
+	if err != nil {
+		return false, "", fmt.Errorf("pod daemon crash probe: running the daemon pod list: %w", err)
+	}
+	if exit != 0 {
+		// The output is left out of the error: a pod's output can hold a secret.
+		return false, "", fmt.Errorf("pod daemon crash probe: the daemon pod list exited %d", exit)
+	}
+	return judgeDaemonPod(out, now)
+}
+
+// podCrashTarget is the probe's target with surrounding space trimmed, or the
+// refusal for a value kubectl could not be given as written.
+func podCrashTarget(target podDaemonTarget) (podDaemonTarget, error) {
+	target.Context = strings.TrimSpace(target.Context)
+	target.Namespace = strings.TrimSpace(target.Namespace)
+	if target.InCluster {
+		if target.Context != "" {
+			return podDaemonTarget{}, errors.New("pod daemon crash probe: names both a kube context and the in-cluster service account")
+		}
+	} else if target.Context == "" || strings.HasPrefix(target.Context, "-") {
+		return podDaemonTarget{}, fmt.Errorf("pod daemon crash probe: the kube context %q is not a usable kubectl context", target.Context)
+	}
+	if !isDNSLabel(target.Namespace) {
+		return podDaemonTarget{}, fmt.Errorf("pod daemon crash probe: the namespace %q is not a Kubernetes namespace name", target.Namespace)
+	}
+	return target, nil
+}
+
+// podCrashListing is the part of `kubectl get pods -o json` the crash probe
+// reads. It is its own shape rather than the pair check's podListing because it
+// judges a different part of a pod: when it was created, whether it is Ready,
+// and each container's restart count and waiting state.
+type podCrashListing struct {
+	Items []podCrashItem `json:"items"`
+}
+
+// podCrashItem is one pod as the crash probe reads it.
+type podCrashItem struct {
+	Metadata struct {
+		Name              string  `json:"name"`
+		CreationTimestamp string  `json:"creationTimestamp"`
+		DeletionTimestamp *string `json:"deletionTimestamp"`
+	} `json:"metadata"`
+	Status struct {
+		Conditions        []podCrashCondition       `json:"conditions"`
+		ContainerStatuses []podCrashContainerStatus `json:"containerStatuses"`
+	} `json:"status"`
+}
+
+// podCrashCondition is one pod condition, as the pod reports it.
+type podCrashCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+// podCrashContainerStatus is one container as the crash probe reads it: whether
+// it reports itself ready, how often it has restarted, and the state it waits
+// in when it is not running.
+type podCrashContainerStatus struct {
+	Name         string `json:"name"`
+	Ready        bool   `json:"ready"`
+	RestartCount int    `json:"restartCount"`
+	State        struct {
+		Waiting *podCrashWaiting `json:"waiting"`
+	} `json:"state"`
+}
+
+// podCrashWaiting is a container's waiting state and its reason.
+type podCrashWaiting struct {
+	Reason string `json:"reason"`
+}
+
+// judgeDaemonPod judges the newest live pod in the list kubectl printed: the
+// CrashLoopBackOff wait first, then the restart count, then the pod that stayed
+// not Ready past podCrashNotReadyAfter its creation. The checks are answered in
+// that order, so a pod that both waits in CrashLoopBackOff and has restarted
+// reports the reason it is waiting in.
+func judgeDaemonPod(out string, now time.Time) (bool, string, error) {
+	var list podCrashListing
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return false, "", errors.New("pod daemon crash probe: the daemon pod list is not JSON")
+	}
+	pod, created, err := newestDaemonPod(list.Items)
+	if err != nil {
+		return false, "", err
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if waiting := status.State.Waiting; waiting != nil && waiting.Reason == "CrashLoopBackOff" {
+			return true, status.Name + ": CrashLoopBackOff", nil
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.RestartCount >= podCrashRestartLimit {
+			return true, fmt.Sprintf("%s: restarted %d times", status.Name, status.RestartCount), nil
+		}
+	}
+	if podCrashReady(pod) {
+		return false, "", nil
+	}
+	age := now.Sub(created)
+	if age < podCrashNotReadyAfter {
+		return false, "", nil
+	}
+	return true, fmt.Sprintf("%s: not Ready %s after creation", podCrashContainerName(pod), age.Round(time.Second)), nil
+}
+
+// newestDaemonPod is the newest pod in items that the cluster is not deleting,
+// and when it was created. The newest pod is the one the Deployment rolled, so a
+// reading from an old pod a rollout left behind cannot end a wait for the new
+// one. A list with no live pod, or a pod whose creation time does not parse, is
+// an error: neither says anything about the pod that must come up.
+func newestDaemonPod(items []podCrashItem) (podCrashItem, time.Time, error) {
+	var newest podCrashItem
+	var newestAt time.Time
+	found := false
+	for _, pod := range items {
+		if pod.Metadata.DeletionTimestamp != nil {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339, pod.Metadata.CreationTimestamp)
+		if err != nil {
+			return podCrashItem{}, time.Time{}, fmt.Errorf("pod daemon crash probe: the daemon pod %s reports no readable creation time", pod.Metadata.Name)
+		}
+		if found && !created.After(newestAt) {
+			continue
+		}
+		newest, newestAt, found = pod, created, true
+	}
+	if !found {
+		return podCrashItem{}, time.Time{}, errors.New("pod daemon crash probe: the daemon pod list names no pod to judge")
+	}
+	return newest, newestAt, nil
+}
+
+// podCrashReady reports whether the pod's Ready condition says True. A pod with
+// no Ready condition yet is not Ready.
+func podCrashReady(pod podCrashItem) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == "Ready" {
+			return condition.Status == "True"
+		}
+	}
+	return false
+}
+
+// podCrashContainerName names the container the not-Ready reason is about: the
+// first container that does not report itself ready, else the first container
+// the pod reports, else the pod itself, which reports no container.
+func podCrashContainerName(pod podCrashItem) string {
+	for _, status := range pod.Status.ContainerStatuses {
+		if !status.Ready {
+			return status.Name
+		}
+	}
+	if len(pod.Status.ContainerStatuses) > 0 {
+		return pod.Status.ContainerStatuses[0].Name
+	}
+	return "pod " + pod.Metadata.Name
+}
