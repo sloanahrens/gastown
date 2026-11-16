@@ -403,10 +403,13 @@ func TestUsageSampleDedupesAgainstTheNewestCompleteRow(t *testing.T) {
 	}
 }
 
-func TestUsageSampleRefusesWhenNoScannedRowCarriesAReading(t *testing.T) {
+func TestUsageSampleWritesOverAFullWindowOfPartialRows(t *testing.T) {
 	t.Parallel()
 	r := newUsageSampleRig()
 	f := beadsfake.New()
+	// Every row the scan can read is partial, so there is nothing to dedupe
+	// against. That is not an error: the reading must be written, and it is the
+	// only thing that can clear the window.
 	for i := range newestRowScan {
 		partial := completeClaudePlanSample(r.now.Add(-time.Duration(i+1)*time.Minute), 41, 12)
 		partial.FiveHourPct = nil
@@ -416,15 +419,24 @@ func TestUsageSampleRefusesWhenNoScannedRowCarriesAReading(t *testing.T) {
 	}
 
 	stderr, err := runUsageSampleCmd(t, fakeClaudePlanDeps(r, f), statusLinePayload("41", "12"), "--strict")
-	if err == nil {
-		t.Fatal("exit err = nil, want non-zero: a full window of rows with no reading must not read as an empty table")
+	if err != nil {
+		t.Fatalf("exit err = %v, want nil: a window with no reading is nothing to dedupe against, not a refusal; stderr = %q", err, stderr)
 	}
-	assertOneStderrLine(t, stderr)
-	if !strings.Contains(stderr, "carry no reading") {
-		t.Errorf("stderr = %q, want the refusal named", stderr)
+	if stderr != "" {
+		t.Errorf("stderr = %q, want none", stderr)
 	}
-	if rows := fakeClaudePlanRows(t, f); len(rows) != newestRowScan {
-		t.Errorf("rows = %d, want the %d seeded: the reading was not written", len(rows), newestRowScan)
+	rows := fakeClaudePlanRows(t, f)
+	if len(rows) != newestRowScan+1 {
+		t.Fatalf("rows = %d, want the %d seeded and the written reading", len(rows), newestRowScan)
+	}
+	want := r.now.Truncate(time.Second)
+	if !rows[0].At.Equal(want) {
+		t.Fatalf("newest row at = %v, want the written reading at %v", rows[0].At, want)
+	}
+	if rows[0].FiveHourPct == nil || *rows[0].FiveHourPct != 41 ||
+		rows[0].SevenDayPct == nil || *rows[0].SevenDayPct != 12 ||
+		rows[0].FiveHourResetsAt == nil || rows[0].SevenDayResetsAt == nil {
+		t.Errorf("written row = %+v, want all four readings", rows[0])
 	}
 }
 

@@ -56,17 +56,20 @@ type clientClaudePlanStore struct {
 }
 
 // newestRowScan bounds how many claude_plan rows NewestClaudePlan reads looking
-// for the newest reading. It is the whole window a store over bd can inspect:
-// ReadCostSamples has no offset to page past it.
+// for the newest reading. It is the window one read of ReadCostSamples
+// inspects; that call takes a limit but no offset to page past it. The scan
+// relies on ReadCostSamples returning rows newest first, as its contract says,
+// and stops at the first complete row.
 const newestRowScan = 32
 
 // NewestClaudePlan returns the newest claude_plan row that carries a reading,
-// or nil when the table holds no reading. A row missing one of the four
+// or nil when the scanned rows hold none. A row missing one of the four
 // readings is not a reading, so it is skipped rather than read as zero or as an
 // error: one partial row another writer left must not wedge every later write,
-// which are the writes that would put a complete row on top. When the scan
-// finds no reading at all the store refuses, because an older reading may sit
-// past the window and nil would claim there is none.
+// which are the writes that would put a complete row on top. A window with no
+// reading in it is nil too: finding nothing to dedupe against is not a failure,
+// and the write that follows can only put a complete row over partial ones,
+// never worsen the window. Only a read that fails is an error.
 func (s clientClaudePlanStore) NewestClaudePlan(ctx context.Context) (*usage.ClaudePlan, error) {
 	rows, err := s.client.ReadCostSamples(ctx, beads.SampleKindClaudePlan, time.Time{}, newestRowScan)
 	if err != nil {
@@ -79,9 +82,6 @@ func (s clientClaudePlanStore) NewestClaudePlan(ctx context.Context) (*usage.Cla
 		}
 		return &p, nil
 	}
-	if len(rows) == newestRowScan {
-		return nil, fmt.Errorf("the newest %d claude_plan rows carry no reading", newestRowScan)
-	}
 	return nil, nil
 }
 
@@ -92,7 +92,9 @@ func (s clientClaudePlanStore) NewestClaudePlan(ctx context.Context) (*usage.Cla
 // re-read is as close to the append as this store can put it, and two writers
 // racing over one town cost one duplicate heartbeat row at worst. A partial row
 // another writer appends over the reading is skipped by the re-read, so it does
-// not read as a changed newest row.
+// not read as a changed newest row. A re-read that finds no reading at all
+// matches a prev of nil (nothing was found when the caller read either) and
+// appends; it differs from a prev that was a reading, which is a change.
 func (s clientClaudePlanStore) WriteClaudePlanAfter(ctx context.Context, p usage.ClaudePlan, prev *usage.ClaudePlan) error {
 	newest, err := s.NewestClaudePlan(ctx)
 	if err != nil {
