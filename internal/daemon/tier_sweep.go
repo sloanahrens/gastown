@@ -249,8 +249,10 @@ type tierSweepState struct {
 	LastGreenSHA string `json:"last_green_sha"`
 	// ImagesRetries counts the re-runs an images failure at ImagesRetrySHA has
 	// already cost. The pair belongs together: the count is read only while
-	// ImagesRetrySHA equals LastGreenSHA, so a green sweep that moves the tip
-	// starts the new sha at zero without an explicit reset.
+	// ImagesRetrySHA equals LastGreenSHA, and every cycle rewrites the pair
+	// (tierSweepImagesRetryRecorded), so a green sweep that moves the tip and a
+	// green tip whose images run succeeded both clear it. It lives in this file
+	// so a daemon restart reads back what the loop has already spent (gt-opkfch).
 	ImagesRetries int `json:"images_retries,omitempty"`
 	// ImagesRetrySHA is the green tip the ImagesRetries count belongs to. An
 	// empty value, or one naming another tip, reads as zero retries.
@@ -923,6 +925,46 @@ func tierSweepImagesRetryRecordDue(st tierSweepState, now time.Time) bool {
 		return false
 	}
 	return now.Sub(st.LastRun) >= tierSweepImagesRetryGap
+}
+
+// tierSweepImagesRetryRecorded says the images retry fields a cycle leaves in
+// the rig's record: the retries a failed images run at the green tip has cost,
+// and the tip they belong to (gt-opkfch). prior is the record the cycle read,
+// greenSHA the green tip the cycle recorded (empty when it recorded none), early
+// whether the cycle is an early re-run, and now when it started.
+//
+// A cycle that records another green tip clears the pair: the retries were spent
+// on a failure the old tip owns, and the sweep retries only the images run at the
+// tip its record now names. A green tip whose images run no longer stands failed
+// clears it too: a later run for it succeeded, or the pair check no longer holds
+// that failed run, so there is no failure for a count to belong to. An early
+// re-run the record allows a retry on adds one to the count of the tip whose
+// images failed, which is how the retry cap (tierSweepImagesRetryMax) bounds the
+// loop across a daemon restart. Any other cycle leaves the record's pair as it
+// was.
+func (d *Daemon) tierSweepImagesRetryRecorded(rig string, prior tierSweepState, greenSHA string, early bool, now time.Time) (int, string) {
+	if greenSHA != prior.LastGreenSHA {
+		// A sweep produced a new green sha.
+		return 0, ""
+	}
+	// The count is only the green tip's own: a pair recorded for another sha
+	// counts for nothing.
+	retries := 0
+	if prior.ImagesRetrySHA == greenSHA {
+		retries = prior.ImagesRetries
+	}
+	if !d.tierSweepImagesFailedFor(rig, greenSHA) {
+		// The images run for the green sha no longer stands failed.
+		return 0, ""
+	}
+	if early && tierSweepImagesRetryRecordDue(prior, now) {
+		return retries + 1, greenSHA
+	}
+	if retries == 0 {
+		// No count left to keep, so the tip it would name is not written either.
+		return 0, ""
+	}
+	return retries, greenSHA
 }
 
 // tierSweepEarlyCandidates lists the configured rigs whose record passes
@@ -1619,11 +1661,13 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		return false
 	}
 
+	// The record this cycle replaces, read before any field below rebinds it:
+	// its LastRun dates the images retry gap the cycle is held to
+	// (tierSweepImagesRetryRecorded), and its LastSHA dates the verdicts the
+	// cycle carries forward.
+	prior := state
 	state.LastRun = now
 	state.EarlyRun = bool(kind)
-	// The record this cycle replaces, read before the fields below rebind it:
-	// its LastSHA dates the verdicts the cycle carries forward.
-	prior := state
 	// partial covers both kinds of incomplete cycle: one that deferred, and one
 	// whose multi-tier stage was starved before its later tiers could print
 	// (gt-34r68). Neither says anything about the tiers it did not judge.
@@ -1649,6 +1693,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		// retires the restart's deferral (gt-icmdq).
 		state.OwedSince = now
 	}
+	// The retries this cycle spent on a failed images run, written beside the
+	// tip they belong to in the same atomic record (gt-opkfch). A cycle that
+	// produced a new green sha owns no retry at the old one, and neither does
+	// one whose images run no longer stands failed.
+	state.ImagesRetries, state.ImagesRetrySHA = d.tierSweepImagesRetryRecorded(rig, prior, state.LastGreenSHA, kind == tierSweepEarlyRun, now)
 	if err := writeTierSweepState(d.config.TownRoot, rig, state); err != nil {
 		d.logger.Printf("tier_sweep: %s: writing the sweep record: %v", rig, err)
 		d.logger.Print(tierSweepAbortedLine(rig, sha, "sweep record not written"))
