@@ -2,7 +2,9 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode"
@@ -45,6 +47,15 @@ type PairProbes interface {
 	DevTagDigest(ctx context.Context) (string, error)
 }
 
+// CrashProbes is the optional extension of VerifyProbes a run implements when it
+// can tell whether the daemon's newest pod is crash-looping.
+type CrashProbes interface {
+	// PodCrashing reports whether the daemon's newest pod is crash-looping and,
+	// when it is, why: the container and the reason, for example
+	// "gt: CrashLoopBackOff".
+	PodCrashing(ctx context.Context) (crashing bool, why string, err error)
+}
+
 // Check is one result of Verify: the fact checked, whether it matched, and
 // what the probe reported.
 type Check struct {
@@ -78,12 +89,30 @@ func Verify(ctx context.Context, p VerifyProbes, want string) []Check {
 // WaitForRestart polls the daemon until it reports want or timeout passes,
 // which is measured from the first poll. The poll that finds the timeout passed
 // is the last one, so a sleep that ends on the timeout still gets its poll; a
-// canceled context or a failing sleep returns that error.
+// canceled context or a failing sleep returns that error. A probe set that also
+// implements CrashProbes is asked on each poll, before the daemon: a poll that
+// finds the newest pod crash-looping ends the wait at once with healthy false
+// and why in the error, because a pod that cannot come up cannot report want
+// inside the bound. A crash probe error is logged and the wait goes on, since
+// the pod is briefly unreadable while it starts or restarts.
 func WaitForRestart(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p VerifyProbes, want string, timeout, poll time.Duration) (bool, error) {
 	start := clock.Now()
+	crash, watchesCrash := p.(CrashProbes)
 	for {
 		if err := ctx.Err(); err != nil {
 			return false, err
+		}
+		if watchesCrash {
+			crashing, why, err := crash.PodCrashing(ctx)
+			switch {
+			case err != nil:
+				log.Printf("update: waiting for the daemon restart: the crash probe failed: %v", err)
+			case crashing:
+				if why = strings.TrimSpace(why); why == "" {
+					return false, errors.New("the daemon's new pod is crash-looping")
+				}
+				return false, fmt.Errorf("the daemon's new pod is crash-looping: %s", why)
+			}
 		}
 		// A probe error is expected while the daemon is down mid-restart, so
 		// only a version that matches ends the wait.
