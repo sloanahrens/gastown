@@ -219,6 +219,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Rework != nil {
 		start(h.cfg.ReworkEvery, h.pollRework)
 	}
+	if h.cfg.ReworkNumbers != nil {
+		start(h.cfg.ReworkNumbersEvery, h.pollReworkNumbers)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -1062,6 +1065,21 @@ func (h *Hub) pollRework() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Rework = r
+	h.publishLocked()
+}
+
+// pollReworkNumbers carries the rework program's document, read verbatim. A
+// read that found no document, or failed, returns nil: the key keeps the
+// document the feed last carried, whose generated_at says how old it is, and
+// the reader logs a failed read once.
+func (h *Hub) pollReworkNumbers() {
+	doc := h.cfg.ReworkNumbers()
+	if len(doc) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.ReworkNumbers = doc
 	h.publishLocked()
 }
 

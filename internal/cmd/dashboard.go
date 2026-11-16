@@ -480,6 +480,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	usage := newDashboardUsageReader(townRoot)
 	claudePlan := newDashboardClaudePlanRead(townRoot, beadReads.costSamples, os.UserHomeDir, os.Stat, whyLog, usage, claudePlanUSD, claudePlanRenewalDay, time.Now)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
+	reworkNumbers := newDashReworkNumbersReader(townRoot).withWhy(whyLog)
 	loads := newDashLoads(townRoot, time.Now)
 	mango := dashboardMangoPath(townRoot, mangoDir)
 	// One reader for the panel's whole life: it reads only what Jev appended
@@ -521,6 +522,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Usage:          func() *dashboard.Usage { return usage.read(time.Now()) },
 		ClaudePlan:     claudePlan,
 		Rework:         func() *dashboard.Rework { return rework.read(time.Now()) },
+		ReworkNumbers:  reworkNumbers.read,
 		Escalation:     func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:       om.dispatch,
 		Attention:      dashboard.NewAttentionFollower(townRoot).Read,
