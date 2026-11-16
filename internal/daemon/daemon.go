@@ -1378,6 +1378,25 @@ type Daemon struct {
 	// (gt-fu9c8a, gt-ff9cxi).
 	imagePinsBeadRunner func(ctx context.Context, dir string, env, args []string) (stdout, stderr []byte, err error)
 
+	// deepSeekBalanceRunning and deepSeekBalanceCycles are the
+	// deepseek_balance tick's single-flight guard and cycle count: the tick
+	// runs off the select loop, and Run's return joins one it left
+	// (deepseek_balance_patrol.go).
+	deepSeekBalanceRunning atomic.Bool
+	deepSeekBalanceCycles  sync.WaitGroup
+	// deepSeekBalanceJoinWait overrides deepSeekBalanceJoinWait in tests.
+	deepSeekBalanceJoinWait time.Duration
+	// deepSeekBalanceStateMu guards deepSeekBalanceUnconfiguredSaid, the flag
+	// that keeps the unconfigured line to one per absence.
+	deepSeekBalanceStateMu          sync.Mutex
+	deepSeekBalanceUnconfiguredSaid bool
+	// newDeepSeekBalanceTicker is where the patrol's ticker comes from: nil is
+	// time.NewTicker, and a test sets it to record the cadence.
+	newDeepSeekBalanceTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
+	// newDeepSeekBalanceSeams replaces the tick's seams in tests: nil is the
+	// production key reader, and a test sets it to hand the tick a fake fetch.
+	newDeepSeekBalanceSeams func() deepSeekBalanceTickSeams
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -2381,6 +2400,14 @@ func (d *Daemon) Run() (err error) {
 		defer d.stopImagePinsPatrol(stopImagePins)
 	}
 
+	// Start the deepseek balance ticker if enabled (default off, gt-whaxw7; its
+	// config block says why). The defer stops the ticker and joins a tick it
+	// left running.
+	deepSeekBalanceChan, stopDeepSeekBalance := d.startDeepSeekBalanceTicker()
+	if stopDeepSeekBalance != nil {
+		defer d.stopDeepSeekBalancePatrol(stopDeepSeekBalance)
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2575,6 +2602,14 @@ func (d *Daemon) Run() (err error) {
 			// reach git and the town's Forgejo (gt-01lcq2).
 			if !d.isShutdownInProgress() {
 				d.startImagePinsTick()
+			}
+
+		case <-deepSeekBalanceChan:
+			// DeepSeek balance — reads the key file and fetches the account
+			// balance on its own goroutine, so the request never holds the
+			// loop (gt-whaxw7).
+			if !d.isShutdownInProgress() {
+				d.startDeepSeekBalanceTick()
 			}
 
 		case <-findingsFilerChan:
