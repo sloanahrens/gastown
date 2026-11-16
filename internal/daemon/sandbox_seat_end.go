@@ -224,13 +224,11 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		h.clearKeptSeat(rig, name)
 		return false
 	}
-	// The end keeps deciding on the agent bead's hook, and reads the hook the
-	// seat's intent record names beside it, so the shadow window measures the
-	// fact the decision moves onto the record (P1.7 of
-	// docs/plans/2026-11-15-agent-bead-retirement-plan.md). The line is logged
-	// once per seat through the daemon's latch, and a record the read cannot
-	// parse is logged there too: the shadow answers with nothing the decision
-	// can see (gt-xoj72t).
+	// The end keeps deciding on the agent bead's hook; the shadow line measures
+	// it against the seat's intent record, so the two can be compared over the
+	// shadow window P1.7 opens before the decision moves onto the record
+	// (docs/plans/2026-11-15-agent-bead-retirement-plan.md). Nothing it logs
+	// changes what this function returns (gt-xoj72t).
 	h.shadowWorkBead(rig, name, strings.TrimSpace(fields.HookBead))
 	rigPath := filepath.Join(h.town(), rig)
 	var (
