@@ -744,16 +744,21 @@ func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, 
 // holds the deepseek.env file the gt-deepseek-balance Secret is created from.
 // The patrol runs without the key (one log line and no fetch), and the pod must
 // not mount a Secret that was never created, so the mount and its create line
-// are rendered only for a configured key. A path that cannot be read for any
-// other reason refuses the render rather than guessing the file away
+// are rendered only for a configured key. A path that cannot be inspected, or
+// that is a directory or special file rather than a regular file or a symlink,
+// refuses the render rather than printing a create line that cannot read it
 // (gt-hfcssw).
 func deepSeekBalanceKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, error)) (bool, error) {
 	path := filepath.Join(configDir, k8sdaemon.DeepSeekBalanceFile)
-	switch _, err := lstat(path); {
+	info, err := lstat(path)
+	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return false, nil
 	case err != nil:
-		return false, fmt.Errorf("the deepseek balance key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
+		return false, fmt.Errorf("the deepseek balance key file %s cannot be inspected, so the render cannot tell whether to mount it: %w", path, err)
+	}
+	if mode := info.Mode(); !mode.IsRegular() && mode&fs.ModeSymlink == 0 {
+		return false, fmt.Errorf("the deepseek balance key path %s is not a regular file or a symlink, so the create line cannot read it", path)
 	}
 	return true, nil
 }

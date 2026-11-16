@@ -524,7 +524,23 @@ func TestTownClusterRenderMountsTheDeepSeekBalanceKeyOnlyWhenPresent(t *testing.
 			return os.Lstat(path)
 		}
 		err := runClusterRender(deps, f)
-		requireErrorNames(t, err, k8sdaemon.DeepSeekBalanceFile, "cannot be read")
+		requireErrorNames(t, err, k8sdaemon.DeepSeekBalanceFile, "cannot be inspected")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left --out %s, want it untouched", got)
+		}
+	})
+
+	t.Run("a directory is not a key file", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		keyPath := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
+		if err := os.MkdirAll(keyPath, 0o700); err != nil {
+			t.Fatalf("making the key path a directory: %v", err)
+		}
+		var out bytes.Buffer
+		deps := clusterRenderTestDeps(t, &out)
+		err := runClusterRender(deps, f)
+		requireErrorNames(t, err, k8sdaemon.DeepSeekBalanceFile, "not a regular file")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left --out %s, want it untouched", got)
 		}
