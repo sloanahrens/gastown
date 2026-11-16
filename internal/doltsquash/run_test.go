@@ -15,15 +15,18 @@ import (
 // the writer added a row to, and one commit newer than the cut on both sides.
 // work overrides the tables verification reads on compact-work, so a test can
 // make compact-work differ from the record; nil means it matches after.
+// recordTip is the tip the record at the last picked tip reads; empty means it
+// reads the catch-up's, so a test can put the two on different commits.
 type runFixture struct {
-	before  Before
-	after   Before
-	work    []TableState
-	initial string
-	picked  string
-	made    string
-	newer   []commitIdentity
-	old     int64
+	before    Before
+	after     Before
+	work      []TableState
+	initial   string
+	picked    string
+	made      string
+	newer     []commitIdentity
+	old       int64
+	recordTip string
 }
 
 func newRunFixture() runFixture {
@@ -75,7 +78,15 @@ func (fx runFixture) fake() *FakeExec {
 	}
 	f.Respond(sqlCheckoutMain, Rows{})
 	f.Respond(sqlMainTip, single("dolt_hashof('main')", fx.before.Tip))
-	f.Respond(sqlMainTip, single("dolt_hashof('main')", fx.after.Tip))
+	// The catch-up reads main's tip once per pass: the pass that picks, the empty
+	// pass that records the tip, and the pass that finds it quiet. The record at
+	// the last picked tip reads it once more.
+	for range 3 {
+		f.Respond(sqlMainTip, single("dolt_hashof('main')", fx.after.Tip))
+	}
+	if fx.recordTip != "" {
+		f.Respond(sqlMainTip, single("dolt_hashof('main')", fx.recordTip))
+	}
 	f.Respond(sqlMainCommits, single("n", strconv.FormatInt(fx.before.Commits, 10)))
 	f.Respond(sqlMainCommits, single("n", strconv.FormatInt(fx.after.Commits, 10)))
 	f.Respond(sqlShowTables, Rows{
@@ -282,6 +293,50 @@ func TestRunStopsBeforeTheSwapWhenVerificationDiffers(t *testing.T) {
 	}
 }
 
+// TestRunRefusesARecordAtATipTheCatchUpNeverReached drives the refusal between a
+// record taken at one tip and a catch-up that stopped at another: verification
+// would prove compact-work against a state the picks never reached, and the swap
+// would replay the tail from a different one, so the run must stop before
+// either, with main untouched.
+func TestRunRefusesARecordAtATipTheCatchUpNeverReached(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture()
+	fx.recordTip = hash(0x07)
+	f := fx.fake()
+	clk := newTestClock()
+	marker := &runMarker{}
+
+	got, err := Run(context.Background(), RunInput{
+		Exec:    f,
+		Marker:  marker,
+		Clock:   clk,
+		Sleeper: &testSleeper{clk: clk},
+		Cut:     cutOf(),
+	})
+	if err == nil {
+		t.Fatal("Run returned no error on a record at a tip the catch-up never reached")
+	}
+	for _, want := range []string{
+		"the record at the last picked tip read main at " + fx.recordTip,
+		"the catch-up stopped at " + fx.after.Tip,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not hold %q", err, want)
+		}
+	}
+	if got.Verify.MainTip != "" || got.Swap.SwappedTip != "" {
+		t.Errorf("the refused run verified and swapped anyway: verify %+v, swap %+v", got.Verify, got.Swap)
+	}
+	// Only the rebase's branch creation ran: neither of the swap's renames was
+	// sent, so main is untouched.
+	if got, want := branchStatements(f), []string{sqlBranchBase + quoteLiteral(fx.initial) + ")", sqlBranchWork + quoteLiteral(fx.before.Tip) + ")"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("branch statements = %q, want only the rebase's two, %q", got, want)
+	}
+	if marker.held || marker.releases != 1 {
+		t.Errorf("the stopped run held %v with %d releases, want the marker released", marker.held, marker.releases)
+	}
+}
+
 func TestRunRefusesASecondRunWhileTheMarkerIsHeld(t *testing.T) {
 	t.Parallel()
 	// The marker a previous run holds is what a second, concurrent run finds.
@@ -307,20 +362,46 @@ func TestRunRefusesASecondRunWhileTheMarkerIsHeld(t *testing.T) {
 	}
 }
 
-// runStep names one step of a run by a statement it sends, and which
-// occurrence of that statement in the run it is: a step shares statements with
-// the steps before it, so the occurrence is what locates it.
+// runStep names one step of a run by a statement it sends, which occurrence of
+// that statement in the run it is, and how many of the design's steps have
+// finished when that statement fails. A step shares statements with the steps
+// around it, so the occurrence alone cannot say which step a statement belongs
+// to; done is what proves the label names the step the statement is in.
 type runStep struct {
 	name      string
 	statement string
 	nth       int
+	done      int
+}
+
+// completedSteps returns how many of a run's steps finished before it stopped,
+// read from the result: a step assigns its field only when it returns, and a
+// step that fails at its first statement returns that field zero, so the first
+// zero field names the step the run stopped in.
+func completedSteps(r RunResult) int {
+	switch {
+	case r.Swap.SwappedTip != "":
+		return 6
+	case r.Verify.MainTip != "":
+		return 5
+	case r.Verified.Tip != "":
+		return 4
+	case r.Catchup.Tip != "":
+		return 3
+	case r.Rebase.Marked > 0:
+		return 2
+	case r.Before.Tip != "":
+		return 1
+	}
+	return 0
 }
 
 // TestRunStopsAtTheStepThatFails drives every step's error return: one
 // statement of the step fails, and the run must return that error at once,
-// having sent nothing after it, with the marker released. The statements are
-// located by index in a run that succeeded, so a failure lands in the step it
-// names and the count proves the run stopped there.
+// having sent nothing after it, with the steps before it finished and that step
+// and every later one not, and the marker released. The statements are located
+// by index in a run that succeeded, so a failure lands in the step it names,
+// and the count of finished steps proves the label and the statement agree.
 func TestRunStopsAtTheStepThatFails(t *testing.T) {
 	t.Parallel()
 	fx := newRunFixture()
@@ -337,12 +418,12 @@ func TestRunStopsAtTheStepThatFails(t *testing.T) {
 	}
 	statements := healthy.Statements()
 	steps := []runStep{
-		{"the BEFORE record", sqlCheckoutMain, 1},
-		{"the rebase", sqlRebaseStart, 1},
-		{"the catch-up", sqlActiveBranch, 2},
-		{"the record at the last picked tip", sqlCheckoutMain, 2},
-		{"verification", sqlCheckoutWork, 2},
-		{"the swap", sqlCompactWorkTip, 1},
+		{"the BEFORE record", sqlCheckoutMain, 1, 0},
+		{"the rebase", sqlRebaseStart, 1, 1},
+		{"the catch-up", sqlActiveBranch, 2, 2},
+		{"the record at the last picked tip", sqlCheckoutMain, 2, 3},
+		{"verification", sqlCheckoutWork, 2, 4},
+		{"the swap", sqlCompactWorkTip, 1, 5},
 	}
 	refused := errors.New("server closed the connection")
 	for _, step := range steps {
@@ -354,7 +435,7 @@ func TestRunStopsAtTheStepThatFails(t *testing.T) {
 			marker := &runMarker{}
 			clk := newTestClock()
 
-			_, err := Run(context.Background(), RunInput{
+			got, err := Run(context.Background(), RunInput{
 				Exec:    f,
 				Marker:  marker,
 				Clock:   clk,
@@ -364,8 +445,12 @@ func TestRunStopsAtTheStepThatFails(t *testing.T) {
 			if !errors.Is(err, refused) {
 				t.Fatalf("Run returned %v, want the failed step's error", err)
 			}
-			if got := len(f.Statements()); got != at+1 {
-				t.Errorf("the run sent %d statements, want %d: it stopped at the failed statement", got, at+1)
+			if sent := len(f.Statements()); sent != at+1 {
+				t.Errorf("the run sent %d statements, want %d: it stopped at the failed statement", sent, at+1)
+			}
+			if finished := completedSteps(got); finished != step.done {
+				t.Errorf("the run finished %d steps, want %d: %q does not name the step that sent the failed statement",
+					finished, step.done, step.name)
 			}
 			if marker.held || marker.releases != 1 {
 				t.Errorf("the failed run held %v with %d releases, want the marker released", marker.held, marker.releases)

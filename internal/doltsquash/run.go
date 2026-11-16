@@ -38,7 +38,9 @@ type RunInput struct {
 }
 
 // RunResult is what each step of one run did, one field per step in the order
-// the steps run.
+// the steps run. "Design step N", here and in the package's other comments, is
+// step N of "The run" in docs/plans/2026-11-15-dolt-squash-design.md: read that
+// list before changing a step's order or its statements.
 type RunResult struct {
 	// Before is design step 3's record of main, read before the rebase.
 	Before Before
@@ -67,8 +69,10 @@ type RunResult struct {
 // Verification compares compact-work with main at the tip the catch-up stopped
 // at, so main's state there is recorded after the catch-up: the BEFORE record
 // describes the tip the rebase branched at, and the commits that landed since
-// then are on compact-work. A run that stops before the swap leaves main and
-// the work branches as the stopped step left them.
+// then are on compact-work. A record that reads main at another tip stops the
+// run before verification, because the swap replays from the tip verification
+// proved. A run that stops before the swap leaves main and the work branches as
+// the stopped step left them.
 //
 // A step that fails, or a verification difference, stops the run and returns
 // the result the steps reached. A swap that leaves a conflict is not an error:
@@ -109,6 +113,16 @@ func Run(ctx context.Context, in RunInput) (result RunResult, err error) {
 	if result.Verified, err = RecordBefore(ctx, in.Exec); err != nil {
 		return result, err
 	}
+	// Verification proves compact-work equal to main at the recorded tip, and the
+	// swap replays the old main's tail from the tip it verified against. A record
+	// that read a tip the catch-up never stopped at would leave both steps reading
+	// different states of main, so the run refuses instead of proving one state and
+	// swapping from another.
+	if result.Verified.Tip != result.Catchup.Tip {
+		return result, fmt.Errorf(
+			"doltsquash: the record at the last picked tip read main at %s, but the catch-up stopped at %s, so the run cannot verify and swap at the tip the picks reached",
+			result.Verified.Tip, result.Catchup.Tip)
+	}
 	if result.Verify, err = Verify(ctx, in.Exec, result.Verified, in.Cut); err != nil {
 		return result, err
 	}
@@ -116,7 +130,7 @@ func Run(ctx context.Context, in RunInput) (result RunResult, err error) {
 		return result, fmt.Errorf("doltsquash: compact-work does not verify against main at %s, so main is untouched: %s",
 			result.Verified.Tip, describeDifferences(result.Verify.Differences))
 	}
-	if result.Swap, err = Swap(ctx, in.Exec, result.Catchup.Tip, in.Sleeper); err != nil {
+	if result.Swap, err = Swap(ctx, in.Exec, result.Verified.Tip, in.Sleeper); err != nil {
 		return result, err
 	}
 	return result, nil
