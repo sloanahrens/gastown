@@ -465,9 +465,10 @@ func TestNoBeadAccessApplyCreatesTheEscalationFromAValidatedOutbox(t *testing.T)
 }
 
 // TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText: an outbox that asks
-// for no help creates no escalation, and one whose request is empty — whether
-// the decoder refused it or a host built the Result by hand — creates none and
-// is reported (gt-5rmlks).
+// for no help creates no escalation, and one whose request is empty or only
+// whitespace creates none and is reported by Apply, whether it came through the
+// decoder or a host built the Result by hand. The decoder's own refusal of an
+// empty request is tested in outbox_test.go (gt-5rmlks, gt-n91cyx).
 func TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -484,13 +485,20 @@ func TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText(t *testing.T) {
 			result: Result{},
 		},
 		{
-			name:    "an outbox the decoder refuses for an empty request creates none and is reported",
-			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "escalation": {"text": ""}}`,
+			// The decoder checks only for "", so this request reaches Apply and
+			// Apply's own guard is what refuses it.
+			name:    "an outbox whose request is only whitespace is refused by Apply",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "escalation": {"text": "  \n\t"}}`,
 			wantErr: "escalation text is empty",
 		},
 		{
 			name:    "a hand-built result with an empty request creates none and is reported",
 			result:  Result{Status: StatusDone, Escalation: &Escalation{}},
+			wantErr: "escalation text is empty",
+		},
+		{
+			name:    "a hand-built result with a whitespace-only request creates none and is reported",
+			result:  Result{Status: StatusDone, Escalation: &Escalation{Text: "  \n\t"}},
 			wantErr: "escalation text is empty",
 		},
 	}
