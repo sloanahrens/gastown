@@ -116,6 +116,12 @@ type overrunSeat struct {
 	// and an idle seat there would otherwise read as finished work
 	// (overrunFinishedOnOrigin).
 	SlingAt time.Time
+	// StopReason, when set, is why the guard stops this seat instead of the 20
+	// minute rule: the mid-run tripwire's account of the change it found. The
+	// stop carries it into the bead's hand-back note and the needs-split
+	// attention item, which then name the reason rather than the rule
+	// (overrunStop).
+	StopReason string
 	// ReworkSHA is set only on the seat handed to handBack, when the stopped
 	// seat's finished work was already on origin: the commit both hold for the
 	// kept branch. It turns the hand-back into rework (overrunStop, step 5).
