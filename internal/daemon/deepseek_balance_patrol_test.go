@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,15 +21,21 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deepseekbalance"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // deepSeekBalanceTestDaemon builds a daemon whose patrol ticks inline, over the
-// key file the test names.
+// key file the test names. Its rows and escalations go to an in-memory store
+// and notifier, so a tick that reads a balance spawns no bd or gt.
 func deepSeekBalanceTestDaemon(t *testing.T, logged io.Writer, keyFile string) *Daemon {
 	t.Helper()
+	store := beadsfake.New()
 	return &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(logged, "", 0),
+		config:              &Config{TownRoot: t.TempDir()},
+		logger:              log.New(logged, "", 0),
+		notifier:            notifyfake.New(),
+		openCostSampleBeads: func() beads.Client { return store },
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 			DeepSeekBalance: &agentconfig.DeepSeekBalanceConfig{Enabled: true, KeyFile: keyFile},
 		}},
@@ -35,20 +43,22 @@ func deepSeekBalanceTestDaemon(t *testing.T, logged io.Writer, keyFile string) *
 }
 
 // deepSeekBalanceFetches is the tick's fetch seam: the keys it was handed and
-// the error it answers.
+// the reading or error it answers.
 type deepSeekBalanceFetches struct {
-	keys []string
-	err  error
+	keys    []string
+	reading deepseekbalance.Sample
+	err     error
 }
 
 // seams is the tick's seams over the production key reader and this recorder.
 func (f *deepSeekBalanceFetches) seams() deepSeekBalanceTickSeams {
 	return deepSeekBalanceTickSeams{
 		readKey: deepSeekBalanceReadKey,
-		fetch: func(_ context.Context, key string) error {
+		fetch: func(_ context.Context, key string) (deepseekbalance.Sample, error) {
 			f.keys = append(f.keys, key)
-			return f.err
+			return f.reading, f.err
 		},
+		evaluate: deepseekbalance.Evaluate,
 	}
 }
 
@@ -181,7 +191,7 @@ func TestDeepSeekPatrolUnconfiguredLogsOnceAgainAfterTheKeyReturns(t *testing.T)
 	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
 	var logged bytes.Buffer
 	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
-	fetches := &deepSeekBalanceFetches{}
+	fetches := &deepSeekBalanceFetches{reading: deepseekbalance.Sample{Total: 25}}
 	d.newDeepSeekBalanceSeams = fetches.seams
 
 	d.triggerDeepSeekBalance()
@@ -223,7 +233,7 @@ func TestDeepSeekPatrolKeyNeverLogged(t *testing.T) {
 			}
 			var logged bytes.Buffer
 			d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
-			fetches := &deepSeekBalanceFetches{err: tt.fetchErr}
+			fetches := &deepSeekBalanceFetches{reading: deepseekbalance.Sample{Total: 25}, err: tt.fetchErr}
 			d.newDeepSeekBalanceSeams = fetches.seams
 
 			d.triggerDeepSeekBalance()
@@ -346,7 +356,7 @@ func TestDeepSeekPatrolConfiguredWithoutAFetchRefuses(t *testing.T) {
 	var logged bytes.Buffer
 	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
 	d.newDeepSeekBalanceSeams = func() deepSeekBalanceTickSeams {
-		return deepSeekBalanceTickSeams{readKey: deepSeekBalanceReadKey}
+		return deepSeekBalanceTickSeams{readKey: deepSeekBalanceReadKey, evaluate: deepseekbalance.Evaluate}
 	}
 
 	d.triggerDeepSeekBalance()
@@ -519,6 +529,347 @@ func TestDeepSeekPatrolFailedWriteIsLogged(t *testing.T) {
 	}
 }
 
+// deepSeekBalanceAlertDaemon is a daemon whose balance endpoint answers the
+// readings in order, one per good tick, and whose rows, escalations and clears
+// are recorded in memory.
+func deepSeekBalanceAlertDaemon(t *testing.T, logged io.Writer, key string, readings ...string) (*Daemon, *beadsfake.Fake, *notifyfake.Recorder, *clockwork.FakeClock) {
+	t.Helper()
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	client := fakeDeepSeekBalance(key, func(n int) (int, string) {
+		if n > len(readings) {
+			return http.StatusInternalServerError, "the test asked for more readings than it listed"
+		}
+		return http.StatusOK, deepSeekBalanceBody(readings[n-1], "0.00", readings[n-1])
+	})
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC))
+	store := beadsfake.New(beadsfake.WithClock(clk))
+	rec := notifyfake.New()
+	d := deepSeekBalanceTestDaemon(t, logged, keyFile)
+	d.clock = clk
+	d.notifier = rec
+	d.deepSeekBalanceHTTP = client
+	d.openCostSampleBeads = func() beads.Client { return store }
+	return d, store, rec, clk
+}
+
+// assertDeepSeekBalanceKeyAbsent fails when the API key appears in the run's
+// log, in a notify call, or in a row: the key reaches the request header and
+// nowhere else.
+func assertDeepSeekBalanceKeyAbsent(t *testing.T, key, logText string, rec *notifyfake.Recorder, rows []beads.Sample) {
+	t.Helper()
+	if strings.Contains(logText, key) {
+		t.Errorf("the key appears in the log: %q", logText)
+	}
+	for _, c := range rec.Calls() {
+		if strings.Contains(fmt.Sprintf("%+v", c), key) {
+			t.Errorf("the key appears in a notify call: %+v", c)
+		}
+	}
+	for _, r := range rows {
+		written := fmt.Sprintf("%v %v %v %q", deref(r.Total), deref(r.Granted), deref(r.ToppedUp), r.Note)
+		if strings.Contains(written, key) {
+			t.Errorf("the key appears in the row: %s", written)
+		}
+	}
+}
+
+// TestDeepSeekPatrolAlertKeyMap: each line Evaluate raises is matched to its own
+// stable key, pinned against the package's own text so a reworded alert fails
+// here rather than losing its escalation.
+func TestDeepSeekPatrolAlertKeyMap(t *testing.T) {
+	t.Parallel()
+	spent := deepseekbalance.Sample{Total: 25.00}
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"a spend jump", deepseekbalance.Evaluate(&spent, deepseekbalance.Sample{Total: 22.00}, 0, 10*time.Minute), alertKeyDeepSeekSpendJump},
+		{"a low balance", deepseekbalance.Evaluate(nil, deepseekbalance.Sample{Total: 15.00}, 0, 10*time.Minute), alertKeyDeepSeekLowBalance},
+		{"an unreachable endpoint", deepseekbalance.Evaluate(nil, deepseekbalance.Sample{}, 3, 10*time.Minute), alertKeyDeepSeekUnreachable},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if len(tt.lines) != 1 {
+				t.Fatalf("Evaluate raised %q, want the one line for this condition alone", tt.lines)
+			}
+			key, ok := deepSeekBalanceAlertKey(tt.lines[0])
+			if !ok || key != tt.want {
+				t.Errorf("deepSeekBalanceAlertKey(%q) = %q, %v; want %q", tt.lines[0], key, ok, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeepSeekPatrolAlertsOneEscalationEachAndTheRowCarriesThem: a spend jump
+// and a low balance each file one escalation, a repeat of either counts an
+// occurrence on that same escalation rather than filing another, the row's note
+// carries the alert text, a quiet reading closes the key it ends, and the key
+// reaches none of it.
+func TestDeepSeekPatrolAlertsOneEscalationEachAndTheRowCarriesThem(t *testing.T) {
+	t.Parallel()
+	const key = "sk-alerts-5e11"
+	var logged bytes.Buffer
+	d, store, rec, clk := deepSeekBalanceAlertDaemon(t, &logged, key, "25.00", "22.00", "17.00", "17.50")
+
+	d.triggerDeepSeekBalance()
+	clk.Advance(10 * time.Minute)
+	// $3.00 spent in ten minutes, over the $1.00 that alerts.
+	d.triggerDeepSeekBalance()
+	clk.Advance(10 * time.Minute)
+	// $5.00 more spent, and $17.00 is under the $20.00 low-balance floor.
+	d.triggerDeepSeekBalance()
+
+	spend := rec.OpenEscalations(alertKeyDeepSeekSpendJump)
+	if len(spend) != 1 || spend[0].Occurrences != 2 {
+		t.Fatalf("the spend jump is open as %+v, want one escalation with 2 occurrences", spend)
+	}
+	if want := "DeepSeek spent $5.00 in the last 10 min, a pace of $30.00/h"; spend[0].Reason != want {
+		t.Errorf("the spend escalation's reason = %q, want %q", spend[0].Reason, want)
+	}
+	if !strings.HasPrefix(spend[0].Title, "deepseek_balance: DeepSeek spent $") {
+		t.Errorf("the spend escalation is titled %q, want the source and the alert line", spend[0].Title)
+	}
+	low := rec.OpenEscalations(alertKeyDeepSeekLowBalance)
+	if len(low) != 1 || low[0].Occurrences != 1 {
+		t.Fatalf("the low balance is open as %+v, want one escalation", low)
+	}
+	if want := "DeepSeek balance is $17.00, below $20.00"; low[0].Reason != want {
+		t.Errorf("the low-balance escalation's reason = %q, want %q", low[0].Reason, want)
+	}
+	// The dedupe is the fingerprint: each firing carries the key of its
+	// condition, never the line, or a repeat would be recorded on a new bead.
+	for _, c := range rec.Escalations() {
+		if fp := c.Escalation.Fingerprint; fp != alertKeyDeepSeekSpendJump && fp != alertKeyDeepSeekLowBalance {
+			t.Errorf("an escalation is filed under %q, want one of the patrol's stable keys", fp)
+		}
+	}
+
+	rows, err := store.ReadCostSamples(context.Background(), beads.SampleKindDeepSeekBalance, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the cost samples: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("three ticks wrote %d rows, want 3 (log: %q)", len(rows), logged.String())
+	}
+	wantNotes := []string{
+		"DeepSeek spent $5.00 in the last 10 min, a pace of $30.00/h\nDeepSeek balance is $17.00, below $20.00",
+		"DeepSeek spent $3.00 in the last 10 min, a pace of $18.00/h",
+		"",
+	}
+	for i, want := range wantNotes {
+		if rows[i].Note != want {
+			t.Errorf("row %d notes %q, want %q", i, rows[i].Note, want)
+		}
+	}
+
+	// A quiet interval under the floor: the spend key ends, the low balance is
+	// one occurrence more.
+	clk.Advance(10 * time.Minute)
+	d.triggerDeepSeekBalance()
+	if open := rec.OpenEscalations(alertKeyDeepSeekSpendJump); len(open) != 0 {
+		t.Errorf("the spend jump is open as %+v after a quiet interval, want it cleared", open)
+	}
+	if open := rec.OpenEscalations(alertKeyDeepSeekLowBalance); len(open) != 1 || open[0].Occurrences != 2 {
+		t.Errorf("the low balance is open as %+v, want one escalation with 2 occurrences", open)
+	}
+	clears := rec.Clears()
+	if len(clears) == 0 {
+		t.Fatal("a quiet interval recorded no clear")
+	}
+	last := clears[len(clears)-1]
+	if !slices.Contains(last.Fingerprints, alertKeyDeepSeekSpendJump) {
+		t.Errorf("the quiet interval cleared %v, want the spend key it ended closed", last.Fingerprints)
+	}
+	if slices.Contains(last.Fingerprints, alertKeyDeepSeekLowBalance) {
+		t.Errorf("the quiet interval cleared %v, including the low-balance key it raised", last.Fingerprints)
+	}
+	assertDeepSeekBalanceKeyAbsent(t, key, logged.String(), rec, rows)
+}
+
+// TestDeepSeekPatrolUnreachableAlertsOnTheThirdFailureAndClearsOnRecovery: the
+// unreachable alert files on the third consecutive failed fetch, stays the one
+// open escalation while the failures continue, and closes when the endpoint
+// answers.
+func TestDeepSeekPatrolUnreachableAlertsOnTheThirdFailureAndClearsOnRecovery(t *testing.T) {
+	t.Parallel()
+	const key = "sk-unreachable-77a0"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	var down bool
+	client := fakeDeepSeekBalance(key, func(n int) (int, string) {
+		if down {
+			return http.StatusInternalServerError, "upstream down"
+		}
+		if n == 1 {
+			return http.StatusOK, deepSeekBalanceBody("25.00", "0.00", "25.00")
+		}
+		return http.StatusOK, deepSeekBalanceBody("22.00", "0.00", "22.00")
+	})
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC))
+	store := beadsfake.New(beadsfake.WithClock(clk))
+	rec := notifyfake.New()
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.clock = clk
+	d.notifier = rec
+	d.deepSeekBalanceHTTP = client
+	d.openCostSampleBeads = func() beads.Client { return store }
+
+	d.triggerDeepSeekBalance() // a good reading, no previous one to alert against
+	down = true
+	for i := 0; i < 2; i++ {
+		clk.Advance(10 * time.Minute)
+		d.triggerDeepSeekBalance()
+	}
+	if got := rec.Escalations(); len(got) != 0 {
+		t.Errorf("two failed fetches filed %+v, want nothing before the third", got)
+	}
+
+	clk.Advance(10 * time.Minute)
+	d.triggerDeepSeekBalance()
+	open := rec.OpenEscalations(alertKeyDeepSeekUnreachable)
+	if len(open) != 1 || open[0].Occurrences != 1 {
+		t.Fatalf("the third failed fetch left %+v, want one unreachable escalation", open)
+	}
+	if want := "DeepSeek balance endpoint unreachable for 3 consecutive checks"; open[0].Reason != want {
+		t.Errorf("the unreachable escalation's reason = %q, want %q", open[0].Reason, want)
+	}
+
+	clk.Advance(10 * time.Minute)
+	d.triggerDeepSeekBalance()
+	if open := rec.OpenEscalations(alertKeyDeepSeekUnreachable); len(open) != 1 || open[0].Occurrences != 1 {
+		t.Fatalf("the fourth failed fetch left %+v, want the one escalation still open", open)
+	}
+
+	down = false
+	clk.Advance(10 * time.Minute)
+	d.triggerDeepSeekBalance()
+	if open := rec.OpenEscalations(alertKeyDeepSeekUnreachable); len(open) != 0 {
+		t.Errorf("the endpoint answered but the unreachable escalation is open as %+v, want it cleared", open)
+	}
+
+	rows, err := store.ReadCostSamples(context.Background(), beads.SampleKindDeepSeekBalance, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the cost samples: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("the two good readings wrote %d rows, want 2 (log: %q)", len(rows), logged.String())
+	}
+	// The spend is spread over the fifty minutes between the two readings, not
+	// over the ten-minute cadence the outage interrupted.
+	wantLast := "DeepSeek spent $3.00 in the last 50 min, a pace of $3.60/h"
+	if len(rows) == 2 && rows[0].Note != wantLast {
+		t.Errorf("the recovery row notes %q, want %q", rows[0].Note, wantLast)
+	}
+	assertDeepSeekBalanceKeyAbsent(t, key, logged.String(), rec, rows)
+}
+
+// TestDeepSeekPatrolUnknownAlertLineIsReported: a line no key names is reported
+// rather than filed under a key derived from the line, and the reading is still
+// written with the line in its note.
+func TestDeepSeekPatrolUnknownAlertLineIsReported(t *testing.T) {
+	t.Parallel()
+	const key = "sk-unknown-line-31d0"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	const line = "DeepSeek balance went sideways"
+	store := beadsfake.New()
+	rec := notifyfake.New()
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.notifier = rec
+	d.openCostSampleBeads = func() beads.Client { return store }
+	d.newDeepSeekBalanceSeams = func() deepSeekBalanceTickSeams {
+		return deepSeekBalanceTickSeams{
+			readKey: deepSeekBalanceReadKey,
+			fetch: func(context.Context, string) (deepseekbalance.Sample, error) {
+				return deepseekbalance.Sample{Total: 25}, nil
+			},
+			evaluate: func(*deepseekbalance.Sample, deepseekbalance.Sample, int, time.Duration) []string {
+				return []string{line}
+			},
+		}
+	}
+
+	d.triggerDeepSeekBalance()
+
+	if !strings.Contains(logged.String(), "no alert key names the balance alert") {
+		t.Errorf("an unknown alert line logged %q, want the refusal named", logged.String())
+	}
+	if got := rec.Escalations(); len(got) != 0 {
+		t.Errorf("an unknown alert line filed %+v, want nothing filed", got)
+	}
+	rows, err := store.ReadCostSamples(context.Background(), beads.SampleKindDeepSeekBalance, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the cost samples: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Note != line {
+		t.Errorf("the reading's rows = %+v, want one row noting %q", rows, line)
+	}
+}
+
+// TestDeepSeekPatrolNoEvaluatorRefuses: a tick handed no evaluator refuses
+// before reading, rather than writing rows whose alerts nothing judged.
+func TestDeepSeekPatrolNoEvaluatorRefuses(t *testing.T) {
+	t.Parallel()
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY=sk-no-evaluator\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	fetches := &deepSeekBalanceFetches{}
+	d.newDeepSeekBalanceSeams = func() deepSeekBalanceTickSeams {
+		return deepSeekBalanceTickSeams{readKey: deepSeekBalanceReadKey, fetch: fetches.seams().fetch}
+	}
+
+	d.triggerDeepSeekBalance()
+
+	if !strings.Contains(logged.String(), "no reading evaluator") {
+		t.Errorf("a tick with no evaluator logged %q, want the missing seam named", logged.String())
+	}
+	if len(fetches.keys) != 0 {
+		t.Errorf("a tick with no evaluator fetched %d times, want none", len(fetches.keys))
+	}
+}
+
+// TestDeepSeekPatrolRefusedIntervalFetchesNothing: a cadence the config refuses
+// (here a block built in code, which the loader never judged) stops the tick
+// before the fetch, since Evaluate has no interval to spread the spend over.
+func TestDeepSeekPatrolRefusedIntervalFetchesNothing(t *testing.T) {
+	t.Parallel()
+	const key = "sk-refused-interval-8c2f"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		DeepSeekBalance: &agentconfig.DeepSeekBalanceConfig{Enabled: true, KeyFile: keyFile, Interval: "20s"},
+	}}
+	fetches := &deepSeekBalanceFetches{}
+	d.newDeepSeekBalanceSeams = fetches.seams
+
+	d.triggerDeepSeekBalance()
+
+	if !strings.Contains(logged.String(), "patrols.deepseek_balance.interval") {
+		t.Errorf("a refused interval logged %q, want the interval key named", logged.String())
+	}
+	if len(fetches.keys) != 0 {
+		t.Errorf("a refused interval fetched %d times, want none", len(fetches.keys))
+	}
+}
+
 // deref returns the reading p holds, or "unset" when it holds none.
 func deref(p *float64) any {
 	if p == nil {
@@ -534,11 +885,14 @@ func deepSeekBalanceBlockingDaemon(t *testing.T, logged io.Writer, release <-cha
 	d := deepSeekBalanceTestDaemon(t, logged, filepath.Join(t.TempDir(), "deepseek.env"))
 	d.ctx = context.Background()
 	d.newDeepSeekBalanceSeams = func() deepSeekBalanceTickSeams {
-		return deepSeekBalanceTickSeams{readKey: func(string) (string, bool, error) {
-			reached <- struct{}{}
-			<-release
-			return "", false, nil
-		}}
+		return deepSeekBalanceTickSeams{
+			readKey: func(string) (string, bool, error) {
+				reached <- struct{}{}
+				<-release
+				return "", false, nil
+			},
+			evaluate: deepseekbalance.Evaluate,
+		}
 	}
 	return d
 }

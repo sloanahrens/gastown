@@ -1393,9 +1393,11 @@ type Daemon struct {
 	// deepSeekBalanceJoinWait overrides deepSeekBalanceJoinWait in tests.
 	deepSeekBalanceJoinWait time.Duration
 	// deepSeekBalanceStateMu guards deepSeekBalanceUnconfiguredSaid, the flag
-	// that keeps the unconfigured line to one per absence.
+	// that keeps the unconfigured line to one per absence, and
+	// deepSeekBalanceState, the last reading the alerts are judged against.
 	deepSeekBalanceStateMu          sync.Mutex
 	deepSeekBalanceUnconfiguredSaid bool
+	deepSeekBalanceState            deepSeekBalanceState
 	// newDeepSeekBalanceTicker is where the patrol's ticker comes from: nil is
 	// time.NewTicker, and a test sets it to record the cadence.
 	newDeepSeekBalanceTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
