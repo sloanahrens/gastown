@@ -275,6 +275,14 @@ type attentionSources struct {
 	seats func() ([]townhealth.Seat, error)
 	// seatWork reports whether the seat holds assigned open work.
 	seatWork func(rig, name string) (bool, error)
+	// gateRunning reports whether the seat is inside its own gate now: a gate
+	// suite running under its pane, or a slot of the town's container-gate
+	// pool. A seat inside its gate is doing what its bead told it to do, so
+	// its quiet is not a stall (gt-nh2dgf). The default is the overrun guard's
+	// own read (overrun_guard_gate.go), adapted by attentionGateRunning. nil
+	// is no exemption; an error means the gate state could not be read, and
+	// the item is raised.
+	gateRunning func(rig, name string) (bool, error)
 	// remoteTip reads the rig's landing target from origin with git ls-remote.
 	// It never fetches: the rig repo is the landing worker's and
 	// <town>/gastown/mayor/rig is install-gt's, so a fetch here would race them.
@@ -871,6 +879,9 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.seats = func() ([]townhealth.Seat, error) { return d.attentionSeats(now) }
 	s.seatWork = d.attentionSeatWork
+	// One reader per tick: its ps and tmux reads are cached for the cycle, so
+	// every quiet seat this tick judges shares them.
+	s.gateRunning = attentionGateRunning(newOverrunGateReader(d).running)
 	s.remoteTip = func(rig string) (string, error) {
 		rigPath := filepath.Join(d.config.TownRoot, rig)
 		branch, err := rigDefaultBranch(rigPath)
@@ -1675,11 +1686,12 @@ type readyQueue struct {
 }
 
 // collectPolecatStall raises one item per running polecat whose progress
-// evidence has not changed for attentionPolecatStall and which holds assigned
-// open work (gt-vsct7.3): the daemon's copy of the polecat-stall monitor,
-// read from the intent record the liveness sampler already writes rather than
-// from a fresh pane capture. It is the queue's one low-severity item: a
-// stalled seat costs a session, not a town.
+// evidence has not changed for attentionPolecatStall, which holds assigned
+// open work and which is not inside its own gate (gt-vsct7.3, gt-nh2dgf): the
+// daemon's copy of the polecat-stall monitor, read from the intent record the
+// liveness sampler already writes rather than from a fresh pane capture. It is
+// the queue's one low-severity item: a stalled seat costs a session, not a
+// town.
 //
 // The walk has already dropped every seat whose sample is missing or older
 // than the evidence window, so this reads evidence and holds back nothing.
@@ -1704,6 +1716,21 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 		if quiet <= attentionPolecatStall {
 			continue
 		}
+		// A gate runs go test plus make lint for several minutes, longer with
+		// four seats compiling at once, so a seat that is quiet inside its own
+		// gate is doing what its bead told it to do (gt-nh2dgf). A gate state
+		// that cannot be read is not an exemption: the item is raised, the
+		// direction the overrun guard takes.
+		if s.gateRunning != nil {
+			inGate, err := s.gateRunning(seat.Rig, name)
+			if err != nil {
+				s.d.logger.Printf("attention: cannot read the gate state for %s/%s, raising its stall: %v", seat.Rig, name, err)
+				inGate = false
+			}
+			if inGate {
+				continue
+			}
+		}
 		holds, err := s.seatWork(seat.Rig, name)
 		if err != nil {
 			return nil, err
@@ -1720,6 +1747,15 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 		})
 	}
 	return out, nil
+}
+
+// attentionGateRunning adapts the overrun guard's gate read to the seats the
+// attention walk holds: the walk knows the rig and the polecat's bare name,
+// and the guard asks by overrunSeat (overrun_guard_gate.go).
+func attentionGateRunning(running func(overrunSeat) (bool, error)) func(rig, name string) (bool, error) {
+	return func(rig, name string) (bool, error) {
+		return running(overrunSeat{Rig: rig, Polecat: name})
+	}
 }
 
 // collectRiskPaths raises risk:<bead>:<head12> for each landing in the last
