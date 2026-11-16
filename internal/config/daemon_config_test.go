@@ -2048,3 +2048,79 @@ func TestJevScorecardConfigRefusesBadValues(t *testing.T) {
 		}
 	}
 }
+
+// TestReworkProgramOmLessonsConfigRefusesWhatThePatrolCannotActOn: the block
+// decodes as written, and an interval the pass cannot schedule is an error when
+// the document is decoded rather than the default later.
+func TestReworkProgramOmLessonsConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
+	t.Parallel()
+
+	var cfg PatrolsConfig
+	design := `{"om_lessons": {"enabled": true, "interval": "48h"}}`
+	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
+		t.Fatalf("the design's block does not decode: %v", err)
+	}
+	ol := cfg.OmLessons
+	if ol == nil || !ol.Enabled || ol.Interval != "48h" {
+		t.Fatalf("decoded %+v, want the block as written", ol)
+	}
+
+	bad := map[string]string{
+		"not an object":                `{"om_lessons": "on"}`,
+		"unknown key":                  `{"om_lessons": {"enable": true}}`,
+		"not a duration":               `{"om_lessons": {"interval": "every week"}}`,
+		"an interval under floor":      `{"om_lessons": {"interval": "30m"}}`,
+		"an interval that is a number": `{"om_lessons": {"interval": 168}}`,
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Fatalf("%s decoded without an error: %+v", name, p.OmLessons)
+			}
+		})
+	}
+}
+
+// TestReworkProgramOmLessonsInterval: an absent block reads the weekly default,
+// a set block reads its own interval, and a value the pass cannot schedule is
+// refused with its key named.
+func TestReworkProgramOmLessonsInterval(t *testing.T) {
+	t.Parallel()
+	def, err := time.ParseDuration(OmLessonsDefaultInterval)
+	if err != nil {
+		t.Fatalf("OmLessonsDefaultInterval %q does not parse: %v", OmLessonsDefaultInterval, err)
+	}
+	for _, tt := range []struct {
+		name      string
+		block     *OmLessonsConfig
+		wantEvery time.Duration
+	}{
+		{"no block", nil, def},
+		{"an empty block", &OmLessonsConfig{}, def},
+		{"a set block", &OmLessonsConfig{Interval: "48h"}, 48 * time.Hour},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			every, err := tt.block.IntervalDuration()
+			if err != nil || every != tt.wantEvery {
+				t.Errorf("IntervalDuration = %v, %v; want %v and no error", every, err, tt.wantEvery)
+			}
+		})
+	}
+	for _, tt := range []struct{ name, interval string }{
+		{"unparseable", "every week"},
+		{"zero", "0s"},
+		{"negative", "-1h"},
+		{"under the floor", "30m"},
+	} {
+		t.Run("refused: "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			every, err := (&OmLessonsConfig{Interval: tt.interval}).IntervalDuration()
+			if err == nil || every != 0 || !strings.Contains(err.Error(), "patrols.om_lessons.interval") {
+				t.Errorf("IntervalDuration(%q) = %v, %v; want a refusal naming the key", tt.interval, every, err)
+			}
+		})
+	}
+}

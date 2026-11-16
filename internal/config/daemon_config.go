@@ -401,6 +401,13 @@ type PatrolsConfig struct {
 	// account's key, so a town turns it on rather than an upgrade.
 	DeepSeekBalance *DeepSeekBalanceConfig `json:"deepseek_balance,omitempty"`
 
+	// OmLessons runs the om-lessons pass: the rework program's lever 3, which
+	// turns a week of om review records into draft directive-edit beads
+	// (internal/daemon/om_lessons_patrol.go, gt-vdy9do). Off when absent: its
+	// pass proposes directive-edit beads on the operator's behalf, so a town
+	// turns it on rather than an upgrade.
+	OmLessons *OmLessonsConfig `json:"om_lessons,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.
@@ -2178,6 +2185,74 @@ func (c *DeepSeekBalanceConfig) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if _, err := decoded.ParseKeyFile(); err != nil {
+		return err
+	}
+	*c = decoded
+	return nil
+}
+
+// OmLessonsConfig configures the om_lessons patrol: the interval between its
+// passes over the week's om review records
+// (internal/daemon/om_lessons_patrol.go, docs/design/rework-program.md lever 3).
+//
+// The patrol is opt-in. Its pass proposes directive-edit beads on the
+// operator's behalf, so a town that has not asked for it must not get it from a
+// default.
+type OmLessonsConfig struct {
+	Enabled bool `json:"enabled"`
+	// Interval is the period between two passes, as a Go duration. Empty means
+	// OmLessonsDefaultInterval; read it through IntervalDuration, which refuses
+	// a value that does not parse or is under the floor.
+	Interval string `json:"interval"`
+}
+
+// The values OmLessonsConfig accepts, read through IntervalDuration so a block
+// that omits a key cannot fall back to something else per caller.
+const (
+	// OmLessonsDefaultInterval is one week: the pass reads a week of review
+	// records, so a shorter cadence would read a window it already proposed
+	// against.
+	OmLessonsDefaultInterval = "168h"
+	// OmLessonsMinInterval is the floor: a pass under it would re-propose the
+	// same review window, which is the default's reason one line up.
+	OmLessonsMinInterval = time.Hour
+)
+
+// IntervalDuration returns the period between two passes: the default when
+// unset, and the refusal for a value that does not parse or is under
+// OmLessonsMinInterval, never the default.
+func (c *OmLessonsConfig) IntervalDuration() (time.Duration, error) {
+	var raw string
+	if c != nil {
+		raw = c.Interval
+	}
+	every, err := patrolInterval("patrols.om_lessons.interval", raw, OmLessonsDefaultInterval)
+	if err != nil {
+		return 0, err
+	}
+	if every < OmLessonsMinInterval {
+		return 0, fmt.Errorf("patrols.om_lessons.interval = %q: want at least %s",
+			raw, OmLessonsMinInterval)
+	}
+	return every, nil
+}
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
+// patrol cannot schedule: a mistyped one must not read as the default, or the
+// town would run a pass on a cadence it never asked for.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *OmLessonsConfig) UnmarshalJSON(data []byte) error {
+	type plain OmLessonsConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.om_lessons: %w", err)
+	}
+	decoded := OmLessonsConfig(p)
+	if _, err := decoded.IntervalDuration(); err != nil {
 		return err
 	}
 	*c = decoded

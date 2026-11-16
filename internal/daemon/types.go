@@ -615,6 +615,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.DeepSeekBalance.Enabled
 	}
+	// om_lessons is opt-in; its config block says why (gt-vdy9do).
+	if patrol == "om_lessons" {
+		if config == nil || config.Patrols == nil || config.Patrols.OmLessons == nil {
+			return false
+		}
+		return config.Patrols.OmLessons.Enabled
+	}
 	if config == nil || config.Patrols == nil {
 		return true // Default: enabled
 	}
