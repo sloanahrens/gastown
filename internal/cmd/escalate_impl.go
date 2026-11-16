@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,9 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/taskfile"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -47,6 +50,12 @@ type escalateRun struct {
 	errOut   io.Writer
 	townRoot func() (string, error)
 	sender   func() string
+	// gtDir is the seat's .gt directory (gtDataDir): the one holding the task
+	// files in file mode and the outbox a request is written to.
+	gtDir func() string
+	// files is the filesystem the outbox is read and written through; a zero
+	// value means the OS, and a test names the few calls it wants to fail.
+	files seatFiles
 	// hookedBead names the bead hooked to the polecat seat, "" when none is.
 	hookedBead func(townRoot, seat string) string
 	raise      func(notify.EscalationRequest, *config.EscalationConfig) (*notify.RaiseResult, error)
@@ -75,6 +84,7 @@ func escalateRunFromFlags() escalateRun {
 		errOut:      os.Stderr,
 		townRoot:    workspace.FindFromCwdOrError,
 		sender:      detectSender,
+		gtDir:       gtDataDir,
 		hookedBead:  findPolecatHookedBead,
 		raise:       notify.Raise,
 		clear:       notify.Clear,
@@ -102,6 +112,13 @@ func (r escalateRun) escalate(args []string) error {
 	severity := strings.ToLower(r.severity)
 	if !config.IsValidSeverity(severity) {
 		return fmt.Errorf("invalid severity '%s': must be critical, high, medium, or low", r.severity)
+	}
+
+	// A seat with no bead access reports its escalation through its outbox
+	// instead of filing a bead; the host raises it from there (plan row F4,
+	// gt-9jrzm7).
+	if r.inFileMode() {
+		return r.escalateToOutbox(description, severity)
 	}
 
 	// Find workspace
@@ -169,6 +186,222 @@ func (r escalateRun) escalate(args []string) error {
 		return nil
 	}
 	r.printCreatedEscalation(res, severity)
+	return nil
+}
+
+// A seat with no bead access reads its task from files and reports through them
+// (gt-1m0kb): the sandbox's runtime archive stages .gt/task/MODE beside
+// TASK.md, and the seat writes its result to .gt/outbox (internal/session's
+// runtimeTaskDir and sandboxOutboxDir). Both sit under the sandbox's .gt,
+// which is the seat's HOME/.gt, so gtDataDir names the same directory here.
+const (
+	seatTaskDirName   = "task"
+	seatOutboxDirName = "outbox"
+	seatTaskFile      = "TASK.md"
+	seatOutboxResult  = "result.json"
+	seatOutboxNotes   = "notes.md"
+)
+
+// dataDir is the seat's .gt directory.
+func (r escalateRun) dataDir() string {
+	if r.gtDir != nil {
+		return r.gtDir()
+	}
+	return gtDataDir()
+}
+
+// inFileMode reports whether this seat reads its task from files rather than
+// from its bead: the MODE marker the runtime archive stages beside TASK.md says
+// so (taskfile.FileMode). A seat without the marker reads dolt mode.
+func (r escalateRun) inFileMode() bool {
+	return taskfile.FileMode(filepath.Join(r.dataDir(), seatTaskDirName))
+}
+
+// escalateToOutbox writes the escalation request into the seat's outbox,
+// result.json's escalation field, and raises no bead: the host turns the
+// request into the escalation bead from there, at seat end or on its outbox
+// poll (gt-1m0kb, gt-5rmlks). severity has already been validated by escalate.
+//
+// The request is raised on the seat's own bead, the one result.json names, so
+// --related does not apply, and nothing carries --source or --fingerprint: the
+// outbox holds the escalation as one text, and the severity and the reason
+// travel in it.
+//
+// Nothing is written unless the whole outbox validates. The result.json that
+// replaces an earlier one is decoded by outbox.Validate first, with the seat's
+// notes.md, and the bytes about to be written are validated the same way, so a
+// request the host would refuse is reported here instead of being written for
+// it to drop.
+func (r escalateRun) escalateToOutbox(description, severity string) error {
+	dir := r.dataDir()
+	outboxDir := filepath.Join(dir, seatOutboxDirName)
+	resultPath := filepath.Join(outboxDir, seatOutboxResult)
+
+	beadID, err := taskFileBeadID(filepath.Join(dir, seatTaskDirName, seatTaskFile))
+	if err != nil {
+		return err
+	}
+	notes, err := r.readSeatFile(filepath.Join(outboxDir, seatOutboxNotes))
+	if err != nil {
+		return err
+	}
+	raw, err := r.readSeatFile(resultPath)
+	if err != nil {
+		return err
+	}
+	// A seat that has not ended has written no result.json: the request starts
+	// one, deferred, since a seat that escalates has not finished. A result the
+	// seat already wrote keeps its status, its ticks and its findings.
+	existing := outbox.Result{Status: outbox.StatusDeferred}
+	if len(raw) > 0 {
+		decoded, err := outbox.Validate(raw, notes, beadID)
+		if err != nil {
+			return fmt.Errorf("gt escalate: the outbox %s does not validate, so no request is written: %w", resultPath, err)
+		}
+		if decoded.Escalation != nil {
+			return fmt.Errorf("gt escalate: the outbox %s already carries the escalation request %q, which the host raises; a second request is not written", resultPath, decoded.Escalation.Text)
+		}
+		existing = decoded
+	}
+
+	next := encodeSeatResult(beadID, existing, escalationRequestText(description, severity, r.reason))
+	if _, err := outbox.Validate(next, notes, beadID); err != nil {
+		return fmt.Errorf("gt escalate: the request does not validate, so it is not written: %w", err)
+	}
+
+	if r.dryRun {
+		fmt.Fprintf(r.out, "Would write the escalation request to %s:\n", resultPath)
+		fmt.Fprintf(r.out, "  Severity: %s\n", severity)
+		fmt.Fprintf(r.out, "  Description: %s\n", description)
+		fmt.Fprintf(r.out, "  Reason: %s\n", reasonDisplay(r.reason))
+		return nil
+	}
+	if err := r.writeSeatResult(outboxDir, resultPath, next); err != nil {
+		return err
+	}
+	fmt.Fprintf(r.out, "📢 Escalation request written to the outbox: %s\n", resultPath)
+	fmt.Fprintf(r.out, "  Severity: %s\n", severity)
+	fmt.Fprintf(r.out, "  Reason: %s\n", reasonDisplay(r.reason))
+	fmt.Fprintf(r.out, "  The host raises it from the outbox; gt escalate wrote no bead.\n")
+	return nil
+}
+
+// escalationRequestText is the text the host raises the seat's escalation
+// with: the description, then the severity and, when one was given, the
+// reason. The outbox carries the escalation as one text (outbox.Escalation),
+// so the two travel inside it rather than being lost.
+func escalationRequestText(description, severity, reason string) string {
+	text := description + "\n\nSeverity: " + severity
+	if reason != "" {
+		text += "\nReason: " + reason
+	}
+	return text
+}
+
+// seatResultWire is result.json as the seat writes it: the shape
+// outbox.Validate decodes, which is the only shape the host applies.
+type seatResultWire struct {
+	BeadID      string             `json:"bead_id"`
+	Status      outbox.Status      `json:"status"`
+	TickedBoxes []int              `json:"ticked_boxes"`
+	Findings    []string           `json:"findings"`
+	Escalation  *outbox.Escalation `json:"escalation"`
+}
+
+// encodeSeatResult is the seat's result.json for beadID: what existing carries,
+// with text as its escalation request. Every field is a string or an int list,
+// so the encoding cannot fail; should it ever return nothing, the
+// outbox.Validate call that follows refuses the request and writes nothing.
+func encodeSeatResult(beadID string, existing outbox.Result, text string) []byte {
+	status := existing.Status
+	if status == "" {
+		status = outbox.StatusDeferred
+	}
+	raw, _ := json.MarshalIndent(seatResultWire{
+		BeadID:      beadID,
+		Status:      status,
+		TickedBoxes: existing.Ticked,
+		Findings:    existing.Findings,
+		Escalation:  &outbox.Escalation{Text: text},
+	}, "", "  ")
+	return append(raw, '\n')
+}
+
+// taskFileBeadID is the bead id the seat's task file names in its heading,
+// "# TASK <id>: <title>" (taskfile.heading writes the title only when it has
+// one). The outbox's bead_id must be that id: the host validates the seat's
+// result against the bead it gave the seat.
+func taskFileBeadID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("gt escalate: reading the task file %s: %w", path, err)
+	}
+	heading, _, _ := strings.Cut(string(data), "\n")
+	rest, ok := strings.CutPrefix(heading, "# TASK")
+	if !ok {
+		return "", fmt.Errorf("gt escalate: the task file %s does not start with a \"# TASK <bead id>\" heading, so the seat's bead is unknown and no request is written", path)
+	}
+	id, _, _ := strings.Cut(strings.TrimPrefix(rest, " "), ":")
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsAny(id, " \t") {
+		return "", fmt.Errorf("gt escalate: the task file %s names no bead id in its heading, so no request is written", path)
+	}
+	return id, nil
+}
+
+// seatFiles is the little of the filesystem the outbox is read and written
+// through. The production value is the OS; a test names the calls it wants to
+// fail, so every refusal is driven without a disk that breaks on cue.
+type seatFiles struct {
+	readFile  func(name string) ([]byte, error)
+	writeFile func(name string, data []byte, perm fs.FileMode) error
+	mkdirAll  func(path string, perm fs.FileMode) error
+}
+
+// osSeatFiles is the OS filesystem.
+var osSeatFiles = seatFiles{readFile: os.ReadFile, writeFile: os.WriteFile, mkdirAll: os.MkdirAll}
+
+// filesystem is the filesystem this run reads and writes through: the OS, with
+// whichever calls the caller named in place of it.
+func (r escalateRun) filesystem() seatFiles {
+	files := osSeatFiles
+	if r.files.readFile != nil {
+		files.readFile = r.files.readFile
+	}
+	if r.files.writeFile != nil {
+		files.writeFile = r.files.writeFile
+	}
+	if r.files.mkdirAll != nil {
+		files.mkdirAll = r.files.mkdirAll
+	}
+	return files
+}
+
+// readSeatFile reads the seat's file at path, returning nothing when it is not
+// there. Any other failure is returned: an unreadable outbox is not an empty
+// one, and a request must not be written over it.
+func (r escalateRun) readSeatFile(path string) ([]byte, error) {
+	data, err := r.filesystem().readFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("gt escalate: reading %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// writeSeatResult writes data as the seat's result.json, creating dir. One
+// write replaces the file, and a failed or short write is reported, so a
+// partial result never stands as the seat's.
+func (r escalateRun) writeSeatResult(dir, resultPath string, data []byte) error {
+	files := r.filesystem()
+	if err := files.mkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("gt escalate: creating the outbox %s: %w", dir, err)
+	}
+	if err := files.writeFile(resultPath, data, 0o644); err != nil {
+		return fmt.Errorf("gt escalate: writing the outbox %s: %w", resultPath, err)
+	}
 	return nil
 }
 

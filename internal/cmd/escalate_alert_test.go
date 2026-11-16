@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,6 +40,7 @@ func newEscalateFixture(t *testing.T) *escalateFixture {
 		in:          strings.NewReader(""),
 		out:         fx.out,
 		townRoot:    func() (string, error) { return town, nil },
+		gtDir:       func() string { return filepath.Join(town, "home", ".gt") },
 		sender:      func() string { return "daemon" },
 		raise: func(req notify.EscalationRequest, _ *config.EscalationConfig) (*notify.RaiseResult, error) {
 			fx.raised = append(fx.raised, req)
