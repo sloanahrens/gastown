@@ -120,6 +120,51 @@ func TestNoBeadAccessSeatEndReportsAReadyLabelThatDidNotPersist(t *testing.T) {
 	}
 }
 
+// unreadableReadyBeadClient is the town's bead store writing the block but
+// failing the read-back, the case the read-back exists for.
+type unreadableReadyBeadClient struct {
+	beads.Client
+	updated bool
+}
+
+func (c *unreadableReadyBeadClient) Update(id string, opts beads.UpdateOptions) error {
+	c.updated = true
+	return c.Client.Update(id, opts)
+}
+
+func (c *unreadableReadyBeadClient) Show(id string) (*beads.Issue, error) {
+	if c.updated {
+		return nil, errors.New("dolt unavailable")
+	}
+	return c.Client.Show(id)
+}
+
+// A bead the store writes and then cannot read back is reported by the seat
+// end: the label is not known to be there, so the submission is not taken as
+// applied (gt-qk3ppr).
+func TestNoBeadAccessSeatEndReportsAReadyWriteItCannotReadBack(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return &unreadableReadyBeadClient{Client: f.agentDB}
+	}
+	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end kept a seat for a read-back its block was written before")
+	}
+	if !strings.Contains(logs.String(), "its outbox is not applied in full") || !strings.Contains(logs.String(), "reading "+endBead+" back") {
+		t.Errorf("log %q does not report the read-back that failed", logs.String())
+	}
+}
+
 // readyRefusingClient is the town's bead store refusing the ready write.
 type readyRefusingClient struct {
 	beads.Client
