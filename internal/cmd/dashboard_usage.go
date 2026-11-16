@@ -61,7 +61,6 @@ const (
 	usageRowsReadReason     = "the usage_records rows could not be read"
 	usageRowsTimedOutReason = "the usage_records read timed out"
 	usageRowsCapReason      = "the usage_records read filled its cap, so the window's start is not in the rows"
-	usageRowsConflictReason = "two usage_records rows count the same session with different totals"
 )
 
 // usageRowsRead reads the town's usage_records rows built at or after since, up
@@ -123,6 +122,12 @@ func (r *dashUsageReader) withRows(rows usageRowsRead) *dashUsageReader {
 	return r
 }
 
+// newDashboardUsageReader is the hub's usage reader: the record files with the
+// town's usage_records rows wired in.
+func newDashboardUsageReader(townRoot string) *dashUsageReader {
+	return newDashUsageReader(townRoot).withRows(dashboardUsageRows(townRoot))
+}
+
 // dashboardUsageRows reads the town's usage_records rows through the town's beads
 // store, the store the seat-end and om-review writers file them in.
 func dashboardUsageRows(townRoot string) usageRowsRead {
@@ -133,29 +138,28 @@ func dashboardUsageRows(townRoot string) usageRowsRead {
 }
 
 // read is the panel's whole reading. A row read that fails, or that cannot be
-// taken whole, is an unavailable panel with the reason it could not be, and so is
-// a records directory that cannot be listed: "nothing ran today" and "the records
-// could not be read" are different things to tell the operator.
+// taken whole, falls back to the files alone and the panel carries the reason in
+// its Note, so a slow or down store never blanks the panel. A records directory
+// that cannot be listed is an unavailable panel: "nothing ran today" and "the
+// records could not be read" are different things to tell the operator.
 func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
 	since := now.Add(-usageStaleRecord)
-	rows, reason := r.rowRecords(since)
-	if reason != "" {
-		return &dashboard.Usage{Unavailable: true, Reason: reason}
-	}
+	rows, note := r.rowRecords(since)
 	entries, err := r.entries()
 	if err != nil {
 		return unavailableUsage(err)
 	}
 	u := dashboard.AggregateUsage(r.merge(rows, entries, since), now, r.unmatched())
 	u.AsOf = r.asOf()
+	u.Note = note
 	return &u
 }
 
 // rowRecords is the usage_records rows built at or after since, as the records
 // they hold, newest built first. Nil and no reason when no row store is wired.
 // A reason, with nil records, says why the rows cannot be taken whole: the read
-// failed or ran past rowsTimeout, it filled usageRowsLimit, or its rows share a
-// session. The reason is fixed text, never the store's own output, since that
+// failed or ran past rowsTimeout, or it filled usageRowsLimit; the callers then
+// read the files alone and show the reason. The reason is fixed text, never the store's own output, since that
 // can carry a secret.
 func (r *dashUsageReader) rowRecords(since time.Time) ([]dashboard.UsageRecord, string) {
 	if r.rows == nil {
@@ -173,11 +177,7 @@ func (r *dashUsageReader) rowRecords(since time.Time) ([]dashboard.UsageRecord, 
 	if len(rows) == usageRowsLimit {
 		return nil, usageRowsCapReason
 	}
-	recs, err := dedupeUsageRows(rows)
-	if err != nil {
-		return nil, usageRowsConflictReason
-	}
-	return recs, ""
+	return dedupeUsageRows(rows), ""
 }
 
 // usageKeptRow is a row dedupeUsageRows keeps: its record and the sessions it
@@ -187,19 +187,14 @@ type usageKeptRow struct {
 	sessions map[string]bool
 }
 
-// errUsageRowsConflict is dedupeUsageRows' refusal: two rows count one session
-// but are not the same run.
-var errUsageRowsConflict = errors.New("usage_records rows share a session but are not the same run")
-
 // dedupeUsageRows is the records of rows, newest built first, each session
-// counted once. A row that repeats an earlier row of its bead and kind - the same
-// sessions and the same record - is dropped, as the usage record writer drops a
-// repeated write. Any other session the row shares with an earlier one is refused,
-// since the totals of two rows that count one session cannot be split. A row with
-// no sessions claims no session that could overlap, so it is dropped only when an
-// earlier sessionless row of its bead and kind is the same record; otherwise it is
-// kept.
-func dedupeUsageRows(rows []beads.UsageRecordRow) ([]dashboard.UsageRecord, error) {
+// counted once. A row that shares a session with an earlier (newer) kept row of
+// its bead and kind is dropped: the writer rewrites a run's row as the run gains
+// sessions, so the newer row is the whole run and the older one is superseded,
+// and a session is never two runs. A row with no sessions claims no session that
+// could overlap, so it is dropped only when an earlier sessionless row of its
+// bead and kind is the same record; otherwise it is kept.
+func dedupeUsageRows(rows []beads.UsageRecordRow) []dashboard.UsageRecord {
 	kept := make(map[usageKey][]usageKeptRow, len(rows))
 	recs := make([]dashboard.UsageRecord, 0, len(rows))
 	for _, row := range rows {
@@ -212,34 +207,26 @@ func dedupeUsageRows(rows []beads.UsageRecordRow) ([]dashboard.UsageRecord, erro
 			if usageRowRepeats(kept[key], row.Record) {
 				continue
 			}
-			kept[key] = append(kept[key], usageKeptRow{rec: row.Record, sessions: sessions})
-			recs = append(recs, row.Record)
-			continue
-		}
-		repeat := false
-		for _, k := range kept[key] {
-			shared := 0
-			for s := range sessions {
-				if k.sessions[s] {
-					shared++
-				}
-			}
-			if shared == 0 {
-				continue
-			}
-			if shared != len(sessions) || len(k.sessions) != len(sessions) || !reflect.DeepEqual(k.rec, row.Record) {
-				return nil, errUsageRowsConflict
-			}
-			repeat = true
-			break
-		}
-		if repeat {
+		} else if usageRowSharesSession(kept[key], sessions) {
 			continue
 		}
 		kept[key] = append(kept[key], usageKeptRow{rec: row.Record, sessions: sessions})
 		recs = append(recs, row.Record)
 	}
-	return recs, nil
+	return recs
+}
+
+// usageRowSharesSession says an earlier kept row of the same bead and kind counts
+// one of sessions.
+func usageRowSharesSession(kept []usageKeptRow, sessions map[string]bool) bool {
+	for _, k := range kept {
+		for s := range sessions {
+			if k.sessions[s] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // usageRowRepeats says a sessionless row of rec is already kept: an earlier kept
@@ -308,10 +295,7 @@ func (r *dashUsageReader) absent() bool {
 // draws as no figure at all rather than as a month of no spend.
 func (r *dashUsageReader) monthRecords(now time.Time) []dashboard.UsageRecord {
 	since := now.Add(-usageMonthRecord)
-	rows, reason := r.rowRecords(since)
-	if reason != "" {
-		return nil
-	}
+	rows, _ := r.rowRecords(since)
 	entries, err := r.entries()
 	if err != nil {
 		return nil

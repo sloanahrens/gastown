@@ -3763,6 +3763,7 @@ function costUsage(box, u, s) {
     return;
   }
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
+  if (u.note) box.append(el("div", "empty", u.note + ": drawn from the record files alone"));
 
   const win = u.window || "24h";
   const table = panelTable;

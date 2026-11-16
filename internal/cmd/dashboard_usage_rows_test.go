@@ -107,10 +107,10 @@ func TestUsageRowsCountARecordFiledOnlyAsARow(t *testing.T) {
 	}
 }
 
-// A row read that fails is an unavailable panel and an absent plan month, never
-// the files alone: a row the files lack would be dropped without saying so. The
-// panel names the failure in fixed words, not in the store's own error.
-func TestUsageRowsReadFailureIsUnavailable(t *testing.T) {
+// A row read that fails falls back to the files alone and the panel names the
+// failure in fixed words, not in the store's own error: a store that is down does
+// not blank the panel or the plan month.
+func TestUsageRowsReadFailureFallsBackToTheFiles(t *testing.T) {
 	t.Parallel()
 
 	root, records := usageTestDir(t)
@@ -122,31 +122,37 @@ func TestUsageRowsReadFailureIsUnavailable(t *testing.T) {
 	}
 	r := newDashUsageReader(root).withRows(failing)
 
-	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsReadReason {
-		t.Errorf("read = %+v, want unavailable with the rows-read reason", u)
+	if u := r.read(usageReaderNow); u.Unavailable || u.Note != usageRowsReadReason {
+		t.Errorf("read = %+v, want a live panel with the rows-read note", u)
 	}
-	if month := r.monthRecords(usageReaderNow); month != nil {
-		t.Errorf("month = %+v, want no record set", month)
+	if got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-a", dashboard.UsageKindWork); len(got) != 1 || got[0].WallS != 300 {
+		t.Errorf("month records for gt-a = %+v, want the file's record with wall 300", got)
 	}
 }
 
-// A row read that fills its cap is refused, never folded: the rows that fell off
-// the cap are the window's oldest.
-func TestUsageRowsCapFilledIsRefused(t *testing.T) {
+// A row read that fills its cap is not folded, since the rows that fell off the
+// cap are the window's oldest: the panel falls back to the files and says so.
+func TestUsageRowsCapFilledFallsBackToTheFiles(t *testing.T) {
 	t.Parallel()
 
-	root, _ := usageTestDir(t)
+	root, records := usageTestDir(t)
+	writeUsageRecord(t, records, "gt-a.work.json",
+		usageRecordBody("gt-a", "work", "polecat", usageReaderNow.Add(-time.Hour), 300), time.Hour)
 	full := make([]beads.UsageRecordRow, usageRowsLimit)
 	for i := range full {
 		full[i] = usageRowFor("gt-full", dashboard.UsageKindWork, usageReaderNow.Add(-time.Hour), 1)
 	}
 	r := newDashUsageReader(root).withRows(usageRowsFixed(full...))
 
-	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsCapReason {
-		t.Errorf("read over a filled cap = %+v, want unavailable with the cap reason", u)
+	if u := r.read(usageReaderNow); u.Unavailable || u.Note != usageRowsCapReason {
+		t.Errorf("read over a filled cap = %+v, want a live panel with the cap note", u)
 	}
-	if month := r.monthRecords(usageReaderNow); month != nil {
-		t.Errorf("month over a filled cap = %d records, want none", len(month))
+	month := r.monthRecords(usageReaderNow)
+	if got := findUsageRecords(month, "gt-full", dashboard.UsageKindWork); len(got) != 0 {
+		t.Errorf("month holds %d truncated rows, want none", len(got))
+	}
+	if got := findUsageRecords(month, "gt-a", dashboard.UsageKindWork); len(got) != 1 {
+		t.Errorf("month records for gt-a = %d, want the file's record", len(got))
 	}
 }
 
@@ -167,21 +173,41 @@ func TestUsageRowsReadCarriesADeadline(t *testing.T) {
 	}
 }
 
-// A row read that runs past its deadline is an unavailable panel with the timeout
-// reason, not the generic read failure. The deadline is already past, and the
-// store returns its own error without waiting on the context, so the test ends
-// whether or not the deadline is applied; the store's error is not on the page.
-func TestUsageRowsReadPastItsDeadlineIsUnavailable(t *testing.T) {
+// A row store that blocks until its context ends is cut off at the bound: the
+// read returns, the panel is drawn from the files with the timed-out note, and
+// the plan month holds the file's record. The store waits only on the context,
+// so the test needs no clock of its own.
+func TestUsageRowsBlockingStoreIsCutOffAtTheBound(t *testing.T) {
 	t.Parallel()
 
-	root, _ := usageTestDir(t)
-	r := newDashUsageReader(root).withRows(func(context.Context, time.Time, int) ([]beads.UsageRecordRow, error) {
-		return nil, errors.New("signal: killed")
-	})
-	r.rowsTimeout = 0
+	root, records := usageTestDir(t)
+	writeUsageRecord(t, records, "gt-a.work.json",
+		usageRecordBody("gt-a", "work", "polecat", usageReaderNow.Add(-time.Hour), 300), time.Hour)
+	blocking := func(ctx context.Context, _ time.Time, _ int) ([]beads.UsageRecordRow, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	r := newDashUsageReader(root).withRows(blocking)
+	r.rowsTimeout = time.Millisecond
 
-	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsTimedOutReason {
-		t.Errorf("read past its deadline = %+v, want unavailable with the timed-out reason", u)
+	if u := r.read(usageReaderNow); u.Unavailable || u.Note != usageRowsTimedOutReason {
+		t.Errorf("read = %+v, want a live panel with the timed-out note", u)
+	}
+	if got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-a", dashboard.UsageKindWork); len(got) != 1 {
+		t.Errorf("month records for gt-a = %d, want the file's record", len(got))
+	}
+}
+
+// The hub's usage reader is built with the production row store wired.
+func TestUsageRowsHubReaderHasTheProductionStoreWired(t *testing.T) {
+	t.Parallel()
+
+	r := newDashboardUsageReader(t.TempDir())
+	if r.rows == nil {
+		t.Fatal("the hub's usage reader has no row store: the rows are never read")
+	}
+	if r.rowsTimeout != usageRowsTimeout {
+		t.Errorf("rowsTimeout = %v, want %v", r.rowsTimeout, usageRowsTimeout)
 	}
 }
 
@@ -283,23 +309,25 @@ func TestUsageRowsDisjointSessionsOfOneBeadBothCount(t *testing.T) {
 	}
 }
 
-// Rows of one bead and kind that share a session but differ cannot be split into
-// their totals, so the panel is refused rather than counting the session twice.
-func TestUsageRowsSharedSessionWithDifferentTotalsIsRefused(t *testing.T) {
+// A run's row is rewritten as it gains sessions: the newer row holds the whole
+// run, so the older row that shares a session with it is superseded and the
+// session counts once. The panel stays live.
+func TestUsageRowsRewrittenRunCountsItsNewestRowOnly(t *testing.T) {
 	t.Parallel()
 
 	root, _ := usageTestDir(t)
 	end := usageReaderNow.Add(-time.Hour)
 	r := newDashUsageReader(root).withRows(usageRowsFixed(
-		usageRowWithSessions("gt-f", dashboard.UsageKindWork, end, 700, "s1", "s2"),
-		usageRowWithSessions("gt-f", dashboard.UsageKindWork, end, 300, "s2"),
+		usageRowWithSessions("gt-f", dashboard.UsageKindWork, end, 1000, "s1", "s2"),
+		usageRowWithSessions("gt-f", dashboard.UsageKindWork, end, 700, "s1"),
 	))
 
-	if u := r.read(usageReaderNow); !u.Unavailable || u.Reason != usageRowsConflictReason {
-		t.Errorf("read = %+v, want unavailable with the conflict reason", u)
+	if u := r.read(usageReaderNow); u.Unavailable || u.Note != "" {
+		t.Errorf("read = %+v, want a live panel with no note", u)
 	}
-	if month := r.monthRecords(usageReaderNow); month != nil {
-		t.Errorf("month = %d records, want none", len(month))
+	got := findUsageRecords(r.monthRecords(usageReaderNow), "gt-f", dashboard.UsageKindWork)
+	if len(got) != 1 || got[0].WallS != 1000 {
+		t.Errorf("gt-f records = %+v, want the newest row with wall 1000 only", got)
 	}
 }
 

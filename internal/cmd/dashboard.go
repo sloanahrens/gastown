@@ -477,7 +477,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		return len(open), err
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
-	usage := newDashUsageReader(townRoot).withRows(dashboardUsageRows(townRoot))
+	usage := newDashboardUsageReader(townRoot)
 	claudePlan := newDashboardClaudePlanRead(townRoot, beadReads.costSamples, os.UserHomeDir, os.Stat, whyLog, usage, claudePlanUSD, claudePlanRenewalDay, time.Now)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
