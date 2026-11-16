@@ -148,8 +148,9 @@ type wireResult struct {
 // or StatusDeferred; a title or acceptance that is empty or only spaces; more
 // than 5 findings; a finding over 2 KB; a negative or repeated ticked box; an
 // escalation whose text is empty; and a submission with a status other than
-// StatusDone, an empty branch, head or target, or a submitted_at that is not an
-// RFC 3339 time.
+// StatusDone, an empty branch, head or target, a branch or target git would not
+// accept as a ref, a head that is not an abbreviated or full commit sha, or a
+// submitted_at that is not an RFC 3339 time.
 func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	if beadID == "" {
 		return Result{}, errors.New("outbox: no bead id was given to validate against")
@@ -219,28 +220,13 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	}
 	var submission *Submission
 	if wire.Submission != nil {
-		// A deferred seat submits nothing: gt done with DEFERRED pushes no
-		// branch, and a block written for one would queue a landing the seat
-		// never asked for.
-		if wire.Status != StatusDone {
-			return Result{}, fmt.Errorf("outbox: result.json carries a submission with status %q; only a %q result submits a branch", wire.Status, StatusDone)
-		}
 		submission = &Submission{
 			Branch: strings.TrimSpace(wire.Submission.Branch),
 			Head:   strings.TrimSpace(wire.Submission.Head),
 			Target: strings.TrimSpace(wire.Submission.Target),
 		}
-		for _, field := range []struct {
-			name  string
-			value string
-		}{
-			{"branch", submission.Branch},
-			{"head", submission.Head},
-			{"target", submission.Target},
-		} {
-			if field.value == "" {
-				return Result{}, fmt.Errorf("outbox: result.json submission names no %s", field.name)
-			}
+		if err := submissionProblem(submission, wire.Status); err != nil {
+			return Result{}, fmt.Errorf("outbox: result.json %w", err)
 		}
 		if wire.Submission.SubmittedAt != "" {
 			at, err := time.Parse(time.RFC3339, wire.Submission.SubmittedAt)
@@ -260,6 +246,90 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 		Submission: submission,
 		Notes:      string(notes),
 	}, nil
+}
+
+// submissionProblem returns why s is not a landing the host can write, or nil
+// when it is one. Validate refuses through it what a seat wrote, and Apply
+// through it what a hand-built Result carries, so neither path marks a bead
+// ready to land for a branch or target git would refuse or a head that is not a
+// commit sha: the block's values reach git as a ref to fetch and a commit to
+// merge, and a seat is not the authority on what git accepts.
+func submissionProblem(s *Submission, status Status) error {
+	if s == nil {
+		return nil
+	}
+	// A deferred seat submits nothing: gt done with DEFERRED pushes no branch,
+	// and a block written for one would queue a landing the seat never asked
+	// for.
+	if status != StatusDone {
+		return fmt.Errorf("a submission under status %q; only a %q result submits a branch", status, StatusDone)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"branch", s.Branch},
+		{"head", s.Head},
+		{"target", s.Target},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("the submission names no %s", field.name)
+		}
+	}
+	if !validBranch(s.Branch) {
+		return fmt.Errorf("the submission's branch %q is not a name git accepts", s.Branch)
+	}
+	if !validBranch(s.Target) {
+		return fmt.Errorf("the submission's target %q is not a name git accepts", s.Target)
+	}
+	if !validHead(s.Head) {
+		return fmt.Errorf("the submission's head %q is not a git commit sha", s.Head)
+	}
+	return nil
+}
+
+// validBranch reports whether branch is a name git accepts for a branch, so a
+// seat-written result.json never reaches git as an option or a malformed ref.
+// It follows git check-ref-format --branch: not "HEAD" or "@", no leading '-',
+// no control character or space, none of "~^:?*[\\", no "..", "@{" or "//", no
+// leading or trailing '/', no component starting with '.', and no component
+// ending in ".lock".
+func validBranch(branch string) bool {
+	if branch == "" || branch == "HEAD" || branch == "@" || strings.HasPrefix(branch, "-") {
+		return false
+	}
+	for _, r := range branch {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune(" ~^:?*[\\", r) {
+			return false
+		}
+	}
+	if strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.Contains(branch, "@{") {
+		return false
+	}
+	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".") {
+		return false
+	}
+	for _, component := range strings.Split(branch, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// validHead reports whether head is a commit sha a landing can fetch: 7 to 64
+// lowercase hex digits, the shortest prefix this code accepts a landing head by
+// and the widest object id git writes.
+func validHead(head string) bool {
+	if len(head) < 7 || len(head) > 64 {
+		return false
+	}
+	for _, r := range head {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Encode returns the result.json bytes for beadID: every field of r, in the

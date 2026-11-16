@@ -76,7 +76,7 @@ func TestNoBeadAccessApplyRefusesABadSubmission(t *testing.T) {
 			result: Result{Status: StatusDeferred, Submission: &Submission{
 				Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main",
 			}},
-			wantErr:   `a "deferred" result submits no branch`,
+			wantErr:   `a submission under status "deferred"; only a "done" result submits a branch`,
 			wantCalls: []storeCall{{op: "SetStatus", beadID: testBead, status: "deferred"}},
 		},
 		{
@@ -99,6 +99,27 @@ func TestNoBeadAccessApplyRefusesABadSubmission(t *testing.T) {
 				Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "  ",
 			}},
 			wantErr: "the submission names no target",
+		},
+		{
+			name: "a hand-built submission whose branch is not a ref",
+			result: Result{Status: StatusDone, Submission: &Submission{
+				Branch: "-c core.pager=cat", Head: "0123456789abcdef", Target: "main",
+			}},
+			wantErr: "is not a name git accepts",
+		},
+		{
+			name: "a hand-built submission whose target is not a ref",
+			result: Result{Status: StatusDone, Submission: &Submission{
+				Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main..next",
+			}},
+			wantErr: "is not a name git accepts",
+		},
+		{
+			name: "a hand-built submission whose head is not a sha",
+			result: Result{Status: StatusDone, Submission: &Submission{
+				Branch: "polecat/capable/gt-swfo9e", Head: "the tip", Target: "main",
+			}},
+			wantErr: "is not a git commit sha",
 		},
 		{
 			name: "a refused submission after the findings still writes them",
@@ -169,7 +190,7 @@ func TestNoBeadAccessValidateRefusesABadSubmission(t *testing.T) {
 		{
 			name:    "a submission with a deferred status",
 			raw:     `{"bead_id": "gt-swfo9e", "status": "deferred", "submission": {"branch": "b", "head": "h", "target": "main"}}`,
-			wantErr: `carries a submission with status "deferred"`,
+			wantErr: `a submission under status "deferred"; only a "done" result submits a branch`,
 		},
 		{
 			name:    "a submission with no branch",
@@ -193,8 +214,33 @@ func TestNoBeadAccessValidateRefusesABadSubmission(t *testing.T) {
 		},
 		{
 			name:    "a submitted_at that is not an RFC 3339 time",
-			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "b", "head": "h", "target": "main", "submitted_at": "yesterday"}}`,
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "b", "head": "0123456789abcdef", "target": "main", "submitted_at": "yesterday"}}`,
 			wantErr: "submitted_at is not an RFC 3339 time",
+		},
+		{
+			name:    "a branch git reads as an option",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "--upload-pack=/tmp/x", "head": "0123456789abcdef", "target": "main"}}`,
+			wantErr: "is not a name git accepts",
+		},
+		{
+			name:    "a branch that is not a ref",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "polecat/../main", "head": "0123456789abcdef", "target": "main"}}`,
+			wantErr: "is not a name git accepts",
+		},
+		{
+			name:    "a target that is not a ref",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "polecat/capable/gt-swfo9e", "head": "0123456789abcdef", "target": "HEAD"}}`,
+			wantErr: "is not a name git accepts",
+		},
+		{
+			name:    "a head that is not a commit sha",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "polecat/capable/gt-swfo9e", "head": "main", "target": "main"}}`,
+			wantErr: "is not a git commit sha",
+		},
+		{
+			name:    "a head shorter than the shortest abbreviation the block carries",
+			raw:     `{"bead_id": "gt-swfo9e", "status": "done", "submission": {"branch": "polecat/capable/gt-swfo9e", "head": "0123ab", "target": "main"}}`,
+			wantErr: "is not a git commit sha",
 		},
 		{
 			// The worker is the host's to name: an outbox that names one is
@@ -219,5 +265,21 @@ func TestNoBeadAccessValidateRefusesABadSubmission(t *testing.T) {
 				t.Errorf("Validate(%s) returned a partial Result %#v with its error", tt.raw, got)
 			}
 		})
+	}
+}
+
+// TestNoBeadAccessApplyRefusesASubmissionTheStoreCannotWrite: a store that
+// applies an outbox but cannot mark a bead ready to land refuses the submission
+// with an error, so the host never records a landing nothing picks up
+// (gt-qk3ppr).
+func TestNoBeadAccessApplyRefusesASubmissionTheStoreCannotWrite(t *testing.T) {
+	t.Parallel()
+	store := storeWithoutReady{f: &fakeStore{}}
+	r := Result{Status: StatusDone, Submission: &Submission{
+		Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main",
+	}}
+	err := Apply(store, testBead, testSeat, acceptance, r)
+	if err == nil || !strings.Contains(err.Error(), "cannot write a READY TO LAND block") {
+		t.Fatalf("Apply() error = %v, want the store's refusal to write the block", err)
 	}
 }

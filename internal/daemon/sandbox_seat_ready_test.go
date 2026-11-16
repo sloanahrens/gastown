@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"log"
+	"os"
 	"strings"
 	"testing"
 
@@ -207,5 +208,120 @@ func TestNoBeadAccessSeatEndReportsARefusedReadyWrite(t *testing.T) {
 	}
 	if beads.HasLabel(issue, land.LabelReadyToLand) {
 		t.Errorf("bead labels = %v, want no %s after a refused write", issue.Labels, land.LabelReadyToLand)
+	}
+}
+
+// failOnceReadyReadClient is the town's bead store writing the ready block and
+// failing the first read-back after it, then answering every later read: the
+// store of a pass whose label is unknown.
+type failOnceReadyReadClient struct {
+	beads.Client
+	wrote  bool
+	failed bool
+}
+
+func (c *failOnceReadyReadClient) Update(id string, opts beads.UpdateOptions) error {
+	if err := c.Client.Update(id, opts); err != nil {
+		return err
+	}
+	c.wrote = true
+	return nil
+}
+
+func (c *failOnceReadyReadClient) Show(id string) (*beads.Issue, error) {
+	if c.wrote && !c.failed {
+		c.failed = true
+		return nil, errors.New("dolt unavailable")
+	}
+	return c.Client.Show(id)
+}
+
+// A pass that could not record its outbox as applied applies the same outbox
+// again, and the block it already wrote is not appended a second time: the bead
+// carries one READY TO LAND block for the submission (gt-qk3ppr).
+func TestNoBeadAccessSeatEndReadyRetryAppendsOneBlock(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return &failOnceReadyReadClient{Client: f.agentDB}
+	}
+
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+		t.Fatalf("first pass kept the seat: %s", reason)
+	}
+	if !strings.Contains(logs.String(), "reading "+endBead+" back") {
+		t.Fatalf("log %q does not report the read-back the first pass failed", logs.String())
+	}
+	// The applied record a pass writes is unreadable: the documented state in
+	// which the next pass applies the same outbox again.
+	path, err := appliedSeatOutboxPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not a record"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.host.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+		t.Fatalf("retry pass kept the seat: %s", reason)
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(issue.Notes, land.ReadyNoteMarker); got != 1 {
+		t.Errorf("bead notes carry %d READY TO LAND blocks, want the one the submission wrote: %q", got, issue.Notes)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Errorf("bead labels = %v, want %s after the retry", issue.Labels, land.LabelReadyToLand)
+	}
+}
+
+// unreadableBeforeReadyClient answers the outbox's own read of the bead and
+// fails every later one: the store of a pass that cannot read the bead before
+// the ready write.
+type unreadableBeforeReadyClient struct {
+	beads.Client
+	shown int
+}
+
+func (c *unreadableBeforeReadyClient) Show(id string) (*beads.Issue, error) {
+	c.shown++
+	if c.shown > 1 {
+		return nil, errors.New("dolt unavailable")
+	}
+	return c.Client.Show(id)
+}
+
+// A bead the store cannot read before the ready write gets no block: the store
+// refuses rather than appending a block it could not check, and the seat end
+// reports the failure (gt-qk3ppr).
+func TestNoBeadAccessSeatEndReportsABeadItCannotReadBeforeTheReadyWrite(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return &unreadableBeforeReadyClient{Client: f.agentDB}
+	}
+
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+		t.Fatalf("the outbox kept the seat for a read it failed: %s", reason)
+	}
+	if !strings.Contains(logs.String(), "reading "+endBead+" before the ready write") {
+		t.Errorf("log %q does not report the read that failed before the write", logs.String())
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(issue.Notes, land.ReadyNoteMarker) {
+		t.Errorf("bead notes = %q, want no block written through a bead the store could not read", issue.Notes)
 	}
 }

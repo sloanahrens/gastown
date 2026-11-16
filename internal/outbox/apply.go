@@ -25,6 +25,14 @@ type Store interface {
 	// Escalate raises an escalation on beadID from actor with text as its
 	// request.
 	Escalate(beadID, actor, text string) error
+}
+
+// ReadyStore is the part of the bead store that marks a bead ready to land,
+// which is what a submitted outbox asks for. It is separate from Store because
+// only a result that submitted a branch writes it: a store that handles an
+// outbox but cannot write the block refuses the submission through Apply's
+// error rather than dropping it (gt-qk3ppr).
+type ReadyStore interface {
 	// MarkReadyToLand appends note, a READY TO LAND block, to beadID's notes
 	// and adds the label the landing worker picks the bead by, in one write,
 	// as gt done marks its own submission.
@@ -66,7 +74,8 @@ type Seat struct {
 // and read as a clean run. An escalation whose text is empty is refused the
 // same way, with no escalation raised, and so is a title or an acceptance that
 // is empty: either would replace what the bead has with nothing. A submission
-// whose branch, head or target is empty gets no block, and neither does one
+// whose branch, head or target is empty or that names a branch git would not
+// accept or a head that is not a commit sha gets no block, and neither does one
 // that arrives with a status other than StatusDone: a deferred seat submits
 // nothing.
 //
@@ -137,25 +146,18 @@ func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) e
 }
 
 // markReady marks beadID ready to land for r's submission. It refuses, with the
-// block unwritten, a submission with a status other than StatusDone, which
-// Validate does not return, and one whose branch, head or target is empty:
-// either would queue a landing gt done never asked for. The Worker line is
-// seat.Worker, never a value from the outbox.
+// block unwritten, what Validate refuses and what a hand-built Result can still
+// carry: a status other than StatusDone, an empty branch, head or target, and a
+// branch or head git would not accept. The Worker line is seat.Worker, never a
+// value from the outbox. The block is written through the store's ReadyStore: a
+// store that cannot write it refuses the submission rather than dropping it.
 func markReady(store Store, beadID string, seat Seat, r Result) error {
-	if r.Status != StatusDone {
-		return fmt.Errorf("outbox: mark %s ready to land: a %q result submits no branch", beadID, r.Status)
+	if err := submissionProblem(r.Submission, r.Status); err != nil {
+		return fmt.Errorf("outbox: mark %s ready to land: %w", beadID, err)
 	}
-	for _, field := range []struct {
-		name  string
-		value string
-	}{
-		{"branch", r.Submission.Branch},
-		{"head", r.Submission.Head},
-		{"target", r.Submission.Target},
-	} {
-		if strings.TrimSpace(field.value) == "" {
-			return fmt.Errorf("outbox: mark %s ready to land: the submission names no %s", beadID, field.name)
-		}
+	ready, ok := store.(ReadyStore)
+	if !ok {
+		return fmt.Errorf("outbox: mark %s ready to land: the store cannot write a %s block", beadID, land.ReadyNoteMarker)
 	}
 	note := land.FormatReadyNote(land.Work{
 		Branch:    r.Submission.Branch,
@@ -164,7 +166,7 @@ func markReady(store Store, beadID string, seat Seat, r Result) error {
 		Worker:    seat.Worker,
 		Submitted: r.Submission.SubmittedAt,
 	})
-	if err := store.MarkReadyToLand(beadID, note); err != nil {
+	if err := ready.MarkReadyToLand(beadID, note); err != nil {
 		return fmt.Errorf("outbox: mark %s ready to land: %w", beadID, err)
 	}
 	return nil

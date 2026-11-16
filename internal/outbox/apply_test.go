@@ -66,6 +66,35 @@ func (f *fakeStore) MarkReadyToLand(beadID, note string) error {
 	return f.record(storeCall{op: "MarkReadyToLand", beadID: beadID, text: note})
 }
 
+// storeWithoutReady forwards the six Store writes to f and has no
+// MarkReadyToLand: the store of a host that applies an outbox but cannot mark a
+// bead ready to land.
+type storeWithoutReady struct{ f *fakeStore }
+
+func (s storeWithoutReady) AppendNotes(beadID, text string) error {
+	return s.f.AppendNotes(beadID, text)
+}
+
+func (s storeWithoutReady) SetTitle(beadID, title string) error {
+	return s.f.SetTitle(beadID, title)
+}
+
+func (s storeWithoutReady) SetAcceptance(beadID, text string) error {
+	return s.f.SetAcceptance(beadID, text)
+}
+
+func (s storeWithoutReady) AddComment(beadID, author, text string) error {
+	return s.f.AddComment(beadID, author, text)
+}
+
+func (s storeWithoutReady) SetStatus(beadID, status string) error {
+	return s.f.SetStatus(beadID, status)
+}
+
+func (s storeWithoutReady) Escalate(beadID, actor, text string) error {
+	return s.f.Escalate(beadID, actor, text)
+}
+
 // acceptance is the bead's acceptance text the ticks index into. Its second box
 // is already ticked.
 const acceptance = `## Acceptance

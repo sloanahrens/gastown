@@ -862,15 +862,30 @@ func (s *seatOutboxStore) Escalate(beadID, actor, text string) error {
 // since bd reporting success is not proof the write persisted (GH#1945): a lost
 // label is a submission nothing picks up, and the seat end records the outbox
 // as applied, so no later pass would write it again.
+//
+// A retry applies the same outbox again — a pass whose applied record could not
+// be written, or whose read-back failed — so the block is appended only when the
+// notes do not already carry this exact one: a second copy would only grow the
+// bead, and the label write is made either way. The block the host writes is its
+// own text with its own stamp, so a match is the earlier pass's own block.
 func (s *seatOutboxStore) MarkReadyToLand(beadID, note string) error {
-	if err := s.bd.Update(beadID, beads.UpdateOptions{
-		AppendNotes:  note,
+	// The bead is read before the write, not only after it: a store that cannot
+	// read it refuses here rather than appending a block it cannot check.
+	issue, err := s.bd.Show(beadID)
+	if err != nil {
+		return fmt.Errorf("reading %s before the ready write: %w", beadID, err)
+	}
+	opts := beads.UpdateOptions{
 		AddLabels:    []string{land.LabelReadyToLand},
 		RemoveLabels: []string{land.LabelRework, land.LabelOverseerReviewed},
-	}); err != nil {
+	}
+	if !strings.Contains(issue.Notes, note) {
+		opts.AppendNotes = note
+	}
+	if err := s.bd.Update(beadID, opts); err != nil {
 		return fmt.Errorf("adding %s: %w", land.LabelReadyToLand, err)
 	}
-	issue, err := s.bd.Show(beadID)
+	issue, err = s.bd.Show(beadID)
 	if err != nil {
 		return fmt.Errorf("reading %s back: %w", beadID, err)
 	}
