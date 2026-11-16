@@ -118,6 +118,10 @@ var ruleOwners = map[string]Owner{
 	// A pair check that cannot read is the overseer's to look at: while it is
 	// broken, no roll is reported as ready (gt-4nlpw8).
 	RuleDeployPairUnreadable: OwnerOverseer,
+	// A pair unpublished past the stuck bound is the town's own image build to
+	// start or repair: the overseer acts on it before a person is woken
+	// (gt-afwjb4).
+	RuleDeployPairStuck: OwnerOverseer,
 	// A green commit whose image build failed is the town's own workflow to
 	// look at: the overseer re-runs it or finds what stopped it before a person
 	// is woken (gt-3vafwr).
