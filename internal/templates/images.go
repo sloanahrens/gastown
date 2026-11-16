@@ -46,18 +46,26 @@ const (
 	// the URL it changes.
 	ClaudeCLIURLFormat = "https://downloads.claude.ai/claude-code-releases/%s/linux-arm64/claude"
 
+	// dockerImageDigest is the digest of the dind tag's image index, the one
+	// digest DindImage and SweepDindImage are both built from, so moving the pin
+	// edits it once here. deploy/polecat/Dockerfile's DOCKER_CLI_DIGEST ARG moves
+	// with it: TestPolecatImageInstallsDockerCLIPinned holds that ARG equal to
+	// SweepDindImage.
+	dockerImageDigest = "sha256:7bf70dcb85c822e3fa6f2d332143e474b99147b9d7b39102b0cfe8b04a7dd61b"
+
 	// DindImage is the Docker engine the daemon's tier sweep drives, pinned by
 	// digest rather than tag so a restart runs the engine the ladder proved.
-	// It shares its digest with SweepDindImage (gt-3we5ru).
-	DindImage = "data.forgejo.org/oci/docker@sha256:7bf70dcb85c822e3fa6f2d332143e474b99147b9d7b39102b0cfe8b04a7dd61b"
+	// It is built from dockerImageDigest, the same digest SweepDindImage names
+	// (gt-3we5ru).
+	DindImage = "data.forgejo.org/oci/docker@" + dockerImageDigest
 
 	// SweepDindImage is the Docker engine the sweep runner's sidecar runs, and the
 	// image the polecat image's docker client is copied from (gt-2u79h). It is
 	// pinned by the digest of the dind tag's image index, so the client and the
-	// engine are one build. DindImage is the daemon's own engine and now names
-	// the same digest. Moving this pin means reading the tag's index digest
-	// from the registry again.
-	SweepDindImage = "data.forgejo.org/oci/docker@sha256:7bf70dcb85c822e3fa6f2d332143e474b99147b9d7b39102b0cfe8b04a7dd61b"
+	// engine are one build. DindImage is the daemon's own engine and is built
+	// from the same dockerImageDigest. Moving this pin means reading the tag's
+	// index digest from the registry again and editing dockerImageDigest.
+	SweepDindImage = "data.forgejo.org/oci/docker@" + dockerImageDigest
 
 	// DoltServerImage is the Dolt SQL server the scratch project runs, at the
 	// version DoltVersion names, so the scratch town's Dolt and the daemon
