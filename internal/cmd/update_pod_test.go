@@ -645,10 +645,11 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 		// The image label of a pod run is read from the registry the --images file
 		// names: this fake registry serves no digest, so the read is refused there,
 		// and the refusal names the target pair's read rather than a docker inspect.
-		label, ok := got.deps.Verify.(podImageLabelProbes)
+		crash, ok := got.deps.Verify.(podCrashProbes)
 		if !ok {
-			t.Fatalf("verify probe = %T, want the pod image label probe", got.deps.Verify)
+			t.Fatalf("verify probe = %T, want the pod probes with the crash probe", got.deps.Verify)
 		}
+		label := crash.podImageLabelProbes
 		if _, err := label.ImageLabel(context.Background()); err == nil || !strings.Contains(err.Error(), "target pair") {
 			t.Errorf("pod image label = %v, want the registry read of the --images pair", err)
 		}

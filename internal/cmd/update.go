@@ -237,6 +237,33 @@ func podDaemonDeps(seams updateSeams, deps update.Deps, pod *podDaemonTarget) (u
 	return deps, nil
 }
 
+// podCrashProbes is a pod-target run's verify probes with the crash probe the
+// restart wait asks on every poll: the daemon Deployment's newest pod is read
+// through kubectl, so a pod that cannot come up ends the wait at once instead of
+// holding it for the whole restart bound. The pair probes are embedded by value
+// so this type keeps their extension too; an embedded update.VerifyProbes
+// interface would carry the four base probes and silently drop update.PairProbes.
+type podCrashProbes struct {
+	podImageLabelProbes
+	target podDaemonTarget
+	run    update.RunFunc
+	// Clock stamps the reviewed pod's age. Nil is the real clock.
+	Clock update.Clock
+}
+
+var _ update.CrashProbes = podCrashProbes{}
+var _ update.PairProbes = podCrashProbes{}
+
+// PodCrashing is the daemon Deployment's newest pod, read through kubectl under
+// podProbeBound and judged by podDaemonCrashing.
+func (p podCrashProbes) PodCrashing(ctx context.Context) (bool, string, error) {
+	now := time.Now()
+	if p.Clock != nil {
+		now = p.Clock.Now()
+	}
+	return podDaemonCrashing(ctx, p.run, p.target, now)
+}
+
 // updateSelectableSteps names the steps --skip and --only accept, in the order
 // a run works through them. The plan is not selectable: it always runs.
 var updateSelectableSteps = []update.StepName{
@@ -439,12 +466,20 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 		// A run that names no --images names no target pair, so wantPolecat is
 		// empty and both pair checks fail: verify never passes a pair the run
 		// did not name, and it reads neither record to say so.
-		deps.Verify = podImageLabelProbes{
-			VerifyProbes: deps.Verify,
-			label:        podTargetImageLabel(seams.Images, townRoot, req.Images),
-			wantPolecat:  podRefDigest(imagesValues.Polecat),
-			annotation:   podTargetAnnotation(*pod, seams.PodRun),
-			devTag:       podTargetDevTag(*pod, seams.PodRun),
+		// The crash probe wraps those probes: the restart wait reads the daemon
+		// Deployment's newest pod through it, so a pod that cannot come up ends
+		// the wait at once.
+		deps.Verify = podCrashProbes{
+			podImageLabelProbes: podImageLabelProbes{
+				VerifyProbes: deps.Verify,
+				label:        podTargetImageLabel(seams.Images, townRoot, req.Images),
+				wantPolecat:  podRefDigest(imagesValues.Polecat),
+				annotation:   podTargetAnnotation(*pod, seams.PodRun),
+				devTag:       podTargetDevTag(*pod, seams.PodRun),
+			},
+			target: *pod,
+			run:    seams.PodRun,
+			Clock:  deps.Clock,
 		}
 	}
 	if req.Images != "" {
