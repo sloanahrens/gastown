@@ -171,32 +171,29 @@ func (h *patrolScanHost) recordedAgent(rig, name string) (string, error) {
 	return strings.TrimSpace(fields.Agent), nil
 }
 
-// shadowWorkBead logs where the seat's intent record and its agent bead
-// disagree about the hook — the bead the seat holds — as
-// `agentbead_shadow: <rig>/<name> hook intent=<v> bead=<v>`. The seat cap goes
-// on deciding on the bead (P1.7 of
-// docs/plans/2026-11-15-agent-bead-retirement-plan.md); the line is the shadow
-// window's measurement of the fact the cap moves onto the record in P2.2, so
-// the two can be compared before anything reads the record.
-//
-// It is logged once per seat and pair of values, through the Daemon's
-// seatShadowLog latch, not once per tick: patrol_scan runs every few minutes
-// and the window it feeds is days. An intent record that cannot be read is
-// logged the same way and decides nothing. That read fails closed, and
-// returning its error here would change what the cap answers — a shadow that
-// changes the decision would measure nothing.
+// shadowWorkBead logs through the Daemon's seatShadowLog latch where a seat's
+// intent record and agent bead disagree about the hook, or the record cannot be
+// read (gt-eyph71).
 func (h *patrolScanHost) shadowWorkBead(rig, name, beadHook string) {
 	if h.d.logger == nil {
 		return
 	}
 	seat := rig + "/" + name
+	// The seat cap keeps deciding on the bead; this line measures the fact the
+	// cap moves onto the record in P2.2 of
+	// docs/plans/2026-11-15-agent-bead-retirement-plan.md, so the two can be
+	// compared first.
 	facts, err := seatfacts.Read(h.town(), intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name})
 	if err != nil {
+		// The read fails closed; returning its error would change what the
+		// shadow measures, so the line is all it answers.
 		h.d.seatShadowLog.logf(h.d.logger.Printf, seat,
 			"agentbead_shadow: %s hook unreadable intent record: %v", seat, err)
 		return
 	}
 	if facts.WorkBead == beadHook {
+		// The agreement ends the latched state, so a recurrence logs again.
+		h.d.seatShadowLog.forget(seat)
 		return
 	}
 	h.d.seatShadowLog.logf(h.d.logger.Printf, seat,
