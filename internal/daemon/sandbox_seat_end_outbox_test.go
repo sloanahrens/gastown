@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
@@ -246,5 +249,382 @@ func TestNoBeadAccessSeatEndCopiesThroughItsGatewayWithoutARecord(t *testing.T) 
 	}
 	if got[0] != want {
 		t.Errorf("outbox copied from %+v, want a record for the measured gateway %+v", got[0], want)
+	}
+}
+
+// writeSeatOutbox writes a sandbox seat's outbox into the directory the host
+// copies it to, the place the seat end reads it from. An empty argument is a
+// file the seat did not write.
+func writeSeatOutbox(t *testing.T, town, result, notes string) {
+	t.Helper()
+	dir := session.SandboxOutboxCopyDir(town, endRig, endPolecat)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct{ name, body string }{
+		{"result.json", result},
+		{"notes.md", notes},
+	} {
+		if file.body == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// seedSeatBead creates the bead the seat was given, so its outbox is applied to
+// a bead that exists and carries the acceptance its ticks index.
+func seedSeatBead(t *testing.T, f *seatEndFake, acceptance string) {
+	t.Helper()
+	if _, err := f.agentDB.Create(beads.CreateOptions{
+		ID: endBead, Title: "the seat's task", Priority: 1, Acceptance: acceptance,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// failingEscalationClient is the town's bead store refusing to create the
+// escalation bead, every other write answering as the fake does.
+type failingEscalationClient struct {
+	beads.Client
+	err error
+}
+
+func (c failingEscalationClient) Create(beads.CreateOptions) (*beads.Issue, error) {
+	return nil, c.err
+}
+
+// seatOutboxEscalation is result.json carrying a HELP request, the shape a
+// file-mode `gt escalate` writes: the description, then the severity line.
+func seatOutboxEscalation() string {
+	return `{"bead_id":"` + endBead + `","status":"done",` +
+		`"escalation":{"text":"HELP: the acceptance list names a missing file\n\nSeverity: high"}}`
+}
+
+// A seat that ended with a HELP request in its outbox files it as one
+// escalation bead, raised as the seat and about its bead (gt-s4gfph).
+func TestNoBeadAccessSeatEndFilesTheOutboxEscalation(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, seatOutboxEscalation(), "")
+	f.host.d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC))
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end did not finish a seat whose outbox it applied")
+	}
+	escalations, err := beads.ListEscalations(f.agentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("the outbox filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+	got := escalations[0]
+	if got.Title != "HELP: the acceptance list names a missing file" {
+		t.Errorf("escalation title = %q, want the request's first line", got.Title)
+	}
+	fields := beads.ParseEscalationFields(got.Description)
+	for _, c := range []struct{ what, got, want string }{
+		{"severity", fields.Severity, "high"},
+		{"escalated_by", fields.EscalatedBy, endRig + "/polecats/" + endPolecat},
+		{"escalated_at", fields.EscalatedAt, "2026-11-16T09:00:00Z"},
+		{"related_bead", fields.RelatedBead, endBead},
+		{"source", fields.Source, seatEscalationSource},
+	} {
+		if c.got != c.want {
+			t.Errorf("escalation %s = %q, want %q", c.what, c.got, c.want)
+		}
+	}
+	if !strings.Contains(fields.Reason, "HELP: the acceptance list names a missing file") {
+		t.Errorf("escalation reason = %q, want the seat's request as its detail", fields.Reason)
+	}
+}
+
+// A seat whose escalation the store did not file keeps its sandbox: the
+// request is what the outbox exists for, and the sandbox is where a later pass
+// reads it from (gt-s4gfph).
+func TestNoBeadAccessSeatEndFailedEscalationKeepsTheSeat(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	seedSeatBead(t, f, "## Acceptance\n\n- [ ] one\n")
+	writeSeatOutbox(t, f.town, seatOutboxEscalation(), "the seat's note\n")
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return failingEscalationClient{Client: f.agentDB, err: errors.New("dolt unavailable")}
+	}
+	removed := 0
+	f.host.removeSandboxSeatDirs = func(string, string, string) (bool, error) {
+		removed++
+		return true, nil
+	}
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end removed a seat whose escalation it could not file")
+	}
+	if removed != 0 {
+		t.Errorf("the seat's directories were removed %d times, want the seat kept", removed)
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed, want it kept")
+	}
+	want := outboxEscalationReason + ": filing the escalation: dolt unavailable"
+	if !strings.Contains(logs.String(), "kept: "+want) {
+		t.Errorf("log %q does not name the unraised escalation %q", logs.String(), want)
+	}
+	path, err := keptSandboxSeatPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := readKeptSandboxSeatRecord(path)
+	if err != nil {
+		t.Fatalf("reading the kept record: %v", err)
+	}
+	if kept.Reason != want {
+		t.Errorf("kept record reason = %q, want %q", kept.Reason, want)
+	}
+}
+
+// A seat end that runs again after a failed escalation files the escalation
+// alone: the notes and findings the earlier pass wrote are not written twice
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndRetriesOnlyTheEscalation(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	const result = `{"bead_id":"` + endBead + `","status":"done","findings":["the retry never resets its counter"],` +
+		`"escalation":{"text":"HELP: nothing lands\n\nSeverity: high"}}`
+	writeSeatOutbox(t, f.town, result, "the seat's note\n")
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return failingEscalationClient{Client: f.agentDB, err: errors.New("dolt unavailable")}
+	}
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the first pass finished a seat whose escalation it could not file")
+	}
+
+	// The store answers again, and the patrol offers the kept seat its end.
+	f.host.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the second pass did not finish a seat whose escalation it filed")
+	}
+
+	escalations, err := beads.ListEscalations(f.agentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("the outbox filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(issue.Notes, "the seat's note"); got != 1 {
+		t.Errorf("the seat's note is on the bead %d times, want once: %q", got, issue.Notes)
+	}
+	comments, err := f.agentDB.Comments(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Errorf("the bead carries %d findings, want the seat's one: %+v", len(comments), comments)
+	}
+}
+
+// An outbox is applied once however many times the seat end runs: a pass that
+// reads the same bytes again writes no second note, finding, tick or escalation
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndAppliesAnOutboxOnce(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "## Acceptance\n\n- [ ] the fix holds\n")
+	const result = `{"bead_id":"` + endBead + `","status":"done","ticked_boxes":[0],` +
+		`"findings":["the retry never resets its counter"],` +
+		`"escalation":{"text":"HELP: nothing lands\n\nSeverity: high"}}`
+	writeSeatOutbox(t, f.town, result, "the seat's note\n")
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end did not finish a seat whose outbox it applied")
+	}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the second pass did not finish the same seat")
+	}
+
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(issue.Notes, "the seat's note"); got != 1 {
+		t.Errorf("the seat's note is on the bead %d times, want once: %q", got, issue.Notes)
+	}
+	if !strings.Contains(issue.AcceptanceCriteria, "- [x] the fix holds") {
+		t.Errorf("acceptance = %q, want the seat's ticked box", issue.AcceptanceCriteria)
+	}
+	comments, err := f.agentDB.Comments(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Errorf("the bead carries %d findings, want the seat's one: %+v", len(comments), comments)
+	}
+	escalations, err := beads.ListEscalations(f.agentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("two passes filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+}
+
+// A second raise of one bead's request adds no escalation bead: one open
+// escalation stands for the request, however many passes read the outbox
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndDoesNotFileTheEscalationTwice(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, seatOutboxEscalation(), "")
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end did not finish a seat whose outbox it applied")
+	}
+	// A record the host lost is the case the escalation's own key answers: the
+	// next pass reads the same outbox as unapplied.
+	path, err := appliedSeatOutboxPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the second pass did not finish the same seat")
+	}
+	escalations, err := beads.ListEscalations(f.agentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("two passes filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+}
+
+// A seat that wrote notes but no result.json is reported: the notes are not
+// applied, since nothing names the outcome they belong to, and the copy keeps
+// them (gt-s4gfph).
+func TestNoBeadAccessSeatEndNotesWithoutAResultAreReported(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, "", "the seat's note\n")
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end kept a seat whose outbox holds no result.json")
+	}
+	if !strings.Contains(logs.String(), "holds notes.md but no result.json") {
+		t.Errorf("log %q does not report the notes it applied nothing from", logs.String())
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue.Notes != "" {
+		t.Errorf("notes = %q, want the bead untouched", issue.Notes)
+	}
+}
+
+// An outbox the validator refuses is reported and not applied, and it does not
+// keep the seat: the sandbox holds the same bytes, so a later pass would refuse
+// them the same way, and the copy stays on the host for an operator
+// (gt-s4gfph).
+func TestNoBeadAccessSeatEndRefusedOutboxIsNotApplied(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, `{"bead_id":"gt-someone-else","status":"done"}`, "")
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end kept a seat whose outbox belongs to another bead")
+	}
+	if !strings.Contains(logs.String(), "its outbox is not applied") {
+		t.Errorf("log %q does not report the refused outbox", logs.String())
+	}
+	escalations, err := beads.ListEscalations(f.agentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escalations) != 0 {
+		t.Errorf("the refused outbox filed %d escalation beads, want none", len(escalations))
+	}
+}
+
+// An outbox the host cannot read keeps the seat: nothing is applied from a read
+// that failed, and the sandbox stays with the copy (gt-s4gfph).
+func TestNoBeadAccessSeatEndUnreadableOutboxKeepsTheSeat(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	seedSeatBead(t, f, "")
+	// result.json is a directory, so the read fails in a way that is not
+	// "the seat wrote none".
+	dir := session.SandboxOutboxCopyDir(f.town, endRig, endPolecat)
+	if err := os.MkdirAll(filepath.Join(dir, "result.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end removed a seat whose outbox it could not read")
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed, want it kept")
+	}
+	path, err := keptSandboxSeatPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := readKeptSandboxSeatRecord(path)
+	if err != nil {
+		t.Fatalf("reading the kept record: %v", err)
+	}
+	if !strings.HasPrefix(kept.Reason, outboxNotReadReason) {
+		t.Errorf("kept record reason = %q, want %q", kept.Reason, outboxNotReadReason)
 	}
 }
