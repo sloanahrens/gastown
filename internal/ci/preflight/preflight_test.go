@@ -44,6 +44,7 @@ func options(t *testing.T) (preflight.Options, *strings.Builder) {
 	return preflight.Options{
 		LookPath:    lookPath(installed()),
 		Version:     func() (string, error) { return preflight.JQVersion, nil },
+		PinCheck:    func() error { return nil },
 		SHA:         green,
 		MangoURL:    mangoURL,
 		MangoCommit: mango,
@@ -318,6 +319,83 @@ func TestCheckRefusesAnUnwiredCheck(t *testing.T) {
 				t.Errorf("Check error = %q, want it to contain %q", err, field.want)
 			}
 		})
+	}
+}
+
+// TestImagePinDurabilityCheckRefuses drives every pin-check refusal: a nil
+// seam, a pinned image with a dead layer and a registry that did not answer
+// all stop the job, and none of them hands the later steps a commit to build.
+func TestImagePinDurabilityCheckRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		check func() error
+		want  []string
+	}{
+		{
+			name:  "no pin check",
+			check: nil,
+			want:  []string{"no image pin check is wired"},
+		},
+		{
+			name: "a dead layer",
+			check: func() error {
+				return errors.New("the pinned image dolthub/dolt-sql-server:2.3.2@sha256:38d5 has layers the registry no longer serves: sha256:2b50 (linux/arm64 layer 2)")
+			},
+			want: []string{"dolthub/dolt-sql-server:2.3.2@sha256:38d5", "sha256:2b50 (linux/arm64 layer 2)"},
+		},
+		{
+			name: "a registry that did not answer",
+			check: func() error {
+				return errors.New("the pinned image data.forgejo.org/oci/docker@sha256:7bf7 cannot be checked: the registry answered HTTP 503")
+			},
+			want: []string{"cannot be checked", "HTTP 503"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			o, env := options(t)
+			o.PinCheck = tc.check
+
+			_, err := preflight.Check(o)
+			if err == nil {
+				t.Fatalf("Check passed with %s", tc.name)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Check error = %q, want it to contain %q", err, want)
+				}
+			}
+			if env.Len() != 0 {
+				t.Errorf("Check wrote %q for a pin it refused", env.String())
+			}
+		})
+	}
+}
+
+// TestImagePinDurabilityPinCheckRunsAfterTheToolChecks holds the order the pin
+// check is placed in: a runner that cannot build is refused before a registry
+// is asked anything.
+func TestImagePinDurabilityPinCheckRunsAfterTheToolChecks(t *testing.T) {
+	t.Parallel()
+	o, env := options(t)
+	asked := false
+	o.PinCheck = func() error {
+		asked = true
+		return nil
+	}
+	o.LookPath = lookPath([]string{"jq", "go"})
+
+	_, err := preflight.Check(o)
+	if err == nil {
+		t.Fatal("Check passed with tools missing")
+	}
+	if asked {
+		t.Errorf("Check asked the registry with tools missing: %v", err)
+	}
+	if env.Len() != 0 {
+		t.Errorf("Check wrote %q with tools missing", env.String())
 	}
 }
 
