@@ -231,7 +231,9 @@ func (r escalateRun) inFileMode() bool {
 // replaces an earlier one is decoded by outbox.Validate first, with the seat's
 // notes.md, and the bytes about to be written are validated the same way, so a
 // request the host would refuse is reported here instead of being written for
-// it to drop.
+// it to drop. The bytes come from outbox.Encode, the one encoder of the shape
+// Validate decodes, so the fields an earlier seat write recorded — a title or
+// an acceptance block from `gt bead update` among them — survive the request.
 func (r escalateRun) escalateToOutbox(description, severity string) error {
 	dir := r.dataDir()
 	outboxDir := filepath.Join(dir, seatOutboxDirName)
@@ -264,7 +266,8 @@ func (r escalateRun) escalateToOutbox(description, severity string) error {
 		existing = decoded
 	}
 
-	next := encodeSeatResult(beadID, existing, escalationRequestText(description, severity, r.reason))
+	existing.Escalation = &outbox.Escalation{Text: escalationRequestText(description, severity, r.reason)}
+	next := outbox.Encode(beadID, existing)
 	if _, err := outbox.Validate(next, notes, beadID); err != nil {
 		return fmt.Errorf("gt escalate: the request does not validate, so it is not written: %w", err)
 	}
@@ -296,35 +299,6 @@ func escalationRequestText(description, severity, reason string) string {
 		text += "\nReason: " + reason
 	}
 	return text
-}
-
-// seatResultWire is result.json as the seat writes it: the shape
-// outbox.Validate decodes, which is the only shape the host applies.
-type seatResultWire struct {
-	BeadID      string             `json:"bead_id"`
-	Status      outbox.Status      `json:"status"`
-	TickedBoxes []int              `json:"ticked_boxes"`
-	Findings    []string           `json:"findings"`
-	Escalation  *outbox.Escalation `json:"escalation"`
-}
-
-// encodeSeatResult is the seat's result.json for beadID: what existing carries,
-// with text as its escalation request. Every field is a string or an int list,
-// so the encoding cannot fail; should it ever return nothing, the
-// outbox.Validate call that follows refuses the request and writes nothing.
-func encodeSeatResult(beadID string, existing outbox.Result, text string) []byte {
-	status := existing.Status
-	if status == "" {
-		status = outbox.StatusDeferred
-	}
-	raw, _ := json.MarshalIndent(seatResultWire{
-		BeadID:      beadID,
-		Status:      status,
-		TickedBoxes: existing.Ticked,
-		Findings:    existing.Findings,
-		Escalation:  &outbox.Escalation{Text: text},
-	}, "", "  ")
-	return append(raw, '\n')
 }
 
 // taskFileBeadID is the bead id the seat's task file names in its heading,

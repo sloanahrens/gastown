@@ -13,6 +13,8 @@ import (
 type Store interface {
 	// AppendNotes appends text to beadID's notes.
 	AppendNotes(beadID, text string) error
+	// SetTitle replaces beadID's title.
+	SetTitle(beadID, title string) error
 	// SetAcceptance replaces beadID's acceptance text.
 	SetAcceptance(beadID, text string) error
 	// AddComment adds a comment from author to beadID.
@@ -25,9 +27,10 @@ type Store interface {
 }
 
 // Apply writes the parts of r that change the bead through store: the seat's
-// notes, the acceptance boxes it ticked, its findings, a deferred status and
-// its escalation request. actor is the seat's name, the author every finding is
-// commented under and the one the escalation is raised from.
+// title, its notes, its acceptance (the block it replaced or the boxes it
+// ticked), its findings, a deferred status and its escalation request. actor is
+// the seat's name, the author every finding is commented under and the one the
+// escalation is raised from.
 //
 // A deferred result sets the bead's status to deferred, after the other writes.
 // A done result sets no status: the landing path owns the status of a task it
@@ -41,27 +44,41 @@ type Store interface {
 // which Validate does not return, is refused into that joined error with no
 // status written: a hand-built Result must not skip the status and read as a
 // clean run. An escalation whose text is empty is refused the same way, with no
-// escalation raised.
+// escalation raised, and so is a title or an acceptance that is empty: either
+// would replace what the bead has with nothing.
 //
-// r.Ticked holds zero-based indexes into the checkbox lines of acceptance, read
-// in order by beads.AcceptanceBoxes: an index outside that list is an error and
-// no acceptance text is written for it. The acceptance is written only when
-// ticking changed it, and a note only when r.Notes is not empty.
+// r.Acceptance, when set, is the block that replaces the bead's, and r.Ticked
+// holds zero-based indexes into it. When it is not set the ticks index into
+// acceptance, the block the host read. The indexes are read in order by
+// beads.AcceptanceBoxes: an index outside that list is an error and no
+// acceptance text is written for it. The acceptance is written only when the
+// replacement or the ticks change the block the host read, and a note only when
+// r.Notes is not empty.
 func Apply(store Store, beadID, actor, acceptance string, r Result) error {
 	var errs []error
+	if r.Title != nil {
+		if strings.TrimSpace(*r.Title) == "" {
+			errs = append(errs, fmt.Errorf("outbox: set title of %s: the result's title is empty", beadID))
+		} else if err := store.SetTitle(beadID, *r.Title); err != nil {
+			errs = append(errs, fmt.Errorf("outbox: set title of %s: %w", beadID, err))
+		}
+	}
 	if r.Notes != "" {
 		if err := store.AppendNotes(beadID, r.Notes); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: append notes to %s: %w", beadID, err))
 		}
 	}
-	if len(r.Ticked) > 0 {
-		updated, err := ticked(acceptance, r.Ticked)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("outbox: tick acceptance of %s: %w", beadID, err))
-		} else if updated != acceptance {
-			if err := store.SetAcceptance(beadID, updated); err != nil {
-				errs = append(errs, fmt.Errorf("outbox: set acceptance of %s: %w", beadID, err))
-			}
+	block := acceptance
+	if r.Acceptance != nil {
+		block = *r.Acceptance
+	}
+	if r.Acceptance != nil && strings.TrimSpace(block) == "" {
+		errs = append(errs, fmt.Errorf("outbox: set acceptance of %s: the result's acceptance is empty, so the criteria are not replaced", beadID))
+	} else if updated, err := ticked(block, r.Ticked); err != nil {
+		errs = append(errs, fmt.Errorf("outbox: tick acceptance of %s: %w", beadID, err))
+	} else if updated != acceptance {
+		if err := store.SetAcceptance(beadID, updated); err != nil {
+			errs = append(errs, fmt.Errorf("outbox: set acceptance of %s: %w", beadID, err))
 		}
 	}
 	for i, finding := range r.Findings {
