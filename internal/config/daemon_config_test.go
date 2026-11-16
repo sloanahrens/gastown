@@ -752,6 +752,99 @@ func TestHMSyncIntervalDuration(t *testing.T) {
 	}
 }
 
+// TestDeepSeekPatrolConfigRefusesWhatThePatrolCannotActOn: the block decodes as
+// written, and an interval the patrol cannot schedule or a key_file it cannot
+// read is an error when the document is decoded rather than the default later.
+func TestDeepSeekPatrolConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
+	t.Parallel()
+
+	var cfg PatrolsConfig
+	design := `{"deepseek_balance": {"enabled": true, "interval": "45m", "key_file": "/run/k/deepseek.env"}}`
+	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
+		t.Fatalf("the design's block does not decode: %v", err)
+	}
+	db := cfg.DeepSeekBalance
+	if db == nil || !db.Enabled || db.Interval != "45m" || db.KeyFile != "/run/k/deepseek.env" {
+		t.Fatalf("decoded %+v, want the block as written", db)
+	}
+
+	bad := map[string]string{
+		"not an object":                `{"deepseek_balance": "on"}`,
+		"unknown key":                  `{"deepseek_balance": {"enable": true}}`,
+		"not a duration":               `{"deepseek_balance": {"interval": "every so often"}}`,
+		"an interval under floor":      `{"deepseek_balance": {"interval": "20s"}}`,
+		"a relative key_file":          `{"deepseek_balance": {"key_file": "deepseek.env"}}`,
+		"an interval that is a number": `{"deepseek_balance": {"interval": 600}}`,
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Fatalf("%s decoded without an error: %+v", name, p.DeepSeekBalance)
+			}
+		})
+	}
+}
+
+// TestDeepSeekPatrolIntervalAndKeyFile: an absent block reads the 10m default
+// and the pod's mount path, a set block reads its own values, and a value the
+// patrol cannot act on is refused with its key named.
+func TestDeepSeekPatrolIntervalAndKeyFile(t *testing.T) {
+	t.Parallel()
+	def, err := time.ParseDuration(DeepSeekBalanceDefaultInterval)
+	if err != nil {
+		t.Fatalf("DeepSeekBalanceDefaultInterval %q does not parse: %v", DeepSeekBalanceDefaultInterval, err)
+	}
+	for _, tt := range []struct {
+		name        string
+		block       *DeepSeekBalanceConfig
+		wantEvery   time.Duration
+		wantKeyFile string
+	}{
+		{"no block", nil, def, DeepSeekBalanceDefaultKeyFile},
+		{"an empty block", &DeepSeekBalanceConfig{}, def, DeepSeekBalanceDefaultKeyFile},
+		{"a set block", &DeepSeekBalanceConfig{Interval: "2h", KeyFile: "/run/k/deepseek.env"}, 2 * time.Hour, "/run/k/deepseek.env"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			every, err := tt.block.IntervalDuration()
+			if err != nil || every != tt.wantEvery {
+				t.Errorf("IntervalDuration = %v, %v; want %v and no error", every, err, tt.wantEvery)
+			}
+			keyFile, err := tt.block.ParseKeyFile()
+			if err != nil || keyFile != tt.wantKeyFile {
+				t.Errorf("ParseKeyFile = %q, %v; want %q and no error", keyFile, err, tt.wantKeyFile)
+			}
+		})
+	}
+	for _, tt := range []struct{ name, interval string }{
+		{"unparseable", "every so often"},
+		{"zero", "0s"},
+		{"under the floor", "20s"},
+	} {
+		t.Run("refused interval: "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			every, err := (&DeepSeekBalanceConfig{Interval: tt.interval}).IntervalDuration()
+			if err == nil || every != 0 || !strings.Contains(err.Error(), "patrols.deepseek_balance.interval") {
+				t.Errorf("IntervalDuration(%q) = %v, %v; want a refusal naming the key", tt.interval, every, err)
+			}
+		})
+	}
+	for _, tt := range []struct{ name, keyFile string }{
+		{"relative", "deepseek.env"},
+		{"dot-relative", "./deepseek.env"},
+	} {
+		t.Run("refused key_file: "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := (&DeepSeekBalanceConfig{KeyFile: tt.keyFile}).ParseKeyFile()
+			if err == nil || got != "" || !strings.Contains(err.Error(), "patrols.deepseek_balance.key_file") {
+				t.Errorf("ParseKeyFile(%q) = %q, %v; want a refusal naming the key", tt.keyFile, got, err)
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn: the design's block
 // decodes as written, and a value the patrol cannot act on is an error when the
 // document is decoded rather than a default later. A mistyped mode must not

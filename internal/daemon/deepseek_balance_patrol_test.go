@@ -474,8 +474,9 @@ func TestDeepSeekPatrolNoKeyReaderRefuses(t *testing.T) {
 	}
 }
 
-// TestDeepSeekPatrolConfigDecode: the block's defaults, and the values the
-// strict decoder refuses rather than reading as the default.
+// TestDeepSeekPatrolConfigDecode: the block's defaults and the values the
+// strict decoder refuses rather than reading as the default. The decoder is the
+// config kernel's, so this drives the daemon's own reading of a decoded block.
 func TestDeepSeekPatrolConfigDecode(t *testing.T) {
 	t.Parallel()
 	block := func(body string) string {
@@ -495,10 +496,8 @@ func TestDeepSeekPatrolConfigDecode(t *testing.T) {
 		{"a configured key file", block(`{"enabled":true,"key_file":"/run/k/deepseek.env"}`), 10 * time.Minute, "/run/k/deepseek.env", ""},
 		{"an empty key file", block(`{"enabled":true,"key_file":""}`), 10 * time.Minute, agentconfig.DeepSeekBalanceDefaultKeyFile, ""},
 		{"an interval under the floor", block(`{"enabled":true,"interval":"20s"}`), 0, "", "patrols.deepseek_balance.interval"},
-		{"an interval that does not parse", block(`{"enabled":true,"interval":"soon"}`), 0, "", "patrols.deepseek_balance.interval"},
-		{"an interval that is not a string", block(`{"enabled":true,"interval":5}`), 0, "", "patrols.deepseek_balance"},
-		{"a relative key file", block(`{"enabled":true,"key_file":"deepseek.env"}`), 0, "", "want an absolute path"},
 		{"an unknown key", block(`{"enabled":true,"fetch_every":"1m"}`), 0, "", "patrols.deepseek_balance"},
+		{"a relative key file", block(`{"enabled":true,"key_file":"deepseek.env"}`), 0, "", "want an absolute path"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
