@@ -6,11 +6,15 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/omlessons"
@@ -30,8 +34,10 @@ func omLessonsTestDaemon(t *testing.T, logged io.Writer) *Daemon {
 
 // TestReworkProgramOmLessonsPatrolStartsOnlyWhenEnabled: the patrol's own
 // ticker exists only when daemon.patrols.om_lessons.enabled is true, and it is
-// off by default. A configured interval it cannot schedule starts no ticker and
-// names the key once.
+// off by default. It fires on a check cadence inside the week, never on the
+// 168h run interval, since a ticker set to the interval restarts its countdown
+// on every daemon start (gt-ima2). A configured interval it cannot schedule
+// starts no ticker and names the key once.
 func TestReworkProgramOmLessonsPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	t.Parallel()
 	var intervals []time.Duration
@@ -67,8 +73,8 @@ func TestReworkProgramOmLessonsPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	if channel == nil || stop == nil {
 		t.Fatal("an enabled om_lessons started no ticker")
 	}
-	if len(intervals) != 1 || intervals[0] != 168*time.Hour {
-		t.Errorf("the ticker asks for an interval of %v, want the 168h default", intervals)
+	if want := shortPatrolCheckTick(168 * time.Hour); len(intervals) != 1 || intervals[0] != want {
+		t.Errorf("the ticker asks for an interval of %v, want the %v check cadence of the 168h default", intervals, want)
 	}
 	stop()
 	if stops != 1 {
@@ -82,8 +88,8 @@ func TestReworkProgramOmLessonsPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	if channel == nil || stop == nil {
 		t.Fatal("an enabled om_lessons with an interval started no ticker")
 	}
-	if len(intervals) != 2 || intervals[1] != 48*time.Hour {
-		t.Errorf("the ticker asks for an interval of %v, want the configured 48h", intervals)
+	if want := shortPatrolCheckTick(48 * time.Hour); len(intervals) != 2 || intervals[1] != want {
+		t.Errorf("the ticker asks for an interval of %v, want the %v check cadence of the configured 48h", intervals, want)
 	}
 	stop()
 
@@ -112,6 +118,187 @@ func TestReworkProgramOmLessonsPatrolStartsOnlyWhenEnabled(t *testing.T) {
 		t.Fatal("the patrol started no ticker without a ticker seam")
 	}
 	stop()
+}
+
+// omLessonsCountingDaemon builds a daemon over townRoot whose run seam counts
+// its passes, on the clock the caller gives so a test can move the week on.
+func omLessonsCountingDaemon(t *testing.T, townRoot string, clk clockwork.Clock, logged io.Writer, calls *atomic.Int32) *Daemon {
+	t.Helper()
+	d := omLessonsTestDaemon(t, logged)
+	d.config.TownRoot = townRoot
+	d.clock = clk
+	d.omLessonsRun = func(context.Context, time.Time) ([]omlessons.Proposal, error) {
+		calls.Add(1)
+		return nil, nil
+	}
+	t.Cleanup(d.forgetOmLessonsLastRun)
+	return d
+}
+
+// omLessonsOneCheck drives one tick and waits for the pass it started.
+func omLessonsOneCheck(t *testing.T, d *Daemon) {
+	t.Helper()
+	d.startOmLessonsTick()
+	d.omLessonsCycles.Wait()
+}
+
+// TestReworkProgramOmLessonsAWeekRecordSkipsTheRestOfTheWeek: a pass records
+// the week it ran, so a later check inside the week does not call the run seam
+// again — on the same daemon, and on a fresh patrol value over the same town,
+// which can only know the week was had from the record it persisted.
+func TestReworkProgramOmLessonsAWeekRecordSkipsTheRestOfTheWeek(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	fake := clockwork.NewFakeClockAt(base)
+	var calls atomic.Int32
+
+	first := omLessonsCountingDaemon(t, t.TempDir(), fake, io.Discard, &calls)
+	omLessonsOneCheck(t, first)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("the first check called the run seam %d times, want the week's pass", got)
+	}
+
+	fake.Advance(2 * time.Hour)
+	omLessonsOneCheck(t, first)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("a check inside the week ran the pass again (%d calls), want the recorded week to hold", got)
+	}
+
+	restarted := omLessonsCountingDaemon(t, first.config.TownRoot, fake, io.Discard, &calls)
+	omLessonsOneCheck(t, restarted)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("a restarted patrol ran the week again (%d calls), want the persisted record to hold", got)
+	}
+}
+
+// TestReworkProgramOmLessonsNextWeekRunsAgain: a check a full interval after
+// the recorded pass runs the seam again.
+func TestReworkProgramOmLessonsNextWeekRunsAgain(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	fake := clockwork.NewFakeClockAt(base)
+	var calls atomic.Int32
+	d := omLessonsCountingDaemon(t, t.TempDir(), fake, io.Discard, &calls)
+
+	omLessonsOneCheck(t, d)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("the first check called the run seam %d times, want the week's pass", got)
+	}
+
+	fake.Advance(168 * time.Hour)
+	omLessonsOneCheck(t, d)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("a check in the next week called the run seam %d times, want the week's pass run again", got)
+	}
+}
+
+// TestReworkProgramOmLessonsBrokenRecordWarnsAndRuns: a last-run record that
+// cannot be read runs the week and says so, and the pass it ran keeps the check
+// from repeating the week — the record it wrote replaces a corrupt file, and its
+// in-memory completion holds when the write cannot land at all (gt-4nqej).
+func TestReworkProgramOmLessonsBrokenRecordWarnsAndRuns(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a corrupt record", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		var calls atomic.Int32
+		d := omLessonsCountingDaemon(t, t.TempDir(), nil, &logged, &calls)
+
+		path := patrolLastRunPath(d.config.TownRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("make the daemon directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+			t.Fatalf("write a corrupt last-run record: %v", err)
+		}
+
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != 1 {
+			t.Errorf("a check over a corrupt record called the run seam %d times, want the pass run", got)
+		}
+		if !strings.Contains(logged.String(), "WARNING: last-run state unreadable") {
+			t.Errorf("a corrupt record logged %q, want a WARNING naming the unreadable state", logged.String())
+		}
+
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != 1 {
+			t.Errorf("the check after the pass ran the week again (%d calls), want the repaired record to hold", got)
+		}
+	})
+
+	t.Run("a record path that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		var calls atomic.Int32
+		townRoot := t.TempDir()
+		if err := os.WriteFile(filepath.Join(townRoot, "daemon"), []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("block the daemon directory: %v", err)
+		}
+		d := omLessonsCountingDaemon(t, townRoot, nil, &logged, &calls)
+
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != 1 {
+			t.Errorf("a check over an unreadable record called the run seam %d times, want the pass run", got)
+		}
+		if !strings.Contains(logged.String(), "WARNING: last-run state unreadable") {
+			t.Errorf("an unreadable record logged %q, want a WARNING naming the unreadable state", logged.String())
+		}
+
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != 1 {
+			t.Errorf("the check after the pass ran the week again (%d calls), want the in-memory completion to hold", got)
+		}
+	})
+}
+
+// TestReworkProgramOmLessonsTickRefusesWhatItCannotSchedule: a tick on an
+// inactive patrol, or on an interval the patrol cannot schedule, runs no pass
+// and names the key — rather than running on a cadence the town never asked for.
+func TestReworkProgramOmLessonsTickRefusesWhatItCannotSchedule(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	counting := func(context.Context, time.Time) ([]omlessons.Proposal, error) {
+		calls.Add(1)
+		return nil, nil
+	}
+
+	t.Run("inactive", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		unconfigured := &Daemon{
+			config: &Config{TownRoot: t.TempDir()},
+			logger: log.New(&logged, "", 0),
+		}
+		unconfigured.omLessonsRun = counting
+		omLessonsOneCheck(t, unconfigured)
+		if got := calls.Load(); got != 0 {
+			t.Errorf("a tick on an inactive patrol called the run seam %d times, want none", got)
+		}
+		// A tick can outlive the reload that turned the patrol off, and a patrol
+		// the town turned off reads no record and prints no diagnosis.
+		if logged.Len() != 0 {
+			t.Errorf("a tick on an inactive patrol logged %q, want nothing", logged.String())
+		}
+	})
+
+	t.Run("an interval under the floor", func(t *testing.T) {
+		t.Parallel()
+		var logged bytes.Buffer
+		d := omLessonsTestDaemon(t, &logged)
+		d.omLessonsRun = counting
+		d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			OmLessons: &agentconfig.OmLessonsConfig{Enabled: true, Interval: "30m"},
+		}}
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != 0 {
+			t.Errorf("a tick on an unschedulable interval called the run seam %d times, want none", got)
+		}
+		if !strings.Contains(logged.String(), "patrols.om_lessons.interval") {
+			t.Errorf("a tick on an unschedulable interval logged %q, want the interval key named", logged.String())
+		}
+	})
 }
 
 // TestReworkProgramOmLessonsEachTickCallsTheRunSeamOnce: one started tick calls
