@@ -2,10 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"io"
 	"log"
-	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -95,10 +96,10 @@ func (c dropReadyLabelClient) Update(id string, opts beads.UpdateOptions) error 
 	return c.Client.Update(id, opts)
 }
 
-// A ready write the store reported but did not persist is reported by the seat
-// end: the seat's block is written, and the missing label is the failure the
-// log names (gt-qk3ppr).
-func TestNoBeadAccessSeatEndReportsAReadyLabelThatDidNotPersist(t *testing.T) {
+// A ready write the store reported but did not persist keeps the seat: the
+// block is written, the label is not known to be, and a submission nothing
+// picks up is the failure the seat waits on (gt-qk3ppr).
+func TestNoBeadAccessSeatEndKeepsTheSeatForAReadyLabelThatDidNotPersist(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
 	f.seedAgent()
@@ -113,11 +114,14 @@ func TestNoBeadAccessSeatEndReportsAReadyLabelThatDidNotPersist(t *testing.T) {
 	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
 
 	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
-	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
-		t.Fatal("the seat end kept a seat for a label its block was written without")
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end finished a seat whose ready label the write lost")
 	}
 	if !strings.Contains(logs.String(), "does not carry "+land.LabelReadyToLand+" after the write") {
 		t.Errorf("log %q does not report the label the write lost", logs.String())
+	}
+	if !strings.Contains(logs.String(), outboxReadyReason) {
+		t.Errorf("log %q does not name the ready write as the reason the seat is kept", logs.String())
 	}
 }
 
@@ -140,10 +144,10 @@ func (c *unreadableReadyBeadClient) Show(id string) (*beads.Issue, error) {
 	return c.Client.Show(id)
 }
 
-// A bead the store writes and then cannot read back is reported by the seat
-// end: the label is not known to be there, so the submission is not taken as
-// applied (gt-qk3ppr).
-func TestNoBeadAccessSeatEndReportsAReadyWriteItCannotReadBack(t *testing.T) {
+// A bead the store writes and then cannot read back keeps the seat: the label
+// is not known to be there, so the submission is not taken as applied and a
+// later pass makes the write again (gt-qk3ppr).
+func TestNoBeadAccessSeatEndKeepsTheSeatForAReadyWriteItCannotReadBack(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
 	f.seedAgent()
@@ -158,11 +162,14 @@ func TestNoBeadAccessSeatEndReportsAReadyWriteItCannotReadBack(t *testing.T) {
 	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
 
 	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
-	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
-		t.Fatal("the seat end kept a seat for a read-back its block was written before")
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end finished a seat whose ready write it could not read back")
 	}
 	if !strings.Contains(logs.String(), "its outbox is not applied in full") || !strings.Contains(logs.String(), "reading "+endBead+" back") {
 		t.Errorf("log %q does not report the read-back that failed", logs.String())
+	}
+	if !strings.Contains(logs.String(), outboxReadyReason) {
+		t.Errorf("log %q does not name the ready write as the reason the seat is kept", logs.String())
 	}
 }
 
@@ -178,10 +185,10 @@ func (c readyRefusingClient) Update(id string, opts beads.UpdateOptions) error {
 	return c.Client.Update(id, opts)
 }
 
-// A ready write the store refused is reported with the outbox's other failures
-// and leaves the bead unlabelled, rather than reading as a submission
-// (gt-qk3ppr).
-func TestNoBeadAccessSeatEndReportsARefusedReadyWrite(t *testing.T) {
+// A ready write the store refused is reported with the outbox's other failures,
+// leaves the bead unlabelled, and keeps the seat: a submission recorded as
+// applied but never marked ready is one nothing lands (gt-qk3ppr).
+func TestNoBeadAccessSeatEndKeepsTheSeatForARefusedReadyWrite(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
 	f.seedAgent()
@@ -196,11 +203,14 @@ func TestNoBeadAccessSeatEndReportsARefusedReadyWrite(t *testing.T) {
 	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
 
 	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
-	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
-		t.Fatal("the seat end kept a seat whose ready write failed")
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end finished a seat whose ready write it refused")
 	}
 	if !strings.Contains(logs.String(), "its outbox is not applied in full") || !strings.Contains(logs.String(), "dolt unavailable") {
 		t.Errorf("log %q does not report the refused ready write", logs.String())
+	}
+	if !strings.Contains(logs.String(), outboxReadyReason) {
+		t.Errorf("log %q does not name the ready write as the reason the seat is kept", logs.String())
 	}
 	issue, err := f.agentDB.Show(endBead)
 	if err != nil {
@@ -236,9 +246,9 @@ func (c *failOnceReadyReadClient) Show(id string) (*beads.Issue, error) {
 	return c.Client.Show(id)
 }
 
-// A pass that could not record its outbox as applied applies the same outbox
-// again, and the block it already wrote is not appended a second time: the bead
-// carries one READY TO LAND block for the submission (gt-qk3ppr).
+// A seat kept because its ready write could not be read back is offered again,
+// and the retry it drives writes no second block: the bead carries one READY TO
+// LAND block for the submission and the label it was missing (gt-qk3ppr).
 func TestNoBeadAccessSeatEndReadyRetryAppendsOneBlock(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
@@ -246,26 +256,15 @@ func TestNoBeadAccessSeatEndReadyRetryAppendsOneBlock(t *testing.T) {
 	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
 	var logs strings.Builder
 	f.host.d.logger = log.New(&logs, "", 0)
-	f.host.openRecoveryBeads = func([]string) beads.Client {
-		return &failOnceReadyReadClient{Client: f.agentDB}
-	}
+	failOnce := &failOnceReadyReadClient{Client: f.agentDB}
+	f.host.openRecoveryBeads = func([]string) beads.Client { return failOnce }
 
-	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
-		t.Fatalf("first pass kept the seat: %s", reason)
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); !strings.HasPrefix(reason, outboxReadyReason) {
+		t.Fatalf("first pass reason = %q, want it kept for %q", reason, outboxReadyReason)
 	}
 	if !strings.Contains(logs.String(), "reading "+endBead+" back") {
 		t.Fatalf("log %q does not report the read-back the first pass failed", logs.String())
 	}
-	// The applied record a pass writes is unreadable: the documented state in
-	// which the next pass applies the same outbox again.
-	path, err := appliedSeatOutboxPath(f.town, endRig, endPolecat)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("{not a record"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f.host.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
 	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
 		t.Fatalf("retry pass kept the seat: %s", reason)
 	}
@@ -275,6 +274,58 @@ func TestNoBeadAccessSeatEndReadyRetryAppendsOneBlock(t *testing.T) {
 	}
 	if got := strings.Count(issue.Notes, land.ReadyNoteMarker); got != 1 {
 		t.Errorf("bead notes carry %d READY TO LAND blocks, want the one the submission wrote: %q", got, issue.Notes)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Errorf("bead labels = %v, want %s after the retry", issue.Labels, land.LabelReadyToLand)
+	}
+}
+
+// refusedOnceReadyClient refuses the first ready write and answers every later
+// one: the store of a pass whose write the bead never got.
+type refusedOnceReadyClient struct {
+	beads.Client
+	refused bool
+}
+
+func (c *refusedOnceReadyClient) Update(id string, opts beads.UpdateOptions) error {
+	if len(opts.AddLabels) > 0 && !c.refused {
+		c.refused = true
+		return errors.New("dolt unavailable")
+	}
+	return c.Client.Update(id, opts)
+}
+
+// A seat kept because the store refused the ready write is offered again, and
+// the retry it drives writes the block and the label the bead never got: the
+// submission is not dropped with the seat (gt-qk3ppr).
+func TestNoBeadAccessSeatEndReadyRetryWritesARefusedBlock(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
+	f.host.d.logger = log.New(io.Discard, "", 0)
+	refusedOnce := &refusedOnceReadyClient{Client: f.agentDB}
+	f.host.openRecoveryBeads = func([]string) beads.Client { return refusedOnce }
+
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); !strings.HasPrefix(reason, outboxReadyReason) {
+		t.Fatalf("first pass reason = %q, want it kept for %q", reason, outboxReadyReason)
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(issue.Notes, land.ReadyNoteMarker) || beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Fatalf("the refused first pass wrote a block or label anyway: %q %v", issue.Notes, issue.Labels)
+	}
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+		t.Fatalf("retry pass kept the seat: %s", reason)
+	}
+	issue, err = f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(issue.Notes, land.ReadyNoteMarker); got != 1 {
+		t.Errorf("bead notes carry %d READY TO LAND blocks, want the one the retry wrote: %q", got, issue.Notes)
 	}
 	if !beads.HasLabel(issue, land.LabelReadyToLand) {
 		t.Errorf("bead labels = %v, want %s after the retry", issue.Labels, land.LabelReadyToLand)
@@ -298,9 +349,9 @@ func (c *unreadableBeforeReadyClient) Show(id string) (*beads.Issue, error) {
 }
 
 // A bead the store cannot read before the ready write gets no block: the store
-// refuses rather than appending a block it could not check, and the seat end
-// reports the failure (gt-qk3ppr).
-func TestNoBeadAccessSeatEndReportsABeadItCannotReadBeforeTheReadyWrite(t *testing.T) {
+// refuses rather than appending a block it could not check, and the seat is
+// kept for a later pass to make the write (gt-qk3ppr).
+func TestNoBeadAccessSeatEndKeepsTheSeatForABeadItCannotReadBeforeTheReadyWrite(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
 	seedSeatBead(t, f, "")
@@ -311,8 +362,8 @@ func TestNoBeadAccessSeatEndReportsABeadItCannotReadBeforeTheReadyWrite(t *testi
 		return &unreadableBeforeReadyClient{Client: f.agentDB}
 	}
 
-	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
-		t.Fatalf("the outbox kept the seat for a read it failed: %s", reason)
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); !strings.HasPrefix(reason, outboxReadyReason) {
+		t.Fatalf("applySeatOutbox reason = %q, want it kept for %q", reason, outboxReadyReason)
 	}
 	if !strings.Contains(logs.String(), "reading "+endBead+" before the ready write") {
 		t.Errorf("log %q does not report the read that failed before the write", logs.String())
@@ -323,5 +374,90 @@ func TestNoBeadAccessSeatEndReportsABeadItCannotReadBeforeTheReadyWrite(t *testi
 	}
 	if strings.Contains(issue.Notes, land.ReadyNoteMarker) {
 		t.Errorf("bead notes = %q, want no block written through a bead the store could not read", issue.Notes)
+	}
+}
+
+// A bead whose last block is this submission's, whatever stamp it carries, is
+// not given a second one: the retry writes the label, not another block. A bead
+// whose last block names another head is a different submission and gets this
+// one (gt-qk3ppr).
+func TestNoBeadAccessSeatEndReadyWriteAddsOneBlockPerSubmission(t *testing.T) {
+	t.Parallel()
+	submitted := land.Work{
+		Branch: endBranch, Head: "0123456789abcdef0123456789abcdef01234567",
+		Target: "main", Worker: endPolecat,
+	}
+	stamped, err := time.Parse(time.RFC3339, "2026-11-16T18:40:48Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := land.Work{Branch: endBranch, Head: "fedcba9876543210fedcba9876543210fedcba98", Target: "main", Worker: endPolecat}
+	tests := []struct {
+		name       string
+		notes      string
+		wantBlocks int
+	}{
+		{
+			name:       "a block for this submission with another stamp is not repeated",
+			notes:      land.FormatReadyNote(land.Work{Branch: submitted.Branch, Head: submitted.Head, Target: submitted.Target, Worker: submitted.Worker, Submitted: stamped.Add(time.Hour)}),
+			wantBlocks: 1,
+		},
+		{
+			name:       "a block that is not this submission's does not answer it",
+			notes:      land.FormatReadyNote(elsewhere),
+			wantBlocks: 2,
+		},
+		{
+			name:       "a bead with no block gets this one",
+			wantBlocks: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			seedSeatBead(t, f, "")
+			if tt.notes != "" {
+				if err := f.agentDB.AppendNotes(endBead, tt.notes); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := &seatOutboxStore{bd: f.agentDB}
+			note := land.FormatReadyNote(land.Work{Branch: submitted.Branch, Head: submitted.Head, Target: submitted.Target, Worker: submitted.Worker, Submitted: stamped})
+			if err := store.MarkReadyToLand(endBead, note); err != nil {
+				t.Fatalf("MarkReadyToLand() error = %v, want nil", err)
+			}
+			issue, err := f.agentDB.Show(endBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(issue.Notes, land.ReadyNoteMarker); got != tt.wantBlocks {
+				t.Errorf("bead notes carry %d READY TO LAND blocks, want %d: %q", got, tt.wantBlocks, issue.Notes)
+			}
+			if !beads.HasLabel(issue, land.LabelReadyToLand) {
+				t.Errorf("bead labels = %v, want %s", issue.Labels, land.LabelReadyToLand)
+			}
+		})
+	}
+}
+
+// A note the store cannot read as a READY TO LAND block is refused with nothing
+// written: a block it cannot check against the bead's own is one it must not
+// append (gt-qk3ppr).
+func TestNoBeadAccessSeatEndRefusesAReadyNoteItCannotRead(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	seedSeatBead(t, f, "")
+	store := &seatOutboxStore{bd: f.agentDB}
+	err := store.MarkReadyToLand(endBead, land.ReadyNoteMarker+"\nBranch: "+endBranch)
+	if err == nil || !strings.Contains(err.Error(), land.ReadyNoteMarker) {
+		t.Fatalf("MarkReadyToLand() error = %v, want it to name a block it cannot read", err)
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(issue.Notes, land.ReadyNoteMarker) || beads.HasLabel(issue, land.LabelReadyToLand) {
+		t.Errorf("the refused note was written anyway: %q %v", issue.Notes, issue.Labels)
 	}
 }

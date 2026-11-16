@@ -138,20 +138,24 @@ func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) e
 		}
 	}
 	if r.Submission != nil {
-		if err := markReady(store, beadID, seat, r); err != nil {
+		if err := MarkReady(store, beadID, seat, r); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// markReady marks beadID ready to land for r's submission. It refuses, with the
+// MarkReady marks beadID ready to land for r's submission. It refuses, with the
 // block unwritten, what Validate refuses and what a hand-built Result can still
 // carry: a status other than StatusDone, an empty branch, head or target, and a
 // branch or head git would not accept. The Worker line is seat.Worker, never a
 // value from the outbox. The block is written through the store's ReadyStore: a
 // store that cannot write it refuses the submission rather than dropping it.
-func markReady(store Store, beadID string, seat Seat, r Result) error {
+//
+// Apply calls it for its last write. A host that recorded an earlier pass as
+// having left the write undone calls it to make just that one, with the same
+// refusals and the same block (gt-qk3ppr).
+func MarkReady(store Store, beadID string, seat Seat, r Result) error {
 	if err := submissionProblem(r.Submission, r.Status); err != nil {
 		return fmt.Errorf("outbox: mark %s ready to land: %w", beadID, err)
 	}
