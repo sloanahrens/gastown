@@ -628,6 +628,10 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 	if err != nil {
 		return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 	}
+	deepSeekBalanceKey, err := deepSeekBalanceKeyConfigured(f.configDir, d.lstat)
+	if err != nil {
+		return k8sdaemon.Values{}, imagevalues.Values{}, "", err
+	}
 	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
 	hmConfig := false
 	if !f.rehearsal {
@@ -647,6 +651,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		Rehearsal:               f.rehearsal,
 		Secrets:                 secrets.Files,
 		CloudCheckKey:           cloudCheckKey,
+		DeepSeekBalanceKey:      deepSeekBalanceKey,
 		HMConfig:                hmConfig,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
@@ -729,6 +734,24 @@ func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, 
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("the cloud check's key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
+	}
+	return true, nil
+}
+
+// deepSeekBalanceKeyConfigured reports whether the operator's config directory
+// holds the deepseek.env file the gt-deepseek-balance Secret is created from.
+// The patrol runs without the key (one log line and no fetch), and the pod must
+// not mount a Secret that was never created, so the mount and its create line
+// are rendered only for a configured key. A path that cannot be read for any
+// other reason refuses the render rather than guessing the file away
+// (gt-hfcssw).
+func deepSeekBalanceKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, error)) (bool, error) {
+	path := filepath.Join(configDir, k8sdaemon.DeepSeekBalanceFile)
+	switch _, err := lstat(path); {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("the deepseek balance key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
 	}
 	return true, nil
 }

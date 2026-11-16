@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -432,6 +433,114 @@ func TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent(t *testing.T) {
 	})
 }
 
+// TestTownClusterRenderMountsTheDeepSeekBalanceKeyOnlyWhenPresent: the
+// deepseek_balance patrol reads its key from the file the gt-deepseek-balance
+// Secret mounts, and a town with no key runs unconfigured (one log line, no
+// fetch). The render mounts the Secret and prints its create line only when the
+// operator's config directory holds the deepseek.env file, and it never opens
+// that file, so the key cannot reach a manifest or the output (gt-hfcssw).
+func TestTownClusterRenderMountsTheDeepSeekBalanceKeyOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	render := func(t *testing.T, withKey bool) (body, configDir string, lines []string, output string) {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		f.configDir = t.TempDir()
+		keyPath := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
+		if withKey {
+			// A value no manifest or line may carry.
+			if err := os.WriteFile(keyPath, []byte("DEEPSEEK_API_KEY=sk-fixture-1f2e\n"), 0o600); err != nil {
+				t.Fatalf("writing the key file: %v", err)
+			}
+		}
+		var out bytes.Buffer
+		deps := clusterRenderTestDeps(t, &out)
+		deps.readFile = func(path string) ([]byte, error) {
+			if path == keyPath {
+				t.Errorf("the render read the key file %s, and no agent reads a secret", path)
+			}
+			return os.ReadFile(path)
+		}
+		if err := runClusterRender(deps, f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return deploymentBody(t, f.out), f.configDir, createLines(out.String()), out.String()
+	}
+
+	t.Run("present", func(t *testing.T) {
+		t.Parallel()
+		body, configDir, lines, output := render(t, true)
+		for _, want := range []string{
+			"secretName: " + k8sdaemon.DeepSeekBalanceSecretName,
+			"mountPath: " + k8sdaemon.DeepSeekBalancePath,
+			"subPath: " + k8sdaemon.DeepSeekBalanceKey,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the Deployment does not carry %q:\n%s", want, body)
+			}
+		}
+		want := "kubectl -n gt create secret generic " + k8sdaemon.DeepSeekBalanceSecretName +
+			" --from-file=" + k8sdaemon.DeepSeekBalanceKey + "=" + filepath.Join(configDir, k8sdaemon.DeepSeekBalanceFile)
+		if !slices.Contains(lines, want) {
+			t.Errorf("create lines do not carry %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+		deepSeek := 0
+		for _, line := range lines {
+			if strings.Contains(line, k8sdaemon.DeepSeekBalanceSecretName) {
+				deepSeek++
+			}
+		}
+		if deepSeek != 1 {
+			t.Errorf("the render printed %d create lines for %s, want one:\n%s", deepSeek, k8sdaemon.DeepSeekBalanceSecretName, strings.Join(lines, "\n"))
+		}
+		if strings.Contains(body, "sk-fixture-1f2e") || strings.Contains(output, "sk-fixture-1f2e") {
+			t.Error("the key file's contents reached the Deployment or the render's output")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		body, _, lines, _ := render(t, false)
+		if strings.Contains(body, k8sdaemon.DeepSeekBalanceSecretName) {
+			t.Errorf("the Deployment names %s with no key file in the config directory", k8sdaemon.DeepSeekBalanceSecretName)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, k8sdaemon.DeepSeekBalanceSecretName) {
+				t.Errorf("a create line names %s with no key file in the config directory: %s", k8sdaemon.DeepSeekBalanceSecretName, line)
+			}
+		}
+	})
+
+	t.Run("an unreadable path refuses before a write", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		keyPath := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
+		var out bytes.Buffer
+		deps := clusterRenderTestDeps(t, &out)
+		deps.lstat = func(path string) (fs.FileInfo, error) {
+			if path == keyPath {
+				return nil, fs.ErrPermission
+			}
+			return os.Lstat(path)
+		}
+		err := runClusterRender(deps, f)
+		requireErrorNames(t, err, k8sdaemon.DeepSeekBalanceFile, "cannot be read")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left --out %s, want it untouched", got)
+		}
+	})
+}
+
+// TestTownClusterRenderPinsTheDeepSeekKeyPath: the mount path the render writes
+// is the path the patrol reads when the town names no key_file, so the mount
+// alone configures a pod (gt-hfcssw).
+func TestTownClusterRenderPinsTheDeepSeekKeyPath(t *testing.T) {
+	t.Parallel()
+	if k8sdaemon.DeepSeekBalancePath != config.DeepSeekBalanceDefaultKeyFile {
+		t.Errorf("the pod mounts the key at %s, but the patrol reads %s by default", k8sdaemon.DeepSeekBalancePath, config.DeepSeekBalanceDefaultKeyFile)
+	}
+}
+
 // TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived: hm reads its database
 // and its embedder and reranker from the derived hm config, so a live render
 // mounts the gt-hm-config Secret, sets HM_CONFIG to it, and prints the create
@@ -804,6 +913,19 @@ func TestTownClusterRenderValuesRefuseAnUnreadableInput(t *testing.T) {
 				}
 			},
 			cause: "the cloud check's key file",
+		},
+		{
+			name: "the deepseek balance key file cannot be read",
+			mutate: func(_ *testing.T, f *clusterRenderFlags, d *clusterRenderDeps, _ string) {
+				key := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
+				d.lstat = func(path string) (fs.FileInfo, error) {
+					if path == key {
+						return nil, errors.New("permission denied")
+					}
+					return os.Lstat(path)
+				}
+			},
+			cause: "the deepseek balance key file",
 		},
 		{
 			name: "the derived hm config cannot be read",

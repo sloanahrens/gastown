@@ -1731,6 +1731,96 @@ func TestCloudCheckKeyIsOptional(t *testing.T) {
 	})
 }
 
+// TestDeepSeekBalanceKeySecretIsOptional: the operator's gt-deepseek-balance
+// Secret is mounted at the patrol's default key file, with deepseek.env as its
+// one data key, only when Values.DeepSeekBalanceKey says the operator has the
+// key file; a rehearsal never mounts it, and the key's content never enters a
+// manifest (gt-hfcssw).
+func TestDeepSeekBalanceKeySecretIsOptional(t *testing.T) {
+	t.Parallel()
+	mountAt := func(m Manifests) *VolumeMount {
+		return volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, DeepSeekBalancePath)
+	}
+	volumeNamed := func(m Manifests) (Volume, bool) {
+		for _, v := range m.Deployment.Spec.Template.Spec.Volumes {
+			if v.Name == DeepSeekBalanceSecretName {
+				return v, true
+			}
+		}
+		return Volume{}, false
+	}
+	secretNamed := func(m Manifests) (Secret, bool) {
+		for _, s := range m.Secrets {
+			if s.Metadata.Name == DeepSeekBalanceSecretName {
+				return s, true
+			}
+		}
+		return Secret{}, false
+	}
+
+	t.Run("configured", func(t *testing.T) {
+		t.Parallel()
+		v := goldenValues(t)
+		v.DeepSeekBalanceKey = true
+		m := mustBuild(t, v)
+
+		mount := mountAt(m)
+		if mount == nil {
+			t.Fatalf("the pod does not mount %s", DeepSeekBalancePath)
+		}
+		if mount.Name != DeepSeekBalanceSecretName || mount.SubPath != DeepSeekBalanceKey || !mount.ReadOnly {
+			t.Errorf("the mount = %+v, want a read-only subPath of %s from %s", *mount, DeepSeekBalanceKey, DeepSeekBalanceSecretName)
+		}
+		vol, ok := volumeNamed(m)
+		if !ok || vol.Secret == nil || vol.Secret.SecretName != DeepSeekBalanceSecretName {
+			t.Fatalf("the deepseek balance volume = %+v (present %t), want the %s Secret", vol, ok, DeepSeekBalanceSecretName)
+		}
+		if len(vol.Secret.Items) != 1 || vol.Secret.Items[0].Key != DeepSeekBalanceKey || vol.Secret.Items[0].Path != DeepSeekBalanceKey {
+			t.Errorf("the deepseek balance volume items = %+v, want the %s key", vol.Secret.Items, DeepSeekBalanceKey)
+		}
+		s, ok := secretNamed(m)
+		if !ok {
+			t.Fatalf("the render writes no %s Secret", DeepSeekBalanceSecretName)
+		}
+		if got := s.Metadata.Annotations[SourceFileAnnotation]; got != DeepSeekBalanceFile {
+			t.Errorf("the Secret's source = %q, want %q", got, DeepSeekBalanceFile)
+		}
+		if got, ok := s.StringData[DeepSeekBalanceKey]; !ok || got != "" {
+			t.Errorf("the Secret's %s placeholder = %q (present %t), want an empty string", DeepSeekBalanceKey, got, ok)
+		}
+	})
+
+	t.Run("not configured", func(t *testing.T) {
+		t.Parallel()
+		m := mustBuild(t, goldenValues(t))
+		if mount := mountAt(m); mount != nil {
+			t.Errorf("the pod mounts %s with no configured key", DeepSeekBalancePath)
+		}
+		if _, ok := volumeNamed(m); ok {
+			t.Error("the pod carries the deepseek balance volume with no configured key")
+		}
+		if _, ok := secretNamed(m); ok {
+			t.Error("the render writes the deepseek balance key Secret with no configured key")
+		}
+	})
+
+	t.Run("a rehearsal never mounts it", func(t *testing.T) {
+		t.Parallel()
+		v := rehearsalValues(t)
+		v.DeepSeekBalanceKey = true
+		m := mustBuild(t, v)
+		if mount := mountAt(m); mount != nil {
+			t.Errorf("the rehearsal mounts %s", DeepSeekBalancePath)
+		}
+		if _, ok := volumeNamed(m); ok {
+			t.Error("the rehearsal carries the deepseek balance volume")
+		}
+		if _, ok := secretNamed(m); ok {
+			t.Error("the rehearsal renders the deepseek balance key Secret")
+		}
+	})
+}
+
 // TestHMConfigIsAnOptionalSecretReference: hm reads its database and its
 // embedder and reranker from the one JSON file HM_CONFIG names, so the pod
 // mounts the gt-hm-config Secret's key as that file, and sets HM_CONFIG to it,
