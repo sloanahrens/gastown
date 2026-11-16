@@ -103,8 +103,9 @@ func RunCostSamplesContract(t *testing.T, newClient func(t *testing.T) beads.Cli
 }
 
 // contractCostSamples pins the cost-sample pair; see RunCostSamplesContract.
-// The database may be shared with other cases, so each read passes a since
-// just before base, the time this case writes at.
+// The case needs a store it writes alone — one the run has not written and no
+// other case shares — so it writes at a fixed base and asserts the exact rows
+// and their order back; the since and limit reads pin those filters.
 func contractCostSamples(t *testing.T, s *scope) {
 	ctx := context.Background()
 	base := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
@@ -213,8 +214,9 @@ func RunUsageRecordsContract(t *testing.T, newClient func(t *testing.T) beads.Cl
 }
 
 // contractUsageRecords pins the usage-record pair; see RunUsageRecordsContract.
-// The database may be shared with other cases, so each read passes a since just
-// before base, the time this case builds its rows at.
+// The case needs a store it writes alone — one the run has not written and no
+// other case shares — so it builds its rows at a fixed base and asserts the
+// exact rows and their order back; the since and limit reads pin those filters.
 func contractUsageRecords(t *testing.T, s *scope) {
 	ctx := context.Background()
 	base := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
