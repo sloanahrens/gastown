@@ -54,17 +54,24 @@ func imagePairOf(v imagevalues.Values) ImagePair {
 // back. Both are written before the service changes, so a swap that stops
 // partway leaves the pair to restore on record. For a daemon that runs as a
 // pod, Previous is the pair its Deployment ran, read from the cluster, and names
-// no commit: a Deployment carries the two images and no build.
+// no commit: a Deployment carries the two images and no build. Refused is the
+// pair a pre-swap check refused and RefusedReason the failure it named; a later
+// install that succeeds clears both.
 type ImageRecord struct {
-	V        int       `json:"v"`
-	Current  ImagePair `json:"current"`
-	Previous ImagePair `json:"previous"`
+	V             int       `json:"v"`
+	Current       ImagePair `json:"current"`
+	Previous      ImagePair `json:"previous"`
+	Refused       ImagePair `json:"refused,omitempty"`
+	RefusedReason string    `json:"refused_reason,omitempty"`
 }
 
-// The checks a digest install runs after the swap, named in a RollbackRecord.
-// The first two are the rollout wait: the swap must apply and the daemon must
-// report the new commit. The last two are the pair check's digest and tag reads.
+// The checks a digest install names in a failure. CheckPreflight runs before
+// anything is installed or swapped, so it is never in a RollbackRecord: a pair
+// it refuses is never installed, swapped or restored. The rest run after the
+// swap: CheckRollout and CheckVersion are the rollout wait, the last two the
+// pair check's digest and tag reads.
 const (
+	CheckPreflight      = "preflight"
 	CheckRollout        = "rollout"
 	CheckVersion        = "version"
 	CheckRunningDigests = "running-digests"
@@ -324,6 +331,12 @@ type DigestInstaller struct {
 	// fails the install and restores the previous pair, as an unhealthy daemon
 	// does. Nil checks nothing.
 	PairCheck func(ctx context.Context, pair ImagePair) error
+	// PreSwap, when set, runs once the values file, the record and the pair the
+	// daemon runs have been read and before anything changes: the host install,
+	// the record write and the swap. An error refuses the pair: the record keeps
+	// it as refused with the failure named, and nothing is installed, swapped or
+	// restored. Nil checks nothing.
+	PreSwap func(ctx context.Context, target ImagePair) error
 }
 
 // validRecordedPair checks a pair the ledger holds. The zero pair is nothing
@@ -361,7 +374,8 @@ func (d *DigestInstaller) pairHolds(ctx context.Context, pair ImagePair) bool {
 }
 
 // Install validates the values file and its commit, reads the pair the daemon
-// runs now, runs the host install, and moves the daemon to the pair.
+// runs now, runs the pre-swap check, runs the host install, and moves the daemon
+// to the pair.
 func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResult, error) {
 	if err := d.Images.wired(); err != nil {
 		return InstallResult{}, err
@@ -396,6 +410,24 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 		return InstallResult{}, fmt.Errorf("reading the pair the daemon runs now, so a failed install could not be put back; nothing changed: %w", err)
 	}
 
+	// The pre-swap check gates every change the install makes: a pair it
+	// refuses is kept on the record with the failure that named it, and nothing
+	// is installed on the host, swapped or restored.
+	if d.PreSwap != nil {
+		if err := d.PreSwap(ctx, target); err != nil {
+			if ctx.Err() != nil {
+				return InstallResult{}, ctx.Err()
+			}
+			reason := fmt.Sprintf("%s %s: %s", CheckPreflight, pairCheckName(err), err)
+			rec.Refused, rec.RefusedReason = target, reason
+			res := InstallResult{Event: "failed", Exit: 1, Reason: reason}
+			if werr := d.Images.Ledger.Write(rec); werr != nil {
+				res.Reason = reason + "; recording the refused pair failed: " + werr.Error()
+			}
+			return res, nil
+		}
+	}
+
 	res, err := d.Inner.Install(ctx, sha)
 	if err != nil || ClassifyInstall(res) != ResultOK {
 		return res, err
@@ -406,10 +438,18 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 		// commit and the pair check, when wired, holds the pair; otherwise a run
 		// that stopped between the record and the swap left the service behind,
 		// and the swap runs again with the previous pair that record kept.
+		previous = rec.Previous
 		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) && d.pairHolds(ctx, target) {
+			// The install succeeded, so a refusal the record still names is
+			// cleared with the record write the swap path makes below: a pair
+			// the daemon runs must not stay recorded as refused.
+			if rec.Refused != (ImagePair{}) {
+				if err := d.Images.Ledger.Write(ImageRecord{Current: target, Previous: previous}); err != nil {
+					return InstallResult{}, fmt.Errorf("clearing the refused daemon image pair on the record: %w", err)
+				}
+			}
 			return res, nil
 		}
-		previous = rec.Previous
 	}
 
 	// The previous pair is on record before the first change to the service.
