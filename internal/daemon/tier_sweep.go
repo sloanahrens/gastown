@@ -903,7 +903,16 @@ func tierSweepEarlyDue(st tierSweepState, now time.Time) bool {
 // local tier and only the remote images build failed, so the green tip waits
 // for the hourly interval unless this rule re-runs it early (gt-bfvhqt).
 func tierSweepImagesRetryDue(st tierSweepState, now time.Time, imagesFailed bool) bool {
-	if !imagesFailed || st.LastGreenSHA == "" {
+	return imagesFailed && tierSweepImagesRetryRecordDue(st, now)
+}
+
+// tierSweepImagesRetryRecordDue reports whether the record alone still allows
+// an images retry: a green tip, fewer than tierSweepImagesRetryMax retries
+// recorded for it, and tierSweepImagesRetryGap since the last run. The images
+// answer is the other half of tierSweepImagesRetryDue, and a caller asks for it
+// only once this holds.
+func tierSweepImagesRetryRecordDue(st tierSweepState, now time.Time) bool {
+	if st.LastGreenSHA == "" {
 		return false
 	}
 	retries := 0
@@ -917,7 +926,9 @@ func tierSweepImagesRetryDue(st tierSweepState, now time.Time, imagesFailed bool
 }
 
 // tierSweepEarlyCandidates lists the configured rigs whose record passes
-// tierSweepEarlyDue.
+// tierSweepEarlyDue, or whose green commit's images build failed and whose
+// origin/main has moved off that tip so the re-run would sweep new work
+// (gt-heqwuy).
 func (d *Daemon) tierSweepEarlyCandidates(now time.Time) []string {
 	var out []string
 	for _, rig := range tierSweepRigs(d.patrol(), d.getKnownRigs()) {
@@ -925,11 +936,50 @@ func (d *Daemon) tierSweepEarlyCandidates(now time.Time) []string {
 		if err != nil {
 			continue
 		}
-		if tierSweepEarlyDue(st, now) {
+		if tierSweepEarlyDue(st, now) || d.tierSweepImagesRetryWanted(rig, st, now) {
 			out = append(out, rig)
 		}
 	}
 	return out
+}
+
+// tierSweepImagesRetryWanted reports whether rig is listed for an images retry:
+// the record's own conditions hold, the images build at its green tip failed,
+// and origin/main has moved off that tip. The moved tip is the run's own
+// condition, and it is asked here too because a retry at the green tip would
+// rebuild the images that just failed, sweeping nothing new (gt-heqwuy).
+//
+// Only a rig with a failed images build pays for the read: the red reason is
+// settled by the record alone. An origin/main this read cannot resolve lists
+// the rig, so a transient failure defers the decision to the run's own fresh
+// read rather than starving the retry.
+func (d *Daemon) tierSweepImagesRetryWanted(rig string, st tierSweepState, now time.Time) bool {
+	if !tierSweepImagesRetryRecordDue(st, now) {
+		return false
+	}
+	if !d.tierSweepImagesFailedFor(rig, st.LastGreenSHA) {
+		return false
+	}
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig))
+	if _, err := os.Stat(repo); err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), git.RemoteQueryTimeout)
+	defer cancel()
+	sha, err := d.tierSweepMainReader()(ctx, repo)
+	if err != nil {
+		return true
+	}
+	return sha != "" && sha != st.LastGreenSHA
+}
+
+// tierSweepMainReader is the origin/main read the early candidates and the
+// early re-run share: the test seam when one is set, the fetch otherwise.
+func (d *Daemon) tierSweepMainReader() func(context.Context, string) (string, error) {
+	if f := d.tierSweepSeams.mainSHA; f != nil {
+		return f
+	}
+	return tierSweepMainSHA
 }
 
 // tierSweepRedBeadsOpen reports whether rig has a sweep bead that is open or
@@ -953,6 +1003,8 @@ func tierSweepRedBeadsOpen(bd tierSweepBeadStore, rig string) (bool, error) {
 // runTierSweepEarly re-runs the candidate rigs whose red beads have all
 // closed and whose origin/main has moved since their last cycle. A rig that
 // fails either test is left to the normal interval, without a word in the log.
+// A rig listed for a failed images build is held to the same two tests, so the
+// re-run sweeps a tip a fix could have landed on (gt-heqwuy).
 func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 	if d.tierSweepDeferForRestart(now) {
 		return
@@ -971,7 +1023,19 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 			return
 		}
 		state, err := readTierSweepState(d.config.TownRoot, rig)
-		if err != nil || !tierSweepEarlyDue(state, now) {
+		if err != nil {
+			continue
+		}
+		// The record is re-read here because the cycle is what re-runs it: a
+		// red sweep is due by its own record, and a failed images build is due
+		// once its images answer says so. The red-beads and moved-main tests
+		// below are the same for both reasons.
+		redDue := tierSweepEarlyDue(state, now)
+		imagesDue := false
+		if !redDue && tierSweepImagesRetryRecordDue(state, now) {
+			imagesDue = d.tierSweepImagesFailedFor(rig, state.LastGreenSHA)
+		}
+		if !redDue && !imagesDue {
 			continue
 		}
 		bd := d.tierSweepBeads(rig)
@@ -990,13 +1054,9 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if _, err := os.Stat(repo); err != nil {
 			continue
 		}
-		mainSHA := d.tierSweepSeams.mainSHA
-		if mainSHA == nil {
-			mainSHA = tierSweepMainSHA
-		}
 		stepStart := d.clk().Now()
 		d.setTierSweepStep("fetch")
-		sha, err := mainSHA(ctx, repo)
+		sha, err := d.tierSweepMainReader()(ctx, repo)
 		d.logger.Printf("tier_sweep: %s: fetch in %s", rig, d.clk().Now().Sub(stepStart))
 		if err != nil {
 			d.logger.Printf("tier_sweep: %s: cannot read origin/main (%v); deferring the early re-run", rig, err)
@@ -1007,7 +1067,11 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if sha == "" || sha == state.LastGreenSHA || tierSweepTipJudged(state, sha) {
 			continue
 		}
-		d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
+		if redDue {
+			d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
+		} else {
+			d.logger.Printf("tier_sweep: %s: images build failed at the green tip and main moved; re-running now", rig)
+		}
 		if cycle == nil {
 			cycle = d.startDogCycle("tier_sweep")
 		}
