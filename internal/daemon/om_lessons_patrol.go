@@ -90,7 +90,7 @@ func omLessonsPass(sources omLessonsSources) omLessonsRunFunc {
 // with no findings.
 func omLessonsRunFrom(ctx context.Context, at time.Time, sources omLessonsSources) ([]omlessons.Proposal, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("om_lessons: the pass was cancelled before it read anything: %w", err)
+		return nil, fmt.Errorf("om_lessons: the pass was canceled before it read anything: %w", err)
 	}
 	if sources.Records == nil || sources.Rules == nil {
 		return nil, errors.New("om_lessons: the pass has no sources: it needs a review-record reader and a directive-rule reader")

@@ -688,13 +688,13 @@ func TestReworkProgramOmLessonsRunRefusesAnUnreadableInput(t *testing.T) {
 			want: "want at least one day",
 		},
 		{
-			name: "a cancelled pass",
+			name: "a canceled pass",
 			run: func(t *testing.T) ([]omlessons.Proposal, error) {
 				ctx, cancel := context.WithCancel(context.Background())
 				cancel()
 				return omLessonsPass(readable())(ctx, at)
 			},
-			want: "cancelled",
+			want: "canceled",
 		},
 		{
 			name: "the records cannot be read",
