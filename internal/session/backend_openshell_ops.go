@@ -763,8 +763,9 @@ func (b *openshellBackend) copySeatOutbox(rec SandboxRecord) error {
 }
 
 // downloadSeatOutboxFile downloads one outbox file into dest. A download that
-// left no regular file where it was asked to fails here, not later as a reader
-// that finds nothing.
+// left no regular file where it was asked to, or one larger than the copy's
+// cap, fails here, not later as a reader that finds nothing or finds more than
+// the host agreed to hold.
 func (b *openshellBackend) downloadSeatOutboxFile(ctx context.Context, rec SandboxRecord, f sandboxOutboxEntry, dest string) error {
 	if err := b.cli.Download(ctx, rec.Session, f.remote, dest); err != nil {
 		return fmt.Errorf("sandbox %s: copying its outbox file %s out failed: %w", rec.Session, f.name, err)
@@ -775,9 +776,11 @@ func (b *openshellBackend) downloadSeatOutboxFile(ctx context.Context, rec Sandb
 	return nil
 }
 
-// requireSeatOutboxFile reports a download that left no regular file at path.
-// The sandbox chooses what it hands back, so anything else is refused rather
-// than read as the seat's outbox.
+// requireSeatOutboxFile reports a download that left no regular file at path, or
+// one larger than the copy's cap. The sandbox chooses what it hands back, so
+// anything else is refused rather than read as the seat's outbox: the listing
+// admits a file under the cap, and what the download actually wrote is held to
+// the same bound, since the listing's size is only the sandbox's claim.
 func requireSeatOutboxFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -785,6 +788,9 @@ func requireSeatOutboxFile(path string) error {
 	}
 	if !info.Mode().IsRegular() {
 		return errors.New("what the download wrote is not a regular file")
+	}
+	if info.Size() > sandboxOutboxCopyCap {
+		return fmt.Errorf("what the download wrote is %d bytes, more than the %d-byte cap the copy keeps", info.Size(), sandboxOutboxCopyCap)
 	}
 	return nil
 }

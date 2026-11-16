@@ -90,8 +90,9 @@ func outboxCopyDir(b *openshellBackend) string {
 }
 
 // TestNoBeadAccessSeatEndCopiesTheOutboxFilesOut: both outbox files the sandbox
-// holds land on the host, byte for byte, in the copy's own order, and the copy
-// deletes nothing.
+// holds land on the host, byte for byte, in the gateway order a successful copy
+// makes: the listing first, then the two downloads in the copy's own order, and
+// no delete.
 func TestNoBeadAccessSeatEndCopiesTheOutboxFilesOut(t *testing.T) {
 	t.Parallel()
 	fake := &sandbox.Fake{}
@@ -120,6 +121,23 @@ func TestNoBeadAccessSeatEndCopiesTheOutboxFilesOut(t *testing.T) {
 	want := []string{outboxRemote(sandboxOutboxResult), outboxRemote(sandboxOutboxNotes)}
 	if got := downloadedRemotes(calls); !reflect.DeepEqual(got, want) {
 		t.Errorf("downloaded %v, want %v", got, want)
+	}
+	listing, resultAt, notesAt := -1, -1, -1
+	for i, c := range calls {
+		switch {
+		case hasArgText(c, "find "+sandboxOutboxDir):
+			listing = i
+		case hasArg(c, "download") && c[len(c)-2] == outboxRemote(sandboxOutboxResult):
+			resultAt = i
+		case hasArg(c, "download") && c[len(c)-2] == outboxRemote(sandboxOutboxNotes):
+			notesAt = i
+		}
+	}
+	if listing < 0 || resultAt < 0 || notesAt < 0 {
+		t.Fatalf("openshell calls = %v, want the outbox listed and both files downloaded", calls)
+	}
+	if !(listing < resultAt && resultAt < notesAt) {
+		t.Errorf("the outbox was listed at %d, %s downloaded at %d and %s at %d; want the listing first, then the two files in the copy's order", listing, sandboxOutboxResult, resultAt, sandboxOutboxNotes, notesAt)
 	}
 	if callIndex(calls, "delete") >= 0 {
 		t.Error("the outbox copy deleted the sandbox")
@@ -270,12 +288,14 @@ func TestNoBeadAccessSeatEndCopyOfACopyDirItCannotPrepare(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
+		wantErr string
 		prepare func(t *testing.T, dir string)
 	}{
 		{
 			// The parent of the copy directory is a file, so clearing the copy
 			// fails rather than finding nothing there.
-			name: "a copy path whose parent is not a directory",
+			name:    "a copy path whose parent is not a directory",
+			wantErr: "clearing its outbox copy failed",
 			prepare: func(t *testing.T, dir string) {
 				parent := filepath.Dir(dir)
 				if err := os.MkdirAll(filepath.Dir(parent), 0o755); err != nil {
@@ -287,22 +307,21 @@ func TestNoBeadAccessSeatEndCopyOfACopyDirItCannotPrepare(t *testing.T) {
 			},
 		},
 		{
-			// The parent of the copy directory takes no new entry, so creating
-			// the copy fails.
-			name: "a copy directory the host cannot create",
+			// The parent of the copy directory is a symlink that leads nowhere:
+			// clearing the copy finds nothing to remove, and creating it fails.
+			// Symlink resolution is the same for every user, so the case holds
+			// whether or not the test runs as root.
+			name:    "a copy directory the host cannot create",
+			wantErr: "creating its outbox copy failed",
 			prepare: func(t *testing.T, dir string) {
 				parent := filepath.Dir(dir)
-				if err := os.MkdirAll(parent, 0o755); err != nil {
+				up := filepath.Dir(parent)
+				if err := os.MkdirAll(up, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				//testpolicy:allow no-exec-files — a directory's exec bits are its traverse permission, not an executable file
-				if err := os.Chmod(parent, 0o500); err != nil {
+				if err := os.Symlink(filepath.Join(up, "missing"), parent); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() {
-					//testpolicy:allow no-exec-files — restoring the directory's traverse permission, not an executable file
-					_ = os.Chmod(parent, 0o755)
-				})
 			},
 		},
 	}
@@ -314,8 +333,12 @@ func TestNoBeadAccessSeatEndCopyOfACopyDirItCannotPrepare(t *testing.T) {
 			b.cli.Run = outboxRunner(fake, "result.json 34\n", map[string]string{outboxRemote(sandboxOutboxResult): "x"})
 			tt.prepare(t, outboxCopyDir(b))
 
-			if err := b.copySeatOutbox(outboxSeat()); err == nil {
+			err := b.copySeatOutbox(outboxSeat())
+			if err == nil {
 				t.Fatal("copySeatOutbox reported a copy it could not write")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("copy error = %v, want it to name %q", err, tt.wantErr)
 			}
 			if got := downloadedRemotes(fake.Calls()); len(got) != 0 {
 				t.Errorf("downloaded %v, want nothing", got)
@@ -426,6 +449,26 @@ func TestNoBeadAccessSeatEndCopyFailedDownloadIsAnError(t *testing.T) {
 	}
 	if _, err := os.Stat(outboxCopyDir(b)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat of the copy = %v, want the partial copy removed", err)
+	}
+}
+
+// TestNoBeadAccessSeatEndCopyDownloadPastTheCapIsAnError: the listing's size is
+// only the sandbox's claim, so a download that actually wrote more than the cap
+// is refused and its partial copy removed, rather than leaving a file the
+// sandbox chose on the host (gt-c6tofd).
+func TestNoBeadAccessSeatEndCopyDownloadPastTheCapIsAnError(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	b.cli.Run = outboxRunner(fake, "result.json 34\n", map[string]string{
+		outboxRemote(sandboxOutboxResult): strings.Repeat("x", int(sandboxOutboxCopyCap)+1),
+	})
+
+	if err := b.copySeatOutbox(outboxSeat()); err == nil {
+		t.Fatal("copySeatOutbox accepted a download larger than the cap")
+	}
+	if _, err := os.Stat(outboxCopyDir(b)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat of the copy = %v, want the oversized partial copy removed", err)
 	}
 }
 
