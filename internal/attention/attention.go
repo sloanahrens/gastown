@@ -137,6 +137,10 @@ const (
 	// refused by the pre-swap check, so no roll can start from that commit and
 	// nothing retries it (gt-d6ok4r, gt-t8vf15).
 	KindDeployPairRefused Kind = "deploy-pair-refused"
+	// KindDeployPairSkew: the bd commit a green commit's deploy image pins
+	// carries a schema level the live database does not, so the daemon the roll
+	// starts would be refused at its startup handshake (gt-qnjuqp).
+	KindDeployPairSkew Kind = "deploy-pair-skew"
 	// KindImagesFailed: the images workflow's newest run for a green commit
 	// finished failed or canceled, so that commit's daemon and polecat images
 	// were never published and no roll can start from it (gt-3vafwr).
@@ -216,7 +220,7 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindDeployPairStuck,
-		KindDeployPairRefused, KindImagesFailed, KindImagesUnknown,
+		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,

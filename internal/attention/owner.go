@@ -126,6 +126,10 @@ var ruleOwners = map[string]Owner{
 	// overseer finds what failed the check before a person is woken
 	// (gt-d6ok4r).
 	RuleDeployPairRefused: OwnerOverseer,
+	// A pair whose bd schema level the database does not carry is the town's own
+	// pin or migration to fix: the overseer acts on it before a person is woken
+	// (gt-qnjuqp).
+	RuleDeployPairSkew: OwnerOverseer,
 	// A green commit whose image build failed is the town's own workflow to
 	// look at: the overseer re-runs it or finds what stopped it before a person
 	// is woken (gt-3vafwr).
