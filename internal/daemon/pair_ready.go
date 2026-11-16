@@ -311,6 +311,18 @@ func (c *pairReadyCheck) snapshot() (map[string][]attention.Item, map[string]int
 	return held, fails, c.failed
 }
 
+// imagesFailedFor reports whether the check holds a failed images run for rig's
+// green commit sha, whose key names its first 12 characters. A commit the check
+// does not hold answers false: a check that has not run, or whose read did not
+// reach the commit, says nothing about whether the build failed, so an absent
+// answer must read as not failed, never as a guess (gt-ogt6jh).
+func (c *pairReadyCheck) imagesFailedFor(rig, sha string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.failed[imagesFailedKey(rig, greenRefShortSHA(sha))]
+	return ok
+}
+
 // observed is every item the check holds, ordered by key, for the attention
 // queue.
 func (c *pairReadyCheck) observed() []attention.Item {

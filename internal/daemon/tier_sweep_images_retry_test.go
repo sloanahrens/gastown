@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // imagesRetryCase is one state and images outcome the due rule is asked about.
@@ -94,6 +96,76 @@ func TestTierSweepImagesRetryLegacyStateReadsZero(t *testing.T) {
 	}
 	if !tierSweepImagesRetryDue(st, st.LastRun.Add(tierSweepImagesRetryGap), true) {
 		t.Fatal("a legacy record with a failed images run must read as zero retries and be due")
+	}
+}
+
+// The default answer is the pair check's failed-run map, keyed by the commit's
+// 12-character stamp: the green commit the check read a failed images run for
+// answers true, and every other rig, commit or incomplete sha answers false.
+func TestTierSweepImagesRetryAnswersThePairChecksFailedRun(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	// A failed build leaves no images behind, so the check reads the run.
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.NotEmpty(t, fx.check.failed, "the pair check held no failed run to answer from")
+
+	d := &Daemon{}
+	d.pairReady.failed = fx.check.failed
+
+	cases := []struct {
+		name string
+		rig  string
+		sha  string
+		want bool
+	}{
+		{name: "the failed run's rig and commit", rig: "gastown", sha: pairGreen, want: true},
+		{name: "the same rig at another commit", rig: "gastown", sha: pairOther},
+		{name: "another rig at the same commit", rig: "devops", sha: pairGreen},
+		{name: "a sha too short to carry a stamp", rig: "gastown", sha: pairGreen[:8]},
+		{name: "no sha at all", rig: "gastown", sha: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := d.tierSweepImagesFailedFor(c.rig, c.sha); got != c.want {
+				t.Fatalf("tierSweepImagesFailedFor(%q, %q) = %v, want %v", c.rig, c.sha, got, c.want)
+			}
+		})
+	}
+}
+
+// Before the pair check has read, it holds no failed run, so the seam answers
+// false: an absent answer is not failed.
+func TestTierSweepImagesRetryAnswersFalseBeforeThePairCheckRuns(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	for _, sha := range []string{pairGreen, pairGreen[:12], ""} {
+		if d.tierSweepImagesFailedFor("gastown", sha) {
+			t.Fatalf("a daemon whose pair check never ran answered failed for %q", sha)
+		}
+	}
+}
+
+// A test that sets the seam steers the answer: the pair check, which holds a
+// failed run here, is not consulted.
+func TestTierSweepImagesRetryAnswersThroughItsOverride(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	d.pairReady.failed = map[string]pairReadyFailedRun{
+		imagesFailedKey("gastown", pairGreen12): {},
+	}
+	var gotRig, gotSHA string
+	d.tierSweepSeams.imagesFailedFor = func(rig, sha string) bool {
+		gotRig, gotSHA = rig, sha
+		return false
+	}
+	if d.tierSweepImagesFailedFor("gastown", pairGreen) {
+		t.Fatal("the pair check's failed run answered over the seam that said not failed")
+	}
+	if gotRig != "gastown" || gotSHA != pairGreen {
+		t.Fatalf("the seam was called with (%q, %q), want (%q, %q)", gotRig, gotSHA, "gastown", pairGreen)
 	}
 }
 
