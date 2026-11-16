@@ -797,7 +797,7 @@ func cleanServer(t *testing.T) *labServer {
 // A teardown of a server that stopped and left nothing behind reports nothing.
 // The rows below each change one thing, so this row is what says a report means
 // a failure rather than every teardown reporting.
-func TestLabTeardownReportsNothingOnACleanServer(t *testing.T) {
+func TestIntegrationLabTeardownReportsNothingOnACleanServer(t *testing.T) {
 	rec := &labRecorder{}
 	cleanServer(t).teardown(rec)
 	if len(rec.reported) != 0 {
@@ -807,7 +807,7 @@ func TestLabTeardownReportsNothingOnACleanServer(t *testing.T) {
 
 // A data directory the removal could not remove is reported: a teardown that
 // passed would hide the scratch tree the check exists for.
-func TestLabTeardownReportsADirectoryItCouldNotRemove(t *testing.T) {
+func TestIntegrationLabTeardownReportsADirectoryItCouldNotRemove(t *testing.T) {
 	srv := cleanServer(t)
 	srv.removeAll = func(string) error { return errors.New("permission denied") }
 	rec := &labRecorder{}
@@ -819,7 +819,7 @@ func TestLabTeardownReportsADirectoryItCouldNotRemove(t *testing.T) {
 
 // A removal that returns without removing is reported: RemoveAll's nil is not
 // evidence the directory is gone, so the check reads the filesystem itself.
-func TestLabTeardownReportsADirectoryStillThere(t *testing.T) {
+func TestIntegrationLabTeardownReportsADirectoryStillThere(t *testing.T) {
 	srv := cleanServer(t)
 	srv.removeAll = func(string) error { return nil }
 	rec := &labRecorder{}
@@ -834,7 +834,7 @@ func TestLabTeardownReportsADirectoryStillThere(t *testing.T) {
 
 // A port that still accepts a connection is reported: the stopped server's port
 // must refuse, or the throwaway server outlived the test.
-func TestLabTeardownReportsAPortStillAccepting(t *testing.T) {
+func TestIntegrationLabTeardownReportsAPortStillAccepting(t *testing.T) {
 	srv := cleanServer(t)
 	conn, peer := net.Pipe()
 	defer peer.Close()
@@ -849,7 +849,7 @@ func TestLabTeardownReportsAPortStillAccepting(t *testing.T) {
 // The port check passes only on a refused connection. A dial that failed for
 // another reason leaves the port unread, and the teardown reports that with the
 // cause rather than reading it as a stopped server (om finding 23f23127b898).
-func TestLabTeardownReportsAnUnansweredPortCheck(t *testing.T) {
+func TestIntegrationLabTeardownReportsAnUnansweredPortCheck(t *testing.T) {
 	srv := cleanServer(t)
 	unanswered := errors.New("too many open files")
 	srv.dial = func(string, string, time.Duration) (net.Conn, error) { return nil, unanswered }
@@ -868,7 +868,7 @@ func TestLabTeardownReportsAnUnansweredPortCheck(t *testing.T) {
 
 // A start refused for the port it was handed comes back on a fresh one, and the
 // server it returns is the one that started.
-func TestLabStartOnFreePortRetriesOnPortRace(t *testing.T) {
+func TestIntegrationLabStartOnFreePortRetriesOnPortRace(t *testing.T) {
 	var tried []int
 	picks := 0
 	srv, err := labStartOnFreePort(
@@ -897,7 +897,7 @@ func TestLabStartOnFreePortRetriesOnPortRace(t *testing.T) {
 // A start that failed for another reason is reported at once: a retry would
 // spend two more ports on a host that is not handing ports out twice, and hide
 // the first failure behind the last.
-func TestLabStartOnFreePortReportsOtherFailuresWithoutRetrying(t *testing.T) {
+func TestIntegrationLabStartOnFreePortReportsOtherFailuresWithoutRetrying(t *testing.T) {
 	want := errors.New("starting dolt sql-server: executable file not found in $PATH")
 	picks, calls := 0, 0
 	srv, err := labStartOnFreePort(
@@ -916,7 +916,7 @@ func TestLabStartOnFreePortReportsOtherFailuresWithoutRetrying(t *testing.T) {
 
 // A picker that cannot pick a port is reported, not retried: there is no port to
 // start on, so another attempt would fail the same way.
-func TestLabStartOnFreePortReportsAPortItCouldNotPick(t *testing.T) {
+func TestIntegrationLabStartOnFreePortReportsAPortItCouldNotPick(t *testing.T) {
 	want := errors.New("picking a scratch port: address already in use")
 	picks := 0
 	srv, err := labStartOnFreePort(
@@ -938,7 +938,7 @@ func TestLabStartOnFreePortReportsAPortItCouldNotPick(t *testing.T) {
 
 // The retry runs out: every attempt gets a fresh port, and the last failure is
 // what comes back rather than a bare attempt count.
-func TestLabStartOnFreePortGivesUpAfterThreeStarts(t *testing.T) {
+func TestIntegrationLabStartOnFreePortGivesUpAfterThreeStarts(t *testing.T) {
 	race := errors.New("Port 41000 already in use.")
 	picks, calls := 0, 0
 	srv, err := labStartOnFreePort(
