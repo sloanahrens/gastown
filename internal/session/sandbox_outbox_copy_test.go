@@ -295,10 +295,14 @@ func TestNoBeadAccessSeatEndCopyOfACopyDirItCannotPrepare(t *testing.T) {
 				if err := os.MkdirAll(parent, 0o755); err != nil {
 					t.Fatal(err)
 				}
+				//testpolicy:allow no-exec-files — a directory's exec bits are its traverse permission, not an executable file
 				if err := os.Chmod(parent, 0o500); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+				t.Cleanup(func() {
+					//testpolicy:allow no-exec-files — restoring the directory's traverse permission, not an executable file
+					_ = os.Chmod(parent, 0o755)
+				})
 			},
 		},
 	}
