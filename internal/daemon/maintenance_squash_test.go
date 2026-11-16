@@ -128,6 +128,9 @@ func TestSquashCheckQuietDayDoesNothingAndLogsWhy(t *testing.T) {
 	if d.squashCheckRun.last().IsZero() {
 		t.Error("the check did not record its completion")
 	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); due.due {
+		t.Error("a decided check was due again after the retry delay: it must keep the daily gate")
+	}
 	// 20 latency reads and one commit count, all reads: nothing is squashed
 	// until D9b wires the run.
 	if len(server.queries) != squashP95Rounds+1 {
@@ -461,6 +464,14 @@ func TestSquashCheckUnreadableReadingsDoNotTrip(t *testing.T) {
 			}
 			if len(*escalations) != 0 {
 				t.Errorf("an unreadable reading escalated: %v", *escalations)
+			}
+			// A check that could not decide is not a completed day: it is due
+			// again after the retry delay, not after the daily gate.
+			if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter-time.Minute), squashCheckInterval); due.due {
+				t.Error("an undecided check was due again before the retry delay")
+			}
+			if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+				t.Error("an undecided check was not due again after the retry delay: the unreadable day set the daily gate")
 			}
 		})
 	}

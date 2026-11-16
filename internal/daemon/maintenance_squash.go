@@ -41,6 +41,11 @@ const (
 	// read once a day.
 	squashCheckInterval = doltsquash.RunInterval
 
+	// squashCheckRetryAfter is how soon a check that could not decide is due
+	// again: re-reading every tick would repeat the same failure, and waiting
+	// the whole day would leave it unseen for 24 hours.
+	squashCheckRetryAfter = time.Hour
+
 	// squashP95Rounds is how many round trips the query p95 is taken over, one
 	// read per round, cycling the mix. Twenty is the floor gt-dc81 set for a
 	// p95 to mean anything: a percentile over fewer samples is noise.
@@ -142,10 +147,11 @@ func (d *Daemon) triggerSquashCheck() {
 }
 
 // runSquashCheck reads the four numbers for each enabled database and logs
-// doltsquash.Decide's answer with the cut. It records the check's completion
-// on every way out, so a check that could not read anything is not retried
-// until the next day: a check that re-read every five minutes would only
-// repeat the same failure.
+// doltsquash.Decide's answer with the cut. A check that decided for every database
+// records its completion, so it is not due again for a day. A check that could
+// not decide for some database is NOT recorded as completed: it is due again
+// after squashCheckRetryAfter, so a day of unreadable inputs does not set the
+// daily gate (overseer decision, gt-g4iwk0).
 //
 // A number that cannot be read is a WARNING naming it, and no verdict is
 // logged for that database: a quiet-day line over an unreadable input would
@@ -153,7 +159,16 @@ func (d *Daemon) triggerSquashCheck() {
 // zero time: nothing has run yet, and the record of a run belongs to D9b, which
 // also owns the marker and the backend the run executes against.
 func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
-	defer d.recordPatrolRun(&d.squashCheckRun, squashCheckPatrol, d.maintenance().now())
+	undecided := false
+	defer func() {
+		at := d.maintenance().now()
+		if undecided {
+			// Backdated so the patrol's own interval makes it due again after
+			// squashCheckRetryAfter rather than after the whole interval.
+			at = at.Add(squashCheckRetryAfter - squashCheckInterval)
+		}
+		d.recordPatrolRun(&d.squashCheckRun, squashCheckPatrol, at)
+	}()
 
 	settings := doltsquash.Settings{
 		Thresholds: doltsquash.Thresholds{
@@ -169,12 +184,14 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	for _, db := range step.settings.Databases {
 		readings := d.readSquashInputs(ctx, db, now)
 		if names := readings.unreadable(); len(names) > 0 {
+			undecided = true
 			d.logger.Printf("squash: WARNING: %s: the check did not decide, unreadable: %s (%s)",
 				db, strings.Join(names, ", "), readings.describe())
 			continue
 		}
 		dec, err := doltsquash.Decide(now, time.Time{}, readings.inputs, settings)
 		if err != nil {
+			undecided = true
 			d.logger.Printf("squash: WARNING: %s: %v — the check did not decide", db, err)
 			continue
 		}
