@@ -87,6 +87,12 @@ type Daemon struct {
 	// per state, not every heartbeat (gt tail noise).
 	crashSkipLog logLatch
 
+	// seatShadowLog logs a seat's agentbead_shadow disagreement once per pair
+	// of values, not once per patrol tick: the seat cap reads the intent
+	// record beside the agent bead for the shadow window, and the host that
+	// reads it lives one tick (gt-eyph71).
+	seatShadowLog logLatch
+
 	// promoteViaLog logs a rig's promote_via opt-out once, not on every
 	// verdict and tier-sweep call that builds its promoter (gt-mxa3op).
 	promoteViaLog logLatch
