@@ -1015,6 +1015,19 @@ func TestTierSweepImagesRetryExhaustedUnreadableRecordKeepsTheItem(t *testing.T)
 	}
 }
 
+// A cancelled tick stops the collector rather than reading a record nobody is
+// left to see.
+func TestTierSweepImagesRetryExhaustedStopsOnACancelledTick(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.src.collectTierSweepImagesRetryExhausted(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 // The cap is raised once: a second tick that still sees the condition keeps the
 // item's first_seen and writes no second new event.
 func TestTierSweepImagesRetryExhaustedRaisedOnce(t *testing.T) {
