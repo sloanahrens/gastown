@@ -124,6 +124,21 @@ func TestIntegrationClientContract(t *testing.T) {
 		}
 		beadsfake.RunCostSamplesContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
 	})
+	t.Run("usage records", func(t *testing.T) {
+		t.Parallel()
+		offers, err := bdOffersSampleVerb()
+		if err != nil {
+			t.Fatalf("bd --help: %v", err)
+		}
+		if !offers {
+			// Skip in place with the blocker named (docs/testing.md): the bd at
+			// the deploy pin predates the sample verb, and WriteUsageRecord
+			// refuses that bd by name, so the suite cannot run until an image
+			// pair ships be-1qqu. The fake still runs it.
+			t.Skip("the bd on PATH predates the sample verb (beads be-1qqu): WriteUsageRecord refuses it by name")
+		}
+		beadsfake.RunUsageRecordsContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
+	})
 }
 
 // bdOffersSampleVerb reports whether the bd the isolated stores run offers the

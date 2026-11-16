@@ -162,30 +162,28 @@ func sampleTime(t time.Time) string {
 	return t.UTC().Truncate(time.Second).Format(time.RFC3339)
 }
 
-// costSampleRow is one row of bd sample list --json. The id and created_at
-// columns are not read; the payload stays raw for the decoder.
-type costSampleRow struct {
+// sampleRow is one row of bd sample list --json, whatever its kind: the kind
+// and at columns every kind carries, and the payload left raw for the
+// decoder. The id and created_at columns are not read.
+type sampleRow struct {
 	Kind    string          `json:"kind"`
 	At      time.Time       `json:"at"`
 	Payload json.RawMessage `json:"payload"`
 }
 
-// parseCostSamples decodes bd sample list --json output. Unknown payload
-// fields are ignored so a row written by a later type still reads; output
-// that is not a JSON array, a row under another kind, a row with no at, and
-// a payload that is not a JSON object are errors.
-func parseCostSamples(kind string, out []byte) ([]Sample, error) {
+// parseSampleRows decodes bd sample list --json output for kind: output that is
+// not a JSON array, a row under another kind, and a row with no at are errors.
+func parseSampleRows(kind string, out []byte) ([]sampleRow, error) {
 	// null and an empty output are not "no rows": bd answers no rows with an
 	// empty array, so anything else is a shape this parser does not know.
 	trimmed := bytes.TrimSpace(out)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return nil, fmt.Errorf("decode rows: want a JSON array of samples")
 	}
-	var rows []costSampleRow
+	var rows []sampleRow
 	if err := json.Unmarshal(trimmed, &rows); err != nil {
 		return nil, fmt.Errorf("decode rows: %w", err)
 	}
-	samples := make([]Sample, 0, len(rows))
 	for i, row := range rows {
 		if row.Kind != kind {
 			return nil, fmt.Errorf("row %d is kind %q, want %q", i, row.Kind, kind)
@@ -193,6 +191,21 @@ func parseCostSamples(kind string, out []byte) ([]Sample, error) {
 		if row.At.IsZero() {
 			return nil, fmt.Errorf("row %d has no at", i)
 		}
+	}
+	return rows, nil
+}
+
+// parseCostSamples decodes bd sample list --json output. Unknown payload
+// fields are ignored so a row written by a later type still reads; output
+// that is not a JSON array, a row under another kind, a row with no at, and
+// a payload that is not a JSON object are errors.
+func parseCostSamples(kind string, out []byte) ([]Sample, error) {
+	rows, err := parseSampleRows(kind, out)
+	if err != nil {
+		return nil, err
+	}
+	samples := make([]Sample, 0, len(rows))
+	for i, row := range rows {
 		s, err := decodeSamplePayload(kind, row.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("row %d: %w", i, err)

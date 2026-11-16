@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/usagerecord"
 )
 
 // AdminClient is a database offering both surfaces the contracts pin.
@@ -188,6 +190,128 @@ func contractCostSamples(t *testing.T, s *scope) {
 	after, err := s.ReadCostSamples(ctx, beads.SampleKindClaudePlan, floor, 0)
 	if err != nil || len(after) != 2 {
 		t.Errorf("claude_plan rows after the refused writes = %v, %v; want the same two rows", after, err)
+	}
+}
+
+// RunUsageRecordsContract checks the usage-record pair, WriteUsageRecord and
+// ReadUsageRecords, that every store with usage records must share: a row read
+// back carries the record and the session ids it was written with, since and
+// limit narrow the read newest built first, and these are each refused — a
+// write with no built at or no bead, a write of a cost JSON cannot carry, and a
+// read with a negative limit — the refused writes leaving no row behind.
+//
+// It is separate from RunAdminContract for the reason RunCostSamplesContract is:
+// a bd that predates the samples table (beads be-1qqu) refuses the write by name
+// and cannot answer the case, so only a store whose bd offers the verb runs it.
+// beadsfake's Fake runs it in the unit tier.
+func RunUsageRecordsContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+	t.Helper()
+	t.Run("usage records", func(t *testing.T) {
+		t.Parallel()
+		contractUsageRecords(t, newScope(t, newClient(t)))
+	})
+}
+
+// contractUsageRecords pins the usage-record pair; see RunUsageRecordsContract.
+// The database may be shared with other cases, so each read passes a since just
+// before base, the time this case builds its rows at.
+func contractUsageRecords(t *testing.T, s *scope) {
+	ctx := context.Background()
+	base := time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	seat := "furiosa"
+	first := beads.UsageRecordRow{
+		BuiltAt: base.Add(time.Minute),
+		Record: usagerecord.Record{
+			Bead:       "gt-usage-1",
+			Kind:       dashboard.UsageKindWork,
+			Class:      dashboard.UsageClassPolecat,
+			Rig:        "gastown",
+			Workspace:  "ws-town",
+			Seat:       &seat,
+			Complete:   true,
+			Start:      base,
+			End:        base.Add(time.Minute),
+			WallS:      60,
+			EstCostUSD: 0.5,
+			Models: map[string]usagerecord.Model{
+				"opus": {Calls: 2, Input: 10, Output: 20, CacheCreation: 1, CacheRead: 3, EstCostUSD: 0.5},
+			},
+			Totals:    usagerecord.Totals{Calls: 2, Input: 10, Output: 20, CacheCreation: 1, CacheRead: 3, Uncached: 31},
+			Subagents: usagerecord.Subagents{Calls: 1, Share: 0.5, Uncached: 5},
+			Activity:  usagerecord.Activity{ToolCalls: 4, Edits: 2, TestRuns: 1},
+		},
+		Sessions: []string{"sess-1", "sess-2"},
+	}
+	second := beads.UsageRecordRow{
+		BuiltAt: base.Add(5 * time.Minute),
+		Record: usagerecord.Record{
+			Bead:   "gt-usage-2",
+			Kind:   dashboard.UsageKindOM,
+			Class:  dashboard.UsageClassOMReview,
+			Rig:    "gastown",
+			Start:  base.Add(3 * time.Minute),
+			End:    base.Add(5 * time.Minute),
+			WallS:  120,
+			Models: map[string]usagerecord.Model{},
+		},
+		Sessions: []string{"sess-3"},
+	}
+	floor := base.Add(-time.Second)
+	for _, w := range []struct {
+		what string
+		row  beads.UsageRecordRow
+	}{
+		{"first", first},
+		{"second", second},
+	} {
+		mustDo(t, "WriteUsageRecord("+w.what+")", s.WriteUsageRecord(ctx, w.row))
+	}
+
+	rows, err := s.ReadUsageRecords(ctx, floor, 0)
+	if err != nil {
+		t.Fatalf("ReadUsageRecords: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ReadUsageRecords = %v, want the two rows written here", rows)
+	}
+	if !reflect.DeepEqual(rows[0], second) {
+		t.Errorf("newest row = %+v, want the second row written: %+v", rows[0], second)
+	}
+	if !reflect.DeepEqual(rows[1], first) {
+		t.Errorf("older row = %+v, want the first row written: %+v", rows[1], first)
+	}
+
+	// A since between the two rows keeps only the newer one, and a limit caps
+	// the answer after the filter.
+	between := first.BuiltAt.Add(30 * time.Second)
+	recent, err := s.ReadUsageRecords(ctx, between, 0)
+	if err != nil || len(recent) != 1 || recent[0].Record.Bead != second.Record.Bead {
+		t.Errorf("ReadUsageRecords(since %v) = %v, %v; want only the newer row", between, recent, err)
+	}
+	newest, err := s.ReadUsageRecords(ctx, floor, 1)
+	if err != nil || len(newest) != 1 || newest[0].Record.Bead != second.Record.Bead {
+		t.Errorf("ReadUsageRecords(limit 1) = %v, %v; want the newest row", newest, err)
+	}
+
+	// A refused write must not leave a row behind.
+	if err := s.WriteUsageRecord(ctx, beads.UsageRecordRow{BuiltAt: base, Record: usagerecord.Record{Kind: dashboard.UsageKindWork}}); err == nil {
+		t.Error("WriteUsageRecord(no bead) succeeded, want it refused")
+	}
+	if err := s.WriteUsageRecord(ctx, beads.UsageRecordRow{Record: first.Record}); err == nil {
+		t.Error("WriteUsageRecord(no built at) succeeded, want it refused")
+	}
+	nan := math.NaN()
+	badCost := first.Record
+	badCost.EstCostUSD = nan
+	if err := s.WriteUsageRecord(ctx, beads.UsageRecordRow{BuiltAt: base, Record: badCost}); err == nil {
+		t.Error("WriteUsageRecord(NaN cost) succeeded, want it refused: the payload cannot carry one")
+	}
+	if _, err := s.ReadUsageRecords(ctx, floor, -1); err == nil {
+		t.Error("ReadUsageRecords(limit -1) succeeded, want it refused")
+	}
+	after, err := s.ReadUsageRecords(ctx, floor, 0)
+	if err != nil || len(after) != 2 {
+		t.Errorf("rows after the refused writes = %v, %v; want the same two rows", after, err)
 	}
 }
 

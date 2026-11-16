@@ -23,7 +23,7 @@ type ReadyOptions struct {
 // Client is the issue-store surface that code outside this package uses
 // most: reading, listing, creating, updating and closing issues, their
 // comments and dependencies, the ready queue, claim release, and the
-// cost-sample rows. *Beads
+// cost-sample and usage-record rows. *Beads
 // implements it against bd; internal/beads/beadsfake implements it in memory
 // for unit tests, and beadsfake.RunClientContract pins the two to the same
 // behavior.
@@ -152,17 +152,29 @@ type Client interface {
 	// limit, or a row that does not read back is an error, never an empty
 	// series.
 	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]Sample, error)
+
+	// WriteUsageRecord appends one usage record row. A zero BuiltAt, a record
+	// with no bead, and a cost JSON cannot carry are each an error with no row
+	// written.
+	WriteUsageRecord(ctx context.Context, row UsageRecordRow) error
+	// ReadUsageRecords returns the rows newest built first, one per write; a
+	// non-zero since keeps the rows from that instant on and a positive limit
+	// caps the count, zero leaves the store's own default. A negative limit, or
+	// a row that does not read back as a usage record, is an error, never a
+	// short series.
+	ReadUsageRecords(ctx context.Context, since time.Time, limit int) ([]UsageRecordRow, error)
 }
 
 var _ Client = (*Beads)(nil)
 
 // Admin is the maintenance surface beadsfake models: config keys, the
 // key-value store, counts, stats, the wisp list, gc's dry-run candidates, the
-// events journal, the cost-sample rows, and the version handshake's two reads.
-// beadsfake.RunAdminContract pins the fake to *Beads on the shared cases,
-// RunVersionContract on the version pair, and RunCostSamplesContract on the
-// cost-sample pair. (SQLCSV and InitDatabase are on *Beads too, but a fake
-// can only script or record them.)
+// events journal, the cost-sample and usage-record rows, and the version
+// handshake's two reads. beadsfake.RunAdminContract pins the fake to *Beads on
+// the shared cases, RunVersionContract on the version pair, RunCostSamplesContract
+// on the cost-sample pair and RunUsageRecordsContract on the usage-record pair.
+// (SQLCSV and InitDatabase are on *Beads too, but a fake can only script or
+// record them.)
 type Admin interface {
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
@@ -195,6 +207,11 @@ type Admin interface {
 	// ReadCostSamples returns a kind's cost sample rows; the behavior is
 	// Client's.
 	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]Sample, error)
+	// WriteUsageRecord appends one usage record row; the behavior is Client's.
+	WriteUsageRecord(ctx context.Context, row UsageRecordRow) error
+	// ReadUsageRecords returns the usage record rows; the behavior is
+	// Client's.
+	ReadUsageRecords(ctx context.Context, since time.Time, limit int) ([]UsageRecordRow, error)
 }
 
 var _ Admin = (*Beads)(nil)
