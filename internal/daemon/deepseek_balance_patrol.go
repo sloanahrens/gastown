@@ -391,16 +391,16 @@ func (d *Daemon) raiseDeepSeekBalanceAlerts(ctx context.Context, lines []string)
 // condition but reachability, and the unreachable key stays open while the
 // failures continue.
 func (d *Daemon) clearDeepSeekBalanceAlerts(ctx context.Context, raised map[string]bool) error {
-	var clear []string
+	var toClear []string
 	for _, key := range deepSeekBalanceAlertKeys {
 		if !raised[key] {
-			clear = append(clear, key)
+			toClear = append(toClear, key)
 		}
 	}
-	if len(clear) == 0 {
+	if len(toClear) == 0 {
 		return nil
 	}
-	return d.clearAlertsCtx(ctx, "the balance was read and this alert did not fire", clear...)
+	return d.clearAlertsCtx(ctx, "the balance was read and this alert did not fire", toClear...)
 }
 
 // deepSeekBalanceUnconfigured logs the unconfigured line once per absence: a
