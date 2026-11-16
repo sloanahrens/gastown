@@ -129,11 +129,11 @@ func (d *Daemon) deepSeekBalanceSeamsOf() deepSeekBalanceTickSeams {
 // row: its error is returned and the tick logs it. The key travels only in the
 // request's Authorization header, so neither the row nor an error carries it.
 func (d *Daemon) fetchDeepSeekBalance(ctx context.Context, key string) error {
-	base := d.deepSeekBalanceURL
-	if base == "" {
-		base = deepSeekBalanceAPI
+	client := d.deepSeekBalanceHTTP
+	if client == nil {
+		client = http.DefaultClient
 	}
-	s, err := deepseekbalance.Fetch(ctx, http.DefaultClient, base, key)
+	s, err := deepseekbalance.Fetch(ctx, client, deepSeekBalanceAPI, key)
 	if err != nil {
 		return err
 	}

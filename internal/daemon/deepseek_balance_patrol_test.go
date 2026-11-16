@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -360,23 +359,31 @@ func TestDeepSeekPatrolConfiguredWithoutAFetchRefuses(t *testing.T) {
 	}
 }
 
-// newDeepSeekBalanceServer serves GET /user/balance: request n (from 1) gets the
-// status and body answer returns. A request whose bearer token is not key is
-// refused, so a tick that fetched with the wrong key reads nothing.
-func newDeepSeekBalanceServer(t *testing.T, key string, answer func(n int) (int, string)) *httptest.Server {
-	t.Helper()
+// balanceTransport answers one http.Client's requests in process, so a test
+// fakes the balance endpoint without a socket.
+type balanceTransport func(*http.Request) (*http.Response, error)
+
+// RoundTrip implements http.RoundTripper.
+func (f balanceTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// fakeDeepSeekBalance is the balance endpoint as an in-process client: request n
+// (from 1) gets the status and body answer returns. A request that is not GET
+// /user/balance with the bearer token key is refused, so a tick that fetched
+// with the wrong key reads nothing.
+func fakeDeepSeekBalance(key string, answer func(n int) (int, string)) *http.Client {
 	var requests atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/user/balance" || r.Header.Get("Authorization") != "Bearer "+key {
-			http.Error(w, "unexpected request", http.StatusUnauthorized)
-			return
+	return &http.Client{Transport: balanceTransport(func(r *http.Request) (*http.Response, error) {
+		status, body := http.StatusUnauthorized, "unexpected request"
+		if r.Method == http.MethodGet && r.URL.Path == "/user/balance" && r.Header.Get("Authorization") == "Bearer "+key {
+			status, body = answer(int(requests.Add(1)))
 		}
-		status, body := answer(int(requests.Add(1)))
-		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+		return &http.Response{
+			StatusCode: status,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
 }
 
 // deepSeekBalanceBody is the GET /user/balance answer for one reading.
@@ -400,7 +407,7 @@ func TestDeepSeekPatrolTwoTicksWriteTwoRows(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
 		t.Fatalf("writing the key file: %v", err)
 	}
-	srv := newDeepSeekBalanceServer(t, key, func(n int) (int, string) {
+	client := fakeDeepSeekBalance(key, func(n int) (int, string) {
 		if n == 1 {
 			return http.StatusOK, deepSeekBalanceBody("10.00", "4.00", "6.00")
 		}
@@ -412,7 +419,7 @@ func TestDeepSeekPatrolTwoTicksWriteTwoRows(t *testing.T) {
 	var logged bytes.Buffer
 	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
 	d.clock = clk
-	d.deepSeekBalanceURL = srv.URL
+	d.deepSeekBalanceHTTP = client
 	d.openCostSampleBeads = func() beads.Client { return store }
 
 	d.triggerDeepSeekBalance()
@@ -457,13 +464,13 @@ func TestDeepSeekPatrolFailedFetchWritesNoRow(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
 		t.Fatalf("writing the key file: %v", err)
 	}
-	srv := newDeepSeekBalanceServer(t, key, func(int) (int, string) {
+	client := fakeDeepSeekBalance(key, func(int) (int, string) {
 		return http.StatusInternalServerError, "upstream down"
 	})
 	store := beadsfake.New()
 	var logged bytes.Buffer
 	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
-	d.deepSeekBalanceURL = srv.URL
+	d.deepSeekBalanceHTTP = client
 	d.openCostSampleBeads = func() beads.Client { return store }
 
 	d.triggerDeepSeekBalance()
@@ -492,14 +499,14 @@ func TestDeepSeekPatrolFailedWriteIsLogged(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
 		t.Fatalf("writing the key file: %v", err)
 	}
-	srv := newDeepSeekBalanceServer(t, key, func(int) (int, string) {
+	client := fakeDeepSeekBalance(key, func(int) (int, string) {
 		return http.StatusOK, deepSeekBalanceBody("10.00", "4.00", "6.00")
 	})
 	store := beadsfake.New()
 	store.FailWith("sample add", errors.New("store refused the row"))
 	var logged bytes.Buffer
 	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
-	d.deepSeekBalanceURL = srv.URL
+	d.deepSeekBalanceHTTP = client
 	d.openCostSampleBeads = func() beads.Client { return store }
 
 	d.triggerDeepSeekBalance()
