@@ -681,6 +681,8 @@ func TestUpdatePodDigestInstallRestoresPreviousWhenPodRunsAnotherImage(t *testin
 	seams := updateSeams{
 		Notifier: func(string) notify.Notifier { return notifyfake.New() },
 		PodRun:   kube.run,
+		// The pre-swap gate is not what this test drives: its checks pass.
+		Preflight: preflightPassing,
 	}
 	target := podPairTarget()
 	installer, err := digestInstaller(seams, townRoot, deps, path, &target, io.Discard)
