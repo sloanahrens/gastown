@@ -557,6 +557,15 @@ func TestRebaseHistoryRefusals(t *testing.T) {
 			want: "want a number",
 		},
 		{
+			name:   "a plan order has a non-zero fraction",
+			before: Before{Tip: fx.tip},
+			changes: map[string]Rows{sqlPlan: {
+				Columns: []string{"rebase_order", "commit_hash"},
+				Data:    [][]string{{"1.50", hash(0x11)}},
+			}},
+			want: "want a number",
+		},
+		{
 			name:   "a plan commit is not a hash",
 			before: Before{Tip: fx.tip},
 			changes: map[string]Rows{sqlPlan: {
