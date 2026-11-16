@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -217,19 +218,29 @@ func (d *Daemon) writeDeepSeekBalanceRow(ctx context.Context, at time.Time, read
 		ToppedUp: &toppedUp,
 		Note:     note,
 	}
-	if err := d.costSampleBeads().WriteCostSample(ctx, row); err != nil {
+	store, err := d.costSampleBeads()
+	if err != nil {
+		return err
+	}
+	if err := store.WriteCostSample(ctx, row); err != nil {
 		return fmt.Errorf("writing the deepseek_balance row: %w", err)
 	}
 	return nil
 }
 
 // costSampleBeads opens the store the balance row is written to: the town
-// database, unless a test hands one in.
-func (d *Daemon) costSampleBeads() beads.Client {
+// database, unless a test hands one in. A test binary that left the seam nil
+// is refused instead of given the town client: the write would land in the
+// live town database, so the tick fails at the seam the test did not inject
+// (gt-84iyam).
+func (d *Daemon) costSampleBeads() (beads.Client, error) {
 	if d.openCostSampleBeads != nil {
-		return d.openCostSampleBeads()
+		return d.openCostSampleBeads(), nil
 	}
-	return beads.New(d.config.TownRoot)
+	if testing.Testing() {
+		return nil, errors.New("the deepseek_balance row has no store: this test left openCostSampleBeads nil, so the write would land in the live town database; hand the daemon a beadsfake")
+	}
+	return beads.New(d.config.TownRoot), nil
 }
 
 // startDeepSeekBalanceTick runs one tick on its own goroutine: a tick reads the

@@ -1416,7 +1416,7 @@ type Daemon struct {
 	// default client, and a test hands it a transport that answers in process.
 	deepSeekBalanceHTTP *http.Client
 	// openCostSampleBeads opens the store the balance row is written to: nil is
-	// the town database, and a test hands it a beadsfake.
+	// the town database, and a test hands it a beadsfake (costSampleBeads).
 	openCostSampleBeads func() beads.Client
 
 	// omLessonsRunning and omLessonsCycles are the om_lessons pass's
