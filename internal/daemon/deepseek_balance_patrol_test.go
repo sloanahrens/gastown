@@ -7,12 +7,18 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
 
@@ -330,9 +336,8 @@ func TestDeepSeekPatrolRelativeKeyFileRefuses(t *testing.T) {
 	}
 }
 
-// TestDeepSeekPatrolConfiguredWithoutAFetchRefuses: production wires no fetch
-// until gt-a5c8ld, and a tick holding a key says so rather than passing as a
-// clean read.
+// TestDeepSeekPatrolConfiguredWithoutAFetchRefuses: a tick whose seams carry no
+// fetch holds a key and says so rather than passing as a clean read.
 func TestDeepSeekPatrolConfiguredWithoutAFetchRefuses(t *testing.T) {
 	t.Parallel()
 	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
@@ -341,6 +346,9 @@ func TestDeepSeekPatrolConfiguredWithoutAFetchRefuses(t *testing.T) {
 	}
 	var logged bytes.Buffer
 	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.newDeepSeekBalanceSeams = func() deepSeekBalanceTickSeams {
+		return deepSeekBalanceTickSeams{readKey: deepSeekBalanceReadKey}
+	}
 
 	d.triggerDeepSeekBalance()
 
@@ -350,6 +358,166 @@ func TestDeepSeekPatrolConfiguredWithoutAFetchRefuses(t *testing.T) {
 	if strings.Contains(logged.String(), "sk-nowhere-to-go") {
 		t.Errorf("the refusal logged the key: %q", logged.String())
 	}
+}
+
+// newDeepSeekBalanceServer serves GET /user/balance: request n (from 1) gets the
+// status and body answer returns. A request whose bearer token is not key is
+// refused, so a tick that fetched with the wrong key reads nothing.
+func newDeepSeekBalanceServer(t *testing.T, key string, answer func(n int) (int, string)) *httptest.Server {
+	t.Helper()
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user/balance" || r.Header.Get("Authorization") != "Bearer "+key {
+			http.Error(w, "unexpected request", http.StatusUnauthorized)
+			return
+		}
+		status, body := answer(int(requests.Add(1)))
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// deepSeekBalanceBody is the GET /user/balance answer for one reading.
+func deepSeekBalanceBody(total, granted, toppedUp string) string {
+	return `{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"` + total +
+		`","granted_balance":"` + granted + `","topped_up_balance":"` + toppedUp + `"}]}`
+}
+
+// sameReading reports whether the reading p holds is want.
+func sameReading(p *float64, want float64) bool {
+	return p != nil && *p == want
+}
+
+// TestDeepSeekPatrolTwoTicksWriteTwoRows: two ticks over the balance endpoint
+// write two deepseek_balance rows, read back newest first with each reading's
+// fields and the instant the daemon's clock gave it.
+func TestDeepSeekPatrolTwoTicksWriteTwoRows(t *testing.T) {
+	t.Parallel()
+	const key = "sk-two-ticks-7c1e"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	srv := newDeepSeekBalanceServer(t, key, func(n int) (int, string) {
+		if n == 1 {
+			return http.StatusOK, deepSeekBalanceBody("10.00", "4.00", "6.00")
+		}
+		return http.StatusOK, deepSeekBalanceBody("8.50", "3.50", "5.00")
+	})
+	first := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	clk := clockwork.NewFakeClockAt(first)
+	store := beadsfake.New(beadsfake.WithClock(clk))
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.clock = clk
+	d.deepSeekBalanceURL = srv.URL
+	d.openCostSampleBeads = func() beads.Client { return store }
+
+	d.triggerDeepSeekBalance()
+	clk.Advance(10 * time.Minute)
+	d.triggerDeepSeekBalance()
+
+	rows, err := store.ReadCostSamples(context.Background(), beads.SampleKindDeepSeekBalance, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the cost samples: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("two ticks wrote %d rows, want 2 (log: %q)", len(rows), logged.String())
+	}
+	want := []struct {
+		at                       time.Time
+		total, granted, toppedUp float64
+	}{
+		{first.Add(10 * time.Minute), 8.50, 3.50, 5.00},
+		{first, 10.00, 4.00, 6.00},
+	}
+	for i, w := range want {
+		r := rows[i]
+		if r.Kind != beads.SampleKindDeepSeekBalance || !r.At.Equal(w.at) {
+			t.Errorf("row %d is kind %q at %v, want deepseek_balance at %v", i, r.Kind, r.At, w.at)
+		}
+		if !sameReading(r.Total, w.total) || !sameReading(r.Granted, w.granted) || !sameReading(r.ToppedUp, w.toppedUp) {
+			t.Errorf("row %d reads total %v, granted %v, topped up %v; want %v, %v, %v",
+				i, deref(r.Total), deref(r.Granted), deref(r.ToppedUp), w.total, w.granted, w.toppedUp)
+		}
+	}
+	if strings.Contains(logged.String(), key) {
+		t.Errorf("the key appears in the log: %q", logged.String())
+	}
+}
+
+// TestDeepSeekPatrolFailedFetchWritesNoRow: a balance endpoint that answers an
+// error writes no row, and the tick logs the failure.
+func TestDeepSeekPatrolFailedFetchWritesNoRow(t *testing.T) {
+	t.Parallel()
+	const key = "sk-failed-fetch-4a9b"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	srv := newDeepSeekBalanceServer(t, key, func(int) (int, string) {
+		return http.StatusInternalServerError, "upstream down"
+	})
+	store := beadsfake.New()
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.deepSeekBalanceURL = srv.URL
+	d.openCostSampleBeads = func() beads.Client { return store }
+
+	d.triggerDeepSeekBalance()
+
+	rows, err := store.ReadCostSamples(context.Background(), beads.SampleKindDeepSeekBalance, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the cost samples: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("a failed fetch wrote %d rows, want none", len(rows))
+	}
+	if !strings.Contains(logged.String(), "HTTP 500") {
+		t.Errorf("a failed fetch logged %q, want the failed status named", logged.String())
+	}
+	if strings.Contains(logged.String(), key) {
+		t.Errorf("the key appears in the log: %q", logged.String())
+	}
+}
+
+// TestDeepSeekPatrolFailedWriteIsLogged: a balance read that the store refuses
+// to record is logged as a failed tick, not passed as a written row.
+func TestDeepSeekPatrolFailedWriteIsLogged(t *testing.T) {
+	t.Parallel()
+	const key = "sk-failed-write-b08e"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	srv := newDeepSeekBalanceServer(t, key, func(int) (int, string) {
+		return http.StatusOK, deepSeekBalanceBody("10.00", "4.00", "6.00")
+	})
+	store := beadsfake.New()
+	store.FailWith("sample add", errors.New("store refused the row"))
+	var logged bytes.Buffer
+	d := deepSeekBalanceTestDaemon(t, &logged, keyFile)
+	d.deepSeekBalanceURL = srv.URL
+	d.openCostSampleBeads = func() beads.Client { return store }
+
+	d.triggerDeepSeekBalance()
+
+	if !strings.Contains(logged.String(), "writing the deepseek_balance row") {
+		t.Errorf("a refused row logged %q, want the failed write named", logged.String())
+	}
+	if strings.Contains(logged.String(), key) {
+		t.Errorf("the key appears in the log: %q", logged.String())
+	}
+}
+
+// deref returns the reading p holds, or "unset" when it holds none.
+func deref(p *float64) any {
+	if p == nil {
+		return "unset"
+	}
+	return *p
 }
 
 // deepSeekBalanceBlockingDaemon is a daemon whose tick waits on release before
