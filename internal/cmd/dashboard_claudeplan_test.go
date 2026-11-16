@@ -62,7 +62,9 @@ func rowsOf(rows ...beads.Sample) costSamplesRead {
 // TestClaudePlanReadPrefersTheCostRows: the plan meter reads the town's
 // claude_plan rows before the series file, so the page draws the series the
 // status line records now rather than an older copy, and the why-log names the
-// rows as the source that answered.
+// rows as the source that answered. The read reaches back the weekly window the
+// meter folds, and asks for this package's own row cap rather than leaving the
+// count to the store (gt-u9dsir).
 func TestClaudePlanReadPrefersTheCostRows(t *testing.T) {
 	t.Parallel()
 
@@ -71,9 +73,11 @@ func TestClaudePlanReadPrefersTheCostRows(t *testing.T) {
 
 	var logged []string
 	var asked []string
+	var sinces []time.Time
 	var limits []int
 	rows := func(kind string, since time.Time, limit int) ([]beads.Sample, error) {
 		asked = append(asked, kind)
+		sinces = append(sinces, since)
 		limits = append(limits, limit)
 		return []beads.Sample{claudePlanRow(fixedClaudePlanNow, 3, 7)}, nil
 	}
@@ -88,14 +92,19 @@ func TestClaudePlanReadPrefersTheCostRows(t *testing.T) {
 	if len(asked) != 1 || asked[0] != beads.SampleKindClaudePlan {
 		t.Errorf("the poll read rows of kind %v, want one %s read", asked, beads.SampleKindClaudePlan)
 	}
-	if len(limits) != 1 || limits[0] <= 0 {
-		t.Errorf("the poll read rows with limits %v, want a bounded read", limits)
+	if want := fixedClaudePlanNow.Add(-claudePlanRowScanSpan); len(sinces) != 1 || !sinces[0].Equal(want) {
+		t.Errorf("the poll read rows since %v, want %v, a span that covers the weekly window", sinces, want)
+	}
+	if len(limits) != 1 || limits[0] != claudePlanRowScanLimit {
+		t.Errorf("the poll read rows with limits %v, want its own count of %d, not the store's default", limits, claudePlanRowScanLimit)
 	}
 }
 
 // TestClaudePlanReadFallsBackToTheSeriesFile: while the town has no claude_plan
 // row the series file answers, and the why-log names the file it read, so a
-// town that has not started recording rows still draws its meter.
+// town that has not started recording rows still draws its meter. The line
+// carries no unusable-row reason, so a town with no row and one whose rows are
+// all unusable read differently in the log (gt-u9dsir).
 func TestClaudePlanReadFallsBackToTheSeriesFile(t *testing.T) {
 	t.Parallel()
 
@@ -109,7 +118,10 @@ func TestClaudePlanReadFallsBackToTheSeriesFile(t *testing.T) {
 		t.Errorf("the meter reads %v%%, want the file's 38%%", p.WeeklyPct)
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], file) {
-		t.Errorf("the why-log = %q, want one line naming %s", logged, file)
+		t.Fatalf("the why-log = %q, want one line naming %s", logged, file)
+	}
+	if strings.Contains(logged[0], "unusable") {
+		t.Errorf("the why-log = %q, want no unusable-row reason for a town with no rows", logged)
 	}
 }
 
@@ -154,9 +166,69 @@ func TestClaudePlanReadFallsBackWhenTheRowsFail(t *testing.T) {
 	}
 }
 
+// TestClaudePlanReadRefusesAFullRowCap: a rows read that comes back with as
+// many rows as it asked for has dropped whatever came before them, and the
+// window's start is the first thing that falls off, so the poll refuses that
+// series and answers from the file with the reason logged rather than fold a
+// partial week as the whole one (gt-u9dsir).
+func TestClaudePlanReadRefusesAFullRowCap(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	file := writeClaudePlanSeries(t, town, fixedClaudePlanNow) // the file stands at 38%
+
+	var logged []string
+	rows := func(string, time.Time, int) ([]beads.Sample, error) {
+		return fullClaudePlanRows(claudePlanRowScanLimit), nil
+	}
+	p := claudePlanRead(t, town, rows, &logged)()
+
+	if p.WeeklyPct != 38 {
+		t.Errorf("the meter reads %v%% from a full-cap read, want the file's 38%%", p.WeeklyPct)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], file) || !strings.Contains(logged[0], "filled its cap") {
+		t.Errorf("the why-log = %q, want one line naming %s and the full row cap", logged, file)
+	}
+}
+
+// TestClaudePlanReadAcceptsAReadJustUnderTheCap: one row under the cap is not a
+// full cap, so the rows answer and the file is left alone; the refusal is the
+// filled cap itself, not a read of any size (gt-u9dsir).
+func TestClaudePlanReadAcceptsAReadJustUnderTheCap(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	writeClaudePlanSeries(t, town, fixedClaudePlanNow) // the file stands at 38%
+
+	var logged []string
+	rows := func(string, time.Time, int) ([]beads.Sample, error) {
+		return fullClaudePlanRows(claudePlanRowScanLimit - 1), nil
+	}
+	p := claudePlanRead(t, town, rows, &logged)()
+
+	if p.WeeklyPct != 7 {
+		t.Errorf("the meter reads %v%%, want the rows' 7%% from a read under the cap", p.WeeklyPct)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], claudePlanSourceRows) {
+		t.Errorf("the why-log = %q, want one line naming %q", logged, claudePlanSourceRows)
+	}
+}
+
+// fullClaudePlanRows is n copies of one complete claude_plan row, the shape a
+// read comes back in when a town wrote more rows than the scan asked for.
+func fullClaudePlanRows(n int) []beads.Sample {
+	rows := make([]beads.Sample, n)
+	for i := range rows {
+		rows[i] = claudePlanRow(fixedClaudePlanNow, 3, 7)
+	}
+	return rows
+}
+
 // TestClaudePlanReadSkipsPartialRows: a row missing a reading is not a reading,
 // so it never folds as a week at 0%; with a complete row beside it the rows
-// still answer, and with none the file does.
+// still answer, and with none the file does. Either way the why-log names the
+// rows it could not use, so a fallback over unusable rows is not the same line
+// as a town with no rows (gt-u9dsir).
 func TestClaudePlanReadSkipsPartialRows(t *testing.T) {
 	t.Parallel()
 
@@ -171,7 +243,10 @@ func TestClaudePlanReadSkipsPartialRows(t *testing.T) {
 		t.Errorf("the meter reads %v%% of the week and %v%% of five hours, want the complete row's 7 and 3", p.WeeklyPct, p.FiveHourPct)
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], claudePlanSourceRows) {
-		t.Errorf("the why-log = %q, want one line naming %q", logged, claudePlanSourceRows)
+		t.Fatalf("the why-log = %q, want one line naming %q", logged, claudePlanSourceRows)
+	}
+	if !strings.Contains(logged[0], "unusable claude_plan rows: 1") {
+		t.Errorf("the why-log = %q, want the skipped partial row named beside the source", logged)
 	}
 
 	partialOnly := t.TempDir()
@@ -182,7 +257,10 @@ func TestClaudePlanReadSkipsPartialRows(t *testing.T) {
 		t.Errorf("rows of one partial row gave %v%%, want the file's 38%%", p.WeeklyPct)
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], file) {
-		t.Errorf("the why-log = %q, want one line naming %s", logged, file)
+		t.Fatalf("the why-log = %q, want one line naming %s", logged, file)
+	}
+	if !strings.Contains(logged[0], "unusable claude_plan rows: 1") {
+		t.Errorf("the why-log = %q, want the fallback to name the row it could not use, not read as no rows", logged)
 	}
 }
 
@@ -231,7 +309,7 @@ func TestClaudePlanReadFollowsTheRowsAppearing(t *testing.T) {
 	}
 	read()
 	if len(logged) != 2 || !strings.Contains(logged[1], claudePlanSourceRows) {
-		t.Errorf("the why-log = %q, want the file named at build and then one line for the rows", logged)
+		t.Errorf("the why-log = %q, want the file named while no row existed, then one line for the rows", logged)
 	}
 }
 

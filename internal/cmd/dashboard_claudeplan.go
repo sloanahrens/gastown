@@ -9,10 +9,24 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// claudePlanRowScan bounds how many claude_plan rows one poll reads: about the
-// number of sample lines the series file's tail read holds, so the meter
-// reaches back as far from the rows as it did from the file.
-const claudePlanRowScan = 2000
+// claudePlanRowScanSpan is how far back one poll reads the town's claude_plan
+// rows: one weekly window, the span the meter folds, plus a day, so the reading
+// that closed the window before this one is still in the series. A count of
+// rows cannot name that span: the status line appends a row on every changed
+// reading and holds only an unchanged one to the ten-minute heartbeat, so a
+// busy town writes far more rows in a week than a count sized for a quiet one
+// holds, and the window's start would fall off the read (gt-u9dsir).
+const claudePlanRowScanSpan = 8 * 24 * time.Hour
+
+// claudePlanRowScanLimit caps one poll's row read over that span. It is this
+// package's count, never the store's default, which this repo does not define:
+// a read that leaves the limit to bd stops at whatever count bd holds and drops
+// the window's start without saying so (gt-u9dsir). The cap holds a quiet
+// town's ten-minute heartbeat with room to spare and a busy session's changed
+// readings with it, and a read that fills it is refused rather than folded,
+// because a full cap is the one case where the window's start is not known to
+// be in the rows.
+const claudePlanRowScanLimit = 20000
 
 // claudePlanSourceRows names the row series in the plan meter's log line.
 const claudePlanSourceRows = "the town's claude_plan rows"
@@ -41,20 +55,29 @@ func newDashboardClaudePlanReader(path string, usage *dashUsageReader, planUSDMo
 		WithUsageAbsent(usage.absent)
 }
 
-// claudePlanRowSamples reads the town's claude_plan rows as the plan series.
-// A row missing one of its four readings is not a reading and is skipped, never
-// folded as a week at 0%, so a partial row another writer left cannot pull the
-// meter down (gt-j3ya0x). A failed read is the caller's error, never an empty
-// series.
-func claudePlanRowSamples(read costSamplesRead) ([]dashboard.ClaudePlanSample, error) {
-	rows, err := read(beads.SampleKindClaudePlan, time.Time{}, claudePlanRowScan)
+// claudePlanRowSamples reads the town's claude_plan rows since the start of
+// the span the meter folds, as the plan series. A row missing one of its four
+// readings is not a reading and is skipped, never folded as a week at 0%, so a
+// partial row another writer left cannot pull the meter down (gt-j3ya0x). The
+// skipped count comes back beside the samples so the caller can name the rows
+// it could not use; without it a fallback over unusable rows reads the same as
+// a town with no rows (gt-u9dsir). A read that fills the scan cap is refused,
+// never folded: the rows that fell off it are the window's start. A failed read
+// is the caller's error, never an empty series.
+func claudePlanRowSamples(read costSamplesRead, now time.Time) ([]dashboard.ClaudePlanSample, int, error) {
+	rows, err := read(beads.SampleKindClaudePlan, now.Add(-claudePlanRowScanSpan), claudePlanRowScanLimit)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	if len(rows) == claudePlanRowScanLimit {
+		return nil, 0, fmt.Errorf("the read filled its cap of %d rows, so the window's start is not known to be in the series", claudePlanRowScanLimit)
+	}
+	unusable := 0
 	samples := make([]dashboard.ClaudePlanSample, 0, len(rows))
 	for _, row := range rows {
 		p, err := claudePlanOfSample(row)
 		if err != nil {
+			unusable++
 			continue
 		}
 		samples = append(samples, dashboard.ClaudePlanSample{
@@ -65,7 +88,7 @@ func claudePlanRowSamples(read costSamplesRead) ([]dashboard.ClaudePlanSample, e
 			SevenDayResetsAt: p.SevenDayResetsAt.Unix(),
 		})
 	}
-	return samples, nil
+	return samples, unusable, nil
 }
 
 // newDashboardClaudePlanRead is the plan meter's read for the hub. It chooses
@@ -73,22 +96,31 @@ func claudePlanRowSamples(read costSamplesRead) ([]dashboard.ClaudePlanSample, e
 // answer while it has any, and the series file answers only while no row
 // exists, so the first row the status line writes is read at the next poll. The
 // why-log names the source that answered, once per change. A rows read that
-// fails falls back to the file with the reason logged, so a bd hiccup does not
-// blank a meter whose old series is still there (gt-hutsr6).
+// fails, or that fills the scan cap so the window's start is not known to be in
+// it, falls back to the file with the reason logged, so a bd hiccup does not
+// blank a meter whose old series is still there (gt-hutsr6). Rows that carry no
+// complete reading are named in the log beside whichever source answered, so a
+// fallback over unusable rows is not read as a town that has no rows
+// (gt-u9dsir).
 func newDashboardClaudePlanRead(townRoot string, rows costSamplesRead, whyLog *dashWhyLog, usage *dashUsageReader, planUSDMonth float64, renewalDay int, now func() time.Time) func() *dashboard.ClaudePlan {
 	file := dashboardClaudePlanPath(townRoot)
 	return func() *dashboard.ClaudePlan {
+		at := now()
 		read := newDashboardClaudePlanReader(file, usage, planUSDMonth).WithRenewalDay(renewalDay)
-		samples, err := claudePlanRowSamples(rows)
+		samples, unusable, err := claudePlanRowSamples(rows, at)
+		why := ""
+		if unusable > 0 {
+			why = fmt.Sprintf("unusable claude_plan rows: %d", unusable)
+		}
 		switch {
 		case err != nil:
 			whyLog.claudePlanSeries(file, fmt.Sprintf("reading the claude_plan rows: %v", err))
 		case len(samples) > 0:
-			whyLog.claudePlanSeries(claudePlanSourceRows, "")
+			whyLog.claudePlanSeries(claudePlanSourceRows, why)
 			read = read.WithSamples(samples)
 		default:
-			whyLog.claudePlanSeries(file, "")
+			whyLog.claudePlanSeries(file, why)
 		}
-		return read.Read(now())
+		return read.Read(at)
 	}
 }
