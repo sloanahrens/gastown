@@ -406,7 +406,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		escalationAnsweredAt = func(overrunSeat) (time.Time, error) { return time.Time{}, nil }
 	}
 	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(pc))
-	maxGateTotal := overrunMaxGateTotal(stopAfter)
+	// The ceiling on the gate time one sling may bank is the configured
+	// gate_allowance, or twice the stop threshold when none is set: a seat
+	// inside its gate counts as working only up to that ceiling.
+	maxGateTotal := overrunGateAllowance(pc, stopAfter)
 	maxEscalationTotal := overrunMaxEscalationTotal(stopAfter)
 	// The escalation read is logged once per tick, not once per seat: a failed
 	// read is the same failure for every seat it reaches this cycle.
