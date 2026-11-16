@@ -307,6 +307,28 @@ func TestRebaseHistoryReturnsTheRowsTheUpdateMarked(t *testing.T) {
 	}
 }
 
+// TestRebaseHistoryReadsTheOrderDoltRenders drives the plan's order as Dolt
+// renders it: dolt_rebase.rebase_order is a DECIMAL(6,2), so the number arrives
+// as "1.00" rather than "1". The lab (gt-dmxf57) is where the integer-only parse
+// met it; this keeps the case in the unit tier, off a real server.
+func TestRebaseHistoryReadsTheOrderDoltRenders(t *testing.T) {
+	t.Parallel()
+	fx := newRebaseFixture()
+	plan := Rows{Columns: []string{"rebase_order", "commit_hash"}}
+	for _, row := range fx.plan {
+		plan.Data = append(plan.Data, []string{fmt.Sprintf("%d.00", row.order), row.commit})
+	}
+	f := fx.fake(map[string]Rows{sqlPlan: plan})
+
+	got, err := RebaseHistory(context.Background(), f, Before{Tip: fx.tip}, cutOf())
+	if err != nil {
+		t.Fatalf("RebaseHistory refused the order Dolt renders: %v", err)
+	}
+	if got.Marked != fx.marked {
+		t.Errorf("RebaseHistory marked %d rows, want %d", got.Marked, fx.marked)
+	}
+}
+
 // TestRebaseFilterReadsTheLogByBranchName pins the statement text the engine
 // sends for the case the 11-01 design got wrong: inside a rebase session an
 // unqualified dolt_log sees only the base, so commit_hash IN (SELECT commit_hash
@@ -531,6 +553,15 @@ func TestRebaseHistoryRefusals(t *testing.T) {
 			changes: map[string]Rows{sqlPlan: {
 				Columns: []string{"rebase_order", "commit_hash"},
 				Data:    [][]string{{"first", hash(0x11)}},
+			}},
+			want: "want a number",
+		},
+		{
+			name:   "a plan order has a non-zero fraction",
+			before: Before{Tip: fx.tip},
+			changes: map[string]Rows{sqlPlan: {
+				Columns: []string{"rebase_order", "commit_hash"},
+				Data:    [][]string{{"1.50", hash(0x11)}},
 			}},
 			want: "want a number",
 		},

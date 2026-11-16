@@ -250,7 +250,7 @@ func readPlan(ctx context.Context, s *designStep) ([]planRow, error) {
 			return nil, fmt.Errorf("doltsquash: statement %d (%s) returned record %d of %d values, want order and commit",
 				s.n, shortStatement(statement), i, len(record))
 		}
-		order, err := strconv.ParseInt(record[0], 10, 64)
+		order, err := parseRebaseOrder(record[0])
 		if err != nil {
 			return nil, fmt.Errorf("doltsquash: statement %d (%s) returned order %q, want a number",
 				s.n, shortStatement(statement), record[0])
@@ -261,6 +261,18 @@ func readPlan(ctx context.Context, s *designStep) ([]planRow, error) {
 		plan = append(plan, planRow{order: order, commit: record[1]})
 	}
 	return plan, nil
+}
+
+// parseRebaseOrder reads one dolt_rebase.rebase_order. Dolt holds the plan's
+// position in a DECIMAL(6,2) column and renders it as "1.00", so the order
+// arrives with a zero fraction the parse must take; a value with a non-zero
+// fraction, like "1.50", is not a row position and is refused.
+func parseRebaseOrder(value string) (int64, error) {
+	whole, fraction, hasFraction := strings.Cut(value, ".")
+	if hasFraction && strings.Trim(fraction, "0") != "" {
+		return 0, fmt.Errorf("%q is not a whole number", value)
+	}
+	return strconv.ParseInt(whole, 10, 64)
 }
 
 // squashPredicate is design step 4's filter: every plan row after the first
