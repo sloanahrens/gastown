@@ -245,6 +245,60 @@ func TestNoBeadAccessCommentLeavesDoltModeAlone(t *testing.T) {
 	}
 }
 
+// A comment whose outbox write fails reports the failure as a comment and
+// leaves the notes the seat already had, so a killed append never loses them
+// (gt-jqo63z).
+func TestNoBeadAccessCommentRefusesAFailedOutboxWrite(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("the seat was killed mid-write")
+	const previous = "the first comment\n"
+	for name, fsys := range map[string]failingOutboxFS{
+		"write":  {writeErr: boom},
+		"rename": {renameErr: boom},
+	} {
+		name, fsys := name, fsys
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := newNoteSeat(t, "gt-own1")
+			dir := filepath.Join(root, outbox.Dir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, outbox.NotesFile), []byte(previous), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			v, store, _ := seatVerbs(t, root)
+			v.outboxFS = fsys
+			err := v.comment("gt-own1", "the second comment")
+			if err == nil {
+				t.Fatal("a comment whose write failed reported success")
+			}
+			if !strings.Contains(err.Error(), "commenting") {
+				t.Errorf("error %q does not read as a failed comment", err)
+			}
+			if got := outboxNotes(t, root); string(got) != previous {
+				t.Errorf("outbox notes = %q after a failed write, want the previous %q", got, previous)
+			}
+			// The host's copy refuses a name in the outbox directory that is
+			// not one of its two files, so a killed write must leave none there.
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 1 || entries[0].Name() != outbox.NotesFile {
+				names := make([]string, len(entries))
+				for i, e := range entries {
+					names[i] = e.Name()
+				}
+				t.Errorf("the outbox directory holds %v after a failed write, want only %s", names, outbox.NotesFile)
+			}
+			if len(store.calls) != 0 {
+				t.Errorf("the bead store was written after a failed outbox write: %v", store.calls)
+			}
+		})
+	}
+}
+
 // failingOutboxFS fails the step its field names and runs every other step on
 // the real filesystem, so one row is one way a seat is killed or a disk fails
 // partway through the append.
