@@ -133,6 +133,10 @@ const (
 	// published, whether or not an images run exists, so no roll can start
 	// from it (gt-afwjb4).
 	KindDeployPairStuck Kind = "deploy-pair-stuck"
+	// KindDeployPairRefused: the update ledger records a green commit's pair as
+	// refused by the pre-swap check, so no roll can start from that commit and
+	// nothing retries it (gt-d6ok4r, gt-t8vf15).
+	KindDeployPairRefused Kind = "deploy-pair-refused"
 	// KindImagesFailed: the images workflow's newest run for a green commit
 	// finished failed or canceled, so that commit's daemon and polecat images
 	// were never published and no roll can start from it (gt-3vafwr).
@@ -212,7 +216,8 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindDeployPairStuck,
-		KindImagesFailed, KindImagesUnknown, KindTierSweepImagesRetryExhausted,
+		KindDeployPairRefused, KindImagesFailed, KindImagesUnknown,
+		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,

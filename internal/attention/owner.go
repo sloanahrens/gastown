@@ -122,6 +122,10 @@ var ruleOwners = map[string]Owner{
 	// start or repair: the overseer acts on it before a person is woken
 	// (gt-afwjb4).
 	RuleDeployPairStuck: OwnerOverseer,
+	// A pair the pre-swap check refused is the town's own update to fix: the
+	// overseer finds what failed the check before a person is woken
+	// (gt-d6ok4r).
+	RuleDeployPairRefused: OwnerOverseer,
 	// A green commit whose image build failed is the town's own workflow to
 	// look at: the overseer re-runs it or finds what stopped it before a person
 	// is woken (gt-3vafwr).
