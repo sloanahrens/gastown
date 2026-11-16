@@ -193,6 +193,12 @@ func noteLines(note string) []string {
 // back is not read as a town with no rows. A nil rows read is a hub with no row
 // store wired and leaves the file source exactly as it was. The clock is
 // injected so a test drives the report's pace windows.
+//
+// The returned closure is called from the hub's one spend poller, so the row
+// series it holds is mutated without a lock; a second caller needs one. A town
+// whose deepseek_balance table reaches deepSeekRowScanLimit rows is refused on
+// every poll from then on and the file source answers, with the reason logged:
+// a bounded window is the way out when that table nears the cap.
 func deepSeekSpendRowsFirst(rows costSamplesRead, file func() json.RawMessage, fileSource string, now func() time.Time, whyLog *dashWhyLog) func() json.RawMessage {
 	if rows == nil {
 		return file

@@ -182,6 +182,42 @@ func TestSpendFileKeepsANewerRowStampedReadingOverAnUndatedLedgerReport(t *testi
 	assert.Empty(t, spendTemps(t, dir), "an undated report left a temporary file behind")
 }
 
+// A dated ledger report older than the reading in the file leaves the file
+// alone: when the rows read fails the ledger answers with its older sample, and
+// writing it would move the watch file back to that balance and stamp (gt-u3fp8i).
+func TestSpendFileKeepsANewerRowStampedReadingOverAnOlderDatedLedgerReport(t *testing.T) {
+	t.Parallel()
+
+	newer := spendSampleAt.Add(time.Hour)
+	dir := t.TempDir()
+	path := filepath.Join(dir, spendWatchName)
+	require.NoError(t, writeSpendWatch(dir, spendRowsReport(t, 74.55, 1.25, newer)))
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	require.NoError(t, writeSpendWatch(dir, spendReport(t, 12.5, 0.5, 2.5)))
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "an older dated ledger report replaced the newer row-stamped reading")
+	assert.Empty(t, spendTemps(t, dir), "an older report left a temporary file behind")
+}
+
+// A dated ledger report as new as the reading in the file, or newer, is written.
+func TestSpendFileWritesALedgerReportNotOlderThanTheReadingInTheFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, writeSpendWatch(dir, spendRowsReport(t, 74.55, 1.25, spendSampleAt.Add(-time.Hour))))
+
+	require.NoError(t, writeSpendWatch(dir, spendReport(t, 12.5, 0.5, 2.5)))
+
+	doc, _ := readSpendWatch(t, dir)
+	require.NotNil(t, doc.Balance)
+	assert.InDelta(t, 12.5, *doc.Balance, 1e-9, "a newer ledger report was not written")
+	assert.True(t, spendSampleAt.Equal(doc.TS), "ts = %s, want %s", doc.TS, spendSampleAt)
+}
+
 // A report with no balance is no reading: the file keeps its own age instead of
 // being restamped with a figure the report does not have. A report that will
 // not decode is a failure the poll reports, not a silent no-write.

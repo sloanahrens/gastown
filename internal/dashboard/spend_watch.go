@@ -94,6 +94,13 @@ func writeSpendWatchWith(dir string, report json.RawMessage, create func(dir str
 	if !dated {
 		return nil
 	}
+	// A dated report older than the reading already in the file leaves it alone:
+	// when the rows read fails the file ledger answers with an older balance, and
+	// writing it would move the watch file back to that balance and its older
+	// stamp, over the newer row-stamped reading (gt-u3fp8i).
+	if onDisk, ok := spendWatchOnDisk(dir); ok && onDisk.After(ts) {
+		return nil
+	}
 	// The file has one per_hour field, and the 1-hour pace is the report's
 	// current rate: the 24-hour pace beside it is a daily average.
 	doc := spendWatch{TS: ts.UTC(), PerHour: d.Pace1h.PerHour, Balance: *d.Balance}
@@ -105,6 +112,21 @@ func writeSpendWatchWith(dir string, report json.RawMessage, create func(dir str
 		return fmt.Errorf("spend watch: creating %s: %w", dir, err)
 	}
 	return writeSpendWatchVia(dir, data, create)
+}
+
+// spendWatchOnDisk is the instant of the reading the watch file in dir already
+// holds. ok is false when the file is absent, unreadable or carries no usable ts:
+// then there is no newer reading to protect and the report is written.
+func spendWatchOnDisk(dir string) (ts time.Time, ok bool) {
+	data, err := os.ReadFile(filepath.Join(dir, spendWatchName))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var cur spendWatch
+	if json.Unmarshal(data, &cur) != nil || cur.TS.IsZero() {
+		return time.Time{}, false
+	}
+	return cur.TS, true
 }
 
 // spendSampleLayouts are the forms a report's last_sample is written in: the
