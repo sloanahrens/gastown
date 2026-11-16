@@ -21,16 +21,20 @@ import (
 	"github.com/steveyegge/gastown/internal/omlessons"
 )
 
-// omLessonsTestDaemon builds a daemon whose om_lessons patrol is enabled.
+// omLessonsTestDaemon builds a daemon whose om_lessons patrol is enabled. Its
+// in-memory last-run entry is dropped when the test ends, so no later daemon
+// can inherit a completion through a recycled address.
 func omLessonsTestDaemon(t *testing.T, logged io.Writer) *Daemon {
 	t.Helper()
-	return &Daemon{
+	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(logged, "", 0),
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 			OmLessons: &agentconfig.OmLessonsConfig{Enabled: true},
 		}},
 	}
+	t.Cleanup(d.forgetOmLessonsLastRun)
+	return d
 }
 
 // TestReworkProgramOmLessonsPatrolStartsOnlyWhenEnabled: the patrol's own
@@ -132,7 +136,6 @@ func omLessonsCountingDaemon(t *testing.T, townRoot string, clk clockwork.Clock,
 		calls.Add(1)
 		return nil, nil
 	}
-	t.Cleanup(d.forgetOmLessonsLastRun)
 	return d
 }
 
@@ -667,11 +670,11 @@ func TestReworkProgramOmLessonsRunRefusesAnUnreadableInput(t *testing.T) {
 			}
 		}
 		if withLog {
-			log := land.TownReviewsFile(root)
-			if err := os.MkdirAll(filepath.Dir(log.Path), 0o755); err != nil {
+			reviews := land.TownReviewsFile(root)
+			if err := os.MkdirAll(filepath.Dir(reviews.Path), 0o755); err != nil {
 				t.Fatalf("make the landings directory: %v", err)
 			}
-			if err := os.WriteFile(log.Path, nil, 0o644); err != nil {
+			if err := os.WriteFile(reviews.Path, nil, 0o644); err != nil {
 				t.Fatalf("write the review log: %v", err)
 			}
 		}

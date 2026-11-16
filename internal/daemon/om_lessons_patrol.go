@@ -137,9 +137,7 @@ func omLessonsTownSources(townRoot string) (omLessonsSources, error) {
 }
 
 // omLessonsTownRecords reads the review records of the window that starts at
-// since. The log's own reader takes an absent file as no records, since a town
-// that has not landed yet has none; the patrol refuses instead, because a moved
-// or unconfigured log would otherwise read as a clean week with no findings.
+// since.
 func omLessonsTownRecords(townRoot string, since time.Time) ([]land.ReviewRecord, error) {
 	file := land.TownReviewsFile(townRoot)
 	if _, err := os.Stat(file.Path); err != nil {
