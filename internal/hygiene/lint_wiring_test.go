@@ -24,8 +24,44 @@ func TestLintRunsTheHygieneScan(t *testing.T) {
 	if !ok {
 		t.Fatal("the Makefile has no lint target")
 	}
-	if !strings.Contains(recipe, lintScanStep) {
-		t.Fatalf("the lint recipe does not run %q", lintScanStep)
+	if !recipeRunsScan(recipe) {
+		t.Fatalf("the lint recipe has no line that is exactly %q: a commented, chained or exit-swallowing step does not enforce the scan", "\t"+lintScanStep)
+	}
+}
+
+// recipeRunsScan reports whether the recipe holds the scan as a whole line of
+// its own, so its exit status is the line's: a make comment, a trailing
+// "|| true" or a "; true" leaves the line different and does not count.
+func recipeRunsScan(recipe string) bool {
+	for _, l := range strings.Split(recipe, "\n") {
+		if strings.TrimRight(l, " ") == "\t"+lintScanStep {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWiringCheckRefusesADisabledScan checks the exact-line rule on the ways a
+// lint line can keep the command text and still not fail the gate.
+func TestWiringCheckRefusesADisabledScan(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		recipe string
+		want   bool
+	}{
+		{"the plain step", "\tgo run ./cmd/repo-guards\n\t" + lintScanStep, true},
+		{"trailing spaces", "\t" + lintScanStep + "  ", true},
+		{"commented out", "\t# " + lintScanStep, false},
+		{"exit swallowed", "\t" + lintScanStep + " || true", false},
+		{"chained to a success", "\t" + lintScanStep + "; true", false},
+		{"dash prefix ignores the exit", "\t-" + lintScanStep, false},
+		{"only echoed", "\t@echo " + lintScanStep, false},
+		{"absent", "\tgo run ./cmd/repo-guards", false},
+	} {
+		if got := recipeRunsScan(c.recipe); got != c.want {
+			t.Errorf("%s: recipeRunsScan = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -45,6 +81,9 @@ func TestLintRecipeIsReadFromItsTargetOnly(t *testing.T) {
 	if _, ok := lintRecipe("build:\n\tgo build\n"); ok {
 		t.Fatal("found a lint target in a Makefile without one")
 	}
+	if recipe, ok := lintRecipe("lint:fast:\n\tgo vet\n\nlint: docs-lint\n\t" + lintScanStep + "\n"); !ok || !strings.Contains(recipe, lintScanStep) {
+		t.Fatalf("a target named lint:fast: was read instead of lint: (%q, %v)", recipe, ok)
+	}
 }
 
 // lintRecipe returns the tab-indented lines under the lint target, up to the
@@ -53,7 +92,7 @@ func lintRecipe(makefile string) (string, bool) {
 	lines := strings.Split(makefile, "\n")
 	start := -1
 	for i, l := range lines {
-		if strings.HasPrefix(l, "lint:") {
+		if l == "lint:" || strings.HasPrefix(l, "lint: ") {
 			start = i
 			break
 		}
