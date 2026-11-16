@@ -71,13 +71,13 @@ type Seat struct {
 // every write it made succeeded. A status other than StatusDone or
 // StatusDeferred, which Validate does not return, is refused into that joined
 // error with no status written: a hand-built Result must not skip the status
-// and read as a clean run. An escalation whose text is empty is refused the
-// same way, with no escalation raised, and so is a title or an acceptance that
-// is empty: either would replace what the bead has with nothing. A submission
-// whose branch, head or target is empty or that names a branch git would not
-// accept or a head that is not a commit sha gets no block, and neither does one
-// that arrives with a status other than StatusDone: a deferred seat submits
-// nothing.
+// and read as a clean run. An escalation whose text is empty or only whitespace
+// is refused the same way, with no escalation raised, and so is a title or an
+// acceptance that is empty: either would replace what the bead has with
+// nothing. A submission whose branch, head or target is empty or that names a
+// branch git would not accept or a head that is not a commit sha gets no block,
+// and neither does one that arrives with a status other than StatusDone: a
+// deferred seat submits nothing.
 //
 // r.Acceptance, when set, is the block that replaces the bead's, and r.Ticked
 // holds zero-based indexes into it. When it is not set the ticks index into
@@ -129,9 +129,9 @@ func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) e
 		errs = append(errs, fmt.Errorf("outbox: set status of %s: result status %q is neither %q nor %q", beadID, r.Status, StatusDone, StatusDeferred))
 	}
 	if r.Escalation != nil {
-		// An empty request is the one Escalation that Validate refuses; raising it
-		// would create an escalation bead carrying no text (gt-5rmlks).
-		if r.Escalation.Text == "" {
+		// Raising an empty request, or one of only whitespace, would create an
+		// escalation bead carrying no text (gt-5rmlks, gt-n91cyx).
+		if strings.TrimSpace(r.Escalation.Text) == "" {
 			errs = append(errs, fmt.Errorf("outbox: escalate on %s: escalation text is empty", beadID))
 		} else if err := store.Escalate(beadID, seat.Actor, r.Escalation.Text); err != nil {
 			errs = append(errs, fmt.Errorf("outbox: escalate on %s: %w", beadID, err))
