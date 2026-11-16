@@ -11,9 +11,12 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
+	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 // This file is the CLI layer's half of gt done's completion: closing the
@@ -102,6 +105,10 @@ type doneStateEnv struct {
 	// spanLog opens the polecat span log a submission's end is appended to;
 	// nil is the store under townRoot.
 	spanLog func(townRoot string) spanStore
+	// warn reports a write that failed without stopping gt done; nil is
+	// stderr. It is a seam so a test can read what the operator was told about
+	// an intent-record write that could not be made.
+	warn func(format string, args ...any)
 }
 
 // spanStore is the part of the polecat span log gt done reads and appends.
@@ -153,6 +160,63 @@ func (e doneStateEnv) head() func(string) (string, error) {
 	return e.reviewHead
 }
 
+func (e doneStateEnv) warnf(format string, args ...any) {
+	if e.warn != nil {
+		e.warn(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// doneTurnEndSeat names the intent record a gt done turn end is written to.
+// Only a polecat has a seat: a crew gt done submits a branch and retires no
+// seat (done.IsCrewRun), so no other role is given one here — naming a polecat
+// seat for a crew run would write a record for a session that does not exist.
+// A returned seat with no Role means "this role has no seat".
+//
+// A polecat turn that cannot name its seat is an error, not a skip: without a
+// name the record would land under the town's town-level directory, where no
+// supervisor reads it.
+func doneTurnEndSeat(roleInfo RoleInfo) (intent.Seat, error) {
+	if roleInfo.Role != RolePolecat {
+		return intent.Seat{}, nil
+	}
+	if roleInfo.Rig == "" || roleInfo.Polecat == "" {
+		return intent.Seat{}, fmt.Errorf("no seat to name (rig %q, polecat %q)", roleInfo.Rig, roleInfo.Polecat)
+	}
+	return supervisor.IntentSeat(supervisor.SeatFor(roleInfo.Rig, string(role.Polecat), roleInfo.Polecat)), nil
+}
+
+// recordTurnEnd writes the turn's end to the seat's intent record, the record
+// the supervisor reads before Dolt and that the agent bead mirrors (ADR 0003).
+// Every caller makes this write before the agent-bead write of the same facts.
+//
+// A failed write is reported the way a failed agent-bead write is and never
+// stops gt done: the agent-bead write after it, and the rest of the run, are
+// still owed.
+func (e doneStateEnv) recordTurnEnd(townRoot string, roleInfo RoleInfo, turnEnd intent.TurnEnd) {
+	seat, err := doneTurnEndSeat(roleInfo)
+	if err != nil {
+		e.warnf("couldn't record the turn's end in the intent record: %v", err)
+		return
+	}
+	if seat.Role == "" {
+		return
+	}
+	if err := intent.MarkTurnEnded(townRoot, seat, turnEnd, "gt done", time.Now()); err != nil {
+		e.warnf("couldn't record the turn's end in the intent record of %s: %v", seat, err)
+	}
+}
+
+// cleanupStatusFromPending is the cleanup status pending carries, or "" when
+// the caller gathered none.
+func cleanupStatusFromPending(pending beads.AgentFieldUpdates) string {
+	if pending.CleanupStatus == nil {
+		return ""
+	}
+	return *pending.CleanupStatus
+}
+
 // doneRoleInfo resolves the role gt done's agent-state write addresses, trying
 // multiple sources for resilience. When detection fails it falls back to the
 // environment, which handles the case where cwd is deleted but env vars are
@@ -198,8 +262,23 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		WorkDir:  cwd,
 	}
 
+	// Find the hooked bead to close. Use issueID directly instead of reading
+	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking). Declared
+	// before the deferred record write below, which carries it.
+	hookedBeadID := issueID
+
 	agentBeadID := getAgentBeadID(ctx)
 	if agentBeadID == "" {
+		// The turn still ends, and its end still goes to the seat's intent
+		// record: that write needs the seat, not an agent bead. The cleanup
+		// status is whatever pending carries, the same value the agent-bead
+		// write elsewhere would have left.
+		e.recordTurnEnd(townRoot, roleInfo, intent.TurnEnd{
+			TurnState:     done.DoneTurnState(exitType),
+			ExitType:      exitType,
+			CleanupStatus: cleanupStatusFromPending(pending),
+			WorkBead:      hookedBeadID,
+		})
 		style.PrintWarning("no agent bead ID found for %s/%s, skipping agent state update", ctx.Rig, ctx.Polecat)
 		return false, nil
 	}
@@ -209,6 +288,14 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// work even if the polecat worktree is deleted.
 	beadsPath := filepath.Join(townRoot, ctx.Rig)
 	bd := e.routedAt(beadsPath)
+	if hookedBeadID == "" {
+		// Fallback: query for hooked beads assigned to this agent
+		agentID := roleInfo.ActorString()
+		if found := done.FindHookedBeadForAgent(bd, agentID); found != "" {
+			hookedBeadID = found
+		}
+	}
+
 	// agentBd resolves agent beads dual-scope: their canonical (rig-local)
 	// database first, with a town fallback for legacy beads created before
 	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
@@ -224,26 +311,38 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// bead still on its rejected head (gt-3e1z4). That exit is recorded as stuck
 	// with a DEFERRED exit, not COMPLETED, so patrol_scan restarts the seat (gt-jfhvc).
 	reworkStandDown := false
+	// turnEndRecorded is set once the turn's end has been written to the
+	// intent record. The final write below records it before the bead; when
+	// that write is what failed, the defer must not write the record again,
+	// because a second write from the defer carries no turn_state and would
+	// clear the one the final write recorded.
+	turnEndRecorded := false
 	defer func() {
-		if stateWritten || pending == (beads.AgentFieldUpdates{}) {
+		if stateWritten {
+			return
+		}
+		if !turnEndRecorded {
+			// The final write below never ran: a close was refused fatally, or
+			// the hooked bead could not be read. This attempt still has facts
+			// of its own to leave on the seat's record before the bead that
+			// mirrors them — its exit type, the cleanup status pending
+			// carries, and the work bead it was on. TurnState stays empty:
+			// those refusals leave the session up to retry the same turn, so
+			// no agent state has ended.
+			e.recordTurnEnd(townRoot, roleInfo, intent.TurnEnd{
+				CleanupStatus: cleanupStatusFromPending(pending),
+				ExitType:      exitType,
+				WorkBead:      hookedBeadID,
+			})
+		}
+		if pending == (beads.AgentFieldUpdates{}) {
 			return
 		}
 		if werr := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, pending); werr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: couldn't record completion on %s: %v\n", agentBeadID, werr)
+			e.warnf("couldn't record completion on %s: %v", agentBeadID, werr)
 		}
 		consumed = true
 	}()
-
-	// Find the hooked bead to close. Use issueID directly instead of reading
-	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
-	hookedBeadID := issueID
-	if hookedBeadID == "" {
-		// Fallback: query for hooked beads assigned to this agent
-		agentID := roleInfo.ActorString()
-		if found := done.FindHookedBeadForAgent(bd, agentID); found != "" {
-			hookedBeadID = found
-		}
-	}
 
 	// Workflow step beads (*-wfs-*) are ephemeral formula steps managed by the workflow
 	// engine. For these, DEFERRED means "step complete, no code commits" not "work
@@ -488,23 +587,35 @@ doneStateUpdate:
 	// runDone's failure path writes it alone, so a failed submission records it
 	// too: the case where polecat reclaim needs "has_unpushed".
 	emptyHook := ""
-	doneState := string(beads.AgentStateDone)
-	if exitType != done.ExitCompleted || reworkStandDown {
-		doneState = "stuck"
+	doneState := done.DoneTurnState(exitType)
+	finalExit := exitType
+	if reworkStandDown {
+		// A stand-down submitted nothing, so it is not a completion. DEFERRED is
+		// the exit patrol_scan recovers a stuck seat from: it restarts the seat
+		// on its preserved branch once the done-close grace passes (gt-ks62m).
+		doneState = string(beads.AgentStateStuck)
+		finalExit = done.ExitDeferred
 	}
 	final := pending
 	final.HookBead = &emptyHook
 	final.AgentState = &doneState
 	if reworkStandDown {
-		// A stand-down submitted nothing, so it is not a completion. DEFERRED is
-		// the exit patrol_scan recovers a stuck seat from: it restarts the seat
-		// on its preserved branch once the done-close grace passes (gt-ks62m).
-		deferred := done.ExitDeferred
-		final.ExitType = &deferred
+		final.ExitType = &finalExit
 	}
+	// The turn's end reaches the intent record first, with the same state,
+	// exit type, cleanup status and work bead this write leaves on the agent
+	// bead: the record is what the supervisor reads before Dolt, and the bead
+	// is its mirror (ADR 0003).
+	e.recordTurnEnd(townRoot, roleInfo, intent.TurnEnd{
+		TurnState:     doneState,
+		ExitType:      finalExit,
+		CleanupStatus: cleanupStatusFromPending(pending),
+		WorkBead:      hookedBeadID,
+	})
+	turnEndRecorded = true
 	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, final); err != nil {
 		// stateWritten stays false: the deferred write retries pending alone.
-		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s to %s: %v\n", agentBeadID, doneState, err)
+		e.warnf("couldn't set agent %s to %s: %v", agentBeadID, doneState, err)
 	} else {
 		stateWritten = true
 		consumed = true

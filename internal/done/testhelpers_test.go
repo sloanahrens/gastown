@@ -1,6 +1,8 @@
 package done
 
 import (
+	"testing"
+
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/session"
@@ -56,4 +58,20 @@ func detectFromEnv(cwd, townRoot string, getenv func(string) string) (Agent, str
 		return agent, "", false
 	}
 	return agent, agent.Actor(), true
+}
+
+// cleanupStatusRun is a run whose only facts the cleanup-status self-report
+// reads: the branch it names, and the polecat seat whose intent record it
+// writes beside the agent bead. The town is a temporary one, so the record
+// lands in a directory the test owns.
+func cleanupStatusRun(t *testing.T) *doneRun {
+	t.Helper()
+	return &doneRun{
+		branch:      "polecat/jasper/gt-624w+xyz",
+		townRoot:    t.TempDir(),
+		rigName:     "gastown",
+		polecatName: "jasper",
+		agent:       Agent{Role: role.Polecat, Rig: "gastown", Polecat: "jasper"},
+		warn:        func(string, ...any) {},
+	}
 }
