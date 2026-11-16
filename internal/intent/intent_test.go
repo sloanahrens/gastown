@@ -886,7 +886,8 @@ func TestAgentBeadRetireLegacyRecordReadsAndRewritesUnchanged(t *testing.T) {
 }
 
 // SetCleanupStatus answers a cleanup status found after the turn's facts were
-// recorded: it changes that one field and the bookkeeping, nothing else.
+// recorded: it changes that one field and UpdatedAt, and the actor that recorded
+// the turn stays.
 func TestAgentBeadRetireSetCleanupStatusChangesOnlyCleanupStatus(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -920,9 +921,9 @@ func TestAgentBeadRetireSetCleanupStatusChangesOnlyCleanupStatus(t *testing.T) {
 	}
 	want := before
 	want.CleanupStatus = "has_unpushed"
-	want.Actor, want.UpdatedAt = "overrun guard", now
+	want.UpdatedAt = now
 	if !reflect.DeepEqual(after, want) {
-		t.Fatalf("record after SetCleanupStatus =\n %+v\nwant only cleanup_status, actor and updated_at to change, from\n %+v", after, before)
+		t.Fatalf("record after SetCleanupStatus =\n %+v\nwant only cleanup_status and updated_at to change, from\n %+v", after, before)
 	}
 	raw := recordJSON(t, town)
 	if got, isString := raw["cleanup_status"].(string); !isString || got != "has_unpushed" {
