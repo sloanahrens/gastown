@@ -23,7 +23,7 @@ const (
 // the decision never touches a clock.
 type overrunInput struct {
 	Now, SlungAt    time.Time
-	Nudged          bool          // the nudge already went out for this sling
+	Nudged          bool          // the seat was already marked for this sling
 	NudgeAt, StopAt time.Duration // elapsed since SlungAt
 	// GateSpent is how much of this sling the seat spent inside its own gate
 	// (overrun_guard_gate.go): the 12 and 20 minute rule measures the rest of
@@ -36,12 +36,12 @@ type overrunInput struct {
 
 // decideOverrun returns the action for one seat. A zero SlungAt or one after
 // Now means the sling time is unknown or wrong, so it acts on nothing. Stop
-// wins over nudge, and fires even when the seat was never nudged. A nudge fires
-// once: Nudged suppresses it on later ticks.
+// wins over the nudge threshold, and fires even when the seat was never marked.
+// The threshold fires once: Nudged suppresses it on later ticks.
 //
 // The elapsed time it judges is the sling's wall time less GateSpent and
 // EscalationSpent, so a seat waiting on its own gate or on an escalation it
-// raised runs past both thresholds without a nudge or a stop, and one whose
+// raised runs past both thresholds without a mark or a stop, and one whose
 // remaining time passes the stop threshold is stopped even while it is in a
 // gate (gt-vfwuc). Spent time past the wall time leaves a negative elapsed,
 // which is under both thresholds: acting on nothing.
@@ -60,12 +60,6 @@ func decideOverrun(in overrunInput) overrunAction {
 }
 
 const (
-	// overrunNudgeRetryAfter is the least wait after a failed nudge before the
-	// next attempt for the same sling.
-	overrunNudgeRetryAfter = 5 * time.Minute
-	// overrunNudgeMaxAttempts is how many nudges the guard tries per sling
-	// before it gives up on the nudge. The stop never depends on it.
-	overrunNudgeMaxAttempts = 3
 	// overrunCheckpointMaxAttempts is how many failed checkpoints a stop
 	// tolerates, one per tick, before it hands the bead back without one. A
 	// refusal such as a mid-rebase worktree does not clear while the seat is
@@ -122,22 +116,6 @@ func slungFloor(slung, sessionStart, restarted time.Time) time.Time {
 		return sessionStart
 	}
 	return slung
-}
-
-// nudgeFailures is how many nudges have failed for the sling at slung.
-func (s overrunState) nudgeFailures(slung time.Time) int {
-	if s.NudgeFailedAt.Before(slung) {
-		return 0
-	}
-	return s.NudgeFailures
-}
-
-// nudgeHeld reports whether a nudge due at now must wait: the attempts for
-// this sling are used up, or the last one failed less than
-// overrunNudgeRetryAfter ago.
-func (s overrunState) nudgeHeld(slung, now time.Time) bool {
-	n := s.nudgeFailures(slung)
-	return n >= overrunNudgeMaxAttempts || (n > 0 && now.Sub(s.NudgeFailedAt) < overrunNudgeRetryAfter)
 }
 
 // overrunMaxRestartClocks is how many restarts of one run may each start its
@@ -278,15 +256,11 @@ func (s overrunState) sameWait(o overrunState) bool {
 // gone the seat is no longer a working seat, so a step that fails is retried
 // from this record (pendingOverrunStops), not from the seat list.
 type overrunState struct {
-	Bead     string    `json:"bead"`
+	Bead string `json:"bead"`
+	// NudgedAt is when the guard marked the seat at the nudge threshold. A
+	// stamp not before the current clock suppresses a second mark, so each run
+	// of the bead is marked once.
 	NudgedAt time.Time `json:"nudged_at,omitzero"`
-
-	// NudgeFailures counts the failed nudges for the sling that NudgeFailedAt
-	// belongs to; NudgeFailedAt is when the latest one failed. A failure
-	// stamped before the current sling belongs to an earlier run of the bead
-	// and counts for nothing (nudgeFailures).
-	NudgeFailures int       `json:"nudge_failures,omitempty"`
-	NudgeFailedAt time.Time `json:"nudge_failed_at,omitzero"`
 
 	// GateSlingAt is the sling the gate accounting below belongs to, GateSpent
 	// the gate time charged for it (at most overrunMaxGateTotal for the sling),

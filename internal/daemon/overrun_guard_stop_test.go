@@ -1188,18 +1188,6 @@ func TestOverrunRemoveSandbox_InvalidSessionNameSkipsTheStepWithALog(t *testing.
 	}
 }
 
-func TestNudge_MessageAsksForSplitProposal(t *testing.T) {
-	t.Parallel()
-	for _, want := range []string{"split proposal", "bead notes"} {
-		if !strings.Contains(overrunNudgeMessage, want) {
-			t.Errorf("nudge message lacks %q: %s", want, overrunNudgeMessage)
-		}
-	}
-	if strings.Contains(strings.ToLower(overrunNudgeMessage), "flaky") {
-		t.Errorf("nudge message uses the word flaky: %s", overrunNudgeMessage)
-	}
-}
-
 // bdFake is an in-memory bead behind the production BeadWriter: HandBack runs
 // over it for real, so a test can read the bead the roster would read.
 type bdFake struct {

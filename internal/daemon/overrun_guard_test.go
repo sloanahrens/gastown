@@ -118,12 +118,11 @@ func TestOverrunGuardInterval(t *testing.T) {
 
 // overrunFake holds the fake seams and the calls they received.
 type overrunFake struct {
-	now      time.Time
-	seats    []overrunSeat
-	slung    map[string]time.Time // by bead
-	nudges   []string             // "<rig>/<polecat>"
-	stops    []string             // seats whose session was stopped
-	nudgeErr error
+	now    time.Time
+	seats  []overrunSeat
+	slung  map[string]time.Time // by bead
+	nudges []string             // seats the nudged hook was called for, "<rig>/<polecat>"
+	stops  []string             // seats whose session was stopped
 
 	// calls is the ordered log of the stop's side effects, "<step> <rig>/<polecat>";
 	// failOn makes the named step return its error each time it runs.
@@ -189,6 +188,11 @@ type overrunFake struct {
 	lapsedErr error
 }
 
+// mark records a nudge-threshold mark, as the guard's nudged hook call does.
+func (f *overrunFake) mark(seat overrunSeat, _ time.Time) {
+	f.nudges = append(f.nudges, seat.Rig+"/"+seat.Polecat)
+}
+
 // step logs one stop step and returns the error injected for it.
 func (f *overrunFake) step(name string, seat overrunSeat) error {
 	f.calls = append(f.calls, name+" "+seat.Rig+"/"+seat.Polecat)
@@ -230,13 +234,7 @@ func (f *overrunFake) baseSeams() overrunSeams {
 			t, ok := f.slung[seat.Bead]
 			return t, ok
 		},
-		nudge: func(seat overrunSeat, msg string) error {
-			if f.nudgeErr != nil {
-				return f.nudgeErr
-			}
-			f.nudges = append(f.nudges, seat.Rig+"/"+seat.Polecat)
-			return nil
-		},
+		nudged: f.mark,
 		submittedNow: func(overrunSeat) bool {
 			return f.submitted || (f.readyAfterStop && len(f.stops) > 0)
 		},
@@ -366,10 +364,10 @@ func TestRunOverrunGuard_DryRunNudgeWritesNothing(t *testing.T) {
 	d.runOverrunGuard(f.seams())
 
 	if len(f.nudges) != 0 {
-		t.Errorf("dry run nudged %v", f.nudges)
+		t.Errorf("dry run marked %v", f.nudges)
 	}
-	if !strings.Contains(buf.String(), "would nudge gastown/capable on gt-aaa11") {
-		t.Errorf("log lacks the would-nudge line:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "would mark gastown/capable on gt-aaa11") {
+		t.Errorf("log lacks the would-mark line:\n%s", buf.String())
 	}
 	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.NudgedAt.IsZero() {
 		t.Errorf("dry run persisted NudgedAt %v", st.NudgedAt)
@@ -478,6 +476,111 @@ func TestRunOverrunGuard_NudgesOncePerBead(t *testing.T) {
 	}
 }
 
+// The nudge threshold marks the seat and sends it nothing: the message was
+// queued and never delivered to a working seat, timed out on a busy one, and
+// only the stop acts. The production seams are the real ones — the notifier the
+// daemon would deliver through records no call — with only the seat list, its
+// clock and the reads that would leave the test faked (gt-fe0gj8).
+func TestOverrunGuardNoNudgeSendsNothing(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	tm := newFakeTmux(clockwork.NewFakeClockAt(overrunSlung))
+	rec := notifyfake.New()
+	d.tmux = tm
+	d.notifier = rec
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), "capable")
+	tm.addSession(sessionName, "", tm.clock.Now())
+	tm.SetIdle(sessionName, true)
+
+	f := newOverrunFake(13*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
+	s := d.overrunProdSeams()
+	s.now = func() time.Time { return f.now }
+	s.workingSeats = func() ([]overrunSeat, error) { return f.seats, nil }
+	s.slungAt = f.baseSeams().slungAt
+	s.gateRunning = func(overrunSeat) (bool, error) { return false, nil }
+	s.escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
+	s.escalationAnsweredAt = func(overrunSeat) (time.Time, error) { return time.Time{}, nil }
+	d.runOverrunGuard(s)
+
+	if calls := rec.Nudges(); len(calls) != 0 {
+		t.Errorf("nudges = %+v, want none: the threshold sends no message", calls)
+	}
+	st, err := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := overrunSlung.Add(13 * time.Minute); !st.NudgedAt.Equal(want) {
+		t.Errorf("NudgedAt = %v, want %v", st.NudgedAt, want)
+	}
+}
+
+// The mark is what the progress battery sees: the nudged hook is called once
+// with the seat and the tick's time, and the saved stamp stops a second call on
+// the next tick (gt-fe0gj8).
+func TestOverrunGuardNoNudgeHookOnceWithSeatAndTime(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"}
+	f := newOverrunFake(13*time.Minute, seat)
+	type call struct {
+		seat overrunSeat
+		at   time.Time
+	}
+	var calls []call
+	s := f.seams()
+	s.nudged = func(seat overrunSeat, at time.Time) { calls = append(calls, call{seat, at}) }
+
+	d.runOverrunGuard(s)
+
+	if len(calls) != 1 {
+		t.Fatalf("nudged calls = %v, want one", calls)
+	}
+	if calls[0].seat != seat || !calls[0].at.Equal(f.now) {
+		t.Errorf("nudged(%+v, %v), want (%+v, %v)", calls[0].seat, calls[0].at, seat, f.now)
+	}
+	st, err := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.NudgedAt.Equal(f.now) {
+		t.Errorf("NudgedAt = %v, want the hook's time %v", st.NudgedAt, f.now)
+	}
+
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(s)
+	if len(calls) != 1 {
+		t.Errorf("nudged calls after the next tick = %v, want still one", calls)
+	}
+}
+
+// A state file written when the guard retried failed nudges still reads: the
+// retired keys are ignored, and the guard marks the seat from it (gt-fe0gj8).
+func TestOverrunGuardNoNudgeRetiredKeysRead(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(13*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
+	path, err := overrunStatePath(d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retired := `{"bead":"gt-aaa11","nudge_failures":3,"nudge_failed_at":"2026-10-13T11:55:00Z"}`
+	if err := os.WriteFile(path, []byte(retired), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOverrunState(d.config.TownRoot, "gt-aaa11"); err != nil {
+		t.Fatalf("readOverrunState with retired keys = %v, want nil", err)
+	}
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.nudges) != 1 {
+		t.Errorf("marks = %v, want the seat marked from a state with retired keys", f.nudges)
+	}
+}
+
 func TestRunOverrunGuard_NoActionBeforeNudgeThreshold(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
@@ -555,278 +658,6 @@ func TestRunOverrunGuard_StoppedRunWithoutARecordedEndKeepsItsSling(t *testing.T
 
 	if len(f.stops) != 0 || len(f.calls) != 0 {
 		t.Errorf("stopped a run that recorded no end again: stops %v, calls %v", f.stops, f.calls)
-	}
-}
-
-func TestRunOverrunGuard_FailedNudgeRetriesAfterBackoff(t *testing.T) {
-	t.Parallel()
-	d, buf := newOverrunDaemon(t, false)
-	f := newOverrunFake(13*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
-	f.nudgeErr = errors.New("no session")
-
-	d.runOverrunGuard(f.seams())
-	if !strings.Contains(buf.String(), "failed (attempt 1 of 3): no session") {
-		t.Errorf("log lacks the nudge failure:\n%s", buf.String())
-	}
-	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.NudgedAt.IsZero() {
-		t.Fatalf("a failed nudge was recorded as sent: %v", st.NudgedAt)
-	}
-
-	// Within the backoff the guard does not try again, even once the cause is gone.
-	f.nudgeErr = nil
-	f.now = f.now.Add(overrunNudgeRetryAfter - time.Second)
-	d.runOverrunGuard(f.seams())
-	if len(f.nudges) != 0 {
-		t.Fatalf("nudges = %v, want none inside the 5-minute backoff", f.nudges)
-	}
-
-	f.now = f.now.Add(time.Second)
-	d.runOverrunGuard(f.seams())
-	if len(f.nudges) != 1 {
-		t.Errorf("nudges = %v, want the retry to deliver one", f.nudges)
-	}
-}
-
-func TestRunOverrunGuard_NudgeAbandonedAfterThreeAttempts(t *testing.T) {
-	t.Parallel()
-	d, buf := newOverrunDaemon(t, false)
-	// With the default 12m/20m thresholds only two attempts fit before the
-	// stop; a later stop leaves room for the cap to bind.
-	d.patrolConfig.Patrols.OverrunGuard.StopAfter = "1h"
-	f := newOverrunFake(13*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
-	attempts := 0
-	s := f.seams()
-	s.nudge = func(overrunSeat, string) error {
-		attempts++
-		return errors.New("busy")
-	}
-
-	// A tick every minute: the attempts land at 13, 18 and 23 minutes, never
-	// closer than the backoff, and there is no fourth.
-	for range 7 {
-		d.runOverrunGuard(s)
-		f.now = f.now.Add(time.Minute)
-	}
-	if attempts != 2 {
-		t.Fatalf("attempts after 7 minutes = %d, want 2 (13m and 18m)", attempts)
-	}
-	f.now = overrunSlung.Add(23 * time.Minute)
-	d.runOverrunGuard(s)
-	if attempts != 3 {
-		t.Fatalf("attempts at 23 minutes = %d, want the third", attempts)
-	}
-	if got := strings.Count(buf.String(), "abandoned"); got != 1 {
-		t.Errorf("abandoned logged %d times, want once:\n%s", got, buf.String())
-	}
-
-	// Nothing more is tried, and the log stays quiet, however long the seat runs
-	// short of the stop.
-	f.now = overrunSlung.Add(40 * time.Minute)
-	d.runOverrunGuard(s)
-	if attempts != 3 {
-		t.Errorf("attempts = %d, want the cap at 3", attempts)
-	}
-	if got := strings.Count(buf.String(), "abandoned"); got != 1 {
-		t.Errorf("abandoned logged %d times after the cap, want still once", got)
-	}
-}
-
-func TestRunOverrunGuard_StopDoesNotDependOnAbandonedNudge(t *testing.T) {
-	t.Parallel()
-	d, _ := newOverrunDaemon(t, false)
-	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"}
-	f := newOverrunFake(13*time.Minute, seat)
-	f.nudgeErr = errors.New("busy")
-	d.runOverrunGuard(f.seams())
-	f.now = overrunSlung.Add(18 * time.Minute)
-	d.runOverrunGuard(f.seams())
-	f.now = overrunSlung.Add(20 * time.Minute)
-	d.runOverrunGuard(f.seams())
-	if len(f.stops) != 1 {
-		t.Errorf("stops = %v, want the 20-minute stop despite the failed nudges", f.stops)
-	}
-}
-
-func TestRunOverrunGuard_NudgeFailuresResetOnResling(t *testing.T) {
-	t.Parallel()
-	d, _ := newOverrunDaemon(t, false)
-	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"}
-	f := newOverrunFake(13*time.Minute, seat)
-	f.nudgeErr = errors.New("busy")
-	d.runOverrunGuard(f.seams())
-
-	// The bead is slung again; its new run is nudged afresh, backoff or not.
-	f.nudgeErr = nil
-	f.slung[seat.Bead] = f.now.Add(time.Second)
-	f.now = f.slung[seat.Bead].Add(13 * time.Minute)
-	d.runOverrunGuard(f.seams())
-	if len(f.nudges) != 1 {
-		t.Errorf("nudges = %v, want one for the new sling", f.nudges)
-	}
-}
-
-// newOverrunNudgeDaemon is the production nudge seam's world: a fake tmux
-// with the seat's session (at its prompt when idle) and a recording
-// notifier.
-func newOverrunNudgeDaemon(t *testing.T, seat overrunSeat, live, idle bool) (*Daemon, *notifyfake.Recorder, *fakeTmux) {
-	t.Helper()
-	d, _ := newOverrunDaemon(t, false)
-	tm := newFakeTmux(clockwork.NewFakeClockAt(overrunSlung))
-	rec := notifyfake.New()
-	d.tmux = tm
-	d.notifier = rec
-	if live {
-		name := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
-		tm.addSession(name, "", tm.clock.Now())
-		tm.SetIdle(name, idle)
-	}
-	return d, rec, tm
-}
-
-// TestOverrunNudgeDeliveryBySeatState pins how the production nudge seam
-// reaches a seat (gt-mq5x52). A seat idle at its prompt is typed into by the
-// default wait-idle delivery, the only one it reads: it drains no queue, and a
-// sandbox seat's hooks read another filesystem (gt-700w3u). A seat running a
-// turn keeps the queue, whose watch of the busy seat would outlast the seam's
-// context (gt-t61ft).
-func TestOverrunNudgeDeliveryBySeatState(t *testing.T) {
-	t.Parallel()
-	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
-	cases := []struct {
-		name  string
-		idle  bool
-		queue bool
-	}{
-		{"a seat idle at its prompt is typed into", true, false},
-		{"a seat running a turn is queued", false, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			d, rec, _ := newOverrunNudgeDaemon(t, seat, true, tc.idle)
-			if err := d.overrunProdSeams().nudge(seat, overrunNudgeMessage); err != nil {
-				t.Fatal(err)
-			}
-			calls := rec.Nudges()
-			if len(calls) != 1 || calls[0].Target != "gastown/furiosa" {
-				t.Fatalf("nudges = %+v, want one to gastown/furiosa", calls)
-			}
-			if calls[0].Nudge.Queue != tc.queue {
-				t.Errorf("Queue = %v, want %v", calls[0].Nudge.Queue, tc.queue)
-			}
-		})
-	}
-}
-
-// A seat whose prompt state cannot be read is not nudged at all: a seat whose
-// state is unknown is not taken for idle, and a queue write it may never read
-// is the miss this delivery fixes. Nothing was attempted, so the guard retries
-// at its next tick rather than spending an attempt (gt-mq5x52, gt-tnv41j).
-func TestOverrunNudgeUnreadablePromptIsNotDelivered(t *testing.T) {
-	t.Parallel()
-	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
-	d, rec, tm := newOverrunNudgeDaemon(t, seat, true, true)
-	tm.setIdleErr(session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat),
-		errors.New("cannot capture pane"))
-	err := d.overrunProdSeams().nudge(seat, overrunNudgeMessage)
-	if !errors.Is(err, errOverrunNudgeNotAttempted) {
-		t.Fatalf("err = %v, want the nudge reported not attempted", err)
-	}
-	if calls := rec.Nudges(); len(calls) != 0 {
-		t.Errorf("nudges = %+v, want none when the seat's prompt state is unknown", calls)
-	}
-}
-
-// A seat whose session has gone since the guard listed it gets no nudge: the
-// queue it would take has no reader. The seam reports the nudge not attempted,
-// so no notifier call is made (gt-tnv41j).
-func TestOverrunNudgeGoneSessionIsNotQueued(t *testing.T) {
-	t.Parallel()
-	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
-	d, rec, _ := newOverrunNudgeDaemon(t, seat, false, false)
-	err := d.overrunProdSeams().nudge(seat, overrunNudgeMessage)
-	if !errors.Is(err, errOverrunNudgeNotAttempted) {
-		t.Fatalf("err = %v, want the nudge reported not attempted", err)
-	}
-	if calls := rec.Nudges(); len(calls) != 0 {
-		t.Errorf("nudges = %+v, want none to a seat with no session", calls)
-	}
-}
-
-// A pane the guard cannot read does not spend one of the sling's nudge
-// attempts and starts no backoff: the failed probe is not a refused delivery,
-// so the very next tick delivers once the pane reads (gt-tnv41j).
-func TestOverrunNudgeUnreadablePaneDoesNotSpendAnAttempt(t *testing.T) {
-	t.Parallel()
-	seat := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"}
-	d, buf := newOverrunDaemon(t, false)
-	tm := newFakeTmux(clockwork.NewFakeClockAt(overrunSlung))
-	rec := notifyfake.New()
-	d.tmux = tm
-	d.notifier = rec
-	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
-	tm.addSession(sessionName, "", tm.clock.Now())
-	tm.SetIdle(sessionName, true)
-	tm.setIdleErr(sessionName, errors.New("cannot capture pane"))
-
-	f := newOverrunFake(13*time.Minute, seat)
-	s := f.seams()
-	s.nudge = d.overrunProdSeams().nudge
-
-	d.runOverrunGuard(s)
-	if strings.Contains(buf.String(), "failed (attempt") {
-		t.Errorf("an unreadable pane was counted as a nudge attempt:\n%s", buf.String())
-	}
-	if st, err := readOverrunState(d.config.TownRoot, seat.Bead); err != nil || st.NudgeFailures != 0 {
-		t.Errorf("NudgeFailures = %d (err %v) after an unreadable pane, want 0", st.NudgeFailures, err)
-	}
-
-	tm.setIdleErr(sessionName, nil)
-	f.now = f.now.Add(time.Minute)
-	d.runOverrunGuard(s)
-	calls := rec.Nudges()
-	if len(calls) != 1 {
-		t.Fatalf("nudges = %+v, want the read retried on the next tick without the backoff", calls)
-	}
-	if calls[0].Nudge.Queue {
-		t.Errorf("the recovered seat was queued, want the idle prompt typed into")
-	}
-}
-
-// A send the notifier refuses is the guard's existing nudge-failure line, and
-// the tick goes on to the next seat rather than stopping with it (gt-mq5x52).
-func TestOverrunNudgeFailureLogsAndGuardGoesOn(t *testing.T) {
-	t.Parallel()
-	d, buf := newOverrunDaemon(t, false)
-	tm := newFakeTmux(clockwork.NewFakeClockAt(overrunSlung))
-	rec := notifyfake.New()
-	rec.Missing("gastown/furiosa")
-	d.tmux = tm
-	d.notifier = rec
-	for _, name := range []string{"furiosa", "capable"} {
-		sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), name)
-		tm.addSession(sessionName, "", tm.clock.Now())
-		tm.SetIdle(sessionName, true)
-	}
-
-	f := newOverrunFake(13*time.Minute,
-		overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-jhf24"},
-		overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"},
-	)
-	s := f.seams()
-	s.nudge = d.overrunProdSeams().nudge
-	d.runOverrunGuard(s)
-
-	want := "overrun_guard: nudge gastown/furiosa on gt-jhf24 failed (attempt 1 of 3)"
-	if got := strings.Count(buf.String(), want); got != 1 {
-		t.Errorf("the existing failure line appears %d times, want once:\n%s", got, buf.String())
-	}
-	calls := rec.Nudges()
-	if len(calls) != 2 {
-		t.Fatalf("nudges = %+v, want the refused send and the next seat's", calls)
-	}
-	if calls[1].Err != nil || calls[1].Target != "gastown/capable" {
-		t.Errorf("the tick stopped at the refused send: calls = %+v", calls)
 	}
 }
 

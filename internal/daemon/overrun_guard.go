@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -13,7 +11,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
-	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -22,12 +19,12 @@ import (
 // The overrun_guard patrol watches how long each polecat seat's bead has been
 // in progress, counted from the bead's dispatch rather than from the sling
 // that reached the seat holding it, so a bead handed between seats keeps one
-// clock. It nudges the seat once when the bead runs long, asking for a split
-// proposal in the bead notes, and past the stop threshold it stops the
-// session and hands the bead back. This file is the patrol's config, ticker
-// entry, dry-run and nudge; the stop is overrunStop (overrun_guard_stop.go).
-// The pure decision is decideOverrun and the per-bead memory is overrunState
-// (overrun_guard_decide.go).
+// clock. At the nudge threshold it marks the seat once — recording the time and
+// calling the progress hook, writing no message — and past the stop threshold
+// it stops the session and hands the bead back. This file is the patrol's
+// config, ticker entry, dry-run and mark; the stop is overrunStop
+// (overrun_guard_stop.go). The pure decision is decideOverrun and the per-bead
+// memory is overrunState (overrun_guard_decide.go).
 
 const (
 	defaultOverrunGuardInterval   = time.Minute
@@ -37,16 +34,6 @@ const (
 	// sling. A deliberate deep-review runs long, but not without end.
 	defaultOverrunGuardScheduledStopAfter = 60 * time.Minute
 )
-
-// overrunNudgeTimeout bounds one nudge. Queue mode only writes a file, so it
-// is generous.
-const overrunNudgeTimeout = 30 * time.Second
-
-// errOverrunNudgeNotAttempted marks a nudge the production seam did not
-// attempt: the seat's session has gone, or its pane could not be read. Neither
-// is a delivery the notifier refused, so the guard retries at the next tick
-// without spending one of the sling's attempts (gt-tnv41j).
-var errOverrunNudgeNotAttempted = errors.New("overrun nudge not attempted")
 
 // overrunMaxGateCharge is how much gate time one tick may charge a seat: twice
 // the guard's interval. A cycle takes the interval plus its own bd reads, so
@@ -69,15 +56,6 @@ func overrunMaxGateTotal(stopAfter time.Duration) time.Duration { return 2 * sto
 // is a seat held for a person, and past this ceiling the clock runs again even
 // while the escalation stays open (gt-i1qwy).
 func overrunMaxEscalationTotal(stopAfter time.Duration) time.Duration { return 2 * stopAfter }
-
-// overrunNudgeMessage is what the seat reads at the nudge threshold. It says
-// which time the clock measures, because a seat waiting on its own gate is the
-// one case where a long-running bead is not an overrun (gt-vfwuc).
-const overrunNudgeMessage = "This bead has run longer than expected. Write a split proposal in the bead notes now " +
-	"(gt bead note): ordered steps, each small enough for one pass. Then keep going on the first step. " +
-	"Time spent waiting inside your own gate — a container-gate slot you hold, or a gate suite running in your " +
-	"pane — does not count toward this clock, up to a fixed ceiling: a gate that never returns is still a stop. " +
-	"If the bead is still running at the stop threshold, the session is stopped and the bead goes back to the pool."
 
 // overrunSeat is one polecat seat the guard judges.
 type overrunSeat struct {
@@ -107,7 +85,7 @@ type overrunSeat struct {
 	SessionStart time.Time
 	// Scheduled is set when the bead carries a scheduled: label, the mark of a
 	// run the daemon's scheduled_slings patrol created. Those run long by
-	// design (the deep-review is report-only), so the guard never nudges them
+	// design (the deep-review is report-only), so the guard never marks them
 	// and gives them the longer scheduled_stop_after limit in place of the 12
 	// and 20 minute rule. Past it the session is stopped and the bead is not
 	// handed back (overrunScheduledStop).
@@ -136,11 +114,9 @@ type overrunSeams struct {
 	// the seat because the bead's last submission is read with it (the seat's
 	// bead read), so the clock and the run end it started after are one read.
 	slungAt func(seat overrunSeat) (time.Time, bool)
-	// nudge delivers msg to the seat's session.
-	nudge func(seat overrunSeat, msg string) error
-	// nudged is told each nudge that was delivered, and when, so the progress
-	// battery can ask about the seat (jev_progress.go). It is called only after
-	// nudge succeeds, and nil means nothing is asked.
+	// nudged is told each seat the guard marks at the nudge threshold, and when,
+	// so the progress battery can ask about the seat (jev_progress.go). nil
+	// means nothing is asked.
 	nudged func(seat overrunSeat, at time.Time)
 
 	// submittedNow re-reads, at the moment of acting, whether the seat has
@@ -373,15 +349,16 @@ func (d *Daemon) triggerOverrunGuard() {
 }
 
 // runOverrunGuard judges every working seat once. A seat that is submitted,
-// parked or undated is left alone. At the nudge threshold the seat is nudged
-// once per run of the bead, remembered in the bead's state file; past the stop
-// threshold the stop seam runs. A seat on a scheduled sling is never nudged and
-// is judged by scheduled_stop_after alone (zero leaves it alone). The clock it
-// judges is the later of the bead's dispatch (slungAt) and a restart of the
-// seat since then, less the time the seat spends inside its gate, or waiting on
-// an escalation it raised; a state that cannot be read counts all of its time
-// (overrun_guard_gate.go, overrun_guard_escalation.go, withRestart).
-// In dry-run mode nothing is sent, stopped or written, and the log says what
+// parked or undated is left alone. At the nudge threshold the seat is marked
+// once per run of the bead — the time saved in the bead's state file and the
+// progress hook called, no message sent; past the stop threshold the stop seam
+// runs. A seat on a scheduled sling is never marked and is judged by
+// scheduled_stop_after alone (zero leaves it alone). The clock it judges is the
+// later of the bead's dispatch (slungAt) and a restart of the seat since then,
+// less the time the seat spends inside its gate, or waiting on an escalation it
+// raised; a state that cannot be read counts all of its time
+// (overrun_guard_gate.go, overrun_guard_escalation.go, withRestart). In dry-run
+// mode nothing is stopped or written, no hook is called, and the log says what
 // would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	pc := d.patrol()
@@ -432,8 +409,8 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	// never reaches the seat list below: it is built from the seats whose
 	// sessions answer, and this one's does not — and that list's read can fail
 	// for a reason of its own. The stop path is taken for these seats here,
-	// before the list is read, without a nudge: there is no session that could
-	// read one (gt-wgim24).
+	// before the list is read, without a mark: there is no session that could
+	// record one (gt-wgim24).
 	d.releaseUnreachableSeats(d.stopSeamsForUnreachableSeats(s), now, dry)
 
 	seats, err := s.workingSeats()
@@ -466,7 +443,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		slung = overrunAnsweredFloor(slung, answered)
 		state, err := readOverrunState(d.config.TownRoot, seat.Bead)
 		if err != nil {
-			// An unreadable record could hide a nudge already sent; act on
+			// An unreadable record could hide a mark already made; act on
 			// nothing until it reads.
 			d.logger.Printf("overrun_guard: %s: cannot read state for %s: %v", who, seat.Bead, err)
 			continue
@@ -476,15 +453,15 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// below only when it moved.
 		before := state
 
-		// A restart of the seat starts the clock over (withRestart), so the nudge
+		// A restart of the seat starts the clock over (withRestart), so the mark
 		// and stop limits below measure the later of the sling and the restart;
 		// slung keeps dating the run for the stop's own state.
 		state, clockStart := state.withRestart(slung, seat.RestartedAt)
 
-		// A nudge sent before this clock belongs to an earlier run of the bead
+		// A mark written before this clock belongs to an earlier run of the bead
 		// (a run that ended, after which the bead was dispatched again). The
-		// nudge is the bead's, not the seat's: a bead handed to a second seat
-		// keeps the clock, and the nudge already went out for it.
+		// mark is the bead's, not the seat's: a bead handed to a second seat
+		// keeps the clock, and the mark was already made for it.
 		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(clockStart)
 
 		// Gate time does not count (overrun_guard_gate.go). A state that cannot
@@ -547,7 +524,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		}
 		if seat.Scheduled {
 			// Both thresholds at the one limit: the stop wins from there on
-			// and no nudge can fall due before it.
+			// and no mark can fall due before it.
 			in.NudgeAt, in.StopAt = scheduledStopAfter, scheduledStopAfter
 		}
 		action := decideOverrun(in)
@@ -555,42 +532,22 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		switch action {
 		case overrunNudge:
 			if dry {
-				d.logger.Printf("overrun_guard: dry run: would nudge %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
+				d.logger.Printf("overrun_guard: dry run: would mark %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
 				continue
 			}
-			if state.nudgeHeld(clockStart, now) {
-				continue
-			}
-			if err := s.nudge(seat, overrunNudgeMessage); err != nil {
-				if errors.Is(err, errOverrunNudgeNotAttempted) {
-					// Nothing was delivered, so the tick spent none of the
-					// sling's attempts and starts no backoff: the next tick
-					// reads the seat again (gt-tnv41j).
-					d.logger.Printf("overrun_guard: nudge %s on %s not attempted, will retry next tick: %v", who, seat.Bead, err)
-					continue
-				}
-				state.NudgeFailures = state.nudgeFailures(clockStart) + 1
-				state.NudgeFailedAt = now
-				d.logger.Printf("overrun_guard: nudge %s on %s failed (attempt %d of %d): %v",
-					who, seat.Bead, state.NudgeFailures, overrunNudgeMaxAttempts, err)
-				if state.NudgeFailures >= overrunNudgeMaxAttempts {
-					d.logger.Printf("overrun_guard: nudge to %s on %s abandoned after %d failed attempts; the stop at %s still applies",
-						who, seat.Bead, state.NudgeFailures, stopAfter)
-				}
-				if err := writeOverrunState(d.config.TownRoot, state); err != nil {
-					d.logger.Printf("overrun_guard: WARNING: %s nudge failure on %s not saved (%v) — it may be retried next tick", who, seat.Bead, err)
-				}
-				continue
-			}
+			// The threshold marks the seat and nothing else: a message to the
+			// session changed nothing measurable (gt-drwph, gt-t61ft), and only
+			// the stop acts. The stamp keeps the mark once per run and keeps the
+			// progress battery's trigger.
 			if s.nudged != nil {
 				s.nudged(seat, now)
 			}
 			state.NudgedAt = now
 			if err := writeOverrunState(d.config.TownRoot, state); err != nil {
-				d.logger.Printf("overrun_guard: WARNING: %s nudged on %s but state not saved (%v) — it may be nudged again", who, seat.Bead, err)
+				d.logger.Printf("overrun_guard: WARNING: %s marked on %s but state not saved (%v) — it may be marked again", who, seat.Bead, err)
 				continue
 			}
-			d.logger.Printf("overrun_guard: nudged %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
+			d.logger.Printf("overrun_guard: marked %s on %s after %s; no message sent", who, seat.Bead, elapsed.Round(time.Second))
 		case overrunStop:
 			// The stop ran for this run of the bead already and the bead is
 			// back in the pool, labeled for a split or as rework. The stop
@@ -637,36 +594,6 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		escalationWaiting:    escalation.waiting,
 		escalationAnsweredAt: escalation.answeredAt,
 		nudged:               d.enqueueJevProgress,
-		nudge: func(seat overrunSeat, msg string) error {
-			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
-			defer cancel()
-			target := seat.Rig + "/" + seat.Polecat
-			// A seat idle at its prompt drains no queue, and a sandbox seat's
-			// hooks read a filesystem this one does not write, so the default
-			// delivery types the nudge into its pane (gt-mq5x52, gt-700w3u).
-			// That delivery waits up to 15 s for the idle prompt, inside this
-			// context, so it is called only for a seat already read idle.
-			st, err := d.escalationSeatState(seat.Rig, seat.Polecat)
-			if err != nil {
-				// Unknown is not idle: a queued nudge an idle seat never reads
-				// is the miss this delivery exists to fix, so the seat is left
-				// for the next tick rather than queued.
-				return fmt.Errorf("%w: cannot read %s's pane: %w", errOverrunNudgeNotAttempted, target, err)
-			}
-			if !st.Live {
-				// The guard listed this seat live and its session left since:
-				// a queue write would have no reader.
-				return fmt.Errorf("%w: %s has no session", errOverrunNudgeNotAttempted, target)
-			}
-			if st.Idle {
-				return d.notify().Nudge(ctx, target, msg)
-			}
-			// A seat running a turn keeps the queue: the default would watch
-			// the busy seat for 60 s more, which outlasts this context, and a
-			// busy seat drains the queue through the polecat PostToolUse hook,
-			// gt tap nudge-drain (gt-drwph, gt-t61ft).
-			return d.notify().Nudge(ctx, target, msg, notify.Queue())
-		},
 	})
 }
 

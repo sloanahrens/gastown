@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -42,27 +41,29 @@ func TestJevProgressPatrolIsOptIn(t *testing.T) {
 	}
 }
 
-// With the patrol off, a guard nudge queues nothing: a town that has not opted
+// With the patrol off, a guard mark queues nothing: a town that has not opted
 // in does no work and holds no memory for the battery.
 func TestJevProgressNudgeQueuesNothingWhenOff(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
 	f := newOverrunFake(13*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-hurgx"})
 	s := f.seams()
-	s.nudged = d.enqueueJevProgress
+	s.nudged = func(seat overrunSeat, at time.Time) {
+		f.mark(seat, at)
+		d.enqueueJevProgress(seat, at)
+	}
 
 	d.runOverrunGuard(s)
 
 	if len(f.nudges) != 1 {
-		t.Fatalf("nudges = %v, want the guard to nudge once", f.nudges)
+		t.Fatalf("nudges = %v, want the guard to mark once", f.nudges)
 	}
 	if n := d.jevProgressQueue.Len(); n != 0 {
 		t.Errorf("queue holds %d nudges with the patrol off", n)
 	}
 }
 
-// A nudge the guard delivers queues one ask for that seat. A nudge that failed
-// to deliver queues nothing, and neither does a dry run.
+// A mark queues one ask for that seat; a dry run queues none.
 func TestJevProgressGuardNudgeEnqueuesOneAsk(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
@@ -71,7 +72,10 @@ func TestJevProgressGuardNudgeEnqueuesOneAsk(t *testing.T) {
 
 	f := newOverrunFake(13*time.Minute, seat)
 	s := f.seams()
-	s.nudged = d.enqueueJevProgress
+	s.nudged = func(seat overrunSeat, at time.Time) {
+		f.mark(seat, at)
+		d.enqueueJevProgress(seat, at)
+	}
 	d.runOverrunGuard(s)
 
 	if len(f.nudges) != 1 {
@@ -88,27 +92,11 @@ func TestJevProgressGuardNudgeEnqueuesOneAsk(t *testing.T) {
 		t.Errorf("queued nudge has no time or session: %+v", got)
 	}
 
-	// The same seat, nudged again on a later tick: the guard does not
-	// re-nudge a seat it already nudged, so the queue stays at the one ask.
+	// The same seat on a later tick: the guard does not mark a seat it already
+	// marked, so the queue stays at the one ask.
 	d.runOverrunGuard(s)
 	if n := d.jevProgressQueue.Len(); n != 0 {
 		t.Errorf("a second tick queued %d more asks, want none", n)
-	}
-
-	// A fresh town: the guard's state for this bead already records the nudge
-	// above, so re-using d would skip the nudge and prove nothing.
-	failD, _ := newOverrunDaemon(t, false)
-	failD.patrolConfig.Patrols.JevProgress = &JevProgressConfig{Enabled: true}
-	failing := newOverrunFake(13*time.Minute, seat)
-	failing.nudgeErr = fmt.Errorf("session gone")
-	fs := failing.seams()
-	fs.nudged = failD.enqueueJevProgress
-	failD.runOverrunGuard(fs)
-	if len(failing.nudges) != 0 {
-		t.Fatalf("the failing nudge was delivered: %v", failing.nudges)
-	}
-	if n := failD.jevProgressQueue.Len(); n != 0 {
-		t.Errorf("a nudge that did not deliver queued %d asks", n)
 	}
 
 	dry, _ := newOverrunDaemon(t, true)
