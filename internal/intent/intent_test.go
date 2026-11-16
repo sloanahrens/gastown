@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -651,5 +652,280 @@ func TestRemoveDeletesTheRecordAndToleratesAnAbsentOne(t *testing.T) {
 	}
 	if err := Remove(town, polecat); err != nil {
 		t.Fatalf("Remove with no record: %v", err)
+	}
+}
+
+// recordJSON returns the test seat's record file as the raw JSON object it was
+// written as, so a test can assert the exact keys and not only what a typed
+// read makes of them.
+func recordJSON(t *testing.T, town string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(polecat.Path(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("record is not a JSON object: %v\n%s", err, data)
+	}
+	return raw
+}
+
+// gt-chcarg: the finished-turn facts the agent bead carries today (turn state,
+// exit type, cleanup status, last work bead) land in the intent record, under
+// the keys the design names, so a reader can leave the bead.
+func TestAgentBeadRetireMarkTurnEndedRoundTrips(t *testing.T) {
+	t.Parallel()
+	seeded := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	now := seeded.Add(2 * time.Hour)
+	for _, c := range []struct {
+		name string
+		end  TurnEnd
+	}{
+		{"completed", TurnEnd{TurnState: "done", ExitType: "COMPLETED", CleanupStatus: "clean", WorkBead: "gt-work"}},
+		{"deferred", TurnEnd{TurnState: "stuck", ExitType: "DEFERRED", CleanupStatus: "has_uncommitted", WorkBead: "gt-other"}},
+		{"escalated", TurnEnd{TurnState: "awaiting-gate", ExitType: "ESCALATED", CleanupStatus: "has_unpushed", WorkBead: "gt-third"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if _, err := Update(town, polecat, func(r *Record) error {
+				r.Desired = DesiredRun
+				r.WorkBead = "gt-waiting-to-land"
+				r.Actor, r.UpdatedAt = "gt sling", seeded
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := MarkTurnEnded(town, polecat, c.end, "gt done", now); err != nil {
+				t.Fatalf("MarkTurnEnded: %v", err)
+			}
+			rec, err := Read(town, polecat)
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if rec.TurnState != c.end.TurnState || rec.ExitType != c.end.ExitType ||
+				rec.CleanupStatus != c.end.CleanupStatus || rec.LastWorkBead != c.end.WorkBead {
+				t.Fatalf("record after MarkTurnEnded = %+v, want the turn's facts %+v", rec, c.end)
+			}
+			// WorkBead is the work waiting to land, not the turn's bead, and the
+			// write leaves it alone.
+			if rec.WorkBead != "gt-waiting-to-land" {
+				t.Fatalf("WorkBead = %q, want it left as gt-waiting-to-land", rec.WorkBead)
+			}
+			if rec.Actor != "gt done" || !rec.UpdatedAt.Equal(now) {
+				t.Fatalf("record actor/updated_at = %q/%s, want gt done/%s", rec.Actor, rec.UpdatedAt, now)
+			}
+
+			raw := recordJSON(t, town)
+			for key, want := range map[string]string{
+				"turn_state":     c.end.TurnState,
+				"exit_type":      c.end.ExitType,
+				"cleanup_status": c.end.CleanupStatus,
+				"last_work_bead": c.end.WorkBead,
+			} {
+				got, isString := raw[key].(string)
+				if !isString || got != want {
+					t.Errorf("file key %q = %v, want the string %q (in %v)", key, raw[key], want, raw)
+				}
+			}
+		})
+	}
+}
+
+// The finished-turn facts are observations of what the session did, so a park or
+// a freeze does not stop the write; the hold itself is left exactly as it was
+// and the record still reads as held.
+func TestAgentBeadRetireMarkTurnEndedLeavesAHoldStanding(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 15, 11, 0, 0, 0, time.UTC)
+	end := TurnEnd{TurnState: "done", ExitType: "COMPLETED", CleanupStatus: "clean", WorkBead: "gt-work"}
+	for _, c := range []struct {
+		name   string
+		reason string
+		apply  func(r *Record)
+	}{
+		{"parked", "operator inspecting", func(r *Record) { r.Desired, r.Reason = DesiredPark, "operator inspecting" }},
+		{"frozen", "budget", func(r *Record) { r.Frozen, r.Reason = true, "budget" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if _, err := Update(town, polecat, func(r *Record) error {
+				c.apply(r)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := MarkTurnEnded(town, polecat, end, "gt done", now); err != nil {
+				t.Fatalf("MarkTurnEnded: %v", err)
+			}
+			rec, err := Read(town, polecat)
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if !rec.Held() || !rec.Paused || rec.Reason != c.reason {
+				t.Fatalf("hold after MarkTurnEnded = %+v, want the %s seat still held with reason %q", rec, c.name, c.reason)
+			}
+			if rec.TurnState != end.TurnState || rec.ExitType != end.ExitType ||
+				rec.CleanupStatus != end.CleanupStatus || rec.LastWorkBead != end.WorkBead {
+				t.Fatalf("record after MarkTurnEnded = %+v, want the turn's facts recorded on the held seat", rec)
+			}
+		})
+	}
+}
+
+// The fail-closed rule survives the new writer: a record that cannot be parsed
+// is still held after MarkTurnEnded, with the facts beside the hold.
+func TestAgentBeadRetireMarkTurnEndedKeepsAFailClosedRecordHeld(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := polecat.Path(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	end := TurnEnd{TurnState: "done", ExitType: "COMPLETED", CleanupStatus: "clean", WorkBead: "gt-work"}
+	if err := MarkTurnEnded(town, polecat, end, "gt done", time.Date(2026, 11, 15, 11, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("MarkTurnEnded: %v", err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatalf("Read after the rewrite: %v", err)
+	}
+	if !rec.Held() || !rec.Frozen || !rec.Paused {
+		t.Fatalf("record after MarkTurnEnded = %+v, want it still held and frozen", rec)
+	}
+	if rec.TurnState != end.TurnState || rec.LastWorkBead != end.WorkBead {
+		t.Fatalf("record = %+v, want the turn's facts beside the hold", rec)
+	}
+}
+
+// A sling starts a new session, so the previous turn's facts go with it; the
+// last work bead is what the seat did, not what it is doing, and stays.
+func TestAgentBeadRetireMarkSlungClearsTheTurnFacts(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	if err := MarkTurnEnded(town, polecat, TurnEnd{
+		TurnState: "done", ExitType: "COMPLETED", CleanupStatus: "clean", WorkBead: "gt-work",
+	}, "gt done", now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MarkSlung(town, polecat, "deepseek-flash", "gt sling", now.Add(time.Hour)); err != nil {
+		t.Fatalf("MarkSlung: %v", err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if rec.TurnState != "" || rec.ExitType != "" || rec.CleanupStatus != "" {
+		t.Fatalf("record after MarkSlung = %+v, want the turn's state, exit type and cleanup status cleared", rec)
+	}
+	if rec.LastWorkBead != "gt-work" || rec.Agent != "deepseek-flash" {
+		t.Fatalf("record after MarkSlung = %+v, want last_work_bead kept and the new agent", rec)
+	}
+	raw := recordJSON(t, town)
+	for _, key := range []string{"turn_state", "exit_type", "cleanup_status"} {
+		if _, ok := raw[key]; ok {
+			t.Errorf("cleared key %q is still in the file: %v", key, raw)
+		}
+	}
+	if got, isString := raw["last_work_bead"].(string); !isString || got != "gt-work" {
+		t.Errorf("last_work_bead = %v, want gt-work kept in %v", raw["last_work_bead"], raw)
+	}
+}
+
+// A record written before these fields existed carries none of them: it reads
+// back unchanged, and a rewrite does not add them.
+func TestAgentBeadRetireLegacyRecordReadsAndRewritesUnchanged(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := polecat.Path(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	legacy := `{"version":1,"desired":"run","work_bead":"gt-abc","agent":"deepseek-flash",` +
+		`"actor":"gt sling","updated_at":"2026-11-14T08:00:00Z","submitted_at":"2026-11-14T08:00:00Z","paused":false}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := Record{
+		Version: Version, Desired: DesiredRun, WorkBead: "gt-abc", Agent: "deepseek-flash",
+		Actor: "gt sling", SubmittedAt: at, UpdatedAt: at,
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(rec, want) {
+		t.Fatalf("legacy record read as\n %+v\nwant\n %+v", rec, want)
+	}
+
+	if _, err := Update(town, polecat, func(r *Record) error { r.Actor = "rewrite"; return nil }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw := recordJSON(t, town)
+	for _, key := range []string{"turn_state", "exit_type", "cleanup_status", "last_work_bead"} {
+		if _, ok := raw[key]; ok {
+			t.Errorf("a rewrite added %q to a record that never had it: %v", key, raw)
+		}
+	}
+	for key, want := range map[string]any{"work_bead": "gt-abc", "agent": "deepseek-flash", "actor": "rewrite"} {
+		if got := raw[key]; got != want {
+			t.Errorf("rewrite changed %q: %v, want %v (in %v)", key, got, want, raw)
+		}
+	}
+}
+
+// SetCleanupStatus answers a cleanup status found after the turn's facts were
+// recorded: it changes that one field and the bookkeeping, nothing else.
+func TestAgentBeadRetireSetCleanupStatusChangesOnlyCleanupStatus(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seeded := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	now := seeded.Add(90 * time.Minute)
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.Desired = DesiredRun
+		r.WorkBead = "gt-live"
+		r.Agent = "deepseek-flash"
+		r.LastWorkBead = "gt-work"
+		r.TurnState, r.ExitType, r.CleanupStatus = "done", "COMPLETED", "clean"
+		r.SubmittedAt = seeded.Add(-time.Hour)
+		r.Restarts = []time.Time{seeded.Add(-2 * time.Hour)}
+		r.Progress = &Progress{SampledAt: seeded, DeadSamples: 2}
+		r.Actor, r.UpdatedAt = "gt done", seeded
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetCleanupStatus(town, polecat, "has_unpushed", "overrun guard", now); err != nil {
+		t.Fatalf("SetCleanupStatus: %v", err)
+	}
+	after, err := Read(town, polecat)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := before
+	want.CleanupStatus = "has_unpushed"
+	want.Actor, want.UpdatedAt = "overrun guard", now
+	if !reflect.DeepEqual(after, want) {
+		t.Fatalf("record after SetCleanupStatus =\n %+v\nwant only cleanup_status, actor and updated_at to change, from\n %+v", after, before)
+	}
+	raw := recordJSON(t, town)
+	if got, isString := raw["cleanup_status"].(string); !isString || got != "has_unpushed" {
+		t.Fatalf("cleanup_status in the file = %v, want has_unpushed", raw["cleanup_status"])
 	}
 }
