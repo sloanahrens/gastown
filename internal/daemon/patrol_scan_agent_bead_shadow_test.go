@@ -194,7 +194,7 @@ func TestAgentBeadRetireUnreadableRecordLogsOnce(t *testing.T) {
 			t.Fatalf("read %d: AgentRecord = %+v, want the bead's %+v", read, got, want)
 		}
 	}
-	if n := strings.Count(logs.String(), "agentbead_shadow: "); n != 1 {
+	if n := strings.Count(logs.String(), agentBeadShadowLogPrefix); n != 1 {
 		t.Fatalf("logged %d lines, want 1: %q", n, logs.String())
 	}
 	if line := logs.String(); !strings.Contains(line, "agentbead_shadow: retire/shadow-broken intent record unreadable") {

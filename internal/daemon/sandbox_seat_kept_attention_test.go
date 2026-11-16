@@ -371,14 +371,28 @@ func TestKeptSeatAttentionRaisesForASeatStillKept(t *testing.T) {
 				t.Errorf("summary = %q, want it to carry the reason %q", items[0].Summary, tt.want)
 			}
 			if tt.wantLog == "" {
-				if f.logs.Len() != 0 {
-					t.Errorf("logged %q, want no read failure logged", f.logs.String())
+				if got := withoutAgentBeadShadow(f.logs.String()); got != "" {
+					t.Errorf("logged %q, want no read failure logged", got)
 				}
 			} else if !strings.Contains(f.logs.String(), tt.wantLog) {
 				t.Errorf("logged %q, want the read failure %q", f.logs.String(), tt.wantLog)
 			}
 		})
 	}
+}
+
+// withoutAgentBeadShadow drops the shadow window's lines (gt-8adi4i). The
+// collector reads the agent bead through AgentRecord, which reports where the
+// seat's intent record and that bead disagree into the same daemon log; those
+// lines are not the read failure these rows are about.
+func withoutAgentBeadShadow(log string) string {
+	var kept []string
+	for _, line := range strings.Split(log, "\n") {
+		if line != "" && !strings.HasPrefix(line, agentBeadShadowLogPrefix) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // The retired-record reason this collector skips on is the one the seat end

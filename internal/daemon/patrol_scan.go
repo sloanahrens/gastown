@@ -689,6 +689,10 @@ func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, 
 	return rec, nil
 }
 
+// agentBeadShadowLogPrefix starts every shadow window line, so a reader of the
+// daemon log greps for one marker.
+const agentBeadShadowLogPrefix = "agentbead_shadow: "
+
 // agentBeadShadowKey names one shadow line: the seat, the field the intent
 // record and the agent bead disagree on, and the pair of values they answered
 // with. The values are part of the key so a disagreement logs again when a
@@ -751,12 +755,12 @@ func (h *patrolScanHost) shadowAgentRecord(rig, name string, bead patrolscan.Age
 	facts, err := seatfacts.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
 	if err != nil {
 		h.logAgentBeadShadow(agentBeadShadowKey{seat: seat, field: "intent_record"},
-			fmt.Sprintf("agentbead_shadow: %s intent record unreadable, the bead's values stand: %v", seat, err))
+			agentBeadShadowLogPrefix+fmt.Sprintf("%s intent record unreadable, the bead's values stand: %v", seat, err))
 		return
 	}
 	for _, d := range seatfacts.Disagreements(facts, bead) {
 		h.logAgentBeadShadow(agentBeadShadowKey{seat: seat, field: d.Field, intent: d.Intent, bead: d.Bead},
-			fmt.Sprintf("agentbead_shadow: %s %s intent=%s bead=%s", seat, d.Field, d.Intent, d.Bead))
+			agentBeadShadowLogPrefix+fmt.Sprintf("%s %s intent=%s bead=%s", seat, d.Field, d.Intent, d.Bead))
 	}
 }
 
