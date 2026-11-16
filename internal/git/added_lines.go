@@ -12,9 +12,12 @@ import (
 // "-" counts 0) plus the line count of every untracked file, or the error of
 // the git command that failed, never a partial count.
 func (g *Git) AddedLinesSince(base string) (int, error) {
-	out, err := g.run("diff", "--numstat", "--no-renames", base)
+	// --end-of-options makes git refuse a base that begins with "-" instead of
+	// reading it as an option: --output= would write a file, --ext-diff would
+	// run a program. The call fails, so no count comes back.
+	out, err := g.run("diff", "--numstat", "--no-renames", "--end-of-options", base)
 	if err != nil {
-		return 0, fmt.Errorf("git diff --numstat --no-renames %s: %w", base, err)
+		return 0, fmt.Errorf("git diff --numstat --no-renames --end-of-options %s: %w", base, err)
 	}
 	tracked, err := sumNumstatAdded(out)
 	if err != nil {
@@ -114,8 +117,10 @@ func batchPaths(paths []string) [][]string {
 func (g *Git) linesInUntrackedBatch(paths []string) (int, error) {
 	// -z separates a path from its count with NUL and prints the path verbatim,
 	// so a name holding a space, a colon or a newline still parses; the empty
-	// pattern matches every line.
-	args := append([]string{"grep", "--no-index", "-c", "-z", "", "--"}, paths...)
+	// pattern matches every line. --literal-pathspecs makes git read each path
+	// as itself: as pathspecs, a name holding * ? or [ would instead glob and
+	// count other files.
+	args := append([]string{"--literal-pathspecs", "grep", "--no-index", "-c", "-z", "", "--"}, paths...)
 	out, err := g.runOutput(args...)
 	if err != nil {
 		if isGrepNoMatch(err) {

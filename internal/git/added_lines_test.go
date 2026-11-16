@@ -8,7 +8,7 @@ import (
 
 // grepCallKey is the scripted key for the git grep call that counts paths.
 func grepCallKey(paths ...string) string {
-	return strings.Join(append([]string{"grep", "--no-index", "-c", "-z", "", "--"}, paths...), " ")
+	return strings.Join(append([]string{"--literal-pathspecs", "grep", "--no-index", "-c", "-z", "", "--"}, paths...), " ")
 }
 
 // grepRecords is git grep -c -z output counting one line in each path.
@@ -26,9 +26,9 @@ func grepRecords(paths []string) string {
 func TestRunawayBeadAddedLinesSinceCountsTrackedAndUntracked(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{
-		"diff --numstat --no-renames main":             ok("3\t0\tinternal/git/a.go\n1\t2\tinternal/git/b.go\n-\t-\tlogo.png\n"),
-		"ls-files --others --exclude-standard -z":      ok("notes/empty.txt\x00notes/new.go\x00"),
-		grepCallKey("notes/empty.txt", "notes/new.go"): ok("notes/new.go\x002\n"),
+		"diff --numstat --no-renames --end-of-options main": ok("3\t0\tinternal/git/a.go\n1\t2\tinternal/git/b.go\n-\t-\tlogo.png\n"),
+		"ls-files --others --exclude-standard -z":           ok("notes/empty.txt\x00notes/new.go\x00"),
+		grepCallKey("notes/empty.txt", "notes/new.go"):      ok("notes/new.go\x002\n"),
 	})
 	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince("main")
 	if err != nil {
@@ -40,7 +40,7 @@ func TestRunawayBeadAddedLinesSinceCountsTrackedAndUntracked(t *testing.T) {
 	}
 	s.noUnscripted(t)
 	want := []string{
-		"diff --numstat --no-renames main",
+		"diff --numstat --no-renames --end-of-options main",
 		"ls-files --others --exclude-standard -z",
 		grepCallKey("notes/empty.txt", "notes/new.go"),
 	}
@@ -61,23 +61,23 @@ func TestRunawayBeadAddedLinesSinceFailsWithoutCount(t *testing.T) {
 	}{
 		{
 			name:    "diff fails",
-			answers: map[string]reply{"diff --numstat --no-renames main": fail(128, "fatal: bad revision 'main'")},
-			wantCmd: "git diff --numstat --no-renames main",
+			answers: map[string]reply{"diff --numstat --no-renames --end-of-options main": fail(128, "fatal: bad revision 'main'")},
+			wantCmd: "git diff --numstat --no-renames --end-of-options main",
 		},
 		{
 			name: "ls-files fails",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok("2\t0\tx.go\n"),
-				"ls-files --others --exclude-standard -z": fail(128, "fatal: not a git repository"),
+				"diff --numstat --no-renames --end-of-options main": ok("2\t0\tx.go\n"),
+				"ls-files --others --exclude-standard -z":           fail(128, "fatal: not a git repository"),
 			},
 			wantCmd: "git ls-files --others --exclude-standard",
 		},
 		{
 			name: "grep fails",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok("2\t0\tx.go\n"),
-				"ls-files --others --exclude-standard -z": ok("y.txt\x00"),
-				grepCallKey("y.txt"):                      fail(2, "fatal: cannot use --no-index outside a repository"),
+				"diff --numstat --no-renames --end-of-options main": ok("2\t0\tx.go\n"),
+				"ls-files --others --exclude-standard -z":           ok("y.txt\x00"),
+				grepCallKey("y.txt"):                                fail(2, "fatal: cannot use --no-index outside a repository"),
 			},
 			wantCmd: "git grep --no-index -c",
 		},
@@ -87,18 +87,18 @@ func TestRunawayBeadAddedLinesSinceFailsWithoutCount(t *testing.T) {
 			// either stream makes it a failure, never a zero count.
 			name: "grep exits 1 with a message on stderr",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok("2\t0\tx.go\n"),
-				"ls-files --others --exclude-standard -z": ok("y.txt\x00"),
-				grepCallKey("y.txt"):                      fail(1, "error: sandbox exec failed"),
+				"diff --numstat --no-renames --end-of-options main": ok("2\t0\tx.go\n"),
+				"ls-files --others --exclude-standard -z":           ok("y.txt\x00"),
+				grepCallKey("y.txt"):                                fail(1, "error: sandbox exec failed"),
 			},
 			wantCmd: "git grep --no-index -c",
 		},
 		{
 			name: "grep exits 1 with output on stdout",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok("2\t0\tx.go\n"),
-				"ls-files --others --exclude-standard -z": ok("y.txt\x00"),
-				grepCallKey("y.txt"):                      {stdout: "y.txt\x001\n", code: 1},
+				"diff --numstat --no-renames --end-of-options main": ok("2\t0\tx.go\n"),
+				"ls-files --others --exclude-standard -z":           ok("y.txt\x00"),
+				grepCallKey("y.txt"):                                {stdout: "y.txt\x001\n", code: 1},
 			},
 			wantCmd: "git grep --no-index -c",
 		},
@@ -127,8 +127,8 @@ func TestRunawayBeadAddedLinesSinceFailsWithoutCount(t *testing.T) {
 func TestRunawayBeadAddedLinesSinceCleanCloneIsZero(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{
-		"diff --numstat --no-renames main":        ok(""),
-		"ls-files --others --exclude-standard -z": ok(""),
+		"diff --numstat --no-renames --end-of-options main": ok(""),
+		"ls-files --others --exclude-standard -z":           ok(""),
 	})
 	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince("main")
 	if err != nil || got != 0 {
@@ -136,9 +136,59 @@ func TestRunawayBeadAddedLinesSinceCleanCloneIsZero(t *testing.T) {
 	}
 	s.noUnscripted(t)
 	for _, call := range s.sent() {
-		if strings.HasPrefix(call, "grep ") {
+		if strings.HasPrefix(call, "--literal-pathspecs grep ") {
 			t.Errorf("ran %q with no untracked file to count", call)
 		}
+	}
+}
+
+// TestRunawayBeadAddedLinesSinceBaseIsNotAnOption: a base that begins with "-"
+// reaches git behind --end-of-options, so git refuses it instead of running it
+// as an option.
+func TestRunawayBeadAddedLinesSinceBaseIsNotAnOption(t *testing.T) {
+	t.Parallel()
+	const base = "--output=evil"
+	call := "diff --numstat --no-renames --end-of-options " + base
+	s := newScripted(map[string]reply{
+		call: fail(128, "fatal: option '"+base+"' must come before non-option arguments"),
+	})
+	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince(base)
+	if err == nil {
+		t.Fatalf("AddedLinesSince(%q) = %d, nil; want an error", base, got)
+	}
+	if got != 0 {
+		t.Errorf("AddedLinesSince(%q) = %d with an error; want 0", base, got)
+	}
+	if !strings.Contains(err.Error(), call) {
+		t.Errorf("error %q does not name %q", err, call)
+	}
+	s.noUnscripted(t)
+	if !s.hasSent(call) {
+		t.Errorf("git was sent %q; want %q", s.sent(), call)
+	}
+}
+
+// TestRunawayBeadAddedLinesSinceUntrackedPathsAreLiteral: an untracked file
+// whose name holds a glob character reaches git grep as itself, behind
+// --literal-pathspecs, so it is not read as a pathspec matching other files.
+func TestRunawayBeadAddedLinesSinceUntrackedPathsAreLiteral(t *testing.T) {
+	t.Parallel()
+	const path = "star*.txt"
+	s := newScripted(map[string]reply{
+		"diff --numstat --no-renames --end-of-options main": ok(""),
+		"ls-files --others --exclude-standard -z":           ok(path + "\x00"),
+		grepCallKey(path): ok(path + "\x002\n"),
+	})
+	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince("main")
+	if err != nil {
+		t.Fatalf("AddedLinesSince: %v", err)
+	}
+	if got != 2 {
+		t.Errorf("AddedLinesSince = %d, want 2", got)
+	}
+	s.noUnscripted(t)
+	if !s.hasSent(grepCallKey(path)) {
+		t.Errorf("git grep was not sent %q; an untracked path must be literal", grepCallKey(path))
 	}
 }
 
@@ -149,9 +199,9 @@ func TestRunawayBeadAddedLinesSincePathWithNewlineCounts(t *testing.T) {
 	t.Parallel()
 	name := "we\nird.txt"
 	s := newScripted(map[string]reply{
-		"diff --numstat --no-renames main":        ok(""),
-		"ls-files --others --exclude-standard -z": ok(name + "\x00"),
-		grepCallKey(name):                         ok(name + "\x002\n"),
+		"diff --numstat --no-renames --end-of-options main": ok(""),
+		"ls-files --others --exclude-standard -z":           ok(name + "\x00"),
+		grepCallKey(name): ok(name + "\x002\n"),
 	})
 	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince("main")
 	if err != nil || got != 2 {
@@ -171,10 +221,10 @@ func TestRunawayBeadAddedLinesSinceBatchesUntrackedPaths(t *testing.T) {
 	}
 	first, second := names[:grepBatchPaths], names[grepBatchPaths:]
 	s := newScripted(map[string]reply{
-		"diff --numstat --no-renames main":        ok(""),
-		"ls-files --others --exclude-standard -z": ok(strings.Join(names, "\x00") + "\x00"),
-		grepCallKey(first...):                     ok(grepRecords(first)),
-		grepCallKey(second...):                    ok(grepRecords(second)),
+		"diff --numstat --no-renames --end-of-options main": ok(""),
+		"ls-files --others --exclude-standard -z":           ok(strings.Join(names, "\x00") + "\x00"),
+		grepCallKey(first...):                               ok(grepRecords(first)),
+		grepCallKey(second...):                              ok(grepRecords(second)),
 	})
 	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince("main")
 	if err != nil {
@@ -186,7 +236,7 @@ func TestRunawayBeadAddedLinesSinceBatchesUntrackedPaths(t *testing.T) {
 	s.noUnscripted(t)
 	grepCalls := 0
 	for _, call := range s.sent() {
-		if strings.HasPrefix(call, "grep ") {
+		if strings.HasPrefix(call, "--literal-pathspecs grep ") {
 			grepCalls++
 		}
 	}
@@ -206,8 +256,8 @@ func TestRunawayBeadAddedLinesSinceSplitsBatchAtByteBound(t *testing.T) {
 		t.Fatalf("test names total %d bytes, not over the %d-byte bound", len(a)+len(b)+2, grepBatchBytes)
 	}
 	s := newScripted(map[string]reply{
-		"diff --numstat --no-renames main":        ok(""),
-		"ls-files --others --exclude-standard -z": ok(a + "\x00" + b + "\x00"),
+		"diff --numstat --no-renames --end-of-options main": ok(""),
+		"ls-files --others --exclude-standard -z":           ok(a + "\x00" + b + "\x00"),
 		grepCallKey(a): ok(grepRecords([]string{a})),
 		grepCallKey(b): ok(grepRecords([]string{b})),
 	})
@@ -227,9 +277,9 @@ func TestRunawayBeadAddedLinesSinceSplitsBatchAtByteBound(t *testing.T) {
 func TestRunawayBeadAddedLinesSinceEmptyUntrackedFileCountsZero(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{
-		"diff --numstat --no-renames main":        ok("4\t1\tx.go\n"),
-		"ls-files --others --exclude-standard -z": ok("empty.txt\x00"),
-		grepCallKey("empty.txt"):                  fail(1, ""),
+		"diff --numstat --no-renames --end-of-options main": ok("4\t1\tx.go\n"),
+		"ls-files --others --exclude-standard -z":           ok("empty.txt\x00"),
+		grepCallKey("empty.txt"):                            fail(1, ""),
 	})
 	got, err := NewGitWithExec(t.TempDir(), s.run).AddedLinesSince("main")
 	if err != nil {
@@ -252,43 +302,43 @@ func TestRunawayBeadAddedLinesSinceRejectsBadOutput(t *testing.T) {
 		{
 			name: "numstat line lacks its fields",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main": ok("3\t0\tx.go\nnot numstat\n"),
+				"diff --numstat --no-renames --end-of-options main": ok("3\t0\tx.go\nnot numstat\n"),
 			},
 		},
 		{
 			name: "numstat added field is not a number",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main": ok("many\t0\tx.go\n"),
+				"diff --numstat --no-renames --end-of-options main": ok("many\t0\tx.go\n"),
 			},
 		},
 		{
 			name: "numstat line lacks its path",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main": ok("3\t0\tx.go\n4\t0\n"),
+				"diff --numstat --no-renames --end-of-options main": ok("3\t0\tx.go\n4\t0\n"),
 			},
 		},
 		{
 			name: "grep line has no count",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok(""),
-				"ls-files --others --exclude-standard -z": ok("x.txt\x00"),
-				grepCallKey("x.txt"):                      ok("x.txt\n"),
+				"diff --numstat --no-renames --end-of-options main": ok(""),
+				"ls-files --others --exclude-standard -z":           ok("x.txt\x00"),
+				grepCallKey("x.txt"):                                ok("x.txt\n"),
 			},
 		},
 		{
 			name: "grep count is not a number",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok(""),
-				"ls-files --others --exclude-standard -z": ok("x.txt\x00"),
-				grepCallKey("x.txt"):                      ok("x.txt\x00lots\n"),
+				"diff --numstat --no-renames --end-of-options main": ok(""),
+				"ls-files --others --exclude-standard -z":           ok("x.txt\x00"),
+				grepCallKey("x.txt"):                                ok("x.txt\x00lots\n"),
 			},
 		},
 		{
 			name: "grep line has an empty path",
 			answers: map[string]reply{
-				"diff --numstat --no-renames main":        ok(""),
-				"ls-files --others --exclude-standard -z": ok("x.txt\x00"),
-				grepCallKey("x.txt"):                      ok("\x005\n"),
+				"diff --numstat --no-renames --end-of-options main": ok(""),
+				"ls-files --others --exclude-standard -z":           ok("x.txt\x00"),
+				grepCallKey("x.txt"):                                ok("\x005\n"),
 			},
 		},
 	}
