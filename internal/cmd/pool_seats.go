@@ -414,15 +414,17 @@ func (b *poolSeatBatch) hookHeld(rigName, polecatName string) (bool, error) {
 }
 
 // shadowSeatHook logs where a sessionless seat's intent record and its agent
-// bead name different work beads, keeping the counts on the bead until the
-// overseer has read the window: the record's work_bead is the fact the
-// dead-hooked count moves onto next
-// (docs/plans/2026-11-15-agent-bead-retirement-plan.md, P1.7). The batch logs a
-// seat at most once however often it is asked about it, so the window reads as
-// a set of disagreeing seats rather than a tally of reads.
+// bead name different work beads, as `agentbead_shadow: <rig>/<name> hook
+// intent=<v> bead=<v>`. The count keeps reading the bead, so the line is the
+// only evidence of whether moving it onto the record's work_bead would change
+// the answer (gt-1o0tqs). The batch logs a seat at most once however often it
+// is asked about it, so the window reads as a set of disagreeing seats rather
+// than a tally of reads.
 //
 // A record that cannot be read is logged rather than skipped: the seat's two
-// sources could not be compared, which is not the same as agreeing.
+// sources could not be compared, which is not the same as agreeing. A record
+// that does not exist is not compared at all: Read answers it as the zero
+// facts, and an empty work_bead is not a value a missing file states.
 func (b *poolSeatBatch) shadowSeatHook(rigName, polecatName, beadHook string) {
 	if b.townRoot == "" {
 		return // no town, no record to read against
@@ -445,6 +447,13 @@ func (b *poolSeatBatch) shadowSeatHook(rigName, polecatName, beadHook string) {
 	}
 	if facts.WorkBead == beadHook {
 		return
+	}
+	if facts.WorkBead == "" {
+		// Read answers a missing record as zero facts, so only the file's
+		// existence tells a record that names no work bead from no record.
+		if _, statErr := os.Stat(polecatIntentSeat(rigName, polecatName).Path(b.townRoot)); errors.Is(statErr, os.ErrNotExist) {
+			return
+		}
 	}
 	fmt.Fprintf(b.shadowOut(), "agentbead_shadow: %s hook intent=%s bead=%s\n", key, facts.WorkBead, beadHook)
 }

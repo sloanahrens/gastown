@@ -169,6 +169,49 @@ func TestAgentBeadRetireDeadHookedLogsAnUnreadableRecord(t *testing.T) {
 	}
 }
 
+// TestAgentBeadRetireDeadHookedNoRecordIsNotADisagreement: Read answers a
+// missing record as zero facts, the facts a record naming no work bead also
+// answers, and comparing them with a bead hook logs a disagreement no record
+// states. The seat is not logged and still counts on its bead.
+func TestAgentBeadRetireDeadHookedNoRecordIsNotADisagreement(t *testing.T) {
+	t.Parallel()
+	town, db, batch, lines := seatShadowTown(t, "ember", "gt-work")
+	db.Seed(beads.Issue{ID: "gt-work", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/ember"})
+
+	sessions, _, err := rosterOverShadowBatch(&fakeLister{}, town, batch)
+	if err != nil {
+		t.Fatalf("roster: %v", err)
+	}
+	if got := shadowLines(lines); len(got) != 0 {
+		t.Fatalf("shadow lines = %q, want none for a seat with no intent record", got)
+	}
+	counted := false
+	for _, s := range sessions {
+		counted = counted || (s.rig == "gastown" && s.polecat == "ember" && s.deadHooked)
+	}
+	if !counted {
+		t.Fatalf("a missing record changed the count: %+v", sessions)
+	}
+}
+
+// TestAgentBeadRetireDeadHookedLogsAnEmptyWorkBead: a record that exists and
+// names no work bead while its agent bead holds one is the disagreement the
+// window exists to report, so the missing-record skip must not swallow it.
+func TestAgentBeadRetireDeadHookedLogsAnEmptyWorkBead(t *testing.T) {
+	t.Parallel()
+	town, _, batch, lines := seatShadowTown(t, "ember", "gt-bead-hook")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town,
+		intent.Record{Agent: "deepseek-flash"})
+
+	if _, _, err := rosterOverShadowBatch(&fakeLister{}, town, batch); err != nil {
+		t.Fatalf("roster: %v", err)
+	}
+	want := []string{"agentbead_shadow: gastown/ember hook intent= bead=gt-bead-hook"}
+	if got := shadowLines(lines); !reflect.DeepEqual(got, want) {
+		t.Fatalf("shadow lines = %q, want %q", got, want)
+	}
+}
+
 // TestAgentBeadRetireDeadHookedDoesNotReadWithoutATown: a batch built with no
 // town has no record to read, and reading one anyway would resolve a path
 // against the process's working directory. The seat's hook question is still
