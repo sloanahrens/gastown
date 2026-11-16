@@ -827,3 +827,45 @@ func TestNoBeadAccessPrepareStagesTheFileModeMarkerFromTheProfile(t *testing.T) 
 		})
 	}
 }
+
+// A file-mode spawn's uploaded settings drop the mail check and the
+// bead-reading stop hook, and a dolt-mode or unset spawn's are their unchanged
+// render; every guard survives both (gt-1m0kb F6). The mode is the profile's.
+func TestNoBeadAccessRuntimeArchiveSettingsFollowTheFileModeProfile(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	writeOpenshellFile(t, filepath.Join(town, openshellTestRig, "polecats", ".claude", "settings.json"), polecatHostSettings)
+	const settingsPath = "gt/" + openshellTestRig + "/polecats/.claude/settings.json"
+	cases := []struct {
+		name         string
+		beadAccess   string
+		wantMailStop bool
+	}{
+		{name: "files profile", beadAccess: config.SandboxBeadAccessFiles},
+		{name: "dolt profile", beadAccess: config.SandboxBeadAccessDolt, wantMailStop: true},
+		{name: "unset profile", wantMailStop: true},
+	}
+	for _, tc := range cases {
+		// Not parallel: the subtests share one town and render the same
+		// system prompt into it.
+		t.Run(tc.name, func(t *testing.T) {
+			spec := openshellSpawn(town, work)
+			spec.Profile = Profile{BeadAccess: tc.beadAccess}
+			data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
+			if err != nil {
+				t.Fatalf("buildRuntimeArchiveLogging: %v", err)
+			}
+			body := untarRuntime(t, data)[settingsPath].body
+			for _, hook := range []string{"gt mail check --inject", "gt mail inbox", "gt tap polecat-stop-check"} {
+				if got := strings.Contains(body, hook); got != tc.wantMailStop {
+					t.Errorf("uploaded settings hold %q = %v, want %v:\n%s", hook, got, tc.wantMailStop, body)
+				}
+			}
+			for _, guard := range polecatGuardCommands {
+				if !strings.Contains(body, guard) {
+					t.Errorf("uploaded settings lost the guard %q:\n%s", guard, body)
+				}
+			}
+		})
+	}
+}

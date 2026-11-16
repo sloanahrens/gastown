@@ -1,10 +1,13 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // openshellHostSettings is a host polecat settings.json: gt hooks at the
@@ -27,6 +30,70 @@ const openshellHostSettings = `{
     ]
   }
 }`
+
+// polecatHostSettings is a host polecat settings.json holding the hooks a
+// file-mode seat must and must not run (gt-1m0kb F6): every guard, the prime
+// hook, the nudge drain, the mail check and mail inbox, and the bead-reading
+// stop hook.
+const polecatHostSettings = `{
+  "theme": "dark",
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash|Monitor", "hooks": [
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard pr-workflow"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard dangerous-command"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard container-suite"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard bd-close-invariant"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard bd-create-store"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard sandbox-secrets"}
+      ]},
+      {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard polecat-paths"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard script-files"}
+      ]},
+      {"matcher": "AskUserQuestion", "hooks": [
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard question-tool"}
+      ]},
+      {"matcher": "Bash", "hooks": [
+        {"type": "command", "command": "/usr/bin/python3 /Users/x/.claude/tools/polecat-path-guard.py"}
+      ]}
+    ],
+    "PermissionRequest": [
+      {"matcher": "Bash|Monitor", "hooks": [
+        {"type": "command", "command": "/Users/x/.local/bin/gt tap guard permission-request"}
+      ]}
+    ],
+    "SessionStart": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "/Users/x/.local/bin/gt prime --hook"}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "/Users/x/.local/bin/gt tap nudge-drain"}]}
+    ],
+    "Stop": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "/Users/x/.local/bin/gt tap polecat-stop-check"}]}
+    ],
+    "UserPromptSubmit": [
+      {"matcher": "", "hooks": [
+        {"type": "command", "command": "/Users/x/.local/bin/gt mail check --inject"},
+        {"type": "command", "command": "/Users/x/.local/bin/gt mail inbox"}
+      ]}
+    ]
+  }
+}`
+
+// polecatGuardCommands is every guard the polecat settings above carry.
+var polecatGuardCommands = []string{
+	"/usr/local/bin/gt tap guard pr-workflow",
+	"/usr/local/bin/gt tap guard dangerous-command",
+	"/usr/local/bin/gt tap guard container-suite",
+	"/usr/local/bin/gt tap guard bd-close-invariant",
+	"/usr/local/bin/gt tap guard bd-create-store",
+	"/usr/local/bin/gt tap guard sandbox-secrets",
+	"/usr/local/bin/gt tap guard polecat-paths",
+	"/usr/local/bin/gt tap guard script-files",
+	"/usr/local/bin/gt tap guard question-tool",
+	"/usr/local/bin/gt tap guard permission-request",
+}
 
 func hookCommands(t *testing.T, settings []byte) map[string][]string {
 	t.Helper()
@@ -210,5 +277,78 @@ func TestRewriteTownRootChangesWholePathsOnly(t *testing.T) {
 	}
 	if got := RewriteTownRoot("/h/gt/x", from, from); got != "/h/gt/x" {
 		t.Errorf("an unchanged root must leave the text alone, got %q", got)
+	}
+}
+
+// TestNoBeadAccessFileModeSeatSettingsDropMailAndKeepEveryGuard is the seat's
+// rendered hook set in file mode (gt-1m0kb F6): the mail check, the mail inbox
+// and the bead-reading stop hook are gone, and every guard, the prime hook and
+// the nudge drain stay.
+func TestNoBeadAccessFileModeSeatSettingsDropMailAndKeepEveryGuard(t *testing.T) {
+	t.Parallel()
+	out, err := renderSandboxSettingsForSeat([]byte(polecatHostSettings), config.SandboxBeadAccessFiles)
+	if err != nil {
+		t.Fatalf("renderSandboxSettingsForSeat(files): %v", err)
+	}
+	got := hookCommands(t, out)
+
+	for event, commands := range got {
+		for _, command := range commands {
+			for _, gone := range []string{"mail check", "mail inbox", "polecat-stop-check"} {
+				if strings.Contains(command, gone) {
+					t.Errorf("file-mode seat still runs %q (%s)", command, event)
+				}
+			}
+		}
+	}
+	for _, event := range []string{"Stop", "UserPromptSubmit"} {
+		if _, present := got[event]; present {
+			t.Errorf("file-mode seat keeps a %s hook: %q", event, got[event])
+		}
+	}
+	for _, guard := range polecatGuardCommands {
+		if !slices.Contains(got["PreToolUse"], guard) && !slices.Contains(got["PermissionRequest"], guard) {
+			t.Errorf("file-mode seat lost the guard %q", guard)
+		}
+	}
+	for event, want := range map[string]string{
+		"SessionStart": "/usr/local/bin/gt prime --hook",
+		"PostToolUse":  "/usr/local/bin/gt tap nudge-drain",
+	} {
+		if !slices.Contains(got[event], want) {
+			t.Errorf("file-mode seat lost the %s hook %q, got %q", event, want, got[event])
+		}
+	}
+}
+
+// TestNoBeadAccessDoltModeSeatSettingsUnchanged pins that bead access other
+// than files renders the settings exactly as before (gt-1m0kb F6): byte for
+// byte the unchanged render, mail hooks and stop hook intact.
+func TestNoBeadAccessDoltModeSeatSettingsUnchanged(t *testing.T) {
+	t.Parallel()
+	plain, err := renderSandboxSettings([]byte(polecatHostSettings))
+	if err != nil {
+		t.Fatalf("renderSandboxSettings: %v", err)
+	}
+	for _, beadAccess := range []string{config.SandboxBeadAccessDolt, ""} {
+		t.Run("bead_access="+beadAccess, func(t *testing.T) {
+			t.Parallel()
+			got, err := renderSandboxSettingsForSeat([]byte(polecatHostSettings), beadAccess)
+			if err != nil {
+				t.Fatalf("renderSandboxSettingsForSeat(%q): %v", beadAccess, err)
+			}
+			if !bytes.Equal(got, plain) {
+				t.Errorf("bead_access %q changed the rendered settings:\ngot:\n%s\nwant:\n%s", beadAccess, got, plain)
+			}
+			commands := hookCommands(t, got)
+			for event, want := range map[string]string{
+				"Stop":             "/usr/local/bin/gt tap polecat-stop-check",
+				"UserPromptSubmit": "/usr/local/bin/gt mail check --inject",
+			} {
+				if !slices.Contains(commands[event], want) {
+					t.Errorf("bead_access %q lost the %s hook %q, got %q", beadAccess, event, want, commands[event])
+				}
+			}
+		})
 	}
 }

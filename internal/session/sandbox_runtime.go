@@ -111,12 +111,16 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	if err != nil {
 		return nil, err
 	}
+	// A file-mode seat reads no bead, so its settings drop the hooks that do:
+	// the mail check and the bead-reading stop hook (gt-1m0kb, F6). Every
+	// other profile renders the settings unchanged.
+	filesMode := spec.Profile.BeadAccess == config.SandboxBeadAccessFiles
 	dir := filepath.Join(spec.TownRoot, spec.Rig, "polecats", ".claude")
 	rawSettings, err := os.ReadFile(filepath.Join(dir, "settings.json"))
 	if err != nil {
 		return nil, fmt.Errorf("polecat settings: %w", err)
 	}
-	settings, err := renderSandboxSettings(rawSettings)
+	settings, err := renderSandboxSettingsForSeat(rawSettings, spec.Profile.BeadAccess)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +189,6 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	// files mode stages it: a dolt-mode or unset profile stages none, and the
 	// seat then reads dolt mode. The directory entry is staged once, for
 	// whichever of the two the spawn carries.
-	filesMode := spec.Profile.BeadAccess == config.SandboxBeadAccessFiles
 	if len(spec.TaskFile) > 0 || filesMode {
 		files = append(files, runtimeFile{runtimeTaskDir, nil, 0o755, true})
 	}

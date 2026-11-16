@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1558,6 +1559,100 @@ func TestComputeExpectedNudgeDrainIsPolecatOnly(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// gtInvokedWith is command with its program word replaced by a bare gt, the
+// way a production settings file names the binary. gtCommand records the test
+// binary as the program word inside a test run, and no seat ever runs that.
+func gtInvokedWith(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return command
+	}
+	return strings.Join(append([]string{"gt"}, fields[1:]...), " ")
+}
+
+// TestNoBeadAccessFileModeDropsCommand pins the predicate a file-mode seat's
+// settings render uses (gt-1m0kb F6): only the mail check, the mail inbox and
+// the bead-reading stop hook are named; every guard, prime and the nudge drain
+// are not.
+func TestNoBeadAccessFileModeDropsCommand(t *testing.T) {
+	t.Parallel()
+	for command, want := range map[string]bool{
+		"gt mail check --inject":                   true,
+		"/usr/local/bin/gt mail check --inject":    true,
+		"gt mail inbox":                            true,
+		"/Users/x/.local/bin/gt mail inbox":        true,
+		"gt tap polecat-stop-check":                true,
+		"/usr/local/bin/gt tap polecat-stop-check": true,
+		"gt mail read gt-abc":                      false,
+		"gt mail":                                  false,
+		"gt tap guard pr-workflow":                 false,
+		"gt tap guard sandbox-secrets":             false,
+		"gt tap guard polecat-paths":               false,
+		"gt tap nudge-drain":                       false,
+		"gt prime --hook":                          false,
+		"gt":                                       false,
+		"echo gt mail inbox":                       false,
+		"python3 /x/guard.py gt mail inbox":        false,
+	} {
+		if got := FileModeDropsCommand(command); got != want {
+			t.Errorf("FileModeDropsCommand(%q) = %v, want %v", command, got, want)
+		}
+	}
+}
+
+// TestNoBeadAccessFileModeHookSetKeepsEveryGuard pins gt-1m0kb F6 against the
+// real polecat hook set: a file-mode seat loses exactly the mail check and the
+// stop hook, and keeps every guard (guards make no bead call), the prime hook
+// and the nudge drain.
+func TestNoBeadAccessFileModeHookSetKeepsEveryGuard(t *testing.T) {
+	t.Parallel()
+	home := configHome{home: t.TempDir()}
+	cfg, err := home.computeExpected("gastown/polecats")
+	if err != nil {
+		t.Fatalf("home.computeExpected(gastown/polecats): %v", err)
+	}
+
+	var kept, dropped []string
+	for _, eventType := range EventTypes {
+		for _, entry := range cfg.GetEntries(eventType) {
+			for _, h := range entry.Hooks {
+				if FileModeDropsCommand(gtInvokedWith(h.Command)) {
+					dropped = append(dropped, gtInvokedWith(h.Command))
+					continue
+				}
+				kept = append(kept, gtInvokedWith(h.Command))
+			}
+		}
+	}
+
+	wantDropped := []string{"gt mail check --inject", "gt tap polecat-stop-check"}
+	slices.Sort(dropped)
+	if !slices.Equal(dropped, wantDropped) {
+		t.Errorf("file-mode seat drops %q, want exactly %q", dropped, wantDropped)
+	}
+	for _, cmd := range kept {
+		if strings.Contains(cmd, "mail check") || strings.Contains(cmd, "mail inbox") {
+			t.Errorf("file-mode seat would still run the mail hook %q", cmd)
+		}
+	}
+	for _, guard := range []string{
+		"gt tap guard pr-workflow",
+		"gt tap guard dangerous-command",
+		"gt tap guard container-suite",
+		"gt tap guard bd-close-invariant",
+		"gt tap guard bd-create-store",
+		"gt tap guard sandbox-secrets",
+		"gt tap guard polecat-paths",
+		"gt tap guard script-files",
+		"gt tap guard question-tool",
+		"gt tap guard permission-request",
+	} {
+		if !slices.Contains(kept, guard) {
+			t.Errorf("file-mode seat lost the guard %q", guard)
 		}
 	}
 }
