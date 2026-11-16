@@ -69,7 +69,10 @@ const newestRowScan = 32
 // which are the writes that would put a complete row on top. A window with no
 // reading in it is nil too: finding nothing to dedupe against is not a failure,
 // and the write that follows can only put a complete row over partial ones,
-// never worsen the window. Only a read that fails is an error.
+// never worsen the window. A complete row older than the window is not seen
+// either, so the first write after thirty-two newer partial rows is not
+// deduped against it: one extra row, never a lost one. Only a read that fails
+// is an error.
 func (s clientClaudePlanStore) NewestClaudePlan(ctx context.Context) (*usage.ClaudePlan, error) {
 	rows, err := s.client.ReadCostSamples(ctx, beads.SampleKindClaudePlan, time.Time{}, newestRowScan)
 	if err != nil {

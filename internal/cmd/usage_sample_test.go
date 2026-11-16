@@ -247,6 +247,38 @@ func fakeClaudePlanRows(t *testing.T, f *beadsfake.Fake) []beads.Sample {
 	return rows
 }
 
+// TestUsageSampleFeedWritesThroughTheProductionOpener drives a status-line feed
+// with the store opened the way defaultUsageSampleDeps opens it: through
+// openClaudePlanStoreFrom, which resolves the town and builds the client. The
+// other feed tests hand the command a store they built themselves, so none of
+// them would notice the opener resolving the wrong town or building no client.
+func TestUsageSampleFeedWritesThroughTheProductionOpener(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	town := t.TempDir()
+	f := beadsfake.New()
+	var gotTown string
+	deps := r.deps()
+	deps.openStore = func() (usage.Store, error) {
+		return openClaudePlanStoreFrom(
+			func() (string, error) { return town, nil },
+			func(root string) beads.Client { gotTown = root; return f },
+		)
+	}
+
+	stderr, err := runUsageSampleCmd(t, deps, statusLinePayload("41", "12"), "--strict")
+	if err != nil {
+		t.Fatalf("exit err = %v, want nil; stderr = %q", err, stderr)
+	}
+	if gotTown != town {
+		t.Errorf("the feed built its client for town %q, want the resolved town %q", gotTown, town)
+	}
+	rows := fakeClaudePlanRows(t, f)
+	if len(rows) != 1 {
+		t.Fatalf("the town's client holds %d claude_plan rows after one feed, want 1", len(rows))
+	}
+}
+
 func TestUsageSampleWritesOneClaudePlanRowToTheBeadsStore(t *testing.T) {
 	t.Parallel()
 	r := newUsageSampleRig()
