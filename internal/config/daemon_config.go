@@ -395,6 +395,12 @@ type PatrolsConfig struct {
 	// four compares, so a town turns it on rather than an upgrade.
 	ImagePins *PatrolConfig `json:"image_pins,omitempty"`
 
+	// DeepSeekBalance reads the DeepSeek account balance every interval, from
+	// the key file its block names (internal/daemon/deepseek_balance_patrol.go,
+	// gt-whaxw7). Off when absent: each tick spends one request against the
+	// account's key, so a town turns it on rather than an upgrade.
+	DeepSeekBalance *DeepSeekBalanceConfig `json:"deepseek_balance,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.
@@ -2085,6 +2091,97 @@ func (c *CloudCheckConfig) KeyFilePath() string {
 		return c.KeyFile
 	}
 	return CloudCheckDefaultKeyFile
+}
+
+// DeepSeekBalanceConfig configures the deepseek_balance patrol: the interval
+// between its readings of the DeepSeek account balance, and the file it reads
+// the key from (internal/daemon/deepseek_balance_patrol.go).
+//
+// The patrol is opt-in. Each tick spends one request against the account's key,
+// so a town that has not asked for it must not get it from a default.
+type DeepSeekBalanceConfig struct {
+	Enabled bool `json:"enabled"`
+	// Interval is the period between two readings, as a Go duration. Empty
+	// means DeepSeekBalanceDefaultInterval; read it through IntervalDuration,
+	// which refuses a value that does not parse or is under the floor.
+	Interval string `json:"interval"`
+	// KeyFile is the file the key is read from, a KEY=VALUE line under
+	// DeepSeekBalanceKeyEnv. The value never leaves the file except into the
+	// request header. Empty means DeepSeekBalanceDefaultKeyFile.
+	KeyFile string `json:"key_file"`
+}
+
+// The values DeepSeekBalanceConfig accepts, read through the methods below so a
+// block that omits a key cannot fall back to something else per caller.
+const (
+	DeepSeekBalanceDefaultInterval = "10m"
+	// DeepSeekBalanceMinInterval is the floor: the balance moves by the minute,
+	// and a shorter interval spends the account's requests on readings that
+	// cannot have moved far.
+	DeepSeekBalanceMinInterval = time.Minute
+	// DeepSeekBalanceKeyEnv is the name the key file sets the key under, the
+	// name the town's deepseek.env uses (deploy/daemon/secrets.yaml).
+	DeepSeekBalanceKeyEnv = "DEEPSEEK_API_KEY"
+	// DeepSeekBalanceDefaultKeyFile is the file the patrol reads when the block
+	// names no key_file: the mount path the daemon pod's key Secret renders at
+	// (gt-hfcssw). A host whose key is elsewhere names key_file.
+	DeepSeekBalanceDefaultKeyFile = "/var/run/secrets/gt-deepseek-balance/deepseek.env"
+)
+
+// IntervalDuration returns the period between two readings: the default when
+// unset, and the refusal for a value that does not parse or is under
+// DeepSeekBalanceMinInterval, never the default.
+func (c *DeepSeekBalanceConfig) IntervalDuration() (time.Duration, error) {
+	var raw string
+	if c != nil {
+		raw = c.Interval
+	}
+	every, err := patrolInterval("patrols.deepseek_balance.interval", raw, DeepSeekBalanceDefaultInterval)
+	if err != nil {
+		return 0, err
+	}
+	if every < DeepSeekBalanceMinInterval {
+		return 0, fmt.Errorf("patrols.deepseek_balance.interval = %q: want at least %s",
+			raw, DeepSeekBalanceMinInterval)
+	}
+	return every, nil
+}
+
+// ParseKeyFile returns the file the key is read from: the setting, or
+// DeepSeekBalanceDefaultKeyFile when it names none. A setting that is not
+// absolute is refused rather than resolved against the daemon's working
+// directory, which is not the operator's.
+func (c *DeepSeekBalanceConfig) ParseKeyFile() (string, error) {
+	if c == nil || c.KeyFile == "" {
+		return DeepSeekBalanceDefaultKeyFile, nil
+	}
+	if !filepath.IsAbs(c.KeyFile) {
+		return "", fmt.Errorf("patrols.deepseek_balance.key_file = %q: want an absolute path", c.KeyFile)
+	}
+	return filepath.Clean(c.KeyFile), nil
+}
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
+// patrol cannot schedule and a key_file the reader would not read.
+// The unknown-field check is repeated here because a type that decodes itself is
+// decoded by the config kernel's strict decoder opaquely.
+func (c *DeepSeekBalanceConfig) UnmarshalJSON(data []byte) error {
+	type plain DeepSeekBalanceConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.deepseek_balance: %w", err)
+	}
+	decoded := DeepSeekBalanceConfig(p)
+	if _, err := decoded.IntervalDuration(); err != nil {
+		return err
+	}
+	if _, err := decoded.ParseKeyFile(); err != nil {
+		return err
+	}
+	*c = decoded
+	return nil
 }
 
 // JevScrub turns on the state scrubber for one Jev battery: secret-shaped text
