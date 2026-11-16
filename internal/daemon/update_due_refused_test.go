@@ -187,13 +187,110 @@ func TestPreRollGuardDueDecisionForARefusedPair(t *testing.T) {
 	}
 }
 
-// TestPreRollGuardAnUnreadableLedgerLeavesTheDecision holds a damaged image
-// record to the decision the facts that read give: the refused-pair hold is
-// skipped and its absence logged, a due update still launches, and a guard
-// that was holding the update still holds. The run's own pre-swap check
-// refuses a bad pair before any swap, so the launch rests on that check rather
-// than a guess about pair safety.
-func TestPreRollGuardAnUnreadableLedgerLeavesTheDecision(t *testing.T) {
+// TestPreRollGuardAnUnreadableLedgerKeepsTheHold holds a damaged image record
+// to the refusal the last readable one named: main is still the pair that
+// record refused, so the update stays not due and the reason names the check
+// rather than launching a pair a readable record would have held.
+func TestPreRollGuardAnUnreadableLedgerKeepsTheHold(t *testing.T) {
+	t.Parallel()
+
+	const installed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const refusal = "preflight pair: no digest for the daemon image"
+
+	d, logs, launches, path := newRefusedLedgerDaemon(t, installed)
+	writeImageRecordFile(t, path, `{"v": 1, "refused": {"commit": "`+installed+`"}, "refused_reason": "`+refusal+`"}`)
+
+	// The readable record holds the pair; this is the refusal a damaged record
+	// must keep in force.
+	d.triggerUpdate()
+	if *launches != 0 {
+		t.Fatalf("launches with the readable record = %d, want 0 (log %q)", *launches, logs.String())
+	}
+
+	writeImageRecordFile(t, path, "{")
+	advanceUpdateTriggerClock(d, updateLaunchSuppression+time.Minute)
+	d.triggerUpdate()
+
+	if *launches != 0 {
+		t.Fatalf("launches with the damaged record = %d, want 0: the refusal the last readable record named still holds (log %q)", *launches, logs.String())
+	}
+	for _, want := range []string{
+		"update: not due — pair aaaaaaaaaaaa was refused by " + refusal,
+		"update: the image ledger could not be read",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log = %q, want it to contain %q", logs.String(), want)
+		}
+	}
+}
+
+// TestPreRollGuardAnUnreadableLedgerDoesNotBlockANewerPair holds a damaged
+// image record to the other half of the criterion: the remembered refusal names
+// another commit, so main's newer pair is due as before.
+func TestPreRollGuardAnUnreadableLedgerDoesNotBlockANewerPair(t *testing.T) {
+	t.Parallel()
+
+	const installed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const otherCommit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	d, logs, launches, path := newRefusedLedgerDaemon(t, installed)
+	writeImageRecordFile(t, path, `{"v": 1, "refused": {"commit": "`+otherCommit+`"}, "refused_reason": "preflight pair: no digest for the daemon image"}`)
+
+	// The readable record refuses another commit, so this update is due; the
+	// refused pair is remembered for the damaged read that follows.
+	d.triggerUpdate()
+	if *launches != 1 {
+		t.Fatalf("launches with the readable record = %d, want 1 (log %q)", *launches, logs.String())
+	}
+
+	writeImageRecordFile(t, path, "{")
+	advanceUpdateTriggerClock(d, updateLaunchSuppression+time.Minute)
+	d.triggerUpdate()
+
+	if *launches != 2 {
+		t.Fatalf("launches with the damaged record = %d, want 2: a newer pair than the refused one is due (log %q)", *launches, logs.String())
+	}
+	if !strings.Contains(logs.String(), "update: the image ledger could not be read") {
+		t.Errorf("log = %q, want it to name the damaged record", logs.String())
+	}
+}
+
+// TestPreRollGuardAClearedRecordForgetsTheRefusedPair holds a pair a later
+// install cleared to being due again: a readable record naming no refusal
+// replaces the remembered one, so a damaged read after it holds nothing.
+func TestPreRollGuardAClearedRecordForgetsTheRefusedPair(t *testing.T) {
+	t.Parallel()
+
+	const installed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const refusal = "preflight pair: no digest for the daemon image"
+
+	d, logs, launches, path := newRefusedLedgerDaemon(t, installed)
+	writeImageRecordFile(t, path, `{"v": 1, "refused": {"commit": "`+installed+`"}, "refused_reason": "`+refusal+`"}`)
+	d.triggerUpdate()
+	if *launches != 0 {
+		t.Fatalf("launches with the refused record = %d, want 0 (log %q)", *launches, logs.String())
+	}
+
+	writeImageRecordFile(t, path, `{"v": 1, "current": {"commit": "`+installed+`"}}`)
+	advanceUpdateTriggerClock(d, updateLaunchSuppression+time.Minute)
+	d.triggerUpdate()
+	if *launches != 1 {
+		t.Fatalf("launches with the cleared record = %d, want 1: the refusal is gone (log %q)", *launches, logs.String())
+	}
+
+	writeImageRecordFile(t, path, "{")
+	advanceUpdateTriggerClock(d, updateLaunchSuppression+time.Minute)
+	d.triggerUpdate()
+	if *launches != 2 {
+		t.Fatalf("launches with the damaged record = %d, want 2: the cleared refusal is not remembered (log %q)", *launches, logs.String())
+	}
+}
+
+// TestPreRollGuardAnUnreadableLedgerFirstRead holds a daemon that has never
+// read the record to the decision the facts that read give: no refusal is
+// remembered, so a due update launches and the outage is logged, rather than
+// every target being held on a record that never read.
+func TestPreRollGuardAnUnreadableLedgerFirstRead(t *testing.T) {
 	t.Parallel()
 
 	const installed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -201,79 +298,72 @@ func TestPreRollGuardAnUnreadableLedgerLeavesTheDecision(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
-		// failedRun writes an update state failed on main's target, the
-		// failed-run hold, so the decision under test is a held one.
-		failedRun    bool
-		wantLaunches int
-		wantLog      []string
 	}{
-		{
-			name:         "a record that does not parse still lets a due update launch",
-			content:      "{",
-			wantLaunches: 1,
-			wantLog:      []string{"update: due (nightly", "update: the image ledger could not be read"},
-		},
-		{
-			name:         "a record version this package does not read still lets a due update launch",
-			content:      `{"v": 99}`,
-			wantLaunches: 1,
-			wantLog:      []string{"update: due (nightly", "update: the image ledger could not be read"},
-		},
-		{
-			name:         "another guard still holds the update",
-			content:      "{",
-			failedRun:    true,
-			wantLaunches: 0,
-			wantLog:      []string{"update: not due — last run failed on this target", "update: the image ledger could not be read"},
-		},
+		{name: "a record that does not parse", content: "{"},
+		{name: "a record version this package does not read", content: `{"v": 99}`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			d, logs, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
-				Enabled: true,
-				Window:  "03:00",
-			})
-			createUpdateSource(t, d.config.TownRoot)
-			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
-				return &version.StaleBinaryInfo{RepoCommit: installed}
-			}
-			if tt.failedRun {
-				// The failed-run hold reads main's tip from origin, which this
-				// stub answers with the installed commit.
-				d.updateRemoteRun = (&updateRemoteFake{output: installed + "\trefs/heads/main\n"}).run
-				store := update.Store{Dir: update.Dir(d.config.TownRoot)}
-				ended := updateTriggerTestTime.Add(-24 * time.Hour)
-				if err := store.Write(update.State{
-					RunID:     "run-1",
-					StartedAt: ended.Add(-time.Minute),
-					EndedAt:   ended,
-					Outcome:   update.OutcomeFailed,
-					Target:    update.Target{SHA: installed},
-				}); err != nil {
-					t.Fatalf("write the failed run's state: %v", err)
-				}
-			}
-			path := filepath.Join(update.Dir(d.config.TownRoot), "images.json")
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				t.Fatalf("create the update state directory: %v", err)
-			}
-			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
-				t.Fatalf("write the damaged image record: %v", err)
-			}
+
+			d, logs, launches, path := newRefusedLedgerDaemon(t, installed)
+			writeImageRecordFile(t, path, tt.content)
 
 			d.triggerUpdate()
 
-			if *launches != tt.wantLaunches {
-				t.Fatalf("launches = %d, want %d (log %q)", *launches, tt.wantLaunches, logs.String())
+			if *launches != 1 {
+				t.Fatalf("launches = %d, want 1: no refusal was ever read, so nothing remembers one (log %q)", *launches, logs.String())
 			}
-			for _, want := range tt.wantLog {
+			for _, want := range []string{
+				"update: due (nightly",
+				"update: the image ledger could not be read",
+			} {
 				if !strings.Contains(logs.String(), want) {
 					t.Errorf("log = %q, want it to contain %q", logs.String(), want)
 				}
 			}
 		})
+	}
+}
+
+// TestPreRollGuardAnotherGuardStillHoldsOnADamagedLedger holds a decision the
+// other rules made with the damaged record: the failed-run hold still holds
+// main's target, so the missing refusal changes nothing.
+func TestPreRollGuardAnotherGuardStillHoldsOnADamagedLedger(t *testing.T) {
+	t.Parallel()
+
+	const installed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	d, logs, launches, path := newRefusedLedgerDaemon(t, installed)
+	// The failed-run hold reads main's tip from origin, which this stub answers
+	// with the installed commit.
+	d.updateRemoteRun = (&updateRemoteFake{output: installed + "\trefs/heads/main\n"}).run
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	ended := updateTriggerTestTime.Add(-24 * time.Hour)
+	if err := store.Write(update.State{
+		RunID:     "run-1",
+		StartedAt: ended.Add(-time.Minute),
+		EndedAt:   ended,
+		Outcome:   update.OutcomeFailed,
+		Target:    update.Target{SHA: installed},
+	}); err != nil {
+		t.Fatalf("write the failed run's state: %v", err)
+	}
+	writeImageRecordFile(t, path, "{")
+
+	d.triggerUpdate()
+
+	if *launches != 0 {
+		t.Fatalf("launches = %d, want 0: the failed-run hold stands (log %q)", *launches, logs.String())
+	}
+	for _, want := range []string{
+		"update: not due — last run failed on this target",
+		"update: the image ledger could not be read",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log = %q, want it to contain %q", logs.String(), want)
+		}
 	}
 }
 
@@ -304,9 +394,16 @@ func writeImageRecordFile(t *testing.T, path, content string) {
 	}
 }
 
+// advanceUpdateTriggerClock moves the trigger's clock by d, so the next
+// heartbeat is past the launch a previous one made.
+func advanceUpdateTriggerClock(d *Daemon, by time.Duration) {
+	d.clock = clockwork.NewFakeClockAt(d.clk().Now().Add(by))
+}
+
 // TestPreRollGuardARepairedLedgerRestoresTheHold holds a record that reads
-// again to the refused-pair hold it names: the damaged record let the update
-// launch, and the repaired one holds the same pair.
+// again to the refused-pair hold it names: a damaged record no readable record
+// preceded remembers no refusal, so the update launches, and the repaired one
+// holds the same pair.
 func TestPreRollGuardARepairedLedgerRestoresTheHold(t *testing.T) {
 	t.Parallel()
 

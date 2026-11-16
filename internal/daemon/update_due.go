@@ -42,7 +42,9 @@ type UpdateFacts struct {
 	MainSHA string
 	// RefusedCommit is the pair commit the image ledger records as refused by
 	// a pre-swap check, with the failure the check named; both empty when the
-	// record names none. A run for that commit meets the same refusal.
+	// record names none. When the record cannot be read, the pair the last
+	// readable record named stands. A run for that commit meets the same
+	// refusal.
 	RefusedCommit string
 	RefusedReason string
 }
