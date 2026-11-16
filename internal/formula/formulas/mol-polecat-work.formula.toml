@@ -75,27 +75,29 @@ Initialize your session and understand your assignment.
 gt prime                    # Load role context
 ```
 
-**2. Preflight check (validate connectivity):**
+**2. Read your assignment:**
 ```bash
-gt hook               # Shows your pinned molecule and hook_bead
-bd show {{issue}}           # Validates Dolt connectivity + reads your assignment
+gt hook               # Shows your hooked work
 ```
-If `bd show` hangs or fails: retry `bd list --limit 1` up to 3 times, about 10 seconds apart.
-Port 3307 from bash, nc or curl is denied by the sandbox policy and is not evidence of an outage; `bd` is the probe.
-If all 3 probes fail: `gt escalate -s HIGH "Dolt: <symptom>"` and say it failed 3 times — do NOT restart Dolt yourself.
+The hook_bead is your assigned issue. Read your assignment carefully.
 
-The hook_bead is your assigned issue. Read the output of `bd show` carefully.
+**Your seat's source.** A seat either holds bead access or it does not. With
+bead access the bead is the source, and `bd show {{issue}}` reads it. Without
+it, a file-mode seat reads TASK.md, which `gt prime` printed at spawn: its
+`Description`, `Acceptance`, `Notes`, `Comments`, `Earlier rejections` and
+`Rejection unchanged` sections carry the same facts as the bead. In file mode
+every `gt bead note`, `gt bead comment` and `gt bead update` this formula names
+appends to the outbox beside TASK.md, and the host applies it to the bead when
+the seat ends. Every later step names one source per fact and points back to
+this paragraph.
 
-**3. Check inbox for additional context:**
-```bash
-gt mail inbox
-# Read any HANDOFF or assignment messages
-```
+**3. Check for prior landing rejection context:**
 
-**4. Check for prior landing rejection context:**
-
-If the bead notes contain "MERGE REJECTION", the landing worker rejected a
-previous polecat's work.
+An `Earlier rejections` section in your seat's source (load-context) means the
+landing worker rejected a previous polecat's work. A `Rejection unchanged`
+section says your branch still sits on the commit that refusal judged, so the
+same content is refused again: change it to answer the findings, or escalate
+if the refusal did not come from this diff.
 Read the failure details carefully:
 - **Failure-Type**: what broke (tests, build, lint, typecheck)
 - **Error**: the actual error output
@@ -110,14 +112,14 @@ git branch -a | grep <branch-from-notes>
 
 This lets you make a targeted fix rather than starting from scratch.
 
-**5. Understand the requirements:**
+**4. Understand the requirements:**
 - What exactly needs to be done?
 - What files are likely involved?
 - Are there dependencies or blockers?
 - What does "done" look like?
 - If this is a rework: what specifically failed and why?
 
-**6. Verify you can proceed:**
+**5. Verify you can proceed:**
 - No unresolved blockers on the issue
 - You understand what to do
 - Required resources are available
@@ -155,11 +157,12 @@ branch in step 3.
 
 **2. Exception — rejected-landing rework for THIS bead only:**
 
-If the bead notes contain "MERGE REJECTION" with a branch name, that branch holds previous work on {{issue}} itself. Reusing it preserves all previous work:
+An `Earlier rejections` section in your seat's source (load-context) means a
+previous attempt may have pushed a branch for {{issue}}. The branch name embeds
+the bead id, so find it:
 ```bash
 git fetch origin
-# Check for prior branch
-git branch -r | grep <prior-branch>
+git branch -r --list '*{{issue}}*'
 # If found, check it out:
 git checkout -b <prior-branch> origin/<prior-branch>
 git rebase origin/{{base_branch}}
@@ -268,8 +271,8 @@ gt bead note {{issue}} "Findings so far: <what you discovered>"
 gt bead note {{issue}} "<structured findings>"
 ```
 `gt bead note` appends and never overwrites: a resumed bead already carries the
-landing worker's MERGE REJECTION block, and the resume path in load-context greps
-notes for it (gt-nxvg).
+landing worker's MERGE REJECTION block, and the resume path in load-context
+reads it from your seat's source (gt-nxvg).
 
 Do this BEFORE closing molecule steps, not after. If your session dies between
 persisting and closing, the findings survive. If you close first, they're lost.
@@ -403,10 +406,8 @@ git status
 Must show "nothing to commit, working tree clean".
 
 **Report-only tasks (audits, reviews, research — no code changes):**
-If your task produced no code changes, verify your findings are persisted to the bead:
-```bash
-bd show {{issue}}    # Check the notes field has your findings
-```
+If your task produced no code changes, verify your findings are persisted:
+read back what `gt bead note` wrote in your seat's source (load-context).
 If the bead is `review_only: true`, also verify a fresh assignee-authored
 `PR-SHERIFF-EVIDENCE` comment exists for the current `HEAD`.
 If findings/evidence are persisted, proceed to review. Report-only tasks with
@@ -625,12 +626,12 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 **Pre-flight: Tick the acceptance criteria your work satisfies.**
 The landing worker rejects a bead with any `- [ ]` acceptance line left, after
 your session has retired. `gt done` refuses first and lists each unchecked
-line. `bd show {{issue}}` prints the current criteria; resend the whole block
-with `- [x]` on each line your work satisfies:
+line. Your acceptance list is in your seat's source (load-context). Resend the
+whole block with `- [x]` on each line your work satisfies:
 ```bash
 gt bead update {{issue}} --acceptance="<the block, those lines ticked>"
 ```
-Exit criterion: `bd show {{issue}}` shows no `- [ ]` line.
+Exit criterion: the acceptance block you send carries no `- [ ]` line.
 
 **Pre-flight: Is your bead's title still true?**
 Every later reader sees a bead's title before the diff, and the title outlives
@@ -641,9 +642,10 @@ redirected — amend the title before submitting:
 gt bead update {{issue}} --title "DISPROVEN: <original claim>; <what actually shipped>"
 ```
 Prefixing `DISPROVEN:` is the cheap default; restating the title to what
-shipped is equivalent. Exit criterion: `bd show {{issue}}` no longer asserts
-anything the work disproved, because the title becomes the merged commit
-subject and the next reader's premise (gt-3t2).
+shipped is equivalent. Exit criterion: the title your submission carries, in
+your seat's source (load-context), no longer asserts anything the work
+disproved, because the title becomes the merged commit subject and the next
+reader's premise (gt-3t2).
 
 **While gt done runs — do not touch it (gt-7dxw):**
 

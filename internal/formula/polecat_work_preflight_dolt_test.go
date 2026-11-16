@@ -6,26 +6,24 @@ import (
 )
 
 // A sandboxed polecat once read a refused shell connection to port 3307 as a
-// Dolt outage, escalated HIGH and parked (gt-0chpv). The preflight step must
-// name bd as the probe, retry it, and say a shell connection to 3307 proves
-// nothing.
-func TestPolecatWorkPreflightDoltUsesBdProbeNotTheNetwork(t *testing.T) {
+// Dolt outage, escalated HIGH and parked (gt-0chpv). F7 (gt-fgnho3) removes the
+// probe rather than fixing its wording: the load-context step reads the
+// assignment with `bd show`, and no step sends a seat to a Dolt health check.
+func TestNoBeadAccessPolecatReadsTheAssignmentWithBdShowOnly(t *testing.T) {
 	t.Parallel()
-	raw, err := GetEmbeddedFormulaContent("mol-polecat-work")
-	if err != nil {
-		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	text := strings.ToLower(embeddedFormulaText(t, "mol-polecat-work"))
+	if !strings.Contains(text, "bd show {{issue}}") {
+		t.Fatal("mol-polecat-work names no `bd show {{issue}}`; a seat with bead access has no way to read its assignment")
 	}
-	text := string(raw)
-	for _, want := range []string{
+	for _, banned := range []string{
+		"gt dolt status",
 		"bd list --limit 1",
-		"up to 3 times",
-		"denied by the sandbox policy and is not evidence of an outage",
+		"port 3307",
+		"restart dolt",
+		"dolt health",
 	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("mol-polecat-work preflight lacks %q", want)
+		if i := strings.Index(text, banned); i >= 0 {
+			t.Errorf("mol-polecat-work names %q at byte %d; the Dolt probe is gone and no step should name a Dolt health check", banned, i)
 		}
-	}
-	if strings.Contains(text, "run `gt dolt status` to check Dolt health") {
-		t.Error("preflight still sends the polecat to gt dolt status as its Dolt check")
 	}
 }
