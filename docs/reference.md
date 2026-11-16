@@ -2523,14 +2523,15 @@ nothing.
 
 ### Progress battery (`jev_progress`)
 
-When the overrun guard nudges a polecat at its nudge threshold, the nudge is
-queued. The progress pass runs on the next heartbeat that finds a nudge queued,
-so the answer lands while the seat is still inside its clock. The pass reads the
-seat's transcript for the window before the nudge and asks five questions in one
-call: `making_progress`, `looping`, `blocked_on_environment` and
-`drifted_from_bead`, each a `noul` probability, and `remaining`, a `score` whose
-levels run from `barely started` up to `done`, so a finished bead scores at the
-top. It appends one line to
+When the overrun guard marks a polecat at its nudge threshold, it queues the
+progress pass: the mark records the run as nudged and calls the battery's hook,
+and the seat is sent no message to read. The pass runs on the next heartbeat
+that finds an entry queued, so the answer lands while the seat is still inside
+its clock. The pass reads the seat's transcript for the window before the nudge
+and asks five questions in one call: `making_progress`, `looping`,
+`blocked_on_environment` and `drifted_from_bead`, each a `noul` probability, and
+`remaining`, a `score` whose levels run from `barely started` up to `done`, so a
+finished bead scores at the top. It appends one line to
 `.runtime/jev/progress.jsonl`: `{ts, rig, polecat, bead, session, nudge_at,
 model, answers, question_version}`. A level's position is its score, so the
 scorecard reads one question set only: a line logged under another one is
