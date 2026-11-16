@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/ci/preflight"
+	"github.com/steveyegge/gastown/internal/pincheck"
+	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -42,6 +46,53 @@ func jobArgs(envPath string) []string {
 // greenVersion answers the version read with the base image's jq.
 func greenVersion() (string, error) { return preflight.JQVersion, nil }
 
+// The blobs every fake manifest names, so a dead one is a digest a test chose
+// rather than a real layer.
+var (
+	liveConfig = digestFor(0x01)
+	liveLayer  = digestFor(0x02)
+	deadLayer  = digestFor(0x03)
+)
+
+// digestFor is a digest of the byte k repeated, so each fake blob has its own.
+func digestFor(k byte) string {
+	return "sha256:" + strings.Repeat(fmt.Sprintf("%02x", k), 32)
+}
+
+// fakeRegistry answers every reference with one image manifest and serves every
+// blob but Dead, which it reports unserved for the repositories naming In.
+// Checking a layer's durability needs no socket: pincheck reads the Registry
+// interface, and this is one.
+type fakeRegistry struct {
+	Dead string
+	In   string
+}
+
+func (f fakeRegistry) Manifest(_ context.Context, repo, _ string) ([]byte, string, error) {
+	layers := []string{liveLayer}
+	if f.Dead != "" && strings.Contains(repo, f.In) {
+		layers = append(layers, f.Dead)
+	}
+	return imageManifest(liveConfig, layers...), ociManifestType, nil
+}
+
+func (f fakeRegistry) BlobExists(_ context.Context, _ string, digest string) (bool, error) {
+	return digest != f.Dead, nil
+}
+
+// ociManifestType is the media type of the body fakeRegistry answers.
+const ociManifestType = "application/vnd.oci.image.manifest.v1+json"
+
+// imageManifest is the body a registry answers for an image manifest.
+func imageManifest(config string, layers ...string) []byte {
+	entries := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		entries = append(entries, fmt.Sprintf(`{"digest":%q,"size":1}`, layer))
+	}
+	return []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"config":{"digest":%q,"size":1},"layers":[%s]}`,
+		ociManifestType, config, strings.Join(entries, ",")))
+}
+
 // TestRunAcceptsTheGreenCommit holds the passing branch: the command exits
 // zero and hands the later steps the commit and its tag.
 func TestRunAcceptsTheGreenCommit(t *testing.T) {
@@ -49,7 +100,7 @@ func TestRunAcceptsTheGreenCommit(t *testing.T) {
 	envPath := filepath.Join(t.TempDir(), envFile)
 	var stdout, stderr strings.Builder
 
-	if code := run(jobArgs(envPath), &stdout, &stderr, installed, greenVersion); code != 0 {
+	if code := run(jobArgs(envPath), &stdout, &stderr, installed, greenVersion, fakeRegistry{}); code != 0 {
 		t.Fatalf("run exited %d, stderr %q", code, stderr.String())
 	}
 	got, err := os.ReadFile(envPath)
@@ -73,7 +124,7 @@ func TestRunRefusesWhatThePreflightRefuses(t *testing.T) {
 
 	code := run(jobArgs(envPath), &stdout, &stderr, installed, func() (string, error) {
 		return "jq-1.6", nil
-	})
+	}, fakeRegistry{})
 	if code == 0 {
 		t.Fatalf("run passed with another jq, stdout %q", stdout.String())
 	}
@@ -93,7 +144,7 @@ func TestRunRefusesACommandLineWithoutTheEnvFile(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
 
-	code := run([]string{"-sha", green}, &stdout, &stderr, installed, greenVersion)
+	code := run([]string{"-sha", green}, &stdout, &stderr, installed, greenVersion, fakeRegistry{})
 	if code == 0 {
 		t.Fatalf("run passed without -env-out, stdout %q", stdout.String())
 	}
@@ -110,7 +161,7 @@ func TestRunRefusesAnEnvFileItCannotOpen(t *testing.T) {
 	var stdout, stderr strings.Builder
 	envPath := filepath.Join(t.TempDir(), "absent", envFile)
 
-	if code := run(jobArgs(envPath), &stdout, &stderr, installed, greenVersion); code == 0 {
+	if code := run(jobArgs(envPath), &stdout, &stderr, installed, greenVersion, fakeRegistry{}); code == 0 {
 		t.Fatalf("run passed with an environment file it could not open, stdout %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), envPath) {
@@ -125,4 +176,161 @@ func TestJQVersionRefusesAProgramThatIsNotThere(t *testing.T) {
 	if got, err := jqVersion(filepath.Join(t.TempDir(), noSuchJQ)); err == nil {
 		t.Fatalf("jqVersion answered %q for a program that is not there", got)
 	}
+}
+
+// TestImagePinDurabilityRefusesADeadLayer is the command's pin rule: a pinned
+// image whose layer the registry no longer serves exits non-zero naming the
+// image and the digest, with no commit left for the later steps, and every
+// layer served exits zero.
+func TestImagePinDurabilityRefusesADeadLayer(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		reg  pincheck.Registry
+		want []string
+		// refuse rows exit non-zero; the last row is the job that may build.
+		refuse bool
+	}{
+		{
+			name:   "a layer of the Dolt server pin",
+			reg:    fakeRegistry{Dead: deadLayer, In: "dolt-sql-server"},
+			want:   []string{templates.DoltServerImage, deadLayer + " (linux/arm64 layer 2)"},
+			refuse: true,
+		},
+		{
+			name:   "no registry",
+			reg:    nil,
+			want:   []string{templates.DindImage, "no registry to ask"},
+			refuse: true,
+		},
+		{"every layer served", fakeRegistry{}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			envPath := filepath.Join(t.TempDir(), envFile)
+			var stdout, stderr strings.Builder
+
+			code := run(jobArgs(envPath), &stdout, &stderr, installed, greenVersion, tc.reg)
+			got, err := os.ReadFile(envPath)
+			if err != nil {
+				t.Fatalf("reading the environment file: %v", err)
+			}
+			if !tc.refuse {
+				if code != 0 {
+					t.Fatalf("run exited %d with every layer served, stderr %q", code, stderr.String())
+				}
+				if string(got) != envOutput {
+					t.Errorf("the environment file holds %q, want %q", got, envOutput)
+				}
+				return
+			}
+			if code == 0 {
+				t.Fatalf("run exited 0 with a dead layer, stdout %q", stdout.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to name %q", stderr.String(), want)
+				}
+			}
+			if len(got) != 0 {
+				t.Errorf("the environment file holds %q for a refused job", got)
+			}
+		})
+	}
+}
+
+// TestImagePinDurabilityRegistryRef holds the reference the registry is asked
+// about: the tag a pin keeps for its readers is dropped, and a pin that names
+// no registry host is qualified with Docker Hub's, the registry docker
+// resolves it at.
+func TestImagePinDurabilityRegistryRef(t *testing.T) {
+	t.Parallel()
+	dindDigest := pinnedDigest(templates.DindImage)
+	hubDigest := digestFor(0x55)
+	cases := []struct {
+		name    string
+		pinned  string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "a Forgejo pin",
+			pinned: templates.DindImage,
+			want:   templates.DindImage,
+		},
+		{
+			name:   "a tag the pin keeps for its readers",
+			pinned: "data.forgejo.org/oci/docker:v1@" + dindDigest,
+			want:   "data.forgejo.org/oci/docker@" + dindDigest,
+		},
+		{
+			name:   "an unqualified Docker Hub pin",
+			pinned: templates.DoltServerImage,
+			want:   "registry-1.docker.io/dolthub/dolt-sql-server@" + pinnedDigest(templates.DoltServerImage),
+		},
+		{
+			name:   "a Docker Hub library pin",
+			pinned: "postgres:17.11@" + hubDigest,
+			want:   "registry-1.docker.io/library/postgres@" + hubDigest,
+		},
+		{"a pin without a digest", "data.forgejo.org/oci/docker", "", true},
+		{"a pin without a repository", "data.forgejo.org/@" + hubDigest, "", true},
+		{"an empty pin", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := registryRef(tc.pinned)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("registryRef(%q) = %q, want a refusal", tc.pinned, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("registryRef(%q) = error %v", tc.pinned, err)
+			}
+			if got != tc.want {
+				t.Errorf("registryRef(%q) = %q, want %q", tc.pinned, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestImagePinDurabilityCheckRefusesAListOfNothing drives the check's own
+// refusals: a pin the registry cannot be asked about, and a list holding no
+// pin, are refusals rather than a build that started unverified.
+func TestImagePinDurabilityCheckRefusesAListOfNothing(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		refs []string
+		want string
+	}{
+		{"a pin without a digest", []string{"data.forgejo.org/oci/docker"}, "is not repo@digest"},
+		{"a pin without a repository", []string{"data.forgejo.org/@" + deadLayer}, "names no repository"},
+		{"no pins", nil, "no digest-pinned image was named to check"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkPinnedImages(context.Background(), fakeRegistry{}, tc.refs)
+			if err == nil {
+				t.Fatalf("checkPinnedImages(%q) passed", tc.refs)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("checkPinnedImages(%q) = %q, want it to contain %q", tc.refs, err, tc.want)
+			}
+		})
+	}
+}
+
+// pinnedDigest is the digest part of a pinned reference, after its '@'.
+func pinnedDigest(pinned string) string {
+	i := strings.LastIndexByte(pinned, '@')
+	if i < 0 {
+		return ""
+	}
+	return pinned[i+1:]
 }
