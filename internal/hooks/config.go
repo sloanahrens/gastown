@@ -1102,6 +1102,33 @@ func runsRetiredGTSubcommand(command string) bool {
 	return len(fields) >= 4 && fields[1] == "tap" && fields[2] == "guard" && retiredTapGuards[fields[3]]
 }
 
+// FileModeDropsCommand reports whether a no-bead-access seat must not run a
+// hook command, because it reads bead state a file-mode seat does not have
+// (gt-1m0kb, F6). Two hooks are dropped:
+//
+//   - `gt mail check` and `gt mail inbox` list the seat's mail, which comes
+//     from the bead store; the design drops inbound mail for a file-mode seat.
+//   - `gt tap polecat-stop-check` reads the seat's agent bead in a sandbox to
+//     decide the session is finished; in file mode the host reads its own
+//     agent bead at seat end instead.
+//
+// Guards stay: `gt tap guard` makes no bead call, so every guard still runs.
+// The program word is matched by base name, as runsRetiredGTSubcommand matches
+// it, so the host's absolute path to gt and a bare `gt` both match.
+func FileModeDropsCommand(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) < 3 || filepath.Base(fields[0]) != "gt" {
+		return false
+	}
+	switch fields[1] {
+	case "mail":
+		return fields[2] == "check" || fields[2] == "inbox"
+	case "tap":
+		return fields[2] == "polecat-stop-check"
+	}
+	return false
+}
+
 // dropRetiredCommandHooks removes hooks that run a retired gt subcommand from
 // a loaded config, and entries left with no hooks, so sync stops writing them
 // into managed settings files.

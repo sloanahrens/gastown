@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/hooks"
 )
 
 // sandboxGT is where the image keeps gt. The host's settings name the host's
@@ -33,6 +36,25 @@ var pythonInterpreterRE = regexp.MustCompile(`^python(3(\.\d+)*)?$`)
 // malformed file must not pass host paths into the sandbox or lose hooks
 // without saying so.
 func renderSandboxSettings(raw []byte) ([]byte, error) {
+	return renderSandboxSettingsWith(raw, nil)
+}
+
+// renderSandboxSettingsForSeat is renderSandboxSettings for a seat whose
+// sandbox profile names beadAccess: a file-mode seat (bead_access files) also
+// drops every hook command hooks.FileModeDropsCommand names, because such a
+// seat reads no bead and the mail and stop hooks do (gt-1m0kb, F6). Any other
+// value, including the empty string config fills with the dolt default,
+// renders exactly as renderSandboxSettings.
+func renderSandboxSettingsForSeat(raw []byte, beadAccess string) ([]byte, error) {
+	if beadAccess != config.SandboxBeadAccessFiles {
+		return renderSandboxSettings(raw)
+	}
+	return renderSandboxSettingsWith(raw, hooks.FileModeDropsCommand)
+}
+
+// renderSandboxSettingsWith is renderSandboxSettings with one more drop rule:
+// a hook command dropCommand names is removed after it renders.
+func renderSandboxSettingsWith(raw []byte, dropCommand func(command string) bool) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var doc map[string]any
@@ -76,7 +98,7 @@ func renderSandboxSettings(raw []byte) ([]byte, error) {
 				if err != nil {
 					return nil, fmt.Errorf("polecat settings: hook %s: %w", event, err)
 				}
-				if drop {
+				if drop || (dropCommand != nil && dropCommand(cmd)) {
 					continue
 				}
 				hook["command"] = rendered
