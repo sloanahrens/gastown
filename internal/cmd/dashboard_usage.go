@@ -189,11 +189,12 @@ type usageKeptRow struct {
 
 // dedupeUsageRows is the records of rows, newest built first, each session
 // counted once. A row that shares a session with an earlier (newer) kept row of
-// its bead and kind is dropped: the writer rewrites a run's row as the run gains
-// sessions, so the newer row is the whole run and the older one is superseded,
-// and a session is never two runs. A row with no sessions claims no session that
-// could overlap, so it is dropped only when an earlier sessionless row of its
-// bead and kind is the same record; otherwise it is kept.
+// its bead and kind is dropped: each write files the bead's whole record as of
+// that run (gt-27kuyd), so the newer row holds every session the older one does
+// and the older is superseded, and a session is never two runs. A row with no
+// sessions claims no session that could overlap, so it is dropped only when an
+// earlier sessionless row of its bead and kind is the same record; otherwise it
+// is kept.
 func dedupeUsageRows(rows []beads.UsageRecordRow) []dashboard.UsageRecord {
 	kept := make(map[usageKey][]usageKeptRow, len(rows))
 	recs := make([]dashboard.UsageRecord, 0, len(rows))

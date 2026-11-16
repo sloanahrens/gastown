@@ -268,8 +268,10 @@ type Daemon struct {
 	openRecoveryBeads func(env []string) beads.Client
 
 	// openUsageRecords opens the town's usage_records store the seat-end and
-	// om-review writers file each record's row in (see usageRecords); nil is
-	// bd against the town database. Tests answer from a beadsfake.
+	// om-review writers file each record's row in (see usageRecords). It has no
+	// default: nil opens nothing, so a daemon a test builds reaches no database
+	// and its writers report the row not written. New wires bd against the town
+	// database; tests answer from a beadsfake.
 	openUsageRecords func() usageRecordStore
 
 	// openOverrunBeads opens the store the overrun stop's ownership re-check
@@ -1845,6 +1847,13 @@ func New(config *Config) (*Daemon, error) {
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {
 		doltServer.SetRestartSuppressor(d.doltRestartHeldForGC)
+	}
+
+	// The town's usage_records rows: the seat-end and om-review writers file
+	// their rows here, and this is the one place the production store is wired
+	// (see usageRecords).
+	d.openUsageRecords = func() usageRecordStore {
+		return beads.New(d.config.TownRoot, beads.WithBin(d.bdPathOrDefault()))
 	}
 
 	return d, nil
