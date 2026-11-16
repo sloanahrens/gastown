@@ -628,7 +628,7 @@ func TestTierSweepImagesRetryRecorded(t *testing.T) {
 			name: "an images answer the check does not hold keeps the pair", lastSHA: imagesRetryGreen,
 			lastGreenSHA: imagesRetryGreen, sinceLastRun: tierSweepImagesRetryGap,
 			retries: 2, retrySHA: imagesRetryGreen,
-			greenSHA: imagesRetryGreen,
+			greenSHA:    imagesRetryGreen,
 			wantRetries: 2, wantSHA: imagesRetryGreen,
 		},
 		{
