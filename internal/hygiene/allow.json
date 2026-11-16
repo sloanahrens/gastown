@@ -667,5 +667,41 @@
     "rule": "blocked word",
     "line": "27df8d1c5536152b",
     "reason": "public repository path: the upstream repository the refresh script reads the command tree from by default"
+  },
+  {
+    "path": "internal/manifestdata/podpaths.go",
+    "rule": "blocked word",
+    "line": "e717f121950c22f8",
+    "reason": "the production pod path the Deployment mounts as the landing work claim, which carries the host account's name; kept by the operator's 2026-11-14 decision until the rename (gt-ipp4uy) retires it"
+  },
+  {
+    "path": "internal/manifestdata/podpaths.go",
+    "rule": "home directory path",
+    "line": "e717f121950c22f8",
+    "reason": "the production pod path the Deployment mounts as the landing work claim, which names the host account's directory; kept by the operator's 2026-11-14 decision until the rename (gt-ipp4uy) retires it"
+  },
+  {
+    "path": "internal/manifestdata/podpaths.go",
+    "rule": "blocked word",
+    "line": "2ef72e03c05c0ccc",
+    "reason": "the production pod path the compose file and the pod mount as the host's Dolt backup root, carrying the host account's name; kept by the operator's 2026-11-14 decision until the rename (gt-ipp4uy) retires it"
+  },
+  {
+    "path": "internal/manifestdata/podpaths.go",
+    "rule": "home directory path",
+    "line": "2ef72e03c05c0ccc",
+    "reason": "the production pod path the compose file and the pod mount as the host's Dolt backup root, which names the host account's directory; kept by the operator's 2026-11-14 decision until the rename (gt-ipp4uy) retires it"
+  },
+  {
+    "path": "internal/manifestdata/podpaths.go",
+    "rule": "blocked word",
+    "line": "a93051e0c1fa8fc7",
+    "reason": "the production pod path the compose daemon binds the host's Claude state directory at, carrying the host account's name; kept by the operator's 2026-11-14 decision until the rename (gt-ipp4uy) retires it"
+  },
+  {
+    "path": "internal/manifestdata/podpaths.go",
+    "rule": "home directory path",
+    "line": "a93051e0c1fa8fc7",
+    "reason": "the production pod path the compose daemon binds the host's Claude state directory at, which names the host account's directory; kept by the operator's 2026-11-14 decision until the rename (gt-ipp4uy) retires it"
   }
 ]
