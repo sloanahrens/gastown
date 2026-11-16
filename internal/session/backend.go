@@ -34,7 +34,8 @@ type Profile struct {
 	KubernetesCacheClaim string
 	// BeadAccess is where the seat's task lives: config.SandboxBeadAccessDolt
 	// (the default) or config.SandboxBeadAccessFiles. The config conversion
-	// fills the default; nothing reads it yet (gt-1m0kb).
+	// fills the default; the runtime archive reads it to stage the files-mode
+	// marker (gt-3qkaws).
 	BeadAccess string
 	// EndedHoldSeconds is how long the sandbox stays up after the agent's session
 	// ends, so the daemon can copy the seat's transcripts out (gt-yck7hz). 0 is

@@ -19,6 +19,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/promptstamp"
+	"github.com/steveyegge/gastown/internal/taskfile"
 )
 
 // runtimeArchiveName is the staged archive holding the polecat's Claude
@@ -53,10 +54,18 @@ type runtimeFile struct {
 // extracts under /sandbox: the path TRACKER_TOKEN_FILE names.
 const runtimeTrackerToken = ".tracker/token"
 
-// runtimeTaskFile is the task file's name in the runtime archive, which
-// extracts under /sandbox: the task a no-bead-access seat reads at spawn. It
-// is outside the seat's worktree, so the seat's `git add -A` never sees it.
-const runtimeTaskFile = ".gt/task/TASK.md"
+// runtimeTaskDir is the task directory's name in the runtime archive, which
+// extracts under /sandbox. It is outside the seat's worktree, so the seat's
+// `git add -A` never sees what the archive stages there.
+const runtimeTaskDir = ".gt/task"
+
+// runtimeTaskFile is the task's name in runtimeTaskDir: the task a
+// no-bead-access seat reads at spawn (gt-0ne2hw).
+const runtimeTaskFile = runtimeTaskDir + "/TASK.md"
+
+// runtimeModeFile is the file-mode marker's name in runtimeTaskDir: the file
+// taskfile.FileMode reads to learn where the seat's task lives (gt-3qkaws).
+const runtimeModeFile = runtimeTaskDir + "/" + taskfile.ModeFile
 
 // SandboxTrackerPlaceholder is the value a tracker-routed sandbox's token file
 // holds when the spawn asks for a placeholder instead of the seat's real token;
@@ -79,8 +88,9 @@ type promptCommentStore interface {
 // town root rewritten. The agent command names settings.json and the system
 // prompt, so a missing one is an error. A rig or polecat name that is not one
 // path segment is an error too. A tracker-routed seat's archive also carries
-// its token file at .tracker/token (gt-p85pw.84), and a spec with task text
-// carries it at .gt/task/TASK.md (gt-0ne2hw).
+// its token file at .tracker/token (gt-p85pw.84), a spec with task text carries
+// it at .gt/task/TASK.md (gt-0ne2hw), and a files-mode spec carries the
+// file-mode marker beside it (gt-3qkaws).
 //
 // The spawn log, the renderer and the comment store are seams: the production
 // caller passes its own, and a test captures the uploaded prompt's hash line
@@ -168,12 +178,22 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	// (gt-1m0kb). The archive stages it at 0444 in a 0755 directory: the mode
 	// stops an accidental edit, not a deliberate one, since the seat owns both
 	// and can chmod the file or replace it (gt-0ne2hw). A spawn with no task
-	// text stages nothing.
+	// text stages no task file.
+	//
+	// A files-mode profile also gets the marker taskfile.FileMode reads, so the
+	// seat learns its bead access from the archive alone (gt-3qkaws). Only
+	// files mode stages it: a dolt-mode or unset profile stages none, and the
+	// seat then reads dolt mode. The directory entry is staged once, for
+	// whichever of the two the spawn carries.
+	filesMode := spec.Profile.BeadAccess == config.SandboxBeadAccessFiles
+	if len(spec.TaskFile) > 0 || filesMode {
+		files = append(files, runtimeFile{runtimeTaskDir, nil, 0o755, true})
+	}
 	if len(spec.TaskFile) > 0 {
-		files = append(files,
-			runtimeFile{path.Dir(runtimeTaskFile), nil, 0o755, true},
-			runtimeFile{runtimeTaskFile, spec.TaskFile, 0o444, false},
-		)
+		files = append(files, runtimeFile{runtimeTaskFile, spec.TaskFile, 0o444, false})
+	}
+	if filesMode {
+		files = append(files, runtimeFile{runtimeModeFile, []byte(taskfile.ModeFiles), 0o444, false})
 	}
 	// The bytes are kept by hash so a rejection can be joined to the prompt its
 	// author had (gt-js6di). A store failure is logged and never fails the spawn.

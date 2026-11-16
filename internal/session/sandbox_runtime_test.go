@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -20,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/promptstamp"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/taskfile"
 )
 
 // runtimeEntry is one extracted archive member: its body and tar mode.
@@ -704,6 +706,123 @@ func TestRuntimeArchiveStagesTheTaskFile(t *testing.T) {
 			}
 			if entry.body != taskText {
 				t.Errorf("%s = %q, want exactly the spec's task text", runtimeTaskFile, entry.body)
+			}
+		})
+	}
+}
+
+// A files-mode profile's archive carries .gt/task/MODE with ModeFiles, and a
+// dolt-mode or unset one carries no marker: the seat learns its bead access
+// from the archive alone and asks no bead (gt-3qkaws). The marker's body is the
+// one taskfile.FileMode reads as true, and the task directory is staged once,
+// whether the spawn carries the marker, the task text or both.
+func TestNoBeadAccessRuntimeArchiveStagesTheFileModeMarker(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	const taskText = "## Goal\n\nFinish the hooked bead (gt-3qkaws).\n"
+	cases := []struct {
+		name       string
+		beadAccess string
+		task       []byte
+		want       bool
+	}{
+		{name: "files mode", beadAccess: config.SandboxBeadAccessFiles, want: true},
+		{name: "files mode with task text", beadAccess: config.SandboxBeadAccessFiles, task: []byte(taskText), want: true},
+		{name: "dolt mode", beadAccess: config.SandboxBeadAccessDolt},
+		{name: "dolt mode with task text", beadAccess: config.SandboxBeadAccessDolt, task: []byte(taskText)},
+		{name: "unset bead access"},
+	}
+	for _, tc := range cases {
+		// Not parallel: the subtests share one town and render the same
+		// system prompt into it.
+		t.Run(tc.name, func(t *testing.T) {
+			spec := openshellSpawn(town, work)
+			spec.Profile = Profile{BeadAccess: tc.beadAccess}
+			spec.TaskFile = tc.task
+			entries := untarRuntime(t, openshellArchiveBytes(t, spec, sandboxTracker{}))
+
+			marker, ok := entries[runtimeModeFile]
+			if ok != tc.want {
+				t.Fatalf("the archive stages %s = %v, want %v", runtimeModeFile, ok, tc.want)
+			}
+			if tc.want {
+				if marker.body != taskfile.ModeFiles {
+					t.Errorf("%s = %q, want %q", runtimeModeFile, marker.body, taskfile.ModeFiles)
+				}
+				if marker.mode != 0o444 {
+					t.Errorf("%s mode = %o, want 444", runtimeModeFile, marker.mode)
+				}
+			}
+			_, dirOK := entries[runtimeTaskDir+"/"]
+			if wantDir := tc.want || len(tc.task) > 0; dirOK != wantDir {
+				t.Errorf("the archive stages %s/ = %v, want %v", runtimeTaskDir, dirOK, wantDir)
+			}
+			// The marker the archive stages is the one the seat's reader takes
+			// as file mode.
+			if tc.want {
+				root := t.TempDir()
+				writeTaskModeMarker(t, root, marker.body)
+				if !taskfile.FileMode(root) {
+					t.Errorf("FileMode = false on the marker the archive stages")
+				}
+			}
+		})
+	}
+}
+
+// writeTaskModeMarker lays the archive's marker into a task directory the way
+// the archive extracts it.
+func writeTaskModeMarker(t *testing.T, root, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, taskfile.ModeFile), []byte(body), 0o444); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Prepare stages the marker from the profile the backend was built with: no
+// production caller fills SpawnSpec.Profile, so a Prepare that read only the
+// spec would stage no marker on any real spawn (gt-3qkaws).
+func TestNoBeadAccessPrepareStagesTheFileModeMarkerFromTheProfile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		beadAccess string
+		want       bool
+	}{
+		{name: "files profile", beadAccess: config.SandboxBeadAccessFiles, want: true},
+		{name: "dolt profile", beadAccess: config.SandboxBeadAccessDolt},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			town, work := openshellTown(t)
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+			profile := openshellTestProfile
+			profile.BeadAccess = tc.beadAccess
+			b, _ := openshellTestBackend(town, profile, fake)
+
+			// The staging directory is removed before Prepare returns, so the
+			// test reads the archive while the upload runs.
+			var uploaded []byte
+			run := b.cli.Run
+			b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
+				if len(argv) > 2 && argv[2] == "upload" && filepath.Base(argv[len(argv)-2]) == runtimeArchiveName {
+					data, err := os.ReadFile(argv[len(argv)-2])
+					if err != nil {
+						return nil, nil, fmt.Errorf("reading the staged runtime archive: %w", err)
+					}
+					uploaded = data
+				}
+				return run(ctx, argv, stdin, env)
+			}
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			if uploaded == nil {
+				t.Fatal("Prepare uploaded no runtime archive")
+			}
+			_, ok := untarRuntime(t, uploaded)[runtimeModeFile]
+			if ok != tc.want {
+				t.Errorf("the archive Prepare uploaded stages %s = %v, want %v", runtimeModeFile, ok, tc.want)
 			}
 		})
 	}
