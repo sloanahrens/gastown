@@ -19,7 +19,10 @@ func recordDoneTestRun(seen *seenDoneEvent) *doneRun {
 		branch:  "polecat/dag/gt-work+abc",
 		sender:  "gastown/polecats/dag",
 		agent:   Agent{Role: role.Crew},
-		env:     func(string) string { return "" },
+		// The status reportDone records. Set, so reportDone never observes a
+		// git repository through the nil seam this run has none of.
+		cleanupStatus: "clean",
+		env:           func(string) string { return "" },
 		logEvent: func(eventType, actor string, payload map[string]interface{}) error {
 			seen.eventType, seen.actor, seen.payload = eventType, actor, payload
 			return nil

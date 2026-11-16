@@ -1147,7 +1147,7 @@ func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			updater := &doneFakeCleanupUpdater{}
-			selfReportCleanupStatus(notARepo, "polecat/jasper/gt-624w+xyz", updater, "gt-gastown-polecat-jasper", tt.computed)
+			cleanupStatusRun(t).selfReportCleanupStatus(notARepo, updater, "gt-gastown-polecat-jasper", tt.computed)
 
 			if updater.calls != 1 {
 				t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1 (the write must never be skipped)", updater.calls)
@@ -1163,7 +1163,7 @@ func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 
 	t.Run("missing agent bead id is loud, not silent", func(t *testing.T) {
 		updater := &doneFakeCleanupUpdater{}
-		selfReportCleanupStatus(notARepo, "polecat/jasper/gt-624w+xyz", updater, "", "clean")
+		cleanupStatusRun(t).selfReportCleanupStatus(notARepo, updater, "", "clean")
 		if updater.calls != 0 {
 			t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 0 with no agent bead ID", updater.calls)
 		}
@@ -1171,7 +1171,7 @@ func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 
 	t.Run("write failure is non-fatal", func(t *testing.T) {
 		updater := &doneFakeCleanupUpdater{err: errors.New("dolt is sad")}
-		selfReportCleanupStatus(notARepo, "polecat/jasper/gt-624w+xyz", updater, "gt-gastown-polecat-jasper", "clean")
+		cleanupStatusRun(t).selfReportCleanupStatus(notARepo, updater, "gt-gastown-polecat-jasper", "clean")
 		if updater.calls != 1 {
 			t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1", updater.calls)
 		}
@@ -1190,7 +1190,7 @@ func TestRunAmbiguityErrorWritesCleanupStatus(t *testing.T) {
 		errors.New("cannot auto-save unmerged conflicts: a.go"),
 	} {
 		updater := &doneFakeCleanupUpdater{}
-		got := failWithCleanupStatus(stop, unobservableGit{}, "fix/add-retry", updater, "gt-gastown-polecat-jasper", "")
+		got := cleanupStatusRun(t).failWithCleanupStatus(stop, unobservableGit{}, updater, "gt-gastown-polecat-jasper", "")
 		if got != stop {
 			t.Errorf("failWithCleanupStatus returned %v, want %v", got, stop)
 		}

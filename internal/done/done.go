@@ -58,6 +58,18 @@ func isFinalDoneExitType(exitType string) bool {
 	}
 }
 
+// DoneTurnState is the agent state an exit ends in: done for a COMPLETED
+// exit, stuck for one that leaves work for a later session (DEFERRED) or the
+// operator (ESCALATED). The CLI layer's final agent_state and the intent
+// record's turn_state are both written from this rule, so a supervisor
+// comparing the record with its bead mirror cannot see them disagree.
+func DoneTurnState(exitType string) string {
+	if exitType == ExitCompleted {
+		return string(beads.AgentStateDone)
+	}
+	return string(beads.AgentStateStuck)
+}
+
 // backendOpenShell is the GT_SESSION_BACKEND value of a session that lives in
 // an OpenShell sandbox.
 const backendOpenShell = "openshell"
@@ -544,8 +556,9 @@ func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string)
 	return polecat.CleanupUnknown
 }
 
-// selfReportCleanupStatus writes the polecat's cleanup_status to its agent bead.
-// The write is TOTAL by construction: every completed gt done leaves a value.
+// selfReportCleanupStatus writes the polecat's cleanup_status to its seat's
+// intent record and to its agent bead. The write is TOTAL by construction:
+// every completed gt done leaves a value.
 //
 // cleanup_status is the durable evidence that decides whether a slot may be
 // reclaimed (nuke, check-recovery, broken-idle reclaim), and nothing else ever
@@ -567,15 +580,20 @@ func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string)
 //     value, so recording it is fail-closed. It only makes "gt done ran and
 //     could not prove the tree was safe" distinguishable from "gt done never
 //     ran", which is what the blocked slots were indistinguishable from.
-func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater beads.Client, agentBeadID, doneCleanupStatus string) {
+func (r *doneRun) selfReportCleanupStatus(g cleanupStatusGit, updater beads.Client, agentBeadID, doneCleanupStatus string) {
+	status := cleanupStatusToReport(g, r.branch, doneCleanupStatus)
+	// The intent record is written first, and whether or not an agent bead
+	// exists to mirror it: the record is the seat's own statement of its
+	// session and needs no Dolt row to be written. Doing it after the ID check
+	// would leave a run with no resolvable agent bead with no record at all.
+	r.recordCleanupStatusInIntent(status)
 	if agentBeadID == "" {
-		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
+		r.warnf("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
 		return
 	}
-	status := cleanupStatusToReport(g, branch, doneCleanupStatus)
 	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, status); err != nil {
 		// Non-fatal: the rest of gt done still runs (za-o9e)
-		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
+		r.warnf("couldn't update agent %s cleanup status: %v", agentBeadID, err)
 	}
 }
 
@@ -583,9 +601,68 @@ func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater beads.Cl
 // returns err. Run stops through it on the errors that leave nothing reported
 // done (an ambiguous hook, a failed auto-save): the slot's reclaim reads
 // cleanup_status and cannot repair a missing one (hq-vx224).
-func failWithCleanupStatus(err error, g cleanupStatusGit, branch string, updater beads.Client, agentBeadID, doneCleanupStatus string) error {
-	selfReportCleanupStatus(g, branch, updater, agentBeadID, doneCleanupStatus)
+func (r *doneRun) failWithCleanupStatus(err error, g cleanupStatusGit, updater beads.Client, agentBeadID, doneCleanupStatus string) error {
+	r.selfReportCleanupStatus(g, updater, agentBeadID, doneCleanupStatus)
 	return err
+}
+
+// intentSeat names the intent record gt done's turn-end writes address. Only a
+// polecat has one: a crew gt done submits a branch and retires no seat (see
+// IsCrewRun), so no other role is given a seat here — naming a polecat seat
+// for a crew run would write a record under a session that does not exist. A
+// returned seat with no Role means "this role has no seat".
+//
+// A polecat run that cannot name its seat is an error, not a skip: an empty
+// town root would put the record in the process's own directory, where no
+// supervisor reads it.
+func (r *doneRun) intentSeat() (intent.Seat, error) {
+	if r.agent.Role != role.Polecat {
+		return intent.Seat{}, nil
+	}
+	if r.townRoot == "" || r.rigName == "" || r.polecatName == "" {
+		return intent.Seat{}, fmt.Errorf("no seat to name (town %q, rig %q, polecat %q)", r.townRoot, r.rigName, r.polecatName)
+	}
+	return supervisor.IntentSeat(supervisor.SeatFor(r.rigName, string(role.Polecat), r.polecatName)), nil
+}
+
+// recordTurnEndInIntent writes the facts of the turn that has just ended to the
+// seat's intent record: the record the supervisor reads before Dolt, which the
+// agent bead mirrors (ADR 0003). Every caller writes it before the agent-bead
+// write of the same facts, so a reader never sees the mirror ahead of the
+// record.
+//
+// A failed write is reported the way a failed agent-bead write is and never
+// stops the run: the writes after it are still owed.
+func (r *doneRun) recordTurnEndInIntent(e intent.TurnEnd) {
+	seat, err := r.intentSeat()
+	if err != nil {
+		r.warnf("couldn't record the turn's end in the intent record: %v", err)
+		return
+	}
+	if seat.Role == "" {
+		return
+	}
+	if err := intent.MarkTurnEnded(r.townRoot, seat, e, "gt done", time.Now()); err != nil {
+		r.warnf("couldn't record the turn's end in the intent record of %s: %v", seat, err)
+	}
+}
+
+// recordCleanupStatusInIntent writes only the cleanup status to the seat's
+// intent record. It is the write for a run that fails before its turn ends, so
+// the facts MarkTurnEnded records are not known yet: SetCleanupStatus leaves
+// whatever turn facts the record already holds alone.
+func (r *doneRun) recordCleanupStatusInIntent(status string) {
+	seat, err := r.intentSeat()
+	if err != nil {
+		r.warnf("couldn't record cleanup status %q in the intent record: %v", status, err)
+		return
+	}
+	if seat.Role == "" {
+		return
+	}
+	if err := intent.SetCleanupStatus(r.townRoot, seat, status, "gt done", time.Now()); err != nil {
+		r.warnf("couldn't record cleanup status %q in the intent record of %s: %v", status, seat, err)
+	}
 }
 
 // cleanupStatusToReport is the value selfReportCleanupStatus records: the
@@ -940,6 +1017,24 @@ type doneRun struct {
 	// openSource opens the bead store a DEFERRED exit releases its bead in;
 	// nil is OpenSourceStore.
 	openSource SourceStoreOpener
+	// warn reports a write that failed without stopping the run; nil is
+	// style.PrintWarning. It is a seam so a test can read what the operator was
+	// told about an intent-record write it could not make.
+	warn func(format string, args ...any)
+	// agentBD is the store the completion-metadata fallback writes the agent
+	// bead in; nil is beads.ForAgentBead(beads.New(<town>/<rig>)), the rig
+	// directory the write still resolves through when the worktree is gone.
+	agentBD beads.Client
+}
+
+// warnf reports a failed write the way gt done reports every other non-fatal
+// one: a warning, never an error, because the writes after it are still owed.
+func (r *doneRun) warnf(format string, args ...any) {
+	if r.warn != nil {
+		r.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 // stdout is the writer a submission prints its outcome to.
@@ -1042,7 +1137,7 @@ func Run(opts Options) error {
 	// that dies on this error must not strand its slot with cleanup_status
 	// missing (hq-vx224).
 	failRun := func(err error) error {
-		return failWithCleanupStatus(err, r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
+		return r.failWithCleanupStatus(err, r.g, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
 	}
 	if cleanupStatus == "" {
 		cleanupStatus = observeCleanupStatus(r.g, r.branch)
@@ -1822,6 +1917,9 @@ func reportDone(r *doneRun, exitType string) error {
 	// below: each agent-bead write is a Dolt commit, and one gt done used to
 	// make four.
 	fmt.Printf("\nRecording completion...\n")
+	// The cleanup status is resolved before the bead is known to exist: the
+	// intent record carries it whether or not an agent bead mirrors it.
+	cleanup := cleanupStatusToReport(r.g, r.branch, r.cleanupStatus)
 	var pending beads.AgentFieldUpdates
 	if r.agentBeadID != "" {
 		meta := &beads.CompletionMetadata{
@@ -1831,22 +1929,38 @@ func reportDone(r *doneRun, exitType string) error {
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
 		}
 		pending = beads.CompletionUpdates(meta)
-		cleanup := cleanupStatusToReport(r.g, r.branch, r.cleanupStatus)
 		pending.CleanupStatus = &cleanup
 	} else {
-		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
+		r.warnf("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
 	}
 	// flushPending writes pending when the state callback did not. It is
 	// addressed through the rig directory so it still resolves if the worktree
 	// is already gone.
 	consumed := false
 	flushPending := func() {
-		if consumed || r.agentBeadID == "" {
+		if consumed {
 			return
 		}
-		rigBd := beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName)))
+		// The turn's end reaches the seat's intent record before the agent bead
+		// that mirrors it. This runs when the CLI layer's state write did not
+		// take the completion write (no caller for it, it addressed no bead, or
+		// it failed), so the record write that layer would have made is made
+		// here instead.
+		r.recordTurnEndInIntent(intent.TurnEnd{
+			TurnState:     DoneTurnState(exitType),
+			ExitType:      exitType,
+			CleanupStatus: cleanup,
+			WorkBead:      r.issueID,
+		})
+		if r.agentBeadID == "" {
+			return
+		}
+		rigBd := r.agentBD
+		if rigBd == nil {
+			rigBd = beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName)))
+		}
 		if err := beads.UpdateAgentDescriptionFields(rigBd, r.agentBeadID, pending); err != nil {
-			style.PrintWarning("could not write completion metadata to agent bead: %v", err)
+			r.warnf("could not write completion metadata to agent bead: %v", err)
 		}
 		consumed = true
 	}
