@@ -1,13 +1,8 @@
 package daemon
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -22,8 +17,8 @@ import (
 // run folds the town's landing ledgers and review log into the program's two
 // numbers for the last complete week and each lever's before/after deltas, and
 // writes them as one JSON document under .runtime/rework-numbers. The dashboard
-// feed passes the document through verbatim (internal/cmd/dashboard_rework_numbers.go);
-// no panel draws it yet.
+// feed passes the document through verbatim (internal/cmd/dashboard_rework_numbers.go,
+// whose header says what reads it).
 //
 // Nothing schedules this step here: gt-2232t4 adds the patrol, the off-by-default
 // switch and the last-run record.
@@ -82,11 +77,11 @@ func newReworkNumbersStep(town string, now func() time.Time) *reworkNumbersStep 
 		weeks:  reworkNumbersWeeks,
 		weekOf: metrics.WeekOf,
 		read: func() (reworkNumbersRecord, error) {
-			recs, bad, err := readReworkNumbersLandings(landingsDir)
+			recs, bad, err := reworkstats.ReadLandings(landingsDir)
 			if err != nil {
 				return reworkNumbersRecord{}, err
 			}
-			reviews, unreadable, err := readReworkNumbersReviews(land.TownReviewsFile(town).Path)
+			reviews, unreadable, err := reworkstats.ReadReviews(land.TownReviewsFile(town).Path)
 			if err != nil {
 				return reworkNumbersRecord{}, err
 			}
@@ -365,76 +360,4 @@ func reworkNumbersDelta(before, after *float64) *float64 {
 	}
 	d := *after - *before
 	return &d
-}
-
-// readReworkNumbersLandings reads every rig's landing ledger in dir, with the
-// count of lines that are not records. A directory that does not exist is a town
-// that has not landed yet, and no records; a file that will not open or read is
-// an error naming it, so a run never reads a failed read as an empty week.
-//
-// internal/daemon cannot import internal/cmd, so this reader and the review
-// reader below repeat internal/cmd/land_rework_stats.go's. The two must stay in
-// step: the same files, the same skip of the review log, and the same count of
-// lines they cannot use.
-func readReworkNumbersLandings(dir string) ([]landings.Record, int, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
-	}
-	if err != nil {
-		return nil, 0, fmt.Errorf("reading the landings directory %s: %w", dir, err)
-	}
-	var recs []landings.Record
-	bad := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		// The review log is a .jsonl in the same directory and is not a ledger;
-		// the verdict store and the backoff snapshots are directories and other
-		// file kinds.
-		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") || name == land.ReviewsFileName {
-			continue
-		}
-		got, skipped, err := (&landings.Reader{Path: filepath.Join(dir, name)}).ReadNew()
-		if err != nil {
-			return nil, 0, fmt.Errorf("%s: %w", name, err)
-		}
-		recs = append(recs, got...)
-		bad += len(skipped)
-	}
-	return recs, bad, nil
-}
-
-// readReworkNumbersReviews reads the town's om verdicts through the review log's
-// own line scanner, skipping the queue lines and counting the lines it cannot
-// use, because a lost verdict reads as a bead that needed fewer rounds. A log
-// that does not exist is a town whose landings were never reviewed, and no
-// records.
-func readReworkNumbersReviews(path string) ([]land.ReviewRecord, int, error) {
-	fh, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
-	}
-	if err != nil {
-		return nil, 0, fmt.Errorf("opening the review records %s: %w", path, err)
-	}
-	defer func() { _ = fh.Close() }()
-	var recs []land.ReviewRecord
-	unreadable := 0
-	_, err = land.ScanReviewLines(fh, func(raw []byte) {
-		// The scanner hands a blank final line to every reader of a file that
-		// ends in a newline; a blank line is no record, not an unreadable one.
-		if len(raw) == 0 || land.IsQueueLine(raw) {
-			return
-		}
-		var rec land.ReviewRecord
-		if json.Unmarshal(raw, &rec) != nil {
-			unreadable++
-			return
-		}
-		recs = append(recs, rec)
-	})
-	if err != nil {
-		return nil, 0, fmt.Errorf("reading the review records %s: %w", path, err)
-	}
-	return recs, unreadable, nil
 }
