@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/taskfile"
 )
 
@@ -59,7 +61,7 @@ func TestNoBeadAccessPrimeFileModePrintsFromTaskFile(t *testing.T) {
 		writeFile(t, taskPath, task)
 
 		opener := &noBeadAccessOpener{t: t}
-		work, err := primeSeatWork(ctx, taskPath, primeSeatDeps{open: opener.open, clock: fakeSeatClock()})
+		work, err := primeSeatWork(ctx, primeSeatDeps{taskPath: taskPath, open: opener.open, clock: fakeSeatClock()})
 		if err != nil {
 			t.Fatalf("primeSeatWork = %v, want the TASK.md text", err)
 		}
@@ -94,7 +96,7 @@ func TestNoBeadAccessPrimeFileModePrintsFromTaskFile(t *testing.T) {
 		}
 		clock := fakeSeatClock()
 
-		work, err := primeSeatWork(ctx, filepath.Join(taskDir, "TASK.md"), primeSeatDeps{open: open, clock: clock})
+		work, err := primeSeatWork(ctx, primeSeatDeps{taskPath: filepath.Join(taskDir, "TASK.md"), open: open, clock: clock})
 		if err != nil {
 			t.Fatalf("primeSeatWork = %v, want the hooked bead", err)
 		}
@@ -139,7 +141,7 @@ func TestNoBeadAccessPrimeFileModeMissingTaskNamesThePath(t *testing.T) {
 			tc.setup(t, taskPath)
 
 			opener := &noBeadAccessOpener{t: t}
-			work, err := primeSeatWork(ctx, taskPath, primeSeatDeps{open: opener.open, clock: fakeSeatClock()})
+			work, err := primeSeatWork(ctx, primeSeatDeps{taskPath: taskPath, open: opener.open, clock: fakeSeatClock()})
 			if err == nil {
 				t.Fatalf("primeSeatWork = nil, want an error naming %s", taskPath)
 			}
@@ -174,7 +176,7 @@ func TestNoBeadAccessPrimeUnknownModeRefusesTheBeadStore(t *testing.T) {
 	}
 
 	opener := &noBeadAccessOpener{t: t}
-	work, err := primeSeatWork(ctx, filepath.Join(taskDir, "TASK.md"), primeSeatDeps{open: opener.open, clock: fakeSeatClock()})
+	work, err := primeSeatWork(ctx, primeSeatDeps{taskPath: filepath.Join(taskDir, "TASK.md"), open: opener.open, clock: fakeSeatClock()})
 	if err == nil {
 		t.Fatal("primeSeatWork = nil over an unreadable marker; want the mode to be refused")
 	}
@@ -232,3 +234,94 @@ func TestNoBeadAccessPrimeFileModeReturnsTheWriteFailure(t *testing.T) {
 type failingPrimeWriter struct{}
 
 func (failingPrimeWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+// gt prime's whole run path — not only the seat read it delegates to — prints a
+// file-mode seat's task from TASK.md and opens no bead store; a missing TASK.md
+// on that path is an error naming the path. Deleting the file-mode branch in
+// runPrimeWith turns both rows red: the dolt path opens deps.open and prints no
+// task (gt-w1mzol).
+//
+//testpolicy:allow parallel — the test sets GT_CALLER_CWD, GT_ROLE and prime's dry-run and session-ID flag variables, which the whole process shares
+func TestNoBeadAccessPrimeRunPathFileMode(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownRoot(t, townRoot)
+	worktree := filepath.Join(townRoot, "gastown", "polecats", "dag", "gastown")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	writeGitMetadata(t, worktree)
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test: which seat this run answers for
+	t.Setenv(callercwd.EnvCallerCwd, worktree)
+	//testpolicy:allow no-env — GT_ROLE would override the role this run must detect from the worktree
+	t.Setenv("GT_ROLE", "")
+	wasDryRun := primeDryRun
+	//testpolicy:allow no-global-swap — runPrime reads the --dry-run flag variable; it is not an argument
+	primeDryRun = true
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the flag variable swapped above
+		primeDryRun = wasDryRun
+	})
+	wasHookSession := primeHookSessionID
+	//testpolicy:allow no-global-swap — runPrime reads the session ID the hook would set; it is not an argument
+	primeHookSessionID = "w1mzol-run"
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the session ID swapped above
+		primeHookSessionID = wasHookSession
+	})
+
+	const task = "# TASK gt-w1mzol\n\nPrint this from TASK.md.\n"
+	cases := []struct {
+		name      string
+		writeTask bool
+		wantErr   bool
+	}{
+		{name: "prints the task from TASK.md and opens no bead", writeTask: true},
+		{name: "a missing TASK.md is an error naming the path", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			taskDir := filepath.Join(t.TempDir(), "task")
+			if err := os.Mkdir(taskDir, 0o755); err != nil {
+				t.Fatalf("mkdir task directory: %v", err)
+			}
+			writeFile(t, filepath.Join(taskDir, taskfile.ModeFile), taskfile.ModeFiles)
+			taskPath := filepath.Join(taskDir, "TASK.md")
+			if tc.writeTask {
+				writeFile(t, taskPath, task)
+			}
+
+			var out strings.Builder
+			opener := &noBeadAccessOpener{t: t}
+			err := runPrimeWith(&cobra.Command{}, primeSeatDeps{
+				taskPath: taskPath,
+				open:     opener.open,
+				clock:    fakeSeatClock(),
+				out:      &out,
+			})
+			if len(opener.opened) != 0 {
+				t.Errorf("file-mode prime opened the bead store at %q; it must open none", opener.opened)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("runPrime in file mode = nil, want an error naming %s", taskPath)
+				}
+				if !strings.Contains(err.Error(), taskPath) {
+					t.Errorf("runPrime error = %q, want it to name %s", err, taskPath)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runPrime in file mode = %v, want the task printed", err)
+			}
+			if !strings.Contains(out.String(), task) {
+				t.Errorf("prime output does not carry the TASK.md text:\n%s", out.String())
+			}
+			// The hooked-bead framing tells the seat to look its bead up; a
+			// file-mode seat has none to look up. (The role text may name bd
+			// show as a command in general, so match the instruction itself.)
+			if strings.Contains(out.String(), "IMMEDIATELY run: `bd show") {
+				t.Errorf("prime printed the hooked-bead instruction, which file mode cannot follow:\n%s", out.String())
+			}
+		})
+	}
+}

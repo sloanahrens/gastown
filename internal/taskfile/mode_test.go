@@ -89,14 +89,17 @@ func TestNoBeadAccessFileModeWithoutATaskDirectory(t *testing.T) {
 func TestNoBeadAccessReadFileModeRefusesAnUnreadableMarker(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
+		name string
+		// root derives the task directory from a temporary one; nil uses it as
+		// it is.
+		root  func(tmp string) string
 		setup func(t *testing.T, root string)
 		want  bool
 		// wantErr is whether the answer must be an error, not a mode.
 		wantErr bool
 	}{
 		{name: "no marker", want: false},
-		{name: "absent task directory", want: false},
+		{name: "absent task directory", root: func(tmp string) string { return filepath.Join(tmp, "absent") }, want: false},
 		{name: "a files marker", setup: writeMode(ModeFiles), want: true},
 		{name: "a dolt marker", setup: writeMode("dolt"), want: false},
 		{name: "an unreadable marker", setup: mkdirMode, wantErr: true},
@@ -105,8 +108,8 @@ func TestNoBeadAccessReadFileModeRefusesAnUnreadableMarker(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
-			if tc.name == "absent task directory" {
-				root = filepath.Join(root, "absent")
+			if tc.root != nil {
+				root = tc.root(root)
 			}
 			if tc.setup != nil {
 				tc.setup(t, root)
