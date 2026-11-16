@@ -3211,6 +3211,40 @@ type StoryPointsConfig struct {
 	// filed, not found out at the overrun stop (gt-mtzx6s). Zero or negative,
 	// the default, leaves the gate off (gt-ljb57x).
 	LintOverMinutes float64 `json:"lint_over_minutes,omitempty"`
+
+	// LintBudgetMaxLines is the change budget's ceiling in added lines: gt spec
+	// lint refuses a bead whose Size section declares a Change line over it and
+	// says how to split the bead (gt-j0xfx5). Zero or absent, the default,
+	// leaves the ceiling off; a negative value is refused at decode, since a
+	// budget below zero is a typo that would refuse every bead. Read it through
+	// StoryPointsLintBudgetMaxLines.
+	LintBudgetMaxLines int `json:"lint_budget_max_lines,omitempty"`
+
+	// LintBudgetRequired requires a bead to declare its Change line in the Size
+	// section, so the ceiling above has a number to judge (gt-j0xfx5). Absent
+	// is off. Read it through StoryPointsLintBudgetRequired.
+	LintBudgetRequired bool `json:"lint_budget_required,omitempty"`
+}
+
+// UnmarshalJSON decodes the story_points block strictly, refusing a negative
+// lint_budget_max_lines: the ceiling counts lines a bead may add, so a negative
+// value has no reading, and read as written it would refuse every bead the lint
+// sees (gt-svfrrr). The unknown-field check is repeated here because a type
+// that decodes itself is decoded by the config kernel's strict decoder
+// opaquely.
+func (c *StoryPointsConfig) UnmarshalJSON(data []byte) error {
+	type plain StoryPointsConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.spec_dispatch.story_points: %w", err)
+	}
+	if p.LintBudgetMaxLines < 0 {
+		return fmt.Errorf("daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines %d: want zero or more added lines, or absent for off", p.LintBudgetMaxLines)
+	}
+	*c = StoryPointsConfig(p)
+	return nil
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
@@ -3251,6 +3285,23 @@ func (c *SpecDispatchConfig) StoryPointsLintOver() float64 {
 		return 0
 	}
 	return c.StoryPoints.LintOverMinutes
+}
+
+// StoryPointsLintBudgetMaxLines is the change budget's ceiling in added lines
+// (story_points.lint_budget_max_lines). A nil block, or a zero or negative
+// value, is 0, which leaves the ceiling off.
+func (c *SpecDispatchConfig) StoryPointsLintBudgetMaxLines() int {
+	if c == nil || c.StoryPoints == nil || c.StoryPoints.LintBudgetMaxLines <= 0 {
+		return 0
+	}
+	return c.StoryPoints.LintBudgetMaxLines
+}
+
+// StoryPointsLintBudgetRequired reports whether a bead must declare its Change
+// line (story_points.lint_budget_required). A nil block, or one that leaves the
+// key unset, is off.
+func (c *SpecDispatchConfig) StoryPointsLintBudgetRequired() bool {
+	return c != nil && c.StoryPoints != nil && c.StoryPoints.LintBudgetRequired
 }
 
 // ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a
