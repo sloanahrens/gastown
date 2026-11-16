@@ -303,6 +303,15 @@ type LintOptions struct {
 	// off, the default: the lint then reads no story-point label at all
 	// (gt-mtzx6s).
 	LintOverMinutes float64
+	// BudgetMaxLines refuses a work bead whose Size section declares a change
+	// budget over this many added lines. Zero or below is off, the default: no
+	// declared budget is then over it, though BudgetRequired still asks for one
+	// (gt-j0xfx5).
+	BudgetMaxLines int
+	// BudgetRequired refuses a work bead whose Size section states no change
+	// budget line at all. Off (false) is the default: a bead that declares no
+	// budget is not judged on one (gt-j0xfx5).
+	BudgetRequired bool
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -792,8 +801,8 @@ func LintWith(s Spec, t Template, opts LintOptions) LintVerdict {
 // Constraints paths against (gt-7t1im). Every dispatch decision reads Lint:
 // this one answers a bead it cannot see the base of as shape-clean, which is
 // why it is not the dispatcher's question. It is Lint with LintOptions{}: the
-// story-point size gate decides a dispatch, so it is asked where a dispatch is
-// decided (gt-mtzx6s).
+// story-point size gate and the change-budget gate decide a dispatch, so they
+// are asked where a dispatch is decided (gt-mtzx6s, gt-j0xfx5).
 func LintShape(s Spec, t Template) LintVerdict {
 	return lint(s, t, false, LintOptions{})
 }
@@ -874,6 +883,12 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if r, refused := storyPointsSizeRefusal(s, opts.LintOverMinutes); refused {
 		failures = append(failures, r)
 	}
+	// A bead that declares a change budget over the operator's maximum is
+	// refused here, where the size gate refuses, rather than at the landing gate
+	// once the work is already done (gt-j0xfx5).
+	if r, refused := changeBudgetRefusal(s, sections["size"], opts); refused {
+		failures = append(failures, r)
+	}
 	if len(failures) > 0 {
 		return refusal(failures...)
 	}
@@ -932,6 +947,40 @@ func storyPointsSizeRefusal(s Spec, overMinutes float64) (Refusal, bool) {
 	return Refusal{Field: "size", Reason: fmt.Sprintf(
 		"%s is at or over lint_over_minutes %s: split the bead into beads of about twenty minutes each, one deliverable each, or remove the label with the reason if the estimate is wrong (a bead the overseer marks %s with a comment passes)",
 		label, minutesString(overMinutes), sizeOkLabel)}, true
+}
+
+// changeBudgetRefusal is the lint's verdict on a bead's declared change budget
+// (changeBudgetGrammar): the refusal when the budget is over opts.BudgetMaxLines,
+// when the Change line does not parse, or when the line is absent and
+// opts.BudgetRequired asks for one (gt-j0xfx5). The gate is off when both
+// settings are at their off value, so a caller that sets neither reads no
+// budget and answers what it answered before the gate existed. A bead for the
+// overseer or the operator is not held to it: its budget counts a session's
+// work, not one polecat's landing.
+func changeBudgetRefusal(s Spec, size string, opts LintOptions) (Refusal, bool) {
+	if opts.BudgetMaxLines <= 0 && !opts.BudgetRequired {
+		return Refusal{}, false
+	}
+	if s.HasLabel(dispatch.OverseerOnlyLabel) || s.HasLabel(dispatch.OperatorOnlyLabel) {
+		return Refusal{}, false
+	}
+	budget, found, err := ParseChangeBudget(size)
+	if err != nil {
+		return Refusal{Field: "size", Reason: err.Error()}, true
+	}
+	if !found {
+		if !opts.BudgetRequired {
+			return Refusal{}, false
+		}
+		return Refusal{Field: "size", Reason: "the Size section states no change budget: add a line such as " +
+			strconv.Quote(changeBudgetGrammar) + ", counting the lines you expect to add"}, true
+	}
+	if opts.BudgetMaxLines <= 0 || budget.Lines <= opts.BudgetMaxLines {
+		return Refusal{}, false
+	}
+	return Refusal{Field: "size", Reason: fmt.Sprintf(
+		"the Size section declares at most %d added lines, over the change budget maximum of %d: split the bead by package (one bead per package) or by test group (one bead per group of acceptance boxes that share a fake)",
+		budget.Lines, opts.BudgetMaxLines)}, true
 }
 
 // StoryPointsSizeGateWarning is the WARN line a bead whose sp-minutes labels
