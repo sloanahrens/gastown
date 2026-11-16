@@ -119,6 +119,7 @@ func clusterRenderDepsAt(t *testing.T, town string, out io.Writer) clusterRender
 		containerEnv:             func(string) (map[string]string, error) { return map[string]string{}, nil },
 		readFile:                 os.ReadFile,
 		lstat:                    os.Lstat,
+		stat:                     os.Stat,
 		getenv:                   func(string) string { return "" },
 		userHome:                 func() (string, error) { return "/fake/home", nil },
 		build:                    k8sdaemon.Build,
@@ -533,16 +534,56 @@ func TestTownClusterRenderMountsTheDeepSeekBalanceKeyOnlyWhenPresent(t *testing.
 	t.Run("a directory is not a key file", func(t *testing.T) {
 		t.Parallel()
 		f := clusterRenderFixture(t)
-		keyPath := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
-		if err := os.MkdirAll(keyPath, 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile), 0o700); err != nil {
 			t.Fatalf("making the key path a directory: %v", err)
 		}
 		var out bytes.Buffer
-		deps := clusterRenderTestDeps(t, &out)
-		err := runClusterRender(deps, f)
-		requireErrorNames(t, err, k8sdaemon.DeepSeekBalanceFile, "not a regular file")
-		if got := outState(f.out); got != "absent" {
-			t.Errorf("the refused render left --out %s, want it untouched", got)
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("a directory at the key path refused the render: %v", err)
+		}
+		if strings.Contains(deploymentBody(t, f.out), k8sdaemon.DeepSeekBalanceSecretName) {
+			t.Error("a directory at the key path mounted the Secret")
+		}
+	})
+
+	t.Run("a dangling symlink is not a key file", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		if err := os.MkdirAll(f.configDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		keyPath := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
+		if err := os.Symlink(filepath.Join(f.configDir, "no-such-target"), keyPath); err != nil {
+			t.Fatalf("making a dangling symlink: %v", err)
+		}
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("a dangling symlink refused the render: %v", err)
+		}
+		if strings.Contains(deploymentBody(t, f.out), k8sdaemon.DeepSeekBalanceSecretName) {
+			t.Error("a dangling symlink mounted the Secret")
+		}
+	})
+
+	t.Run("a symlink to a regular file is a key file", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		if err := os.MkdirAll(f.configDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(f.configDir, "real.env")
+		if err := os.WriteFile(target, []byte("KEY=x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(deploymentBody(t, f.out), k8sdaemon.DeepSeekBalanceSecretName) {
+			t.Error("a symlink to a regular file did not mount the Secret")
 		}
 	})
 }
