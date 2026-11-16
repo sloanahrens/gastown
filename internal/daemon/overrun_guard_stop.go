@@ -1612,14 +1612,20 @@ func overrunCleanupStatus(g daemonGit) string {
 }
 
 // recordOverrunCleanupStatus is overrunRecordCleanupStatus over c: it writes
-// status onto agent bead id and onto iseat's intent record. The intent record
-// is where the agent bead's readers move (gt-bnugwz), so its failure is logged
-// on its own and the bead write, which the release step depends on, still runs.
+// status onto agent bead id and, when the seat has one, onto iseat's intent
+// record. The intent record is where the agent bead's readers move (gt-bnugwz),
+// so its failure is logged on its own and the bead write, which the release
+// step depends on, still runs.
 func recordOverrunCleanupStatus(c beads.Client, townRoot string, iseat intent.Seat, id, status string, now time.Time, logger *log.Logger) error {
 	if id == "" {
 		return errors.New("no agent bead id to record a cleanup status on")
 	}
-	if err := intent.SetCleanupStatus(townRoot, iseat, status, overrunActor, now); err != nil {
+	// The stop parks the seat before this write, so a seat with no record here
+	// is one something else removed — a nuke — and SetCleanupStatus would build
+	// one from the zero-value record and put the seat back as running (gt-zgl13s).
+	if _, err := os.Lstat(iseat.Path(townRoot)); errors.Is(err, os.ErrNotExist) {
+		logger.Printf("overrun_guard: %s: no intent record to carry the cleanup status %q; it is written on the agent bead only", iseat, status)
+	} else if err := intent.SetCleanupStatus(townRoot, iseat, status, overrunActor, now); err != nil {
 		logger.Printf("overrun_guard: WARNING: cleanup status %q not recorded on the intent record of %s: %v", status, iseat, err)
 	}
 	return beads.UpdateAgentCleanupStatus(c, id, status)

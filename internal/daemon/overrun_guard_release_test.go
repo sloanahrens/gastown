@@ -419,11 +419,17 @@ func TestRecordOverrunCleanupStatus_WritesTheAgentBead(t *testing.T) {
 }
 
 // The cleanup status the release records lands on the seat's intent record,
-// where the agent bead's readers move (gt-bnugwz).
+// where the agent bead's readers move (gt-bnugwz), without lifting the park the
+// stop wrote to hold the seat.
 func TestAgentBeadRetireCleanupStatusReachesTheIntentRecord(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
+	// The park the stop writes in its first step, and the record this write
+	// updates.
+	if err := agentpause.Pause(town, seat.Rig, seat.Role, seat.Name, overrunPauseReason, overrunActor, ""); err != nil {
+		t.Fatal(err)
+	}
 	c := agentBeadFake(t, "gt-0pt32")
 	var logBuf bytes.Buffer
 
@@ -439,6 +445,9 @@ func TestAgentBeadRetireCleanupStatusReachesTheIntentRecord(t *testing.T) {
 	if rec.CleanupStatus != string(polecat.CleanupUnpushed) {
 		t.Errorf("intent record cleanup status = %q, want %q", rec.CleanupStatus, polecat.CleanupUnpushed)
 	}
+	if !rec.Held() || rec.PausedBy != overrunActor {
+		t.Errorf("intent record after recording = %+v, want the stop's park kept", rec)
+	}
 	if got := nuxAgentFields(t, c); got.CleanupStatus != string(polecat.CleanupUnpushed) {
 		t.Errorf("agent bead cleanup status = %q, want %q", got.CleanupStatus, polecat.CleanupUnpushed)
 	}
@@ -452,15 +461,20 @@ func TestAgentBeadRetireCleanupStatusReachesTheIntentRecord(t *testing.T) {
 func TestAgentBeadRetireFailedIntentWriteIsLoggedAndTheBeadIsWritten(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
+	// The park the stop writes in its first step: it gives the record this write
+	// is meant to update.
+	if err := agentpause.Pause(town, seat.Rig, seat.Role, seat.Name, overrunPauseReason, overrunActor, ""); err != nil {
+		t.Fatal(err)
+	}
 	// A regular file where the intent lock directory belongs fails the record
 	// write at once, without depending on file modes.
-	if err := os.MkdirAll(filepath.Join(town, ".runtime"), 0o755); err != nil {
+	if err := os.RemoveAll(filepath.Join(town, ".runtime", "locks")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(town, ".runtime", "locks"), []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
 	c := agentBeadFake(t, "gt-0pt32")
 	var logBuf bytes.Buffer
 
@@ -474,6 +488,33 @@ func TestAgentBeadRetireFailedIntentWriteIsLoggedAndTheBeadIsWritten(t *testing.
 		t.Errorf("agent bead cleanup status = %q, want %q", got.CleanupStatus, polecat.CleanupClean)
 	}
 	if want := "not recorded on the intent record of " + seat.String(); !strings.Contains(logBuf.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logBuf.String())
+	}
+}
+
+// A seat with no intent record is left with none: the stop parks the seat
+// before recording, so a missing record is one something else removed — a nuke
+// — and a record built from the zero value would put that seat back as running
+// (gt-zgl13s). The agent bead still gets the status.
+func TestAgentBeadRetireCleanupStatusCreatesNoRecordForASeatWithNone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
+	c := agentBeadFake(t, "gt-0pt32")
+	var logBuf bytes.Buffer
+
+	if err := recordOverrunCleanupStatus(c, town, seat, nuxAgentBead, string(polecat.CleanupClean),
+		time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC), log.New(&logBuf, "", 0)); err != nil {
+		t.Fatalf("recordOverrunCleanupStatus: %v", err)
+	}
+
+	if _, err := os.Stat(seat.Path(town)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recordOverrunCleanupStatus created an intent record (stat err %v)", err)
+	}
+	if got := nuxAgentFields(t, c); got.CleanupStatus != string(polecat.CleanupClean) {
+		t.Errorf("agent bead cleanup status = %q, want %q", got.CleanupStatus, polecat.CleanupClean)
+	}
+	if want := "no intent record"; !strings.Contains(logBuf.String(), want) {
 		t.Errorf("log lacks %q:\n%s", want, logBuf.String())
 	}
 }
