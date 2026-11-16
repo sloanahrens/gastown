@@ -2049,6 +2049,35 @@ func TestJevScorecardConfigRefusesBadValues(t *testing.T) {
 	}
 }
 
+// TestReworkProgramReworkNumbersConfigKey: daemon.patrols.rework_numbers
+// carries one switch, an unknown key is refused, and a town that names no block
+// leaves the patrol off.
+func TestReworkProgramReworkNumbersConfigKey(t *testing.T) {
+	t.Parallel()
+
+	var cfg DaemonPatrolConfig
+	doc := `{"patrols":{"rework_numbers":{"enabled":true}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(doc), &cfg); err != nil {
+		t.Fatalf("the block does not decode: %v", err)
+	}
+	if cfg.Patrols == nil || cfg.Patrols.ReworkNumbers == nil || !cfg.Patrols.ReworkNumbers.Enabled {
+		t.Fatalf("decoded %+v, want the block's enabled:true", cfg.Patrols)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{}}`), &absent); err != nil {
+		t.Fatalf("an empty patrols block does not decode: %v", err)
+	}
+	if absent.Patrols != nil && absent.Patrols.ReworkNumbers != nil {
+		t.Errorf("an absent rework_numbers block decoded as %+v, want nothing", absent.Patrols.ReworkNumbers)
+	}
+
+	var refused DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"rework_numbers":{"enaabled":true}}}`), &refused); err == nil {
+		t.Fatal("an unknown key decoded, want a refusal naming it")
+	}
+}
+
 // TestReworkProgramOmLessonsConfigRefusesWhatThePatrolCannotActOn: the block
 // decodes as written, and an interval the pass cannot schedule is an error when
 // the document is decoded rather than the default later.

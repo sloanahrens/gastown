@@ -622,6 +622,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.OmLessons.Enabled
 	}
+	// rework_numbers is opt-in; its config block says why (gt-2232t4).
+	if patrol == "rework_numbers" {
+		if config == nil || config.Patrols == nil || config.Patrols.ReworkNumbers == nil {
+			return false
+		}
+		return config.Patrols.ReworkNumbers.Enabled
+	}
 	if config == nil || config.Patrols == nil {
 		return true // Default: enabled
 	}

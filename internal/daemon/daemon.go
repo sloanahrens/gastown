@@ -1434,6 +1434,19 @@ type Daemon struct {
 	// time.NewTicker, and a test sets it to record the cadence.
 	newOmLessonsTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
 
+	// reworkNumbersRunning and reworkNumbersCycles are the rework numbers
+	// step's single-flight guard and cycle count: a due run reads the town's
+	// landing ledgers off the select loop, and Run's return joins one it left
+	// (rework_numbers.go).
+	reworkNumbersRunning atomic.Bool
+	reworkNumbersCycles  sync.WaitGroup
+	// reworkNumbersJoinWait overrides reworkNumbersJoinWait in tests.
+	reworkNumbersJoinWait time.Duration
+	// reworkNumbersStepFor builds each tick's step: nil is
+	// newReworkNumbersStep, and a test sets it to hand the tick a fake record
+	// source.
+	reworkNumbersStepFor reworkNumbersStepFunc
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -2453,6 +2466,16 @@ func (d *Daemon) Run() (err error) {
 		defer d.stopOmLessonsPatrol(stopOmLessons)
 	}
 
+	// Start the rework numbers ticker if enabled (default off, gt-2232t4; its
+	// config block says why). The ticker checks whether the week's run is due;
+	// the last-run record beside the document decides, so a restart inside the
+	// week leaves that week's document alone. The defer stops the ticker and
+	// joins a run it left going.
+	reworkNumbersChan, stopReworkNumbers := d.startReworkNumbersTicker()
+	if stopReworkNumbers != nil {
+		defer d.stopReworkNumbersPatrol(stopReworkNumbers)
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2663,6 +2686,14 @@ func (d *Daemon) Run() (err error) {
 			// loop (gt-vdy9do).
 			if !d.isShutdownInProgress() {
 				d.startOmLessonsTick()
+			}
+
+		case <-reworkNumbersChan:
+			// rework numbers — a due run folds the town's landing ledgers into
+			// the week's document, on its own goroutine; the last-run record
+			// decides whether this tick is the week's run (gt-2232t4).
+			if !d.isShutdownInProgress() {
+				d.startReworkNumbersTick()
 			}
 
 		case <-findingsFilerChan:
