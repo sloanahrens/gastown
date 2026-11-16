@@ -1,9 +1,19 @@
 package omlessons
 
 import (
+	"fmt"
+	"os"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
+
+// proposeGoldenPath is the output `gt land om-lessons --propose` prints for the
+// fixture town, which internal/cmd's TestLandOmLessonsProposeGolden pins. The
+// test below reads it rather than restating the drafts: the golden is the only
+// place a draft appears, so a draft that drifts reddens both tests.
+const proposeGoldenPath = "../cmd/testdata/land_om_lessons_propose.golden"
 
 // TestReworkProgramProposalsMatchPrintedDrafts pins Proposals against the
 // drafts the command printed for the same fixture: fail-open is covered by rule
@@ -30,29 +40,134 @@ func TestReworkProgramProposalsMatchPrintedDrafts(t *testing.T) {
 		},
 	}
 	rules := map[string]bool{"1": true, "2": true, "7": true}
+	golden := readProposeGolden(t, proposeGoldenPath)
 
-	want := []Proposal{
-		{ID: "fail-open", Name: "an error reads as success",
-			Coverage: "violated-anyway: rule #1 covers it and it still appears",
-			Current:  ClassCounts{Findings: 6, Beads: 4, Rounds: 2},
-			Prior:    ClassCounts{Findings: 1, Beads: 1},
-			Examples: []string{"gt-a", "gt-b", "gt-c"}},
-		{ID: "missing-refusal-test", Name: "a refusal branch has no test",
-			Coverage: "gap: the table names rule #3 and the directive has no rule #3",
-			Current:  ClassCounts{Findings: 5, Beads: 5},
-			Examples: []string{"gt-j", "gt-k", "gt-l"}},
-		{ID: "wall-clock-wait", Name: "a wait or sleep on the wall clock",
-			Coverage: "gap: no numbered rule covers it",
-			Current:  ClassCounts{Findings: 5, Beads: 5},
-			Examples: []string{"gt-e", "gt-f", "gt-g"}},
-		{ID: "secret-in-output", Name: "a secret reaches output", TooFew: true,
-			Current:  ClassCounts{Findings: 2, Beads: 2},
-			Examples: []string{"gt-o", "gt-p"}},
+	got := Proposals(report, rules)
+	if len(got) != len(report.Classes) {
+		t.Fatalf("Proposals() returned %d entries for %d classes", len(got), len(report.Classes))
 	}
+	for i, p := range got {
+		want, ok := golden[p.Name]
+		if !ok {
+			t.Fatalf("class %q: the golden prints no draft for it", p.Name)
+		}
+		if p.TooFew {
+			// A too-few line carries the class name and the count only.
+			if !want.TooFew || want.Current.Findings != p.Current.Findings {
+				t.Errorf("class %q = %+v, want the golden's too-few line with %d finding(s)",
+					p.Name, p, want.Current.Findings)
+			}
+			continue
+		}
+		if want.TooFew {
+			t.Errorf("class %q: Proposals drafted it, the golden marks it too few", p.Name)
+			continue
+		}
+		if !reflect.DeepEqual(p, want) {
+			t.Errorf("Proposals()[%d] =\n%+v\nwant the golden's draft\n%+v", i, p, want)
+		}
+	}
+}
 
-	if got := Proposals(report, rules); !reflect.DeepEqual(got, want) {
-		t.Errorf("Proposals() =\n%+v\nwant\n%+v", got, want)
+// readProposeGolden parses the drafts the command printed, keyed by class name.
+// A "--- name (id)" heading opens a draft whose Coverage, Counts and Examples
+// lines follow; a "too few to say: name (N finding(s) in the window)" line is a
+// class under the threshold, carrying only its name and count. A heading
+// missing one of its lines, or a line that does not parse, is an error: a
+// renamed line must not read as a zero draft.
+func readProposeGolden(t *testing.T, path string) map[string]Proposal {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
 	}
+	out := map[string]Proposal{}
+	var cur *Proposal
+	var haveCoverage, haveCounts, haveExamples bool
+	flush := func() {
+		if cur == nil {
+			return
+		}
+		if !haveCoverage || !haveCounts || !haveExamples {
+			t.Fatalf("golden draft %q is missing its coverage, counts or examples line", cur.Name)
+		}
+		out[cur.Name] = *cur
+		cur = nil
+		haveCoverage, haveCounts, haveExamples = false, false, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			flush()
+			name, id, err := splitGoldenHeading(strings.TrimPrefix(line, "--- "))
+			if err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			cur = &Proposal{ID: id, Name: name}
+		case strings.HasPrefix(line, "too few to say: "):
+			flush()
+			name, findings, err := splitGoldenTooFew(strings.TrimPrefix(line, "too few to say: "))
+			if err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			out[name] = Proposal{Name: name, TooFew: true, Current: ClassCounts{Findings: findings}}
+		case strings.HasPrefix(line, "Coverage: ") && cur != nil:
+			cur.Coverage = strings.TrimPrefix(line, "Coverage: ")
+			haveCoverage = true
+		case strings.HasPrefix(line, "Counts: ") && cur != nil:
+			if err := splitGoldenCounts(line, &cur.Current, &cur.Prior); err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			haveCounts = true
+		case strings.HasPrefix(line, "Examples: ") && cur != nil:
+			if examples := strings.TrimPrefix(line, "Examples: "); examples != "" {
+				cur.Examples = strings.Split(examples, ", ")
+			}
+			haveExamples = true
+		}
+	}
+	flush()
+	if len(out) == 0 {
+		t.Fatalf("%s holds no drafts", path)
+	}
+	return out
+}
+
+// splitGoldenHeading splits "an error reads as success (fail-open)" into the
+// class name and id.
+func splitGoldenHeading(s string) (name, id string, err error) {
+	i := strings.LastIndex(s, " (")
+	if i < 0 || !strings.HasSuffix(s, ")") {
+		return "", "", fmt.Errorf("draft heading %q is not \"name (id)\"", s)
+	}
+	return s[:i], s[i+2 : len(s)-1], nil
+}
+
+// splitGoldenTooFew splits "a secret reaches output (2 finding(s) in the
+// window)" into the class name and the finding count.
+func splitGoldenTooFew(s string) (name string, findings int, err error) {
+	const suffix = " finding(s) in the window)"
+	i := strings.LastIndex(s, " (")
+	if i < 0 || !strings.HasSuffix(s, suffix) {
+		return "", 0, fmt.Errorf("too-few line %q is not \"name (N finding(s) in the window)\"", s)
+	}
+	findings, err = strconv.Atoi(strings.TrimSuffix(s[i+2:], suffix))
+	if err != nil {
+		return "", 0, fmt.Errorf("too-few line %q: %w", s, err)
+	}
+	return s[:i], findings, nil
+}
+
+// splitGoldenCounts reads a draft's counts line into the window's counts and
+// the prior window's.
+func splitGoldenCounts(line string, current, prior *ClassCounts) error {
+	format := "Counts: %d finding(s) on %d bead(s), %d round(s) burned; prior window %d finding(s) on %d bead(s), %d round(s)"
+	n, err := fmt.Sscanf(line, format, &current.Findings, &current.Beads, &current.Rounds,
+		&prior.Findings, &prior.Beads, &prior.Rounds)
+	if err != nil || n != 6 {
+		return fmt.Errorf("counts line %q does not match %q", line, format)
+	}
+	return nil
 }
 
 // TestReworkProgramProposalCoverage: a class with enough findings names its
