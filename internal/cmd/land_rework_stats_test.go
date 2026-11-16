@@ -191,10 +191,16 @@ func checkLandReworkStatsGolden(t *testing.T, name string, out []byte) {
 	}
 }
 
-// TestLandReworkStats pins the weekly table: the share of beads with two or
-// more om rounds, with two or more seats, and the mean polecat minutes, with
-// the untimed landings counted separately and the thin week saying so.
-func TestLandReworkStats(t *testing.T) {
+// TestReworkProgramStatsTable pins the weekly table: the share of beads with
+// two or more om rounds, with two or more seats, and the mean polecat minutes,
+// with the untimed landings counted separately and the thin week saying so.
+//
+// The ReworkProgram prefix is deliberate (gt-rmq3yv): the rework-stats gate
+// line selects the tests it covers with -run 'ReworkProgram' over
+// ./internal/cmd, and its siblings in this file are named TestLandReworkStats*,
+// which that filter does not match. A rename back into that family hides this
+// test from the gate.
+func TestReworkProgramStatsTable(t *testing.T) {
 	t.Parallel()
 	town, _ := landReworkStatsFixture(t)
 	var out bytes.Buffer
