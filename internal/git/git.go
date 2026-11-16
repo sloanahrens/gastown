@@ -453,7 +453,7 @@ func (g *Git) guardRemoteTownRootMutation(args []string) error {
 	if effective == "" {
 		return nil
 	}
-	top, ok := gitTopLevel(g.runner(), effective)
+	top, ok := gitTopLevelIn(g.runner(), effective)
 	if !ok {
 		// Unlike the host guard, the remote guard fails closed: a sandbox seat's
 		// mutation that cannot be placed relative to the town root is refused, not
@@ -545,6 +545,28 @@ func ensureSafeMutationWorkDir(run runFunc, workDir string) error {
 
 func gitTopLevel(run runFunc, workDir string) (string, bool) {
 	out, _, err := run(gitCall{args: []string{"-C", workDir, "rev-parse", "--show-toplevel"}})
+	if err != nil {
+		return "", false
+	}
+	topLevel := strings.TrimSpace(out)
+	if topLevel == "" {
+		return "", false
+	}
+	abs, err := filepath.Abs(topLevel)
+	if err != nil {
+		return filepath.Clean(topLevel), true
+	}
+	return filepath.Clean(abs), true
+}
+
+// gitTopLevelIn reads the top level of dir through run, which runs git in the
+// directory the call names. The call carries dir as its own directory and no
+// -C: the in-sandbox runner refuses an empty directory and any -C argument
+// before it sends anything (sandboxGitRefusal in internal/session), so the -C
+// form gitTopLevel uses can never answer there and the remote guard that asks
+// through it can never read a top level (gt-3xsm9w).
+func gitTopLevelIn(run runFunc, dir string) (string, bool) {
+	out, _, err := run(gitCall{dir: dir, args: []string{"rev-parse", "--show-toplevel"}})
 	if err != nil {
 		return "", false
 	}
