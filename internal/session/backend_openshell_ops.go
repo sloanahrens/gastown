@@ -2,13 +2,17 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/seattoken"
@@ -655,4 +659,201 @@ var sandboxNotFound = regexp.MustCompile(`\bsandbox (?:not found\b|"[^"\n]*" not
 // delete that did not happen (om 1dc191fba3ee).
 func isSandboxNotFound(err error) bool {
 	return err != nil && sandboxNotFound.MatchString(strings.ToLower(err.Error()))
+}
+
+// A no-bead-access seat reports its work in an outbox instead of writing beads
+// (gt-1m0kb): result.json and notes.md, the two files internal/outbox decodes.
+// They live inside the seat's sandbox, so the host copies them out before the
+// sandbox is deleted, the same way the seat's transcripts are copied
+// (gt-c6tofd).
+
+// sandboxOutboxDir is the outbox directory inside a sandbox: where a
+// no-bead-access seat writes result.json and notes.md when it ends (gt-1m0kb).
+// It sits under the sandbox's .gt directory, beside the task file's .gt/task
+// (gt-0ne2hw), and outside the seat's worktree, so the formula's `git add -A`
+// never sees it.
+const sandboxOutboxDir = sandboxHome + "/.gt/outbox"
+
+// sandboxOutboxResult and sandboxOutboxNotes are the only two files the host
+// copies out of the outbox directory. A file of any other name is refused: the
+// seat writes these two, and the host has no rule for reading anything else.
+const (
+	sandboxOutboxResult = "result.json"
+	sandboxOutboxNotes  = "notes.md"
+)
+
+// sandboxOutboxFiles is the outbox in the order the host copies it, so a copy's
+// order is the same on every run.
+var sandboxOutboxFiles = []string{sandboxOutboxResult, sandboxOutboxNotes}
+
+// sandboxOutboxCopyTimeout bounds one seat's outbox listing and downloads.
+const sandboxOutboxCopyTimeout = 30 * time.Second
+
+// sandboxOutboxCopyCap is the most one outbox file may be, in bytes. It is
+// larger than either cap the decoder applies to the same file (64 KiB for
+// result.json, 256 KiB for notes.md), so the copy never refuses a file the
+// host's apply would accept. A larger file would be refused there, and
+// downloading it first would put a file of the sandbox's choosing on the host.
+const sandboxOutboxCopyCap int64 = 512 << 10
+
+// sandboxOutboxListing prints "<name> <size>" for each file directly under the
+// outbox directory, and nothing when the directory is not there: a seat that
+// wrote no outbox is an empty listing, not a failed exec.
+var sandboxOutboxListing = []string{"sh", "-c",
+	`if test -d ` + sandboxOutboxDir + `; then find ` + sandboxOutboxDir + ` -maxdepth 1 -type f -printf '%f %s\n'; fi`}
+
+// SandboxOutboxCopyDir is the directory a seat's copied outbox is downloaded
+// into: <town>/.runtime/outbox/<rig>/<polecat>. It is under the town's runtime
+// directory, never inside a repository, and it holds a seat's outbox only after
+// that seat's sandbox was copied; a reader must not take it for another seat's.
+func SandboxOutboxCopyDir(townRoot, rig, polecat string) string {
+	return filepath.Join(townRoot, constants.DirRuntime, "outbox", rig, polecat)
+}
+
+// CopySandboxSeatOutbox copies rec's seat's outbox files out of its sandbox to
+// the host, for the caller that is about to delete that sandbox (gt-c6tofd).
+// The copy is this seat's outbox or nothing: whatever a previous seat of the
+// same name left in the copy directory is cleared first, so a reader never
+// finds it as this seat's. A sandbox that is already gone has no outbox to
+// copy, which is not a failure. Every other failure is returned, so the caller
+// can keep the sandbox that holds the only copy of what the seat wrote; a
+// failure partway through the downloads removes what it wrote, and a listing
+// that fails leaves an earlier copy alone, since the copy it cannot replace may
+// be the only one.
+func CopySandboxSeatOutbox(townRoot string, rec SandboxRecord) error {
+	return recordBackend(townRoot, rec).copySeatOutbox(rec)
+}
+
+// copySeatOutbox is CopySandboxSeatOutbox over the backend the caller built,
+// so a test can answer the execs.
+func (b *openshellBackend) copySeatOutbox(rec SandboxRecord) error {
+	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
+		// A record that names no seat names no place to copy to. Keeping the
+		// sandbox is the safe answer, so this is an error and not a no-op.
+		return fmt.Errorf("sandbox %s: its record names no seat, so its outbox is not copied out", rec.Session)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxOutboxCopyTimeout)
+	defer cancel()
+	files, err := b.listSeatOutbox(ctx, rec)
+	if isSandboxNotFound(err) {
+		return nil // a sandbox that is already gone has no outbox to copy
+	}
+	if err != nil {
+		return fmt.Errorf("sandbox %s: listing its outbox failed, so it is not copied out: %w", rec.Session, err)
+	}
+	dest := SandboxOutboxCopyDir(b.townRoot, rec.Rig, rec.Polecat)
+	// The copy is this seat's outbox or nothing, so a stale copy goes whether or
+	// not this seat wrote one.
+	if err := os.RemoveAll(dest); err != nil {
+		return fmt.Errorf("sandbox %s: clearing its outbox copy failed, so it is not copied out: %w", rec.Session, err)
+	}
+	if len(files) == 0 {
+		return nil // a seat that wrote no outbox
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return fmt.Errorf("sandbox %s: creating its outbox copy failed, so it is not copied out: %w", rec.Session, err)
+	}
+	for _, f := range files {
+		if err := b.downloadSeatOutboxFile(ctx, rec, f, dest); err != nil {
+			// A partial copy would read as the seat's whole outbox.
+			return errors.Join(err, os.RemoveAll(dest))
+		}
+	}
+	return nil
+}
+
+// downloadSeatOutboxFile downloads one outbox file into dest. A download that
+// left no regular file where it was asked to, or one larger than the copy's
+// cap, fails here, not later as a reader that finds nothing or finds more than
+// the host agreed to hold.
+func (b *openshellBackend) downloadSeatOutboxFile(ctx context.Context, rec SandboxRecord, f sandboxOutboxEntry, dest string) error {
+	if err := b.cli.Download(ctx, rec.Session, f.remote, dest); err != nil {
+		return fmt.Errorf("sandbox %s: copying its outbox file %s out failed: %w", rec.Session, f.name, err)
+	}
+	if err := requireSeatOutboxFile(filepath.Join(dest, f.name)); err != nil {
+		return fmt.Errorf("sandbox %s: copying its outbox file %s out failed: %w", rec.Session, f.name, err)
+	}
+	return nil
+}
+
+// requireSeatOutboxFile reports a download that left no regular file at path, or
+// one larger than the copy's cap. The sandbox chooses what it hands back, so
+// anything else is refused rather than read as the seat's outbox: the listing
+// admits a file under the cap, and what the download actually wrote is held to
+// the same bound, since the listing's size is only the sandbox's claim.
+func requireSeatOutboxFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("what the download wrote is not a regular file")
+	}
+	if info.Size() > sandboxOutboxCopyCap {
+		return fmt.Errorf("what the download wrote is %d bytes, more than the %d-byte cap the copy keeps", info.Size(), sandboxOutboxCopyCap)
+	}
+	return nil
+}
+
+// sandboxOutboxEntry is one file the sandbox outbox listing names.
+type sandboxOutboxEntry struct {
+	name   string // result.json or notes.md
+	remote string // its path inside the sandbox
+}
+
+// listSeatOutbox lists the files in rec's seat's outbox, in the order the host
+// copies them. A listing that fails or does not parse is an error, never a
+// shorter list: a dropped entry would be a file the host silently never reads.
+func (b *openshellBackend) listSeatOutbox(ctx context.Context, rec SandboxRecord) ([]sandboxOutboxEntry, error) {
+	out, _, err := b.cli.Exec(ctx, rec.Session, nil, sandboxOutboxListing, nil)
+	if err != nil {
+		return nil, fmt.Errorf("listing its outbox: %w", err)
+	}
+	return parseSandboxOutboxListing(string(out))
+}
+
+// parseSandboxOutboxListing reads the outbox listing: one "<name> <size>" line
+// per file under the outbox directory. The sandbox chooses this output, so a
+// name that is neither outbox file, a name listed twice, a size that is not a
+// byte count, and a file past the copy's cap are each an error: the host copies
+// only what it can name and bound.
+func parseSandboxOutboxListing(out string) ([]sandboxOutboxEntry, error) {
+	sizes := map[string]int64{}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		name, sizeText, ok := strings.Cut(line, " ")
+		if !ok || !sandboxOutboxFileName(name) {
+			return nil, fmt.Errorf("outbox listing names an entry that is not %s or %s", sandboxOutboxResult, sandboxOutboxNotes)
+		}
+		size, err := strconv.ParseInt(sizeText, 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("outbox listing gives %s a size that is not a byte count", name)
+		}
+		if size > sandboxOutboxCopyCap {
+			return nil, fmt.Errorf("outbox listing gives %s %d bytes, more than the %d-byte cap the copy keeps", name, size, sandboxOutboxCopyCap)
+		}
+		if _, dup := sizes[name]; dup {
+			return nil, fmt.Errorf("outbox listing names %s twice", name)
+		}
+		sizes[name] = size
+	}
+	var files []sandboxOutboxEntry
+	for _, name := range sandboxOutboxFiles {
+		if _, ok := sizes[name]; ok {
+			files = append(files, sandboxOutboxEntry{name: name, remote: sandboxOutboxDir + "/" + name})
+		}
+	}
+	return files, nil
+}
+
+// sandboxOutboxFileName reports whether name is one of the two outbox files.
+func sandboxOutboxFileName(name string) bool {
+	for _, f := range sandboxOutboxFiles {
+		if f == name {
+			return true
+		}
+	}
+	return false
 }
