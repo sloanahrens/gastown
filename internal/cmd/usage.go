@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/usage"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // usageSampleDeps is what `gt usage sample` reads from outside itself: the
@@ -18,16 +20,141 @@ type usageSampleDeps struct {
 	openStore func() (usage.Store, error)
 }
 
-// defaultUsageSampleDeps is the production wiring. The beads cost_samples
-// client (gt-8r17fp) is not on the bead store yet, so openClaudePlanStore
-// refuses by name: a run then reports the missing store on stderr and writes
-// nothing, instead of pretending the row landed.
+// defaultUsageSampleDeps is the production wiring: the wall clock and the
+// town's claude_plan rows.
 func defaultUsageSampleDeps() usageSampleDeps {
 	return usageSampleDeps{now: time.Now, openStore: openClaudePlanStore}
 }
 
+// openClaudePlanStore opens the town's cost_samples table, where the status-line
+// hook appends its claude_plan rows.
 func openClaudePlanStore() (usage.Store, error) {
-	return nil, fmt.Errorf("%w: the beads cost_samples client (gt-8r17fp) has not landed", usage.ErrNoStore)
+	return openClaudePlanStoreFrom(workspace.FindFromCwdOrError, func(townRoot string) beads.Client {
+		return beads.New(townRoot)
+	})
+}
+
+// openClaudePlanStoreFrom builds the store over the client newClient builds for
+// the town findRoot names. A town root that cannot be found, or a client the
+// factory does not build, is an error, never a store over some other database.
+func openClaudePlanStoreFrom(findRoot func() (string, error), newClient func(townRoot string) beads.Client) (usage.Store, error) {
+	townRoot, err := findRoot()
+	if err != nil {
+		return nil, fmt.Errorf("the cost_samples table lives in the town: %w", err)
+	}
+	client := newClient(townRoot)
+	if client == nil {
+		return nil, fmt.Errorf("no beads client for the town at %s", townRoot)
+	}
+	return clientClaudePlanStore{client: client}, nil
+}
+
+// clientClaudePlanStore is the usage.Store over the beads client's
+// claude_plan rows: the kind gt usage sample appends.
+type clientClaudePlanStore struct {
+	client beads.Client
+}
+
+// newestRowScan bounds how many claude_plan rows NewestClaudePlan reads looking
+// for the newest reading. It is the window one read of ReadCostSamples
+// inspects; that call takes a limit but no offset to page past it. The scan
+// relies on ReadCostSamples returning rows newest first, as its contract says,
+// and stops at the first complete row.
+const newestRowScan = 32
+
+// NewestClaudePlan returns the newest claude_plan row that carries a reading,
+// or nil when the scanned rows hold none. A row missing one of the four
+// readings is not a reading, so it is skipped rather than read as zero or as an
+// error: one partial row another writer left must not wedge every later write,
+// which are the writes that would put a complete row on top. A window with no
+// reading in it is nil too: finding nothing to dedupe against is not a failure,
+// and the write that follows can only put a complete row over partial ones,
+// never worsen the window. A complete row older than the window is not seen
+// either, so the first write after thirty-two newer partial rows is not
+// deduped against it: one extra row, never a lost one. Only a read that fails
+// is an error.
+func (s clientClaudePlanStore) NewestClaudePlan(ctx context.Context) (*usage.ClaudePlan, error) {
+	rows, err := s.client.ReadCostSamples(ctx, beads.SampleKindClaudePlan, time.Time{}, newestRowScan)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		p, err := claudePlanOfSample(row)
+		if err != nil {
+			continue
+		}
+		return &p, nil
+	}
+	return nil, nil
+}
+
+// WriteClaudePlanAfter re-reads the newest claude_plan reading and appends p
+// only while that reading still matches prev. bd's samples table takes appends
+// only and has no conditional add, so the compare and the append are two steps:
+// a row another writer appends between this read and the write is not seen. The
+// re-read is as close to the append as this store can put it, and two writers
+// racing over one town cost one duplicate heartbeat row at worst. A partial row
+// another writer appends over the reading is skipped by the re-read, so it does
+// not read as a changed newest row. A re-read that finds no reading at all
+// matches a prev of nil (nothing was found when the caller read either) and
+// appends; it differs from a prev that was a reading, which is a change.
+func (s clientClaudePlanStore) WriteClaudePlanAfter(ctx context.Context, p usage.ClaudePlan, prev *usage.ClaudePlan) error {
+	newest, err := s.NewestClaudePlan(ctx)
+	if err != nil {
+		return fmt.Errorf("re-read newest claude_plan row: %w", err)
+	}
+	if !sameClaudePlan(newest, prev) {
+		return usage.ErrNewestChanged
+	}
+	if err := s.client.WriteCostSample(ctx, sampleOfClaudePlan(p)); err != nil {
+		return fmt.Errorf("write claude_plan row: %w", err)
+	}
+	return nil
+}
+
+// sameClaudePlan reports whether two newest-row readings are the same row: both
+// absent, or both present at the same sample time with the same four values.
+func sameClaudePlan(a, b *usage.ClaudePlan) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.At.Equal(b.At) && a.SameValues(*b)
+}
+
+// claudePlanOfSample reads a stored claude_plan row. Every reading must be
+// present for the row to be a plan reading.
+func claudePlanOfSample(s beads.Sample) (usage.ClaudePlan, error) {
+	switch {
+	case s.FiveHourPct == nil:
+		return usage.ClaudePlan{}, fmt.Errorf("row has no five_hour_pct")
+	case s.FiveHourResetsAt == nil:
+		return usage.ClaudePlan{}, fmt.Errorf("row has no five_hour_resets_at")
+	case s.SevenDayPct == nil:
+		return usage.ClaudePlan{}, fmt.Errorf("row has no seven_day_pct")
+	case s.SevenDayResetsAt == nil:
+		return usage.ClaudePlan{}, fmt.Errorf("row has no seven_day_resets_at")
+	}
+	return usage.ClaudePlan{
+		At:               s.At.UTC(),
+		FiveHourPct:      *s.FiveHourPct,
+		FiveHourResetsAt: s.FiveHourResetsAt.UTC(),
+		SevenDayPct:      *s.SevenDayPct,
+		SevenDayResetsAt: s.SevenDayResetsAt.UTC(),
+	}, nil
+}
+
+// sampleOfClaudePlan is p as the claude_plan row the store appends.
+func sampleOfClaudePlan(p usage.ClaudePlan) beads.Sample {
+	fivePct, sevenPct := p.FiveHourPct, p.SevenDayPct
+	fiveResets, sevenResets := p.FiveHourResetsAt, p.SevenDayResetsAt
+	return beads.Sample{
+		Kind:             beads.SampleKindClaudePlan,
+		At:               p.At.UTC(),
+		FiveHourPct:      &fivePct,
+		FiveHourResetsAt: &fiveResets,
+		SevenDayPct:      &sevenPct,
+		SevenDayResetsAt: &sevenResets,
+	}
 }
 
 var usageCmd = &cobra.Command{
