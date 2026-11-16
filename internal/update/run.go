@@ -529,7 +529,8 @@ func oneLine(note string) string {
 // restart waits for the daemon to come up on the new build. A timeout leaves
 // the install in place and makes the run partial: the town keeps working on the
 // old binary until the daemon restarts, so verify cannot pass and is recorded
-// as skipped here.
+// as skipped here. A newest pod that reports crash-looping ends the run failed
+// instead: the new build cannot come up, so nothing is left to wait for.
 func (r *runner) restart(i int) (Outcome, error) {
 	if err := r.beginStep(i); err != nil {
 		return "", err
@@ -539,6 +540,13 @@ func (r *runner) restart(i int) (Outcome, error) {
 		return r.failStep(i, "canceled", OutcomeInterrupted)
 	}
 	if err != nil {
+		var crash *CrashLoopError
+		if errors.As(err, &crash) {
+			// The new pod cannot come up at all, so the town is not still
+			// running the old build the way it is after a timeout: the run
+			// ends failed rather than partial.
+			return r.failStep(i, err.Error(), OutcomeFailed)
+		}
 		// WaitForRestart reports the sleep's error, which is the context's, so
 		// the wait could not be completed and the run is cut short.
 		return r.failStep(i, err.Error(), OutcomeInterrupted)
