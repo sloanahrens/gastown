@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -870,6 +871,105 @@ func TestSeatEndUsageUnreachableFromTheDaemonSaysSo(t *testing.T) {
 	for _, want := range []string{"usage record is not written", "may have written", "/sandbox/.claude/projects", "copy"} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("usage line %q does not contain %q", lines[0], want)
+		}
+	}
+}
+
+// TestSeatEndUsageWritesTheRowAndTheFile: the seat end's one write files the
+// seat's usage twice, as the town's usage_records row and as the record file
+// under the usage tree, and the row carries the same record as the file.
+func TestSeatEndUsageWritesTheRowAndTheFile(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+	seat := filepath.Join(f.town, "transcripts", "row-session.jsonl")
+	writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("row", 100, 50, 20))
+	f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("the finished seat was not removed")
+	}
+
+	rows, err := f.agentDB.ReadUsageRecords(context.Background(), time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("reading the usage records: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %d, want one for the seat's run", len(rows))
+	}
+	row := rows[0]
+	if row.Record.Bead != endBead || row.Record.Kind != dashboard.UsageKindWork || row.Record.Class != dashboard.UsageClassPolecat {
+		t.Errorf("row names bead %q kind %q class %q, want %q %q %q",
+			row.Record.Bead, row.Record.Kind, row.Record.Class, endBead, dashboard.UsageKindWork, dashboard.UsageClassPolecat)
+	}
+	if !row.BuiltAt.Equal(end) {
+		t.Errorf("row built at %v, want the seat's end %v", row.BuiltAt, end)
+	}
+	if got := strings.Join(row.Sessions, ","); got != "row-session" {
+		t.Errorf("row sessions = %q, want the seat's own session", got)
+	}
+
+	path := usageattrib.WorkRecordPath(filepath.Join(f.town, ".runtime", "usage"), endBead)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no record file beside the row: %v", err)
+	}
+	var file omUsageOnDisk
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("the record file: %v", err)
+	}
+	if !file.Start.Equal(row.Record.Start) || !file.End.Equal(row.Record.End) {
+		t.Errorf("file bounds %v..%v, want the row's %v..%v", file.Start, file.End, row.Record.Start, row.Record.End)
+	}
+	if file.Totals != row.Record.Totals {
+		t.Errorf("file totals %+v, want the row's %+v", file.Totals, row.Record.Totals)
+	}
+	if got := strings.Join(file.Sessions, ","); got != "row-session" {
+		t.Errorf("file sessions = %q, want the seat's own session", got)
+	}
+}
+
+// TestSeatEndUsageRowFailureKeepsTheFile: a row that cannot be written costs the
+// row and not the record. The file is still written, and the end logs the file
+// it wrote beside the row it did not, rather than calling the record missing.
+func TestSeatEndUsageRowFailureKeepsTheFile(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+	seat := filepath.Join(f.town, "transcripts", "seat.jsonl")
+	writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("ok", 100, 0, 20))
+	f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+	f.host.seatUsage.store = failingUsageStore{err: errors.New("bd sample add: Dolt is down")}
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("a usage row failure kept the seat")
+	}
+
+	path := usageattrib.WorkRecordPath(filepath.Join(f.town, ".runtime", "usage"), endBead)
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("no record file beside the failed row: %v", err)
+	}
+	line := strings.Join(usageLogLines(logs.String()), "\n")
+	if want := "wrote its usage record " + path + " for bead " + endBead; !strings.Contains(line, want) {
+		t.Errorf("usage log does not name the file it wrote %q:\n%s", want, logs.String())
+	}
+	for _, want := range []string{"its usage_records row is not written", "Dolt is down"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("usage log does not contain %q:\n%s", want, logs.String())
 		}
 	}
 }

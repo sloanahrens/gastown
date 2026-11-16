@@ -45,10 +45,19 @@ type omUsageSink struct {
 	userHomeDir  func() (string, error)
 	// bound returns the context one read runs under; nil is a usageReadBound timeout.
 	bound func(ctx context.Context) (context.Context, context.CancelFunc)
-	// write merges a record into the usage tree; nil is usageattrib.Write.
+	// store is the town's usage_records rows the record is filed in beside its
+	// file. It has no default: a sink that is not wired writes the file and
+	// reports the row's absence, so a missing wiring is logged, never silent.
+	store usageRecordStore
+	// write files a record as its file and its row in one call; nil is
+	// writeUsageRecord over store. A *usageRowNotWrittenError means the file is
+	// written and the row is not. A test replaces it to see the call, and it is
+	// what keeps the unit tier off bd.
 	write func(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error
 	// mark writes the incomplete record of a run whose transcripts could not be
-	// listed; nil is usageattrib.MarkIncomplete.
+	// listed; nil is usageattrib.MarkIncomplete. It is file-only: the marker
+	// counts no session and keeps the sessions the file already holds, so it
+	// has no row of its own and leaves the bead's earlier rows as they are.
 	mark func(usageDir string, f usageattrib.Facts, reason string) error
 	logf func(format string, args ...any)
 
@@ -56,6 +65,12 @@ type omUsageSink struct {
 	// quiet holds the beads whose review ran with no transcript, so that is
 	// logged once per bead, not once per review.
 	quiet map[string]bool
+}
+
+// omUsageSinkFor is the sink a rig's landing worker records om usage through:
+// the town's usage_records store its row is filed in beside the record file.
+func (d *Daemon) omUsageSinkFor(townRoot string) *omUsageSink {
+	return &omUsageSink{townRoot: townRoot, store: d.usageRecords(), logf: d.logger.Printf}
 }
 
 // record writes the usage record of one om review. It returns nothing: a
@@ -111,7 +126,10 @@ func (s *omUsageSink) record(ctx context.Context, u land.ReviewUsage) {
 	rec := usageattrib.Build(facts, run.sessions)
 	write := s.write
 	if write == nil {
-		write = usageattrib.Write
+		store := s.store
+		write = func(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+			return writeUsageRecord(ctx, store, usageDir, rec, sessionIDs)
+		}
 	}
 	if err := write(s.usageDir(), rec, ids); err != nil {
 		s.logf("landing_worker: %s: om usage record: %v", u.BeadID, err)

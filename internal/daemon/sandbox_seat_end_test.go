@@ -93,6 +93,9 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 	f.host = &patrolScanHost{
 		d:                 d,
 		openRecoveryBeads: func([]string) beads.Client { return f.agentDB },
+		// The town's usage_records store the seat's record row is filed in: the
+		// fake the agent beads come from, so a seat end writes no bd call.
+		seatUsage: seatUsageHook{store: f.agentDB},
 		sandboxExists: func(gateway, name string) (bool, error) {
 			f.gwAsked = append(f.gwAsked, gateway+"|"+name)
 			return false, nil
@@ -1055,6 +1058,22 @@ func TestSandboxSeatEnderDefaultPathEndsTheSeat(t *testing.T) {
 	}
 	if len(f.gwAsked) != 1 {
 		t.Errorf("gateway asked %v, want one question", f.gwAsked)
+	}
+}
+
+// TestSandboxSeatEndHostWiresTheUsageRecordStore: the host the daemon's own
+// seat end runs on carries the town's usage_records store, so a seat's record
+// is filed as a row beside its file and never as a file alone.
+func TestSandboxSeatEndHostWiresTheUsageRecordStore(t *testing.T) {
+	t.Parallel()
+	store := beadsfake.New()
+	d := &Daemon{
+		config:           &Config{TownRoot: t.TempDir()},
+		logger:           log.New(io.Discard, "", 0),
+		openUsageRecords: func() usageRecordStore { return store },
+	}
+	if got := d.sandboxSeatEndHost().seatUsage.store; got != store {
+		t.Errorf("the seat-end host's usage_records store = %v, want the daemon's store %v", got, store)
 	}
 }
 

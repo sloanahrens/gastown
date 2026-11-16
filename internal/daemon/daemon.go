@@ -266,6 +266,11 @@ type Daemon struct {
 	// the routed bd. Tests answer from a beadsfake.
 	openRecoveryBeads func(env []string) beads.Client
 
+	// openUsageRecords opens the town's usage_records store the seat-end and
+	// om-review writers file each record's row in (see usageRecords); nil is
+	// bd against the town database. Tests answer from a beadsfake.
+	openUsageRecords func() usageRecordStore
+
 	// openOverrunBeads opens the store the overrun stop's ownership re-check
 	// reads the stopped seat's bead through (overrunStopSeams); nil is the
 	// routed bd. Tests answer from a beadsfake.

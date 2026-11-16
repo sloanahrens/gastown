@@ -290,8 +290,12 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// failure is logged and the removal goes on (gt-6qc3nw.12).
 		written, incomplete, usageErr := h.writeSeatUsage(rig, name, landing, start, startErr)
 		switch {
-		case usageErr != nil:
+		case usageErr != nil && written == "":
 			log("its usage record is not written: %v", usageErr)
+		case usageErr != nil:
+			// The file is there and the row is not: the record still reads, so
+			// the line names the path rather than calling the record missing.
+			log("wrote its usage record %s for bead %s, but %v", written, landing.BeadID, usageErr)
 		case written != "" && incomplete != nil:
 			log("wrote its usage record %s for bead %s, but its transcripts were not read in full: %v", written, landing.BeadID, incomplete)
 		case written != "":
@@ -854,17 +858,23 @@ func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, 
 
 // sandboxSeatEnder is the step that ends one sandbox seat: patrolScanHost's
 // endFinishedSandboxSeat when the daemon was not given one, over the daemon's
-// own agent-bead and gateway seams. It is the production wiring of the seat's
-// transcript lister (seatUsageHook.list), which the host does not default.
+// own agent-bead and gateway seams.
 func (d *Daemon) sandboxSeatEnder() func(rig, name string, landing sandboxSeatLanding) bool {
 	if d.endSandboxSeat != nil {
 		return d.endSandboxSeat
 	}
-	h := &patrolScanHost{
+	return d.sandboxSeatEndHost().endFinishedSandboxSeat
+}
+
+// sandboxSeatEndHost is the host the daemon's own seat end runs on. It is the
+// production wiring of the seat's transcript lister (seatUsageHook.list) and of
+// the town's usage_records store its row is filed in (seatUsageHook.store),
+// neither of which the host defaults.
+func (d *Daemon) sandboxSeatEndHost() *patrolScanHost {
+	return &patrolScanHost{
 		d:                 d,
 		sandboxExists:     d.sandboxExists,
 		openRecoveryBeads: d.openRecoveryBeads,
-		seatUsage:         seatUsageHook{list: agentlog.ProjectTranscripts},
+		seatUsage:         seatUsageHook{list: agentlog.ProjectTranscripts, store: d.usageRecords()},
 	}
-	return h.endFinishedSandboxSeat
 }
