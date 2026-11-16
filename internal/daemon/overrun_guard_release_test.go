@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -397,9 +400,12 @@ func TestOverrunCleanupStatus_ReadsTheWorktree(t *testing.T) {
 // bead, which the release's reset left missing.
 func TestRecordOverrunCleanupStatus_WritesTheAgentBead(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
+	at := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
 	c := agentBeadFake(t, "gt-0pt32")
 
-	if err := recordOverrunCleanupStatus(c, nuxAgentBead, string(polecat.CleanupClean)); err != nil {
+	if err := recordOverrunCleanupStatus(c, town, seat, nuxAgentBead, string(polecat.CleanupClean), at, log.New(io.Discard, "", 0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -407,8 +413,68 @@ func TestRecordOverrunCleanupStatus_WritesTheAgentBead(t *testing.T) {
 	if got.CleanupStatus != string(polecat.CleanupClean) || got.HookBead != "gt-0pt32" {
 		t.Errorf("agent bead after recording = %+v, want cleanup clean with the rest untouched", got)
 	}
-	if err := recordOverrunCleanupStatus(c, "", string(polecat.CleanupClean)); err == nil {
+	if err := recordOverrunCleanupStatus(c, town, seat, "", string(polecat.CleanupClean), at, log.New(io.Discard, "", 0)); err == nil {
 		t.Error("recording on no bead id succeeded, want an error")
+	}
+}
+
+// The cleanup status the release records lands on the seat's intent record,
+// where the agent bead's readers move (gt-bnugwz).
+func TestAgentBeadRetireCleanupStatusReachesTheIntentRecord(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
+	c := agentBeadFake(t, "gt-0pt32")
+	var logBuf bytes.Buffer
+
+	if err := recordOverrunCleanupStatus(c, town, seat, nuxAgentBead, string(polecat.CleanupUnpushed),
+		time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC), log.New(&logBuf, "", 0)); err != nil {
+		t.Fatalf("recordOverrunCleanupStatus: %v", err)
+	}
+
+	rec, err := intent.Read(town, seat)
+	if err != nil {
+		t.Fatalf("read the intent record: %v", err)
+	}
+	if rec.CleanupStatus != string(polecat.CleanupUnpushed) {
+		t.Errorf("intent record cleanup status = %q, want %q", rec.CleanupStatus, polecat.CleanupUnpushed)
+	}
+	if got := nuxAgentFields(t, c); got.CleanupStatus != string(polecat.CleanupUnpushed) {
+		t.Errorf("agent bead cleanup status = %q, want %q", got.CleanupStatus, polecat.CleanupUnpushed)
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("a recorded status logged:\n%s", logBuf.String())
+	}
+}
+
+// An intent record that cannot be written is logged, and the agent bead write
+// the release step depends on still happens (gt-bnugwz).
+func TestAgentBeadRetireFailedIntentWriteIsLoggedAndTheBeadIsWritten(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A regular file where the intent lock directory belongs fails the record
+	// write at once, without depending on file modes.
+	if err := os.MkdirAll(filepath.Join(town, ".runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, ".runtime", "locks"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "nux"}
+	c := agentBeadFake(t, "gt-0pt32")
+	var logBuf bytes.Buffer
+
+	err := recordOverrunCleanupStatus(c, town, seat, nuxAgentBead, string(polecat.CleanupClean),
+		time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC), log.New(&logBuf, "", 0))
+	if err != nil {
+		t.Fatalf("recordOverrunCleanupStatus over a failed intent write = %v, want nil", err)
+	}
+
+	if got := nuxAgentFields(t, c); got.CleanupStatus != string(polecat.CleanupClean) {
+		t.Errorf("agent bead cleanup status = %q, want %q", got.CleanupStatus, polecat.CleanupClean)
+	}
+	if want := "not recorded on the intent record of " + seat.String(); !strings.Contains(logBuf.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logBuf.String())
 	}
 }
 

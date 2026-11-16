@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -1567,12 +1568,13 @@ func resetOverrunAgentBead(c beads.Client, id, bead string) error {
 }
 
 // overrunRecordCleanupStatus records what a live probe of the released seat's
-// worktree finds, so a later `gt polecat nuke` does not refuse the seat it was
-// told to release for a cleanup_status=<missing> the release itself created
-// (gt-6ixtp). The push runs before the hand-back, so a seat with a branch has
-// it on origin by then; a seat on a detached HEAD has no branch to push, and
-// the probe's unpushed count is what records its commits as at risk. A seat
-// with no worktree has nothing to record.
+// worktree finds, on the seat's agent bead and on its intent record, so a later
+// `gt polecat nuke` does not refuse the seat it was told to release for a
+// cleanup_status=<missing> the release itself created (gt-6ixtp). The push runs
+// before the hand-back, so a seat with a branch has it on origin by then; a seat
+// on a detached HEAD has no branch to push, and the probe's unpushed count is
+// what records its commits as at risk. A seat with no worktree has nothing to
+// record.
 func (d *Daemon) overrunRecordCleanupStatus(seat overrunSeat) error {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
@@ -1581,7 +1583,9 @@ func (d *Daemon) overrunRecordCleanupStatus(seat overrunSeat) error {
 		return nil
 	}
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(d.config.TownRoot, seat.Rig), seat.Rig, seat.Polecat)
-	return recordOverrunCleanupStatus(beads.New(d.config.TownRoot), id, overrunCleanupStatus(d.gitAt(workDir)))
+	iseat := supervisor.IntentSeat(supervisor.SeatIn(d.prefixRegistry(), seat.Rig, constants.RolePolecat, seat.Polecat))
+	return recordOverrunCleanupStatus(beads.New(d.config.TownRoot), d.config.TownRoot, iseat, id,
+		overrunCleanupStatus(d.gitAt(workDir)), d.clk().Now(), d.logger)
 }
 
 // overrunCleanupStatus is the status a live probe of g's worktree supports:
@@ -1608,10 +1612,15 @@ func overrunCleanupStatus(g daemonGit) string {
 }
 
 // recordOverrunCleanupStatus is overrunRecordCleanupStatus over c: it writes
-// status onto agent bead id.
-func recordOverrunCleanupStatus(c beads.Client, id, status string) error {
+// status onto agent bead id and onto iseat's intent record. The intent record
+// is where the agent bead's readers move (gt-bnugwz), so its failure is logged
+// on its own and the bead write, which the release step depends on, still runs.
+func recordOverrunCleanupStatus(c beads.Client, townRoot string, iseat intent.Seat, id, status string, now time.Time, logger *log.Logger) error {
 	if id == "" {
 		return errors.New("no agent bead id to record a cleanup status on")
+	}
+	if err := intent.SetCleanupStatus(townRoot, iseat, status, overrunActor, now); err != nil {
+		logger.Printf("overrun_guard: WARNING: cleanup status %q not recorded on the intent record of %s: %v", status, iseat, err)
 	}
 	return beads.UpdateAgentCleanupStatus(c, id, status)
 }
