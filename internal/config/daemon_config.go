@@ -1107,8 +1107,45 @@ type OverrunGuardConfig struct {
 	// saving it is refused.
 	GateAllowance string `json:"gate_allowance,omitempty"`
 
+	// SplitAddedLines is the runaway-bead tripwire: once the mark has gone out,
+	// a seat whose clone has added at least this many lines is stopped early
+	// and its bead handed back to be split (gt-1eg5u3). Zero or absent is off;
+	// a negative value is refused at decode. Read it through
+	// SplitAddedLinesOrOff.
+	SplitAddedLines int `json:"split_added_lines,omitempty"`
+
 	// DryRun logs what a stop would do and sends nothing.
 	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// SplitAddedLinesOrOff returns the runaway-bead tripwire's line count, or 0
+// (off) when the block is nil or sets none.
+func (c *OverrunGuardConfig) SplitAddedLinesOrOff() int {
+	if c == nil || c.SplitAddedLines <= 0 {
+		return 0
+	}
+	return c.SplitAddedLines
+}
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing a negative
+// split_added_lines: the tripwire counts lines a clone adds, so a negative
+// value is a typo with no reading, and it must not reach a seat as an instant
+// stop (gt-1eg5u3). The unknown-field check is repeated here because a type
+// that decodes itself is decoded by the config kernel's strict decoder
+// opaquely.
+func (c *OverrunGuardConfig) UnmarshalJSON(data []byte) error {
+	type plain OverrunGuardConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.overrun_guard: %w", err)
+	}
+	if p.SplitAddedLines < 0 {
+		return fmt.Errorf("daemon.patrols.overrun_guard.split_added_lines %d: want zero or more added lines, or absent for off", p.SplitAddedLines)
+	}
+	*c = OverrunGuardConfig(p)
+	return nil
 }
 
 // ScheduledMaintenanceConfig holds configuration for the scheduled_maintenance
