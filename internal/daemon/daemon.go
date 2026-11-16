@@ -1419,6 +1419,21 @@ type Daemon struct {
 	// the town database, and a test hands it a beadsfake.
 	openCostSampleBeads func() beads.Client
 
+	// omLessonsRunning and omLessonsCycles are the om_lessons pass's
+	// single-flight guard and cycle count: the pass runs off the select loop,
+	// and Run's return joins one it left (om_lessons_patrol.go).
+	omLessonsRunning atomic.Bool
+	omLessonsCycles  sync.WaitGroup
+	// omLessonsJoinWait overrides omLessonsJoinWait in tests.
+	omLessonsJoinWait time.Duration
+	// omLessonsRun is the patrol's run seam: nil is omLessonsRunSkeleton,
+	// which proposes nothing until a later bead fills the body, and a test sets
+	// it to count the passes.
+	omLessonsRun omLessonsRunFunc
+	// newOmLessonsTicker is where the patrol's ticker comes from: nil is
+	// time.NewTicker, and a test sets it to record the cadence.
+	newOmLessonsTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
+
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
 	// and the zero value is production.
@@ -2430,6 +2445,14 @@ func (d *Daemon) Run() (err error) {
 		defer d.stopDeepSeekBalancePatrol(stopDeepSeekBalance)
 	}
 
+	// Start the om_lessons ticker if enabled (default off, gt-vdy9do; its
+	// config block says why). The defer stops the ticker and joins a pass it
+	// left running.
+	omLessonsChan, stopOmLessons := d.startOmLessonsTicker()
+	if stopOmLessons != nil {
+		defer d.stopOmLessonsPatrol(stopOmLessons)
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2632,6 +2655,14 @@ func (d *Daemon) Run() (err error) {
 			// loop (gt-whaxw7).
 			if !d.isShutdownInProgress() {
 				d.startDeepSeekBalanceTick()
+			}
+
+		case <-omLessonsChan:
+			// om_lessons — the lessons pass runs on its own goroutine: a run
+			// that reads the week's review records must not hold the select
+			// loop (gt-vdy9do).
+			if !d.isShutdownInProgress() {
+				d.startOmLessonsTick()
 			}
 
 		case <-findingsFilerChan:
