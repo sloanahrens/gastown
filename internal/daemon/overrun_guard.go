@@ -42,8 +42,9 @@ const (
 // the rest of that gap counts as the seat's own time (gt-vfwuc).
 func overrunMaxGateCharge(interval time.Duration) time.Duration { return 2 * interval }
 
-// overrunMaxGateTotal is the ceiling on the gate time one sling may bank: twice
-// the stop threshold. A gate that never returns is a stuck seat, and the
+// overrunMaxGateTotal is the default ceiling on the gate time one sling may
+// bank, used when gate_allowance is unset or unusable (overrunGateAllowance):
+// twice the stop threshold. A gate that never returns is a stuck seat, and the
 // exemption must not hold its clock for good. At the default stop the ceiling
 // bounds any sling, gated or not, at an hour of wall time — the same hour the
 // scheduled-sling limit gives a deep review — and leaves a real gate the margin
@@ -52,9 +53,11 @@ func overrunMaxGateCharge(interval time.Duration) time.Duration { return 2 * int
 func overrunMaxGateTotal(stopAfter time.Duration) time.Duration { return 2 * stopAfter }
 
 // overrunGateAllowance is the configured ceiling on the gate time one sling may
-// bank (gate_allowance), or overrunMaxGateTotal when it is unset, empty,
-// unparseable or negative. "0" is a real setting: the sling banks no gate time,
-// and a seat inside its own gate counts as working.
+// bank (gate_allowance), or overrunMaxGateTotal when it is unset or empty. "0"
+// is a real setting: the sling banks no gate time, and a seat inside its own
+// gate counts as working. A negative or unparseable value falls back to
+// overrunMaxGateTotal as well, but not in silence: the config loader warns
+// about it (warnBadGateAllowance) and a save of it is refused (gt-nbwd87).
 func overrunGateAllowance(c *DaemonPatrolConfig, stopAfter time.Duration) time.Duration {
 	cfg := overrunGuardConfig(c)
 	if cfg == nil || cfg.GateAllowance == "" {

@@ -188,9 +188,9 @@ func OverrunRestartClock(townRoot, bead string, slung time.Time) time.Time {
 // re-entered. What it cannot watch it does not charge, which keeps the clock
 // counting (the fail-safe direction, gt-vfwuc).
 //
-// maxTotal is the ceiling on the whole sling (overrunMaxGateTotal): a gate that
-// does not return is a stuck seat, and past the ceiling the clock runs again
-// even inside the gate.
+// maxTotal is the ceiling on the whole sling (the configured gate_allowance,
+// overrunMaxGateTotal by default): a gate that does not return is a stuck
+// seat, and past the ceiling the clock runs again even inside the gate.
 func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge, maxTotal time.Duration) (overrunState, time.Duration) {
 	if !s.GateSlingAt.Equal(slung) {
 		s.GateSlingAt, s.GateSpent, s.GateSeenAt = slung, 0, time.Time{}
@@ -263,8 +263,9 @@ type overrunState struct {
 	NudgedAt time.Time `json:"nudged_at,omitzero"`
 
 	// GateSlingAt is the sling the gate accounting below belongs to, GateSpent
-	// the gate time charged for it (at most overrunMaxGateTotal for the sling),
-	// and GateSeenAt — when set — the last tick that saw the seat inside its
+	// the gate time charged for it (at most the configured gate_allowance, or
+	// overrunMaxGateTotal when it is unset, for the sling), and GateSeenAt —
+	// when set — the last tick that saw the seat inside its
 	// gate (see withGate). The guard measures the sling's elapsed time as
 	// (now - slung) - GateSpent, so the time a seat waits inside its own gate
 	// does not count toward the 12 and 20 minute rule, and a gate that never

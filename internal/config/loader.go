@@ -611,6 +611,15 @@ func DaemonPatrolConfigPath(townRoot string) string {
 
 // LoadDaemonPatrolConfig loads and validates a daemon patrol config file.
 func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
+	return loadDaemonPatrolConfig(path, os.Stderr)
+}
+
+// loadDaemonPatrolConfig is LoadDaemonPatrolConfig with the warnings it emits
+// on a bad overrun guard duration written to warn. The daemon's own reader
+// (ReadPatrolConfig) goes through here, so a typo in a duration setting is
+// reported each time the config is read rather than silently replaced by the
+// default.
+func loadDaemonPatrolConfig(path string, warn io.Writer) (*DaemonPatrolConfig, error) {
 	data, label, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -624,7 +633,8 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 		return nil, err
 	}
 
-	warnBadScheduledStopAfter(os.Stderr, &config)
+	warnBadScheduledStopAfter(warn, &config)
+	warnBadGateAllowance(warn, &config)
 	if err := validateDaemonPatrolConfigIdentity(&config); err != nil {
 		return nil, err
 	}
@@ -643,7 +653,8 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 }
 
 // validateDaemonPatrolConfigIdentity checks the type and version: all a load
-// requires, since a bad scheduled_stop_after loads with a warning.
+// requires, since a bad scheduled_stop_after or gate_allowance loads with a
+// warning.
 func validateDaemonPatrolConfigIdentity(c *DaemonPatrolConfig) error {
 	if c.Type != "daemon-patrol-config" && c.Type != "" {
 		return fmt.Errorf("%w: expected type 'daemon-patrol-config', got '%s'", ErrInvalidType, c.Type)
@@ -661,18 +672,17 @@ func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	if s := badScheduledStopAfter(c); s != "" {
 		return fmt.Errorf("daemon.patrols.overrun_guard.scheduled_stop_after %q: want a duration of zero or more, such as \"60m\"", s)
 	}
+	if s := badGateAllowance(c); s != "" {
+		return fmt.Errorf("daemon.patrols.overrun_guard.gate_allowance %q: want a duration of zero or more, such as \"5m\"", s)
+	}
 	return nil
 }
 
-// badScheduledStopAfter returns the overrun guard's scheduled_stop_after when
-// it is set to something that is not a duration of zero or more, else "". "0"
-// is a valid duration and means never; a negative one would read as an instant
-// stop or as never, so it counts as bad.
-func badScheduledStopAfter(c *DaemonPatrolConfig) string {
-	if c.Patrols == nil || c.Patrols.OverrunGuard == nil {
-		return ""
-	}
-	s := c.Patrols.OverrunGuard.ScheduledStopAfter
+// badOverrunDuration returns s when it is set to something that is not a
+// duration of zero or more, else "". "0" is a valid duration and means none
+// of whatever the setting limits; a negative one would read as an instant
+// limit or as never, so it counts as bad.
+func badOverrunDuration(s string) string {
 	if s == "" {
 		return ""
 	}
@@ -680,6 +690,24 @@ func badScheduledStopAfter(c *DaemonPatrolConfig) string {
 		return s
 	}
 	return ""
+}
+
+// badScheduledStopAfter returns the overrun guard's scheduled_stop_after when
+// it is set to something that is not a duration of zero or more, else "".
+func badScheduledStopAfter(c *DaemonPatrolConfig) string {
+	if c.Patrols == nil || c.Patrols.OverrunGuard == nil {
+		return ""
+	}
+	return badOverrunDuration(c.Patrols.OverrunGuard.ScheduledStopAfter)
+}
+
+// badGateAllowance returns the overrun guard's gate_allowance when it is set
+// to something that is not a duration of zero or more, else "".
+func badGateAllowance(c *DaemonPatrolConfig) string {
+	if c.Patrols == nil || c.Patrols.OverrunGuard == nil {
+		return ""
+	}
+	return badOverrunDuration(c.Patrols.OverrunGuard.GateAllowance)
 }
 
 // warnBadScheduledStopAfter says on warn that scheduled_stop_after is not a
@@ -690,6 +718,16 @@ func badScheduledStopAfter(c *DaemonPatrolConfig) string {
 func warnBadScheduledStopAfter(warn io.Writer, c *DaemonPatrolConfig) {
 	if s := badScheduledStopAfter(c); s != "" {
 		fmt.Fprintf(warn, "warning: daemon.patrols.overrun_guard.scheduled_stop_after %q is not a duration of zero or more, using the default\n", s)
+	}
+}
+
+// warnBadGateAllowance is warnBadScheduledStopAfter for gate_allowance: the
+// guard falls back to overrunMaxGateTotal on a value it cannot use
+// (overrunGateAllowance), so a typo must be reported, not applied in silence.
+// The value stays as written and Save refuses it, as for scheduled_stop_after.
+func warnBadGateAllowance(warn io.Writer, c *DaemonPatrolConfig) {
+	if s := badGateAllowance(c); s != "" {
+		fmt.Fprintf(warn, "warning: daemon.patrols.overrun_guard.gate_allowance %q is not a duration of zero or more, using the default\n", s)
 	}
 }
 

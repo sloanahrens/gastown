@@ -2648,6 +2648,11 @@ func TestDaemonPatrolConfigValidation(t *testing.T) {
 		{name: "scheduled stop limit zero means never", config: overrunScheduledLimit("0"), wantErr: false},
 		{name: "scheduled stop limit negative rejected", config: overrunScheduledLimit("-5m"), wantErr: true},
 		{name: "scheduled stop limit unparseable rejected", config: overrunScheduledLimit("an hour"), wantErr: true},
+		{name: "gate allowance", config: overrunGateLimit("5m"), wantErr: false},
+		{name: "gate allowance unset", config: overrunGateLimit(""), wantErr: false},
+		{name: "gate allowance zero banks nothing", config: overrunGateLimit("0"), wantErr: false},
+		{name: "gate allowance negative rejected", config: overrunGateLimit("-5m"), wantErr: true},
+		{name: "gate allowance unparseable rejected", config: overrunGateLimit("five minutes"), wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -2733,6 +2738,131 @@ func TestSaveDaemonPatrolConfigRefusesBadScheduledStopAfter(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("a refused save left a file behind: %v", err)
+	}
+}
+
+// overrunGateLimit is a daemon patrol config whose overrun guard sets
+// gate_allowance to limit.
+func overrunGateLimit(limit string) *DaemonPatrolConfig {
+	return &DaemonPatrolConfig{
+		Type:    "daemon-patrol-config",
+		Version: 1,
+		Patrols: &PatrolsConfig{OverrunGuard: &OverrunGuardConfig{Enabled: true, GateAllowance: limit}},
+	}
+}
+
+// A gate_allowance the guard cannot use is not applied in silence: the load
+// says so, keeps the operator's value, and leaves the other settings alone, so
+// the read-modify-write callers can save the file back without erasing it.
+func TestLoadDaemonPatrolConfigWarnsBadGateAllowance(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"90min", "1h30", "-5m"} {
+		t.Run(bad, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			raw := `{"type":"daemon-patrol-config","version":1,"patrols":{` +
+				`"overrun_guard":{"enabled":true,"gate_allowance":"` + bad + `","stop_after":"20m"},` +
+				`"checkpoint_dog":{"enabled":true,"interval":"7m"}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var warn strings.Builder
+			cfg, err := loadDaemonPatrolConfig(path, &warn)
+			if err != nil {
+				t.Fatalf("loadDaemonPatrolConfig: %v", err)
+			}
+			og := cfg.Patrols.OverrunGuard
+			if og == nil || !og.Enabled || og.StopAfter != "20m" {
+				t.Fatalf("overrun_guard = %+v, want enabled with stop_after 20m", og)
+			}
+			if og.GateAllowance != bad {
+				t.Errorf("GateAllowance = %q, want the operator's %q kept", og.GateAllowance, bad)
+			}
+			if got := warn.String(); !strings.Contains(got, "gate_allowance") || !strings.Contains(got, `"`+bad+`"`) {
+				t.Errorf("warning = %q, want it to name gate_allowance and the bad value", got)
+			}
+			if cd := cfg.Patrols.CheckpointDog; cd == nil || !cd.Enabled || cd.IntervalStr != "7m" {
+				t.Errorf("checkpoint_dog = %+v, want enabled with interval 7m", cd)
+			}
+
+			cfg.Patrols.CheckpointDog.IntervalStr = "9m"
+			if err := WriteConfigJSON(path, cfg, 0o644); err != nil {
+				t.Fatalf("WriteConfigJSON: %v", err)
+			}
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(saved), `"gate_allowance": "`+bad+`"`) {
+				t.Errorf("saved file lost gate_allowance %q:\n%s", bad, saved)
+			}
+		})
+	}
+}
+
+// A gate_allowance the guard can use is loaded without a word: "0" banks no
+// gate time and is a real setting, not a bad one.
+func TestLoadDaemonPatrolConfigGoodGateAllowanceWarnsNothing(t *testing.T) {
+	t.Parallel()
+	for _, good := range []string{"5m", "0", "0s", "45m"} {
+		t.Run(good, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			raw := `{"type":"daemon-patrol-config","version":1,"patrols":{` +
+				`"overrun_guard":{"enabled":true,"gate_allowance":"` + good + `"}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var warn strings.Builder
+			cfg, err := loadDaemonPatrolConfig(path, &warn)
+			if err != nil {
+				t.Fatalf("loadDaemonPatrolConfig: %v", err)
+			}
+			if got := cfg.Patrols.OverrunGuard.GateAllowance; got != good {
+				t.Errorf("GateAllowance = %q, want %q", got, good)
+			}
+			if warn.Len() != 0 {
+				t.Errorf("a usable gate_allowance %q warned: %q", good, warn.String())
+			}
+		})
+	}
+}
+
+func TestSaveDaemonPatrolConfigRefusesBadGateAllowance(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"90min", "1h30", "-5m"} {
+		t.Run(bad, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			err := SaveDaemonPatrolConfig(path, overrunGateLimit(bad))
+			if err == nil {
+				t.Fatalf("SaveDaemonPatrolConfig accepted gate_allowance %q", bad)
+			}
+			if !strings.Contains(err.Error(), "gate_allowance") {
+				t.Errorf("error = %v, want it to name gate_allowance", err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("a refused save left a file behind: %v", err)
+			}
+		})
+	}
+}
+
+func TestSaveDaemonPatrolConfigAcceptsGoodGateAllowance(t *testing.T) {
+	t.Parallel()
+	for _, good := range []string{"5m", "0", "45m"} {
+		t.Run(good, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			if err := SaveDaemonPatrolConfig(path, overrunGateLimit(good)); err != nil {
+				t.Fatalf("SaveDaemonPatrolConfig refused gate_allowance %q: %v", good, err)
+			}
+			loaded, err := LoadDaemonPatrolConfig(path)
+			if err != nil {
+				t.Fatalf("LoadDaemonPatrolConfig: %v", err)
+			}
+			if got := loaded.Patrols.OverrunGuard.GateAllowance; got != good {
+				t.Errorf("GateAllowance after the round trip = %q, want %q", got, good)
+			}
+		})
 	}
 }
 
