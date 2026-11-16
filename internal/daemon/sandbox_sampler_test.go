@@ -704,6 +704,10 @@ func newSandboxRunDaemon(t *testing.T, source sandboxSeatSource) *sandboxRunDaem
 	d := &Daemon{
 		config: DefaultConfig(town),
 		logger: log.New(logs, "", 0),
+		// The sampler names its day file from the daemon's clock, and sendTick
+		// dates its tick 2026-11-15: a real clock would write the file of the
+		// day the test runs on, so these tests only passed on that day.
+		clock: clockwork.NewFakeClockAt(time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)),
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 			SandboxSampler: &PatrolConfig{Enabled: true},
 		}},
