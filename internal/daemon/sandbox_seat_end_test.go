@@ -104,6 +104,10 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 			f.deleted = append(f.deleted, rec.Session)
 			return nil
 		},
+		// The unit tier has no gateway to copy an outbox out of: a seat's outbox
+		// copy succeeds with nothing, and a test that needs a copy, or a copy
+		// that fails, sets its own seam (gt-c6tofd).
+		sandboxOutboxCopy: func(string, session.SandboxRecord) error { return nil },
 		// The ended marker is not set unless a test says so: a held sandbox the
 		// seat end asks about must never reach the real gateway exec.
 		sandboxEndedMarker: func(string, string) (bool, error) { return false, nil },

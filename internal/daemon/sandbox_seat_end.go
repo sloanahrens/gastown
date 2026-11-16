@@ -100,6 +100,11 @@ const sandboxNotGoneReason = "the gateway has not confirmed the sandbox gone"
 // (gt-0vb2fy).
 const sandboxSessionLiveReason = "session still live"
 
+// outboxNotCopiedReason is the keep reason of a seat whose outbox could not be
+// copied out of its sandbox: the sandbox holds the only copy of what the seat
+// wrote, so the delete waits for a copy that works (gt-c6tofd).
+const outboxNotCopiedReason = "its outbox is not copied out of its sandbox, so nothing it wrote is deleted with it"
+
 // keepReason names why the seat's host directories must stay, or "" when they
 // may be removed. Every reason is a fact someone else measured; the first one
 // this file can answer decides. A missing fact keeps the seat: the removal
@@ -207,6 +212,18 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		if unmeasuredReason != "" {
 			unmeasured = unmeasuredReason
 			return nil
+		}
+		// Everything the seat wrote leaves the sandbox before the sandbox does:
+		// its outbox here, and its transcripts in the delete below. Both calls
+		// this pass can make to delete a sandbox follow this step, so a copy that
+		// fails keeps the seat and leaves the only copy of the seat's words where
+		// it is (gt-c6tofd).
+		if !end.SandboxGone {
+			if why := h.copySeatOutbox(rig, name, end.Gateway); why != "" {
+				kept = why
+				h.clearPendingSeatEnd(rig, name)
+				return nil
+			}
 		}
 		// A sandbox the gateway still holds is ended here, at the landing, once
 		// every other fact releases the seat (gt-0vb2fy). The probe takes that
@@ -554,6 +571,38 @@ func (h *patrolScanHost) seatAgentFields(rig, name string) (*beads.AgentFields, 
 		return nil, err
 	}
 	return fields, nil
+}
+
+// copySeatOutbox copies the seat's outbox files out of its sandbox to the host,
+// before either delete step of this end can remove that sandbox. It returns the
+// reason the seat is kept, or "" when the outbox is on the host, the seat wrote
+// none, or its sandbox is already gone.
+//
+// A record that names the sandbox is copied from as it stands; a seat with no
+// record is copied from the gateway the end measured its sandbox at, the record
+// the errored-sandbox delete builds when none names it. A record that cannot be
+// read is not copied and not kept on this step's account: the delete steps that
+// follow re-read it and keep the seat with their own reason, so no sandbox is
+// deleted on a record this step could not read. A copy that fails keeps the
+// seat, naming the copy failure (gt-c6tofd).
+func (h *patrolScanHost) copySeatOutbox(rig, name, gateway string) string {
+	sessionName := h.sessionName(rig, name)
+	rec, recorded, err := session.ReadSandboxRecord(h.town(), sessionName)
+	if err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not copied out: %v; the delete steps keep the seat on the same fact", rig, name, err)
+		return ""
+	}
+	if !recorded {
+		rec = session.SandboxRecord{Session: sessionName, Rig: rig, Polecat: name, Gateway: gateway}
+	}
+	copyOut := h.sandboxOutboxCopy
+	if copyOut == nil {
+		copyOut = session.CopySandboxSeatOutbox
+	}
+	if err := copyOut(h.town(), rec); err != nil {
+		return outboxNotCopiedReason + ": " + err.Error()
+	}
+	return ""
 }
 
 // removeSeatDirs removes the host directories of one sandbox seat, through the
