@@ -763,6 +763,41 @@ func TestReworkProgramRefusesUnnameableRunWeek(t *testing.T) {
 	}
 }
 
+// TestReworkProgramRefusesUnnameableRecordWeek: a record whose own time cannot
+// be named a week is an error, not a week read as never run: the next tick would
+// then either rerun the week or skip it on a guess.
+func TestReworkProgramRefusesUnnameableRecordWeek(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	read := 0
+	d := reworkNumbersTestDaemon(t, town, io.Discard)
+	source := reworkProgramSource(t, &read)
+	d.reworkNumbersStepFor = func(town string, now func() time.Time) *reworkNumbersStep {
+		step := source(town, now)
+		step.weekOf = func(ts string) (string, error) {
+			if strings.HasPrefix(ts, "2026-11-09") {
+				return "", errors.New("no calendar here")
+			}
+			return "2026-11-16", nil
+		}
+		return step
+	}
+	if err := writeReworkNumbersLastRun(reworkNumbersLastRunPath(town), reworkProgramNow().AddDate(0, 0, -7)); err != nil {
+		t.Fatalf("the last-run record: %v", err)
+	}
+
+	ran, _, err := d.runReworkNumbersTick(reworkProgramNow())
+	if ran || err == nil || !strings.Contains(err.Error(), "the week of the last run") {
+		t.Fatalf("an unnameable record week = %v, %v; want no run and the record's week named", ran, err)
+	}
+	if read != 0 {
+		t.Errorf("an unnameable record week read the town's records %d times, want none", read)
+	}
+	if _, statErr := os.Stat(reworkProgramOut(t, town)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("an unnameable record week wrote a document: %v", statErr)
+	}
+}
+
 // TestReworkProgramRunReportsARecordItCannotWrite: the document lands, and the
 // run still fails, naming the record: a silent failure would leave the next tick
 // running the week again with nothing said about why.
