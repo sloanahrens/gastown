@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"time"
 
@@ -55,6 +57,37 @@ func newDashboardClaudePlanReader(path string, usage *dashUsageReader, planUSDMo
 		WithUsageAbsent(usage.absent)
 }
 
+// resolveClaudePlanFile is the series file the plan meter falls back to: the
+// status line's copy under the home directory when it exists, else the town's
+// own. The dashboard pod mounts the Mac's ~/.claude read-only at its home
+// (/root/.claude) and the status line writes the live series there, while the
+// pod's own <town>/.runtime copy stopped moving when the pod took over, so
+// reading the town's copy first shows a meter whose newest sample is days old
+// (gt-q6qd1j; lost when the rows source replaced it, gt-hutsr6). A home lookup
+// that fails, or a stat that fails for a reason other than absence, answers
+// with the town's copy and the reason goes to whyLog. Callers resolve it on
+// every poll, so a file that appears after the hub started is read at the next
+// poll. The home lookup and the stat are injected so a test drives each case.
+func resolveClaudePlanFile(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog) string {
+	town := dashboardClaudePlanPath(townRoot)
+	h, err := home()
+	if err != nil {
+		whyLog.claudePlanSeries(town, fmt.Sprintf("no home directory: %v", err))
+		return town
+	}
+	homePath := filepath.Join(h, ".claude", ".runtime", "claude-plan", "samples.jsonl")
+	_, err = stat(homePath)
+	switch {
+	case err == nil:
+		return homePath
+	case errors.Is(err, fs.ErrNotExist):
+		return town
+	default:
+		whyLog.claudePlanSeries(town, fmt.Sprintf("cannot stat %s: %v", homePath, err))
+		return town
+	}
+}
+
 // claudePlanRowSamples reads the town's claude_plan rows since the start of
 // the span the meter folds, as the plan series. A row missing one of its four
 // readings is not a reading and is skipped, never folded as a week at 0%, so a
@@ -102,10 +135,10 @@ func claudePlanRowSamples(read costSamplesRead, now time.Time) ([]dashboard.Clau
 // complete reading are named in the log beside whichever source answered, so a
 // fallback over unusable rows is not read as a town that has no rows
 // (gt-u9dsir).
-func newDashboardClaudePlanRead(townRoot string, rows costSamplesRead, whyLog *dashWhyLog, usage *dashUsageReader, planUSDMonth float64, renewalDay int, now func() time.Time) func() *dashboard.ClaudePlan {
-	file := dashboardClaudePlanPath(townRoot)
+func newDashboardClaudePlanRead(townRoot string, rows costSamplesRead, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog, usage *dashUsageReader, planUSDMonth float64, renewalDay int, now func() time.Time) func() *dashboard.ClaudePlan {
 	return func() *dashboard.ClaudePlan {
 		at := now()
+		file := resolveClaudePlanFile(townRoot, home, stat, whyLog)
 		read := newDashboardClaudePlanReader(file, usage, planUSDMonth).WithRenewalDay(renewalDay)
 		samples, unusable, err := claudePlanRowSamples(rows, at)
 		why := ""

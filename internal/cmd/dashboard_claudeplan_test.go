@@ -28,7 +28,7 @@ func claudePlanRead(t *testing.T, town string, rows costSamplesRead, logged *[]s
 			*logged = append(*logged, fmt.Sprintf(format, args...))
 		}
 	})
-	return newDashboardClaudePlanRead(town, rows, whyLog, newDashUsageReader(town),
+	return newDashboardClaudePlanRead(town, rows, func() (string, error) { return filepath.Join(town, "no-home"), nil }, os.Stat, whyLog, newDashUsageReader(town),
 		dashboardClaudePlanUSD, dashboard.ClaudePlanDefaultRenewalDay, func() time.Time { return fixedClaudePlanNow })
 }
 
