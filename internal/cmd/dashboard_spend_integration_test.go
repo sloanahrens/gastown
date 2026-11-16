@@ -38,7 +38,7 @@ func TestIntegrationResolveSpendReadsTheClusterSignalFromEnvironment(t *testing.
 			whyLog := newDashWhyLog(func(format string, args ...any) {
 				logged = append(logged, fmt.Sprintf(format, args...))
 			})
-			spend, reason := resolveSpend("", whyLog)
+			spend, reason := resolveSpend("", nil, whyLog)
 			if spend == nil || reason != "" {
 				t.Fatalf("resolveSpend: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
 			}

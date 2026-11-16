@@ -83,12 +83,15 @@ The page is read-only. It binds loopback only and refuses any request whose
 Host is not a loopback name.
 
 --spend-cmd names a command that prints the DeepSeek spend report as JSON. When
-it is empty, the dashboard runs ~/.claude/tools/deepseek-spend.py --json if that
-file exists, and falls back to the report built in process from the balance
-ledger in ~/.claude/docs/research/deepseek-spend when that run fails. In the
-cluster the ledger is used alone. The ledger report carries no live balance. The
-command runs every five minutes while a page is open; with neither,
-the spend panel is left out. Each report it prints also rewrites the town's watch reading,
+it is empty, the dashboard reads the town's deepseek_balance cost samples (the
+rows the balance patrol writes) on every poll, and answers from
+~/.claude/tools/deepseek-spend.py --json, or from the report built in process
+from the balance ledger in ~/.claude/docs/research/deepseek-spend, only while
+the town has no usable row (in the cluster the ledger is the file source). The
+log names the source that answered each time it changes. Neither the rows nor
+the ledger report carries a live balance. The command runs every five minutes
+while a page is open; with no rows and neither file, the spend panel is left
+out. Each report read also rewrites the town's watch reading,
 <town>/.runtime/watch/spend.json, as {ts, per_hour, balance} — what the hourly
 snapshot, gt tail and gt report read as the live DeepSeek rate — with ts the
 instant of the read. A report that carries no balance leaves the file as it
@@ -231,7 +234,7 @@ func init() {
 	dashboardCmd.Flags().IntVar(&dashboardPort, "port", 8787, "Port to listen on")
 	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", "127.0.0.1", "Address to bind; loopback only")
 	dashboardCmd.Flags().StringVar(&dashboardSince, "since", "2h", "How far back the feed starts (as gt tail --since)")
-	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present outside the cluster, else the report built from the balance ledger)")
+	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the town's deepseek_balance rows, else the ~/.claude tool outside the cluster, else the report built from the balance ledger)")
 	dashboardCmd.Flags().StringVar(&dashboardJevSpendCmd, "jev-spend-cmd", defaultJevSpendCmd, "Command that prints the Jev ledger's spend as JSON; empty leaves the Jev row out")
 	dashboardCmd.Flags().Float64Var(&dashboardJevUSDPerBillion, "jev-usd-per-billion-tokens", defaultJevUSDPerBillionTokens, "Price of Jev's tokens in US dollars per billion, passed to the --jev-spend-cmd command")
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
@@ -488,7 +491,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// so the dashboard does not reach into the battery's own (gt-b9j3o.2).
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
-	spend, spendReason := resolveSpend(spendCmd, whyLog)
+	spend, spendReason := resolveSpend(spendCmd, beadReads.costSamples, whyLog)
 	return dashboard.NewHub(dashboard.Config{
 		Feed: feed,
 		Summary: func() dashboard.Summary {
@@ -991,33 +994,39 @@ const (
 // from the ledger's so a tool that fails on every poll logs once.
 const spendToolSource = "spend tool"
 
-// resolveSpend is the hub's spend source: the --spend-cmd the operator named, or
-// the ~/.claude tool, or the report built in process from the balance ledger, or
-// nothing. In the cluster the ledger comes first and alone: the Mac's ~/.claude
-// is mounted there, and its tool cannot run (no Python, no key). On a Mac the
-// tool comes first so the live balance it reads is kept, and a tool run that
-// fails falls back to the ledger when one exists. The reason is set when this
-// host has no source to offer: no home, or no ledger and, outside the cluster,
-// no tool either. A failed read of the ledger is logged through whyLog and served
-// as an unavailable state, not as no source.
-func resolveSpend(flagValue string, whyLog *dashWhyLog) (func() json.RawMessage, string) {
-	return resolveSpendIn(config.InContainerMode(), flagValue, os.UserHomeDir, os.Stat, execSpend, whyLog)
+// resolveSpend is the hub's spend source: the town's deepseek_balance rows, or
+// the file source behind them. The rows are read first on every poll, so a pod
+// with no Mac ledger still draws the panel, and the ~/.claude tool or the report
+// built in process from the balance ledger answers only while the town has no
+// usable row (gt-u3fp8i). A --spend-cmd the operator named is an explicit
+// source, not a file ledger, so it answers alone.
+//
+// In the cluster the ledger comes first among the file sources and alone: the
+// Mac's ~/.claude is mounted there, and its tool cannot run (no Python, no key).
+// On a Mac the tool comes first so the live balance it reads is kept, and a tool
+// run that fails falls back to the ledger when one exists. The reason is set
+// when this host has no file source to offer: no home, or no ledger and, outside
+// the cluster, no tool either. A failed read of the ledger is logged through
+// whyLog and served as an unavailable state, not as no source.
+func resolveSpend(flagValue string, rows costSamplesRead, whyLog *dashWhyLog) (func() json.RawMessage, string) {
+	return resolveSpendIn(config.InContainerMode(), flagValue, os.UserHomeDir, os.Stat, execSpend, rows, whyLog)
 }
 
 // resolveSpendIn is resolveSpend with the in-cluster signal, the home directory,
-// the file check and the command runner injected, so a test drives either host
-// and absent and present without the real home, the process environment or a
-// process. The in-cluster signal is read the way the daemon reads it
-// (config.InContainerMode), by resolveSpend alone. A tool or ledger the check
-// cannot stat for a reason other than its absence still counts as present, so
-// the poll that reads it reports a failed read rather than an absent pane.
-func resolveSpendIn(inCluster bool, flagValue string, home func() (string, error), stat func(string) (fs.FileInfo, error), run spendRunner, whyLog *dashWhyLog) (func() json.RawMessage, string) {
+// the file check, the command runner and the rows read injected, so a test
+// drives either host and absent and present without the real home, the process
+// environment, a process or a beads store. The in-cluster signal is read the way
+// the daemon reads it (config.InContainerMode), by resolveSpend alone. A tool or
+// ledger the check cannot stat for a reason other than its absence still counts
+// as present, so the poll that reads it reports a failed read rather than an
+// absent pane. A nil rows read is a hub with no row store wired.
+func resolveSpendIn(inCluster bool, flagValue string, home func() (string, error), stat func(string) (fs.FileInfo, error), run spendRunner, rows costSamplesRead, whyLog *dashWhyLog) (func() json.RawMessage, string) {
 	if f := strings.Fields(flagValue); len(f) > 0 {
 		return dashboardSpend(f, run), ""
 	}
 	h, err := home()
 	if err != nil {
-		return nil, dashboard.NotInClusterReason
+		return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, whyLog), dashboard.NotInClusterReason
 	}
 	tool := filepath.Join(h, ".claude", "tools", "deepseek-spend.py")
 	dir := spendDirIn(h)
@@ -1025,29 +1034,30 @@ func resolveSpendIn(inCluster bool, flagValue string, home func() (string, error
 	hasLedger := !errors.Is(ledgerErr, fs.ErrNotExist)
 	if inCluster {
 		if hasLedger {
-			return dashboardSpendLedger(dir, whyLog), ""
+			return deepSeekSpendRowsFirst(rows, dashboardSpendLedger(dir, whyLog), spendFileSourceLedger, whyLog), ""
 		}
-		return nil, dashboard.NotInClusterReason
+		return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, whyLog), dashboard.NotInClusterReason
 	}
 	if _, err := stat(tool); !errors.Is(err, fs.ErrNotExist) {
 		toolSpend := dashboardSpend([]string{tool, "--json"}, run)
 		if !hasLedger {
-			return toolSpend, ""
+			return deepSeekSpendRowsFirst(rows, toolSpend, spendFileSourceTool, whyLog), ""
 		}
 		ledgerSpend := dashboardSpendLedger(dir, whyLog)
-		return func() json.RawMessage {
+		fileSpend := func() json.RawMessage {
 			if out := toolSpend(); out != nil {
 				whyLog.note(spendToolSource, "")
 				return out
 			}
 			whyLog.note(spendToolSource, "no answer; the balance ledger answers")
 			return ledgerSpend()
-		}, ""
+		}
+		return deepSeekSpendRowsFirst(rows, fileSpend, spendFileSourceToolThenLedger, whyLog), ""
 	}
 	if hasLedger {
-		return dashboardSpendLedger(dir, whyLog), ""
+		return deepSeekSpendRowsFirst(rows, dashboardSpendLedger(dir, whyLog), spendFileSourceLedger, whyLog), ""
 	}
-	return nil, dashboard.NotInClusterReason
+	return deepSeekSpendRowsFirst(rows, nil, spendFileSourceNone, whyLog), dashboard.NotInClusterReason
 }
 
 // spendRunner runs a spend command and returns what it printed. The dashboard's
