@@ -245,6 +245,27 @@ func ParseRejectionNote(notes string) (RejectionNote, bool) {
 	return parseRejectionBlock(notes[blocks[len(blocks)-1][0]:])
 }
 
+// Rejections returns every rejection block in notes, in the order they were
+// written, every class included. A reader that needs each attempt's findings
+// reads this rather than re-splitting the notes: the format is
+// FormatRejectionNote's, and a second parser drifts from it (gt-9bioi.1).
+// Unlike RejectionsOfKind the class is left as written: an unclassified block
+// reads as "" (gt-1jig).
+func Rejections(notes string) []RejectionNote {
+	starts := rejectionBlockRE.FindAllStringIndex(notes, -1)
+	var out []RejectionNote
+	for i, b := range starts {
+		end := len(notes)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		if rej, ok := parseRejectionBlock(notes[b[0]:end]); ok {
+			out = append(out, rej)
+		}
+	}
+	return out
+}
+
 // RejectionsOfKind returns the rejection blocks of kind in notes, in the order
 // they were written: the record of each refusal of that kind, so a reader that
 // needs the nth one counts from the notes, which are never pruned. A block with

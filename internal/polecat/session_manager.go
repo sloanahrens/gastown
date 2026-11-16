@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -1471,6 +1472,18 @@ func (m *SessionManager) taskFileFor(issue *beads.Issue, workDir string) []byte 
 		Acceptance:  beads.AcceptanceText(issue),
 		Notes:       noteLines(issue.Notes),
 		Comments:    taskComments(comments),
+		Rejections:  land.Rejections(issue.Notes),
+	}
+	// The unchanged fact is a rework fact: a bead no refusal has rejected gets
+	// no git read at all. A head this cannot read leaves the fact out, the
+	// direction reportUnchangedSinceRejection takes when it cannot tell — the
+	// miss costs a gate run, while a wrong "unchanged" strands the seat.
+	if len(fields.Rejections) > 0 {
+		if head, rerr := m.gits.Open(workDir).Rev("HEAD"); rerr != nil {
+			m.warnTaskFile("starting %s: cannot read the worktree head for the rejected-rework check, leaving the unchanged fact out: %v", issue.ID, rerr)
+		} else {
+			fields.UnchangedRejection = unchangedRejectedHead(fields.Rejections, head)
+		}
 	}
 	return []byte(taskfile.Assemble(taskInputFromBead(fields)))
 }

@@ -68,6 +68,46 @@ type Step struct {
 	Done bool
 }
 
+// Finding is one review finding an earlier landing refusal recorded: the id
+// the rework pass tracks, its severity, where it points and its title. The
+// rejection note keeps no finding detail, so none is carried.
+type Finding struct {
+	ID       string
+	Severity string
+	Path     string
+	Line     int
+	Title    string
+}
+
+// Rejection is one MERGE REJECTION block: an earlier landing attempt of the
+// bead and the findings it was refused for.
+type Rejection struct {
+	Attempt  int
+	Kind     string
+	Reason   string
+	Findings []Finding
+}
+
+// Rework is a re-slung seat's rework context. A first-time seat carries none,
+// and the text then reads as it did before rework existed.
+type Rework struct {
+	// Attempts are the bead's earlier refusals, in the order Land recorded
+	// them, each with the findings it filed.
+	Attempts []Rejection
+	// Unchanged is the latest refusal naming the commit the seat's branch
+	// still sits on, nil when the branch moved past every refusal. The host
+	// computes it once at spawn: a seat with no bead access cannot ask again.
+	Unchanged *UnchangedRejection
+}
+
+// UnchangedRejection is the refusal whose commit the seat's branch still sits
+// on. Head is shown abbreviated.
+type UnchangedRejection struct {
+	Attempt int
+	Kind    string
+	Head    string
+}
+
 // Input is every field Assemble reads. A field left at its zero value is a
 // field the caller did not pass, and it is left out of the text: no heading and
 // no section for it. A list entry with no text is left out the same way, so a
@@ -80,13 +120,14 @@ type Input struct {
 	Notes       []Note
 	Comments    []Comment
 	Steps       []Step
+	Rework      *Rework
 }
 
 // Assemble renders the TASK.md text for one seat. Sections appear in the order a
 // reader wants them: what the bead is, what done means, what has been tried,
-// what others said, and the steps to run. A section whose field is empty is
-// left out whole, heading included, so the text never carries a heading over
-// nothing.
+// what others said, what earlier attempts were refused for, and the steps to
+// run. A section whose field is empty is left out whole, heading included, so
+// the text never carries a heading over nothing.
 //
 // The text ends with exactly one newline. Slices render in caller order and
 // nothing is sorted or looked up in a map, so the result is deterministic.
@@ -109,6 +150,12 @@ func Assemble(in Input) string {
 		chunks = append(chunks, section)
 	}
 	if section := assembleComments(in.Comments); section != "" {
+		chunks = append(chunks, section)
+	}
+	if section := assembleRejections(in.Rework); section != "" {
+		chunks = append(chunks, section)
+	}
+	if section := assembleRejectionUnchanged(in.Rework); section != "" {
 		chunks = append(chunks, section)
 	}
 	if section := assembleSteps(in.Steps); section != "" {
@@ -190,6 +237,93 @@ func assembleComments(comments []Comment) string {
 		writeItem(&sb, "- ", commentItem(comment))
 	}
 	return section("Comments", sb.String())
+}
+
+// assembleRejections renders every earlier refusal with the findings it filed.
+// Each finding says what the next attempt has to answer: its id, severity, the
+// place it points at and its title. The attempt header names the refusal's
+// class and reason, which a block with neither leaves as the bare number.
+func assembleRejections(rw *Rework) string {
+	if rw == nil {
+		return ""
+	}
+	var blocks []string
+	for _, r := range rw.Attempts {
+		var sb strings.Builder
+		header := fmt.Sprintf("### Attempt %d", r.Attempt)
+		var parts []string
+		if kind := oneLine(r.Kind); kind != "" {
+			parts = append(parts, kind)
+		}
+		if reason := oneLine(r.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
+		if len(parts) > 0 {
+			header += ": " + strings.Join(parts, " — ")
+		}
+		sb.WriteString(header + "\n")
+		for _, f := range r.Findings {
+			writeItem(&sb, "- ", findingItem(f))
+		}
+		blocks = append(blocks, strings.TrimRight(sb.String(), "\n"))
+	}
+	return section("Earlier rejections", strings.Join(blocks, "\n\n"))
+}
+
+// findingItem is one finding's line after the bullet, in the shape the bead's
+// rejection note writes it: the fields it records, then the title.
+func findingItem(f Finding) string {
+	var head []string
+	if id := oneLine(f.ID); id != "" {
+		head = append(head, "id:"+id)
+	}
+	if severity := oneLine(f.Severity); severity != "" {
+		head = append(head, "sev:"+severity)
+	}
+	if path := oneLine(f.Path); path != "" {
+		head = append(head, fmt.Sprintf("%s:%d", path, f.Line))
+	}
+	label := strings.Join(head, " ")
+	title := strings.TrimRight(f.Title, "\n")
+	switch {
+	case label == "":
+		return title
+	case title == "":
+		return label
+	}
+	return label + " — " + title
+}
+
+// assembleRejectionUnchanged states that the branch the seat starts on holds
+// the content a refusal already judged, and what that means for submitting it
+// again. The seat cannot recompute this: it has no bead access.
+func assembleRejectionUnchanged(rw *Rework) string {
+	if rw == nil || rw.Unchanged == nil {
+		return ""
+	}
+	u := rw.Unchanged
+	refusal := fmt.Sprintf("attempt %d", u.Attempt)
+	if kind := oneLine(u.Kind); kind != "" {
+		refusal += " (" + kind + ")"
+	}
+	var b strings.Builder
+	if head := shortHead(u.Head); head != "" {
+		fmt.Fprintf(&b, "Your branch still sits on %s, the commit that %s refused; nothing has been committed since.\n\n", head, refusal)
+	} else {
+		fmt.Fprintf(&b, "Your branch still sits on the commit that %s refused; nothing has been committed since.\n\n", refusal)
+	}
+	b.WriteString("If that refusal came from this diff, a resubmission of the same content is refused as no change: change the content so it answers the findings, or escalate if the refusal did not come from this diff.")
+	return section("Rejection unchanged", b.String())
+}
+
+// shortHead abbreviates a commit to git's default seven characters, the id a
+// polecat knows it by. A value already shorter is shown as written.
+func shortHead(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 func assembleSteps(steps []Step) string {
