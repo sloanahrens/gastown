@@ -687,6 +687,21 @@ type tierSweepSeams struct {
 	// one that holds a digest at the default path, so the default is exercised
 	// without a file under /run.
 	readImageFile func(path string) ([]byte, error)
+	// imagesFailedFor reports whether the images workflow's run for rig's green
+	// commit sha ended failed. Nil is the pair check's failed-run map, which
+	// answers false for a commit it does not hold: an absent answer is not
+	// failed, never a guess (gt-ogt6jh).
+	imagesFailedFor func(rig, sha string) bool
+}
+
+// tierSweepImagesFailedFor answers whether the images build for rig's green
+// commit sha failed: the seam when a test set one, the pair check's failed-run
+// map otherwise (gt-ogt6jh).
+func (d *Daemon) tierSweepImagesFailedFor(rig, sha string) bool {
+	if f := d.tierSweepSeams.imagesFailedFor; f != nil {
+		return f(rig, sha)
+	}
+	return d.pairReady.imagesFailedFor(rig, sha)
 }
 
 // tierSweepPolecatImageFile is where a daemon pod finds the polecat image its
